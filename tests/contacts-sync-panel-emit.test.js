@@ -85,17 +85,21 @@ test("contacts panel: edit emits update", async () => {
   } finally { __setEmitSinkForTest(null); cleanup(); }
 });
 
-test("contacts panel: delete emits delete for a manual row, nothing for a crow: row", async () => {
+test("contacts panel: confirmed delete emits delete for BOTH a manual and a crow: row (F-CONTACT-1)", async () => {
   const { db, cleanup } = freshDb();
   try {
     const manualId = await seedContact(db, { crow_id: "manual:d1", contact_type: "manual", secp: "" });
     const crowId = await seedContact(db, { crow_id: "crow:d2", contact_type: "crow" });
     const seen = spy();
-    await handleContactAction({ body: { action: "delete_contact", contact_id: String(manualId) } }, db);
-    await handleContactAction({ body: { action: "delete_contact", contact_id: String(crowId) } }, db); // no-op (not manual)
-    assert.equal(seen.length, 1, "only the manual delete emitted");
-    assert.equal(seen[0].op, "delete");
-    assert.equal(seen[0].crow_id, "manual:d1");
+    // A no-confirm POST is a two-step redirect — it must NOT emit.
+    await handleContactAction({ body: { action: "delete_contact", contact_id: String(crowId) } }, db);
+    assert.equal(seen.length, 0, "a no-confirm delete does not mutate");
+    // confirm=1 actually deletes. Post-F-CONTACT-1 the crow: row deletes too.
+    await handleContactAction({ body: { action: "delete_contact", contact_id: String(manualId), confirm: "1" } }, db);
+    await handleContactAction({ body: { action: "delete_contact", contact_id: String(crowId), confirm: "1" } }, db);
+    assert.equal(seen.length, 2, "both confirmed deletes emitted");
+    assert.deepEqual(seen.map((s) => s.op), ["delete", "delete"]);
+    assert.deepEqual(seen.map((s) => s.crow_id), ["manual:d1", "crow:d2"]);
   } finally { __setEmitSinkForTest(null); cleanup(); }
 });
 

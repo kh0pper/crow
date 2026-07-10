@@ -8,7 +8,7 @@
  */
 
 import { contactsCss } from "./contacts/css.js";
-import { renderContactList, renderContactProfile, renderGroupManager, renderMyProfile } from "./contacts/html.js";
+import { renderContactList, renderContactProfile, renderDeleteConfirm, renderGroupManager, renderMyProfile } from "./contacts/html.js";
 import { contactsClientJs } from "./contacts/client.js";
 import { getContacts, getContact, getContactActivity, getGroups, getMyProfile } from "./contacts/data-queries.js";
 import { handleContactAction } from "./contacts/api-handlers.js";
@@ -62,7 +62,17 @@ export default {
     // Tab bar (not shown on contact detail view)
     const showTabs = view !== "contact";
 
-    if (view === "contact" && contactId) {
+    if (view === "contact" && contactId && req.query.confirm === "delete") {
+      // --- Delete confirmation interstitial (F-CONTACT-1, design §4.2) ---
+      // GET only; strictly side-effect-free (csrfMiddleware guards the POST, not
+      // this GET). Reads the blast-radius counts and renders Block/Cancel/Delete.
+      const contact = await getContact(db, contactId);
+      const { deleteContactCascadePreview } = await import("../../../sharing/contact-delete.js");
+      const preview = contact
+        ? await deleteContactCascadePreview(db, contact.id)
+        : { messages: 0, sharedItems: 0, groups: 0, projectsOwned: 0, projectMemberships: 0 };
+      bodyHtml = renderDeleteConfirm(contact, preview, lang, peerAdd.csrf);
+    } else if (view === "contact" && contactId) {
       // --- Contact Profile ---
       const contact = await getContact(db, contactId);
       const activities = contact ? await getContactActivity(db, contact.id) : [];

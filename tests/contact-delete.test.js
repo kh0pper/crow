@@ -25,6 +25,8 @@ import {
   readTombstone,
 } from "../servers/sharing/contact-delete.js";
 import { __setEmitSinkForTest } from "../servers/sharing/contact-sync.js";
+import { handleContactAction } from "../servers/gateway/dashboard/panels/contacts/api-handlers.js";
+import { readSetting } from "../servers/gateway/dashboard/settings/registry.js";
 
 const tmpDir = mkdtempSync(join(tmpdir(), "crow-contact-delete-test-"));
 function initDb() {
@@ -223,4 +225,78 @@ test("guard: deleteContactLocal refuses a local-bot row (no delete, no tombstone
   const { rows } = await db.execute({ sql: "SELECT COUNT(*) AS n FROM contacts WHERE id = ?", args: [row.id] });
   assert.equal(Number(rows[0].n), 1, "the local-bot row must survive");
   assert.equal(await readTombstone(db, "crow:botlocal"), null, "no tombstone for a refused local-bot delete");
+});
+
+// ── Task 12: panel handler — two-step confirmation + real crow: delete ────────
+//
+// These drive the REAL exported handler (handleContactAction), not a
+// reimplementation. The emit sink is suppressed so deleteContactLocal's tombstone
+// lands at the row's fallback lamport with no live mesh.
+
+async function countContact(crowId) {
+  const { rows } = await db.execute({ sql: "SELECT COUNT(*) AS n FROM contacts WHERE crow_id = ?", args: [crowId] });
+  return Number(rows[0].n);
+}
+
+test("Task 12: delete_contact POST WITHOUT confirm=1 deletes nothing and redirects to the interstitial", async () => {
+  __setEmitSinkForTest({ emitChange: async () => null });
+  after(() => __setEmitSinkForTest(null));
+
+  const row = await seedContact({ crowId: "crow:noconfirm" });
+  const result = await handleContactAction({ body: { action: "delete_contact", contact_id: String(row.id) } }, db);
+
+  // Redirects to the GET interstitial for THIS contact.
+  assert.equal(result.redirect, `/dashboard/contacts?view=contact&contact=${row.id}&confirm=delete`);
+  // Nothing deleted, no tombstone written.
+  assert.equal(await countContact("crow:noconfirm"), 1, "the contact must survive a no-confirm POST");
+  assert.equal(await readTombstone(db, "crow:noconfirm"), null, "no tombstone before confirmation");
+});
+
+test("Task 12 (F-CONTACT-1 regression): delete_contact POST WITH confirm=1 deletes a crow: contact", async () => {
+  __setEmitSinkForTest({ emitChange: async () => null });
+  after(() => __setEmitSinkForTest(null));
+
+  const row = await seedContact({ crowId: "crow:reallygone", lamport: 42 });
+  assert.equal(await countContact("crow:reallygone"), 1);
+
+  const result = await handleContactAction({ body: { action: "delete_contact", contact_id: String(row.id), confirm: "1" } }, db);
+  assert.equal(result.redirect, "/dashboard/contacts");
+
+  // The crow: row is GONE — the whole point of F-CONTACT-1. On `main` (WHERE
+  // contact_type='manual') this delete is a silent no-op and the count stays 1.
+  assert.equal(await countContact("crow:reallygone"), 0, "a crow: contact must actually delete on confirm");
+  const tomb = await readTombstone(db, "crow:reallygone");
+  assert.ok(tomb, "a durable tombstone must exist after the confirmed delete");
+  assert.equal(tomb.lamport_ts, 42);
+});
+
+test("Task 12: delete_contact confirm=1 refuses a local-bot row (still present, no tombstone)", async () => {
+  __setEmitSinkForTest({ emitChange: async () => null });
+  after(() => __setEmitSinkForTest(null));
+
+  const row = await seedContact({ crowId: "crow:handlerbot", origin: "local-bot", lamport: 9 });
+  const result = await handleContactAction({ body: { action: "delete_contact", contact_id: String(row.id), confirm: "1" } }, db);
+  // Redirects back to the contact, no delete.
+  assert.equal(result.redirect, `/dashboard/contacts?view=contact&contact=${row.id}`);
+  assert.equal(await countContact("crow:handlerbot"), 1, "a local-bot row must not be deletable via the panel");
+  assert.equal(await readTombstone(db, "crow:handlerbot"), null, "no tombstone for a refused local-bot delete");
+});
+
+// ── Task 9 (third bullet): save_profile caps the user's own display name ──────
+
+test("Task 9: save_profile caps a 10 KB hostile display name via sanitizeDisplayName", async () => {
+  const hostile = "‮" + "A".repeat(10240) + "\n <img src=x>";
+  await handleContactAction({ body: { action: "save_profile", display_name: hostile } }, db);
+
+  const stored = await readSetting(db, "profile_display_name");
+  assert.ok(stored != null, "a value must be stored");
+  assert.ok(Array.from(stored).length <= 64, `stored name must be capped at 64 code points, got ${Array.from(stored).length}`);
+  assert.ok(!stored.includes("‮"), "bidi override must be stripped");
+  assert.ok(!stored.includes("\n") && !stored.includes(" "), "control chars must be stripped");
+});
+
+test("Task 9: save_profile stores empty string (not the literal 'null') when the name sanitizes away", async () => {
+  await handleContactAction({ body: { action: "save_profile", display_name: " ‮   " } }, db);
+  const stored = await readSetting(db, "profile_display_name");
+  assert.equal(stored, "", "an all-hostile name must clear to empty, never the string 'null'");
 });

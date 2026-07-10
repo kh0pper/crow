@@ -78,9 +78,13 @@ export async function renameRoom(db, groupId, name) {
   await db.execute({ sql: "UPDATE contact_groups SET name = ? WHERE id = ? AND room_uid IS NOT NULL", args: [name, groupId] });
 }
 export async function deleteRoom(db, groupId) {
-  // FK ON DELETE CASCADE does not fire at runtime (foreign_keys pragma is off on the
-  // request-path client), so explicitly remove room messages + memberships to avoid
-  // orphan rows. Guard on getRoom so a plain organizational group is never touched.
+  // Explicitly remove room messages + memberships before the group row. These
+  // deletes are correct and harmless; they no longer defend against a missing
+  // cascade. (A prior comment here claimed FK ON DELETE CASCADE "does not fire at
+  // runtime because the foreign_keys pragma is off" — that predated the migration
+  // off @libsql/client onto better-sqlite3, which sets foreign_keys=ON on every
+  // connection, so the cascade DOES fire. Verified by probe; design §2.1.)
+  // Guard on getRoom so a plain organizational group is never touched.
   const room = await getRoom(db, groupId);
   if (!room) return;
   await db.execute({ sql: "DELETE FROM room_messages WHERE group_id = ?", args: [groupId] });
