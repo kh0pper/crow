@@ -76,3 +76,9 @@ test("renderPeerInviteForms escapes a hostile prefill", () => {
   const { acceptForm } = renderPeerInviteForms({ lang: "en", prefillCode: '</textarea><script>x</script>' });
   assert.ok(!acceptForm.includes("<script>"), "prefill escaped");
 });
+
+test("invite forms opt out of Turbo Drive (F-UI-1: Turbo discards non-redirect POST responses)", () => {
+  const { generateForm, acceptForm } = renderPeerInviteForms({ lang: "en", csrf: "" });
+  assert.match(generateForm, /<form method="POST" data-turbo="false">/);
+  assert.match(acceptForm, /<form method="POST" data-turbo="false">/);
+});

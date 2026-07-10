@@ -102,6 +102,12 @@ test("renderShortCodeForms resolves Spanish placeholder", () => {
   assert.ok(!acceptForm.includes("invite.shortCode"), "no raw i18n keys");
 });
 
+test("short-code forms opt out of Turbo Drive (F-UI-1)", () => {
+  const { generateForm, acceptForm } = renderShortCodeForms({ lang: "en", csrf: "" });
+  assert.match(generateForm, /<form method="POST" data-turbo="false">/);
+  assert.match(acceptForm, /<form method="POST" data-turbo="false">/);
+});
+
 // ──────────────────────────────────────────────
 // Messages panel wiring
 // ──────────────────────────────────────────────

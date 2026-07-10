@@ -32,3 +32,12 @@ test("spanish strings resolve", () => {
   assert.ok(html.includes("Añadir un par de Crow"), "es title");
   assert.ok(!html.includes("contacts.addPeer"), "no raw keys");
 });
+
+test("add_by_id form opts out of Turbo Drive (F-UI-1 addendum: silent add-by-id rejection)", () => {
+  const html = renderContactList([], [], {}, "en", {});
+  const addByIdIdx = html.indexOf('value="add_by_id"');
+  assert.ok(addByIdIdx > -1);
+  const formOpen = html.lastIndexOf("<form", addByIdIdx);
+  const formTag = html.slice(formOpen, html.indexOf(">", formOpen) + 1);
+  assert.match(formTag, /data-turbo="false"/);
+});
