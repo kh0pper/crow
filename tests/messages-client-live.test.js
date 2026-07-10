@@ -11,10 +11,21 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { messagesClientJS } from "../servers/gateway/dashboard/panels/messages/client.js";
+import { messagesCSS } from "../servers/gateway/dashboard/panels/messages/css.js";
 
 const js = messagesClientJS({ aiConfigured: false, storageAvailable: false, lang: "en" });
+
+// Raw (pre-build) source text — needed to check for an i18n KEY reference
+// (e.g. "contacts.safetyNumber") because tJs(key, lang) is evaluated at
+// build time: the BUILT `js` string above contains the resolved translation
+// ("Safety number"), not the key name.
+const clientSrc = readFileSync(
+  new URL("../servers/gateway/dashboard/panels/messages/client.js", import.meta.url),
+  "utf8",
+);
 
 // Grab a named `function name(...) { ... }` declaration out of the generated
 // script text via balanced-brace matching (copied from
@@ -92,4 +103,46 @@ test("a failed retry chains the NEXT Retry to the NEW failed row id (supersede-o
   // via addEventListener, so the handler itself can't be rebuilt in place).
   const mbf = extractFunction(js, "markBubbleFailed");
   assert.match(mbf, /_retryCtx/, "retry ctx is stored mutably on the bubble and read at click time");
+});
+
+test("Info panel renders the symmetric safety number, not the raw peer pubkey (F-UI-6)", () => {
+  assert.match(js, /contact\.safety_number/);
+  assert.ok(!/ed25519_pubkey\.substring\(0, 32\)/.test(js), "raw truncated peer pubkey must be gone");
+  // i18n label reference: checked against the RAW SOURCE, not the built `js`
+  // — tJs("contacts.safetyNumber", lang) is evaluated at build time, so the
+  // built output holds the resolved translation text ("Safety number"), not
+  // the literal key name.
+  assert.match(clientSrc, /contacts\.safetyNumber/);
+});
+
+test("delivery CSS is legible (F-UI-6)", () => {
+  const css = messagesCSS();
+  assert.match(css, /\.msg-delivery\s*\{[^}]*font-size:\s*0\.8rem/s);
+  assert.match(css, /\.msg-delivery\.delivered\s*\{[^}]*var\(--crow-success/s);
+  assert.match(css, /\.msg-bubble-failed-note/);
+  assert.match(css, /\.msg-retry-btn/);
+});
+
+// Extra (folded from Task 6 review): the generated client script is a big
+// browser-executed template string built per-request from lang/aiConfigured.
+// A broken \${tJs(...)} interpolation that only fires for one lang/branch
+// combo (e.g. an es-only key typo) would silently ship a syntax error to
+// Spanish-language browsers while the en-only build stayed green. Parse
+// (not execute) every lang x aiConfigured permutation via `new Function` so
+// a syntax break in any combo reddens CI.
+function stripScriptTags(html) {
+  // messagesClientJS returns a full '<script>...<\/script>' block (see its
+  // JSDoc); new Function() needs the bare JS body, not the HTML wrapper.
+  const start = html.indexOf("<script>") + "<script>".length;
+  const end = html.lastIndexOf("</script>");
+  return html.slice(start, end);
+}
+
+test("generated client JS parses for every lang x aiConfigured permutation (F-UI-6 regression guard)", () => {
+  for (const lang of ["en", "es"]) {
+    for (const aiConfigured of [true, false]) {
+      const built = messagesClientJS({ aiConfigured, storageAvailable: false, lang });
+      assert.doesNotThrow(() => new Function(stripScriptTags(built)), `lang=${lang} aiConfigured=${aiConfigured} must parse`);
+    }
+  }
 });
