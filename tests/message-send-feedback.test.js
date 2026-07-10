@@ -120,5 +120,203 @@ test("handlePeerSend returns {ok:true} when the tool succeeds (>=1 relay, no reg
   });
   await handlePeerSend(req, res, { db: dbWithContact, sharingClientFactory });
   assert.equal(res.statusCode, 200, "successful send stays 200");
-  assert.deepEqual(res.body, { ok: true }, "successful send returns ok:true");
+  assert.equal(res.body.ok, true, "successful send returns ok:true");
+});
+
+// --- (c) ROUTE: handlePeerSend returns row ids + guarded retry_of delete (F-UI-5/7) ---
+
+function fakeJsonRes() {
+  return {
+    statusCode: 200, body: null, headersSent: false,
+    status(c) { this.statusCode = c; return this; },
+    json(b) { this.body = b; this.headersSent = true; return this; },
+  };
+}
+
+// Stub factory that mimics sendMessage's row write, then answers ok/isError.
+function stubSendFactory(db, contactId, { fail = false } = {}) {
+  return async () => ({
+    callTool: async () => {
+      await db.execute({
+        sql: `INSERT INTO messages (contact_id, content, direction, delivery_status, nostr_event_id, created_at)
+              VALUES (?, ?, 'sent', ?, ?, datetime('now'))`,
+        args: [contactId, "hi", fail ? "failed" : "relayed", fail ? null : "evt-abc"],
+      });
+      return fail
+        ? { isError: true, content: [{ type: "text", text: "reached 0 relays" }] }
+        : { content: [{ type: "text", text: "Message sent to 3 relay(s)" }] };
+    },
+    close: async () => {},
+  });
+}
+
+test("send success returns the new row id + delivery_status (F-UI-5)", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactId = await mkContact(db, { crowId: "crow:idreturn", name: "R" });
+    const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactId) }, body: { message: "hi" } },
+      res,
+      { db, sharingClientFactory: stubSendFactory(db, contactId) },
+    );
+    assert.equal(res.body.ok, true);
+    assert.ok(Number.isInteger(res.body.id));
+    assert.equal(res.body.delivery_status, "relayed");
+    assert.equal(res.body.nostr_event_id, "evt-abc");
+  } finally { cleanup(); }
+});
+
+test("send failure (0 relays) returns the failed row id so the client can retry it (F-UI-7)", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactId = await mkContact(db, { crowId: "crow:failreturn", name: "R" });
+    const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactId) }, body: { message: "hi" } },
+      res,
+      { db, sharingClientFactory: stubSendFactory(db, contactId, { fail: true }) },
+    );
+    assert.equal(res.statusCode, 502);
+    assert.equal(res.body.ok, false);
+    const { rows } = await db.execute({
+      sql: `SELECT id FROM messages WHERE contact_id = ? AND direction = 'sent' ORDER BY id DESC LIMIT 1`,
+      args: [contactId],
+    });
+    assert.equal(res.body.id, Number(rows[0].id));
+  } finally { cleanup(); }
+});
+
+test("retry_of deletes the old failed row on success — guarded (F-UI-7)", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactId = await mkContact(db, { crowId: "crow:retryok", name: "R" });
+    // Seed the OLD failed row this retry replaces.
+    const seed = await db.execute({
+      sql: `INSERT INTO messages (contact_id, content, direction, delivery_status, created_at)
+            VALUES (?, 'hi', 'sent', 'failed', datetime('now'))`,
+      args: [contactId],
+    });
+    const failedId = Number(seed.lastInsertRowid);
+    const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactId) }, body: { message: "hi", retry_of: String(failedId) } },
+      res,
+      { db, sharingClientFactory: stubSendFactory(db, contactId) },
+    );
+    assert.equal(res.body.ok, true);
+    const { rows } = await db.execute({ sql: "SELECT id FROM messages WHERE id = ?", args: [failedId] });
+    assert.equal(rows.length, 0, "old failed row deleted");
+  } finally { cleanup(); }
+});
+
+test("retry_of does NOT delete a row belonging to another contact", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactA = await mkContact(db, { crowId: "crow:retryA", name: "A" });
+    const contactB = await mkContact(db, { crowId: "crow:retryB", name: "B" });
+    const seed = await db.execute({
+      sql: `INSERT INTO messages (contact_id, content, direction, delivery_status, created_at)
+            VALUES (?, 'hi', 'sent', 'failed', datetime('now'))`,
+      args: [contactB],
+    });
+    const failedId = Number(seed.lastInsertRowid);
+    const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactA) }, body: { message: "hi", retry_of: String(failedId) } },
+      res,
+      { db, sharingClientFactory: stubSendFactory(db, contactA) },
+    );
+    assert.equal(res.body.ok, true);
+    const { rows } = await db.execute({ sql: "SELECT id FROM messages WHERE id = ?", args: [failedId] });
+    assert.equal(rows.length, 1, "other contact's row survives");
+  } finally { cleanup(); }
+});
+
+test("retry_of does NOT delete a non-failed row", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactId = await mkContact(db, { crowId: "crow:retrynonfailed", name: "R" });
+    const seed = await db.execute({
+      sql: `INSERT INTO messages (contact_id, content, direction, delivery_status, created_at)
+            VALUES (?, 'hi', 'sent', 'relayed', datetime('now'))`,
+      args: [contactId],
+    });
+    const rowId = Number(seed.lastInsertRowid);
+    const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactId) }, body: { message: "hi", retry_of: String(rowId) } },
+      res,
+      { db, sharingClientFactory: stubSendFactory(db, contactId) },
+    );
+    assert.equal(res.body.ok, true);
+    const { rows } = await db.execute({ sql: "SELECT id FROM messages WHERE id = ?", args: [rowId] });
+    assert.equal(rows.length, 1, "non-failed row survives");
+  } finally { cleanup(); }
+});
+
+test("retry_of does NOT delete a received row", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactId = await mkContact(db, { crowId: "crow:retryreceived", name: "R" });
+    const seed = await db.execute({
+      sql: `INSERT INTO messages (contact_id, content, direction, delivery_status, created_at)
+            VALUES (?, 'hi', 'received', 'failed', datetime('now'))`,
+      args: [contactId],
+    });
+    const rowId = Number(seed.lastInsertRowid);
+    const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactId) }, body: { message: "hi", retry_of: String(rowId) } },
+      res,
+      { db, sharingClientFactory: stubSendFactory(db, contactId) },
+    );
+    assert.equal(res.body.ok, true);
+    const { rows } = await db.execute({ sql: "SELECT id FROM messages WHERE id = ?", args: [rowId] });
+    assert.equal(rows.length, 1, "received row survives");
+  } finally { cleanup(); }
+});
+
+test("retry_of is IGNORED when the send itself fails", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactId = await mkContact(db, { crowId: "crow:retryignoredfail", name: "R" });
+    const seed = await db.execute({
+      sql: `INSERT INTO messages (contact_id, content, direction, delivery_status, created_at)
+            VALUES (?, 'hi', 'sent', 'failed', datetime('now'))`,
+      args: [contactId],
+    });
+    const failedId = Number(seed.lastInsertRowid);
+    const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactId) }, body: { message: "hi", retry_of: String(failedId) } },
+      res,
+      { db, sharingClientFactory: stubSendFactory(db, contactId, { fail: true }) },
+    );
+    assert.equal(res.body.ok, false);
+    const { rows } = await db.execute({ sql: "SELECT id FROM messages WHERE id = ?", args: [failedId] });
+    assert.equal(rows.length, 1, "seeded failed row survives — retry_of ignored on a failed send");
+  } finally { cleanup(); }
+});
+
+test("non-digit retry_of is ignored", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactId = await mkContact(db, { crowId: "crow:retrynondigit", name: "R" });
+    const seed = await db.execute({
+      sql: `INSERT INTO messages (contact_id, content, direction, delivery_status, created_at)
+            VALUES (?, 'hi', 'sent', 'failed', datetime('now'))`,
+      args: [contactId],
+    });
+    const failedId = Number(seed.lastInsertRowid);
+    const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactId) }, body: { message: "hi", retry_of: `${failedId}x` } },
+      res,
+      { db, sharingClientFactory: stubSendFactory(db, contactId) },
+    );
+    assert.equal(res.body.ok, true);
+    const { rows } = await db.execute({ sql: "SELECT id FROM messages WHERE id = ?", args: [failedId] });
+    assert.equal(rows.length, 1, "strict digit gate rejects '55x'; row survives");
+  } finally { cleanup(); }
 });
