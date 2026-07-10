@@ -198,6 +198,18 @@ test("the ?open=/?openRoom= hook is a self-verifying retry loop, not a single-sh
   );
 });
 
+test("?open digit-gate regex survives template escaping (the \\d that became d)", () => {
+  // client.js is a template literal; a source-level `\d` renders as plain
+  // `d` in the served page (`/^d+$/`), which matches NO id — the whole
+  // ?open/?openRoom hook was silently dead (found by reading the SERVED
+  // page; the broken regex is valid JS so the parse-permutation test can't
+  // catch it). The source must write `\\d` so the built output shows
+  // `/^\d+$/`. NOTE: this was broken on main too (pre-existing) — main's
+  // built output also renders `/^d+$/` — not introduced on this branch.
+  assert.match(js, /\/\^\\d\+\$\/\.test\(openId\)/);
+  assert.match(js, /\/\^\\d\+\$\/\.test\(openRoom\)/);
+});
+
 test("generated client JS parses for every lang x aiConfigured permutation (F-UI-6 regression guard)", () => {
   for (const lang of ["en", "es"]) {
     for (const aiConfigured of [true, false]) {

@@ -165,7 +165,7 @@ export function messagesClientJS(opts) {
       setTimeout(tick, 0);
     };
     var openId = params.get('open');
-    if (openId && /^\d+$/.test(openId)) {
+    if (openId && /^\\d+$/.test(openId)) {
       fireOpen(
         function () {
           // a wiped render leaves stale _activeItem → reset so the retry re-renders
@@ -176,7 +176,7 @@ export function messagesClientJS(opts) {
       );
     }
     var openRoom = params.get('openRoom');
-    if (openRoom && /^\d+$/.test(openRoom)) {
+    if (openRoom && /^\\d+$/.test(openRoom)) {
       fireOpen(
         function () {
           // a wiped render leaves stale _activeItem → reset so the retry re-renders
