@@ -125,8 +125,9 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     if (!crowId || !secp) return { redirect: "/dashboard/contacts" };
     try {
       const client = await sharingClientFactory();
+      let result;
       try {
-        await client.callTool({
+        result = await client.callTool({
           name: "crow_add_contact",
           arguments: {
             crow_id: crowId,
@@ -136,10 +137,20 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
           },
         });
       } finally { try { await client.close?.(); } catch {} }
+      if (result?.isError) {
+        const text = result.content?.[0]?.text || "Contact could not be added.";
+        // Addendum (S4.5b): the I1 key-pinning refusal used to be silent at
+        // EVERY layer — an attacker got silence (fine) but so did a legit typo
+        // (bad). One journal line + a visible error. The guard itself is
+        // untouched.
+        console.warn("[contacts] add_by_id refused:", text);
+        return { inviteError: text };
+      }
     } catch (err) {
       console.error("[contacts] add_by_id failed:", err.message);
+      return { inviteError: err.message };
     }
-    return { redirect: "/dashboard/contacts" };
+    return { redirect: "/dashboard/contacts?flash=peer_added" };
   }
 
   // P2/C1+C3: full peer-add from the Contacts panel — generate an invite…
@@ -171,7 +182,7 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
       console.error("[contacts] accept_invite failed"); // never echo the code
       return { inviteError: err.message };
     }
-    return { redirect: "/dashboard/contacts" };
+    return { redirect: "/dashboard/contacts?flash=peer_added" };
   }
 
   // Short-code pairing (P2/C2): generate a 12-char code to read aloud/type...
@@ -202,7 +213,7 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
       console.error("[contacts] accept_short_invite failed"); // never echo the code
       return { inviteError: err.message };
     }
-    return { redirect: "/dashboard/contacts" };
+    return { redirect: "/dashboard/contacts?flash=peer_added" };
   }
 
   // --- Edit contact ---

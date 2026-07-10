@@ -284,16 +284,39 @@ export function messagesCSS() {
   }
   .msg-bubble.sent .msg-bubble-meta { text-align: right; }
 
-  /* R2 Task 4: persisted delivery-status indicator (thread reload). Small,
-     muted single/double check for relayed/delivered. The 'failed' state
-     reuses .msg-bubble-failed / .msg-bubble-failed-note from Task 3. */
+  /* F-UI-6: legible per-bubble delivery state. Single ✓ = relayed, accent
+     ✓✓ = delivered, red note + Retry = failed. The old 0.7rem/muted/0.7-opacity
+     tick was invisible in practice (P4 walkthrough). */
   .msg-delivery {
     display: inline-block;
-    margin-left: 4px;
-    font-size: 0.7rem;
+    margin-left: 6px;
+    font-size: 0.8rem;
     color: var(--crow-text-muted);
-    opacity: 0.7;
   }
+  .msg-delivery.delivered {
+    color: var(--crow-success, #10b981);
+  }
+  .msg-bubble-failed {
+    border: 1px solid color-mix(in srgb, var(--crow-error, #ef4444) 45%, transparent);
+  }
+  .msg-bubble-failed-note {
+    color: var(--crow-error, #ef4444);
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-top: 4px;
+  }
+  .msg-retry-btn {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 2px 10px;
+    font-size: 0.75rem;
+    color: var(--crow-error, #ef4444);
+    background: none;
+    border: 1px solid var(--crow-error, #ef4444);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .msg-retry-btn:disabled { opacity: 0.5; cursor: default; }
 
   /* Reply preview inside bubble */
   .msg-bubble-reply-preview {

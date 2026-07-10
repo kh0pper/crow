@@ -17,6 +17,43 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../sharing/server.js";
 
+// R1-I1: loadOrCreateIdentity() does a sync disk read + full keypair
+// re-derivation (identity.js:119-133) — far too heavy for the per-message
+// afterId hot path. Cache my ed25519 pubkey once per process (it cannot
+// change without a restart).
+let _myEd25519 = null;
+async function myEd25519Pubkey() {
+  // R2-M1: cache ON SUCCESS only — a transient load failure must not disable
+  // safety numbers for the rest of the process lifetime.
+  if (_myEd25519) return _myEd25519;
+  try {
+    const { loadOrCreateIdentity } = await import("../../sharing/identity.js");
+    const ed = loadOrCreateIdentity().ed25519Pubkey || "";
+    if (ed) _myEd25519 = ed;
+    return ed;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * F-UI-6: attach the symmetric safety number to the contact payload so the
+ * Messages Info panel can show the SAME trust string the Contacts detail
+ * shows (raw peer pubkeys are asymmetric and read as "numbers don't match").
+ * Never throws; omits the field (null) when either key is unavailable.
+ */
+export async function withSafetyNumber(contact) {
+  if (!contact || !contact.ed25519_pubkey) return contact ? { ...contact, safety_number: null } : null;
+  try {
+    const myEd = await myEd25519Pubkey();
+    if (!myEd) return { ...contact, safety_number: null };
+    const { computeSafetyNumber } = await import("../../sharing/identity.js");
+    return { ...contact, safety_number: computeSafetyNumber(myEd, contact.ed25519_pubkey) };
+  } catch {
+    return { ...contact, safety_number: null };
+  }
+}
+
 /**
  * Create a connected sharing MCP client (the real in-memory transport). This is
  * the default factory; tests inject a stub so no live Nostr runtime starts.
@@ -61,6 +98,31 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
   const contact = contactRows[0];
   const contactIdentifier = contact.display_name || contact.crow_id;
 
+  // Read back the row sendMessage just wrote (success → relayed/…, 0-relay →
+  // failed) so the client can key its optimistic bubble to the real row
+  // (F-UI-5 dedup) and retry a failed one (F-UI-7). Latest-sent-row read-back
+  // matches the existing attachments logic; a cross-tab race grabbing a
+  // sibling's row is acceptable for UI reconciliation (same trade the
+  // attachments path already makes).
+  async function latestSentRow() {
+    try {
+      const { rows } = await db.execute({
+        sql: `SELECT id, nostr_event_id, delivery_status FROM messages
+              WHERE contact_id = ? AND direction = 'sent'
+              ORDER BY id DESC LIMIT 1`,
+        args: [contactId],
+      });
+      return rows[0] || null;
+    } catch { return null; }
+  }
+
+  // Pre-capture the latest sent row BEFORE the tool call. Some tool errors
+  // happen before sendMessage writes anything (blocked/pending contact
+  // filtered by the tool's own lookup, a nip44 encrypt throw) — in that case
+  // the post-call read-back would surface a PRE-EXISTING older failed row and
+  // the 502 would misattribute its id to this attempt.
+  const preRow = await latestSentRow();
+
   // Send via MCP sharing server — CAPTURE the result (a 0-relay send is a
   // failure the client must see).
   let toolResult;
@@ -78,23 +140,51 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
     .map((c) => c && c.text)
     .filter(Boolean)
     .join(" ");
+
   if (toolResult?.isError) {
-    // Delivery failed (e.g. reached 0 relays). Do NOT report success.
-    return res.status(502).json({ ok: false, error: resultText || "Message could not be delivered." });
+    // Delivery failed (e.g. reached 0 relays). Do NOT report success. Include
+    // the failed row's id so the client can offer Retry on the exact row —
+    // but only when the row was written by THIS attempt (failed status AND a
+    // different id than the pre-call read-back).
+    const failedRow = await latestSentRow();
+    const wroteThisAttempt =
+      failedRow &&
+      failedRow.delivery_status === "failed" &&
+      Number(failedRow.id) !== Number(preRow?.id);
+    // Supersede-on-failure (F-UI-7 follow-up): when THIS attempt wrote a new
+    // failed row AND the client named the old failed row it was retrying,
+    // delete the superseded row. The new failed row retains the content, so
+    // nothing is lost — and repeated Retry clicks during a relay outage stop
+    // accumulating orphan failed rows. Guarded by wroteThisAttempt: an error
+    // that wrote NO row (blocked contact, pre-write throw) must leave the old
+    // failed row alone — it is still the only copy of the content. Same
+    // guarded delete predicate as the success path. (retry_of can never name
+    // the row THIS attempt wrote: the client can't know that id before this
+    // response, so no self-collision guard is needed.)
+    if (wroteThisAttempt) {
+      const failRetryRaw = req.body?.retry_of;
+      if (typeof failRetryRaw === "string" ? /^\d+$/.test(failRetryRaw) : Number.isInteger(failRetryRaw)) {
+        try {
+          await db.execute({
+            sql: `DELETE FROM messages WHERE id = ? AND contact_id = ? AND direction = 'sent' AND delivery_status = 'failed'`,
+            args: [Number(failRetryRaw), contactId],
+          });
+        } catch { /* best-effort cleanup; never mask the 502 over this */ }
+      }
+    }
+    return res.status(502).json({
+      ok: false,
+      error: resultText || "Message could not be delivered.",
+      id: wroteThisAttempt ? Number(failedRow.id) : null,
+    });
   }
+
+  const sentRow = await latestSentRow();
 
   // Store attachment metadata if provided (only for a delivered message)
   if (attachments && Array.isArray(attachments) && attachments.length > 0) {
-    // Get the message we just sent (latest sent message to this contact)
-    const { rows: latestMsg } = await db.execute({
-      sql: `SELECT id FROM messages
-            WHERE contact_id = ? AND direction = 'sent'
-            ORDER BY id DESC LIMIT 1`,
-      args: [contactId],
-    });
-
-    if (latestMsg.length > 0) {
-      const msgId = latestMsg[0].id;
+    const msgId = sentRow && sentRow.id;
+    if (msgId) {
       await db.execute({
         sql: "UPDATE messages SET attachments = ? WHERE id = ?",
         args: [JSON.stringify(attachments), msgId],
@@ -112,7 +202,26 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
     }
   }
 
-  res.json({ ok: true });
+  // F-UI-7: a successful retry replaces the old failed bubble — delete the
+  // referenced row ONLY if it is this contact's own failed sent message.
+  // Strict digit gate: parseInt would accept "55x".
+  const retryOfRaw = req.body?.retry_of;
+  if (typeof retryOfRaw === "string" ? /^\d+$/.test(retryOfRaw) : Number.isInteger(retryOfRaw)) {
+    const retryOf = Number(retryOfRaw);
+    try {
+      await db.execute({
+        sql: `DELETE FROM messages WHERE id = ? AND contact_id = ? AND direction = 'sent' AND delivery_status = 'failed'`,
+        args: [retryOf, contactId],
+      });
+    } catch { /* best-effort cleanup (e.g. SQLITE_BUSY); never fail a successful send over this */ }
+  }
+
+  res.json({
+    ok: true,
+    id: sentRow ? Number(sentRow.id) : null,
+    nostr_event_id: sentRow ? sentRow.nostr_event_id : null,
+    delivery_status: sentRow ? sentRow.delivery_status : null,
+  });
 }
 
 export default function peerMessagesRouter(dashboardAuth, { sharingClientFactory = makePeerSharingClient } = {}) {
@@ -133,46 +242,20 @@ export default function peerMessagesRouter(dashboardAuth, { sharingClientFactory
       const offset = parseInt(req.query.offset) || 0;
       const afterId = parseInt(req.query.afterId) || 0;
 
-      let sql, args;
-      if (afterId) {
-        sql = `SELECT m.id, m.content, m.direction, m.is_read, m.created_at,
-                      m.thread_id, m.nostr_event_id, m.attachments,
-                      c.display_name, c.crow_id, c.last_seen
-               FROM messages m
-               LEFT JOIN contacts c ON m.contact_id = c.id
-               WHERE m.contact_id = ? AND m.id > ?
-               ORDER BY m.id ASC
-               LIMIT ?`;
-        args = [contactId, afterId, limit];
-      } else {
-        sql = `SELECT m.id, m.content, m.direction, m.is_read, m.created_at,
-                      m.thread_id, m.nostr_event_id, m.attachments,
-                      c.display_name, c.crow_id, c.last_seen
-               FROM messages m
-               LEFT JOIN contacts c ON m.contact_id = c.id
-               WHERE m.contact_id = ?
-               ORDER BY m.id DESC
-               LIMIT ? OFFSET ?`;
-        args = [contactId, limit, offset];
-      }
+      const { getPeerMessages } = await import("../dashboard/panels/messages/data-queries.js");
+      const messages = await getPeerMessages(db, contactId, { limit, offset, afterId });
 
-      const { rows } = await db.execute({ sql, args });
-
-      // Get contact info
       const { rows: contactRows } = await db.execute({
         sql: `SELECT id, crow_id, display_name, ed25519_pubkey, is_blocked, last_seen, created_at, verified
               FROM contacts WHERE id = ?`,
         args: [contactId],
       });
 
-      // Parse attachments JSON
-      const messages = (afterId ? rows : rows.reverse()).map((m) => ({
-        ...m,
-        attachments: m.attachments ? JSON.parse(m.attachments) : null,
-      }));
-
       res.json({
-        contact: contactRows[0] || null,
+        // R1-I1: compute the safety number only on the initial load — the
+        // afterId incremental fetches (SSE nudge / poll) don't render the Info
+        // panel and must stay light.
+        contact: afterId > 0 ? (contactRows[0] || null) : await withSafetyNumber(contactRows[0] || null),
         messages,
       });
     } catch (err) {

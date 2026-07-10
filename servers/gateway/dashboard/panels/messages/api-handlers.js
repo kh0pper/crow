@@ -16,6 +16,28 @@ import { buildRoomJoinEnvelope, fanOut } from "../../../../sharing/room-fanout.j
 import { extractInviteCode } from "../../../../sharing/invite-url.js";
 
 /**
+ * F-UI-3: resolve the just-accepted peer's contact row id so the accept
+ * redirect can land INSIDE the new conversation. The invite code's first
+ * segment is the inviter's crow id; the short-code path finds it in the
+ * tool's success text ("Crow ID: crow:…"). Never throws — a resolution
+ * failure just means we fall back to a plain success signal.
+ */
+async function resolveAcceptedContactId(db, ...texts) {
+  try {
+    for (const t of texts) {
+      const m = String(t || "").match(/crow:[a-z0-9]{10}/);
+      if (!m) continue;
+      const { rows } = await db.execute({
+        sql: "SELECT id FROM contacts WHERE crow_id = ?",
+        args: [m[0]],
+      });
+      if (rows[0]) return Number(rows[0].id);
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
+/**
  * Create a connected sharing MCP client.
  */
 async function getSharingClient() {
@@ -124,10 +146,11 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
   }
 
   if (action === "accept_invite" && req.body.invite_code) {
+    let code;
+    let result;
     try {
-      const code = extractInviteCode(req.body.invite_code);
+      code = extractInviteCode(req.body.invite_code);
       const client = await sharingClientFactory();
-      let result;
       try {
         result = await client.callTool({
           name: "crow_accept_invite",
@@ -143,7 +166,10 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
       req._inviteError = err.message;
       return false;
     }
-    return res.redirectAfterPost("/dashboard/messages");
+    const openId = await resolveAcceptedContactId(db, code, result?.content?.[0]?.text);
+    return res.redirectAfterPost(
+      "/dashboard/messages?connected=1" + (openId ? `&open=${openId}` : ""),
+    );
   }
 
   // Short-code pairing (P2/C2): generate a 12-char code to read aloud/type.
@@ -169,9 +195,9 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
   }
 
   if (action === "accept_short_invite" && req.body.short_code) {
+    let result;
     try {
       const client = await sharingClientFactory();
-      let result;
       try {
         result = await client.callTool({
           name: "crow_accept_short_invite",
@@ -187,7 +213,10 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
       req._inviteError = err.message;
       return false;
     }
-    return res.redirectAfterPost("/dashboard/messages");
+    const openId = await resolveAcceptedContactId(db, result?.content?.[0]?.text);
+    return res.redirectAfterPost(
+      "/dashboard/messages?connected=1" + (openId ? `&open=${openId}` : ""),
+    );
   }
 
   if (action === "accept_bot_invite" && req.body.invite_code) {
