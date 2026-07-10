@@ -65,16 +65,24 @@ export default function streamsRouter(dashboardAuth) {
     res.on("error", () => bus.off("notifications:changed", handler));
   });
 
-  // --- Messages peer-badge updates (C.3) ---
+  // --- Messages peer-badge updates + live named events (C.3, F-UI-4/6) ---
   //
-  // Two emit sites feed this stream:
+  // Two emit sites feed the badge/crow-msg side of this stream:
   //   - servers/sharing/nostr.js      — live inbound peer message
   //   - servers/sharing/instance-sync.js::_applyEntry()
   //                                   — paired-instance synced rows
   // Both pre-compute the per-peer unread count. The stream replaces
   // the specific <span id="badge-peer-<contactId>"> so sibling badges
-  // stay untouched. Badge-only here; message-body live updates are
-  // deferred to a later plan.
+  // stay untouched. Alongside the badge turbo-stream frame, this route
+  // ALSO emits a `crow-msg` NAMED SSE event with the same payload —
+  // named events are invisible to <turbo-stream-source> (it only
+  // consumes default "message" events), so a panel's own EventSource
+  // (client.js) can react without disturbing the badge behavior above.
+  //
+  // A SEPARATE `crow-receipt` named event forwards `messages:receipt`
+  // (emitted from servers/sharing/boot.js::handleDeliveryReceipt) so an
+  // open conversation can flip ✓→✓✓ live. This is a distinct bus event
+  // from messages:changed — that consumer contract stays badge-only.
   router.get("/dashboard/streams/messages", (req, res) => {
     const stream = openAuthedStream(req, res);
     if (!stream) return;
@@ -93,14 +101,36 @@ export default function streamsRouter(dashboardAuth) {
           `badge-peer-${contactId}`,
           html`<span id="badge-peer-${contactId}" class="${unreadClass}" data-badge-peer="${contactId}">${display}</span>`,
         );
+        // F-UI-4: named event for the panel's own EventSource (client.js).
+        // Named events are invisible to <turbo-stream-source> (it only
+        // consumes default "message" events), so badge behavior above is
+        // untouched. Payload is server-derived numbers only.
+        sendRaw(`event: crow-msg\ndata: ${JSON.stringify({ contactId: Number(contactId), unread })}\n\n`);
+      } catch {
+        // Subscriber isolation.
+      }
+    };
+
+    // F-UI-6: delivery receipts flip ✓→✓✓ live in an open conversation. A
+    // SEPARATE bus event from messages:changed — that consumer contract is
+    // badge-only and reads payload.unread (see boot.js handleDeliveryReceipt).
+    const receiptHandler = (payload) => {
+      try {
+        const contactId = payload?.contactId;
+        if (contactId == null) return;
+        const ids = (Array.isArray(payload?.ids) ? payload.ids : [])
+          .map(Number)
+          .filter(Number.isFinite);
+        sendRaw(`event: crow-receipt\ndata: ${JSON.stringify({ contactId: Number(contactId), ids })}\n\n`);
       } catch {
         // Subscriber isolation.
       }
     };
 
     bus.on("messages:changed", handler);
-    res.on("close", () => bus.off("messages:changed", handler));
-    res.on("error", () => bus.off("messages:changed", handler));
+    bus.on("messages:receipt", receiptHandler);
+    res.on("close", () => { bus.off("messages:changed", handler); bus.off("messages:receipt", receiptHandler); });
+    res.on("error", () => { bus.off("messages:changed", handler); bus.off("messages:receipt", receiptHandler); });
   });
 
   // --- Glasses media state (C.5) ---
