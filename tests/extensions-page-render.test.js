@@ -197,6 +197,10 @@ function resolveDisplay(css, elementClasses) {
       if (!s || s.startsWith("@")) continue;
       const right = rightmostClasses(s);
       // Only class-only compounds can match our element; every class must be present.
+      // Deliberately ignores ancestor qualifiers (e.g. `.foo .ext-card`) and skips
+      // @media-conditioned rules outright (see the `startsWith("@")` guard above) —
+      // nothing sets `display` on an .ext-card under either today, so a simpler
+      // rightmost-compound match is enough; revisit if that ever changes.
       if (right.length === 0 || !right.every((c) => owned.has(c))) continue;
       const spec = specificity(s);
       if (!winner || cmpSpec(spec, winner.spec) > 0 || (cmpSpec(spec, winner.spec) === 0 && order >= winner.order)) {
