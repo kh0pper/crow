@@ -187,9 +187,9 @@ export class SyncManager {
    * concurrent initContact call for the same contactId. Hypercore close is safe
    * and the on-disk storage persists; the next initContact call will reopen.
    *
-   * NOTE: UNBLOCKING a contact does NOT re-init feeds — no lazy re-init path
-   * exists for contacts. A restart or re-invite is needed to reopen feeds after
-   * an unblock. This is intentional; do NOT add re-init here.
+   * NOTE: unblock re-inits lazily via wireSyncedContact → wireFullContact →
+   * initContact (F-BLOCK-1 D2) — both panel unblock handlers and the synced
+   * onContactSynced hook route through it. Keep re-init OUT of this method.
    */
   async closeContactFeeds(contactId) {
     const prior = this._initLocks.get(contactId) || Promise.resolve();
