@@ -42,9 +42,12 @@ The missing pieces:
 
 ## 2. Non-goals
 
-- No change to room/group inbound (blocked members are already filtered at
-  send-time fan-out: rooms-store.js:62, tools/messaging.js:181; room
-  subscriptions are hub-and-spoke and out of scope).
+- No change to ROOM inbound (`room-inbound.js` hub-and-spoke path) — out of
+  scope. NOTE (R1 MAJOR-1 correction): the original rationale here ("blocked
+  members are filtered at send-time fan-out") was WRONG — a sender-side filter
+  (tools/messaging.js:181 filters *my* blocked members when *I* fan out) does
+  nothing about what a blocked contact sends *to me*. The legacy
+  `group_message` receive path is therefore IN scope now (D4c below).
 - No new unread-badge code: the badge bump WAS the stored row. The conversation
   list + `totalUnread` already filter `c.is_blocked = 0`
   (messages/data-queries.js:51), and the live `messages:changed` unread emit is
@@ -117,6 +120,22 @@ wiring path that forgets teardown:
   reuse and before the store. A blocked contact of ANY request_status (full,
   pending, accepted) is silently dropped on the catch-all path. This kills the
   S5.4 store path.
+- **(c) `group_message` handler** (boot.js:548-577, R1 MAJOR-1): the
+  `onSocialMessage` branch fires a notification UNCONDITIONALLY and stores a
+  `direction='received'` row with no `is_blocked` check — a blocked contact who
+  shares a group can still ping the notification tray via
+  `crow_send_group_message` (they didn't block us; their fan-out includes us).
+  Fix: extend the existing sender lookup to `SELECT id, is_blocked` and
+  early-return BEFORE the notification and the store when blocked.
+- **(d) blocked re-wire guard (R1 MINOR-2):** a blocked contact's
+  `invite_accepted` (or its ~60h retry re-send) currently flows
+  `handleInviteAccepted` → `upsertFullContact` → `wireFullContact`, recreating
+  the sub/feeds/DHT state this design tears down. Fix in two layers:
+  `handleInviteAccepted` early-returns (no upsert, no ack — silence toward the
+  blocked party; `recordProcessedEvent` hygiene untouched) when the resolved
+  sender contact is blocked, AND `wireFullContact` itself skips wiring when
+  `row.is_blocked` (belt: no upsert path — tool, accept, handshake — can wire a
+  blocked contact; the wiring returns on unblock via D2).
 
 ### D5 — Testability seam
 
@@ -146,12 +165,20 @@ unchanged.
    behavior green). **Mutation:** removing the guard reddens the blocked-accepted
    case on the message-count assertion.
 6. `onevent` guard: drive a real `NostrManager` instance with a stub relay that
-   captures the subscription's `onevent` (mirror the existing receive-path test
-   pattern — e.g. delivery-receipt-emit / boot-receive-decouple tests), deliver
-   a NIP-44-encrypted event for a contact flipped to `is_blocked=1` AFTER
-   subscribe → no messages row, no receipt attempt; flip back → stores.
-   **Mutation:** removing the fresh check reddens the blocked case.
-7. Full suite ≥ current baseline (1385/1 pre-existing/1 skip); gateway boots
+   captures the subscription's `onevent` — mirror `tests/nostr-receive-health-hooks.test.js`
+   / `tests/nostr-resubscribe.test.js` (`mgr.relays.set("wss://stub", relay)` +
+   captured `subscribeCalls[0].onevent` + `encryptToUs`; R1 MINOR-6 corrected the
+   earlier citation) — deliver a NIP-44-encrypted event for a contact flipped to
+   `is_blocked=1` AFTER subscribe → no messages row, no receipt attempt; flip
+   back → stores. **Mutation:** removing the fresh check reddens the blocked case.
+7. D4c group_message guard: blocked sender's group_message → no notification, no
+   stored row; unblocked sender's still notifies+stores. **Mutation:** removing
+   the guard reddens the blocked case on both assertions.
+8. D4d blocked re-wire: `handleInviteAccepted` from a blocked sender → no upsert
+   mutation, no ack, no wiring; `wireFullContact` with a blocked row → none of
+   initContact/joinContact/subscribeToContact called. **Mutation:** each layer's
+   removal reddens its own test.
+9. Full suite ≥ current baseline (1385/1 pre-existing/1 skip); gateway boots
    clean.
 
 ## 5. Verification beyond the suite
@@ -182,3 +209,22 @@ unchanged.
 - `unwireContact` also closes sync feeds; a blocked contact therefore stops
   message-mirroring too — same semantics the block handlers already had
   (closeContactFeeds was already inline).
+- **R1 MINOR-3 (accepted):** unblock over-wires a `req:` accepted stranger —
+  `wireFullContact` creates an out-feed + DHT topic where `accept_request` only
+  ever subscribed. Harmless waste (all guarded, stranger can't replicate);
+  documented asymmetry, not engineered around. Note `req:` rows have no synced
+  echo (they don't sync), so the "matches the sync-applied echo" argument
+  applies only to full contacts.
+- **R1 MINOR-4 (precision):** unblock restores the out feed only —
+  `initContact(row.id, null)` cannot restore a peer in-feed without a fresh
+  handshake (`theirFeedKey`). Identical to what a boot restart produces; DMs
+  (the finding's scope) are fully restored via the Nostr sub.
+- **R1 MINOR-5 (disclosure):** on a multi-own-instance fleet,
+  `_applyMessage` (instance-sync.js:1510) deliberately STORES a mirrored row
+  for a locally-blocked contact ("converged-block semantics") while suppressing
+  the badge + notification — so during the ~2s block-mirror window a peer's
+  store can still mirror in, invisibly. "Blocked inbound never stores" is
+  strictly true per-instance for relay inbound; fleet-wide invisibility is
+  row-suppression. §5's "no new messages row on crow" assertion is valid for
+  crow↔black-swan precisely because distinct identities have no instance-sync
+  mirror.
