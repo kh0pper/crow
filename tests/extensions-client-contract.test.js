@@ -410,17 +410,108 @@ test("BEHAVIOR: after the reload, the persisted checklist renders a Configure ro
   assert.equal(store.get("crow_ext_needs_config"), undefined, "consumed once — a Turbo revisit must not re-open it");
 });
 
-test("BEHAVIOR: Configure opens the add-on's existing env form", async () => {
+/**
+ * Every checklist member is BY DEFINITION already installed (that's what
+ * NEEDS_CONFIG means), so Configure must write the env value through the
+ * existing-bundle route — never re-run install, which validateInstall would
+ * reject with 409 already_installed and silently drop the typed value.
+ */
+function envFetch({ status = 200, body = { ok: true, needs_restart: false } } = {}) {
+  return (url) => {
+    if (url.includes("/bundles/api/env")) {
+      return { ok: status < 400, status, json: () => Promise.resolve(body) };
+    }
+    return { ok: true, status: 200, json: () => Promise.resolve({}) };
+  };
+}
+
+test("BEHAVIOR: Configure opens an env-only form scoped to the missing keys", async () => {
   const { $, click, settle, document } = boot({
     session: { crow_ext_needs_config: JSON.stringify([{ id: "jellyfin", keys: ["JELLYFIN_API_KEY"] }]) },
-    fetchImpl: installSetFetch(),
+    fetchImpl: envFetch(),
   });
 
   click($(".ext-checklist__configure"));
   await settle();
 
-  assert.match(document.getElementById("modal-content").textContent, /Install.*Jellyfin/s);
+  assert.match(document.getElementById("modal-content").textContent, /Configure.*Jellyfin/s);
   assert.ok(document.getElementById("env_JELLYFIN_API_KEY"), "the env field for the missing key is on screen");
+});
+
+test("BEHAVIOR: Configure submits to /bundles/api/env (never /bundles/api/install) and clears the checklist entry", async () => {
+  const { $, click, settle, flushTimers, document, calls, store } = boot({
+    session: { crow_ext_needs_config: JSON.stringify([{ id: "jellyfin", keys: ["JELLYFIN_API_KEY"] }]) },
+    fetchImpl: envFetch(),
+  });
+
+  click($(".ext-checklist__configure"));
+  await settle();
+
+  const input = document.getElementById("env_JELLYFIN_API_KEY");
+  input.value = "secret-key-123";
+
+  const saveBtn = document.querySelector("#modal-content .ext-checklist__save");
+  assert.ok(saveBtn, "the configure form has a save action");
+  click(saveBtn);
+  await settle();
+  flushTimers(); // the queued onSaved() that clears the checklist entry
+
+  const envCall = calls.find((c) => c.url.includes("/bundles/api/env"));
+  assert.ok(envCall, "the client POSTed to /bundles/api/env");
+  assert.equal(envCall.init.method, "POST");
+  assert.deepEqual(envCall.body, { bundle_id: "jellyfin", env_vars: { JELLYFIN_API_KEY: "secret-key-123" } });
+
+  assert.ok(
+    !calls.some((c) => c.url.includes("/bundles/api/install")),
+    "an already-installed checklist member must never hit /install — validateInstall would 409 it and the typed value would vanish",
+  );
+
+  assert.equal(
+    store.get("crow_ext_needs_config"),
+    undefined,
+    "the checklist entry is cleared from sessionStorage once its env is saved",
+  );
+});
+
+test("BEHAVIOR: a save that needs a restart surfaces that via i18n text before the modal moves on", async () => {
+  const { $, click, settle, document } = boot({
+    session: { crow_ext_needs_config: JSON.stringify([{ id: "jellyfin", keys: ["JELLYFIN_API_KEY"] }]) },
+    fetchImpl: envFetch({ body: { ok: true, needs_restart: true } }),
+  });
+
+  click($(".ext-checklist__configure"));
+  await settle();
+  document.getElementById("env_JELLYFIN_API_KEY").value = "secret-key-123";
+  click(document.querySelector("#modal-content .ext-checklist__save"));
+  await settle();
+
+  assert.match(
+    document.getElementById("install-status").textContent,
+    /restart/i,
+    "a needs_restart response tells the user before the checklist entry is cleared",
+  );
+});
+
+test("BEHAVIOR: a failed Configure save keeps the checklist entry and shows the server's error", async () => {
+  const { $, click, settle, document } = boot({
+    session: { crow_ext_needs_config: JSON.stringify([{ id: "jellyfin", keys: ["JELLYFIN_API_KEY"] }]) },
+    fetchImpl: envFetch({ status: 404, body: { error: "Bundle 'jellyfin' is not installed" } }),
+  });
+
+  click($(".ext-checklist__configure"));
+  await settle();
+
+  document.getElementById("env_JELLYFIN_API_KEY").value = "secret-key-123";
+  const saveBtn = document.querySelector("#modal-content .ext-checklist__save");
+  click(saveBtn);
+  await settle();
+
+  assert.match(document.getElementById("modal-content").textContent, /Bundle 'jellyfin' is not installed/);
+  // onSaved (the only thing that clears/marks-done a checklist entry) is wired
+  // to the success branch only — a failure hands the button back for another
+  // try instead, proving the entry was never cleared.
+  assert.equal(saveBtn.disabled, false, "the save button is handed back so the user can retry");
+  assert.match(saveBtn.textContent, /Retry/);
 });
 
 // ─── 7. Category badge i18n (the live gap: the detail modal rendered the raw slug) ───

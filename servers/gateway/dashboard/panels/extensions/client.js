@@ -75,12 +75,22 @@ export function extensionsClientJS(lang) {
         });
 
         // --- Install modal (extracted as named function) ---
-        function showInstallModal(id, name, envVars, minRam, minDisk, isCommunity) {
+        //
+        // configureOnly + onSaved (both optional): the post-install checklist's
+        // Configure button reuses this exact form in "env-only" mode. Every
+        // checklist member is BY DEFINITION already installed (that's what
+        // NEEDS_CONFIG means) — POSTing /install for it 409s (already_installed)
+        // and the typed value is dropped on the floor. So configureOnly skips the
+        // consent gate / community warning / resource-warning fetch (none apply
+        // to reconfiguring an installed bundle) and the submit button writes
+        // through POST /bundles/api/env instead, then calls onSaved() so the
+        // caller can clear the checklist entry.
+        function showInstallModal(id, name, envVars, minRam, minDisk, isCommunity, configureOnly, onSaved) {
             var frag = document.createElement("div");
 
             var h3 = document.createElement("h3");
             h3.style.cssText = "font-family:Fraunces,serif;margin-bottom:0.75rem";
-            h3.textContent = '${tJs("extensions.installTitle", lang)}' + " " + name;
+            h3.textContent = (configureOnly ? '${tJs("extensions.configure", lang)}' : '${tJs("extensions.installTitle", lang)}') + " " + name;
             frag.appendChild(h3);
 
             // PR 0: Consent gate. Before showing env config, check whether the bundle
@@ -88,6 +98,8 @@ export function extensionsClientJS(lang) {
             // If yes, render a warning box with capability list and gate the install
             // button until the user checks "I understand" (and types INSTALL for privileged).
             // The consent_token returned from /consent-challenge is passed to /install.
+            // None of this applies in configureOnly mode: the bundle is already
+            // installed and past consent, and the submit path never touches /install.
             var consentToken = null;       // populated on /consent-challenge if required
             var consentSatisfied = true;   // false until user passes the gate (only when consent required)
             var installBtnRef = null;      // forward ref so consent UI can enable/disable it
@@ -98,7 +110,7 @@ export function extensionsClientJS(lang) {
             }
 
             // Async: fetch consent challenge (non-blocking; install button starts disabled if required)
-            fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'))
+            if (!configureOnly) fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'))
               .then(function(r) { return r.json(); })
               .then(function(data) {
                 if (!data || data.required === false) return; // no consent required
@@ -216,7 +228,7 @@ export function extensionsClientJS(lang) {
                 // the install if consent is actually required (no token) so it's safe.
               });
 
-            if (isCommunity) {
+            if (isCommunity && !configureOnly) {
               var communityWarn = document.createElement("div");
               communityWarn.style.cssText = "background:rgba(240,173,78,0.1);border:1px solid rgba(240,173,78,0.3);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem";
               var cwTitle = document.createElement("div");
@@ -232,10 +244,10 @@ export function extensionsClientJS(lang) {
 
             var desc = document.createElement("p");
             desc.style.cssText = "color:var(--crow-text-secondary);font-size:0.9rem;margin-bottom:1rem";
-            desc.textContent = '${tJs("extensions.installDesc", lang)}';
+            desc.textContent = configureOnly ? '${tJs("extensions.configureDesc", lang)}' : '${tJs("extensions.installDesc", lang)}';
             frag.appendChild(desc);
 
-            if (minRam > 0 || minDisk > 0) {
+            if (!configureOnly && (minRam > 0 || minDisk > 0)) {
               var warnDiv = document.createElement("div");
               warnDiv.id = "resource-warning";
               warnDiv.style.cssText = "font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.75rem";
@@ -309,13 +321,55 @@ export function extensionsClientJS(lang) {
             btnRow.appendChild(cancelBtn);
 
             var installBtn = document.createElement("button");
-            installBtn.className = "btn btn-primary";
-            installBtn.textContent = '${tJs("extensions.install", lang)}';
+            installBtn.className = configureOnly ? "btn btn-primary ext-checklist__save" : "btn btn-primary";
+            installBtn.textContent = configureOnly ? '${tJs("common.save", lang)}' : '${tJs("extensions.install", lang)}';
             installBtnRef = installBtn;
             // Start disabled if consent is required (will be enabled when gate is satisfied);
             // initial value of consentSatisfied is true and gets flipped by the consent fetch.
+            // (configureOnly never fetches consent, so this is always a no-op there.)
             refreshInstallBtnState();
+
+            // --- configureOnly submit path: write-only through /bundles/api/env,
+            // never /install (the bundle is already installed; /install would 409).
+            function submitConfigureOnly() {
+              installBtn.disabled = true;
+              installBtn.textContent = '${tJs("extensions.saving", lang)}';
+              statusDiv.style.display = "block";
+              statusDiv.style.color = "var(--crow-accent)";
+              statusDiv.textContent = '${tJs("extensions.saving", lang)}';
+
+              var envData = {};
+              envNames.forEach(function(n) {
+                var inp = document.getElementById("env_" + n);
+                if (inp && inp.value) envData[n] = inp.value;
+              });
+
+              apiCall("env", { bundle_id: id, env_vars: envData }).then(function(res) {
+                if (res.ok && res.data && res.data.ok) {
+                  statusDiv.style.color = "var(--crow-accent)";
+                  statusDiv.textContent = res.data.needs_restart
+                    ? '${tJs("extensions.configureNeedsRestart", lang)}'
+                    : '${tJs("extensions.configureSaved", lang)}';
+                  setTimeout(function() {
+                    if (typeof onSaved === "function") onSaved();
+                  }, 1200);
+                } else {
+                  statusDiv.style.color = "var(--crow-error, #e74c3c)";
+                  statusDiv.textContent = (res.data && res.data.error) || '${tJs("extensions.configureFailed", lang)}';
+                  installBtn.disabled = false;
+                  installBtn.textContent = '${tJs("extensions.retry", lang)}';
+                }
+              }).catch(function() {
+                statusDiv.style.color = "var(--crow-error, #e74c3c)";
+                statusDiv.textContent = '${tJs("extensions.networkError", lang)}';
+                installBtn.disabled = false;
+                installBtn.textContent = '${tJs("extensions.retry", lang)}';
+              });
+            }
+
             installBtn.addEventListener("click", function() {
+              if (configureOnly) { submitConfigureOnly(); return; }
+
               installBtn.disabled = true;
               installBtn.textContent = '${tJs("extensions.installing", lang)}';
               statusDiv.style.display = "block";
@@ -1216,15 +1270,40 @@ export function extensionsClientJS(lang) {
             cfgBtn.textContent = '${tJs("extensions.configure", lang)}';
             cfgBtn.addEventListener("click", function() {
               hideModal();
-              // The env form the user already knows — same modal as a fresh install;
-              // re-running the install with the filled values writes the bundle .env.
+              // The env form the user already knows — same modal as a fresh install,
+              // but in configureOnly mode: this member is ALREADY installed (that's
+              // what NEEDS_CONFIG means), so it must write through /bundles/api/env,
+              // never re-run /install (which 409s already_installed and drops the
+              // typed value on the floor). Scope the form to exactly the keys the
+              // NEEDS_CONFIG harvest named — not the bundle's full env_vars list,
+              // which may include already-configured fields this checklist entry
+              // isn't about.
+              var neededKeys = entry.keys || [];
+              var metaByName = {};
+              (addon.env_vars || []).forEach(function(ev) { metaByName[ev.name] = ev; });
+              var scopedEnvVars = neededKeys.map(function(key) {
+                return metaByName[key] || { name: key, required: true };
+              });
+
               showInstallModal(
                 entry.id,
                 addon.name || entry.id,
-                addon.env_vars || [],
-                (addon.requires || {}).min_ram_mb || 0,
-                (addon.requires || {}).min_disk_mb || 0,
-                addon.official === false,
+                scopedEnvVars,
+                0, 0, false,
+                true, // configureOnly
+                function onSaved() {
+                  // Clear this entry — from the in-memory checklist AND from
+                  // sessionStorage, so a later reload (e.g. the restart this very
+                  // save may have triggered) doesn't resurrect an already-done item.
+                  var idx = list.indexOf(entry);
+                  if (idx !== -1) list.splice(idx, 1);
+                  try {
+                    if (list.length > 0) sessionStorage.setItem("crow_ext_needs_config", JSON.stringify(list));
+                    else sessionStorage.removeItem("crow_ext_needs_config");
+                  } catch (e) {}
+                  if (list.length > 0) showNeedsConfigModal(list);
+                  else hideModal();
+                },
               );
             });
             row.appendChild(cfgBtn);

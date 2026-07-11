@@ -633,6 +633,11 @@ export const translations = {
   "extensions.collectionConfigure": { en: "Finish setup", es: "Completar configuración" },
   "extensions.collectionConfigureDesc": { en: "These extensions are installed but need a value before they can do anything:", es: "Estas extensiones están instaladas pero necesitan un valor para funcionar:" },
   "extensions.configure": { en: "Configure", es: "Configurar" },
+  "extensions.configureDesc": { en: "This add-on is already installed. Fill in the value below and save.", es: "Este complemento ya está instalado. Completa el valor a continuación y guarda." },
+  "extensions.saving": { en: "Saving...", es: "Guardando..." },
+  "extensions.configureSaved": { en: "Saved.", es: "Guardado." },
+  "extensions.configureNeedsRestart": { en: "Saved — restart the gateway to apply this change.", es: "Guardado — reinicia la puerta de enlace para aplicar este cambio." },
+  "extensions.configureFailed": { en: "Save failed", es: "Error al guardar" },
   "extensions.collectionBusy": { en: "Another install is already running — wait for it to finish.", es: "Ya hay otra instalación en curso — espera a que termine." },
   "extensions.noResults": { en: "No add-ons match your search.", es: "Ningún complemento coincide con tu búsqueda." },
 
