@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "collections": [
+    {
+      "id": "home-server",
+      "name": "Home Server",
+      "description": "Media, documents, network filtering and uptime alerts — the core of a self-hosted home.",
+      "icon": "home",
+      "members": [
+        { "id": "jellyfin", "kind": "deploys" },
+        { "id": "paperless", "kind": "deploys" },
+        { "id": "adguard-home", "kind": "deploys" },
+        { "id": "uptime-kuma", "kind": "deploys" },
+        { "id": "ntfy", "kind": "deploys" },
+        { "id": "home-assistant", "kind": "connects", "you_need": "A running Home Assistant instance (its URL and a long-lived access token)." }
+      ]
+    },
+    {
+      "id": "education",
+      "name": "Education",
+      "description": "Course content, a library, a wiki, and document tools for teaching and learning.",
+      "icon": "graduation-cap",
+      "members": [
+        { "id": "kolibri", "kind": "deploys" },
+        { "id": "kavita", "kind": "deploys" },
+        { "id": "calibre-web", "kind": "deploys" },
+        { "id": "bookstack", "kind": "deploys" },
+        { "id": "stirling-pdf", "kind": "deploys" },
+        { "id": "knowledge-base", "kind": "builtin" }
+      ]
+    },
+    {
+      "id": "research",
+      "name": "Research",
+      "description": "Private search, feeds, read-later, bookmarks and document archiving for source-driven work.",
+      "icon": "search",
+      "members": [
+        { "id": "searxng", "kind": "deploys" },
+        { "id": "miniflux", "kind": "deploys" },
+        { "id": "wallabag", "kind": "deploys" },
+        { "id": "linkding", "kind": "deploys" },
+        { "id": "paperless", "kind": "deploys" },
+        { "id": "knowledge-base", "kind": "builtin" }
+      ]
+    },
+    {
+      "id": "development",
+      "name": "Development",
+      "description": "Self-hosted git, object storage, uptime monitoring and a SQL explorer.",
+      "icon": "git",
+      "members": [
+        { "id": "gitea", "kind": "deploys" },
+        { "id": "minio", "kind": "deploys" },
+        { "id": "uptime-kuma", "kind": "deploys" },
+        { "id": "data-dashboard", "kind": "builtin" }
+      ]
+    }
+  ]
+}
