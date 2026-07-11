@@ -38,13 +38,20 @@ Before building any item:
    ledger and move on.
 3. Check for open branches touching the same files: `git branch -a`.
 
-Baseline state when this plan was written (2026-07-11 night): fleet all on main
-`845f3e41`, healthy; suite 1604 pass / 0 fail / 1 skip; sync_conflicts crow 219 /
-grackle 162 / black-swan 0 (decreases are #124 retention-prune — only GROWTH is a red
-flag); stash baselines crow 4 / grackle 17 (growth = auto-update stash regression);
-PRs #163–#173 all merged (settings-scope, bug-hunt squash, bundle version-refresh,
-maker-lab location-independence, auto-update hardening, providers owner-asserts,
-follow-up minors, tailnet-dial minors, docs, extensions overhaul).
+**This rule is global — it applies to EVERY item, not just the ones whose text repeats
+it.** Work items rot: F-INSTALL-11 ("installer renames the OS hostname") was already
+fixed before this plan was written (`scripts/crow-install.sh:209` defaults to N, and
+`ask_yn` returns No in the headless path too) and has been struck from Item 4c. Assume
+others have rotted the same way.
+
+Baseline state when this plan was written (**2026-07-11 night** — anchor on the date,
+not the sha; main moves): fleet healthy on the then-current main; suite 1604 pass / 0
+fail / 1 skip; sync_conflicts crow 219 / grackle 162 / black-swan 0 (decreases are
+#124 retention-prune — only GROWTH is a red flag); stash baselines crow 4 / grackle 17
+(growth = auto-update stash regression); PRs #163–#173 all merged (settings-scope,
+bug-hunt squash, bundle version-refresh, maker-lab location-independence, auto-update
+hardening, providers owner-asserts, follow-up minors, tailnet-dial minors, docs,
+extensions overhaul).
 
 ## 2. The rigor pipeline (per PR)
 
@@ -82,13 +89,42 @@ session at the front.
      to `docs/developers/port-allocation.md` or this fails),
    - `node scripts/build-registry.mjs --check`.
 
-   Known local-only artifact: Kevin's untracked `bundles/capstone-tracker/` WIP makes
-   check-ports error locally — it has 0 tracked files, so it is invisible to CI on the
-   merged tree. Confirm that the ONLY check-ports error is that directory; do not
-   "fix" or touch his WIP.
-6. **Deploy fleet** (§3 runbook) → **live verify** — CDP browser proof for anything
-   UI-facing (a curl 200 is not proof a page works), plus the item's own acceptance
-   checks. Evidence under `~/.crow/p4/<item-slug>/` (screenshots + assertions.jsonl).
+   **⚠️ The suite runs against PROD unless you isolate it.** There is NO CI test
+   workflow (`.github/workflows/` has only deploy-docs, image-freshness,
+   pet-mode-appimage, port-allocation) — this local run, on the prod box, is the only
+   execution the code ever gets. And `CROW_HOME` / `CROW_DATA_DIR` default to the real
+   `~/.crow` (`routes/bundles.js:118`, `panels/extensions/data-queries.js:19`,
+   `panel-registry.js:40`, `servers/db.js:72` — all `process.env.CROW_HOME ||
+   join(homedir(), ".crow")`), 261 test files run in PARALLEL, and a throwaway clone
+   does NOT help because the path is homedir-derived, not repo-derived. This is the
+   exact mechanism behind both incidents in §3 (a suite run refreshed prod maker-lab;
+   an install test installed a real container on prod). **Run the suite with scratch
+   env:**
+   ```
+   T=$(mktemp -d); CROW_HOME=$T CROW_DATA_DIR=$T/data CROW_DISABLE_NOSTR=1 \
+     CROW_DISABLE_INSTANCE_SYNC=1 node --test tests/*.test.js
+   ```
+   and `fuser ~/.crow/data/crow.db` first to confirm no stale writer. Individual tests
+   that need prod-shaped state must set it up in the scratch dir themselves.
+
+   **Check-ports has a known permanent error — make the check mechanical, not
+   eyeball-based.** Kevin's untracked `bundles/capstone-tracker/` WIP (0 tracked files,
+   invisible to CI on the merged tree) makes `check-port-allocation.js` exit 1. The
+   gate is green iff the error block contains **exactly one** line and it is
+   `Port 8090 (capstone-tracker)`. Any second line, or a different port, is real drift
+   — stop. Do not "fix" or touch his WIP.
+   **Post-merge, watch the docs deploy.** `.github/workflows/deploy-docs.yml` fires on
+   any push to main touching `docs/**` → rebuilds the **public** VitePress site on
+   GitHub Pages. §5 asks you to update THIS plan doc (which lives under `docs/`) as part
+   of each item, so **every item ships a public docs rebuild.** The `total_count: 0`
+   check-runs result on the PR sha does NOT cover it — after merging, poll the
+   `deploy-docs` run on main and confirm it succeeded. (A known-flaky Pages-publish step
+   has failed cosmetically before with the build green; distinguish the two.)
+
+6. **Deploy fleet** (§3 runbook — read the auto-update migration rail first if the PR
+   bumps the schema) → **live verify** — CDP browser proof for anything UI-facing (a
+   curl 200 is not proof a page works), plus the item's own acceptance checks. Evidence
+   under `~/.crow/p4/<item-slug>/` (screenshots + assertions.jsonl).
 7. **Record** — append outcome to the ledger; update the memory file for the arc.
 
 ## 3. Standing rules + fleet runbook
@@ -163,6 +199,39 @@ waiters. Keep windows short; verify prod is back before calling a job "monitored
 - Take a DB backup before any deploy that runs a migration or boot heal
   (`cp ~/.crow/data/crow.db ~/.crow/data/crow.db.pre-<slug>-$(date +%Y%m%d-%H%M%S)`).
 
+### ⚠️ Auto-update means MERGING *IS* DEPLOYING — the migration rail
+
+`servers/gateway/auto-update.js` is **ON by default** (`auto_update_enabled: "true"`,
+`DEFAULT_INTERVAL_HOURS = 6`). On tick it does `git pull --ff-only origin main` → npm
+install → **`init-db`** → restart. Verified live on crow 2026-07-11 (`auto_update_enabled
+|true`, `interval|6`, a check at 22:13 that same day). **So the moment you merge to
+main, every fleet box will pull and migrate itself within ~6 hours, unattended — before
+you have taken a single backup, and ignoring grackle's bridge-then-gateway restart
+order.**
+
+`SCHEMA_GENERATION` / `user_version` is monotonic: **reverting the merge does NOT
+un-migrate the databases.** Item 2b (contact_groups tombstones) requires a schema bump,
+so this is not hypothetical — merged carelessly it migrates three production DBs
+simultaneously with no backups and no human gate. This is the single worst thing this
+plan can do to Kevin's fleet.
+
+**Rail — for any PR that bumps `SCHEMA_GENERATION` or adds a boot heal:**
+1. Disable auto-update on all three boxes FIRST (Settings → Updates, or set
+   `auto_update_enabled=false`); confirm each box reports it disabled.
+2. Back up all three DBs (`crow.db.pre-<slug>-<ts>`), verify each backup file exists
+   and is non-zero.
+3. Merge.
+4. Deploy manually, in the §3 runbook order, one box at a time; verify health +
+   `PRAGMA integrity_check` + the migration's own acceptance check before moving on.
+5. Re-enable auto-update on all three; confirm.
+
+**Executor note on the lock:** crow runs TWO gateways off the same tree, and the
+**crow-mpa-gateway** is typically the one that wins the atomic update lock — the primary
+then logs `Skipped: another updater is running (pid …)`. That message is normal
+co-hosted behavior, **not** evidence that auto-update is inert. Never assume it won't
+fire. Determine the real state (`sqlite3 ~/.crow/data/crow.db "SELECT key,value FROM
+dashboard_settings WHERE key LIKE 'auto_update%';"`) before merging anything schema-bearing.
+
 ### Network exposure invariant (never regress)
 Dashboard + private routes must never be Funnel-reachable. Only `/blog`,
 `/robots.txt`, `/sitemap.xml`, `/.well-known/`, `/favicon.ico`, `/manifest.json` are
@@ -174,8 +243,13 @@ public-safe. If you touch gateway routing/auth, run `tests/auth-network.test.js`
   `op=insert`.
 - One-shot boot reconciliations: only `done:<n>` is terminal; `no-peers` must write NO
   flag (the flag-stuck class, PR #147).
-- Schema changes bump `SCHEMA_GENERATION` in `scripts/init-db.js`; the boot gate
-  auto-migrates on restart. FTS-shadowed tables need trigger updates in the same file.
+- Schema changes bump `SCHEMA_GENERATION` — defined in **`servers/shared/schema-version.js:13`**
+  (currently `6`), merely imported by `scripts/init-db.js`. That module is imported by
+  gateway boot, so **keep it free of side-effecting imports**. Table/trigger DDL goes in
+  `scripts/init-db.js`; the boot gate auto-migrates on restart. FTS-shadowed tables
+  (`memories`, `sources`, `blog_posts`, `kb_articles`) need their virtual table +
+  insert/update/delete triggers updated in the same place. See the migration rail above
+  before merging any bump.
 - `fix-the-product-not-the-instance`: every fix must work on a fresh single-click
   install, not just this fleet.
 
@@ -199,28 +273,66 @@ Small, adjacent, zero design risk. Code lives in
 `tests/install-set-e2e.test.js`.
 
 **1a. Checklist re-derive-on-demand.** Today the post-install NEEDS_CONFIG checklist
-is one-shot: `renderPendingChecklist` consumes the sessionStorage entry at load, and
+is one-shot: `renderPendingChecklist` consumes the sessionStorage entry at load
+(`panels/extensions/client.js:1341-1347` — `removeItem` fires before the parse), so
 closing the modal without configuring loses the proactive checklist until reinstall.
-The data is derivable live: `needsConfigKeys` already derives from the bundle manifest
-vs the live `.env`. Spec: add an affordance (e.g. a "Needs configuration" pill/button
-on an Installed card whose bundle has unmet `needsConfigKeys`) that re-opens the same
-Configure (env-only) modal on demand — no sessionStorage dependency.
-*Acceptance:* a bundle with unmet config keys shows the affordance after a full page
-reload with clean sessionStorage; clicking it opens Configure scoped to the missing
-keys; a successful save clears the affordance without reinstall; a bundle with no
-missing keys never shows it. Client-contract test (linkedom+vm, extend
-`tests/extensions-client-contract.test.js`) + CDP proof on a scratch gateway.
 
-**1b. Onboarding action-card target decision (all-or-none).** All onboarding cards
-open `target="_blank"` (uniform scheme, `panels/onboarding.js:34,74`). For INTERNAL
-dashboard links (e.g. the collections card → `/dashboard/extensions#collections`)
-a new tab is odd UX. Decide and implement ONE of: (a) same-tab for internal hrefs
-(path-relative), new-tab only for external — recommended; or (b) keep uniform _blank
-and document why. Whichever way, change ALL cards consistently, keep
-`rel="noopener"` on every remaining _blank, and update the CDP assertion recipe
-(9b asserted in the opened tab — that assertion inverts under (a)).
-*Acceptance:* one scheme, applied to every card; test executes the renderer and
-asserts the `target` attribute per card class; CDP click-through proof.
+**This requires a NEW SERVER SURFACE — do not try to do it client-side.**
+`needsConfigKeys` is a *server* function (`servers/gateway/routes/bundles.js:1725`) and
+its only caller is the install-set job runner (`:1961`), which writes `NEEDS_CONFIG <id>
+<keys>` into a job log the client scrapes. Nothing exposes per-installed-bundle config
+state: `GET /bundles/api/status` (`:1766`) returns only id/name/type/containers/running,
+and the server-rendered Installed cards (`panels/extensions/html.js:303-338`) render
+name/version/date. Note also that `NEEDS_CONFIG` is emitted **only** by `/install-set` —
+a bundle installed via single `/install` (`:1849`) never gets a checklist at all, so
+this affordance is its ONLY config surface. Cover that case.
+
+**🔒 Hard constraint: expose KEY NAMES ONLY, never values.** The `.env` holds bundle
+secrets (API keys, DB passwords). Shipping parsed `.env` contents to the browser to make
+the state "derivable client-side" would leak them into dashboard HTML. Never do this.
+
+*Decide in the spec (pick ONE, it determines the test shape):* (a) add a `needs_config:
+["KEY", …]` field to `/bundles/api/status` → client-contract test; or (b) compute at
+render time in `panels/extensions/html.js:303` → HTML-render test. (b) is simpler and
+avoids a new client fetch; (a) is better if the client needs to refresh it without a
+reload.
+
+*Acceptance:* a bundle with unmet config keys shows the affordance after a full page
+reload with **cleared sessionStorage**; it also shows for a bundle installed via single
+`/install` (never had a checklist); clicking it opens the Configure (env-only) modal
+scoped to exactly the missing keys; a successful save clears the affordance without
+reinstall; a bundle with no missing keys never shows it; **no `.env` VALUE appears
+anywhere in the response body or DOM** (assert this explicitly — grep the rendered HTML
+for a known secret value and require zero hits). Test per the chosen surface + CDP proof
+on a scratch gateway.
+
+**1b. Onboarding action-card target decision — SCOPED TO THE DONE-STEP CARDS ONLY.**
+
+⚠️ An earlier draft of this plan said "uniform `_blank` scheme, change all-or-none."
+**That was wrong and would have broken the wizard.** The two `_blank` sites are
+different things:
+- **`deepLink()` (`panels/onboarding.js:33`) must KEEP `target="_blank"`.** Its callers
+  (`:155, :157, :160`) are **mid-tour** steps pointing at internal dashboard paths
+  (`/dashboard/settings?section=integrations`, `/dashboard/bot-builder`,
+  `/dashboard/connect`), and its docstring (`:31-32`) states the rationale: it opens the
+  surface in a new tab *so the tour stays open behind it*. Same-tab here navigates the
+  user OUT of the wizard mid-tour. Do not touch it.
+- **`renderActionCards()` (`:74`)** renders on the **done** step, after
+  `onboarding_completed_at` is persisted (`:213-218`). There is no tour left to
+  preserve, so new tabs for internal links are just odd UX. **This is the only site in
+  scope.**
+
+Change the done-step action cards so INTERNAL hrefs open in the same tab; external
+hrefs keep `target="_blank" rel="noopener"`.
+*Acceptance:* `deepLink` and its three mid-tour callers are byte-unchanged (assert);
+each done-step card carries the correct `target` for its href class (test executes the
+renderer, per-card assertion); CDP click-through proof on a done-step internal card —
+note this **inverts** the old assertion 9b in `~/.crow/p4/ext-overhaul/` (which asserted
+in the opened tab); update that recipe.
+
+*Coupling with Item 4d:* 4d rewires this same wizard to offer starter collections and
+may rewrite `renderActionCards` anyway. If you reach Item 4 with 1b unshipped, fold 1b
+into Item 4's onboarding spec rather than shipping it twice.
 
 **1c. T12 timer→barrier pacing.** `tests/install-set-e2e.test.js` paces the
 install-set busy-gate window with `_setInstallSetStepDelayForTest(150)` (the seam is
@@ -228,9 +340,13 @@ install-set busy-gate window with `_setInstallSetStepDelayForTest(150)` (the sea
 setTimeout sleeps. Replace the timer coupling with a deterministic barrier promise
 (the test seam resolves a promise the runner awaits), keeping the prod default a true
 no-op.
-*Acceptance:* test passes with zero wall-clock sleeps in the busy-gate section; the
-seam's prod-path no-op is proven (default value short-circuits); mutation check: break
-the barrier order, a named assertion goes red.
+*Acceptance:* the busy-gate section of the test contains zero wall-clock sleeps (grep
+the test file for `setTimeout`/`sleep` in that block — zero hits); **the prod no-op is
+proven by mechanism, not assertion-by-comment** — the seam is a module-private
+`let _installSetStepDelayMs = 0` (`bundles.js:155-156`), so prove the production path
+never awaits the barrier when the seam is untouched (e.g. assert the branch is
+unreachable at default, or export a read-only getter and assert it is 0/undefined in a
+fresh import). Mutation check: break the barrier ordering, a NAMED assertion goes red.
 
 **Ship:** one branch `fix/extensions-follow-up-pool`, suite + gates green, CDP
 evidence in `~/.crow/p4/ext-followups/`, PR, merge, fleet deploy, live verify
@@ -248,23 +364,38 @@ lamport ties, offline-peer resurrection). All four live in `servers/sharing/`
 `servers/gateway/dashboard/panels/messages/data-queries.js`.
 
 **2a. pruneStaleAdvertisedContacts resurrection.** The prune
-(`messages/data-queries.js:284`) deletes bot-advertised contact rows that are no
-longer live, but deleted rows can resurrect via sync because the delete doesn't
-propagate correctly — the documented-inert fix must move to where `origin` is set
-(the `shouldSyncRow` approach was proven inert per #155 R2 MAJOR-2; do not retry it).
-*Acceptance:* two-instance test — a pruned advertised contact stays gone on both
-sides across a sync cycle + restart; a live advertised contact still syncs.
+(`messages/data-queries.js:284`, called from `:275`) DELETEs contact rows where
+`origin = 'advertised'` and the contact has zero messages and its pubkey is no longer
+in the live set. The delete is local-only, so a peer re-advertises the row and it
+resurrects. **This item is the least-specified in the queue and sits in the layer that
+has bitten us most — do NOT skip the spec.** Two things the spec must nail down before
+any code: (i) *where `origin` is actually set* on a contact row (grep `origin` across
+`servers/sharing/` + `panels/messages|contacts` and enumerate every writer — the fix
+belongs there, at the point the row is classified, not at the prune); (ii) why the
+`shouldSyncRow` approach is a dead end — it was proven **documented-inert** in #155's R2
+review (MAJOR-2). Do not retry `shouldSyncRow`; read that review first
+(`docs/superpowers/specs/` + the #155 PR body).
+*Acceptance:* two-instance test — a pruned advertised contact stays gone on BOTH sides
+across a full sync cycle AND a restart of each side; a still-live advertised contact
+continues to sync normally (negative control); `sync_conflicts` does not grow.
 
 **2b. contact_groups offline-peer tombstones.** Group delete PROPAGATES live
-(`emitGroupDelete` exists and is wired in `panels/contacts/api-handlers.js:323`), but
-there is no tombstone table — a peer OFFLINE at delete time re-advertises the group
-later and resurrects it fleet-wide (the exact class `contact_tombstones` fixed for
-contacts in #155, delete-wins). Spec: mirror #155's design for groups (tombstone on
-group_uid, delete-wins on apply, retention pruning), including the SCHEMA_GENERATION
-bump + boot-gate migration.
-*Acceptance:* test — delete a group while a simulated peer is offline; peer comes
-back and re-emits the group; the tombstone wins on both sides. Live verify on
-crow↔grackle with a throwaway group.
+(`emitGroupDelete` exists and is wired at `panels/contacts/api-handlers.js:323`), so
+this is **a missing-tombstone gap, not a missing emit** — a peer OFFLINE at delete time
+re-advertises the group later and resurrects it fleet-wide. `contact_tombstones`
+(`scripts/init-db.js:1884` + `servers/sharing/contact-delete.js`) is the #155 precedent
+that fixed exactly this class for contacts, delete-wins. Mirror it for groups: tombstone
+keyed on `group_uid`, delete-wins on apply, retention pruning.
+**Files: `servers/sharing/group-sync.js` + `scripts/init-db.js` (DDL) +
+`servers/shared/schema-version.js` (the `SCHEMA_GENERATION` bump).**
+**⚠️ This is the schema-bumping PR — the auto-update migration rail in §3 is MANDATORY
+here.** (Disable auto-update fleet-wide → back up all three DBs → merge → deploy
+manually in runbook order → verify → re-enable. `user_version` is monotonic; a revert
+does not un-migrate.)
+*Acceptance:* test — delete a group while a simulated peer is offline; the peer returns
+and re-emits it; the tombstone wins on both sides. Live verify on crow↔grackle with a
+throwaway group. Post-deploy: `user_version` = new gen on all three boxes,
+`PRAGMA integrity_check` ok, `sync_conflicts` did not grow.
 
 **2c. Lamport-preserving contact re-emit.** Boot backfills currently re-emit contacts
 with fresh lamports, creating a divergence window where a stale value can clobber a
@@ -276,7 +407,15 @@ a peer row with a higher lamport; the #147 done:<n> flag semantics stay intact.
 **2d. Tailnet in-feed key rotation.** When an instance rotates keys, peers keep the
 stale-keyed in-feed until restart. Spec: detect key change and recreate the affected
 feed/storage live (the "storage-recreate on key change" note from #144's follow-ups).
-*Acceptance:* two-instance test — rotate, verify replication resumes without restart.
+**Under-specified on purpose — this one is NOT queueable until its spec answers:** which
+key rotates (instance identity? feed/Hypercore key? Noise static?), what event or code
+path performs the rotation today, how a peer currently detects it (if at all), and what
+"recreate the storage" means concretely for an open Hypercore. If the spec cannot answer
+those from the code, the honest output of the session is the spec + a recommendation,
+not a rushed fix.
+*Acceptance:* two-instance test — rotate the key, replication resumes WITHOUT a restart
+on either side; no feed corruption (existing blocks still readable); `sync_conflicts`
+does not grow. Live crow↔grackle verification with a real rotation.
 
 Each PR: full pipeline, deploy, live crow↔grackle verification (these are exactly the
 changes where "tests pass" ≠ "fleet converges" — prove convergence with real rows,
@@ -286,18 +425,25 @@ then check sync_conflicts did not grow).
 
 ### Item 3 — Messages/docs minors batch (one PR)
 
-Pooled accepted minors; batch them like PR #170. Verify each still exists first:
+Pooled accepted minors; batch them like PR #170. **Run a triage pass FIRST** — confirm
+each still reproduces, and drop the ones that don't (F-INSTALL-11 was already fixed;
+expect others to be too). The batch PR contains only what survived triage.
 - onevent-test happens-after hardening (sharing tests' event-ordering assumption).
 - `findContactByPubkey` deterministic `ORDER BY` (multi-row pubkey matches).
 - null-syncManager no-heal guard (boot heal path when sync is disabled).
 - `req:`-row delete propagation (deleting a message-request row doesn't tombstone).
-- F-UI-2: maestro.press invite page code box dark-on-dark (docs-site CSS, lives in
-  the maestro-press static page — coordinate with the Deploy Docs workflow).
-- F-SETTINGS-2: raw i18n keys visible in Settings (may already be fixed by #165's
-  label fixes — verify in the live UI first).
+- F-SETTINGS-2: raw i18n keys visible in Settings. **This is a research task, not a
+  fix — #165 shipped label fixes that may already cover it.** Reproduce in the live UI
+  first; if it's gone, strike it and say so. Do not carry it into the PR unverified.
+- **F-UI-2 (maestro.press invite page, dark-on-dark code box) — HOLD, ASK KEVIN.** This
+  is a change to a **public web property**, not the private fleet. The blanket
+  authorization covers the improvement arc on Kevin's instances; it is not obviously a
+  mandate to push to the public site. Do not ship it autonomously. Either ask, or leave
+  it out of the batch and flag it as pending his call.
 
-*Acceptance:* per-minor test where testable; CDP screenshot for the two UI ones;
-suite green; one PR, merge, deploy, live verify.
+*Acceptance:* per-minor test where testable; CDP screenshot for any UI one; suite green
+(scratch env); one PR, merge, deploy, live verify. State plainly in the PR body which
+pooled items were dropped at triage and why.
 
 ---
 
@@ -333,10 +479,12 @@ public-education admin. This is `fix-the-product-not-the-instance` at product sc
   connect-AI-client instructions (kill the dead-end cloud-web callout). F-ONBOARD-4:
   password screen confirm/show-password/paste guard.
 - **4c. Installer prerequisites.** Extensions are unusable without Docker; Tailscale
-  is assumed. `scripts/crow-install.sh` should detect+offer-to-install both (or degrade with
-  clear per-OS guidance — macOS has no headless Docker; the spec must decide
-  per-platform behavior honestly, not promise auto-install everywhere). Include
-  F-INSTALL-11: stop renaming the OS hostname to 'crow' by default.
+  is assumed. `scripts/crow-install.sh` should detect+offer-to-install both (or degrade
+  with clear per-OS guidance — macOS has no headless Docker; the spec must decide
+  per-platform behavior honestly, not promise auto-install everywhere).
+  (**F-INSTALL-11 is STRUCK — already fixed:** `crow-install.sh:209` defaults the
+  hostname rename to N, and `ask_yn` returns No on the headless path too. Left here as
+  a worked example of the §1 rot rule.)
 - **4d. First-run starter templates.** The onboarding wizard offers the themed
   collections (home server / education / research / development) — the
   `registry/collections.json` + one-click `/install-set` machinery from #173 already
@@ -442,6 +590,55 @@ deletes `origin='advertised'` rows with no messages), `panels/contacts/api-handl
 `scripts/{check-port-allocation.js,build-registry.mjs,init-db.js,crow-install.sh}`,
 and all three `~/.crow/p4/` evidence dirs.
 
-**A future session should treat this doc as reviewed-but-not-independently-approved.**
-Before Item 1, re-run the §1 anti-archaeology checks; if you have review budget, a
-fresh adversarial read of §4 is still worth having.
+### Round 2 — independent adversarial review (Opus, 2026-07-11, verdict REVISE → folded)
+
+The review was re-run on Opus and completed. Verdict **REVISE**, with six critical
+issues — **two of which would have caused a wrong build, and one of which could have
+damaged all three production databases.** Every claim was independently re-verified
+against the code/live fleet by the authoring session before folding. All six are now
+fixed in this doc:
+
+- **C1 — Item 1a was not buildable as written, and invited a secret leak.**
+  `needsConfigKeys` is server-side (`routes/bundles.js:1725`) with no client-reachable
+  surface; the old wording ("derivable live") would have pushed an executor to either
+  give up or ship the parsed `.env` to the browser. 1a now mandates a new server surface
+  (key names only, never values, with an explicit no-secrets assertion) and covers the
+  single-`/install` case, which never emits a checklist at all.
+- **C2 — Item 1b's recommended option would have broken the onboarding wizard.**
+  `deepLink()` (`onboarding.js:33`, callers `:155/:157/:160`) is `_blank` **on purpose**
+  — its docstring says it keeps the tour open behind the new tab. "One scheme for every
+  card" would have navigated users out of the wizard mid-tour. 1b is now scoped to the
+  done-step `renderActionCards` only, with `deepLink` explicitly out of bounds.
+- **C3 — the suite gate ran 261 test files against PRODUCTION state.** `CROW_HOME`
+  defaults to the real `~/.crow` (homedir-derived — a throwaway clone does not help),
+  there is no CI test workflow, and `node --test` runs files in parallel. This is the
+  exact mechanism behind both contamination incidents §3 already records. §2 now
+  mandates the scratch-env invocation.
+- **C4 — merging IS deploying, and the migration rail was unenforceable.** Auto-update
+  is ON by default (6h) and runs `pull → init-db → restart` unattended. Item 2b bumps
+  the schema; `user_version` is monotonic, so a revert does not un-migrate. §3 now
+  carries a mandatory disable-backup-merge-deploy-verify-reenable rail, plus the note
+  that the primary's "Skipped: another updater is running" is normal co-hosted behavior
+  (crow-mpa-gateway wins the lock) and is NOT evidence auto-update is inert.
+- **C5 — wrong `SCHEMA_GENERATION` path** (it lives at `servers/shared/schema-version.js:13`,
+  not `scripts/init-db.js`) — the same defect class round 1 claimed to have swept, and
+  Item 2b depends on it.
+- **C6 — F-INSTALL-11 was already fixed** (`crow-install.sh:209` defaults to N). Struck,
+  and the §1 rot rule was made explicitly global rather than per-item.
+
+Suggestions folded: the public docs-site deploy now has a post-merge check (every item
+ships one, since §5 edits this doc); check-ports has a mechanical green predicate
+(exactly one error line, `Port 8090 (capstone-tracker)`); the 1b↔4d coupling is noted;
+the baseline is date-anchored rather than sha-anchored; and the weak acceptance criteria
+the reviewer named (1c's no-op proof, 2a's unnamed call site, 2d's undefined "key
+change", Item 3's research-task-in-a-fix-batch) are tightened.
+
+**Two open questions for Kevin** (the doc does not decide them autonomously): whether
+auto-update should stay ON during the arc, and whether the blanket authorization extends
+to the **public** maestro.press site (Item 3's F-UI-2). F-UI-2 is marked HOLD until he
+says.
+
+Reviewer-verified-accurate, no action needed: `renderPendingChecklist`'s sessionStorage
+consumption (`client.js:1341-1347`), the bot-builder hardcodes, `pruneStaleAdvertisedContacts`,
+`emitGroupDelete` being wired, `contact_tombstones` as the #155 precedent, the identity.json
+keys, the 1c seam, the evidence dirs, and the stash/sync_conflicts baselines.
