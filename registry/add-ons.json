@@ -2741,7 +2741,7 @@
     {
       "id": "maker-lab",
       "name": "Maker Lab",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Scaffolded AI learning companion paired with FOSS maker surfaces (Blockly first). Hint-ladder pedagogy, per-learner memory, age-banded personas, classroom-capable.",
       "type": "mcp-server",
       "author": "Crow",
@@ -4853,6 +4853,91 @@
       "official": true
     },
     {
+      "id": "rookery",
+      "name": "Rookery Reviewer",
+      "version": "0.1.0",
+      "description": "Self-hosted OpenScience reviewer + experiment-audit workspace assembler — audit a report's numeric claims against its registered evidence, on your own local model",
+      "type": "bundle",
+      "author": "kh0pper",
+      "category": "ai",
+      "tags": [
+        "research",
+        "audit",
+        "provenance",
+        "openscience",
+        "self-hosted"
+      ],
+      "icon": "search",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "./run.sh",
+        "args": [],
+        "envKeys": [
+          "ROOKERY_WORKSPACES_DIR",
+          "ROOKERY_REVIEWER_URL",
+          "UV_NO_CACHE"
+        ]
+      },
+      "panel": "panel/rookery.js",
+      "panelRoutes": "panel/routes.js",
+      "requires": {
+        "env": [
+          "ROOKERY_MODEL_BASE_URL"
+        ],
+        "min_ram_mb": 512,
+        "min_disk_mb": 1600
+      },
+      "env_vars": [
+        {
+          "name": "ROOKERY_MODEL_BASE_URL",
+          "description": "OpenAI-compatible endpoint for the reviewer model (e.g. a local llama.cpp/vLLM server; find your configured endpoint in Crow's AI settings). For a server on the Docker host use http://host.docker.internal:<port>/v1",
+          "required": true
+        },
+        {
+          "name": "ROOKERY_MODEL_ID",
+          "description": "Model id as reported by the endpoint's /v1/models",
+          "default": "local-model",
+          "required": true
+        },
+        {
+          "name": "ROOKERY_MODEL_API_KEY",
+          "description": "API key if the endpoint needs one (local servers usually ignore it)",
+          "default": "local",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "ROOKERY_WORKSPACES_DIR",
+          "description": "Host directory where audit workspaces are assembled (shared by the reviewer and the assemble tool)",
+          "default": "~/.crow/data/rookery/workspaces",
+          "required": false
+        },
+        {
+          "name": "ROOKERY_CORS_ORIGINS",
+          "description": "Space-separated browser origins for the app's own CORS/CSRF whitelist. RECOMMENDED: set to your serving origin when the reviewer is served beyond localhost. Empty = shim strips Origin (fine for tunnel/localhost use; disables the app's origin check)",
+          "required": false
+        },
+        {
+          "name": "ROOKERY_REVIEWER_URL",
+          "description": "Where the reviewer UI is reachable on your deployment (serve 127.0.0.1:3061 at a ROOT origin: Tailscale Serve HTTPS port, reverse proxy, or ssh -L tunnel). Shown by the panel and the assemble tool",
+          "required": false
+        },
+        {
+          "name": "UV_NO_CACHE",
+          "description": "Disable uv's download cache for the host MCP process (prevents multi-GB cache growth)",
+          "default": "1",
+          "required": false
+        }
+      ],
+      "ports": [
+        3061
+      ],
+      "notes": "Self-hosted only — never configure the vendor's Atlas/cloud layer. The reviewer runs entirely on the endpoint you provide. Assembled workspaces contain COPIES of your report + evidence; originals are never modified. NO webUI block on purpose: the app cannot live behind the gateway's /proxy/<id>/ subpath (root-absolute asset paths baked in its binary) — serve 127.0.0.1:3061 at a root origin and set ROOKERY_REVIEWER_URL (see README).",
+      "official": true
+    },
+    {
       "id": "scratch-offline",
       "name": "Offline Block Coding (Scratch-compatible)",
       "version": "1.0.0",
@@ -6089,91 +6174,6 @@
       "webUI": null,
       "notes": "No host port publish. Expose via Caddy after install: caddy_add_federation_site { domain: WF_HOST, upstream: 'writefreely:8080', profile: 'activitypub' }. On first-run the admin account is created via the web UI; there is no CLI bootstrap.",
       "official": true
-    },
-    {
-      "id": "rookery",
-      "name": "Rookery Reviewer",
-      "version": "0.1.0",
-      "description": "Self-hosted OpenScience reviewer + experiment-audit workspace assembler — audit a report's numeric claims against its registered evidence, on your own local model",
-      "type": "bundle",
-      "author": "kh0pper",
-      "category": "ai",
-      "tags": [
-        "research",
-        "audit",
-        "provenance",
-        "openscience",
-        "self-hosted"
-      ],
-      "icon": "search",
-      "docker": {
-        "composefile": "docker-compose.yml"
-      },
-      "server": {
-        "command": "./run.sh",
-        "args": [],
-        "envKeys": [
-          "ROOKERY_WORKSPACES_DIR",
-          "ROOKERY_REVIEWER_URL",
-          "UV_NO_CACHE"
-        ]
-      },
-      "panel": "panel/rookery.js",
-      "panelRoutes": "panel/routes.js",
-      "requires": {
-        "env": [
-          "ROOKERY_MODEL_BASE_URL"
-        ],
-        "min_ram_mb": 512,
-        "min_disk_mb": 1600
-      },
-      "env_vars": [
-        {
-          "name": "ROOKERY_MODEL_BASE_URL",
-          "description": "OpenAI-compatible endpoint for the reviewer model (e.g. a local llama.cpp/vLLM server; find your configured endpoint in Crow's AI settings). For a server on the Docker host use http://host.docker.internal:<port>/v1",
-          "required": true
-        },
-        {
-          "name": "ROOKERY_MODEL_ID",
-          "description": "Model id as reported by the endpoint's /v1/models",
-          "default": "local-model",
-          "required": true
-        },
-        {
-          "name": "ROOKERY_MODEL_API_KEY",
-          "description": "API key if the endpoint needs one (local servers usually ignore it)",
-          "default": "local",
-          "required": false,
-          "secret": true
-        },
-        {
-          "name": "ROOKERY_WORKSPACES_DIR",
-          "description": "Host directory where audit workspaces are assembled (shared by the reviewer and the assemble tool)",
-          "default": "~/.crow/data/rookery/workspaces",
-          "required": false
-        },
-        {
-          "name": "ROOKERY_CORS_ORIGINS",
-          "description": "Space-separated browser origins for the app's own CORS/CSRF whitelist. RECOMMENDED: set to your serving origin when the reviewer is served beyond localhost. Empty = shim strips Origin (fine for tunnel/localhost use; disables the app's origin check)",
-          "required": false
-        },
-        {
-          "name": "ROOKERY_REVIEWER_URL",
-          "description": "Where the reviewer UI is reachable on your deployment (serve 127.0.0.1:3061 at a ROOT origin: Tailscale Serve HTTPS port, reverse proxy, or ssh -L tunnel). Shown by the panel and the assemble tool",
-          "required": false
-        },
-        {
-          "name": "UV_NO_CACHE",
-          "description": "Disable uv's download cache for the host MCP process (prevents multi-GB cache growth)",
-          "default": "1",
-          "required": false
-        }
-      ],
-      "ports": [
-        3061
-      ],
-      "notes": "Self-hosted only — never configure the vendor's Atlas/cloud layer. The reviewer runs entirely on the endpoint you provide. Assembled workspaces contain COPIES of your report + evidence; originals are never modified. NO webUI block on purpose: the app cannot live behind the gateway's /proxy/<id>/ subpath (root-absolute asset paths baked in its binary) — serve 127.0.0.1:3061 at a root origin and set ROOKERY_REVIEWER_URL (see README).",
-      "official": false
     }
   ]
 }
