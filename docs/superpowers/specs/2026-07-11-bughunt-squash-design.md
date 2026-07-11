@@ -16,9 +16,18 @@ BH-5b the providers/crow-local sync loop root cause (per-instance-volatile
 (:119). Destructuring yields undefined → TypeError on call → caught →
 placeholder rendered on EVERY request since the import was written.
 Fix: import and call `loadOrCreateIdentity` at both sites (it is sync;
-existing `await` is harmless). Test: render the section against a scratch
-data dir → output contains a crow: id, NOT the unavailable placeholder —
-red pre-fix. Mutation: reverting the name reddens.
+existing `await` is harmless). R1 verified this decisively: ~10 always-run
+gateway paths already call no-arg `loadOrCreateIdentity()` (managers.js:25,
+post-listen.js:84/339, …) against the same CROW_DATA_DIR-keyed identity.json
+(plaintext on this fleet), and boot creates the file before any render — no
+new passphrase exposure, no create-on-render concern, no read-only path
+needed. Test: render the section against a scratch data dir → output
+contains a crow: id, NOT the unavailable placeholder — red pre-fix.
+TEST GOTCHA (R1 MINOR-2): identity.js resolves DATA_DIR/IDENTITY_PATH as
+module-level consts at import time — the test MUST set CROW_DATA_DIR before
+its first import of sharing/identity.js (subprocess or import-order
+discipline), never mutate env after import. Mutation: reverting the name
+reddens.
 
 ## F2 (BH-1/2, MINOR) — raw i18n keys for two section labels
 
@@ -41,9 +50,17 @@ BH-5b) the page grows unboundedly. Fix: `LIMIT 200`, plus an honest count —
 a `SELECT COUNT(*)` drives a "showing first 200 of N" line when N > 200
 (never a silent truncation; the render already shows per-row cards, add the
 notice above the list, i18n EN+ES: `settings.syncConflicts.showingFirst`).
+Key namespace (R1 MINOR-1): the notice key is `syncConflicts.showingFirst`
+— the section's entire namespace is `syncConflicts.*` (27 existing t()
+calls, NO `settings.` prefix); a mismatched prefix would render the raw key,
+recreating the exact F2 defect. i18n entry and t() call must use the SAME
+key (test asserts the rendered string, which catches any mismatch).
 Test: seed 205 unresolved rows → render lists 200 + the notice with N=205;
 seed 5 → no notice. Mutation: dropping the LIMIT reddens the 200-count
 assert; dropping the notice reddens the notice assert.
+R1 verified: `resolve_all` is `UPDATE … WHERE resolved=0` — bulk resolve is
+NEVER scoped by the display limit; the nest banner + section preview both
+read COUNT(*) independently, so F3 does not mask BH-5b's growth signal.
 
 ## Non-goals
 BH-5b root cause (no change to what emits providers rows or how conflicts
