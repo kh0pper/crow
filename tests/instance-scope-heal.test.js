@@ -82,11 +82,12 @@ test("heal: promote override-only, newest-wins vs global, blog_* pattern, non-in
       assert.equal(await overrideCount(db, "profile_%"), 1, "(g) allowlisted-key override untouched");
       assert.match(String(await flagValue(db)), /^done:2$/);
 
-      // (b) second run is a flag-guarded no-op even with a fresh override present
-      await seedOverride(db, localId, "discovery_enabled", "false", "2026-07-03 10:00:00");
+      // (b) second run is a flag-guarded no-op even with a fresh FUTURE-DATED override present (so a flag-less run would promote it)
+      await seedOverride(db, localId, "discovery_enabled", "false", "2099-01-01 00:00:00");
       const n2 = await healInstanceScopeOverridesOnce(db);
       assert.equal(n2, 0, "(b) flag-guarded");
       assert.equal(await globalValue(db, "discovery_enabled"), "true", "(b) post-flag override not consumed");
+      assert.equal(await overrideCount(db, "discovery_%"), 1, "(b) flag-guarded run leaves the override untouched");
     } finally { cleanup(); }
   });
 });
