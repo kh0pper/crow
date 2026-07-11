@@ -682,6 +682,13 @@ export function playerBarJs(lang) {
   if (!bundleProbed) {
     fetch('/api/meta-glasses/devices', { credentials: 'same-origin' })
       .then(function(r) {
+        // Cache 'false' ONLY on an explicit 404 (bundle not installed) — a
+        // transient error (network blip, 401, 500) must not poison the
+        // tab-session cache, which the notifications PTT poll also honors.
+        if (r.status === 404) {
+          try { sessionStorage.setItem('crow-glasses-bundle', 'false'); } catch(e) {}
+          throw new Error();
+        }
         if (!r.ok) throw new Error();
         try { sessionStorage.setItem('crow-glasses-bundle', 'true'); } catch(e) {}
         return r.json();
@@ -695,7 +702,6 @@ export function playerBarJs(lang) {
         }
       })
       .catch(function() {
-        try { sessionStorage.setItem('crow-glasses-bundle', 'false'); } catch(e) {}
         glassesBundleAvailable = false;
       });
   }

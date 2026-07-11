@@ -594,16 +594,39 @@ export function headerIconsJs(lang) {
     if (!btn) return;
     try {
       var res = await fetch('/api/meta-glasses/devices', { credentials: 'same-origin' });
+      if (res.status === 404) {
+        // Bundle not installed — 404 is permanent for this page's lifetime.
+        // Cache the verdict (same key player.js uses) and stop the 15s poll
+        // instead of hammering a dead route forever (BH-6).
+        btn.style.display = 'none';
+        try { sessionStorage.setItem('crow-glasses-bundle', 'false'); } catch (e) {}
+        if (window.__crowPttVisibilityInterval) {
+          clearInterval(window.__crowPttVisibilityInterval);
+          window.__crowPttVisibilityInterval = null;
+        }
+        return;
+      }
       if (!res.ok) { btn.style.display = 'none'; return; }
+      try { sessionStorage.setItem('crow-glasses-bundle', 'true'); } catch (e) {}
       var data = await res.json();
       btn.style.display = (data.connected_count > 0) ? '' : 'none';
-    } catch {
+    } catch (e) {
       btn.style.display = 'none';
     }
   }
-  _refreshCrowPttVisibility();
-  if (!window.__crowPttVisibilityInterval) {
-    window.__crowPttVisibilityInterval = setInterval(_refreshCrowPttVisibility, 15000);
+  var _pttBundleCached = null;
+  try { _pttBundleCached = sessionStorage.getItem('crow-glasses-bundle'); } catch (e) {}
+  if (_pttBundleCached === 'false') {
+    // Known-absent this tab session (player.js probe or an earlier 404 here) —
+    // hide and never start the poll. Installing the bundle restarts the
+    // gateway; a fresh tab re-probes.
+    var _pttBtn = document.getElementById('crow-ptt-btn');
+    if (_pttBtn) _pttBtn.style.display = 'none';
+  } else {
+    _refreshCrowPttVisibility();
+    if (!window.__crowPttVisibilityInterval) {
+      window.__crowPttVisibilityInterval = setInterval(_refreshCrowPttVisibility, 15000);
+    }
   }
 
   async function toggleCrowPtt(e) {
@@ -941,16 +964,39 @@ export function tamagotchiJs(lang) {
     if (!btn) return;
     try {
       var res = await fetch('/api/meta-glasses/devices', { credentials: 'same-origin' });
+      if (res.status === 404) {
+        // Bundle not installed — 404 is permanent for this page's lifetime.
+        // Cache the verdict (same key player.js uses) and stop the 15s poll
+        // instead of hammering a dead route forever (BH-6).
+        btn.style.display = 'none';
+        try { sessionStorage.setItem('crow-glasses-bundle', 'false'); } catch (e) {}
+        if (window.__crowPttVisibilityInterval) {
+          clearInterval(window.__crowPttVisibilityInterval);
+          window.__crowPttVisibilityInterval = null;
+        }
+        return;
+      }
       if (!res.ok) { btn.style.display = 'none'; return; }
+      try { sessionStorage.setItem('crow-glasses-bundle', 'true'); } catch (e) {}
       var data = await res.json();
       btn.style.display = (data.connected_count > 0) ? '' : 'none';
-    } catch {
+    } catch (e) {
       btn.style.display = 'none';
     }
   }
-  _refreshCrowPttVisibility();
-  if (!window.__crowPttVisibilityInterval) {
-    window.__crowPttVisibilityInterval = setInterval(_refreshCrowPttVisibility, 15000);
+  var _pttBundleCached = null;
+  try { _pttBundleCached = sessionStorage.getItem('crow-glasses-bundle'); } catch (e) {}
+  if (_pttBundleCached === 'false') {
+    // Known-absent this tab session (player.js probe or an earlier 404 here) —
+    // hide and never start the poll. Installing the bundle restarts the
+    // gateway; a fresh tab re-probes.
+    var _pttBtn = document.getElementById('crow-ptt-btn');
+    if (_pttBtn) _pttBtn.style.display = 'none';
+  } else {
+    _refreshCrowPttVisibility();
+    if (!window.__crowPttVisibilityInterval) {
+      window.__crowPttVisibilityInterval = setInterval(_refreshCrowPttVisibility, 15000);
+    }
   }
 
   async function toggleCrowPtt(e) {
