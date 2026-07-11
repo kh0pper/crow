@@ -8,12 +8,18 @@
  */
 
 import { execFile } from "node:child_process";
-import { dirname } from "node:path";
+import { readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, renameSync } from "node:fs";
+import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isSupervised } from "../shared/supervisor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const APP_ROOT = dirname(dirname(__dirname));
+let APP_ROOT = dirname(dirname(__dirname));
+
+/** Test-only: retarget git/npm/lock operations at a fixture repo. */
+export function _setAppRootForTest(dir) {
+  APP_ROOT = dir;
+}
 
 const DEFAULT_INTERVAL_HOURS = 6;
 const MIN_INTERVAL_HOURS = 1;
@@ -106,112 +112,106 @@ function run(cmd, args, options = {}) {
   });
 }
 
+const LOCK_STALE_MS = 30 * 60 * 1000;
+
+async function lockPath() {
+  const r = await run("git", ["rev-parse", "--absolute-git-dir"]);
+  if (r.code !== 0 || !r.stdout) return null; // not a git checkout → no lock possible
+  return join(r.stdout, "crow-auto-update.lock");
+}
+
+function readLock(path) {
+  try {
+    const [pidLine, tsLine] = readFileSync(path, "utf8").split("\n");
+    return { pid: parseInt(pidLine, 10), ts: Date.parse(tsLine || "") };
+  } catch { return null; }
+}
+
+function lockIsStale(info) {
+  if (!info || !Number.isFinite(info.pid)) return true;
+  let alive = true;
+  try { process.kill(info.pid, 0); } catch { alive = false; }
+  const old = !Number.isFinite(info.ts) || Date.now() - info.ts > LOCK_STALE_MS;
+  return !alive || old; // reclaim on (dead PID) OR (age>30min) — a wedged live updater must not block forever
+}
+
+/** Returns the lock file path on success, null when another updater holds it. */
+function acquireLock(path) {
+  // Sweep crash-orphaned quarantine files older than the staleness window.
+  try {
+    const dir = dirname(path);
+    for (const f of readdirSync(dir)) {
+      if (!f.startsWith(basename(path) + ".stale.")) continue;
+      const full = join(dir, f);
+      try { if (Date.now() - statSync(full).mtimeMs > LOCK_STALE_MS) unlinkSync(full); } catch {}
+    }
+  } catch {}
+  const body = `${process.pid}\n${new Date().toISOString()}\n`;
+  try {
+    writeFileSync(path, body, { flag: "wx" });
+    return path;
+  } catch (err) {
+    if (err.code !== "EEXIST") return null;
+  }
+  const info = readLock(path);
+  if (!lockIsStale(info)) return null; // live young holder → skip
+  // Atomic reclaim: rename-quarantine — exactly one winner among reclaimers
+  // racing the SAME stale inode (rename is NOT compare-and-swap; the lapping
+  // residual is accepted in the spec with named backstops).
+  const quarantine = `${path}.stale.${process.pid}`;
+  try { renameSync(path, quarantine); } catch { return null; } // ENOENT = lost the race
+  try { unlinkSync(quarantine); } catch {}
+  try {
+    writeFileSync(path, body, { flag: "wx" });
+    return path;
+  } catch { return null; } // a third party acquired meanwhile
+}
+
+/** Owner-checked release: never unlink a lock we no longer own. */
+function releaseLock(path) {
+  try {
+    const info = readLock(path);
+    if (info && info.pid === process.pid) unlinkSync(path);
+  } catch {}
+}
+
+/** Test-only: the lock primitives, unit-tested directly (they are not
+ *  exported for production use — checkForUpdates()/runLockedUpdate() are the
+ *  real callers). */
+export const _lockPrimitivesForTest = { acquireLock, releaseLock, lockIsStale };
+
 /**
  * Check for and apply updates
- * Returns { updated, from, to, error }
+ * Returns { updated, from, to, error, skipped?, message?, branch? }
  */
 export async function checkForUpdates() {
   const log = (msg) => console.log(`[auto-update] ${msg}`);
-
   try {
-    // Get current version
-    const currentRef = await run("git", ["rev-parse", "--short", "HEAD"]);
-    const currentVersion = currentRef.stdout;
-
-    // Fetch latest from remote
-    log("Checking for updates...");
-    const fetchResult = await run("git", ["fetch", "--quiet", "origin", "main"]);
-    if (fetchResult.code !== 0) {
-      const msg = `Fetch failed: ${fetchResult.stderr}`;
+    const branch = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (branch.code !== 0 || branch.stdout !== "main") {
+      const msg = branch.code !== 0
+        ? `Skipped: cannot determine branch (${branch.stderr || "not a git checkout"})`
+        : `Skipped: not on main (on '${branch.stdout}')`;
       log(msg);
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, error: msg };
+      return { updated: false, skipped: "not-on-main", branch: branch.stdout, message: msg };
     }
-
-    // Check if there are new commits
-    const behind = await run("git", ["rev-list", "--count", "HEAD..origin/main"]);
-    const behindCount = parseInt(behind.stdout, 10) || 0;
-
-    await saveSetting("auto_update_current_version", currentVersion);
-
-    if (behindCount === 0) {
-      log("Already up to date.");
-      await saveSetting("auto_update_last_check", new Date().toISOString());
-      await saveSetting("auto_update_last_result", "Up to date");
-      await saveSetting("auto_update_latest_version", currentVersion);
-      return { updated: false };
-    }
-
-    log(`${behindCount} new commit(s) available. Updating...`);
-
-    // Stash any local changes before pulling
-    const stashResult = await run("git", ["stash", "--include-untracked"]);
-    const didStash = !stashResult.stdout.includes("No local changes");
-
-    // Pull
-    const pullResult = await run("git", ["pull", "--ff-only", "origin", "main"]);
-    if (pullResult.code !== 0) {
-      const msg = `Pull failed: ${pullResult.stderr}`;
+    const lock = await lockPath();
+    const held = lock ? acquireLock(lock) : null;
+    if (lock && !held) {
+      const info = readLock(lock);
+      const msg = `Skipped: another updater is running (pid ${info?.pid ?? "unknown"})`;
       log(msg);
-      if (didStash) {
-        await run("git", ["stash", "pop"]);
-      }
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, error: msg };
+      return { updated: false, skipped: "locked", message: msg };
     }
-
-    // Install deps (only if package-lock changed)
-    const changedFiles = await run("git", ["diff", "--name-only", `${currentVersion}..HEAD`]);
-    if (changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json")) {
-      log("Dependencies changed — running npm install...");
-      const npmResult = await run("npm", ["install", "--omit=dev"], { timeout: 300000 });
-      if (npmResult.code !== 0) {
-        log(`npm install warning: ${npmResult.stderr}`);
-      }
+    try {
+      return await runLockedUpdate(log);
+    } finally {
+      if (held) releaseLock(held);
     }
-
-    // Run init-db for any schema changes
-    log("Running database migrations...");
-    await run("node", ["scripts/init-db.js"]);
-
-    // Restore stashed local changes
-    if (didStash) {
-      const popResult = await run("git", ["stash", "pop"]);
-      if (popResult.code !== 0) {
-        // Conflict: restore clean post-pull state, keep changes in stash
-        await run("git", ["checkout", "--", "."]);
-        log("Warning: local changes could not be auto-merged after update. They are saved in 'git stash list' and can be recovered with 'git stash pop'.");
-      } else {
-        log("Local changes stashed and restored successfully.");
-      }
-    }
-
-    const newRef = await run("git", ["rev-parse", "--short", "HEAD"]);
-    const newVersion = newRef.stdout;
-
-    await saveSetting("auto_update_last_check", new Date().toISOString());
-    await saveSetting("auto_update_last_result", `Updated ${currentVersion} → ${newVersion}`);
-    await saveSetting("auto_update_current_version", newVersion);
-    await saveSetting("auto_update_latest_version", newVersion);
-
-    log(`Updated: ${currentVersion} → ${newVersion}`);
-
-    // Restart to load the new code when supervised (systemd, launchd
-    // KeepAlive, Docker, etc.). Without a supervisor the pulled code only
-    // takes effect on the next manual restart.
-    if (isSupervised()) {
-      log("Restarting gateway to apply update...");
-      // Close the HTTP server first to release the port, then exit
-      // so the supervisor's restart doesn't hit EADDRINUSE
-      setTimeout(() => {
-        process.emit("crow:shutdown");
-        setTimeout(() => process.exit(1), 1000);
-      }, 1500);
-    }
-
-    return { updated: true, from: currentVersion, to: newVersion };
   } catch (err) {
     const msg = `Update error: ${err.message}`;
     console.error(`[auto-update] ${msg}`);
@@ -219,6 +219,106 @@ export async function checkForUpdates() {
     await saveSetting("auto_update_last_result", msg);
     return { updated: false, error: msg };
   }
+}
+
+/** The mutating sequence; exported ONLY as the test seam for the under-lock
+ *  branch re-check (spec D3b — the outer guard would abort a branch fixture
+ *  before the lock). */
+export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${m}`)) {
+  // Get current version
+  const currentRef = await run("git", ["rev-parse", "--short", "HEAD"]);
+  const currentVersion = currentRef.stdout;
+
+  // Fetch latest from remote
+  log("Checking for updates...");
+  const fetchResult = await run("git", ["fetch", "--quiet", "origin", "main"]);
+  if (fetchResult.code !== 0) {
+    const msg = `Fetch failed: ${fetchResult.stderr}`;
+    log(msg);
+    await saveSetting("auto_update_last_check", new Date().toISOString());
+    await saveSetting("auto_update_last_result", msg);
+    return { updated: false, error: msg };
+  }
+
+  // Check if there are new commits
+  const behind = await run("git", ["rev-list", "--count", "HEAD..origin/main"]);
+  const behindCount = parseInt(behind.stdout, 10) || 0;
+
+  await saveSetting("auto_update_current_version", currentVersion);
+
+  if (behindCount === 0) {
+    log("Already up to date.");
+    await saveSetting("auto_update_last_check", new Date().toISOString());
+    await saveSetting("auto_update_last_result", "Up to date");
+    await saveSetting("auto_update_latest_version", currentVersion);
+    return { updated: false };
+  }
+
+  log(`${behindCount} new commit(s) available. Updating...`);
+
+  // D3b: re-check the branch UNDER the lock, immediately before the pull —
+  // a parallel session's raw `git checkout` races the outer guard across the
+  // fetch window, and `pull --ff-only origin main` on an ancestor feature
+  // branch FAST-FORWARDS that ref (R1 empirically proved it).
+  const recheck = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (recheck.stdout !== "main") {
+    const msg = `Skipped: branch changed mid-update (now '${recheck.stdout}')`;
+    log(msg);
+    await saveSetting("auto_update_last_check", new Date().toISOString());
+    await saveSetting("auto_update_last_result", msg);
+    return { updated: false, skipped: "not-on-main", branch: recheck.stdout, message: msg };
+  }
+
+  // D2: pull directly — NO stash. `git pull --ff-only` refuses only when the
+  // incoming diff overlaps a locally-modified file; disjoint local WIP
+  // survives untouched.
+  const pullResult = await run("git", ["pull", "--ff-only", "origin", "main"]);
+  if (pullResult.code !== 0) {
+    const msg = `Pull failed (local changes may conflict with the update — resolve manually): ${pullResult.stderr}`;
+    log(msg);
+    await saveSetting("auto_update_last_check", new Date().toISOString());
+    await saveSetting("auto_update_last_result", msg);
+    return { updated: false, error: msg };
+  }
+
+  // Install deps (only if package-lock changed)
+  const changedFiles = await run("git", ["diff", "--name-only", `${currentVersion}..HEAD`]);
+  if (changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json")) {
+    log("Dependencies changed — running npm install...");
+    const npmResult = await run("npm", ["install", "--omit=dev"], { timeout: 300000 });
+    if (npmResult.code !== 0) {
+      log(`npm install warning: ${npmResult.stderr}`);
+    }
+  }
+
+  // Run init-db for any schema changes
+  log("Running database migrations...");
+  await run("node", ["scripts/init-db.js"]);
+
+  const newRef = await run("git", ["rev-parse", "--short", "HEAD"]);
+  const newVersion = newRef.stdout;
+
+  await saveSetting("auto_update_last_check", new Date().toISOString());
+  await saveSetting("auto_update_last_result", `Updated ${currentVersion} → ${newVersion}`);
+  await saveSetting("auto_update_current_version", newVersion);
+  await saveSetting("auto_update_latest_version", newVersion);
+
+  log(`Updated: ${currentVersion} → ${newVersion}`);
+
+  // Restart to load the new code when supervised (systemd, launchd
+  // KeepAlive, Docker, etc.). Without a supervisor the pulled code only
+  // takes effect on the next manual restart.
+  if (isSupervised()) {
+    log("Restarting gateway to apply update...");
+    // Close the HTTP server first to release the port, then exit
+    // so the supervisor's restart doesn't hit EADDRINUSE
+    setTimeout(() => {
+      process.emit("crow:shutdown");
+      setTimeout(() => process.exit(1), 1000);
+    }, 1500);
+  }
+
+  return { updated: true, from: currentVersion, to: newVersion };
 }
 
 /**
