@@ -136,6 +136,18 @@ export async function mountMcpServers(app, deps) {
     console.warn(`[instance-sync] backfillGroupsOnce failed: ${err.message}`);
   }
 
+  // D7: one-shot providers backfill per NEW peer — per-peer outgoing Hypercores
+  // are born empty (no history replay), and D2's no-op suppression removed the
+  // accidental per-boot re-emit that used to deliver provider rows to fresh
+  // pairings. Guarded by per-peer flag rows; idempotent on later boots.
+  try {
+    if (syncManager?.backfillProvidersForNewPeers) {
+      await syncManager.backfillProvidersForNewPeers();
+    }
+  } catch (err) {
+    console.warn(`[instance-sync] backfillProvidersForNewPeers failed: ${err.message}`);
+  }
+
   // Bundle asset repair: when a bundle is marked installed but its ~/.crow/bundles/<id>/
   // directory is missing user-visible files (settings-section.js, panel/, manifest.json),
   // re-copy them from the app repo. Prevents the Companion migration gap from recurring.
