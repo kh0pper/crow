@@ -198,6 +198,21 @@ export function extensionStyles() {
 }
 .ext-collection-modal__item-state--done { color:var(--crow-success); }
 .ext-collection-modal__item-state--failed { color:var(--crow-error); }
+/* "Runs on this Crow" / "Connects to a service you already run · You'll need: …"
+ * — its own line under the member name (the item is a wrapping flex row). */
+.ext-collection-modal__item-kind {
+  flex-basis:100%;
+  font-size:0.75rem; line-height:1.4;
+  color:var(--crow-text-muted);
+}
+/* Post-install checklist: the env keys a member is still missing. */
+.ext-checklist__keys {
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.72rem;
+  color:var(--crow-text-muted);
+  word-break:break-word;
+}
+.ext-checklist__row .btn { margin-left:auto; }
 .ext-collection-modal__note {
   font-size:0.8rem; line-height:1.5;
   color:var(--crow-text-muted);
