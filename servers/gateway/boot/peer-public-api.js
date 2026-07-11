@@ -58,8 +58,11 @@ export async function mountPeerPublicApi(app, deps) {
         crow_discovery: true,
         crow_id: identity.crowId,
         display_name: nameSetting.rows[0]?.value || null,
-        ed25519_pubkey: identity.ed25519Public,
-        secp256k1_pubkey: identity.secp256k1Public,
+        // Identity fields are ed25519Pubkey/secp256k1Pubkey (identity.js) —
+        // the *Public spellings shipped undefined pubkeys for months (twin of
+        // the #165 identity-fields fix).
+        ed25519_pubkey: identity.ed25519Pubkey,
+        secp256k1_pubkey: identity.secp256k1Pubkey,
       });
     } catch (err) {
       res.status(500).json({ error: "Discovery unavailable" });
