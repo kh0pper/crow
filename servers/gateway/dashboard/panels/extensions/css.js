@@ -6,7 +6,223 @@
 
 export function extensionStyles() {
   return `<style>
-/* ─── Extensions Store ─── */
+/* ─── Extensions Store ───
+ * Hierarchy (collections > featured > groups) is carried by scale, weight and
+ * one accent "spine" — never by new colors. Everything wraps: there is no
+ * horizontally scrolling surface on this page, by design.
+ */
+
+/* View switcher (Browse | Installed) */
+.ext-viewtabs {
+  display:flex; flex-wrap:wrap; gap:0.25rem;
+  padding:0.25rem;
+  margin-bottom:1.25rem;
+  background:var(--crow-bg-deep);
+  border:1px solid var(--crow-border);
+  border-radius:var(--crow-radius-pill, 8px);
+  width:fit-content; max-width:100%;
+}
+.ext-viewtab {
+  display:inline-flex; align-items:center; gap:0.4rem;
+  padding:0.45rem 1.1rem;
+  border:none; border-radius:calc(var(--crow-radius-pill, 8px) - 2px);
+  background:transparent;
+  color:var(--crow-text-secondary);
+  font-family:'DM Sans',sans-serif;
+  font-size:0.85rem; font-weight:500;
+  cursor:pointer;
+  transition:background 0.18s ease, color 0.18s ease;
+}
+.ext-viewtab:hover { color:var(--crow-text-primary); }
+.ext-viewtab:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
+.ext-viewtab--active {
+  background:var(--crow-bg-surface);
+  color:var(--crow-text-primary);
+  font-weight:600;
+  box-shadow:0 1px 3px rgba(0,0,0,0.25);
+}
+.ext-viewtab__count {
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.7rem;
+  padding:0.05rem 0.35rem;
+  border-radius:999px;
+  background:var(--crow-accent-muted);
+  color:var(--crow-accent);
+}
+.ext-view--hidden { display:none; }
+
+/* Section headings — the type scale IS the hierarchy */
+.ext-section { margin-bottom:2.25rem; }
+.ext-section-title {
+  font-family:'Fraunces',serif;
+  font-weight:600;
+  color:var(--crow-text-primary);
+  margin:0 0 0.5rem;
+  display:flex; align-items:center; gap:0.5rem;
+  font-size:1rem;
+}
+.ext-section-title--lead { font-size:1.45rem; letter-spacing:-0.01em; margin-bottom:0.25rem; }
+.ext-section-title--feature { font-size:1.2rem; margin-bottom:0.75rem; }
+.ext-section-title--feature::before {
+  content:""; flex:0 0 3px; align-self:stretch; min-height:1.1em;
+  border-radius:2px; background:var(--crow-accent);
+}
+.ext-section-sub {
+  font-size:0.85rem; color:var(--crow-text-muted);
+  margin:0 0 1rem; max-width:56ch; line-height:1.5;
+}
+.ext-section-count {
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.7rem; font-weight:500;
+  color:var(--crow-text-muted);
+  padding:0.1rem 0.4rem;
+  border-radius:4px;
+  background:var(--crow-bg-elevated);
+}
+.ext-sourcenote { font-size:0.75rem; color:var(--crow-text-muted); margin-bottom:1rem; }
+.ext-empty { text-align:center; padding:2rem; color:var(--crow-text-muted); }
+
+/* Starter collections — the loudest surface on the page */
+.ext-collections__row {
+  display:flex; flex-wrap:wrap; gap:0.85rem;
+}
+.ext-collection-card {
+  flex:1 1 240px; min-width:0; max-width:100%;
+  display:flex; flex-direction:column; align-items:flex-start; gap:0.3rem;
+  padding:1.1rem 1.15rem 1.1rem 1.35rem;
+  text-align:left;
+  background:var(--crow-bg-surface);
+  border:1px solid var(--crow-border);
+  border-left:3px solid var(--crow-accent);
+  border-radius:var(--crow-radius-card, 12px);
+  cursor:pointer;
+  font-family:'DM Sans',sans-serif;
+  transition:transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  animation:fadeInUp 0.4s ease-out both;
+}
+.ext-collection-card:hover {
+  transform:translateY(-3px);
+  border-color:var(--crow-accent);
+  box-shadow:0 10px 28px rgba(0,0,0,0.22);
+}
+.ext-collection-card:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
+.ext-collection-card__icon { font-size:1.6rem; line-height:1; margin-bottom:0.15rem; }
+.ext-collection-card__name {
+  font-family:'Fraunces',serif;
+  font-size:1.05rem; font-weight:600;
+  color:var(--crow-text-primary);
+}
+.ext-collection-card__desc {
+  font-size:0.8rem; line-height:1.45;
+  color:var(--crow-text-secondary);
+}
+.ext-collection-card__count {
+  margin-top:0.35rem;
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.7rem;
+  color:var(--crow-accent);
+}
+
+/* Group chips — wrap, never scroll (the 19-tab nowrap row is what broke the page) */
+.ext-group-chips {
+  display:flex; flex-wrap:wrap; gap:0.5rem;
+  margin-bottom:1.75rem;
+}
+.ext-group-chip {
+  display:inline-flex; align-items:center; gap:0.35rem;
+  padding:0.4rem 0.9rem;
+  border-radius:var(--crow-radius-pill, 8px);
+  background:transparent;
+  border:1px solid var(--crow-border);
+  color:var(--crow-text-secondary);
+  font-family:'DM Sans',sans-serif;
+  font-size:0.8rem; font-weight:500;
+  cursor:pointer;
+  transition:border-color 0.15s, color 0.15s, background 0.15s;
+}
+.ext-group-chip:hover { border-color:var(--crow-accent); color:var(--crow-text-primary); }
+.ext-group-chip:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
+.ext-group-chip--active {
+  background:var(--crow-accent-muted);
+  color:var(--crow-accent);
+  border-color:var(--crow-accent);
+}
+.ext-group-chip__count { font-family:'JetBrains Mono',monospace; font-size:0.7rem; opacity:0.75; }
+
+/* Group sections */
+.ext-group-section { margin-bottom:2rem; scroll-margin-top:1rem; }
+.ext-group-more { margin-top:0.25rem; }
+/* Cards past the per-group cap. Hidden by CLASS, not by an inline style: the
+ * search filter writes card.style.display, which would clobber an inline hide
+ * and reveal every overflow card on the first keystroke. "Show all" removes
+ * this class.
+ *
+ * The selector is compound (0-2-0) on purpose. A bare .ext-card--overflow is
+ * 0-1-0, which TIES with the .ext-card display:flex rule further down and loses
+ * on source order — it would never hide anything. Don't "fix" a future ordering
+ * problem by moving this rule; keep it more specific than .ext-card. */
+.ext-card.ext-card--overflow { display:none; }
+
+/* Collection install modal (shell — content is built by the client) */
+.ext-collection-modal__title {
+  font-family:'Fraunces',serif;
+  font-size:1.2rem; font-weight:600;
+  margin:0 0 0.35rem;
+  color:var(--crow-text-primary);
+}
+.ext-collection-modal__desc {
+  font-size:0.85rem; color:var(--crow-text-secondary);
+  line-height:1.5; margin:0 0 1rem;
+}
+.ext-collection-modal__group-title {
+  font-size:0.7rem; font-weight:600;
+  text-transform:uppercase; letter-spacing:0.08em;
+  color:var(--crow-text-muted);
+  margin:1rem 0 0.4rem;
+}
+.ext-collection-modal__list { list-style:none; margin:0; padding:0; }
+.ext-collection-modal__item {
+  display:flex; align-items:center; gap:0.6rem; flex-wrap:wrap;
+  padding:0.4rem 0;
+  border-bottom:1px solid var(--crow-border);
+  font-size:0.85rem;
+  color:var(--crow-text-secondary);
+}
+.ext-collection-modal__item:last-child { border-bottom:none; }
+.ext-collection-modal__item-name { color:var(--crow-text-primary); font-weight:500; }
+.ext-collection-modal__item-state {
+  margin-left:auto;
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.7rem;
+  color:var(--crow-text-muted);
+}
+.ext-collection-modal__item-state--done { color:var(--crow-success); }
+.ext-collection-modal__item-state--failed { color:var(--crow-error); }
+/* "Runs on this Crow" / "Connects to a service you already run · You'll need: …"
+ * — its own line under the member name (the item is a wrapping flex row). */
+.ext-collection-modal__item-kind {
+  flex-basis:100%;
+  font-size:0.75rem; line-height:1.4;
+  color:var(--crow-text-muted);
+}
+/* Post-install checklist: the env keys a member is still missing. */
+.ext-checklist__keys {
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.72rem;
+  color:var(--crow-text-muted);
+  word-break:break-word;
+}
+.ext-checklist__row .btn { margin-left:auto; }
+.ext-collection-modal__note {
+  font-size:0.8rem; line-height:1.5;
+  color:var(--crow-text-muted);
+  background:var(--crow-bg-deep);
+  border-radius:8px;
+  padding:0.65rem 0.85rem;
+  margin-top:1rem;
+}
+.ext-collection-modal__progress { margin-top:1rem; }
+
 .ext-search { position:relative; margin-bottom:1.5rem; }
 .ext-search__icon {
   position:absolute; left:0.85rem; top:50%;
@@ -28,30 +244,8 @@ export function extensionStyles() {
 .ext-search__input:focus { outline:none; border-color:var(--crow-accent); }
 .ext-search__input::placeholder { color:var(--crow-text-muted); }
 
-/* Installed strip */
-.ext-section-label {
-  font-size:0.75rem; font-weight:600;
-  text-transform:uppercase; letter-spacing:0.08em;
-  color:var(--crow-text-muted);
-  margin:0 0 0.6rem 0.1rem;
-}
-.ext-installed-toggle {
-  display:flex; align-items:center; justify-content:space-between;
-  padding:0.6rem 1rem;
-  background:var(--crow-bg-surface);
-  border:1px solid var(--crow-border);
-  border-radius:var(--crow-radius-card, 12px);
-  cursor:pointer; user-select:none;
-  font-size:0.85rem; font-weight:600;
-  color:var(--crow-text-secondary);
-  margin-bottom:0.5rem;
-  transition:border-color 0.15s;
-}
-.ext-installed-toggle:hover { border-color:var(--crow-accent); }
-.ext-installed-toggle__chevron { transition:transform 0.2s; font-size:0.8rem; }
-.ext-installed-toggle__chevron--open { transform:rotate(180deg); }
-.ext-installed__list { display:none; flex-direction:column; gap:0.5rem; margin-bottom:1.5rem; }
-.ext-installed__list--open { display:flex; }
+/* Installed list — its own view now, so it is always expanded */
+.ext-installed__list { display:flex; flex-direction:column; gap:0.5rem; margin-bottom:1.5rem; }
 .ext-installed__item {
   display:flex; align-items:center; gap:0.75rem;
   padding:0.65rem 1rem;
@@ -66,35 +260,6 @@ export function extensionStyles() {
 .ext-installed__name { font-family:'Fraunces',serif; font-size:0.95rem; font-weight:600; }
 .ext-installed__meta { font-size:0.75rem; font-family:'JetBrains Mono',monospace; color:var(--crow-text-muted); }
 .ext-installed__actions { display:flex; gap:0.4rem; align-items:center; flex-shrink:0; }
-
-/* Category tabs */
-.ext-tabs {
-  display:flex; gap:0.5rem;
-  margin-bottom:1.25rem;
-  overflow-x:auto; scrollbar-width:none;
-  padding-bottom:0.25rem;
-  -webkit-overflow-scrolling:touch;
-}
-.ext-tabs::-webkit-scrollbar { display:none; }
-.ext-tab {
-  flex-shrink:0;
-  padding:0.4rem 0.9rem;
-  border-radius:var(--crow-radius-pill, 8px);
-  background:transparent;
-  border:1px solid var(--crow-border);
-  color:var(--crow-text-secondary);
-  font-size:0.8rem; font-weight:500;
-  cursor:pointer;
-  transition:all 0.15s;
-  white-space:nowrap;
-  font-family:'DM Sans',sans-serif;
-}
-.ext-tab:hover { border-color:var(--crow-accent); color:var(--crow-text-primary); }
-.ext-tab--active {
-  background:var(--crow-accent-muted);
-  color:var(--crow-accent);
-  border-color:var(--crow-accent);
-}
 
 /* Browse grid */
 .ext-grid {
@@ -187,6 +352,17 @@ export function extensionStyles() {
   border-radius:0 0 var(--crow-radius-card, 12px) var(--crow-radius-card, 12px);
 }
 .ext-stores__body--open { display:block; }
+.ext-stores__row {
+  display:flex; align-items:center; justify-content:space-between; gap:0.5rem;
+  padding:0.4rem 0;
+  border-bottom:1px solid var(--crow-border);
+}
+.ext-stores__url {
+  font-size:0.85rem; color:var(--crow-text-secondary);
+  font-family:'JetBrains Mono',monospace;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  min-width:0; flex:1 1 auto;
+}
 
 /* Help card */
 .ext-help {
@@ -219,16 +395,23 @@ export function extensionStyles() {
   box-shadow:0 20px 60px rgba(0,0,0,0.5);
 }
 
-/* Glass overrides */
+/* Glass overrides — every surface on this page has a companion rule here */
 .theme-glass .ext-card,
 .theme-glass .ext-installed__item,
-.theme-glass .ext-installed-toggle,
 .theme-glass .ext-stores__header,
-.theme-glass .ext-stores__body {
+.theme-glass .ext-stores__body,
+.theme-glass .ext-viewtabs,
+.theme-glass .ext-collection-card,
+.theme-glass .ext-group-chip,
+.theme-glass .ext-help,
+.theme-glass .ext-section-count {
   backdrop-filter:var(--crow-glass-blur);
   -webkit-backdrop-filter:var(--crow-glass-blur);
 }
 .theme-glass .ext-card:hover { box-shadow:0 8px 32px rgba(0,0,0,0.3); }
+.theme-glass .ext-viewtab--active { box-shadow:0 1px 8px rgba(0,0,0,0.35); }
+.theme-glass .ext-collection-card:hover { box-shadow:0 10px 34px rgba(0,0,0,0.32); }
+.theme-glass .ext-collection-modal__note { backdrop-filter:var(--crow-glass-blur); -webkit-backdrop-filter:var(--crow-glass-blur); }
 .theme-glass .ext-search__input {
   backdrop-filter:var(--crow-glass-blur);
   -webkit-backdrop-filter:var(--crow-glass-blur);
@@ -268,6 +451,15 @@ export function extensionStyles() {
   .ext-card__icon { width:48px; height:48px; border-radius:12px; }
   .ext-installed__item { flex-wrap:wrap; }
   .ext-installed__actions { width:100%; justify-content:flex-end; margin-top:0.25rem; }
+  .ext-viewtabs { width:100%; }
+  .ext-viewtab { flex:1 1 0; justify-content:center; }
+  .ext-collection-card { flex-basis:100%; }
+  .ext-section-title--lead { font-size:1.25rem; }
+}
+
+@media (prefers-reduced-motion:reduce) {
+  .ext-collection-card, .ext-card, .ext-installed__item { animation:none !important; }
+  .ext-collection-card:hover, .ext-card:hover { transform:none; }
 }
 </style>`;
 }

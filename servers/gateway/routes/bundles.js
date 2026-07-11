@@ -38,6 +38,8 @@ import {
 } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { writeSetting } from "../dashboard/settings/registry.js";
+import { getCollection } from "../dashboard/panels/extensions/collections.js";
+import { beginInstallSet, endInstallSet, isInstallSetRunning } from "../install-lock.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -121,8 +123,37 @@ const MCP_ADDONS_PATH = join(CROW_HOME, "mcp-addons.json");
 const PANELS_CONFIG_PATH = join(CROW_HOME, "panels.json");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
 const APP_ROOT = resolve(__dirname, "../../..");
-const APP_BUNDLES = join(APP_ROOT, "bundles");
+// `let` (not `const`): _setAppBundlesForTest below repoints this at a scratch
+// source tree so install-set E2E tests never install real bundles onto the
+// operator's host (see tests/install-set-e2e.test.js).
+let APP_BUNDLES = join(APP_ROOT, "bundles");
 const APP_ENV_PATH = join(APP_ROOT, ".env");
+
+/** Test-only: repoint the repo bundle-source root (normally APP_ROOT/bundles). */
+export function _setAppBundlesForTest(path) { APP_BUNDLES = path; }
+
+// Test-only: override the collections.json path read by POST /install-set
+// (getCollection() defaults to the real registry/collections.json, which has
+// no path parameter at that call site — a fixture collection needs this seam
+// to be reachable at all).
+let _collectionsPathOverride = null;
+export function _setCollectionsPathForTest(path) { _collectionsPathOverride = path; }
+
+// Test-only: replace the gateway-restart side effect (which calls process.exit)
+// so install-set E2E tests can assert it fires exactly once without killing
+// the test process. Pass null to restore the real behavior.
+let _restartHookForTest = null;
+export function _setRestartHookForTest(fn) { _restartHookForTest = fn; }
+
+// Test-only: pace the install-set loop with a real setTimeout between members.
+// Default 0 = no delay (identical to production behavior). Without this, every
+// fixture install in the E2E suite is pure synchronous file I/O with no real
+// async wait, so the whole set finishes inside the microtask queue before a
+// concurrent HTTP request's socket data can even be read — the busy-gate
+// (second POST while the set runs → 409) would then be untestable over real
+// HTTP: there is no run happening for the second call to observe.
+let _installSetStepDelayMs = 0;
+export function _setInstallSetStepDelayForTest(ms) { _installSetStepDelayMs = ms; }
 
 // -----------------------------------------------------------------------
 // Cross-host manifest support (Phase 5-MVP)
@@ -222,8 +253,10 @@ function createJob(bundleId, action) {
     completedAt: null,
   };
   jobs.set(id, job);
-  // Clean up old jobs after 10 minutes
-  setTimeout(() => jobs.delete(id), 600_000);
+  // NOTE: eviction is armed in finishJob(), NOT here. A collection install can
+  // run for tens of minutes (multi-GB image pulls); a creation-time timer would
+  // delete the job mid-flight, the client's poll would 404, and its catch-path
+  // would mistake that for a gateway restart (spurious reload + lost summary).
   return job;
 }
 
@@ -232,11 +265,24 @@ function appendLog(job, line) {
   emitJobChanged(job);
 }
 
+const JOB_TTL_MS = 600_000;
+
 function finishJob(job, status) {
   job.status = status;
   job.completedAt = new Date().toISOString();
+  // Evict N minutes after the job ENDS — never while it runs.
+  const timer = setTimeout(() => jobs.delete(job.id), JOB_TTL_MS);
+  if (typeof timer.unref === "function") timer.unref();
+  // Non-enumerable: GET /bundles/api/jobs/:id does res.json(job); an enumerable
+  // Timeout (circular _idlePrev/_idleNext) would make JSON.stringify throw.
+  Object.defineProperty(job, "_evictTimer", { value: timer, configurable: true, writable: true });
   emitJobChanged(job);
 }
+
+/** Test-only seams (jobs are in-process; tests need to create/inspect/finish one). */
+export function _createJobForTest(bundleId, action) { return createJob(bundleId, action); }
+export function _getJobForTest(id) { return jobs.get(id); }
+export function _finishJobForTest(job, status) { return finishJob(job, status); }
 
 // Broadcasts the job's new state to any live Turbo Stream subscribers
 // (see /dashboard/streams/jobs in routes/streams.js). All mutations go
@@ -613,6 +659,35 @@ function writeJsonSafe(path, data) {
 }
 
 /**
+ * Push env values into the add-on's mcp-addons.json entry.
+ *
+ * MCP children are spawned with { ...process.env, ...(config.env||{}) } from
+ * mcp-addons.json (proxy.js) — they never read bundles/<id>/.env. Before this,
+ * mcp-addons env was only ever written at install time, so post-install
+ * configuration silently did nothing (home-assistant would stay dead no matter
+ * how carefully you filled in HA_URL/HA_TOKEN).
+ *
+ * @returns {boolean} true if the add-on registers an MCP server and the file was written
+ */
+export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH) {
+  const mcpAddons = readJsonSafe(path, {});
+  const entry = mcpAddons[bundleId];
+  if (!entry) return false; // not an MCP add-on — nothing to configure
+  const merged = { ...(entry.env || {}) };
+  // Skip falsy values: proxy.js spawns the child with { ...process.env, ...config.env },
+  // so a blank here would SHADOW a working ambient value rather than clear it. The two
+  // install-time writers of this file (see the mcp_server registration paths) guard the
+  // same way. Clearing a value stays the .env file's job.
+  for (const [k, v] of Object.entries(envVars || {})) {
+    if (v) merged[k] = v;
+  }
+  entry.env = merged;
+  mcpAddons[bundleId] = entry;
+  writeJsonSafe(path, mcpAddons);
+  return true;
+}
+
+/**
  * Append or replace a managed env block inside the given .env file.
  * blockName is the human marker: "# crow-<name> BEGIN" / "# crow-<name> END".
  * version: optional fingerprint of the block's contents, stamped as a comment
@@ -948,6 +1023,10 @@ function revertEnvInGateway(envKeys) {
  * When unsupervised, just sets process.env so the storage server can reinitialize.
  */
 function scheduleGatewayRestart(delayMs = 2000) {
+  if (_restartHookForTest) {
+    _restartHookForTest(delayMs);
+    return;
+  }
   if (isSupervised()) {
     // Supervised — close server, then exit to trigger restart
     console.log("[bundles] Restarting gateway to apply new configuration...");
@@ -991,10 +1070,697 @@ function getAiProviderConfig(bundleId, envVars) {
 }
 
 /**
+ * All install-time gates, as an outcome function.
+ *
+ * The single-install route maps the outcome to HTTP; the collection installer
+ * (Task 6) maps it to a per-member skip/fail entry. Semantics are identical to
+ * the pre-refactor inline chain in POST /bundles/api/install (order matters:
+ * id → source exists → already-installed → dependencies → hardware → GPU →
+ * consent → hosted-host-networking refusal).
+ *
+ * @returns {Promise<
+ *   { ok: true, manifest: object, installed: Array, consentVerified: boolean, hardwareWarning?: object }
+ * | { ok: false, status: number, code: string, error: string, extra?: object }>}
+ *   codes: invalid_id | not_found | already_installed | missing_dependencies |
+ *          hardware_gate | gpu_arch_gate | consent_required | consent_invalid | hosted_forbidden
+ */
+export async function validateInstall(bundleId, { envVars = {}, consentToken = null, forceInstall = false } = {}) {
+  if (!bundleId || !isValidBundleId(bundleId)) {
+    return { ok: false, status: 400, code: "invalid_id", error: "Invalid bundle ID" };
+  }
+
+  // Check source exists
+  const sourceDir = join(APP_BUNDLES, bundleId);
+  if (!existsSync(sourceDir)) {
+    return { ok: false, status: 404, code: "not_found", error: `Bundle '${bundleId}' not found` };
+  }
+
+  // Check not already installed
+  const installed = getInstalled();
+  if (installed.find((i) => i.id === bundleId)) {
+    return { ok: false, status: 409, code: "already_installed", error: `Bundle '${bundleId}' is already installed` };
+  }
+
+  // PR 0: dependency check — refuse install if any required bundle is missing
+  const manifest = getManifest(bundleId);
+  const requiredBundles = manifest?.requires?.bundles || [];
+  if (requiredBundles.length > 0) {
+    const installedIds = new Set(installed.map((i) => i.id));
+    const missing = requiredBundles.filter((id) => !installedIds.has(id));
+    if (missing.length > 0) {
+      return {
+        ok: false, status: 400, code: "missing_dependencies",
+        error: `Bundle '${bundleId}' requires the following bundles to be installed first: ${missing.join(", ")}`,
+        extra: { missing_dependencies: missing },
+      };
+    }
+  }
+
+  // PR 3: advisory Android-app version gate. The gateway can't verify the
+  // user's phone from here — the check happens on the phone when the panel
+  // JS reads navigator.userAgent. Log a warning so ops can see the
+  // requirement and include it in the install response for UIs that want
+  // to surface it.
+  const minAndroidApp = manifest?.requires?.min_android_app;
+  if (minAndroidApp) {
+    console.log(`[bundles] ${bundleId} declares min_android_app=${minAndroidApp} — enforced client-side on the Crow Android app`);
+  }
+
+  // F.0: hardware gate — refuse install if RAM/disk headroom is insufficient,
+  // warn (but allow) if under the recommended threshold. MemAvailable + SSD-
+  // backed swap at half-weight is the effective-RAM basis; already-installed
+  // bundles' recommended_ram_mb is subtracted from the pool. Bypass via
+  // `force_install: true` (CLI-only — the web UI never surfaces this flag).
+  let hardwareWarning;
+  if (!forceInstall) {
+    const gate = checkHardwareGate({
+      manifest,
+      installed,
+      manifestLookup: (id) => getManifest(id),
+      dataDir: CROW_HOME,
+    });
+    if (!gate.allow) {
+      return { ok: false, status: 400, code: "hardware_gate", error: gate.reason, extra: { hardware_gate: gate } };
+    }
+    if (gate.level === "warn") {
+      // Attach warning to the job so the UI can surface it; install proceeds.
+      hardwareWarning = gate;
+    }
+  }
+
+  // GPU arch gate — refuse install if the bundle's required GPU architecture
+  // family doesn't match what the host actually has (e.g. CUDA-only bundle on
+  // an AMD ROCm box). No force_install bypass: the install would crash anyway.
+  {
+    const gpuCheck = checkGpuArchCompatible(manifest);
+    if (!gpuCheck.ok) {
+      return { ok: false, status: 400, code: "gpu_arch_gate", error: gpuCheck.reason, extra: { gpu_arch_gate: gpuCheck } };
+    }
+  }
+
+  // PR 0: consent token check — required for privileged or consent_required bundles
+  let consentVerified = false;
+  if (manifestRequiresConsent(manifest)) {
+    if (!consentToken) {
+      return {
+        ok: false, status: 403, code: "consent_required",
+        error: "Consent token required. Call GET /bundles/api/consent-challenge/:id to obtain one.",
+        extra: { consent_required: true },
+      };
+    }
+    const consentDb = createDbClient();
+    try {
+      consentVerified = await validateConsentToken(consentDb, bundleId, consentToken);
+    } finally {
+      try { consentDb.close(); } catch {}
+    }
+    if (!consentVerified) {
+      return {
+        ok: false, status: 403, code: "consent_invalid",
+        error: "Consent token is invalid, expired, or already consumed. Mint a new one and retry.",
+        extra: { consent_expired: true },
+      };
+    }
+  }
+
+  // Block bundles with network_mode: host on managed hosting (security risk on shared infrastructure)
+  if (process.env.CROW_HOSTED) {
+    const composePath = join(sourceDir, "docker-compose.yml");
+    if (existsSync(composePath)) {
+      const composeContent = readFileSync(composePath, "utf8");
+      if (/network_mode:\s*host/i.test(composeContent)) {
+        return {
+          ok: false, status: 403, code: "hosted_forbidden",
+          error: "This bundle requires host networking and is not available on managed hosting.",
+        };
+      }
+    }
+  }
+
+  return { ok: true, manifest, installed, consentVerified, ...(hardwareWarning ? { hardwareWarning } : {}) };
+}
+
+/**
+ * Run one bundle install against an existing job.
+ *
+ * Outcome-returning by design: the collection installer shares ONE job across N
+ * members, so this function must not decide the job's fate. It never calls
+ * finishJob() and never calls scheduleGatewayRestart() itself under any
+ * circumstance — it only reports `needsRestart`; the caller (the single-install
+ * route, or the set runner after all members finish) owns the restart.
+ *
+ * @param {object} opts
+ * @param {object} opts.job              the job to append logs to
+ * @param {Array}  opts.installedSnapshot  getInstalled() as of validation (the body pushes onto it)
+ * @param {boolean} opts.consentVerified  from validateInstall — gates validateComposeFile
+ * @param {object} opts.manifest          the on-disk manifest
+ * @returns {Promise<{ok:true, needsRestart:boolean}|{ok:false, reason:string}>}
+ */
+export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest }) {
+  let needsRestart = false;
+  try {
+    const addonType = manifest?.type || "bundle";
+    const sourceDir = join(APP_BUNDLES, bundleId);
+
+    // 1. Copy bundle files to ~/.crow/bundles/<id>
+    const destDir = join(BUNDLES_DIR, bundleId);
+    mkdirSync(destDir, { recursive: true });
+    cpSync(sourceDir, destDir, { recursive: true });
+    appendLog(job, "Copied bundle files");
+
+    // 1.5 If the bundle ships its own package.json (typically because it
+    // brings an MCP server using @modelcontextprotocol/sdk), install
+    // those deps now. Without this the proxy spawns the MCP child and it
+    // immediately dies with ERR_MODULE_NOT_FOUND for the SDK, which
+    // surfaces user-side as "I don't have a music player integration
+    // installed" or similar mysteries.
+    if (existsSync(join(destDir, "package.json")) && !existsSync(join(destDir, "node_modules"))) {
+      appendLog(job, "Installing bundle dependencies (npm install)…");
+      try {
+        execFileSync("npm", ["install", "--omit=optional", "--no-audit", "--no-fund"], {
+          cwd: destDir,
+          env: process.env,
+          timeout: 120_000,
+          stdio: "pipe",
+        });
+        appendLog(job, "Dependencies installed");
+      } catch (err) {
+        appendLog(job, `Warning: npm install failed: ${err.message?.slice(0, 200)}`);
+        // Don't fail install; some bundles may have optional deps that
+        // can't resolve in every environment. The MCP server will fail
+        // to start later but the bundle install itself succeeds.
+      }
+    }
+
+    // 2. Write env vars if provided
+    if (envVars && typeof envVars === "object") {
+      const envLines = Object.entries(envVars)
+        .filter(([, v]) => v !== undefined && v !== "")
+        .map(([k, v]) => `${k}=${v}`);
+      if (envLines.length > 0) {
+        writeFileSync(join(destDir, ".env"), envLines.join("\n") + "\n");
+        appendLog(job, `Wrote ${envLines.length} env vars`);
+      }
+    } else if (existsSync(join(destDir, ".env.example")) && !existsSync(join(destDir, ".env"))) {
+      cpSync(join(destDir, ".env.example"), join(destDir, ".env"));
+      appendLog(job, "Created .env from .env.example");
+    }
+
+    // 2.5 Inject shared-storage vars if bundle declares a translator.
+    // Gateway owns the translation in-process (configure-storage.mjs is not
+    // invoked by the install flow — it's a manual-recovery tool only).
+    if (manifest?.storage?.translator) {
+      try {
+        const injected = await injectSharedStorage({
+          destDir,
+          bundleId: bundleId,
+          translator: manifest.storage.translator,
+          bucketSuffix: manifest.storage.bucket || bundleId,
+        });
+        if (injected === null) {
+          appendLog(job, "No shared-storage config in DB; bundle will use on-disk storage.");
+        } else {
+          appendLog(job, `Injected shared-storage vars via translator=${manifest.storage.translator} (version=${injected.version.slice(0, 8)})`);
+        }
+      } catch (err) {
+        appendLog(job, `Warning: shared-storage injection failed: ${err.message}`);
+      }
+    }
+
+    // 3. Type-specific install steps
+    if (addonType === "bundle") {
+      // Docker bundle — pull images and start containers
+      const composePath = join(destDir, "docker-compose.yml");
+      if (existsSync(composePath)) {
+        // PR 0: validate compose for ALL bundles (first-party + community).
+        // First-party bundles with privileged/host-network must declare manifest.privileged
+        // and the install request must include a verified consent token.
+        const validation = validateComposeFile(composePath, bundleId, {
+          manifest,
+          consentVerified,
+        });
+        if (!validation.valid) {
+          appendLog(job, `Security check failed: ${validation.reason}`);
+          // Clean up copied files
+          rmSync(destDir, { recursive: true, force: true });
+          return { ok: false, reason: `Security check failed: ${validation.reason}` };
+        }
+        appendLog(job, "Security check passed");
+
+        appendLog(job, "Pulling Docker images...");
+        try {
+          await runCompose(["pull"], { cwd: destDir });
+          appendLog(job, "Docker images pulled");
+        } catch (err) {
+          appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
+        }
+
+        // Start containers (add --build if compose file has build directives)
+        const composeContent = readFileSync(composePath, "utf8");
+        const needsBuild = /^\s+build:/m.test(composeContent);
+        const upArgs = needsBuild ? ["up", "-d", "--build"] : ["up", "-d"];
+        appendLog(job, needsBuild ? "Building and starting containers..." : "Starting containers...");
+        try {
+          await runCompose(upArgs, { cwd: destDir });
+          appendLog(job, "Containers started");
+        } catch (err) {
+          const detail = err.stderr || err.message;
+          appendLog(job, `docker compose up failed: ${detail}`);
+          // Still add to installed.json so user can configure env vars and hit "Start"
+          const installed2 = getInstalled();
+          if (!installed2.find((i) => i.id === bundleId)) {
+            installed2.push({ id: bundleId, type: addonType, version: manifest?.version, installedAt: new Date().toISOString() });
+            saveInstalled(installed2);
+          }
+          return { ok: false, reason: `docker compose up failed: ${detail}` };
+        }
+      }
+
+      // Propagate env vars to gateway .env so dependent services connect
+      if (envVars && Object.keys(envVars).length > 0) {
+        propagateEnvToGateway(envVars);
+        appendLog(job, "Configuration applied to gateway");
+        needsRestart = true;
+      }
+
+      // Bundle types can also have MCP servers — register if manifest has server config
+      if (manifest?.server) {
+        const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
+        const env = {};
+        if (manifest.server.envKeys && envVars) {
+          for (const key of manifest.server.envKeys) {
+            if (envVars[key]) env[key] = envVars[key];
+          }
+        }
+        if (manifest.env_vars) {
+          for (const v of manifest.env_vars) {
+            if (v.default && !env[v.name]) env[v.name] = v.default;
+          }
+        }
+        // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
+        // shared by more than one gateway on a host (e.g. grackle runs a
+        // main gateway + a separate-DB instance off the same ~/.crow), so a
+        // hard-coded path is correct for one and a cross-instance DB leak for
+        // the other — which crash-loops the wrong gateway on "database is
+        // locked". The MCP child instead inherits the SPAWNING gateway's
+        // CROW_DB_PATH via process.env at launch (its own default otherwise),
+        // so each gateway's children always use that gateway's DB.
+        mcpAddons[bundleId] = {
+          command: manifest.server.command,
+          args: manifest.server.args || [],
+          ...(Object.keys(env).length > 0 ? { env } : {}),
+        };
+        writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
+        appendLog(job, `Registered MCP server '${bundleId}'`);
+        needsRestart = true;
+      }
+
+      // Bundle types can also have panels — install them
+      if (manifest?.panel) {
+        mkdirSync(PANELS_DIR, { recursive: true });
+        const panelPath = resolvePanelPath(manifest, bundleId);
+        const panelSrc = join(destDir, panelPath);
+        if (existsSync(panelSrc)) {
+          cpSync(panelSrc, join(PANELS_DIR, `${bundleId}.js`));
+          appendLog(job, `Installed panel: ${bundleId}`);
+        }
+        if (manifest.panelRoutes) {
+          const routesSrc = join(destDir, manifest.panelRoutes);
+          if (existsSync(routesSrc)) {
+            cpSync(routesSrc, join(PANELS_DIR, `${bundleId}-routes.js`));
+            appendLog(job, `Installed panel routes: ${bundleId}-routes`);
+          }
+        }
+        // Ensure panels dir can resolve gateway dependencies
+        const nmLink = join(PANELS_DIR, "node_modules");
+        if (!existsSync(nmLink)) {
+          const gatewayNm = join(APP_ROOT, "node_modules");
+          if (existsSync(gatewayNm)) {
+            try { symlinkSync(gatewayNm, nmLink); } catch {}
+          }
+        }
+        const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
+        if (!panelsConfig.includes(bundleId)) {
+          panelsConfig.push(bundleId);
+          writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
+        }
+        needsRestart = true;
+      }
+    } else if (addonType === "mcp-server") {
+      // MCP server — register in mcp-addons.json
+      if (manifest?.server) {
+        const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
+        const env = {};
+        // Collect user-provided env vars
+        if (manifest.server.envKeys && envVars) {
+          for (const key of manifest.server.envKeys) {
+            if (envVars[key]) env[key] = envVars[key];
+          }
+        }
+        // Also include default values from manifest.env_vars
+        if (manifest.env_vars) {
+          for (const v of manifest.env_vars) {
+            if (v.default && !env[v.name]) env[v.name] = v.default;
+          }
+        }
+        mcpAddons[bundleId] = {
+          command: manifest.server.command,
+          args: manifest.server.args || [],
+          ...(Object.keys(env).length > 0 ? { env } : {}),
+        };
+        writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
+        appendLog(job, `Registered MCP server '${bundleId}'`);
+      }
+
+      // Install npm dependencies if package.json exists
+      const pkgJson = join(destDir, "package.json");
+      if (existsSync(pkgJson)) {
+        appendLog(job, "Installing dependencies...");
+        try {
+          const { execFileSync } = await import("node:child_process");
+          execFileSync("npm", ["install", "--prefix", destDir, "--omit=dev"], {
+            stdio: "pipe",
+            timeout: 120_000,
+          });
+          appendLog(job, "Dependencies installed");
+        } catch (npmErr) {
+          appendLog(job, `Warning: npm install failed — ${npmErr.message}`);
+        }
+      }
+
+      // Install panel + routes if present in manifest
+      if (manifest?.panel) {
+        mkdirSync(PANELS_DIR, { recursive: true });
+        const panelPath = resolvePanelPath(manifest, bundleId);
+        const panelSrc = join(destDir, panelPath);
+        if (existsSync(panelSrc)) {
+          cpSync(panelSrc, join(PANELS_DIR, `${bundleId}.js`));
+          appendLog(job, `Installed panel: ${bundleId}`);
+        }
+        if (manifest.panelRoutes) {
+          const routesSrc = join(destDir, manifest.panelRoutes);
+          if (existsSync(routesSrc)) {
+            cpSync(routesSrc, join(PANELS_DIR, `${bundleId}-routes.js`));
+            appendLog(job, `Installed panel routes: ${bundleId}-routes`);
+          }
+        }
+        // Ensure panels dir can resolve gateway dependencies (express, multer, etc.)
+        const nmLink = join(PANELS_DIR, "node_modules");
+        if (!existsSync(nmLink)) {
+          const gatewayNm = join(APP_ROOT, "node_modules");
+          if (existsSync(gatewayNm)) {
+            try {
+              symlinkSync(gatewayNm, nmLink);
+              appendLog(job, "Linked gateway node_modules for panel route resolution");
+            } catch {}
+          }
+        }
+        // Register in panels.json
+        const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
+        if (!panelsConfig.includes(bundleId)) {
+          panelsConfig.push(bundleId);
+          writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
+        }
+        needsRestart = true;
+      }
+    } else if (addonType === "skill") {
+      // Skill — copy skill files to ~/.crow/skills/
+      mkdirSync(SKILLS_DIR, { recursive: true });
+      if (manifest?.skills) {
+        for (const skillPath of manifest.skills) {
+          const src = join(destDir, skillPath);
+          const dest = join(SKILLS_DIR, skillPath.split("/").pop());
+          if (existsSync(src)) {
+            cpSync(src, dest);
+            appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
+          }
+        }
+      }
+    } else if (addonType === "panel") {
+      // Panel — copy panel file to ~/.crow/panels/ and register
+      mkdirSync(PANELS_DIR, { recursive: true });
+      if (manifest?.panel) {
+        const panelPath = resolvePanelPath(manifest, bundleId);
+        const src = join(destDir, panelPath);
+        const dest = join(PANELS_DIR, panelPath.split("/").pop());
+        if (existsSync(src)) {
+          cpSync(src, dest);
+          const panelsCfg = readJsonSafe(PANELS_CONFIG_PATH, []);
+          if (!panelsCfg.includes(bundleId)) {
+            panelsCfg.push(bundleId);
+            writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
+          }
+          appendLog(job, `Installed panel: ${panelPath.split("/").pop()}`);
+        }
+      }
+    }
+
+    // 3b. Handle panel field on any add-on type
+    if (manifest.panel && addonType !== "panel") {
+      const panelPath = resolvePanelPath(manifest, bundleId);
+      const panelSourceDir = join(APP_BUNDLES, bundleId, panelPath.replace(/[^a-zA-Z0-9_\-\/\.]/g, ""));
+      if (existsSync(panelSourceDir)) {
+        const panelFilename = panelPath.split("/").pop();
+        const panelDest = join(CROW_HOME, "panels", panelFilename);
+        // Ensure panels directory exists
+        mkdirSync(join(CROW_HOME, "panels"), { recursive: true });
+        copyFileSync(panelSourceDir, panelDest);
+        // Register in panels.json
+        const panelsJsonPath = join(CROW_HOME, "panels.json");
+        let panelsList = [];
+        if (existsSync(panelsJsonPath)) {
+          try { panelsList = JSON.parse(readFileSync(panelsJsonPath, "utf8")); } catch {}
+        }
+        const panelId = panelFilename.replace(/\.js$/, "");
+        if (!panelsList.includes(panelId)) {
+          panelsList.push(panelId);
+          writeFileSync(panelsJsonPath, JSON.stringify(panelsList, null, 2));
+        }
+        needsRestart = true;
+        appendLog(job, `Installed panel: ${panelFilename}`);
+      }
+    }
+
+    // 4. Copy any associated skills (bundles and mcp-servers can have skills too)
+    if (addonType !== "skill" && manifest?.skills) {
+      mkdirSync(SKILLS_DIR, { recursive: true });
+      for (const skillPath of manifest.skills) {
+        const src = join(destDir, skillPath);
+        const dest = join(SKILLS_DIR, skillPath.split("/").pop());
+        if (existsSync(src)) {
+          cpSync(src, dest);
+          appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
+        }
+      }
+    }
+
+    // 5. Auto-configure AI Provider when installing local AI bundles
+    if (manifest?.category === "ai" && addonType === "bundle") {
+      const aiConfig = getAiProviderConfig(bundleId, envVars);
+      if (aiConfig) {
+        try {
+          const { resolveEnvPath, writeEnvVar, sanitizeEnvValue } = await import("../env-manager.js");
+          const envPath = resolveEnvPath();
+          writeEnvVar(envPath, "AI_PROVIDER", sanitizeEnvValue(aiConfig.provider));
+          writeEnvVar(envPath, "AI_BASE_URL", sanitizeEnvValue(aiConfig.baseUrl));
+          // Invalidate cached provider config
+          try {
+            const { invalidateConfigCache } = await import("../ai/provider.js");
+            invalidateConfigCache();
+          } catch {}
+          appendLog(job, `AI Chat configured — provider: ${aiConfig.provider}, endpoint: ${aiConfig.baseUrl}`);
+          appendLog(job, "Open Messages → AI Chat to start chatting with your local AI");
+          needsRestart = true;
+        } catch (err) {
+          appendLog(job, `Note: Could not auto-configure AI Chat: ${err.message}. Set it manually in Settings.`);
+        }
+      }
+    }
+
+    // 6. Track installation
+    installedSnapshot.push({
+      id: bundleId,
+      type: addonType,
+      version: manifest?.version || "1.0.0",
+      installedAt: new Date().toISOString(),
+    });
+    saveInstalled(installedSnapshot);
+    appendLog(job, "Installation tracked");
+
+    // Open firewall ports and set up Tailscale HTTPS for direct-mode web UIs
+    if (manifest?.ports && Array.isArray(manifest.ports)) {
+      const { execFileSync: efs } = await import("node:child_process");
+      for (const port of manifest.ports) {
+        // Open firewall for Tailscale
+        try {
+          efs("sudo", ["-n", "ufw", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp", "comment", `Crow: ${manifest.name || bundleId}`], { timeout: 10000 });
+          appendLog(job, `Opened firewall port ${port}/tcp for Tailscale`);
+        } catch {
+          appendLog(job, `Note: Could not open port ${port} (sudo/ufw not available — open manually if needed)`);
+        }
+      }
+      // Set up Tailscale HTTPS proxy for direct-mode webUI ports (SPA apps need TLS due to HSTS)
+      if (manifest?.webUI?.proxyMode === "direct" && manifest.webUI.port) {
+        try {
+          efs("sudo", ["-n", "tailscale", "serve", "--bg", "--https", String(manifest.webUI.port), `http://localhost:${manifest.webUI.port}`], { timeout: 15000 });
+          appendLog(job, `Set up Tailscale HTTPS on port ${manifest.webUI.port}`);
+        } catch {
+          appendLog(job, `Note: Could not set up Tailscale HTTPS for port ${manifest.webUI.port}`);
+        }
+      }
+    }
+
+    let notifDb;
+    try {
+      notifDb = createDbClient();
+      await createNotification(notifDb, {
+        title: `Installed: ${manifest?.name || bundleId}`,
+        type: "system",
+        source: "bundle-installer",
+        action_url: "/dashboard/extensions",
+      });
+    } catch {} finally {
+      notifDb?.close();
+    }
+
+    // Phase 5-full: auto-register providers declared in manifest.providers[]
+    try {
+      const manifest = getManifest(bundleId);
+      if (manifest?.providers?.length) {
+        const providerDb = createDbClient();
+        let hostIp = "127.0.0.1";
+        if (manifest.host && manifest.host !== "local") {
+          try {
+            const peer = await getInstance(providerDb, manifest.host);
+            hostIp = peer?.tailscale_ip || peer?.gateway_url?.replace(/^https?:\/\//, "").replace(/:\d+$/, "").replace(/\/.*/, "") || hostIp;
+          } catch {}
+        }
+        const port = manifest.port || 0;
+        for (const pdef of manifest.providers) {
+          try {
+            const r = await registerProviderFromManifest({
+              db: providerDb, manifest, providerDef: pdef, port, hostIp,
+            });
+            appendLog(job, `Registered provider: ${pdef.id} (${r.lamport_ts})`);
+          } catch (err) {
+            appendLog(job, `Provider register skipped for ${pdef.id}: ${err.message}`);
+          }
+        }
+        invalidateProvidersCache();
+      }
+    } catch (err) {
+      appendLog(job, `Provider auto-register skipped: ${err.message}`);
+    }
+
+    // Seed STT/TTS profiles declared in manifest.{stt,tts}ProfileSeed.
+    try {
+      const manifest = getManifest(bundleId);
+      if (manifest?.sttProfileSeed || manifest?.ttsProfileSeed) {
+        const seedDb = createDbClient();
+        if (manifest.sttProfileSeed) await seedProfile(seedDb, "stt", manifest.sttProfileSeed, (m) => appendLog(job, m));
+        if (manifest.ttsProfileSeed) await seedProfile(seedDb, "tts", manifest.ttsProfileSeed, (m) => appendLog(job, m));
+      }
+    } catch (err) {
+      appendLog(job, `Profile seed skipped: ${err.message}`);
+    }
+
+    return { ok: true, needsRestart };
+  } catch (err) {
+    const reason = err?.message || String(err);
+    appendLog(job, `Install failed: ${reason}`);
+    return { ok: false, reason };
+  }
+}
+
+/**
+ * Re-validate a collection's membership against the ON-DISK manifests.
+ * registry/collections.json is data, not a trust boundary: this is the gate that
+ * stops a tampered file from one-click-installing a privileged, consent-required,
+ * or host-networking bundle without the consent ceremony.
+ */
+export function validateCollectionServerSide(collection) {
+  if (!collection || !Array.isArray(collection.members) || collection.members.length === 0) {
+    return { ok: false, error: "Collection has no members" };
+  }
+  const seen = new Set();
+  for (const m of collection.members) {
+    if (!m?.id || !isValidBundleId(m.id)) return { ok: false, error: `Invalid member id '${m?.id}'` };
+    if (!existsSync(join(APP_BUNDLES, m.id))) return { ok: false, error: `Member '${m.id}' is not a known bundle` };
+    const man = getManifest(m.id);
+    if (man?.privileged === true || man?.consent_required === true) {
+      return { ok: false, error: `Member '${m.id}' requires explicit consent — install it individually` };
+    }
+    if (man?.requires?.gpu || man?.requires?.min_vram_gb) {
+      return { ok: false, error: `Member '${m.id}' is GPU-gated — install it individually` };
+    }
+    for (const dep of man?.requires?.bundles || []) {
+      if (!seen.has(dep) && !getInstalled().some((i) => i.id === dep)) {
+        return { ok: false, error: `Member '${m.id}' requires '${dep}', which is neither installed nor earlier in the collection` };
+      }
+    }
+    seen.add(m.id);
+  }
+  return { ok: true };
+}
+
+/** Display plan (what the user is told will happen). Execution re-checks every gate live. */
+export function planInstallSet(collection) {
+  const installedIds = new Set(getInstalled().map((i) => i.id));
+  return collection.members.map((m) => {
+    if (installedIds.has(m.id)) return { id: m.id, action: "skip", reason: "already installed" };
+    if (!existsSync(join(APP_BUNDLES, m.id))) return { id: m.id, action: "skip", reason: "not found in this Crow's bundle set" };
+    const gpu = checkGpuArchCompatible(getManifest(m.id));
+    if (!gpu.ok) return { id: m.id, action: "skip", reason: gpu.reason || "incompatible with this host's GPU" };
+    return { id: m.id, action: "install" };
+  });
+}
+
+/**
+ * Manifest-required env keys that are still EMPTY in the bundle's written .env.
+ * Keys with a value (including .env.example defaults — DB passwords, secret keys)
+ * count as configured and are NEVER surfaced: those are consumed at first container
+ * boot, and changing them afterwards breaks the app or strands its data.
+ * @param {object} [envOverride] test seam — the parsed .env
+ */
+export function needsConfigKeys(bundleId, envOverride = null) {
+  const man = getManifest(bundleId);
+  const required = (man?.env_vars || []).filter((v) => v.required).map((v) => v.name);
+  if (required.length === 0) return [];
+  let env = envOverride;
+  if (!env) {
+    env = {};
+    const envPath = join(BUNDLES_DIR, bundleId, ".env");
+    if (existsSync(envPath)) {
+      for (const line of readFileSync(envPath, "utf8").split("\n")) {
+        const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+        if (m) env[m[1]] = m[2];
+      }
+    }
+  }
+  return required.filter((k) => !env[k] || env[k].trim() === "");
+}
+
+/**
  * @returns {Router}
  */
 export default function bundlesRouter() {
   const router = Router();
+
+  // Cross-host verification. dashboard/index.js routes ANY request bearing an
+  // x-crow-signature header straight here, BEFORE dashboardAuth and CSRF — so a
+  // bogus header would otherwise reach install/uninstall/restart/env with no auth
+  // at all. Mount router-wide (not per-route): denylist-by-omission is how
+  // /restart (unauthenticated gateway DoS) and /env (unauthenticated secret write)
+  // stayed exposed. optional:true ⇒ unsigned requests fall through to the normal
+  // dashboardAuth+CSRF mount, so the dashboard path is unaffected.
+  const dbForXhost = createDbClient();
+  const xhostVerify = crossHostVerifyMiddleware(dbForXhost, {
+    optional: true, // non-signed requests fall through to dashboardAuth/OAuth
+    audit: (req) => `bundle.${(req.path.split("/").pop() || "")}`,
+    auditBundleId: true,
+    // emptyBodyString stays at the default "{}" — bundle signers hash JSON.stringify(body || {})
+  });
+  router.use(xhostVerify);
 
   // GET /bundles/api/status — List installed bundles with container status
   router.get("/bundles/api/status", async (req, res) => {
@@ -1083,582 +1849,129 @@ export default function bundlesRouter() {
   router.post("/bundles/api/install", async (req, res) => {
     const { bundle_id, env_vars, consent_token } = req.body;
 
-    if (!bundle_id || !isValidBundleId(bundle_id)) {
-      return res.status(400).json({ error: "Invalid bundle ID" });
+    const v = await validateInstall(bundle_id, {
+      envVars: env_vars,
+      consentToken: consent_token,
+      forceInstall: !!req.body.force_install,
+    });
+    if (!v.ok) {
+      return res.status(v.status).json({ error: v.error, ...(v.extra || {}) });
     }
+    if (v.hardwareWarning) req._hardwareWarning = v.hardwareWarning;
 
-    // Check source exists
-    const sourceDir = join(APP_BUNDLES, bundle_id);
-    if (!existsSync(sourceDir)) {
-      return res.status(404).json({ error: `Bundle '${bundle_id}' not found` });
-    }
-
-    // Check not already installed
-    const installed = getInstalled();
-    if (installed.find((i) => i.id === bundle_id)) {
-      return res.status(409).json({ error: `Bundle '${bundle_id}' is already installed` });
-    }
-
-    // PR 0: dependency check — refuse install if any required bundle is missing
-    const manifestPre = getManifest(bundle_id);
-    const requiredBundles = manifestPre?.requires?.bundles || [];
-    if (requiredBundles.length > 0) {
-      const installedIds = new Set(installed.map((i) => i.id));
-      const missing = requiredBundles.filter((id) => !installedIds.has(id));
-      if (missing.length > 0) {
-        return res.status(400).json({
-          error: `Bundle '${bundle_id}' requires the following bundles to be installed first: ${missing.join(", ")}`,
-          missing_dependencies: missing,
-        });
-      }
-    }
-
-    // PR 3: advisory Android-app version gate. The gateway can't verify the
-    // user's phone from here — the check happens on the phone when the panel
-    // JS reads navigator.userAgent. Log a warning so ops can see the
-    // requirement and include it in the install response for UIs that want
-    // to surface it.
-    const minAndroidApp = manifestPre?.requires?.min_android_app;
-    if (minAndroidApp) {
-      console.log(`[bundles] ${bundle_id} declares min_android_app=${minAndroidApp} — enforced client-side on the Crow Android app`);
-    }
-
-    // F.0: hardware gate — refuse install if RAM/disk headroom is insufficient,
-    // warn (but allow) if under the recommended threshold. MemAvailable + SSD-
-    // backed swap at half-weight is the effective-RAM basis; already-installed
-    // bundles' recommended_ram_mb is subtracted from the pool. Bypass via
-    // `force_install: true` (CLI-only — the web UI never surfaces this flag).
-    if (!req.body.force_install) {
-      const gate = checkHardwareGate({
-        manifest: manifestPre,
-        installed,
-        manifestLookup: (id) => getManifest(id),
-        dataDir: CROW_HOME,
-      });
-      if (!gate.allow) {
-        return res.status(400).json({
-          error: gate.reason,
-          hardware_gate: gate,
-        });
-      }
-      if (gate.level === "warn") {
-        // Attach warning to the job so the UI can surface it; install proceeds.
-        req._hardwareWarning = gate;
-      }
-    }
-
-    // GPU arch gate — refuse install if the bundle's required GPU architecture
-    // family doesn't match what the host actually has (e.g. CUDA-only bundle on
-    // an AMD ROCm box). No force_install bypass: the install would crash anyway.
-    {
-      const gpuCheck = checkGpuArchCompatible(manifestPre);
-      if (!gpuCheck.ok) {
-        return res.status(400).json({
-          error: gpuCheck.reason,
-          gpu_arch_gate: gpuCheck,
-        });
-      }
-    }
-
-    // PR 0: consent token check — required for privileged or consent_required bundles
-    let consentVerified = false;
-    if (manifestRequiresConsent(manifestPre)) {
-      if (!consent_token) {
-        return res.status(403).json({
-          error: "Consent token required. Call GET /bundles/api/consent-challenge/:id to obtain one.",
-          consent_required: true,
-        });
-      }
-      const consentDb = createDbClient();
-      try {
-        consentVerified = await validateConsentToken(consentDb, bundle_id, consent_token);
-      } finally {
-        try { consentDb.close(); } catch {}
-      }
-      if (!consentVerified) {
-        return res.status(403).json({
-          error: "Consent token is invalid, expired, or already consumed. Mint a new one and retry.",
-          consent_expired: true,
-        });
-      }
-    }
-
-    // Block bundles with network_mode: host on managed hosting (security risk on shared infrastructure)
-    if (process.env.CROW_HOSTED) {
-      const composePath = join(sourceDir, "docker-compose.yml");
-      if (existsSync(composePath)) {
-        const composeContent = readFileSync(composePath, "utf8");
-        if (/network_mode:\s*host/i.test(composeContent)) {
-          return res.status(403).json({ error: "This bundle requires host networking and is not available on managed hosting." });
-        }
-      }
+    // D6.9: a collection install-set owns the process's next restart and runs
+    // its members with deferred restart; a single install finishing mid-set
+    // would fire scheduleGatewayRestart() itself and kill the set runner.
+    // Checked here — immediately before createJob, after validateInstall's
+    // await has already settled — so nothing can race past this point into
+    // job creation.
+    if (isInstallSetRunning()) {
+      return res.status(409).json({ error: "A collection install is in progress — wait for it to finish and try again." });
     }
 
     // Create job for async tracking
     const job = createJob(bundle_id, "install");
     res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
 
-    // Run install async (don't block the response)
+    // Run install async (don't block the response). The single-install route
+    // owns the job's lifecycle: runInstallJob only reports an outcome.
     (async () => {
-      try {
-        const manifest = getManifest(bundle_id);
-        const addonType = manifest?.type || "bundle";
-
-        // 1. Copy bundle files to ~/.crow/bundles/<id>
-        const destDir = join(BUNDLES_DIR, bundle_id);
-        mkdirSync(destDir, { recursive: true });
-        cpSync(sourceDir, destDir, { recursive: true });
-        appendLog(job, "Copied bundle files");
-
-        // 1.5 If the bundle ships its own package.json (typically because it
-        // brings an MCP server using @modelcontextprotocol/sdk), install
-        // those deps now. Without this the proxy spawns the MCP child and it
-        // immediately dies with ERR_MODULE_NOT_FOUND for the SDK, which
-        // surfaces user-side as "I don't have a music player integration
-        // installed" or similar mysteries.
-        if (existsSync(join(destDir, "package.json")) && !existsSync(join(destDir, "node_modules"))) {
-          appendLog(job, "Installing bundle dependencies (npm install)…");
-          try {
-            execFileSync("npm", ["install", "--omit=optional", "--no-audit", "--no-fund"], {
-              cwd: destDir,
-              env: process.env,
-              timeout: 120_000,
-              stdio: "pipe",
-            });
-            appendLog(job, "Dependencies installed");
-          } catch (err) {
-            appendLog(job, `Warning: npm install failed: ${err.message?.slice(0, 200)}`);
-            // Don't fail install; some bundles may have optional deps that
-            // can't resolve in every environment. The MCP server will fail
-            // to start later but the bundle install itself succeeds.
-          }
-        }
-
-        // 2. Write env vars if provided
-        if (env_vars && typeof env_vars === "object") {
-          const envLines = Object.entries(env_vars)
-            .filter(([, v]) => v !== undefined && v !== "")
-            .map(([k, v]) => `${k}=${v}`);
-          if (envLines.length > 0) {
-            writeFileSync(join(destDir, ".env"), envLines.join("\n") + "\n");
-            appendLog(job, `Wrote ${envLines.length} env vars`);
-          }
-        } else if (existsSync(join(destDir, ".env.example")) && !existsSync(join(destDir, ".env"))) {
-          cpSync(join(destDir, ".env.example"), join(destDir, ".env"));
-          appendLog(job, "Created .env from .env.example");
-        }
-
-        // 2.5 Inject shared-storage vars if bundle declares a translator.
-        // Gateway owns the translation in-process (configure-storage.mjs is not
-        // invoked by the install flow — it's a manual-recovery tool only).
-        if (manifest?.storage?.translator) {
-          try {
-            const injected = await injectSharedStorage({
-              destDir,
-              bundleId: bundle_id,
-              translator: manifest.storage.translator,
-              bucketSuffix: manifest.storage.bucket || bundle_id,
-            });
-            if (injected === null) {
-              appendLog(job, "No shared-storage config in DB; bundle will use on-disk storage.");
-            } else {
-              appendLog(job, `Injected shared-storage vars via translator=${manifest.storage.translator} (version=${injected.version.slice(0, 8)})`);
-            }
-          } catch (err) {
-            appendLog(job, `Warning: shared-storage injection failed: ${err.message}`);
-          }
-        }
-
-        // 3. Type-specific install steps
-        let needsRestart = false;
-        if (addonType === "bundle") {
-          // Docker bundle — pull images and start containers
-          const composePath = join(destDir, "docker-compose.yml");
-          if (existsSync(composePath)) {
-            // PR 0: validate compose for ALL bundles (first-party + community).
-            // First-party bundles with privileged/host-network must declare manifest.privileged
-            // and the install request must include a verified consent token.
-            const validation = validateComposeFile(composePath, bundle_id, {
-              manifest,
-              consentVerified,
-            });
-            if (!validation.valid) {
-              appendLog(job, `Security check failed: ${validation.reason}`);
-              // Clean up copied files
-              rmSync(destDir, { recursive: true, force: true });
-              finishJob(job, "failed");
-              return;
-            }
-            appendLog(job, "Security check passed");
-
-            appendLog(job, "Pulling Docker images...");
-            try {
-              await runCompose(["pull"], { cwd: destDir });
-              appendLog(job, "Docker images pulled");
-            } catch (err) {
-              appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
-            }
-
-            // Start containers (add --build if compose file has build directives)
-            const composeContent = readFileSync(composePath, "utf8");
-            const needsBuild = /^\s+build:/m.test(composeContent);
-            const upArgs = needsBuild ? ["up", "-d", "--build"] : ["up", "-d"];
-            appendLog(job, needsBuild ? "Building and starting containers..." : "Starting containers...");
-            try {
-              await runCompose(upArgs, { cwd: destDir });
-              appendLog(job, "Containers started");
-            } catch (err) {
-              const detail = err.stderr || err.message;
-              appendLog(job, `docker compose up failed: ${detail}`);
-              // Still add to installed.json so user can configure env vars and hit "Start"
-              const installed2 = getInstalled();
-              if (!installed2.find((i) => i.id === bundle_id)) {
-                installed2.push({ id: bundle_id, type: addonType, version: manifest?.version, installedAt: new Date().toISOString() });
-                saveInstalled(installed2);
-              }
-              finishJob(job, "failed");
-              return;
-            }
-          }
-
-          // Propagate env vars to gateway .env so dependent services connect
-          if (env_vars && Object.keys(env_vars).length > 0) {
-            propagateEnvToGateway(env_vars);
-            appendLog(job, "Configuration applied to gateway");
-            needsRestart = true;
-          }
-
-          // Bundle types can also have MCP servers — register if manifest has server config
-          if (manifest?.server) {
-            const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-            const env = {};
-            if (manifest.server.envKeys && env_vars) {
-              for (const key of manifest.server.envKeys) {
-                if (env_vars[key]) env[key] = env_vars[key];
-              }
-            }
-            if (manifest.env_vars) {
-              for (const v of manifest.env_vars) {
-                if (v.default && !env[v.name]) env[v.name] = v.default;
-              }
-            }
-            // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
-            // shared by more than one gateway on a host (e.g. grackle runs a
-            // main gateway + a separate-DB instance off the same ~/.crow), so a
-            // hard-coded path is correct for one and a cross-instance DB leak for
-            // the other — which crash-loops the wrong gateway on "database is
-            // locked". The MCP child instead inherits the SPAWNING gateway's
-            // CROW_DB_PATH via process.env at launch (its own default otherwise),
-            // so each gateway's children always use that gateway's DB.
-            mcpAddons[bundle_id] = {
-              command: manifest.server.command,
-              args: manifest.server.args || [],
-              ...(Object.keys(env).length > 0 ? { env } : {}),
-            };
-            writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
-            appendLog(job, `Registered MCP server '${bundle_id}'`);
-            needsRestart = true;
-          }
-
-          // Bundle types can also have panels — install them
-          if (manifest?.panel) {
-            mkdirSync(PANELS_DIR, { recursive: true });
-            const panelPath = resolvePanelPath(manifest, bundle_id);
-            const panelSrc = join(destDir, panelPath);
-            if (existsSync(panelSrc)) {
-              cpSync(panelSrc, join(PANELS_DIR, `${bundle_id}.js`));
-              appendLog(job, `Installed panel: ${bundle_id}`);
-            }
-            if (manifest.panelRoutes) {
-              const routesSrc = join(destDir, manifest.panelRoutes);
-              if (existsSync(routesSrc)) {
-                cpSync(routesSrc, join(PANELS_DIR, `${bundle_id}-routes.js`));
-                appendLog(job, `Installed panel routes: ${bundle_id}-routes`);
-              }
-            }
-            // Ensure panels dir can resolve gateway dependencies
-            const nmLink = join(PANELS_DIR, "node_modules");
-            if (!existsSync(nmLink)) {
-              const gatewayNm = join(APP_ROOT, "node_modules");
-              if (existsSync(gatewayNm)) {
-                try { symlinkSync(gatewayNm, nmLink); } catch {}
-              }
-            }
-            const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
-            if (!panelsConfig.includes(bundle_id)) {
-              panelsConfig.push(bundle_id);
-              writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
-            }
-            needsRestart = true;
-          }
-        } else if (addonType === "mcp-server") {
-          // MCP server — register in mcp-addons.json
-          if (manifest?.server) {
-            const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-            const env = {};
-            // Collect user-provided env vars
-            if (manifest.server.envKeys && env_vars) {
-              for (const key of manifest.server.envKeys) {
-                if (env_vars[key]) env[key] = env_vars[key];
-              }
-            }
-            // Also include default values from manifest.env_vars
-            if (manifest.env_vars) {
-              for (const v of manifest.env_vars) {
-                if (v.default && !env[v.name]) env[v.name] = v.default;
-              }
-            }
-            mcpAddons[bundle_id] = {
-              command: manifest.server.command,
-              args: manifest.server.args || [],
-              ...(Object.keys(env).length > 0 ? { env } : {}),
-            };
-            writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
-            appendLog(job, `Registered MCP server '${bundle_id}'`);
-          }
-
-          // Install npm dependencies if package.json exists
-          const pkgJson = join(destDir, "package.json");
-          if (existsSync(pkgJson)) {
-            appendLog(job, "Installing dependencies...");
-            try {
-              const { execFileSync } = await import("node:child_process");
-              execFileSync("npm", ["install", "--prefix", destDir, "--omit=dev"], {
-                stdio: "pipe",
-                timeout: 120_000,
-              });
-              appendLog(job, "Dependencies installed");
-            } catch (npmErr) {
-              appendLog(job, `Warning: npm install failed — ${npmErr.message}`);
-            }
-          }
-
-          // Install panel + routes if present in manifest
-          if (manifest?.panel) {
-            mkdirSync(PANELS_DIR, { recursive: true });
-            const panelPath = resolvePanelPath(manifest, bundle_id);
-            const panelSrc = join(destDir, panelPath);
-            if (existsSync(panelSrc)) {
-              cpSync(panelSrc, join(PANELS_DIR, `${bundle_id}.js`));
-              appendLog(job, `Installed panel: ${bundle_id}`);
-            }
-            if (manifest.panelRoutes) {
-              const routesSrc = join(destDir, manifest.panelRoutes);
-              if (existsSync(routesSrc)) {
-                cpSync(routesSrc, join(PANELS_DIR, `${bundle_id}-routes.js`));
-                appendLog(job, `Installed panel routes: ${bundle_id}-routes`);
-              }
-            }
-            // Ensure panels dir can resolve gateway dependencies (express, multer, etc.)
-            const nmLink = join(PANELS_DIR, "node_modules");
-            if (!existsSync(nmLink)) {
-              const gatewayNm = join(APP_ROOT, "node_modules");
-              if (existsSync(gatewayNm)) {
-                try {
-                  symlinkSync(gatewayNm, nmLink);
-                  appendLog(job, "Linked gateway node_modules for panel route resolution");
-                } catch {}
-              }
-            }
-            // Register in panels.json
-            const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
-            if (!panelsConfig.includes(bundle_id)) {
-              panelsConfig.push(bundle_id);
-              writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
-            }
-            needsRestart = true;
-          }
-        } else if (addonType === "skill") {
-          // Skill — copy skill files to ~/.crow/skills/
-          mkdirSync(SKILLS_DIR, { recursive: true });
-          if (manifest?.skills) {
-            for (const skillPath of manifest.skills) {
-              const src = join(destDir, skillPath);
-              const dest = join(SKILLS_DIR, skillPath.split("/").pop());
-              if (existsSync(src)) {
-                cpSync(src, dest);
-                appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
-              }
-            }
-          }
-        } else if (addonType === "panel") {
-          // Panel — copy panel file to ~/.crow/panels/ and register
-          mkdirSync(PANELS_DIR, { recursive: true });
-          if (manifest?.panel) {
-            const panelPath = resolvePanelPath(manifest, bundle_id);
-            const src = join(destDir, panelPath);
-            const dest = join(PANELS_DIR, panelPath.split("/").pop());
-            if (existsSync(src)) {
-              cpSync(src, dest);
-              const panelsCfg = readJsonSafe(PANELS_CONFIG_PATH, []);
-              if (!panelsCfg.includes(bundle_id)) {
-                panelsCfg.push(bundle_id);
-                writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
-              }
-              appendLog(job, `Installed panel: ${panelPath.split("/").pop()}`);
-            }
-          }
-        }
-
-        // 3b. Handle panel field on any add-on type
-        if (manifest.panel && addonType !== "panel") {
-          const panelPath = resolvePanelPath(manifest, bundle_id);
-          const panelSourceDir = join(APP_BUNDLES, bundle_id, panelPath.replace(/[^a-zA-Z0-9_\-\/\.]/g, ""));
-          if (existsSync(panelSourceDir)) {
-            const panelFilename = panelPath.split("/").pop();
-            const panelDest = join(CROW_HOME, "panels", panelFilename);
-            // Ensure panels directory exists
-            mkdirSync(join(CROW_HOME, "panels"), { recursive: true });
-            copyFileSync(panelSourceDir, panelDest);
-            // Register in panels.json
-            const panelsJsonPath = join(CROW_HOME, "panels.json");
-            let panelsList = [];
-            if (existsSync(panelsJsonPath)) {
-              try { panelsList = JSON.parse(readFileSync(panelsJsonPath, "utf8")); } catch {}
-            }
-            const panelId = panelFilename.replace(/\.js$/, "");
-            if (!panelsList.includes(panelId)) {
-              panelsList.push(panelId);
-              writeFileSync(panelsJsonPath, JSON.stringify(panelsList, null, 2));
-            }
-            needsRestart = true;
-            appendLog(job, `Installed panel: ${panelFilename}`);
-          }
-        }
-
-        // 4. Copy any associated skills (bundles and mcp-servers can have skills too)
-        if (addonType !== "skill" && manifest?.skills) {
-          mkdirSync(SKILLS_DIR, { recursive: true });
-          for (const skillPath of manifest.skills) {
-            const src = join(destDir, skillPath);
-            const dest = join(SKILLS_DIR, skillPath.split("/").pop());
-            if (existsSync(src)) {
-              cpSync(src, dest);
-              appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
-            }
-          }
-        }
-
-        // 5. Auto-configure AI Provider when installing local AI bundles
-        if (manifest?.category === "ai" && addonType === "bundle") {
-          const aiConfig = getAiProviderConfig(bundle_id, env_vars);
-          if (aiConfig) {
-            try {
-              const { resolveEnvPath, writeEnvVar, sanitizeEnvValue } = await import("../env-manager.js");
-              const envPath = resolveEnvPath();
-              writeEnvVar(envPath, "AI_PROVIDER", sanitizeEnvValue(aiConfig.provider));
-              writeEnvVar(envPath, "AI_BASE_URL", sanitizeEnvValue(aiConfig.baseUrl));
-              // Invalidate cached provider config
-              try {
-                const { invalidateConfigCache } = await import("../ai/provider.js");
-                invalidateConfigCache();
-              } catch {}
-              appendLog(job, `AI Chat configured — provider: ${aiConfig.provider}, endpoint: ${aiConfig.baseUrl}`);
-              appendLog(job, "Open Messages → AI Chat to start chatting with your local AI");
-              needsRestart = true;
-            } catch (err) {
-              appendLog(job, `Note: Could not auto-configure AI Chat: ${err.message}. Set it manually in Settings.`);
-            }
-          }
-        }
-
-        // 6. Track installation
-        installed.push({
-          id: bundle_id,
-          type: addonType,
-          version: manifest?.version || "1.0.0",
-          installedAt: new Date().toISOString(),
-        });
-        saveInstalled(installed);
-        appendLog(job, "Installation tracked");
-
-        // Open firewall ports and set up Tailscale HTTPS for direct-mode web UIs
-        if (manifest?.ports && Array.isArray(manifest.ports)) {
-          const { execFileSync: efs } = await import("node:child_process");
-          for (const port of manifest.ports) {
-            // Open firewall for Tailscale
-            try {
-              efs("sudo", ["-n", "ufw", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp", "comment", `Crow: ${manifest.name || bundle_id}`], { timeout: 10000 });
-              appendLog(job, `Opened firewall port ${port}/tcp for Tailscale`);
-            } catch {
-              appendLog(job, `Note: Could not open port ${port} (sudo/ufw not available — open manually if needed)`);
-            }
-          }
-          // Set up Tailscale HTTPS proxy for direct-mode webUI ports (SPA apps need TLS due to HSTS)
-          if (manifest?.webUI?.proxyMode === "direct" && manifest.webUI.port) {
-            try {
-              efs("sudo", ["-n", "tailscale", "serve", "--bg", "--https", String(manifest.webUI.port), `http://localhost:${manifest.webUI.port}`], { timeout: 15000 });
-              appendLog(job, `Set up Tailscale HTTPS on port ${manifest.webUI.port}`);
-            } catch {
-              appendLog(job, `Note: Could not set up Tailscale HTTPS for port ${manifest.webUI.port}`);
-            }
-          }
-        }
-
-        let notifDb;
-        try {
-          notifDb = createDbClient();
-          await createNotification(notifDb, {
-            title: `Installed: ${manifest?.name || bundle_id}`,
-            type: "system",
-            source: "bundle-installer",
-            action_url: "/dashboard/extensions",
-          });
-        } catch {} finally {
-          notifDb?.close();
-        }
-
-        // Phase 5-full: auto-register providers declared in manifest.providers[]
-        try {
-          const manifest = getManifest(bundle_id);
-          if (manifest?.providers?.length) {
-            const providerDb = createDbClient();
-            let hostIp = "127.0.0.1";
-            if (manifest.host && manifest.host !== "local") {
-              try {
-                const peer = await getInstance(providerDb, manifest.host);
-                hostIp = peer?.tailscale_ip || peer?.gateway_url?.replace(/^https?:\/\//, "").replace(/:\d+$/, "").replace(/\/.*/, "") || hostIp;
-              } catch {}
-            }
-            const port = manifest.port || 0;
-            for (const pdef of manifest.providers) {
-              try {
-                const r = await registerProviderFromManifest({
-                  db: providerDb, manifest, providerDef: pdef, port, hostIp,
-                });
-                appendLog(job, `Registered provider: ${pdef.id} (${r.lamport_ts})`);
-              } catch (err) {
-                appendLog(job, `Provider register skipped for ${pdef.id}: ${err.message}`);
-              }
-            }
-            invalidateProvidersCache();
-          }
-        } catch (err) {
-          appendLog(job, `Provider auto-register skipped: ${err.message}`);
-        }
-
-        // Seed STT/TTS profiles declared in manifest.{stt,tts}ProfileSeed.
-        try {
-          const manifest = getManifest(bundle_id);
-          if (manifest?.sttProfileSeed || manifest?.ttsProfileSeed) {
-            const seedDb = createDbClient();
-            if (manifest.sttProfileSeed) await seedProfile(seedDb, "stt", manifest.sttProfileSeed, (m) => appendLog(job, m));
-            if (manifest.ttsProfileSeed) await seedProfile(seedDb, "tts", manifest.ttsProfileSeed, (m) => appendLog(job, m));
-          }
-        } catch (err) {
-          appendLog(job, `Profile seed skipped: ${err.message}`);
-        }
-
-        finishJob(job, needsRestart ? "complete_restart" : "complete");
-
-        // Auto-restart gateway if panels or MCP servers were added
-        if (needsRestart) {
-          appendLog(job, "Scheduling gateway restart to load new panels/servers...");
-          scheduleGatewayRestart(3000);
-        }
-      } catch (err) {
-        appendLog(job, `Error: ${err.message}`);
+      const out = await runInstallJob(bundle_id, env_vars, {
+        job,
+        installedSnapshot: v.installed,
+        consentVerified: v.consentVerified,
+        manifest: v.manifest,
+      });
+      if (!out.ok) {
         finishJob(job, "failed");
+        return;
+      }
+      finishJob(job, out.needsRestart ? "complete_restart" : "complete");
+      if (out.needsRestart) {
+        appendLog(job, "Scheduling gateway restart to load new panels/servers...");
+        scheduleGatewayRestart(3000);
+      }
+    })();
+  });
+
+  // POST /bundles/api/install-set — install a themed collection in one click.
+  // ONE job for the whole set (the client polls it like any install), members run
+  // sequentially in the collection's topological order, a member failure does NOT
+  // abort the set, and exactly ONE gateway restart happens at the end.
+  router.post("/bundles/api/install-set", async (req, res) => {
+    const { collection_id } = req.body || {};
+
+    const collection = getCollection(collection_id, _collectionsPathOverride || undefined);
+    if (!collection) return res.status(404).json({ error: `Unknown collection '${collection_id}'` });
+
+    const v = validateCollectionServerSide(collection);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+
+    // Refuse to start while ANY install/uninstall job is running: a single install
+    // finishing mid-set fires its own immediate restart and would kill this runner.
+    // Predicate is status === "running" — finished jobs linger in the Map for their
+    // TTL, so a presence check would 409 every set for 10 minutes after any install.
+    const busy = [...jobs.values()].some(
+      (j) => j.status === "running" && (j.action === "install" || j.action === "uninstall" || j.action === "install-set"),
+    );
+    if (busy || isInstallSetRunning()) {
+      return res.status(409).json({ error: "Another install is in progress — wait for it to finish and try again." });
+    }
+
+    const plan = planInstallSet(collection);
+    const job = createJob(collection.id, "install-set");
+    try {
+      beginInstallSet(collection.id);
+    } catch {
+      finishJob(job, "failed");
+      return res.status(409).json({ error: "A collection install is already in progress." });
+    }
+
+    res.json({ job_id: job.id, plan });
+
+    (async () => {
+      let anyRestart = false;
+      const needsConfig = [];
+      try {
+        appendLog(job, `Installing collection '${collection.name}' (${plan.filter((p) => p.action === "install").length} to install, ${plan.filter((p) => p.action === "skip").length} skipped)`);
+
+        for (const member of collection.members) {
+          // Test-only pacing (see _setInstallSetStepDelayForTest) — 0 in production.
+          if (_installSetStepDelayMs > 0) await new Promise((r) => setTimeout(r, _installSetStepDelayMs));
+          // Live gate re-check: getInstalled() has grown as earlier members landed,
+          // so cumulative RAM commitments and intra-set dependencies are enforced for
+          // real — not against a stale pre-set snapshot.
+          const mv = await validateInstall(member.id, {});
+          if (!mv.ok) {
+            appendLog(job, `SUMMARY member ${member.id} skipped ${mv.error}`);
+            continue;
+          }
+          appendLog(job, `Installing ${member.id}...`);
+          const out = await runInstallJob(member.id, {}, {
+            job,
+            installedSnapshot: mv.installed,
+            consentVerified: mv.consentVerified,
+            manifest: mv.manifest,
+          });
+          if (!out.ok) {
+            appendLog(job, `SUMMARY member ${member.id} failed ${out.reason}`);
+            continue; // continue-on-error: one bad member must not sink the collection
+          }
+          if (out.needsRestart) anyRestart = true;
+          const keys = needsConfigKeys(member.id);
+          if (keys.length > 0) needsConfig.push({ id: member.id, keys });
+          appendLog(job, `SUMMARY member ${member.id} installed`);
+        }
+
+        for (const nc of needsConfig) appendLog(job, `NEEDS_CONFIG ${nc.id} ${nc.keys.join(",")}`);
+        appendLog(job, "Collection install complete");
+        finishJob(job, anyRestart ? "complete_restart" : "complete");
+        if (anyRestart) scheduleGatewayRestart(3000);
+      } catch (err) {
+        appendLog(job, `Collection install failed: ${err?.message || err}`);
+        finishJob(job, "failed");
+      } finally {
+        endInstallSet();
       }
     })();
   });
@@ -1683,6 +1996,13 @@ export default function bundlesRouter() {
         error: `Cannot uninstall '${bundle_id}' — other installed bundles depend on it: ${dependents.join(", ")}. Uninstall the dependents first.`,
         dependents,
       });
+    }
+
+    // D6.9: same reverse guard as /install — an uninstall finishing mid-set
+    // would fire its own restart and kill the set runner. Checked immediately
+    // before createJob so nothing can race past this point into job creation.
+    if (isInstallSetRunning()) {
+      return res.status(409).json({ error: "A collection install is in progress — wait for it to finish and try again." });
     }
 
     const job = createJob(bundle_id, "uninstall");
@@ -1870,16 +2190,6 @@ export default function bundlesRouter() {
     })();
   });
 
-  // Cross-host verification middleware — runs before start/stop, only acts if
-  // X-Crow-Signature header is present (otherwise falls through to existing auth).
-  const dbForXhost = createDbClient();
-  const xhostVerify = crossHostVerifyMiddleware(dbForXhost, {
-    optional: true, // non-signed requests fall through to dashboardAuth/OAuth
-    audit: (req) => `bundle.${(req.path.split("/").pop() || "")}`,
-    auditBundleId: true,
-    // emptyBodyString stays at the default "{}" — bundle signers hash JSON.stringify(body || {})
-  });
-
   /**
    * Unified bundle-action dispatcher: if the bundle manifest declares
    * `host: <instance-id>` (and trust boundary passes), forward to that peer.
@@ -1952,7 +2262,7 @@ export default function bundlesRouter() {
   }
 
   // POST /bundles/api/start — Start bundle containers (local or peer)
-  router.post("/bundles/api/start", xhostVerify, async (req, res) => {
+  router.post("/bundles/api/start", async (req, res) => {
     const { bundle_id } = req.body || {};
     if (!bundle_id || !isValidBundleId(bundle_id)) {
       return res.status(400).json({ error: "Invalid bundle ID" });
@@ -1967,7 +2277,7 @@ export default function bundlesRouter() {
   });
 
   // POST /bundles/api/stop — Stop bundle containers (local or peer)
-  router.post("/bundles/api/stop", xhostVerify, async (req, res) => {
+  router.post("/bundles/api/stop", async (req, res) => {
     const { bundle_id } = req.body || {};
     if (!bundle_id || !isValidBundleId(bundle_id)) {
       return res.status(400).json({ error: "Invalid bundle ID" });
@@ -2015,7 +2325,16 @@ export default function bundlesRouter() {
       .join("\n") + "\n";
     writeFileSync(envPath, envContent);
 
-    res.json({ ok: true, message: "Environment variables saved" });
+    // Also configure the MCP child, which reads mcp-addons.json — not this .env.
+    const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
+
+    res.json({
+      ok: true,
+      message: mcpUpdated
+        ? "Environment variables saved — restart the gateway to apply them to the MCP server"
+        : "Environment variables saved",
+      needs_restart: mcpUpdated,
+    });
   });
 
   // GET /bundles/api/jobs/:id — Poll job progress

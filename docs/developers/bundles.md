@@ -85,3 +85,23 @@ bundles/your-bundle/
 ```
 
 After adding or editing a bundle, run `npm run build-registry` and commit both the manifest and the regenerated `registry/add-ons.json`.
+
+## Collections
+
+`registry/collections.json` groups official bundles into curated, one-click "starter collections" (Home Server, Education, Research, Development) surfaced on the Extensions page's Browse view. Each collection is `{ id, name, description, icon, members }`, where every member is `{ id, kind, you_need? }`.
+
+Membership is constrained by hard rules, enforced by `tests/extensions-collections.test.js`:
+
+- **Official**: every member `id` must exist in `registry/add-ons.json` and have a manifest under `bundles/<id>/`.
+- **Non-privileged, non-consent**: no member may set `privileged: true` or `consent_required: true` — a one-click install must never bypass the consent gate.
+- **Non-GPU**: no member may declare `requires.gpu` or `requires.min_vram_gb` — collections are host-independent, not tuned to any one machine's hardware.
+- **No host networking, no Docker socket**: no member's `docker-compose.yml` may use `network_mode: host` or mount `/var/run/docker.sock` — `validateComposeFile` refuses both without the privileged/consent gate, so such a member would fail the one-click install.
+- **Dependency-closed and topologically ordered**: every `requires.bundles` dependency of a member must itself be a member of the same collection, and must appear earlier in the `members` array than its dependent.
+- **`kind` matches compose presence**: a member with a `docker-compose.yml` must be `kind: "deploys"`; a member without one is `"builtin"` or `"connects"`.
+- **`connects` members declare `you_need`**: a member that connects to something the user already runs (e.g. an existing Home Assistant instance) must set `kind: "connects"` and a non-empty `you_need` string describing what the user needs to bring.
+
+At install time the gateway does not trust the loaded JSON blindly — it re-validates each member's manifest against these same rules from the on-disk `bundles/<id>/manifest.json` files before running the install job, so a collection can't be used to smuggle in a bundle whose manifest changed (or was removed) since `collections.json` was written.
+
+### Deployment invariant: co-hosted gateways need distinct `CROW_HOME`
+
+The one-click install path guards against concurrent installs with an in-process busy flag plus an `installed.json` file under `CROW_HOME`. Both are **per-process**, not cross-process: if two gateway processes are co-hosted and share the same `~/.crow` (the same `CROW_HOME`), they can race on `installed.json` and on the install-set busy gate, corrupting installed-bundle bookkeeping. Every gateway instance — including scratch/throwaway ones spun up for testing — must run with its own distinct `CROW_HOME`.

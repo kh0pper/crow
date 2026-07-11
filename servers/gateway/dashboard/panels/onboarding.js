@@ -7,7 +7,7 @@
  *
  * W3-3 additions:
  *   - Reaching the "done" step sets onboarding_completed_at (first time only)
- *   - Done step shows a subtle CSS-only celebration + three "what to try" cards
+ *   - Done step shows a subtle CSS-only celebration + "what to try" cards
  */
 import { stepper, section, callout, button } from "../shared/components.js";
 import { t, SUPPORTED_LANGS } from "../shared/i18n.js";
@@ -35,8 +35,9 @@ function deepLink(label, href) {
 }
 
 /**
- * Three "what to try first" action cards shown on the done step (W3-3).
- * Each card is a link, description, and CTA button.
+ * "What to try first" action cards shown on the done step (W3-3; extensions
+ * overhaul added the fourth, starter-collections, card). Each card is a link,
+ * description, and CTA button.
  */
 function renderActionCards(lang) {
   const cards = [
@@ -57,6 +58,12 @@ function renderActionCards(lang) {
       bodyKey: "onboarding.firstConnect.body",
       actionKey: "onboarding.firstConnect.action",
       href: "/dashboard/connect",
+    },
+    {
+      titleKey: "onboarding.tryCollections.title",
+      bodyKey: "onboarding.tryCollections.body",
+      actionKey: "onboarding.tryCollections.action",
+      href: "/dashboard/extensions#collections",
     },
   ];
 

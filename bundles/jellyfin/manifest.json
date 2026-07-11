@@ -6,6 +6,7 @@
   "type": "bundle",
   "author": "Crow",
   "category": "media",
+  "featured": true,
   "tags": ["media", "movies", "tv", "music", "streaming", "self-hosted"],
   "icon": "film",
   "docker": { "composefile": "docker-compose.yml" },

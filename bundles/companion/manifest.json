@@ -6,6 +6,7 @@
   "type": "bundle",
   "author": "Crow",
   "category": "ai",
+  "featured": true,
   "tags": ["companion", "voice", "avatar", "vtuber", "live2d"],
   "icon": "🐦",
   "docker": {

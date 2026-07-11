@@ -6,6 +6,7 @@
   "type": "mcp-server",
   "author": "Crow",
   "category": "smart-home",
+  "featured": true,
   "tags": ["smart-home", "iot", "automation", "devices", "sensors"],
   "icon": "home",
   "server": {

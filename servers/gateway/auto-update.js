@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, renameS
 import { dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isSupervised } from "../shared/supervisor.js";
+import { isInstallSetRunning } from "./install-lock.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let APP_ROOT = dirname(dirname(__dirname));
@@ -69,6 +70,14 @@ async function getSettings() {
  * `check` is injectable for tests only.
  */
 export async function tickCheck(check = checkForUpdates) {
+  // A collection install runs N installs against one job and ends in a single
+  // deferred restart. An auto-update pull+exit here would kill that runner
+  // mid-flight (partial collection, lost summary). Manual Check-now stays
+  // ungated — that's explicit operator intent.
+  if (isInstallSetRunning()) {
+    console.log("[auto-update] Skipping scheduled check — a collection install is in progress");
+    return null;
+  }
   const settings = await getSettings();
   if (settings.auto_update_enabled !== "true") {
     console.log("[auto-update] Skipping scheduled check — disabled in settings");
