@@ -1,7 +1,7 @@
 /**
  * Extensions Panel — HTML Builders
  *
- * ICON_MAP, CATEGORY_COLORS, CATEGORY_LABELS, helper functions, and
+ * ICON_MAP, CATEGORY_COLORS, helper functions, and
  * the full page-content HTML builder for the extensions/add-ons store panel.
  */
 
@@ -46,6 +46,23 @@ export const ICON_MAP = {
   cpu: "\u{1F9EE}",
 };
 
+/**
+ * Emoji for an icon name — own-property lookup only.
+ * A bare `ICON_MAP[name]` inherits from Object.prototype, so an icon of
+ * "constructor" or "toString" would return a *function* that stringifies into
+ * the page. Registry data is repo-shipped today; community stores are not.
+ * @returns {string|null}
+ */
+export function iconEmoji(name) {
+  if (typeof name !== "string") return null;
+  return Object.hasOwn(ICON_MAP, name) ? ICON_MAP[name] : null;
+}
+
+/** Collection card icon, with the generic-package default. */
+function collectionIcon(name) {
+  return iconEmoji(name) || "\u{1F4E6}";
+}
+
 export const CATEGORY_COLORS = {
   ai:           { bg: "rgba(168,85,247,0.12)", color: "#a855f7" },
   media:        { bg: "rgba(251,191,36,0.12)", color: "#fbbf24" },
@@ -65,27 +82,6 @@ export const CATEGORY_COLORS = {
   "federated-comms":  { bg: "rgba(167,139,250,0.12)", color: "#a78bfa" },
   cameras:        { bg: "rgba(239,68,68,0.12)",   color: "#ef4444" },
   other:          { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
-};
-
-export const CATEGORY_LABELS = {
-  ai: "extensions.categoryAi",
-  media: "extensions.categoryMedia",
-  productivity: "extensions.categoryProductivity",
-  storage: "extensions.categoryStorage",
-  "smart-home": "extensions.categorySmartHome",
-  networking: "extensions.categoryNetworking",
-  gaming: "extensions.categoryGaming",
-  data: "extensions.categoryData",
-  social: "extensions.categorySocial",
-  finance: "extensions.categoryFinance",
-  infrastructure: "extensions.categoryInfrastructure",
-  automation: "extensions.categoryAutomation",
-  education: "extensions.categoryEducation",
-  "federated-social": "extensions.categoryFederatedSocial",
-  "federated-media": "extensions.categoryFederatedMedia",
-  "federated-comms": "extensions.categoryFederatedComms",
-  cameras: "extensions.categoryCameras",
-  other: "extensions.categoryOther",
 };
 
 export function formatResources(requires) {
@@ -125,7 +121,7 @@ export function renderIcon(addon, size) {
   const logo = getAddonLogo(addon.id, size);
   if (logo) return logo;
 
-  const emoji = ICON_MAP[addon.icon];
+  const emoji = iconEmoji(addon.icon);
   if (emoji) {
     const emojiSize = size >= 48 ? "1.75rem" : "1.25rem";
     return `<span style="font-size:${emojiSize}">${emoji}</span>`;
@@ -192,12 +188,16 @@ export function buildExtensionsHTML({
     }
 
     const tags = (addon.tags || []).join(",");
+    // Overflow cards are hidden by the CLASS (.ext-card--overflow { display:none }),
+    // never by an inline style: the search filter assigns card.style.display, which
+    // would clobber an inline hide and reveal every card past index 8 on the first
+    // keystroke. A class-driven hide survives that; "Show all" removes the class.
     const cls = `ext-card addon-card${hidden ? " ext-card--overflow" : ""}`;
     const style = hidden
-      ? "display:none"
-      : `animation:fadeInUp 0.4s ease-out ${Math.min(i * 30, 300)}ms both`;
+      ? ""
+      : ` style="animation:fadeInUp 0.4s ease-out ${Math.min(i * 30, 300)}ms both"`;
 
-    return `<div class="${cls}" data-addon-id="${escapeHtml(addon.id)}" data-addon-type="${escapeHtml(addon.type)}" data-addon-category="${escapeHtml(cat)}" data-addon-group="${escapeHtml(group)}" data-addon-name="${escapeHtml((addon.name || "").toLowerCase())}" data-addon-desc="${escapeHtml((addon.description || "").toLowerCase())}" data-addon-tags="${escapeHtml(tags.toLowerCase())}" style="${style}">
+    return `<div class="${cls}" data-addon-id="${escapeHtml(addon.id)}" data-addon-type="${escapeHtml(addon.type)}" data-addon-category="${escapeHtml(cat)}" data-addon-group="${escapeHtml(group)}" data-addon-name="${escapeHtml((addon.name || "").toLowerCase())}" data-addon-desc="${escapeHtml((addon.description || "").toLowerCase())}" data-addon-tags="${escapeHtml(tags.toLowerCase())}"${style}>
           <div class="ext-card__icon" style="background:${catColor.bg};color:${catColor.color}">${iconHtml}</div>
           <div class="ext-card__body">
             <div class="ext-card__name">${escapeHtml(addon.name)}</div>
@@ -231,7 +231,7 @@ export function buildExtensionsHTML({
 
   // ─── Starter collections ───
   const collectionCard = (c) => `<button type="button" class="ext-collection-card" data-collection-id="${escapeHtml(c.id)}">
-        <span class="ext-collection-card__icon">${ICON_MAP[c.icon] || "\u{1F4E6}"}</span>
+        <span class="ext-collection-card__icon">${collectionIcon(c.icon)}</span>
         <span class="ext-collection-card__name">${escapeHtml(c.name)}</span>
         <span class="ext-collection-card__desc">${escapeHtml(c.description)}</span>
         <span class="ext-collection-card__count">${c.members.length} ${t("extensions.collectionMembers", lang)}</span>
