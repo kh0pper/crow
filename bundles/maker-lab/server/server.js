@@ -31,7 +31,9 @@ import {
   mintGuestSession,
   mintBatchSessions,
 } from "./sessions.js";
-import { createProjectSpace, updateProjectSpaceMeta } from "../../../servers/shared/project-spaces.js";
+import { appImport } from "./app-root.js";
+
+const { createProjectSpace, updateProjectSpaceMeta } = await appImport("servers/shared/project-spaces.js");
 
 const ENDING_FLUSH_SEC = 5;
 

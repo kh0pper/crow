@@ -9,8 +9,10 @@
  * This module handles the server-side checks for both.
  */
 
-import { verifySession } from "../../../servers/gateway/dashboard/auth.js";
-import { createProjectSpace } from "../../../servers/shared/project-spaces.js";
+import { appImport } from "./app-root.js";
+
+const { verifySession } = await appImport("servers/gateway/dashboard/auth.js");
+const { createProjectSpace } = await appImport("servers/shared/project-spaces.js");
 
 /**
  * Is the request coming from loopback (same-host)?
