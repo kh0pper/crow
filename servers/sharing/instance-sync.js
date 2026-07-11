@@ -672,6 +672,116 @@ export class InstanceSyncManager {
   }
 
   /**
+   * D7 — one-shot providers backfill PER PEER GENERATION (the new-pairing
+   * counterpart to D2's no-op suppression). Outgoing sync feeds are per-peer
+   * Hypercores created EMPTY at first pairing (_initInstanceInner — no history
+   * replay); before D2, the boot reconciler's unconditional per-boot re-emit
+   * was accidentally how a newly-paired peer ever received this instance's
+   * provider rows. D2 kills that boot churn, so this backfill is the
+   * deliberate delivery channel.
+   *
+   * Unlike the GLOBAL contacts flag, the flag here is PER PEER
+   * (`__providers_backfill_v1:<peerId>` in dashboard_settings) so every FUTURE
+   * pairing also gets a backfill — not just the deploy transition. Only a
+   * "done:*" value is terminal; a stale non-done value is overwritten by the
+   * UPSERT done-mark. Zero armed peers → return WITHOUT writing any flag
+   * (feeds may not have opened yet this boot — retry next boot; contacts
+   * lesson, observed live on grackle 2026-07-06). Inbound backlog is drained
+   * first (I-B1) so a peer's already-delivered newer provider edit is applied
+   * before we re-emit with a fresh lamport.
+   *
+   * emitChange broadcasts to ALL peers: already-current peers converge the
+   * re-emit as re-delivery noise (rowsEquivalent → silent skip in
+   * _checkConflict, or a plain newer-lamport UPDATE with identical values) —
+   * accepted cost, same as the contacts backfill. shouldSyncRow('providers')
+   * inside emitChange drops loopback rows automatically, and
+   * EXCLUDED_COLUMNS/OUTBOUND_TRANSFORMS strip bookkeeping + null gpu_policy —
+   * no pre-filtering here. Disabled rows ARE included: disabled=1 is a synced
+   * fact the peer must learn (see disableProvider's emit).
+   *
+   * Documented limitation (parity with the contacts backfill): a pairing
+   * formed mid-run without a subsequent reboot waits for the next boot —
+   * acceptable, pairing flows involve restarts in practice.
+   * Never throws out of the loop. Returns the count of rows actually emitted.
+   */
+  async backfillProvidersForNewPeers() {
+    const FLAG_PREFIX = "__providers_backfill_v1:";
+    if (this.outFeeds.size === 0) {
+      // No peer feeds armed (yet) — deliberately write NO flags: feeds may
+      // simply not have opened yet this boot. A later boot retries; a
+      // genuinely peer-less instance just re-runs a cheap check per boot.
+      return 0;
+    }
+
+    // Which armed peers still need a backfill? Only "done:*" is terminal.
+    const newPeers = [];
+    for (const peerId of this.outFeeds.keys()) {
+      let done = false;
+      try {
+        const { rows } = await this.db.execute({
+          sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+          args: [FLAG_PREFIX + peerId],
+        });
+        done = typeof rows?.[0]?.value === "string" && rows[0].value.startsWith("done:");
+      } catch {}
+      if (!done) newPeers.push(peerId);
+    }
+    if (newPeers.length === 0) return 0; // every armed peer already covered
+
+    // I-B1 ordering guard: drain the locally-replicated inbound backlog FIRST,
+    // so a peer's already-delivered newer provider edit is applied before we
+    // re-emit with a fresh lamport and fabricate recency over it.
+    try {
+      for (const [peerId, inFeed] of this.inFeeds) {
+        await this._processNewEntries(peerId, inFeed);
+      }
+    } catch (err) {
+      console.warn(`[instance-sync] providers backfill drain failed: ${err.message}`);
+    }
+
+    let rows = [];
+    try {
+      // ALL rows, including disabled ones — disabled=1 is a synced fact.
+      // No pre-filtering: shouldSyncRow inside emitChange drops loopback rows,
+      // EXCLUDED_COLUMNS/OUTBOUND_TRANSFORMS handle wire hygiene.
+      const r = await this.db.execute({ sql: "SELECT * FROM providers" });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] providers backfill read failed: ${err.message}`);
+      return 0;
+    }
+
+    let emitted = 0;
+    for (const row of rows) {
+      try {
+        // emitChange returns null when the row was gated off the wire
+        // (loopback / feedsDisabled) — only count rows that actually rode.
+        const ts = await this.emitChange("providers", "update", row);
+        if (ts != null) emitted++;
+      } catch (err) {
+        console.warn(`[instance-sync] providers backfill emit failed for ${row.id}: ${err.message}`);
+      }
+    }
+
+    for (const peerId of newPeers) {
+      try {
+        // UPSERT: a stale non-done value must be overwritten or the done-mark
+        // silently no-ops (per-boot re-emit thrash). Already-done peers are
+        // never rewritten — only the previously-unflagged ones.
+        await this.db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+          args: [FLAG_PREFIX + peerId, `done:${emitted}`],
+        });
+      } catch {}
+    }
+
+    if (emitted > 0) {
+      console.log(`[instance-sync] providers backfill: ${emitted} provider row(s) re-emitted for ${newPeers.length} new peer(s)`);
+    }
+    return emitted;
+  }
+
+  /**
    * C1: assign a DETERMINISTIC, FROZEN group_uid to every pre-existing PLAIN group
    * the migration left NULL, so the SAME logical group on two instances (same shared
    * identity) converges on ONE uid instead of duplicating. uid = first-32-hex of
