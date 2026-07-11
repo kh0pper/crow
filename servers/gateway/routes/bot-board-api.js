@@ -55,6 +55,7 @@ import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";
 import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mjs";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
 import { parsePlanRef, resolvePlanFile, containedRealPath } from "./plan-ref.js";
+import { isStage, stageToStatus, effectiveStage } from "./board-stages.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -176,6 +177,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const card = (await tdb.execute({
         sql:
           "SELECT id,title,description,status,priority,due_date,owner,tags,parent_id,project_id," +
+          "stage,assigned_bot,plan_ref," +
           "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=?",
         args: [id],
       })).rows[0];
@@ -183,10 +185,18 @@ export default function botBoardApiRouter(dashboardAuth) {
       cdb = createDbClient();
       let projects = [];
       try {
-        projects = (await cdb.execute({ sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows || [];
+        projects = (await cdb.execute({ sql: "SELECT id, name, slug, repo_path FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows || [];
       } catch { projects = []; }
       const { locked } = await lockState(cdb, id);
-      return res.json({ card, projects, locked });
+      // effectiveStage needs plan existence only for legacy null-stage cards.
+      let planExists = false;
+      if (card.stage == null) {
+        try {
+          const info = await derivePlanPath(cdb, card);
+          planExists = !!(info && existsSync(info.path));
+        } catch { planExists = false; }
+      }
+      return res.json({ card, projects, locked, effectiveStage: effectiveStage(card, planExists) });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
@@ -241,11 +251,22 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (!Number.isInteger(prio) || prio < 1 || prio > 5) return jsonError(res, 400, "priority must be 1-5");
       prioSet = true;
     }
+    let botSet = false, botVal = null;
+    if (b.assigned_bot !== undefined) {
+      botSet = true;
+      botVal = b.assigned_bot == null || b.assigned_bot === "" ? null : String(b.assigned_bot);
+    }
     let tdb, cdb;
     try {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
+      if (botSet && botVal != null) {
+        const botRow = (await cdb.execute({
+          sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [botVal],
+        })).rows[0];
+        if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
+      }
       tdb = createDbClient(TASKS_DB);
       const cur = (await tdb.execute({ sql: "SELECT status FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
@@ -258,6 +279,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         b.tags == null || b.tags === "" ? null : String(b.tags),
       ];
       if (prioSet) { sets.push("priority=?"); args.push(prio); }
+      if (botSet) { sets.push("assigned_bot=?"); args.push(botVal); }
       if (b.status != null) {
         const ns = String(b.status);
         sets.push("status=?"); args.push(ns);
@@ -280,20 +302,34 @@ export default function botBoardApiRouter(dashboardAuth) {
   router.post(P + "/card/:id/move", async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
-    const status = String((req.body || {}).status || "");
-    if (!CARD_STATUSES.has(status)) return jsonError(res, 400, "invalid status"); // BEFORE SQL
+    const b = req.body || {};
+    const stageReq = b.stage != null ? String(b.stage) : null;
+    const status = String(b.status || "");
+    if (stageReq != null) {
+      if (!isStage(stageReq)) return jsonError(res, 400, "invalid stage"); // BEFORE SQL
+    } else if (!CARD_STATUSES.has(status)) {
+      return jsonError(res, 400, "invalid status"); // BEFORE SQL (legacy path unchanged)
+    }
     let tdb, cdb;
     try {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, stage FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
-      const sets = ["status=?", "updated_at=datetime('now')"];
-      if (TERMINAL.has(status) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
-      else if (!TERMINAL.has(status) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
-      await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [status, id] });
+      if (stageReq != null) {
+        const proj = stageToStatus(stageReq);
+        const sets = ["stage=?", "status=?", "updated_at=datetime('now')"];
+        if (TERMINAL.has(proj) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
+        else if (!TERMINAL.has(proj) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
+        await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [stageReq, proj, id] });
+      } else {
+        const sets = ["status=?", "updated_at=datetime('now')"];
+        if (TERMINAL.has(status) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
+        else if (!TERMINAL.has(status) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
+        await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [status, id] });
+      }
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
