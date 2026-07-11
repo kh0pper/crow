@@ -630,6 +630,27 @@ function writeJsonSafe(path, data) {
 }
 
 /**
+ * Push env values into the add-on's mcp-addons.json entry.
+ *
+ * MCP children are spawned with { ...process.env, ...(config.env||{}) } from
+ * mcp-addons.json (proxy.js) — they never read bundles/<id>/.env. Before this,
+ * mcp-addons env was only ever written at install time, so post-install
+ * configuration silently did nothing (home-assistant would stay dead no matter
+ * how carefully you filled in HA_URL/HA_TOKEN).
+ *
+ * @returns {boolean} true if the add-on registers an MCP server and the file was written
+ */
+export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH) {
+  const mcpAddons = readJsonSafe(path, {});
+  const entry = mcpAddons[bundleId];
+  if (!entry) return false; // not an MCP add-on — nothing to configure
+  entry.env = { ...(entry.env || {}), ...envVars };
+  mcpAddons[bundleId] = entry;
+  writeJsonSafe(path, mcpAddons);
+  return true;
+}
+
+/**
  * Append or replace a managed env block inside the given .env file.
  * blockName is the human marker: "# crow-<name> BEGIN" / "# crow-<name> END".
  * version: optional fingerprint of the block's contents, stamped as a comment
@@ -2246,7 +2267,16 @@ export default function bundlesRouter() {
       .join("\n") + "\n";
     writeFileSync(envPath, envContent);
 
-    res.json({ ok: true, message: "Environment variables saved" });
+    // Also configure the MCP child, which reads mcp-addons.json — not this .env.
+    const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
+
+    res.json({
+      ok: true,
+      message: mcpUpdated
+        ? "Environment variables saved — restart the gateway to apply them to the MCP server"
+        : "Environment variables saved",
+      needs_restart: mcpUpdated,
+    });
   });
 
   // GET /bundles/api/jobs/:id — Poll job progress
