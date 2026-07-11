@@ -2,6 +2,17 @@
 
 Date: 2026-07-11 · Operator directive: "do the bundle migrating; don't worry
 about learner data in the backups."
+Review: R1 (adversarial, opus) REVISE — 4 MAJOR (D2 inversion: full regen is
+MANDATORY for a green suite, absorbing the rookery drift which R1 verified is
+the ONLY other diff; async call-site integration at mcp-mounts.js:144;
+npm-at-boot needless-trigger + listen-blocking; include-list doesn't
+generalize to Python bundles) + 3 minors — ALL FOLDED. R1 also verified: boot
+ordering HOLDS (refresh at index.js:490 precedes listen, panel load AND MCP
+child spawn are post-listen); cpSync is additive (dest-only files survive);
+crow's served panels are SYMLINKS into the bundle dir (legacy state) and
+cpSync-over-symlink is safe on Node 20 but rmSync-first is specified for
+determinism; on THIS deploy only maker-lab refreshes (every other installed
+bundle is version-equal — verified against crow's installed.json).
 
 ## 1. Problem
 
@@ -39,55 +50,93 @@ via the product UI).
 For each installed first-party bundle (`APP_BUNDLES/<id>` exists), BEFORE the
 existing missing-file repair:
 
-- Read `version` from the repo manifest and the installed manifest. If both
-  are readable and **differ** (string inequality — repo is the source of
-  truth in either direction; installed copies are snapshots, not forks), do a
-  refresh:
+- Read `version` from the repo manifest and the installed manifest. Compare
+  as strings with **both-undefined treated as equal** (R1: crow's vllm/llama
+  bundles carry no version — they must never churn). If both readable and
+  they **differ** (either direction — repo is the source of truth; installed
+  copies are snapshots, not forks), do a refresh:
   - Copy the bundle's CODE artifacts from repo → `~/.crow/bundles/<id>/`,
-    overwrite: `manifest.json`, `package.json`, `package-lock.json`,
-    `settings-section.js`, and the `server/`, `panel/`, `skills/`,
-    `curriculum/`, `public/`, `scripts/` dirs (each only if present in the
-    repo bundle). EXPLICIT-INCLUDE list — never a blanket dir copy — so
-    instance-local files (`.env`, `node_modules/`, `data/`, anything the repo
-    doesn't ship) are structurally untouchable.
+    overwrite. EXPLICIT-INCLUDE set, generalized per R1 MAJOR-4 so it covers
+    JS AND Python first-party bundles: top-level files `manifest.json`,
+    `package.json`, `package-lock.json`, `pyproject.toml`, `uv.lock`,
+    `settings-section.js`, `main.py`, `run.sh`, `config.py`; dirs `server/`,
+    `panel/`, `skills/`, `curriculum/`, `public/`, `scripts/`, `templates/`,
+    `routes/`, `config/`, `src/` (each only if present in the repo bundle);
+    PLUS any file/dir roots the manifest itself declares (`server.args[0]`'s
+    first path segment, `panel`, `panelRoutes`, each `skills[]` entry) — the
+    bundle contract is manifest-declaration-driven, so declared paths are
+    always code. NEVER copied (stated, deliberate): `docker-compose.yml`,
+    `Dockerfile`, `entrypoint.sh`, `.env*`, `node_modules/`, `data/` —
+    container assets must not be mutated at boot under a possibly-running
+    container (gateway-side `server//panel//skills/` refresh IS safe for
+    docker-type bundles; the possible code↔container contract skew across a
+    version bump is inherent drift, warn-worthy, accepted). cpSync is
+    additive — dest-only files (operator lesson packs, .env) survive
+    structurally.
   - Re-copy the SERVED panel artifacts exactly as install does
     (bundles.js:1170-1184): `resolvePanelPath(manifest,id)` →
     `~/.crow/panels/<id>.js`, and `manifest.panelRoutes` →
-    `~/.crow/panels/<id>-routes.js`.
-  - If the repo `package.json` content differs from the previously-installed
-    one (compare BEFORE overwriting), run `npm install --omit=dev` in the
-    bundle dir (5-min timeout, warn-only on failure — same posture as
-    auto-update's npm step). Deps-removed (maker-lab's actual case: repo
-    dropped `@libsql/client`) needs no install — a superset node_modules is
-    harmless — but content-difference is the honest general trigger.
+    `~/.crow/panels/<id>-routes.js` — with `rmSync(dest, {force:true})`
+    BEFORE each cpSync (R1 minor: crow's live panel files are legacy
+    SYMLINKS into the bundle dir; copy-over-symlink is safe on Node 20 but
+    rm-first is deterministic across versions; post-refresh they are regular
+    files, and every future bump re-copies them).
+  - npm step (R1 MAJOR-3 — narrow trigger, no needless boot network op):
+    run `npm install --omit=dev` in the bundle dir ONLY when the repo
+    `package.json` declares a dependency NAME absent from the installed
+    bundle's `node_modules/` (added dep). A removed dep (maker-lab's actual
+    delta — repo dropped `@libsql/client`) or version-range-only change does
+    NOT trigger (superset node_modules is harmless; ranges resolve at next
+    real install). Reuse the file's own `run()` (bundles.js:361, execFile,
+    300s timeout), warn-only on failure.
   - Log one `[bundles] refreshed <id> <oldV> -> <newV>` line; include in the
     function's `repaired` return.
-- Version equal or either manifest unreadable → existing missing-only repair
-  behavior, unchanged.
-- mcp-server bundles' running processes: the refresh happens at boot before
-  MCP mounts spawn bundle servers, so the new server code is what starts.
+- Version equal or either manifest unreadable (getManifest→null,
+  bundles.js:351-357) → existing missing-only repair behavior, unchanged.
+  The `APP_BUNDLES/<id>` existence guard (:292) stays first — foreign
+  bundles skipped as today.
+- **Async integration (R1 MAJOR-2 — load-bearing):** the function becomes
+  `async` (the npm step awaits); its call site `mcp-mounts.js:144` becomes
+  `await repairInstalledBundleAssets()` — WITHOUT this, `repaired` is a
+  Promise, `:145` throws into the `:151` catch and logging breaks while npm
+  runs unhandled. `mountMcpServers` is already awaited at index.js:490,
+  BEFORE `server.listen` — which is exactly the ordering D3 needs (panel
+  load at post-listen.js:111 and the MCP child spawn at :168 both run
+  post-listen). The npm step is the only boot-time cost; its narrow trigger
+  (added-dep-only) keeps the common refresh path file-copy-fast, satisfying
+  the global unattended-window posture.
 
 ### D2 — maker-lab version bump 0.1.0 → 0.1.1
 
 `bundles/maker-lab/manifest.json` + the registry entry. Registry is
-generated: run `node scripts/build-registry.mjs` and commit the regenerated
-`registry/add-ons.json`. INSPECT the regen diff — if it also reconciles the
-pre-existing rookery drift (the known failing bundle-contract test on main),
-that is a separate concern: commit ONLY the maker-lab hunk (positional-path
-staging can't split hunks — use `git add -p`-equivalent care or regenerate,
-then `git checkout -p`-style restore of foreign hunks; simplest: if the regen
-touches non-maker-lab entries, report and commit the full honest regen in its
-OWN commit explaining why, since the generator is the source of truth).
-Process discipline: whichever way, `git show --stat` + diff review before
-push.
+generated (`scripts/build-registry.mjs`). **The FULL regen is MANDATORY, not
+a fallback (R1 MAJOR-1 — the spec's first draft had this inverted):**
+`tests/bundle-contract.test.js:212` ("committed registry matches generated")
+is ALREADY RED on main from the rookery drift; committing only a maker-lab
+hunk leaves it red. R1 ran `build-registry.mjs --check` and verified the
+regen delta is 170 lines touching ONLY the rookery entry (+ maker-lab's bump
+once the manifest changes) — so the honest full regen, in its OWN commit,
+both carries the bump AND turns the long-red drift test green. Diff review +
+`git show --stat` before push; the commit message states it absorbs the
+rookery reconciliation. (No CI workflow runs the drift check — R1 verified —
+so local suite green is the gate that matters.)
 
 ### D3 — Instance activation (deploy)
 
 Deploy = normal fleet pull + restart. On crow's boot, D1 sees 0.1.1 ≠ 0.1.0 →
 refreshes `~/.crow/bundles/maker-lab/` + `~/.crow/panels/maker-lab.js` +
-`-routes.js`. The revived panel queries `project_spaces`; the bundle server's
-init-tables FK rebuild runs on its next spawn. Other instances without
-maker-lab installed are no-ops (`APP_BUNDLES` check + installed.json gate).
+`-routes.js`. R1 verified the fix is MORE self-contained than first drafted:
+the 500 comes from the served `-routes.js` (April copy, `JOIN
+research_projects` at :117) importing against crow's main DB — the panel
+refresh ALONE fixes it; it does not depend on the bundle server's
+init-tables rebuild. CAUTION recorded (R1): maker-lab's tables live in the
+shared prod `crow.db` (bundle db.js honors CROW_DB_PATH → main DB), and its
+init-tables.js performs a PRAGMA foreign_keys=OFF table REBUILD there on the
+MCP child's next spawn — a DDL migration on a DB with two prior corruption
+incidents; deploy verification includes a post-spawn `PRAGMA
+integrity_check`. Only maker-lab refreshes on this deploy (all other
+installed bundles version-equal — verified); other instances have no
+maker-lab → no-op.
 
 ## 3. Non-goals
 
@@ -100,10 +149,12 @@ maker-lab installed are no-ops (`APP_BUNDLES` check + installed.json gate).
 
 ## 4. Tests (TDD; mutation-test the guards)
 
-Fixture: temp APP_BUNDLES-like dir + temp BUNDLES_DIR/PANELS_DIR via the
-module's path seams (check how bundles.js resolves CROW_HOME/APP_BUNDLES —
-env-keyed CROW_HOME? verify; if consts, add a test seam consistent with the
-file's existing test hooks or use CROW_HOME env if respected).
+Fixture seams (R1 answered concretely): CROW_HOME **is** env-keyed
+(bundles.js:116) so the DEST side (BUNDLES_DIR/PANELS_DIR) redirects via
+env; the SOURCE (`APP_BUNDLES = join(APP_ROOT,"bundles")`, :123-124) is
+hardcoded. The function therefore gains injectable params —
+`repairInstalledBundleAssets({ appBundles = APP_BUNDLES, run = defaultRun } = {})`
+— solving the source seam AND the npm-runner seam (test 4) in one shape.
 
 1. Version differs → code files overwritten (a stale server/server.js gets
    the repo content), PANELS_DIR `<id>.js` + `<id>-routes.js` refreshed —
