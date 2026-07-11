@@ -261,6 +261,12 @@ export const translations = {
     es: "Usa la memoria y herramientas de Crow desde Claude Code, Cursor y otros.",
   },
   "onboarding.firstConnect.action": { en: "Connect a client", es: "Conectar cliente" },
+  "onboarding.tryCollections.title": { en: "Set up a starter collection", es: "Instala una colección inicial" },
+  "onboarding.tryCollections.body": {
+    en: "Home server, education, research or development — install a curated set of extensions in one click.",
+    es: "Servidor doméstico, educación, investigación o desarrollo — instala un conjunto curado de extensiones con un clic.",
+  },
+  "onboarding.tryCollections.action": { en: "Browse collections", es: "Explorar colecciones" },
   "onboarding.celebration": { en: "You're all set up", es: "Todo está listo" },
 
   // ─── Messages Panel ───
