@@ -140,9 +140,9 @@ Una vez aprobado, el mantenedor agrega tu complemento a `registry/add-ons.json` 
 Agregar la entrada al registro por sí sola no basta. El mantenedor debe completar **todos** estos pasos o el complemento quedará invisible o roto en la interfaz:
 
 1. **Entrada del registro** — Agrega la entrada JSON a `registry/add-ons.json`
-2. **Mapa de íconos** — Si el valor de `icon` es nuevo, agrégalo a `ICON_MAP` en `servers/gateway/dashboard/panels/extensions.js`
-3. **Color de categoría** — Si la `category` es nueva, agrégala a `CATEGORY_COLORS` en `extensions.js`
-4. **Etiqueta de categoría** — Si la `category` es nueva, agrégala a `CATEGORY_LABELS` en `extensions.js`
+2. **Mapa de íconos** — Si el valor de `icon` es nuevo, agrégalo a `ICON_MAP` en `servers/gateway/dashboard/panels/extensions/html.js`
+3. **Color de categoría** — Si la `category` es nueva, agrégala a `CATEGORY_COLORS` en `panels/extensions/html.js`
+4. **Grupo de la tienda** — Una `category` nueva cae automáticamente en el grupo **Más**, así que nada se rompe si omites este paso. Para ubicarla deliberadamente, agrégala a la entrada correspondiente de `DISPLAY_GROUPS` en `servers/gateway/dashboard/panels/extensions/groups.js` (la tienda se explora por grupo, no por categoría cruda)
 5. **Clave i18n** — Si la `category` es nueva, agrega una clave `extensions.category*` a `servers/gateway/dashboard/shared/i18n.js`
 6. **Mapeo de grupo de navegación** — Si la `category` es nueva, agrégala a `CATEGORY_TO_GROUP` en `servers/gateway/dashboard/nav-registry.js` (determina en qué grupo de la barra lateral aparece el panel)
 7. **Reinicio del gateway** — Requerido después de cualquier cambio en el registro o en los paneles
