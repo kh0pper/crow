@@ -85,3 +85,22 @@ bundles/your-bundle/
 ```
 
 Después de agregar o editar un bundle, ejecuta `npm run build-registry` y confirma tanto el manifiesto como el `registry/add-ons.json` regenerado.
+
+## Colecciones
+
+`registry/collections.json` agrupa bundles oficiales en "colecciones iniciales" curadas de un clic (Servidor Doméstico, Educación, Investigación, Desarrollo) que aparecen en la vista Explorar de la página de Extensiones. Cada colección es `{ id, name, description, icon, members }`, donde cada miembro es `{ id, kind, you_need? }`.
+
+La membresía está limitada por reglas obligatorias, aplicadas por `tests/extensions-collections.test.js`:
+
+- **Oficial**: el `id` de cada miembro debe existir en `registry/add-ons.json` y tener un manifiesto bajo `bundles/<id>/`.
+- **No privilegiado, sin consentimiento especial**: ningún miembro puede declarar `privileged: true` ni `consent_required: true` — una instalación de un clic nunca debe saltarse la puerta de consentimiento.
+- **Sin GPU**: ningún miembro puede declarar `requires.gpu` ni `requires.min_vram_gb` — las colecciones son independientes del host, no ajustadas al hardware de una máquina en particular.
+- **Cierre de dependencias y orden topológico**: toda dependencia `requires.bundles` de un miembro debe ser también miembro de la misma colección, y debe aparecer antes que el miembro que depende de ella en el arreglo `members`.
+- **`kind` coincide con la presencia del compose**: un miembro con `docker-compose.yml` debe ser `kind: "deploys"`; un miembro sin él es `"builtin"` o `"connects"`.
+- **Los miembros `connects` declaran `you_need`**: un miembro que se conecta a algo que el usuario ya ejecuta (por ejemplo, una instancia existente de Home Assistant) debe declarar `kind: "connects"` y una cadena `you_need` no vacía que describa qué debe aportar el usuario.
+
+Al instalar, el gateway no confía ciegamente en el JSON cargado — vuelve a validar el manifiesto de cada miembro contra estas mismas reglas a partir de los archivos `bundles/<id>/manifest.json` en disco antes de ejecutar el trabajo de instalación, de modo que una colección no pueda usarse para introducir un bundle cuyo manifiesto haya cambiado (o se haya eliminado) desde que se escribió `collections.json`.
+
+### Invariante de despliegue: los gateways coalojados necesitan `CROW_HOME` distintos
+
+La ruta de instalación de un clic se protege contra instalaciones concurrentes con una bandera de ocupado en proceso más un archivo `installed.json` bajo `CROW_HOME`. Ambos son **por proceso**, no entre procesos: si dos procesos de gateway están coalojados y comparten el mismo `~/.crow` (el mismo `CROW_HOME`), pueden competir por `installed.json` y por la bandera de ocupado del conjunto de instalación, corrompiendo el registro de bundles instalados. Toda instancia de gateway — incluidas las de prueba/desechables levantadas para testing — debe ejecutarse con su propio `CROW_HOME` distinto.

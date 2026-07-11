@@ -114,6 +114,7 @@ Aquí hay un ejemplo más completo (un bundle con Docker, un servidor MCP, un pa
 | `ports` | No | Puertos que usa el complemento |
 | `webUI` | No | Configuración de la interfaz web (ver abajo), o `null` para complementos sin interfaz |
 | `notes` | No | Notas adicionales que se muestran en la página de Extensiones |
+| `featured` | No | `true` muestra el complemento en la sección Destacados de la página de Extensiones (vista Explorar) |
 
 ### Campo `webUI`
 
@@ -160,6 +161,16 @@ Los complementos oficiales tienen logos SVG en línea definidos en `servers/gate
 ::: tip
 Si vas a enviar un complemento al registro, puedes proponer un logo SVG para que se incluya en `logos.js`. Usa un viewBox de 24x24, `stroke="currentColor"` y sin rellenos para que el icono se adapte a los temas oscuro y claro.
 :::
+
+## Complementos destacados y colecciones iniciales
+
+Declara `"featured": true` en tu manifiesto para mostrar el complemento en la sección Destacados de la página de Extensiones — un conjunto pequeño y curado de complementos que aparece por encima de la cuadrícula normal de Explorar. Destacado es ortogonal a `category`; no mueve ni quita el complemento de su sección de categoría.
+
+Entrar en una **colección inicial** (los paquetes de un clic "Servidor Doméstico" / "Educación" / "Investigación" / "Desarrollo" de la vista Explorar) es un criterio distinto y más exigente que `featured`: las colecciones se curan en `registry/collections.json` y cada miembro debe ser oficial, no privilegiado, sin `consent_required`, sin GPU y, si incluye Docker, sin red de host ni montaje del socket de Docker. Consulta [Colecciones](./bundles.md#colecciones) en el documento de Bundles para el conjunto completo de reglas y cómo proponer una incorporación.
+
+## Configuración posterior a la instalación y complementos MCP
+
+Cuando un usuario completa los `env_vars` de un complemento después de instalarlo (la lista de configuración posterior a la instalación), el gateway escribe esos valores en el propio archivo `.env` del bundle. Para complementos de tipo servidor MCP, ahora **también** actualiza la entrada en `~/.crow/mcp-addons.json` — el proceso hijo de MCP lee su entorno de `mcp-addons.json`, no de `bundles/<id>/.env`, así que sin esto un valor de entorno guardado nunca llegaría a un servidor en ejecución. Reiniciar el gateway es lo que realmente aplica el nuevo valor al hijo de MCP.
 
 ## Estructura de archivos
 

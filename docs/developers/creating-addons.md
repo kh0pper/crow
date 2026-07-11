@@ -114,6 +114,7 @@ Here is a more complete example (a bundle with Docker, an MCP server, a panel, a
 | `ports` | No | Ports used by the add-on |
 | `webUI` | No | Web interface config (see below), or `null` for headless add-ons |
 | `notes` | No | Additional notes shown on the Extensions page |
+| `featured` | No | `true` surfaces the add-on in the Extensions page's Featured section (Browse view) |
 
 ### `webUI` Field
 
@@ -160,6 +161,16 @@ Official add-ons have inline SVG logos defined in `servers/gateway/dashboard/sha
 ::: tip
 If you are submitting an add-on to the registry, you can propose an SVG logo to be included in `logos.js`. Use a 24x24 viewBox, `stroke="currentColor"`, and no fills so the icon adapts to both dark and light themes.
 :::
+
+## Featured add-ons and starter collections
+
+Set `"featured": true` in your manifest to surface the add-on in the Extensions page's Featured section — a small, curated set of add-ons shown above the regular Browse grid. Featured is orthogonal to `category`; it doesn't move or remove the add-on from its category section.
+
+Getting into a **starter collection** (the one-click "Home Server" / "Education" / "Research" / "Development" bundles on the Browse view) is a separate, higher bar than `featured`: collections are curated in `registry/collections.json` and every member must be official, non-privileged, non-`consent_required`, non-GPU, and (if it ships Docker) not use host networking or mount the Docker socket. See [Collections](./bundles.md#collections) in the Bundles doc for the full rule set and how to propose an addition.
+
+## Post-install configuration and MCP add-ons
+
+When a user fills in an add-on's `env_vars` after install (the post-install configuration checklist), the gateway writes those values to the bundle's own `.env` file. For MCP-server add-ons, it now **also** updates the entry in `~/.crow/mcp-addons.json` — the MCP child process reads its environment from `mcp-addons.json`, not from `bundles/<id>/.env`, so without this a saved env value would never reach a running server. A gateway restart is what actually applies the new value to the MCP child.
 
 ## File Structure
 
