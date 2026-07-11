@@ -222,8 +222,10 @@ function createJob(bundleId, action) {
     completedAt: null,
   };
   jobs.set(id, job);
-  // Clean up old jobs after 10 minutes
-  setTimeout(() => jobs.delete(id), 600_000);
+  // NOTE: eviction is armed in finishJob(), NOT here. A collection install can
+  // run for tens of minutes (multi-GB image pulls); a creation-time timer would
+  // delete the job mid-flight, the client's poll would 404, and its catch-path
+  // would mistake that for a gateway restart (spurious reload + lost summary).
   return job;
 }
 
@@ -232,11 +234,21 @@ function appendLog(job, line) {
   emitJobChanged(job);
 }
 
+const JOB_TTL_MS = 600_000;
+
 function finishJob(job, status) {
   job.status = status;
   job.completedAt = new Date().toISOString();
+  // Evict N minutes after the job ENDS — never while it runs.
+  job._evictTimer = setTimeout(() => jobs.delete(job.id), JOB_TTL_MS);
+  if (typeof job._evictTimer.unref === "function") job._evictTimer.unref();
   emitJobChanged(job);
 }
+
+/** Test-only seams (jobs are in-process; tests need to create/inspect/finish one). */
+export function _createJobForTest(bundleId, action) { return createJob(bundleId, action); }
+export function _getJobForTest(id) { return jobs.get(id); }
+export function _finishJobForTest(job, status) { return finishJob(job, status); }
 
 // Broadcasts the job's new state to any live Turbo Stream subscribers
 // (see /dashboard/streams/jobs in routes/streams.js). All mutations go
@@ -1122,6 +1134,478 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
 }
 
 /**
+ * Run one bundle install against an existing job.
+ *
+ * Outcome-returning by design: the collection installer shares ONE job across N
+ * members, so this function must not decide the job's fate. With deferRestart:true
+ * it never calls finishJob() and never calls scheduleGatewayRestart() — it reports
+ * `needsRestart` and the caller does exactly one restart at the end.
+ *
+ * @param {object} opts
+ * @param {object} opts.job              the job to append logs to
+ * @param {Array}  opts.installedSnapshot  getInstalled() as of validation (the body pushes onto it)
+ * @param {boolean} opts.consentVerified  from validateInstall — gates validateComposeFile
+ * @param {object} opts.manifest          the on-disk manifest
+ * @param {boolean} opts.deferRestart     true → return needsRestart instead of restarting
+ * @returns {Promise<{ok:true, needsRestart:boolean}|{ok:false, reason:string}>}
+ */
+export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, deferRestart = false }) {
+  let needsRestart = false;
+  try {
+    const addonType = manifest?.type || "bundle";
+    const sourceDir = join(APP_BUNDLES, bundleId);
+
+    // 1. Copy bundle files to ~/.crow/bundles/<id>
+    const destDir = join(BUNDLES_DIR, bundleId);
+    mkdirSync(destDir, { recursive: true });
+    cpSync(sourceDir, destDir, { recursive: true });
+    appendLog(job, "Copied bundle files");
+
+    // 1.5 If the bundle ships its own package.json (typically because it
+    // brings an MCP server using @modelcontextprotocol/sdk), install
+    // those deps now. Without this the proxy spawns the MCP child and it
+    // immediately dies with ERR_MODULE_NOT_FOUND for the SDK, which
+    // surfaces user-side as "I don't have a music player integration
+    // installed" or similar mysteries.
+    if (existsSync(join(destDir, "package.json")) && !existsSync(join(destDir, "node_modules"))) {
+      appendLog(job, "Installing bundle dependencies (npm install)…");
+      try {
+        execFileSync("npm", ["install", "--omit=optional", "--no-audit", "--no-fund"], {
+          cwd: destDir,
+          env: process.env,
+          timeout: 120_000,
+          stdio: "pipe",
+        });
+        appendLog(job, "Dependencies installed");
+      } catch (err) {
+        appendLog(job, `Warning: npm install failed: ${err.message?.slice(0, 200)}`);
+        // Don't fail install; some bundles may have optional deps that
+        // can't resolve in every environment. The MCP server will fail
+        // to start later but the bundle install itself succeeds.
+      }
+    }
+
+    // 2. Write env vars if provided
+    if (envVars && typeof envVars === "object") {
+      const envLines = Object.entries(envVars)
+        .filter(([, v]) => v !== undefined && v !== "")
+        .map(([k, v]) => `${k}=${v}`);
+      if (envLines.length > 0) {
+        writeFileSync(join(destDir, ".env"), envLines.join("\n") + "\n");
+        appendLog(job, `Wrote ${envLines.length} env vars`);
+      }
+    } else if (existsSync(join(destDir, ".env.example")) && !existsSync(join(destDir, ".env"))) {
+      cpSync(join(destDir, ".env.example"), join(destDir, ".env"));
+      appendLog(job, "Created .env from .env.example");
+    }
+
+    // 2.5 Inject shared-storage vars if bundle declares a translator.
+    // Gateway owns the translation in-process (configure-storage.mjs is not
+    // invoked by the install flow — it's a manual-recovery tool only).
+    if (manifest?.storage?.translator) {
+      try {
+        const injected = await injectSharedStorage({
+          destDir,
+          bundleId: bundleId,
+          translator: manifest.storage.translator,
+          bucketSuffix: manifest.storage.bucket || bundleId,
+        });
+        if (injected === null) {
+          appendLog(job, "No shared-storage config in DB; bundle will use on-disk storage.");
+        } else {
+          appendLog(job, `Injected shared-storage vars via translator=${manifest.storage.translator} (version=${injected.version.slice(0, 8)})`);
+        }
+      } catch (err) {
+        appendLog(job, `Warning: shared-storage injection failed: ${err.message}`);
+      }
+    }
+
+    // 3. Type-specific install steps
+    if (addonType === "bundle") {
+      // Docker bundle — pull images and start containers
+      const composePath = join(destDir, "docker-compose.yml");
+      if (existsSync(composePath)) {
+        // PR 0: validate compose for ALL bundles (first-party + community).
+        // First-party bundles with privileged/host-network must declare manifest.privileged
+        // and the install request must include a verified consent token.
+        const validation = validateComposeFile(composePath, bundleId, {
+          manifest,
+          consentVerified,
+        });
+        if (!validation.valid) {
+          appendLog(job, `Security check failed: ${validation.reason}`);
+          // Clean up copied files
+          rmSync(destDir, { recursive: true, force: true });
+          return { ok: false, reason: `Security check failed: ${validation.reason}` };
+        }
+        appendLog(job, "Security check passed");
+
+        appendLog(job, "Pulling Docker images...");
+        try {
+          await runCompose(["pull"], { cwd: destDir });
+          appendLog(job, "Docker images pulled");
+        } catch (err) {
+          appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
+        }
+
+        // Start containers (add --build if compose file has build directives)
+        const composeContent = readFileSync(composePath, "utf8");
+        const needsBuild = /^\s+build:/m.test(composeContent);
+        const upArgs = needsBuild ? ["up", "-d", "--build"] : ["up", "-d"];
+        appendLog(job, needsBuild ? "Building and starting containers..." : "Starting containers...");
+        try {
+          await runCompose(upArgs, { cwd: destDir });
+          appendLog(job, "Containers started");
+        } catch (err) {
+          const detail = err.stderr || err.message;
+          appendLog(job, `docker compose up failed: ${detail}`);
+          // Still add to installed.json so user can configure env vars and hit "Start"
+          const installed2 = getInstalled();
+          if (!installed2.find((i) => i.id === bundleId)) {
+            installed2.push({ id: bundleId, type: addonType, version: manifest?.version, installedAt: new Date().toISOString() });
+            saveInstalled(installed2);
+          }
+          return { ok: false, reason: `docker compose up failed: ${detail}` };
+        }
+      }
+
+      // Propagate env vars to gateway .env so dependent services connect
+      if (envVars && Object.keys(envVars).length > 0) {
+        propagateEnvToGateway(envVars);
+        appendLog(job, "Configuration applied to gateway");
+        needsRestart = true;
+      }
+
+      // Bundle types can also have MCP servers — register if manifest has server config
+      if (manifest?.server) {
+        const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
+        const env = {};
+        if (manifest.server.envKeys && envVars) {
+          for (const key of manifest.server.envKeys) {
+            if (envVars[key]) env[key] = envVars[key];
+          }
+        }
+        if (manifest.env_vars) {
+          for (const v of manifest.env_vars) {
+            if (v.default && !env[v.name]) env[v.name] = v.default;
+          }
+        }
+        // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
+        // shared by more than one gateway on a host (e.g. grackle runs a
+        // main gateway + a separate-DB instance off the same ~/.crow), so a
+        // hard-coded path is correct for one and a cross-instance DB leak for
+        // the other — which crash-loops the wrong gateway on "database is
+        // locked". The MCP child instead inherits the SPAWNING gateway's
+        // CROW_DB_PATH via process.env at launch (its own default otherwise),
+        // so each gateway's children always use that gateway's DB.
+        mcpAddons[bundleId] = {
+          command: manifest.server.command,
+          args: manifest.server.args || [],
+          ...(Object.keys(env).length > 0 ? { env } : {}),
+        };
+        writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
+        appendLog(job, `Registered MCP server '${bundleId}'`);
+        needsRestart = true;
+      }
+
+      // Bundle types can also have panels — install them
+      if (manifest?.panel) {
+        mkdirSync(PANELS_DIR, { recursive: true });
+        const panelPath = resolvePanelPath(manifest, bundleId);
+        const panelSrc = join(destDir, panelPath);
+        if (existsSync(panelSrc)) {
+          cpSync(panelSrc, join(PANELS_DIR, `${bundleId}.js`));
+          appendLog(job, `Installed panel: ${bundleId}`);
+        }
+        if (manifest.panelRoutes) {
+          const routesSrc = join(destDir, manifest.panelRoutes);
+          if (existsSync(routesSrc)) {
+            cpSync(routesSrc, join(PANELS_DIR, `${bundleId}-routes.js`));
+            appendLog(job, `Installed panel routes: ${bundleId}-routes`);
+          }
+        }
+        // Ensure panels dir can resolve gateway dependencies
+        const nmLink = join(PANELS_DIR, "node_modules");
+        if (!existsSync(nmLink)) {
+          const gatewayNm = join(APP_ROOT, "node_modules");
+          if (existsSync(gatewayNm)) {
+            try { symlinkSync(gatewayNm, nmLink); } catch {}
+          }
+        }
+        const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
+        if (!panelsConfig.includes(bundleId)) {
+          panelsConfig.push(bundleId);
+          writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
+        }
+        needsRestart = true;
+      }
+    } else if (addonType === "mcp-server") {
+      // MCP server — register in mcp-addons.json
+      if (manifest?.server) {
+        const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
+        const env = {};
+        // Collect user-provided env vars
+        if (manifest.server.envKeys && envVars) {
+          for (const key of manifest.server.envKeys) {
+            if (envVars[key]) env[key] = envVars[key];
+          }
+        }
+        // Also include default values from manifest.env_vars
+        if (manifest.env_vars) {
+          for (const v of manifest.env_vars) {
+            if (v.default && !env[v.name]) env[v.name] = v.default;
+          }
+        }
+        mcpAddons[bundleId] = {
+          command: manifest.server.command,
+          args: manifest.server.args || [],
+          ...(Object.keys(env).length > 0 ? { env } : {}),
+        };
+        writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
+        appendLog(job, `Registered MCP server '${bundleId}'`);
+      }
+
+      // Install npm dependencies if package.json exists
+      const pkgJson = join(destDir, "package.json");
+      if (existsSync(pkgJson)) {
+        appendLog(job, "Installing dependencies...");
+        try {
+          const { execFileSync } = await import("node:child_process");
+          execFileSync("npm", ["install", "--prefix", destDir, "--omit=dev"], {
+            stdio: "pipe",
+            timeout: 120_000,
+          });
+          appendLog(job, "Dependencies installed");
+        } catch (npmErr) {
+          appendLog(job, `Warning: npm install failed — ${npmErr.message}`);
+        }
+      }
+
+      // Install panel + routes if present in manifest
+      if (manifest?.panel) {
+        mkdirSync(PANELS_DIR, { recursive: true });
+        const panelPath = resolvePanelPath(manifest, bundleId);
+        const panelSrc = join(destDir, panelPath);
+        if (existsSync(panelSrc)) {
+          cpSync(panelSrc, join(PANELS_DIR, `${bundleId}.js`));
+          appendLog(job, `Installed panel: ${bundleId}`);
+        }
+        if (manifest.panelRoutes) {
+          const routesSrc = join(destDir, manifest.panelRoutes);
+          if (existsSync(routesSrc)) {
+            cpSync(routesSrc, join(PANELS_DIR, `${bundleId}-routes.js`));
+            appendLog(job, `Installed panel routes: ${bundleId}-routes`);
+          }
+        }
+        // Ensure panels dir can resolve gateway dependencies (express, multer, etc.)
+        const nmLink = join(PANELS_DIR, "node_modules");
+        if (!existsSync(nmLink)) {
+          const gatewayNm = join(APP_ROOT, "node_modules");
+          if (existsSync(gatewayNm)) {
+            try {
+              symlinkSync(gatewayNm, nmLink);
+              appendLog(job, "Linked gateway node_modules for panel route resolution");
+            } catch {}
+          }
+        }
+        // Register in panels.json
+        const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
+        if (!panelsConfig.includes(bundleId)) {
+          panelsConfig.push(bundleId);
+          writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
+        }
+        needsRestart = true;
+      }
+    } else if (addonType === "skill") {
+      // Skill — copy skill files to ~/.crow/skills/
+      mkdirSync(SKILLS_DIR, { recursive: true });
+      if (manifest?.skills) {
+        for (const skillPath of manifest.skills) {
+          const src = join(destDir, skillPath);
+          const dest = join(SKILLS_DIR, skillPath.split("/").pop());
+          if (existsSync(src)) {
+            cpSync(src, dest);
+            appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
+          }
+        }
+      }
+    } else if (addonType === "panel") {
+      // Panel — copy panel file to ~/.crow/panels/ and register
+      mkdirSync(PANELS_DIR, { recursive: true });
+      if (manifest?.panel) {
+        const panelPath = resolvePanelPath(manifest, bundleId);
+        const src = join(destDir, panelPath);
+        const dest = join(PANELS_DIR, panelPath.split("/").pop());
+        if (existsSync(src)) {
+          cpSync(src, dest);
+          const panelsCfg = readJsonSafe(PANELS_CONFIG_PATH, []);
+          if (!panelsCfg.includes(bundleId)) {
+            panelsCfg.push(bundleId);
+            writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
+          }
+          appendLog(job, `Installed panel: ${panelPath.split("/").pop()}`);
+        }
+      }
+    }
+
+    // 3b. Handle panel field on any add-on type
+    if (manifest.panel && addonType !== "panel") {
+      const panelPath = resolvePanelPath(manifest, bundleId);
+      const panelSourceDir = join(APP_BUNDLES, bundleId, panelPath.replace(/[^a-zA-Z0-9_\-\/\.]/g, ""));
+      if (existsSync(panelSourceDir)) {
+        const panelFilename = panelPath.split("/").pop();
+        const panelDest = join(CROW_HOME, "panels", panelFilename);
+        // Ensure panels directory exists
+        mkdirSync(join(CROW_HOME, "panels"), { recursive: true });
+        copyFileSync(panelSourceDir, panelDest);
+        // Register in panels.json
+        const panelsJsonPath = join(CROW_HOME, "panels.json");
+        let panelsList = [];
+        if (existsSync(panelsJsonPath)) {
+          try { panelsList = JSON.parse(readFileSync(panelsJsonPath, "utf8")); } catch {}
+        }
+        const panelId = panelFilename.replace(/\.js$/, "");
+        if (!panelsList.includes(panelId)) {
+          panelsList.push(panelId);
+          writeFileSync(panelsJsonPath, JSON.stringify(panelsList, null, 2));
+        }
+        needsRestart = true;
+        appendLog(job, `Installed panel: ${panelFilename}`);
+      }
+    }
+
+    // 4. Copy any associated skills (bundles and mcp-servers can have skills too)
+    if (addonType !== "skill" && manifest?.skills) {
+      mkdirSync(SKILLS_DIR, { recursive: true });
+      for (const skillPath of manifest.skills) {
+        const src = join(destDir, skillPath);
+        const dest = join(SKILLS_DIR, skillPath.split("/").pop());
+        if (existsSync(src)) {
+          cpSync(src, dest);
+          appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
+        }
+      }
+    }
+
+    // 5. Auto-configure AI Provider when installing local AI bundles
+    if (manifest?.category === "ai" && addonType === "bundle") {
+      const aiConfig = getAiProviderConfig(bundleId, envVars);
+      if (aiConfig) {
+        try {
+          const { resolveEnvPath, writeEnvVar, sanitizeEnvValue } = await import("../env-manager.js");
+          const envPath = resolveEnvPath();
+          writeEnvVar(envPath, "AI_PROVIDER", sanitizeEnvValue(aiConfig.provider));
+          writeEnvVar(envPath, "AI_BASE_URL", sanitizeEnvValue(aiConfig.baseUrl));
+          // Invalidate cached provider config
+          try {
+            const { invalidateConfigCache } = await import("../ai/provider.js");
+            invalidateConfigCache();
+          } catch {}
+          appendLog(job, `AI Chat configured — provider: ${aiConfig.provider}, endpoint: ${aiConfig.baseUrl}`);
+          appendLog(job, "Open Messages → AI Chat to start chatting with your local AI");
+          needsRestart = true;
+        } catch (err) {
+          appendLog(job, `Note: Could not auto-configure AI Chat: ${err.message}. Set it manually in Settings.`);
+        }
+      }
+    }
+
+    // 6. Track installation
+    installedSnapshot.push({
+      id: bundleId,
+      type: addonType,
+      version: manifest?.version || "1.0.0",
+      installedAt: new Date().toISOString(),
+    });
+    saveInstalled(installedSnapshot);
+    appendLog(job, "Installation tracked");
+
+    // Open firewall ports and set up Tailscale HTTPS for direct-mode web UIs
+    if (manifest?.ports && Array.isArray(manifest.ports)) {
+      const { execFileSync: efs } = await import("node:child_process");
+      for (const port of manifest.ports) {
+        // Open firewall for Tailscale
+        try {
+          efs("sudo", ["-n", "ufw", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp", "comment", `Crow: ${manifest.name || bundleId}`], { timeout: 10000 });
+          appendLog(job, `Opened firewall port ${port}/tcp for Tailscale`);
+        } catch {
+          appendLog(job, `Note: Could not open port ${port} (sudo/ufw not available — open manually if needed)`);
+        }
+      }
+      // Set up Tailscale HTTPS proxy for direct-mode webUI ports (SPA apps need TLS due to HSTS)
+      if (manifest?.webUI?.proxyMode === "direct" && manifest.webUI.port) {
+        try {
+          efs("sudo", ["-n", "tailscale", "serve", "--bg", "--https", String(manifest.webUI.port), `http://localhost:${manifest.webUI.port}`], { timeout: 15000 });
+          appendLog(job, `Set up Tailscale HTTPS on port ${manifest.webUI.port}`);
+        } catch {
+          appendLog(job, `Note: Could not set up Tailscale HTTPS for port ${manifest.webUI.port}`);
+        }
+      }
+    }
+
+    let notifDb;
+    try {
+      notifDb = createDbClient();
+      await createNotification(notifDb, {
+        title: `Installed: ${manifest?.name || bundleId}`,
+        type: "system",
+        source: "bundle-installer",
+        action_url: "/dashboard/extensions",
+      });
+    } catch {} finally {
+      notifDb?.close();
+    }
+
+    // Phase 5-full: auto-register providers declared in manifest.providers[]
+    try {
+      const manifest = getManifest(bundleId);
+      if (manifest?.providers?.length) {
+        const providerDb = createDbClient();
+        let hostIp = "127.0.0.1";
+        if (manifest.host && manifest.host !== "local") {
+          try {
+            const peer = await getInstance(providerDb, manifest.host);
+            hostIp = peer?.tailscale_ip || peer?.gateway_url?.replace(/^https?:\/\//, "").replace(/:\d+$/, "").replace(/\/.*/, "") || hostIp;
+          } catch {}
+        }
+        const port = manifest.port || 0;
+        for (const pdef of manifest.providers) {
+          try {
+            const r = await registerProviderFromManifest({
+              db: providerDb, manifest, providerDef: pdef, port, hostIp,
+            });
+            appendLog(job, `Registered provider: ${pdef.id} (${r.lamport_ts})`);
+          } catch (err) {
+            appendLog(job, `Provider register skipped for ${pdef.id}: ${err.message}`);
+          }
+        }
+        invalidateProvidersCache();
+      }
+    } catch (err) {
+      appendLog(job, `Provider auto-register skipped: ${err.message}`);
+    }
+
+    // Seed STT/TTS profiles declared in manifest.{stt,tts}ProfileSeed.
+    try {
+      const manifest = getManifest(bundleId);
+      if (manifest?.sttProfileSeed || manifest?.ttsProfileSeed) {
+        const seedDb = createDbClient();
+        if (manifest.sttProfileSeed) await seedProfile(seedDb, "stt", manifest.sttProfileSeed, (m) => appendLog(job, m));
+        if (manifest.ttsProfileSeed) await seedProfile(seedDb, "tts", manifest.ttsProfileSeed, (m) => appendLog(job, m));
+      }
+    } catch (err) {
+      appendLog(job, `Profile seed skipped: ${err.message}`);
+    }
+
+    return { ok: true, needsRestart };
+  } catch (err) {
+    const reason = err?.message || String(err);
+    appendLog(job, `Install failed: ${reason}`);
+    return { ok: false, reason };
+  }
+}
+
+/**
  * @returns {Router}
  */
 export default function bundlesRouter() {
@@ -1224,477 +1708,28 @@ export default function bundlesRouter() {
     }
     if (v.hardwareWarning) req._hardwareWarning = v.hardwareWarning;
 
-    // Source dir is recomputed here (cheap, pure) so it's in scope for the
-    // async install body below — validateInstall already confirmed it exists.
-    const sourceDir = join(APP_BUNDLES, bundle_id);
-    const installed = v.installed;
-    const consentVerified = v.consentVerified;
-
     // Create job for async tracking
     const job = createJob(bundle_id, "install");
     res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
 
-    // Run install async (don't block the response)
+    // Run install async (don't block the response). The single-install route
+    // owns the job's lifecycle: runInstallJob only reports an outcome.
     (async () => {
-      try {
-        const manifest = getManifest(bundle_id);
-        const addonType = manifest?.type || "bundle";
-
-        // 1. Copy bundle files to ~/.crow/bundles/<id>
-        const destDir = join(BUNDLES_DIR, bundle_id);
-        mkdirSync(destDir, { recursive: true });
-        cpSync(sourceDir, destDir, { recursive: true });
-        appendLog(job, "Copied bundle files");
-
-        // 1.5 If the bundle ships its own package.json (typically because it
-        // brings an MCP server using @modelcontextprotocol/sdk), install
-        // those deps now. Without this the proxy spawns the MCP child and it
-        // immediately dies with ERR_MODULE_NOT_FOUND for the SDK, which
-        // surfaces user-side as "I don't have a music player integration
-        // installed" or similar mysteries.
-        if (existsSync(join(destDir, "package.json")) && !existsSync(join(destDir, "node_modules"))) {
-          appendLog(job, "Installing bundle dependencies (npm install)…");
-          try {
-            execFileSync("npm", ["install", "--omit=optional", "--no-audit", "--no-fund"], {
-              cwd: destDir,
-              env: process.env,
-              timeout: 120_000,
-              stdio: "pipe",
-            });
-            appendLog(job, "Dependencies installed");
-          } catch (err) {
-            appendLog(job, `Warning: npm install failed: ${err.message?.slice(0, 200)}`);
-            // Don't fail install; some bundles may have optional deps that
-            // can't resolve in every environment. The MCP server will fail
-            // to start later but the bundle install itself succeeds.
-          }
-        }
-
-        // 2. Write env vars if provided
-        if (env_vars && typeof env_vars === "object") {
-          const envLines = Object.entries(env_vars)
-            .filter(([, v]) => v !== undefined && v !== "")
-            .map(([k, v]) => `${k}=${v}`);
-          if (envLines.length > 0) {
-            writeFileSync(join(destDir, ".env"), envLines.join("\n") + "\n");
-            appendLog(job, `Wrote ${envLines.length} env vars`);
-          }
-        } else if (existsSync(join(destDir, ".env.example")) && !existsSync(join(destDir, ".env"))) {
-          cpSync(join(destDir, ".env.example"), join(destDir, ".env"));
-          appendLog(job, "Created .env from .env.example");
-        }
-
-        // 2.5 Inject shared-storage vars if bundle declares a translator.
-        // Gateway owns the translation in-process (configure-storage.mjs is not
-        // invoked by the install flow — it's a manual-recovery tool only).
-        if (manifest?.storage?.translator) {
-          try {
-            const injected = await injectSharedStorage({
-              destDir,
-              bundleId: bundle_id,
-              translator: manifest.storage.translator,
-              bucketSuffix: manifest.storage.bucket || bundle_id,
-            });
-            if (injected === null) {
-              appendLog(job, "No shared-storage config in DB; bundle will use on-disk storage.");
-            } else {
-              appendLog(job, `Injected shared-storage vars via translator=${manifest.storage.translator} (version=${injected.version.slice(0, 8)})`);
-            }
-          } catch (err) {
-            appendLog(job, `Warning: shared-storage injection failed: ${err.message}`);
-          }
-        }
-
-        // 3. Type-specific install steps
-        let needsRestart = false;
-        if (addonType === "bundle") {
-          // Docker bundle — pull images and start containers
-          const composePath = join(destDir, "docker-compose.yml");
-          if (existsSync(composePath)) {
-            // PR 0: validate compose for ALL bundles (first-party + community).
-            // First-party bundles with privileged/host-network must declare manifest.privileged
-            // and the install request must include a verified consent token.
-            const validation = validateComposeFile(composePath, bundle_id, {
-              manifest,
-              consentVerified,
-            });
-            if (!validation.valid) {
-              appendLog(job, `Security check failed: ${validation.reason}`);
-              // Clean up copied files
-              rmSync(destDir, { recursive: true, force: true });
-              finishJob(job, "failed");
-              return;
-            }
-            appendLog(job, "Security check passed");
-
-            appendLog(job, "Pulling Docker images...");
-            try {
-              await runCompose(["pull"], { cwd: destDir });
-              appendLog(job, "Docker images pulled");
-            } catch (err) {
-              appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
-            }
-
-            // Start containers (add --build if compose file has build directives)
-            const composeContent = readFileSync(composePath, "utf8");
-            const needsBuild = /^\s+build:/m.test(composeContent);
-            const upArgs = needsBuild ? ["up", "-d", "--build"] : ["up", "-d"];
-            appendLog(job, needsBuild ? "Building and starting containers..." : "Starting containers...");
-            try {
-              await runCompose(upArgs, { cwd: destDir });
-              appendLog(job, "Containers started");
-            } catch (err) {
-              const detail = err.stderr || err.message;
-              appendLog(job, `docker compose up failed: ${detail}`);
-              // Still add to installed.json so user can configure env vars and hit "Start"
-              const installed2 = getInstalled();
-              if (!installed2.find((i) => i.id === bundle_id)) {
-                installed2.push({ id: bundle_id, type: addonType, version: manifest?.version, installedAt: new Date().toISOString() });
-                saveInstalled(installed2);
-              }
-              finishJob(job, "failed");
-              return;
-            }
-          }
-
-          // Propagate env vars to gateway .env so dependent services connect
-          if (env_vars && Object.keys(env_vars).length > 0) {
-            propagateEnvToGateway(env_vars);
-            appendLog(job, "Configuration applied to gateway");
-            needsRestart = true;
-          }
-
-          // Bundle types can also have MCP servers — register if manifest has server config
-          if (manifest?.server) {
-            const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-            const env = {};
-            if (manifest.server.envKeys && env_vars) {
-              for (const key of manifest.server.envKeys) {
-                if (env_vars[key]) env[key] = env_vars[key];
-              }
-            }
-            if (manifest.env_vars) {
-              for (const v of manifest.env_vars) {
-                if (v.default && !env[v.name]) env[v.name] = v.default;
-              }
-            }
-            // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
-            // shared by more than one gateway on a host (e.g. grackle runs a
-            // main gateway + a separate-DB instance off the same ~/.crow), so a
-            // hard-coded path is correct for one and a cross-instance DB leak for
-            // the other — which crash-loops the wrong gateway on "database is
-            // locked". The MCP child instead inherits the SPAWNING gateway's
-            // CROW_DB_PATH via process.env at launch (its own default otherwise),
-            // so each gateway's children always use that gateway's DB.
-            mcpAddons[bundle_id] = {
-              command: manifest.server.command,
-              args: manifest.server.args || [],
-              ...(Object.keys(env).length > 0 ? { env } : {}),
-            };
-            writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
-            appendLog(job, `Registered MCP server '${bundle_id}'`);
-            needsRestart = true;
-          }
-
-          // Bundle types can also have panels — install them
-          if (manifest?.panel) {
-            mkdirSync(PANELS_DIR, { recursive: true });
-            const panelPath = resolvePanelPath(manifest, bundle_id);
-            const panelSrc = join(destDir, panelPath);
-            if (existsSync(panelSrc)) {
-              cpSync(panelSrc, join(PANELS_DIR, `${bundle_id}.js`));
-              appendLog(job, `Installed panel: ${bundle_id}`);
-            }
-            if (manifest.panelRoutes) {
-              const routesSrc = join(destDir, manifest.panelRoutes);
-              if (existsSync(routesSrc)) {
-                cpSync(routesSrc, join(PANELS_DIR, `${bundle_id}-routes.js`));
-                appendLog(job, `Installed panel routes: ${bundle_id}-routes`);
-              }
-            }
-            // Ensure panels dir can resolve gateway dependencies
-            const nmLink = join(PANELS_DIR, "node_modules");
-            if (!existsSync(nmLink)) {
-              const gatewayNm = join(APP_ROOT, "node_modules");
-              if (existsSync(gatewayNm)) {
-                try { symlinkSync(gatewayNm, nmLink); } catch {}
-              }
-            }
-            const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
-            if (!panelsConfig.includes(bundle_id)) {
-              panelsConfig.push(bundle_id);
-              writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
-            }
-            needsRestart = true;
-          }
-        } else if (addonType === "mcp-server") {
-          // MCP server — register in mcp-addons.json
-          if (manifest?.server) {
-            const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
-            const env = {};
-            // Collect user-provided env vars
-            if (manifest.server.envKeys && env_vars) {
-              for (const key of manifest.server.envKeys) {
-                if (env_vars[key]) env[key] = env_vars[key];
-              }
-            }
-            // Also include default values from manifest.env_vars
-            if (manifest.env_vars) {
-              for (const v of manifest.env_vars) {
-                if (v.default && !env[v.name]) env[v.name] = v.default;
-              }
-            }
-            mcpAddons[bundle_id] = {
-              command: manifest.server.command,
-              args: manifest.server.args || [],
-              ...(Object.keys(env).length > 0 ? { env } : {}),
-            };
-            writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
-            appendLog(job, `Registered MCP server '${bundle_id}'`);
-          }
-
-          // Install npm dependencies if package.json exists
-          const pkgJson = join(destDir, "package.json");
-          if (existsSync(pkgJson)) {
-            appendLog(job, "Installing dependencies...");
-            try {
-              const { execFileSync } = await import("node:child_process");
-              execFileSync("npm", ["install", "--prefix", destDir, "--omit=dev"], {
-                stdio: "pipe",
-                timeout: 120_000,
-              });
-              appendLog(job, "Dependencies installed");
-            } catch (npmErr) {
-              appendLog(job, `Warning: npm install failed — ${npmErr.message}`);
-            }
-          }
-
-          // Install panel + routes if present in manifest
-          if (manifest?.panel) {
-            mkdirSync(PANELS_DIR, { recursive: true });
-            const panelPath = resolvePanelPath(manifest, bundle_id);
-            const panelSrc = join(destDir, panelPath);
-            if (existsSync(panelSrc)) {
-              cpSync(panelSrc, join(PANELS_DIR, `${bundle_id}.js`));
-              appendLog(job, `Installed panel: ${bundle_id}`);
-            }
-            if (manifest.panelRoutes) {
-              const routesSrc = join(destDir, manifest.panelRoutes);
-              if (existsSync(routesSrc)) {
-                cpSync(routesSrc, join(PANELS_DIR, `${bundle_id}-routes.js`));
-                appendLog(job, `Installed panel routes: ${bundle_id}-routes`);
-              }
-            }
-            // Ensure panels dir can resolve gateway dependencies (express, multer, etc.)
-            const nmLink = join(PANELS_DIR, "node_modules");
-            if (!existsSync(nmLink)) {
-              const gatewayNm = join(APP_ROOT, "node_modules");
-              if (existsSync(gatewayNm)) {
-                try {
-                  symlinkSync(gatewayNm, nmLink);
-                  appendLog(job, "Linked gateway node_modules for panel route resolution");
-                } catch {}
-              }
-            }
-            // Register in panels.json
-            const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
-            if (!panelsConfig.includes(bundle_id)) {
-              panelsConfig.push(bundle_id);
-              writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
-            }
-            needsRestart = true;
-          }
-        } else if (addonType === "skill") {
-          // Skill — copy skill files to ~/.crow/skills/
-          mkdirSync(SKILLS_DIR, { recursive: true });
-          if (manifest?.skills) {
-            for (const skillPath of manifest.skills) {
-              const src = join(destDir, skillPath);
-              const dest = join(SKILLS_DIR, skillPath.split("/").pop());
-              if (existsSync(src)) {
-                cpSync(src, dest);
-                appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
-              }
-            }
-          }
-        } else if (addonType === "panel") {
-          // Panel — copy panel file to ~/.crow/panels/ and register
-          mkdirSync(PANELS_DIR, { recursive: true });
-          if (manifest?.panel) {
-            const panelPath = resolvePanelPath(manifest, bundle_id);
-            const src = join(destDir, panelPath);
-            const dest = join(PANELS_DIR, panelPath.split("/").pop());
-            if (existsSync(src)) {
-              cpSync(src, dest);
-              const panelsCfg = readJsonSafe(PANELS_CONFIG_PATH, []);
-              if (!panelsCfg.includes(bundle_id)) {
-                panelsCfg.push(bundle_id);
-                writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
-              }
-              appendLog(job, `Installed panel: ${panelPath.split("/").pop()}`);
-            }
-          }
-        }
-
-        // 3b. Handle panel field on any add-on type
-        if (manifest.panel && addonType !== "panel") {
-          const panelPath = resolvePanelPath(manifest, bundle_id);
-          const panelSourceDir = join(APP_BUNDLES, bundle_id, panelPath.replace(/[^a-zA-Z0-9_\-\/\.]/g, ""));
-          if (existsSync(panelSourceDir)) {
-            const panelFilename = panelPath.split("/").pop();
-            const panelDest = join(CROW_HOME, "panels", panelFilename);
-            // Ensure panels directory exists
-            mkdirSync(join(CROW_HOME, "panels"), { recursive: true });
-            copyFileSync(panelSourceDir, panelDest);
-            // Register in panels.json
-            const panelsJsonPath = join(CROW_HOME, "panels.json");
-            let panelsList = [];
-            if (existsSync(panelsJsonPath)) {
-              try { panelsList = JSON.parse(readFileSync(panelsJsonPath, "utf8")); } catch {}
-            }
-            const panelId = panelFilename.replace(/\.js$/, "");
-            if (!panelsList.includes(panelId)) {
-              panelsList.push(panelId);
-              writeFileSync(panelsJsonPath, JSON.stringify(panelsList, null, 2));
-            }
-            needsRestart = true;
-            appendLog(job, `Installed panel: ${panelFilename}`);
-          }
-        }
-
-        // 4. Copy any associated skills (bundles and mcp-servers can have skills too)
-        if (addonType !== "skill" && manifest?.skills) {
-          mkdirSync(SKILLS_DIR, { recursive: true });
-          for (const skillPath of manifest.skills) {
-            const src = join(destDir, skillPath);
-            const dest = join(SKILLS_DIR, skillPath.split("/").pop());
-            if (existsSync(src)) {
-              cpSync(src, dest);
-              appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
-            }
-          }
-        }
-
-        // 5. Auto-configure AI Provider when installing local AI bundles
-        if (manifest?.category === "ai" && addonType === "bundle") {
-          const aiConfig = getAiProviderConfig(bundle_id, env_vars);
-          if (aiConfig) {
-            try {
-              const { resolveEnvPath, writeEnvVar, sanitizeEnvValue } = await import("../env-manager.js");
-              const envPath = resolveEnvPath();
-              writeEnvVar(envPath, "AI_PROVIDER", sanitizeEnvValue(aiConfig.provider));
-              writeEnvVar(envPath, "AI_BASE_URL", sanitizeEnvValue(aiConfig.baseUrl));
-              // Invalidate cached provider config
-              try {
-                const { invalidateConfigCache } = await import("../ai/provider.js");
-                invalidateConfigCache();
-              } catch {}
-              appendLog(job, `AI Chat configured — provider: ${aiConfig.provider}, endpoint: ${aiConfig.baseUrl}`);
-              appendLog(job, "Open Messages → AI Chat to start chatting with your local AI");
-              needsRestart = true;
-            } catch (err) {
-              appendLog(job, `Note: Could not auto-configure AI Chat: ${err.message}. Set it manually in Settings.`);
-            }
-          }
-        }
-
-        // 6. Track installation
-        installed.push({
-          id: bundle_id,
-          type: addonType,
-          version: manifest?.version || "1.0.0",
-          installedAt: new Date().toISOString(),
-        });
-        saveInstalled(installed);
-        appendLog(job, "Installation tracked");
-
-        // Open firewall ports and set up Tailscale HTTPS for direct-mode web UIs
-        if (manifest?.ports && Array.isArray(manifest.ports)) {
-          const { execFileSync: efs } = await import("node:child_process");
-          for (const port of manifest.ports) {
-            // Open firewall for Tailscale
-            try {
-              efs("sudo", ["-n", "ufw", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp", "comment", `Crow: ${manifest.name || bundle_id}`], { timeout: 10000 });
-              appendLog(job, `Opened firewall port ${port}/tcp for Tailscale`);
-            } catch {
-              appendLog(job, `Note: Could not open port ${port} (sudo/ufw not available — open manually if needed)`);
-            }
-          }
-          // Set up Tailscale HTTPS proxy for direct-mode webUI ports (SPA apps need TLS due to HSTS)
-          if (manifest?.webUI?.proxyMode === "direct" && manifest.webUI.port) {
-            try {
-              efs("sudo", ["-n", "tailscale", "serve", "--bg", "--https", String(manifest.webUI.port), `http://localhost:${manifest.webUI.port}`], { timeout: 15000 });
-              appendLog(job, `Set up Tailscale HTTPS on port ${manifest.webUI.port}`);
-            } catch {
-              appendLog(job, `Note: Could not set up Tailscale HTTPS for port ${manifest.webUI.port}`);
-            }
-          }
-        }
-
-        let notifDb;
-        try {
-          notifDb = createDbClient();
-          await createNotification(notifDb, {
-            title: `Installed: ${manifest?.name || bundle_id}`,
-            type: "system",
-            source: "bundle-installer",
-            action_url: "/dashboard/extensions",
-          });
-        } catch {} finally {
-          notifDb?.close();
-        }
-
-        // Phase 5-full: auto-register providers declared in manifest.providers[]
-        try {
-          const manifest = getManifest(bundle_id);
-          if (manifest?.providers?.length) {
-            const providerDb = createDbClient();
-            let hostIp = "127.0.0.1";
-            if (manifest.host && manifest.host !== "local") {
-              try {
-                const peer = await getInstance(providerDb, manifest.host);
-                hostIp = peer?.tailscale_ip || peer?.gateway_url?.replace(/^https?:\/\//, "").replace(/:\d+$/, "").replace(/\/.*/, "") || hostIp;
-              } catch {}
-            }
-            const port = manifest.port || 0;
-            for (const pdef of manifest.providers) {
-              try {
-                const r = await registerProviderFromManifest({
-                  db: providerDb, manifest, providerDef: pdef, port, hostIp,
-                });
-                appendLog(job, `Registered provider: ${pdef.id} (${r.lamport_ts})`);
-              } catch (err) {
-                appendLog(job, `Provider register skipped for ${pdef.id}: ${err.message}`);
-              }
-            }
-            invalidateProvidersCache();
-          }
-        } catch (err) {
-          appendLog(job, `Provider auto-register skipped: ${err.message}`);
-        }
-
-        // Seed STT/TTS profiles declared in manifest.{stt,tts}ProfileSeed.
-        try {
-          const manifest = getManifest(bundle_id);
-          if (manifest?.sttProfileSeed || manifest?.ttsProfileSeed) {
-            const seedDb = createDbClient();
-            if (manifest.sttProfileSeed) await seedProfile(seedDb, "stt", manifest.sttProfileSeed, (m) => appendLog(job, m));
-            if (manifest.ttsProfileSeed) await seedProfile(seedDb, "tts", manifest.ttsProfileSeed, (m) => appendLog(job, m));
-          }
-        } catch (err) {
-          appendLog(job, `Profile seed skipped: ${err.message}`);
-        }
-
-        finishJob(job, needsRestart ? "complete_restart" : "complete");
-
-        // Auto-restart gateway if panels or MCP servers were added
-        if (needsRestart) {
-          appendLog(job, "Scheduling gateway restart to load new panels/servers...");
-          scheduleGatewayRestart(3000);
-        }
-      } catch (err) {
-        appendLog(job, `Error: ${err.message}`);
+      const out = await runInstallJob(bundle_id, env_vars, {
+        job,
+        installedSnapshot: v.installed,
+        consentVerified: v.consentVerified,
+        manifest: v.manifest,
+        deferRestart: false,
+      });
+      if (!out.ok) {
         finishJob(job, "failed");
+        return;
+      }
+      finishJob(job, out.needsRestart ? "complete_restart" : "complete");
+      if (out.needsRestart) {
+        appendLog(job, "Scheduling gateway restart to load new panels/servers...");
+        scheduleGatewayRestart(3000);
       }
     })();
   });
