@@ -39,6 +39,7 @@ import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 import { statusToStage } from "../../servers/gateway/routes/board-stages.js";
+import { parsePlanRef, containedRealPath } from "../../servers/gateway/routes/plan-ref.js";
 import { extractPlanFileLine, buildPlanPrompt } from "./plan_dispatch.mjs";
 
 const HOME = "/home/kh0pp";
@@ -303,6 +304,42 @@ function planFor(def, cardId) {
   const p = def.session_dir + "/plans/" + cardId + ".md";
   return { path: p, exists: existsSync(p), text: existsSync(p) ? readFileSync(p, "utf8") : "" };
 }
+// plan_ref-aware plan resolution for the execute path (final-review C1).
+// kind:"repo" resolves under the project's repo_path with the same fail-closed
+// containment as the board API; anything else (null ref, workspace ref,
+// pre-migration DBs, missing repo_path) falls back to the legacy workspace
+// path. Sync (better-sqlite3), never throws — a broken ref degrades to legacy.
+function planForCard(def, cardId, tasksDbPathArg) {
+  try {
+    const t = db(tasksDbPathArg);
+    let row = null;
+    try {
+      const have = t.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
+      if (have.includes("plan_ref")) {
+        row = t.prepare("SELECT plan_ref, project_id FROM tasks_items WHERE id=?").get(Number(cardId));
+      }
+    } finally { t.close(); }
+    const ref = row ? parsePlanRef(row.plan_ref) : null;
+    if (ref && ref.kind === "repo" && row.project_id != null) {
+      const c = db(CROW_DB);
+      let repoRoot = null;
+      try {
+        const have = c.prepare("PRAGMA table_info(project_spaces)").all().map((col) => col.name);
+        if (have.includes("repo_path")) {
+          const p = c.prepare("SELECT repo_path FROM project_spaces WHERE id=?").get(Number(row.project_id));
+          repoRoot = p && p.repo_path ? String(p.repo_path) : null;
+        }
+      } finally { c.close(); }
+      if (repoRoot) {
+        const path = repoRoot.replace(/\/+$/, "") + "/" + ref.path;
+        if (containedRealPath(path, repoRoot) && existsSync(path)) {
+          return { path, exists: true, text: readFileSync(path, "utf8") };
+        }
+      }
+    }
+  } catch { /* fall through to legacy */ }
+  return planFor(def, cardId);
+}
 function getSession(botId, threadId) {
   const c = db(CROW_DB);
   const r = c.prepare("SELECT * FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1").get(botId, threadId);
@@ -479,7 +516,7 @@ export async function handleInbound(opts) {
   // existing plan files live). Project-native bots that get a project_space
   // workspace will accumulate plans under <workspace>/bots/<bot_id>/plans/
   // once any are written; for the transition we look in both locations.
-  const plan = cardId != null ? planFor(def, cardId) : { path: null, exists: false, text: "" };
+  const plan = cardId != null ? planForCard(def, cardId, tasksDbPath) : { path: null, exists: false, text: "" };
 
   // M3b: structured project header replaces the bare "Project #N" string.
   // Falls back to a one-liner for legacy bots with no project_spaces row.
@@ -582,8 +619,15 @@ export async function handleInbound(opts) {
           const have = t.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
           if (have.includes("stage")) {
             const cur = t.prepare("SELECT stage FROM tasks_items WHERE id=?").get(cardId);
-            t.prepare("UPDATE tasks_items SET stage=? WHERE id=?")
-              .run(statusToStage(newCardStatus, cur && cur.stage), cardId);
+            // I2: null-stage cards behave exactly as today — a legacy card
+            // with no stage yet must not be stamped onto the stage model just
+            // because its bot-written status round-tripped as "pending".
+            // Only write when the card already carries a stage, or the new
+            // status unambiguously implies a real transition.
+            if ((cur && cur.stage != null) || ["done", "cancelled", "in_progress"].includes(String(newCardStatus))) {
+              t.prepare("UPDATE tasks_items SET stage=?, updated_at=datetime('now') WHERE id=?")
+                .run(statusToStage(newCardStatus, cur && cur.stage), cardId);
+            }
           }
         } finally { t.close(); }
       } catch (e) { log("stage reconcile skipped (non-fatal): " + (e && e.message || e)); }
@@ -664,6 +708,24 @@ export async function handleInbound(opts) {
   return result;
 }
 
+// I3b: the route (bot-board-api.js POST .../plan-dispatch) already flips the
+// card to stage='planning' BEFORE spawning this process. An early refusal in
+// planCard below (card not found / no repo_path / pi-capacity deferred /
+// non-local provider) must not strand the card in Planning with nothing
+// actually running — reset it back to Backlog/pending. Best-effort against
+// the SAME tasks db used to read the card; never throws. Do NOT call this
+// after a pi session has actually been started — the post-session error
+// paths carry the signal via the session row + status='error' instead.
+function resetStrandedCardBestEffort(cardsDb, cardId) {
+  try {
+    const c = db(cardsDb);
+    try {
+      c.prepare("UPDATE tasks_items SET stage='backlog', status='pending', updated_at=datetime('now') WHERE id=?")
+        .run(cardId);
+    } finally { c.close(); }
+  } catch { /* best-effort */ }
+}
+
 // Board plan dispatch (Plan 1 Task 7): spawn a CONFINED local-model planning
 // run against the card's project repo. Structural guarantees (spec §Safety):
 // resolved provider MUST be crow-local (no config knob reaches a paid model);
@@ -682,17 +744,22 @@ export async function planCard(opts) {
   const t = db(cardsDb);
   const card = t.prepare("SELECT id, title, description, project_id FROM tasks_items WHERE id=?").get(cardId);
   t.close();
-  if (!card) return { action: "error", error: "card not found" };
+  if (!card) { resetStrandedCardBestEffort(cardsDb, cardId); return { action: "error", error: "card not found" }; }
 
   const repoRoot = projectSpace && projectSpace.repo_path ? String(projectSpace.repo_path) : null;
   if (!repoRoot || !existsSync(repoRoot)) {
+    resetStrandedCardBestEffort(cardsDb, cardId);
     return { action: "error", error: "project has no repo_path (workspace plan dispatch is not in v1 — edit the plan in the drawer)" };
   }
 
-  if (countLivePi() >= LIFECYCLE_DEFAULTS.maxPi) return { action: "deferred", reason: "pi-capacity" };
+  if (countLivePi() >= LIFECYCLE_DEFAULTS.maxPi) {
+    resetStrandedCardBestEffort(cardsDb, cardId);
+    return { action: "deferred", reason: "pi-capacity" };
+  }
 
   const resolved = await resolveModel(def, { escalate: false });
   if (String(resolved.provider) !== "crow-local") {
+    resetStrandedCardBestEffort(cardsDb, cardId);
     return { action: "error", error: "plan dispatch is local-only; bot resolves to " + resolved.provider + "/" + resolved.model };
   }
 
@@ -713,7 +780,14 @@ export async function planCard(opts) {
     // Confinement belt: write_paths limited to plans+docs, bash denied. The
     // stored def's policy is NOT used — planning is stricter than the bot.
     const planningDef = Object.assign({}, def, {
-      permission_policy: { bash: "deny", write_paths: [repoRoot + "/.pi/plans", repoRoot + "/docs"] },
+      // I1: MERGE onto the bot's own policy (keeps external_send/confirm
+      // belts) rather than replacing it wholesale — bash/write/multi_agent
+      // are still forced down for the planning run.
+      permission_policy: Object.assign({}, def.permission_policy || {}, {
+        bash: "deny",
+        write_paths: [repoRoot + "/.pi/plans", repoRoot + "/docs"],
+        multi_agent: false,
+      }),
       spawn_env: def.spawn_env || {},
       tools: def.tools,
     });
