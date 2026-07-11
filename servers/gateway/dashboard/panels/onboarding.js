@@ -35,6 +35,31 @@ function deepLink(label, href) {
 }
 
 /**
+ * Is this href a same-origin dashboard path? Deliberately conservative: only a
+ * leading "/" counts, and a protocol-relative "//host" does not (it is a
+ * cross-origin URL wearing a slash). Anything else — absolute http(s), mailto:,
+ * javascript:, a bare relative path — is treated as external.
+ * @param {string} href
+ * @returns {boolean}
+ */
+export function isInternalHref(href) {
+  return typeof href === "string" && href.startsWith("/") && !href.startsWith("//");
+}
+
+/**
+ * The target/rel attributes an action card's CTA should carry, decided by href.
+ * Internal links navigate in the same tab (the tour is over by the time the done
+ * step renders, so a new tab is just noise); external links keep opening a new tab,
+ * with rel="noopener" so the opened page cannot reach back through window.opener.
+ * Classifying by href means a card added later gets the right behavior for free.
+ * @param {string} href
+ * @returns {string} attribute string for button({ attrs })  ("" for internal)
+ */
+export function cardLinkAttrs(href) {
+  return isInternalHref(href) ? "" : 'target="_blank" rel="noopener"';
+}
+
+/**
  * "What to try first" action cards shown on the done step (W3-3; extensions
  * overhaul added the fourth, starter-collections, card). Each card is a link,
  * description, and CTA button.
@@ -71,7 +96,7 @@ function renderActionCards(lang) {
     <div class="onboarding-action-card">
       <div class="onboarding-action-card-title">${t(c.titleKey, lang)}</div>
       <div class="onboarding-action-card-body">${t(c.bodyKey, lang)}</div>
-      ${button(t(c.actionKey, lang), { variant: "secondary", size: "sm", href: c.href, attrs: 'target="_blank" rel="noopener"' })}
+      ${button(t(c.actionKey, lang), { variant: "secondary", size: "sm", href: c.href, attrs: cardLinkAttrs(c.href) })}
     </div>`).join("");
 
   return `<div class="onboarding-action-cards">${cardHtml}</div>`;
