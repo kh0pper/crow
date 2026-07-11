@@ -6,6 +6,7 @@
   "type": "mcp-server",
   "author": "Crow",
   "category": "productivity",
+  "featured": true,
   "tags": ["knowledge-base", "guides", "articles", "bilingual", "resources", "documentation"],
   "icon": "book-open",
   "server": {
