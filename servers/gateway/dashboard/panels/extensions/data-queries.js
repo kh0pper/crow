@@ -11,6 +11,10 @@ import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { loadCollections } from "./collections.js";
+// bundles-config.js ONLY — never routes/bundles.js, which would drag express
+// Router, db.js, peer-forward, cross-host-auth and the settings registry into the
+// panel's render path (it already imports ./collections.js, so that knot is real).
+import { needsConfigKeys } from "../../../bundles-config.js";
 
 export const REGISTRY_URL = "https://raw.githubusercontent.com/kh0pper/crow-addons/main/registry.json";
 // Respect the instance's CROW_HOME (matches bundles.js / proxy.js resolveCrowHome).
@@ -138,6 +142,27 @@ export async function fetchRegistryData() {
   available.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 
   return { installed, available, collections: loadCollections(), registrySource, communityStores };
+}
+
+/**
+ * Which installed bundles still have an unmet required config key.
+ *
+ * Returns key NAMES only — a value from .env / mcp-addons.json must never reach the
+ * browser (D5). Bundles with nothing missing are omitted entirely, so the render
+ * layer can just test `needsConfig[id]`.
+ *
+ * `installed` is the OBJECT getInstalled() returns (keyed by id), not an array.
+ *
+ * @param {Record<string, object>} installed
+ * @returns {Record<string, string[]>}
+ */
+export function fetchNeedsConfig(installed) {
+  const out = {};
+  for (const id of Object.keys(installed || {})) {
+    const keys = needsConfigKeys(id);
+    if (keys.length > 0) out[id] = keys;
+  }
+  return out;
 }
 
 /**
