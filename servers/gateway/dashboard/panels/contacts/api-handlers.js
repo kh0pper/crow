@@ -283,7 +283,6 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     // co-writes (design §D3). deleteContactLocal drops the old
     // contact_type='manual' restriction (so crow: rows are finally deletable)
     // and refuses origin='local-bot' rows, which this instance recreates at boot.
-    const managers = getManagersOrNull();
     const result = await deleteContactLocal(db, managers || {}, row);
     if (!result.ok) return { redirect: `/dashboard/contacts?view=contact&contact=${delId}` };
     return { redirect: "/dashboard/contacts" };
