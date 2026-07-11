@@ -1,7 +1,7 @@
 /**
  * Extensions Panel — HTML Builders
  *
- * ICON_MAP, CATEGORY_COLORS, CATEGORY_LABELS, helper functions, and
+ * ICON_MAP, CATEGORY_COLORS, helper functions, and
  * the full page-content HTML builder for the extensions/add-ons store panel.
  */
 
@@ -9,6 +9,11 @@ import { escapeHtml, badge, formatDate } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { getAddonLogo } from "../../shared/logos.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../../gpu-arch.js";
+import { DISPLAY_GROUPS, groupAddons, groupForCategory } from "./groups.js";
+
+/** Add-ons shown per group before "Show all" — a fixed count, deliberately not
+ *  "two grid rows" (which would need viewport-dependent column measurement). */
+export const GROUP_SHOWN = 8;
 
 export const ICON_MAP = {
   brain: "\u{1F9E0}",
@@ -41,6 +46,23 @@ export const ICON_MAP = {
   cpu: "\u{1F9EE}",
 };
 
+/**
+ * Emoji for an icon name — own-property lookup only.
+ * A bare `ICON_MAP[name]` inherits from Object.prototype, so an icon of
+ * "constructor" or "toString" would return a *function* that stringifies into
+ * the page. Registry data is repo-shipped today; community stores are not.
+ * @returns {string|null}
+ */
+export function iconEmoji(name) {
+  if (typeof name !== "string") return null;
+  return Object.hasOwn(ICON_MAP, name) ? ICON_MAP[name] : null;
+}
+
+/** Collection card icon, with the generic-package default. */
+function collectionIcon(name) {
+  return iconEmoji(name) || "\u{1F4E6}";
+}
+
 export const CATEGORY_COLORS = {
   ai:           { bg: "rgba(168,85,247,0.12)", color: "#a855f7" },
   media:        { bg: "rgba(251,191,36,0.12)", color: "#fbbf24" },
@@ -60,27 +82,6 @@ export const CATEGORY_COLORS = {
   "federated-comms":  { bg: "rgba(167,139,250,0.12)", color: "#a78bfa" },
   cameras:        { bg: "rgba(239,68,68,0.12)",   color: "#ef4444" },
   other:          { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
-};
-
-export const CATEGORY_LABELS = {
-  ai: "extensions.categoryAi",
-  media: "extensions.categoryMedia",
-  productivity: "extensions.categoryProductivity",
-  storage: "extensions.categoryStorage",
-  "smart-home": "extensions.categorySmartHome",
-  networking: "extensions.categoryNetworking",
-  gaming: "extensions.categoryGaming",
-  data: "extensions.categoryData",
-  social: "extensions.categorySocial",
-  finance: "extensions.categoryFinance",
-  infrastructure: "extensions.categoryInfrastructure",
-  automation: "extensions.categoryAutomation",
-  education: "extensions.categoryEducation",
-  "federated-social": "extensions.categoryFederatedSocial",
-  "federated-media": "extensions.categoryFederatedMedia",
-  "federated-comms": "extensions.categoryFederatedComms",
-  cameras: "extensions.categoryCameras",
-  other: "extensions.categoryOther",
 };
 
 export function formatResources(requires) {
@@ -120,7 +121,7 @@ export function renderIcon(addon, size) {
   const logo = getAddonLogo(addon.id, size);
   if (logo) return logo;
 
-  const emoji = ICON_MAP[addon.icon];
+  const emoji = iconEmoji(addon.icon);
   if (emoji) {
     const emojiSize = size >= 48 ? "1.75rem" : "1.25rem";
     return `<span style="font-size:${emojiSize}">${emoji}</span>`;
@@ -135,22 +136,170 @@ export function renderIcon(addon, size) {
 }
 
 /**
- * Build the full extensions page content HTML (everything except the
- * client JS block). Returns an object with all the HTML fragment strings
- * needed by the orchestrator to compose the page.
+ * Build the extensions page content.
+ *
+ * The store is two views (Browse / Installed) behind a segmented control, and
+ * Browse reads top-down: starter collections → featured → grouped sections.
+ * Everything wraps; nothing scrolls sideways (the old 19-tab nowrap row is what
+ * inflated the whole dashboard to 2555px).
+ *
+ * @returns {{viewsHtml:string, addonRegistryScript:string, collectionsScript:string}}
  */
-export function buildExtensionsHTML({ installed, available, registrySource, communityStores, bundleStatus, lang }) {
+export function buildExtensionsHTML({
+  installed,
+  available,
+  collections = [],
+  registrySource,
+  communityStores,
+  bundleStatus,
+  lang,
+}) {
   const installedCount = Object.keys(installed).length;
+  const hostArches = detectGpuArch();
+  const hostVramGb = detectGpuVramGb();
 
-  // ─── Search bar ───
-  const searchHtml = `<div class="ext-search">
-      <svg class="ext-search__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input class="ext-search__input" type="text" placeholder="${t("extensions.searchPlaceholder", lang)}" id="ext-search">
+  // ─── Add-on card (shared by Featured and the group sections) ───
+  const addonCard = (addon, i, hidden) => {
+    const isInstalled = installed[addon.id];
+    const cat = addon.category || "other";
+    const group = groupForCategory(addon.category);
+    const catColor = getCategoryColor(cat);
+    const iconHtml = renderIcon(addon, 32);
+
+    const communityBadge = addon._community
+      ? `<span class="ext-card__badge ext-card__badge--community" title="${t("extensions.communityNotVerified", lang)}">${t("extensions.community", lang)}</span>`
+      : `<span class="ext-card__badge ext-card__badge--official">${t("extensions.official", lang)}</span>`;
+    const typeBadge = `<span class="ext-card__badge ext-card__badge--type">${escapeHtml(addon.type)}</span>`;
+    const resources = formatResources(addon.requires);
+
+    let installButton;
+    const gpuCompat = checkGpuArchCompatible(addon, hostArches, hostVramGb);
+    if (isInstalled) {
+      installButton = badge(t("extensions.installedBadge", lang), "published");
+    } else if (!gpuCompat.ok) {
+      const tip = `${gpuCompat.reason || t("extensions.incompatibleGpuArch", lang)}`;
+      const label = gpuCompat.kind === "vram" ? t("extensions.insufficientVram", lang) : t("extensions.incompatibleHost", lang);
+      installButton = `<span class="ext-card__badge ext-card__badge--type" title="${escapeHtml(tip)}" style="opacity:0.85">${escapeHtml(label)}</span>`;
+    } else {
+      const envVarsAttr = escapeHtml(JSON.stringify(addon.env_vars || []));
+      const minRam = addon.requires?.min_ram_mb || 0;
+      const minDisk = addon.requires?.min_disk_mb || 0;
+      installButton = `<button class="btn btn-sm btn-primary bundle-install" data-id="${escapeHtml(addon.id)}" data-name="${escapeHtml(addon.name)}" data-envvars="${envVarsAttr}" data-minram="${minRam}" data-mindisk="${minDisk}" data-community="${addon._community ? "true" : "false"}">${t("extensions.install", lang)}</button>`;
+    }
+
+    const tags = (addon.tags || []).join(",");
+    // Overflow cards are hidden by the CLASS (.ext-card--overflow { display:none }),
+    // never by an inline style: the search filter assigns card.style.display, which
+    // would clobber an inline hide and reveal every card past index 8 on the first
+    // keystroke. A class-driven hide survives that; "Show all" removes the class.
+    const cls = `ext-card addon-card${hidden ? " ext-card--overflow" : ""}`;
+    const style = hidden
+      ? ""
+      : ` style="animation:fadeInUp 0.4s ease-out ${Math.min(i * 30, 300)}ms both"`;
+
+    return `<div class="${cls}" data-addon-id="${escapeHtml(addon.id)}" data-addon-type="${escapeHtml(addon.type)}" data-addon-category="${escapeHtml(cat)}" data-addon-group="${escapeHtml(group)}" data-addon-name="${escapeHtml((addon.name || "").toLowerCase())}" data-addon-desc="${escapeHtml((addon.description || "").toLowerCase())}" data-addon-tags="${escapeHtml(tags.toLowerCase())}"${style}>
+          <div class="ext-card__icon" style="background:${catColor.bg};color:${catColor.color}">${iconHtml}</div>
+          <div class="ext-card__body">
+            <div class="ext-card__name">${escapeHtml(addon.name)}</div>
+            <p class="ext-card__desc">${escapeHtml(addon.description)}</p>
+            <div class="ext-card__meta">
+              ${communityBadge}
+              ${typeBadge}
+            </div>
+            ${resources}
+            <span class="ext-card__version">v${escapeHtml(addon.version || "1.0.0")} · ${escapeHtml(addon.author || "community")}</span>
+          </div>
+          <div class="ext-card__footer">${installButton}</div>
+        </div>`;
+  };
+
+  // ─── Segmented control ───
+  const viewTabsHtml = `<div class="ext-viewtabs" id="ext-viewtabs" role="tablist" aria-label="${t("extensions.pageTitle", lang)}">
+      <button type="button" class="ext-viewtab ext-viewtab--active" data-view="browse" role="tab" aria-selected="true" aria-controls="ext-view-browse">${t("extensions.viewBrowse", lang)}</button>
+      <button type="button" class="ext-viewtab" data-view="installed" role="tab" aria-selected="false" aria-controls="ext-view-installed">${t("extensions.viewInstalled", lang)} <span class="ext-viewtab__count">${installedCount}</span></button>
     </div>`;
 
-  // ─── Installed strip ───
-  let installedHtml = "";
-  if (installedCount > 0) {
+  // ─── Search ───
+  const searchHtml = `<div class="ext-search">
+      <svg class="ext-search__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input class="ext-search__input" type="text" placeholder="${t("extensions.searchPlaceholder", lang)}" id="ext-search" autocomplete="off">
+    </div>`;
+
+  const sourceNote = registrySource === "local"
+    ? `<div class="ext-sourcenote">${t("extensions.localRegistry", lang)}</div>`
+    : "";
+
+  // ─── Starter collections ───
+  const collectionCard = (c) => `<button type="button" class="ext-collection-card" data-collection-id="${escapeHtml(c.id)}">
+        <span class="ext-collection-card__icon">${collectionIcon(c.icon)}</span>
+        <span class="ext-collection-card__name">${escapeHtml(c.name)}</span>
+        <span class="ext-collection-card__desc">${escapeHtml(c.description)}</span>
+        <span class="ext-collection-card__count">${c.members.length} ${t("extensions.collectionMembers", lang)}</span>
+      </button>`;
+
+  const collectionsHtml = collections.length > 0
+    ? `<section class="ext-section ext-collections" id="ext-collections">
+      <h2 class="ext-section-title ext-section-title--lead">${t("extensions.collectionsTitle", lang)}</h2>
+      <p class="ext-section-sub">${t("extensions.collectionsSubtitle", lang)}</p>
+      <div class="ext-collections__row">${collections.map(collectionCard).join("")}</div>
+    </section>`
+    : "";
+
+  // ─── Featured ───
+  const featured = available.filter((a) => a.featured && !a._community);
+  const featuredHtml = featured.length > 0
+    ? `<section class="ext-section ext-featured" id="ext-featured">
+      <h2 class="ext-section-title ext-section-title--feature">${t("extensions.featuredTitle", lang)}</h2>
+      <div class="ext-grid">${featured.map((a, i) => addonCard(a, i, false)).join("")}</div>
+    </section>`
+    : "";
+
+  // ─── Group chips + group sections ───
+  let groupsHtml = "";
+  let chipsHtml = "";
+  if (available.length === 0) {
+    const isDoubleFailure = registrySource === "none";
+    groupsHtml = isDoubleFailure
+      ? `<div class="callout callout-error" role="status" style="margin:1rem 0">
+            <strong>${t("extensions.serviceUnavailable", lang)}</strong>
+            <p style="margin:0.25rem 0 0">${t("extensions.serviceUnavailableDesc", lang)}</p>
+          </div>`
+      : `<div class="ext-empty">
+            <h3>${t("extensions.registryUnavailable", lang)}</h3>
+            <p>${t("extensions.registryUnavailableDesc", lang)}</p>
+          </div>`;
+  } else {
+    const grouped = groupAddons(available);
+
+    chipsHtml = `<div class="ext-group-chips" id="ext-group-chips">
+        ${DISPLAY_GROUPS.filter((g) => grouped.has(g.id)).map((g) =>
+          `<button type="button" class="ext-group-chip" data-group="${escapeHtml(g.id)}">${t(g.labelKey, lang)} <span class="ext-group-chip__count">${grouped.get(g.id).length}</span></button>`,
+        ).join("")}
+      </div>`;
+
+    groupsHtml = DISPLAY_GROUPS.filter((g) => grouped.has(g.id)).map((g) => {
+      const addons = grouped.get(g.id);
+      const more = addons.length > GROUP_SHOWN
+        ? `<button type="button" class="btn btn-sm btn-secondary ext-group-more" data-group="${escapeHtml(g.id)}">${t("extensions.showAll", lang)} (${addons.length})</button>`
+        : "";
+      return `<section class="ext-group-section" data-group="${escapeHtml(g.id)}">
+        <h3 class="ext-section-title">${t(g.labelKey, lang)} <span class="ext-section-count">${addons.length}</span></h3>
+        <div class="ext-grid">${addons.map((a, i) => addonCard(a, i, i >= GROUP_SHOWN)).join("")}</div>
+        ${more}
+      </section>`;
+    }).join("");
+  }
+
+  const noResultsHtml = `<p class="ext-empty" id="ext-no-results" style="display:none">${t("extensions.noResults", lang)}</p>`;
+
+  // ─── Installed view ───
+  let installedListHtml;
+  if (installedCount === 0) {
+    installedListHtml = `<div class="ext-empty">
+        <h3>${t("extensions.noAddonsInstalled", lang)}</h3>
+        <p>${t("extensions.browseBelow", lang)}</p>
+      </div>`;
+  } else {
     const items = Object.entries(installed).map(([id, info], i) => {
       const registryEntry = available.find((a) => a.id === id);
       const name = registryEntry?.name || id;
@@ -186,102 +335,10 @@ export function buildExtensionsHTML({ installed, available, registrySource, comm
           <div id="status-${escapeHtml(id)}" style="font-size:0.8rem;margin-top:0.4rem;display:none;width:100%"></div>
         </div>`;
     }).join("");
-
-    installedHtml = `
-        <div class="ext-installed-toggle" onclick="(function(){var b=document.getElementById('installed-list');var c=document.getElementById('installed-chevron');b.classList.toggle('ext-installed__list--open');c.classList.toggle('ext-installed-toggle__chevron--open')})()">
-          <span>${t("extensions.installedSection", lang)} (${installedCount})</span>
-          <span class="ext-installed-toggle__chevron" id="installed-chevron">&#9662;</span>
-        </div>
-        <div class="ext-installed__list" id="installed-list">${items}</div>`;
+    installedListHtml = `<div class="ext-installed__list" id="installed-list">${items}</div>`;
   }
 
-  // ─── Category tabs ───
-  const categories = [...new Set(available.map((a) => a.category || "other"))].sort();
-  const categoryCounts = {};
-  for (const cat of categories) {
-    categoryCounts[cat] = available.filter((a) => (a.category || "other") === cat).length;
-  }
-
-  const tabsHtml = `<div class="ext-tabs" id="ext-tabs">
-      <button class="ext-tab ext-tab--active" data-category="all">${t("extensions.categoryAll", lang)} (${available.length})</button>
-      ${categories.map((cat) => {
-        const labelKey = CATEGORY_LABELS[cat] || "extensions.categoryOther";
-        return `<button class="ext-tab" data-category="${escapeHtml(cat)}">${t(labelKey, lang)} (${categoryCounts[cat]})</button>`;
-      }).join("")}
-    </div>`;
-
-  // ─── Available add-on cards (grid) ───
-  let gridHtml;
-  if (available.length === 0) {
-    // Double-failure banner: both remote and local registry unavailable.
-    const isDoubleFailure = registrySource === "none";
-    gridHtml = isDoubleFailure
-      ? `<div class="callout callout-error" role="status" style="margin:1rem 0">
-            <strong>${t("extensions.serviceUnavailable", lang)}</strong>
-            <p style="margin:0.25rem 0 0">${t("extensions.serviceUnavailableDesc", lang)}</p>
-          </div>`
-      : `<div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">
-            <h3>${t("extensions.registryUnavailable", lang)}</h3>
-            <p>${t("extensions.registryUnavailableDesc", lang)}</p>
-          </div>`;
-  } else {
-    const hostArches = detectGpuArch();
-    const hostVramGb = detectGpuVramGb();
-          const cards = available.map((addon, i) => {
-      const isInstalled = installed[addon.id];
-      const cat = addon.category || "other";
-      const catColor = getCategoryColor(cat);
-      const iconHtml = renderIcon(addon, 32);
-
-      const communityBadge = addon._community
-        ? `<span class="ext-card__badge ext-card__badge--community" title="${t("extensions.communityNotVerified", lang)}">${t("extensions.community", lang)}</span>`
-        : `<span class="ext-card__badge ext-card__badge--official">${t("extensions.official", lang)}</span>`;
-
-      const typeBadge = `<span class="ext-card__badge ext-card__badge--type">${escapeHtml(addon.type)}</span>`;
-      const resources = formatResources(addon.requires);
-
-      let installButton;
-      const gpuCompat = checkGpuArchCompatible(addon, hostArches, hostVramGb);
-      if (isInstalled) {
-        installButton = badge(t("extensions.installedBadge", lang), "published");
-      } else if (!gpuCompat.ok) {
-        const tip = `${gpuCompat.reason || t("extensions.incompatibleGpuArch", lang)}`;
-        const label = gpuCompat.kind === "vram" ? t("extensions.insufficientVram", lang) : t("extensions.incompatibleHost", lang);
-        installButton = `<span class="ext-card__badge ext-card__badge--type" title="${escapeHtml(tip)}" style="opacity:0.85">${escapeHtml(label)}</span>`;
-      } else {
-        const envVarsAttr = escapeHtml(JSON.stringify(addon.env_vars || []));
-        const minRam = addon.requires?.min_ram_mb || 0;
-        const minDisk = addon.requires?.min_disk_mb || 0;
-        installButton = `<button class="btn btn-sm btn-primary bundle-install" data-id="${escapeHtml(addon.id)}" data-name="${escapeHtml(addon.name)}" data-envvars="${envVarsAttr}" data-minram="${minRam}" data-mindisk="${minDisk}" data-community="${addon._community ? "true" : "false"}">${t("extensions.install", lang)}</button>`;
-      }
-
-      const tags = (addon.tags || []).join(",");
-      const delay = Math.min(i * 30, 300);
-
-      return `<div class="ext-card addon-card" data-addon-id="${escapeHtml(addon.id)}" data-addon-type="${escapeHtml(addon.type)}" data-addon-category="${escapeHtml(cat)}" data-addon-name="${escapeHtml((addon.name || "").toLowerCase())}" data-addon-desc="${escapeHtml((addon.description || "").toLowerCase())}" data-addon-tags="${escapeHtml(tags.toLowerCase())}" style="animation:fadeInUp 0.4s ease-out ${delay}ms both">
-          <div class="ext-card__icon" style="background:${catColor.bg};color:${catColor.color}">${iconHtml}</div>
-          <div class="ext-card__body">
-            <div class="ext-card__name">${escapeHtml(addon.name)}</div>
-            <p class="ext-card__desc">${escapeHtml(addon.description)}</p>
-            <div class="ext-card__meta">
-              ${communityBadge}
-              ${typeBadge}
-            </div>
-            ${resources}
-            <span class="ext-card__version">v${escapeHtml(addon.version || "1.0.0")} · ${escapeHtml(addon.author || "community")}</span>
-          </div>
-          <div class="ext-card__footer">${installButton}</div>
-        </div>`;
-    }).join("");
-
-    gridHtml = `<div class="ext-grid" id="addon-grid">${cards}</div>`;
-  }
-
-  const sourceNote = registrySource === "local"
-    ? `<div style="font-size:0.75rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${t("extensions.localRegistry", lang)}</div>`
-    : "";
-
-  // ─── Community stores (collapsible) ───
+  // ─── Community stores (collapsible; lives in the Installed view) ───
   const storesHtml = `<div class="ext-stores">
       <div class="ext-stores__header" onclick="(function(e){var b=document.getElementById('stores-body');var c=document.getElementById('stores-chevron');b.classList.toggle('ext-stores__body--open');c.classList.toggle('ext-stores__chevron--open')})()" >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
@@ -290,8 +347,8 @@ export function buildExtensionsHTML({ installed, available, registrySource, comm
       </div>
       <div class="ext-stores__body" id="stores-body">
         ${communityStores.length > 0 ? communityStores.map((s) => `
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:0.4rem 0;border-bottom:1px solid var(--crow-border)">
-            <span style="font-size:0.85rem;color:var(--crow-text-secondary);font-family:'JetBrains Mono',monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%">${escapeHtml(s.url)}</span>
+          <div class="ext-stores__row">
+            <span class="ext-stores__url">${escapeHtml(s.url)}</span>
             <form method="POST" style="margin:0">
               <input type="hidden" name="action" value="remove_store">
               <input type="hidden" name="store_url" value="${escapeHtml(s.url)}">
@@ -301,7 +358,7 @@ export function buildExtensionsHTML({ installed, available, registrySource, comm
         `).join("") : `<p style="font-size:0.85rem;color:var(--crow-text-muted);margin-bottom:0.75rem">${t("extensions.noStoresConfigured", lang)}</p>`}
         <form method="POST" style="display:flex;gap:0.5rem;margin-top:0.75rem">
           <input type="hidden" name="action" value="add_store">
-          <input type="text" name="store_url" placeholder="https://github.com/user/crow-store" style="flex:1;padding:0.4rem 0.6rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-size:0.85rem;font-family:'JetBrains Mono',monospace;box-sizing:border-box">
+          <input type="text" name="store_url" placeholder="https://github.com/user/crow-store" style="flex:1;min-width:0;padding:0.4rem 0.6rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-size:0.85rem;font-family:'JetBrains Mono',monospace;box-sizing:border-box">
           <button type="submit" class="btn btn-sm btn-primary">${t("extensions.addStore", lang)}</button>
         </form>
       </div>
@@ -313,7 +370,23 @@ export function buildExtensionsHTML({ installed, available, registrySource, comm
       ${t("extensions.toCreateOwn", lang)} <a href="/crow/developers/creating-addons" style="color:var(--crow-accent)">${t("extensions.devGuide", lang)}</a>.
     </div>`;
 
-  // ─── Addon registry blob for client-side detail modal ───
+  const viewsHtml = `${viewTabsHtml}
+    <div class="ext-view" id="ext-view-browse" role="tabpanel">
+      ${searchHtml}
+      ${sourceNote}
+      ${collectionsHtml}
+      ${featuredHtml}
+      ${chipsHtml}
+      ${noResultsHtml}
+      ${groupsHtml}
+    </div>
+    <div class="ext-view ext-view--hidden" id="ext-view-installed" role="tabpanel" hidden>
+      ${installedListHtml}
+      ${storesHtml}
+      ${helpHtml}
+    </div>`;
+
+  // ─── Add-on registry blob for the client-side detail modal ───
   const addonMap = {};
   for (const addon of available) {
     const catColor = getCategoryColor(addon.category);
@@ -325,16 +398,18 @@ export function buildExtensionsHTML({ installed, available, registrySource, comm
       version: addon.version,
       author: addon.author,
       category: addon.category,
+      group: groupForCategory(addon.category),
       tags: addon.tags || [],
       notes: addon.notes || "",
       ports: addon.ports || [],
       webUI: addon.webUI || null,
       requires: addon.requires || {},
-      env_vars: (addon.env_vars || []).map(ev => ({
+      env_vars: (addon.env_vars || []).map((ev) => ({
         name: ev.name, description: ev.description,
         default: ev.secret ? "" : (ev.default || ""), required: ev.required, secret: !!ev.secret,
       })),
       official: !addon._community,
+      featured: !!addon.featured,
       _iconHtml: renderIcon(addon, 48),
       _iconBg: catColor.bg,
       _iconColor: catColor.color,
@@ -344,5 +419,23 @@ export function buildExtensionsHTML({ installed, available, registrySource, comm
   const addonRegistryJson = JSON.stringify(addonMap).replace(/<\//g, "<\\/");
   const addonRegistryScript = `<script id="addon-registry" type="application/json">${addonRegistryJson}<\/script>`;
 
-  return { searchHtml, installedHtml, sourceNote, tabsHtml, gridHtml, storesHtml, helpHtml, addonRegistryScript };
+  // ─── Collection blob for the client-side install-set modal (Task 11) ───
+  const collectionsJson = JSON.stringify(
+    collections.map((c) => ({
+      id: c.id,
+      name: c.name,
+      description: c.description,
+      icon: c.icon,
+      members: (c.members || []).map((m) => ({
+        id: m.id,
+        kind: m.kind,
+        you_need: m.you_need || "",
+        name: available.find((a) => a.id === m.id)?.name || m.id,
+        installed: !!installed[m.id],
+      })),
+    })),
+  ).replace(/<\//g, "<\\/");
+  const collectionsScript = `<script id="collection-registry" type="application/json">${collectionsJson}<\/script>`;
+
+  return { viewsHtml, addonRegistryScript, collectionsScript };
 }

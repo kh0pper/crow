@@ -28,33 +28,21 @@ export default {
       if (res.headersSent) return;
     }
 
-    const { installed, available, registrySource, communityStores } = await fetchRegistryData();
+    const { installed, available, collections, registrySource, communityStores } = await fetchRegistryData();
     const { bundleStatus } = fetchBundleStatus(installed);
 
-    const {
-      searchHtml,
-      installedHtml,
-      sourceNote,
-      tabsHtml,
-      gridHtml,
-      storesHtml,
-      helpHtml,
-      addonRegistryScript,
-    } = buildExtensionsHTML({ installed, available, registrySource, communityStores, bundleStatus, lang });
+    const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
+      installed, available, collections, registrySource, communityStores, bundleStatus, lang,
+    });
 
     // ─── Modal + client-side JavaScript ───
     const interactiveScript = extensionsClientJS(lang);
 
     const content = `
       ${extensionStyles()}
-      ${searchHtml}
-      ${installedHtml}
-      ${sourceNote}
-      ${tabsHtml}
-      ${gridHtml}
-      ${storesHtml}
-      ${helpHtml}
+      ${viewsHtml}
       ${addonRegistryScript}
+      ${collectionsScript}
       ${interactiveScript}
     `;
 

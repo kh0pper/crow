@@ -962,6 +962,12 @@ function dashboardCss() {
   /* Main content */
   .main-content {
     flex: 1;
+    /* Flex children default to min-width:auto, so a nowrap descendant's
+       min-content width inflates this column and the whole document
+       (the Extensions horizontal-scroll bug: doc 2555px vs viewport 1904px).
+       min-width:0 lets the column shrink and forces descendants to handle
+       their own overflow. */
+    min-width: 0;
     margin-left: 240px;
     min-height: 100vh;
   }

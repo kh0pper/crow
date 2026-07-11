@@ -1,7 +1,7 @@
 # Extensions Page Overhaul + One-Click Collections — Design Spec
 
 - **Date:** 2026-07-11
-- **Status:** Draft v1 (pre adversarial review)
+- **Status:** v3 — R1 + R2 adversarial Opus reviews folded (R1: 7 MAJOR/6 minor; R2: 3 new MAJOR/5 minor + fold audit); see §10
 - **Queue:** post-arc item 3 (blanket authorization 2026-07-11)
 - **Directive:** memory `crow-extensions-page-overhaul-directive` (Kevin, 2026-07-10)
 
@@ -56,9 +56,22 @@ non-wrapping descendant can reproduce it (this is a page-wide bug class).
     install-now/configure-later is the existing product semantic. `/bundles/api/env`
     exists for post-install reconfiguration.
   - **Install starts containers immediately** (`compose pull` + `up -d`) and finishes with
-    `complete_restart` (gateway exit + supervisor restart) when panels/servers/skills were
-    added. A naive N-bundle sequence would restart the gateway mid-sequence and kill the
-    job runner → batching with ONE deferred restart is mandatory.
+    `complete_restart` (gateway exit + supervisor restart) when panels, MCP servers on a
+    bundle, env propagation, or AI-provider config were added (R1-m1: skill installs and
+    panel-less mcp-server installs do NOT set needsRestart — install setters at
+    bundles.js:1328/1360/1392/1469/1524/1558; uninstall's are :1772/:1792 — R2-n-m5).
+    A naive N-bundle sequence would restart the gateway
+    mid-sequence and kill the job runner → batching with ONE deferred restart is mandatory.
+  - **Jobs are in-process with a 10-minute TTL from creation** (`createJob` arms
+    `setTimeout(() => jobs.delete(id), 600_000)` at bundles.js:226) — a multi-GB set
+    install outlives it (R1-M1; see D6).
+  - **Pre-existing auth hole (R1-M5)**: dashboard/index.js:596-607 routes any request
+    bearing an `x-crow-signature` header to the bundles router BEFORE `dashboardAuth` and
+    `csrfMiddleware`; `start`/`stop` then verify the HMAC via `xhostVerify`
+    (bundles.js:1955/1970) but `install`/`uninstall` do NOT — a bogus signature header
+    reaches them with no session, no CSRF, no valid HMAC. Tailnet/LAN-local privilege
+    escalation (Funnel-blocked, not internet-exposed). In-scope to fix here since these
+    routes are being reworked anyway (D6.8).
   - The install handler is inline in `routes/bundles.js` (~1083–1665) — must be extracted
     to be reusable by a set-installer.
   - CSRF: all `/dashboard` POSTs pass `csrfMiddleware` (double-submit); the existing
@@ -125,8 +138,11 @@ Top-level segmented control (client-side toggle, no new routes):
   3. **Featured** — a curated grid of ~6 add-ons (D4), larger cards with accent styling.
   4. **Category-group sections** — the ~7 display groups (D3) as stacked vertical
      sections. Each section shows its add-ons in the existing auto-fill card grid,
-     collapsed to the first 2 grid rows with a "Show all (N)" toggle when longer.
-     No horizontal scrolling anywhere; group chips row **wraps** (`flex-wrap:wrap`).
+     collapsed to a fixed count of cards (first 8) with a "Show all (N)" toggle when
+     longer (R2-n-m4: a "2 grid rows" collapse would need viewport-dependent column
+     measurement + ResizeObserver; a fixed count is viewport-independent and pure CSS/JS
+     trivial). No horizontal scrolling anywhere; group chips row **wraps**
+     (`flex-wrap:wrap`).
 - **Installed (N)**: the management view — the current installed-strip content
   (status badge, start/stop/restart, remove, version) always expanded, plus community
   stores management and the help card (they are management concerns, not browsing).
@@ -179,25 +195,50 @@ New file `registry/collections.json`:
       "name": "Home Server",
       "description": "Turn Crow into the brain of your home network.",
       "icon": "home",
-      "members": ["home-assistant", "jellyfin", "immich", "paperless", "adguard-home", "uptime-kuma", "ntfy"]
+      "members": ["jellyfin", "paperless", "adguard-home", "uptime-kuma", "ntfy", "home-assistant"]
     },
     { "id": "education",   "members": ["kolibri", "kavita", "calibre-web", "bookstack", "knowledge-base", "stirling-pdf"] },
     { "id": "research",    "members": ["knowledge-base", "searxng", "miniflux", "wallabag", "linkding", "paperless"] },
-    { "id": "development", "members": ["gitea", "uptime-kuma", "browser", "maker-lab", "minio"] }
+    { "id": "development", "members": ["gitea", "minio", "uptime-kuma", "data-dashboard"] }
   ]
 }
 ```
 
 (Names/descriptions/icons elided above for brevity — real file carries them; membership
-is draft and gets finalized during build against the hard rules below.)
+is draft and gets finalized during build against the hard rules below. R1-M2 removed
+`browser` — its `network_mode: host` compose fails `validateComposeFile` on a
+non-privileged manifest, so a web install can never succeed — and `maker-lab` — unmet
+`requires.bundles: ["companion"]` dependency. R1-M7 removed `immich` from home-server:
+it ships no compose file; it is an integration to an external Immich.)
 
-**Hard membership rules (enforced by a unit test against the real registry):**
+**Hard membership rules (enforced by a unit test against the real registry AND the real
+on-disk bundle manifests/compose files — R1-m5: `getManifest()` reads
+`bundles/<id>/manifest.json`, which is what install actually enforces, so the test
+validates against BOTH sources):**
 - Official registry members only (no community).
 - No `privileged` and no `consent_required` manifests — one-click must not weaken the
   consent UX (a collection card can still *link* to such add-ons later; v1 just excludes
   them).
 - No GPU-model bundles (host-specific; the model-bundle picker already handles those).
-- Every member id must exist in the local registry.
+- Every member id must exist in the local registry AND have a `bundles/<id>` source dir.
+- **(R1-M2) Installability**: every member's compose file must pass `validateComposeFile`
+  under non-consent conditions (no host networking, no docker-socket mounts, etc.).
+- **(R1-M2) Dependency closure + order**: every `requires.bundles` dependency of every
+  member must itself be in the set (or the rule fails), and the members array must be
+  topologically ordered so dependencies install first.
+- **(R1-m4) Headless-boot verification**: every Docker member must have been verified to
+  `compose up` cleanly with only its `.env.example` values (one-time manual verification
+  per member, recorded in the collections file as a `verified` note) before shipping.
+
+**Deploy-vs-connect honesty (R1-M7):** each member entry carries a `kind` field:
+`"deploys"` (ships its own service via compose), `"connects"` (integration to an
+external service the user must already run — e.g. `home-assistant` requires an existing
+Home Assistant with HA_URL/HA_TOKEN; carries a `you_need` prerequisites string rendered
+in the modal), or `"builtin"` (pure panel/MCP bundle that runs in-process, e.g.
+`data-dashboard` — no container, no external service). The collection modal renders the
+distinction and lists `connects` prerequisites under a "You'll need" line. The unit test
+enforces: compose file present ⇒ `deploys`; `connects` ⇒ non-empty `you_need`; and every
+member has a valid `kind`.
 
 Load path: local file only in v1 (`fetchRegistryData()` gains a `collections` output).
 The remote registry may add collections later; merge semantics then are local-wins-by-id,
@@ -209,25 +250,83 @@ Body: `{ collection_id }`. Response: `{ job_id }` (one job for the whole set).
 
 Server behavior:
 1. Resolve the collection from the registry loader; 404 unknown id.
-2. Re-validate the membership hard rules server-side (defense in depth — a tampered
-   collections file cannot smuggle a consent-required bundle past the gate); refuse the
-   whole set otherwise.
-3. Compute the member plan: for each member, mark `install` / `skip (already installed)`
-   / `skip (GPU-incompatible)` / `skip (hardware gate)` — reusing the same gate functions
-   the single install uses. The plan is written into the job log up front.
-4. Extract the current inline install body (bundles.js ~1083–1665) into
-   `runInstallJob(bundleId, envVars, { job, deferRestart })` — the single-install route
-   becomes a thin wrapper (`deferRestart:false`), install-set calls it sequentially with
-   `deferRestart:true`. Extraction is verbatim-body-move discipline (the F-UPDATE-1
-   pattern): no logic edits in the move commit.
+2. Re-validate the membership hard rules server-side against the **on-disk manifests via
+   `getManifest()`** (R1-m5 — that is what install actually enforces; a tampered
+   collections file cannot smuggle a consent-required/privileged/host-networking bundle
+   past the gate); refuse the whole set otherwise.
+3. Compute the member **display plan** up front (`install` / `skip (already installed)` /
+   `skip (GPU-incompatible)` / `skip (hardware gate)`) and write it into the job log —
+   but **(R1-M3) every gate re-evaluates per member at execution time** against the live
+   `getInstalled()` (which grows as members complete), so cumulative RAM commitments and
+   intra-set dependencies are enforced for real, not against a stale pre-set snapshot.
+   Execution follows the collection's topological member order (D5).
+4. **(R1-M4 + R2-N-M2) Extraction: NEITHER half is a pure body-move — both are
+   re-implementations with dedicated tests:**
+   (a) The async install IIFE (bundles.js ~1202–1663) is `res`-free but NOT
+   closure-free (it captures `installed` from :1097 and `consentVerified` from
+   :1164–1184) and its tail is single-install job-lifecycle control flow
+   (`finishJob(job, …)` at :1652/:1289/:1319/:1661, `scheduleGatewayRestart` at :1657)
+   that must NOT run against a shared set job — a literal move would mark the set job
+   finished after member 1, abort the set on first member failure (defeating
+   continue-on-error), and fire restarts mid-set. `runInstallJob(bundleId, envVars,
+   { job, installedSnapshot, consentVerified, deferRestart })` therefore RETURNS a
+   per-member outcome `{ ok, needsRestart } | { ok:false, reason }` and never calls
+   `finishJob`/`scheduleGatewayRestart` itself when `deferRestart` is set; the
+   single-install wrapper keeps finish+restart semantics, the set runner aggregates
+   outcomes into the ONE shared job (accumulated log — that's what the client's
+   `pollJob` renders) and finishes it once.
+   (b) The synchronous validation half (~1083–1200) is full of `res.status().json()`
+   early returns and is re-implemented as an outcome-returning
+   `validateInstall(bundleId, opts) → { ok } | { ok:false, status, error, ... }` used by
+   both the single-install route (maps outcomes to HTTP) and the set runner (maps them
+   to per-member skip/fail log entries). Every early-return branch gets a dedicated
+   test — this is where consent/gate regressions would hide.
 5. Sequential execution, **continue-on-error**: a member failure is logged and the set
    proceeds; the job summary lists per-member outcome (installed / skipped-why / failed-why).
 6. **One deferred gateway restart at the end** iff any member reported needsRestart.
    Job finishes `complete_restart` (client already knows how to wait out a restart).
-7. Job summary includes a **needs-configuration list**: members whose manifests declare
-   required env vars with no default, so the UI can render the post-install checklist.
-8. Auth/CSRF: same posture as the existing bundles API (dashboard session + double-submit
-   CSRF). Never reachable via Funnel (dashboard-gated; no PUBLIC_FUNNEL_PREFIXES change).
+   Fixture note (R1-m1): skill-only and panel-less mcp-server members never set
+   needsRestart — the deferred-restart integration test must use a panel-bearing fixture.
+7. **(R1-M1) Job lifetime**: `createJob`'s 10-minute-from-creation eviction timer would
+   delete a long-running set job mid-flight (multi-GB pulls routinely exceed it), making
+   the client's poll-404 `.catch` fire `waitForRestart` → spurious reload and a lost
+   summary. Fix (applies to ALL jobs, it's strictly safer): arm the eviction timer in
+   `finishJob`/failure instead of `createJob` — jobs are evicted N minutes after they
+   END, never while running.
+8. **(R1-M5 + R2-N-M1) Auth hardening — ROUTER-WIDE, not per-route**: the
+   `x-crow-signature` pre-auth bypass (dashboard/index.js:596-607) reaches EVERY
+   bundles route, and the unguarded set is wider than install/uninstall:
+   `POST /bundles/api/restart` (bundles.js:2032 — unauthenticated gateway-restart DoS),
+   `POST /bundles/api/env` (:1985 — unauthenticated secret writes into bundle .env),
+   `POST /bundles/api/shared-storage/apply/:id` (:2096). Denylist-by-omission is the
+   bug pattern; the fix is `router.use(xhostVerify)` ONCE at the top of bundlesRouter
+   so every present-and-future route inherits it. This is safe for the normal path:
+   `crossHostVerifyMiddleware(..., {optional:true})` passes requests WITHOUT the header
+   straight through (cross-host-auth.js:422-424), and unsigned requests only arrive via
+   the dashboardAuth+CSRF mount — while signed requests get real HMAC verification
+   (bogus → 401). Regression tests: bogus-signature → 401/403 on install, uninstall,
+   install-set, restart, AND env; session+CSRF path still works. Posture statement:
+   dashboard session + double-submit CSRF on the normal path; verified HMAC on the
+   cross-host path; never reachable via Funnel (no PUBLIC_FUNNEL_PREFIXES change).
+9. **Set-busy gate (R1-m2/m3 + R2-n-m1)**: refuses to START if any install/uninstall
+   job with `status === "running"` exists in the jobs Map (an in-flight single
+   install's immediate restart would kill the set — a forward-only lock can't stop it).
+   The predicate MUST key on `status === "running"`, never Map presence — post-M1-fold,
+   finished jobs linger in the Map for the TTL after they END, and a presence check
+   would 409 all sets for 10 minutes after every ordinary install. While a set runs,
+   install/uninstall/install-set → 409. Release in try/finally on every exit path; the
+   deferred restart clears it trivially (fresh process). Belt-and-braces max-age (2h)
+   on the gate check included.
+10. **Auto-update inhibition (R2-n-m3)**: the auto-update tick runs in the SAME gateway
+   process; its mid-set `exit(1)` would kill the runner (resumable but summary-losing).
+   The scheduled-update tick skips (with a log line) while a set job is running — same
+   in-process flag the busy gate uses. Manual Check-now stays ungated (operator intent,
+   #163 precedent).
+11. **Co-hosted gateways (R2-n-m2)**: the busy gate is in-process; gateways sharing one
+   `~/.crow` would race on installed.json/mcp-addons.json. Deployment invariant (already
+   true on crow: the MPA unit sets `CROW_HOME=/home/kh0pp/.crow-mpa`): co-hosted
+   gateways MUST use distinct CROW_HOME. Documented in the bundles developer doc; no
+   cross-process locking built (YAGNI until a real co-tenant exists).
 
 Concurrency: there is NO existing global install lock (verified — the only install-path
 409 today is "already installed"). A concurrent single install finishing with an
@@ -242,14 +341,31 @@ Collection card: icon, name, one-line description, member count + tiny member-ic
 Click → collection modal:
 
 - Member list with live status chips: `Installed ✓` / `Will install` / `Skipped: needs
-  NVIDIA GPU` etc. (client renders from the same gate data the cards already embed).
-- Honest expectation copy: "Installs N extensions one after another (may take several
-  minutes to download), then restarts the Crow gateway once."
+  NVIDIA GPU` etc. (client renders from the same gate data the cards already embed),
+  plus the D5 `kind` distinction: deploys-here vs connects-to-external (with a "You'll
+  need" prerequisites line for `connects` members — R1-M7).
+- Honest expectation copy (R1-m6): "Installs N extensions one after another — large
+  downloads can take a while on home bandwidth — then restarts the Crow gateway once."
 - ONE primary button: "Install collection (N)". No env-var wall — install-now/
   configure-later is the existing product semantic (see §1). After completion the modal
-  shows the **configuration checklist**: each member needing env values gets a row with a
-  "Configure" link opening the existing detail modal/env form. Members already installed
-  are simply checked off.
+  shows the **configuration checklist** (R1-M6: derived from the installed `.env` STATE,
+  not from manifest declarations alone): a member appears iff it has manifest-required
+  keys that are absent/empty in its written `.env` (keys satisfied by `.env.example`
+  defaults — DB passwords, secret keys — count as configured and are NEVER flagged;
+  inviting a post-init change of an initialized boot secret would break the app or wipe
+  data). Checklist rows get a "Configure" link opening the existing detail modal/env
+  form. Members already installed are simply checked off.
+- **(R2-N-M3) The Configure path must actually work for mcp-server members.** Today
+  `POST /bundles/api/env` writes only `bundles/<id>/.env` (bundles.js:2016) — a file
+  MCP children NEVER read: the proxy spawns them with `{...process.env,
+  ...(config.env||{})}` from `mcp-addons.json` (proxy.js:145), whose `env` block is
+  populated only at install time (bundles.js:~1400-1415). So a user configuring
+  HA_URL/HA_TOKEN post-install would leave home-assistant dead — a pre-existing product
+  bug that collections would mass-produce. Fix (benefits all mcp add-ons, not just
+  collections): `POST /bundles/api/env` ALSO updates the add-on's `mcp-addons.json`
+  entry `env` block when the add-on registers an MCP server, and returns
+  `needs_restart: true` so the client offers the existing restart flow. Test: env POST
+  → mcp-addons.json reflects the values; restart offered.
 - Progress: reuse `pollJob` (the job log is the live progress feed), then the restart
   waiter.
 
@@ -290,23 +406,38 @@ the entire item-3 footprint; the full wizard is item 4.
 | Collection references unknown id | member skipped with logged notice (client shows it); unit test prevents shipping this state in-repo |
 | Member install fails mid-set | logged, set continues, summary shows failed member with reason; user can retry that member individually |
 | Gateway restart after set | client restart-waiter (existing) reloads when /health returns |
-| Double install-set / single install-or-uninstall during a set | 409 via the NEW set-busy gate (D6); lock released on job finish/failure |
-| Tampered collections file smuggles consent-required member | server-side re-validation refuses the set (D6.2) |
+| Double install-set / single install-or-uninstall during a set | 409 via the NEW set-busy gate (D6.9); released in try/finally on every exit path + 2h max-age backstop |
+| Set requested while a single install/uninstall job is already running | set refuses to start with 409 (an in-flight install's immediate restart would kill the set — D6.9) |
+| Set job outlives the old 10-min TTL | fixed: eviction timer arms at job END, never while running (D6.7) |
+| Tampered collections file smuggles consent-required/privileged/host-net member | server-side re-validation against on-disk manifests refuses the set (D6.2) |
+| Bogus x-crow-signature header hits ANY bundles route (incl. restart/env) | 401/403 via router-wide xhostVerify (D6.8 — closes pre-existing hole incl. unauth restart-DoS + secret-write) |
+| Auto-update tick fires mid-set | tick skips while a set job runs (D6.10); manual Check-now ungated |
+| Configured env for an mcp-server member never reaches the MCP child | /bundles/api/env also updates mcp-addons.json env + offers restart (D7 / R2-N-M3) |
 
 ## 7. Testing strategy
 
 - **Unit** (node --test): groups mapping (every registry category maps somewhere; unknown
   → More), collections loader (missing/corrupt/valid), membership hard-rules test against
-  the real registry + real manifests, install-set planner (skip logic), runInstallJob
-  extraction seam (single-install wrapper still passes existing tests).
+  the real registry + real on-disk manifests/compose files (existence, non-consent,
+  validateComposeFile pass, dependency closure + topological order, kind matches
+  compose-file presence), install-set planner (skip logic), `validateInstall` outcome
+  function (EVERY early-return branch of the re-implemented validation half: invalid id,
+  missing source, already installed, missing dependency, hardware gate, GPU gate, consent
+  required/invalid, hosted host-net), runInstallJob extraction seam (single-install
+  wrapper still passes existing tests), job-TTL rearm (running job never evicted;
+  finished job evicted after TTL).
 - **Integration** (scratch CROW_HOME + scratch CROW_DATA_DIR, fully-offline env:
   CROW_AUTO_UPDATE=0, CROW_DISABLE_HEALTH_MONITOR=1, CROW_DISABLE_INSTANCE_SYNC=1,
   CROW_DISABLE_NOSTR=1, never the real .env): install-set over a fixture collection of
-  tiny non-Docker members (skill/mcp-server type) → sequential logs, one
-  `complete_restart`, installed.json correct; failure-injection member → continue-on-error
-  summary.
+  tiny non-Docker members **at least one of which is panel-bearing** (R1-m1: skill-only /
+  panel-less mcp-server members never set needsRestart, so the deferred-restart assertion
+  would be vacuous) → sequential logs, ONE `complete_restart`, installed.json correct;
+  failure-injection member → continue-on-error summary; per-member live-gate re-check
+  (second member already installed by first → skip at execution time); bogus
+  x-crow-signature → 401/403 on install/uninstall/install-set; set-busy 409 paths.
 - **Mutation guards**: each load-bearing gate (server-side membership re-validation,
-  deferRestart, continue-on-error) gets a red-then-restored mutation check.
+  deferRestart, continue-on-error, xhostVerify mounting, TTL rearm) gets a
+  red-then-restored mutation check.
 - **CDP (HARD REQUIREMENT, evidence `~/.crow/p4/ext-overhaul/`)**:
   1. Overflow: `scrollWidth <= clientWidth+1` on Extensions at 1920/1366/768/390 + the D1
      regression sweep pages.
@@ -338,3 +469,57 @@ data); the D1 layout line is the only global touch and carries the CDP sweep.
 - 19 tabs → 7 wrapped display-group chips (D3).
 - Horizontal scroll root cause → `.main-content` containment + no horizontal patterns
   anywhere in the new IA (D1/D2).
+
+## 10. Review record
+
+**R1 (adversarial Opus, 2026-07-11): REVISE — 7 MAJOR, 6 minor. All folded into v2:**
+- M1 job TTL evicts running set → eviction timer arms at finishJob (D6.7).
+- M2 dev collection un-installable (browser host-net fails validateComposeFile
+  non-privileged; maker-lab unmet requires.bundles) → members dropped; hard rules gained
+  installability + dependency-closure/topological-order checks (D5).
+- M3 up-front plan vs live state → gates re-evaluate per member at execution time (D6.3).
+- M4 extraction is not a pure body-move → two-seam plan: verbatim-move the async IIFE
+  only; re-implement the validation half as tested outcome functions (D6.4).
+- M5 x-crow-signature bypass reaches install/uninstall unauthenticated → xhostVerify on
+  install/uninstall/install-set + regression test; posture claim corrected (§1, D6.8).
+- M6 checklist from manifest-required flags would invite changing initialized boot
+  secrets → checklist derives from installed .env state; .env.example-satisfied keys
+  count configured (D7).
+- M7 home-server mixes deployments with external integrations → `kind` deploys/connects
+  labeling + "You'll need" prerequisites; immich dropped (D5/D7).
+- m1 skills-don't-restart claim corrected (§1) + panel-bearing fixture (§7); m2/m3
+  set-busy gate try/finally + refuse-to-start-if-any-running-job + max-age (D6.9);
+  m4 headless-boot verification rule (D5); m5 validate against on-disk getManifest
+  (D5/D6.2); m6 honest download copy (D7).
+- R1 VERIFIED (kept as design ground truth): D1 root cause + fix validity incl. mobile
+  overflow:hidden scoping; env-not-enforced; compose pull/up -d; restart setters;
+  no-global-lock; CSRF mechanics; restart-waiter client path; all 21 draft members exist,
+  none consent/privileged/GPU-gated, all have source dirs; `featured` additive
+  (schema additionalProperties:true, validated only in scripts/build-registry.mjs);
+  bilingual i18n; onboarding has exactly three cards today.
+
+**R2 (fresh adversarial Opus, 2026-07-11): REVISE — fold audit + 3 new MAJOR, 5 minor.
+All folded into v3:**
+- Fold audit: M1 CORRECT (every terminal path reaches finishJob — run() has a hard 300s
+  execFile timeout, so arming eviction at finish cannot leak); M2 CORRECT (all 19 unique
+  members verified on disk, zero requires.bundles, compose `${VAR:-default}` substitution
+  makes headless boot genuinely satisfiable); M3 CORRECT (saveInstalled is sync
+  writeFileSync → member N sees 1..N-1; getManifest uncached); M6 CORRECT for bundles
+  (manifest-required keys are present-but-EMPTY in .env.example; DB secrets aren't
+  manifest-required so never wrongly flagged); M7 classification CORRECT
+  (knowledge-base is also `builtin`); M4/M5 INCOMPLETE → superseded by N-M2/N-M1.
+- N-M1 bypass remained open on restart (unauth gateway-restart DoS), env (unauth secret
+  write), shared-storage/apply → router-wide `router.use(xhostVerify)` (D6.8).
+- N-M2 verbatim IIFE move breaks set semantics (per-member finishJob/restart on the
+  shared job; `installed`/`consentVerified` closures) → outcome-returning runInstallJob,
+  wrapper keeps finish+restart, set runner finishes once (D6.4).
+- N-M3 Configure dead-end for mcp-server connects members (env POST writes .env the MCP
+  child never reads; config.env only set at install) → /bundles/api/env also updates
+  mcp-addons.json + needs_restart (D7).
+- n-m1 busy-gate predicate = status==="running" (D6.9); n-m2 co-hosted CROW_HOME
+  invariant (D6.11 — already true: MPA unit sets its own CROW_HOME); n-m3 auto-update
+  tick inhibited during set (D6.10); n-m4 fixed-count Show-all collapse (D2); n-m5
+  setter enumeration corrected (§1).
+- R2 final: "Fold those, re-state D6.8's posture accurately, specify the set's
+  single-job model, and this is ready for planning." All three folded + D6.4 nails the
+  single-job model (one shared job, accumulated log, finished once by the set runner).
