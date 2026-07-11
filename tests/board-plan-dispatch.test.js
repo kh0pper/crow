@@ -11,6 +11,8 @@ test("extractPlanFileLine finds the last well-formed marker, rejects escapes", (
   assert.equal(extractPlanFileLine("PLAN_FILE: /etc/passwd"), null);
   assert.equal(extractPlanFileLine("PLAN_FILE: ../escape.md"), null);
   assert.equal(extractPlanFileLine("no marker here"), null);
+  assert.equal(extractPlanFileLine("PLAN_FILE:    \r\n"), null);
+  assert.equal(extractPlanFileLine("PLAN_FILE:\n"), null);
 });
 
 test("buildPlanPrompt embeds card fields and the marker contract", () => {
