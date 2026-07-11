@@ -23,7 +23,7 @@ import {
   deleteLocalSetting,
   getSettingScope,
 } from "../dashboard/settings/registry.js";
-import { isSyncable } from "../dashboard/settings/sync-allowlist.js";
+import { isSyncable, isInstanceScope } from "../dashboard/settings/sync-allowlist.js";
 
 export default function settingsScopeRouter(authMiddleware) {
   const router = Router();
@@ -54,6 +54,12 @@ export default function settingsScopeRouter(authMiddleware) {
     }
     if (scope !== "global" && scope !== "local") {
       return res.status(400).json({ error: "scope must be 'global' or 'local'" });
+    }
+    if (isInstanceScope(key)) {
+      return res.status(403).json({
+        error: `Key "${key}" is per-instance by design; its scope cannot be changed.`,
+        code: "InstanceScoped",
+      });
     }
     if (scope === "global" && !isSyncable(key)) {
       return res.status(403).json({
