@@ -7,6 +7,12 @@ pre-check — git's own overlap refusal is the gate); ALL FOUR guards approved
 default OFF, tolerant pull).
 BUILD CONSTRAINT: branches AFTER PR #163 merges — both touch
 servers/gateway/auto-update.js (#163 added tickCheck/_setDbForTest).
+Review: R1 (adversarial, opus, git semantics empirically verified in real
+temp repos) REVISE — 3 MAJOR (fake-success on the manual skip; double-acquire
+reclaim race; branch-guard TOCTOU that fast-forwards an ancestor feature ref)
++ 5 minors — ALL FOLDED below. R1 confirmed the D2 safety matrix empirically:
+disjoint dirty survives byte-identical; overlap/delete/untracked-collision all
+refused with tree untouched.
 
 ## 1. Problem — the F-UPDATE-1 incident class (Cluster A, 2026-07-10)
 
@@ -56,11 +62,20 @@ if (branch.stdout !== "main") {
 
 Inside `checkForUpdates` — NOT in #163's tickCheck — so it protects BOTH
 callers (operator decision d): the timer, and the manual `check_updates_now`
-action, whose UI already renders `data.message`-style results; the returned
-message must be honest ("Skipped: not on main…"), never a fake success.
+action. **Manual-UI honesty (R1 MAJOR-1):** the check-now click handler
+(updates.js:114-135) branches only on `data.updated` → `data.error` → else
+"Already up to date" — as-is, a skip return would render a FAKE SUCCESS (the
+exact Cluster-A fake-success class, invisible to the node suite). Two wired
+ends, both required: (a) every skip return carries a human `message` field
+("Skipped: not on main (on 'x')" / "Skipped: another updater is running
+(pid N)"); (b) the check-now JS gains a NEUTRAL branch — `else if
+(data.skipped)` renders `data.message` in the muted style, not green, not
+red — before the else. §5's UI verification asserts this exact rendering.
 Rationale for guarding the manual path too: a click on a dev checkout must
-not fetch/pull under a feature branch; `--ff-only` can't cross branches, but
-the fetch+status writes would still churn and confuse.
+not fetch/pull under a feature branch — R1 proved this is not hypothetical:
+`git pull --ff-only origin main` while an ANCESTOR feature branch is checked
+out FAST-FORWARDS that feature ref onto main (empirically confirmed), then
+behindCount>0 logic proceeds and can RESTART the gateway under a dev's feet.
 
 Detached HEAD (`rev-parse --abbrev-ref` prints `HEAD`) also skips — correct:
 an updater must never mutate a detached checkout. A rev-parse failure (not a
@@ -91,23 +106,54 @@ and no pop can ever touch a foreign stash entry.
 
 New module-level helpers in auto-update.js (no new deps):
 
-- Lock path: `<APP_ROOT>/.git/crow-auto-update.lock` (inside .git so it can
-  never be swept into a commit and lives with the repo the lock protects).
+- Lock path: `<gitDir>/crow-auto-update.lock`, where gitDir is resolved PER
+  ACQUIRE via `git rev-parse --absolute-git-dir` (R1 MINOR-4: `.git` is a
+  FILE in a worktree — a hardcoded `<APP_ROOT>/.git/…` open would throw
+  ENOTDIR every tick there; rev-parse gives the real per-worktree git dir,
+  which is also exactly the right serialization scope: one lock per working
+  tree). Resolved from the live APP_ROOT each call (R1 MINOR-3: APP_ROOT
+  becomes `let` for the `_setAppRootForTest` seam; nothing may capture it at
+  module load).
 - Acquire: `fs.open(path, "wx")` → write `${pid}\n${new Date().toISOString()}`.
   On EEXIST: read the file; if the recorded PID is alive (`process.kill(pid,0)`
   succeeds) AND the timestamp is younger than 30 minutes → **skip this tick**
-  (`{ updated:false, skipped:"locked" }`, honest status "Another updater is
-  running (pid N)"). Otherwise the lock is stale (crashed process or PID
-  reuse older than 30min) → unlink and retry the O_EXCL open ONCE; a second
-  EEXIST (lost the race to another reclaimer) → skip.
-- Release: unlink in a `finally` around the fetch→pull→npm→init-db sequence.
-  The lock wraps everything AFTER the branch guard (a skipped-branch tick
-  never takes the lock). The restart path (:179-187) fires after release —
-  a restarting process must not leave a lock that its successor then treats
-  as live-PID (the PID may be REUSED by the new gateway itself).
+  (`{ updated:false, skipped:"locked", message:"Another updater is running
+  (pid N)" }`).
+- **Stale reclaim is ATOMIC via rename-quarantine (R1 MAJOR-2** — blind
+  unlink-then-open lets two reclaimers interleave: A unlinks, A re-creates,
+  B unlinks A's FRESH lock, B creates → two "holders", and A's release then
+  unlinks B's lock): the reclaimer does
+  `fs.rename(lock, lock + ".stale." + process.pid)` — atomic, exactly one
+  winner; ENOENT on rename = lost the reclaim race → skip. The winner unlinks
+  its quarantine file and retries the O_EXCL open ONCE; EEXIST there (a third
+  party acquired meanwhile) → skip.
+- **Owner-checked release**: the `finally` re-reads the lockfile and unlinks
+  ONLY if it still contains our PID+timestamp — never blindly (the second
+  half of MAJOR-2: a process must not release a lock it no longer owns).
+- The lock wraps everything AFTER the branch guard (a skipped-branch tick
+  never takes the lock). Restart ordering verified by R1: the `finally`
+  unlink runs synchronously on return, ~1.5s before `crow:shutdown` and
+  ~2.5s before `process.exit` — the lock is always released before exit.
 - Scope: same-host only, which matches the threat (crow + MPA + scratch
-  gateways share one host and one tree). Staleness = PID-liveness AND age,
-  both required to reclaim, because PIDs recycle.
+  gateways share one host and one tree). Staleness reclaim requires
+  (dead PID) OR (age > 30min) — a live-but-wedged updater must not block
+  forever; 30min exceeds the worst-case internal timeout sum (~11min: git
+  120s×N + npm 300s + init-db 120s — R1 verified init-db inherits run()'s
+  120s default, it is NOT unbounded).
+
+### D3b — Branch re-check under the lock (R1 MAJOR-3, TOCTOU)
+
+The D1 branch read races any parallel session's raw `git checkout` (which
+takes no lock) across the multi-second fetch window. R1 empirically proved
+the damage mode: on a feature branch that is an ancestor of origin/main,
+`pull --ff-only origin main` fast-forwards THAT ref. Mitigation: re-run
+`git rev-parse --abbrev-ref HEAD` INSIDE the lock, immediately before the
+pull; if it no longer says `main`, abort with the honest skip (no pull, no
+npm, no init-db). This shrinks the window from seconds to milliseconds.
+RESIDUAL (documented, accepted): a checkout landing inside those final
+milliseconds can still be fast-forwarded — recoverable via reflog; git
+offers no transactional checkout+pull without a wrapper lock that external
+sessions won't take.
 
 ### D4 — --no-auth gateways: auto-update OFF by default
 
@@ -123,15 +169,28 @@ export function shouldStartAutoUpdate({ env = {}, noAuth = false } = {}) {
 ```
 
 Wired at the post-listen.js call site (:186), which already has `noAuth` in
-scope: `if (shouldStartAutoUpdate({ env: process.env, noAuth })) startAutoUpdate(...)`.
-The existing in-function env check (:206-209) stays as a second layer (other
-callers/tests hit startAutoUpdate directly). Kill-switch semantics unchanged;
-`CROW_AUTO_UPDATE=1` on a --no-auth unit is the explicit opt-in.
+scope (R1 verified the threading: index.js:577 → post-listen deps :62), AND
+enforced inside `startAutoUpdate` itself: it gains a `{ noAuth }` option and
+applies the same predicate (R1 MINOR-1 — the existing in-function check
+:206-209 is kill-switch-only; without the in-function predicate, any future
+caller added without the call-site guard silently reintroduces defect 4).
+Kill-switch semantics unchanged; `CROW_AUTO_UPDATE=1` on a --no-auth unit is
+the explicit opt-in.
 
 ### D5 — init-db equivalence (documentation only)
 
 Post-pull `node scripts/init-db.js` (:152) + the #127 schema boot gate remain
 the two-layer schema story. No change.
+
+Accepted D2 residuals (R1 MINOR-5, explicit): (a) `npm install` and
+`init-db.js` now run against a tree that may carry local WIP — this bites
+only when package.json/package-lock.json/scripts/init-db.js are themselves
+locally modified AND disjoint from the incoming diff (overlap → the pull
+already refused); the old stash's "pristine build inputs" property is
+consciously traded for never touching the stash stack. (b) A persistently
+branch-checked-out gateway shows a stale `auto_update_current_version` in
+the Updates section (the skip path deliberately writes only
+last_check/last_result — status churn is bounded and honest).
 
 ## 3. Non-goals
 
@@ -162,16 +221,29 @@ the changed-files check simply not matching). Each test builds its own repos.
    pull refused, result honest error naming local changes, tree untouched,
    NO stash entry, no pop.
 3. D3 lock: (i) lock held by a live PID (this test process's own pid, fresh
-   timestamp) → skip `{skipped:"locked"}` — **mutation**: removing the
-   EEXIST-skip reddens; (ii) stale lock (dead PID or old timestamp) →
-   reclaimed, update proceeds, lock removed afterward — **mutation**:
-   removing the staleness reclaim reddens (ii); (iii) lock released in
-   finally even when the pull fails (assert no lockfile after an
-   overlap-refused run); (iv) both-required rule: live PID + old timestamp →
-   still reclaimed after 30min? NO — decide: live-PID + old-age means a WEDGED
-   updater; reclaim requires (dead PID) OR (age>30min). Test pins the chosen
-   rule: dead-PID young lock → reclaimed; live-PID old lock → reclaimed;
-   live-PID young lock → skip.
+   timestamp) → skip `{skipped:"locked"}` with a `message` — **mutation**:
+   removing the EEXIST-skip reddens; (ii) stale lock (dead PID or old
+   timestamp) → reclaimed VIA RENAME-QUARANTINE, update proceeds, lock
+   removed afterward — **mutation**: removing the staleness reclaim reddens;
+   (iii) lock released in finally even when the pull fails (no lockfile after
+   an overlap-refused run); (iv) staleness rule pinned: dead-PID young lock →
+   reclaimed; live-PID old (>30min) lock → reclaimed; live-PID young → skip;
+   (v) **reclaim race (R1 MAJOR-2)**: with a stale lock present, two
+   concurrent acquire attempts → EXACTLY ONE proceeds (the rename loser gets
+   ENOENT → skip) — **mutation**: reverting rename-quarantine to
+   unlink-then-open reddens (both would proceed); (vi) **owner-checked
+   release**: if the lockfile now holds a DIFFERENT pid, release must NOT
+   unlink it — **mutation**: blind-unlink release reddens.
+3b. D3b branch re-check under lock (R1 MAJOR-3): fixture switches the clone
+   to a feature branch AFTER the first guard passes (via a test seam hook or
+   by invoking the internal locked-pull helper directly on a branch-checked
+   repo) → aborts with the honest skip, NO pull ran (feature ref position
+   unchanged) — **mutation**: removing the re-check reddens (R1's empirical
+   ancestor-ff repro becomes the negative case).
+3c. Manual-UI honesty (R1 MAJOR-1): node side — every skip return carries
+   `message`; the check-now action's JSON therefore includes it. Client side
+   is CDP-verified (§5): the neutral branch renders the message, NOT
+   "Already up to date" — the fake-success repro is the red case.
 4. D4 predicate: table-driven — (noAuth, env) × {unset,"0","false","1","true"}
    → expected; **mutation**: dropping the noAuth branch reddens. Call-site
    test: post-listen wiring passes noAuth (unit test the predicate + assert
@@ -208,10 +280,11 @@ the changed-files check simply not matching). Each test builds its own repos.
   silent data loss.
 - The D1 skip writes last_check/last_result on every tick on a
   branch-checkout gateway (status churn only; same as today's failure paths).
-- #163 interaction: D6's "manual runs while auto-update disabled" test uses a
-  db stub only — its fixture has no git repo at all; adding the branch guard
-  FIRST in checkForUpdates would make that test hit rev-parse against the
-  REAL repo cwd (on main in CI, on a branch mid-build!). The plan must
-  restructure: branch guard uses `run()` which obeys `_setAppRootForTest`;
-  the #163 tick tests inject their check spy and never reach the real
-  checkForUpdates — verify each existing test's actual path before coding.
+- #163 interaction — RESOLVED by R1 (MINOR-2): all four
+  tests/auto-update-tick-gate.test.js tests inject a spy via
+  `tickCheck(check)` and NEVER reach the real `checkForUpdates`; no existing
+  test anywhere calls it. Adding the branch guard reddens nothing. No D6
+  fixture restructuring is needed — the plan must not invent it.
+- `_setAppRootForTest` seam: APP_ROOT `const` → `let`; `run()` re-reads it
+  per call (R1 verified nothing else captures it); the D3 lock/gitDir
+  resolution must also read it per acquire, never at module load.
