@@ -137,3 +137,24 @@ test("repo plan_ref with no repo_path on the project → 400, never a fallback",
   t.prepare("UPDATE tasks_items SET plan_ref=NULL WHERE id=1").run();
   t.close();
 });
+
+test("first plan save into a repo with NO .pi/plans tree creates it (contained)", async () => {
+  const { mkdtempSync: mkd } = await import("node:fs");
+  const repo = mkd(join(tmpdir(), "board-repo-bare-"));
+  const c = new Database(process.env.CROW_DB_PATH);
+  c.prepare("UPDATE project_spaces SET repo_path=? WHERE id=1").run(repo);
+  c.close();
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  t.prepare("UPDATE tasks_items SET plan_ref=? WHERE id=1")
+    .run(JSON.stringify({ kind: "repo", path: ".pi/plans/first.md" }));
+  t.close();
+  const p = await fetch(base + "/card/1/plan", { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ markdown: "# first plan\n" }) });
+  assert.equal(p.status, 200);
+  const g = await (await fetch(base + "/card/1/plan")).json();
+  assert.equal(g.markdown, "# first plan\n");
+  const t2 = new Database(process.env.CROW_TASKS_DB_PATH); // restore for any later tests
+  t2.prepare("UPDATE tasks_items SET plan_ref=NULL WHERE id=1").run();
+  t2.close();
+});

@@ -434,10 +434,21 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (!card) return jsonError(res, 404, "card not found");
       const info = await resolveCardPlan(cdb, card);
       if (info.error) return jsonError(res, 400, info.error);
+      // Containment BEFORE creation, on the deepest EXISTING ancestor — so a
+      // symlinked ancestor pointing outside the root is caught before mkdir
+      // can create anything through it. Then create the parent and re-verify
+      // the full path (still fail-closed).
+      const parentDir = info.path.slice(0, info.path.lastIndexOf("/"));
+      let probe = parentDir;
+      while (!existsSync(probe)) {
+        const i = probe.lastIndexOf("/");
+        if (i <= 0) break;
+        probe = probe.slice(0, i);
+      }
+      if (!containedRealPath(probe, info.root)) return jsonError(res, 400, "plan path escapes its root");
+      mkdirSync(parentDir, { recursive: true });
       const real = containedRealPath(info.path, info.root);
       if (!real) return jsonError(res, 400, "plan path escapes its root");
-      // repo plans may live in a not-yet-created .pi/plans/ — create it (contained).
-      mkdirSync(info.path.slice(0, info.path.lastIndexOf("/")), { recursive: true });
       const exists = existsSync(info.path);
       if (exists) {
         // Optimistic concurrency: the client's mtime (from its GET) must
