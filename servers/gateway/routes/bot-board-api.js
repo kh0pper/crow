@@ -54,6 +54,7 @@ import { proposalsDir, normalizeSkillName, listProposals } from "../../../script
 import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";
 import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mjs";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
+import { parsePlanRef, resolvePlanFile, containedRealPath } from "./plan-ref.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -115,26 +116,6 @@ async function derivePlanPath(cdb, card) {
   return null;
 }
 
-// Realpath containment — the resolved file must live under sessionDir. For a
-// not-yet-existing plan file, resolve+contain the parent dir instead.
-function containedRealPath(path, sessionDir) {
-  try {
-    const rootReal = realpathSync(sessionDir);
-    let real;
-    if (existsSync(path)) {
-      real = realpathSync(path);
-    } else {
-      const slash = path.lastIndexOf("/");
-      const dir = path.slice(0, slash);
-      if (!existsSync(dir)) return null;
-      real = realpathSync(dir) + path.slice(slash);
-    }
-    if (real === rootReal || real.startsWith(rootReal + "/")) return real;
-    return null;
-  } catch {
-    return null;
-  }
-}
 
 // Fail-closed pi-liveness (Step-1 pinned pattern, recorded in the plan's
 // Verified Claims): a process is "the live pi holding bot_sessions row R"
