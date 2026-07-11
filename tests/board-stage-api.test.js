@@ -158,3 +158,30 @@ test("first plan save into a repo with NO .pi/plans tree creates it (contained)"
   t2.prepare("UPDATE tasks_items SET plan_ref=NULL WHERE id=1").run();
   t2.close();
 });
+
+test("execute: refuses without assigned_bot, refuses when not Ready, dispatches when Ready", async () => {
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  t.prepare("UPDATE tasks_items SET stage='ready', status='pending', assigned_bot=NULL WHERE id=1").run();
+  t.close();
+  const noBot = await fetch(base + "/card/1/execute", { method: "POST" });
+  assert.equal(noBot.status, 400);
+
+  const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
+  t2.prepare("UPDATE tasks_items SET assigned_bot='scout', stage='backlog', status='pending' WHERE id=1").run();
+  t2.close();
+  const notReady = await fetch(base + "/card/1/execute", { method: "POST" });
+  assert.equal(notReady.status, 409);
+
+  const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
+  t3.prepare("UPDATE tasks_items SET stage='ready' WHERE id=1").run();
+  t3.close();
+  process.env.CROW_BOARD_DISPATCH_DRYRUN = "1"; // test seam: skip the real spawn
+  const ok = await (await fetch(base + "/card/1/execute", { method: "POST" })).json();
+  delete process.env.CROW_BOARD_DISPATCH_DRYRUN;
+  assert.equal(ok.ok, true);
+  assert.equal(ok.dispatched, "scout");
+  const t4 = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = t4.prepare("SELECT stage, status FROM tasks_items WHERE id=1").get();
+  t4.close();
+  assert.deepEqual([row.stage, row.status], ["executing", "in_progress"]);
+});
