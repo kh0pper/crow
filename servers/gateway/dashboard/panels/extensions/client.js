@@ -332,17 +332,28 @@ export function extensionsClientJS(lang) {
             // --- configureOnly submit path: write-only through /bundles/api/env,
             // never /install (the bundle is already installed; /install would 409).
             function submitConfigureOnly() {
-              installBtn.disabled = true;
-              installBtn.textContent = '${tJs("extensions.saving", lang)}';
-              statusDiv.style.display = "block";
-              statusDiv.style.color = "var(--crow-accent)";
-              statusDiv.textContent = '${tJs("extensions.saving", lang)}';
-
               var envData = {};
               envNames.forEach(function(n) {
                 var inp = document.getElementById("env_" + n);
                 if (inp && inp.value) envData[n] = inp.value;
               });
+
+              // A blank form must not silently "succeed": /bundles/api/env would
+              // 200 with an empty env_vars, onSaved() would then clear this
+              // checklist entry from memory + sessionStorage, and the still-
+              // unconfigured bundle would never resurface the checklist item.
+              if (envNames.length > 0 && Object.keys(envData).length === 0) {
+                statusDiv.style.display = "block";
+                statusDiv.style.color = "var(--crow-error, #e74c3c)";
+                statusDiv.textContent = '${tJs("extensions.configureEmpty", lang)}';
+                return;
+              }
+
+              installBtn.disabled = true;
+              installBtn.textContent = '${tJs("extensions.saving", lang)}';
+              statusDiv.style.display = "block";
+              statusDiv.style.color = "var(--crow-accent)";
+              statusDiv.textContent = '${tJs("extensions.saving", lang)}';
 
               apiCall("env", { bundle_id: id, env_vars: envData }).then(function(res) {
                 if (res.ok && res.data && res.data.ok) {
