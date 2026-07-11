@@ -13,7 +13,10 @@ import { fileURLToPath } from "url";
 import { loadCollections } from "./collections.js";
 
 export const REGISTRY_URL = "https://raw.githubusercontent.com/kh0pper/crow-addons/main/registry.json";
-export const CROW_DIR = join(homedir(), ".crow");
+// Respect the instance's CROW_HOME (matches bundles.js / proxy.js resolveCrowHome).
+// Without this, an alternate instance (CROW_HOME=~/.crow-mpa, ~/.crow-finance) reads
+// the MAIN ~/.crow's installed.json/stores.json instead of its own.
+export const CROW_DIR = process.env.CROW_HOME || join(homedir(), ".crow");
 export const INSTALLED_PATH = join(CROW_DIR, "installed.json");
 export const STORES_PATH = join(CROW_DIR, "stores.json");
 
