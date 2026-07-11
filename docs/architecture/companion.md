@@ -86,6 +86,7 @@ The privacy rationale is the same in both cases: a shared kiosk's default charac
 - **"error calling the chat endpoint…"** — the generated `conf.yaml` is pointing OLVV at an endpoint that rejects the request. Check `docker logs crow-companion` for the upstream error. Common causes: a cloud profile rejecting an empty `tools: []` array (use a local model, which tolerates it), or the MCP bridge failing so no tools load. The bridge targets the gateway's MCP mounts (`/router`, `/storage`, `/wm`) on `CROW_MCP_BRIDGE_PORT` (default `3001`); `/router`, `/storage`, and `/wm` all require a local MCP token (generate it in the dashboard's Connect panel; `generate-config.py` reads it from the `CROW_LOCAL_MCP_TOKEN` env var and embeds it in `mcp_servers.json` — unset, the bridges get 401s).
 - **Avatar speaks its reasoning** — ensure the fast route disables thinking (`COMPANION_FAST_DISABLE_THINKING=1`, the default).
 - **Window/media commands do nothing** — the `crow_wm` MCP bridge isn't connected; verify `ToolManager initialized with N OpenAI tools` (N>0) in the container logs.
+- **Companion edits don't appear on paired instances** — expected: the companion container does not drive cross-instance sync. Its writes land through the gateway's MCP mounts, and only the primary gateway process (never a `--no-auth` companion/bridge gateway) opens the instance-sync feeds and emits changes. If gateway-side edits aren't syncing either, check `CROW_DISABLE_INSTANCE_SYNC` and the sync-conflicts page.
 
 ## Files
 
