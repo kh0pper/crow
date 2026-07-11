@@ -95,6 +95,7 @@ Membership is constrained by hard rules, enforced by `tests/extensions-collectio
 - **Official**: every member `id` must exist in `registry/add-ons.json` and have a manifest under `bundles/<id>/`.
 - **Non-privileged, non-consent**: no member may set `privileged: true` or `consent_required: true` — a one-click install must never bypass the consent gate.
 - **Non-GPU**: no member may declare `requires.gpu` or `requires.min_vram_gb` — collections are host-independent, not tuned to any one machine's hardware.
+- **No host networking, no Docker socket**: no member's `docker-compose.yml` may use `network_mode: host` or mount `/var/run/docker.sock` — `validateComposeFile` refuses both without the privileged/consent gate, so such a member would fail the one-click install.
 - **Dependency-closed and topologically ordered**: every `requires.bundles` dependency of a member must itself be a member of the same collection, and must appear earlier in the `members` array than its dependent.
 - **`kind` matches compose presence**: a member with a `docker-compose.yml` must be `kind: "deploys"`; a member without one is `"builtin"` or `"connects"`.
 - **`connects` members declare `you_need`**: a member that connects to something the user already runs (e.g. an existing Home Assistant instance) must set `kind: "connects"` and a non-empty `you_need` string describing what the user needs to bring.

@@ -95,6 +95,7 @@ La membresía está limitada por reglas obligatorias, aplicadas por `tests/exten
 - **Oficial**: el `id` de cada miembro debe existir en `registry/add-ons.json` y tener un manifiesto bajo `bundles/<id>/`.
 - **No privilegiado, sin consentimiento especial**: ningún miembro puede declarar `privileged: true` ni `consent_required: true` — una instalación de un clic nunca debe saltarse la puerta de consentimiento.
 - **Sin GPU**: ningún miembro puede declarar `requires.gpu` ni `requires.min_vram_gb` — las colecciones son independientes del host, no ajustadas al hardware de una máquina en particular.
+- **Sin red de host, sin socket de Docker**: el `docker-compose.yml` de ningún miembro puede usar `network_mode: host` ni montar `/var/run/docker.sock` — `validateComposeFile` rechaza ambos sin la puerta de privilegio/consentimiento, así que un miembro así haría fallar la instalación de un clic.
 - **Cierre de dependencias y orden topológico**: toda dependencia `requires.bundles` de un miembro debe ser también miembro de la misma colección, y debe aparecer antes que el miembro que depende de ella en el arreglo `members`.
 - **`kind` coincide con la presencia del compose**: un miembro con `docker-compose.yml` debe ser `kind: "deploys"`; un miembro sin él es `"builtin"` o `"connects"`.
 - **Los miembros `connects` declaran `you_need`**: un miembro que se conecta a algo que el usuario ya ejecuta (por ejemplo, una instancia existente de Home Assistant) debe declarar `kind: "connects"` y una cadena `you_need` no vacía que describa qué debe aportar el usuario.
