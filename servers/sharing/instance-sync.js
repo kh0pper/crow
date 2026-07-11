@@ -690,9 +690,9 @@ export class InstanceSyncManager {
    * first (I-B1) so a peer's already-delivered newer provider edit is applied
    * before we re-emit with a fresh lamport.
    *
-   * emitChange broadcasts to ALL peers: already-current peers converge the
-   * re-emit as re-delivery noise (rowsEquivalent → silent skip in
-   * _checkConflict, or a plain newer-lamport UPDATE with identical values) —
+   * emitChange broadcasts to ALL peers as op="insert": fresh peers land the
+   * row via _applyInsert's INSERT OR IGNORE; already-current peers IGNORE and
+   * converge it as re-delivery noise (rowsEquivalent → no conflict logged) —
    * accepted cost, same as the contacts backfill. shouldSyncRow('providers')
    * inside emitChange drops loopback rows automatically, and
    * EXCLUDED_COLUMNS/OUTBOUND_TRANSFORMS strip bookkeeping + null gpu_policy —
@@ -754,9 +754,16 @@ export class InstanceSyncManager {
     let emitted = 0;
     for (const row of rows) {
       try {
+        // op MUST be "insert", not "update": providers has no natural-key
+        // apply handler, so an update falls through to the generic
+        // _applyUpdate (`UPDATE … WHERE id=?`) which matches ZERO rows on the
+        // freshly-paired peer this backfill exists for — the row would be
+        // silently never delivered. "insert" lands via _applyInsert's
+        // INSERT OR IGNORE: delivers to fresh peers, no-ops benignly on
+        // peers that already hold an equivalent row (final-review B1).
         // emitChange returns null when the row was gated off the wire
         // (loopback / feedsDisabled) — only count rows that actually rode.
-        const ts = await this.emitChange("providers", "update", row);
+        const ts = await this.emitChange("providers", "insert", row);
         if (ts != null) emitted++;
       } catch (err) {
         console.warn(`[instance-sync] providers backfill emit failed for ${row.id}: ${err.message}`);

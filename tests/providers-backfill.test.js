@@ -56,6 +56,8 @@ test("backfillProvidersForNewPeers: fresh peer → syncable (tailnet) row append
   assert.equal(n, 1, "only the tailnet row counts as emitted (loopback dropped inside emitChange)");
   assert.equal(feed.entries.length, 1, "exactly one entry appended to the peer feed");
   assert.equal(feed.entries[0].table, "providers");
+  assert.equal(feed.entries[0].op, "insert",
+    "backfill MUST emit op=insert — an update falls through to the generic UPDATE-by-id, matches zero rows on a fresh peer, and the row is silently never delivered (final-review B1)");
   assert.equal(feed.entries[0].row.id, "prov-tailnet");
   assert.ok(!feed.entries.some((e) => e.row.id === "prov-loop"), "loopback row never rides the wire");
   // Wire hygiene rides along (D3): bookkeeping columns stripped by emitChange.
@@ -129,4 +131,40 @@ test("backfillProvidersForNewPeers: disabled provider rows ARE emitted — disab
   assert.equal(feed.entries.length, 1);
   assert.equal(feed.entries[0].row.id, "prov-off");
   assert.equal(Number(feed.entries[0].row.disabled), 1, "disabled state rides the wire");
+});
+
+test("backfillProvidersForNewPeers: END-TO-END DELIVERY — a fresh peer that applies the backfill feed actually HOLDS the provider row (final-review B1)", async () => {
+  const origin = freshMgr("e2e-origin", "origin-1");
+  const peer = freshMgr("e2e-peer", "peer-fresh");
+  const feed = captureFeed();
+  origin.outFeeds.set("peer-fresh", feed);
+  await origin.db.execute({
+    sql: "INSERT INTO providers (id, base_url, models, lamport_ts) VALUES ('prov-e2e', 'http://100.118.41.122:8003/v1', ?, 7)",
+    args: [JSON.stringify([{ id: "m", contextWindow: 262144 }])],
+  });
+
+  assert.equal(await origin.backfillProvidersForNewPeers(), 1);
+
+  // The peer's providers table starts EMPTY (per-peer feeds are born empty —
+  // this is the exact case D7 exists for). Apply the captured wire.
+  const consumerFeed = {
+    get length() { return feed.entries.length; },
+    async get(seq) { return feed.entries[seq]; },
+  };
+  await peer._processNewEntries("origin-1", consumerFeed);
+
+  const { rows } = await peer.db.execute({
+    sql: "SELECT * FROM providers WHERE id = 'prov-e2e'",
+  });
+  assert.equal(rows.length, 1,
+    "the backfilled provider row must actually LAND on a fresh peer (op=insert via INSERT OR IGNORE; an op=update would UPDATE zero rows and vanish)");
+  assert.deepEqual(JSON.parse(rows[0].models), [{ id: "m", contextWindow: 262144 }]);
+  const { rows: conflicts } = await peer.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" });
+  assert.equal(Number(conflicts[0].n), 0, "delivery is conflict-free");
+
+  // Idempotence: re-applying the same feed is benign (INSERT OR IGNORE +
+  // equivalence — no duplicate, no conflict).
+  await peer._processNewEntries("origin-1", consumerFeed);
+  const { rows: again } = await peer.db.execute({ sql: "SELECT COUNT(*) AS n FROM providers WHERE id = 'prov-e2e'" });
+  assert.equal(Number(again[0].n), 1);
 });
