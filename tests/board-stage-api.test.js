@@ -185,3 +185,21 @@ test("execute: refuses without assigned_bot, refuses when not Ready, dispatches 
   t4.close();
   assert.deepEqual([row.stage, row.status], ["executing", "in_progress"]);
 });
+
+test("plan-dispatch: only legal from backlog/planning; moves stage to planning", async () => {
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  t.prepare("UPDATE tasks_items SET stage='ready', assigned_bot='scout' WHERE id=1").run();
+  t.close();
+  const notBacklog = await fetch(base + "/card/1/plan-dispatch", { method: "POST" });
+  assert.equal(notBacklog.status, 409);
+  const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
+  t2.prepare("UPDATE tasks_items SET stage='backlog', status='pending' WHERE id=1").run();
+  t2.close();
+  process.env.CROW_BOARD_DISPATCH_DRYRUN = "1";
+  const ok = await (await fetch(base + "/card/1/plan-dispatch", { method: "POST" })).json();
+  delete process.env.CROW_BOARD_DISPATCH_DRYRUN;
+  assert.equal(ok.ok, true);
+  const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
+  assert.equal(t3.prepare("SELECT stage FROM tasks_items WHERE id=1").get().stage, "planning");
+  t3.close();
+});

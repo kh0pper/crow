@@ -39,6 +39,7 @@ import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 import { statusToStage } from "../../servers/gateway/routes/board-stages.js";
+import { extractPlanFileLine, buildPlanPrompt } from "./plan_dispatch.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -310,11 +311,11 @@ function getSession(botId, threadId) {
 function upsertSession(s) {
   const c = db(CROW_DB);
   if (s.id) {
-    c.prepare("UPDATE bot_sessions SET pi_session_id=?, pi_session_dir=?, project_id=?, card_id=?, plan_path=?, status=?, control=?, model=?, escalated=?, updated_at=datetime('now') WHERE id=?")
-      .run(s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control, s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0), s.id);
+    c.prepare("UPDATE bot_sessions SET pi_session_id=?, pi_session_dir=?, project_id=?, card_id=?, plan_path=?, status=?, control=?, model=?, escalated=?, kind=?, updated_at=datetime('now') WHERE id=?")
+      .run(s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control, s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0), s.kind == null ? "chat" : s.kind, s.id);
   } else {
-    const info = c.prepare("INSERT INTO bot_sessions (bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,project_id,card_id,plan_path,status,control,model,escalated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run(s.bot_id, s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.gateway_type || "gmail", s.gateway_thread_id, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control || "run", s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0));
+    const info = c.prepare("INSERT INTO bot_sessions (bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,project_id,card_id,plan_path,status,control,model,escalated,kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(s.bot_id, s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.gateway_type || "gmail", s.gateway_thread_id, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control || "run", s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0), s.kind == null ? "chat" : s.kind);
     s.id = info.lastInsertRowid;
   }
   c.close(); return s;
@@ -663,6 +664,87 @@ export async function handleInbound(opts) {
   return result;
 }
 
+// Board plan dispatch (Plan 1 Task 7): spawn a CONFINED local-model planning
+// run against the card's project repo. Structural guarantees (spec §Safety):
+// resolved provider MUST be crow-local (no config knob reaches a paid model);
+// write_paths = [<repo>/.pi/plans, <repo>/docs] + bash deny; bot_sessions row
+// kind='planning' takes the same single-writer lock as execution.
+export async function planCard(opts) {
+  const cardId = Number(opts.cardId), botId = String(opts.botId);
+  const log = opts.log || function () {};
+  const bot = loadBot(botId);
+  const def = bot.def;
+  const projectId = bot.project_id == null ? null : Number(bot.project_id);
+  const projectSpace = loadProjectSpace(projectId);
+
+  // Same tasks-db resolution as handleInbound (project override wins).
+  const cardsDb = (projectSpace && projectSpace.tasks_db_uri) || TASKS_DB;
+  const t = db(cardsDb);
+  const card = t.prepare("SELECT id, title, description, project_id FROM tasks_items WHERE id=?").get(cardId);
+  t.close();
+  if (!card) return { action: "error", error: "card not found" };
+
+  const repoRoot = projectSpace && projectSpace.repo_path ? String(projectSpace.repo_path) : null;
+  if (!repoRoot || !existsSync(repoRoot)) {
+    return { action: "error", error: "project has no repo_path (workspace plan dispatch is not in v1 — edit the plan in the drawer)" };
+  }
+
+  if (countLivePi() >= LIFECYCLE_DEFAULTS.maxPi) return { action: "deferred", reason: "pi-capacity" };
+
+  const resolved = await resolveModel(def, { escalate: false });
+  if (String(resolved.provider) !== "crow-local") {
+    return { action: "error", error: "plan dispatch is local-only; bot resolves to " + resolved.provider + "/" + resolved.model };
+  }
+
+  const sysFile = join(mkdtempSync(join(tmpdir(), "pibot-plan-")), "sys.md");
+  writeFileSync(sysFile, "You are a careful software planner. You explore code read-only and write ONE plan file.", { mode: 0o600 });
+
+  // Planning session takes the card lock: kind='planning', status active.
+  let session = upsertSession({
+    bot_id: botId, gateway_thread_id: "board-plan-" + cardId, gateway_type: "board",
+    project_id: projectId, card_id: cardId, plan_path: null,
+    pi_session_dir: repoRoot + "/.pi/board-planning", status: "active", control: "run",
+    model: resolved.key, escalated: 0, kind: "planning",
+  });
+  mkdirSync(repoRoot + "/.pi/board-planning", { recursive: true });
+
+  // Confinement belt: write_paths limited to plans+docs, bash denied. The
+  // stored def's policy is NOT used — planning is stricter than the bot.
+  const planningDef = Object.assign({}, def, {
+    permission_policy: { bash: "deny", write_paths: [repoRoot + "/.pi/plans", repoRoot + "/docs"] },
+    spawn_env: def.spawn_env || {},
+    tools: def.tools,
+  });
+  await warmModel(resolved.provider, log);
+  const pi = new PiRpc({ def: planningDef, sessionDir: repoRoot + "/.pi/board-planning",
+    resolved, piSessionId: null, appendSystemPromptFile: sysFile });
+  try {
+    await pi.prompt(buildPlanPrompt(card, ".pi/plans"), TURN_TIMEOUT_MS);
+    const text = pi.assistantText();
+    const rel = extractPlanFileLine(text);
+    if (!rel || !existsSync(repoRoot + "/" + rel)) {
+      session.status = "error"; upsertSession(session);
+      return { action: "error", error: "planning run produced no verifiable PLAN_FILE (reply tail: " + text.slice(-200) + ")" };
+    }
+    const planRef = { kind: "repo", path: rel };
+    const t2 = db(cardsDb);
+    t2.prepare("UPDATE tasks_items SET plan_ref=?, stage='ready', status='pending', updated_at=datetime('now') WHERE id=?")
+      .run(JSON.stringify(planRef), cardId);
+    t2.close();
+    session.status = "done"; upsertSession(session);
+    appendAuditBridge(projectId, {
+      actor_type: "bot", actor_id: botId, action: "bot.plan",
+      target: "card:" + cardId, payload: { plan_ref: planRef, model: resolved.key },
+    });
+    return { action: "planned", planRef };
+  } catch (e) {
+    session.status = "error"; upsertSession(session);
+    return { action: "error", error: e.message };
+  } finally {
+    await pi.close();
+  }
+}
+
 export function stopSession(botId, threadId) {
   const s = getSession(botId, threadId);
   if (!s) return { ok: false, reason: "no session" };
@@ -676,12 +758,19 @@ if (import.meta.url === "file://" + process.argv[1]) {
     const bot = a[a.indexOf("--bot") + 1], thread = a[a.indexOf("--thread") + 1];
     console.log(JSON.stringify(stopSession(bot, thread))); process.exit(0);
   }
-  const inj = a[a.indexOf("--inject") + 1];
-  if (!inj) { console.error("usage: bridge.mjs --inject '<json>' | --stop --bot B --thread T"); process.exit(2); }
-  const payload = JSON.parse(inj);
-  handleInbound(Object.assign({}, payload, {
-    log: (m) => console.error("[bridge] " + m),
-    sendReply: async (t) => console.log("REPLY>>>\n" + t + "\n<<<REPLY"),
-  })).then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
-    .catch((e) => { console.error("BRIDGE CRASH " + e.stack); process.exit(2); });
+  if (a.includes("--plan-card")) {
+    const payload = JSON.parse(a[a.indexOf("--plan-card") + 1]);
+    planCard(Object.assign({}, payload, { log: (m) => console.error("[plan] " + m) }))
+      .then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
+      .catch((e) => { console.error("PLAN CRASH " + e.stack); process.exit(2); });
+  } else {
+    const inj = a[a.indexOf("--inject") + 1];
+    if (!inj) { console.error("usage: bridge.mjs --inject '<json>' | --stop --bot B --thread T | --plan-card '<json>'"); process.exit(2); }
+    const payload = JSON.parse(inj);
+    handleInbound(Object.assign({}, payload, {
+      log: (m) => console.error("[bridge] " + m),
+      sendReply: async (t) => console.log("REPLY>>>\n" + t + "\n<<<REPLY"),
+    })).then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
+      .catch((e) => { console.error("BRIDGE CRASH " + e.stack); process.exit(2); });
+  }
 }
