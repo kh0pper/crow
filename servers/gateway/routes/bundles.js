@@ -38,6 +38,8 @@ import {
 } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { writeSetting } from "../dashboard/settings/registry.js";
+import { getCollection } from "../dashboard/panels/extensions/collections.js";
+import { beginInstallSet, endInstallSet, isInstallSetRunning } from "../install-lock.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -1609,6 +1611,74 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
 }
 
 /**
+ * Re-validate a collection's membership against the ON-DISK manifests.
+ * registry/collections.json is data, not a trust boundary: this is the gate that
+ * stops a tampered file from one-click-installing a privileged, consent-required,
+ * or host-networking bundle without the consent ceremony.
+ */
+export function validateCollectionServerSide(collection) {
+  if (!collection || !Array.isArray(collection.members) || collection.members.length === 0) {
+    return { ok: false, error: "Collection has no members" };
+  }
+  const seen = new Set();
+  for (const m of collection.members) {
+    if (!m?.id || !isValidBundleId(m.id)) return { ok: false, error: `Invalid member id '${m?.id}'` };
+    if (!existsSync(join(APP_BUNDLES, m.id))) return { ok: false, error: `Member '${m.id}' is not a known bundle` };
+    const man = getManifest(m.id);
+    if (man?.privileged === true || man?.consent_required === true) {
+      return { ok: false, error: `Member '${m.id}' requires explicit consent — install it individually` };
+    }
+    if (man?.requires?.gpu || man?.requires?.min_vram_gb) {
+      return { ok: false, error: `Member '${m.id}' is GPU-gated — install it individually` };
+    }
+    for (const dep of man?.requires?.bundles || []) {
+      if (!seen.has(dep) && !getInstalled().some((i) => i.id === dep)) {
+        return { ok: false, error: `Member '${m.id}' requires '${dep}', which is neither installed nor earlier in the collection` };
+      }
+    }
+    seen.add(m.id);
+  }
+  return { ok: true };
+}
+
+/** Display plan (what the user is told will happen). Execution re-checks every gate live. */
+export function planInstallSet(collection) {
+  const installedIds = new Set(getInstalled().map((i) => i.id));
+  return collection.members.map((m) => {
+    if (installedIds.has(m.id)) return { id: m.id, action: "skip", reason: "already installed" };
+    if (!existsSync(join(APP_BUNDLES, m.id))) return { id: m.id, action: "skip", reason: "not found in this Crow's bundle set" };
+    const gpu = checkGpuArchCompatible(getManifest(m.id));
+    if (!gpu.ok) return { id: m.id, action: "skip", reason: gpu.reason || "incompatible with this host's GPU" };
+    return { id: m.id, action: "install" };
+  });
+}
+
+/**
+ * Manifest-required env keys that are still EMPTY in the bundle's written .env.
+ * Keys with a value (including .env.example defaults — DB passwords, secret keys)
+ * count as configured and are NEVER surfaced: those are consumed at first container
+ * boot, and changing them afterwards breaks the app or strands its data.
+ * @param {object} [envOverride] test seam — the parsed .env
+ */
+export function needsConfigKeys(bundleId, envOverride = null) {
+  const man = getManifest(bundleId);
+  const required = (man?.env_vars || []).filter((v) => v.required).map((v) => v.name);
+  if (required.length === 0) return [];
+  let env = envOverride;
+  if (!env) {
+    env = {};
+    const envPath = join(BUNDLES_DIR, bundleId, ".env");
+    if (existsSync(envPath)) {
+      for (const line of readFileSync(envPath, "utf8").split("\n")) {
+        const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+        if (m) env[m[1]] = m[2];
+      }
+    }
+  }
+  return required.filter((k) => !env[k] || env[k].trim() === "");
+}
+
+/**
  * @returns {Router}
  */
 export default function bundlesRouter() {
@@ -1733,6 +1803,87 @@ export default function bundlesRouter() {
       if (out.needsRestart) {
         appendLog(job, "Scheduling gateway restart to load new panels/servers...");
         scheduleGatewayRestart(3000);
+      }
+    })();
+  });
+
+  // POST /bundles/api/install-set — install a themed collection in one click.
+  // ONE job for the whole set (the client polls it like any install), members run
+  // sequentially in the collection's topological order, a member failure does NOT
+  // abort the set, and exactly ONE gateway restart happens at the end.
+  router.post("/bundles/api/install-set", async (req, res) => {
+    const { collection_id } = req.body || {};
+
+    const collection = getCollection(collection_id);
+    if (!collection) return res.status(404).json({ error: `Unknown collection '${collection_id}'` });
+
+    const v = validateCollectionServerSide(collection);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+
+    // Refuse to start while ANY install/uninstall job is running: a single install
+    // finishing mid-set fires its own immediate restart and would kill this runner.
+    // Predicate is status === "running" — finished jobs linger in the Map for their
+    // TTL, so a presence check would 409 every set for 10 minutes after any install.
+    const busy = [...jobs.values()].some(
+      (j) => j.status === "running" && (j.action === "install" || j.action === "uninstall" || j.action === "install-set"),
+    );
+    if (busy || isInstallSetRunning()) {
+      return res.status(409).json({ error: "Another install is in progress — wait for it to finish and try again." });
+    }
+
+    const plan = planInstallSet(collection);
+    const job = createJob(collection.id, "install-set");
+    try {
+      beginInstallSet(collection.id);
+    } catch {
+      finishJob(job, "failed");
+      return res.status(409).json({ error: "A collection install is already in progress." });
+    }
+
+    res.json({ job_id: job.id, plan });
+
+    (async () => {
+      let anyRestart = false;
+      const needsConfig = [];
+      try {
+        appendLog(job, `Installing collection '${collection.name}' (${plan.filter((p) => p.action === "install").length} to install, ${plan.filter((p) => p.action === "skip").length} skipped)`);
+
+        for (const member of collection.members) {
+          // Live gate re-check: getInstalled() has grown as earlier members landed,
+          // so cumulative RAM commitments and intra-set dependencies are enforced for
+          // real — not against a stale pre-set snapshot.
+          const mv = await validateInstall(member.id, {});
+          if (!mv.ok) {
+            appendLog(job, `SUMMARY member ${member.id} skipped ${mv.error}`);
+            continue;
+          }
+          appendLog(job, `Installing ${member.id}...`);
+          const out = await runInstallJob(member.id, {}, {
+            job,
+            installedSnapshot: mv.installed,
+            consentVerified: mv.consentVerified,
+            manifest: mv.manifest,
+            deferRestart: true,
+          });
+          if (!out.ok) {
+            appendLog(job, `SUMMARY member ${member.id} failed ${out.reason}`);
+            continue; // continue-on-error: one bad member must not sink the collection
+          }
+          if (out.needsRestart) anyRestart = true;
+          const keys = needsConfigKeys(member.id);
+          if (keys.length > 0) needsConfig.push({ id: member.id, keys });
+          appendLog(job, `SUMMARY member ${member.id} installed`);
+        }
+
+        for (const nc of needsConfig) appendLog(job, `NEEDS_CONFIG ${nc.id} ${nc.keys.join(",")}`);
+        appendLog(job, "Collection install complete");
+        finishJob(job, anyRestart ? "complete_restart" : "complete");
+        if (anyRestart) scheduleGatewayRestart(3000);
+      } catch (err) {
+        appendLog(job, `Collection install failed: ${err?.message || err}`);
+        finishJob(job, "failed");
+      } finally {
+        endInstallSet();
       }
     })();
   });
