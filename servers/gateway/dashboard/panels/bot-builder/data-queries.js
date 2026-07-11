@@ -96,16 +96,15 @@ export async function probeExtensions(crowHome) {
   return out;
 }
 
-// A6: vision profiles have no dedicated getter (unlike tts/stt) — read the
-// dashboard_settings row directly, same storage shape, apiKey stripped.
+// A6: vision profiles have no dedicated getter (unlike tts/stt) — resolve via
+// readSetting (override-then-global) like every other vision_profiles reader
+// (the section default-writes LOCAL scope; a raw global SELECT here returned
+// [] forever on such installs). apiKey stripped, same storage shape.
 export async function loadVisionProfiles(db) {
   try {
-    const r = await db.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key = 'vision_profiles'",
-      args: [],
-    });
-    if (!r.rows[0]?.value) return [];
-    return JSON.parse(r.rows[0].value).map(({ apiKey, ...rest }) => rest);
+    const value = await readSetting(db, "vision_profiles");
+    if (!value) return [];
+    return JSON.parse(value).map(({ apiKey, ...rest }) => rest);
   } catch {
     return [];
   }

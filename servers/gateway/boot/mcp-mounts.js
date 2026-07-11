@@ -75,6 +75,19 @@ export async function mountMcpServers(app, deps) {
     setSettingsSyncManager(syncManager);
   } catch {}
 
+  // Settings-scope coherence D2: one-shot heal — promote instance-scope
+  // values stranded in dashboard_settings_overrides by the broken-era
+  // upsertSetting downgrade. Deliberately UNGATED (contrast the profile heal
+  // below): zero sync side effects, so a --no-auth companion sharing the
+  // primary's DB reaches the identical result — and it uses its own
+  // createDbClient() so even a null-syncManager boot heals.
+  try {
+    const { healInstanceScopeOverridesOnce } = await import("../dashboard/settings/instance-scope-heal.js");
+    await healInstanceScopeOverridesOnce(createDbClient());
+  } catch (err) {
+    console.warn(`[settings] healInstanceScopeOverridesOnce failed: ${err.message}`);
+  }
+
   // Cluster B D3: one-shot heal — promote profile values stranded in
   // dashboard_settings_overrides by the broken-era save_profile. Gated on
   // !feedsDisabled: a --no-auth companion shares the primary's DB and must
