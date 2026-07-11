@@ -134,12 +134,27 @@ the degraded state latches for exactly one health tick (~45s) before
 (next tick) back to `[ok] "4 relays"`. This is the exact scenario that stayed
 green in the walkthrough.
 
-## 6. Risks / review focus
+## 6. Risks / implementation requirements (R2-hardened)
 
+- **HARD REQ (R2 #1):** `_refreshRelayHealth`'s body is wrapped in `try/catch`.
+  It is the FIRST synchronous throw-surface in an interval callback that has no
+  sync guard (the existing body is pure async-dispatch with per-promise
+  `.catch`); an escaped throw is an uncaughtException — the "gateway silently
+  dies" class this arc exists to kill. Tested with a throwing `.connected`
+  getter stub.
+- **HARD REQ (R2 #2):** place `_refreshRelayHealth` adjacent to
+  `_startHealthLoop` (~:385) or after `_doConnectRelays` (~:125) — NOT in the
+  ~:470-510 window, which is Cluster C (#160)'s onevent hunk; keeps the merge
+  conflict-free in either order (B #159 doesn't touch nostr.js at all).
+- **HARD REQ (R2 #3):** the health-loop test must `await mgr.destroy()` AND
+  restore `CROW_NOSTR_HEALTH_MS` in `finally` (same-file state bleed; the
+  50ms interval keeps writing the process-global count).
+- **(R2 #4, cleanliness):** `destroy()` additionally calls
+  `setRelaysConnected(0)` — not prod-reachable today (the manager is a
+  lifetime singleton; destroy is test-only), but a destroyed manager must not
+  freeze a stale count into the signal.
 - `relay.connected` getter semantics across nostr-tools versions (pinned
-  dependency; ensureHealthy already relies on it — no new coupling).
-- The refresh runs inside the interval callback — must never throw (wrap; a
-  throw in an interval is an uncaughtException).
+  2.23.3; ensureHealthy already relies on it — no new coupling).
 - Signal flap risk: a relay mid-reconnect at tick time shows a lower count for
   one tick — cosmetic, honest, and the warn threshold (0) makes flapping warns
   unlikely unless ALL relays are down (which deserves the warn).
