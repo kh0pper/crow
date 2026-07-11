@@ -123,8 +123,37 @@ const MCP_ADDONS_PATH = join(CROW_HOME, "mcp-addons.json");
 const PANELS_CONFIG_PATH = join(CROW_HOME, "panels.json");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
 const APP_ROOT = resolve(__dirname, "../../..");
-const APP_BUNDLES = join(APP_ROOT, "bundles");
+// `let` (not `const`): _setAppBundlesForTest below repoints this at a scratch
+// source tree so install-set E2E tests never install real bundles onto the
+// operator's host (see tests/install-set-e2e.test.js).
+let APP_BUNDLES = join(APP_ROOT, "bundles");
 const APP_ENV_PATH = join(APP_ROOT, ".env");
+
+/** Test-only: repoint the repo bundle-source root (normally APP_ROOT/bundles). */
+export function _setAppBundlesForTest(path) { APP_BUNDLES = path; }
+
+// Test-only: override the collections.json path read by POST /install-set
+// (getCollection() defaults to the real registry/collections.json, which has
+// no path parameter at that call site — a fixture collection needs this seam
+// to be reachable at all).
+let _collectionsPathOverride = null;
+export function _setCollectionsPathForTest(path) { _collectionsPathOverride = path; }
+
+// Test-only: replace the gateway-restart side effect (which calls process.exit)
+// so install-set E2E tests can assert it fires exactly once without killing
+// the test process. Pass null to restore the real behavior.
+let _restartHookForTest = null;
+export function _setRestartHookForTest(fn) { _restartHookForTest = fn; }
+
+// Test-only: pace the install-set loop with a real setTimeout between members.
+// Default 0 = no delay (identical to production behavior). Without this, every
+// fixture install in the E2E suite is pure synchronous file I/O with no real
+// async wait, so the whole set finishes inside the microtask queue before a
+// concurrent HTTP request's socket data can even be read — the busy-gate
+// (second POST while the set runs → 409) would then be untestable over real
+// HTTP: there is no run happening for the second call to observe.
+let _installSetStepDelayMs = 0;
+export function _setInstallSetStepDelayForTest(ms) { _installSetStepDelayMs = ms; }
 
 // -----------------------------------------------------------------------
 // Cross-host manifest support (Phase 5-MVP)
@@ -994,6 +1023,10 @@ function revertEnvInGateway(envKeys) {
  * When unsupervised, just sets process.env so the storage server can reinitialize.
  */
 function scheduleGatewayRestart(delayMs = 2000) {
+  if (_restartHookForTest) {
+    _restartHookForTest(delayMs);
+    return;
+  }
   if (isSupervised()) {
     // Supervised — close server, then exit to trigger restart
     console.log("[bundles] Restarting gateway to apply new configuration...");
@@ -1859,7 +1892,7 @@ export default function bundlesRouter() {
   router.post("/bundles/api/install-set", async (req, res) => {
     const { collection_id } = req.body || {};
 
-    const collection = getCollection(collection_id);
+    const collection = getCollection(collection_id, _collectionsPathOverride || undefined);
     if (!collection) return res.status(404).json({ error: `Unknown collection '${collection_id}'` });
 
     const v = validateCollectionServerSide(collection);
@@ -1894,6 +1927,8 @@ export default function bundlesRouter() {
         appendLog(job, `Installing collection '${collection.name}' (${plan.filter((p) => p.action === "install").length} to install, ${plan.filter((p) => p.action === "skip").length} skipped)`);
 
         for (const member of collection.members) {
+          // Test-only pacing (see _setInstallSetStepDelayForTest) — 0 in production.
+          if (_installSetStepDelayMs > 0) await new Promise((r) => setTimeout(r, _installSetStepDelayMs));
           // Live gate re-check: getInstalled() has grown as earlier members landed,
           // so cumulative RAM commitments and intra-set dependencies are enforced for
           // real — not against a stale pre-set snapshot.
