@@ -154,13 +154,13 @@ test("reemitSyncableSettingsOnce: stale 'no-peers' flag row is healed (UPSERT do
     args: [],
   });
   await m.db.execute({
-    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('__sync_reemit_allowlist_v1', 'no-peers', datetime('now'))",
+    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('__sync_reemit_allowlist_v2', 'no-peers', datetime('now'))", // v2 since Cluster B (v1 orphaned by the profile-keys allowlist re-run)
     args: [],
   });
   const emitted = [];
   m.emitChange = async (_t, _o, r) => emitted.push(r.key);
   assert.ok((await m.reemitSyncableSettingsOnce()) >= 1, "stale no-peers is not terminal");
-  const { rows } = await m.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key='__sync_reemit_allowlist_v1'" });
+  const { rows } = await m.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key='__sync_reemit_allowlist_v2'" }); // v2 since Cluster B (v1 orphaned by the profile-keys allowlist re-run)
   assert.match(rows[0].value, /^done:\d+$/, "done-mark UPSERTs over the stale row");
   const before = emitted.length;
   assert.equal(await m.reemitSyncableSettingsOnce(), 0, "terminal — no per-boot re-emit thrash");

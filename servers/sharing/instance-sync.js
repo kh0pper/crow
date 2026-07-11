@@ -19,7 +19,7 @@ import { createHash } from "node:crypto";
 import { sign, verify } from "./identity.js";
 import { emitGroupUpsert } from "./group-sync.js";
 import { resolveDataDir } from "../db.js";
-import { isSyncable } from "../gateway/dashboard/settings/sync-allowlist.js";
+import { isSyncable, PROFILE_SYNC_KEYS } from "../gateway/dashboard/settings/sync-allowlist.js";
 import { normalizePubkey } from "./pubkey-util.js";
 import { readTombstone, writeTombstone, clearTombstone } from "./contact-delete.js";
 import { sanitizeDisplayName } from "./display-name.js";
@@ -468,7 +468,12 @@ export class InstanceSyncManager {
    * safe even when the peer already has current data.
    */
   async reemitSyncableSettingsOnce() {
-    const FLAG_KEY = "__sync_reemit_allowlist_v1";
+    // v1 → v2 (Cluster B, 2026-07-10): the profile keys were added to the
+    // allowlist and every fleet instance's v1 flag is already done: — without a
+    // re-run, pre-existing global profile rows (written before the settings-
+    // scope refactor) would never replicate until the next manual save. The v1
+    // flag row remains as a harmless orphan.
+    const FLAG_KEY = "__sync_reemit_allowlist_v2";
     // Same race class as backfillContactsOnce: the boot call runs concurrently
     // with the async sharing boot that arms outFeeds, so 'no-peers' must be
     // retryable, and only a real completed run ('done:<n>') is terminal.
@@ -503,6 +508,12 @@ export class InstanceSyncManager {
     let emitted = 0;
     for (const row of rows) {
       if (!isSyncable(row.key)) continue;
+      // R1 MAJOR-2 (Cluster B): never re-emit an EMPTY profile value — a
+      // historical empty row (indistinguishable from "never set") would get a
+      // fresh lamport and could win LWW, blanking a peer's real value. A LIVE
+      // save of "" still emits via writeSetting (a deliberate clear propagates);
+      // this guard is scoped to the re-emit reconciliation only.
+      if (PROFILE_SYNC_KEYS.includes(row.key) && (typeof row.value !== "string" || row.value.trim() === "")) continue;
       try {
         await this.emitChange("dashboard_settings", "update", {
           key: row.key,

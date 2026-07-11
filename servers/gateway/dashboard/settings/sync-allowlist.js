@@ -21,6 +21,16 @@ export const SYNC_ALLOWLIST = {
   nav_panel_assignments:     "Panel-to-group assignments",
   "storage.shared.*":        "Shared MinIO / S3 object-store config (secrets sealed via secret-box)",
   unified_dashboard_enabled: "Unified multi-instance dashboard opt-in",
+  // Cluster B (F-SETTINGS-1/F-CONTACT-5): own-profile identity is user-level
+  // data — it follows the user across instances like contacts/groups do.
+  // SECURITY NOTE: the sync-apply path (_applyDashboardSetting) writes peer
+  // values RAW. The defense is (a) every dashboard render of profile values is
+  // escapeHtml'd and (b) both handshake readers re-sanitize via
+  // sanitizeDisplayName at READ time. Any future reader of profile_* must
+  // follow the same rule.
+  profile_display_name:      "Own profile — display name (sent in pairing handshakes)",
+  profile_avatar_url:        "Own profile — avatar URL",
+  profile_bio:               "Own profile — bio",
   // companion_wm_federation removed — the kiosk button's federation is
   // driven by real-time overview availability now, not a separate opt-in
   // flag. Rollback to local-only kiosk is CROW_UNIFIED_DASHBOARD=0.
@@ -83,3 +93,11 @@ export function checkSyncKeyDrift(sections) {
   }
   return drift;
 }
+
+/**
+ * The three own-profile keys (explicit list, deliberately NOT a "profile_*"
+ * allowlist prefix — a future profile_ key must be consciously added).
+ * Consumed by the save-path override clear, the one-shot heal, and the
+ * re-emit empty-value guard.
+ */
+export const PROFILE_SYNC_KEYS = ["profile_display_name", "profile_avatar_url", "profile_bio"];

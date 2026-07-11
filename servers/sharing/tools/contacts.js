@@ -67,6 +67,8 @@ async function acceptInviteCore({ invite_code, display_name }, { db, identity, s
     // dashboard_settings.profile_display_name, sanitized. When unset or rejected
     // the key is OMITTED entirely — byte-identical to today, no placeholder. A
     // settings-read failure must not abort the acceptance, so it is guarded.
+    // Reads the GLOBAL scope on purpose (Cluster B design D6): profile identity
+    // is user-level; per-instance overrides of profile_* keys are intentionally inert.
     let selfName = null;
     try {
       const { rows } = await db.execute({

@@ -6,7 +6,7 @@
 
 import { randomUUID } from "crypto";
 import { parseVCard, generateVCard, parseCsv } from "./vcard.js";
-import { upsertSetting } from "../../settings/registry.js";
+import { upsertSetting, deleteLocalSetting } from "../../settings/registry.js";
 import { getContacts } from "./data-queries.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
 import { emitContactChange } from "../../../../sharing/contact-sync.js";
@@ -351,18 +351,26 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
 
   // --- Own profile ---
   if (action === "save_profile") {
+    // F-SETTINGS-1 (Cluster B D2): each save also clears any stranded
+    // broken-era local override — during the era when these keys were not
+    // sync-allowlisted, upsertSetting silently downgraded profile saves to
+    // dashboard_settings_overrides rows that no reader consults. The global
+    // row (which readers use and peers sync) must be effective from this save.
     if (req.body.display_name !== undefined) {
       // This value is SENT on every handshake and syncs to all of the user's
       // instances — cap + strip it at write (design §D5). sanitizeDisplayName
       // returns null when nothing survives; store "" rather than the literal
       // "null" so the setting is cleared, not poisoned.
       await upsertSetting(db, "profile_display_name", sanitizeDisplayName(req.body.display_name) ?? "");
+      await deleteLocalSetting(db, "profile_display_name");
     }
     if (req.body.avatar_url !== undefined) {
       await upsertSetting(db, "profile_avatar_url", req.body.avatar_url.trim());
+      await deleteLocalSetting(db, "profile_avatar_url");
     }
     if (req.body.bio !== undefined) {
       await upsertSetting(db, "profile_bio", req.body.bio.trim());
+      await deleteLocalSetting(db, "profile_bio");
     }
     return { redirect: "/dashboard/contacts?view=profile" };
   }

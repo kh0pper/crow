@@ -31,6 +31,8 @@ import { sanitizeDisplayName } from "./display-name.js";
  * Read the local user's own display name (dashboard_settings.profile_display_name),
  * sanitized (design §D5). Returns null when unset, empty, rejected, or on any DB
  * error — the caller then omits the field entirely (no placeholder). Never throws.
+ * Reads the GLOBAL scope on purpose (Cluster B design D6): profile identity is
+ * user-level; per-instance overrides of profile_* keys are intentionally inert.
  */
 async function readLocalDisplayName(db) {
   try {
