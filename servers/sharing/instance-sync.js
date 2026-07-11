@@ -85,7 +85,12 @@ export const EXCLUDED_COLUMNS = {
   crow_instances: ["auth_token_hash"],
   // apiKey can be sensitive for some deployments; keep in sync by default for
   // local-lab scenarios but flag here as the place to exclude if paranoid.
-  providers: [],
+  // created_at/updated_at are per-instance bookkeeping that ride the wire
+  // TODAY via disableProvider's SELECT * spread and manufacture the same
+  // spurious conflicts as contacts.created_at below. lamport_ts is sync
+  // metadata carried in the entry envelope, not the row (prior art:
+  // messages/contact_groups).
+  providers: ["created_at", "updated_at", "lamport_ts"],
   // Phase 3 (contacts follow the user): `verified` is a per-device attestation
   // ("I compared the safety number on THIS device") — never assert it on a
   // device that didn't check. `last_seen` is bumped on every inbound DM
@@ -115,6 +120,19 @@ export const EXCLUDED_COLUMNS = {
 // as project-less (null project_id).
 const OUTBOUND_TRANSFORMS = {
   research_notes: (row) => ({ ...row, project_id: null }),
+  // providers: a null gpu_policy must not ride the wire — _applyUpdate writes
+  // wire nulls verbatim and would null a peer's locally-set policy, while the
+  // local write path already treats null as "keep" (COALESCE,
+  // providers-db.js:198). Drop the key when null; pass through otherwise.
+  // NOTE: transforms are applied in emitChange AND to the local row in
+  // _checkConflict — must be pure (never mutate the input).
+  providers: (row) => {
+    if (row.gpu_policy == null) {
+      const { gpu_policy, ...rest } = row;
+      return rest;
+    }
+    return { ...row };
+  },
 };
 
 /**
@@ -203,6 +221,26 @@ function shouldSyncRow(table, row) {
     // `!= null` catches both null and undefined (a delete row omits room_uid).
     if (row.room_uid != null) return false;
     return Boolean(row.group_uid);
+  }
+  if (table === "providers") {
+    // Loopback endpoints are per-instance by construction: a peer dialing
+    // 127.0.0.1 reaches ITSELF, never the origin's service. They're also
+    // co-owned by every instance's locality predicate (loopback matches
+    // everywhere), so the reconciler ownership gate cannot partition them —
+    // keeping them off the wire entirely (this function gates BOTH emit and
+    // apply) is the only clean single-writer story. Missing/malformed
+    // base_url → defensive false: a providers row without a parseable
+    // endpoint shouldn't sync either.
+    if (!row || !row.base_url) return false;
+    let hostname;
+    try {
+      hostname = new URL(row.base_url).hostname;
+    } catch {
+      return false;
+    }
+    const host = hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+    if (host === "localhost" || host === "::1" || /^127\./.test(host)) return false;
+    return true;
   }
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
@@ -807,6 +845,16 @@ export class InstanceSyncManager {
     if (!SYNCED_TABLES.includes(table)) return null;
     if (!shouldSyncRow(table, row)) return null; // local-only row; don't broadcast
 
+    // Envelope counter floor: after a sync_state reset (e.g. DB recovery) the
+    // local counter can sit BELOW lamports already stamped on rows; an emit
+    // would then look stale to peers (they order on the envelope) and the
+    // divergence is silent and permanent. Floor the counter at the outgoing
+    // row's own lamport first — _advanceCounter is an atomic
+    // MAX(counter, ts+1), so the _nextLamport below strictly exceeds it.
+    const rowTs = Number(row?.lamport_ts);
+    if (Number.isFinite(rowTs) && rowTs > 0) {
+      await this._advanceCounter(rowTs);
+    }
     const lamportTs = await this._nextLamport();
 
     // Strip excluded columns
