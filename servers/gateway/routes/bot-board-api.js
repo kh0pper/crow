@@ -117,6 +117,31 @@ async function derivePlanPath(cdb, card) {
   return null;
 }
 
+// plan_ref-aware resolution: repo refs resolve under the project's repo_path
+// (400-style null when unset — NEVER fall back to the workspace for a repo
+// ref); null/workspace refs keep the legacy derived path. Returns
+// { path, root, kind } or { error } for the endpoints to translate.
+async function resolveCardPlan(cdb, card) {
+  const ref = parsePlanRef(card.plan_ref);
+  if (ref && ref.kind === "repo") {
+    let repoRoot = null;
+    if (card.project_id != null) {
+      try {
+        const p = (await cdb.execute({
+          sql: "SELECT repo_path FROM project_spaces WHERE id=?", args: [Number(card.project_id)],
+        })).rows[0];
+        repoRoot = p && p.repo_path ? String(p.repo_path) : null;
+      } catch { repoRoot = null; }
+    }
+    const r = resolvePlanFile(ref, { repoRoot, workspaceInfo: null });
+    if (!r) return { error: "repo plan_ref set but project has no repo_path" };
+    return r;
+  }
+  const info = await derivePlanPath(cdb, card);
+  const r = resolvePlanFile(ref, { repoRoot: null, workspaceInfo: info });
+  if (!r) return { error: "no bot is linked to this project" };
+  return r;
+}
 
 // Fail-closed pi-liveness (Step-1 pinned pattern, recorded in the plan's
 // Verified Claims): a process is "the live pi holding bot_sessions row R"
@@ -371,16 +396,20 @@ export default function botBoardApiRouter(dashboardAuth) {
     let tdb, cdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      const card = (await tdb.execute({ sql: "SELECT id, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const card = (await tdb.execute({ sql: "SELECT id, project_id, plan_ref FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
       cdb = createDbClient();
-      const info = await derivePlanPath(cdb, card);
-      if (!info) return res.json({ exists: false, markdown: "", mtime: null, reason: "no bot is linked to this project" });
-      const real = containedRealPath(info.path, info.sessionDir);
-      if (!real) return jsonError(res, 400, "plan path escapes the bot workspace");
-      if (!existsSync(info.path)) return res.json({ exists: false, markdown: "", mtime: null });
+      const info = await resolveCardPlan(cdb, card);
+      if (info.error) {
+        return info.error.startsWith("no bot")
+          ? res.json({ exists: false, markdown: "", mtime: null, reason: info.error })
+          : jsonError(res, 400, info.error);
+      }
+      const real = containedRealPath(info.path, info.root);
+      if (!real) return jsonError(res, 400, "plan path escapes its root");
+      if (!existsSync(info.path)) return res.json({ exists: false, markdown: "", mtime: null, kind: info.kind });
       const mtime = String(statSync(info.path).mtimeMs);
-      return res.json({ exists: true, markdown: readFileSync(info.path, "utf8"), mtime });
+      return res.json({ exists: true, markdown: readFileSync(info.path, "utf8"), mtime, kind: info.kind });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
@@ -401,12 +430,14 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const card = (await tdb.execute({ sql: "SELECT id, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const card = (await tdb.execute({ sql: "SELECT id, project_id, plan_ref FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
-      const info = await derivePlanPath(cdb, card);
-      if (!info) return jsonError(res, 400, "no bot is linked to this project — no plan path");
-      const real = containedRealPath(info.path, info.sessionDir);
-      if (!real) return jsonError(res, 400, "plan path escapes the bot workspace");
+      const info = await resolveCardPlan(cdb, card);
+      if (info.error) return jsonError(res, 400, info.error);
+      const real = containedRealPath(info.path, info.root);
+      if (!real) return jsonError(res, 400, "plan path escapes its root");
+      // repo plans may live in a not-yet-created .pi/plans/ — create it (contained).
+      mkdirSync(info.path.slice(0, info.path.lastIndexOf("/")), { recursive: true });
       const exists = existsSync(info.path);
       if (exists) {
         // Optimistic concurrency: the client's mtime (from its GET) must

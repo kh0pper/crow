@@ -104,3 +104,36 @@ test("assigned_bot: set to known bot OK, unknown 400, clear OK", async () => {
     body: JSON.stringify({ title: "card one", assigned_bot: "" }) });
   assert.equal(clear.status, 200);
 });
+
+test("plan GET/POST honors a repo plan_ref, contained under repo_path", async () => {
+  const { mkdtempSync: mkd, mkdirSync: mkdir, writeFileSync: wf } = await import("node:fs");
+  const repo = mkd(join(tmpdir(), "board-repo-"));
+  mkdir(join(repo, ".pi", "plans"), { recursive: true });
+  wf(join(repo, ".pi", "plans", "card-1.md"), "# the plan\n");
+  const c = new Database(process.env.CROW_DB_PATH);
+  c.prepare("UPDATE project_spaces SET repo_path=? WHERE id=1").run(repo);
+  c.close();
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  t.prepare("UPDATE tasks_items SET plan_ref=? WHERE id=1")
+    .run(JSON.stringify({ kind: "repo", path: ".pi/plans/card-1.md" }));
+  t.close();
+  const g = await (await fetch(base + "/card/1/plan")).json();
+  assert.equal(g.exists, true);
+  assert.equal(g.kind, "repo");
+  assert.equal(g.markdown, "# the plan\n");
+  const p = await fetch(base + "/card/1/plan", { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ markdown: "# edited\n", mtime: g.mtime }) });
+  assert.equal(p.status, 200);
+});
+
+test("repo plan_ref with no repo_path on the project → 400, never a fallback", async () => {
+  const c = new Database(process.env.CROW_DB_PATH);
+  c.prepare("UPDATE project_spaces SET repo_path=NULL WHERE id=1").run();
+  c.close();
+  const g = await fetch(base + "/card/1/plan");
+  assert.equal(g.status, 400);
+  const t = new Database(process.env.CROW_TASKS_DB_PATH); // restore for later tests
+  t.prepare("UPDATE tasks_items SET plan_ref=NULL WHERE id=1").run();
+  t.close();
+});
