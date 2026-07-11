@@ -1684,6 +1684,22 @@ export function needsConfigKeys(bundleId, envOverride = null) {
 export default function bundlesRouter() {
   const router = Router();
 
+  // Cross-host verification. dashboard/index.js routes ANY request bearing an
+  // x-crow-signature header straight here, BEFORE dashboardAuth and CSRF — so a
+  // bogus header would otherwise reach install/uninstall/restart/env with no auth
+  // at all. Mount router-wide (not per-route): denylist-by-omission is how
+  // /restart (unauthenticated gateway DoS) and /env (unauthenticated secret write)
+  // stayed exposed. optional:true ⇒ unsigned requests fall through to the normal
+  // dashboardAuth+CSRF mount, so the dashboard path is unaffected.
+  const dbForXhost = createDbClient();
+  const xhostVerify = crossHostVerifyMiddleware(dbForXhost, {
+    optional: true, // non-signed requests fall through to dashboardAuth/OAuth
+    audit: (req) => `bundle.${(req.path.split("/").pop() || "")}`,
+    auditBundleId: true,
+    // emptyBodyString stays at the default "{}" — bundle signers hash JSON.stringify(body || {})
+  });
+  router.use(xhostVerify);
+
   // GET /bundles/api/status — List installed bundles with container status
   router.get("/bundles/api/status", async (req, res) => {
     const installed = getInstalled();
@@ -2095,16 +2111,6 @@ export default function bundlesRouter() {
     })();
   });
 
-  // Cross-host verification middleware — runs before start/stop, only acts if
-  // X-Crow-Signature header is present (otherwise falls through to existing auth).
-  const dbForXhost = createDbClient();
-  const xhostVerify = crossHostVerifyMiddleware(dbForXhost, {
-    optional: true, // non-signed requests fall through to dashboardAuth/OAuth
-    audit: (req) => `bundle.${(req.path.split("/").pop() || "")}`,
-    auditBundleId: true,
-    // emptyBodyString stays at the default "{}" — bundle signers hash JSON.stringify(body || {})
-  });
-
   /**
    * Unified bundle-action dispatcher: if the bundle manifest declares
    * `host: <instance-id>` (and trust boundary passes), forward to that peer.
@@ -2177,7 +2183,7 @@ export default function bundlesRouter() {
   }
 
   // POST /bundles/api/start — Start bundle containers (local or peer)
-  router.post("/bundles/api/start", xhostVerify, async (req, res) => {
+  router.post("/bundles/api/start", async (req, res) => {
     const { bundle_id } = req.body || {};
     if (!bundle_id || !isValidBundleId(bundle_id)) {
       return res.status(400).json({ error: "Invalid bundle ID" });
@@ -2192,7 +2198,7 @@ export default function bundlesRouter() {
   });
 
   // POST /bundles/api/stop — Stop bundle containers (local or peer)
-  router.post("/bundles/api/stop", xhostVerify, async (req, res) => {
+  router.post("/bundles/api/stop", async (req, res) => {
     const { bundle_id } = req.body || {};
     if (!bundle_id || !isValidBundleId(bundle_id)) {
       return res.status(400).json({ error: "Invalid bundle ID" });
