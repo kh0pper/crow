@@ -120,7 +120,10 @@ export class NostrManager {
       }
     }
 
-    setRelaysConnected(this.relays.size);
+    // F-HEALTH-2: live count, not map size (defensive — at connect time they
+    // match today because the wrapper only runs from an empty map, but a
+    // relay dropping between .set() and here reads honest).
+    this._refreshRelayHealth();
     return [...this.relays.keys()];
   }
 
@@ -378,6 +381,23 @@ export class NostrManager {
   }
 
   /**
+   * F-HEALTH-2: mirror LIVE socket state into receive-health. relay.connected
+   * is the canonical liveness bit — enablePing flips it false on a silently-
+   * dead socket (the same signal ensureHealthy keys on), and ensureHealthy's
+   * relay.connect() flips it back true, so the count self-heals both ways.
+   * Fully guarded: this runs synchronously inside the interval callback, and
+   * an escaped throw there is an uncaughtException (per-entry try so one
+   * hostile/broken relay object can't hide the others).
+   */
+  _refreshRelayHealth() {
+    let live = 0;
+    for (const relay of this.relays.values()) {
+      try { if (relay && relay.connected === true) live++; } catch { /* count it dead */ }
+    }
+    try { setRelaysConnected(live); } catch { /* never escape the interval */ }
+  }
+
+  /**
    * Start the single periodic health loop that re-establishes any resilient
    * subscription whose relay has dropped. Idempotent (created once). unref'd so
    * it never keeps the process alive on its own.
@@ -386,6 +406,11 @@ export class NostrManager {
     if (this._healthTimer) return;
     const ms = Number(process.env.CROW_NOSTR_HEALTH_MS) || 45000;
     this._healthTimer = setInterval(() => {
+      // F-HEALTH-2: refresh BEFORE the ensureHealthy sweep — the sweep
+      // reconnects this same tick, and refreshing after it would erase the
+      // degraded reading and re-hide the outage (the exact bug class this
+      // fixes). Ordering is load-bearing; do not move below the loop.
+      this._refreshRelayHealth();
       for (const h of this.subscriptions.values()) {
         // ensureHealthy is async — a sync try/catch would NOT catch a rejected
         // promise. Wrap so a stray rejection can never become an unhandledRejection
@@ -781,5 +806,6 @@ export class NostrManager {
       } catch {}
     }
     this.relays.clear();
+    setRelaysConnected(0); // a destroyed manager must not freeze a stale count
   }
 }
