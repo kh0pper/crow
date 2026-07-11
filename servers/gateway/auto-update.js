@@ -52,6 +52,31 @@ async function getSettings() {
 }
 
 /**
+ * Timer-tick wrapper: re-reads auto_update_enabled each tick so a UI disable
+ * takes effect within one interval, no restart. The gate lives HERE and NOT
+ * in checkForUpdates() — the manual "Check for updates now" settings action
+ * calls checkForUpdates() directly and must work while auto-update is
+ * disabled (that is the point of a manual button). getSettings() cannot
+ * throw: on DB error it returns defaults (enabled:"true"), indistinguishable
+ * from a fresh install, so a blip proceeds for that one tick — consistent
+ * with the boot gate's identical defaulting; self-corrects next tick.
+ * `check` is injectable for tests only.
+ */
+export async function tickCheck(check = checkForUpdates) {
+  const settings = await getSettings();
+  if (settings.auto_update_enabled !== "true") {
+    console.log("[auto-update] Skipping scheduled check — disabled in settings");
+    return null;
+  }
+  return check();
+}
+
+/** Test-only: inject the module-level db handle without starting timers. */
+export function _setDbForTest(database) {
+  db = database;
+}
+
+/**
  * Save a setting to DB
  */
 async function saveSetting(key, value) {
@@ -228,9 +253,9 @@ export async function startAutoUpdate(database) {
 
   // First check after 5 minutes (let gateway fully start)
   updateTimer = setTimeout(async () => {
-    await checkForUpdates();
+    await tickCheck();
     // Then schedule recurring checks
-    updateTimer = setInterval(() => checkForUpdates(), intervalMs);
+    updateTimer = setInterval(() => { tickCheck().catch(() => {}); }, intervalMs);
   }, 5 * 60 * 1000);
 }
 
