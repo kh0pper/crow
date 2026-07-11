@@ -514,6 +514,42 @@ test("BEHAVIOR: a failed Configure save keeps the checklist entry and shows the 
   assert.match(saveBtn.textContent, /Retry/);
 });
 
+test("BEHAVIOR: an empty Configure save is refused — no fetch, onSaved never runs", async () => {
+  // renderPendingChecklist() consumes crow_ext_needs_config from sessionStorage
+  // unconditionally at load (it's re-written only from inside onSaved, with
+  // whatever the in-memory checklist `list` looks like at that moment) — so the
+  // observable proof that a blocked save didn't silently "complete" the entry
+  // is that onSaved's side effects (splicing it out of `list`, moving the modal
+  // on to the next screen) never fire, not sessionStorage state at rest.
+  const { $, click, settle, document, calls } = boot({
+    session: { crow_ext_needs_config: JSON.stringify([{ id: "jellyfin", keys: ["JELLYFIN_API_KEY"] }]) },
+    fetchImpl: envFetch(),
+  });
+
+  click($(".ext-checklist__configure"));
+  await settle();
+
+  // Leave the field blank and click Save.
+  const saveBtn = document.querySelector("#modal-content .ext-checklist__save");
+  click(saveBtn);
+  await settle();
+
+  assert.ok(
+    !calls.some((c) => c.url.includes("/bundles/api/env")),
+    "a blank form must not POST to /bundles/api/env",
+  );
+  assert.ok(
+    document.getElementById("env_JELLYFIN_API_KEY"),
+    "the Configure form for the still-unconfigured key stays on screen — onSaved (which would replace it) never ran",
+  );
+  assert.equal(saveBtn.disabled, false, "the button must not be left in the disabled/saving state");
+  assert.match(
+    document.getElementById("install-status").textContent,
+    /fill in|value/i,
+    "the form tells the user why it didn't save",
+  );
+});
+
 // ─── 7. Category badge i18n (the live gap: the detail modal rendered the raw slug) ───
 
 test("BEHAVIOR: the detail modal shows a localized category, never the raw registry slug", () => {

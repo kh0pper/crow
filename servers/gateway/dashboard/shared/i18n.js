@@ -640,6 +640,7 @@ export const translations = {
   "extensions.collectionConfigureDesc": { en: "These extensions are installed but need a value before they can do anything:", es: "Estas extensiones están instaladas pero necesitan un valor para funcionar:" },
   "extensions.configure": { en: "Configure", es: "Configurar" },
   "extensions.configureDesc": { en: "This add-on is already installed. Fill in the value below and save.", es: "Este complemento ya está instalado. Completa el valor a continuación y guarda." },
+  "extensions.configureEmpty": { en: "Fill in at least one value before saving.", es: "Completa al menos un valor antes de guardar." },
   "extensions.saving": { en: "Saving...", es: "Guardando..." },
   "extensions.configureSaved": { en: "Saved.", es: "Guardado." },
   "extensions.configureNeedsRestart": { en: "Saved — restart the gateway to apply this change.", es: "Guardado — reinicia la puerta de enlace para aplicar este cambio." },
