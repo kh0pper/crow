@@ -118,7 +118,7 @@ export async function loadAddonSettings() {
   }
 }
 
-import { isSyncable } from "./sync-allowlist.js";
+import { isSyncable, isInstanceScope } from "./sync-allowlist.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 
 // Optional InstanceSyncManager injection so writeSetting() can broadcast
@@ -174,24 +174,27 @@ export async function readSettings(db, pattern) {
 }
 
 /**
- * Write a setting with explicit scope.
+ * Write a setting with explicit scope. Three-way routing:
  *
- * scope:
- *   - "global" → dashboard_settings row (synced if key in SYNC_ALLOWLIST).
- *     Does NOT clear a local override — an existing override for this instance
- *     keeps winning readSetting until deleteLocalSetting is called (the scope
- *     route does that explicitly; see routes/settings-scope.js).
- *   - "local"  → dashboard_settings_overrides row keyed by (key, instance_id).
- *     Never syncs. Takes precedence over the global row on reads.
- *
- * allowLocalFallback: when scope="global" and the key is NOT in the allowlist,
- * silently downgrade to local. Default true (preserves legacy upsertSetting behavior).
+ *   - allowlisted key + scope "global"     → dashboard_settings row, EMITTED
+ *     to paired peers. Does NOT clear a local override — an existing override
+ *     for this instance keeps winning readSetting until deleteLocalSetting is
+ *     called (the scope route does that explicitly; see routes/settings-scope.js).
+ *   - instance-scope key + scope "global"  → dashboard_settings row, NEVER
+ *     emitted (per-install setting; readers are global-direct by design —
+ *     see INSTANCE_SCOPE_KEYS in sync-allowlist.js).
+ *   - any other key + scope "global"       → silently downgraded to local
+ *     (legacy upsertSetting behavior) unless allowLocalFallback:false, which
+ *     throws NotSyncable instead.
+ *   - scope "local" → dashboard_settings_overrides row keyed by
+ *     (key, instance_id). Never syncs. Takes precedence over the global row
+ *     on readSetting reads.
  */
 export async function writeSetting(db, key, value, opts = {}) {
   const { scope = "global", allowLocalFallback = true } = opts;
 
   let effectiveScope = scope;
-  if (scope === "global" && !isSyncable(key)) {
+  if (scope === "global" && !isSyncable(key) && !isInstanceScope(key)) {
     if (!allowLocalFallback) {
       const err = new Error(`Setting key "${key}" is not in the sync allowlist (fail-closed).`);
       err.code = "NotSyncable";
@@ -218,8 +221,12 @@ export async function writeSetting(db, key, value, opts = {}) {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
     args: [key, value],
   });
-  // Emit to peers — filter happens inside InstanceSyncManager.
-  await emitSettingsSync("update", { key, value, instance_id: null });
+  // Emit to peers only for allowlisted keys. Instance-scope keys are
+  // per-install and must not emit (the manager's shouldSyncRow gate would
+  // drop them anyway — this makes the intent explicit at the source).
+  if (isSyncable(key)) {
+    await emitSettingsSync("update", { key, value, instance_id: null });
+  }
   return { scope: "global", instance_id: null };
 }
 
@@ -253,7 +260,7 @@ export async function getSettingScope(db, key) {
   return "none";
 }
 
-export { isSyncable };
+export { isSyncable, isInstanceScope };
 
 /**
  * Legacy shared upsert helper for dashboard_settings table.
