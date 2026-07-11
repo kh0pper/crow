@@ -479,6 +479,21 @@ export class NostrManager {
               }
             }
 
+            // F-BLOCK-1 D4a: fresh block check. The sub is torn down on block,
+            // but an in-flight event — or a future wiring path that forgets
+            // teardown — must not store, notify, bump unread, mirror, receipt,
+            // or surface a blocked contact's DM. Silent drop (no receipt: we
+            // deliberately stop confirming receipt to a blocked party).
+            if (contactId && this.db) {
+              try {
+                const { rows: blockRows } = await this.db.execute({
+                  sql: "SELECT is_blocked FROM contacts WHERE id = ?",
+                  args: [contactId],
+                });
+                if (Number(blockRows?.[0]?.is_blocked ?? 0) === 1) return;
+              } catch { /* an unreadable check must not break delivery */ }
+            }
+
             if (contactId && this.db) {
               try {
                 const result = await this.db.execute({
