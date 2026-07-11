@@ -103,9 +103,12 @@ export function checkSyncKeyDrift(sections) {
 export const PROFILE_SYNC_KEYS = ["profile_display_name", "profile_avatar_url", "profile_bio"];
 
 /**
- * Instance-scope keys — per-install settings whose readers query the global
- * dashboard_settings table directly (auto-update timer, notification delivery
- * gate, peer-discovery API, public blog, media bundle, setup pages). Each
+ * Instance-scope keys — per-install settings whose load-bearing readers
+ * resolve from the global dashboard_settings table (most query it directly —
+ * auto-update timer, notification delivery gate, peer-discovery API, public
+ * blog, media bundle, setup pages; a few, like the language chrome and the
+ * onboarding guard, go through readSetting, which is equivalent post-heal
+ * because no instance-scope override rows remain). Each
  * instance's DB is its own world for these: replication is gated by
  * isSyncable at BOTH emit (instance-sync.js shouldSyncRow) and apply (the
  * inbound-entry dispatch), so a global row for a key listed here NEVER leaves
