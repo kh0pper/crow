@@ -183,7 +183,7 @@ export async function runPostListenSetup(server, app, deps) {
   setInterval(runRemoteProbe, 60_000).unref();
 
   // Start auto-update checker
-  startAutoUpdate(createDbClient()).catch((err) => {
+  startAutoUpdate(createDbClient(), { noAuth }).catch((err) => {
     console.error("[auto-update] Failed to start:", err.message);
   });
 
