@@ -499,7 +499,9 @@ const { peerExposureGate } = await mountMcpServers(app, { authMiddleware, noAuth
 await mountFeatureRoutes(app, { authMiddleware, dashboardAuth, peerExposureGate, sessionManager, instructions, PORT });
 
 // boot/admin-api.js — /api/health, provider health, LLM migration, provider seed/reconciler, storage wiring
-await mountAdminApi(app, { dashboardAuth });
+// noAuth gates the provider seed/reconcile/interval (R2-C1: a --no-auth
+// companion shares the primary's DB and must not write synced provider rows).
+await mountAdminApi(app, { dashboardAuth, noAuth });
 
 // --- Mount Crow's Nest (conditional) ---
 try {

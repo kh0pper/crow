@@ -85,7 +85,12 @@ export const EXCLUDED_COLUMNS = {
   crow_instances: ["auth_token_hash"],
   // apiKey can be sensitive for some deployments; keep in sync by default for
   // local-lab scenarios but flag here as the place to exclude if paranoid.
-  providers: [],
+  // created_at/updated_at are per-instance bookkeeping that ride the wire
+  // TODAY via disableProvider's SELECT * spread and manufacture the same
+  // spurious conflicts as contacts.created_at below. lamport_ts is sync
+  // metadata carried in the entry envelope, not the row (prior art:
+  // messages/contact_groups).
+  providers: ["created_at", "updated_at", "lamport_ts"],
   // Phase 3 (contacts follow the user): `verified` is a per-device attestation
   // ("I compared the safety number on THIS device") — never assert it on a
   // device that didn't check. `last_seen` is bumped on every inbound DM
@@ -115,6 +120,19 @@ export const EXCLUDED_COLUMNS = {
 // as project-less (null project_id).
 const OUTBOUND_TRANSFORMS = {
   research_notes: (row) => ({ ...row, project_id: null }),
+  // providers: a null gpu_policy must not ride the wire — _applyUpdate writes
+  // wire nulls verbatim and would null a peer's locally-set policy, while the
+  // local write path already treats null as "keep" (COALESCE,
+  // providers-db.js:198). Drop the key when null; pass through otherwise.
+  // NOTE: transforms are applied in emitChange AND to the local row in
+  // _checkConflict — must be pure (never mutate the input).
+  providers: (row) => {
+    if (row.gpu_policy == null) {
+      const { gpu_policy, ...rest } = row;
+      return rest;
+    }
+    return { ...row };
+  },
 };
 
 /**
@@ -203,6 +221,26 @@ function shouldSyncRow(table, row) {
     // `!= null` catches both null and undefined (a delete row omits room_uid).
     if (row.room_uid != null) return false;
     return Boolean(row.group_uid);
+  }
+  if (table === "providers") {
+    // Loopback endpoints are per-instance by construction: a peer dialing
+    // 127.0.0.1 reaches ITSELF, never the origin's service. They're also
+    // co-owned by every instance's locality predicate (loopback matches
+    // everywhere), so the reconciler ownership gate cannot partition them —
+    // keeping them off the wire entirely (this function gates BOTH emit and
+    // apply) is the only clean single-writer story. Missing/malformed
+    // base_url → defensive false: a providers row without a parseable
+    // endpoint shouldn't sync either.
+    if (!row || !row.base_url) return false;
+    let hostname;
+    try {
+      hostname = new URL(row.base_url).hostname;
+    } catch {
+      return false;
+    }
+    const host = hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+    if (host === "localhost" || host === "::1" || /^127\./.test(host)) return false;
+    return true;
   }
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
@@ -634,6 +672,123 @@ export class InstanceSyncManager {
   }
 
   /**
+   * D7 — one-shot providers backfill PER PEER GENERATION (the new-pairing
+   * counterpart to D2's no-op suppression). Outgoing sync feeds are per-peer
+   * Hypercores created EMPTY at first pairing (_initInstanceInner — no history
+   * replay); before D2, the boot reconciler's unconditional per-boot re-emit
+   * was accidentally how a newly-paired peer ever received this instance's
+   * provider rows. D2 kills that boot churn, so this backfill is the
+   * deliberate delivery channel.
+   *
+   * Unlike the GLOBAL contacts flag, the flag here is PER PEER
+   * (`__providers_backfill_v1:<peerId>` in dashboard_settings) so every FUTURE
+   * pairing also gets a backfill — not just the deploy transition. Only a
+   * "done:*" value is terminal; a stale non-done value is overwritten by the
+   * UPSERT done-mark. Zero armed peers → return WITHOUT writing any flag
+   * (feeds may not have opened yet this boot — retry next boot; contacts
+   * lesson, observed live on grackle 2026-07-06). Inbound backlog is drained
+   * first (I-B1) so a peer's already-delivered newer provider edit is applied
+   * before we re-emit with a fresh lamport.
+   *
+   * emitChange broadcasts to ALL peers as op="insert": fresh peers land the
+   * row via _applyInsert's INSERT OR IGNORE; already-current peers IGNORE and
+   * converge it as re-delivery noise (rowsEquivalent → no conflict logged) —
+   * accepted cost, same as the contacts backfill. shouldSyncRow('providers')
+   * inside emitChange drops loopback rows automatically, and
+   * EXCLUDED_COLUMNS/OUTBOUND_TRANSFORMS strip bookkeeping + null gpu_policy —
+   * no pre-filtering here. Disabled rows ARE included: disabled=1 is a synced
+   * fact the peer must learn (see disableProvider's emit).
+   *
+   * Documented limitation (parity with the contacts backfill): a pairing
+   * formed mid-run without a subsequent reboot waits for the next boot —
+   * acceptable, pairing flows involve restarts in practice.
+   * Never throws out of the loop. Returns the count of rows actually emitted.
+   */
+  async backfillProvidersForNewPeers() {
+    const FLAG_PREFIX = "__providers_backfill_v1:";
+    if (this.outFeeds.size === 0) {
+      // No peer feeds armed (yet) — deliberately write NO flags: feeds may
+      // simply not have opened yet this boot. A later boot retries; a
+      // genuinely peer-less instance just re-runs a cheap check per boot.
+      return 0;
+    }
+
+    // Which armed peers still need a backfill? Only "done:*" is terminal.
+    const newPeers = [];
+    for (const peerId of this.outFeeds.keys()) {
+      let done = false;
+      try {
+        const { rows } = await this.db.execute({
+          sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+          args: [FLAG_PREFIX + peerId],
+        });
+        done = typeof rows?.[0]?.value === "string" && rows[0].value.startsWith("done:");
+      } catch {}
+      if (!done) newPeers.push(peerId);
+    }
+    if (newPeers.length === 0) return 0; // every armed peer already covered
+
+    // I-B1 ordering guard: drain the locally-replicated inbound backlog FIRST,
+    // so a peer's already-delivered newer provider edit is applied before we
+    // re-emit with a fresh lamport and fabricate recency over it.
+    try {
+      for (const [peerId, inFeed] of this.inFeeds) {
+        await this._processNewEntries(peerId, inFeed);
+      }
+    } catch (err) {
+      console.warn(`[instance-sync] providers backfill drain failed: ${err.message}`);
+    }
+
+    let rows = [];
+    try {
+      // ALL rows, including disabled ones — disabled=1 is a synced fact.
+      // No pre-filtering: shouldSyncRow inside emitChange drops loopback rows,
+      // EXCLUDED_COLUMNS/OUTBOUND_TRANSFORMS handle wire hygiene.
+      const r = await this.db.execute({ sql: "SELECT * FROM providers" });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] providers backfill read failed: ${err.message}`);
+      return 0;
+    }
+
+    let emitted = 0;
+    for (const row of rows) {
+      try {
+        // op MUST be "insert", not "update": providers has no natural-key
+        // apply handler, so an update falls through to the generic
+        // _applyUpdate (`UPDATE … WHERE id=?`) which matches ZERO rows on the
+        // freshly-paired peer this backfill exists for — the row would be
+        // silently never delivered. "insert" lands via _applyInsert's
+        // INSERT OR IGNORE: delivers to fresh peers, no-ops benignly on
+        // peers that already hold an equivalent row (final-review B1).
+        // emitChange returns null when the row was gated off the wire
+        // (loopback / feedsDisabled) — only count rows that actually rode.
+        const ts = await this.emitChange("providers", "insert", row);
+        if (ts != null) emitted++;
+      } catch (err) {
+        console.warn(`[instance-sync] providers backfill emit failed for ${row.id}: ${err.message}`);
+      }
+    }
+
+    for (const peerId of newPeers) {
+      try {
+        // UPSERT: a stale non-done value must be overwritten or the done-mark
+        // silently no-ops (per-boot re-emit thrash). Already-done peers are
+        // never rewritten — only the previously-unflagged ones.
+        await this.db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+          args: [FLAG_PREFIX + peerId, `done:${emitted}`],
+        });
+      } catch {}
+    }
+
+    if (emitted > 0) {
+      console.log(`[instance-sync] providers backfill: ${emitted} provider row(s) re-emitted for ${newPeers.length} new peer(s)`);
+    }
+    return emitted;
+  }
+
+  /**
    * C1: assign a DETERMINISTIC, FROZEN group_uid to every pre-existing PLAIN group
    * the migration left NULL, so the SAME logical group on two instances (same shared
    * identity) converges on ONE uid instead of duplicating. uid = first-32-hex of
@@ -807,6 +962,16 @@ export class InstanceSyncManager {
     if (!SYNCED_TABLES.includes(table)) return null;
     if (!shouldSyncRow(table, row)) return null; // local-only row; don't broadcast
 
+    // Envelope counter floor: after a sync_state reset (e.g. DB recovery) the
+    // local counter can sit BELOW lamports already stamped on rows; an emit
+    // would then look stale to peers (they order on the envelope) and the
+    // divergence is silent and permanent. Floor the counter at the outgoing
+    // row's own lamport first — _advanceCounter is an atomic
+    // MAX(counter, ts+1), so the _nextLamport below strictly exceeds it.
+    const rowTs = Number(row?.lamport_ts);
+    if (Number.isFinite(rowTs) && rowTs > 0) {
+      await this._advanceCounter(rowTs);
+    }
     const lamportTs = await this._nextLamport();
 
     // Strip excluded columns

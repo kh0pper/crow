@@ -29,6 +29,7 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { createDbClient } from "../db.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
+import { getOwnAddresses, isLocallyOrchestratable } from "./locality.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || "/home/kh0pp";
@@ -163,22 +164,101 @@ async function emitSync(op, row) {
 }
 
 /**
+ * Canonical deep-equal for parsed-JSON values: recursive, object-key-order
+ * insensitive, array-order sensitive. Used by the upsert no-op comparator so
+ * `models` / `gpu_policy` compare on structure, never on string form (a
+ * key-order shuffle in models.json must not count as a change).
+ */
+function canonicalJsonEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+  const aArr = Array.isArray(a);
+  if (aArr !== Array.isArray(b)) return false;
+  if (aArr) {
+    if (a.length !== b.length) return false;
+    return a.every((v, i) => canonicalJsonEqual(v, b[i]));
+  }
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((k) => Object.prototype.hasOwnProperty.call(b, k) && canonicalJsonEqual(a[k], b[k]));
+}
+
+/**
+ * D2 no-op comparator: does the write-image match the stored row on every
+ * content column? Normalization rules (spec R1-F6):
+ *   - base_url/host/bundle_id/description/provider_type: (x ?? null), String
+ *     coercion on non-null (libsql may return non-string cell types).
+ *   - disabled: both sides → Number(x) ? 1 : 0 (libsql can return BigInt).
+ *   - api_key: null ≡ "" (both mean "no key"), otherwise strict.
+ *   - models: canonical deep-equal of JSON.parse(dbRow.models) vs the incoming
+ *     array. DB-side parse failure → CHANGED (R2-m3 FAIL-OPEN: the good
+ *     incoming content overwrites the corruption; fail-closed would make a
+ *     corrupt row permanently unhealable).
+ *   - gpu_policy: incoming null/undefined → UNCHANGED by definition (the SQL
+ *     uses COALESCE(excluded.gpu_policy, providers.gpu_policy), so a null
+ *     write keeps the stored value). Non-null → deep-equal of parsed values;
+ *     any parse failure → CHANGED (same fail-open rule).
+ */
+function upsertIsNoop(existing, w) {
+  const s = (x) => (x == null ? null : String(x));
+  if (s(existing.base_url) !== s(w.baseUrl)) return false;
+  if (s(existing.host) !== s(w.host)) return false;
+  if (s(existing.bundle_id) !== s(w.bundleId)) return false;
+  if (s(existing.description) !== s(w.description)) return false;
+  if (s(existing.provider_type) !== s(w.providerType)) return false;
+  if ((Number(existing.disabled) ? 1 : 0) !== (Number(w.disabled) ? 1 : 0)) return false;
+  const keyNorm = (x) => (x == null ? "" : String(x));
+  if (keyNorm(existing.api_key) !== keyNorm(w.apiKey)) return false;
+  let dbModels;
+  try { dbModels = JSON.parse(existing.models); } catch { return false; } // fail-open
+  if (!canonicalJsonEqual(dbModels, w.models)) return false;
+  if (w.gpuPolicy != null) {
+    let dbPolicy, incomingPolicy;
+    try { dbPolicy = existing.gpu_policy == null ? null : JSON.parse(existing.gpu_policy); } catch { return false; } // fail-open
+    try { incomingPolicy = JSON.parse(w.gpuPolicy); } catch { return false; } // fail-open
+    if (!canonicalJsonEqual(dbPolicy, incomingPolicy)) return false;
+  }
+  return true;
+}
+
+/**
  * Upsert a single provider. Bumps lamport_ts and sets instance_id so
  * instance-sync can propagate. Emits a sync change to peers when a
  * syncManager has been attached via setProviderSyncManager.
+ *
+ * No-op suppression (D2): when the row exists and every content column
+ * matches the write-image (per upsertIsNoop's normalization), returns
+ * `{ id, lamport_ts: <current>, unchanged: true }` WITHOUT writing, bumping
+ * lamport, or emitting to peers — unchanged content must never manufacture
+ * sync churn (the 211-conflict restart war).
  */
 export async function upsertProvider(db, provider) {
   if (!provider || !provider.id) throw new Error("provider.id required");
   const instanceId = getOrCreateLocalInstanceId();
   const { rows } = await db.execute({
-    sql: "SELECT lamport_ts FROM providers WHERE id = ?",
+    sql: "SELECT * FROM providers WHERE id = ?",
     args: [provider.id],
   });
   const currentTs = rows[0]?.lamport_ts ?? 0;
   const existed = rows.length > 0;
-  const newTs = Math.max(Number(currentTs), Number(provider.lamport_ts || 0)) + 1;
   const providerType = provider.providerType ?? provider.provider_type ?? null;
   const gpuPolicy = provider.gpuPolicy != null ? JSON.stringify(provider.gpuPolicy) : (provider.gpu_policy ?? null);
+
+  if (existed && upsertIsNoop(rows[0], {
+    baseUrl: provider.baseUrl || provider.base_url || "",
+    apiKey: provider.apiKey ?? provider.api_key ?? null,
+    host: provider.host || "local",
+    bundleId: provider.bundleId ?? provider.bundle_id ?? null,
+    description: provider.description ?? null,
+    models: provider.models || [],
+    disabled: provider.disabled ? 1 : 0,
+    providerType,
+    gpuPolicy,
+  })) {
+    return { id: provider.id, lamport_ts: Number(currentTs), unchanged: true };
+  }
+
+  const newTs = Math.max(Number(currentTs), Number(provider.lamport_ts || 0)) + 1;
 
   await db.execute({
     sql: `INSERT INTO providers
@@ -324,43 +404,122 @@ export async function unregisterProvidersByBundle(db, bundleId) {
 }
 
 /**
- * Continuous reconciler: upsert every provider declared in models.json so
- * post-boot edits to models.json propagate into the DB. Complements
- * seedProvidersFromModelsJson (which runs once on an empty table).
+ * D1 decision table for the owner-asserts reconciler. Pure — exported for
+ * exhaustive unit-testing of the matrix (tests/providers-reconcile-gate.test.js).
  *
- * Key safety rule: rows currently `disabled=1` are skipped unless
- * `force=true`. This is required because `unregisterProvidersByBundle`
- * uses the disabled flag to mark bundle-uninstall, and a naive reconciler
- * would silently re-enable those rows on the next gateway startup because
- * the bundle's entry still lives in models.json. The `force=true` path is
- * for the explicit "Sync bundle providers" operator action in the LLM
- * settings page — that action's semantics are "I know, re-enable."
+ *   seed          → row absent from DB: insert it (any instance may seed).
+ *   assert        → owned + enabled (or owned + disabled + force): full
+ *                   re-assert from models.json (D2 makes converged runs no-ops).
+ *   skip_unowned  → present + NOT owned + enabled: the DB/sync copy is
+ *                   authoritative; this instance's file must not assert.
+ *                   Force does NOT override this (spec R-Q1: force never
+ *                   asserts file content over an enabled unowned row).
+ *   skip_disabled → disabled without force: today's bundle-uninstall guard.
+ *   reenable      → present + NOT owned + disabled + force: flip disabled→0
+ *                   preserving DB content (never assert this file's copy).
+ */
+export function reconcileDecision({ owned, present, disabled, force }) {
+  if (!present) return "seed";
+  if (owned) {
+    if (!disabled) return "assert";
+    return force ? "assert" : "skip_disabled";
+  }
+  if (!disabled) return "skip_unowned";
+  return force ? "reenable" : "skip_disabled";
+}
+
+/**
+ * Re-enable a provider row WITHOUT asserting models.json content over it —
+ * the force path for unowned+disabled rows (spec R1-F5 / R2-M2).
+ *
+ * CRITICAL (R2-M2): this must round-trip through the PARSED listProvidersAll
+ * shape (models as an array, gpuPolicy as an object). Spreading a raw
+ * `SELECT *` row into upsertProvider would double-encode its string `models`
+ * through the unconditional JSON.stringify in the upsert write path.
+ * In-tree precedent: the llm_provider_enable action (providers-tab.js).
+ *
+ * Returns the upsertProvider result, or null when the id doesn't exist.
+ */
+export async function reenableProviderPreservingContent(db, id) {
+  const all = await listProvidersAll(db);
+  const row = all.find((p) => p.id === id);
+  if (!row) return null;
+  return upsertProvider(db, { ...row, disabled: false });
+}
+
+/**
+ * Continuous reconciler: assert models.json entries into the DB — but only
+ * the entries this instance OWNS (single-writer by endpoint ownership).
+ *
+ * Why the ownership gate (the 211-conflict war, spec D1): models.json is
+ * per-machine (repo file + git-untracked ~/.pi/agent/models.json overlay),
+ * so copies drift across the fleet. The old reconciler had every instance
+ * unconditionally assert its own file into fleet-synced rows on every boot —
+ * two drifted files ⇒ an infinite sync ping-pong (181 recurring
+ * providers/crow-local conflict rows) with peers' stale metadata overwriting
+ * the owner's truth. The volatile truth "what does the server at this
+ * endpoint serve" has exactly one natural owner: the instance whose address
+ * the baseUrl points at. Only that owner asserts; sync propagates the
+ * owner's copy to everyone else. Rows absent from the DB are still seeded by
+ * any instance (cloud rows have no owner and are seed-once, then
+ * dashboard/force-edited).
+ *
+ * Loopback baseUrls are co-owned by design (every instance's own-address set
+ * contains loopback) — harmless, because shouldSyncRow('providers') keeps
+ * loopback rows off the sync wire entirely (D9): each instance asserts its
+ * own file's loopback rows into its own DB only.
+ *
+ * Disabled-row safety rule (unchanged): rows `disabled=1` are skipped unless
+ * `force=true`, because `unregisterProvidersByBundle` uses the flag to mark
+ * bundle-uninstall. Force ("Sync bundle providers" button) means "I know,
+ * re-enable": owned rows get today's full re-assert; UNOWNED rows are only
+ * flipped back to enabled with their DB content preserved (see
+ * reenableProviderPreservingContent).
+ *
+ * `ownAddrs` is recomputed on EVERY call (never module-cached) so the hourly
+ * reconcile sees tailscale coming up after boot and tailnet/DHCP IP changes.
+ * Injectable for tests.
  *
  * @param {object} db
- * @param {{ force?: boolean }} opts
- * @returns {Promise<{ upserted: number, skipped_disabled: number, source: string|null }>}
+ * @param {{ force?: boolean, ownAddrs?: Set<string> }} opts
+ * @returns {Promise<{ upserted: number, unchanged: number, skipped_disabled: number,
+ *                     skipped_unowned: number, reenabled: number, source: string|null }>}
+ *   `upserted` counts actual writes; `unchanged` counts owned entries whose
+ *   content already converged (D2 no-op suppression).
  */
-export async function syncProvidersFromModelsJson(db, { force = false } = {}) {
+export async function syncProvidersFromModelsJson(db, { force = false, ownAddrs } = {}) {
   const dbClient = db || createDbClient();
+  const addrs = ownAddrs || getOwnAddresses(); // fresh every run — see doc comment
   const { path, config } = readModelsJson();
-  if (!config?.providers) return { upserted: 0, skipped_disabled: 0, source: path };
+  const counters = { upserted: 0, unchanged: 0, skipped_disabled: 0, skipped_unowned: 0, reenabled: 0 };
+  if (!config?.providers) return { ...counters, source: path };
 
   const entries = Object.entries(config.providers).filter(([id]) => !id.startsWith("$"));
-  if (entries.length === 0) return { upserted: 0, skipped_disabled: 0, source: path };
+  if (entries.length === 0) return { ...counters, source: path };
 
-  const { rows: disabledRows } = await dbClient.execute(
-    "SELECT id FROM providers WHERE disabled = 1",
-  );
-  const disabledIds = new Set(disabledRows.map((r) => r.id));
+  const { rows: existingRows } = await dbClient.execute("SELECT id, disabled FROM providers");
+  const existing = new Map(existingRows.map((r) => [r.id, r]));
 
-  let upserted = 0;
-  let skippedDisabled = 0;
   for (const [id, p] of entries) {
-    if (!force && disabledIds.has(id)) { skippedDisabled++; continue; }
+    const cur = existing.get(id);
+    const decision = reconcileDecision({
+      owned: isLocallyOrchestratable({ baseUrl: p.baseUrl }, addrs),
+      present: cur !== undefined,
+      disabled: cur !== undefined && !!Number(cur.disabled),
+      force,
+    });
+    if (decision === "skip_disabled") { counters.skipped_disabled++; continue; }
+    if (decision === "skip_unowned") { counters.skipped_unowned++; continue; }
+    if (decision === "reenable") {
+      const res = await reenableProviderPreservingContent(dbClient, id);
+      if (res) counters.reenabled++;
+      continue;
+    }
+    // "seed" | "assert" — full assert from the file entry.
     const gpuPolicy = (p.mutexGroup || p.alwaysResident || p.defaultMember)
       ? { mutexGroup: p.mutexGroup ?? null, alwaysResident: !!p.alwaysResident, defaultMember: !!p.defaultMember }
       : null;
-    await upsertProvider(dbClient, {
+    const res = await upsertProvider(dbClient, {
       id,
       baseUrl: p.baseUrl || "",
       apiKey: p.apiKey ?? null,
@@ -372,7 +531,8 @@ export async function syncProvidersFromModelsJson(db, { force = false } = {}) {
       providerType: inferProviderType(p.api) || p.providerType || null,
       gpuPolicy,
     });
-    upserted++;
+    if (res.unchanged) counters.unchanged++;
+    else counters.upserted++;
   }
-  return { upserted, skipped_disabled: skippedDisabled, source: path };
+  return { ...counters, source: path };
 }

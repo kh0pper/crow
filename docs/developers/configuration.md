@@ -42,6 +42,7 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 | Variable | Default | Purpose |
 |---|---|---|
 | `CROW_ORCHESTRATOR_PROVIDER` / `CROW_ORCHESTRATOR_MODEL` | *(DB `providers` table first)* | Default provider/model for the orchestrator. Prefer configuring providers in Settings → AI. |
+| `CROW_PROVIDERS_RECONCILE_MS` | `3600000` | Interval for the models.json → providers-DB reconcile (owner-asserted rows only; skipped entirely on `--no-auth` companions). |
 | `COMPANION_FAST_MODEL` | `crow-voice/qwen3.5-4b` | Fast voice-turn model for the AI Companion. |
 | `COMPANION_ESCALATION_MODEL` | `crow-chat/qwen3.6-35b-a3b` | Escalation model (`!escalate` / tool turns). |
 | `COMPANION_FAST_DISABLE_THINKING` | `1` | Disable chain-of-thought on voice turns. |
