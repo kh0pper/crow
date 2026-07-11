@@ -28,5 +28,7 @@ test("jobs are evicted only after they FINISH (a long-running job is never delet
   assert.equal(job._evictTimer, undefined, "createJob must NOT arm an eviction timer (a multi-GB set install outlives it and the client's poll 404s mid-install)");
   _finishJobForTest(job, "complete");
   assert.ok(job._evictTimer, "finishJob must arm the eviction timer");
+  assert.doesNotThrow(() => JSON.stringify(_getJobForTest(job.id)), "finished job must stay JSON-serializable — the poll endpoint does res.json(job)");
+  assert.ok(!JSON.stringify(_getJobForTest(job.id)).includes("_evictTimer"), "timer handle must not serialize");
   clearTimeout(job._evictTimer); // don't leave a handle open in the test process
 });
