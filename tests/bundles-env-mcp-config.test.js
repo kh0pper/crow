@@ -29,6 +29,35 @@ test("configuring an mcp-server add-on's env updates mcp-addons.json (the file t
   assert.equal(after["home-assistant"].command, "node", "existing config fields survive");
 });
 
+test("an empty-string value is skipped — a blank must never land in the MCP env block (it would SHADOW an inherited process.env value at spawn, not clear it)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
+  const path = join(dir, "mcp-addons.json");
+  writeFileSync(path, JSON.stringify({
+    "home-assistant": { command: "node", env: { HA_TOKEN: "existing" } },
+  }));
+
+  applyEnvToMcpAddons("home-assistant", { HA_TOKEN: "" }, path);
+
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(after["home-assistant"].env.HA_TOKEN, "existing", "blank must not overwrite — proxy.js spawns with { ...process.env, ...config.env }, so \"\" would shadow a working ambient value");
+});
+
+test("an existing env key not mentioned in the update survives the merge", () => {
+  const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
+  const path = join(dir, "mcp-addons.json");
+  writeFileSync(path, JSON.stringify({
+    "home-assistant": { command: "node", env: { HA_URL: "http://ha.local:8123", HA_VERIFY_SSL: "false" } },
+  }));
+
+  const wrote = applyEnvToMcpAddons("home-assistant", { HA_TOKEN: "tok" }, path);
+  assert.equal(wrote, true);
+
+  const after = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(after["home-assistant"].env.HA_VERIFY_SSL, "false", "untouched existing env key survives");
+  assert.equal(after["home-assistant"].env.HA_URL, "http://ha.local:8123");
+  assert.equal(after["home-assistant"].env.HA_TOKEN, "tok");
+});
+
 test("an add-on with no MCP server registration is a no-op (returns false)", () => {
   const dir = mkdtempSync(join(tmpdir(), "crowmcp-"));
   const path = join(dir, "mcp-addons.json");

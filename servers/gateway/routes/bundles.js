@@ -644,7 +644,15 @@ export function applyEnvToMcpAddons(bundleId, envVars, path = MCP_ADDONS_PATH) {
   const mcpAddons = readJsonSafe(path, {});
   const entry = mcpAddons[bundleId];
   if (!entry) return false; // not an MCP add-on — nothing to configure
-  entry.env = { ...(entry.env || {}), ...envVars };
+  const merged = { ...(entry.env || {}) };
+  // Skip falsy values: proxy.js spawns the child with { ...process.env, ...config.env },
+  // so a blank here would SHADOW a working ambient value rather than clear it. The two
+  // install-time writers of this file (see the mcp_server registration paths) guard the
+  // same way. Clearing a value stays the .env file's job.
+  for (const [k, v] of Object.entries(envVars || {})) {
+    if (v) merged[k] = v;
+  }
+  entry.env = merged;
   mcpAddons[bundleId] = entry;
   writeJsonSafe(path, mcpAddons);
   return true;
