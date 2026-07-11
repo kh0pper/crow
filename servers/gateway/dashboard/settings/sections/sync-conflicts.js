@@ -197,10 +197,15 @@ export default {
 
     let unresolvedRows = [];
     let resolvedRows = [];
+    let unresolvedTotal = 0;
     let dbError = null;
     try {
       const { rows: unresolved } = await db.execute({
-        sql: `SELECT * FROM sync_conflicts WHERE resolved = 0 ORDER BY created_at DESC`,
+        sql: `SELECT * FROM sync_conflicts WHERE resolved = 0 ORDER BY created_at DESC LIMIT 200`,
+        args: [],
+      });
+      const { rows: unresolvedCount } = await db.execute({
+        sql: `SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 0`,
         args: [],
       });
       const { rows: resolved } = await db.execute({
@@ -208,6 +213,7 @@ export default {
         args: [],
       });
       unresolvedRows = unresolved;
+      unresolvedTotal = Number(unresolvedCount[0]?.n || 0);
       resolvedRows = resolved;
     } catch (err) {
       dbError = err.message || "Unknown error";
@@ -264,6 +270,12 @@ export default {
            ${escapeHtml(t("syncConflicts.noneResolved", lang))}
          </td></tr>`;
 
+    const overLimitNotice = unresolvedTotal > 200
+      ? `<div style="margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:var(--crow-bg-deep);border-left:3px solid #ff9800;border-radius:4px;font-size:0.82rem;color:var(--crow-text-muted)">
+           ${escapeHtml(t("syncConflicts.showingFirst", lang).replace("{n}", String(unresolvedTotal)))}
+         </div>`
+      : "";
+
     const bulkResolveBtn = unresolvedRows.length > 0
       ? `<form method="POST" action="/dashboard/settings"
               style="margin-top:0.75rem"
@@ -293,6 +305,8 @@ export default {
       ${escapeHtml(t("syncConflicts.unresolvedHeading", lang))}
       ${unresolvedRows.length > 0 ? `<span style="font-size:0.78rem;color:#e53935;margin-left:0.4rem">(${unresolvedRows.length})</span>` : ""}
     </h3>
+
+    ${overLimitNotice}
 
     <div style="overflow-x:auto">
       <table class="sc-table">
