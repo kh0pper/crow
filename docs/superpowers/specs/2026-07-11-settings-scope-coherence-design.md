@@ -5,8 +5,12 @@ Operator decisions (2026-07-11, AskUserQuestion): Approach A approved; ALL keys
 per-instance (none promoted to fleet-sync in this PR); auto-update per-tick
 enabled re-check INCLUDED; both vestigial dead writes DELETED.
 Review: R1 (adversarial, opus) REVISE — 2 MAJOR (D6 manual-check regression;
-D2 flag/retry contradiction) + 4 minors, all folded below; 13/13 §1 claims
-spot-checked HELD.
+D2 flag/retry contradiction) + 4 minors, all folded; 13/13 §1 claims
+spot-checked HELD. R2 (adversarial, opus) **APPROVE** — all R1 folds
+confirmed faithful; 4 precision minors folded (heal uses createDbClient not
+syncManager.db; §5.7 fail-open test reframed — getSettings cannot throw;
+D4 persistence-key name corrected to blog_theme_mode; §6 notifications/
+language checks labeled mixed browser+node-probe).
 
 ## 1. Problem
 
@@ -155,7 +159,8 @@ module `servers/gateway/dashboard/settings/instance-scope-heal.js`:
     override wins (the override is by construction the broken-era UI write
     being healed). **NULL/empty `updated_at` guard (R1 MINOR-1** — both columns
     are nullable `TEXT DEFAULT (datetime('now'))`, init-db.js:1093,1735, so a
-    hand-edited/legacy row must not silently lose via `null >= "…"` coercion):
+    hand-edited/legacy row must not silently lose via `null >= "…"` coercion;
+    columns at init-db.js:1094,1736):
     explicit precedence — global ts NULL/empty → override wins; else override
     ts NULL/empty → global wins; else lexicographic. Both-NULL falls into the
     first branch (override wins, consistent with the tie rule). Either way the
@@ -176,9 +181,12 @@ module `servers/gateway/dashboard/settings/instance-scope-heal.js`:
   (beside healProfileOverridesOnce, :84-89) but **deliberately NOT gated on
   `syncManager`/`feedsDisabled`** — the heal is a pure local-DB transformation
   with zero sync side effects; a `--no-auth` companion gateway sharing the
-  primary's DB may run it first with an identical result. It needs only a db
-  handle (use the same client that block already holds). Value: unlike the
-  profile heal, a companion-only boot still heals (closes the
+  primary's DB may run it first with an identical result (same data dir → same
+  instance-id → identical override enumeration; verified R2). DB handle: use
+  `createDbClient()` (already imported in mcp-mounts.js:17), **NOT
+  `syncManager.db`** (R2 minor — a genuinely null syncManager would otherwise
+  NPE-and-skip, silently voiding the ungated claim). Value: unlike the profile
+  heal, a companion-only or null-syncManager boot still heals (closes the
   "null-syncManager boots never heal" gap for THIS heal class).
 - Per-key failure isolation + retry (**R1 MAJOR-2** — these two goals conflict
   unless failure is tracked explicitly): each key is wrapped in its own
@@ -201,10 +209,12 @@ and must not emit). GET continues to report scope truthfully.
 ### D4 — Vestigial dead writes deleted (operator-approved)
 
 - theme.js:98: remove the `upsertSetting(db,"dashboard_theme",...)` line. The
-  `set_theme` action KEEPS returning `{ok:true}` — layout.js:282 is a live
-  caller; theme persistence actually flows through `set_theme_mode` →
-  `blog_theme_dashboard_mode` (read by index.js:798). Comment notes why the
-  action is response-only.
+  `set_theme` action KEEPS returning `{ok:true}` — shared/layout.js:282 is a
+  live caller; theme persistence actually flows through `set_theme_mode` →
+  **`blog_theme_mode`** (theme.js:109-114; chrome mode read at
+  index.js:801-802 — R2 corrected the key name; `blog_theme_dashboard_mode`
+  belongs to the separate `update_theme` action, theme.js:121). Comment notes
+  why the action is response-only.
 - llm-settings-migration.js:173-179: remove the `llm_chat_default_provider_id`
   upsert block (zero readers repo-wide; migration's other work and its
   done-marking are untouched).
@@ -230,9 +240,15 @@ wants to update on demand. Design: extract the timer callback into a
 `tickCheck()` that re-reads `auto_update_enabled` via the existing
 `getSettings()` and returns early (one log line) when not "true", otherwise
 calls `checkForUpdates()`. The manual action keeps calling `checkForUpdates()`
-directly, ungated. A `getSettings()` throw inside the tick is caught and
-treated as "proceed" (fail-open to the boot-time value — an I/O blip must not
-permanently disable updates; noted for review). Boot behavior unchanged (env
+directly, ungated. Fail-open semantics (R2-refined): `getSettings()` cannot
+throw — it returns defaults (`auto_update_enabled:"true"`) on any DB error
+(auto-update.js:39-52), and that state is indistinguishable from a legitimate
+fresh install with no rows, which MUST proceed (auto-update defaults on). So a
+DB blip at tick proceeds for that one tick — this briefly re-enables what the
+operator disabled, but is consistent with the boot gate's identical defaulting
+(:211-216), self-corrects at the next tick, and avoiding it would require
+restructuring getSettings' error contract for a marginal case. Accepted,
+stated. Boot behavior unchanged (env
 `CROW_AUTO_UPDATE` still hard-wins before any DB read at :206; a boot-disabled
 timer still never starts). Interval changes still require restart — the UI
 already says "Restart gateway to apply new interval". This makes the headline
@@ -293,7 +309,9 @@ click-to-tick-skip, not click-to-restart-to-skip.
    fetching — **mutation**: removing the tick re-check reddens — while a
    direct/manual `checkForUpdates()` invocation with the same DB state STILL
    runs (the R1 MAJOR-1 regression made red-able); with 'true' the tick
-   proceeds. A `getSettings()` throw at tick → proceeds (fail-open). Env
+   proceeds. Fail-open case (R2 reframe — `getSettings()` cannot throw): on a
+   broken/unavailable DB it returns defaults → the tick PROCEEDS (assert via a
+   db stub that errors; not via a throw, which is unreachable). Env
    kill-switch precedence test unchanged.
 8. D4: `set_theme` action still returns ok and writes NOTHING anywhere;
    llm migration writes no llm_chat_default_provider_id row; both migrations'
@@ -317,10 +335,15 @@ auto-update scenario — use a scratch data dir + short interval,
   /discover/profile` flips 404→200 carrying the name.
 - **Blog**: edit blog_title via the settings form → form persists; public
   `/blog` renders the new title.
-- **Notifications**: uncheck a type + Save → checkboxes persist; a server-side
-  `createNotification` of that type is suppressed (returns null).
-- **Language**: save Español → in a FRESH CDP browser context (no crow_lang
-  cookie) the settings/help pages render Spanish.
+- **Notifications** (mixed: browser click + node probe — R2 framing): uncheck a
+  type + Save in the browser → checkboxes persist; then a NODE PROBE against
+  the scratch DB asserts `createNotification` of that type returns null (the
+  gate is server-side, servers/shared/notifications.js:44 — not observable in
+  the DOM; alternatively observe the bell not populating).
+- **Language** (mixed — R2 framing): save Español (authed click) → in a FRESH
+  CDP browser context WITHOUT the crow_lang cookie, the pre-auth readers
+  (setup/help pages) and the authed language dropdown (minted session, no
+  cookie) render Spanish.
 - **Heal**: boot a scratch gateway on a DB seeded with broken-era overrides
   (incl. one where global is newer — dual-writer case) → log shows promotions,
   overrides table empty for instance keys, flag done.
