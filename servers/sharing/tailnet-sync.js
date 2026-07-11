@@ -66,9 +66,14 @@ function verifyHandshakePayload(payload, expectedPubkeyHex) {
  * public Funnel, which only proxies the curated public path-list and
  * /api/instance-sync/stream is deliberately not on it.
  *
- * Fallback: ws://<tailscale_ip>:<fallbackPort> — a direct plain-WS dial of
- * the standard backend gateway port for Serve-less peers. fallbackPort is a
- * BACKEND port (the gateway listens plain HTTP), never a Serve HTTPS port.
+ * Fallback: ws://<tailscale_ip>:<port> direct plain-WS dials of the COMMON
+ * backend gateway ports for Serve-less peers. The peer's real backend port
+ * isn't advertised in its crow_instances row (gateway_url carries the Serve
+ * HTTPS port, not the backend), so the ladder tries the caller's own port
+ * plus the fleet-standard 3001/3002 (#144 minor: a single hardcoded 3002
+ * was wrong for any non-3002 peer). All fallback ports are BACKEND ports
+ * (the gateway listens plain HTTP), never Serve HTTPS ports. Bare IPv6
+ * addresses are bracketed for the URL (#144 minor).
  */
 export function peerToWsUrlCandidates(peer, fallbackPort = 3002) {
   const candidates = [];
@@ -80,13 +85,18 @@ export function peerToWsUrlCandidates(peer, fallbackPort = 3002) {
       const isHttp = u.protocol === "http:";
       const port = u.port ? parseInt(u.port, 10) : (isHttp ? 80 : 443);
       if (port !== 443) {
+        // u.hostname keeps IPv6 brackets — safe to re-embed verbatim.
         candidates.push(`${isHttp ? "ws" : "wss"}://${u.hostname}:${port}${WS_PATH}`);
       }
     }
   }
   if (peer?.tailscale_ip) {
-    const direct = `ws://${peer.tailscale_ip}:${fallbackPort}${WS_PATH}`;
-    if (!candidates.includes(direct)) candidates.push(direct);
+    const ip = String(peer.tailscale_ip);
+    const host = ip.includes(":") && !ip.startsWith("[") ? `[${ip}]` : ip;
+    for (const port of new Set([fallbackPort, 3001, 3002])) {
+      const direct = `ws://${host}:${port}${WS_PATH}`;
+      if (!candidates.includes(direct)) candidates.push(direct);
+    }
   }
   return candidates;
 }
@@ -313,7 +323,9 @@ export function setupTailnetSyncServer(server, ctx) {
 /**
  * Outbound dialer state per peer.
  */
-class PeerDialer {
+// Exported for tests (backoff-cycle behavior); production callers construct
+// it only via startTailnetSyncClients' refresh loop.
+export class PeerDialer {
   constructor(peerRow, ctx) {
     this.peer = peerRow;
     this.ctx = ctx;
@@ -346,13 +358,21 @@ class PeerDialer {
   scheduleRetry() {
     if (this.stopped) return;
     this.timer = setTimeout(() => this.connect(), this.retryMs);
-    this.retryMs = Math.min(this.retryMs * 2, RETRY_MAX_MS);
+    // #144 minor: grow the backoff only after a FULL ladder cycle, so a
+    // healthy candidate later in the ladder gets its first try at the base
+    // delay instead of inheriting the exponential penalty earned by the
+    // candidates before it. _candCount is stamped by connect().
+    const cycle = Math.max(1, this._candCount || 1);
+    if (this.attempt % cycle === 0) {
+      this.retryMs = Math.min(this.retryMs * 2, RETRY_MAX_MS);
+    }
   }
 
   async connect() {
     if (this.stopped) return;
     const { identity, instanceSyncManager, db } = this.ctx;
     const candidates = peerToWsUrlCandidates(this.peer, this.ctx.gatewayPort);
+    this._candCount = candidates.length; // backoff grows once per full ladder cycle
     if (candidates.length === 0) {
       // No tailnet endpoint to dial; leave for Hyperswarm.
       return;
@@ -372,7 +392,14 @@ class PeerDialer {
     }
 
     let ws;
-    try { ws = new WebSocket(wsUrl, { handshakeTimeout: HANDSHAKE_TIMEOUT_MS, rejectUnauthorized: false }); }
+    // TLS verification is ON for wss candidates (#144 follow-up): every wss
+    // candidate is hostname-based (the ladder never emits raw-IP wss), and
+    // the fleet's Serve endpoints carry real LE certs — SNI + verification
+    // both work. ws:// candidates are unaffected. A deployment fronting its
+    // gateway with a self-signed cert should use an http/ws gateway_url or a
+    // real cert; silently accepting any cert on an authenticated sync
+    // transport was the worse default.
+    try { ws = new WebSocket(wsUrl, { handshakeTimeout: HANDSHAKE_TIMEOUT_MS }); }
     catch (err) {
       console.warn(`[tailnet-sync] dial failed for ${wsUrl}: ${err.message}`);
       return this.scheduleRetry();
@@ -489,7 +516,14 @@ export async function startTailnetSyncClients(ctx) {
     for (const peer of rows) {
       seenIds.add(peer.id);
       if (!peer.gateway_url) continue;
-      if (dialers.has(peer.id)) continue;
+      if (dialers.has(peer.id)) {
+        // #144 minor: keep the dialer's row snapshot fresh — a changed
+        // gateway_url/tailscale_ip previously kept dialing the OLD address
+        // until a gateway restart. connect() re-derives candidates from
+        // this.peer on every attempt, so updating the reference suffices.
+        dialers.get(peer.id).peer = peer;
+        continue;
+      }
       const dialer = new PeerDialer(peer, ctx);
       dialers.set(peer.id, dialer);
       dialer.start();

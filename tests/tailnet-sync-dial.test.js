@@ -48,6 +48,7 @@ test("tailnet-IP fallback candidate uses the backend fallbackPort, not the Serve
   assert.deepEqual(urls, [
     `wss://grackle.dachshund-chromatic.ts.net:8444${WS_PATH}`,
     `ws://100.121.254.89:3002${WS_PATH}`,
+    `ws://100.121.254.89:3001${WS_PATH}`,
   ]);
 });
 
@@ -61,12 +62,20 @@ test("port 443 (public Funnel) is never dialed — falls back to tailnet IP", ()
     { gateway_url: "https://grackle.dachshund-chromatic.ts.net", tailscale_ip: "100.121.254.89" },
     3002
   );
-  assert.deepEqual(urls, [`ws://100.121.254.89:3002${WS_PATH}`]);
+  assert.deepEqual(urls, [
+    `ws://100.121.254.89:3002${WS_PATH}`,
+    `ws://100.121.254.89:3001${WS_PATH}`,
+  ]);
 });
 
 test("no gateway_url → tailnet IP + fallbackPort only", () => {
   const urls = peerToWsUrlCandidates({ tailscale_ip: "100.118.41.122" }, 3001);
-  assert.deepEqual(urls, [`ws://100.118.41.122:3001${WS_PATH}`]);
+  // #144 minor: the peer's backend port isn't advertised, so the ladder
+  // tries the caller's own port plus the fleet-standard 3001/3002.
+  assert.deepEqual(urls, [
+    `ws://100.118.41.122:3001${WS_PATH}`,
+    `ws://100.118.41.122:3002${WS_PATH}`,
+  ]);
 });
 
 test("neither gateway_url nor tailscale_ip → no candidates", () => {
@@ -79,7 +88,10 @@ test("malformed gateway_url falls back to the tailnet IP candidate", () => {
     { gateway_url: "not a url ::", tailscale_ip: "100.121.254.89" },
     3002
   );
-  assert.deepEqual(urls, [`ws://100.121.254.89:3002${WS_PATH}`]);
+  assert.deepEqual(urls, [
+    `ws://100.121.254.89:3002${WS_PATH}`,
+    `ws://100.121.254.89:3001${WS_PATH}`,
+  ]);
 });
 
 test("candidates are deduped when gateway_url already IS the tailnet-IP dial", () => {
@@ -87,7 +99,27 @@ test("candidates are deduped when gateway_url already IS the tailnet-IP dial", (
     { gateway_url: "http://100.121.254.89:3002", tailscale_ip: "100.121.254.89" },
     3002
   );
-  assert.deepEqual(urls, [`ws://100.121.254.89:3002${WS_PATH}`]);
+  assert.deepEqual(urls, [
+    `ws://100.121.254.89:3002${WS_PATH}`,
+    `ws://100.121.254.89:3001${WS_PATH}`,
+  ]);
+});
+
+test("non-standard caller port leads the fallback ladder, then the fleet-standard ports", () => {
+  const urls = peerToWsUrlCandidates({ tailscale_ip: "100.118.41.122" }, 3006);
+  assert.deepEqual(urls, [
+    `ws://100.118.41.122:3006${WS_PATH}`,
+    `ws://100.118.41.122:3001${WS_PATH}`,
+    `ws://100.118.41.122:3002${WS_PATH}`,
+  ]);
+});
+
+test("bare IPv6 tailscale_ip is bracketed in the direct candidates (#144 minor)", () => {
+  const urls = peerToWsUrlCandidates({ tailscale_ip: "fd7a:115c:a1e0::1" }, 3001);
+  assert.deepEqual(urls, [
+    `ws://[fd7a:115c:a1e0::1]:3001${WS_PATH}`,
+    `ws://[fd7a:115c:a1e0::1]:3002${WS_PATH}`,
+  ]);
 });
 
 test("upgrade handler destroys Funnel-tagged sockets before any handshake", () => {
@@ -120,4 +152,31 @@ test("upgrade handler ignores non-matching paths (leaves socket alone)", () => {
   const socket = { destroy: () => { destroyed = true; } };
   server.emit("upgrade", { url: "/other/ws", headers: {}, socket: {} }, socket, Buffer.alloc(0));
   assert.equal(destroyed, false);
+});
+
+test("backoff grows once per FULL ladder cycle, not per candidate (#144 minor)", async () => {
+  const { PeerDialer } = await import("../servers/sharing/tailnet-sync.js");
+  const d = new PeerDialer({ id: "peer-x" }, {});
+  d._candCount = 3; // three candidates in the ladder
+  const base = d.retryMs;
+
+  // Attempts 1 and 2 (mid-cycle): retry delay stays at base for the untried
+  // candidates — no exponential penalty inherited from earlier failures.
+  d.attempt = 1; d.scheduleRetry(); assert.equal(d.retryMs, base, "mid-cycle attempt 1: no growth");
+  d.attempt = 2; d.scheduleRetry(); assert.equal(d.retryMs, base, "mid-cycle attempt 2: no growth");
+  // Attempt 3 completes the cycle → double.
+  d.attempt = 3; d.scheduleRetry(); assert.equal(d.retryMs, base * 2, "full cycle → doubled");
+  // Next full cycle doubles again; cap respected eventually.
+  d.attempt = 6; d.scheduleRetry(); assert.equal(d.retryMs, base * 4, "second full cycle → doubled again");
+
+  // Single-candidate ladder degenerates to the old per-attempt behavior.
+  const d1 = new PeerDialer({ id: "peer-y" }, {});
+  d1._candCount = 1;
+  d1.attempt = 1; d1.scheduleRetry(); assert.equal(d1.retryMs, base * 2, "single candidate: doubles every retry");
+
+  // Unset _candCount (retry before any connect) must not throw or divide by zero.
+  const d2 = new PeerDialer({ id: "peer-z" }, {});
+  d2.attempt = 0; d2.scheduleRetry(); assert.equal(d2.retryMs, base * 2);
+
+  d.stop(); d1.stop(); d2.stop(); // clear pending timers so the test process exits
 });
