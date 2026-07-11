@@ -78,6 +78,58 @@ function runImport(absPath, env = {}) {
   return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "" };
 }
 
+/**
+ * Import routes.js's default export (the kiosk router factory) in a fresh
+ * node subprocess, then invoke the router's FIRST layer directly — the
+ * `router.use(["/kiosk", "/maker-lab"], ...)` gate middleware that every
+ * kiosk route passes through before its own handler runs. This is the
+ * non-vacuous check the panel/maker-lab.js-only `runImport` can't give us:
+ * routes.js's lazy db.js/retention-sweep.js imports are wrapped in
+ * try/catch, so a bare "the module imported without throwing" (exit 0)
+ * would pass whether or not the import inside the try actually succeeded —
+ * the catch swallows it either way. Driving the gate for real distinguishes
+ * "resolved" (calls next()) from "silently degraded" (500 db_unavailable).
+ *
+ * Calling `router.stack[0].handle` directly (rather than routing a request
+ * through the full Router matcher) is deliberate: it exercises exactly the
+ * gate closure we care about without also dispatching into a real route
+ * handler, which would need a fully-migrated schema in the scratch DB.
+ *
+ * Returns { status, stdout, stderr, observed } — `observed` is null on a
+ * non-zero exit (see stderr) or the parsed `{ nextCalled: true }` /
+ * `{ status: 500, body: { error: "db_unavailable" } }` result otherwise.
+ */
+function runKioskGateCheck(absPath, env = {}) {
+  const url = pathToFileURL(absPath).href;
+  const code = `
+    import(${JSON.stringify(url)}).then((mod) => {
+      const router = mod.default();
+      const gate = router.stack[0];
+      let observed = null;
+      const req = { method: "GET", url: "/kiosk/api/context", headers: {}, secure: false };
+      const res = {
+        statusCode: 200,
+        status(code) { this.statusCode = code; return this; },
+        json(body) { observed = { status: this.statusCode, body }; },
+      };
+      gate.handle(req, res, (err) => {
+        if (!observed) observed = { nextCalled: true, err: err ? String(err.message || err) : null };
+      });
+      process.stdout.write(JSON.stringify(observed));
+      process.exit(0);
+    }).catch((e) => { console.error(String((e && e.stack) || e)); process.exit(1); });
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+    cwd: dirname(absPath),
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+  let observed = null;
+  try { observed = result.stdout ? JSON.parse(result.stdout.trim()) : null; } catch { observed = null; }
+  return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "", observed };
+}
+
 describe("maker-lab location independence (BH-4 phase 2)", () => {
   test("no static repo-relative `servers/` import remains under panel/ or server/", () => {
     const files = [
@@ -154,5 +206,85 @@ describe("maker-lab location independence (BH-4 phase 2)", () => {
     writeFileSync(dbPath, current);
     const green = runImport(dbPath, { CROW_APP_ROOT: REPO_ROOT });
     assert.equal(green.status, 0, `expected the current (fixed) content to import cleanly after restoring it:\n${green.stderr}`);
+  });
+
+  // ─── BH-4 phase 2 follow-up: panel/routes.js is ALSO copied alone ────────
+  //
+  // routes.js is copied to ~/.crow/panels/maker-lab-routes.js independently
+  // of panel/maker-lab.js (bundles.js resolves `manifest.panelRoutes`
+  // separately from `manifest.panel`). Its two try/catch-guarded lazy
+  // imports of ../server/db.js and ../server/retention-sweep.js used to
+  // resolve relative to __dirname, which on the installed copy is
+  // ~/.crow/panels — not the bundle dir — so the import silently failed,
+  // createDbClient/startRetentionSweep stayed null, and the gate middleware
+  // (`router.use(["/kiosk","/maker-lab"], ...)`, first thing every kiosk
+  // route hits) 500'd db_unavailable on every request. Fixed the same way
+  // as maker-lab.js: an inlined app-root resolver + bundle-absolute imports.
+
+  test("installed-location routes.js import succeeds with CROW_APP_ROOT set (copied alone, like ~/.crow/panels)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "maker-lab-routes-import-"));
+    cpSync(join(MAKER_LAB_DIR, "panel", "routes.js"), join(tmp, "maker-lab-routes.js"));
+    symlinkSync(join(REPO_ROOT, "node_modules"), join(tmp, "node_modules"));
+
+    const withRoot = runImport(join(tmp, "maker-lab-routes.js"), { CROW_APP_ROOT: REPO_ROOT });
+    assert.equal(withRoot.status, 0, `expected import to succeed with CROW_APP_ROOT set:\n${withRoot.stderr}`);
+  });
+
+  test("installed-location routes.js: the db lazy-import actually resolves (non-vacuous — a bare successful import doesn't prove this, since the try/catch swallows a failed import into a null createDbClient)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "maker-lab-routes-gate-"));
+    cpSync(join(MAKER_LAB_DIR, "panel", "routes.js"), join(tmp, "maker-lab-routes.js"));
+    symlinkSync(join(REPO_ROOT, "node_modules"), join(tmp, "node_modules"));
+
+    // Scratch DB path so createDbClient() (real better-sqlite3 client) never
+    // touches ~/.crow — CROW_DB_PATH takes priority over CROW_DATA_DIR/HOME
+    // resolution in servers/db.js's createDbClient().
+    const scratchDbPath = join(tmp, "scratch.db");
+    const result = runKioskGateCheck(join(tmp, "maker-lab-routes.js"), {
+      CROW_APP_ROOT: REPO_ROOT,
+      CROW_DB_PATH: scratchDbPath,
+    });
+    assert.equal(result.status, 0, `expected the gate-check subprocess to exit cleanly:\n${result.stderr}`);
+    assert.ok(result.observed, `expected a parsed observation from the gate-check subprocess, got stdout: ${result.stdout}`);
+    assert.equal(
+      result.observed.nextCalled,
+      true,
+      `expected the kiosk gate middleware to resolve the db and call next(); got: ${JSON.stringify(result.observed)}`
+    );
+    assert.equal(
+      result.observed.status,
+      undefined,
+      `gate middleware must not have set a db_unavailable response status; got: ${JSON.stringify(result.observed)}`
+    );
+  });
+
+  test("class-regression: the fixed `../server/{db,retention-sweep}.js` lazy dynamic-import pattern does not reappear anywhere under panel/*.js", () => {
+    // Narrower than the static-import net above (which only ever matched
+    // `from "../../../servers/..."`, i.e. the shared top-level servers/
+    // tree): this catches the DYNAMIC `import(pathToFileURL(resolve(__dirname,
+    // "../server/...")))` shape that caused this exact regression — a
+    // relative resolution assuming a sibling ../server/ dir that doesn't
+    // exist once a panel/*.js file is copied alone. Scoped to the two
+    // targets this follow-up fixed (db.js, retention-sweep.js) rather than
+    // every `../server/*` lazy import in panel/*.js: panel/routes.js and
+    // panel/maker-lab.js both have other pre-existing lazy imports of this
+    // same shape (device-binding.js, sessions.js, hint-pipeline.js,
+    // resolve-llm-endpoint.js, lesson-validator.js) that are a real but
+    // separate, tracked, out-of-scope gap — asserting a blanket "zero
+    // matches" here would either force fixing them as a drive-by (out of
+    // this follow-up's stated scope) or require a brittle allowlist that
+    // doesn't buy anything additional over a green earlier-run gate check.
+    const files = listJsFiles(join(MAKER_LAB_DIR, "panel"));
+    const lazyBrokenImport = /pathToFileURL\(resolve\(__dirname,\s*["'`]\.\.\/server\/(db|retention-sweep)\.js["'`]\)\)/;
+    const offenders = [];
+    for (const f of files) {
+      const src = readFileSync(f, "utf8");
+      if (lazyBrokenImport.test(src)) offenders.push(f);
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      `broken "../server/{db,retention-sweep}.js" lazy dynamic-import pattern reappeared in: ` +
+        `${offenders.map((f) => f.replace(REPO_ROOT + "/", "")).join(", ")}`
+    );
   });
 });
