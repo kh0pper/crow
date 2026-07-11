@@ -81,6 +81,7 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 | Variable | Default | Purpose |
 |---|---|---|
 | `CROW_UNIFIED_DASHBOARD` | enabled | Federated dashboard across paired instances (`0` disables). |
+| `CROW_DISABLE_INSTANCE_SYNC` | *(unset)* | `1` disables cross-instance sync entirely (Hypercore feeds, Hyperswarm DHT, tailnet-sync dialers). `--no-auth` gateways are always sync-disabled regardless. Pair with `CROW_DISABLE_NOSTR=1` for a fully-offline scratch/test boot. |
 | `CROW_PEER_TOKENS_PATH` | per-`CROW_HOME` | Peer credential file override (multi-gateway hosts). |
 | `CROW_CALLS_ENABLED` | `0` | WebRTC calls feature. |
 | `CROW_CALLS_MAX_PEERS` | `4` | Max peers per call room. |
