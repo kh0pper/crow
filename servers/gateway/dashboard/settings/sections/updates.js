@@ -129,6 +129,10 @@ export default {
           } else if (data.error) {
             msg.style.color = 'var(--crow-error)';
             msg.textContent = data.error;
+          } else if (data.skipped) {
+            msg.style.display = 'block';
+            msg.style.color = 'var(--crow-text-muted)';
+            msg.textContent = data.message || data.skipped;
           } else {
             msg.style.color = 'var(--crow-text-muted)';
             msg.textContent = '${tJs("settings.alreadyUpToDate", lang)}';

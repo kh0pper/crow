@@ -26,6 +26,9 @@ import assert from "node:assert/strict";
 import {
   checkForUpdates,
   runLockedUpdate,
+  startAutoUpdate,
+  stopAutoUpdate,
+  shouldStartAutoUpdate,
   _setAppRootForTest,
   _setDbForTest,
   _lockPrimitivesForTest,
@@ -311,4 +314,98 @@ test("lock primitives: lockIsStale — dead pid OR age>30min is stale, live+youn
   } finally {
     restoreRoot();
   }
+});
+
+// ---------------------------------------------------------------------------
+// D4: shouldStartAutoUpdate predicate — --no-auth defaults OFF, requires
+// explicit opt-in via CROW_AUTO_UPDATE=1|true; the kill-switch ("0"/"false")
+// semantics are preserved for every noAuth value.
+// ---------------------------------------------------------------------------
+
+test("D4 predicate: truth table over noAuth x CROW_AUTO_UPDATE", () => {
+  const cases = [
+    // [noAuth, envValue, expected]
+    [false, undefined, true],
+    [false, "0", false],
+    [false, "false", false],
+    [false, "1", true],
+    [false, "true", true],
+    [true, undefined, false],
+    [true, "0", false],
+    [true, "false", false],
+    [true, "1", true],
+    [true, "true", true],
+  ];
+  for (const [noAuth, envValue, expected] of cases) {
+    const env = envValue === undefined ? {} : { CROW_AUTO_UPDATE: envValue };
+    const got = shouldStartAutoUpdate({ env, noAuth });
+    assert.equal(
+      got,
+      expected,
+      `noAuth=${noAuth} CROW_AUTO_UPDATE=${envValue} expected ${expected} got ${got}`,
+    );
+  }
+});
+
+test("D4 predicate: defaults to { env: {}, noAuth: false } → true when called with no args", () => {
+  assert.equal(shouldStartAutoUpdate(), true);
+  assert.equal(shouldStartAutoUpdate({}), true);
+});
+
+// ---------------------------------------------------------------------------
+// D4: startAutoUpdate call-site wiring
+// ---------------------------------------------------------------------------
+
+test("startAutoUpdate: noAuth:true + CROW_AUTO_UPDATE unset → returns without arming (no 'Enabled' log, no DB writes)", async () => {
+  const fx = fixture();
+  const originalEnv = process.env.CROW_AUTO_UPDATE;
+  delete process.env.CROW_AUTO_UPDATE;
+  let dbCalls = 0;
+  const trackingDb = { execute: async () => { dbCalls++; return { rows: [] }; } };
+  const originalLog = console.log;
+  const logs = [];
+  console.log = (...args) => { logs.push(args.join(" ")); };
+  try {
+    _setAppRootForTest(fx.work);
+    await startAutoUpdate(trackingDb, { noAuth: true });
+  } finally {
+    console.log = originalLog;
+    if (originalEnv === undefined) delete process.env.CROW_AUTO_UPDATE;
+    else process.env.CROW_AUTO_UPDATE = originalEnv;
+    _setDbForTest(null);
+    restoreRoot();
+    fx.cleanup();
+    stopAutoUpdate(); // safety net — must be a no-op if the predicate worked
+  }
+  assert.ok(
+    !logs.some((l) => l.includes("Enabled")),
+    `must not log "Enabled" when skipped via noAuth predicate; got: ${JSON.stringify(logs)}`,
+  );
+  assert.equal(dbCalls, 0, "must return before ever touching the db (no settings read, no version save)");
+});
+
+test("startAutoUpdate: noAuth:true + CROW_AUTO_UPDATE=1 → arms (logs 'Enabled'); torn down via stopAutoUpdate", async () => {
+  const fx = fixture();
+  const originalEnv = process.env.CROW_AUTO_UPDATE;
+  process.env.CROW_AUTO_UPDATE = "1";
+  const stub = { execute: async () => ({ rows: [] }) };
+  const originalLog = console.log;
+  const logs = [];
+  console.log = (...args) => { logs.push(args.join(" ")); };
+  try {
+    _setAppRootForTest(fx.work);
+    await startAutoUpdate(stub, { noAuth: true });
+  } finally {
+    console.log = originalLog;
+    stopAutoUpdate(); // clear the armed setTimeout before it can fire
+    if (originalEnv === undefined) delete process.env.CROW_AUTO_UPDATE;
+    else process.env.CROW_AUTO_UPDATE = originalEnv;
+    _setDbForTest(null);
+    restoreRoot();
+    fx.cleanup();
+  }
+  assert.ok(
+    logs.some((l) => l.includes("Enabled")),
+    `expected an "Enabled" log when CROW_AUTO_UPDATE=1 opts a noAuth gateway in; got: ${JSON.stringify(logs)}`,
+  );
 });
