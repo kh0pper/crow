@@ -65,14 +65,23 @@ existing missing-file repair:
     PLUS any file/dir roots the manifest itself declares (`server.args[0]`'s
     first path segment, `panel`, `panelRoutes`, each `skills[]` entry) — the
     bundle contract is manifest-declaration-driven, so declared paths are
-    always code. NEVER copied (stated, deliberate): `docker-compose.yml`,
-    `Dockerfile`, `entrypoint.sh`, `.env*`, `node_modules/`, `data/` —
-    container assets must not be mutated at boot under a possibly-running
-    container (gateway-side `server//panel//skills/` refresh IS safe for
-    docker-type bundles; the possible code↔container contract skew across a
-    version bump is inherent drift, warn-worthy, accepted). cpSync is
-    additive — dest-only files (operator lesson packs, .env) survive
-    structurally.
+    always code. **Each manifest-declared root is validated to a single
+    plain path segment (no `/`, not `.`/`..`) before any join (R2 minor —
+    no existing guard confines these; F-HEALTH-1 already fixed a
+    `bundleId: ".."` traversal in this file's neighborhood; same class).**
+    **TYPE-AWARE restriction (R2 MAJOR-2):** for bundles whose manifest
+    declares docker surfaces, the refresh set is ONLY `manifest.json`,
+    `settings-section.js`, `server/`, `panel/`, `skills/` + the validated
+    manifest-declared paths — NEVER `config/`, `scripts/`, `templates/`,
+    `src/` or other roots: existing bundles bind-mount exactly those into
+    LIVE containers (lemmy `./config:ro`, maker-lab-advanced
+    `./config`+`./scripts` — R2 verified), and containers survive gateway
+    restarts; a refresh must never mutate a running container's mounts and
+    never restarts containers. Non-docker (mcp-server) bundles get the full
+    set above. NEVER copied for ANY type (stated, deliberate):
+    `docker-compose.yml`, `Dockerfile`, `entrypoint.sh`, `.env*`,
+    `node_modules/`, `data/`. cpSync is additive — dest-only files
+    (operator lesson packs, .env) survive structurally.
   - Re-copy the SERVED panel artifacts exactly as install does
     (bundles.js:1170-1184): `resolvePanelPath(manifest,id)` →
     `~/.crow/panels/<id>.js`, and `manifest.panelRoutes` →
@@ -81,14 +90,23 @@ existing missing-file repair:
     SYMLINKS into the bundle dir; copy-over-symlink is safe on Node 20 but
     rm-first is deterministic across versions; post-refresh they are regular
     files, and every future bump re-copies them).
-  - npm step (R1 MAJOR-3 — narrow trigger, no needless boot network op):
-    run `npm install --omit=dev` in the bundle dir ONLY when the repo
-    `package.json` declares a dependency NAME absent from the installed
-    bundle's `node_modules/` (added dep). A removed dep (maker-lab's actual
-    delta — repo dropped `@libsql/client`) or version-range-only change does
-    NOT trigger (superset node_modules is harmless; ranges resolve at next
-    real install). Reuse the file's own `run()` (bundles.js:361, execFile,
-    300s timeout), warn-only on failure.
+  - npm step (R1 MAJOR-3 — narrow trigger; delta narrative corrected by R2
+    MAJOR-1): run `npm install --omit=dev` in the bundle dir ONLY when the
+    repo `package.json` declares a dependency NAME absent from the installed
+    bundle's `node_modules/` (added dep; `existsSync(join(nm, depName))`
+    handles @scope/name naturally). Removed-dep-only or version-range-only
+    changes do NOT trigger. **Maker-lab's real delta is BOTH kinds**: repo
+    dropped `@libsql/client` AND added `qrcode` — so npm DOES fire on this
+    deploy, awaited pre-listen, bounded by run()'s 300s timeout, warn-only
+    (bundles.js:361). Accepted and stated: one bounded first-boot delay on
+    the refreshing instance; §5 verifies the npm log line and the bounded
+    boot. Resolution facts (R2+controller-verified): the SERVED panel
+    resolves imports via the PANELS_DIR `node_modules` symlink → GATEWAY
+    node_modules (qrcode present at root package.json:77 from Phase 2), and
+    the maker-lab server never imports qrcode — so the bundle npm step is
+    hygiene, not load-bearing, for THIS deploy. The refresh must ALSO ensure
+    the PANELS_DIR `node_modules` link exists (install-parity,
+    bundles.js:1186) — an April-era install may predate it.
   - Log one `[bundles] refreshed <id> <oldV> -> <newV>` line; include in the
     function's `repaired` return.
 - Version equal or either manifest unreadable (getManifest→null,
@@ -165,8 +183,15 @@ hardcoded. The function therefore gains injectable params —
 3. Instance-local preservation: `.env` + `data/marker.txt` + an extra
    node_modules file survive a refresh byte-identical — **mutation**:
    swapping explicit-include for a blanket dir copy reddens.
-4. package.json changed → the npm step is invoked (injectable runner seam or
-   recorded exec; NOT a real npm install in tests); unchanged → not invoked.
+4. npm trigger (R2-reworded to pin the M3 guard): an ADDED dep name absent
+   from the installed node_modules → npm invoked (injectable runner records
+   the call; never a real npm in tests); a removed-dep-only change AND a
+   version-range-only change → NOT invoked — **mutation**: reverting the
+   trigger to any-package.json-byte-diff reddens the removed-only case.
+4b. Docker-type bundle → `config//scripts/` NOT copied even when present in
+   repo; mcp-server type → copied — **mutation**: dropping the type gate
+   reddens. Manifest-declared root `"../x"` → rejected, no copy outside the
+   bundle dir — **mutation**: dropping the segment validation reddens.
 5. Unreadable/missing installed manifest → falls back to missing-only repair,
    no throw.
 6. Full suite ≥ baseline; boot clean.
