@@ -4,6 +4,9 @@ Date: 2026-07-11 · Arc: post-Messages-arc follow-up pool, item (1)
 Operator decisions (2026-07-11, AskUserQuestion): Approach A approved; ALL keys
 per-instance (none promoted to fleet-sync in this PR); auto-update per-tick
 enabled re-check INCLUDED; both vestigial dead writes DELETED.
+Review: R1 (adversarial, opus) REVISE — 2 MAJOR (D6 manual-check regression;
+D2 flag/retry contradiction) + 4 minors, all folded below; 13/13 §1 claims
+spot-checked HELD.
 
 ## 1. Problem
 
@@ -44,8 +47,10 @@ readSetting/override-first incl. the two raw pi-bots readers),
 
 Replication is enforced by `isSyncable` gates at **emit** (`shouldSyncRow`,
 servers/sharing/instance-sync.js:207-211 — "dashboard_settings holds only the
-global scope … Allowlist gates the key") **and apply**
-(`_applyDashboardSetting`, instance-sync.js:1056; reemit loop :510) — NOT by
+global scope … Allowlist gates the key") **and apply** (the inbound-entry
+dispatch re-runs `shouldSyncRow` before `_applyDashboardSetting` is ever
+reached — instance-sync.js:936, "Defense in depth: drop inbound rows that fail
+the local syncability check"; reemit loop :510) — NOT by
 which table a row lives in. A global-table row for a non-allowlisted key never
 leaves the box. Each instance has its own DB, so for never-synced keys the
 global table is already per-instance. The overrides table is only semantically
@@ -145,11 +150,18 @@ module `servers/gateway/dashboard/settings/instance-scope-heal.js`:
   - If a global row exists → **newest `updated_at` wins**: promote only when
     `override.updated_at >= global.updated_at` (lexicographic compare is valid:
     both tables' writers use SQLite `datetime('now')` — registry.js:207,218,
-    memory/server.js:1398, blog/server.js:522, migrations.js:135). Tie →
+    memory/server.js:1397-1399, blog/server.js:522-525,540-543,
+    panels/blog.js:74-77, migrations.js:135; R1 verified every writer). Tie →
     override wins (the override is by construction the broken-era UI write
-    being healed). Either way the override row is **deleted** — post-D1,
-    overrides for instance-scope keys are meaningless and would keep shadowing
-    the override-aware readers (the blog_theme_* chrome/public split).
+    being healed). **NULL/empty `updated_at` guard (R1 MINOR-1** — both columns
+    are nullable `TEXT DEFAULT (datetime('now'))`, init-db.js:1093,1735, so a
+    hand-edited/legacy row must not silently lose via `null >= "…"` coercion):
+    explicit precedence — global ts NULL/empty → override wins; else override
+    ts NULL/empty → global wins; else lexicographic. Both-NULL falls into the
+    first branch (override wins, consistent with the tie rule). Either way the
+    override row is **deleted** — post-D1, overrides for instance-scope keys
+    are meaningless and would keep shadowing the override-aware readers (the
+    blog_theme_* chrome/public split).
   - Unlike Cluster B there is NO empty-value guard and NO fleet hazard: nothing
     here syncs; promoting `""` is a local, per-instance act (e.g. a cleared
     discovery_name), and the newest-wins rule already arbitrates dual-writer
@@ -168,9 +180,14 @@ module `servers/gateway/dashboard/settings/instance-scope-heal.js`:
   handle (use the same client that block already holds). Value: unlike the
   profile heal, a companion-only boot still heals (closes the
   "null-syncManager boots never heal" gap for THIS heal class).
-- Per-key failure isolation: one key's promote/delete error must not abort the
-  others (try/catch per key, warn); flag written only after the loop completes
-  without throwing, so a partial failure retries next boot.
+- Per-key failure isolation + retry (**R1 MAJOR-2** — these two goals conflict
+  unless failure is tracked explicitly): each key is wrapped in its own
+  try/catch (warn, continue), setting `hadFailure = true` in the catch; the
+  flag is written **only when `hadFailure` is false**, so a partial failure
+  retries every boot until clean. This is a DELIBERATE divergence from the
+  profile-heal precedent, which writes its flag unconditionally after the loop
+  and therefore never retries (profile-heal.js:70-75) — implementers must not
+  "simplify" back to that shape; §5.4(h) mutation-guards it.
 
 ### D3 — Scope-route guard
 
@@ -204,13 +221,23 @@ INSTANCE_SCOPE_KEYS; its write-scope default stays as designed.
 
 ### D6 — Auto-update disable takes effect without a restart
 
-`checkForUpdates()` (auto-update.js) re-reads `auto_update_enabled` at tick top
-via the existing `getSettings()` and returns early (one log line) when not
-"true". Boot behavior unchanged (env `CROW_AUTO_UPDATE` still hard-wins before
-any DB read; a boot-disabled timer still never starts). Interval changes still
-require restart — the UI already says "Restart gateway to apply new interval".
-This makes the headline harm ("disabling auto-update in the UI is inert")
-CDP-provable click-to-tick-skip, not click-to-restart-to-skip.
+**Gate the TICK, not `checkForUpdates()` (R1 MAJOR-1).** `checkForUpdates()`
+has TWO callers: the timer (auto-update.js:230-233) and the manual "Check for
+updates now" button (settings section `updates`, action `check_updates_now`,
+updates.js:165-167). A gate inside the function would silently break the
+manual button for exactly the operator who disabled automatic updates but
+wants to update on demand. Design: extract the timer callback into a
+`tickCheck()` that re-reads `auto_update_enabled` via the existing
+`getSettings()` and returns early (one log line) when not "true", otherwise
+calls `checkForUpdates()`. The manual action keeps calling `checkForUpdates()`
+directly, ungated. A `getSettings()` throw inside the tick is caught and
+treated as "proceed" (fail-open to the boot-time value — an I/O blip must not
+permanently disable updates; noted for review). Boot behavior unchanged (env
+`CROW_AUTO_UPDATE` still hard-wins before any DB read at :206; a boot-disabled
+timer still never starts). Interval changes still require restart — the UI
+already says "Restart gateway to apply new interval". This makes the headline
+harm ("disabling auto-update in the UI is inert") CDP-provable
+click-to-tick-skip, not click-to-restart-to-skip.
 
 ### D7 — Docs
 
@@ -250,17 +277,24 @@ CDP-provable click-to-tick-skip, not click-to-restart-to-skip.
    updated_at comparison reddens (d); (e) no overrides → flag set, nothing
    written; (f) `blog_*` pattern keys healed; (g) non-instance-scope overrides
    (feature_flags, a profile key) are UNTOUCHED — **mutation**: relaxing the
-   isInstanceScope filter reddens; (h) per-key error does not abort the loop
-   and leaves the flag UNWRITTEN (retry next boot); (i) heal runs without a
-   sync manager (null/feedsDisabled) — asserts the deliberate ungated posture.
+   isInstanceScope filter reddens; (h) one key's error does not abort the
+   others AND leaves the flag UNWRITTEN (retry next boot) — **mutation**:
+   writing the flag unconditionally (the profile-heal shape) reddens;
+   (i) heal runs without a sync manager (null/feedsDisabled) — asserts the
+   deliberate ungated posture; (j) NULL-updated_at precedence: global-ts-NULL →
+   override wins; override-ts-NULL → global wins — **mutation**: dropping the
+   NULL guard reddens.
 5. Scope-route: POST promote AND demote on an instance key → 403 InstanceScoped
    — **mutation**: removing the guard reddens; allowlisted + plain keys behave
    as before; GET unaffected.
 6. D5: loadVisionProfiles returns a local-scoped vision_profiles row (red
    pre-fix, green post).
-7. D6: with a global `auto_update_enabled='false'`, `checkForUpdates()` returns
-   early without fetching — **mutation**: removing the tick re-check reddens.
-   With 'true' it proceeds. Env kill-switch precedence test unchanged.
+7. D6: with a global `auto_update_enabled='false'`, the TICK path skips without
+   fetching — **mutation**: removing the tick re-check reddens — while a
+   direct/manual `checkForUpdates()` invocation with the same DB state STILL
+   runs (the R1 MAJOR-1 regression made red-able); with 'true' the tick
+   proceeds. A `getSettings()` throw at tick → proceeds (fail-open). Env
+   kill-switch precedence test unchanged.
 8. D4: `set_theme` action still returns ok and writes NOTHING anywhere;
    llm migration writes no llm_chat_default_provider_id row; both migrations'
    existing suites stay green.
@@ -327,6 +361,19 @@ Post-deploy prod (fleet: crow, MPA, grackle, black-swan):
 - The heal deliberately runs on `--no-auth` companion gateways (shared DB,
   idempotent, no sync side effects) — the inverse of the profile heal's gate;
   reviewers should check this asymmetry is stated and tested, not accidental.
-- D3 blocks a previously-possible (if useless) scope demote for these keys —
-  breaking-change surface is the settings UI scope toggle, which reads the 403
-  code; verify the UI shows the message rather than a silent failure.
+- The heal is racy against a SIMULTANEOUS live MCP write in the boot window
+  (R1 MINOR-2: e.g. `crow_notification_settings` firing exactly while the heal
+  compares timestamps → the fresh global write can lose to an older override).
+  Boot-window-narrow, value-restorable via the same tool, accepted; not
+  engineered around.
+- D3 is pure hardening, NOT a UI breaking change (R1 MINOR-3): the scope
+  toggle UI renders interactive radios only for `isSyncable` keys
+  (shared/scope-toggle.js:22-27) and its only callers are the four allowlisted
+  profile sections — no UI path can POST a scope change for an instance-scope
+  key. The 403 guards hand-crafted requests; the client handler surfaces
+  `data.error` if one is ever made.
+- The §1 blog key enumeration is illustrative, not load-bearing (R1 MINOR-4):
+  the `blog_*` prefix also captures the bare legacy `blog_theme` settings key
+  (benign — instance-scope treatment is correct for it) and any future blog_
+  key; non-settings identifiers that merely start with "blog_" (table/tool
+  names) have no dashboard_settings rows and are unaffected.
