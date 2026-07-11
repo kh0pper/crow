@@ -48,6 +48,11 @@ export function gatewayHint(type, threadId) {
     return "\nGATEWAY THREAD: gmail thread_id=" + threadId
       + " — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.";
   }
+  if (type === "board") {
+    return "\nGATEWAY: board (card ref: " + threadId + ") — this run was dispatched from the "
+      + "kanban board. Do NOT use gmail/discord tools to reply; write your durable result under "
+      + "the plan file's \"## Result\" section and keep your final reply to a short summary.";
+  }
   const a = HOST_BY_TYPE[type];
   if (a && typeof a.gatewayHint === "function") return a.gatewayHint(threadId);
   return "\nGATEWAY: " + type + " (thread ref: " + threadId

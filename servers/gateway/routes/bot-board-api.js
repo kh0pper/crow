@@ -537,6 +537,62 @@ export default function botBoardApiRouter(dashboardAuth) {
     }
   });
 
+  // ---- execute from board (spec: dispatch is explicit; drags never dispatch) ----
+  // Reuses the /session/send detached bridge --inject seam. Board turns get
+  // gateway_type "board" + thread "board-card-<id>"; the bot's durable output
+  // is the plan file ## Result + the audit log + the session transcript.
+  router.post(P + "/card/:id/execute", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
+    let tdb, cdb;
+    try {
+      cdb = createDbClient();
+      const { locked } = await lockState(cdb, id);
+      if (locked) return res.status(409).json({ reason: "bot is working this card" });
+      tdb = createDbClient(TASKS_DB);
+      const card = (await tdb.execute({
+        sql: "SELECT id, status, stage, assigned_bot, plan_ref, project_id FROM tasks_items WHERE id=?",
+        args: [id],
+      })).rows[0];
+      if (!card) return jsonError(res, 404, "card not found");
+      const bot = card.assigned_bot ? String(card.assigned_bot) : "";
+      if (!bot) return jsonError(res, 400, "card has no assigned_bot");
+      const botRow = (await cdb.execute({
+        sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [bot],
+      })).rows[0];
+      if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
+      let planExists = false;
+      try {
+        const info = await resolveCardPlan(cdb, card);
+        planExists = !info.error && existsSync(info.path);
+      } catch { planExists = false; }
+      const eff = effectiveStage(card, planExists);
+      if (eff !== "ready") return res.status(409).json({ reason: "card is not Ready (stage: " + eff + ")" });
+      await tdb.execute({
+        sql: "UPDATE tasks_items SET stage='executing', status='in_progress', updated_at=datetime('now') WHERE id=?",
+        args: [id],
+      });
+      if (!process.env.CROW_BOARD_DISPATCH_DRYRUN) {
+        const { spawn } = await import("node:child_process");
+        const NODE_BIN = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
+        const BRIDGE = HOME + "/crow/scripts/pi-bots/bridge.mjs";
+        const payload = JSON.stringify({
+          bot_id: bot, gateway_type: "board", gateway_thread_id: "board-card-" + id,
+          user_message: "execute #" + id,
+        });
+        const child = spawn(NODE_BIN, [BRIDGE, "--inject", payload],
+          { cwd: HOME, stdio: ["ignore", "ignore", "ignore"], detached: true });
+        child.unref();
+      }
+      return res.json({ ok: true, dispatched: bot });
+    } catch (e) {
+      return jsonError(res, 500, String(e.message || e));
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
   // ---- create project ----
   router.post(P + "/project", async (req, res) => {
     const b = req.body || {};

@@ -38,6 +38,7 @@ import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
+import { statusToStage } from "../../servers/gateway/routes/board-stages.js";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -570,6 +571,22 @@ export async function handleInbound(opts) {
     const calls = pi.toolCalls();
     postTurn = { user: cleanMsg, assistant: text, toolNames: calls.map((c) => c.tool) };
     const newCardStatus = cardId != null ? cardStatus(cardId, tasksDbPath) : null;
+    // Board–plan unification: fold the bot-written status back onto the
+    // canonical stage column (single reconciliation point). Guarded on the
+    // column existing so pre-migration instances are untouched.
+    if (cardId != null && newCardStatus != null) {
+      try {
+        const t = db(tasksDbPath);
+        try {
+          const have = t.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
+          if (have.includes("stage")) {
+            const cur = t.prepare("SELECT stage FROM tasks_items WHERE id=?").get(cardId);
+            t.prepare("UPDATE tasks_items SET stage=? WHERE id=?")
+              .run(statusToStage(newCardStatus, cur && cur.stage), cardId);
+          }
+        } finally { t.close(); }
+      } catch (e) { log("stage reconcile skipped (non-fatal): " + (e && e.message || e)); }
+    }
     const status = newCardStatus === "done" ? "done" : "waiting-user";
     session.pi_session_id = piSessionId;
     session.status = status; session.control = "run";
