@@ -95,7 +95,10 @@ export default {
 
   async handleAction({ req, res, db, action }) {
     if (action === "set_theme") {
-      await upsertSetting(db, "dashboard_theme", req.body.theme);
+      // Response-only: chrome theme persistence flows through set_theme_mode →
+      // blog_theme_mode (read by dashboard/index.js). The old dashboard_theme
+      // write here was vestigial — zero runtime readers — and was removed with
+      // the settings-scope coherence PR.
       res.json({ ok: true });
       return true;
     }

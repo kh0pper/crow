@@ -170,13 +170,6 @@ async function migrateEnvDefault(db) {
     return { migrated: false };
   }
 
-  // Record the env-default pointer. llm_chat_default_provider_id is a
-  // local-only key (not in SYNC_ALLOWLIST); upsertSetting falls back to
-  // dashboard_settings_overrides for non-allowlisted keys.
-  try {
-    await upsertSetting(db, "llm_chat_default_provider_id", ENV_DEFAULT_ID);
-  } catch {}
-
   return { migrated: true, provider_id: ENV_DEFAULT_ID };
 }
 
