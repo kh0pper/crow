@@ -17,9 +17,13 @@ follow-up. Independent of Clusters B/C.
    `relaysConnected` keeps the boot-time value forever. The nest signal
    (health-signals.js:611, `relaysConnected === 0 → warn`) can effectively
    only fire for a boot-time all-relays-down.
-2. **Counts the map, not liveness:** even at connect time, `this.relays.size`
-   counts stale entries from earlier connects (entries are only ever added or
-   overwritten by URL, never removed), so the boot count itself can overcount.
+2. **(Defensive only — R1 F2 correction):** the originally-claimed "stale
+   entries from earlier connects overcount at boot" state is UNREACHABLE —
+   `connectRelays` early-returns when the map is non-empty (nostr.js:84), so
+   `_doConnectRelays` only ever runs from an empty map and `size === live` at
+   line 123 today. Replacing the size-count with the live-count at connect is
+   kept as defensive correctness (a relay that drops between `.set()` and the
+   count reads honest), not as a bug fix. The REAL defect is #1 alone.
 
 Meanwhile the receive path's own resilience (makeResilientSub + the 45s
 `_startHealthLoop`) reconnects within seconds — delivery self-heals while the
@@ -56,14 +60,20 @@ Called from exactly two places:
 1. **End of `connectRelays()`** — replacing `setRelaysConnected(this.relays.size)`
    (fixes the stale-entry overcount at connect time too).
 2. **Top of every `_startHealthLoop` tick** (the existing 45s
-   `CROW_NOSTR_HEALTH_MS` interval) — before the `ensureHealthy` sweep, so the
-   signal reflects the pre-heal truth each tick and the next tick reports the
-   healed state.
+   `CROW_NOSTR_HEALTH_MS` interval) — **before** the `ensureHealthy` sweep.
+   **This ordering is LOAD-BEARING (R1 F5):** the same tick's `ensureHealthy`
+   reconnects the socket; refreshed *after* the sweep, the reconnect would
+   erase the degraded reading and re-hide the outage — the F-HEALTH-2 bug
+   class reintroduced. Refresh-first latches the degraded count for one full
+   tick. A code comment must pin this against future reordering.
 
-Honesty contract: the signal reflects live socket state within
-≤ ping-timeout + one health tick (~45-60s) of a socket death, and recovers on
-the tick after `ensureHealthy` reconnects. The S8 repro (kill all sockets)
-now drives the signal to `[warn] "0 relays"` instead of a permanent green.
+Honesty contract (R1 F3 — pinned nostr-tools 2.23.3 defaults: pingFrequency
+29s, pingTimeout 20s): the signal reflects a **hard close** (RST / `ss -K`)
+within ≤ one health tick (~45s), and a **silent half-open** (NAT idle-drop)
+within ≤ pingFrequency + pingTimeout + one tick (~95s). It recovers on the
+tick after `ensureHealthy` reconnects. The S8 repro (hard kill) now drives the
+signal to `[warn] "0 relays"` for at least one full tick instead of a
+permanent green.
 
 ### Alternatives rejected
 
@@ -93,13 +103,21 @@ usage) keeps the connect-time count, same as today.
 1. `_refreshRelayHealth`: Map seeded with fake relays `{connected:true}` ×2 +
    `{connected:false}` ×1 + a null entry → `getReceiveHealth().relaysConnected === 2`.
    **Mutation:** reverting to `this.relays.size` must redden this.
-2. `connectRelays` end-state: pre-seed the map with a dead (`connected:false`)
-   stub, call `connectRelays([])` → count is 0, not 1 (pins the overcount fix;
-   the existing "mirrors relay count" test in nostr-receive-health-hooks stays
-   green).
-3. Health-loop tick refresh: `CROW_NOSTR_HEALTH_MS=50`, start the loop, flip a
-   stub relay's `connected` false → poll until `relaysConnected` drops (bounded
-   waitFor, no fixed sleep); flip back true → poll until it recovers.
+2. Connect-path end-state (R1 F1 — the naive `connectRelays([])` version is
+   VACUOUS: the :84 non-empty-map early-return skips `_doConnectRelays`
+   entirely and the assertion passes off the reset state): pre-seed the map
+   with a dead (`connected:false`) stub and call **`_doConnectRelays([])`
+   directly** — the stub survives the empty connect loop, so `size===1` while
+   live===0. Assert `relaysConnected === 0`. **Mutation:** reverting line
+   ~123 to `this.relays.size` must redden THIS variant (a genuinely live
+   guard).
+3. Health-loop tick refresh (R1 F4 — start the loop via
+   **`mgr._startHealthLoop()` directly with NO registered subscription**, or
+   the same tick's `ensureHealthy` calls the stub's `connect()` which flips it
+   back to connected and races the poll): `CROW_NOSTR_HEALTH_MS=50`, seed a
+   connected stub in the map, start the loop, poll `relaysConnected===1`; flip
+   `stub.connected=false` → poll until it drops to 0 (bounded waitFor, no
+   fixed sleep); flip back true → poll until it recovers to 1.
    **Mutation:** removing the tick's refresh call must redden this.
 4. Full suite ≥ current baseline (1385-class / 1 pre-existing foreign fail / 1
    skip); gateway boots clean.
@@ -108,11 +126,13 @@ usage) keeps the connect-time count, same as today.
 
 Post-deploy live E2E (repeat the S8 probe that proved the finding): on
 black-swan, kill all relay sockets (`ss -K`, deadman-armed per the unattended
--window rule if the window is long — here it is seconds and self-healing) →
-the Messages nest signal must leave `[ok]` and show the degraded count/warn
-within ~1 minute → sockets self-heal via ensureHealthy → signal returns to
-`[ok] "4 relays"`. This is the exact scenario that stayed green in the
-walkthrough.
+-window rule if the window is long — here it is seconds and self-healing).
+**Poll the nest signal at ≤10s cadence across a ~2-minute window (R1 F5)** —
+the degraded state latches for exactly one health tick (~45s) before
+`ensureHealthy`'s reconnect clears it, so a single glance can miss it. Expect:
+`[ok] "4 relays"` → (≤1 tick) degraded count / `[warn] "0 relays"` →
+(next tick) back to `[ok] "4 relays"`. This is the exact scenario that stayed
+green in the walkthrough.
 
 ## 6. Risks / review focus
 
