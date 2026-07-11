@@ -582,6 +582,9 @@ export default function botBoardApiRouter(dashboardAuth) {
         });
         const child = spawn(NODE_BIN, [BRIDGE, "--inject", payload],
           { cwd: HOME, stdio: ["ignore", "ignore", "ignore"], detached: true });
+        // I3a: a spawn failure (e.g. a stale NODE_BIN path) must not crash the
+        // gateway as an uncaughtException — this dispatch is fire-and-forget.
+        child.on("error", () => {});
         child.unref();
       }
       return res.json({ ok: true, dispatched: bot });
@@ -629,6 +632,9 @@ export default function botBoardApiRouter(dashboardAuth) {
         const payload = JSON.stringify({ cardId: id, botId: bot });
         const child = spawn(NODE_BIN, [BRIDGE, "--plan-card", payload],
           { cwd: HOME, stdio: ["ignore", "ignore", "ignore"], detached: true });
+        // I3a: a spawn failure (e.g. a stale NODE_BIN path) must not crash the
+        // gateway as an uncaughtException — this dispatch is fire-and-forget.
+        child.on("error", () => {});
         child.unref();
       }
       return res.json({ ok: true, dispatched: bot });
