@@ -39,6 +39,10 @@ const APP_ROOT = looksLikeAppRoot(process.env.CROW_APP_ROOT) ? process.env.CROW_
   : looksLikeAppRoot(__appRootGuess) ? __appRootGuess
   : (process.env.CROW_APP_ROOT || __appRootGuess);
 const appImport = (rel) => import(pathToFileURL(join(APP_ROOT, rel)).href);
+// This panel's own lazy imports below target the BUNDLE's server/ dir (not
+// the app root's shared servers/ tree) — resolve through APP_ROOT +
+// bundles/maker-lab/server/, mirroring panel/routes.js's bundleImport().
+const bundleImport = (rel) => import(pathToFileURL(join(APP_ROOT, "bundles", "maker-lab", "server", rel)).href);
 
 const { createProjectSpace, updateProjectSpaceMeta } = await appImport("servers/shared/project-spaces.js");
 
@@ -90,7 +94,7 @@ function readInstalledBundleIds() {
 }
 
 async function loadDeviceBinding() {
-  return import(pathToFileURL(resolve(__dirname, "../server/device-binding.js")).href);
+  return bundleImport("device-binding.js");
 }
 
 export default {
@@ -105,7 +109,7 @@ export default {
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
     const { escapeHtml } = await import(pathToFileURL(componentsPath).href);
 
-    const sessionsMod = await import(pathToFileURL(resolve(__dirname, "../server/sessions.js")).href);
+    const sessionsMod = await bundleImport("sessions.js");
     const { mintSessionForLearner, mintGuestSession, mintBatchSessions } = sessionsMod;
 
     // ─── Helpers ─────────────────────────────────────────────────────────
@@ -347,7 +351,7 @@ export default {
             content: renderLessonImportResult({ errors: [`JSON parse error: ${err.message}`], raw, escapeHtml }),
           });
         }
-        const { validateLesson } = await import(pathToFileURL(resolve(__dirname, "../server/lesson-validator.js")).href);
+        const { validateLesson } = await bundleImport("lesson-validator.js");
         const { valid, errors } = validateLesson(parsed);
         if (!valid) {
           return layout({
