@@ -23,9 +23,7 @@ import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
-import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { join, dirname } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
 import { checkGpuArchCompatible } from "../gpu-arch.js";
@@ -40,6 +38,16 @@ import { invalidateProvidersCache } from "../../shared/providers.js";
 import { writeSetting } from "../dashboard/settings/registry.js";
 import { getCollection } from "../dashboard/panels/extensions/collections.js";
 import { beginInstallSet, endInstallSet, isInstallSetRunning } from "../install-lock.js";
+import {
+  CROW_HOME,
+  BUNDLES_DIR,
+  MCP_ADDONS_PATH,
+  APP_ROOT,
+  APP_BUNDLES,
+  getManifest,
+  needsConfigKeys,
+  _setAppBundlesForTest,
+} from "../bundles-config.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -110,27 +118,18 @@ async function unseedProfile(db, kind, seed, log) {
 const CONSENT_TOKEN_TTL_SECONDS = 15 * 60; // 15 min — covers slow image pulls
 const CONSENT_TOKEN_SCHEMA_VERSION = 1;
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-// Respect the instance's CROW_HOME (matches proxy.js resolveCrowHome). Without
-// this, installs on an alternate instance (CROW_HOME=~/.crow-mpa, ~/.crow-finance)
-// wrote bundle files + mcp-addons.json into the MAIN ~/.crow, re-coupling the
-// instances. Falls back to ~/.crow when unset (the main instance).
-const CROW_HOME = process.env.CROW_HOME || join(homedir(), ".crow");
-const BUNDLES_DIR = join(CROW_HOME, "bundles");
+// CROW_HOME / BUNDLES_DIR / APP_ROOT / APP_BUNDLES / getManifest / needsConfigKeys and
+// the _setAppBundlesForTest seam all live in ../bundles-config.js — the single source of
+// truth (imported here as ESM live bindings, so _setAppBundlesForTest repoints the one
+// and only APP_BUNDLES binding for every reader). Re-exported below for pre-existing
+// importers (tests/bundles-install-set.test.js, tests/install-set-e2e.test.js).
 const SKILLS_DIR = join(CROW_HOME, "skills");
 const PANELS_DIR = join(CROW_HOME, "panels");
-const MCP_ADDONS_PATH = join(CROW_HOME, "mcp-addons.json");
 const PANELS_CONFIG_PATH = join(CROW_HOME, "panels.json");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
-const APP_ROOT = resolve(__dirname, "../../..");
-// `let` (not `const`): _setAppBundlesForTest below repoints this at a scratch
-// source tree so install-set E2E tests never install real bundles onto the
-// operator's host (see tests/install-set-e2e.test.js).
-let APP_BUNDLES = join(APP_ROOT, "bundles");
 const APP_ENV_PATH = join(APP_ROOT, ".env");
 
-/** Test-only: repoint the repo bundle-source root (normally APP_ROOT/bundles). */
-export function _setAppBundlesForTest(path) { APP_BUNDLES = path; }
+export { needsConfigKeys, _setAppBundlesForTest };
 
 // Test-only: override the collections.json path read by POST /install-set
 // (getCollection() defaults to the real registry/collections.json, which has
@@ -585,16 +584,6 @@ function getInstalled() {
 function saveInstalled(arr) {
   mkdirSync(dirname(INSTALLED_PATH), { recursive: true });
   writeFileSync(INSTALLED_PATH, JSON.stringify(arr, null, 2));
-}
-
-/** Read manifest.json for a bundle from app source */
-function getManifest(bundleId) {
-  const manifestPath = join(APP_BUNDLES, bundleId, "manifest.json");
-  try {
-    return JSON.parse(readFileSync(manifestPath, "utf8"));
-  } catch {
-    return null;
-  }
 }
 
 /** Run a shell command safely with execFile */
@@ -1713,31 +1702,6 @@ export function planInstallSet(collection) {
     if (!gpu.ok) return { id: m.id, action: "skip", reason: gpu.reason || "incompatible with this host's GPU" };
     return { id: m.id, action: "install" };
   });
-}
-
-/**
- * Manifest-required env keys that are still EMPTY in the bundle's written .env.
- * Keys with a value (including .env.example defaults — DB passwords, secret keys)
- * count as configured and are NEVER surfaced: those are consumed at first container
- * boot, and changing them afterwards breaks the app or strands its data.
- * @param {object} [envOverride] test seam — the parsed .env
- */
-export function needsConfigKeys(bundleId, envOverride = null) {
-  const man = getManifest(bundleId);
-  const required = (man?.env_vars || []).filter((v) => v.required).map((v) => v.name);
-  if (required.length === 0) return [];
-  let env = envOverride;
-  if (!env) {
-    env = {};
-    const envPath = join(BUNDLES_DIR, bundleId, ".env");
-    if (existsSync(envPath)) {
-      for (const line of readFileSync(envPath, "utf8").split("\n")) {
-        const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-        if (m) env[m[1]] = m[2];
-      }
-    }
-  }
-  return required.filter((k) => !env[k] || env[k].trim() === "");
 }
 
 /**
