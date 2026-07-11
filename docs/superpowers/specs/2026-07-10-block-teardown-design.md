@@ -57,7 +57,10 @@ The missing pieces:
   (Phase 3, live-proven in S7 7.2).
 - Receipts/acks FROM a blocked contact for messages we previously sent still
   process (`handleDeliveryReceipt` is contact-bound and harmless); only their
-  inbound DMs are silenced.
+  inbound DMs are silenced. Likewise `handleHandshakeComplete` (boot.js:285)
+  from a blocked contact can still apply a sanitized display name over a
+  PLACEHOLDER name (R2 F5) — cosmetic, placeholder-only, and the conversation
+  is `is_blocked`-filtered out of the list; dispositioned harmless, not gated.
 
 ## 3. Design
 
@@ -121,21 +124,41 @@ wiring path that forgets teardown:
   pending, accepted) is silently dropped on the catch-all path. This kills the
   S5.4 store path.
 - **(c) `group_message` handler** (boot.js:548-577, R1 MAJOR-1): the
-  `onSocialMessage` branch fires a notification UNCONDITIONALLY and stores a
-  `direction='received'` row with no `is_blocked` check — a blocked contact who
-  shares a group can still ping the notification tray via
+  `onSocialMessage` branch fires a notification UNCONDITIONALLY (:552) and
+  stores a `direction='received'` row (:573) with no `is_blocked` check — a
+  blocked contact who shares a group can still ping the notification tray via
   `crow_send_group_message` (they didn't block us; their fan-out includes us).
-  Fix: extend the existing sender lookup to `SELECT id, is_blocked` and
-  early-return BEFORE the notification and the store when blocked.
+  Fix (R2 F2 — this is a REORDER, not an in-place extension: the sender lookup
+  currently sits at :567, AFTER the notification): move the sender resolve
+  (`SELECT id, is_blocked FROM contacts WHERE crow_id = ?`) ABOVE the
+  notification, and early-return ONLY when the resolved row exists AND
+  `is_blocked === 1`. An UNKNOWN (non-contact) group sender must still notify
+  exactly as today — the guard is `found && blocked`, never `!found` (test
+  pins this).
 - **(d) blocked re-wire guard (R1 MINOR-2):** a blocked contact's
   `invite_accepted` (or its ~60h retry re-send) currently flows
   `handleInviteAccepted` → `upsertFullContact` → `wireFullContact`, recreating
   the sub/feeds/DHT state this design tears down. Fix in two layers:
   `handleInviteAccepted` early-returns (no upsert, no ack — silence toward the
-  blocked party; `recordProcessedEvent` hygiene untouched) when the resolved
-  sender contact is blocked, AND `wireFullContact` itself skips wiring when
-  `row.is_blocked` (belt: no upsert path — tool, accept, handshake — can wire a
-  blocked contact; the wiring returns on unblock via D2).
+  blocked party) when the resolved sender contact is blocked, AND
+  `wireFullContact` itself skips wiring when `row.is_blocked` (belt: no upsert
+  path — tool, accept, handshake — can wire a blocked contact; the wiring
+  returns on unblock via D2).
+  **Placement is load-bearing (R2 F1 MAJOR):** the early-return (resolve via
+  `findContactByPubkey(senderPubkey)` + blocked check) goes IMMEDIATELY after
+  the R4 auth check (boot.js:182) and BEFORE the `wasProcessed` replay branch
+  (:190) and the short-code `"replayed"` branch (:209) — both of those branches
+  ACK. The common blocked case is "added via a processed invite_accepted, then
+  blocked": its ~60h retry re-sends the same event.id, which hits `wasProcessed`
+  → ack. Placed after :190, the guard's sole unique contribution (ack silence)
+  silently fails. Mutation test: a blocked sender whose event.id is already in
+  processed_control_events produces NO sendControl/ack call.
+  **Ledger note (R2 F6):** skipping `consumeShortInvite` for a blocked sender is
+  safe — the invite was consumed on the pre-block accept (a retry verdicts
+  "replayed" and changes nothing) and any genuinely-unconsumed row expires at
+  the 72h ledger TTL. No outstanding-forever leak.
+  **Export note (R2 F3):** `wireFullContact` is currently module-private —
+  export it so the belt-guard test can drive it directly.
 
 ### D5 — Testability seam
 
@@ -172,12 +195,16 @@ unchanged.
    `is_blocked=1` AFTER subscribe → no messages row, no receipt attempt; flip
    back → stores. **Mutation:** removing the fresh check reddens the blocked case.
 7. D4c group_message guard: blocked sender's group_message → no notification, no
-   stored row; unblocked sender's still notifies+stores. **Mutation:** removing
-   the guard reddens the blocked case on both assertions.
+   stored row; unblocked sender's still notifies+stores; **unknown (non-contact)
+   sender still notifies** (pins the reorder against a `!found` mistake).
+   **Mutation:** removing the guard reddens the blocked case on both assertions.
 8. D4d blocked re-wire: `handleInviteAccepted` from a blocked sender → no upsert
-   mutation, no ack, no wiring; `wireFullContact` with a blocked row → none of
-   initContact/joinContact/subscribeToContact called. **Mutation:** each layer's
-   removal reddens its own test.
+   mutation, no ack, no wiring — INCLUDING the replay case: blocked sender +
+   event.id already recorded in processed_control_events → NO sendControl/ack
+   (pins the guard's placement before the ack branches). `wireFullContact`
+   (exported) with a blocked row → none of initContact/joinContact/
+   subscribeToContact called. **Mutation:** each layer's removal reddens its
+   own test.
 9. Full suite ≥ current baseline (1385/1 pre-existing/1 skip); gateway boots
    clean.
 
@@ -209,10 +236,14 @@ unchanged.
 - `unwireContact` also closes sync feeds; a blocked contact therefore stops
   message-mirroring too — same semantics the block handlers already had
   (closeContactFeeds was already inline).
-- **R1 MINOR-3 (accepted):** unblock over-wires a `req:` accepted stranger —
+- **R1 MINOR-3 + R2 F4 (accepted):** unblock over-wires `req:` rows —
   `wireFullContact` creates an out-feed + DHT topic where `accept_request` only
-  ever subscribed. Harmless waste (all guarded, stranger can't replicate);
-  documented asymmetry, not engineered around. Note `req:` rows have no synced
+  ever subscribed, and a keyed PENDING request row gains a per-contact sub that
+  boot deliberately omits (boot.js:479 skips pending). Harmless: all steps
+  guarded, the stranger can't replicate, and `INSERT OR IGNORE` on
+  nostr_event_id dedupes any double-store vs the incoming catch-all; block on a
+  pending row is not reachable from the UI (only Accept/Decline render).
+  Documented asymmetry, not engineered around. Note `req:` rows have no synced
   echo (they don't sync), so the "matches the sync-applied echo" argument
   applies only to full contacts.
 - **R1 MINOR-4 (precision):** unblock restores the out feed only —
