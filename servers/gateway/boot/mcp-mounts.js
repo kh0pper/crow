@@ -141,7 +141,7 @@ export async function mountMcpServers(app, deps) {
   // re-copy them from the app repo. Prevents the Companion migration gap from recurring.
   try {
     const { repairInstalledBundleAssets } = await import("../routes/bundles.js");
-    const { repaired, errors } = repairInstalledBundleAssets();
+    const { repaired, errors } = await repairInstalledBundleAssets();
     if (repaired.length > 0) {
       console.log(`[bundles] Repaired assets: ${repaired.join("; ")}`);
     }

@@ -22,7 +22,7 @@ import bus from "../../shared/event-bus.js";
 import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -257,20 +257,207 @@ function emitJobChanged(job) {
 
 /** Read installed.json as array */
 /**
- * Repair missing bundle UI artifacts for already-installed bundles.
+ * First path segment of a manifest-declared path, or null for a falsy/non-string
+ * input. Used to derive extra refresh-eligible roots from manifest.server.args[0],
+ * .panel, .panelRoutes, .skills[] — see isValidPathSegment for the guard that
+ * keeps a hostile declared path (e.g. "../x") from ever being joined.
+ */
+function firstPathSegment(p) {
+  if (!p || typeof p !== "string") return null;
+  const seg = p.split("/")[0];
+  return seg || null;
+}
+
+/** A single, plain, non-traversal path segment (no "/", not "." or ".."). */
+function isValidPathSegment(seg) {
+  return typeof seg === "string" && seg.length > 0 && seg !== "." && seg !== ".." && !seg.includes("/") && !seg.includes("\\");
+}
+
+/**
+ * Copy one explicit-include item (a top-level file or a directory) from a
+ * bundle's repo source into its installed dest dir. No-op (returns false) if
+ * the item doesn't exist in the repo source. cpSync is additive: dest-only
+ * files not present in the source survive.
+ */
+function copyBundleRefreshItem(appSrc, destDir, item) {
+  const src = join(appSrc, item);
+  if (!existsSync(src)) return false;
+  const dst = join(destDir, item);
+  if (statSync(src).isDirectory()) {
+    cpSync(src, dst, { recursive: true });
+  } else {
+    mkdirSync(dirname(dst), { recursive: true });
+    copyFileSync(src, dst);
+  }
+  return true;
+}
+
+/**
+ * True iff the repo package.json declares a dependency NAME absent from the
+ * installed bundle's node_modules/ — the ONLY npm-install trigger (R1/R2:
+ * narrow, added-dep-only; a removed dep or a version-range-only bump must NOT
+ * fire a boot-time npm install). existsSync(join(nm, depName)) handles
+ * @scope/name naturally.
+ */
+function bundleNeedsNpmInstall(appSrc, destDir) {
+  const pkg = readJsonSafe(join(appSrc, "package.json"), null);
+  if (!pkg || !pkg.dependencies || typeof pkg.dependencies !== "object") return false;
+  const nodeModules = join(destDir, "node_modules");
+  return Object.keys(pkg.dependencies).some((depName) => !existsSync(join(nodeModules, depName)));
+}
+
+/**
+ * D1 (BH-4): version-keyed refresh of one installed first-party bundle.
+ *
+ * If the repo manifest and the installed manifest are both readable and their
+ * `version` strings differ (both-undefined counts as EQUAL — crow's no-version
+ * bundles like vllm/llama must never churn; otherwise a difference in either
+ * direction refreshes, since the repo is the source of truth and installed
+ * copies are snapshots, not forks), this:
+ *   1. Copies the explicit-include set of code artifacts from appSrc → destDir
+ *      (type-aware: docker-surface bundles get a narrower set, since existing
+ *      docker bundles bind-mount config/scripts/etc into LIVE containers and a
+ *      refresh must never mutate a running container's mounts).
+ *   2. Re-copies the served PANELS_DIR artifacts (<id>.js, <id>-routes.js),
+ *      rmSync-first for determinism, and ensures the PANELS_DIR node_modules
+ *      symlink exists (install-parity — an April-era install may predate it).
+ *   3. Runs `npm install --omit=dev` in destDir, via the injected runner,
+ *      ONLY when an added dependency name triggers it (warn-only; never
+ *      throws into the caller).
+ *
+ * Returns null (caller falls back to the existing missing-only repair) when
+ * either manifest is unreadable/missing or the versions are equal. Otherwise
+ * returns { oldVersion, newVersion, touched }.
+ */
+async function refreshVersionedBundle({ id, appSrc, destDir, runner }) {
+  const repoManifest = readJsonSafe(join(appSrc, "manifest.json"), null);
+  const installedManifest = readJsonSafe(join(destDir, "manifest.json"), null);
+  if (!repoManifest || !installedManifest) return null;
+
+  const oldVersion = installedManifest.version;
+  const newVersion = repoManifest.version;
+  const bothUndefined = oldVersion === undefined && newVersion === undefined;
+  if (bothUndefined || oldVersion === newVersion) return null;
+
+  const isDocker = !!repoManifest.docker;
+  const touched = [];
+
+  // Explicit-include set (R1 MAJOR-4: generalized to cover JS AND Python
+  // first-party bundles). R2 MAJOR-2: type-aware restriction — docker-surface
+  // bundles get ONLY manifest.json/settings-section.js/server//panel//skills/
+  // + validated manifest-declared roots, NEVER config/scripts/templates/src
+  // (existing bundles bind-mount exactly those into live containers).
+  const topFiles = isDocker
+    ? ["manifest.json", "settings-section.js"]
+    : ["manifest.json", "package.json", "package-lock.json", "pyproject.toml", "uv.lock", "settings-section.js", "main.py", "run.sh", "config.py"];
+  const dirs = isDocker
+    ? ["server", "panel", "skills"]
+    : ["server", "panel", "skills", "curriculum", "public", "scripts", "templates", "routes", "config", "src"];
+  // Never copied for ANY type: docker-compose.yml, Dockerfile, entrypoint.sh,
+  // .env*, node_modules/, data/ — simply absent from both lists above.
+
+  // Manifest-declared roots: the bundle contract is manifest-declaration-
+  // driven, so any path a manifest names is code by definition. Each is
+  // reduced to its first path segment and validated to a single plain segment
+  // before any join (R2 minor — same traversal class F-HEALTH-1 fixed for
+  // bundleId elsewhere in this file).
+  const declaredRoots = new Set();
+  const declare = (p) => {
+    const seg = firstPathSegment(p);
+    if (seg && isValidPathSegment(seg)) declaredRoots.add(seg);
+  };
+  if (repoManifest.server?.args?.[0]) declare(repoManifest.server.args[0]);
+  if (typeof repoManifest.panel === "string") declare(repoManifest.panel);
+  else if (repoManifest.panel && typeof repoManifest.panel === "object") declaredRoots.add("panel");
+  if (repoManifest.panelRoutes) declare(repoManifest.panelRoutes);
+  if (Array.isArray(repoManifest.skills)) {
+    for (const s of repoManifest.skills) declare(s);
+  }
+
+  for (const item of new Set([...topFiles, ...dirs, ...declaredRoots])) {
+    if (copyBundleRefreshItem(appSrc, destDir, item)) touched.push(item);
+  }
+
+  // Served panel artifacts — exactly as install does (bundles.js ~:1170-1184),
+  // rmSync-first (R1 minor: crow's live panel files are legacy symlinks into
+  // the bundle dir; cpSync-over-symlink is safe on Node 20, but rm-first is
+  // deterministic across Node versions, and post-refresh they're regular files).
+  mkdirSync(PANELS_DIR, { recursive: true });
+  const panelRelPath = resolvePanelPath(repoManifest, id);
+  if (panelRelPath) {
+    const panelSrc = join(destDir, panelRelPath);
+    if (existsSync(panelSrc)) {
+      const panelDst = join(PANELS_DIR, `${id}.js`);
+      rmSync(panelDst, { force: true });
+      cpSync(panelSrc, panelDst);
+      touched.push(`panels/${id}.js`);
+    }
+  }
+  if (repoManifest.panelRoutes) {
+    const routesSrc = join(destDir, repoManifest.panelRoutes);
+    if (existsSync(routesSrc)) {
+      const routesDst = join(PANELS_DIR, `${id}-routes.js`);
+      rmSync(routesDst, { force: true });
+      cpSync(routesSrc, routesDst);
+      touched.push(`panels/${id}-routes.js`);
+    }
+  }
+  // Install-parity: ensure the PANELS_DIR node_modules symlink exists (an
+  // April-era install may predate it — bundles.js:1186).
+  const nmLink = join(PANELS_DIR, "node_modules");
+  if (!existsSync(nmLink)) {
+    const gatewayNm = join(APP_ROOT, "node_modules");
+    if (existsSync(gatewayNm)) {
+      try { symlinkSync(gatewayNm, nmLink); } catch {}
+    }
+  }
+
+  // npm step: narrow, added-dep-name-only trigger; warn-only; via the
+  // injected runner so tests never shell out to a real npm.
+  if (bundleNeedsNpmInstall(appSrc, destDir)) {
+    try {
+      await runner("npm", ["install", "--omit=dev"], { cwd: destDir });
+      touched.push("npm install");
+    } catch (err) {
+      console.warn(`[bundles] npm install failed for ${id}: ${err.message}`);
+    }
+  }
+
+  console.log(`[bundles] refreshed ${id} ${oldVersion} -> ${newVersion}`);
+  return { oldVersion, newVersion, touched };
+}
+
+/**
+ * Repair missing bundle UI artifacts for already-installed bundles, and
+ * (D1, BH-4) refresh a bundle's installed copy when the repo manifest's
+ * version has moved past the installed manifest's version.
  *
  * Prior incident (2026-04-14): the Companion bundle's docker service was migrated
  * from grackle to crow, but ~/.crow/bundles/companion/settings-section.js was
  * absent on crow because only the docker volumes moved over. This meant the
  * Settings → Companion section disappeared until the file was manually copied.
  *
+ * Prior incident (2026-07-11, BH-4): W2-5 migrated bundles/maker-lab/ in-repo
+ * from research_projects to project_spaces, but the missing-only repair below
+ * never refreshes a file that's merely stale-but-present — the installed copy
+ * was an April snapshot, so /dashboard/maker-lab 500'd on `no such table:
+ * research_projects` for months. The version-keyed refresh phase (above,
+ * refreshVersionedBundle) is the fix: ANY version delta re-copies the
+ * bundle's code + served panel artifacts, since the repo is the source of
+ * truth. It runs BEFORE — and, when it fires, supersedes — the missing-only
+ * repair for that bundle.
+ *
  * This function idempotently re-copies settings-section.js and panel/ from the
- * app repo (APP_BUNDLES) into ~/.crow/bundles/<id>/ for every installed bundle.
+ * app repo (appBundles) into ~/.crow/bundles/<id>/ for every installed bundle.
  * It's safe to run on every gateway start — cpSync overwrites identical files.
  *
- * Returns { repaired: string[], errors: Array<{id, error}> }.
+ * @param {{appBundles?: string, run?: Function}} [opts]
+ *   appBundles: override the repo bundles root (test seam; defaults to APP_BUNDLES).
+ *   run: override the shell runner used for the npm-install step (test seam;
+ *        defaults to the module's `run`).
+ * @returns {Promise<{repaired: string[], errors: Array<{id, error}>}>}
  */
-export function repairInstalledBundleAssets() {
+export async function repairInstalledBundleAssets({ appBundles = APP_BUNDLES, run: runner = run } = {}) {
   const repaired = [];
   const errors = [];
 
@@ -288,13 +475,20 @@ export function repairInstalledBundleAssets() {
     const id = typeof entry === "string" ? entry : entry?.id;
     if (!id || !isValidBundleId(id)) continue;
 
-    const appSrc = join(APP_BUNDLES, id);
+    const appSrc = join(appBundles, id);
     if (!existsSync(appSrc)) continue; // not a first-party bundle — skip
 
     const destDir = join(BUNDLES_DIR, id);
     const touched = [];
     try {
       mkdirSync(destDir, { recursive: true });
+
+      // D1: version-keyed refresh phase, BEFORE the missing-only repair below.
+      const refreshed = await refreshVersionedBundle({ id, appSrc, destDir, runner });
+      if (refreshed) {
+        repaired.push(`${id}: refreshed ${refreshed.oldVersion} -> ${refreshed.newVersion} (${refreshed.touched.join(", ") || "no files changed"})`);
+        continue; // refresh fully supersedes the missing-only phase for this bundle
+      }
 
       // settings-section.js: single file — copy if missing or stale-size
       const settingsSrc = join(appSrc, "settings-section.js");
