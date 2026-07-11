@@ -161,8 +161,72 @@ test("overflow cards are hidden by CLASS, never by an inline display style", () 
   for (const card of overflowCards) {
     assert.ok(!/style="[^"]*display/.test(card), `overflow card carries an inline display: ${card}`);
   }
-  // ...and the stylesheet is what actually hides them.
-  assert.match(extensionStyles(), /\.ext-card--overflow\s*\{[^}]*display\s*:\s*none/);
+  // ...and the stylesheet is what actually hides them — see the cascade test below.
+  // (A string match for the RULE is NOT proof: the rule can be present and still
+  //  lose the cascade to `.ext-card { display:flex }`. Resolve, don't grep.)
+});
+
+/** Specificity (a,b,c) of a single selector: #id, .class/[attr]/:pseudo-class, element. */
+function specificity(sel) {
+  const ids = (sel.match(/#[\w-]+/g) || []).length;
+  const classes = (sel.match(/\.[\w-]+|\[[^\]]+\]|:[\w-]+(?!:)/g) || []).length;
+  const elements = (sel.match(/(^|[\s>+~])[a-zA-Z][\w-]*/g) || []).length;
+  return [ids, classes, elements];
+}
+const cmpSpec = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+
+/** Classes of the compound selector at the far right (what must match the element). */
+function rightmostClasses(sel) {
+  const last = sel.trim().split(/[\s>+~]+/).pop();
+  return (last.match(/\.[\w-]+/g) || []).map((c) => c.slice(1));
+}
+
+/**
+ * Resolve `display` for an element with the given classes, the way a browser would:
+ * highest specificity wins; on a tie, the LAST rule in source order wins.
+ * @returns {{value:string, selector:string}|null}
+ */
+function resolveDisplay(css, elementClasses) {
+  const owned = new Set(elementClasses);
+  let winner = null;
+  cssRules(css).forEach((rule, order) => {
+    const decl = [...rule.body.matchAll(/(?:^|;)\s*display\s*:\s*([^;]+)/g)].pop();
+    if (!decl) return;
+    for (const sel of rule.selector.split(",")) {
+      const s = sel.trim();
+      if (!s || s.startsWith("@")) continue;
+      const right = rightmostClasses(s);
+      // Only class-only compounds can match our element; every class must be present.
+      if (right.length === 0 || !right.every((c) => owned.has(c))) continue;
+      const spec = specificity(s);
+      if (!winner || cmpSpec(spec, winner.spec) > 0 || (cmpSpec(spec, winner.spec) === 0 && order >= winner.order)) {
+        winner = { value: decl[1].trim(), selector: s, spec, order };
+      }
+    }
+  });
+  return winner;
+}
+
+test("CASCADE: an overflow card actually resolves to display:none in a browser", () => {
+  // The regression this catches: `.ext-card--overflow { display:none }` (0-1-0) TIES
+  // with `.ext-card { display:flex }` (0-1-0) and loses on source order, so every
+  // "hidden" card past the cap renders and the Show-all cap is dead. The rule is
+  // *present* in the stylesheet the whole time — only resolving the cascade catches it.
+  const css = extensionStyles();
+  const winner = resolveDisplay(css, ["ext-card", "addon-card", "ext-card--overflow"]);
+  assert.ok(winner, "no rule sets display on an overflow card");
+  assert.equal(
+    winner.value,
+    "none",
+    `an overflow card resolves to display:${winner.value} via "${winner.selector}" — it is NOT hidden`,
+  );
+});
+
+test("CASCADE: a normal (non-overflow) add-on card still resolves to display:flex", () => {
+  // The other half: the fix must not hide every card.
+  const winner = resolveDisplay(extensionStyles(), ["ext-card", "addon-card"]);
+  assert.ok(winner);
+  assert.equal(winner.value, "flex", `a visible card resolves to display:${winner.value}`);
 });
 
 test("search input and both registry script blobs are emitted", () => {

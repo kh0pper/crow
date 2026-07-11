@@ -155,8 +155,13 @@ export function extensionStyles() {
 /* Cards past the per-group cap. Hidden by CLASS, not by an inline style: the
  * search filter writes card.style.display, which would clobber an inline hide
  * and reveal every overflow card on the first keystroke. "Show all" removes
- * this class. */
-.ext-card--overflow { display:none; }
+ * this class.
+ *
+ * The selector is compound (0-2-0) on purpose. A bare .ext-card--overflow is
+ * 0-1-0, which TIES with the .ext-card display:flex rule further down and loses
+ * on source order — it would never hide anything. Don't "fix" a future ordering
+ * problem by moving this rule; keep it more specific than .ext-card. */
+.ext-card.ext-card--overflow { display:none; }
 
 /* Collection install modal (shell — content is built by the client) */
 .ext-collection-modal__title {
