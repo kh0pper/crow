@@ -8,7 +8,7 @@
 
 import { t } from "../shared/i18n.js";
 import { extensionStyles } from "./extensions/css.js";
-import { fetchRegistryData, fetchBundleStatus } from "./extensions/data-queries.js";
+import { fetchRegistryData, fetchBundleStatus, fetchNeedsConfig } from "./extensions/data-queries.js";
 import { extensionsClientJS } from "./extensions/client.js";
 import { handleExtensionsPost } from "./extensions/api-handlers.js";
 import { buildExtensionsHTML } from "./extensions/html.js";
@@ -30,9 +30,12 @@ export default {
 
     const { installed, available, collections, registrySource, communityStores } = await fetchRegistryData();
     const { bundleStatus } = fetchBundleStatus(installed);
+    // Config completeness is computed HERE, never in html.js (which stays pure and
+    // is unit-tested without ~/.crow).
+    const needsConfig = fetchNeedsConfig(installed);
 
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
-      installed, available, collections, registrySource, communityStores, bundleStatus, lang,
+      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, lang,
     });
 
     // ─── Modal + client-side JavaScript ───

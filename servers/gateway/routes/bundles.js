@@ -2292,12 +2292,19 @@ export default function bundlesRouter() {
     // Also configure the MCP child, which reads mcp-addons.json — not this .env.
     const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
 
+    // RE-DERIVE config state from the files we just wrote and hand it back: the
+    // client must not decide "configured" itself. submitConfigureOnly guards only
+    // the all-blank case and its `if (inp && inp.value)` accepts whitespace (which
+    // needsConfigKeys trims away), so filling 1 of 12 keys still 200s — a client
+    // that cleared its badge on any 200 would hide a still-unconfigured bundle.
+    // Key NAMES only; never values (D5).
     res.json({
       ok: true,
       message: mcpUpdated
         ? "Environment variables saved — restart the gateway to apply them to the MCP server"
         : "Environment variables saved",
       needs_restart: mcpUpdated,
+      needs_config: needsConfigKeys(bundle_id),
     });
   });
 

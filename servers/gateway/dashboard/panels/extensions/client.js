@@ -362,7 +362,10 @@ export function extensionsClientJS(lang) {
                     ? '${tJs("extensions.configureNeedsRestart", lang)}'
                     : '${tJs("extensions.configureSaved", lang)}';
                   setTimeout(function() {
-                    if (typeof onSaved === "function") onSaved();
+                    // Hand the WHOLE response to onSaved: needs_config is the server's
+                    // re-derived truth about what is still missing, and the only thing
+                    // allowed to decide whether the "Needs setup" badge may come off.
+                    if (typeof onSaved === "function") onSaved(res.data);
                   }, 1200);
                 } else {
                   statusDiv.style.color = "var(--crow-error, #e74c3c)";
@@ -445,6 +448,67 @@ export function extensionsClientJS(lang) {
               parseInt(this.dataset.minram || "0", 10),
               parseInt(this.dataset.mindisk || "0", 10),
               this.dataset.community === "true");
+          });
+        });
+
+        // --- "Needs setup" → Configure (installed card) ---
+        // The durable affordance: unlike the post-collection-install checklist (one-shot
+        // sessionStorage), this is re-derived server-side on every render, and it is the
+        // ONLY prompt a bundle installed through the single /install path ever gets.
+
+        /** The installed card for a bundle id, or null (it may not be on this page). */
+        function findInstalledCard(id) {
+          var items = document.querySelectorAll(".ext-installed__item");
+          for (var i = 0; i < items.length; i++) {
+            if (items[i].dataset.addonId === id) return items[i];
+          }
+          return null;
+        }
+
+        /**
+         * Repaint a card's config state from the SERVER's re-derived needs_config.
+         * Empty => the bundle is configured: drop the badge and the button.
+         * Non-empty => still unconfigured: keep both, re-scope the button.
+         * Not an array (old server / no field) => leave the DOM alone: we have no truth,
+         * and a false "done" is worse than a stale badge.
+         */
+        function applyNeedsConfig(id, keys) {
+          if (!Array.isArray(keys)) return;
+          var item = findInstalledCard(id);
+          if (!item) return;                       // e.g. saved from the checklist after a restart
+          var btn = item.querySelector(".bundle-configure");
+          var badgeEl = item.querySelector(".ext-installed__needsconfig");
+          if (keys.length > 0) {
+            if (btn) btn.setAttribute("data-keys", keys.join(","));
+          } else {
+            if (btn) btn.remove();
+            if (badgeEl) badgeEl.remove();
+          }
+        }
+
+        document.querySelectorAll(".bundle-configure").forEach(function(btn) {
+          btn.addEventListener("click", function() {
+            var id = this.dataset.id;
+            var keys = (this.dataset.keys || "").split(",").filter(function(k) { return k; });
+            var addon = ADDON_DATA[id] || {};
+            // Scope the form to exactly the missing keys, with the registry's metadata
+            // where we have it — an installed-but-unregistered bundle degrades to a
+            // plain required text field rather than showing nothing.
+            var metaByName = {};
+            (addon.env_vars || []).forEach(function(ev) { metaByName[ev.name] = ev; });
+            var scopedEnvVars = keys.map(function(key) {
+              return metaByName[key] || { name: key, required: true };
+            });
+
+            showInstallModal(
+              id, addon.name || id, scopedEnvVars,
+              0, 0, false,
+              true, // configureOnly → writes through /bundles/api/env, never /install
+              function onSaved(resp) {
+                applyNeedsConfig(id, resp && resp.needs_config);
+                hideModal();
+              },
+            );
           });
         });
 
@@ -1302,7 +1366,11 @@ export function extensionsClientJS(lang) {
                 scopedEnvVars,
                 0, 0, false,
                 true, // configureOnly
-                function onSaved() {
+                function onSaved(resp) {
+                  // The card behind this modal shows the same state — repaint it from
+                  // the server's needs_config, or a save made here leaves a stale
+                  // "Needs setup" badge on the Installed view.
+                  applyNeedsConfig(entry.id, resp && resp.needs_config);
                   // Clear this entry — from the in-memory checklist AND from
                   // sessionStorage, so a later reload (e.g. the restart this very
                   // save may have triggered) doesn't resurrect an already-done item.
