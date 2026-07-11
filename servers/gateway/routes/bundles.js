@@ -991,6 +991,137 @@ function getAiProviderConfig(bundleId, envVars) {
 }
 
 /**
+ * All install-time gates, as an outcome function.
+ *
+ * The single-install route maps the outcome to HTTP; the collection installer
+ * (Task 6) maps it to a per-member skip/fail entry. Semantics are identical to
+ * the pre-refactor inline chain in POST /bundles/api/install (order matters:
+ * id → source exists → already-installed → dependencies → hardware → GPU →
+ * consent → hosted-host-networking refusal).
+ *
+ * @returns {Promise<
+ *   { ok: true, manifest: object, installed: Array, consentVerified: boolean, hardwareWarning?: object }
+ * | { ok: false, status: number, code: string, error: string, extra?: object }>}
+ *   codes: invalid_id | not_found | already_installed | missing_dependencies |
+ *          hardware_gate | gpu_arch_gate | consent_required | consent_invalid | hosted_forbidden
+ */
+export async function validateInstall(bundleId, { envVars = {}, consentToken = null, forceInstall = false } = {}) {
+  if (!bundleId || !isValidBundleId(bundleId)) {
+    return { ok: false, status: 400, code: "invalid_id", error: "Invalid bundle ID" };
+  }
+
+  // Check source exists
+  const sourceDir = join(APP_BUNDLES, bundleId);
+  if (!existsSync(sourceDir)) {
+    return { ok: false, status: 404, code: "not_found", error: `Bundle '${bundleId}' not found` };
+  }
+
+  // Check not already installed
+  const installed = getInstalled();
+  if (installed.find((i) => i.id === bundleId)) {
+    return { ok: false, status: 409, code: "already_installed", error: `Bundle '${bundleId}' is already installed` };
+  }
+
+  // PR 0: dependency check — refuse install if any required bundle is missing
+  const manifest = getManifest(bundleId);
+  const requiredBundles = manifest?.requires?.bundles || [];
+  if (requiredBundles.length > 0) {
+    const installedIds = new Set(installed.map((i) => i.id));
+    const missing = requiredBundles.filter((id) => !installedIds.has(id));
+    if (missing.length > 0) {
+      return {
+        ok: false, status: 400, code: "missing_dependencies",
+        error: `Bundle '${bundleId}' requires the following bundles to be installed first: ${missing.join(", ")}`,
+        extra: { missing_dependencies: missing },
+      };
+    }
+  }
+
+  // PR 3: advisory Android-app version gate. The gateway can't verify the
+  // user's phone from here — the check happens on the phone when the panel
+  // JS reads navigator.userAgent. Log a warning so ops can see the
+  // requirement and include it in the install response for UIs that want
+  // to surface it.
+  const minAndroidApp = manifest?.requires?.min_android_app;
+  if (minAndroidApp) {
+    console.log(`[bundles] ${bundleId} declares min_android_app=${minAndroidApp} — enforced client-side on the Crow Android app`);
+  }
+
+  // F.0: hardware gate — refuse install if RAM/disk headroom is insufficient,
+  // warn (but allow) if under the recommended threshold. MemAvailable + SSD-
+  // backed swap at half-weight is the effective-RAM basis; already-installed
+  // bundles' recommended_ram_mb is subtracted from the pool. Bypass via
+  // `force_install: true` (CLI-only — the web UI never surfaces this flag).
+  let hardwareWarning;
+  if (!forceInstall) {
+    const gate = checkHardwareGate({
+      manifest,
+      installed,
+      manifestLookup: (id) => getManifest(id),
+      dataDir: CROW_HOME,
+    });
+    if (!gate.allow) {
+      return { ok: false, status: 400, code: "hardware_gate", error: gate.reason, extra: { hardware_gate: gate } };
+    }
+    if (gate.level === "warn") {
+      // Attach warning to the job so the UI can surface it; install proceeds.
+      hardwareWarning = gate;
+    }
+  }
+
+  // GPU arch gate — refuse install if the bundle's required GPU architecture
+  // family doesn't match what the host actually has (e.g. CUDA-only bundle on
+  // an AMD ROCm box). No force_install bypass: the install would crash anyway.
+  {
+    const gpuCheck = checkGpuArchCompatible(manifest);
+    if (!gpuCheck.ok) {
+      return { ok: false, status: 400, code: "gpu_arch_gate", error: gpuCheck.reason, extra: { gpu_arch_gate: gpuCheck } };
+    }
+  }
+
+  // PR 0: consent token check — required for privileged or consent_required bundles
+  let consentVerified = false;
+  if (manifestRequiresConsent(manifest)) {
+    if (!consentToken) {
+      return {
+        ok: false, status: 403, code: "consent_required",
+        error: "Consent token required. Call GET /bundles/api/consent-challenge/:id to obtain one.",
+        extra: { consent_required: true },
+      };
+    }
+    const consentDb = createDbClient();
+    try {
+      consentVerified = await validateConsentToken(consentDb, bundleId, consentToken);
+    } finally {
+      try { consentDb.close(); } catch {}
+    }
+    if (!consentVerified) {
+      return {
+        ok: false, status: 403, code: "consent_invalid",
+        error: "Consent token is invalid, expired, or already consumed. Mint a new one and retry.",
+        extra: { consent_expired: true },
+      };
+    }
+  }
+
+  // Block bundles with network_mode: host on managed hosting (security risk on shared infrastructure)
+  if (process.env.CROW_HOSTED) {
+    const composePath = join(sourceDir, "docker-compose.yml");
+    if (existsSync(composePath)) {
+      const composeContent = readFileSync(composePath, "utf8");
+      if (/network_mode:\s*host/i.test(composeContent)) {
+        return {
+          ok: false, status: 403, code: "hosted_forbidden",
+          error: "This bundle requires host networking and is not available on managed hosting.",
+        };
+      }
+    }
+  }
+
+  return { ok: true, manifest, installed, consentVerified, ...(hardwareWarning ? { hardwareWarning } : {}) };
+}
+
+/**
  * @returns {Router}
  */
 export default function bundlesRouter() {
@@ -1083,116 +1214,21 @@ export default function bundlesRouter() {
   router.post("/bundles/api/install", async (req, res) => {
     const { bundle_id, env_vars, consent_token } = req.body;
 
-    if (!bundle_id || !isValidBundleId(bundle_id)) {
-      return res.status(400).json({ error: "Invalid bundle ID" });
+    const v = await validateInstall(bundle_id, {
+      envVars: env_vars,
+      consentToken: consent_token,
+      forceInstall: !!req.body.force_install,
+    });
+    if (!v.ok) {
+      return res.status(v.status).json({ error: v.error, ...(v.extra || {}) });
     }
+    if (v.hardwareWarning) req._hardwareWarning = v.hardwareWarning;
 
-    // Check source exists
+    // Source dir is recomputed here (cheap, pure) so it's in scope for the
+    // async install body below — validateInstall already confirmed it exists.
     const sourceDir = join(APP_BUNDLES, bundle_id);
-    if (!existsSync(sourceDir)) {
-      return res.status(404).json({ error: `Bundle '${bundle_id}' not found` });
-    }
-
-    // Check not already installed
-    const installed = getInstalled();
-    if (installed.find((i) => i.id === bundle_id)) {
-      return res.status(409).json({ error: `Bundle '${bundle_id}' is already installed` });
-    }
-
-    // PR 0: dependency check — refuse install if any required bundle is missing
-    const manifestPre = getManifest(bundle_id);
-    const requiredBundles = manifestPre?.requires?.bundles || [];
-    if (requiredBundles.length > 0) {
-      const installedIds = new Set(installed.map((i) => i.id));
-      const missing = requiredBundles.filter((id) => !installedIds.has(id));
-      if (missing.length > 0) {
-        return res.status(400).json({
-          error: `Bundle '${bundle_id}' requires the following bundles to be installed first: ${missing.join(", ")}`,
-          missing_dependencies: missing,
-        });
-      }
-    }
-
-    // PR 3: advisory Android-app version gate. The gateway can't verify the
-    // user's phone from here — the check happens on the phone when the panel
-    // JS reads navigator.userAgent. Log a warning so ops can see the
-    // requirement and include it in the install response for UIs that want
-    // to surface it.
-    const minAndroidApp = manifestPre?.requires?.min_android_app;
-    if (minAndroidApp) {
-      console.log(`[bundles] ${bundle_id} declares min_android_app=${minAndroidApp} — enforced client-side on the Crow Android app`);
-    }
-
-    // F.0: hardware gate — refuse install if RAM/disk headroom is insufficient,
-    // warn (but allow) if under the recommended threshold. MemAvailable + SSD-
-    // backed swap at half-weight is the effective-RAM basis; already-installed
-    // bundles' recommended_ram_mb is subtracted from the pool. Bypass via
-    // `force_install: true` (CLI-only — the web UI never surfaces this flag).
-    if (!req.body.force_install) {
-      const gate = checkHardwareGate({
-        manifest: manifestPre,
-        installed,
-        manifestLookup: (id) => getManifest(id),
-        dataDir: CROW_HOME,
-      });
-      if (!gate.allow) {
-        return res.status(400).json({
-          error: gate.reason,
-          hardware_gate: gate,
-        });
-      }
-      if (gate.level === "warn") {
-        // Attach warning to the job so the UI can surface it; install proceeds.
-        req._hardwareWarning = gate;
-      }
-    }
-
-    // GPU arch gate — refuse install if the bundle's required GPU architecture
-    // family doesn't match what the host actually has (e.g. CUDA-only bundle on
-    // an AMD ROCm box). No force_install bypass: the install would crash anyway.
-    {
-      const gpuCheck = checkGpuArchCompatible(manifestPre);
-      if (!gpuCheck.ok) {
-        return res.status(400).json({
-          error: gpuCheck.reason,
-          gpu_arch_gate: gpuCheck,
-        });
-      }
-    }
-
-    // PR 0: consent token check — required for privileged or consent_required bundles
-    let consentVerified = false;
-    if (manifestRequiresConsent(manifestPre)) {
-      if (!consent_token) {
-        return res.status(403).json({
-          error: "Consent token required. Call GET /bundles/api/consent-challenge/:id to obtain one.",
-          consent_required: true,
-        });
-      }
-      const consentDb = createDbClient();
-      try {
-        consentVerified = await validateConsentToken(consentDb, bundle_id, consent_token);
-      } finally {
-        try { consentDb.close(); } catch {}
-      }
-      if (!consentVerified) {
-        return res.status(403).json({
-          error: "Consent token is invalid, expired, or already consumed. Mint a new one and retry.",
-          consent_expired: true,
-        });
-      }
-    }
-
-    // Block bundles with network_mode: host on managed hosting (security risk on shared infrastructure)
-    if (process.env.CROW_HOSTED) {
-      const composePath = join(sourceDir, "docker-compose.yml");
-      if (existsSync(composePath)) {
-        const composeContent = readFileSync(composePath, "utf8");
-        if (/network_mode:\s*host/i.test(composeContent)) {
-          return res.status(403).json({ error: "This bundle requires host networking and is not available on managed hosting." });
-        }
-      }
-    }
+    const installed = v.installed;
+    const consentVerified = v.consentVerified;
 
     // Create job for async tracking
     const job = createJob(bundle_id, "install");
