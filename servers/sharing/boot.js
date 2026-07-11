@@ -83,6 +83,10 @@ export async function handleIncomingRequest(db, managers, { senderPubkey, conten
 
     const existing = await findContactByPubkey(db, senderPubkey);
     if (existing) {
+      // F-BLOCK-1 D4b: a blocked contact — ANY request_status (full, pending,
+      // accepted) — is silently dropped on the catch-all path: no store, no
+      // notification. This was the S5.4 live store path.
+      if (Number(existing.is_blocked) === 1) return;
       // A full contact (request_status NULL) is already handled by the
       // per-contact subscription — do nothing here to avoid a double-store.
       if (existing.request_status === null || existing.request_status === undefined) {
@@ -182,6 +186,18 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
     // secp key must equal the event's cryptographically-bound pubkey, else a
     // stranger could forge an invite_accepted to promote/hijack a gated contact.
     if (normalizePubkey(payload.secp256k1Pub) !== normalizePubkey(senderPubkey)) return;
+
+    // F-BLOCK-1 D4d: silence toward a blocked contact. Resolve BEFORE the
+    // replay-hygiene and short-code branches below — BOTH of those ack, and
+    // the common blocked case ("handshake processed, then blocked") re-sends
+    // the same event.id for ~60h, which would keep acking a blocked party.
+    // No upsert, no ack, no wiring. Skipping consumeShortInvite is safe: the
+    // invite was consumed on the pre-block accept, and an unconsumed row
+    // expires at the 72h ledger TTL.
+    try {
+      const senderContact = await findContactByPubkey(db, senderPubkey);
+      if (senderContact && Number(senderContact.is_blocked) === 1) return;
+    } catch { /* resolution failure must not break honest handshakes */ }
 
     // D4 (design §D4): clock-free replay hygiene. R5's retry loop re-publishes
     // the EXACT stored signed event for ~60h, so a stale retry arriving AFTER
@@ -548,36 +564,7 @@ export async function wireNostrReceive(managers) {
         });
       } catch {}
     } else if (subtype === "group_message") {
-      const { group_name, sender_name, message: msgText } = payload;
-      if (!msgText) return;
-      try {
-        await createNotification(db, {
-          title: `[${group_name || "Group"}] ${sender_name || "Someone"}`,
-          body: msgText.length > 200 ? msgText.slice(0, 200) + "..." : msgText,
-          type: "peer",
-          source: "sharing:group_message",
-          priority: "high",
-        });
-      } catch (err) {
-        console.warn("[sharing] Failed to create group message notification:", err.message);
-      }
-      // Also store as a regular message with group context.
-      // Phase 3 PR-B: deliberately NOT emitted to instance-sync — synthetic
-      // grp_<ts> event id (not a real Nostr event); rooms have their own sync path.
-      try {
-        // Find the sender contact
-        const senderContact = await db.execute({
-          sql: "SELECT id FROM contacts WHERE crow_id = ?",
-          args: [payload.sender_crow_id || ""],
-        });
-        if (senderContact.rows.length > 0) {
-          await db.execute({
-            sql: `INSERT INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
-                  VALUES (?, ?, ?, 'received', 0, datetime('now'))`,
-            args: [senderContact.rows[0].id, `grp_${Date.now()}`, `[${group_name}] ${msgText}`],
-          });
-        }
-      } catch {}
+      await handleGroupMessageNotify(db, payload, managers);
     } else if (subtype === "bot_relay") {
       const localName = await resolveLocalInstanceName(db);
       if (payload.target_instance !== localName) return; // Not for us
@@ -630,6 +617,61 @@ export async function wireNostrReceive(managers) {
     }
   });
   console.log("[sharing] Subscribed to incoming Nostr messages");
+}
+
+/**
+ * F-BLOCK-1 D4c — the `group_message` fan-out notify+store logic, extracted
+ * from the inline `onSocialMessage` dispatcher below so it's unit-testable
+ * without live relays. Behavior is byte-identical to before EXCEPT the sender
+ * resolve now happens BEFORE the notification: a blocked group member's
+ * fan-out (which includes us) must neither notify nor store — send-side
+ * filters only cover members WE blocked when WE fan out. An UNKNOWN
+ * (non-contact) sender still notifies exactly as before — the guard is
+ * `found && is_blocked===1`, never `!found`.
+ *
+ * `managers.createNotification` may be injected (tests); otherwise the
+ * shared helper is used, matching `handleIncomingRequest`'s convention.
+ *
+ * @param {object} db
+ * @param {{group_name?:string, sender_name?:string, message?:string, sender_crow_id?:string}} payload
+ * @param {{createNotification?: Function}} [managers]
+ */
+export async function handleGroupMessageNotify(db, payload, managers = {}) {
+  const notify = (managers && managers.createNotification) || createNotification;
+  const { group_name, sender_name, message: msgText } = payload || {};
+  if (!msgText) return;
+  let senderRow = null;
+  try {
+    const senderContact = await db.execute({
+      sql: "SELECT id, is_blocked FROM contacts WHERE crow_id = ?",
+      args: [payload.sender_crow_id || ""],
+    });
+    senderRow = senderContact.rows[0] || null;
+  } catch { /* lookup failure degrades to today's behavior */ }
+  if (senderRow && Number(senderRow.is_blocked) === 1) return;
+  try {
+    await notify(db, {
+      title: `[${group_name || "Group"}] ${sender_name || "Someone"}`,
+      body: msgText.length > 200 ? msgText.slice(0, 200) + "..." : msgText,
+      type: "peer",
+      source: "sharing:group_message",
+      priority: "high",
+    });
+  } catch (err) {
+    console.warn("[sharing] Failed to create group message notification:", err.message);
+  }
+  // Also store as a regular message with group context.
+  // Phase 3 PR-B: deliberately NOT emitted to instance-sync — synthetic
+  // grp_<ts> event id (not a real Nostr event); rooms have their own sync path.
+  try {
+    if (senderRow) {
+      await db.execute({
+        sql: `INSERT INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
+              VALUES (?, ?, ?, 'received', 0, datetime('now'))`,
+        args: [senderRow.id, `grp_${Date.now()}`, `[${group_name}] ${msgText}`],
+      });
+    }
+  } catch {}
 }
 
 /**
