@@ -1,6 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runInstallJob, _createJobForTest, _getJobForTest, _finishJobForTest } from "../servers/gateway/routes/bundles.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// bundles.js resolves BUNDLES_DIR/INSTALLED_PATH/MCP_ADDONS_PATH from CROW_HOME at
+// module load. Point it at a scratch dir BEFORE importing it: runInstallJob()
+// mkdirSync's ~/.crow/bundles/<bundleId> unconditionally as its first step — even
+// for a bundle that goes on to fail — so an unisolated run creates real directories
+// in the operator's real ~/.crow (it has — see bundles-auth-bypass.test.js's header
+// comment for the live incident this caused).
+process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
+const { runInstallJob, _createJobForTest, _getJobForTest, _finishJobForTest } =
+  await import("../servers/gateway/routes/bundles.js");
 
 test("runInstallJob is exported with the outcome-returning signature", () => {
   assert.equal(typeof runInstallJob, "function");
