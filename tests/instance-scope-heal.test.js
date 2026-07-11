@@ -156,3 +156,32 @@ test("heal: (h) one key's failure does not abort the others AND leaves the flag 
     } finally { cleanup(); }
   });
 });
+
+test("heal: (k) EMPTY-STRING updated_at precedence — '' behaves like NULL on both sides", async () => {
+  // overrideWins() explicitly treats '' the same as NULL (String(ts).trim()
+  // === ''). Previously untested branch (#163 accepted minor).
+  const { dir, db, cleanup } = fresh();
+  await withDataDir(dir, async () => {
+    try {
+      const localId = getOrCreateLocalInstanceId();
+      // global ts '' → override wins (empty global timestamp = no basis to keep it)
+      await seedOverride(db, localId, "language", "es", "2026-07-01 10:00:00");
+      await seedGlobal(db, "language", "en", "");
+      // override ts '', global ts present → global wins, override deleted
+      await seedOverride(db, localId, "tts_voice", "af_bella", "");
+      await seedGlobal(db, "tts_voice", "en-US-BrianNeural", "2026-07-01 10:00:00");
+      // BOTH '' → override wins (globalTs '' short-circuits first)
+      await seedOverride(db, localId, "discovery_name", "Crow of Kevin", "");
+      await seedGlobal(db, "discovery_name", "old-name", "");
+
+      const n = await healInstanceScopeOverridesOnce(db);
+      assert.equal(n, 2, "language + discovery_name promoted");
+      assert.equal(await globalValue(db, "language"), "es", "global-ts-'' → override wins");
+      assert.equal(await globalValue(db, "tts_voice"), "en-US-BrianNeural", "override-ts-'' → global wins");
+      assert.equal(await globalValue(db, "discovery_name"), "Crow of Kevin", "both-'' → override wins");
+      assert.equal(await overrideCount(db, "tts_voice"), 0, "losing override deleted");
+      assert.equal(await overrideCount(db, "language"), 0);
+      assert.equal(await overrideCount(db, "discovery_name"), 0);
+    } finally { cleanup(); }
+  });
+});
