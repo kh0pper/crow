@@ -21,10 +21,29 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Inlined app-root resolver (BH-4 phase 2 follow-up): this file is copied
+// ALONE into ~/.crow/panels/maker-lab-routes.js on install/refresh — same
+// as panel/maker-lab.js — so none of its `../server/*` siblings exist
+// relative to __dirname on an installed copy. Every lazy import below must
+// resolve through the bundle's real on-disk location under CROW_APP_ROOT
+// instead. Logic duplicated (not imported) from
+// bundles/maker-lab/server/app-root.js / panel/maker-lab.js's own inline
+// copy, since this file travels alone too and can't rely on a sibling.
+function looksLikeAppRoot(p) { return !!p && existsSync(join(p, "servers", "db.js")); }
+const __appRootGuess = resolve(__dirname, "..", "..", "..");
+const APP_ROOT = looksLikeAppRoot(process.env.CROW_APP_ROOT) ? process.env.CROW_APP_ROOT
+  : looksLikeAppRoot(__appRootGuess) ? __appRootGuess
+  : (process.env.CROW_APP_ROOT || __appRootGuess);
+// These lazy imports target the BUNDLE's own server/ dir (not the app root's
+// shared servers/ tree) — resolve through APP_ROOT + bundles/maker-lab/server/,
+// which is always present on an installed instance (CROW_APP_ROOT points at
+// the repo checkout).
+const bundleImport = (rel) => import(pathToFileURL(join(APP_ROOT, "bundles", "maker-lab", "server", rel)).href);
+
 // Lazy DB
 let createDbClient;
 try {
-  const dbMod = await import(pathToFileURL(resolve(__dirname, "../server/db.js")).href);
+  const dbMod = await bundleImport("db.js");
   createDbClient = dbMod.createDbClient;
 } catch {
   createDbClient = null;
@@ -162,7 +181,7 @@ function ageBandFromGuestBand(band) {
 // where the bundle's server/ modules aren't reachable.
 let startRetentionSweep;
 try {
-  const mod = await import(pathToFileURL(resolve(__dirname, "../server/retention-sweep.js")).href);
+  const mod = await bundleImport("retention-sweep.js");
   startRetentionSweep = mod.startRetentionSweep;
 } catch {
   startRetentionSweep = null;
