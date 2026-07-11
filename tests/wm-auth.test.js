@@ -115,9 +115,12 @@ let token = null;
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), "wm-auth-"));
   const dbPath = join(dataDir, "crow.db");
+  // Scratch CROW_HOME so the gateway's boot-time bundle/panel repair never
+  // touches the operator's real ~/.crow (see repairInstalledBundleAssets).
+  const crowHome = join(dataDir, "crow-home");
 
   execFileSync(process.execPath, ["scripts/init-db.js"], {
-    env: { ...process.env, CROW_DATA_DIR: dataDir, CROW_DB_PATH: dbPath },
+    env: { ...process.env, CROW_DATA_DIR: dataDir, CROW_DB_PATH: dbPath, CROW_HOME: crowHome },
     stdio: "pipe",
     cwd: repoRoot,
   });
@@ -135,7 +138,7 @@ before(async () => {
     db.close();
   `;
   token = execFileSync(process.execPath, ["--input-type=module", "-e", mintScript], {
-    env: { ...process.env, CROW_DATA_DIR: dataDir, CROW_DB_PATH: dbPath },
+    env: { ...process.env, CROW_DATA_DIR: dataDir, CROW_DB_PATH: dbPath, CROW_HOME: crowHome },
     cwd: repoRoot,
     encoding: "utf8",
   }).trim();
@@ -148,6 +151,7 @@ before(async () => {
       ...process.env,
       CROW_DATA_DIR: dataDir,
       CROW_DB_PATH: dbPath,
+      CROW_HOME: crowHome,
       CROW_GATEWAY_URL: `http://127.0.0.1:${port}`,
       PORT: String(port),
     },

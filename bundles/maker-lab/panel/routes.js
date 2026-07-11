@@ -21,10 +21,29 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Inlined app-root resolver (BH-4 phase 2 follow-up): this file is copied
+// ALONE into ~/.crow/panels/maker-lab-routes.js on install/refresh — same
+// as panel/maker-lab.js — so none of its `../server/*` siblings exist
+// relative to __dirname on an installed copy. Every lazy import below must
+// resolve through the bundle's real on-disk location under CROW_APP_ROOT
+// instead. Logic duplicated (not imported) from
+// bundles/maker-lab/server/app-root.js / panel/maker-lab.js's own inline
+// copy, since this file travels alone too and can't rely on a sibling.
+function looksLikeAppRoot(p) { return !!p && existsSync(join(p, "servers", "db.js")); }
+const __appRootGuess = resolve(__dirname, "..", "..", "..");
+const APP_ROOT = looksLikeAppRoot(process.env.CROW_APP_ROOT) ? process.env.CROW_APP_ROOT
+  : looksLikeAppRoot(__appRootGuess) ? __appRootGuess
+  : (process.env.CROW_APP_ROOT || __appRootGuess);
+// These lazy imports target the BUNDLE's own server/ dir (not the app root's
+// shared servers/ tree) — resolve through APP_ROOT + bundles/maker-lab/server/,
+// which is always present on an installed instance (CROW_APP_ROOT points at
+// the repo checkout).
+const bundleImport = (rel) => import(pathToFileURL(join(APP_ROOT, "bundles", "maker-lab", "server", rel)).href);
+
 // Lazy DB
 let createDbClient;
 try {
-  const dbMod = await import(pathToFileURL(resolve(__dirname, "../server/db.js")).href);
+  const dbMod = await bundleImport("db.js");
   createDbClient = dbMod.createDbClient;
 } catch {
   createDbClient = null;
@@ -162,7 +181,7 @@ function ageBandFromGuestBand(band) {
 // where the bundle's server/ modules aren't reachable.
 let startRetentionSweep;
 try {
-  const mod = await import(pathToFileURL(resolve(__dirname, "../server/retention-sweep.js")).href);
+  const mod = await bundleImport("retention-sweep.js");
   startRetentionSweep = mod.startRetentionSweep;
 } catch {
   startRetentionSweep = null;
@@ -248,8 +267,8 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
       return noSessionResponse(res);
     }
 
-    const deviceBinding = await import(pathToFileURL(resolve(__dirname, "../server/device-binding.js")).href);
-    const sessionsMod = await import(pathToFileURL(resolve(__dirname, "../server/sessions.js")).href);
+    const deviceBinding = await bundleImport("device-binding.js");
+    const sessionsMod = await bundleImport("sessions.js");
 
     const fp = fingerprint(req);
     const loopback = deviceBinding.isLoopback(req);
@@ -552,7 +571,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     });
 
     // Route through the shared hint pipeline (LLM + filter). Phase 2.
-    const { handleHintRequest } = await import(pathToFileURL(resolve(__dirname, "../server/hint-pipeline.js")).href);
+    const { handleHintRequest } = await bundleImport("hint-pipeline.js");
     try {
       const result = await handleHintRequest(db, {
         sessionToken: guard.sessionToken,
@@ -575,7 +594,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
   // backend Maker Lab is currently routing hints through. Read-only;
   // no secrets leaked.
   router.get("/maker-lab/api/engine", async (req, res) => {
-    const mod = await import(pathToFileURL(resolve(__dirname, "../server/resolve-llm-endpoint.js")).href);
+    const mod = await bundleImport("resolve-llm-endpoint.js");
     const resolved = await mod.resolveLlmEndpoint();
     res.json({
       engine: resolved.engine,
@@ -595,7 +614,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
   // AND thus shares the host's loopback) can reach it.
 
   router.post("/maker-lab/api/hint-internal", express_json(), async (req, res) => {
-    const deviceBinding = await import(pathToFileURL(resolve(__dirname, "../server/device-binding.js")).href);
+    const deviceBinding = await bundleImport("device-binding.js");
     if (!deviceBinding.isLoopback(req)) {
       return res.status(403).json({ error: "loopback_only" });
     }
@@ -612,7 +631,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     if (!session) return res.status(401).json({ error: "session_invalid" });
     if (session.state === "revoked") return res.status(410).json({ error: "revoked" });
 
-    const { handleHintRequest } = await import(pathToFileURL(resolve(__dirname, "../server/hint-pipeline.js")).href);
+    const { handleHintRequest } = await bundleImport("hint-pipeline.js");
     try {
       const result = await handleHintRequest(db, {
         sessionToken: session_token,

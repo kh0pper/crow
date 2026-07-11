@@ -89,8 +89,11 @@ function openSse(port, path) {
 /** Spawn a fresh gateway process; return { child, port, dataDir }. */
 async function spawnGateway() {
   const dataDir = mkdtempSync(join(tmpdir(), "gw-shutdown-"));
+  // Scratch CROW_HOME so the gateway's boot-time bundle/panel repair never
+  // touches the operator's real ~/.crow (see repairInstalledBundleAssets).
+  const crowHome = join(dataDir, "crow-home");
   execFileSync(process.execPath, ["scripts/init-db.js"], {
-    env: { ...process.env, CROW_DATA_DIR: dataDir },
+    env: { ...process.env, CROW_DATA_DIR: dataDir, CROW_HOME: crowHome },
     stdio: "pipe",
     cwd: join(import.meta.dirname, ".."),
   });
@@ -105,6 +108,7 @@ async function spawnGateway() {
       env: {
         ...process.env,
         CROW_DATA_DIR: dataDir,
+        CROW_HOME: crowHome,
         CROW_GATEWAY_URL: `http://127.0.0.1:${port}`,
         PORT: String(port),
         CROW_SHUTDOWN_DRAIN_MS: "500",

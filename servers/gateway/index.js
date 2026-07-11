@@ -37,6 +37,10 @@ import { fileURLToPath } from "node:url";
 
 const __gatewayDir = dirnamePath(fileURLToPath(import.meta.url));
 const __appRoot = resolvePath(__gatewayDir, "../..");
+// Export the repo root so spawned addon children (bundle MCP servers) can
+// resolve shared servers/ modules without a hardcoded repo-relative path —
+// see bundles/maker-lab/server/app-root.js (BH-4 phase 2).
+process.env.CROW_APP_ROOT ||= __appRoot;
 const envPath = resolvePath(__appRoot, ".env");
 if (existsSync(envPath)) {
   for (const line of readFileSync(envPath, "utf8").split("\n")) {
