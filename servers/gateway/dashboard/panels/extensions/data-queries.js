@@ -10,6 +10,7 @@ import { execFileSync } from "child_process";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
+import { loadCollections } from "./collections.js";
 
 export const REGISTRY_URL = "https://raw.githubusercontent.com/kh0pper/crow-addons/main/registry.json";
 export const CROW_DIR = join(homedir(), ".crow");
@@ -85,7 +86,7 @@ export async function fetchCommunityStore(storeUrl) {
 
 /**
  * Fetch and merge remote + local registry into the available add-ons list.
- * Returns { installed, available, registrySource, communityStores }.
+ * Returns { installed, available, collections, registrySource, communityStores }.
  */
 export async function fetchRegistryData() {
   const installed = getInstalled();
@@ -133,7 +134,7 @@ export async function fetchRegistryData() {
   const available = [...officialAddons, ...dedupedCommunity];
   available.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 
-  return { installed, available, registrySource, communityStores };
+  return { installed, available, collections: loadCollections(), registrySource, communityStores };
 }
 
 /**

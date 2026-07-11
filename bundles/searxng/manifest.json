@@ -6,6 +6,7 @@
   "type": "bundle",
   "author": "Crow",
   "category": "productivity",
+  "featured": true,
   "tags": ["search", "metasearch", "privacy", "self-hosted"],
   "icon": "search",
   "docker": { "composefile": "docker-compose.yml" },
