@@ -101,3 +101,54 @@ export function checkSyncKeyDrift(sections) {
  * re-emit empty-value guard.
  */
 export const PROFILE_SYNC_KEYS = ["profile_display_name", "profile_avatar_url", "profile_bio"];
+
+/**
+ * Instance-scope keys — per-install settings whose readers query the global
+ * dashboard_settings table directly (auto-update timer, notification delivery
+ * gate, peer-discovery API, public blog, media bundle, setup pages). Each
+ * instance's DB is its own world for these: replication is gated by
+ * isSyncable at BOTH emit (instance-sync.js shouldSyncRow) and apply (the
+ * inbound-entry dispatch), so a global row for a key listed here NEVER leaves
+ * the box. writeSetting routes these to the global table instead of the
+ * legacy downgrade-to-local (which stranded every UI save in an overrides row
+ * no reader consulted — the F-SETTINGS-1 §6 bug class).
+ *
+ * What belongs here: per-install behavior toggles with global-direct readers.
+ * What does NOT: user-level data that should follow the user (SYNC_ALLOWLIST,
+ * e.g. profile_*), and intentionally-local keys whose readers all resolve
+ * overrides via readSetting (feature_flags, kiosk_mode — do NOT add those).
+ * Promoting a key from here to fleet-synced later = move it to SYNC_ALLOWLIST
+ * + bump the reemit flag (see reemitSyncableSettingsOnce) — a deliberate,
+ * per-key product decision.
+ *
+ * Entries may end with "*" to match a prefix. A key must never match BOTH
+ * lists (test-enforced, pattern-aware).
+ */
+export const INSTANCE_SCOPE_KEYS = {
+  auto_update_enabled:        "Auto-update on/off (per install)",
+  auto_update_interval_hours: "Auto-update check interval (per install)",
+  notification_prefs:         "Notification type gating (per install)",
+  discovery_enabled:          "Peer discovery opt-in (per install)",
+  discovery_name:             "Peer discovery display name (per install)",
+  onboarding_completed_at:    "Onboarding completion stamp (per install)",
+  language:                   "Dashboard language default (per install)",
+  "blog_*":                   "Blog config — the blog is hosted per instance",
+  tts_voice:                  "Legacy TTS voice mirror (per install)",
+};
+
+/**
+ * Check whether a key is instance-scope (global table, never synced).
+ * @param {string} key
+ * @returns {boolean}
+ */
+export function isInstanceScope(key) {
+  if (!key) return false;
+  for (const pattern of Object.keys(INSTANCE_SCOPE_KEYS)) {
+    if (pattern.endsWith("*")) {
+      if (key.startsWith(pattern.slice(0, -1))) return true;
+    } else if (pattern === key) {
+      return true;
+    }
+  }
+  return false;
+}
