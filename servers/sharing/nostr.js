@@ -56,6 +56,15 @@ export const DEFAULT_RELAYS = [
   "wss://nostr.crow.maestro.press",
 ];
 
+/**
+ * Offline kill-switch for all Nostr relay dialing (scratch/test gateways
+ * must be able to boot without touching the public DEFAULT_RELAYS).
+ * Pure + injectable for tests.
+ */
+export function nostrDisabled(env = process.env) {
+  return env.CROW_DISABLE_NOSTR === "1";
+}
+
 export class NostrManager {
   constructor(identity, db) {
     this.identity = identity;
@@ -76,8 +85,22 @@ export class NostrManager {
 
   /**
    * Connect to configured relays.
+   *
+   * CROW_DISABLE_NOSTR=1 is the offline kill-switch: every dial funnels
+   * through here, so gating this one method keeps a scratch/test gateway
+   * from ever touching the baked-in public DEFAULT_RELAYS. (Hyperswarm is
+   * separately gated by CROW_DISABLE_INSTANCE_SYNC via shouldInitInstanceSync
+   * — set BOTH for a fully-offline boot.) Subscribe/publish paths degrade
+   * gracefully against the empty relay map.
    */
   async connectRelays(customRelays) {
+    if (nostrDisabled()) {
+      if (!this._disabledLogged) {
+        this._disabledLogged = true;
+        console.log("[nostr] Disabled via CROW_DISABLE_NOSTR — no relay connections will be made");
+      }
+      return [];
+    }
     // Prevent concurrent connection attempts
     if (this._connectingPromise) return this._connectingPromise;
 
