@@ -47,7 +47,12 @@ export function extensionsClientJS(lang) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
-          }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); });
+          }).then(function(r) {
+            // status is carried through: the collection installer branches on 409
+            // (another install is already running) and must not read that as a
+            // generic failure.
+            return r.json().then(function(d) { return { ok: r.ok, status: r.status, data: d }; });
+          });
         }
 
         // --- Bundle start/stop ---
@@ -493,9 +498,16 @@ export function extensionsClientJS(lang) {
         }
 
         // --- Job polling ---
-        function pollJob(jobId, statusEl, btn) {
+        // onDone (optional) runs once, on a terminal SUCCESS status, BEFORE the
+        // reload/restart is kicked off — that is the last moment the job's log is
+        // readable (the gateway restart drops the in-process job), so the collection
+        // installer harvests its SUMMARY / NEEDS_CONFIG lines there.
+        function pollJob(jobId, statusEl, btn, onDone) {
           fetch(API + "/jobs/" + jobId).then(function(r) { return r.json(); }).then(function(job) {
             statusEl.textContent = job.log[job.log.length - 1] || '${tJs("extensions.working", lang)}';
+            if ((job.status === "complete" || job.status === "complete_restart") && typeof onDone === "function") {
+              try { onDone(job); } catch (e) {}
+            }
             if (job.status === "complete") {
               statusEl.style.color = "var(--crow-accent)";
               statusEl.textContent = '${tJs("extensions.done", lang)}';
@@ -517,39 +529,181 @@ export function extensionsClientJS(lang) {
               btn.disabled = false;
               btn.textContent = '${tJs("extensions.retry", lang)}';
             } else {
-              setTimeout(function() { pollJob(jobId, statusEl, btn); }, 1000);
+              setTimeout(function() { pollJob(jobId, statusEl, btn, onDone); }, 1000);
             }
           }).catch(function() {
             waitForRestart(statusEl);
           });
         }
 
-        // --- Category filter tabs ---
-        function applyFilters() {
-          var activeTab = document.querySelector(".ext-tab--active");
-          var cat = activeTab ? activeTab.dataset.category : "all";
-          var searchInput = document.getElementById("ext-search");
-          var q = searchInput ? searchInput.value.toLowerCase().trim() : "";
+        // ─── Store views: segmented control + hash deep links ───
 
-          document.querySelectorAll(".addon-card").forEach(function(card) {
-            var catMatch = cat === "all" || card.dataset.addonCategory === cat;
-            var searchMatch = !q
-              || (card.dataset.addonName || "").indexOf(q) !== -1
-              || (card.dataset.addonDesc || "").indexOf(q) !== -1
-              || (card.dataset.addonTags || "").indexOf(q) !== -1;
-            card.style.display = (catMatch && searchMatch) ? "" : "none";
-          });
+        var VIEW_BROWSE = document.getElementById("ext-view-browse");
+        var VIEW_INSTALLED = document.getElementById("ext-view-installed");
+
+        // A view is hidden by BOTH the [hidden] attribute and .ext-view--hidden
+        // (the stylesheet's display:none lives on the class; [hidden] alone loses
+        // to any display rule), so they are always flipped together.
+        function setViewHidden(view, hidden) {
+          if (!view) return;
+          view.hidden = hidden;
+          view.classList.toggle("ext-view--hidden", hidden);
         }
 
-        document.querySelectorAll(".ext-tab").forEach(function(btn) {
-          btn.addEventListener("click", function() {
-            document.querySelectorAll(".ext-tab").forEach(function(b) { b.classList.remove("ext-tab--active"); });
-            this.classList.add("ext-tab--active");
+        function showView(view) {
+          document.querySelectorAll(".ext-viewtab").forEach(function(tab) {
+            var on = tab.dataset.view === view;
+            tab.classList.toggle("ext-viewtab--active", on);
+            tab.setAttribute("aria-pressed", on ? "true" : "false");
+            tab.setAttribute("aria-selected", on ? "true" : "false");
+          });
+          setViewHidden(VIEW_BROWSE, view !== "browse");
+          setViewHidden(VIEW_INSTALLED, view !== "installed");
+        }
+
+        document.querySelectorAll(".ext-viewtab").forEach(function(tab) {
+          tab.addEventListener("click", function() {
+            var view = this.dataset.view;
+            showView(view);
+            location.hash = view === "installed" ? "installed" : "";
+          });
+        });
+
+        // ─── Browse filters: group chips, search, show-all ───
+        //
+        // COMPOSITION RULE (the one the cascade forced):
+        //   A card's hidden-ness in the group sections is carried ONLY by the
+        //   .ext-card--overflow class — never by an inline display. "Show all"
+        //   REMOVES the class (an inline style could not beat .ext-card.ext-card--overflow,
+        //   0-2-0), and search never writes card.style.display either.
+        //   Search is a MODE, not an overlay on the group view: a non-empty query
+        //   hides collections / featured / the chips / every group section and moves
+        //   the matching cards (the real nodes, so their install + detail listeners
+        //   survive) into a flat #ext-search-results grid, with the overflow class
+        //   stripped — an overflow cap is a property of a group section, and a
+        //   search result is not in one. Clearing the query moves every card home
+        //   and re-applies the overflow class to exactly the cards that had it,
+        //   except in groups the user has expanded.
+        var CARDS = Array.prototype.slice.call(document.querySelectorAll(".addon-card"));
+        CARDS.forEach(function(card) {
+          card.__extHome = card.parentNode;             // where it must go back to
+          card.__extNext = card.nextSibling;            // ...and in front of what
+          card.__extOverflow = card.classList.contains("ext-card--overflow");
+        });
+        var expandedGroups = {};   // group id → true once "Show all" is on
+        var activeGroup = "all";   // group chip filter
+
+        function searchQuery() {
+          var input = document.getElementById("ext-search");
+          return input ? input.value.toLowerCase().trim() : "";
+        }
+
+        function cardMatches(card, q) {
+          return (card.dataset.addonName || "").indexOf(q) !== -1
+            || (card.dataset.addonDesc || "").indexOf(q) !== -1
+            || (card.dataset.addonTags || "").indexOf(q) !== -1;
+        }
+
+        function resultsGrid() {
+          var grid = document.getElementById("ext-search-results");
+          if (!grid) {
+            grid = document.createElement("div");
+            grid.id = "ext-search-results";
+            grid.className = "ext-grid";
+            var anchor = document.getElementById("ext-no-results");
+            if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(grid, anchor);
+            else if (VIEW_BROWSE) VIEW_BROWSE.appendChild(grid);
+          }
+          return grid;
+        }
+
+        // Put every card back where the server rendered it. Walking backwards means
+        // each card's original next-sibling is already home, so insertBefore lands it
+        // in the original order.
+        function homeCards() {
+          for (var i = CARDS.length - 1; i >= 0; i--) {
+            var card = CARDS[i];
+            if (card.__extHome && card.parentNode !== card.__extHome) {
+              card.__extHome.insertBefore(card, card.__extNext || null);
+            }
+            var over = card.__extOverflow && !expandedGroups[card.dataset.addonGroup];
+            card.classList.toggle("ext-card--overflow", !!over);
+          }
+        }
+
+        function setBlockVisible(el, visible) {
+          if (el) el.style.display = visible ? "" : "none";
+        }
+
+        function applyFilters() {
+          homeCards();
+
+          var q = searchQuery();
+          var collections = document.getElementById("ext-collections");
+          var featured = document.getElementById("ext-featured");
+          var chips = document.getElementById("ext-group-chips");
+          var noResults = document.getElementById("ext-no-results");
+          var sections = document.querySelectorAll(".ext-group-section");
+          var grid = document.getElementById("ext-search-results");
+
+          if (q) {
+            grid = resultsGrid();
+            var seen = {};
+            var hits = 0;
+            CARDS.forEach(function(card) {
+              var id = card.dataset.addonId;
+              if (seen[id]) return;                    // featured re-renders a card; show it once
+              if (!cardMatches(card, q)) return;
+              seen[id] = true;
+              hits++;
+              card.classList.remove("ext-card--overflow");
+              grid.appendChild(card);
+            });
+            setBlockVisible(collections, false);
+            setBlockVisible(featured, false);
+            setBlockVisible(chips, false);
+            sections.forEach(function(s) { s.style.display = "none"; });
+            setBlockVisible(grid, hits > 0);
+            if (noResults) noResults.style.display = hits > 0 ? "none" : "block";
+          } else {
+            if (grid) grid.style.display = "none";
+            setBlockVisible(collections, true);
+            setBlockVisible(featured, true);
+            setBlockVisible(chips, true);
+            sections.forEach(function(s) {
+              var on = activeGroup === "all" || s.dataset.group === activeGroup;
+              s.style.display = on ? "" : "none";
+            });
+            if (noResults) noResults.style.display = "none";
+          }
+        }
+
+        // Chips are a single-select toggle: clicking the active chip (or an "all"
+        // chip, if the server ever renders one) goes back to showing every group.
+        document.querySelectorAll(".ext-group-chip").forEach(function(chip) {
+          chip.addEventListener("click", function() {
+            var group = this.dataset.group;
+            activeGroup = (group === "all" || activeGroup === group) ? "all" : group;
+            document.querySelectorAll(".ext-group-chip").forEach(function(c) {
+              c.classList.toggle("ext-group-chip--active", c.dataset.group === activeGroup);
+              c.setAttribute("aria-pressed", c.dataset.group === activeGroup ? "true" : "false");
+            });
             applyFilters();
           });
         });
 
-        // --- Search ---
+        document.querySelectorAll(".ext-group-more").forEach(function(btn) {
+          btn.__extShowAllLabel = btn.textContent;
+          btn.addEventListener("click", function() {
+            var group = this.dataset.group;
+            expandedGroups[group] = !expandedGroups[group];
+            this.textContent = expandedGroups[group]
+              ? '${tJs("extensions.showFewer", lang)}'
+              : this.__extShowAllLabel;
+            applyFilters();
+          });
+        });
+
         var searchInput = document.getElementById("ext-search");
         if (searchInput) {
           searchInput.addEventListener("input", applyFilters);
@@ -561,6 +715,35 @@ export function extensionsClientJS(lang) {
           if (!el) return {};
           try { return JSON.parse(el.textContent); } catch(e) { return {}; }
         })();
+
+        // Registry category slugs are machine ids ("smart-home", "federated-comms").
+        // The detail badge showed the raw slug; these are the localized labels.
+        // An unknown slug (a community store inventing a category) falls back to
+        // the slug itself rather than mislabelling it.
+        var CATEGORY_LABELS = {
+          "ai": '${tJs("extensions.categoryAi", lang)}',
+          "media": '${tJs("extensions.categoryMedia", lang)}',
+          "productivity": '${tJs("extensions.categoryProductivity", lang)}',
+          "storage": '${tJs("extensions.categoryStorage", lang)}',
+          "smart-home": '${tJs("extensions.categorySmartHome", lang)}',
+          "networking": '${tJs("extensions.categoryNetworking", lang)}',
+          "gaming": '${tJs("extensions.categoryGaming", lang)}',
+          "data": '${tJs("extensions.categoryData", lang)}',
+          "social": '${tJs("extensions.categorySocial", lang)}',
+          "finance": '${tJs("extensions.categoryFinance", lang)}',
+          "infrastructure": '${tJs("extensions.categoryInfrastructure", lang)}',
+          "automation": '${tJs("extensions.categoryAutomation", lang)}',
+          "education": '${tJs("extensions.categoryEducation", lang)}',
+          "federated-social": '${tJs("extensions.categoryFederatedSocial", lang)}',
+          "federated-media": '${tJs("extensions.categoryFederatedMedia", lang)}',
+          "federated-comms": '${tJs("extensions.categoryFederatedComms", lang)}',
+          "cameras": '${tJs("extensions.categoryCameras", lang)}',
+          "other": '${tJs("extensions.categoryOther", lang)}',
+        };
+        function categoryLabel(slug) {
+          if (!slug) return CATEGORY_LABELS.other;
+          return Object.hasOwn(CATEGORY_LABELS, slug) ? CATEGORY_LABELS[slug] : slug;
+        }
 
         function showDetailModal(addon) {
           var frag = document.createElement("div");
@@ -610,7 +793,7 @@ export function extensionsClientJS(lang) {
           var catBadge = document.createElement("span");
           catBadge.className = "ext-card__badge";
           catBadge.style.cssText = "color:" + (addon._iconColor || "var(--crow-accent)") + ";background:" + (addon._iconBg || "var(--crow-accent-muted)");
-          catBadge.textContent = addon.category || "other";
+          catBadge.textContent = categoryLabel(addon.category);
           badges.appendChild(catBadge);
 
           var typeBadge = document.createElement("span");
@@ -796,6 +979,302 @@ export function extensionsClientJS(lang) {
             if (addon) showDetailModal(addon);
           });
         });
+
+        // ─── Starter collections: one-click install of a themed set ───
+
+        var COLLECTIONS = (function() {
+          var el = document.getElementById("collection-registry");
+          if (!el) return [];
+          try {
+            var parsed = JSON.parse(el.textContent);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch (e) { return []; }
+        })();
+
+        function showCollectionModal(collection) {
+          var frag = document.createElement("div");
+          frag.className = "ext-collection-modal";
+          frag.dataset.collectionId = collection.id;
+
+          var h3 = document.createElement("h3");
+          h3.className = "ext-collection-modal__title";
+          h3.textContent = collection.name || collection.id;
+          frag.appendChild(h3);
+
+          var desc = document.createElement("p");
+          desc.className = "ext-collection-modal__desc";
+          desc.textContent = collection.description || "";
+          frag.appendChild(desc);
+
+          var list = document.createElement("ul");
+          list.className = "ext-collection-modal__list";
+          (collection.members || []).forEach(function(member) {
+            var row = document.createElement("li");
+            row.className = "ext-collection-modal__item";
+            row.dataset.memberId = member.id;
+
+            var nm = document.createElement("span");
+            nm.className = "ext-collection-modal__item-name";
+            nm.textContent = member.name || member.id;
+            row.appendChild(nm);
+
+            var state = document.createElement("span");
+            state.className = "ext-collection-modal__item-state";
+            state.dataset.memberId = member.id;
+            state.textContent = member.installed
+              ? '${tJs("extensions.collectionAlreadyInstalled", lang)}'
+              : '${tJs("extensions.collectionWillInstall", lang)}';
+            row.appendChild(state);
+
+            // How this member arrives: its own containers here, or a bridge to a
+            // service the user must already run (then say what they'll need).
+            var kind = document.createElement("span");
+            kind.className = "ext-collection-modal__item-kind";
+            var kindText = member.kind === "connects"
+              ? '${tJs("extensions.collectionConnects", lang)}'
+              : '${tJs("extensions.collectionRunsHere", lang)}';
+            if (member.kind === "connects" && member.you_need) {
+              kindText += " \\u00B7 " + '${tJs("extensions.collectionYouNeed", lang)}' + ": " + member.you_need;
+            }
+            kind.textContent = kindText;
+            row.appendChild(kind);
+
+            list.appendChild(row);
+          });
+          frag.appendChild(list);
+
+          var expectation = document.createElement("p");
+          expectation.className = "ext-collection-modal__note";
+          expectation.textContent = '${tJs("extensions.collectionExpectation", lang)}';
+          frag.appendChild(expectation);
+
+          var statusDiv = document.createElement("div");
+          statusDiv.id = "collection-status";
+          statusDiv.className = "ext-collection-modal__progress";
+          statusDiv.style.cssText = "font-size:0.85rem;display:none";
+          frag.appendChild(statusDiv);
+
+          var btnRow = document.createElement("div");
+          btnRow.style.cssText = "display:flex;gap:0.5rem;justify-content:flex-end;margin-top:1rem";
+
+          var cancelBtn = document.createElement("button");
+          cancelBtn.className = "btn btn-secondary";
+          cancelBtn.textContent = '${tJs("common.cancel", lang)}';
+          cancelBtn.addEventListener("click", hideModal);
+          btnRow.appendChild(cancelBtn);
+
+          var installBtn = document.createElement("button");
+          installBtn.className = "btn btn-primary ext-collection-install";
+          installBtn.textContent = '${tJs("extensions.collectionInstall", lang)}';
+          installBtn.addEventListener("click", function() {
+            startCollectionInstall(collection, statusDiv, installBtn);
+          });
+          btnRow.appendChild(installBtn);
+
+          frag.appendChild(btnRow);
+          setModalContent(frag);
+          showModal();
+        }
+
+        /** Repaint one member's state chip. tone: "done" | "failed" | null. */
+        function setMemberState(id, text, tone) {
+          var chip = document.querySelector('.ext-collection-modal__item-state[data-member-id="' + id + '"]');
+          if (!chip) return;
+          chip.textContent = text;
+          chip.classList.toggle("ext-collection-modal__item-state--done", tone === "done");
+          chip.classList.toggle("ext-collection-modal__item-state--failed", tone === "failed");
+        }
+
+        /** The install-set plan (returned with the job) says up front what is skipped and why. */
+        function applyPlan(plan) {
+          (plan || []).forEach(function(p) {
+            if (p.action === "skip") {
+              setMemberState(p.id, '${tJs("extensions.collectionSkipped", lang)}' + (p.reason ? " \\u00B7 " + p.reason : ""), null);
+            }
+          });
+        }
+
+        /** SUMMARY member <id> <installed|skipped|failed> <reason?> */
+        function applySummary(job) {
+          (job.log || []).forEach(function(line) {
+            var m = /^SUMMARY member (\\S+) (\\S+)\\s*(.*)$/.exec(line);
+            if (!m) return;
+            var state = m[2];
+            var reason = m[3];
+            var text, tone;
+            if (state === "installed") {
+              text = '${tJs("extensions.installedBadge", lang)}';
+              tone = "done";
+            } else if (state === "failed") {
+              text = '${tJs("extensions.failed", lang)}';
+              tone = "failed";
+            } else {
+              text = '${tJs("extensions.collectionSkipped", lang)}';
+              tone = null;
+            }
+            if (reason) text += " \\u00B7 " + reason;
+            setMemberState(m[1], text, tone);
+          });
+        }
+
+        /**
+         * NEEDS_CONFIG <id> <KEY1,KEY2> — members that installed but cannot do
+         * anything until the user supplies a value. Persisted BEFORE the reload:
+         * a collection that pulls in a panel/server ends in a gateway restart,
+         * which drops the in-process job and its log.
+         */
+        function harvestNeedsConfig(job) {
+          var out = [];
+          (job.log || []).forEach(function(line) {
+            var m = /^NEEDS_CONFIG (\\S+) (\\S+)$/.exec(line);
+            if (m) out.push({ id: m[1], keys: m[2].split(",") });
+          });
+          if (out.length > 0) {
+            try { sessionStorage.setItem("crow_ext_needs_config", JSON.stringify(out)); } catch (e) {}
+          }
+          return out;
+        }
+
+        function startCollectionInstall(collection, statusEl, btn) {
+          btn.disabled = true;
+          statusEl.style.display = "block";
+          statusEl.style.color = "var(--crow-accent)";
+          statusEl.textContent = '${tJs("extensions.installing", lang)}';
+
+          apiCall("install-set", { collection_id: collection.id }).then(function(res) {
+            if (res.status === 409) {
+              // Another install/uninstall is already running — the set was NOT started.
+              statusEl.style.color = "var(--crow-warning, #f0ad4e)";
+              statusEl.textContent = '${tJs("extensions.collectionBusy", lang)}';
+              btn.disabled = false;
+              return;
+            }
+            if (res.ok && res.data && res.data.job_id) {
+              applyPlan(res.data.plan);
+              try { sessionStorage.setItem("crow_ext_pending_collection", collection.id); } catch (e) {}
+              pollJob(res.data.job_id, statusEl, btn, function(job) {
+                applySummary(job);
+                harvestNeedsConfig(job);
+              });
+              return;
+            }
+            statusEl.style.color = "var(--crow-error, #e74c3c)";
+            statusEl.textContent = (res.data && res.data.error) || '${tJs("extensions.installFailed", lang)}';
+            btn.disabled = false;
+          }).catch(function() {
+            statusEl.style.color = "var(--crow-error, #e74c3c)";
+            statusEl.textContent = '${tJs("extensions.networkError", lang)}';
+            btn.disabled = false;
+          });
+        }
+
+        document.querySelectorAll(".ext-collection-card").forEach(function(card) {
+          card.addEventListener("click", function() {
+            var id = this.dataset.collectionId;
+            var collection = COLLECTIONS.filter(function(c) { return c.id === id; })[0];
+            if (collection) showCollectionModal(collection);
+          });
+        });
+
+        // ─── Post-install checklist (survives the restart reload) ───
+
+        function showNeedsConfigModal(list) {
+          var frag = document.createElement("div");
+          frag.className = "ext-checklist";
+
+          var h3 = document.createElement("h3");
+          h3.className = "ext-collection-modal__title";
+          h3.textContent = '${tJs("extensions.collectionConfigure", lang)}';
+          frag.appendChild(h3);
+
+          var desc = document.createElement("p");
+          desc.className = "ext-collection-modal__desc";
+          desc.textContent = '${tJs("extensions.collectionConfigureDesc", lang)}';
+          frag.appendChild(desc);
+
+          var rows = document.createElement("ul");
+          rows.className = "ext-collection-modal__list";
+
+          list.forEach(function(entry) {
+            var addon = ADDON_DATA[entry.id] || {};
+            var row = document.createElement("li");
+            row.className = "ext-collection-modal__item ext-checklist__row";
+            row.dataset.addonId = entry.id;
+
+            var nm = document.createElement("span");
+            nm.className = "ext-collection-modal__item-name";
+            nm.textContent = addon.name || entry.id;
+            row.appendChild(nm);
+
+            var keys = document.createElement("code");
+            keys.className = "ext-checklist__keys";
+            keys.textContent = (entry.keys || []).join(", ");
+            row.appendChild(keys);
+
+            var cfgBtn = document.createElement("button");
+            cfgBtn.className = "btn btn-sm btn-primary ext-checklist__configure";
+            cfgBtn.textContent = '${tJs("extensions.configure", lang)}';
+            cfgBtn.addEventListener("click", function() {
+              hideModal();
+              // The env form the user already knows — same modal as a fresh install;
+              // re-running the install with the filled values writes the bundle .env.
+              showInstallModal(
+                entry.id,
+                addon.name || entry.id,
+                addon.env_vars || [],
+                (addon.requires || {}).min_ram_mb || 0,
+                (addon.requires || {}).min_disk_mb || 0,
+                addon.official === false,
+              );
+            });
+            row.appendChild(cfgBtn);
+
+            rows.appendChild(row);
+          });
+          frag.appendChild(rows);
+
+          var btnRow = document.createElement("div");
+          btnRow.style.cssText = "display:flex;gap:0.5rem;justify-content:flex-end;margin-top:1rem";
+          var closeBtn = document.createElement("button");
+          closeBtn.className = "btn btn-secondary";
+          closeBtn.textContent = '${tJs("extensions.close", lang)}';
+          closeBtn.addEventListener("click", hideModal);
+          btnRow.appendChild(closeBtn);
+          frag.appendChild(btnRow);
+
+          setModalContent(frag);
+          showModal();
+        }
+
+        // Runs on every render (Turbo revisits included): the checklist is consumed
+        // once — a page the user navigated back to must not re-open it.
+        (function renderPendingChecklist() {
+          var raw = null;
+          try { raw = sessionStorage.getItem("crow_ext_needs_config"); } catch (e) { return; }
+          if (!raw) return;
+          try {
+            sessionStorage.removeItem("crow_ext_needs_config");
+            sessionStorage.removeItem("crow_ext_pending_collection");
+          } catch (e) {}
+          var list;
+          try { list = JSON.parse(raw); } catch (e) { return; }
+          if (!Array.isArray(list) || list.length === 0) return;
+          showNeedsConfigModal(list);
+        })();
+
+        // ─── Initial view state (runs on every render, so Turbo revisits behave) ───
+        (function applyHash() {
+          var hash = (location.hash || "").replace(/^#/, "");
+          if (hash === "installed") { showView("installed"); return; }
+          showView("browse");
+          applyFilters();
+          if (hash === "collections") {
+            var sec = document.getElementById("ext-collections");
+            if (sec && typeof sec.scrollIntoView === "function") {
+              sec.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+          }
+        })();
 
         // --- Escape key --- attach once per document lifetime so Turbo
         // re-entries don't stack keydown listeners. The modal lookup is
