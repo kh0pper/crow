@@ -152,6 +152,11 @@ export function extensionStyles() {
 /* Group sections */
 .ext-group-section { margin-bottom:2rem; scroll-margin-top:1rem; }
 .ext-group-more { margin-top:0.25rem; }
+/* Cards past the per-group cap. Hidden by CLASS, not by an inline style: the
+ * search filter writes card.style.display, which would clobber an inline hide
+ * and reveal every overflow card on the first keystroke. "Show all" removes
+ * this class. */
+.ext-card--overflow { display:none; }
 
 /* Collection install modal (shell — content is built by the client) */
 .ext-collection-modal__title {
@@ -186,8 +191,8 @@ export function extensionStyles() {
   font-size:0.7rem;
   color:var(--crow-text-muted);
 }
-.ext-collection-modal__item-state--done { color:var(--crow-success, var(--crow-accent)); }
-.ext-collection-modal__item-state--failed { color:var(--crow-error, #e74c3c); }
+.ext-collection-modal__item-state--done { color:var(--crow-success); }
+.ext-collection-modal__item-state--failed { color:var(--crow-error); }
 .ext-collection-modal__note {
   font-size:0.8rem; line-height:1.5;
   color:var(--crow-text-muted);
@@ -219,13 +224,6 @@ export function extensionStyles() {
 .ext-search__input:focus { outline:none; border-color:var(--crow-accent); }
 .ext-search__input::placeholder { color:var(--crow-text-muted); }
 
-/* Installed strip */
-.ext-section-label {
-  font-size:0.75rem; font-weight:600;
-  text-transform:uppercase; letter-spacing:0.08em;
-  color:var(--crow-text-muted);
-  margin:0 0 0.6rem 0.1rem;
-}
 /* Installed list — its own view now, so it is always expanded */
 .ext-installed__list { display:flex; flex-direction:column; gap:0.5rem; margin-bottom:1.5rem; }
 .ext-installed__item {
@@ -385,7 +383,8 @@ export function extensionStyles() {
 .theme-glass .ext-viewtabs,
 .theme-glass .ext-collection-card,
 .theme-glass .ext-group-chip,
-.theme-glass .ext-help {
+.theme-glass .ext-help,
+.theme-glass .ext-section-count {
   backdrop-filter:var(--crow-glass-blur);
   -webkit-backdrop-filter:var(--crow-glass-blur);
 }

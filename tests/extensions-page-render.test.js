@@ -11,6 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildExtensionsHTML } from "../servers/gateway/dashboard/panels/extensions/html.js";
 import { loadCollections } from "../servers/gateway/dashboard/panels/extensions/collections.js";
+import { extensionStyles } from "../servers/gateway/dashboard/panels/extensions/css.js";
 
 const AVAILABLE = [
   { id: "jellyfin", name: "Jellyfin", description: "Media server", type: "bundle", category: "media", version: "1.0.0", author: "Crow", featured: true, tags: ["media"] },
@@ -63,7 +64,49 @@ test("every add-on lands in exactly one group section, tagged with its group", (
   assert.match(viewsHtml, /data-addon-id="kolibri"[^>]*data-addon-group="productivity"/);
 });
 
-test("no horizontal-scroll patterns are emitted (the bug we are fixing)", () => {
+// ─── The horizontal-scroll guard (the bug this page's overhaul exists to fix) ───
+//
+// The 2555px document overflow lived in the STYLESHEET, not the markup:
+//   .ext-tabs { overflow-x:auto }  +  .ext-tab { white-space:nowrap; flex-shrink:0 }
+// So asserting on the HTML alone is vacuous — it passes on the buggy code. These
+// two tests read css.js's actual output.
+
+/** Split a stylesheet into { selector, body } rule blocks (flat CSS; no nesting here). */
+function cssRules(css) {
+  const stripped = css.replace(/\/\*[\s\S]*?\*\//g, ""); // comments can mention "nowrap"
+  const rules = [];
+  for (const m of stripped.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    rules.push({ selector: m[1].trim(), body: m[2] });
+  }
+  return rules;
+}
+
+test("the stylesheet declares no horizontal scroller", () => {
+  const css = extensionStyles();
+  const offenders = cssRules(css).filter((r) => /overflow-x\s*:\s*(auto|scroll)/.test(r.body));
+  assert.deepEqual(
+    offenders.map((r) => r.selector),
+    [],
+    "a rule scrolls horizontally — this is exactly the 2555px overflow bug",
+  );
+});
+
+test("the stylesheet has no nowrap row (nowrap is only legal when the rule also clips)", () => {
+  const css = extensionStyles();
+  // `white-space:nowrap` + `overflow:hidden` is the single-line truncation idiom
+  // (.ext-stores__url) and cannot inflate a parent. A bare nowrap CAN: it is what
+  // made 19 category tabs push the page to 2555px.
+  const offenders = cssRules(css).filter(
+    (r) => /white-space\s*:\s*nowrap/.test(r.body) && !/overflow\s*:\s*hidden/.test(r.body),
+  );
+  assert.deepEqual(
+    offenders.map((r) => r.selector),
+    [],
+    "a rule sets white-space:nowrap without clipping — it can inflate the page horizontally",
+  );
+});
+
+test("no horizontal-scroll patterns are emitted in the markup either", () => {
   const { viewsHtml } = render();
   assert.ok(!/overflow-x\s*:\s*(auto|scroll)/.test(viewsHtml), "no inline horizontal scrollers in the markup");
 });
@@ -92,6 +135,34 @@ test("group chips and Show-all buttons carry their group id", () => {
   // first 8 shown, the rest carry the overflow marker and start hidden
   const overflow = viewsHtml.match(/ext-card--overflow/g) || [];
   assert.equal(overflow.length, 2, "10 add-ons in one group → 2 overflow cards");
+});
+
+test("overflow cards are hidden by CLASS, never by an inline display style", () => {
+  const many = Array.from({ length: 10 }, (_, i) => ({
+    id: `m${i}`, name: `Media ${i}`, description: "d", type: "bundle",
+    category: "media", version: "1.0.0", author: "Crow", tags: [],
+  }));
+  const { viewsHtml } = render({ available: many });
+
+  // The client's search filter assigns card.style.display across every .addon-card.
+  // An inline `display:none` would be clobbered on the first keystroke, revealing
+  // every card past the cap; a class-driven hide survives it.
+  const allCards = viewsHtml.match(/<div class="ext-card addon-card[^>]*>/g) || [];
+  assert.equal(allCards.length, 10);
+  for (const card of allCards) {
+    assert.ok(
+      !/style="[^"]*display/.test(card),
+      `an add-on card carries an inline display — the search filter would clobber it: ${card}`,
+    );
+  }
+
+  const overflowCards = viewsHtml.match(/<div class="ext-card addon-card ext-card--overflow"[^>]*>/g) || [];
+  assert.equal(overflowCards.length, 2, "10 add-ons, cap 8 → 2 overflow cards");
+  for (const card of overflowCards) {
+    assert.ok(!/style="[^"]*display/.test(card), `overflow card carries an inline display: ${card}`);
+  }
+  // ...and the stylesheet is what actually hides them.
+  assert.match(extensionStyles(), /\.ext-card--overflow\s*\{[^}]*display\s*:\s*none/);
 });
 
 test("search input and both registry script blobs are emitted", () => {
