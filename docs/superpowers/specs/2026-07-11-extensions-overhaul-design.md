@@ -1,7 +1,7 @@
 # Extensions Page Overhaul + One-Click Collections — Design Spec
 
 - **Date:** 2026-07-11
-- **Status:** Draft v2 (R1 adversarial Opus review folded — 7 MAJOR + 6 minor findings; see §10)
+- **Status:** v3 — R1 + R2 adversarial Opus reviews folded (R1: 7 MAJOR/6 minor; R2: 3 new MAJOR/5 minor + fold audit); see §10
 - **Queue:** post-arc item 3 (blanket authorization 2026-07-11)
 - **Directive:** memory `crow-extensions-page-overhaul-directive` (Kevin, 2026-07-10)
 
@@ -58,8 +58,9 @@ non-wrapping descendant can reproduce it (this is a page-wide bug class).
   - **Install starts containers immediately** (`compose pull` + `up -d`) and finishes with
     `complete_restart` (gateway exit + supervisor restart) when panels, MCP servers on a
     bundle, env propagation, or AI-provider config were added (R1-m1: skill installs and
-    panel-less mcp-server installs do NOT set needsRestart — bundles.js:1469/1524/1360/
-    1328/1558 are the only setters). A naive N-bundle sequence would restart the gateway
+    panel-less mcp-server installs do NOT set needsRestart — install setters at
+    bundles.js:1328/1360/1392/1469/1524/1558; uninstall's are :1772/:1792 — R2-n-m5).
+    A naive N-bundle sequence would restart the gateway
     mid-sequence and kill the job runner → batching with ONE deferred restart is mandatory.
   - **Jobs are in-process with a 10-minute TTL from creation** (`createJob` arms
     `setTimeout(() => jobs.delete(id), 600_000)` at bundles.js:226) — a multi-GB set
@@ -137,8 +138,11 @@ Top-level segmented control (client-side toggle, no new routes):
   3. **Featured** — a curated grid of ~6 add-ons (D4), larger cards with accent styling.
   4. **Category-group sections** — the ~7 display groups (D3) as stacked vertical
      sections. Each section shows its add-ons in the existing auto-fill card grid,
-     collapsed to the first 2 grid rows with a "Show all (N)" toggle when longer.
-     No horizontal scrolling anywhere; group chips row **wraps** (`flex-wrap:wrap`).
+     collapsed to a fixed count of cards (first 8) with a "Show all (N)" toggle when
+     longer (R2-n-m4: a "2 grid rows" collapse would need viewport-dependent column
+     measurement + ResizeObserver; a fixed count is viewport-independent and pure CSS/JS
+     trivial). No horizontal scrolling anywhere; group chips row **wraps**
+     (`flex-wrap:wrap`).
 - **Installed (N)**: the management view — the current installed-strip content
   (status badge, start/stop/restart, remove, version) always expanded, plus community
   stores management and the help card (they are management concerns, not browsing).
@@ -256,16 +260,27 @@ Server behavior:
    `getInstalled()` (which grows as members complete), so cumulative RAM commitments and
    intra-set dependencies are enforced for real, not against a stale pre-set snapshot.
    Execution follows the collection's topological member order (D5).
-4. **(R1-M4) Extraction is NOT a pure body-move — scope it honestly in two seams:**
-   (a) the async install IIFE (bundles.js ~1202–1663) IS `res`-free and moves verbatim
-   into `runInstallJob(bundleId, envVars, { job, deferRestart })` under
-   verbatim-body-move discipline; (b) the synchronous validation half (~1083–1200) is
-   full of `res.status().json()` early returns and must be **re-implemented** as an
-   outcome-returning `validateInstall(bundleId, opts) → { ok } | { ok:false, status,
-   error, ... }` used by both the single-install route (which maps outcomes to HTTP) and
-   the set runner (which maps them to per-member skip/fail log entries). The gate
-   re-implementation gets its own dedicated tests (every early-return branch) — this is
-   where consent/gate regressions would hide.
+4. **(R1-M4 + R2-N-M2) Extraction: NEITHER half is a pure body-move — both are
+   re-implementations with dedicated tests:**
+   (a) The async install IIFE (bundles.js ~1202–1663) is `res`-free but NOT
+   closure-free (it captures `installed` from :1097 and `consentVerified` from
+   :1164–1184) and its tail is single-install job-lifecycle control flow
+   (`finishJob(job, …)` at :1652/:1289/:1319/:1661, `scheduleGatewayRestart` at :1657)
+   that must NOT run against a shared set job — a literal move would mark the set job
+   finished after member 1, abort the set on first member failure (defeating
+   continue-on-error), and fire restarts mid-set. `runInstallJob(bundleId, envVars,
+   { job, installedSnapshot, consentVerified, deferRestart })` therefore RETURNS a
+   per-member outcome `{ ok, needsRestart } | { ok:false, reason }` and never calls
+   `finishJob`/`scheduleGatewayRestart` itself when `deferRestart` is set; the
+   single-install wrapper keeps finish+restart semantics, the set runner aggregates
+   outcomes into the ONE shared job (accumulated log — that's what the client's
+   `pollJob` renders) and finishes it once.
+   (b) The synchronous validation half (~1083–1200) is full of `res.status().json()`
+   early returns and is re-implemented as an outcome-returning
+   `validateInstall(bundleId, opts) → { ok } | { ok:false, status, error, ... }` used by
+   both the single-install route (maps outcomes to HTTP) and the set runner (maps them
+   to per-member skip/fail log entries). Every early-return branch gets a dedicated
+   test — this is where consent/gate regressions would hide.
 5. Sequential execution, **continue-on-error**: a member failure is logged and the set
    proceeds; the job summary lists per-member outcome (installed / skipped-why / failed-why).
 6. **One deferred gateway restart at the end** iff any member reported needsRestart.
@@ -278,22 +293,40 @@ Server behavior:
    summary. Fix (applies to ALL jobs, it's strictly safer): arm the eviction timer in
    `finishJob`/failure instead of `createJob` — jobs are evicted N minutes after they
    END, never while running.
-8. **(R1-M5) Auth hardening**: mount `install-set` — AND the existing `install` +
-   `uninstall` routes, which are being reworked here anyway — behind `xhostVerify`
-   exactly like `start`/`stop`, closing the pre-existing bypass where a bogus
-   `x-crow-signature` header skips `dashboardAuth`+CSRF and reaches them unauthenticated.
-   Regression test: bogus-signature request → 401/403, session+CSRF request → works.
-   Correct posture statement: dashboard session + double-submit CSRF on the normal path;
-   verified HMAC on the cross-host path; never reachable via Funnel (no
-   PUBLIC_FUNNEL_PREFIXES change).
-9. **Set-busy gate (R1-m2/m3)**: refuses to START if any install/uninstall job is
-   currently running in the jobs Map (an in-flight single install's immediate restart
-   would kill the set — a forward-only lock can't stop it); while a set runs,
+8. **(R1-M5 + R2-N-M1) Auth hardening — ROUTER-WIDE, not per-route**: the
+   `x-crow-signature` pre-auth bypass (dashboard/index.js:596-607) reaches EVERY
+   bundles route, and the unguarded set is wider than install/uninstall:
+   `POST /bundles/api/restart` (bundles.js:2032 — unauthenticated gateway-restart DoS),
+   `POST /bundles/api/env` (:1985 — unauthenticated secret writes into bundle .env),
+   `POST /bundles/api/shared-storage/apply/:id` (:2096). Denylist-by-omission is the
+   bug pattern; the fix is `router.use(xhostVerify)` ONCE at the top of bundlesRouter
+   so every present-and-future route inherits it. This is safe for the normal path:
+   `crossHostVerifyMiddleware(..., {optional:true})` passes requests WITHOUT the header
+   straight through (cross-host-auth.js:422-424), and unsigned requests only arrive via
+   the dashboardAuth+CSRF mount — while signed requests get real HMAC verification
+   (bogus → 401). Regression tests: bogus-signature → 401/403 on install, uninstall,
+   install-set, restart, AND env; session+CSRF path still works. Posture statement:
+   dashboard session + double-submit CSRF on the normal path; verified HMAC on the
+   cross-host path; never reachable via Funnel (no PUBLIC_FUNNEL_PREFIXES change).
+9. **Set-busy gate (R1-m2/m3 + R2-n-m1)**: refuses to START if any install/uninstall
+   job with `status === "running"` exists in the jobs Map (an in-flight single
+   install's immediate restart would kill the set — a forward-only lock can't stop it).
+   The predicate MUST key on `status === "running"`, never Map presence — post-M1-fold,
+   finished jobs linger in the Map for the TTL after they END, and a presence check
+   would 409 all sets for 10 minutes after every ordinary install. While a set runs,
    install/uninstall/install-set → 409. Release in try/finally on every exit path; the
-   deferred restart clears it trivially (fresh process). No wall-clock deadman needed:
-   the gate is in-process state that cannot outlive the gateway, and the gateway restart
-   at set-end (or any crash) resets it — but a belt-and-braces max-age (e.g. 2h) on the
-   gate check costs one line and is included.
+   deferred restart clears it trivially (fresh process). Belt-and-braces max-age (2h)
+   on the gate check included.
+10. **Auto-update inhibition (R2-n-m3)**: the auto-update tick runs in the SAME gateway
+   process; its mid-set `exit(1)` would kill the runner (resumable but summary-losing).
+   The scheduled-update tick skips (with a log line) while a set job is running — same
+   in-process flag the busy gate uses. Manual Check-now stays ungated (operator intent,
+   #163 precedent).
+11. **Co-hosted gateways (R2-n-m2)**: the busy gate is in-process; gateways sharing one
+   `~/.crow` would race on installed.json/mcp-addons.json. Deployment invariant (already
+   true on crow: the MPA unit sets `CROW_HOME=/home/kh0pp/.crow-mpa`): co-hosted
+   gateways MUST use distinct CROW_HOME. Documented in the bundles developer doc; no
+   cross-process locking built (YAGNI until a real co-tenant exists).
 
 Concurrency: there is NO existing global install lock (verified — the only install-path
 409 today is "already installed"). A concurrent single install finishing with an
@@ -322,6 +355,17 @@ Click → collection modal:
   inviting a post-init change of an initialized boot secret would break the app or wipe
   data). Checklist rows get a "Configure" link opening the existing detail modal/env
   form. Members already installed are simply checked off.
+- **(R2-N-M3) The Configure path must actually work for mcp-server members.** Today
+  `POST /bundles/api/env` writes only `bundles/<id>/.env` (bundles.js:2016) — a file
+  MCP children NEVER read: the proxy spawns them with `{...process.env,
+  ...(config.env||{})}` from `mcp-addons.json` (proxy.js:145), whose `env` block is
+  populated only at install time (bundles.js:~1400-1415). So a user configuring
+  HA_URL/HA_TOKEN post-install would leave home-assistant dead — a pre-existing product
+  bug that collections would mass-produce. Fix (benefits all mcp add-ons, not just
+  collections): `POST /bundles/api/env` ALSO updates the add-on's `mcp-addons.json`
+  entry `env` block when the add-on registers an MCP server, and returns
+  `needs_restart: true` so the client offers the existing restart flow. Test: env POST
+  → mcp-addons.json reflects the values; restart offered.
 - Progress: reuse `pollJob` (the job log is the live progress feed), then the restart
   waiter.
 
@@ -366,7 +410,9 @@ the entire item-3 footprint; the full wizard is item 4.
 | Set requested while a single install/uninstall job is already running | set refuses to start with 409 (an in-flight install's immediate restart would kill the set — D6.9) |
 | Set job outlives the old 10-min TTL | fixed: eviction timer arms at job END, never while running (D6.7) |
 | Tampered collections file smuggles consent-required/privileged/host-net member | server-side re-validation against on-disk manifests refuses the set (D6.2) |
-| Bogus x-crow-signature header hits install/uninstall/install-set | 401/403 via xhostVerify (D6.8 — closes pre-existing hole) |
+| Bogus x-crow-signature header hits ANY bundles route (incl. restart/env) | 401/403 via router-wide xhostVerify (D6.8 — closes pre-existing hole incl. unauth restart-DoS + secret-write) |
+| Auto-update tick fires mid-set | tick skips while a set job runs (D6.10); manual Check-now ungated |
+| Configured env for an mcp-server member never reaches the MCP child | /bundles/api/env also updates mcp-addons.json env + offers restart (D7 / R2-N-M3) |
 
 ## 7. Testing strategy
 
@@ -451,3 +497,29 @@ data); the D1 layout line is the only global touch and carries the CDP sweep.
   none consent/privileged/GPU-gated, all have source dirs; `featured` additive
   (schema additionalProperties:true, validated only in scripts/build-registry.mjs);
   bilingual i18n; onboarding has exactly three cards today.
+
+**R2 (fresh adversarial Opus, 2026-07-11): REVISE — fold audit + 3 new MAJOR, 5 minor.
+All folded into v3:**
+- Fold audit: M1 CORRECT (every terminal path reaches finishJob — run() has a hard 300s
+  execFile timeout, so arming eviction at finish cannot leak); M2 CORRECT (all 19 unique
+  members verified on disk, zero requires.bundles, compose `${VAR:-default}` substitution
+  makes headless boot genuinely satisfiable); M3 CORRECT (saveInstalled is sync
+  writeFileSync → member N sees 1..N-1; getManifest uncached); M6 CORRECT for bundles
+  (manifest-required keys are present-but-EMPTY in .env.example; DB secrets aren't
+  manifest-required so never wrongly flagged); M7 classification CORRECT
+  (knowledge-base is also `builtin`); M4/M5 INCOMPLETE → superseded by N-M2/N-M1.
+- N-M1 bypass remained open on restart (unauth gateway-restart DoS), env (unauth secret
+  write), shared-storage/apply → router-wide `router.use(xhostVerify)` (D6.8).
+- N-M2 verbatim IIFE move breaks set semantics (per-member finishJob/restart on the
+  shared job; `installed`/`consentVerified` closures) → outcome-returning runInstallJob,
+  wrapper keeps finish+restart, set runner finishes once (D6.4).
+- N-M3 Configure dead-end for mcp-server connects members (env POST writes .env the MCP
+  child never reads; config.env only set at install) → /bundles/api/env also updates
+  mcp-addons.json + needs_restart (D7).
+- n-m1 busy-gate predicate = status==="running" (D6.9); n-m2 co-hosted CROW_HOME
+  invariant (D6.11 — already true: MPA unit sets its own CROW_HOME); n-m3 auto-update
+  tick inhibited during set (D6.10); n-m4 fixed-count Show-all collapse (D2); n-m5
+  setter enumeration corrected (§1).
+- R2 final: "Fold those, re-state D6.8's posture accurately, specify the set's
+  single-job model, and this is ready for planning." All three folded + D6.4 nails the
+  single-job model (one shared job, accumulated log, finished once by the set runner).
