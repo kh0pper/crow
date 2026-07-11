@@ -1184,6 +1184,7 @@ export const translations = {
     es: "¿Marcar todos los conflictos sin resolver como resueltos? Se mantendrá la versión actual (ganadora) de cada elemento.",
   },
   "syncConflicts.loadError": { en: "Failed to load conflicts", es: "Error al cargar conflictos" },
+  "syncConflicts.showingFirst": { en: "Showing first 200 of {n}", es: "Mostrando los primeros 200 de {n}" },
   "syncConflicts.msgApplied": { en: "The other version was restored.", es: "La otra versión fue restaurada." },
   "syncConflicts.msgStale": { en: "This item has changed since the conflict was recorded — please review the current version and confirm again.", es: "Este elemento ha cambiado desde que se registró el conflicto — revisa la versión actual y confirma de nuevo." },
   "syncConflicts.msgRefused": { en: "This version can't be restored automatically; its data remains visible below.", es: "Esta versión no se puede restaurar automáticamente; sus datos siguen visibles abajo." },
