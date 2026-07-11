@@ -2,7 +2,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
-import bundlesRouter from "../servers/gateway/routes/bundles.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// bundles.js resolves BUNDLES_DIR/INSTALLED_PATH/MCP_ADDONS_PATH from CROW_HOME at
+// module load. Point it at a scratch dir BEFORE importing it: a test that reaches an
+// install path must never be able to write the operator's real ~/.crow (it has —
+// a bogus-signature RED run against this exact test installed uptime-kuma, real
+// docker-compose-up-and-all, on the operator's live host).
+process.env.CROW_HOME = mkdtempSync(join(tmpdir(), "crow-test-home-"));
+const { default: bundlesRouter } = await import("../servers/gateway/routes/bundles.js");
 
 /** Boot the bundles router alone (as the signed-header bypass reaches it) on an ephemeral port. */
 async function withRouter(fn) {
@@ -15,7 +25,15 @@ async function withRouter(fn) {
   try { await fn(base); } finally { server.close(); }
 }
 
-const SIGNED = { "content-type": "application/json", "x-crow-signature": "bogus-not-a-real-hmac" };
+// "x-crow-source" is required to get PAST missing_x_crow_source (cross-host-auth.js:427)
+// and into the credential/HMAC branch (unknown_peer, since "not-a-real-peer" has no
+// signing key). Without it every request short-circuits one branch too early and the
+// test would pass even if the credential/HMAC check itself regressed.
+const SIGNED = {
+  "content-type": "application/json",
+  "x-crow-signature": "bogus-not-a-real-hmac",
+  "x-crow-source": "not-a-real-peer",
+};
 
 test("a bogus x-crow-signature is rejected on every state-changing bundles route", async () => {
   await withRouter(async (base) => {
@@ -29,7 +47,10 @@ test("a bogus x-crow-signature is rejected on every state-changing bundles route
       const res = await fetch(base + path, {
         method: "POST",
         headers: SIGNED,
-        body: JSON.stringify({ bundle_id: "uptime-kuma", collection_id: "home-server", env_vars: { PWNED: "1" } }),
+        // "../etc/passwd" can never resolve to a real, installable bundle — even if
+        // the auth mount regresses and this request reaches the handler, it fails
+        // with 400 invalid_id rather than actually installing something on the host.
+        body: JSON.stringify({ bundle_id: "../etc/passwd", collection_id: "home-server", env_vars: { PWNED: "1" } }),
       });
       assert.ok(
         res.status === 401 || res.status === 403,
