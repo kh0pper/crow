@@ -393,7 +393,7 @@ export class PeerDialer {
 
     let ws;
     // TLS verification is ON for wss candidates (#144 follow-up): every wss
-    // candidate is hostname-based (the ladder never emits raw-IP wss), and
+    // candidate is hostname-based (the fleet's wss candidates are all ts.net hostnames; a raw-IP https gateway_url would emit raw-IP wss, whose cert won't verify — the ws:// tailnet fallback recovers when tailscale_ip is set), and
     // the fleet's Serve endpoints carry real LE certs — SNI + verification
     // both work. ws:// candidates are unaffected. A deployment fronting its
     // gateway with a self-signed cert should use an http/ws gateway_url or a
