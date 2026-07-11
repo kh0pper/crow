@@ -240,8 +240,11 @@ function finishJob(job, status) {
   job.status = status;
   job.completedAt = new Date().toISOString();
   // Evict N minutes after the job ENDS — never while it runs.
-  job._evictTimer = setTimeout(() => jobs.delete(job.id), JOB_TTL_MS);
-  if (typeof job._evictTimer.unref === "function") job._evictTimer.unref();
+  const timer = setTimeout(() => jobs.delete(job.id), JOB_TTL_MS);
+  if (typeof timer.unref === "function") timer.unref();
+  // Non-enumerable: GET /bundles/api/jobs/:id does res.json(job); an enumerable
+  // Timeout (circular _idlePrev/_idleNext) would make JSON.stringify throw.
+  Object.defineProperty(job, "_evictTimer", { value: timer, configurable: true, writable: true });
   emitJobChanged(job);
 }
 
