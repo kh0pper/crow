@@ -23,6 +23,16 @@ post-listen.js:84/339, …) against the same CROW_DATA_DIR-keyed identity.json
 new passphrase exposure, no create-on-render concern, no read-only path
 needed. Test: render the section against a scratch data dir → output
 contains a crow: id, NOT the unavailable placeholder — red pre-fix.
+**Second half of the fix (R2 substantive find):** identity.js:31 reads
+`identity.ed25519Public` — a field that DOES NOT EXIST on
+loadOrCreateIdentity()'s return (correct: `ed25519Pubkey`, hex;
+identity.js:174-183). Pre-fix this never surfaced because the broken import
+threw before the render body ran; the import swap alone would un-mask it as
+a silently-blank Ed25519 line (escapeHtml(undefined)→""). F1 therefore ALSO
+renames `ed25519Public` → `ed25519Pubkey` on that line, and the test asserts
+the rendered ed25519 value is NON-EMPTY (not just that a crow: id appears).
+(Same wrong field names exist latently at boot/peer-public-api.js:61-62 on
+/discover/profile — OUT OF SCOPE, pooled.)
 TEST GOTCHA (R1 MINOR-2): identity.js resolves DATA_DIR/IDENTITY_PATH as
 module-level consts at import time — the test MUST set CROW_DATA_DIR before
 its first import of sharing/identity.js (subprocess or import-order
@@ -49,7 +59,12 @@ resolved one has LIMIT 25). With 211 live rows (and climbing daily via
 BH-5b) the page grows unboundedly. Fix: `LIMIT 200`, plus an honest count —
 a `SELECT COUNT(*)` drives a "showing first 200 of N" line when N > 200
 (never a silent truncation; the render already shows per-row cards, add the
-notice above the list, i18n EN+ES: `settings.syncConflicts.showingFirst`).
+notice above the list, i18n EN+ES key `syncConflicts.showingFirst`, value
+carrying a `{n}` placeholder — `t()` does NO interpolation (i18n.js:1422-26);
+the codebase convention is call-site replace:
+`t("syncConflicts.showingFirst", lang).replace("{n}", String(total))` with
+`{ en: "Showing first 200 of {n}", es: "Mostrando los primeros 200 de {n}" }`
+— R2 verified both the mechanism and ~7 sibling precedents).
 Key namespace (R1 MINOR-1): the notice key is `syncConflicts.showingFirst`
 — the section's entire namespace is `syncConflicts.*` (27 existing t()
 calls, NO `settings.` prefix); a mismatched prefix would render the raw key,
