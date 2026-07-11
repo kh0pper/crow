@@ -67,14 +67,17 @@ export async function persistIncomingCursor(db, createdAtSec) {
 
 import { normalizePubkey } from "./pubkey-util.js";
 import { emitContactChange, emitContactDelete } from "./contact-sync.js";
-import { readTombstone, clearTombstone } from "./contact-delete.js";
+import { readTombstone, clearTombstone, unwireContact } from "./contact-delete.js";
 
 const HEX_KEY = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/; // 64 x-only or 66 compressed
 
 /** Wire a full contact into sync feeds, the DHT topic, and the Nostr sub. Each
  * step is independently guarded — a partial-manager (tests) or a transient
  * failure must not abort the upsert (the row is already correct). */
-async function wireFullContact(managers, row) {
+export async function wireFullContact(managers, row) {
+  // F-BLOCK-1 D4d belt: no upsert path (tool, accept, invite_accepted) may
+  // wire a blocked contact. The wiring returns on unblock (wireSyncedContact).
+  if (row?.is_blocked) return;
   const { syncManager, peerManager, nostrManager } = managers || {};
   try { if (syncManager) await syncManager.initContact(row.id, null); } catch {}
   try { if (peerManager) await peerManager.joinContact({ crowId: row.crow_id, ed25519Pubkey: row.ed25519_pubkey }); } catch {}
@@ -97,10 +100,12 @@ async function wireFullContact(managers, row) {
 export async function wireSyncedContact(managers, row) {
   try {
     if (!managers || !row) return;
-    const { syncManager, peerManager } = managers;
     if (row.is_blocked) {
-      try { if (syncManager && row.id != null) await syncManager.closeContactFeeds(row.id); } catch {}
-      try { if (peerManager && row.crow_id) await peerManager.leaveContact(row.crow_id); } catch {}
+      // F-BLOCK-1 D3: FULL teardown. The old inline pair closed feeds + left
+      // the DHT but LEFT THE LIVE NOSTR SUB — the cross-instance leg of the
+      // finding (a synced block must silence this instance too).
+      // unwireContact is the single teardown owner (delete + block paths).
+      await unwireContact(managers, row);
       return;
     }
     if (row.origin === "local-bot") return;

@@ -185,6 +185,18 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
     // stranger could forge an invite_accepted to promote/hijack a gated contact.
     if (normalizePubkey(payload.secp256k1Pub) !== normalizePubkey(senderPubkey)) return;
 
+    // F-BLOCK-1 D4d: silence toward a blocked contact. Resolve BEFORE the
+    // replay-hygiene and short-code branches below — BOTH of those ack, and
+    // the common blocked case ("handshake processed, then blocked") re-sends
+    // the same event.id for ~60h, which would keep acking a blocked party.
+    // No upsert, no ack, no wiring. Skipping consumeShortInvite is safe: the
+    // invite was consumed on the pre-block accept, and an unconsumed row
+    // expires at the 72h ledger TTL.
+    try {
+      const senderContact = await findContactByPubkey(db, senderPubkey);
+      if (senderContact && Number(senderContact.is_blocked) === 1) return;
+    } catch { /* resolution failure must not break honest handshakes */ }
+
     // D4 (design §D4): clock-free replay hygiene. R5's retry loop re-publishes
     // the EXACT stored signed event for ~60h, so a stale retry arriving AFTER
     // the user deleted this contact carries the same event.id. Skip the upsert
