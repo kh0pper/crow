@@ -257,33 +257,32 @@ describe("maker-lab location independence (BH-4 phase 2)", () => {
     );
   });
 
-  test("class-regression: the fixed `../server/{db,retention-sweep}.js` lazy dynamic-import pattern does not reappear anywhere under panel/*.js", () => {
-    // Narrower than the static-import net above (which only ever matched
-    // `from "../../../servers/..."`, i.e. the shared top-level servers/
-    // tree): this catches the DYNAMIC `import(pathToFileURL(resolve(__dirname,
-    // "../server/...")))` shape that caused this exact regression — a
-    // relative resolution assuming a sibling ../server/ dir that doesn't
-    // exist once a panel/*.js file is copied alone. Scoped to the two
-    // targets this follow-up fixed (db.js, retention-sweep.js) rather than
-    // every `../server/*` lazy import in panel/*.js: panel/routes.js and
-    // panel/maker-lab.js both have other pre-existing lazy imports of this
-    // same shape (device-binding.js, sessions.js, hint-pipeline.js,
-    // resolve-llm-endpoint.js, lesson-validator.js) that are a real but
-    // separate, tracked, out-of-scope gap — asserting a blanket "zero
-    // matches" here would either force fixing them as a drive-by (out of
-    // this follow-up's stated scope) or require a brittle allowlist that
-    // doesn't buy anything additional over a green earlier-run gate check.
+  test("class-regression: no import (static or dynamic) escaping the panel dir remains anywhere under panel/*.js", () => {
+    // Widened from a narrow db.js/retention-sweep.js-only net (this follow-up's
+    // first pass) to a blanket net now that ALL nine pre-existing lazy
+    // `../server/*` sites (routes.js: device-binding.js x2, sessions.js,
+    // hint-pipeline.js x2, resolve-llm-endpoint.js; maker-lab.js:
+    // device-binding.js, sessions.js, lesson-validator.js) have been converted
+    // through the file-local `bundleImport(rel)` helper (routes.js has its
+    // own; maker-lab.js gained an equivalent one alongside its existing
+    // `appImport`). Every panel/*.js file is copied ALONE into
+    // ~/.crow/panels/ on install/refresh, so ANY import escaping the panel
+    // dir via `../` (static `from "../..."` or dynamic
+    // `import("../...")` / `import(pathToFileURL(resolve(__dirname,
+    // "../...")))`) is location-dependent and will 500/crash once installed.
+    // Same-dir `./` imports and node builtins/package imports (bare
+    // specifiers, `node:fs`, etc.) are unaffected and allowed.
     const files = listJsFiles(join(MAKER_LAB_DIR, "panel"));
-    const lazyBrokenImport = /pathToFileURL\(resolve\(__dirname,\s*["'`]\.\.\/server\/(db|retention-sweep)\.js["'`]\)\)/;
+    const escapingImport = /from\s+["'`]\.\.\/|import\(\s*["'`]\.\.\/|import\(pathToFileURL\(resolve\(__dirname,\s*["'`]\.\.\//;
     const offenders = [];
     for (const f of files) {
       const src = readFileSync(f, "utf8");
-      if (lazyBrokenImport.test(src)) offenders.push(f);
+      if (escapingImport.test(src)) offenders.push(f);
     }
     assert.deepEqual(
       offenders,
       [],
-      `broken "../server/{db,retention-sweep}.js" lazy dynamic-import pattern reappeared in: ` +
+      `an import escaping the panel dir (via "../") reappeared in: ` +
         `${offenders.map((f) => f.replace(REPO_ROOT + "/", "")).join(", ")}`
     );
   });

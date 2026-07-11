@@ -267,8 +267,8 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
       return noSessionResponse(res);
     }
 
-    const deviceBinding = await import(pathToFileURL(resolve(__dirname, "../server/device-binding.js")).href);
-    const sessionsMod = await import(pathToFileURL(resolve(__dirname, "../server/sessions.js")).href);
+    const deviceBinding = await bundleImport("device-binding.js");
+    const sessionsMod = await bundleImport("sessions.js");
 
     const fp = fingerprint(req);
     const loopback = deviceBinding.isLoopback(req);
@@ -571,7 +571,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     });
 
     // Route through the shared hint pipeline (LLM + filter). Phase 2.
-    const { handleHintRequest } = await import(pathToFileURL(resolve(__dirname, "../server/hint-pipeline.js")).href);
+    const { handleHintRequest } = await bundleImport("hint-pipeline.js");
     try {
       const result = await handleHintRequest(db, {
         sessionToken: guard.sessionToken,
@@ -594,7 +594,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
   // backend Maker Lab is currently routing hints through. Read-only;
   // no secrets leaked.
   router.get("/maker-lab/api/engine", async (req, res) => {
-    const mod = await import(pathToFileURL(resolve(__dirname, "../server/resolve-llm-endpoint.js")).href);
+    const mod = await bundleImport("resolve-llm-endpoint.js");
     const resolved = await mod.resolveLlmEndpoint();
     res.json({
       engine: resolved.engine,
@@ -614,7 +614,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
   // AND thus shares the host's loopback) can reach it.
 
   router.post("/maker-lab/api/hint-internal", express_json(), async (req, res) => {
-    const deviceBinding = await import(pathToFileURL(resolve(__dirname, "../server/device-binding.js")).href);
+    const deviceBinding = await bundleImport("device-binding.js");
     if (!deviceBinding.isLoopback(req)) {
       return res.status(403).json({ error: "loopback_only" });
     }
@@ -631,7 +631,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     if (!session) return res.status(401).json({ error: "session_invalid" });
     if (session.state === "revoked") return res.status(410).json({ error: "revoked" });
 
-    const { handleHintRequest } = await import(pathToFileURL(resolve(__dirname, "../server/hint-pipeline.js")).href);
+    const { handleHintRequest } = await bundleImport("hint-pipeline.js");
     try {
       const result = await handleHintRequest(db, {
         sessionToken: session_token,
