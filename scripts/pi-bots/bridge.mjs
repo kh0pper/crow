@@ -706,18 +706,24 @@ export async function planCard(opts) {
     pi_session_dir: repoRoot + "/.pi/board-planning", status: "active", control: "run",
     model: resolved.key, escalated: 0, kind: "planning",
   });
-  mkdirSync(repoRoot + "/.pi/board-planning", { recursive: true });
+  let pi;
+  try {
+    mkdirSync(repoRoot + "/.pi/board-planning", { recursive: true });
 
-  // Confinement belt: write_paths limited to plans+docs, bash denied. The
-  // stored def's policy is NOT used — planning is stricter than the bot.
-  const planningDef = Object.assign({}, def, {
-    permission_policy: { bash: "deny", write_paths: [repoRoot + "/.pi/plans", repoRoot + "/docs"] },
-    spawn_env: def.spawn_env || {},
-    tools: def.tools,
-  });
-  await warmModel(resolved.provider, log);
-  const pi = new PiRpc({ def: planningDef, sessionDir: repoRoot + "/.pi/board-planning",
-    resolved, piSessionId: null, appendSystemPromptFile: sysFile });
+    // Confinement belt: write_paths limited to plans+docs, bash denied. The
+    // stored def's policy is NOT used — planning is stricter than the bot.
+    const planningDef = Object.assign({}, def, {
+      permission_policy: { bash: "deny", write_paths: [repoRoot + "/.pi/plans", repoRoot + "/docs"] },
+      spawn_env: def.spawn_env || {},
+      tools: def.tools,
+    });
+    await warmModel(resolved.provider, log);
+    pi = new PiRpc({ def: planningDef, sessionDir: repoRoot + "/.pi/board-planning",
+      resolved, piSessionId: null, appendSystemPromptFile: sysFile });
+  } catch (e) {
+    session.status = "error"; upsertSession(session);
+    return { action: "error", error: e.message };
+  }
   try {
     await pi.prompt(buildPlanPrompt(card, ".pi/plans"), TURN_TIMEOUT_MS);
     const text = pi.assistantText();

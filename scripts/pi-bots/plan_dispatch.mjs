@@ -6,7 +6,7 @@
 export function extractPlanFileLine(text) {
   const matches = [...String(text || "").matchAll(/^PLAN_FILE:\s*(.+?)\s*$/gm)];
   if (!matches.length) return null;
-  const p = matches[matches.length - 1][1];
+  const p = matches[matches.length - 1][1].trim();
   if (!p || p.startsWith("/") || p.split("/").includes("..")) return null;
   return p;
 }
