@@ -64,3 +64,47 @@ test("health-loop tick refreshes the count both ways; throwing getter never kill
     await mgr.destroy().catch(() => {});
   }
 });
+
+test("health-loop tick order: _refreshRelayHealth runs BEFORE the ensureHealthy sweep (M3 pin)", async () => {
+  _resetReceiveHealth();
+  const prev = process.env.CROW_NOSTR_HEALTH_MS;
+  process.env.CROW_NOSTR_HEALTH_MS = "50";
+  const mgr = new NostrManager(identity, null);
+  try {
+    const stub = { connected: true };
+    mgr.relays.set("wss://stub", stub);
+
+    // A FAKE subscription handle, not a real resilient sub — a real one's
+    // ensureHealthy calls relay.connect() and would resurrect the dying
+    // stub, hiding the very ordering bug this test exists to catch. This
+    // handle only observes: it records the receive-health value at the
+    // instant the sweep invokes it, and never touches mgr.relays.
+    const recordings = [];
+    mgr.subscriptions.set("fake:sub", {
+      ensureHealthy: () => { recordings.push(getReceiveHealth().relaysConnected); },
+    });
+
+    mgr._startHealthLoop();
+    assert.ok(await waitFor(() => recordings.length >= 1), "first tick reached the sweep");
+
+    // Kill the stub's socket, then wait for the NEXT tick to record a value.
+    // If _refreshRelayHealth runs first (current code), that tick's refresh
+    // sees the death and sets relaysConnected=0 before ensureHealthy is ever
+    // called, so the recording is 0. If ensureHealthy ran first (refresh
+    // moved after the loop — the M3 mutation), it would still observe the
+    // stale relaysConnected=1 from the previous tick's refresh.
+    stub.connected = false;
+    const countBeforeFlip = recordings.length;
+    assert.ok(await waitFor(() => recordings.length > countBeforeFlip), "a tick ran after the flip");
+    assert.equal(
+      recordings[countBeforeFlip],
+      0,
+      "first post-flip ensureHealthy call must observe relaysConnected===0 — proves refresh ran before the sweep this same tick; refresh-after would still read 1",
+    );
+
+    await mgr.destroy();
+  } finally {
+    if (prev === undefined) delete process.env.CROW_NOSTR_HEALTH_MS; else process.env.CROW_NOSTR_HEALTH_MS = prev;
+    await mgr.destroy().catch(() => {});
+  }
+});
