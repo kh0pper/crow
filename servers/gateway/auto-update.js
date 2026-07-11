@@ -322,14 +322,30 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
 }
 
 /**
+ * D4: whether auto-update should even attempt to start. The
+ * CROW_AUTO_UPDATE=0|false kill switch always wins. Otherwise, a --no-auth
+ * gateway (an unauthenticated scratch/dev surface) defaults OFF and requires
+ * an explicit CROW_AUTO_UPDATE=1|true opt-in; every other gateway defaults
+ * ON (existing behavior preserved).
+ */
+export function shouldStartAutoUpdate({ env = {}, noAuth = false } = {}) {
+  if (env.CROW_AUTO_UPDATE === "0" || env.CROW_AUTO_UPDATE === "false") return false;
+  if (noAuth) return env.CROW_AUTO_UPDATE === "1" || env.CROW_AUTO_UPDATE === "true";
+  return true;
+}
+
+/**
  * Start the auto-update timer
  */
-export async function startAutoUpdate(database) {
+export async function startAutoUpdate(database, { noAuth = false } = {}) {
   db = database;
 
-  // Respect CROW_AUTO_UPDATE env var (overrides DB setting)
-  if (process.env.CROW_AUTO_UPDATE === "0" || process.env.CROW_AUTO_UPDATE === "false") {
-    console.log("[auto-update] Disabled via CROW_AUTO_UPDATE env var");
+  if (!shouldStartAutoUpdate({ env: process.env, noAuth })) {
+    console.log(
+      noAuth
+        ? "[auto-update] Disabled: --no-auth gateway defaults auto-update OFF (set CROW_AUTO_UPDATE=1 to opt in)"
+        : "[auto-update] Disabled via CROW_AUTO_UPDATE env var",
+    );
     return;
   }
 
