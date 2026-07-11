@@ -134,6 +134,13 @@ test("install-set: sequential, continue-on-error, exactly one deferred restart, 
   assert.equal(cols.length, 1);
   assert.equal(cols[0].members.length, 3);
 
+  // Pre-existing installed bundle (on disk, not in installed.json) so the
+  // reverse-guard uninstall assertion below has something real to target.
+  mkdirSync(join(home, "bundles", "fx-preinstalled"), { recursive: true });
+  writeFileSync(join(home, "bundles", "fx-preinstalled", "manifest.json"), JSON.stringify({
+    id: "fx-preinstalled", name: "Fixture Preinstalled", type: "bundle", version: "1.0.0",
+  }, null, 2));
+
   _setAppBundlesForTest(fixtureBundlesDir);
   _setCollectionsPathForTest(fixtureCollectionsPath);
   // Real (small) macrotask pacing between members — see the seam's doc
@@ -177,6 +184,29 @@ test("install-set: sequential, continue-on-error, exactly one deferred restart, 
       body: JSON.stringify({ collection_id: "fx" }),
     });
     assert.equal(res2.status, 409, "a concurrent install-set POST must be refused with 409 while one is running");
+
+    // D6.9 reverse guard: a single install/uninstall started mid-set must ALSO
+    // 409 (and must not create a job) — otherwise it would finish on its own,
+    // call scheduleGatewayRestart(), and kill the set runner mid-sequence.
+    const res3 = await fetch(base + "/bundles/api/install", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bundle_id: "fx-skill" }),
+    });
+    const body3 = await res3.json();
+    assert.equal(res3.status, 409, `a single /install while a set is running must 409: ${JSON.stringify(body3)}`);
+    assert.match(body3.error, /collection install is in progress/i);
+    assert.equal(body3.job_id, undefined, "a rejected /install must not create a job");
+
+    const res4 = await fetch(base + "/bundles/api/uninstall", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bundle_id: "fx-preinstalled" }),
+    });
+    const body4 = await res4.json();
+    assert.equal(res4.status, 409, `a single /uninstall while a set is running must 409: ${JSON.stringify(body4)}`);
+    assert.match(body4.error, /collection install is in progress/i);
+    assert.equal(body4.job_id, undefined, "a rejected /uninstall must not create a job");
 
     // Poll the shared job until it finishes.
     let job;
