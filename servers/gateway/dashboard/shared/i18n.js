@@ -1094,6 +1094,8 @@ export const translations = {
   "settings.group.account": { en: "Account", es: "Cuenta" },
 
   // ─── Settings Section Labels ───
+  "settings.section.unifiedDashboard": { en: "Unified Dashboard", es: "Panel unificado" },
+  "settings.section.sharedStorage": { en: "Shared Storage", es: "Almacenamiento compartido" },
   "settings.section.theme": { en: "Theme", es: "Tema" },
   "settings.section.language": { en: "Language", es: "Idioma" },
   "settings.section.notifications": { en: "Notifications", es: "Notificaciones" },
