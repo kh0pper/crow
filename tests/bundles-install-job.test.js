@@ -25,11 +25,10 @@ test("a failed install returns { ok:false, reason } and does NOT finish the shar
     installedSnapshot: [],
     consentVerified: false,
     manifest: null,
-    deferRestart: true,
   });
   assert.equal(out.ok, false);
   assert.ok(out.reason, "failure must carry a reason for the set summary");
-  assert.equal(_getJobForTest(job.id).status, "running", "deferRestart:true means the CALLER owns finishJob — the set job must still be running");
+  assert.equal(_getJobForTest(job.id).status, "running", "runInstallJob never finishes the job itself — the caller owns finishJob, so the set job must still be running");
 });
 
 test("jobs are evicted only after they FINISH (a long-running job is never deleted mid-flight)", async () => {

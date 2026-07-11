@@ -1204,19 +1204,19 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  * Run one bundle install against an existing job.
  *
  * Outcome-returning by design: the collection installer shares ONE job across N
- * members, so this function must not decide the job's fate. With deferRestart:true
- * it never calls finishJob() and never calls scheduleGatewayRestart() — it reports
- * `needsRestart` and the caller does exactly one restart at the end.
+ * members, so this function must not decide the job's fate. It never calls
+ * finishJob() and never calls scheduleGatewayRestart() itself under any
+ * circumstance — it only reports `needsRestart`; the caller (the single-install
+ * route, or the set runner after all members finish) owns the restart.
  *
  * @param {object} opts
  * @param {object} opts.job              the job to append logs to
  * @param {Array}  opts.installedSnapshot  getInstalled() as of validation (the body pushes onto it)
  * @param {boolean} opts.consentVerified  from validateInstall — gates validateComposeFile
  * @param {object} opts.manifest          the on-disk manifest
- * @param {boolean} opts.deferRestart     true → return needsRestart instead of restarting
  * @returns {Promise<{ok:true, needsRestart:boolean}|{ok:false, reason:string}>}
  */
-export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest, deferRestart = false }) {
+export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest }) {
   let needsRestart = false;
   try {
     const addonType = manifest?.type || "bundle";
@@ -1859,6 +1859,16 @@ export default function bundlesRouter() {
     }
     if (v.hardwareWarning) req._hardwareWarning = v.hardwareWarning;
 
+    // D6.9: a collection install-set owns the process's next restart and runs
+    // its members with deferred restart; a single install finishing mid-set
+    // would fire scheduleGatewayRestart() itself and kill the set runner.
+    // Checked here — immediately before createJob, after validateInstall's
+    // await has already settled — so nothing can race past this point into
+    // job creation.
+    if (isInstallSetRunning()) {
+      return res.status(409).json({ error: "A collection install is in progress — wait for it to finish and try again." });
+    }
+
     // Create job for async tracking
     const job = createJob(bundle_id, "install");
     res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
@@ -1871,7 +1881,6 @@ export default function bundlesRouter() {
         installedSnapshot: v.installed,
         consentVerified: v.consentVerified,
         manifest: v.manifest,
-        deferRestart: false,
       });
       if (!out.ok) {
         finishJob(job, "failed");
@@ -1943,7 +1952,6 @@ export default function bundlesRouter() {
             installedSnapshot: mv.installed,
             consentVerified: mv.consentVerified,
             manifest: mv.manifest,
-            deferRestart: true,
           });
           if (!out.ok) {
             appendLog(job, `SUMMARY member ${member.id} failed ${out.reason}`);
@@ -1988,6 +1996,13 @@ export default function bundlesRouter() {
         error: `Cannot uninstall '${bundle_id}' — other installed bundles depend on it: ${dependents.join(", ")}. Uninstall the dependents first.`,
         dependents,
       });
+    }
+
+    // D6.9: same reverse guard as /install — an uninstall finishing mid-set
+    // would fire its own restart and kill the set runner. Checked immediately
+    // before createJob so nothing can race past this point into job creation.
+    if (isInstallSetRunning()) {
+      return res.status(409).json({ error: "A collection install is in progress — wait for it to finish and try again." });
     }
 
     const job = createJob(bundle_id, "uninstall");
