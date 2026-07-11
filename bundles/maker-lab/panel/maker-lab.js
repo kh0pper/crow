@@ -23,9 +23,24 @@ import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import QRCode from "qrcode";
-import { createProjectSpace, updateProjectSpaceMeta } from "../../../servers/shared/project-spaces.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Inlined app-root resolver (BH-4 phase 2): this panel is copied ALONE into
+// ~/.crow/panels/ on install/refresh, so it cannot import a sibling
+// server/app-root.js — the logic is duplicated here, self-contained, using
+// the node:url/node:path/node:fs imports already above. Resolve the Crow
+// app repo root from an INSTALLED copy or an in-repo run; the gateway
+// exports CROW_APP_ROOT for itself and its spawned addon children, the
+// relative guess covers direct in-repo runs.
+function looksLikeAppRoot(p) { return !!p && existsSync(join(p, "servers", "db.js")); }
+const __appRootGuess = resolve(__dirname, "..", "..", "..");
+const APP_ROOT = looksLikeAppRoot(process.env.CROW_APP_ROOT) ? process.env.CROW_APP_ROOT
+  : looksLikeAppRoot(__appRootGuess) ? __appRootGuess
+  : (process.env.CROW_APP_ROOT || __appRootGuess);
+const appImport = (rel) => import(pathToFileURL(join(APP_ROOT, rel)).href);
+
+const { createProjectSpace, updateProjectSpaceMeta } = await appImport("servers/shared/project-spaces.js");
 
 // Sibling surfaces surfaced in the "Add more surfaces" card. Each entry
 // mirrors the bundle id in registry/add-ons.json; the install flow goes

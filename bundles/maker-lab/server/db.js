@@ -1,7 +1,9 @@
 import { existsSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { createDbClient as createSharedDbClient } from "../../../servers/db.js";
+import { appImport } from "./app-root.js";
+
+const { createDbClient: createSharedDbClient } = await appImport("servers/db.js");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
