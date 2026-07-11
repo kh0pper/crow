@@ -14,8 +14,8 @@ export default {
 
   async getPreview() {
     try {
-      const { getOrCreateIdentity } = await import("../../../../sharing/identity.js");
-      const identity = await getOrCreateIdentity();
+      const { loadOrCreateIdentity } = await import("../../../../sharing/identity.js");
+      const identity = await loadOrCreateIdentity();
       return identity.crowId?.slice(0, 12) + "..." || "";
     } catch {
       return "";
@@ -24,11 +24,11 @@ export default {
 
   async render({ lang }) {
     try {
-      const { getOrCreateIdentity } = await import("../../../../sharing/identity.js");
-      const identity = await getOrCreateIdentity();
+      const { loadOrCreateIdentity } = await import("../../../../sharing/identity.js");
+      const identity = await loadOrCreateIdentity();
       return `<div style="font-family:'JetBrains Mono',monospace;font-size:0.85rem">
         <div style="margin-bottom:0.5rem"><span style="color:var(--crow-text-muted)">${t("settings.crowId", lang)}</span> ${escapeHtml(identity.crowId)}</div>
-        <div><span style="color:var(--crow-text-muted)">${t("settings.ed25519", lang)}</span> ${escapeHtml(identity.ed25519Public?.slice(0, 16))}...</div>
+        <div><span style="color:var(--crow-text-muted)">${t("settings.ed25519", lang)}</span> ${escapeHtml(identity.ed25519Pubkey?.slice(0, 16))}...</div>
       </div>`;
     } catch {
       return `<p style="color:var(--crow-text-muted)">${t("settings.identityNotAvailable", lang)}</p>`;
