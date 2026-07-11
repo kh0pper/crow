@@ -144,15 +144,22 @@ export function _setCollectionsPathForTest(path) { _collectionsPathOverride = pa
 let _restartHookForTest = null;
 export function _setRestartHookForTest(fn) { _restartHookForTest = fn; }
 
-// Test-only: pace the install-set loop with a real setTimeout between members.
-// Default 0 = no delay (identical to production behavior). Without this, every
-// fixture install in the E2E suite is pure synchronous file I/O with no real
-// async wait, so the whole set finishes inside the microtask queue before a
-// concurrent HTTP request's socket data can even be read — the busy-gate
-// (second POST while the set runs → 409) would then be untestable over real
-// HTTP: there is no run happening for the second call to observe.
-let _installSetStepDelayMs = 0;
-export function _setInstallSetStepDelayForTest(ms) { _installSetStepDelayMs = ms; }
+// Test-only: a barrier the install-set runner awaits at the TOP of every member
+// iteration, including the first. Without it, every fixture install in the E2E
+// suite is pure synchronous file I/O with no real async wait, so the whole set
+// finishes before a concurrent HTTP request's socket data can even be read —
+// the busy-gate (second POST while the set runs → 409) would be untestable over
+// real HTTP: there is no run happening for the second call to observe. A test
+// installs a pending promise to park the runner mid-set deterministically, then
+// resolves it; this replaces an earlier wall-clock step-delay seam.
+//
+// Production default is null, which makes `if (_installSetBarrier)` in the
+// runner false — the branch is never entered, so production takes no await and
+// arms no timer. `_getInstallSetBarrierForTest` exists so a test can prove that
+// default by mechanism rather than trusting this comment.
+let _installSetBarrier = null;
+export function _setInstallSetBarrierForTest(promiseOrNull) { _installSetBarrier = promiseOrNull || null; }
+export function _getInstallSetBarrierForTest() { return _installSetBarrier; }
 
 // -----------------------------------------------------------------------
 // Cross-host manifest support (Phase 5-MVP)
@@ -1900,8 +1907,9 @@ export default function bundlesRouter() {
         appendLog(job, `Installing collection '${collection.name}' (${plan.filter((p) => p.action === "install").length} to install, ${plan.filter((p) => p.action === "skip").length} skipped)`);
 
         for (const member of collection.members) {
-          // Test-only pacing (see _setInstallSetStepDelayForTest) — 0 in production.
-          if (_installSetStepDelayMs > 0) await new Promise((r) => setTimeout(r, _installSetStepDelayMs));
+          // Test-only barrier (see _setInstallSetBarrierForTest) — null in
+          // production, so this branch is never entered: no await, no timer.
+          if (_installSetBarrier) await _installSetBarrier;
           // Live gate re-check: getInstalled() has grown as earlier members landed,
           // so cumulative RAM commitments and intra-set dependencies are enforced for
           // real — not against a stale pre-set snapshot.
