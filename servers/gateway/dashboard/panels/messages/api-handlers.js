@@ -10,6 +10,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
 import { emitContactChange } from "../../../../sharing/contact-sync.js";
+import { unwireContact } from "../../../../sharing/contact-delete.js";
+import { wireSyncedContact } from "../../../../sharing/contact-promote.js";
 import { markContactIsBot } from "../../shared/mark-contact-bot.js";
 import { createRoom, listRoomMembers } from "./rooms-store.js";
 import { buildRoomJoinEnvelope, fanOut } from "../../../../sharing/room-fanout.js";
@@ -91,28 +93,18 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
       sql: "UPDATE contacts SET is_blocked = 1 WHERE crow_id = ?",
       args: [req.body.crow_id],
     });
-    // Close Hypercore feeds for the blocked contact to free FDs.
-    // NOTE: unblocking does NOT re-init feeds — no lazy re-init path exists for
-    // contacts. A restart or re-invite is needed to reopen feeds after an unblock.
-    if (managers) {
-      try {
-        if (managers.syncManager) {
-          // SyncManager keys by integer contactId; look it up from crow_id.
-          const { rows } = await db.execute({
-            sql: "SELECT id FROM contacts WHERE crow_id = ?",
-            args: [req.body.crow_id],
-          });
-          if (rows[0]?.id != null) {
-            await managers.syncManager.closeContactFeeds(rows[0].id);
-          }
-        }
-        if (managers.peerManager) {
-          await managers.peerManager.leaveContact(req.body.crow_id);
-        }
-      } catch {}
-    }
+    // F-BLOCK-1 D1: tear down ALL live wiring — the Nostr relay sub (the leg
+    // the old inline pair missed; inbound kept storing until restart), the
+    // Hypercore feeds, and the DHT topic — via the delete-path primitive.
+    // unwireContact is the single teardown owner.
+    let row = null;
+    try {
+      const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [req.body.crow_id] });
+      row = rows[0] || null;
+    } catch {}
+    if (managers && row) { try { await unwireContact(managers, row); } catch {} }
     // Phase 3: a block follows the user across their instances.
-    try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [req.body.crow_id] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
+    try { if (row) await emitContactChange("update", row); } catch {}
     return res.redirectAfterPost("/dashboard/messages");
   }
 
@@ -121,7 +113,16 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
       sql: "UPDATE contacts SET is_blocked = 0 WHERE crow_id = ?",
       args: [req.body.crow_id],
     });
-    try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [req.body.crow_id] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
+    // F-BLOCK-1 D2: lazy re-wire (initContact + joinContact + subscribeToContact
+    // via wireSyncedContact's guards — keyless/local-bot rows stay inert). The
+    // old "no lazy re-init path exists" note predates R4/#155's wireFullContact.
+    let row = null;
+    try {
+      const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [req.body.crow_id] });
+      row = rows[0] || null;
+    } catch {}
+    if (managers && row) { try { await wireSyncedContact(managers, row); } catch {} }
+    try { if (row) await emitContactChange("update", row); } catch {}
     return res.redirectAfterPost("/dashboard/messages");
   }
 

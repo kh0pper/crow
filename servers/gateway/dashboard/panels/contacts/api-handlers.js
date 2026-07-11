@@ -10,7 +10,8 @@ import { upsertSetting, deleteLocalSetting } from "../../settings/registry.js";
 import { getContacts } from "./data-queries.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
 import { emitContactChange } from "../../../../sharing/contact-sync.js";
-import { deleteContactLocal } from "../../../../sharing/contact-delete.js";
+import { deleteContactLocal, unwireContact } from "../../../../sharing/contact-delete.js";
+import { wireSyncedContact } from "../../../../sharing/contact-promote.js";
 import { sanitizeDisplayName } from "../../../../sharing/display-name.js";
 import { emitGroupUpsert, emitGroupDelete } from "../../../../sharing/group-sync.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -35,8 +36,9 @@ async function makeSharingClient() {
  * Handle POST actions from the contacts panel.
  * @returns {{ redirect?: string, download?: string } | null}
  */
-export async function handleContactAction(req, db, { sharingClientFactory = makeSharingClient } = {}) {
+export async function handleContactAction(req, db, { sharingClientFactory = makeSharingClient, managers: injectedManagers = null } = {}) {
   const { action } = req.body;
+  const managers = injectedManagers || getManagersOrNull();
 
   // --- Block / Unblock ---
   if (action === "block" && req.body.contact_id) {
@@ -45,29 +47,18 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
       sql: "UPDATE contacts SET is_blocked = 1 WHERE id = ?",
       args: [contactId],
     });
-    // Close Hypercore feeds for the blocked contact to free FDs.
-    // NOTE: unblocking does NOT re-init feeds — no lazy re-init path exists for
-    // contacts. A restart or re-invite is needed to reopen feeds after an unblock.
-    const managers = getManagersOrNull();
-    if (managers) {
-      try {
-        // SyncManager keys by integer contactId; PeerManager keys by crow_id string.
-        if (managers.syncManager) {
-          await managers.syncManager.closeContactFeeds(contactId);
-        }
-        if (managers.peerManager) {
-          const { rows } = await db.execute({
-            sql: "SELECT crow_id FROM contacts WHERE id = ?",
-            args: [contactId],
-          });
-          if (rows[0]?.crow_id) {
-            await managers.peerManager.leaveContact(rows[0].crow_id);
-          }
-        }
-      } catch {}
-    }
+    // F-BLOCK-1 D1: tear down ALL live wiring — the Nostr relay sub (the leg
+    // the old inline pair missed; inbound kept storing until restart), the
+    // Hypercore feeds, and the DHT topic — via the delete-path primitive.
+    // unwireContact is the single teardown owner.
+    let row = null;
+    try {
+      const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] });
+      row = rows[0] || null;
+    } catch {}
+    if (managers && row) { try { await unwireContact(managers, row); } catch {} }
     // Phase 3: a block follows the user across their instances.
-    try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
+    try { if (row) await emitContactChange("update", row); } catch {}
     return { redirect: "/dashboard/contacts" };
   }
 
@@ -77,7 +68,16 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
       sql: "UPDATE contacts SET is_blocked = 0 WHERE id = ?",
       args: [contactId],
     });
-    try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
+    // F-BLOCK-1 D2: lazy re-wire (initContact + joinContact + subscribeToContact
+    // via wireSyncedContact's guards — keyless/local-bot rows stay inert). The
+    // old "no lazy re-init path exists" note predates R4/#155's wireFullContact.
+    let row = null;
+    try {
+      const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] });
+      row = rows[0] || null;
+    } catch {}
+    if (managers && row) { try { await wireSyncedContact(managers, row); } catch {} }
+    try { if (row) await emitContactChange("update", row); } catch {}
     return { redirect: "/dashboard/contacts" };
   }
 
@@ -283,7 +283,6 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     // co-writes (design §D3). deleteContactLocal drops the old
     // contact_type='manual' restriction (so crow: rows are finally deletable)
     // and refuses origin='local-bot' rows, which this instance recreates at boot.
-    const managers = getManagersOrNull();
     const result = await deleteContactLocal(db, managers || {}, row);
     if (!result.ok) return { redirect: `/dashboard/contacts?view=contact&contact=${delId}` };
     return { redirect: "/dashboard/contacts" };
