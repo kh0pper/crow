@@ -10,9 +10,17 @@ servers/gateway/auto-update.js (#163 added tickCheck/_setDbForTest).
 Review: R1 (adversarial, opus, git semantics empirically verified in real
 temp repos) REVISE — 3 MAJOR (fake-success on the manual skip; double-acquire
 reclaim race; branch-guard TOCTOU that fast-forwards an ancestor feature ref)
-+ 5 minors — ALL FOLDED below. R1 confirmed the D2 safety matrix empirically:
++ 5 minors — ALL FOLDED. R1 confirmed the D2 safety matrix empirically:
 disjoint dirty survives byte-identical; overlap/delete/untracked-collision all
-refused with tree untouched.
+refused with tree untouched. R2 (adversarial, opus) REVISE-documentation-grade
+— all 8 R1 folds CONFIRMED-FAITHFUL; NEW-1 honesty fix folded (rename is not
+CAS: "exactly one winner" holds only among same-inode reclaimers; lapping
+residual accepted with named backstops — owner-checked release, git
+index.lock, separate crow/MPA DBs; sole real exposure = concurrent npm
+install, rare∩rare) + NEW-2 message-in-sketch, NEW-3 runLockedUpdate seam,
+NEW-4 §4.5 clarification, NEW-5 quarantine sweep. R2 also verified: crow/MPA
+share the TREE but NOT crow.db (lock-skip status writes are per-instance);
+restart releases the lock ~1.5s before exit.
 
 ## 1. Problem — the F-UPDATE-1 incident class (Cluster A, 2026-07-10)
 
@@ -56,8 +64,11 @@ const branch = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
 if (branch.stdout !== "main") {
   const msg = `Skipped: not on main (on '${branch.stdout}')`;
   ... saveSetting last_check/last_result ... log(msg);
-  return { updated: false, skipped: "not-on-main", branch: branch.stdout };
+  return { updated: false, skipped: "not-on-main", branch: branch.stdout, message: msg };
 }
+// (R2 NEW-2: `message` is REQUIRED on every skip return — the manual UI
+// renders it; omitting it re-creates the fake-success class via an
+// empty/undefined render.)
 ```
 
 Inside `checkForUpdates` — NOT in #163's tickCheck — so it protects BOTH
@@ -119,14 +130,29 @@ New module-level helpers in auto-update.js (no new deps):
   succeeds) AND the timestamp is younger than 30 minutes → **skip this tick**
   (`{ updated:false, skipped:"locked", message:"Another updater is running
   (pid N)" }`).
-- **Stale reclaim is ATOMIC via rename-quarantine (R1 MAJOR-2** — blind
-  unlink-then-open lets two reclaimers interleave: A unlinks, A re-creates,
-  B unlinks A's FRESH lock, B creates → two "holders", and A's release then
-  unlinks B's lock): the reclaimer does
-  `fs.rename(lock, lock + ".stale." + process.pid)` — atomic, exactly one
-  winner; ENOENT on rename = lost the reclaim race → skip. The winner unlinks
-  its quarantine file and retries the O_EXCL open ONCE; EEXIST there (a third
-  party acquired meanwhile) → skip.
+- **Stale reclaim via rename-quarantine (R1 MAJOR-2**, honesty-corrected by
+  R2 NEW-1): the reclaimer does
+  `fs.rename(lock, lock + ".stale." + process.pid)`; ENOENT on rename = lost
+  the reclaim race → skip. The winner unlinks its quarantine file and retries
+  the O_EXCL open ONCE; EEXIST there (a third party acquired meanwhile) →
+  skip. On every acquire, best-effort sweep any `*.stale.*` leftovers older
+  than the staleness window (R2 NEW-5 — a crash between rename and unlink
+  would otherwise litter $GIT_DIR forever).
+  **What this guarantees, precisely (R2 NEW-1):** exactly one winner among
+  reclaimers racing the SAME stale inode. POSIX rename is not
+  compare-and-swap: a reclaimer that read the stale lock, then lost a full
+  reclaim+fresh-acquire cycle to a peer, can rename the peer's FRESH lock
+  into quarantine and proceed — a residual double-run window that only opens
+  behind an already-rare stale lock. ACCEPTED, with named backstops: (1)
+  owner-checked release contains all lockfile damage (no non-owner unlink);
+  (2) git's own index.lock/ref locks make concurrent pulls fail honestly —
+  refs cannot be doubly mutated; (3) crow and MPA have SEPARATE crow.db files
+  (CROW_DATA_DIR differs; R2 verified) so init-db never contends. The one
+  genuinely unsafe concurrent op is `npm install` on the shared node_modules,
+  which runs only when the incoming diff touches package files — rare∩rare,
+  and still strictly better than main's zero serialization. (The
+  close-it-fully alternative — quarantine-file-as-held-mutex — was assessed
+  and rejected as past the YAGNI bar given these backstops.)
 - **Owner-checked release**: the `finally` re-reads the lockfile and unlinks
   ONLY if it still contains our PID+timestamp — never blindly (the second
   half of MAJOR-2: a process must not release a lock it no longer owns).
@@ -153,7 +179,13 @@ npm, no init-db). This shrinks the window from seconds to milliseconds.
 RESIDUAL (documented, accepted): a checkout landing inside those final
 milliseconds can still be fast-forwarded — recoverable via reflog; git
 offers no transactional checkout+pull without a wrapper lock that external
-sessions won't take.
+sessions won't take. R2 sharpened the bound: DURING the pull itself git's
+own index.lock/ref locks refuse a concurrent checkout, so the true exposure
+is only the process-spawn gap between the re-check and git taking its locks.
+STRUCTURE (R2 NEW-3): everything after the D1 guard lives in a named,
+separately-exported-for-test helper — `runLockedUpdate()` — which is the
+seam test 3b uses to reach the under-lock re-check with a branch already
+checked out (the outer D1 guard would otherwise abort the fixture first).
 
 ### D4 — --no-auth gateways: auto-update OFF by default
 
@@ -230,10 +262,14 @@ the changed-files check simply not matching). Each test builds its own repos.
    reclaimed; live-PID old (>30min) lock → reclaimed; live-PID young → skip;
    (v) **reclaim race (R1 MAJOR-2)**: with a stale lock present, two
    concurrent acquire attempts → EXACTLY ONE proceeds (the rename loser gets
-   ENOENT → skip) — **mutation**: reverting rename-quarantine to
-   unlink-then-open reddens (both would proceed); (vi) **owner-checked
-   release**: if the lockfile now holds a DIFFERENT pid, release must NOT
-   unlink it — **mutation**: blind-unlink release reddens.
+   ENOENT → skip) — deterministic per R2: OS rename atomicity decides the
+   winner regardless of libuv scheduling; NOTE (R2) this covers ONLY the
+   same-inode race — the NEW-1 lapping residual is accepted, not tested —
+   **mutation**: reverting rename-quarantine to unlink-then-open reddens
+   (both would proceed); (vi) **owner-checked release**: if the lockfile now
+   holds a DIFFERENT pid, release must NOT unlink it — **mutation**:
+   blind-unlink release reddens; (vii) quarantine sweep: a stale
+   `*.stale.*` file older than the window is removed on acquire.
 3b. D3b branch re-check under lock (R1 MAJOR-3): fixture switches the clone
    to a feature branch AFTER the first guard passes (via a test seam hook or
    by invoking the internal locked-pull helper directly on a branch-checked
@@ -249,10 +285,14 @@ the changed-files check simply not matching). Each test builds its own repos.
    test: post-listen wiring passes noAuth (unit test the predicate + assert
    the call site via the boot log line absence under --no-auth, reusing the
    #163 scratch-boot pattern).
-5. Existing #163 tests stay green (tickCheck, manual ungated-by-enabled —
-   note the manual path IS now branch-guarded but NOT enabled-gated; the D6
-   test asserting "manual runs while disabled" must run its fixture ON main
-   or inject the check spy above the branch guard — reconcile in the plan).
+5. Existing #163 tests stay green — R1/R2 both verified all four tick-gate
+   tests are spy-injected and never reach the real checkForUpdates, so
+   nothing existing reddens. (R2 NEW-4 clarification: no existing test
+   asserts "manual runs while disabled" by calling the real function — that
+   property is structural, gate-in-tickCheck. This item is guidance for any
+   NEW manual-path test the plan adds: such a fixture must run ON main or
+   use the runLockedUpdate seam, since the manual path is now
+   branch-guarded but still not enabled-gated.)
 6. Full suite ≥ baseline; boot clean.
 
 ## 5. Verification beyond the suite
