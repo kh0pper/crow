@@ -24,9 +24,11 @@ const TTL_DAYS = 30;
  * @param {object} db - libsql database client
  */
 export function createRelayHandlers(db) {
-  // Schedule periodic cleanup every hour
+  // Schedule periodic cleanup every hour. unref() so the housekeeping timer
+  // never keeps an embedding process (tests, one-shot scripts) alive — the
+  // long-running gateway is unaffected.
   if (db) {
-    setInterval(() => cleanupExpiredBlobs(db), 60 * 60 * 1000);
+    setInterval(() => cleanupExpiredBlobs(db), 60 * 60 * 1000).unref();
   }
 
   return {

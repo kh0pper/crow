@@ -198,6 +198,7 @@ export default {
     let unresolvedRows = [];
     let resolvedRows = [];
     let unresolvedTotal = 0;
+    let resolvedTotal = 0;
     let dbError = null;
     try {
       const { rows: unresolved } = await db.execute({
@@ -212,9 +213,14 @@ export default {
         sql: `SELECT * FROM sync_conflicts WHERE resolved = 1 ORDER BY resolved_at DESC LIMIT 25`,
         args: [],
       });
+      const { rows: resolvedCount } = await db.execute({
+        sql: `SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 1`,
+        args: [],
+      });
       unresolvedRows = unresolved;
       unresolvedTotal = Number(unresolvedCount[0]?.n || 0);
       resolvedRows = resolved;
+      resolvedTotal = Number(resolvedCount[0]?.n || 0);
     } catch (err) {
       dbError = err.message || "Unknown error";
     }
@@ -303,7 +309,7 @@ export default {
 
     <h3 style="font-size:0.95rem;margin:0 0 0.5rem;font-weight:600">
       ${escapeHtml(t("syncConflicts.unresolvedHeading", lang))}
-      ${unresolvedRows.length > 0 ? `<span style="font-size:0.78rem;color:#e53935;margin-left:0.4rem">(${unresolvedRows.length})</span>` : ""}
+      ${unresolvedTotal > 0 ? `<span style="font-size:0.78rem;color:#e53935;margin-left:0.4rem">(${unresolvedTotal})</span>` : ""}
     </h3>
 
     ${overLimitNotice}
@@ -321,7 +327,7 @@ export default {
     <details style="margin-top:1.5rem">
       <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-text-muted);padding:0.4rem 0">
         ${escapeHtml(t("syncConflicts.resolvedHeading", lang))}
-        ${resolvedRows.length > 0 ? `(${resolvedRows.length})` : ""}
+        ${resolvedTotal > 0 ? `(${resolvedTotal})` : ""}
       </summary>
       <div style="overflow-x:auto;margin-top:0.5rem">
         <table class="sc-table">

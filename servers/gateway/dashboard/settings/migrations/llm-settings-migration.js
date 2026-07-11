@@ -123,8 +123,10 @@ async function migrateProfiles(db, profiles) {
 }
 
 /**
- * Step 2: fold .env AI_* vars into `cloud-env-default` + record its id in
- * `dashboard_settings.llm_chat_default_provider_id` (local-only key).
+ * Step 2: fold .env AI_* vars into the `cloud-env-default` provider row.
+ * (It used to also record `llm_chat_default_provider_id` in
+ * dashboard_settings; that vestigial write was removed in #163 D4 — the
+ * providers table is the sole output now.)
  */
 async function migrateEnvDefault(db) {
   let envVars;
