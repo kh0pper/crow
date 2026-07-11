@@ -38,6 +38,9 @@ import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
+import { statusToStage } from "../../servers/gateway/routes/board-stages.js";
+import { parsePlanRef, containedRealPath } from "../../servers/gateway/routes/plan-ref.js";
+import { extractPlanFileLine, buildPlanPrompt } from "./plan_dispatch.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -301,6 +304,42 @@ function planFor(def, cardId) {
   const p = def.session_dir + "/plans/" + cardId + ".md";
   return { path: p, exists: existsSync(p), text: existsSync(p) ? readFileSync(p, "utf8") : "" };
 }
+// plan_ref-aware plan resolution for the execute path (final-review C1).
+// kind:"repo" resolves under the project's repo_path with the same fail-closed
+// containment as the board API; anything else (null ref, workspace ref,
+// pre-migration DBs, missing repo_path) falls back to the legacy workspace
+// path. Sync (better-sqlite3), never throws — a broken ref degrades to legacy.
+function planForCard(def, cardId, tasksDbPathArg) {
+  try {
+    const t = db(tasksDbPathArg);
+    let row = null;
+    try {
+      const have = t.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
+      if (have.includes("plan_ref")) {
+        row = t.prepare("SELECT plan_ref, project_id FROM tasks_items WHERE id=?").get(Number(cardId));
+      }
+    } finally { t.close(); }
+    const ref = row ? parsePlanRef(row.plan_ref) : null;
+    if (ref && ref.kind === "repo" && row.project_id != null) {
+      const c = db(CROW_DB);
+      let repoRoot = null;
+      try {
+        const have = c.prepare("PRAGMA table_info(project_spaces)").all().map((col) => col.name);
+        if (have.includes("repo_path")) {
+          const p = c.prepare("SELECT repo_path FROM project_spaces WHERE id=?").get(Number(row.project_id));
+          repoRoot = p && p.repo_path ? String(p.repo_path) : null;
+        }
+      } finally { c.close(); }
+      if (repoRoot) {
+        const path = repoRoot.replace(/\/+$/, "") + "/" + ref.path;
+        if (containedRealPath(path, repoRoot) && existsSync(path)) {
+          return { path, exists: true, text: readFileSync(path, "utf8") };
+        }
+      }
+    }
+  } catch { /* fall through to legacy */ }
+  return planFor(def, cardId);
+}
 function getSession(botId, threadId) {
   const c = db(CROW_DB);
   const r = c.prepare("SELECT * FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1").get(botId, threadId);
@@ -309,11 +348,11 @@ function getSession(botId, threadId) {
 function upsertSession(s) {
   const c = db(CROW_DB);
   if (s.id) {
-    c.prepare("UPDATE bot_sessions SET pi_session_id=?, pi_session_dir=?, project_id=?, card_id=?, plan_path=?, status=?, control=?, model=?, escalated=?, updated_at=datetime('now') WHERE id=?")
-      .run(s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control, s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0), s.id);
+    c.prepare("UPDATE bot_sessions SET pi_session_id=?, pi_session_dir=?, project_id=?, card_id=?, plan_path=?, status=?, control=?, model=?, escalated=?, kind=?, updated_at=datetime('now') WHERE id=?")
+      .run(s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control, s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0), s.kind == null ? "chat" : s.kind, s.id);
   } else {
-    const info = c.prepare("INSERT INTO bot_sessions (bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,project_id,card_id,plan_path,status,control,model,escalated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-      .run(s.bot_id, s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.gateway_type || "gmail", s.gateway_thread_id, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control || "run", s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0));
+    const info = c.prepare("INSERT INTO bot_sessions (bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,project_id,card_id,plan_path,status,control,model,escalated,kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(s.bot_id, s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.gateway_type || "gmail", s.gateway_thread_id, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control || "run", s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0), s.kind == null ? "chat" : s.kind);
     s.id = info.lastInsertRowid;
   }
   c.close(); return s;
@@ -477,7 +516,7 @@ export async function handleInbound(opts) {
   // existing plan files live). Project-native bots that get a project_space
   // workspace will accumulate plans under <workspace>/bots/<bot_id>/plans/
   // once any are written; for the transition we look in both locations.
-  const plan = cardId != null ? planFor(def, cardId) : { path: null, exists: false, text: "" };
+  const plan = cardId != null ? planForCard(def, cardId, tasksDbPath) : { path: null, exists: false, text: "" };
 
   // M3b: structured project header replaces the bare "Project #N" string.
   // Falls back to a one-liner for legacy bots with no project_spaces row.
@@ -570,6 +609,29 @@ export async function handleInbound(opts) {
     const calls = pi.toolCalls();
     postTurn = { user: cleanMsg, assistant: text, toolNames: calls.map((c) => c.tool) };
     const newCardStatus = cardId != null ? cardStatus(cardId, tasksDbPath) : null;
+    // Board–plan unification: fold the bot-written status back onto the
+    // canonical stage column (single reconciliation point). Guarded on the
+    // column existing so pre-migration instances are untouched.
+    if (cardId != null && newCardStatus != null) {
+      try {
+        const t = db(tasksDbPath);
+        try {
+          const have = t.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
+          if (have.includes("stage")) {
+            const cur = t.prepare("SELECT stage FROM tasks_items WHERE id=?").get(cardId);
+            // I2: null-stage cards behave exactly as today — a legacy card
+            // with no stage yet must not be stamped onto the stage model just
+            // because its bot-written status round-tripped as "pending".
+            // Only write when the card already carries a stage, or the new
+            // status unambiguously implies a real transition.
+            if ((cur && cur.stage != null) || ["done", "cancelled", "in_progress"].includes(String(newCardStatus))) {
+              t.prepare("UPDATE tasks_items SET stage=?, updated_at=datetime('now') WHERE id=?")
+                .run(statusToStage(newCardStatus, cur && cur.stage), cardId);
+            }
+          }
+        } finally { t.close(); }
+      } catch (e) { log("stage reconcile skipped (non-fatal): " + (e && e.message || e)); }
+    }
     const status = newCardStatus === "done" ? "done" : "waiting-user";
     session.pi_session_id = piSessionId;
     session.status = status; session.control = "run";
@@ -646,6 +708,123 @@ export async function handleInbound(opts) {
   return result;
 }
 
+// I3b: the route (bot-board-api.js POST .../plan-dispatch) already flips the
+// card to stage='planning' BEFORE spawning this process. An early refusal in
+// planCard below (card not found / no repo_path / pi-capacity deferred /
+// non-local provider) must not strand the card in Planning with nothing
+// actually running — reset it back to Backlog/pending. Best-effort against
+// the SAME tasks db used to read the card; never throws. Do NOT call this
+// after a pi session has actually been started — the post-session error
+// paths carry the signal via the session row + status='error' instead.
+function resetStrandedCardBestEffort(cardsDb, cardId) {
+  try {
+    const c = db(cardsDb);
+    try {
+      c.prepare("UPDATE tasks_items SET stage='backlog', status='pending', updated_at=datetime('now') WHERE id=?")
+        .run(cardId);
+    } finally { c.close(); }
+  } catch { /* best-effort */ }
+}
+
+// Board plan dispatch (Plan 1 Task 7): spawn a CONFINED local-model planning
+// run against the card's project repo. Structural guarantees (spec §Safety):
+// resolved provider MUST be crow-local (no config knob reaches a paid model);
+// write_paths = [<repo>/.pi/plans, <repo>/docs] + bash deny; bot_sessions row
+// kind='planning' takes the same single-writer lock as execution.
+export async function planCard(opts) {
+  const cardId = Number(opts.cardId), botId = String(opts.botId);
+  const log = opts.log || function () {};
+  const bot = loadBot(botId);
+  const def = bot.def;
+  const projectId = bot.project_id == null ? null : Number(bot.project_id);
+  const projectSpace = loadProjectSpace(projectId);
+
+  // Same tasks-db resolution as handleInbound (project override wins).
+  const cardsDb = (projectSpace && projectSpace.tasks_db_uri) || TASKS_DB;
+  const t = db(cardsDb);
+  const card = t.prepare("SELECT id, title, description, project_id FROM tasks_items WHERE id=?").get(cardId);
+  t.close();
+  if (!card) { resetStrandedCardBestEffort(cardsDb, cardId); return { action: "error", error: "card not found" }; }
+
+  const repoRoot = projectSpace && projectSpace.repo_path ? String(projectSpace.repo_path) : null;
+  if (!repoRoot || !existsSync(repoRoot)) {
+    resetStrandedCardBestEffort(cardsDb, cardId);
+    return { action: "error", error: "project has no repo_path (workspace plan dispatch is not in v1 — edit the plan in the drawer)" };
+  }
+
+  if (countLivePi() >= LIFECYCLE_DEFAULTS.maxPi) {
+    resetStrandedCardBestEffort(cardsDb, cardId);
+    return { action: "deferred", reason: "pi-capacity" };
+  }
+
+  const resolved = await resolveModel(def, { escalate: false });
+  if (String(resolved.provider) !== "crow-local") {
+    resetStrandedCardBestEffort(cardsDb, cardId);
+    return { action: "error", error: "plan dispatch is local-only; bot resolves to " + resolved.provider + "/" + resolved.model };
+  }
+
+  const sysFile = join(mkdtempSync(join(tmpdir(), "pibot-plan-")), "sys.md");
+  writeFileSync(sysFile, "You are a careful software planner. You explore code read-only and write ONE plan file.", { mode: 0o600 });
+
+  // Planning session takes the card lock: kind='planning', status active.
+  let session = upsertSession({
+    bot_id: botId, gateway_thread_id: "board-plan-" + cardId, gateway_type: "board",
+    project_id: projectId, card_id: cardId, plan_path: null,
+    pi_session_dir: repoRoot + "/.pi/board-planning", status: "active", control: "run",
+    model: resolved.key, escalated: 0, kind: "planning",
+  });
+  let pi;
+  try {
+    mkdirSync(repoRoot + "/.pi/board-planning", { recursive: true });
+
+    // Confinement belt: write_paths limited to plans+docs, bash denied. The
+    // stored def's policy is NOT used — planning is stricter than the bot.
+    const planningDef = Object.assign({}, def, {
+      // I1: MERGE onto the bot's own policy (keeps external_send/confirm
+      // belts) rather than replacing it wholesale — bash/write/multi_agent
+      // are still forced down for the planning run.
+      permission_policy: Object.assign({}, def.permission_policy || {}, {
+        bash: "deny",
+        write_paths: [repoRoot + "/.pi/plans", repoRoot + "/docs"],
+        multi_agent: false,
+      }),
+      spawn_env: def.spawn_env || {},
+      tools: def.tools,
+    });
+    await warmModel(resolved.provider, log);
+    pi = new PiRpc({ def: planningDef, sessionDir: repoRoot + "/.pi/board-planning",
+      resolved, piSessionId: null, appendSystemPromptFile: sysFile });
+  } catch (e) {
+    session.status = "error"; upsertSession(session);
+    return { action: "error", error: e.message };
+  }
+  try {
+    await pi.prompt(buildPlanPrompt(card, ".pi/plans"), TURN_TIMEOUT_MS);
+    const text = pi.assistantText();
+    const rel = extractPlanFileLine(text);
+    if (!rel || !existsSync(repoRoot + "/" + rel)) {
+      session.status = "error"; upsertSession(session);
+      return { action: "error", error: "planning run produced no verifiable PLAN_FILE (reply tail: " + text.slice(-200) + ")" };
+    }
+    const planRef = { kind: "repo", path: rel };
+    const t2 = db(cardsDb);
+    t2.prepare("UPDATE tasks_items SET plan_ref=?, stage='ready', status='pending', updated_at=datetime('now') WHERE id=?")
+      .run(JSON.stringify(planRef), cardId);
+    t2.close();
+    session.status = "done"; upsertSession(session);
+    appendAuditBridge(projectId, {
+      actor_type: "bot", actor_id: botId, action: "bot.plan",
+      target: "card:" + cardId, payload: { plan_ref: planRef, model: resolved.key },
+    });
+    return { action: "planned", planRef };
+  } catch (e) {
+    session.status = "error"; upsertSession(session);
+    return { action: "error", error: e.message };
+  } finally {
+    await pi.close();
+  }
+}
+
 export function stopSession(botId, threadId) {
   const s = getSession(botId, threadId);
   if (!s) return { ok: false, reason: "no session" };
@@ -659,12 +838,19 @@ if (import.meta.url === "file://" + process.argv[1]) {
     const bot = a[a.indexOf("--bot") + 1], thread = a[a.indexOf("--thread") + 1];
     console.log(JSON.stringify(stopSession(bot, thread))); process.exit(0);
   }
-  const inj = a[a.indexOf("--inject") + 1];
-  if (!inj) { console.error("usage: bridge.mjs --inject '<json>' | --stop --bot B --thread T"); process.exit(2); }
-  const payload = JSON.parse(inj);
-  handleInbound(Object.assign({}, payload, {
-    log: (m) => console.error("[bridge] " + m),
-    sendReply: async (t) => console.log("REPLY>>>\n" + t + "\n<<<REPLY"),
-  })).then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
-    .catch((e) => { console.error("BRIDGE CRASH " + e.stack); process.exit(2); });
+  if (a.includes("--plan-card")) {
+    const payload = JSON.parse(a[a.indexOf("--plan-card") + 1]);
+    planCard(Object.assign({}, payload, { log: (m) => console.error("[plan] " + m) }))
+      .then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
+      .catch((e) => { console.error("PLAN CRASH " + e.stack); process.exit(2); });
+  } else {
+    const inj = a[a.indexOf("--inject") + 1];
+    if (!inj) { console.error("usage: bridge.mjs --inject '<json>' | --stop --bot B --thread T | --plan-card '<json>'"); process.exit(2); }
+    const payload = JSON.parse(inj);
+    handleInbound(Object.assign({}, payload, {
+      log: (m) => console.error("[bridge] " + m),
+      sendReply: async (t) => console.log("REPLY>>>\n" + t + "\n<<<REPLY"),
+    })).then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
+      .catch((e) => { console.error("BRIDGE CRASH " + e.stack); process.exit(2); });
+  }
 }
