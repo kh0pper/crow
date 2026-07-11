@@ -163,22 +163,101 @@ async function emitSync(op, row) {
 }
 
 /**
+ * Canonical deep-equal for parsed-JSON values: recursive, object-key-order
+ * insensitive, array-order sensitive. Used by the upsert no-op comparator so
+ * `models` / `gpu_policy` compare on structure, never on string form (a
+ * key-order shuffle in models.json must not count as a change).
+ */
+function canonicalJsonEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+  const aArr = Array.isArray(a);
+  if (aArr !== Array.isArray(b)) return false;
+  if (aArr) {
+    if (a.length !== b.length) return false;
+    return a.every((v, i) => canonicalJsonEqual(v, b[i]));
+  }
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((k) => Object.prototype.hasOwnProperty.call(b, k) && canonicalJsonEqual(a[k], b[k]));
+}
+
+/**
+ * D2 no-op comparator: does the write-image match the stored row on every
+ * content column? Normalization rules (spec R1-F6):
+ *   - base_url/host/bundle_id/description/provider_type: (x ?? null), String
+ *     coercion on non-null (libsql may return non-string cell types).
+ *   - disabled: both sides → Number(x) ? 1 : 0 (libsql can return BigInt).
+ *   - api_key: null ≡ "" (both mean "no key"), otherwise strict.
+ *   - models: canonical deep-equal of JSON.parse(dbRow.models) vs the incoming
+ *     array. DB-side parse failure → CHANGED (R2-m3 FAIL-OPEN: the good
+ *     incoming content overwrites the corruption; fail-closed would make a
+ *     corrupt row permanently unhealable).
+ *   - gpu_policy: incoming null/undefined → UNCHANGED by definition (the SQL
+ *     uses COALESCE(excluded.gpu_policy, providers.gpu_policy), so a null
+ *     write keeps the stored value). Non-null → deep-equal of parsed values;
+ *     any parse failure → CHANGED (same fail-open rule).
+ */
+function upsertIsNoop(existing, w) {
+  const s = (x) => (x == null ? null : String(x));
+  if (s(existing.base_url) !== s(w.baseUrl)) return false;
+  if (s(existing.host) !== s(w.host)) return false;
+  if (s(existing.bundle_id) !== s(w.bundleId)) return false;
+  if (s(existing.description) !== s(w.description)) return false;
+  if (s(existing.provider_type) !== s(w.providerType)) return false;
+  if ((Number(existing.disabled) ? 1 : 0) !== (Number(w.disabled) ? 1 : 0)) return false;
+  const keyNorm = (x) => (x == null ? "" : String(x));
+  if (keyNorm(existing.api_key) !== keyNorm(w.apiKey)) return false;
+  let dbModels;
+  try { dbModels = JSON.parse(existing.models); } catch { return false; } // fail-open
+  if (!canonicalJsonEqual(dbModels, w.models)) return false;
+  if (w.gpuPolicy != null) {
+    let dbPolicy, incomingPolicy;
+    try { dbPolicy = existing.gpu_policy == null ? null : JSON.parse(existing.gpu_policy); } catch { return false; } // fail-open
+    try { incomingPolicy = JSON.parse(w.gpuPolicy); } catch { return false; } // fail-open
+    if (!canonicalJsonEqual(dbPolicy, incomingPolicy)) return false;
+  }
+  return true;
+}
+
+/**
  * Upsert a single provider. Bumps lamport_ts and sets instance_id so
  * instance-sync can propagate. Emits a sync change to peers when a
  * syncManager has been attached via setProviderSyncManager.
+ *
+ * No-op suppression (D2): when the row exists and every content column
+ * matches the write-image (per upsertIsNoop's normalization), returns
+ * `{ id, lamport_ts: <current>, unchanged: true }` WITHOUT writing, bumping
+ * lamport, or emitting to peers — unchanged content must never manufacture
+ * sync churn (the 211-conflict restart war).
  */
 export async function upsertProvider(db, provider) {
   if (!provider || !provider.id) throw new Error("provider.id required");
   const instanceId = getOrCreateLocalInstanceId();
   const { rows } = await db.execute({
-    sql: "SELECT lamport_ts FROM providers WHERE id = ?",
+    sql: "SELECT * FROM providers WHERE id = ?",
     args: [provider.id],
   });
   const currentTs = rows[0]?.lamport_ts ?? 0;
   const existed = rows.length > 0;
-  const newTs = Math.max(Number(currentTs), Number(provider.lamport_ts || 0)) + 1;
   const providerType = provider.providerType ?? provider.provider_type ?? null;
   const gpuPolicy = provider.gpuPolicy != null ? JSON.stringify(provider.gpuPolicy) : (provider.gpu_policy ?? null);
+
+  if (existed && upsertIsNoop(rows[0], {
+    baseUrl: provider.baseUrl || provider.base_url || "",
+    apiKey: provider.apiKey ?? provider.api_key ?? null,
+    host: provider.host || "local",
+    bundleId: provider.bundleId ?? provider.bundle_id ?? null,
+    description: provider.description ?? null,
+    models: provider.models || [],
+    disabled: provider.disabled ? 1 : 0,
+    providerType,
+    gpuPolicy,
+  })) {
+    return { id: provider.id, lamport_ts: Number(currentTs), unchanged: true };
+  }
+
+  const newTs = Math.max(Number(currentTs), Number(provider.lamport_ts || 0)) + 1;
 
   await db.execute({
     sql: `INSERT INTO providers
