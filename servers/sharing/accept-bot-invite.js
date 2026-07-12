@@ -60,13 +60,16 @@ export function buildBotAcceptPayload(token, identity, displayName) {
  * @param {string} [opts.displayName] overrides the name baked into the invite
  * @param {string} [opts.advertisedByInstanceId] the instance whose directory this bot
  *   came from — supplied ONLY by the panel directory handlers, resolved server-side.
- *   Absent ⇒ `origin=NULL, is_bot=0, advertised_by_instance_id=NULL` (the pasted-invite
- *   shape: byte-identical to the pre-F5 tool, and structurally never prunable).
+ *   Absent ⇒ `origin=NULL, advertised_by_instance_id=NULL` (structurally never prunable).
+ * @param {boolean} [opts.isBot] assert bot-ness INDEPENDENTLY of provenance. Supplied by
+ *   the panel directory handlers (a bot clicked in the bot directory IS a bot). Absent ⇒
+ *   `is_bot` follows provenance, which keeps the MCP/pasted-invite path byte-identical to
+ *   the pre-F5 tool (`is_bot=0` unless the caller marks it).
  * @returns {Promise<{ok:true, outcome:"created"|"existing", contactId:number, name:string,
  *                     botCrowId:string, notified:boolean, error?:string}>}
  * @throws on a malformed invite code or a failed INSERT — the callers render that.
  */
-export async function acceptBotInvite(db, managers, { inviteCode, displayName, advertisedByInstanceId } = {}) {
+export async function acceptBotInvite(db, managers, { inviteCode, displayName, advertisedByInstanceId, isBot } = {}) {
   const { syncManager, nostrManager, identity } = managers || {};
   const bot = parseBotInviteCode(String(inviteCode || "").trim());
   // Prefer an explicit name, else the friendly name the owner put in the invite,
@@ -88,9 +91,19 @@ export async function acceptBotInvite(db, managers, { inviteCode, displayName, a
     outcome = "created";
     // THE one place the classification is decided. An advertiser means: this bot
     // came out of that instance's directory (a FACT, portable and true everywhere)
-    // ⇒ it is a bot, it is advertised, and it is garbage-collectable when that
-    // instance stops advertising it. No advertiser means none of those things.
+    // ⇒ it is advertised, and it is garbage-collectable when that instance stops
+    // advertising it. No advertiser means none of those things.
     const advertisedBy = advertisedByInstanceId ? String(advertisedByInstanceId) : null;
+    // BOT-NESS AND PRUNABILITY ARE DIFFERENT FACTS (R5/MAJOR-3). Deriving `is_bot` from
+    // `advertisedBy` conflates them, and provenance resolution is genuinely fallible: the
+    // advertised-bots cache expires after 60 s and any peer can exceed the 2 s directory
+    // timeout, so a bot the user clicked in the BOT DIRECTORY can arrive here with a null
+    // advertiser. Deriving bot-ness from that would land `is_bot=0`: unbadged in the UI,
+    // AND swept into `backfillContactsOnce` (which filters `is_bot = 0`) to be re-emitted
+    // as an `update` on every boot. So the directory handlers assert `isBot` explicitly and
+    // an unresolvable advertiser costs only PRUNABILITY (advertised_by=NULL — the fail-safe
+    // direction). The MCP/pasted-invite path passes neither ⇒ `is_bot=0`, exactly as before.
+    const isBotFlag = isBot === true || advertisedBy ? 1 : 0;
     const result = await db.execute({
       sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey,
                                   origin, is_bot, advertised_by_instance_id)
@@ -98,7 +111,7 @@ export async function acceptBotInvite(db, managers, { inviteCode, displayName, a
       args: [
         bot.botCrowId, name, bot.ed25519Pubkey, bot.secp256k1Pubkey,
         advertisedBy ? "advertised" : null,
-        advertisedBy ? 1 : 0,
+        isBotFlag,
         advertisedBy,
       ],
     });

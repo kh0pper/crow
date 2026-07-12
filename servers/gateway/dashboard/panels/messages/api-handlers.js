@@ -275,7 +275,12 @@ export async function handlePostAction(req, res, {
       // advertised directory, never from req.body. Unresolvable ⇒ null ⇒ the contact
       // is never prunable (the fail-safe direction).
       const advertisedByInstanceId = await resolveAdvertisedByInstanceId(db, code);
-      await acceptBotInviteFn(db, managers, { inviteCode: code, advertisedByInstanceId });
+      // `isBot` is asserted INDEPENDENTLY of provenance: this action IS the bot directory,
+      // so whatever the user clicked is a bot even when the 60 s cache expired or a peer
+      // timed out and the advertiser came back null. Folding bot-ness into provenance
+      // (R5/MAJOR-3) would land is_bot=0 — unbadged, and re-emitted by backfillContactsOnce
+      // on every boot.
+      await acceptBotInviteFn(db, managers, { inviteCode: code, advertisedByInstanceId, isBot: true });
       if (botCrowId) {
         if (!wasNew) await markContactIsBot(db, botCrowId);
         if (action === "dir_message_bot") {

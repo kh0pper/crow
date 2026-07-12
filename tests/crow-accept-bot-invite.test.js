@@ -323,6 +323,16 @@ test("F5: an unresolvable advertiser (peer unreachable) yields NULL provenance, 
     const row = await contactRow(BOT_CROW_ID);
     assert.ok(row, "the add succeeds — a directory outage must not block the user");
     assert.equal(row.advertised_by_instance_id, null, "un-prunable is the FAIL-SAFE direction");
+    // R5/MAJOR-3: BOT-NESS AND PRUNABILITY ARE DIFFERENT FACTS. Deriving is_bot from
+    // provenance conflates them: the 60 s advertised-bots cache can expire between the
+    // render and the click, and any peer can hit the 2 s timeout — either way the
+    // advertiser is unresolvable, and the user who clicked a BOT in the bot directory
+    // then gets is_bot=0. That row is not badged as a bot, AND it is swept into
+    // `backfillContactsOnce` (which filters `is_bot = 0`) and re-emitted as an `update`
+    // on every boot. The directory handlers therefore assert is_bot EXPLICITLY.
+    assert.equal(Number(row.is_bot), 1,
+      "a bot clicked in the BOT DIRECTORY is a bot even when we could not resolve WHO advertised it — " +
+      "the unresolvable advertiser costs prunability (advertised_by=NULL), never bot-ness");
     assert.equal(emits.length, 1, "still exactly one insert emit");
   } finally { __setEmitSinkForTest(null); }
 });
