@@ -232,15 +232,34 @@ migration window is **authorized**, and **re-enabling it is mandatory** — the 
 "done" until auto-update is back ON and confirmed on all three boxes. If a session ends
 with it off, that is an incident, not a pending task.
 
+**⚠️ THE RAIL AS ORIGINALLY WRITTEN WAS INSUFFICIENT — corrected 2026-07-12 (Item 2a R3/MAJOR-4).**
+A `SCHEMA_GENERATION` bump does NOT run "just the new migration": `needsSchemaInit`
+(`servers/shared/schema-version.js:21-25`) → `gateway/index.js:134` runs **the ENTIRE
+`scripts/init-db.js`**, which contains **8 `DROP TABLE` statements** — `shared_items`
+(`:493`), `crow_context` (`:1275`), `dashboard_settings` (`:1834`), `research_projects`
+(`:2696`), a generic `DROP TABLE ${tableName}` (`:926`) — plus `DELETE FROM schedules`
+(`:2726`) and `DELETE FROM project_spaces` (`:1023`). These are *guarded rebuild-migrations*,
+but **they have not run since gen 6 was stamped**, and a bump re-arms every one of them
+against **FOUR** live DBs (crow, **MPA (`~/.crow-mpa` — easy to forget)**, grackle,
+black-swan — all verified at `user_version = 6` on 2026-07-12).
+**And the old rail could not detect the damage:** `PRAGMA integrity_check` reports *page-level*
+integrity — it returns `ok` for a table that was rebuilt having silently lost rows — and
+`user_version = 7` proves only that the script reached its last line.
+
 **Rail — for any PR that bumps `SCHEMA_GENERATION` or adds a boot heal:**
-1. Disable auto-update on all three boxes FIRST (Settings → Updates, or set
+1. Disable auto-update on all boxes FIRST (Settings → Updates, or set
    `auto_update_enabled=false`); confirm each box reports it disabled.
-2. Back up all three DBs (`crow.db.pre-<slug>-<ts>`), verify each backup file exists
-   and is non-zero.
-3. Merge.
-4. Deploy manually, in the §3 runbook order, one box at a time; verify health +
-   `PRAGMA integrity_check` + the migration's own acceptance check before moving on.
-5. Re-enable auto-update on all three; confirm.
+2. Back up **all four** DBs (`crow.db.pre-<slug>-<ts>`), verify each exists and is non-zero.
+3. **DRY-RUN GATE (new, mandatory):** run `node scripts/init-db.js` against a **COPY** of each
+   of the four prod DBs and **diff `sqlite_master` + per-table `COUNT(*)` pre/post**. Zero
+   unexplained deltas is a merge gate; ship the diff as evidence. (Stop the gateway before any
+   real run — init-db does heavy DDL against a DB the gateway holds open, and
+   `"database is locked"` is a documented recurring failure on this fleet.)
+4. Merge.
+5. Deploy manually, in the §3 runbook order, one box at a time; verify health +
+   `PRAGMA integrity_check` + **the per-table row-count diff** + the migration's own acceptance
+   check before moving on.
+6. Re-enable auto-update on all boxes; confirm.
 
 **Executor note on the lock:** crow runs TWO gateways off the same tree, and the
 **crow-mpa-gateway** is typically the one that wins the atomic update lock — the primary
@@ -409,21 +428,47 @@ lamport ties, offline-peer resurrection). All four live in `servers/sharing/`
 (`contact-sync.js`, `group-sync.js`, `tailnet-sync.js`, `instance-sync.js`) +
 `servers/gateway/dashboard/panels/messages/data-queries.js`.
 
-**2a. pruneStaleAdvertisedContacts resurrection.** The prune
-(`messages/data-queries.js:284`, called from `:275`) DELETEs contact rows where
-`origin = 'advertised'` and the contact has zero messages and its pubkey is no longer
-in the live set. The delete is local-only, so a peer re-advertises the row and it
-resurrects. **This item is the least-specified in the queue and sits in the layer that
-has bitten us most — do NOT skip the spec.** Two things the spec must nail down before
-any code: (i) *where `origin` is actually set* on a contact row (grep `origin` across
-`servers/sharing/` + `panels/messages|contacts` and enumerate every writer — the fix
-belongs there, at the point the row is classified, not at the prune); (ii) why the
-`shouldSyncRow` approach is a dead end — it was proven **documented-inert** in #155's R2
-review (MAJOR-2). Do not retry `shouldSyncRow`; read that review first
-(`docs/superpowers/specs/` + the #155 PR body).
-*Acceptance:* two-instance test — a pruned advertised contact stays gone on BOTH sides
-across a full sync cycle AND a restart of each side; a still-live advertised contact
-continues to sync normally (negative control); `sync_conflicts` does not grow.
+**2a. pruneStaleAdvertisedContacts resurrection — ✅ DESIGN COMPLETE (spec v4, 3 adversarial
+rounds), ⏳ BUILD NOT STARTED (deliberate stop).**
+Spec: `docs/superpowers/specs/2026-07-12-advertised-contact-prune-design.md`.
+Branch `fix/advertised-contact-prune` (spec + this doc only; **no code**).
+
+**Read the spec before touching code — three designs died in review, and the reasons are
+not obvious.** v1 (prune broadcasts a delete-wins tombstone) → R1 REVISE; v2 (local-only
+tombstone) → R2 REJECT; v3 → R3 REJECT; **v4's architecture was attacked directly by R3 and
+held.** The surviving insight: **`origin` is a *judgment* ("I may GC this") — view-relative,
+must NOT sync. "Instance X advertised this bot" is a *FACT* — it syncs safely, and lets every
+instance re-derive prunability from its OWN view.** That converges with no broadcast, no host
+authority, and protects the bot's host for free.
+
+**⚠️ TWO SCOPE CHANGES vs this plan's original assumptions:**
+- **2a now carries a SCHEMA BUMP (6→7)** — a new `contacts.advertised_by_instance_id` column.
+  So 2a, not just 2b, needs the §3 migration rail. (Every schema-free design was proven unsound.)
+- **The §3 rail itself was insufficient and has been corrected** (see the ⚠️ block there). This
+  gates **2b** too. **Recommendation: fix the rail as its own small PR FIRST.**
+
+Three real bugs found on the way, filed as follow-ups (details in spec §6/§7):
+- **[REAL, shipped code]** `emitChange` returns a valid lamport when `outFeeds.size === 0`
+  (`instance-sync.js:1027-1036`), so **#155's user-initiated contact delete**, in the boot
+  window, tombstones locally, broadcasts to **nobody**, and then silently drops the peer's
+  updates ⇒ permanent divergence, no error. `backfillContactsOnce:612` already guards that exact
+  window (its comment records it *observed live on grackle*). **→ fold into 2c.**
+- **[LATENT]** Every `origin='local-bot'` guard is weaker than it reads — a bot's host usually
+  has **no contacts row for its own bot** (only 1 such row exists fleet-wide, on MPA), so
+  `shouldSyncRow:204` / `deleteContactLocal:143` / `wireSyncedContact:111` are near-inert.
+- **[TODAY]** `getBotDirectory` **prunes as a side effect of a read** (`data-queries.js:275`) —
+  so the add path would durably delete contacts.
+
+*Acceptance (unchanged, and v4 delivers it):* a pruned advertised contact stays gone on BOTH
+sides across a full sync cycle AND a restart of each side; a still-live advertised contact
+continues to sync normally (negative control); `sync_conflicts` does not grow. **Plus:** the
+mutual-prune-then-re-add lamport-tie test (spec §5.6) — v3 shipped a permanent-divergence bug
+that every other test passed.
+
+**Live-state note that shapes the build:** *nothing on the fleet is advertised*
+(`allow_paired_instances` is false on all 3 bot defs), so **the prune has never fired** and the
+defect is doubly latent. There is **no urgency** — the bar is `fix-the-product` (correct on a
+fresh install). The live proof must CREATE a throwaway advertised bot on grackle.
 
 **2b. contact_groups offline-peer tombstones.** Group delete PROPAGATES live
 (`emitGroupDelete` exists and is wired at `panels/contacts/api-handlers.js:323`), so
