@@ -226,6 +226,12 @@ so this is not hypothetical — merged carelessly it migrates three production D
 simultaneously with no backups and no human gate. This is the single worst thing this
 plan can do to Kevin's fleet.
 
+**Kevin's decision (2026-07-12), verbatim:** *"auto update can be turned off if necessary,
+but I want to turn it back on when we are done."* So: disabling auto-update for a
+migration window is **authorized**, and **re-enabling it is mandatory** — the item is not
+"done" until auto-update is back ON and confirmed on all three boxes. If a session ends
+with it off, that is an incident, not a pending task.
+
 **Rail — for any PR that bumps `SCHEMA_GENERATION` or adds a boot heal:**
 1. Disable auto-update on all three boxes FIRST (Settings → Updates, or set
    `auto_update_enabled=false`); confirm each box reports it disabled.
@@ -475,11 +481,11 @@ expect others to be too). The batch PR contains only what survived triage.
 - F-SETTINGS-2: raw i18n keys visible in Settings. **This is a research task, not a
   fix — #165 shipped label fixes that may already cover it.** Reproduce in the live UI
   first; if it's gone, strike it and say so. Do not carry it into the PR unverified.
-- **F-UI-2 (maestro.press invite page, dark-on-dark code box) — HOLD, ASK KEVIN.** This
-  is a change to a **public web property**, not the private fleet. The blanket
-  authorization covers the improvement arc on Kevin's instances; it is not obviously a
-  mandate to push to the public site. Do not ship it autonomously. Either ask, or leave
-  it out of the batch and flag it as pending his call.
+- **F-UI-2 (maestro.press invite page, dark-on-dark code box) — ✅ AUTHORIZED.** Kevin
+  confirmed 2026-07-12: *"yes, blanket auth extends to public site."* Ship it. It is still
+  a **public-web** change, so it carries a rollback story: it publishes via the
+  `deploy-docs` workflow → GitHub Pages; verify the live page after the run completes, and
+  know how to revert (re-push the prior CSS) if it renders wrong.
 
 *Acceptance:* per-minor test where testable; CDP screenshot for any UI one; suite green
 (scratch env); one PR, merge, deploy, live verify. State plainly in the PR body which
@@ -673,10 +679,11 @@ the baseline is date-anchored rather than sha-anchored; and the weak acceptance 
 the reviewer named (1c's no-op proof, 2a's unnamed call site, 2d's undefined "key
 change", Item 3's research-task-in-a-fix-batch) are tightened.
 
-**Two open questions for Kevin** (the doc does not decide them autonomously): whether
-auto-update should stay ON during the arc, and whether the blanket authorization extends
-to the **public** maestro.press site (Item 3's F-UI-2). F-UI-2 is marked HOLD until he
-says.
+**Both open questions ANSWERED by Kevin, 2026-07-12 — no longer open:**
+1. *Auto-update:* may be turned OFF when a migration needs it, but **must be turned back
+   ON when the work is done.** Folded into the §3 migration rail.
+2. *Public site:* the blanket authorization **does** extend to maestro.press. Item 3's
+   F-UI-2 is unblocked (ship it with a rollback story).
 
 Reviewer-verified-accurate, no action needed: `renderPendingChecklist`'s sessionStorage
 consumption (`client.js:1341-1347`), the bot-builder hardcodes, `pruneStaleAdvertisedContacts`,
