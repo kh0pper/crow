@@ -97,8 +97,17 @@ export const EXCLUDED_COLUMNS = {
   // (boot.js) — syncing it would firehose the feed. `id` is the per-instance
   // AUTOINCREMENT key (never portable). `created_at` differs when two instances
   // independently form the same req: row, manufacturing spurious conflicts.
+  // `origin` (item 2a / F3) is a JUDGMENT — "this is an advertised bot I may
+  // garbage-collect" — true only relative to the instance holding the row, never
+  // a portable fact. Replicating it is dangerous both ways: toward the bot's HOST
+  // (a peer's emit could relabel the host's own bot row 'advertised', and a host
+  // never sees its OWN bots in its advertised directory ⇒ it would prune its own
+  // bot, FK-CASCADING the DM history away), and toward a peer that cannot see the
+  // advertisement (it inherits 'advertised' for a bot it never sees advertised ⇒
+  // prunes a live bot). Each instance re-derives its own judgment from its own
+  // view; the syncable FACT is which instance advertised the bot.
   // All stripped from the wire; the row still syncs (keyed on crow_id).
-  contacts: ["verified", "last_seen", "id", "created_at"],
+  contacts: ["verified", "last_seen", "id", "created_at", "origin"],
   // Phase 3 PR-B: messages sync keyed on nostr_event_id; the per-instance
   // id/contact_id are never portable (crow_id rides the wire instead). is_read
   // is per-device (each instance computes its own unread badge). lamport_ts is
@@ -1435,8 +1444,10 @@ export class InstanceSyncManager {
     }
 
     // PRAGMA-filter incoming keys to live columns; always drop id/lamport_ts/
-    // instance_id and the never-synced verified/last_seen/created_at (defense on
-    // apply — these are stripped on emit too).
+    // instance_id and the never-synced verified/last_seen/created_at/origin
+    // (defense on apply — these are stripped on emit too). `origin` is NOT
+    // belt-and-braces: an un-upgraded peer still runs the pre-F3 emit path and
+    // WILL keep sending it, so the receive side has to refuse it on its own.
     if (!this._contactCols) {
       try {
         const { rows: pragma } = await this.db.execute({ sql: "PRAGMA table_info(contacts)", args: [] });
@@ -1450,7 +1461,7 @@ export class InstanceSyncManager {
       console.warn("[instance-sync] _applyContact: contacts columns unavailable — skipping");
       return;
     }
-    const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "verified", "last_seen", "created_at"]);
+    const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "verified", "last_seen", "created_at", "origin"]);
     const filtered = {};
     for (const [k, v] of Object.entries(row)) {
       if (ALWAYS_DROP.has(k)) continue;
