@@ -258,6 +258,69 @@ test("Task6: a winning remote delete fires onContactDeleted then removes the row
   await m._applyEntry(REMOTE_ID, signedEntry("contacts", "delete", { crow_id: "crow:tnone" }, 5)); // no row → no throw
 });
 
+// ── 2a/F4: the gate reads `kind` — GC tombstones do NOT gate inserts on lamport ──
+//
+// A prune tombstone carries a LOCAL row lamport (the prune emits nothing), so it is
+// incommensurable with an incoming insert's GLOBAL emit lamport. A user-delete tombstone
+// carries a broadcast lamport and IS commensurable. The gate must tell them apart.
+
+// THE #155 REGRESSION GUARD — the one that matters most after this change. An
+// AUTHORITATIVE tombstone (a user delete, kind NULL) keeps its lamport gate: a stale
+// insert replay is still DROPPED. Weakening this would let a redelivered old insert
+// resurrect a contact the user deliberately deleted.
+test("2a/F4 guard: an AUTHORITATIVE (user-delete) tombstone STILL drops a stale insert replay — #155 unchanged", async () => {
+  const m = mgr(); const db = m.db;
+  await writeTombstone(db, "crow:k1", 100); // no kind ⇒ authoritative user delete
+  // below the tombstone
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "insert",
+    { crow_id: "crow:k1", ed25519_pubkey: "", secp256k1_pubkey: secp(111), display_name: "Zombie" }, 50));
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contacts WHERE crow_id='crow:k1'" })).rows[0].c, 0,
+    "a stale insert BELOW an authoritative tombstone stays dropped");
+  // and at an exact TIE (the gate is `<=`)
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "insert",
+    { crow_id: "crow:k1", ed25519_pubkey: "", secp256k1_pubkey: secp(111), display_name: "Zombie" }, 100));
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contacts WHERE crow_id='crow:k1'" })).rows[0].c, 0,
+    "…and an insert TYING with it stays dropped");
+  assert.ok(await readTombstone(db, "crow:k1"), "the user's tombstone still stands");
+});
+
+// The fix: a GC tombstone must not reject an insert on lamport, at ANY lamport. The
+// re-adder's insert can legitimately sit BELOW the peer's prune tombstone, because the
+// peer's tombstone sits at the peer's own (possibly un-replicated) ROW lamport.
+test("2a/F4 guard: a 'prune' (GC) tombstone lets a LOWER insert land and clears — a re-add must never be gated on a local row lamport", async () => {
+  const m = mgr(); const db = m.db;
+  await writeTombstone(db, "crow:k2", 100, "prune");
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "insert",
+    { crow_id: "crow:k2", ed25519_pubkey: "", secp256k1_pubkey: secp(112), display_name: "Re-added" }, 50));
+  assert.equal((await db.execute({ sql: "SELECT display_name FROM contacts WHERE crow_id='crow:k2'" })).rows[0]?.display_name, "Re-added",
+    "the genuine re-add lands even though its lamport is BELOW the prune tombstone");
+  assert.equal(await readTombstone(db, "crow:k2"), null, "and the GC tombstone is cleared once the row is back");
+});
+
+// …but D3 is untouched: every resurrection vector (rename, block, unblock, backfill) is
+// an `op=update`, and those are still dropped unconditionally by a standing tombstone.
+test("2a/F4 guard: a 'prune' (GC) tombstone STILL drops a resurrecting `update` — D3 intact", async () => {
+  const m = mgr(); const db = m.db;
+  await writeTombstone(db, "crow:k3", 100, "prune");
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "update",
+    { crow_id: "crow:k3", ed25519_pubkey: "", secp256k1_pubkey: secp(113), display_name: "Zombie" }, 150));
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contacts WHERE crow_id='crow:k3'" })).rows[0].c, 0,
+    "an `update` against a GC tombstone must NOT resurrect the contact — the prune's entire job");
+  assert.ok(await readTombstone(db, "crow:k3"), "the GC tombstone still stands");
+});
+
+// Precedence, end to end at the gate: once the USER deletes a previously-pruned contact,
+// the tombstone is authoritative and the lamport gate is armed again.
+test("2a/F4 guard: prune + a later USER delete ⇒ authoritative ⇒ the stale insert replay is DROPPED again", async () => {
+  const m = mgr(); const db = m.db;
+  await writeTombstone(db, "crow:k4", 100, "prune");
+  await writeTombstone(db, "crow:k4", 100);      // the user then really deleted it
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "insert",
+    { crow_id: "crow:k4", ed25519_pubkey: "", secp256k1_pubkey: secp(114), display_name: "Zombie" }, 50));
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contacts WHERE crow_id='crow:k4'" })).rows[0].c, 0,
+    "the authoritative delete re-armed the lamport gate — a GC write must never leave it permissive");
+});
+
 // ── Task 9: sanitize the sync ingress (design §D5) ───────────────────────────
 // A peer entry's display_name is remote-controlled; sanitize it the moment
 // `filtered` is built, BEFORE the equivalence check — else every redelivery of a

@@ -1538,16 +1538,34 @@ export class InstanceSyncManager {
 
     // (c) A tombstone is still standing and there is NO local row (rule (a)
     //     already cleared any tombstone that coexisted with a row). Delete wins
-    //     over a concurrent update; a stale insert replay is dropped; only a
-    //     fresher insert re-adds — and it must APPLY before it clears (ordering
-    //     is load-bearing: _processNewEntries locks per remote instance, so a
-    //     concurrent stale update from another feed must see either the tombstone
-    //     or the row, never neither — design §D3.1(c)).
+    //     over a concurrent update; an insert re-adds — and it must APPLY before it
+    //     clears (ordering is load-bearing: _processNewEntries locks per remote
+    //     instance, so a concurrent stale update from another feed must see either
+    //     the tombstone or the row, never neither — design §D3.1(c)).
+    //
+    //     The lamport gate applies to AUTHORITATIVE tombstones ONLY (`kind` NULL — a
+    //     user delete, F-CONTACT-1). Those were BROADCAST, so their lamport is a global
+    //     emit lamport and IS commensurable with an incoming insert's: `insert <=
+    //     tomb.lamport_ts` is a stale replay of an already-seen insert and must not undo
+    //     the user's delete.
+    //
+    //     A `kind='prune'` tombstone (2a/F4) is GARBAGE COLLECTION and is NOT comparable.
+    //     It emits nothing, and it is stamped with the pruned row's OWN lamport — a LOCAL
+    //     row lamport. Two instances' row lamports are equal only when every emit has been
+    //     applied on both sides, so a single un-replicated `update` on a peer (a rename, a
+    //     block) lifts THAT peer's row lamport and its tombstone then outruns the re-adder's
+    //     `insert`. Gating on it would drop a GENUINE re-add — and every subsequent `update`
+    //     from the re-adder is `op="update"`, dropped unconditionally by the line above ⇒ the
+    //     contact lives on one instance and is gone from the other FOREVER, with zero
+    //     sync_conflicts and nothing logged. GC is not authoritative, so we let the insert
+    //     land. Worst case a redelivered ORIGINAL insert re-creates the row and the next
+    //     render simply RE-PRUNES it — self-healing. `op="update"` still returns above, which
+    //     is the whole of defect D3 (every resurrection vector is an update).
     let clearTombAfterApply = false;
     if (tomb) {
-      if (op === "update") return;                    // drop — delete wins over a concurrent update
-      if (lamportTs <= tomb.lamport_ts) return;        // stale insert replay
-      clearTombAfterApply = true;                      // insert above the tombstone: apply, THEN clear
+      if (op === "update") return;                    // drop — delete wins over a concurrent update (D3)
+      if (tomb.kind !== "prune" && lamportTs <= tomb.lamport_ts) return; // stale insert replay (authoritative only)
+      clearTombAfterApply = true;                      // the insert stands: apply, THEN clear
     }
 
     // ── insert / update ────────────────────────────────────────────────────
