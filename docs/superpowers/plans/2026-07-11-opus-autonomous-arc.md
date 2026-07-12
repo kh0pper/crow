@@ -434,7 +434,7 @@ on prod read-only).
 
 ---
 
-### Item 2 — Sync-layer design leftovers (four separate PRs, in this order) — 2a ✅ SHIPPED; **2b is NEXT**
+### Item 2 — Sync-layer design leftovers — 2a ✅ SHIPPED; **2a-FU is NEXT**, then 2b/2c/2d
 
 These were explicitly deferred as "design-shaped, own session each." Each gets a spec
 + 2-round adversarial review (this layer has bitten us repeatedly — key-rebind,
@@ -542,6 +542,59 @@ whose advertiser is *the host itself* was **KEPT** (rule 1), a **NULL-provenance
 **KEPT** (#155 §2.6), and a row **with a message** was **KEPT** (rule 5, history never destroyed). The
 prune put **nothing on the wire** (peers hold no tombstone and no row), it survived a **full gateway
 restart**, and `sync_conflicts` did not move on any of the four boxes (219/182/162/0).
+
+---
+
+**2a-FU. The four production problems Item 2a uncovered — ONE PR, and it goes BEFORE 2b.**
+**Kevin authorized this explicitly (2026-07-12): "let's be sure to follow up on those bugs with their
+own PR."** Memory: `crow-fleet-findings-2026-07-12.md`.
+
+**Why before 2b:** finding (1) below **gates 2b** — 2b is another schema bump, and the dry-run gate
+cannot presently prove a migration actually *landed*. And findings (2)+(3) mean **the feature just
+shipped in #177 cannot actually work anywhere on this fleet**: no box can advertise a bot, and MPA
+can never prune. 2a is correct code that is currently inert in production.
+
+1. **[GATE — do this first] `scripts/schema-migration-dryrun.sh` is blind to `ALTER TABLE ADD COLUMN.`**
+   It diffs `sqlite_master` **object names**, so a new column is invisible. It proves nothing was
+   LOST; it **cannot prove your migration HAPPENED** (both of 2a's columns had to be hand-verified).
+   *Fix:* add a per-table `PRAGMA table_info` diff (name+type), and report added/removed columns
+   alongside the existing row-count diff. *Acceptance:* run it against a copy of a prod DB from a
+   branch that adds a column — the column MUST appear in the output; and a branch that adds nothing
+   must still report clean.
+
+2. **[REAL BUG] grackle can NEVER advertise a bot.** `botIdentityFor` opens
+   `/home/kh0pp/crow/data/identity.json` (the **repo** dir) instead of `~/.crow/data/identity.json`,
+   so `buildAdvertisementPayload` skips every bot and grackle's advertised list is always empty.
+   **⚠️ ROOT CAUSE IS NOT ESTABLISHED — DO NOT GUESS AND DO NOT "FIX" IT BLIND.** Re-running the exact
+   resolution under systemd's environment (`HOME=/home/kh0pp`, no `CROW_*`, cwd `/home/kh0pp/crow`)
+   yields the **CORRECT** path, so the running gateway disagrees with a faithful repro and that gap is
+   unexplained. **Load-bearing:** grackle's `~/.crow/data/crow.db` is a **SYMLINK** (29 bytes) into the
+   repo's `data/crow.db` (the real 183 MB file); `~/.crow/data/` holds `identity.json` + `instance-id`,
+   `~/crow/data/` does **not**. Any fix must respect that layout. *Start by instrumenting the RUNNING
+   gateway* (log what `botsDbPath()`/`resolveDataDir()` actually return in-process) rather than
+   reasoning from the source. *Acceptance:* a bot advertised on grackle appears in crow's directory
+   with `complete:true`; `fix-the-product` — it must also be right on a fresh install.
+
+3. **[REAL BUG] MPA's federation credentials are broken.** From MPA: `missing_peer_credentials` → crow,
+   `hmac_mismatch` → grackle. Its bot directory is therefore always empty and **it can never prune**
+   (fail-safe, but wrong). crow↔grackle federation is fine, so this is specific to MPA's registry.
+   *Decide deliberately:* a credential repair vs. a re-pair ceremony (the latter is an operator matter —
+   ask Kevin before any re-pair). *Acceptance:* MPA fetches crow's advertised-bots with `status:"ok"`.
+
+4. **[LEAK] a scratch gateway from a previous session ran for 2 DAYS on the prod DB.** pid 960187,
+   port 3495, `CROW_DATA_DIR=…/jobs/…/ssc-dataA`, orphaned to PPID 1 — its own DB was scratch, **but
+   the maker-lab bundle server it spawned resolved to the PROD bundles dir and held
+   `~/.crow/data/crow.db` open.** (Killed 2026-07-12.) This is the leaked-gateway class behind past
+   `database is locked` crash-loops. *Fix:* crow's unit has **no** `ExecStartPre=kill-orphan-gateways.sh`
+   (grackle's does) — add it, and make scratch gateways die with their session. *Acceptance:* start a
+   scratch gateway, kill its parent, confirm it and its bundle children are reaped and that nothing but
+   the systemd gateway holds `~/.crow/data/crow.db` (`fuser`).
+
+*Ship:* one branch, full §2 pipeline. (1) and (4) are mechanical. (2) is an **investigation** — if the
+root cause cannot be established honestly, the correct output is a written diagnosis + a recommendation,
+NOT a guessed patch. (3) may need Kevin for the re-pair decision.
+
+---
 
 **2b. contact_groups offline-peer tombstones.** Group delete PROPAGATES live
 (`emitGroupDelete` exists and is wired at `panels/contacts/api-handlers.js:323`), so
