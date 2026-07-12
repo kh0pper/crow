@@ -56,10 +56,9 @@ test("processed_control_events has the expected columns", async () => {
   assert.deepEqual(rows.map((r) => r.name).sort(), ["event_id", "kind", "seen_at"]);
 });
 
-test("PRAGMA user_version === 6", async () => {
+test("init-db stamps PRAGMA user_version with the current SCHEMA_GENERATION", async () => {
   const { rows } = await db.execute("PRAGMA user_version");
-  assert.equal(rows[0].user_version, 6);
-  assert.equal(SCHEMA_GENERATION, 6);
+  assert.equal(Number(rows[0].user_version), SCHEMA_GENERATION);
 });
 
 test("init-db is idempotent — re-run preserves rows and does not throw", async () => {
@@ -69,7 +68,7 @@ test("init-db is idempotent — re-run preserves rows and does not throw", async
   const { rows } = await fresh.execute({ sql: "SELECT lamport_ts FROM contact_tombstones WHERE crow_id = ?", args: ["crow:idem"] });
   assert.equal(rows[0].lamport_ts, 7);
   const { rows: uv } = await fresh.execute("PRAGMA user_version");
-  assert.equal(uv[0].user_version, 6);
+  assert.equal(Number(uv[0].user_version), SCHEMA_GENERATION);
 });
 
 // ── Task 2: tombstone primitives ────────────────────────────────────────────

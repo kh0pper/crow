@@ -2747,6 +2747,11 @@ await addColumnIfMissing("bot_message_invites", "kind", "TEXT"); // NULL=normal,
 await addColumnIfMissing("contacts", "is_bot", "INTEGER DEFAULT 0");
 await db.execute({ sql: "UPDATE contacts SET is_bot = 1 WHERE origin = 'advertised' AND is_bot = 0" });
 
+// --- Advertised-contact provenance (advertised-contact prune, 2026-07-12) ---
+// contacts.advertised_by_instance_id records a fact: the instance_id of the peer
+// whose advertised-bot directory this contact was added from. Set at INSERT only.
+await addColumnIfMissing("contacts", "advertised_by_instance_id", "TEXT"); // NULL=manual/pasted-invite contact, NEVER prunable
+
 // Stamp the schema generation so the gateway boot gate can detect when an
 // out-of-band code update introduced migrations that a plain restart missed.
 // (PRAGMA values can't be bound params — interpolate the coerced Number.)
