@@ -8,9 +8,14 @@
  * conclusion from its own view. So the prune writes a LOCAL tombstone and emits
  * NOTHING: no delete on the wire, no host authority, and `sync_conflicts` cannot grow.
  *
- * Imports ONLY from ./contact-delete.js — which is deliberately dependency-free to
+ * STATICALLY imports only ./contact-delete.js — which is deliberately dependency-free to
  * stay out of the managers.js → nostr.js import cycle (see its header). Do NOT import
- * managers.js here; the caller passes `managers` in.
+ * managers.js here; the caller passes `managers` in. The one exception is a LAZY dynamic
+ * import of ./contact-promote.js on the prune's failure path (to re-wire a contact that
+ * survived a failed transaction — see `pruneAdvertisedContact`). That is acyclic: nothing on
+ * the managers → nostr → contact-promote chain imports THIS module (its only importer,
+ * panels/messages/data-queries.js, imports it dynamically), and it is verified to resolve in
+ * both module-init orders. Keep it lazy anyway.
  */
 import { unwireContact, readTombstone, tombstoneStatement, isReqId } from "./contact-delete.js";
 
@@ -113,18 +118,36 @@ export async function pruneAdvertisedContact(db, managers, row) {
         // Lazy dynamic import: contact-promote sits on the managers → nostr chain, and this
         // module must stay off it (see the header). Same pattern as contact-delete's loadSyncMod.
         const { wireFullContact } = await import("./contact-promote.js");
+        // rows[0], NOT `row`: `row` is the prune's 3-field skeleton (id/crow_id/lamport_ts),
+        // so `is_blocked` would read undefined and defeat wireFullContact's blocked guard —
+        // re-subscribing a BLOCKED contact, with undefined pubkeys.
         await wireFullContact(managers, rows[0]);
       }
-    } catch { /* best-effort; the next restart re-wires */ }
+    } catch (reErr) {
+      // Do NOT swallow this. Landing here means the contact is alive and STILL UNWIRED —
+      // exactly the state the re-wire exists to prevent, and its symptom (the bot's next DM
+      // silently vanishing) is invisible. Every other failure on this path is loud; so is this.
+      console.warn(
+        `[prune] contact ${row.id} (${row.crow_id}): the prune failed AND re-wiring it failed ` +
+        `(${reErr?.message || "unknown"}) — the contact is alive but torn down, so the bot's next ` +
+        `DM will be dropped. It re-wires on the next gateway restart or inbound sync entry.`,
+      );
+    }
     return { ok: false, reason: "prune-txn-failed" };
   }
 
   // Belt-and-braces: the transaction committed, so this must hold. If it somehow does not,
   // the row is already gone and we cannot undo it — so make it LOUD rather than silent.
   if (!(await readTombstone(db, row.crow_id))) {
-    console.error(
-      `[prune] contact ${row.id} (${row.crow_id}): the delete COMMITTED but no tombstone is ` +
-      `readable. The contact is now resurrectable by the next peer 'update'.`,
+    // Not necessarily data loss: readTombstone returns null on ANY read error, and a peer's
+    // legitimate `insert` can re-create the row and clear this tombstone (clearTombAfterApply)
+    // in the window between the commit and this read. So report it as needing a look, not as a
+    // certainty — but never as silence: if it IS real, the contact is resurrectable and nothing
+    // else would ever say so.
+    console.warn(
+      `[prune] contact ${row.id} (${row.crow_id}): the delete COMMITTED but no tombstone reads ` +
+      `back. Either a transient read error, a peer's concurrent re-add (benign), or the contact ` +
+      `is now resurrectable by the next peer 'update'. Worth checking contact_tombstones.`,
     );
     return { ok: false, reason: "tombstone-lost" };
   }

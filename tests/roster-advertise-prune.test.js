@@ -400,6 +400,37 @@ test("an alive-but-unwired contact is never left behind — a FAILED prune trans
     "dropped on the floor — not stored, not filed as a message request.");
 });
 
+test("the failed-prune re-wire must NOT re-subscribe a BLOCKED survivor", async () => {
+  // The re-wire passes the RE-SELECTED row, not the prune's 3-field skeleton
+  // ({id, crow_id, lamport_ts}). With the skeleton, `is_blocked` reads undefined, defeating
+  // wireFullContact's blocked guard — a blocked contact would be re-subscribed to Nostr with
+  // undefined pubkeys. Nothing else in the suite pins this, so a refactor could silently
+  // reintroduce it.
+  await seedContact({ id: 1, crowId: "crow:gone", pk: PK_BOT, advertisedBy: ADV, lamport: 4382 });
+  await db.execute("UPDATE contacts SET is_blocked = 1 WHERE id = 1");
+  const { pruneAdvertisedContact } = await import("../servers/sharing/contact-prune.js");
+
+  const resubbed = [];
+  const managers = {
+    nostrManager: {
+      unsubscribeFromContact: async () => {},
+      subscribeToContact: async (c) => resubbed.push(c.crowId),
+    },
+  };
+
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    await pruneAdvertisedContact(dbWithFailingTombstoneWrite(db), managers, { id: 1, crow_id: "crow:gone", lamport_ts: 4382 });
+  } finally {
+    console.warn = origWarn;
+  }
+
+  assert.deepEqual(await contactIds(), [1], "the contact survived the failed transaction");
+  assert.deepEqual(resubbed, [], "a BLOCKED contact must never be re-subscribed — the re-wire " +
+    "has to read the real row, not the prune's skeleton");
+});
+
 test("a `req:` crow_id is REFUSED — tombstoneStatement bypasses writeTombstone's req: guard", async () => {
   // tombstoneStatement deliberately skips writeTombstone's guards so it can join the batch.
   // So the req: guard must be re-asserted in the prune, or we would DELETE the row and write
