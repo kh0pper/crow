@@ -14,7 +14,7 @@
  */
 
 /** @param {string} id @returns {boolean} true for a per-instance `req:` row. */
-function isReqId(id) {
+export function isReqId(id) {
   return typeof id === "string" && id.startsWith("req:");
 }
 

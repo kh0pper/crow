@@ -12,7 +12,7 @@
  * stay out of the managers.js → nostr.js import cycle (see its header). Do NOT import
  * managers.js here; the caller passes `managers` in.
  */
-import { unwireContact, readTombstone, tombstoneStatement } from "./contact-delete.js";
+import { unwireContact, readTombstone, tombstoneStatement, isReqId } from "./contact-delete.js";
 
 /**
  * Delete one stale advertised contact.
@@ -47,9 +47,12 @@ import { unwireContact, readTombstone, tombstoneStatement } from "./contact-dele
  * `unwireContact` still runs BEFORE the transaction — an in-flight `subscribeToContact`
  * onevent INSERT against a deleted `contact_id` would otherwise raise FOREIGN KEY
  * constraint failed. (It also fixes a pre-existing Nostr-subscription leak: the bare DELETE
- * this replaces never unsubscribed.) If the transaction then fails we have unwired a
- * surviving contact; that self-heals on the next restart's re-wire and is far cheaper than
- * an untombstoned delete.
+ * this replaces never unsubscribed.) But if the transaction then FAILS we have unwired a
+ * contact that SURVIVED — and that is NOT benign: `boot.js`'s global-inbox catch-all
+ * early-returns for a full contact (`request_status` NULL) on the grounds that its
+ * per-contact subscription is handling the DM, which we just closed. The bot's next message
+ * would be neither stored nor filed as a request — it would silently VANISH. So the failure
+ * path RE-WIRES the surviving contact (see the catch).
  *
  * ── Scope of "self-healing" (do NOT overclaim this — it is load-bearing) ──
  * A redelivered ORIGINAL `insert` re-creates the row, and the next render re-prunes it as a
@@ -73,6 +76,13 @@ export async function pruneAdvertisedContact(db, managers, row) {
   // No crow_id ⇒ no tombstone is possible (writeTombstone silently no-ops on a falsy
   // id) ⇒ the delete would be resurrectable. Refuse rather than ship a silent no-op.
   if (!row.crow_id) return { ok: false, reason: "no-crow-id" };
+  // `tombstoneStatement` deliberately bypasses writeTombstone's guards so it can join the
+  // batch — so the `req:` guard has to be re-asserted HERE, or we would DELETE the row and
+  // write a `req:`-keyed tombstone that readTombstone/clearTombstone can never see (both
+  // no-op on `req:`), violating the table's stated invariant and failing OPEN. No live path
+  // reaches this today (the prune's SELECT needs a non-NULL advertised_by, and `req:` rows
+  // never sync) — but "unreachable" premises have evaporated twice on this branch already.
+  if (isReqId(row.crow_id)) return { ok: false, reason: "req-id" };
 
   await unwireContact(managers, row);
 
@@ -89,6 +99,23 @@ export async function pruneAdvertisedContact(db, managers, row) {
       `(${err?.message || "unknown"}) — the contact is intact and will be re-attempted on the ` +
       `next render. Deleting without a tombstone would leave it resurrectable by the next peer 'update'.`,
     );
+    // RE-WIRE. We already unwired, and the row SURVIVED — an alive-but-torn-down contact is
+    // NOT benign, it SILENTLY LOSES THE BOT'S NEXT DM. boot.js's global-inbox catch-all
+    // early-returns for a full contact (`request_status` NULL) precisely because "the
+    // per-contact subscription is already handling it" — and we just closed that
+    // subscription. The DM would be neither stored on the contact nor filed as a message
+    // request: it would simply vanish. (An un-advertised bot is not a dead bot — that is the
+    // premise of the whole message-request semantic.) Nothing re-wires before the next
+    // gateway restart or inbound sync entry, so do it here.
+    try {
+      const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [row.id] });
+      if (rows[0]) {
+        // Lazy dynamic import: contact-promote sits on the managers → nostr chain, and this
+        // module must stay off it (see the header). Same pattern as contact-delete's loadSyncMod.
+        const { wireFullContact } = await import("./contact-promote.js");
+        await wireFullContact(managers, rows[0]);
+      }
+    } catch { /* best-effort; the next restart re-wires */ }
     return { ok: false, reason: "prune-txn-failed" };
   }
 

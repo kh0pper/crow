@@ -1906,7 +1906,7 @@ await initTable("contact_tombstones table", `
 //
 // Precedence on conflict is AUTHORITATIVE-WINS (the safe, more-restrictive direction):
 // a GC write must never weaken a real user delete into a permissive gate. Resolved in
-// writeTombstone's ON CONFLICT clause, not here.
+// contact-delete.js's `tombstoneStatement()` ON CONFLICT clause, not here.
 await addColumnIfMissing("contact_tombstones", "kind", "TEXT");
 
 // --- F-CONTACT-1 (design §D4): clock-free replay hygiene for authenticated

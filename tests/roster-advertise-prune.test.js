@@ -320,40 +320,103 @@ test("the prune still succeeds normally — the DELETE and the tombstone commit 
   assert.equal(Number((await tombstone("crow:gone")).lamport_ts), 4382, "…and the tombstone is there, at the row's own lamport");
 });
 
-test("a concurrent apply during unwire CANNOT strip the tombstone — the DELETE and the tombstone are ATOMIC", async () => {
-  // THE RACE (found re-reviewing the fix for the previous race — this is why atomicity, not
-  // ordering, is the answer): `_applyContact` rule (a) clears any tombstone whenever a LOCAL
-  // ROW EXISTS. So writing the tombstone BEFORE the delete leaves tombstone-beside-live-row —
-  // and `unwireContact` awaits real network teardown (hypercore close, DHT leave), a wide
-  // window. Nothing serializes the receive path against the render that calls the prune, and
-  // peers are touching this very contact right now (they all see the same directory change).
-  // An inbound entry landing in that window strips the tombstone; the DELETE then lands
-  // UNTOMBSTONED and the next peer `update` re-INSERTs the contact. Defect D3, restored.
+test("a concurrent apply CANNOT strip the tombstone — the DELETE and the tombstone are ATOMIC", async () => {
+  // THE RACE (found re-reviewing the fix for the previous race — this is why ATOMICITY, not
+  // ordering, is the answer). `_applyContact` rule (a) clears any tombstone whenever a LOCAL
+  // ROW EXISTS. Nothing serializes the receive path against the render that calls the prune,
+  // and peers are touching this very contact right now (they all see the same directory
+  // change). So ANY non-atomic prune has an `await` boundary between its tombstone write and
+  // its DELETE at which an inbound entry can land, fire rule (a), and strip the tombstone —
+  // and the DELETE then lands UNTOMBSTONED, so the next peer `update` re-INSERTs the contact.
+  // Defect D3, restored.
   //
-  // Simulate it faithfully: rule (a) fires (clearTombstone) from inside unwireContact.
+  // MODEL THE INTERLEAVE FAITHFULLY: wrap the db so that `execute()` of the DELETE fires a
+  // clearTombstone FIRST — i.e. a receive-path apply slips in at that await boundary. Under
+  // HEAD both statements go through `batch()` (one transaction) and NEVER through `execute()`,
+  // so nothing can interleave and the tombstone survives. Under any two-statement version the
+  // clear lands between them and the belt-and-braces readTombstone trips.
+  //
+  // (An earlier version of this test fired the clear from inside unwireContact. That was
+  // VACUOUS: unwire runs before the tombstone is written, so the clear hit an empty table and
+  // was a no-op. It passed for a reason unrelated to atomicity — the exact vacuity class this
+  // branch keeps producing.)
   const { clearTombstone } = await import("../servers/sharing/contact-delete.js");
   const { pruneAdvertisedContact } = await import("../servers/sharing/contact-prune.js");
   await seedContact({ id: 1, crowId: "crow:gone", pk: PK_BOT, advertisedBy: ADV, lamport: 4382 });
 
+  const racingDb = {
+    execute: async (q) => {
+      const sql = typeof q === "string" ? q : q?.sql || "";
+      if (/DELETE\s+FROM\s+contacts/i.test(sql)) await clearTombstone(db, "crow:gone"); // ← the apply interleaves
+      return db.execute(q);
+    },
+    batch: (stmts) => db.batch(stmts),
+  };
+
+  const res = await pruneAdvertisedContact(racingDb, null, { id: 1, crow_id: "crow:gone", lamport_ts: 4382 });
+
+  assert.deepEqual(res, { ok: true }, "the prune succeeded — so a tombstone MUST have survived with it");
+  assert.deepEqual(await contactIds(), [], "the row is gone");
+  const t = await tombstone("crow:gone");
+  assert.ok(t, "THE ASSERTION: the row must NEVER be deleted without a surviving tombstone. The " +
+    "tombstone is committed in the SAME TRANSACTION as the DELETE, so a concurrent rule-(a) " +
+    "clear has no boundary to land in.");
+  assert.equal(Number(t.lamport_ts), 4382, "and it still carries the pruned row's own lamport");
+});
+
+test("an alive-but-unwired contact is never left behind — a FAILED prune transaction RE-WIRES it", async () => {
+  // unwireContact runs BEFORE the transaction (FK safety). If the transaction then fails, the
+  // contact SURVIVES but is torn down — and that silently loses the bot's next DM: boot.js's
+  // global-inbox catch-all early-returns for a full contact (request_status NULL) because
+  // "the per-contact subscription is handling it", and we just closed that subscription. The
+  // message would be neither stored nor filed as a request. An un-advertised bot is not a
+  // dead bot, so this is a live message-loss path, not a theoretical one.
+  await seedContact({ id: 1, crowId: "crow:gone", pk: PK_BOT, advertisedBy: ADV, lamport: 4382 });
+  const { pruneAdvertisedContact } = await import("../servers/sharing/contact-prune.js");
+
+  const unsubbed = [];
+  const resubbed = [];
   const managers = {
     nostrManager: {
-      unsubscribeFromContact: async (crowId) => {
-        // ← an inbound contacts entry for this crow_id is applied here; the row is still
-        //   alive, so rule (a) wipes any tombstone standing beside it.
-        await clearTombstone(db, crowId);
-      },
+      unsubscribeFromContact: async (id) => unsubbed.push(id),
+      subscribeToContact: async (c) => resubbed.push(c.crowId),
     },
   };
 
-  const res = await pruneAdvertisedContact(db, managers, { id: 1, crow_id: "crow:gone", lamport_ts: 4382 });
+  const origWarn = console.warn;
+  console.warn = () => {};
+  let res;
+  try {
+    res = await pruneAdvertisedContact(dbWithFailingTombstoneWrite(db), managers, { id: 1, crow_id: "crow:gone", lamport_ts: 4382 });
+  } finally {
+    console.warn = origWarn;
+  }
 
-  assert.deepEqual(res, { ok: true });
-  assert.deepEqual(await contactIds(), [], "the row is gone");
-  const t = await tombstone("crow:gone");
-  assert.ok(t, "THE ASSERTION: the row must NEVER be deleted without a surviving tombstone. " +
-    "The tombstone is written INSIDE the same transaction as the DELETE, so a concurrent " +
-    "rule-(a) clear cannot land between them.");
-  assert.equal(Number(t.lamport_ts), 4382, "and it still carries the pruned row's own lamport");
+  assert.deepEqual(res, { ok: false, reason: "prune-txn-failed" });
+  assert.deepEqual(await contactIds(), [1], "the contact survived the failed transaction");
+  assert.deepEqual(unsubbed, ["crow:gone"], "setup check: it really was unwired first");
+  assert.deepEqual(resubbed, ["crow:gone"],
+    "THE ASSERTION: a surviving contact must be RE-WIRED. Left unwired, the bot's next DM is " +
+    "dropped on the floor — not stored, not filed as a message request.");
+});
+
+test("a `req:` crow_id is REFUSED — tombstoneStatement bypasses writeTombstone's req: guard", async () => {
+  // tombstoneStatement deliberately skips writeTombstone's guards so it can join the batch.
+  // So the req: guard must be re-asserted in the prune, or we would DELETE the row and write
+  // a req:-keyed tombstone that readTombstone/clearTombstone can never see (both no-op on
+  // req:) — violating contact_tombstones' stated invariant and failing OPEN. Unreachable
+  // today; "unreachable" premises have evaporated twice on this branch.
+  const { pruneAdvertisedContact } = await import("../servers/sharing/contact-prune.js");
+  await db.execute({
+    sql: `INSERT INTO contacts (id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, lamport_ts, advertised_by_instance_id)
+          VALUES (9, 'req:' || ?, 'Pending', 'ed09', '02' || ?, 5, ?)`,
+    args: [PK_BOT, PK_BOT, ADV],
+  });
+
+  const res = await pruneAdvertisedContact(db, null, { id: 9, crow_id: "req:" + PK_BOT, lamport_ts: 5 });
+
+  assert.deepEqual(res, { ok: false, reason: "req-id" }, "refused, not deleted");
+  assert.deepEqual(await contactIds(), [9], "the row survives — failing SAFE, not open");
 });
 
 // ── unwireContact runs BEFORE the delete (Nostr-subscription leak fix) ───────
