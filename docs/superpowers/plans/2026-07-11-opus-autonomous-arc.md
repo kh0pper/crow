@@ -434,13 +434,62 @@ on prod read-only).
 
 ---
 
-### Item 2 — Sync-layer design leftovers (four separate PRs, in this order) ← **NEXT**
+### Item 2 — Sync-layer design leftovers (four separate PRs, in this order) — 2a ✅ SHIPPED; **2b is NEXT**
 
 These were explicitly deferred as "design-shaped, own session each." Each gets a spec
 + 2-round adversarial review (this layer has bitten us repeatedly — key-rebind,
 lamport ties, offline-peer resurrection). All four live in `servers/sharing/`
 (`contact-sync.js`, `group-sync.js`, `tailnet-sync.js`, `instance-sync.js`) +
 `servers/gateway/dashboard/panels/messages/data-queries.js`.
+
+**2a. pruneStaleAdvertisedContacts resurrection — ✅✅ SHIPPED 2026-07-12 (PR #177, main `2390f287`).**
+Merged, fleet-deployed (crow/MPA/grackle/black-swan all at `user_version` 7), live-verified, auto-update
+back ON. Spec v5 (`…-advertised-contact-prune-design.md`) carries the full record.
+
+> **Read this before ANY future sync-layer work — it is the most expensive lesson of the arc.**
+>
+> **Six bugs. Five of them found AFTER the design was "complete", and three of them introduced by
+> the fix for the previous one.** The v4 design had survived *three* adversarial Opus review rounds.
+> Then an executable two-instance test demolished its convergence proof in one run (permanent silent
+> divergence, zero `sync_conflicts`, nothing logged). Each subsequent fix broke something new:
+> a lamport laundered across tombstone kinds; a "dropped as unreachable" finding (F6) whose premise
+> the fix had silently deleted; a tombstone stripped by rule (a) during an awaited network teardown;
+> a failed prune leaving a contact alive-but-unwired so the bot's next DM vanished.
+>
+> **Three lessons, in order of value:**
+> 1. **Prose review is necessary and NOT sufficient for distributed state.** Three adversarial rounds
+>    read v4's convergence proof and approved it. A test killed it immediately. **For any sync-layer
+>    change the acceptance gate must be EXECUTABLE and MULTI-INSTANCE, and it must exercise the
+>    MUTUAL case** — the single-actor case is exactly where these bugs hide.
+> 2. **A finding dropped as "unreachable" is only as good as the premise that made it so.** When a
+>    later change removes that premise, the dropped finding is live again and *nothing in the process
+>    re-opens it*. That is precisely how F6 shipped as a CRITICAL.
+> 3. **Three tests on this branch were VACUOUS** — they asserted a property they did not exercise, and
+>    passed for unrelated reasons. The tell was identical every time: **the harness could not reach the
+>    mechanism the assertion named** (no SyncManager; the emit sink was a module global left `null`;
+>    the tombstone wasn't written yet when the simulated race fired). Mutation-check every guard, and
+>    make sure the mutation you apply is the one the test *claims* to catch.
+
+**Follow-ups this item produced (own PRs):**
+- **[GATE BLIND SPOT] `scripts/schema-migration-dryrun.sh` cannot see `ALTER TABLE ADD COLUMN`** — it
+  diffs `sqlite_master` *object names*. It proves nothing was LOST; it **cannot prove your migration
+  happened**. Add a per-table `PRAGMA table_info` diff. (Both new columns had to be verified by hand.)
+- **[REAL BUG, grackle] no bot can EVER be advertised from grackle** — `botIdentityFor` opens
+  `/home/kh0pp/crow/data/identity.json` (the repo dir) instead of `~/.crow/data/identity.json`, so
+  `buildAdvertisementPayload` skips every bot. Found by being the first ever to advertise one. **Root
+  cause NOT established:** re-running the resolution under systemd's exact env (`HOME` set, no `CROW_*`)
+  yields the CORRECT path, so the running gateway disagrees with a faithful repro — do not guess, and
+  note grackle's `~/.crow/data/crow.db` is a **symlink** into the repo's `data/`. (F1 handled it
+  perfectly: the skip ⇒ no `complete` key ⇒ `complete:false` ⇒ a peer can never prune from that list.)
+- **[REAL BUG, MPA] MPA's federation credentials are broken** — `missing_peer_credentials` (→crow) and
+  `hmac_mismatch` (→grackle). Its bot directory is therefore always empty and **it can never prune**
+  (fail-safe, but wrong). Pre-existing pairing/credential drift; needs a re-pair or a credential repair.
+- **[LEAK] a scratch gateway from a PREVIOUS session ran for 2 days** (pid 960187, port 3495,
+  `CROW_DATA_DIR=…/jobs/…/ssc-dataA`, orphaned to PPID 1) and its **maker-lab bundle child held the
+  PRODUCTION `crow.db` open**. Killed. grackle's unit has `ExecStartPre=kill-orphan-gateways.sh`;
+  **crow's does not** — give crow the same guard, and make scratch gateways die with their session.
+
+<details><summary>Original entry (design complete, build not started)</summary>
 
 **2a. pruneStaleAdvertisedContacts resurrection — ✅ DESIGN COMPLETE (spec v4, 3 adversarial
 rounds), ⏳ BUILD NOT STARTED (deliberate stop).**
@@ -483,6 +532,16 @@ that every other test passed.
 (`allow_paired_instances` is false on all 3 bot defs), so **the prune has never fired** and the
 defect is doubly latent. There is **no urgency** — the bar is `fix-the-product` (correct on a
 fresh install). The live proof must CREATE a throwaway advertised bot on grackle.
+
+</details>
+
+**Live-verified on production (2026-07-12), advertiser = crow, adder = grackle** — the full F4 trigger
+matrix against real signed federation: a bot un-advertised by its advertiser was **PRUNED**, with the
+tombstone at **the pruned row's own lamport (4400), `kind='prune'`** — while, in the same pass, a row
+whose advertiser is *the host itself* was **KEPT** (rule 1), a **NULL-provenance hand-pasted** row was
+**KEPT** (#155 §2.6), and a row **with a message** was **KEPT** (rule 5, history never destroyed). The
+prune put **nothing on the wire** (peers hold no tombstone and no row), it survived a **full gateway
+restart**, and `sync_conflicts` did not move on any of the four boxes (219/182/162/0).
 
 **2b. contact_groups offline-peer tombstones.** Group delete PROPAGATES live
 (`emitGroupDelete` exists and is wired at `panels/contacts/api-handlers.js:323`), so
