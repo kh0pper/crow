@@ -14,39 +14,98 @@
  */
 
 /** @param {string} id @returns {boolean} true for a per-instance `req:` row. */
-function isReqId(id) {
+export function isReqId(id) {
   return typeof id === "string" && id.startsWith("req:");
 }
 
 /**
  * UPSERT a tombstone keeping the MAX lamport_ts. deleted_at is set to now (unix
  * seconds) on first write and preserved on conflict. No-op for `req:` ids.
+ *
+ * `kind` says WHY the contact is gone, and that decides whether the tombstone's
+ * lamport is a meaningful bound on an incoming `insert` (see instance-sync.js
+ * `_applyContact`):
+ *   - `null`    AUTHORITATIVE — a user delete. Its lamport is a GLOBAL emit lamport
+ *               (emitContactDelete broadcast it) ⇒ comparable to an insert's ⇒ keeps
+ *               the `insert <= tomb.lamport_ts ⇒ drop` stale-replay gate.
+ *   - `'prune'` GARBAGE COLLECTION — the advertised-contact prune (2a/F4). It emits
+ *               nothing and stamps the tombstone with a LOCAL row lamport ⇒ NOT
+ *               comparable across instances ⇒ must not gate inserts on lamport.
+ *
+ * Precedence on conflict is AUTHORITATIVE-ALWAYS-WINS — the safe, more-restrictive
+ * direction. prune+prune ⇒ 'prune'; ANY authoritative delete on either side ⇒ NULL.
+ * A GC write must never weaken a real user delete into a permissive gate; the reverse
+ * (an authoritative delete strengthening a prune tombstone) is exactly what we want.
+ *
+ * ⚠️ LAMPORTS ARE COMMENSURABLE ONLY *WITHIN* A KIND — never MAX across them.
+ * The two kinds stamp `lamport_ts` from different clocks:
+ *   - authoritative → a GLOBAL emit lamport (emitContactDelete broadcast it);
+ *   - 'prune'       → the pruned row's LOCAL row lamport (nothing was emitted).
+ * `lamport_ts` has exactly ONE consumer — the `insert <= tomb.lamport_ts ⇒ drop`
+ * stale-replay gate — and that gate is only meaningful against a global lamport. A
+ * blanket `MAX(lamport_ts, excluded.lamport_ts)` on a kind TRANSITION launders the
+ * local number into the global field and arms the gate at a value no emitter can
+ * exceed: the genuine re-add is dropped, every later `op="update"` from the re-adder is
+ * then dropped unconditionally by the same tombstone ⇒ PERMANENT silent divergence,
+ * zero `sync_conflicts`. (This is why an authoritative delete emitted at a LOW lamport
+ * is not merely a curiosity: `emitContactDelete` sends `{crow_id}` alone — a row with
+ * no `lamport_ts` — so emitChange's counter floor never applies to deletes, and a
+ * lagging or post-DB-recovery instance really does delete at a low lamport.)
+ *
+ * So on a transition the SURVIVING kind's OWN lamport wins, and MAX applies only when
+ * both sides are the same kind.
+ *
  * @param {object} db async db client ({ execute })
  * @param {string} crowId
  * @param {number} lamportTs the delete's Lamport clock
+ * @param {"prune"|null} [kind] null (default) = authoritative user delete
  */
-export async function writeTombstone(db, crowId, lamportTs) {
+/**
+ * The tombstone UPSERT as a STATEMENT, so a caller can commit it atomically with other
+ * writes via `db.batch()` (which wraps its statements in one transaction). The advertised-
+ * contact prune needs exactly that: its DELETE and its tombstone MUST land together, or
+ * not at all. See `contact-prune.js` for why neither ordering is safe on its own.
+ * Callers using this bypass writeTombstone's `req:` guard — check `isReqId` yourself.
+ */
+export function tombstoneStatement(crowId, lamportTs, kind = null) {
+  return {
+    sql: `INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(crow_id) DO UPDATE SET
+            lamport_ts = CASE
+              WHEN contact_tombstones.kind = 'prune' AND excluded.kind IS NULL
+                THEN excluded.lamport_ts               -- GC → authoritative: the DELETE's global lamport
+              WHEN contact_tombstones.kind IS NULL AND excluded.kind = 'prune'
+                THEN contact_tombstones.lamport_ts     -- authoritative → GC: the delete's lamport stands
+              ELSE MAX(contact_tombstones.lamport_ts, excluded.lamport_ts) -- same kind ⇒ comparable
+            END,
+            kind = CASE WHEN contact_tombstones.kind = 'prune' AND excluded.kind = 'prune'
+                        THEN 'prune' ELSE NULL END`,
+    args: [crowId, Number(lamportTs) || 0, Math.floor(Date.now() / 1000), kind === "prune" ? "prune" : null],
+  };
+}
+
+export async function writeTombstone(db, crowId, lamportTs, kind = null) {
   if (!db || !crowId || isReqId(crowId)) return;
   try {
-    await db.execute({
-      sql: `INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(crow_id) DO UPDATE SET lamport_ts = MAX(lamport_ts, excluded.lamport_ts)`,
-      args: [crowId, Number(lamportTs) || 0, Math.floor(Date.now() / 1000)],
-    });
+    await db.execute(tombstoneStatement(crowId, lamportTs, kind));
   } catch { /* never throw into a receive path */ }
 }
 
 /**
+ * `kind` is SELECTed deliberately: the apply gate branches on it, and a gate cannot
+ * read a column the query never returned. (Omitting it is a SILENT no-op — the gate
+ * would see `undefined`, take the authoritative branch, and drop every genuine re-add
+ * with no error. This is the same trap that killed design v2.)
  * @param {object} db async db client
  * @param {string} crowId
- * @returns {Promise<{crow_id:string,lamport_ts:number,deleted_at:number}|null>}
+ * @returns {Promise<{crow_id:string,lamport_ts:number,deleted_at:number,kind:"prune"|null}|null>}
  */
 export async function readTombstone(db, crowId) {
   if (!db || !crowId || isReqId(crowId)) return null;
   try {
     const { rows } = await db.execute({
-      sql: `SELECT crow_id, lamport_ts, deleted_at FROM contact_tombstones WHERE crow_id = ?`,
+      sql: `SELECT crow_id, lamport_ts, deleted_at, kind FROM contact_tombstones WHERE crow_id = ?`,
       args: [crowId],
     });
     return rows[0] || null;

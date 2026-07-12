@@ -97,8 +97,17 @@ export const EXCLUDED_COLUMNS = {
   // (boot.js) — syncing it would firehose the feed. `id` is the per-instance
   // AUTOINCREMENT key (never portable). `created_at` differs when two instances
   // independently form the same req: row, manufacturing spurious conflicts.
+  // `origin` (item 2a / F3) is a JUDGMENT — "this is an advertised bot I may
+  // garbage-collect" — true only relative to the instance holding the row, never
+  // a portable fact. Replicating it is dangerous both ways: toward the bot's HOST
+  // (a peer's emit could relabel the host's own bot row 'advertised', and a host
+  // never sees its OWN bots in its advertised directory ⇒ it would prune its own
+  // bot, FK-CASCADING the DM history away), and toward a peer that cannot see the
+  // advertisement (it inherits 'advertised' for a bot it never sees advertised ⇒
+  // prunes a live bot). Each instance re-derives its own judgment from its own
+  // view; the syncable FACT is which instance advertised the bot.
   // All stripped from the wire; the row still syncs (keyed on crow_id).
-  contacts: ["verified", "last_seen", "id", "created_at"],
+  contacts: ["verified", "last_seen", "id", "created_at", "origin"],
   // Phase 3 PR-B: messages sync keyed on nostr_event_id; the per-instance
   // id/contact_id are never portable (crow_id rides the wire instead). is_read
   // is per-device (each instance computes its own unread badge). lamport_ts is
@@ -1435,8 +1444,10 @@ export class InstanceSyncManager {
     }
 
     // PRAGMA-filter incoming keys to live columns; always drop id/lamport_ts/
-    // instance_id and the never-synced verified/last_seen/created_at (defense on
-    // apply — these are stripped on emit too).
+    // instance_id and the never-synced verified/last_seen/created_at/origin
+    // (defense on apply — these are stripped on emit too). `origin` is NOT
+    // belt-and-braces: an un-upgraded peer still runs the pre-F3 emit path and
+    // WILL keep sending it, so the receive side has to refuse it on its own.
     if (!this._contactCols) {
       try {
         const { rows: pragma } = await this.db.execute({ sql: "PRAGMA table_info(contacts)", args: [] });
@@ -1450,7 +1461,7 @@ export class InstanceSyncManager {
       console.warn("[instance-sync] _applyContact: contacts columns unavailable — skipping");
       return;
     }
-    const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "verified", "last_seen", "created_at"]);
+    const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "verified", "last_seen", "created_at", "origin"]);
     const filtered = {};
     for (const [k, v] of Object.entries(row)) {
       if (ALWAYS_DROP.has(k)) continue;
@@ -1491,6 +1502,16 @@ export class InstanceSyncManager {
       tomb = null;
     }
 
+    // The lamport a STANDING tombstone may contribute to an AUTHORITATIVE one.
+    // Commensurable only within a kind (see writeTombstone's header): an authoritative
+    // tombstone's lamport is a GLOBAL emit lamport, a 'prune' tombstone's is the pruned
+    // row's LOCAL row lamport. `Math.max`-ing a prune's local number into the
+    // authoritative field launders it straight into the `insert <= tomb.lamport_ts ⇒
+    // drop` gate — that field's only consumer — arming it at a value the deleting
+    // instance's own re-add can never exceed ⇒ permanent, silent divergence. So a
+    // 'prune' tombstone contributes ZERO here.
+    const tombFloor = tomb && tomb.kind !== "prune" ? Number(tomb.lamport_ts) || 0 : 0;
+
     // ── delete ──────────────────────────────────────────────────────────────
     if (op === "delete") {
       // A tombstone is written only when the delete is AUTHORITATIVE. The ROW
@@ -1500,7 +1521,7 @@ export class InstanceSyncManager {
       // tombstone: the row won, so no tombstone is warranted.
       if (!localRow) {
         // delete-before-insert race: record the tombstone, apply nothing.
-        await writeTombstone(this.db, crowId, Math.max(tomb?.lamport_ts ?? 0, lamportTs));
+        await writeTombstone(this.db, crowId, Math.max(tombFloor, lamportTs));
         return;
       }
       if (lamportTs > localTs) {
@@ -1511,7 +1532,10 @@ export class InstanceSyncManager {
           try { await this.onContactDeleted(localRow); } catch { /* never throw into apply */ }
         }
         await this.db.execute({ sql: "DELETE FROM contacts WHERE crow_id = ?", args: [crowId] });
-        await writeTombstone(this.db, crowId, Math.max(tomb?.lamport_ts ?? 0, lamportTs));
+        // (Rule (a) above already cleared any tombstone coexisting with a local row, so
+        // `tombFloor` is 0 on this branch today. Kept in the same shape as the branch
+        // above so the two can never drift apart if rule (a) is ever relaxed.)
+        await writeTombstone(this.db, crowId, Math.max(tombFloor, lamportTs));
         return;
       }
       try {
@@ -1527,16 +1551,34 @@ export class InstanceSyncManager {
 
     // (c) A tombstone is still standing and there is NO local row (rule (a)
     //     already cleared any tombstone that coexisted with a row). Delete wins
-    //     over a concurrent update; a stale insert replay is dropped; only a
-    //     fresher insert re-adds — and it must APPLY before it clears (ordering
-    //     is load-bearing: _processNewEntries locks per remote instance, so a
-    //     concurrent stale update from another feed must see either the tombstone
-    //     or the row, never neither — design §D3.1(c)).
+    //     over a concurrent update; an insert re-adds — and it must APPLY before it
+    //     clears (ordering is load-bearing: _processNewEntries locks per remote
+    //     instance, so a concurrent stale update from another feed must see either
+    //     the tombstone or the row, never neither — design §D3.1(c)).
+    //
+    //     The lamport gate applies to AUTHORITATIVE tombstones ONLY (`kind` NULL — a
+    //     user delete, F-CONTACT-1). Those were BROADCAST, so their lamport is a global
+    //     emit lamport and IS commensurable with an incoming insert's: `insert <=
+    //     tomb.lamport_ts` is a stale replay of an already-seen insert and must not undo
+    //     the user's delete.
+    //
+    //     A `kind='prune'` tombstone (2a/F4) is GARBAGE COLLECTION and is NOT comparable.
+    //     It emits nothing, and it is stamped with the pruned row's OWN lamport — a LOCAL
+    //     row lamport. Two instances' row lamports are equal only when every emit has been
+    //     applied on both sides, so a single un-replicated `update` on a peer (a rename, a
+    //     block) lifts THAT peer's row lamport and its tombstone then outruns the re-adder's
+    //     `insert`. Gating on it would drop a GENUINE re-add — and every subsequent `update`
+    //     from the re-adder is `op="update"`, dropped unconditionally by the line above ⇒ the
+    //     contact lives on one instance and is gone from the other FOREVER, with zero
+    //     sync_conflicts and nothing logged. GC is not authoritative, so we let the insert
+    //     land. Worst case a redelivered ORIGINAL insert re-creates the row and the next
+    //     render simply RE-PRUNES it — self-healing. `op="update"` still returns above, which
+    //     is the whole of defect D3 (every resurrection vector is an update).
     let clearTombAfterApply = false;
     if (tomb) {
-      if (op === "update") return;                    // drop — delete wins over a concurrent update
-      if (lamportTs <= tomb.lamport_ts) return;        // stale insert replay
-      clearTombAfterApply = true;                      // insert above the tombstone: apply, THEN clear
+      if (op === "update") return;                    // drop — delete wins over a concurrent update (D3)
+      if (tomb.kind !== "prune" && lamportTs <= tomb.lamport_ts) return; // stale insert replay (authoritative only)
+      clearTombAfterApply = true;                      // the insert stands: apply, THEN clear
     }
 
     // ── insert / update ────────────────────────────────────────────────────
@@ -1564,7 +1606,35 @@ export class InstanceSyncManager {
         sql: "SELECT * FROM contacts WHERE lower(substr(secp256k1_pubkey,-64)) = ? ORDER BY id ASC LIMIT 1",
         args: [secpNorm],
       })).rows[0] || null : null;
-      if (secpRow) {
+
+      // F6 (re-derived, R5/CRITICAL-2). The design dropped F6 as "unreachable": the
+      // tombstone gate above returned for `op=update` and for `insert <= tomb.lamport_ts`,
+      // so a standing tombstone could never coexist with a rebind. `kind='prune'` REMOVED
+      // that premise — a prune deliberately does not gate an insert on lamport — and F6
+      // was never re-derived. It is reachable now:
+      //
+      //   prune ⇒ tombstone stands, row gone. The bot is un-advertised, not dead: it DMs
+      //   us, and the receive path files that under a `req:<secp>` placeholder WITH the
+      //   message (the documented §5.10 semantic). A REPLAYED ORIGINAL insert (feed replay
+      //   after a re-pair or a DB restore) then arrives, misses on crow_id, matches that
+      //   placeholder on secp — and REBINDS it. The pruned bot is back, CARRYING the DM.
+      //   Worse, it now has a message, so prune rule 5 (`HAVING COUNT(m.id) = 0` — the
+      //   prune never destroys history) can NEVER prune it again. Permanent resurrection:
+      //   exactly defect D3, and the "worst case, the next render re-prunes it —
+      //   self-healing" claim that justifies letting replayed inserts through is FALSE.
+      //
+      // So: when a GC tombstone stands, do not promote a `req:` placeholder — fall through
+      // to the plain INSERT below. Legal because `contacts` is UNIQUE on `crow_id` ONLY
+      // (no unique index on secp256k1_pubkey), so `crow:<botid>` and `req:<secp>` coexist.
+      // The re-add lands FRESH, zero-message, and RE-PRUNABLE (self-healing restored), and
+      // the DM stays on the message request, which is where §5.10 says it belongs.
+      //
+      // NARROW BY CONSTRUCTION — the rebind is load-bearing for the ordinary `req:` →
+      // `crow:` handshake promotion (contact-promote.js) and must not be disabled
+      // generally. Only a GC tombstone + a `req:` placeholder skips it.
+      const skipPruneRebind = tomb?.kind === "prune" && String(secpRow?.crow_id || "").startsWith("req:");
+
+      if (secpRow && !skipPruneRebind) {
         // Never relabel a real `crow:` id DOWN to a `req:` placeholder (a 3+-
         // instance cross-feed reorder could otherwise un-promote). One-directional.
         if (String(crowId).startsWith("req:") && !String(secpRow.crow_id).startsWith("req:")) return;
@@ -1596,7 +1666,19 @@ export class InstanceSyncManager {
     }
 
     if (lamportTs > localTs) {
-      const updateKeys = Object.keys(filtered).filter((k) => k !== "crow_id");
+      // `advertised_by_instance_id` is written when a crow_id is FIRST materialized
+      // here (INSERT / REBIND) and NEVER on a subsequent UPDATE (2a/F2 — "set at INSERT
+      // only", honoured on the apply side too). Without this, a peer that added the bot
+      // FROM A DIRECTORY would stamp provenance onto THIS instance's MANUALLY PASTED row
+      // for the same bot — silently making a hand-added contact garbage-collectable and
+      // breaking #155 §2.6 (pasted-invite bots must not be lost). Provenance is a fact
+      // about how a row was ACQUIRED HERE; it is not the sender's to assign after the
+      // fact. A peer that has never seen the contact still learns it on INSERT, so
+      // convergence (spec §5.7) is unaffected; an instance that already held the contact
+      // manually simply keeps it — the documented fail-safe direction.
+      const updateKeys = Object.keys(filtered).filter(
+        (k) => k !== "crow_id" && k !== "advertised_by_instance_id"
+      );
       // PR3 parity: a synced key rebind invalidates a local safety-number check.
       // `verified` is excluded from the wire (only ever set by a local device
       // comparison), so a secp/ed change MUST reset it to 0 — matching the local

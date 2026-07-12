@@ -59,8 +59,9 @@ export default {
     const { items, totalUnread } = await getUnifiedConversationList(db);
 
     // Cross-instance bot directory (read-only browse; never throws).
-    let botDirectory = { groups: [], total: 0, notAddedCount: 0 };
-    try { botDirectory = await getBotDirectory(db); } catch {}
+    let botDirectory = { groups: [], total: 0, notAddedCount: 0, perInstance: new Map() };
+    // A RENDER — one of only two call sites that opt into the stale-contact prune.
+    try { botDirectory = await getBotDirectory(db, { prune: true }); } catch {}
 
     // Pending message requests (L6 "Requests (N)" inbox; never throws).
     let requests = [];

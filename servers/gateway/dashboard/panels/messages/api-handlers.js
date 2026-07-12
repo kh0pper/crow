@@ -13,6 +13,8 @@ import { emitContactChange } from "../../../../sharing/contact-sync.js";
 import { unwireContact } from "../../../../sharing/contact-delete.js";
 import { wireSyncedContact } from "../../../../sharing/contact-promote.js";
 import { markContactIsBot } from "../../shared/mark-contact-bot.js";
+import { resolveAdvertisedByInstanceId } from "../../shared/resolve-advertiser.js";
+import { acceptBotInvite } from "../../../../sharing/accept-bot-invite.js";
 import { createRoom, listRoomMembers } from "./rooms-store.js";
 import { buildRoomJoinEnvelope, fanOut } from "../../../../sharing/room-fanout.js";
 import { extractInviteCode } from "../../../../sharing/invite-url.js";
@@ -55,7 +57,15 @@ async function getSharingClient() {
  * Handle POST actions from the messages panel.
  * Returns true if the action was handled (response sent), false otherwise.
  */
-export async function handlePostAction(req, res, { db, sharingClientFactory = getSharingClient, _managers = null }) {
+export async function handlePostAction(req, res, {
+  db,
+  sharingClientFactory = getSharingClient,
+  _managers = null,
+  // The directory path no longer uses the MCP client — it calls the shared accept
+  // directly. Injectable so tests can drive the routing without a real sharing runtime.
+  // (sharingClientFactory stays: the PASTE form and every other action still use it.)
+  acceptBotInviteFn = acceptBotInvite,
+}) {
   const managers = _managers || getManagersOrNull();
   const { action } = req.body;
 
@@ -238,17 +248,22 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
     return res.redirectAfterPost("/dashboard/messages");
   }
 
+  // F5/D1: the DIRECTORY path calls the shared acceptBotInvite DIRECTLY — no MCP
+  // round-trip. The old path emitted the unclassified row from inside the tool and
+  // then stamped origin/is_bot with a local UPDATE and NO emit at all — so peers
+  // learned this was a bot only if the user happened to use the CONTACTS panel
+  // instead (which emitted a second time). Now the classification rides the INSERT
+  // and acceptBotInvite emits exactly one "insert".
   if ((action === "dir_add_bot" || action === "dir_message_bot") && req.body.invite_code) {
     const code = req.body.invite_code.trim();
     let botCrowId = null;
     try {
       const { parseBotInviteCode } = await import("../../../../sharing/identity.js");
       botCrowId = parseBotInviteCode(code).botCrowId;
-    } catch { /* malformed — accept will report; bail to plain redirect */ }
+    } catch { /* malformed — the accept below reports; bail to plain redirect */ }
 
-    // Was this bot already a contact? Only tag origin on contacts WE create
-    // (mirrors the removed message_advertised_bot discipline), preserving the
-    // pruneStaleAdvertisedContacts lifecycle + the is_bot backfill grain.
+    // Was this bot already a contact? acceptBotInvite only classifies rows IT creates,
+    // so markContactIsBot is kept for the already-a-contact branch.
     let wasNew = false;
     if (botCrowId) {
       try { const { rows } = await db.execute({ sql: "SELECT 1 FROM contacts WHERE crow_id = ?", args: [botCrowId] }); wasNew = rows.length === 0; } catch {}
@@ -256,20 +271,22 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
 
     let redirectTo = "/dashboard/messages";
     try {
-      const client = await sharingClientFactory();
-      try {
-        const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
-        if (accepted?.isError) return res.redirectAfterPost("/dashboard/messages");
-        if (botCrowId) {
-          if (wasNew) await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
-          await markContactIsBot(db, botCrowId);
-          if (action === "dir_message_bot") {
-            const { rows } = await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id = ?", args: [botCrowId] });
-            if (rows[0]?.id != null) redirectTo = `/dashboard/messages?open=${rows[0].id}`;
-          }
+      // Provenance is AUTHORITATIVE and UNSPOOFABLE: resolved server-side from the
+      // advertised directory, never from req.body. Unresolvable ⇒ null ⇒ the contact
+      // is never prunable (the fail-safe direction).
+      const advertisedByInstanceId = await resolveAdvertisedByInstanceId(db, code);
+      // `isBot` is asserted INDEPENDENTLY of provenance: this action IS the bot directory,
+      // so whatever the user clicked is a bot even when the 60 s cache expired or a peer
+      // timed out and the advertiser came back null. Folding bot-ness into provenance
+      // (R5/MAJOR-3) would land is_bot=0 — unbadged, and re-emitted by backfillContactsOnce
+      // on every boot.
+      await acceptBotInviteFn(db, managers, { inviteCode: code, advertisedByInstanceId, isBot: true });
+      if (botCrowId) {
+        if (!wasNew) await markContactIsBot(db, botCrowId);
+        if (action === "dir_message_bot") {
+          const { rows } = await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id = ?", args: [botCrowId] });
+          if (rows[0]?.id != null) redirectTo = `/dashboard/messages?open=${rows[0].id}`;
         }
-      } finally {
-        await client.close();
       }
     } catch (err) {
       console.error("[messages] dir bot materialize failed:", err.message);
