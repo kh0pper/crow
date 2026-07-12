@@ -95,7 +95,9 @@ export default {
       const { getBotDirectory } = await import("./messages/data-queries.js");
       const { buildBotDirectory } = await import("../shared/bot-directory.js");
       const { csrfInput } = await import("../shared/csrf.js");
-      const dir = await getBotDirectory(db).catch(() => ({ groups: [], total: 0, notAddedCount: 0 }));
+      // A RENDER — one of only two call sites that opt into the stale-contact prune.
+      const dir = await getBotDirectory(db, { prune: true })
+        .catch(() => ({ groups: [], total: 0, notAddedCount: 0, perInstance: new Map() }));
       bodyHtml = buildBotDirectory({ groups: dir.groups, context: "contacts", csrf: csrfInput(req), lang });
     } else {
       // --- All Contacts (default) ---
