@@ -17,9 +17,8 @@ const db = initDb();
 after(() => rmSync(tmpDir, { recursive: true, force: true }));
 
 test("SCHEMA_GENERATION is stamped on the db", async () => {
-  assert.equal(SCHEMA_GENERATION, 6);
   const { rows } = await db.execute("PRAGMA user_version");
-  assert.equal(Number(rows[0].user_version), 6);
+  assert.equal(Number(rows[0].user_version), SCHEMA_GENERATION);
 });
 
 test("contact_groups has group_uid + lamport_ts", async () => {

@@ -1889,6 +1889,26 @@ await initTable("contact_tombstones table", `
   );
 `);
 
+// --- 2a/F4: WHY a tombstone exists, which decides whether its lamport is a
+// meaningful bound on an incoming `insert`.
+//
+//   NULL     AUTHORITATIVE — a user delete (F-CONTACT-1). Its lamport is a GLOBAL
+//            emit lamport (emitContactDelete broadcast it), so it IS commensurable
+//            with an incoming insert's lamport. Keeps the original `insert <=
+//            tomb.lamport_ts ⇒ drop` gate: a stale replay of an already-seen insert
+//            must not undo the delete.
+//   'prune'  GARBAGE COLLECTION — the advertised-contact prune (F4). It emits NOTHING
+//            and stamps the tombstone with the PRUNED ROW'S OWN lamport, which is a
+//            LOCAL row lamport: two instances' row lamports agree only once every emit
+//            has been applied on both sides. Comparing a global insert lamport against
+//            it compares incommensurable things, so a `prune` tombstone must NOT gate
+//            inserts on lamport at all (see instance-sync.js `_applyContact`).
+//
+// Precedence on conflict is AUTHORITATIVE-WINS (the safe, more-restrictive direction):
+// a GC write must never weaken a real user delete into a permissive gate. Resolved in
+// contact-delete.js's `tombstoneStatement()` ON CONFLICT clause, not here.
+await addColumnIfMissing("contact_tombstones", "kind", "TEXT");
+
 // --- F-CONTACT-1 (design §D4): clock-free replay hygiene for authenticated
 // control events (invite_accepted). Record every successfully-handled event.id so
 // a stale ~60h retry cannot resurrect a deleted contact. Rows older than 30 days
@@ -2746,6 +2766,11 @@ await addColumnIfMissing("bot_message_invites", "kind", "TEXT"); // NULL=normal,
 // "add a person" uniformly. Backfill the reliably-known bots (origin='advertised').
 await addColumnIfMissing("contacts", "is_bot", "INTEGER DEFAULT 0");
 await db.execute({ sql: "UPDATE contacts SET is_bot = 1 WHERE origin = 'advertised' AND is_bot = 0" });
+
+// --- Advertised-contact provenance (advertised-contact prune, 2026-07-12) ---
+// contacts.advertised_by_instance_id records a fact: the instance_id of the peer
+// whose advertised-bot directory this contact was added from. Set at INSERT only.
+await addColumnIfMissing("contacts", "advertised_by_instance_id", "TEXT"); // NULL=manual/pasted-invite contact, NEVER prunable
 
 // Stamp the schema generation so the gateway boot gate can detect when an
 // out-of-band code update introduced migrations that a plain restart missed.

@@ -8,10 +8,9 @@
 import { z } from "zod";
 import { randomUUID } from "crypto";
 import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js";
-import { generateInviteCode, parseInviteCode, parseBotInviteCode, computeSafetyNumber } from "../identity.js";
+import { generateInviteCode, parseInviteCode, computeSafetyNumber } from "../identity.js";
 import { upsertFullContact } from "../contact-promote.js";
-import { emitContactChange } from "../contact-sync.js";
-import { clearTombstone } from "../contact-delete.js";
+import { acceptBotInvite } from "../accept-bot-invite.js";
 import { sanitizeDisplayName } from "../display-name.js";
 import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
 import {
@@ -111,24 +110,11 @@ async function acceptInviteCore({ invite_code, display_name }, { db, identity, s
   };
 }
 
-/**
- * Build the DM payload a recipient sends to a bot to accept its invite.
- * The adapter authorizes future chats on the SIGNED event pubkey, so the keys
- * here are labels the bot stores; the token is the bearer capability it checks.
- */
-export function buildBotAcceptPayload(token, identity, displayName) {
-  return JSON.stringify({
-    type: "crow_social",
-    subtype: "bot_invite_accept",
-    token,
-    sender: {
-      crow_id: identity.crowId,
-      ed25519_pubkey: identity.ed25519Pubkey,
-      secp256k1_pubkey: identity.secp256k1Pubkey,
-      display_name: displayName || identity.crowId,
-    },
-  });
-}
+// Re-export: buildBotAcceptPayload now lives beside the accept it belongs to. Kept
+// exported from here because it has always been part of this module's surface — and
+// it must NOT be imported back from tools/contacts.js into accept-bot-invite.js, which
+// would close an import cycle.
+export { buildBotAcceptPayload } from "../accept-bot-invite.js";
 
 export function registerContactsTools(server, ctx) {
   const { db, identity, peerManager, syncManager, nostrManager } = ctx;
@@ -364,65 +350,29 @@ export function registerContactsTools(server, ctx) {
       invite_code: z.string().max(2000).describe("The bot invite code (crow:<id>.<payload>.<sig>)"),
       display_name: z.string().max(100).optional().describe("Name to show for this bot"),
     },
+    // NOTE the schema above has NO advertiser / instance-id parameter, and must never
+    // gain one. `advertised_by_instance_id` is what makes a contact garbage-collectable;
+    // a model must never be able to stamp a contact prunable. Provenance is resolved
+    // SERVER-SIDE from the advertised directory (dashboard/shared/resolve-advertiser.js)
+    // and is supplied only by the panel directory handlers. This tool is the PASTE path:
+    // it has no advertiser, so it yields NULL provenance — correct, and never prunable.
     async ({ invite_code, display_name }) => {
       if (await isKioskActive(db)) return kioskBlockedResponse("crow_accept_bot_invite");
       try {
-        const bot = parseBotInviteCode(invite_code.trim());
-        // Prefer an explicit name, else the friendly name the owner put in the
-        // invite, else the raw crow: id.
-        const name = display_name || bot.name || bot.botCrowId;
-
-        // Add the bot as a contact so it appears in Messages and we subscribe
-        // for its replies. Idempotent on crow_id.
-        const existing = await db.execute({
-          sql: "SELECT id FROM contacts WHERE crow_id = ?", args: [bot.botCrowId],
-        });
-        let contactId;
-        if (existing.rows.length > 0) {
-          contactId = Number(existing.rows[0].id);
-        } else {
-          const result = await db.execute({
-            sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)",
-            args: [bot.botCrowId, name, bot.ed25519Pubkey, bot.secp256k1Pubkey],
-          });
-          contactId = Number(result.lastInsertRowid);
-          try { await syncManager.initContact(contactId, null); } catch { /* bot has no hypercore feed; non-fatal */ }
-          // Subscribe to the bot's replies over Nostr (new contact only — existing
-          // contacts already have a live subscription from their first accept or
-          // from restart, so re-subscribing would leak a handle per relay).
-          try {
-            await nostrManager.subscribeToContact({
-              id: contactId, crowId: bot.botCrowId, secp256k1_pubkey: bot.secp256k1Pubkey,
-            });
-          } catch { /* non-fatal — re-subscribed on next restart */ }
-          // Phase 3: an accepted remote bot is a real cross-instance contact —
-          // propagate it to the user's other instances (advertised/remote bots
-          // sync per S-BOTS; a local-bot would be gated by shouldSyncRow).
-          try {
-            const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] });
-            if (rows[0]) {
-              // D3.2: a local re-add supersedes any tombstone for this bot's crowId.
-              await clearTombstone(db, bot.botCrowId);
-              await emitContactChange("insert", rows[0]);
-            }
-          } catch { /* never blocks the accept */ }
-        }
-
-        // Tell the bot we accepted (carries the token it validates).
-        try {
-          if (nostrManager.relays.size === 0) await nostrManager.connectRelays();
-          await nostrManager.sendMessage(
-            { secp256k1_pubkey: bot.secp256k1Pubkey },
-            buildBotAcceptPayload(bot.token, identity, name)
-          );
-        } catch (err) {
+        const r = await acceptBotInvite(
+          db,
+          { syncManager, peerManager, nostrManager, identity },
+          { inviteCode: invite_code.trim(), displayName: display_name },
+        );
+        // Failing to reach the bot is NOT a failure of the accept — the contact is
+        // added either way and the bot authorizes us when it next comes online.
+        if (!r.notified) {
           return {
-            content: [{ type: "text", text: `Added ${name}, but could not reach the bot to confirm (it will authorize you when next online): ${err.message}` }],
+            content: [{ type: "text", text: `Added ${r.name}, but could not reach the bot to confirm (it will authorize you when next online): ${r.error}` }],
           };
         }
-
         return {
-          content: [{ type: "text", text: `Added ${name}! You can now message this bot from your Messages list.` }],
+          content: [{ type: "text", text: `Added ${r.name}! You can now message this bot from your Messages list.` }],
         };
       } catch (err) {
         return {

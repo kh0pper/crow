@@ -46,9 +46,9 @@ test("contact_tombstones + processed_control_events tables exist after init-db",
   assert.deepEqual(rows.map((r) => r.name), ["contact_tombstones", "processed_control_events"]);
 });
 
-test("contact_tombstones has the expected columns", async () => {
+test("contact_tombstones has the expected columns (incl. `kind` — 2a/F4)", async () => {
   const { rows } = await db.execute("PRAGMA table_info(contact_tombstones)");
-  assert.deepEqual(rows.map((r) => r.name).sort(), ["crow_id", "deleted_at", "lamport_ts"]);
+  assert.deepEqual(rows.map((r) => r.name).sort(), ["crow_id", "deleted_at", "kind", "lamport_ts"]);
 });
 
 test("processed_control_events has the expected columns", async () => {
@@ -56,10 +56,9 @@ test("processed_control_events has the expected columns", async () => {
   assert.deepEqual(rows.map((r) => r.name).sort(), ["event_id", "kind", "seen_at"]);
 });
 
-test("PRAGMA user_version === 6", async () => {
+test("init-db stamps PRAGMA user_version with the current SCHEMA_GENERATION", async () => {
   const { rows } = await db.execute("PRAGMA user_version");
-  assert.equal(rows[0].user_version, 6);
-  assert.equal(SCHEMA_GENERATION, 6);
+  assert.equal(Number(rows[0].user_version), SCHEMA_GENERATION);
 });
 
 test("init-db is idempotent — re-run preserves rows and does not throw", async () => {
@@ -69,7 +68,7 @@ test("init-db is idempotent — re-run preserves rows and does not throw", async
   const { rows } = await fresh.execute({ sql: "SELECT lamport_ts FROM contact_tombstones WHERE crow_id = ?", args: ["crow:idem"] });
   assert.equal(rows[0].lamport_ts, 7);
   const { rows: uv } = await fresh.execute("PRAGMA user_version");
-  assert.equal(uv[0].user_version, 6);
+  assert.equal(Number(uv[0].user_version), SCHEMA_GENERATION);
 });
 
 // ── Task 2: tombstone primitives ────────────────────────────────────────────
@@ -109,6 +108,84 @@ test("writeTombstone sets deleted_at on first write and preserves it on conflict
   await writeTombstone(db, "crow:da", 20);
   assert.equal((await readTombstone(db, "crow:da")).deleted_at, first);
   await clearTombstone(db, "crow:da");
+});
+
+// ── 2a/F4: tombstone `kind` — WHY the contact is gone ───────────────────────
+//
+// NULL = AUTHORITATIVE (a user delete; its lamport was BROADCAST ⇒ comparable to an
+// incoming insert's ⇒ keeps the stale-replay lamport gate).
+// 'prune' = GARBAGE COLLECTION (the advertised-contact prune; it emits nothing and
+// carries a LOCAL row lamport ⇒ NOT comparable ⇒ must not gate inserts).
+// Precedence is AUTHORITATIVE-ALWAYS-WINS: a GC write must never weaken a user delete.
+
+test("readTombstone RETURNS `kind` — the apply gate cannot branch on a column the SELECT omits", async () => {
+  await writeTombstone(db, "crow:k-read", 10, "prune");
+  const t = await readTombstone(db, "crow:k-read");
+  assert.ok("kind" in t, "`kind` is present in the returned row (omitting it is a SILENT no-op — the v2 trap)");
+  assert.equal(t.kind, "prune");
+  await clearTombstone(db, "crow:k-read");
+
+  await writeTombstone(db, "crow:k-read2", 10); // default = authoritative
+  assert.equal((await readTombstone(db, "crow:k-read2")).kind, null, "a user delete defaults to authoritative (NULL)");
+  await clearTombstone(db, "crow:k-read2");
+});
+
+test("kind precedence: prune then prune STAYS 'prune' (two instances GC'ing the same bot)", async () => {
+  await writeTombstone(db, "crow:k-pp", 10, "prune");
+  await writeTombstone(db, "crow:k-pp", 20, "prune");
+  const t = await readTombstone(db, "crow:k-pp");
+  assert.equal(t.kind, "prune", "still garbage collection — nobody deleted anything authoritatively");
+  assert.equal(t.lamport_ts, 20, "and MAX(lamport) still holds");
+  await clearTombstone(db, "crow:k-pp");
+});
+
+test("kind precedence: prune then an AUTHORITATIVE delete becomes authoritative (NULL) — and the lamport gate is armed again", async () => {
+  await writeTombstone(db, "crow:k-pd", 10, "prune");
+  await writeTombstone(db, "crow:k-pd", 30);   // the user really deleted it
+  const t = await readTombstone(db, "crow:k-pd");
+  assert.equal(t.kind, null, "the user's delete UPGRADES the tombstone to authoritative");
+  assert.equal(t.lamport_ts, 30);
+  await clearTombstone(db, "crow:k-pd");
+});
+
+// ── R5/CRITICAL-1: lamports are commensurable only WITHIN a kind ─────────────
+//
+// A prune's lamport is the pruned row's LOCAL row lamport. An authoritative
+// tombstone's lamport is a GLOBAL emit lamport, and it is the sole input to the
+// `insert <= tomb.lamport_ts ⇒ drop` gate (instance-sync.js `_applyContact`). A
+// blanket `MAX(lamport_ts, excluded.lamport_ts)` on the kind TRANSITION launders the
+// local number into the global field — arming the gate at a value no emitter can
+// ever exceed. The test above (prune@10 → auth@30) could not see this: MAX happens
+// to give the right answer whenever the authoritative delete's lamport is the higher
+// of the two. Invert the magnitudes and the defect is plain.
+test("kind precedence: prune@500 then an AUTHORITATIVE delete@21 takes the DELETE's lamport (21) — a local row lamport must never become the global insert gate", async () => {
+  await writeTombstone(db, "crow:k-launder", 500, "prune"); // a LOCAL row lamport (this instance saw many updates)
+  await writeTombstone(db, "crow:k-launder", 21);           // the user's REAL delete, broadcast at a global lamport of 21
+  const t = await readTombstone(db, "crow:k-launder");
+  assert.equal(t.kind, null, "the user's delete upgrades the tombstone to authoritative");
+  assert.equal(Number(t.lamport_ts), 21,
+    "the SURVIVING kind's own lamport wins. MAX(500,21)=500 would arm the stale-insert gate at 500 — a number " +
+    "no genuine re-add from the deleting instance can exceed — so every re-add is dropped, and every later " +
+    "`update` from the re-adder is dropped unconditionally by the same tombstone: permanent silent divergence.");
+  await clearTombstone(db, "crow:k-launder");
+});
+
+test("kind precedence: an AUTHORITATIVE delete then a prune STAYS authoritative — GC must never weaken a user delete", async () => {
+  await writeTombstone(db, "crow:k-dp", 30);          // user delete @30
+  await writeTombstone(db, "crow:k-dp", 10, "prune"); // a later prune of the same crow_id
+  const t = await readTombstone(db, "crow:k-dp");
+  assert.equal(t.kind, null,
+    "STILL authoritative. Letting a prune overwrite it would flip a user delete onto the permissive " +
+    "insert path and a stale insert replay could resurrect the deleted contact.");
+  assert.equal(t.lamport_ts, 30, "and the lower prune lamport did not lower the gate");
+  await clearTombstone(db, "crow:k-dp");
+});
+
+test("kind precedence: delete then delete stays authoritative", async () => {
+  await writeTombstone(db, "crow:k-dd", 10);
+  await writeTombstone(db, "crow:k-dd", 20);
+  assert.equal((await readTombstone(db, "crow:k-dd")).kind, null);
+  await clearTombstone(db, "crow:k-dd");
 });
 
 // ── Task 2: emitContactDelete co-writes the local tombstone ─────────────────

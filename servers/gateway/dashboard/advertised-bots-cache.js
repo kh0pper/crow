@@ -3,6 +3,19 @@
  * + TTL cache. Sibling of overview-cache.js, same signed-fetch seam. A peer
  * that errors/times out yields an `unavailable` sentinel (never throws), so a
  * single offline Crow can't break the Messages render.
+ *
+ * COMPLETENESS CONTRACT. Every result carries a boolean `complete`, and it is
+ * true ONLY when both sides positively agree the list is whole:
+ *   - the sender asserted `complete: true` (it skipped no bot while building the
+ *     payload — see buildAdvertisementPayload), AND
+ *   - the receiver dropped no entry in validateBot (raw.length === bots.length).
+ * Anything else — an old peer that sends no `complete` key, a malformed body, a
+ * timeout, an unparseable bot — is `complete: false`. Absence of the assertion
+ * is never trust: a body that isn't `{bots: [...]}` is reported `unavailable`
+ * rather than `ok` with an empty list, because "this peer advertises nothing" is
+ * a claim a garbage collector would act on by DELETING contacts. Consumers that
+ * destroy data must require `status === "ok" && complete === true`; this is
+ * fail-safe by construction across a rolling deploy.
  */
 import { forwardSignedRequest } from "../../shared/peer-forward.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
@@ -48,16 +61,24 @@ let _fetchImpl = defaultFetchImpl;
 async function doFetch(db, instanceId) {
   let result;
   try { result = await _fetchImpl(db, instanceId); }
-  catch (err) { return { instanceId, status: "unavailable", reason: "exception:" + (err?.message || "unknown"), bots: [] }; }
-  if (!result || !result.ok) return { instanceId, status: "unavailable", reason: result?.error || "fetch_failed", bots: [] };
-  const raw = result.body && Array.isArray(result.body.bots) ? result.body.bots : [];
+  catch (err) { return { instanceId, status: "unavailable", reason: "exception:" + (err?.message || "unknown"), bots: [], complete: false }; }
+  if (!result || !result.ok) return { instanceId, status: "unavailable", reason: result?.error || "fetch_failed", bots: [], complete: false };
+  // A body without a `bots` array is an outage, NOT "this peer advertises
+  // nothing" — the latter is a claim the prune would act on by deleting.
+  if (!result.body || !Array.isArray(result.body.bots)) {
+    return { instanceId, status: "unavailable", reason: "bad_body", bots: [], complete: false };
+  }
+  const raw = result.body.bots;
   const bots = raw.map((b) => validateBot(b, instanceId)).filter(Boolean);
-  return { instanceId, status: "ok", bots };
+  // Both sides must agree: the sender positively asserted it, and we parsed
+  // every entry it sent. An old peer sends no key ⇒ false.
+  const complete = result.body.complete === true && raw.length === bots.length;
+  return { instanceId, status: "ok", bots, complete };
 }
 
 /** Fetch (or return cached) advertised bots for one paired peer. Never throws. */
 export async function getPeerAdvertisedBots(db, instanceId) {
-  if (!instanceId) return { instanceId, status: "unavailable", reason: "no_id", bots: [] };
+  if (!instanceId) return { instanceId, status: "unavailable", reason: "no_id", bots: [], complete: false };
   const entry = _cache.get(instanceId);
   if (entry && entry.expiresAt > now()) {
     if (entry.inflight) return entry.inflight;
@@ -72,7 +93,7 @@ export async function getPeerAdvertisedBots(db, instanceId) {
       _cache.set(instanceId, { data, expiresAt: now() + TTL_MS });
       return data;
     } catch (err) {
-      const sentinel = { instanceId, status: "unavailable", reason: "exception:" + (err?.message || "unknown"), bots: [] };
+      const sentinel = { instanceId, status: "unavailable", reason: "exception:" + (err?.message || "unknown"), bots: [], complete: false };
       _cache.set(instanceId, { data: sentinel, expiresAt: now() + TTL_MS });
       return sentinel;
     }
