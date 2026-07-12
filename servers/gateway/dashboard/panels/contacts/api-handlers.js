@@ -18,6 +18,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
 import { markContactIsBot } from "../../shared/mark-contact-bot.js";
+import { resolveAdvertisedByInstanceId } from "../../shared/resolve-advertiser.js";
+import { acceptBotInvite } from "../../../../sharing/accept-bot-invite.js";
 import { extractInviteCode } from "../../../../sharing/invite-url.js";
 
 /**
@@ -36,7 +38,14 @@ async function makeSharingClient() {
  * Handle POST actions from the contacts panel.
  * @returns {{ redirect?: string, download?: string } | null}
  */
-export async function handleContactAction(req, db, { sharingClientFactory = makeSharingClient, managers: injectedManagers = null } = {}) {
+export async function handleContactAction(req, db, {
+  sharingClientFactory = makeSharingClient,
+  managers: injectedManagers = null,
+  // The directory path no longer uses the MCP client — it calls the shared accept
+  // directly. Injectable so tests can drive the routing without a real sharing runtime.
+  // (sharingClientFactory stays: OTHER actions in this handler still use it.)
+  acceptBotInviteFn = acceptBotInvite,
+} = {}) {
   const { action } = req.body;
   const managers = injectedManagers || getManagersOrNull();
 
@@ -415,6 +424,13 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
   }
 
   // --- Browse bots directory: add bot as contact ---
+  //
+  // F5/D1: calls the shared acceptBotInvite DIRECTLY — no MCP round-trip. The old
+  // path went tool → INSERT (unclassified) → emit "insert" → UPDATE origin →
+  // markContactIsBot → a SECOND emit ("update"). Peers saw an unclassified row first
+  // and a classified one only if they were reachable for both; the messages panel
+  // emitted nothing at all after its UPDATE. Now the classification rides the INSERT
+  // and exactly ONE "insert" is emitted, from inside acceptBotInvite.
   if (action === "dir_add_bot" && req.body.invite_code) {
     const code = req.body.invite_code.trim();
     let botCrowId = null;
@@ -425,18 +441,13 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     let wasNew = false;
     if (botCrowId) { try { const { rows } = await db.execute({ sql: "SELECT 1 FROM contacts WHERE crow_id = ?", args: [botCrowId] }); wasNew = rows.length === 0; } catch {} }
     try {
-      const client = await sharingClientFactory();
-      try {
-        const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
-        if (!accepted?.isError && botCrowId) {
-          if (wasNew) await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
-          await markContactIsBot(db, botCrowId);
-          // Phase 3: propagate the final advertised-bot state (origin + is_bot)
-          // to the user's other instances. (The accept tool emits the base row;
-          // this update carries the advertised/is_bot flags set just above.)
-          try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [botCrowId] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
-        }
-      } finally { await client.close(); }
+      // Provenance is AUTHORITATIVE and UNSPOOFABLE: resolved server-side from the
+      // advertised directory, never from req.body. Unresolvable ⇒ null ⇒ the contact
+      // is never prunable (the fail-safe direction).
+      const advertisedByInstanceId = await resolveAdvertisedByInstanceId(db, code);
+      await acceptBotInviteFn(db, managers, { inviteCode: code, advertisedByInstanceId });
+      // Already-a-contact branch only: acceptBotInvite classifies rows IT creates.
+      if (botCrowId && !wasNew) await markContactIsBot(db, botCrowId);
     } catch (err) { console.error("[contacts] dir_add_bot failed:", err.message); }
     return { redirect: "/dashboard/contacts?view=bots" };
   }
