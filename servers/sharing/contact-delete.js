@@ -21,32 +21,56 @@ function isReqId(id) {
 /**
  * UPSERT a tombstone keeping the MAX lamport_ts. deleted_at is set to now (unix
  * seconds) on first write and preserved on conflict. No-op for `req:` ids.
+ *
+ * `kind` says WHY the contact is gone, and that decides whether the tombstone's
+ * lamport is a meaningful bound on an incoming `insert` (see instance-sync.js
+ * `_applyContact`):
+ *   - `null`    AUTHORITATIVE — a user delete. Its lamport is a GLOBAL emit lamport
+ *               (emitContactDelete broadcast it) ⇒ comparable to an insert's ⇒ keeps
+ *               the `insert <= tomb.lamport_ts ⇒ drop` stale-replay gate.
+ *   - `'prune'` GARBAGE COLLECTION — the advertised-contact prune (2a/F4). It emits
+ *               nothing and stamps the tombstone with a LOCAL row lamport ⇒ NOT
+ *               comparable across instances ⇒ must not gate inserts on lamport.
+ *
+ * Precedence on conflict is AUTHORITATIVE-ALWAYS-WINS — the safe, more-restrictive
+ * direction. prune+prune ⇒ 'prune'; ANY authoritative delete on either side ⇒ NULL.
+ * A GC write must never weaken a real user delete into a permissive gate; the reverse
+ * (an authoritative delete strengthening a prune tombstone) is exactly what we want.
+ *
  * @param {object} db async db client ({ execute })
  * @param {string} crowId
  * @param {number} lamportTs the delete's Lamport clock
+ * @param {"prune"|null} [kind] null (default) = authoritative user delete
  */
-export async function writeTombstone(db, crowId, lamportTs) {
+export async function writeTombstone(db, crowId, lamportTs, kind = null) {
   if (!db || !crowId || isReqId(crowId)) return;
   try {
     await db.execute({
-      sql: `INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(crow_id) DO UPDATE SET lamport_ts = MAX(lamport_ts, excluded.lamport_ts)`,
-      args: [crowId, Number(lamportTs) || 0, Math.floor(Date.now() / 1000)],
+      sql: `INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(crow_id) DO UPDATE SET
+              lamport_ts = MAX(lamport_ts, excluded.lamport_ts),
+              kind = CASE WHEN contact_tombstones.kind = 'prune' AND excluded.kind = 'prune'
+                          THEN 'prune' ELSE NULL END`,
+      args: [crowId, Number(lamportTs) || 0, Math.floor(Date.now() / 1000), kind === "prune" ? "prune" : null],
     });
   } catch { /* never throw into a receive path */ }
 }
 
 /**
+ * `kind` is SELECTed deliberately: the apply gate branches on it, and a gate cannot
+ * read a column the query never returned. (Omitting it is a SILENT no-op — the gate
+ * would see `undefined`, take the authoritative branch, and drop every genuine re-add
+ * with no error. This is the same trap that killed design v2.)
  * @param {object} db async db client
  * @param {string} crowId
- * @returns {Promise<{crow_id:string,lamport_ts:number,deleted_at:number}|null>}
+ * @returns {Promise<{crow_id:string,lamport_ts:number,deleted_at:number,kind:"prune"|null}|null>}
  */
 export async function readTombstone(db, crowId) {
   if (!db || !crowId || isReqId(crowId)) return null;
   try {
     const { rows } = await db.execute({
-      sql: `SELECT crow_id, lamport_ts, deleted_at FROM contact_tombstones WHERE crow_id = ?`,
+      sql: `SELECT crow_id, lamport_ts, deleted_at, kind FROM contact_tombstones WHERE crow_id = ?`,
       args: [crowId],
     });
     return rows[0] || null;

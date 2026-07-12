@@ -1889,6 +1889,26 @@ await initTable("contact_tombstones table", `
   );
 `);
 
+// --- 2a/F4: WHY a tombstone exists, which decides whether its lamport is a
+// meaningful bound on an incoming `insert`.
+//
+//   NULL     AUTHORITATIVE — a user delete (F-CONTACT-1). Its lamport is a GLOBAL
+//            emit lamport (emitContactDelete broadcast it), so it IS commensurable
+//            with an incoming insert's lamport. Keeps the original `insert <=
+//            tomb.lamport_ts ⇒ drop` gate: a stale replay of an already-seen insert
+//            must not undo the delete.
+//   'prune'  GARBAGE COLLECTION — the advertised-contact prune (F4). It emits NOTHING
+//            and stamps the tombstone with the PRUNED ROW'S OWN lamport, which is a
+//            LOCAL row lamport: two instances' row lamports agree only once every emit
+//            has been applied on both sides. Comparing a global insert lamport against
+//            it compares incommensurable things, so a `prune` tombstone must NOT gate
+//            inserts on lamport at all (see instance-sync.js `_applyContact`).
+//
+// Precedence on conflict is AUTHORITATIVE-WINS (the safe, more-restrictive direction):
+// a GC write must never weaken a real user delete into a permissive gate. Resolved in
+// writeTombstone's ON CONFLICT clause, not here.
+await addColumnIfMissing("contact_tombstones", "kind", "TEXT");
+
 // --- F-CONTACT-1 (design §D4): clock-free replay hygiene for authenticated
 // control events (invite_accepted). Record every successfully-handled event.id so
 // a stale ~60h retry cannot resurrect a deleted contact. Rows older than 30 days

@@ -46,9 +46,9 @@ test("contact_tombstones + processed_control_events tables exist after init-db",
   assert.deepEqual(rows.map((r) => r.name), ["contact_tombstones", "processed_control_events"]);
 });
 
-test("contact_tombstones has the expected columns", async () => {
+test("contact_tombstones has the expected columns (incl. `kind` — 2a/F4)", async () => {
   const { rows } = await db.execute("PRAGMA table_info(contact_tombstones)");
-  assert.deepEqual(rows.map((r) => r.name).sort(), ["crow_id", "deleted_at", "lamport_ts"]);
+  assert.deepEqual(rows.map((r) => r.name).sort(), ["crow_id", "deleted_at", "kind", "lamport_ts"]);
 });
 
 test("processed_control_events has the expected columns", async () => {
@@ -108,6 +108,62 @@ test("writeTombstone sets deleted_at on first write and preserves it on conflict
   await writeTombstone(db, "crow:da", 20);
   assert.equal((await readTombstone(db, "crow:da")).deleted_at, first);
   await clearTombstone(db, "crow:da");
+});
+
+// ── 2a/F4: tombstone `kind` — WHY the contact is gone ───────────────────────
+//
+// NULL = AUTHORITATIVE (a user delete; its lamport was BROADCAST ⇒ comparable to an
+// incoming insert's ⇒ keeps the stale-replay lamport gate).
+// 'prune' = GARBAGE COLLECTION (the advertised-contact prune; it emits nothing and
+// carries a LOCAL row lamport ⇒ NOT comparable ⇒ must not gate inserts).
+// Precedence is AUTHORITATIVE-ALWAYS-WINS: a GC write must never weaken a user delete.
+
+test("readTombstone RETURNS `kind` — the apply gate cannot branch on a column the SELECT omits", async () => {
+  await writeTombstone(db, "crow:k-read", 10, "prune");
+  const t = await readTombstone(db, "crow:k-read");
+  assert.ok("kind" in t, "`kind` is present in the returned row (omitting it is a SILENT no-op — the v2 trap)");
+  assert.equal(t.kind, "prune");
+  await clearTombstone(db, "crow:k-read");
+
+  await writeTombstone(db, "crow:k-read2", 10); // default = authoritative
+  assert.equal((await readTombstone(db, "crow:k-read2")).kind, null, "a user delete defaults to authoritative (NULL)");
+  await clearTombstone(db, "crow:k-read2");
+});
+
+test("kind precedence: prune then prune STAYS 'prune' (two instances GC'ing the same bot)", async () => {
+  await writeTombstone(db, "crow:k-pp", 10, "prune");
+  await writeTombstone(db, "crow:k-pp", 20, "prune");
+  const t = await readTombstone(db, "crow:k-pp");
+  assert.equal(t.kind, "prune", "still garbage collection — nobody deleted anything authoritatively");
+  assert.equal(t.lamport_ts, 20, "and MAX(lamport) still holds");
+  await clearTombstone(db, "crow:k-pp");
+});
+
+test("kind precedence: prune then an AUTHORITATIVE delete becomes authoritative (NULL) — and the lamport gate is armed again", async () => {
+  await writeTombstone(db, "crow:k-pd", 10, "prune");
+  await writeTombstone(db, "crow:k-pd", 30);   // the user really deleted it
+  const t = await readTombstone(db, "crow:k-pd");
+  assert.equal(t.kind, null, "the user's delete UPGRADES the tombstone to authoritative");
+  assert.equal(t.lamport_ts, 30);
+  await clearTombstone(db, "crow:k-pd");
+});
+
+test("kind precedence: an AUTHORITATIVE delete then a prune STAYS authoritative — GC must never weaken a user delete", async () => {
+  await writeTombstone(db, "crow:k-dp", 30);          // user delete @30
+  await writeTombstone(db, "crow:k-dp", 10, "prune"); // a later prune of the same crow_id
+  const t = await readTombstone(db, "crow:k-dp");
+  assert.equal(t.kind, null,
+    "STILL authoritative. Letting a prune overwrite it would flip a user delete onto the permissive " +
+    "insert path and a stale insert replay could resurrect the deleted contact.");
+  assert.equal(t.lamport_ts, 30, "and the lower prune lamport did not lower the gate");
+  await clearTombstone(db, "crow:k-dp");
+});
+
+test("kind precedence: delete then delete stays authoritative", async () => {
+  await writeTombstone(db, "crow:k-dd", 10);
+  await writeTombstone(db, "crow:k-dd", 20);
+  assert.equal((await readTombstone(db, "crow:k-dd")).kind, null);
+  await clearTombstone(db, "crow:k-dd");
 });
 
 // ── Task 2: emitContactDelete co-writes the local tombstone ─────────────────
