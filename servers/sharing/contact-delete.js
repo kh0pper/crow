@@ -60,24 +60,35 @@ function isReqId(id) {
  * @param {number} lamportTs the delete's Lamport clock
  * @param {"prune"|null} [kind] null (default) = authoritative user delete
  */
+/**
+ * The tombstone UPSERT as a STATEMENT, so a caller can commit it atomically with other
+ * writes via `db.batch()` (which wraps its statements in one transaction). The advertised-
+ * contact prune needs exactly that: its DELETE and its tombstone MUST land together, or
+ * not at all. See `contact-prune.js` for why neither ordering is safe on its own.
+ * Callers using this bypass writeTombstone's `req:` guard — check `isReqId` yourself.
+ */
+export function tombstoneStatement(crowId, lamportTs, kind = null) {
+  return {
+    sql: `INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(crow_id) DO UPDATE SET
+            lamport_ts = CASE
+              WHEN contact_tombstones.kind = 'prune' AND excluded.kind IS NULL
+                THEN excluded.lamport_ts               -- GC → authoritative: the DELETE's global lamport
+              WHEN contact_tombstones.kind IS NULL AND excluded.kind = 'prune'
+                THEN contact_tombstones.lamport_ts     -- authoritative → GC: the delete's lamport stands
+              ELSE MAX(contact_tombstones.lamport_ts, excluded.lamport_ts) -- same kind ⇒ comparable
+            END,
+            kind = CASE WHEN contact_tombstones.kind = 'prune' AND excluded.kind = 'prune'
+                        THEN 'prune' ELSE NULL END`,
+    args: [crowId, Number(lamportTs) || 0, Math.floor(Date.now() / 1000), kind === "prune" ? "prune" : null],
+  };
+}
+
 export async function writeTombstone(db, crowId, lamportTs, kind = null) {
   if (!db || !crowId || isReqId(crowId)) return;
   try {
-    await db.execute({
-      sql: `INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(crow_id) DO UPDATE SET
-              lamport_ts = CASE
-                WHEN contact_tombstones.kind = 'prune' AND excluded.kind IS NULL
-                  THEN excluded.lamport_ts               -- GC → authoritative: the DELETE's global lamport
-                WHEN contact_tombstones.kind IS NULL AND excluded.kind = 'prune'
-                  THEN contact_tombstones.lamport_ts     -- authoritative → GC: the delete's lamport stands
-                ELSE MAX(contact_tombstones.lamport_ts, excluded.lamport_ts) -- same kind ⇒ comparable
-              END,
-              kind = CASE WHEN contact_tombstones.kind = 'prune' AND excluded.kind = 'prune'
-                          THEN 'prune' ELSE NULL END`,
-      args: [crowId, Number(lamportTs) || 0, Math.floor(Date.now() / 1000), kind === "prune" ? "prune" : null],
-    });
+    await db.execute(tombstoneStatement(crowId, lamportTs, kind));
   } catch { /* never throw into a receive path */ }
 }
 
