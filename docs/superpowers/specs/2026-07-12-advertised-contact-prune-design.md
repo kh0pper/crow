@@ -1,9 +1,61 @@
 # Item 2a — `pruneStaleAdvertisedContacts` resurrection: design
 
-**Status:** spec **v4** — design COMPLETE, implementation NOT started (deliberate stop, §8).
+**Status:** spec **v5** — BUILT and shipped on `fix/advertised-contact-prune-impl`.
 **History:** v1 → R1 **REVISE** (4 CRIT) → v2 → R2 **REJECT** (4 CRIT) → v3 → R3 **REJECT**
-(2 CRIT, *spine confirmed*) → **v4** (folds R3; architecture unchanged).
-**Branch:** `fix/advertised-contact-prune`. **Plan:** `2026-07-11-opus-autonomous-arc.md` §4 Item 2a.
+(2 CRIT, *spine confirmed*) → v4 → **its convergence proof was found FALSE during the build**
+(R4, below) → **v5** (adds `contact_tombstones.kind`; architecture otherwise unchanged).
+**Branch:** `fix/advertised-contact-prune-impl`. **Plan:** `2026-07-11-opus-autonomous-arc.md` §4 Item 2a.
+
+> ### 🔴 R4 — v4's convergence proof was FALSE. Read this before touching the tombstone.
+> v4 (§3 F4) claimed: *"a genuine re-add is emitted at the re-adder's next lamport, which is
+> necessarily `> R.lamport_ts` (its counter advanced past that row when it applied it) ⇒
+> **applies and clears the tombstone.**"*
+>
+> **That clause is false, and it is a fourth permanent-divergence bug** — found by the
+> two-instance durability suite (§5.6's harness) *during the build*, not by any of the three
+> adversarial review rounds. The gate runs on the **PEER**, against the **PEER's** tombstone —
+> which sits at the **PEER's** row lamport. Two instances' row lamports are equal **only when
+> every emit has been applied on both sides.**
+>
+> | step | A | B |
+> |---|---|---|
+> | A adds the bot, emits `insert@1` | row 1, counter 1 | row 1 |
+> | B renames/blocks it → emits `update@3`. **A never receives it** (offline / feed lag) | counter still 1 | row **3** |
+> | advertiser un-advertises ⇒ **both prune** | tombstone **@1** | tombstone **@3** |
+> | user re-adds on A ⇒ `acceptBotInvite` emits `insert@2` | row back | — |
+> | B applies: `2 <= 3` ⇒ **DROPPED** (`instance-sync.js:1549`) | has the bot | **no row, tombstone stands** |
+>
+> **Permanent:** every later emit from A is `op="update"`, dropped *unconditionally* by the
+> tombstone. `sync_conflicts` stays 0. Nothing is logged. Only a manual re-add on B recovers it.
+>
+> Neither existing counter-floor saves it (both verified in code): `emitChange:980-983` floors
+> at the **outgoing row's** lamport — but a re-added row is a **fresh INSERT** (`lamport_ts` 0),
+> so there is nothing to floor against; `_applyEntry:1127` advances on receipt — but A never
+> *received* the update.
+>
+> **Root cause:** a prune tombstone's lamport is a **LOCAL row lamport**. Comparing a **global**
+> insert lamport against it compares **incommensurable things**. An authoritative user delete
+> (#155) is different: it was **BROADCAST**, so its lamport *is* a global emit lamport and the
+> stale-replay gate is correct there.
+>
+> **v5's fix — `contact_tombstones.kind`** (gen 7 covers it; no second bump):
+> - `NULL` = **authoritative** (a user delete) — keeps the `insert <= tomb.lamport_ts ⇒ drop` gate.
+> - `'prune'` = **garbage collection** — blocks `op="update"` (which is *all* of defect D3, since
+>   every resurrection vector is an update) but **never gates an `insert` on lamport.**
+> - `ON CONFLICT` resolves **authoritative-always-wins**, so a GC write can never weaken a real
+>   user delete into a permissive gate.
+>
+> Worst case under v5: a redelivered *original* insert re-creates the row, and the next render
+> simply **re-prunes it** — self-healing, no divergence. Safe because *every* `op="insert"`
+> emitter was enumerated: `accept-bot-invite.js:124` (a genuine re-add — **must** land);
+> `contact-promote.js:237` (an accepted message-request — should land); `contacts/api-handlers.js:124,414`
+> (manual/vCard — `advertised_by` NULL ⇒ never prunable ⇒ unreachable); `backfillContactsOnce`
+> (excludes `is_bot=1` **and** emits `op="update"` — doubly unreachable).
+>
+> **The lesson, again:** the unit test that *names* the property ("tombstone lamport === the row's
+> own") stayed **GREEN** under the fresh-counter mutation, because its harness passes a null
+> `managers` and has no SyncManager. Only a **two-instance mutual prune** can see this class of
+> bug. §5.6 was right to be mandatory — and it was still not enough on its own.
 **Constrains this:** `2026-07-09-contact-deletion-and-handshake-name-design.md` (PR #155) §2.6 + R2/MAJOR-2.
 
 > **⚠️ Two scope changes vs the plan, both forced by review:**
@@ -383,7 +435,23 @@ at `user_version = 6`).
 
 ---
 
-## 8. Status: design complete, implementation deliberately NOT started
+## 8. Status: BUILT (2026-07-12) — see the R4 block at the top
+
+The build shipped F1–F5 as five commits plus a sixth carrying the **R4 fix** (`contact_tombstones.kind`)
+and the two-instance durability suite that found it. F6 stayed dropped. The dry-run gate was re-run
+**from the bump-bearing branch** and passed on all four prod DBs (`~/.crow/p4/2a-prune/dryrun-branch-gen7.txt`):
+`user_version` 6→7, zero row-count deltas, nothing lost, and all four *existing* tombstones migrate to
+`kind = NULL` (**authoritative** — the safe direction; a `'prune'` default would have weakened Kevin's
+real user-deletes).
+
+**A blind spot in the gate itself, found here and filed:** `scripts/schema-migration-dryrun.sh` diffs
+`sqlite_master` **object names**, so `ALTER TABLE … ADD COLUMN` is **invisible** to it. It proves nothing
+was *lost*; it cannot prove your migration *happened*. Both new columns were therefore verified positively
+against a migrated copy by hand. **Fix: add a per-table `PRAGMA table_info` diff.**
+
+<details><summary>Original v4 stop-note (kept — its reasoning was right)</summary>
+
+### Design complete, implementation deliberately NOT started
 
 Three adversarial rounds killed three designs; **v4's architecture was attacked directly by R3 and
 held.** What remains is a build with a genuinely dangerous tail: a `SCHEMA_GENERATION` bump against
@@ -396,7 +464,9 @@ deliverable of this session is the vetted design plus three production bugs foun
 §6.3, §7). The build is a clean, well-specified fresh-session job.
 
 **Sequencing recommendation:** fix the rail (§7) **first**, as its own small PR — it gates 2b as
-much as 2a.
+much as 2a. *(Done — PR #176.)*
+
+</details>
 
 ---
 
@@ -412,7 +482,19 @@ much as 2a.
   regression, the unreachable F6 clause, the **init-db rail hazard (§7)**, the un-measured MPA DB,
   and that `getBotDirectory` prunes as a side effect of an *add*.
 
+- **R4 (the build's own two-instance durability suite) — v4's convergence proof FALSE, 1 CRIT.**
+  Killed v4's *tombstone semantics* (not its spine). **No review round caught this** — three
+  adversarial Opus rounds read the proof and accepted it. Only executable, two-instance,
+  *mutual-prune* code found it. See the 🔴 R4 block at the top of this document.
+
 Every CRITICAL from every round was **independently re-verified by the authoring session against the
 code and the live DBs before folding** — the reviewers are not trusted either. Three separate times a
 reviewer caught §0 measuring the wrong table; that is the Item-1 lesson (*compute host-state rules
 against the real host*) refusing to be learned cheaply.
+
+**And the R4 lesson, which is sharper:** three rounds of adversarial *prose* review signed off on a
+convergence proof that a *test* demolished in one run. Prose review is necessary here and it is not
+sufficient. For any distributed-state change, the acceptance gate must be **executable and
+multi-instance** — and it must exercise the *mutual* case, because the single-actor case is exactly
+where these bugs hide (the unit test that names the property stayed green under the mutation that
+breaks it).
