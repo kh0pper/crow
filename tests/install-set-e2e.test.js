@@ -92,6 +92,34 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * A barrier the install-set runner parks on at the TOP of every member
+ * iteration. It is a thenable, not a bare promise, so the test can observe the
+ * runner's interaction with it as a mechanism rather than infer it from timing:
+ *   - `awaited` counts every `await barrier` the runner performs (one per member),
+ *   - `reached` resolves the instant the runner first parks on it, which is what
+ *     lets the busy-gate assertions below run provably mid-flight with zero
+ *     wall-clock sleeping,
+ *   - `release()` unparks the runner and is idempotent.
+ */
+function makeBarrier() {
+  let release;
+  let notifyReached;
+  const gate = new Promise((r) => { release = r; });
+  const reached = new Promise((r) => { notifyReached = r; });
+  const barrier = {
+    awaited: 0,
+    reached,
+    release,
+    then(onFulfilled, onRejected) {
+      barrier.awaited++;
+      notifyReached();
+      return gate.then(onFulfilled, onRejected);
+    },
+  };
+  return barrier;
+}
+
 test("install-set: sequential, continue-on-error, exactly one deferred restart, live gates", async (t) => {
   const home = scratchHome();
   process.env.CROW_HOME = home;
@@ -107,9 +135,21 @@ test("install-set: sequential, continue-on-error, exactly one deferred restart, 
     _setAppBundlesForTest,
     _setCollectionsPathForTest,
     _setRestartHookForTest,
-    _setInstallSetStepDelayForTest,
+    _setInstallSetBarrierForTest,
+    _getInstallSetBarrierForTest,
   } = await import("../servers/gateway/routes/bundles.js");
   const { loadCollections } = await import("../servers/gateway/dashboard/panels/extensions/collections.js");
+
+  // Production no-op, proven by mechanism (not by a comment): on a fresh import,
+  // before anything installs a barrier, the module-private barrier is null. The
+  // runner's only interaction with it is `if (_installSetBarrier) await
+  // _installSetBarrier` — and the thenable spy below proves that branch is live
+  // and gated on the barrier's truthiness. null is falsy ⇒ in production the
+  // branch is never entered: no await, no timer.
+  assert.equal(
+    _getInstallSetBarrierForTest(), null,
+    "production default: the install-set barrier must be null on a fresh import, so the runner's `if (barrier) await barrier` branch is never entered",
+  );
 
   // Fixture bundle source tree (this repoints APP_BUNDLES — the app's real
   // bundles/ tree is never touched or read).
@@ -143,16 +183,22 @@ test("install-set: sequential, continue-on-error, exactly one deferred restart, 
 
   _setAppBundlesForTest(fixtureBundlesDir);
   _setCollectionsPathForTest(fixtureCollectionsPath);
-  // Real (small) macrotask pacing between members — see the seam's doc
-  // comment in bundles.js for why this is required to make the busy-gate
-  // assertion below observable at all over real HTTP, rather than flaky.
-  _setInstallSetStepDelayForTest(150);
+  // Park the set runner at the top of every member iteration. This replaces the
+  // old wall-clock step-delay seam: the busy-gate assertions below no longer
+  // race a ~450ms timer, they run while the runner is provably parked.
+  const barrier = makeBarrier();
+  _setInstallSetBarrierForTest(barrier);
   const restartCalls = [];
   _setRestartHookForTest((delayMs) => restartCalls.push(delayMs));
 
   t.after(() => {
     _setRestartHookForTest(null);
-    _setInstallSetStepDelayForTest(0);
+    // Idempotent release (the happy path already released it after the busy-gate
+    // assertions). This is the failure story: if an assertion throws while the
+    // runner is parked, the runner never reaches the `finally` that calls
+    // endInstallSet() and the busy flag leaks into the next test.
+    barrier.release();
+    _setInstallSetBarrierForTest(null);
     try { rmSync(fixtureBundlesDir, { recursive: true, force: true }); } catch {}
     try { rmSync(home, { recursive: true, force: true }); } catch {}
   });
@@ -176,8 +222,24 @@ test("install-set: sequential, continue-on-error, exactly one deferred restart, 
     assert.equal(plan.length, 3);
     assert.ok(plan.every((p) => p.action === "install"), `expected all 3 members to plan as "install": ${JSON.stringify(plan)}`);
 
+    // Wait until the runner has actually parked on the barrier. From here the
+    // busy-gate assertions are provably mid-flight — not "probably within 450ms".
+    await barrier.reached;
+
+    // The barrier gates the TOP of each iteration, INCLUDING the first: the
+    // runner must park BEFORE installing member 1, otherwise the first member's
+    // install races these busy-gate fetches.
+    assert.equal(barrier.awaited, 1, "the runner must await the barrier once, at the top of the first member's iteration");
+    assert.equal(
+      existsSync(join(home, "bundles", "fx-panel")), false,
+      "the barrier must gate the TOP of the first iteration — fx-panel was already installed by the time the runner reached the barrier",
+    );
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(home, "installed.json"), "utf8")), [],
+      "no member may be installed while the runner is parked on the barrier",
+    );
+
     // Busy gate: a second POST while the first set is still running must 409.
-    // The step-delay seam above keeps the job alive for ~450ms so this isn't a race.
     const res2 = await fetch(base + "/bundles/api/install-set", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -207,6 +269,11 @@ test("install-set: sequential, continue-on-error, exactly one deferred restart, 
     assert.equal(res4.status, 409, `a single /uninstall while a set is running must 409: ${JSON.stringify(body4)}`);
     assert.match(body4.error, /collection install is in progress/i);
     assert.equal(body4.job_id, undefined, "a rejected /uninstall must not create a job");
+
+    // Busy-gate assertions are done — unpark the runner so the set can finish.
+    // This MUST happen here, not only in t.after(): a runner left parked would
+    // make the poll loop below burn all 100 iterations and fail every time.
+    barrier.release();
 
     // Poll the shared job until it finishes.
     let job;
@@ -241,6 +308,11 @@ test("install-set: sequential, continue-on-error, exactly one deferred restart, 
     assert.ok(ids.includes("fx-panel"), `installed.json missing fx-panel: ${JSON.stringify(ids)}`);
     assert.ok(ids.includes("fx-skill"), `installed.json missing fx-skill: ${JSON.stringify(ids)}`);
     assert.ok(!ids.includes("fx-broken"), `installed.json must NOT include the failed fx-broken: ${JSON.stringify(ids)}`);
+
+    // One await per member — the barrier gates the top of EVERY iteration, so a
+    // future member added to the set cannot slip past it.
+    assert.equal(barrier.awaited, 3, "the runner must await the barrier once per member (3 members)");
+    assert.equal(_getInstallSetBarrierForTest(), barrier, "the barrier setter is the only thing that mutates the module-private barrier");
   } finally {
     server.close();
   }

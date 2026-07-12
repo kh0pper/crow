@@ -23,9 +23,7 @@ import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync, statSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
-import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { join, dirname } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
 import { checkGpuArchCompatible } from "../gpu-arch.js";
@@ -40,6 +38,16 @@ import { invalidateProvidersCache } from "../../shared/providers.js";
 import { writeSetting } from "../dashboard/settings/registry.js";
 import { getCollection } from "../dashboard/panels/extensions/collections.js";
 import { beginInstallSet, endInstallSet, isInstallSetRunning } from "../install-lock.js";
+import {
+  CROW_HOME,
+  BUNDLES_DIR,
+  MCP_ADDONS_PATH,
+  APP_ROOT,
+  APP_BUNDLES,
+  getManifest,
+  needsConfigKeys,
+  _setAppBundlesForTest,
+} from "../bundles-config.js";
 
 /**
  * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
@@ -110,27 +118,18 @@ async function unseedProfile(db, kind, seed, log) {
 const CONSENT_TOKEN_TTL_SECONDS = 15 * 60; // 15 min — covers slow image pulls
 const CONSENT_TOKEN_SCHEMA_VERSION = 1;
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-// Respect the instance's CROW_HOME (matches proxy.js resolveCrowHome). Without
-// this, installs on an alternate instance (CROW_HOME=~/.crow-mpa, ~/.crow-finance)
-// wrote bundle files + mcp-addons.json into the MAIN ~/.crow, re-coupling the
-// instances. Falls back to ~/.crow when unset (the main instance).
-const CROW_HOME = process.env.CROW_HOME || join(homedir(), ".crow");
-const BUNDLES_DIR = join(CROW_HOME, "bundles");
+// CROW_HOME / BUNDLES_DIR / APP_ROOT / APP_BUNDLES / getManifest / needsConfigKeys and
+// the _setAppBundlesForTest seam all live in ../bundles-config.js — the single source of
+// truth (imported here as ESM live bindings, so _setAppBundlesForTest repoints the one
+// and only APP_BUNDLES binding for every reader). Re-exported below for pre-existing
+// importers (tests/bundles-install-set.test.js, tests/install-set-e2e.test.js).
 const SKILLS_DIR = join(CROW_HOME, "skills");
 const PANELS_DIR = join(CROW_HOME, "panels");
-const MCP_ADDONS_PATH = join(CROW_HOME, "mcp-addons.json");
 const PANELS_CONFIG_PATH = join(CROW_HOME, "panels.json");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
-const APP_ROOT = resolve(__dirname, "../../..");
-// `let` (not `const`): _setAppBundlesForTest below repoints this at a scratch
-// source tree so install-set E2E tests never install real bundles onto the
-// operator's host (see tests/install-set-e2e.test.js).
-let APP_BUNDLES = join(APP_ROOT, "bundles");
 const APP_ENV_PATH = join(APP_ROOT, ".env");
 
-/** Test-only: repoint the repo bundle-source root (normally APP_ROOT/bundles). */
-export function _setAppBundlesForTest(path) { APP_BUNDLES = path; }
+export { needsConfigKeys, _setAppBundlesForTest };
 
 // Test-only: override the collections.json path read by POST /install-set
 // (getCollection() defaults to the real registry/collections.json, which has
@@ -145,15 +144,22 @@ export function _setCollectionsPathForTest(path) { _collectionsPathOverride = pa
 let _restartHookForTest = null;
 export function _setRestartHookForTest(fn) { _restartHookForTest = fn; }
 
-// Test-only: pace the install-set loop with a real setTimeout between members.
-// Default 0 = no delay (identical to production behavior). Without this, every
-// fixture install in the E2E suite is pure synchronous file I/O with no real
-// async wait, so the whole set finishes inside the microtask queue before a
-// concurrent HTTP request's socket data can even be read — the busy-gate
-// (second POST while the set runs → 409) would then be untestable over real
-// HTTP: there is no run happening for the second call to observe.
-let _installSetStepDelayMs = 0;
-export function _setInstallSetStepDelayForTest(ms) { _installSetStepDelayMs = ms; }
+// Test-only: a barrier the install-set runner awaits at the TOP of every member
+// iteration, including the first. Without it, every fixture install in the E2E
+// suite is pure synchronous file I/O with no real async wait, so the whole set
+// finishes before a concurrent HTTP request's socket data can even be read —
+// the busy-gate (second POST while the set runs → 409) would be untestable over
+// real HTTP: there is no run happening for the second call to observe. A test
+// installs a pending promise to park the runner mid-set deterministically, then
+// resolves it; this replaces an earlier wall-clock step-delay seam.
+//
+// Production default is null, which makes `if (_installSetBarrier)` in the
+// runner false — the branch is never entered, so production takes no await and
+// arms no timer. `_getInstallSetBarrierForTest` exists so a test can prove that
+// default by mechanism rather than trusting this comment.
+let _installSetBarrier = null;
+export function _setInstallSetBarrierForTest(promiseOrNull) { _installSetBarrier = promiseOrNull || null; }
+export function _getInstallSetBarrierForTest() { return _installSetBarrier; }
 
 // -----------------------------------------------------------------------
 // Cross-host manifest support (Phase 5-MVP)
@@ -585,16 +591,6 @@ function getInstalled() {
 function saveInstalled(arr) {
   mkdirSync(dirname(INSTALLED_PATH), { recursive: true });
   writeFileSync(INSTALLED_PATH, JSON.stringify(arr, null, 2));
-}
-
-/** Read manifest.json for a bundle from app source */
-function getManifest(bundleId) {
-  const manifestPath = join(APP_BUNDLES, bundleId, "manifest.json");
-  try {
-    return JSON.parse(readFileSync(manifestPath, "utf8"));
-  } catch {
-    return null;
-  }
 }
 
 /** Run a shell command safely with execFile */
@@ -1716,31 +1712,6 @@ export function planInstallSet(collection) {
 }
 
 /**
- * Manifest-required env keys that are still EMPTY in the bundle's written .env.
- * Keys with a value (including .env.example defaults — DB passwords, secret keys)
- * count as configured and are NEVER surfaced: those are consumed at first container
- * boot, and changing them afterwards breaks the app or strands its data.
- * @param {object} [envOverride] test seam — the parsed .env
- */
-export function needsConfigKeys(bundleId, envOverride = null) {
-  const man = getManifest(bundleId);
-  const required = (man?.env_vars || []).filter((v) => v.required).map((v) => v.name);
-  if (required.length === 0) return [];
-  let env = envOverride;
-  if (!env) {
-    env = {};
-    const envPath = join(BUNDLES_DIR, bundleId, ".env");
-    if (existsSync(envPath)) {
-      for (const line of readFileSync(envPath, "utf8").split("\n")) {
-        const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
-        if (m) env[m[1]] = m[2];
-      }
-    }
-  }
-  return required.filter((k) => !env[k] || env[k].trim() === "");
-}
-
-/**
  * @returns {Router}
  */
 export default function bundlesRouter() {
@@ -1936,8 +1907,9 @@ export default function bundlesRouter() {
         appendLog(job, `Installing collection '${collection.name}' (${plan.filter((p) => p.action === "install").length} to install, ${plan.filter((p) => p.action === "skip").length} skipped)`);
 
         for (const member of collection.members) {
-          // Test-only pacing (see _setInstallSetStepDelayForTest) — 0 in production.
-          if (_installSetStepDelayMs > 0) await new Promise((r) => setTimeout(r, _installSetStepDelayMs));
+          // Test-only barrier (see _setInstallSetBarrierForTest) — null in
+          // production, so this branch is never entered: no await, no timer.
+          if (_installSetBarrier) await _installSetBarrier;
           // Live gate re-check: getInstalled() has grown as earlier members landed,
           // so cumulative RAM commitments and intra-set dependencies are enforced for
           // real — not against a stale pre-set snapshot.
@@ -2328,12 +2300,19 @@ export default function bundlesRouter() {
     // Also configure the MCP child, which reads mcp-addons.json — not this .env.
     const mcpUpdated = applyEnvToMcpAddons(bundle_id, env_vars);
 
+    // RE-DERIVE config state from the files we just wrote and hand it back: the
+    // client must not decide "configured" itself. submitConfigureOnly guards only
+    // the all-blank case and its `if (inp && inp.value)` accepts whitespace (which
+    // needsConfigKeys trims away), so filling 1 of 12 keys still 200s — a client
+    // that cleared its badge on any 200 would hide a still-unconfigured bundle.
+    // Key NAMES only; never values (D5).
     res.json({
       ok: true,
       message: mcpUpdated
         ? "Environment variables saved — restart the gateway to apply them to the MCP server"
         : "Environment variables saved",
       needs_restart: mcpUpdated,
+      needs_config: needsConfigKeys(bundle_id),
     });
   });
 
