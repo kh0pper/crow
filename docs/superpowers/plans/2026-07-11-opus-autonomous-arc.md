@@ -250,11 +250,25 @@ integrity — it returns `ok` for a table that was rebuilt having silently lost 
 1. Disable auto-update on all boxes FIRST (Settings → Updates, or set
    `auto_update_enabled=false`); confirm each box reports it disabled.
 2. Back up **all four** DBs (`crow.db.pre-<slug>-<ts>`), verify each exists and is non-zero.
-3. **DRY-RUN GATE (new, mandatory):** run `node scripts/init-db.js` against a **COPY** of each
-   of the four prod DBs and **diff `sqlite_master` + per-table `COUNT(*)` pre/post**. Zero
-   unexplained deltas is a merge gate; ship the diff as evidence. (Stop the gateway before any
-   real run — init-db does heavy DDL against a DB the gateway holds open, and
-   `"database is locked"` is a documented recurring failure on this fleet.)
+3. **DRY-RUN GATE (new, mandatory) — `scripts/schema-migration-dryrun.sh`.** It copies each DB,
+   runs `init-db` against the copy, and diffs `sqlite_master` + per-table `COUNT(*)` pre/post.
+   Zero unexplained deltas is the merge gate; ship the output as evidence. **Run it from the
+   bump-bearing branch** (that is the point — it must exercise YOUR migration):
+   ```
+   grackle "cp ~/.crow/data/crow.db /tmp/g.db"; scp kh0pp@100.121.254.89:/tmp/g.db /tmp/grackle.db
+   ssh black-swan "cp ~/.crow/data/crow.db /tmp/b.db"; scp black-swan:/tmp/b.db /tmp/bswan.db
+   scripts/schema-migration-dryrun.sh crow ~/.crow/data/crow.db mpa ~/.crow-mpa/data/crow.db \
+     grackle /tmp/grackle.db bswan /tmp/bswan.db
+   ```
+   For a well-behaved additive migration the ONLY deltas are your new column/table and
+   `user_version`; every row count is unchanged. Any unexplained row-count delta or lost table
+   is a STOP.
+   **Baseline established 2026-07-12 (gen 6, unmodified main): the gate PASSES on all four prod
+   DBs — zero schema deltas, zero row-count deltas, nothing lost.** So the 8 `DROP TABLE`
+   rebuild-migrations are empirically **inert on this fleet's real data**, and a bump is
+   de-risked — *provided you re-run the gate on your branch and it still passes.*
+   (Stop the gateway before any REAL migration run — init-db does heavy DDL against a DB the
+   gateway holds open, and `"database is locked"` is a documented recurring failure here.)
 4. Merge.
 5. Deploy manually, in the §3 runbook order, one box at a time; verify health +
    `PRAGMA integrity_check` + **the per-table row-count diff** + the migration's own acceptance
