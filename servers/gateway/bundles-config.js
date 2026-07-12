@@ -109,8 +109,16 @@ const isSet = (v) => typeof v === "string" && v.trim() !== "";
  *   3. ambient process.env            — same spawn: a key supplied via the gateway's
  *                                       own env / systemd Environment= is real config
  *                                       that appears in neither file.
- * (2) and (3) apply ONLY to bundles that register an MCP server — the gateway's
- * environment is not a Docker container's.
+ * (2) and (3) apply ONLY to bundles that register an MCP server. NOT because a docker
+ * bundle can't see the gateway's environment — it can: run() execFiles `docker compose`
+ * with no `env` option, so the child inherits process.env, and Compose interpolation
+ * prefers the shell env over the .env file. But a var consumed via `env_file:` (the
+ * common shape) genuinely does NOT see it, and we cannot tell the two apart from here.
+ * So for docker we trust only the .env — the conservative read. The cost is a possible
+ * false positive: a docker bundle whose required key is set solely in the gateway's
+ * systemd Environment= and left blank in .env would work yet still be badged. Zero
+ * instances of that across the fleet today. Do not "simplify" this by extending ambient
+ * lookup to docker bundles without handling env_file:.
  *
  * Precedence is resolved over *non-empty* values: a blank line in a copied
  * .env.example cannot mask a live mcp-addons value, because an MCP child never reads
