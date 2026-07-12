@@ -53,8 +53,10 @@ test("shouldSyncRow: contacts carve-outs", () => {
   assert.equal(ok({ crow_id: "crow:a", origin: "local-bot" }), false, "local-bot never syncs");
 });
 
-test("EXCLUDED_COLUMNS.contacts strips id + created_at + verified + last_seen", () => {
-  assert.deepEqual([...EXCLUDED_COLUMNS.contacts].sort(), ["created_at", "id", "last_seen", "verified"]);
+// `origin` joined the list in item 2a / F3 — it is a local judgment, not a
+// portable fact. Its own coverage lives in tests/contacts-origin-wire.test.js.
+test("EXCLUDED_COLUMNS.contacts strips id + created_at + verified + last_seen + origin", () => {
+  assert.deepEqual([...EXCLUDED_COLUMNS.contacts].sort(), ["created_at", "id", "last_seen", "origin", "verified"]);
 });
 
 // ── Task 2: _applyContact ──────────────────────────────────────────────────
