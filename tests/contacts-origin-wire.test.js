@@ -136,6 +136,50 @@ test("F3 apply (local row PRESENT as local-bot): an inbound `origin:advertised` 
     "a peer must NOT be able to relabel the host's own bot as prunable");
 });
 
+// ── F2: provenance is set at INSERT only, never by a later UPDATE ───────────
+
+test("F2 apply (local row PRESENT, manually pasted): an inbound UPDATE must NOT stamp advertised_by onto it", async () => {
+  // A peer that added this bot FROM A DIRECTORY carries advertised_by=X on the wire.
+  // If apply wrote that on a LWW UPDATE, it would silently make THIS instance's
+  // hand-pasted contact garbage-collectable — breaking #155 §2.6 (pasted-invite bots
+  // must not be lost). Provenance is a fact about how a row was ACQUIRED HERE; it is
+  // not the sender's to assign after the fact.
+  const { mgr, db } = makeManager();
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, is_bot, advertised_by_instance_id, lamport_ts) VALUES ('crow:f2paste','e',?,'Pasted Bot',1,NULL,10)",
+    args: [secp(404)],
+  });
+  await mgr._applyEntry(REMOTE_ID, signedEntry("contacts", "update", {
+    crow_id: "crow:f2paste",
+    ed25519_pubkey: "e",
+    secp256k1_pubkey: secp(404),
+    display_name: "Pasted Bot (renamed on the peer)",
+    advertised_by_instance_id: "inst-advertiser-X",
+  }, 50));
+  const row = (await db.execute({ sql: "SELECT advertised_by_instance_id AS adv, display_name FROM contacts WHERE crow_id='crow:f2paste'" })).rows[0];
+  assert.equal(row.display_name, "Pasted Bot (renamed on the peer)", "the update itself applied (LWW)");
+  assert.equal(row.adv, null,
+    "a peer must NOT be able to make this instance's hand-pasted contact prunable");
+});
+
+test("F2 apply (local row ABSENT): an inbound INSERT DOES carry advertised_by — convergence depends on it", async () => {
+  // The negative above must not be over-applied: a peer learning the contact for the
+  // FIRST time has to receive the provenance, or it can never prune independently and
+  // spec §5.7's convergence fails.
+  const { mgr, db } = makeManager();
+  await mgr._applyEntry(REMOTE_ID, signedEntry("contacts", "insert", {
+    crow_id: "crow:f2sync",
+    ed25519_pubkey: "e",
+    secp256k1_pubkey: secp(405),
+    display_name: "Synced Bot",
+    is_bot: 1,
+    advertised_by_instance_id: "inst-advertiser-X",
+  }, 60));
+  const row = (await db.execute({ sql: "SELECT advertised_by_instance_id AS adv FROM contacts WHERE crow_id='crow:f2sync'" })).rows[0];
+  assert.equal(row.adv, "inst-advertiser-X",
+    "provenance MUST cross the wire on INSERT — without it the receiver can never prune");
+});
+
 // ── F3 REGRESSION GUARD ─────────────────────────────────────────────────────
 // This is the test that proves the strip runs AFTER the gate. It passed BEFORE
 // the F3 change too — that is exactly its job: it must still pass AFTER.

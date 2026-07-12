@@ -299,18 +299,50 @@ that passes a peer's tombstone gate (`:1538-1539`), so a re-add after a prune ac
 invite → x-only pubkey → the instance advertising it. Authoritative and unspoofable (never from the
 form).
 
-### ~~F6~~ — **DROPPED** (R3/MAJOR-3)
+### F6 — dropped by R3, **RESTORED by R5/CRITICAL-2** (the premise had been deleted)
 
-v3 proposed guarding the same-secp rebind (`:1562-1582`) against a standing tombstone. R3 proved
-that clause is **unreachable**: the tombstone gate (`:1536-1541`) already returns for `op="update"`
-and for `insert <= tomb.lamport_ts`, so by the time control reaches the rebind, "tombstone lamport ≥
-entry's" is **false by construction**. It would have shipped as dead code with a green test.
+> #### 🔴 R5 — "F6 is unreachable" was true of v3 and FALSE of v5. Nobody re-derived it.
+> R3 dropped F6 (a guard on the same-secp rebind) as **unreachable**, and it was right *at the time*:
+> the tombstone gate returned for `op="update"` **and** for `insert <= tomb.lamport_ts`, so by the
+> time control reached the rebind, "a tombstone is standing" was **false by construction**.
+>
+> **`kind='prune'` deleted exactly that premise.** A prune tombstone deliberately does **not** gate an
+> `insert` on lamport (that is R4's whole fix) — so a standing GC tombstone now coexists with a
+> reachable rebind, and F6's clause went from dead code to a live hole in one commit. **The dropped
+> finding was never re-derived against the design that replaced it.**
+>
+> **The resurrection, on top of §5 test 10's own state:**
+> 1. the contact is pruned (GC tombstone standing, row gone);
+> 2. the bot is un-advertised, **not dead** — it DMs us, and §5.10 files that under a `req:<secp>`
+>    placeholder row **carrying the message**;
+> 3. a **replayed ORIGINAL `insert`** arrives (feed replay after a re-pair or a DB restore — this
+>    fleet has had both). It misses on `crow_id`, matches the placeholder on **secp**, and **REBINDS
+>    it**: the pruned bot is back, **carrying that DM**.
+> 4. And now it *has* a message ⇒ prune **rule 5** (`HAVING COUNT(m.id) = 0` — "the prune never
+>    destroys history") **blocks it from EVER being re-pruned.**
+>
+> So the claim that licenses letting replayed inserts through — *"worst case a redelivered ORIGINAL
+> insert re-creates the row and the next render simply RE-PRUNES it. Self-healing."* — was **FALSE**.
+> Defect **D3**, restored.
+>
+> **The fix (narrow, and verified against the schema):** `contacts` is `UNIQUE` on **`crow_id` only**
+> — there is no unique index on `secp256k1_pubkey` — so a `crow:<botid>` row and a `req:<secp>` row
+> may coexist. When a **`kind='prune'`** tombstone stands **and** the same-secp match is a **`req:`**
+> placeholder, skip the rebind and fall through to a plain INSERT. The re-add lands **fresh,
+> zero-message, and RE-PRUNABLE** (self-healing genuinely restored) and the DM stays on the message
+> request — which is exactly the semantic §5.10 documents. The rebind is **not** disabled generally:
+> it remains load-bearing for the ordinary `req:` → `crow:` handshake promotion.
+>
+> **The lesson:** a finding dropped as *unreachable* is only as good as the premise that made it so.
+> When a later change deletes that premise, the dropped finding is **live again** — and nothing in
+> the process re-opens it. Record the premise *with* the dismissal, and re-check it on every change
+> that touches the gate it depends on.
 
 The *other* half — the rebind promoting a `req:` pending row to a full contact because
-`request_status` is not in `EXCLUDED_COLUMNS` — is on inspection **arguably correct** Phase-3
-behaviour (only the operator's own instances can emit, so the `insert` means *the user accepted this
-bot on another instance*, and contacts follow the user). **Not fixed here; filed for investigation
-(§6.4)** rather than "hardened" on a hunch. F4's durability does not depend on it.
+`request_status` is not in `EXCLUDED_COLUMNS` — is, **for a live (un-pruned) contact**, still
+**arguably correct** Phase-3 behaviour (only the operator's own instances can emit, so the `insert`
+means *the user accepted this bot on another instance*, and contacts follow the user). That path is
+untouched. **Filed for investigation (§6.4)** rather than "hardened" on a hunch.
 
 ---
 

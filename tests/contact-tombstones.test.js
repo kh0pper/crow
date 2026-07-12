@@ -148,6 +148,28 @@ test("kind precedence: prune then an AUTHORITATIVE delete becomes authoritative 
   await clearTombstone(db, "crow:k-pd");
 });
 
+// ── R5/CRITICAL-1: lamports are commensurable only WITHIN a kind ─────────────
+//
+// A prune's lamport is the pruned row's LOCAL row lamport. An authoritative
+// tombstone's lamport is a GLOBAL emit lamport, and it is the sole input to the
+// `insert <= tomb.lamport_ts ⇒ drop` gate (instance-sync.js `_applyContact`). A
+// blanket `MAX(lamport_ts, excluded.lamport_ts)` on the kind TRANSITION launders the
+// local number into the global field — arming the gate at a value no emitter can
+// ever exceed. The test above (prune@10 → auth@30) could not see this: MAX happens
+// to give the right answer whenever the authoritative delete's lamport is the higher
+// of the two. Invert the magnitudes and the defect is plain.
+test("kind precedence: prune@500 then an AUTHORITATIVE delete@21 takes the DELETE's lamport (21) — a local row lamport must never become the global insert gate", async () => {
+  await writeTombstone(db, "crow:k-launder", 500, "prune"); // a LOCAL row lamport (this instance saw many updates)
+  await writeTombstone(db, "crow:k-launder", 21);           // the user's REAL delete, broadcast at a global lamport of 21
+  const t = await readTombstone(db, "crow:k-launder");
+  assert.equal(t.kind, null, "the user's delete upgrades the tombstone to authoritative");
+  assert.equal(Number(t.lamport_ts), 21,
+    "the SURVIVING kind's own lamport wins. MAX(500,21)=500 would arm the stale-insert gate at 500 — a number " +
+    "no genuine re-add from the deleting instance can exceed — so every re-add is dropped, and every later " +
+    "`update` from the re-adder is dropped unconditionally by the same tombstone: permanent silent divergence.");
+  await clearTombstone(db, "crow:k-launder");
+});
+
 test("kind precedence: an AUTHORITATIVE delete then a prune STAYS authoritative — GC must never weaken a user delete", async () => {
   await writeTombstone(db, "crow:k-dp", 30);          // user delete @30
   await writeTombstone(db, "crow:k-dp", 10, "prune"); // a later prune of the same crow_id

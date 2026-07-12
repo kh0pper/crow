@@ -30,7 +30,7 @@ import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import { acceptBotInvite } from "../servers/sharing/accept-bot-invite.js";
 import { pruneStaleAdvertisedContacts } from "../servers/gateway/dashboard/panels/messages/data-queries.js";
 import { emitContactChange, __setEmitSinkForTest } from "../servers/sharing/contact-sync.js";
-import { readTombstone } from "../servers/sharing/contact-delete.js";
+import { readTombstone, deleteContactLocal } from "../servers/sharing/contact-delete.js";
 import { deriveBotIdentity, generateBotInviteCode, parseBotInviteCode } from "../servers/sharing/identity.js";
 import { normalizePubkey } from "../servers/sharing/pubkey-util.js";
 import { handleIncomingRequest } from "../servers/sharing/boot.js";
@@ -376,6 +376,94 @@ test("6d. a re-add CONVERGES even when the peer's tombstone outran it (the peer 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// §5 test 6e — R5/CRITICAL-1: the LAUNDERED LAMPORT.
+//
+// `writeTombstone`'s ON CONFLICT kept `MAX(lamport_ts, excluded.lamport_ts)` across a
+// KIND TRANSITION, and `_applyContact`'s delete branch passed `Math.max(tomb.lamport_ts,
+// lamportTs)` regardless of the standing tombstone's kind. Both launder a prune's LOCAL
+// row lamport into the AUTHORITATIVE tombstone — the one field whose only consumer is the
+// `insert <= tomb.lamport_ts ⇒ drop` gate, which is only meaningful for GLOBAL emit
+// lamports. The two numbers are not commensurable, so a prune that ran at a high local row
+// lamport arms the gate at a value the deleting instance's own re-add can never exceed.
+// `emitContactDelete` sends only `{crow_id}` — a row with no `lamport_ts` — so emitChange's
+// counter floor does not apply to deletes: a lagging or post-DB-recovery instance really
+// does emit its delete at a low lamport. Result: the genuine re-add is dropped, every later
+// `op="update"` from the re-adder is dropped unconditionally by the same tombstone, and the
+// two instances diverge PERMANENTLY with zero sync_conflicts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("6e. a prune's LOCAL lamport must not be laundered into an authoritative tombstone — a user delete at a LOW lamport still lets the genuine re-add land", async () => {
+  const f = newFleet();
+  const c0 = { a: await conflicts(f.A), b: await conflicts(f.B) };
+
+  // A adds the bot; B receives it by sync. Both rows @L.
+  await addFromDirectoryAndSync(f, BOT_CODE, BOT_CROW_ID);
+
+  // A sees several updates B never does (offline / feed lag) ⇒ A's ROW lamport climbs
+  // far above anything B's counter knows about. Every one of these is an `op="update"`
+  // (rename, block, unblock…) — the ordinary traffic of a contact.
+  for (const name of ["A1", "A2", "A3", "A4", "A5"]) {
+    const sent = f.wire.length;
+    await emitUpdate(f.A, BOT_CROW_ID, { display_name: name });
+    f.wire.splice(sent); // never reaches B
+  }
+  const aRowTs = Number((await row(f.A, BOT_CROW_ID)).lamport_ts);
+
+  // B is a post-DB-recovery instance: `sync_state` was rebuilt and its counter sits low.
+  // (crow's own fleet has had exactly this — a DB recovery + a re-pair.)
+  await setCounter(f.B, 2);
+
+  // ADV un-advertises ⇒ A prunes. Its tombstone carries A's HIGH local row lamport.
+  await prune(f.A, directory());
+  const pruneTomb = await readTombstone(f.A.db, BOT_CROW_ID);
+  assert.equal(pruneTomb.kind, "prune", "setup: A's tombstone is garbage collection");
+  assert.equal(Number(pruneTomb.lamport_ts), aRowTs, "setup: …stamped with A's LOCAL row lamport");
+
+  // On B the user DELETES the bot for real — an AUTHORITATIVE delete. It is broadcast, and
+  // `emitContactDelete` passes only { crow_id } ⇒ no counter floor ⇒ it goes out at B's own
+  // low counter, BELOW A's prune lamport.
+  const bRow = await row(f.B, BOT_CROW_ID);
+  await act(f.B, () => deleteContactLocal(f.B.db, { syncManager: f.B.mgr }, bRow));
+  const del = f.wire.at(-1).entry;
+  assert.equal(del.op, "delete", "setup: the user delete IS broadcast");
+  assert.ok(Number(del.lamport_ts) < aRowTs,
+    "setup: the authoritative delete's GLOBAL lamport is below A's LOCAL prune lamport — the whole trap");
+  await f.deliver();
+
+  // A now holds an AUTHORITATIVE tombstone. Its lamport must be the DELETE's (a global emit
+  // lamport), never the prune's (a local row lamport).
+  const authTomb = await readTombstone(f.A.db, BOT_CROW_ID);
+  assert.equal(authTomb.kind, null, "A's tombstone was upgraded to authoritative by the user's delete");
+  assert.equal(Number(authTomb.lamport_ts), Number(del.lamport_ts),
+    "…AT THE DELETE'S LAMPORT. Carrying the prune's local lamport forward arms the stale-insert gate at a " +
+    "number B can never emit past.");
+
+  // The user changes their mind and re-adds the bot on B. A genuine re-add, `op=insert`.
+  await act(f.B, () => acceptBotInvite(f.B.db, {}, { inviteCode: BOT_CODE, advertisedByInstanceId: ADV }));
+  const reAdd = f.wire.at(-1).entry;
+  assert.equal(reAdd.op, "insert", "the re-add goes out as an `insert`");
+  assert.ok(Number(reAdd.lamport_ts) < aRowTs,
+    "…and it is BELOW A's laundered prune lamport — exactly what the un-fixed gate drops");
+  await f.deliver();
+
+  assert.ok(await row(f.B, BOT_CROW_ID), "the re-add landed on B");
+  assert.ok(await row(f.A, BOT_CROW_ID),
+    "THE ASSERTION: A MUST apply the genuine re-add. A prune's LOCAL row lamport is not comparable with an " +
+    "`insert`'s GLOBAL one; laundering it into the authoritative tombstone drops the re-add, and then every " +
+    "later `update` from B is dropped unconditionally by the same tombstone — the bot lives on B and is gone " +
+    "from A FOREVER, with zero sync_conflicts and nothing logged.");
+  assert.equal(await readTombstone(f.A.db, BOT_CROW_ID), null, "and A cleared its tombstone once the row was back");
+
+  // Ordinary sync must resume — proof the tombstone is not still swallowing B's updates.
+  await emitUpdate(f.B, BOT_CROW_ID, { display_name: "Back On Both" });
+  await f.deliver();
+  assert.equal((await row(f.A, BOT_CROW_ID)).display_name, "Back On Both", "normal contact sync resumed on A");
+
+  assert.equal(await conflicts(f.A), c0.a, "sync_conflicts unchanged on A");
+  assert.equal(await conflicts(f.B), c0.b, "sync_conflicts unchanged on B");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // §5 test 7 — CONVERGENCE (the plan's acceptance criterion)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -483,4 +571,88 @@ test("10. ACCEPTED TRADE-OFF: a DM from a pruned-but-still-running bot arrives a
   // And the pruned contact stays pruned: a request is not a resurrection.
   assert.equal(await row(f.A, BOT_CROW_ID), null, "the pruned bot contact was NOT recreated");
   assert.ok(await readTombstone(f.A.db, BOT_CROW_ID), "its tombstone still stands");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §5 test 11 — R5/CRITICAL-2: the same-secp REBIND, on top of test 10's exact state.
+//
+// F6 (a guard on the rebind) was DROPPED from the design as "unreachable — the tombstone
+// gate already returns for op=update and for insert <= tomb.lamport_ts, so by the time
+// control reaches the rebind, `tombstone lamport >= entry's` is false by construction."
+// The `kind='prune'` change removed exactly that premise (a prune tombstone deliberately
+// does NOT gate an insert on lamport) and F6 was never re-derived. So with a prune
+// tombstone standing, a REPLAYED ORIGINAL insert (a feed replay after a re-pair or a DB
+// restore — crow's fleet has had both) now reaches the rebind, finds the `req:<secp>` row
+// that test 10 just created, and REBINDS it: the pruned bot comes back CARRYING that DM.
+// And because it now has a message, prune rule 5 (`HAVING COUNT(m.id) = 0` — the prune
+// never destroys history) blocks it from EVER being re-pruned. That kills the design's
+// self-healing claim ("the next render simply re-prunes it") and restores defect D3.
+//
+// The fix is narrow: a `crow:` row and a `req:` row may coexist (contacts is UNIQUE on
+// crow_id ONLY), so when a prune tombstone stands we do NOT promote the placeholder —
+// the re-add lands as a fresh, zero-message, RE-PRUNABLE row and the DM stays where the
+// documented §5.10 semantic puts it: on the message request.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("11. a REPLAYED original insert must not rebind the pruned bot's message-REQUEST row — it lands fresh, keeps zero messages, and is RE-PRUNABLE (self-healing)", async () => {
+  const f = newFleet();
+
+  // B added the bot from ADV's directory; A got it by sync. (The replayed entry has to
+  // come from the OTHER instance's feed — that is what a re-pair/restore replays.)
+  await act(f.B, () => acceptBotInvite(f.B.db, {}, { inviteCode: BOT_CODE, advertisedByInstanceId: ADV }));
+  const originalInsert = f.wire.at(-1).entry;
+  assert.equal(originalInsert.op, "insert", "setup: B's accept emitted the original insert");
+  await f.deliver();
+  assert.ok(await row(f.A, BOT_CROW_ID), "setup: A holds the bot");
+
+  // ADV un-advertises ⇒ A prunes. Prune tombstone standing, row gone.
+  await prune(f.A, directory());
+  assert.equal(await row(f.A, BOT_CROW_ID), null, "setup: pruned on A");
+  assert.equal((await readTombstone(f.A.db, BOT_CROW_ID)).kind, "prune", "setup: …a GC tombstone");
+
+  // §5 test 10's exact state: the bot is un-advertised, not dead. It DMs us, so the
+  // receive path files it as a message request under `req:<secp>` WITH the message.
+  await handleIncomingRequest(f.A.db, { createNotification: async () => {} }, {
+    senderPubkey: BOT.secp256k1Pubkey, content: "still here", eventId: "evt-prune-11",
+  });
+  const reqId = "req:" + normalizePubkey(BOT.secp256k1Pubkey);
+  const reqBefore = await row(f.A, reqId);
+  assert.ok(reqBefore, "setup: the DM landed as a `req:<secp>` row");
+
+  // THE PROBE: B's feed is replayed (re-pair / DB restore) and A re-applies the ORIGINAL
+  // insert. The prune tombstone does not gate it on lamport — by design — so it reaches
+  // the same-secp rebind.
+  await f.A.mgr._applyEntry(B_ID, originalInsert);
+
+  // 1. The placeholder must NOT have been promoted…
+  const reqAfter = await row(f.A, reqId);
+  assert.ok(reqAfter,
+    "THE ASSERTION: the `req:` message-request row must still be a `req:` row. Rebinding it promotes the " +
+    "pruned bot back to a full contact CARRYING the DM — and a contact with a message can never be pruned " +
+    "again (rule 5, `HAVING COUNT(m.id) = 0`), so the resurrection is PERMANENT. That is defect D3, restored.");
+  assert.equal(reqAfter.request_status, "pending", "…still a pending request, awaiting the user");
+  assert.equal(Number(reqAfter.id), Number(reqBefore.id), "…the same row, untouched");
+  const { rows: reqMsgs } = await f.A.db.execute({
+    sql: "SELECT content FROM messages WHERE contact_id = ?", args: [reqAfter.id],
+  });
+  assert.deepEqual(reqMsgs.map((m) => m.content), ["still here"], "…and the DM stayed on it (§5.10's semantic)");
+
+  // 2. …the re-add landed as a FRESH row instead (a `crow:` row and a `req:` row may
+  //    coexist — contacts is UNIQUE on crow_id only).
+  const fresh = await row(f.A, BOT_CROW_ID);
+  assert.ok(fresh, "the replayed insert re-created the contact as a fresh row");
+  assert.notEqual(Number(fresh.id), Number(reqAfter.id), "…a DIFFERENT row from the message request");
+  assert.equal(fresh.advertised_by_instance_id, ADV, "…carrying its provenance, so it is prunable again");
+  const { rows: freshMsgs } = await f.A.db.execute({
+    sql: "SELECT COUNT(*) AS n FROM messages WHERE contact_id = ?", args: [fresh.id],
+  });
+  assert.equal(Number(freshMsgs[0].n), 0, "…with ZERO messages");
+
+  // 3. SELF-HEALING — the whole justification for letting a replayed insert through.
+  await prune(f.A, directory());
+  assert.equal(await row(f.A, BOT_CROW_ID), null,
+    "THE PROOF: the next render RE-PRUNES it. This is the claim contact-prune.js makes in its header " +
+    "(\"the next render simply re-prunes it — self-healing\"), and a rebound row carrying a message could " +
+    "never satisfy rule 5, so the claim was FALSE until the rebind was guarded.");
+  assert.ok(await row(f.A, reqId), "and the message request — with its DM — survives the re-prune");
 });

@@ -80,6 +80,30 @@ test("dir_message_bot materializes and redirects to ?open=<id>", async () => {
   assert.equal(res._redir, `/dashboard/messages?open=${rows[0].id}`, "redirects to the new conversation");
 });
 
+// R5/MAJOR-3: bot-ness and prunability are DIFFERENT facts.
+//
+// Deriving `is_bot` from provenance conflates them. The advertised-bots cache expires
+// after 60 s and any peer can exceed the 2 s directory timeout, so
+// `resolveAdvertisedByInstanceId` legitimately returns null between the render and the
+// click — and the user who clicked a BOT in the BOT DIRECTORY then gets `is_bot=0`: not
+// badged as a bot, AND swept into `backfillContactsOnce` (which filters `is_bot = 0`) to
+// be re-emitted as an `update` every boot. A directory add is a bot whether or not we
+// could resolve WHO advertised it, so the handlers assert it EXPLICITLY. (Both actions:
+// they are the same code path, and both must carry it.)
+for (const action of ["dir_add_bot", "dir_message_bot"]) {
+  test(`${action} passes isBot:true EXPLICITLY — an unresolvable advertiser costs prunability, never bot-ness`, async () => {
+    const db = await db0(); const accepts = [];
+    const req = { body: { action, invite_code: CODE } };
+    await handlePostAction(req, fakeRes(), { db, _managers: {}, acceptBotInviteFn: spyAccept(db, accepts) });
+    assert.equal(accepts.length, 1, "exactly one accept");
+    assert.equal(accepts[0].advertisedByInstanceId ?? null, null,
+      "setup: the advertiser is unresolvable here (no directory) — the 60 s-cache / 2 s-timeout case");
+    assert.equal(accepts[0].isBot, true,
+      "…and the accept is STILL told this is a bot. Otherwise the row lands is_bot=0: unbadged in the UI " +
+      "and re-emitted as an `update` by backfillContactsOnce on every boot.");
+  });
+}
+
 test("dir_add_bot on a failed accept does not materialize anything", async () => {
   const db = await db0();
   const req = { body: { action: "dir_add_bot", invite_code: CODE } };

@@ -37,6 +37,24 @@ function isReqId(id) {
  * A GC write must never weaken a real user delete into a permissive gate; the reverse
  * (an authoritative delete strengthening a prune tombstone) is exactly what we want.
  *
+ * ⚠️ LAMPORTS ARE COMMENSURABLE ONLY *WITHIN* A KIND — never MAX across them.
+ * The two kinds stamp `lamport_ts` from different clocks:
+ *   - authoritative → a GLOBAL emit lamport (emitContactDelete broadcast it);
+ *   - 'prune'       → the pruned row's LOCAL row lamport (nothing was emitted).
+ * `lamport_ts` has exactly ONE consumer — the `insert <= tomb.lamport_ts ⇒ drop`
+ * stale-replay gate — and that gate is only meaningful against a global lamport. A
+ * blanket `MAX(lamport_ts, excluded.lamport_ts)` on a kind TRANSITION launders the
+ * local number into the global field and arms the gate at a value no emitter can
+ * exceed: the genuine re-add is dropped, every later `op="update"` from the re-adder is
+ * then dropped unconditionally by the same tombstone ⇒ PERMANENT silent divergence,
+ * zero `sync_conflicts`. (This is why an authoritative delete emitted at a LOW lamport
+ * is not merely a curiosity: `emitContactDelete` sends `{crow_id}` alone — a row with
+ * no `lamport_ts` — so emitChange's counter floor never applies to deletes, and a
+ * lagging or post-DB-recovery instance really does delete at a low lamport.)
+ *
+ * So on a transition the SURVIVING kind's OWN lamport wins, and MAX applies only when
+ * both sides are the same kind.
+ *
  * @param {object} db async db client ({ execute })
  * @param {string} crowId
  * @param {number} lamportTs the delete's Lamport clock
@@ -49,7 +67,13 @@ export async function writeTombstone(db, crowId, lamportTs, kind = null) {
       sql: `INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(crow_id) DO UPDATE SET
-              lamport_ts = MAX(lamport_ts, excluded.lamport_ts),
+              lamport_ts = CASE
+                WHEN contact_tombstones.kind = 'prune' AND excluded.kind IS NULL
+                  THEN excluded.lamport_ts               -- GC → authoritative: the DELETE's global lamport
+                WHEN contact_tombstones.kind IS NULL AND excluded.kind = 'prune'
+                  THEN contact_tombstones.lamport_ts     -- authoritative → GC: the delete's lamport stands
+                ELSE MAX(contact_tombstones.lamport_ts, excluded.lamport_ts) -- same kind ⇒ comparable
+              END,
               kind = CASE WHEN contact_tombstones.kind = 'prune' AND excluded.kind = 'prune'
                           THEN 'prune' ELSE NULL END`,
       args: [crowId, Number(lamportTs) || 0, Math.floor(Date.now() / 1000), kind === "prune" ? "prune" : null],

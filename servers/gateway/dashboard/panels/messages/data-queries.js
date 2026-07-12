@@ -333,6 +333,17 @@ export async function getBotDirectory(db, { prune = false } = {}) {
  * pruner's tombstone, so the pruner stays clean either way. Never throws (it runs
  * inside a render).
  *
+ * ⚠️ SCOPE OF THAT CLAIM — it holds for a COMPLETE pairing graph, which is what this
+ * fleet has. Rule 4's "live elsewhere" clause scans THIS instance's own peer set, so two
+ * instances paired with DIFFERENT advertiser sets can legitimately disagree: if A is
+ * paired with both X and Y (both advertising bot Z) but C is paired with X only, then
+ * when X un-advertises Z, C prunes it and A keeps it (Y still advertises it). That is a
+ * divergent steady state — but a FAIL-SAFE one: nobody deletes a bot that some peer they
+ * can see still advertises, no history is destroyed (rule 5), and C's tombstone quietly
+ * drops A's later `update`s rather than fighting them. Do not read this function as
+ * promising convergence under an arbitrary topology; it promises that nobody GCs a
+ * contact its own advertiser still vouches for.
+ *
  * @param {object} db async db client
  * @param {Map<string, {ok:boolean, complete:boolean, pubkeys:Set<string>}>} perInstance
  * @param {string|null} localInstanceId

@@ -236,6 +236,82 @@ test("a row with a falsy crow_id is WARNED and SKIPPED, never deleted", async ()
   assert.match(warnings[0], /crow_id/i);
 });
 
+// ── R5/MAJOR-4: the tombstone must LAND before the row is destroyed ──────────
+//
+// The prune DELETEd first and tombstoned after, and `writeTombstone` swallows every
+// error (`catch {}` — it runs on a receive path and must never throw). So a failing
+// tombstone INSERT left the contact GONE with NO tombstone: the exact resurrectable
+// state this whole feature exists to prevent, re-armed by an empty catch. And the
+// failure is not exotic — `"database is locked"` on this DB is a *documented recurring*
+// failure (spec §1 D4.2; crow has had two DB-lock incidents).
+//
+// The order is therefore: tombstone → VERIFY it landed → only then unwire + DELETE. A
+// tombstone coexisting with a live row is benign: `_applyContact` rule (a) clears any
+// tombstone whenever a local row exists.
+
+/** Wrap a db so the tombstone INSERT fails the way SQLite really fails: "database is locked". */
+function dbWithFailingTombstoneWrite(realDb) {
+  return {
+    execute: async (q) => {
+      const sql = typeof q === "string" ? q : q?.sql || "";
+      if (/INSERT\s+INTO\s+contact_tombstones/i.test(sql)) throw new Error("database is locked");
+      return realDb.execute(q);
+    },
+  };
+}
+
+test("the tombstone write FAILING (\"database is locked\") REFUSES the delete — the contact survives rather than becoming resurrectable", async () => {
+  await seedContact({ id: 1, crowId: "crow:gone", pk: PK_BOT, advertisedBy: ADV, lamport: 4382 });
+  const perInstance = new Map([[ADV, peer({ pubkeys: [PK_KEEP] })]]);
+
+  const warnings = [];
+  const origWarn = console.warn;
+  console.warn = (...a) => warnings.push(a.join(" "));
+  try {
+    await pruneStaleAdvertisedContacts(dbWithFailingTombstoneWrite(db), perInstance, LOCAL_ID, null);
+  } finally {
+    console.warn = origWarn;
+  }
+
+  assert.deepEqual(await contactIds(), [1],
+    "THE ASSERTION: no tombstone ⇒ NO DELETE. Deleting first and tombstoning best-effort leaves the row gone " +
+    "with nothing to block resurrection — the next `update` from any peer that still holds it re-INSERTs it. " +
+    "That is defect D3, restored by a `catch {}`.");
+  assert.equal(await tombstone("crow:gone"), null, "setup check: the tombstone genuinely did not land");
+  assert.ok(warnings.some((w) => /tombstone/i.test(w)), "the refusal is LOUD, not silent");
+});
+
+test("pruneAdvertisedContact reports {ok:false, reason:'tombstone-failed'} when the tombstone cannot be written", async () => {
+  await seedContact({ id: 1, crowId: "crow:gone", pk: PK_BOT, advertisedBy: ADV, lamport: 4382 });
+  const { pruneAdvertisedContact } = await import("../servers/sharing/contact-prune.js");
+
+  const origWarn = console.warn;
+  console.warn = () => {};
+  let res;
+  try {
+    res = await pruneAdvertisedContact(dbWithFailingTombstoneWrite(db), null, { id: 1, crow_id: "crow:gone", lamport_ts: 4382 });
+  } finally {
+    console.warn = origWarn;
+  }
+
+  assert.deepEqual(res, { ok: false, reason: "tombstone-failed" },
+    "the caller is TOLD. The existing guard already refuses a falsy crow_id for exactly this reason " +
+    "(a tombstone that cannot be written makes the delete resurrectable); the same distrust must extend " +
+    "to the write actually LANDING, not merely being attempted.");
+  assert.deepEqual(await contactIds(), [1], "and the row is still there");
+});
+
+test("the prune still succeeds normally — the tombstone lands BEFORE the row is destroyed", async () => {
+  await seedContact({ id: 1, crowId: "crow:gone", pk: PK_BOT, advertisedBy: ADV, lamport: 4382 });
+  const { pruneAdvertisedContact } = await import("../servers/sharing/contact-prune.js");
+
+  const res = await pruneAdvertisedContact(db, null, { id: 1, crow_id: "crow:gone", lamport_ts: 4382 });
+
+  assert.deepEqual(res, { ok: true });
+  assert.deepEqual(await contactIds(), [], "the row is gone");
+  assert.equal(Number((await tombstone("crow:gone")).lamport_ts), 4382, "…and the tombstone is there, at the row's own lamport");
+});
+
 // ── unwireContact runs BEFORE the delete (Nostr-subscription leak fix) ───────
 
 test("the prune unwires the contact before deleting it, and a partial managers object never throws", async () => {
