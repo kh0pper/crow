@@ -170,6 +170,17 @@ session at the front.
 - `--no-auth` does NOT bypass dashboard auth (it's MCP-side only). For a scratch
   gateway, mint a session row directly in the SCRATCH DB's `oauth_tokens` and set the
   cookie. Revoke test sessions when done.
+- **Minting a session correctly (this has silently 303'd two sessions to
+  `/dashboard/login`):** `oauth_tokens.token` stores **`sha256(token)`** while the
+  cookie carries the **raw** token (`auth.js:15` `hashToken`, `:348` `verifySession`),
+  and `expires_at` is a **TEXT datetime** compared against `datetime('now')` — NOT a
+  unix epoch. Get either wrong and you get a silent redirect, not an error. Recipe:
+  `TOK=$(openssl rand -hex 20); HASH=$(printf '%s' "$TOK" | sha256sum | cut -d' ' -f1)`
+  → insert `$HASH` with `expires_at = datetime('now','+30 minutes')` → send `$TOK` in
+  the cookie. Simpler alternative on a scratch box: seed `password_hash` in
+  `dashboard_settings` (scrypt, `salt:key`) and just POST `/dashboard/login`.
+- A fresh scratch DB has no password → every route redirects to `/setup`. Seed
+  `password_hash` before expecting a dashboard.
 - Browser gotchas that have burned sessions: cookies ignore ports (scratch + prod
   gateways on the same host share the cookie jar — use distinct cookie names or
   separate contexts); navigating to the SAME URL is a Turbo no-op (change a query
@@ -263,7 +274,34 @@ adversarial review → break into PRs), then execute the PRs one at a time throu
 
 ---
 
-### Item 1 — Extensions follow-up pool (one PR; Kevin's go-ahead already given)
+### Item 1 — Extensions follow-up pool — ✅ SHIPPED 2026-07-12 (PR #174, main `bbedd0f5`)
+
+**Done: merged, fleet-deployed (crow/mpa/grackle/black-swan), live-verified.** Spec:
+`docs/superpowers/specs/2026-07-11-extensions-followups-design.md` (two adversarial
+rounds). Evidence: `~/.crow/p4/ext-followups/` (23 assertions, 9 screenshots; 10/10 on
+scratch + 5/5 on prod). Ledger has the full record.
+
+The load-bearing lesson for later items: **the naive rule would have badged Kevin's
+working bundles.** A missing `bundles/<id>/.env` usually means "not
+gateway-managed-with-config", not "unconfigured" — MCP add-ons never read that file
+(their env is in `mcp-addons.json` or ambient in the gateway's process env). Measured
+before shipping; measured again after deploy: **zero badges on all 10 real bundles.**
+When a rule keys off host state, *compute it against the real host before you build it.*
+
+New follow-ups this item produced (fold into Item 3's batch, or their own PRs):
+- **A docker bundle whose required key has no `default` never gets a `.env` written by
+  the UI install path** (`routes/bundles.js:1252-1263` — the `.env.example` fallback is
+  dead for UI installs, since the modal always sends an `env_vars` object), so it can
+  never badge. `frigate` is the live instance. One-line fix, but it changes install
+  behavior → own PR.
+- The unregistered-bundle env fallback drops `secret` (`client.js:500,1360`), so such a
+  key renders `type=text` instead of `type=password`.
+- **3 tests read prod state to pass** and fail under a scratch `CROW_HOME` on unmodified
+  main (so they'd fail on a fresh clone/CI): `bundles-validate-install.test.js` ("consent
+  bundle with an invalid/bogus token", "a bundle already present in ~/.crow/installed.json")
+  and `instance-sync.test.js` ("crow_context emitChange stamps local row's lamport_ts").
+
+<details><summary>Original spec (kept for reference)</summary>
 
 **Why:** three accepted follow-ups from the shipped extensions overhaul (PR #173).
 Small, adjacent, zero design risk. Code lives in
@@ -353,9 +391,11 @@ evidence in `~/.crow/p4/ext-followups/`, PR, merge, fleet deploy, live verify
 (1a affordance on a real bundle-with-missing-key on scratch; onboarding card behavior
 on prod read-only).
 
+</details>
+
 ---
 
-### Item 2 — Sync-layer design leftovers (four separate PRs, in this order)
+### Item 2 — Sync-layer design leftovers (four separate PRs, in this order) ← **NEXT**
 
 These were explicitly deferred as "design-shaped, own session each." Each gets a spec
 + 2-round adversarial review (this layer has bitten us repeatedly — key-rebind,
