@@ -143,6 +143,12 @@ export function renderIcon(addon, size) {
  * Everything wraps; nothing scrolls sideways (the old 19-tab nowrap row is what
  * inflated the whole dashboard to 2555px).
  *
+ * PURE: plain data in, strings out. It must never call needsConfigKeys itself —
+ * `needsConfig` is computed in panels/extensions.js and handed in (defaulted, so the
+ * render unit tests keep passing). Computing it here would make those tests read the
+ * operator's real ~/.crow.
+ *
+ * @param {Record<string,string[]>} [needsConfig] id → still-missing required key NAMES
  * @returns {{viewsHtml:string, addonRegistryScript:string, collectionsScript:string}}
  */
 export function buildExtensionsHTML({
@@ -152,6 +158,7 @@ export function buildExtensionsHTML({
   registrySource,
   communityStores,
   bundleStatus,
+  needsConfig = {},
   lang,
 }) {
   const installedCount = Object.keys(installed).length;
@@ -312,6 +319,14 @@ export function buildExtensionsHTML({
         ? (isRunning ? badge(t("extensions.runningBadge", lang), "published") : badge(t("extensions.stoppedBadge", lang), "draft"))
         : badge(t("extensions.mcpServer", lang), "connected");
 
+      // Required keys still empty in this bundle's EFFECTIVE env (server-computed).
+      // The wrapper span is a DOM hook, not a style: the client removes it (and the
+      // Configure button) when a save comes back with an empty needs_config.
+      const missingKeys = needsConfig[id] || [];
+      const needsSetupBadge = missingKeys.length > 0
+        ? `<span class="ext-installed__needsconfig">${badge(t("extensions.needsSetup", lang), "draft")}</span>`
+        : "";
+
       let actions = "";
       if (isDocker) {
         if (isRunning) {
@@ -322,6 +337,9 @@ export function buildExtensionsHTML({
           actions = `<button class="btn btn-sm btn-primary bundle-action" data-action="start" data-id="${escapeHtml(id)}">${t("extensions.start", lang)}</button>`;
         }
       }
+      if (missingKeys.length > 0) {
+        actions += `<button class="btn btn-sm btn-primary bundle-configure" data-id="${escapeHtml(id)}" data-keys="${escapeHtml(missingKeys.join(","))}">${t("extensions.configure", lang)}</button>`;
+      }
       actions += `<button class="btn btn-sm btn-secondary bundle-uninstall" data-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" data-docker="${isDocker}">${t("extensions.remove", lang)}</button>`;
 
       return `<div class="ext-installed__item" data-addon-id="${escapeHtml(id)}" style="animation:fadeInUp 0.4s ease-out ${Math.min(i * 30, 300)}ms both">
@@ -329,6 +347,7 @@ export function buildExtensionsHTML({
           <div class="ext-installed__info">
             <span class="ext-installed__name">${escapeHtml(name)}</span>
             ${statusBadge}
+            ${needsSetupBadge}
             <span class="ext-installed__meta">v${escapeHtml(info.version || registryEntry?.version || "?")} · ${t("extensions.installedDate", lang)} ${formatDate(info.installed_at || info.installedAt)}</span>
           </div>
           <div class="ext-installed__actions">${actions}</div>

@@ -638,6 +638,7 @@ export const translations = {
   "extensions.collectionDone": { en: "Collection installed", es: "Colección instalada" },
   "extensions.collectionConfigure": { en: "Finish setup", es: "Completar configuración" },
   "extensions.collectionConfigureDesc": { en: "These extensions are installed but need a value before they can do anything:", es: "Estas extensiones están instaladas pero necesitan un valor para funcionar:" },
+  "extensions.needsSetup": { en: "Needs setup", es: "Requiere configuración" },
   "extensions.configure": { en: "Configure", es: "Configurar" },
   "extensions.configureDesc": { en: "This add-on is already installed. Fill in the value below and save.", es: "Este complemento ya está instalado. Completa el valor a continuación y guarda." },
   "extensions.configureEmpty": { en: "Fill in at least one value before saving.", es: "Completa al menos un valor antes de guardar." },

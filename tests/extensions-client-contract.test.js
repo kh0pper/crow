@@ -74,9 +74,9 @@ const MANY_MEDIA = Array.from({ length: 10 }, (_, i) => ({
  * @param {string}   opts.hash        initial location.hash
  * @returns the DOM plus the spies the tests assert against
  */
-function boot({ available = AVAILABLE, collections = COLLECTIONS, installed = {}, fetchImpl, session = {}, hash = "" } = {}) {
+function boot({ available = AVAILABLE, collections = COLLECTIONS, installed = {}, needsConfig = {}, fetchImpl, session = {}, hash = "" } = {}) {
   const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
-    installed, available, collections,
+    installed, available, collections, needsConfig,
     registrySource: "local", communityStores: [], bundleStatus: {}, lang: "en",
   });
 
@@ -548,6 +548,119 @@ test("BEHAVIOR: an empty Configure save is refused — no fetch, onSaved never r
     /fill in|value/i,
     "the form tells the user why it didn't save",
   );
+});
+
+// ─── 6b. The durable card affordance: "Needs setup" → Configure → server truth ───
+
+/**
+ * The card's badge state is NOT the client's to decide. `submitConfigureOnly`
+ * guards only the all-blank case and its `if (inp && inp.value)` even accepts
+ * whitespace, so filling 1 of N keys returns 200 — a client that cleared the badge
+ * on any 200 would hide a still-unconfigured bundle. Every assertion below drives
+ * the DOM from the route's re-derived `needs_config`.
+ */
+const CARD_BOOT = {
+  installed: { jellyfin: { version: "1.0.0" } },
+  needsConfig: { jellyfin: ["JELLYFIN_API_KEY", "JELLYFIN_URL"] },
+};
+const card = (document) => document.querySelector('.ext-installed__item[data-addon-id="jellyfin"]');
+
+test("BEHAVIOR: an unconfigured installed card carries the Needs setup badge and a Configure button scoped to the missing keys", () => {
+  const { document } = boot({ ...CARD_BOOT, fetchImpl: envFetch() });
+
+  const item = card(document);
+  assert.ok(item.querySelector(".ext-installed__needsconfig"), "the Needs setup badge is on the card");
+  assert.match(item.textContent, /Needs setup/);
+  const btn = item.querySelector(".bundle-configure");
+  assert.ok(btn, "and a Configure button");
+  assert.equal(btn.getAttribute("data-keys"), "JELLYFIN_API_KEY,JELLYFIN_URL");
+});
+
+test("BEHAVIOR: a configured installed card carries neither badge nor Configure button", () => {
+  const { document } = boot({ installed: { jellyfin: { version: "1.0.0" } }, needsConfig: {}, fetchImpl: envFetch() });
+  const item = card(document);
+  assert.equal(item.querySelector(".ext-installed__needsconfig"), null);
+  assert.equal(item.querySelector(".bundle-configure"), null);
+});
+
+test("BEHAVIOR: the card's Configure button opens the env-only form for exactly the missing keys (registry metadata, with a fallback)", async () => {
+  const { document, click, settle, calls } = boot({ ...CARD_BOOT, fetchImpl: envFetch() });
+
+  click(card(document).querySelector(".bundle-configure"));
+  await settle();
+
+  assert.match(document.getElementById("modal-content").textContent, /Configure.*Jellyfin/s);
+  assert.ok(document.getElementById("env_JELLYFIN_API_KEY"), "the registry-described key");
+  assert.ok(document.getElementById("env_JELLYFIN_URL"), "and the key with no registry metadata (name/required fallback)");
+  assert.ok(!calls.some((c) => c.url.includes("/consent-challenge/")), "configureOnly skips the consent gate");
+});
+
+test("BEHAVIOR: a FULL Configure save from the card clears the Needs setup badge and the Configure button", async () => {
+  const { document, click, settle, flushTimers, calls } = boot({
+    ...CARD_BOOT,
+    fetchImpl: envFetch({ body: { ok: true, needs_restart: false, needs_config: [] } }),
+  });
+
+  click(card(document).querySelector(".bundle-configure"));
+  await settle();
+  document.getElementById("env_JELLYFIN_API_KEY").value = "k";
+  document.getElementById("env_JELLYFIN_URL").value = "http://jf";
+  click(document.querySelector("#modal-content .ext-checklist__save"));
+  await settle();
+  flushTimers();   // the queued onSaved()
+
+  const envCall = calls.find((c) => c.url.includes("/bundles/api/env"));
+  assert.deepEqual(envCall.body, { bundle_id: "jellyfin", env_vars: { JELLYFIN_API_KEY: "k", JELLYFIN_URL: "http://jf" } });
+
+  const item = card(document);
+  assert.equal(item.querySelector(".ext-installed__needsconfig"), null, "the badge is gone — the server said nothing is missing");
+  assert.equal(item.querySelector(".bundle-configure"), null, "and so is the Configure button");
+});
+
+test("BEHAVIOR: a PARTIAL Configure save keeps the badge and narrows data-keys to the still-missing keys", async () => {
+  const { document, click, settle, flushTimers } = boot({
+    ...CARD_BOOT,
+    // 1 of 2 keys filled → the route re-derives and says JELLYFIN_URL is still missing.
+    fetchImpl: envFetch({ body: { ok: true, needs_restart: false, needs_config: ["JELLYFIN_URL"] } }),
+  });
+
+  click(card(document).querySelector(".bundle-configure"));
+  await settle();
+  document.getElementById("env_JELLYFIN_API_KEY").value = "k";
+  click(document.querySelector("#modal-content .ext-checklist__save"));
+  await settle();
+  flushTimers();
+
+  const item = card(document);
+  assert.ok(
+    item.querySelector(".ext-installed__needsconfig"),
+    "the bundle is STILL unconfigured — a 200 on a partial save must not clear the badge",
+  );
+  assert.equal(
+    item.querySelector(".bundle-configure").getAttribute("data-keys"),
+    "JELLYFIN_URL",
+    "and the Configure button is re-scoped to what the SERVER says is still missing",
+  );
+});
+
+test("BEHAVIOR: saving from the checklist also updates the card's badge (no cross-surface staleness)", async () => {
+  const { document, click, settle, flushTimers } = boot({
+    ...CARD_BOOT,
+    session: { crow_ext_needs_config: JSON.stringify([{ id: "jellyfin", keys: ["JELLYFIN_API_KEY", "JELLYFIN_URL"] }]) },
+    fetchImpl: envFetch({ body: { ok: true, needs_restart: false, needs_config: ["JELLYFIN_URL"] } }),
+  });
+
+  click(document.querySelector(".ext-checklist__configure"));
+  await settle();
+  document.getElementById("env_JELLYFIN_API_KEY").value = "k";
+  click(document.querySelector("#modal-content .ext-checklist__save"));
+  await settle();
+  flushTimers();
+
+  const item = card(document);
+  assert.ok(item.querySelector(".ext-installed__needsconfig"), "the card behind the checklist still shows Needs setup");
+  assert.equal(item.querySelector(".bundle-configure").getAttribute("data-keys"), "JELLYFIN_URL",
+    "a save made from the checklist re-scopes the card's Configure button too");
 });
 
 // ─── 7. Category badge i18n (the live gap: the detail modal rendered the raw slug) ───
