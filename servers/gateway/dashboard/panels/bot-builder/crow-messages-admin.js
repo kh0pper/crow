@@ -162,6 +162,14 @@ export async function listAdvertisedBots(db) {
  * name) plus the x-only messaging pubkey for receiver-side dedup. A bot whose
  * identity can't derive (no instance seed) is skipped, not fatal.
  *
+ * COMPLETENESS IS A POSITIVE ASSERTION. `complete: true` is set ONLY when zero
+ * bots were skipped; if any bot was skipped the key is OMITTED (never
+ * `complete: false`). The receiver treats a missing key as incomplete, so a
+ * peer that is old, drifted, or answering with a malformed body can never be
+ * read as authoritative — and the downstream contact prune, which DELETES, only
+ * ever acts on a positively-asserted complete list. A skip is still a 200: the
+ * bots that did resolve are returned.
+ *
  * NOTE: there is intentionally NO top-level `relay_url` (the relays are already
  * embedded in the signed invite_code via generateBotInviteCode, so a separate
  * field would be redundant).
@@ -173,6 +181,7 @@ export async function buildAdvertisementPayload(
   db, { instanceId, instanceLabel, _identityFor = botIdentityFor, _buildInviteCode = buildInviteCode } = {}
 ) {
   const bots = [];
+  let skipped = 0;
   for (const b of await listAdvertisedBots(db)) {
     try {
       const ident = _identityFor(b.botId); // throws if no identity.json beside crow.db
@@ -189,11 +198,15 @@ export async function buildAdvertisementPayload(
       if (b.description) entry.description = b.description;
       bots.push(entry);
     } catch (err) {
-      // Skip a bot whose identity can't derive (no instance seed). Log so a
-      // surprising DB/identity error leaves a trace rather than vanishing
-      // silently (cf. the 2026-06-14 crow.db silent-federation-blackout).
+      // Skip a bot whose identity can't derive (no instance seed), or whose
+      // invite INSERT hit "database is locked". Log so a surprising DB/identity
+      // error leaves a trace rather than vanishing silently (cf. the 2026-06-14
+      // crow.db silent-federation-blackout). One skip forfeits the completeness
+      // assertion for the whole payload.
+      skipped += 1;
       console.warn(`[crow-messages] advertise skip for bot ${b.botId}:`, err.message);
     }
   }
-  return { bots };
+  // Positive assertion only: omit the key entirely when anything was skipped.
+  return skipped === 0 ? { bots, complete: true } : { bots };
 }
