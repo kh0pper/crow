@@ -2,7 +2,8 @@
 /**
  * Crow Bot Builder — gateway host (Hermes-parity, A3).
  *
- * One long-lived process (pibot-gateways.service, Type=simple) that hosts every
+ * One long-lived process (pibot-gateways@<instance>.service, Type=simple —
+ * installed by scripts/pi-bots/install-runtime.sh from systemd/) that hosts every
  * REGISTRY host-managed gateway adapter (v1: telegram long-poll + slack socket-
  * mode — both dial OUT, so no inbound port and no Tailscale-Funnel exposure).
  *
