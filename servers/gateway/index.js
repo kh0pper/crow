@@ -69,6 +69,7 @@ import { resolveIssuerUrl } from "./issuer-url.js";
 import { loadDynamicBackends } from "./proxy.js";
 import { dashboardAuth } from "./dashboard/auth.js";
 import { SessionManager } from "./session-manager.js";
+import { startParentWatch } from "./parent-watch.js";
 import { generateInstructions } from "../shared/instructions.js";
 // startAutoUpdate/startScheduler/connectedServers/initProxyServers/loadRemoteInstances
 // are imported directly by boot/post-listen.js (not needed here).
@@ -656,3 +657,20 @@ async function gracefulShutdown() {
 
 process.on("SIGINT", gracefulShutdown);
 process.on("SIGTERM", gracefulShutdown);
+
+// --- Die-with-session watchdog (Item 2a-FU, finding 4) ---
+// A scratch gateway launched from an interactive session can outlive that
+// session with no SIGTERM ever delivered — its bundle children then hold the
+// prod DB open indefinitely. Watch our ppid: if it changes, the parent died
+// and we were re-parented, so run the same gracefulShutdown SIGTERM would
+// have (shutdownAll() reaps the bundle children). No-op under systemd
+// (INVOCATION_ID set), with CROW_ALLOW_ORPHAN=1, or when started detached
+// (initial ppid already <= 1) — see servers/gateway/parent-watch.js.
+startParentWatch({
+  onOrphaned: () => {
+    console.error(
+      "[gateway] parent process died (ppid changed) — shutting down so bundle children don't outlive this session holding the DB"
+    );
+    gracefulShutdown();
+  },
+});

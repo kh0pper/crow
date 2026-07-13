@@ -101,6 +101,8 @@ ts_first_field() {
 
 # Test seam: tests source the helpers without executing the install.
 if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
+  # shellcheck disable=SC2317  # exit IS reachable: `return` fails when the
+  # script is executed (not sourced), and the fallback exit then runs.
   return 0 2>/dev/null || exit 0
 fi
 
@@ -444,7 +446,7 @@ fi
 
 # (b) HTTP health probe — up to 10 attempts, 2s apart
 GATEWAY_OK=false
-for attempt in $(seq 1 10); do
+for _ in $(seq 1 10); do
   if curl -fsS -o /dev/null http://localhost:3001/health 2>/dev/null; then
     GATEWAY_OK=true
     break

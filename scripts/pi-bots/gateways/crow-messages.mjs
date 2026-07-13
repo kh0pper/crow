@@ -17,6 +17,25 @@ export function gatewayHint(threadId) {
     + "Do NOT use gmail tools. (thread ref: " + threadId + ")";
 }
 
+/**
+ * The adapter's seed + bot-identity derivation, exported so the parity test can
+ * hold THIS module to the admin panel's botIdentityFor — they must derive from
+ * the same seed anchor or invites minted by one are unverifiable against the
+ * other. start() routes through adapterSeed() too, so the test constrains the
+ * live path, not a copy. Seed comes from the INSTANCE data dir
+ * (instanceSeedDir() = resolveDataDir()), never from dirname(CROW_DB_PATH):
+ * the DB may legitimately live outside the instance dir (grackle's
+ * symlinked-DB layout).
+ */
+export async function adapterSeed() {
+  const { instanceSeedDir } = await import("../instance-paths.mjs");
+  return loadInstanceSeed(instanceSeedDir());
+}
+
+export async function adapterBotIdentity(botId) {
+  return deriveBotIdentity(await adapterSeed(), botId);
+}
+
 export async function checkRequirements() {
   try { await import("nostr-tools/pure"); return true; } catch { return false; }
 }
@@ -88,17 +107,17 @@ export async function handleCrowMessageEvent({
 }
 
 export async function start({ bot_id, gw, log }) {
-  const { dirname } = await import("node:path");
   const Database = (await import("better-sqlite3")).default;
   const { botsDbPath } = await import("../instance-paths.mjs"); // CROW_DB resolver used by gateway_runner
   const { handleInbound: realHandleInbound } = await import("../bridge.mjs");
   const dbPath = botsDbPath();
   const db = new Database(dbPath); db.pragma("busy_timeout = 10000");
 
-  // Derive the bot key from the SAME instance dir the DB lives in (avoids the
-  // CROW_DATA_DIR/CROW_DB_PATH split-brain — see loadInstanceSeed).
+  // Seed anchor rationale: see adapterSeed() above. Hosts that run bots
+  // against a different instance's DB keep the anchors aligned because
+  // install-runtime.sh always writes CROW_DATA_DIR into the pibot env files.
   let seed;
-  try { seed = loadInstanceSeed(dirname(dbPath)); }
+  try { seed = await adapterSeed(); }
   catch (e) { log("crow-messages bot=" + bot_id + " no instance seed: " + e.message); try { db.close(); } catch {} return { stop() {} }; }
   const botIdentity = deriveBotIdentity(seed, bot_id);
 
