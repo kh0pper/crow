@@ -14,6 +14,8 @@ import { deleteContactLocal, unwireContact } from "../../../../sharing/contact-d
 import { wireSyncedContact } from "../../../../sharing/contact-promote.js";
 import { sanitizeDisplayName } from "../../../../sharing/display-name.js";
 import { emitGroupUpsert, emitGroupDelete } from "../../../../sharing/group-sync.js";
+import { groupTombstoneStatement } from "../../../../sharing/group-delete.js";
+import { deleteRoom } from "../messages/rooms-store.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
@@ -326,10 +328,39 @@ export async function handleContactAction(req, db, {
 
   if (action === "delete_group" && req.body.group_id) {
     const gid = parseInt(req.body.group_id);
-    let gUid = null;
-    try { const { rows } = await db.execute({ sql: "SELECT group_uid FROM contact_groups WHERE id = ?", args: [gid] }); gUid = rows[0]?.group_uid || null; } catch {}
+    let row = null;
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT group_uid, room_uid, lamport_ts FROM contact_groups WHERE id = ?",
+        args: [gid],
+      });
+      row = rows[0] || null;
+    } catch {}
+    if (row && row.room_uid != null) {
+      // 2b R2 F2': a ROOM row (rooms render alongside groups historically, and
+      // a forged id must not bypass this) routes to the room teardown — room +
+      // members + room_messages. Rooms are never group-synced (they have their
+      // own Nostr fan-out), so NO tombstone and NO emit.
+      await deleteRoom(db, gid);
+      return { redirect: "/dashboard/contacts?view=groups" };
+    }
+    if (row && row.group_uid) {
+      // W1 (2b design §3.3): the local DELETE and the group tombstone MUST land
+      // together — one db.batch() = one transaction (the 2a lesson: neither
+      // ordering of two separate executes survives its failure modes). The
+      // tombstone's lamport is the row's own clock — observability only, gates
+      // nothing (§3.2).
+      await db.batch([
+        { sql: "DELETE FROM contact_groups WHERE id = ?", args: [gid] },
+        groupTombstoneStatement(row.group_uid, Number(row.lamport_ts) || 0),
+      ]);
+      try { await emitGroupDelete(row.group_uid); } catch {}
+      return { redirect: "/dashboard/contacts?view=groups" };
+    }
+    // Missing row (harmless DELETE no-op) or a NULL-uid legacy plain group that
+    // never had a wire identity (2b design §3.3 W1 / §3.6 — near-dead branch):
+    // DELETE only, no tombstone, no emit — unchanged behavior.
     await db.execute({ sql: "DELETE FROM contact_groups WHERE id = ?", args: [gid] });
-    if (gUid) { try { await emitGroupDelete(gUid); } catch {} }
     return { redirect: "/dashboard/contacts?view=groups" };
   }
 
