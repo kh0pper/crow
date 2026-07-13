@@ -29,6 +29,8 @@ import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import { emitGroupUpsert, emitGroupDelete, __setEmitSinkForTest } from "../servers/sharing/group-sync.js";
 import { groupTombstoneStatement, readGroupTombstone } from "../servers/sharing/group-delete.js";
+import { handleContactAction } from "../servers/gateway/dashboard/panels/contacts/api-handlers.js";
+import { getGroups } from "../servers/gateway/dashboard/panels/contacts/data-queries.js";
 import { sign } from "../servers/sharing/identity.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
 
@@ -197,6 +199,7 @@ function signedEntry(table, op, row, lamport_ts, instance_id) {
 beforeEach(async () => {
   const dbs = [createDbClient(A_FILES.path), createDbClient(B_FILES.path)];
   for (const db of dbs) {
+    await db.execute("DELETE FROM room_messages");
     await db.execute("DELETE FROM contact_group_members");
     await db.execute("DELETE FROM contact_groups");
     await db.execute("DELETE FROM group_tombstones");
@@ -468,4 +471,113 @@ test("T8b: guarded UPDATE is a no-op against the zombie state (tombstone + live 
     "membership UNTOUCHED — reconcile must be gated on rowsAffected > 0 (R2 F5)");
   assert.ok(await tomb(f.A, uid), "tombstone intact");
   assert.equal(await conflicts(f.A), c0, "zero conflict growth");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T7 — W1 atomicity through the REAL delete_group handler (design §3.3 W1):
+// handleContactAction with a fake req, the pattern the existing panel tests use.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("T7: delete_group on a plain group — row gone AND tombstone standing (row's own lamport) in one call, exactly one delete emitted", async () => {
+  const f = newFleet();
+  const g = await createGroupAndEmit(f, f.A, "Handler Target");
+  // Give the row a real lamport so the tombstone's observability field is provable.
+  await f.A.db.execute({ sql: "UPDATE contact_groups SET lamport_ts = 42 WHERE id = ?", args: [g.id] });
+
+  const wireBefore = f.wire.length;
+  const res = await act(f.A, () => handleContactAction(
+    { body: { action: "delete_group", group_id: String(g.id) } }, f.A.db, { managers: {} }));
+  assert.equal(res.redirect, "/dashboard/contacts?view=groups");
+
+  assert.equal(await groupRow(f.A, g.uid), null, "row gone");
+  const t = await tomb(f.A, g.uid);
+  assert.ok(t, "tombstone standing");
+  assert.equal(Number(t.lamport_ts), 42, "tombstone carries the row's own lamport (observability only, spec §3.2)");
+
+  const emitted = f.wire.slice(wireBefore);
+  assert.equal(emitted.length, 1, "exactly one emit from the handler");
+  assert.equal(emitted[0].entry.op, "delete");
+  assert.equal(emitted[0].entry.row.group_uid, g.uid, "the delete carries the group_uid");
+});
+
+test("T7 (injected failure): when the batch's tombstone statement fails, NEITHER the DELETE nor the tombstone lands, and nothing is emitted", async () => {
+  const f = newFleet();
+  const g = await createGroupAndEmit(f, f.A, "Survivor");
+
+  // Pass-through wrapper over the REAL db: the batch runs for real, but the
+  // tombstone statement is swapped for one that violates deleted_at NOT NULL —
+  // so the batch's OTHER statement (the DELETE) executes inside the transaction
+  // and must roll back with it. This proves batch-atomicity through the real
+  // handler: two sequential db.execute calls would leave the DELETE committed.
+  const failingDb = {
+    execute: (arg) => f.A.db.execute(arg),
+    batch: (stmts) => f.A.db.batch(stmts.map((s) =>
+      typeof s !== "string" && /group_tombstones/i.test(s.sql)
+        ? { sql: "INSERT INTO group_tombstones (group_uid, lamport_ts, deleted_at) VALUES (?, 0, NULL)", args: [g.uid] }
+        : s)),
+  };
+
+  const wireBefore = f.wire.length;
+  await assert.rejects(
+    act(f.A, () => handleContactAction(
+      { body: { action: "delete_group", group_id: String(g.id) } }, failingDb, { managers: {} })),
+    /NOT NULL/i,
+    "the failed batch propagates (handler does not swallow it)",
+  );
+
+  assert.ok(await groupRow(f.A, g.uid), "DELETE rolled back — row still present");
+  assert.equal(await tomb(f.A, g.uid), null, "no tombstone landed");
+  assert.equal(f.wire.length, wireBefore, "nothing emitted after the failed batch");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T10 — room-id routing (design R2 F2') + the Groups-list filter: delete_group
+// on a ROOM must route to deleteRoom (full teardown), never tombstone, never
+// emit; and getGroups must stop returning rooms (they have their own UI).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("T10: delete_group on a ROOM routes to deleteRoom — room+members+room_messages gone, NO tombstone, NOTHING emitted; getGroups excludes rooms", async () => {
+  const f = newFleet();
+  await seedContact(f.A, 801, "crow:roomie");
+
+  // A room row, shaped the way rooms-store.createRoom writes it
+  // (room_uid + host_crow_id + mode), with a member and a room message.
+  await f.A.db.execute({
+    sql: "INSERT INTO contact_groups (name, room_uid, host_crow_id, mode) VALUES ('War Room', ?, 'crow:host', 'addressed')",
+    args: ["f".repeat(32)],
+  });
+  const room = (await f.A.db.execute(
+    "SELECT id, group_uid, room_uid FROM contact_groups WHERE room_uid IS NOT NULL")).rows[0];
+  assert.ok(room.group_uid, "trigger stamped the room row with a group_uid too");
+  await f.A.db.execute({ sql: "INSERT INTO contact_group_members (group_id, contact_id) VALUES (?, 801)", args: [room.id] });
+  await f.A.db.execute({
+    sql: "INSERT INTO room_messages (group_id, msg_uid, content, direction) VALUES (?, 'm1', 'hi', 'received')",
+    args: [room.id],
+  });
+
+  // A plain group beside it — getGroups must keep returning plain groups.
+  const plain = await createGroupAndEmit(f, f.A, "Plain Group");
+  const listed = await getGroups(f.A.db);
+  assert.ok(listed.some((r) => Number(r.id) === Number(plain.id)), "getGroups returns the plain group");
+  assert.ok(!listed.some((r) => Number(r.id) === Number(room.id)), "getGroups does NOT return rooms (WHERE room_uid IS NULL)");
+
+  const wireBefore = f.wire.length;
+  const res = await act(f.A, () => handleContactAction(
+    { body: { action: "delete_group", group_id: String(room.id) } }, f.A.db, { managers: {} }));
+  assert.equal(res.redirect, "/dashboard/contacts?view=groups");
+
+  // deleteRoom teardown: row + members + room_messages all gone.
+  const count = async (sql, args) => Number((await f.A.db.execute({ sql, args })).rows[0].c);
+  assert.equal(await count("SELECT COUNT(*) c FROM contact_groups WHERE id = ?", [room.id]), 0, "room row gone");
+  assert.equal(await count("SELECT COUNT(*) c FROM contact_group_members WHERE group_id = ?", [room.id]), 0, "room members gone");
+  assert.equal(await count("SELECT COUNT(*) c FROM room_messages WHERE group_id = ?", [room.id]), 0, "room messages gone");
+
+  // Rooms are never synced (their own Nostr fan-out): no tombstone under EITHER
+  // of the row's uids, and the group sink captured zero entries for the delete.
+  assert.equal(await tomb(f.A, room.group_uid), null, "no tombstone for the room's group_uid");
+  assert.equal(await tomb(f.A, room.room_uid), null, "no tombstone for the room_uid");
+  assert.equal(f.wire.length, wireBefore, "NOTHING emitted for a room delete");
+
+  // The plain group beside it is untouched.
+  assert.ok(await groupRow(f.A, plain.uid), "the plain group survives");
 });
