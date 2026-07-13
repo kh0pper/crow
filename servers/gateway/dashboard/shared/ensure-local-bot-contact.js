@@ -6,12 +6,11 @@
  * against (Task 7). Marked origin='local-bot' so the 1:1 peer list filters it out.
  * Idempotent on crow_id. Returns the contact id, or null on any failure (never throws).
  */
-import { dirname } from "node:path";
 import { loadInstanceSeed, deriveBotIdentity } from "../../../sharing/identity.js";
-import { botsDbPath } from "../../../../scripts/pi-bots/instance-paths.mjs";
+import { instanceSeedDir } from "../../../../scripts/pi-bots/instance-paths.mjs";
 
 function defaultIdentityFor(botId) {
-  const seed = loadInstanceSeed(dirname(botsDbPath()));
+  const seed = loadInstanceSeed(instanceSeedDir());
   return deriveBotIdentity(seed, botId); // { crowId, secp256k1Pubkey, ed25519Pubkey, ... }
 }
 
