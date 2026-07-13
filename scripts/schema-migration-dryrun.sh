@@ -103,8 +103,20 @@ dryrun_one() { # $1=label  $2=src-db
   [ "$integ" != "ok" ] && FAILED=1
 
   echo "  ── schema objects added/removed ──"
-  if diff "$work/pre.schema" "$work/post.schema" | grep -qE '^[<>]'; then
-    diff "$work/pre.schema" "$work/post.schema" | grep -E '^[<>]' | sed 's/^/    /'
+  # Capture, don't branch on the pipeline: under `set -o pipefail` the old
+  # `if diff | grep -q` inverted — diff exits 1 exactly when differences exist,
+  # so this section printed "(none)" for EVERY real delta (found 2026-07-13 by
+  # 2b's own gate run: the new table showed in the column diff but not here).
+  # Indexes/triggers/views are covered ONLY by this section, so a removed one is
+  # a STOP, not just display.
+  local obj_delta
+  obj_delta=$(diff "$work/pre.schema" "$work/post.schema" | grep -E '^[<>]' || true)
+  if [ -n "$obj_delta" ]; then
+    printf '%s\n' "$obj_delta" | sed 's/^/    /'
+    if printf '%s\n' "$obj_delta" | grep -q '^<'; then
+      echo "    ^^^ STOP — schema object(s) REMOVED (index/trigger/view loss is invisible to every other section)"
+      FAILED=1
+    fi
   else
     echo "    (none)"
   fi

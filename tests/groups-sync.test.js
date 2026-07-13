@@ -113,17 +113,29 @@ test("_applyGroup: I2 — a wire-map naming a LOCAL-BOT contact does NOT add it 
   assert.deepEqual(await members(db, "gg5b"), ["crow:h2"], "resolved-but-non-syncable members (local-bot, pending) skipped on add");
 });
 
-test("_applyGroup: delete is lamport-gated + cascades membership; stale delete logs a conflict and keeps local", async () => {
+test("_applyGroup: STRICT delete-wins (2b spec §3.1) — even a LOWER-lamport delete removes the row, cascades membership, stands a tombstone, logs ONE delete-won conflict; a later higher-lamport upsert is silently dropped", async () => {
   const m = mgr(); const db = m.db;
   await db.execute({ sql: "INSERT INTO contacts (id, crow_id, ed25519_pubkey, secp256k1_pubkey) VALUES (90,'crow:z','', ?)", args: [SECP] });
   await m._applyEntry(REMOTE_ID, signedEntry("contact_groups", "update", { group_uid: "gg6", name: "Doomed", members: ["crow:z"] }, 5));
-  // Stale delete (lower lamport) → kept.
+  // Delete at lamport 3 vs local row at lamport 5: NO lamport gate — the delete wins
+  // (a lamport-gated delete provably loses the mutual case, spec §1.1).
   await m._applyEntry(REMOTE_ID, signedEntry("contact_groups", "delete", { group_uid: "gg6" }, 3));
-  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contact_groups WHERE group_uid='gg6'" })).rows[0].c, 1, "stale delete ignored");
-  // Newer delete → removed + membership cascade-reaped.
-  await m._applyEntry(REMOTE_ID, signedEntry("contact_groups", "delete", { group_uid: "gg6" }, 9));
-  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contact_groups WHERE group_uid='gg6'" })).rows[0].c, 0);
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contact_groups WHERE group_uid='gg6'" })).rows[0].c, 0, "row GONE despite its newer lamport (strict delete-wins)");
   assert.deepEqual(await members(db, "gg6"), [], "membership cascade-reaped on delete");
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM group_tombstones WHERE group_uid='gg6'" })).rows[0].c, 1, "tombstone standing");
+  // Exactly ONE conflict row for this uid, labeled truthfully (spec R2 F6): delete = WINNER,
+  // the discarded local row = LOSER.
+  const rowId = JSON.stringify({ group_uid: "gg6" });
+  const { rows: cr } = await db.execute({ sql: "SELECT * FROM sync_conflicts WHERE row_id = ?", args: [rowId] });
+  assert.equal(cr.length, 1, "exactly one delete-won conflict row");
+  assert.equal(cr[0].op, "delete");
+  assert.equal(cr[0].winning_instance_id, REMOTE_ID, "winner = the deleting (remote) instance");
+  assert.equal(Number(cr[0].winning_lamport_ts), 3, "winning lamport = the delete's");
+  assert.equal(Number(cr[0].losing_lamport_ts), 5, "losing lamport = the discarded local row's");
+  // A HIGHER-lamport upsert for the tombstoned uid: silently dropped (G1 statement guard).
+  await m._applyEntry(REMOTE_ID, signedEntry("contact_groups", "update", { group_uid: "gg6", name: "Zombie", members: ["crow:z"] }, 99));
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contact_groups WHERE group_uid='gg6'" })).rows[0].c, 0, "higher-lamport upsert dropped");
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM sync_conflicts WHERE row_id = ?", args: [rowId] })).rows[0].c, 1, "no new conflict row (silent drop)");
 });
 
 test("_applyGroup: a forged wire id/room_uid cannot hijack — id ignored, room dropped, never throws", async () => {

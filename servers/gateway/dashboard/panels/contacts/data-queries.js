@@ -108,10 +108,13 @@ export async function getContactActivity(db, contactId) {
  * Get all contact groups with member counts.
  */
 export async function getGroups(db) {
+  // room_uid IS NULL (2b R2 F2'): rooms are contact_groups rows too, but they
+  // have their own Messages UI — they must not render in the Groups view.
   const { rows } = await db.execute(
     `SELECT g.*, COUNT(gm.id) as member_count
      FROM contact_groups g
      LEFT JOIN contact_group_members gm ON gm.group_id = g.id
+     WHERE g.room_uid IS NULL
      GROUP BY g.id
      ORDER BY g.sort_order ASC, g.name ASC`
   );
