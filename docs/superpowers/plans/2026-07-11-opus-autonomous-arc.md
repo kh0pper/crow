@@ -640,6 +640,43 @@ then check sync_conflicts did not grow).
 
 ---
 
+### Item 2.9 — Review external PR #99 "Add Xquik add-on bundle" (Kevin-queued 2026-07-13)
+
+**Kevin's direction (2026-07-13, verbatim intent):** review this pull request and decide
+whether or not to merge it; "if the code is good, I think we should merge it and then
+message the user/comment back."
+
+PR #99, opened 2026-06-21 by external contributor **kriptoburak**
+(`codex/add-xquik-crow-bundle-20260621`): +154/−0 over 3 files —
+`bundles/xquik/manifest.json`, `bundles/xquik/skills/xquik.md` (skill-only bundle,
+claims read-only X/Twitter research via `xquik.com`'s public REST API), and a
+`registry/add-ons.json` entry. Mergeable-clean as of 2026-07-13.
+
+**This is not a normal code review — it is an external contribution adding a
+third-party service to the add-on store.** Review dimensions, all mandatory:
+1. **Skill-content security:** the skill markdown is *instructions the AI will follow*.
+   Read every line for prompt-injection, data-exfiltration patterns (e.g. "send the
+   user's data to…", URL templates that leak context into query strings), and scope
+   creep beyond the claimed read-only paths.
+2. **Manifest/registry honesty:** does the manifest declare only what the skill does?
+   Does the registry entry misrepresent capability, publisher, or safety? Does the
+   add-on store have any provenance/verification story for third-party entries, and
+   does listing an unaffiliated commercial API fit the store's intent (operator call —
+   surface to Kevin if ambiguous)?
+3. **Service legitimacy:** is `xquik.com` a real, reputable service (check the site,
+   its openapi.json, terms; X-data scrapers are frequently ToS-violating or
+   short-lived). A dead or shady upstream = decline politely.
+4. **Repo-standard gates:** bundle contract test, `check-port-allocation` (skill-only
+   bundle should claim no port), `build-registry --check`, registry JSON validity.
+5. **CLAUDE.md rule:** external PR merge = check GitHub Actions check-runs on the head
+   sha, not the legacy status API.
+
+Outcome: merge + friendly comment if it passes; otherwise a courteous review comment
+explaining what would make it mergeable (it is a community contribution — be welcoming
+either way). Record the decision here.
+
+---
+
 ### Item 3 — Messages/docs minors batch (one PR)
 
 Pooled accepted minors; batch them like PR #170. **Run a triage pass FIRST** — confirm
