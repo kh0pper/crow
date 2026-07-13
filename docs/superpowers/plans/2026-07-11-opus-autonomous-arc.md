@@ -434,7 +434,7 @@ on prod read-only).
 
 ---
 
-### Item 2 — Sync-layer design leftovers — 2a ✅ SHIPPED; **2a-FU is NEXT**, then 2b/2c/2d
+### Item 2 — Sync-layer design leftovers — 2a ✅ / 2a-FU ✅ SHIPPED; **2b is NEXT**, then 2c/2d
 
 These were explicitly deferred as "design-shaped, own session each." Each gets a spec
 + 2-round adversarial review (this layer has bitten us repeatedly — key-rebind,
@@ -545,6 +545,27 @@ restart**, and `sync_conflicts` did not move on any of the four boxes (219/182/1
 
 ---
 
+**2a-FU. ✅ SHIPPED 2026-07-13 — PR #180 (main `e38c4d21`), fleet-deployed + live-verified.**
+All four findings closed in one PR (no schema bump; rail not needed; auto-update stayed ON,
+confirmed `true` ×4 after). Outcomes: (1) dry-run gate now diffs per-table `PRAGMA table_info`
+— **2b is un-gated**; (2) grackle bot-advertise root cause was `CROW_DB_PATH` in its `.env`
+(the gateway's `.env` loader was the premise the old repro missed) short-circuiting the seed
+anchor — fixed product-wide via `instanceSeedDir()` = `resolveDataDir()`, **live-proven**: a
+probe bot advertised on grackle reached crow `complete:true` with a cryptographically valid
+invite, then was cleaned up; (3) MPA's creds were **never broken** — the 07-12 errors were the
+probe reading crow's token file (no `CROW_PEER_TOKENS_PATH`); proven by signed fetches
+returning 200 from both peers; product hardening: `peer-credentials.js` honors `CROW_HOME`,
+resolved at call time (ESM hoisting); **no re-pair happened or is needed**; (4) in-repo
+orphan sweeper (cgroup-ownership protection, subtree reaping, pid-reuse-safe) + installer
+(ExecStartPre drop-ins + 1-min sweep timer, non-root) **installed on crow/grackle/black-swan**;
+grackle's host-local script is now a shim to the repo sweeper (backup kept:
+`~/bin/kill-orphan-gateways.sh.pre-2afu.bak`); parent-watch die-with-session **live-proven**
+(killed a scratch gateway's parent; it self-terminated logging the orphan line; `fuser` clean).
+Suite baseline note: shellcheck is installed on crow now, so the known-failures baseline is
+**3 fail / 0 skip** (two pre-existing crow-install.sh lints were fixed in the PR).
+
+<details><summary>Original 2a-FU work order (historical)</summary>
+
 **2a-FU. The four production problems Item 2a uncovered — ONE PR, and it goes BEFORE 2b.**
 **Kevin authorized this explicitly (2026-07-12): "let's be sure to follow up on those bugs with their
 own PR."** Memory: `crow-fleet-findings-2026-07-12.md`.
@@ -593,6 +614,8 @@ can never prune. 2a is correct code that is currently inert in production.
 *Ship:* one branch, full §2 pipeline. (1) and (4) are mechanical. (2) is an **investigation** — if the
 root cause cannot be established honestly, the correct output is a written diagnosis + a recommendation,
 NOT a guessed patch. (3) may need Kevin for the re-pair decision.
+
+</details>
 
 ---
 
