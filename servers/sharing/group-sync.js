@@ -17,6 +17,8 @@
  * static import; the cached lazy dynamic import keeps the graph acyclic — identical
  * to contact-sync.js / message-sync.js. Do NOT "simplify" to a static import.
  */
+import { isGroupTombstoned } from "./group-delete.js";
+
 let _mgrMod = null;
 let _testSink = null;
 export function __setEmitSinkForTest(sink) { _testSink = sink; }
@@ -41,6 +43,15 @@ export async function emitGroupUpsert(db, groupId) {
     });
     const row = rows[0];
     if (!row || row.room_uid != null || !row.group_uid) return; // room / keyless → skip
+    // G2 (design §3.3): never emit for a tombstoned uid. Belt-and-braces for
+    // the anomalous live-row-beside-tombstone state (§3.6 — reachable only via
+    // a race or manual DB edit; G1 on receivers is the load-bearing guard, so
+    // this just stops the pointless emit at the source). isGroupTombstoned is
+    // FAIL-OPEN: a read failure (e.g. a missing group_tombstones table under a
+    // stale session-spawned server on an un-migrated DB) returns false and the
+    // emit PROCEEDS — a read failure must never silently kill every group sync
+    // emit from this process (crow_create_message_group, the boot backfill).
+    if (await isGroupTombstoned(db, row.group_uid)) return;
     // I2: attach ONLY syncable members — exclude local-bot origin and pending
     // (unestablished) memberships, which the peer must never learn about.
     const { rows: mem } = await db.execute({
