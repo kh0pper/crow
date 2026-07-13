@@ -119,3 +119,62 @@ test("REMOVED column (table rebuilt narrower): STOP line and exit 1", () => {
   assert.match(r.stdout, /DRY-RUN GATE FAILED/);
   assert.equal(sha256(fixtureDb), fixtureHash, "gate must never mutate the source DB");
 });
+
+// ── Item 2b follow-on: the OBJECT diff section (pipefail inversion bug) ───────
+//
+// Under `set -o pipefail`, `if diff | grep -q` took diff's exit 1 whenever
+// differences existed, so "schema objects added/removed" printed "(none)" for
+// EVERY real delta — found live by 2b's own gate run (the new table showed in
+// the column diff but not here). Indexes/triggers/views are covered ONLY by
+// that section, so a removed one must be a STOP, not just display.
+
+const addTableScript = join(dir, "migrate-add-table.mjs");
+const dropIndexScript = join(dir, "migrate-drop-index.mjs");
+const indexedDb = join(dir, "indexed-fixture.db");
+
+test("ADDED object (new table) is DISPLAYED in the object-diff section", () => {
+  writeFileSync(addTableScript, `
+    import Database from ${JSON.stringify(bsqlite)};
+    const db = new Database(process.env.CROW_DB_PATH);
+    db.exec("CREATE TABLE gadgets (id INTEGER PRIMARY KEY)");
+    db.pragma("user_version = 2");
+    db.close();
+  `);
+  const r = runGate(addTableScript);
+  assert.equal(r.status, 0, `expected exit 0, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.match(r.stdout, /> table gadgets/,
+    "the new table must appear in the object-diff section (pipefail regression)");
+  assert.match(r.stdout, /DRY-RUN GATE PASSED/);
+  assert.equal(sha256(fixtureDb), fixtureHash, "gate must never mutate the source DB");
+});
+
+test("REMOVED index: named in the object diff, STOP line, exit 1", () => {
+  const db = new Database(indexedDb);
+  db.exec(`
+    CREATE TABLE parts (id INTEGER PRIMARY KEY, sku TEXT);
+    CREATE INDEX idx_parts_sku ON parts(sku);
+    INSERT INTO parts (sku) VALUES ('a'), ('b');
+  `);
+  db.pragma("user_version = 1");
+  db.close();
+  const indexedHash = sha256(indexedDb);
+  writeFileSync(dropIndexScript, `
+    import Database from ${JSON.stringify(bsqlite)};
+    const db = new Database(process.env.CROW_DB_PATH);
+    db.exec("DROP INDEX idx_parts_sku");
+    db.pragma("user_version = 2");
+    db.close();
+  `);
+  const r = spawnSync("bash", [gateScript, "indexed", indexedDb], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, DRYRUN_INIT_SCRIPT: dropIndexScript },
+  });
+  assert.equal(r.status, 1, `expected exit 1, got ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert.match(r.stdout, /< index idx_parts_sku/,
+    "the removed index must be named in the object-diff section");
+  assert.match(r.stdout, /STOP — schema object\(s\) REMOVED/,
+    "a removed index is invisible to counts/columns — the object section must FAIL the gate");
+  assert.match(r.stdout, /DRY-RUN GATE FAILED/);
+  assert.equal(sha256(indexedDb), indexedHash, "gate must never mutate the source DB");
+});
