@@ -16,8 +16,10 @@
  *     unit manager owns our lifecycle and ppid tricks don't apply. NOTE this
  *     is a heuristic: a scratch gateway spawned BY a systemd-managed process
  *     (a timer job, the pibot bridge) inherits INVOCATION_ID and silently
- *     never arms — the out-of-process sweep (kill-orphan-gateways.sh) is the
- *     backstop for that case.
+ *     never arms — and it also inherits the parent's *.service cgroup, so the
+ *     out-of-process sweep spares it too. What actually covers that case is
+ *     systemd itself: KillMode=control-group reaps the whole cgroup when the
+ *     owning unit stops.
  *   - process.env.CROW_ALLOW_ORPHAN === "1" — explicit operator opt-out for
  *     deliberately detached scratch gateways.
  *   - the INITIAL ppid is already <= 1 — started detached, or we are a child

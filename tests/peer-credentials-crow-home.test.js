@@ -11,10 +11,11 @@
  *
  *   CROW_PEER_TOKENS_PATH > CROW_HOME/peer-tokens.json > homedir()/.crow/peer-tokens.json
  *
- * PEER_TOKENS_PATH is computed at module load (the gateway loads .env before
- * importing), so each case sets env FIRST and then dynamically imports the
+ * The tokens path is resolved at CALL time (ESM hoists static imports ahead
+ * of the gateway's .env loader, so a module-load constant would miss .env-only
+ * vars). Each case still sets env FIRST and then dynamically imports the
  * module with a `?t=` cache-busting query (same pattern as
- * tests/db-journal-mode.test.js).
+ * tests/db-journal-mode.test.js) so scenarios stay independent.
  *
  * Safety: HOME is pointed at a scratch dir for the whole file so that no
  * regression (or the pre-fix RED run) can ever read or write the real
@@ -64,7 +65,7 @@ function makeFakeHome() {
   return makeTempDir("peer-creds-fakehome-");
 }
 
-// Fresh import per case: PEER_TOKENS_PATH is a module-load-time constant, so
+// Fresh import per case: keeps each scenario's module state independent, so
 // env must be set BEFORE the import, and the ESM cache busted with ?t=.
 let _seq = 0;
 async function freshModule({ home, crowHome, tokensPath }) {
@@ -182,4 +183,27 @@ test("default (no vars): derives homedir()/.crow/peer-tokens.json — path deriv
     mod.peerTokensPath(),
     resolve(fakeHome, ".crow", "peer-tokens.json"),
   );
+});
+
+test("CALL-time resolution: CROW_HOME set AFTER import is honored (ESM-hoisting scenario)", async () => {
+  // The gateway's .env loader runs in index.js's BODY, but ESM hoists static
+  // imports — so this module is always evaluated before .env lands in
+  // process.env. A module-load-time path constant would silently ignore a
+  // CROW_HOME that arrives only via .env and fall back to another instance's
+  // credentials. This pins the call-time contract: import FIRST, set env
+  // SECOND, and the resolution must still follow CROW_HOME.
+  const fakeHome = makeFakeHome();
+  const mod = await freshModule({ home: fakeHome }); // imported with NO CROW_HOME
+  const instHome = makeTempDir("peer-creds-late-env-");
+  writeTokensFile(join(instHome, "peer-tokens.json"), SAMPLE);
+
+  process.env.CROW_HOME = instHome; // simulates the .env loader running post-import
+  assert.equal(
+    mod.peerTokensPath(),
+    resolve(instHome, "peer-tokens.json"),
+    "path must follow env set after module evaluation"
+  );
+  const creds = mod.loadPeerCreds();
+  assert.deepEqual(Object.keys(creds), Object.keys(SAMPLE),
+    "creds must load from the post-import CROW_HOME");
 });
