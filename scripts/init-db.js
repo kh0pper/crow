@@ -1909,6 +1909,23 @@ await initTable("contact_tombstones table", `
 // contact-delete.js's `tombstoneStatement()` ON CONFLICT clause, not here.
 await addColumnIfMissing("contact_tombstones", "kind", "TEXT");
 
+// --- Item 2b (group tombstones design §3.2): group deletion tombstones.
+// LOCAL state, never synced, never pruned — one small row per plain group ever
+// deleted. Keyed on group_uid (the trigger-assigned random uid), deliberately
+// NO foreign key to contact_groups: the whole point is that the row is gone.
+// STRICT delete-wins (contrast contact_tombstones): a random uid can never
+// legitimately return, so there is no clear path and NO `kind` column — groups
+// have exactly one writer class (the authoritative user delete). lamport_ts is
+// observability only and gates NOTHING; deleted_at is unix-seconds diagnostics,
+// first write wins. UPSERT lives in servers/sharing/group-delete.js.
+await initTable("group_tombstones table", `
+  CREATE TABLE IF NOT EXISTS group_tombstones (
+    group_uid   TEXT PRIMARY KEY,
+    lamport_ts  INTEGER NOT NULL DEFAULT 0,
+    deleted_at  INTEGER NOT NULL
+  );
+`);
+
 // --- F-CONTACT-1 (design §D4): clock-free replay hygiene for authenticated
 // control events (invite_accepted). Record every successfully-handled event.id so
 // a stale ~60h retry cannot resurrect a deleted contact. Rows older than 30 days
