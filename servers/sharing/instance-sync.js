@@ -22,6 +22,7 @@ import { resolveDataDir } from "../db.js";
 import { isSyncable, PROFILE_SYNC_KEYS } from "../gateway/dashboard/settings/sync-allowlist.js";
 import { normalizePubkey } from "./pubkey-util.js";
 import { readTombstone, writeTombstone, clearTombstone } from "./contact-delete.js";
+import { groupTombstoneStatement } from "./group-delete.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import bus from "../shared/event-bus.js";
 
@@ -1855,6 +1856,10 @@ export class InstanceSyncManager {
    * members skipped — never conjure a contact, never add a local-bot the peer named).
    * A synced group can never become a room: room_uid/host_crow_id/mode are dropped
    * from every applied write.
+   *
+   * Item 2b: deletes are STRICT delete-wins (no lamport gate — see the delete
+   * branch below), and inserts/updates carry statement-level group_tombstones
+   * guards (G1) so a tombstoned uid can never be re-applied.
    */
   async _applyGroup(op, row, lamportTs, instanceId) {
     const groupUid = row && row.group_uid;
@@ -1888,36 +1893,58 @@ export class InstanceSyncManager {
     const localTs = localRow?.lamport_ts || 0;
     const rowIdJson = JSON.stringify({ group_uid: groupUid });
 
-    // ── delete ──────────────────────────────────────────────────────────────
+    // ── delete: STRICT delete-wins (2b W2, design §3.1/§3.3) ────────────────
+    // Tombstone + DELETE land in ONE transaction, UNCONDITIONALLY — even when
+    // there is no local row (arms this instance against out-of-order
+    // update-after-delete arrival and pre-arms third instances' stale copies).
+    // NO lamport gate: a trigger-random group_uid can never legitimately return
+    // (design §2), so the delete wins even over a NEWER local edit — a
+    // lamport-gated tombstone provably loses the mutual case (design §1.1).
+    // ON DELETE CASCADE reaps contact_group_members.
     if (op === "delete") {
-      if (!localRow) return;
-      if (lamportTs > localTs) {
-        // ON DELETE CASCADE reaps contact_group_members.
-        await this.db.execute({ sql: "DELETE FROM contact_groups WHERE group_uid = ? AND room_uid IS NULL", args: [groupUid] });
-        return;
-      }
-      try {
-        await this._insertConflictRow("contact_groups", rowIdJson,
-          localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
-          JSON.stringify(localRow), JSON.stringify(filtered), "delete");
-        await this._notifyConflict();
-      } catch (err) {
-        console.warn("[instance-sync] contact_groups delete conflict LOGGING failed (local kept):", err.message);
+      await this.db.batch([
+        groupTombstoneStatement(groupUid, lamportTs),
+        { sql: "DELETE FROM contact_groups WHERE group_uid = ? AND room_uid IS NULL", args: [groupUid] },
+      ]);
+      if (localRow && lamportTs <= localTs) {
+        // The local row was NEWER and the delete STILL won. Keep the conflict
+        // row for observability, labeled truthfully (R2 F6): the delete is the
+        // WINNER, the discarded local edit the LOSER — this row is the only
+        // surviving record of the edit that lost (e.g. B's offline rename).
+        try {
+          await this._insertConflictRow("contact_groups", rowIdJson,
+            instanceId, localRow.instance_id || this.localInstanceId, lamportTs, localTs,
+            JSON.stringify(filtered), JSON.stringify(localRow), "delete");
+          await this._notifyConflict();
+        } catch (err) {
+          console.warn("[instance-sync] contact_groups delete-won conflict LOGGING failed (delete applied):", err.message);
+        }
       }
       return;
     }
 
-    // ── insert / update (LWW) ───────────────────────────────────────────────
+    // ── insert / update (LWW, gated by G1 STATEMENT-LEVEL tombstone guards) ──
+    // The tombstone invariant lives IN the write statements (design R1 F1):
+    // different peers' feeds drain concurrently and any read-then-write crosses
+    // await boundaries — a delete applying in that window would otherwise leave
+    // a permanent live-row-beside-tombstone zombie. NEVER add RETURNING to
+    // these statements: stmt.reader would flip and rowsAffected hardcodes 0
+    // (servers/db.js:153-172), silently disarming both guards' gates.
     if (!localRow) {
       const cols = Object.keys(filtered).filter((k) => filtered[k] !== undefined);
       if (!cols.includes("group_uid")) cols.push("group_uid");
       const insertCols = [...new Set(cols)];
       const placeholders = insertCols.map(() => "?").join(", ");
       const values = insertCols.map((k) => (k === "group_uid" ? groupUid : filtered[k] ?? null));
-      await this.db.execute({
-        sql: `INSERT INTO contact_groups (${insertCols.join(", ")}, lamport_ts) VALUES (${placeholders}, ?)`,
-        args: [...values, lamportTs],
+      const res = await this.db.execute({
+        sql: `INSERT INTO contact_groups (${insertCols.join(", ")}, lamport_ts)
+              SELECT ${placeholders}, ?
+              WHERE NOT EXISTS (SELECT 1 FROM group_tombstones WHERE group_uid = ?)`,
+        args: [...values, lamportTs, groupUid],
       });
+      // Tombstoned (or a delete raced in) → dropped silently, NO conflict row
+      // (design §3.1: every same-uid reappearance is stale by construction).
+      if (!(Number(res?.rowsAffected) > 0)) return;
       const gid = await this._groupIdByUid(groupUid);
       await this._reconcileGroupMembers(gid, row.members);
       return;
@@ -1928,7 +1955,16 @@ export class InstanceSyncManager {
       const setClauses = updateKeys.map((k) => `${k} = ?`);
       const vals = updateKeys.map((k) => filtered[k] ?? null);
       setClauses.push("lamport_ts = ?"); vals.push(lamportTs);
-      await this.db.execute({ sql: `UPDATE contact_groups SET ${setClauses.join(", ")} WHERE group_uid = ?`, args: [...vals, groupUid] });
+      const res = await this.db.execute({
+        sql: `UPDATE contact_groups SET ${setClauses.join(", ")} WHERE group_uid = ?
+                AND NOT EXISTS (SELECT 1 FROM group_tombstones WHERE group_uid = ?)`,
+        args: [...vals, groupUid, groupUid],
+      });
+      // Reconcile ONLY on a real write (R2 F5): rowsAffected === 0 means the
+      // uid is tombstoned (zombie local row) or a delete raced in — reconciling
+      // here would mutate membership of a row the fleet has deleted, against
+      // localRow.id which is REAL on this branch (the gate is load-bearing).
+      if (!(Number(res?.rowsAffected) > 0)) return;
       await this._reconcileGroupMembers(localRow.id, row.members);
       return;
     }
