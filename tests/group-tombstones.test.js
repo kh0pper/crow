@@ -29,6 +29,7 @@ import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import { emitGroupUpsert, emitGroupDelete, __setEmitSinkForTest } from "../servers/sharing/group-sync.js";
 import { groupTombstoneStatement, readGroupTombstone } from "../servers/sharing/group-delete.js";
+import { restoreConflict } from "../servers/sharing/sync-conflict-resolve.js";
 import { handleContactAction } from "../servers/gateway/dashboard/panels/contacts/api-handlers.js";
 import { getGroups } from "../servers/gateway/dashboard/panels/contacts/data-queries.js";
 import { sign } from "../servers/sharing/identity.js";
@@ -670,6 +671,94 @@ test("T6b: W3/W4 fail-open — group_tombstones reads that THROW do not kill uid
 // off the wire) and holds a stale live copy of the group. A's boot re-emit must
 // converge it; a second re-emit (next boot) must change nothing.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// G2 (design §3.3): emit gate. Belt-and-braces for the anomalous
+// live-row-beside-tombstone state (§3.6) — G1 on receivers is the load-bearing
+// mechanism; G2 stops this instance from even emitting for a dead uid.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("G2: emitGroupUpsert on a live-row-beside-tombstone zombie emits NOTHING; a non-tombstoned row still emits (negative control)", async () => {
+  const f = newFleet();
+
+  // Manufacture the anomalous state directly (design §3.6: reachable in prod
+  // only via a race/manual edit): a live plain group whose uid is tombstoned.
+  await f.A.db.execute({ sql: "INSERT INTO contact_groups (id, name) VALUES (901, 'Zombie Emitter')", args: [] });
+  const uid = (await f.A.db.execute(
+    "SELECT group_uid FROM contact_groups WHERE id = 901")).rows[0].group_uid;
+  assert.ok(uid, "trigger assigned a group_uid");
+  await f.A.db.execute(groupTombstoneStatement(uid, 4));
+
+  const wireBefore = f.wire.length;
+  await act(f.A, () => emitGroupUpsert(f.A.db, 901));
+  assert.equal(f.wire.length, wireBefore, "G2 muted the tombstoned row's emit (wire unchanged)");
+
+  // NEGATIVE CONTROL: a non-tombstoned group emits through the SAME sink —
+  // proves the muted emit above was G2, not a dead sink (anti-vacuous).
+  await f.A.db.execute({ sql: "INSERT INTO contact_groups (id, name) VALUES (902, 'Live Emitter')", args: [] });
+  await act(f.A, () => emitGroupUpsert(f.A.db, 902));
+  assert.equal(f.wire.length, wireBefore + 1, "negative control: non-tombstoned row emitted (wire +1)");
+  assert.equal(f.wire.at(-1).entry.row.name, "Live Emitter", "the emitted entry is the live group's");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T11 — G3 (design R2 F3'): the sync-conflicts RESTORE button must not
+// re-INSERT a tombstoned uid. The conflict row is seeded in the EXACT shape
+// _insertConflictRow writes on the local-wins path (op="update": row_id = JSON
+// {group_uid}, losing_data = the filtered wire row — the shape T1 asserts).
+// Driven the way the settings UI does (sync-conflicts.js handleAction →
+// restoreConflict): the first call trips the stale-snapshot guard (the
+// winning_data snapshot vs. the now-gone row) and re-snapshots — the UI's
+// confirm-again flow; the SECOND call reaches the INSERT branch G3 guards.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Seed a contact_groups op="update" conflict + drive restore twice (stale → outcome). */
+async function seedConflictAndRestore(inst, uid, tombstoned) {
+  const losing = { group_uid: uid, name: "Restored Zombie" };
+  const winning = { id: 950, group_uid: uid, name: "Local Winner", lamport_ts: 9 };
+  await inst.mgr._insertConflictRow("contact_groups", JSON.stringify({ group_uid: uid }),
+    A_ID, B_ID, 9, 12, JSON.stringify(winning), JSON.stringify(losing), "update");
+  const conflictId = (await inst.db.execute(
+    "SELECT id FROM sync_conflicts ORDER BY id DESC LIMIT 1")).rows[0].id;
+  if (tombstoned) await inst.db.execute(groupTombstoneStatement(uid, 12));
+
+  const first = await restoreConflict(inst.db, String(conflictId), { instanceSync: null });
+  assert.equal(first.status, "stale", "first click re-snapshots (the UI's double-confirm flow)");
+  const second = await restoreConflict(inst.db, String(conflictId), { instanceSync: null });
+  return { conflictId, outcome: second };
+}
+
+test("T11: restoring a contact_groups conflict whose uid is TOMBSTONED is REFUSED — no row inserted, tombstone intact, conflict left unresolved", async () => {
+  const f = newFleet();
+  const uid = "t11-" + "0".repeat(28);
+
+  const { conflictId, outcome } = await seedConflictAndRestore(f.A, uid, true);
+
+  assert.equal(outcome.status, "refused", "G3 refuses the restore (not applied, not error)");
+  assert.match(outcome.message || "", /deleted fleet-wide/i,
+    "the refusal surfaces the reason instead of claiming success");
+  assert.equal(await groupRow(f.A, uid), null, "NO contact_groups row was inserted");
+  assert.ok(await tomb(f.A, uid), "tombstone intact");
+  const c = (await f.A.db.execute({
+    sql: "SELECT resolved FROM sync_conflicts WHERE id = ?", args: [conflictId] })).rows[0];
+  assert.equal(Number(c.resolved), 0,
+    "conflict left UNRESOLVED on refusal (the data stays visible, like the D7 refusal)");
+});
+
+test("T11 negative control: the SAME conflict WITHOUT a tombstone restores — row inserted, conflict resolved (proves the harness reaches the INSERT branch)", async () => {
+  const f = newFleet();
+  const uid = "t11-neg-" + "0".repeat(24);
+
+  const { conflictId, outcome } = await seedConflictAndRestore(f.A, uid, false);
+
+  assert.equal(outcome.status, "applied", "non-tombstoned restore succeeds");
+  const row = await groupRow(f.A, uid);
+  assert.ok(row, "the losing row was re-INSERTed");
+  assert.equal(row.name, "Restored Zombie", "restored with the losing_data values");
+  const c = (await f.A.db.execute({
+    sql: "SELECT resolved FROM sync_conflicts WHERE id = ?", args: [conflictId] })).rows[0];
+  assert.equal(Number(c.resolved), 1, "conflict marked resolved on success");
+});
 
 test("T9: W4 flagless boot re-emit — a peer that paired after the delete converges (stale copy gone, tombstoned, exactly one delete-won conflict row); a second re-emit is idempotent", async () => {
   const f = newFleet();

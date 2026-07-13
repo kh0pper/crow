@@ -302,10 +302,42 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
       const colList = insertKeys.join(", ");
       const placeholders = insertKeys.map(() => "?").join(", ");
       const values = insertKeys.map((k) => losingData[k] ?? null);
-      await db.execute({
-        sql: `INSERT INTO ${table} (${colList}) VALUES (${placeholders})`,
-        args: values,
-      });
+      if (table === "contact_groups") {
+        // G3 (2b design R2 F3'): an operator clicking Restore on an old
+        // contact_groups conflict must NOT re-insert a tombstoned group_uid —
+        // that would manufacture the resurrection zombie through a SUPPORTED
+        // UI path (G1 then quarantines it on peers: permanent, silent).
+        // STATEMENT-LEVEL guard (INSERT…SELECT WHERE NOT EXISTS), same shape
+        // as G1's apply gate, so the check is atomic with the write. A NULL
+        // uid never matches the subquery → the insert proceeds (a keyless row
+        // cannot be tombstoned; fail-open like isGroupTombstoned). NEVER add
+        // RETURNING here: stmt.reader would flip and rowsAffected hardcodes 0
+        // (servers/db.js:153-172), silently turning every restore into a
+        // refusal.
+        const uid = typeof losingData.group_uid === "string" ? losingData.group_uid : null;
+        const res = await db.execute({
+          sql: `INSERT INTO ${table} (${colList})
+                SELECT ${placeholders}
+                WHERE NOT EXISTS (SELECT 1 FROM group_tombstones WHERE group_uid = ?)`,
+          args: [...values, uid],
+        });
+        if (!(Number(res?.rowsAffected) > 0)) {
+          // Refused, not applied: leave the conflict UNRESOLVED (its data
+          // stays visible, like the op='insert' D7 refusal) and emit nothing.
+          return {
+            status: "refused",
+            message:
+              "This group was deleted fleet-wide — restore refused. Deleted " +
+              "groups stay deleted on every instance; re-create the group " +
+              "instead (it will get a fresh identity and sync normally).",
+          };
+        }
+      } else {
+        await db.execute({
+          sql: `INSERT INTO ${table} (${colList}) VALUES (${placeholders})`,
+          args: values,
+        });
+      }
     }
   } catch {
     return {
