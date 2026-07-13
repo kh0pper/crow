@@ -1,7 +1,8 @@
 /**
  * Peer credentials store for cross-host gateway-to-gateway RPC.
  *
- * Each entry in ~/.crow/peer-tokens.json binds an instance ID to the
+ * Each entry in <instance home>/peer-tokens.json (CROW_HOME, default
+ * ~/.crow — see PEER_TOKENS_PATH below) binds an instance ID to the
  * plaintext credentials this node needs to make outbound calls to that
  * peer AND to verify inbound calls from it. Because both sides use the
  * same file shape, pairing is symmetric: a single ceremony provisions
@@ -30,15 +31,30 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, renameSync } from "fs";
-import { resolve } from "path";
+import { resolve, dirname } from "path";
 import { homedir } from "os";
 import { randomBytes } from "crypto";
 
-const PEER_TOKENS_PATH = process.env.CROW_PEER_TOKENS_PATH
-  || resolve(homedir(), ".crow", "peer-tokens.json");
+// peer-tokens.json is an INSTANCE-scoped resource: it must honor CROW_HOME
+// like every other instance-home path (see servers/gateway/bundles-config.js).
+// A process running with CROW_HOME=<instance> (e.g. the MPA gateway under
+// ~/.crow-mpa) must never silently read — or sign with — another instance's
+// credentials; that hardcoded-homedir fallback is exactly what produced the
+// missing_peer_credentials / hmac_mismatch misdiagnosis of 2026-07-12.
+// Resolution order: CROW_PEER_TOKENS_PATH > CROW_HOME > homedir()/.crow.
+// Resolved at CALL time, not module load: ESM hoists static imports, so this
+// module is evaluated BEFORE the gateway's in-body .env loader runs — a
+// module-load constant would silently ignore a CROW_HOME set only in .env,
+// recreating the very wrong-instance failure this resolution exists to stop.
+function peerTokensFile() {
+  return process.env.CROW_PEER_TOKENS_PATH
+    || resolve(process.env.CROW_HOME || resolve(homedir(), ".crow"), "peer-tokens.json");
+}
 
 function ensureDir() {
-  const dir = resolve(homedir(), ".crow");
+  // Anchor on the resolved tokens path: with CROW_PEER_TOKENS_PATH set to an
+  // arbitrary location, we must create THAT file's parent, not ~/.crow.
+  const dir = dirname(peerTokensFile());
   try {
     mkdirSync(dir, { recursive: true });
   } catch {}
@@ -73,12 +89,13 @@ function checkPermissions(path) {
  * if permissions check fails.
  */
 export function loadPeerCreds() {
-  if (!checkPermissions(PEER_TOKENS_PATH)) return {};
+  const p = peerTokensFile();
+  if (!checkPermissions(p)) return {};
   try {
-    if (!existsSync(PEER_TOKENS_PATH)) return {};
-    return JSON.parse(readFileSync(PEER_TOKENS_PATH, "utf-8"));
+    if (!existsSync(p)) return {};
+    return JSON.parse(readFileSync(p, "utf-8"));
   } catch (err) {
-    console.warn(`[peer-credentials] Failed to parse ${PEER_TOKENS_PATH}: ${err.message}`);
+    console.warn(`[peer-credentials] Failed to parse ${p}: ${err.message}`);
     return {};
   }
 }
@@ -88,12 +105,13 @@ export function loadPeerCreds() {
  */
 export function savePeerCreds(creds) {
   ensureDir();
-  const tmp = PEER_TOKENS_PATH + ".tmp";
+  const dest = peerTokensFile();
+  const tmp = dest + ".tmp";
   writeFileSync(tmp, JSON.stringify(creds, null, 2), { mode: 0o600 });
   // renameSync is atomic on POSIX for same-filesystem rename
-  renameSync(tmp, PEER_TOKENS_PATH);
+  renameSync(tmp, dest);
   // Belt & suspenders — re-apply mode in case renameSync preserved different perms
-  chmodSync(PEER_TOKENS_PATH, 0o600);
+  chmodSync(dest, 0o600);
 }
 
 /**
@@ -145,5 +163,5 @@ export function generateSecret() {
  * Resolve the path for operators to reference (e.g. "chmod 600" hints).
  */
 export function peerTokensPath() {
-  return PEER_TOKENS_PATH;
+  return peerTokensFile();
 }

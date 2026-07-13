@@ -216,11 +216,13 @@ export function deriveInstanceIdentity(seed) {
 }
 
 /**
- * Load the raw instance seed from a SPECIFIC data dir's identity.json. Used by
- * the pi-bots host to derive bot keys from the SAME instance the bot DB belongs
- * to — avoiding the CROW_DATA_DIR-vs-CROW_DB_PATH split-brain (the host may set
- * only CROW_DB_PATH, so the module-level CROW_DATA_DIR fallback could resolve a
- * different instance). Unencrypted seeds only (the host has no passphrase).
+ * Load the raw instance seed from a SPECIFIC data dir's identity.json. Callers
+ * pass the INSTANCE data dir — instanceSeedDir() (= resolveDataDir()) from
+ * scripts/pi-bots/instance-paths.mjs — the same anchor this module's own
+ * loadOrCreateIdentity uses, so bot keys always derive from the identity that
+ * federation itself runs on. Never pass dirname(CROW_DB_PATH): the DB file may
+ * legitimately live outside the instance dir (grackle's symlinked-DB layout).
+ * Unencrypted seeds only (the host has no passphrase).
  */
 export function loadInstanceSeed(dataDir) {
   const p = resolve(dataDir, "identity.json");
