@@ -1,7 +1,8 @@
 /**
  * Peer credentials store for cross-host gateway-to-gateway RPC.
  *
- * Each entry in ~/.crow/peer-tokens.json binds an instance ID to the
+ * Each entry in <instance home>/peer-tokens.json (CROW_HOME, default
+ * ~/.crow — see PEER_TOKENS_PATH below) binds an instance ID to the
  * plaintext credentials this node needs to make outbound calls to that
  * peer AND to verify inbound calls from it. Because both sides use the
  * same file shape, pairing is symmetric: a single ceremony provisions
@@ -30,15 +31,25 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, chmodSync, renameSync } from "fs";
-import { resolve } from "path";
+import { resolve, dirname } from "path";
 import { homedir } from "os";
 import { randomBytes } from "crypto";
 
+// peer-tokens.json is an INSTANCE-scoped resource: it must honor CROW_HOME
+// like every other instance-home path (see servers/gateway/bundles-config.js).
+// A process running with CROW_HOME=<instance> (e.g. the MPA gateway under
+// ~/.crow-mpa) must never silently read — or sign with — another instance's
+// credentials; that hardcoded-homedir fallback is exactly what produced the
+// missing_peer_credentials / hmac_mismatch misdiagnosis of 2026-07-12.
+// Resolution order: CROW_PEER_TOKENS_PATH > CROW_HOME > homedir()/.crow.
+// Computed at module load — the gateway loads .env before importing.
 const PEER_TOKENS_PATH = process.env.CROW_PEER_TOKENS_PATH
-  || resolve(homedir(), ".crow", "peer-tokens.json");
+  || resolve(process.env.CROW_HOME || resolve(homedir(), ".crow"), "peer-tokens.json");
 
 function ensureDir() {
-  const dir = resolve(homedir(), ".crow");
+  // Anchor on the resolved tokens path: with CROW_PEER_TOKENS_PATH set to an
+  // arbitrary location, we must create THAT file's parent, not ~/.crow.
+  const dir = dirname(PEER_TOKENS_PATH);
   try {
     mkdirSync(dir, { recursive: true });
   } catch {}
