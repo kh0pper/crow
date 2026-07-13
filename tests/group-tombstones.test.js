@@ -50,7 +50,10 @@ const SECP = "a".repeat(64);
 function initInstance(label) {
   const dir = mkdtempSync(join(tmpdir(), `crow-grp-tomb-${label}-`));
   execFileSync(process.execPath, ["scripts/init-db.js"], {
-    env: { ...process.env, CROW_DATA_DIR: dir, CROW_DISABLE_NOSTR: "1", CROW_DISABLE_INSTANCE_SYNC: "1" },
+    // CROW_DB_PATH outranks CROW_DATA_DIR in init-db (init-db.js:11) — blank it, or a
+    // shell exporting it (grackle's .env did, PR #180) would run the gen-8 migration
+    // against the REAL DB, outside the deploy rail's backups.
+    env: { ...process.env, CROW_DATA_DIR: dir, CROW_DB_PATH: "", CROW_DISABLE_NOSTR: "1", CROW_DISABLE_INSTANCE_SYNC: "1" },
     stdio: "pipe",
   });
   return { dir, path: join(dir, "crow.db") };
