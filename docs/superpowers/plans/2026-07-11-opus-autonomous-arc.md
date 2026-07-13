@@ -619,6 +619,39 @@ NOT a guessed patch. (3) may need Kevin for the re-pair decision.
 
 ---
 
+**2b. contact_groups offline-peer tombstones — ✅✅ SHIPPED 2026-07-13 (PR #181, main `e25d718b`), fleet-deployed + live-verified, auto-update back ON (`true` ×4).**
+Spec: `docs/superpowers/specs/2026-07-13-group-tombstones-design.md` (v3; two adversarial
+rounds — R2 found 3 blockers INSIDE R1's fixes, the 2a pattern caught in prose). Design:
+**STRICT delete-wins keyed on group_uid, NO lamport gate** — sound because the
+`contact_groups_group_uid_ai` trigger makes every genuine re-create a fresh random uid,
+and a #155-style lamport-gated tombstone provably does NOT fix the mutual case (the
+higher-lamport offline rename passes the gate). W1 atomic batch + room routing; W2
+unconditional tombstone+delete with truthful winner/loser; G1 STATEMENT-level
+`NOT EXISTS` guards (per-peer drains interleave at await boundaries); W3 legacy
+deterministic-uid check; W4 FLAGLESS every-boot re-emit (per-peer flags survive
+revoke/re-pair); G2 fail-open emit gate; G3 conflict-restore guard. Bonus: the dry-run
+gate's object-diff was **pipefail-inverted** (always printed "(none)"); fixed on the
+branch, removed index/trigger/view now a STOP.
+**Rail executed in full:** auto-update off ×4 → fifth-DB sweep (found grackle's dormant
+`~/casa-nueva/home-finance/data/crow.db` — the db.js:22 "finance" instance, no service,
+not migrated) → backups ×4 → dry-run gate FROM the branch ×4 (`+ table group_tombstones`
+sole delta, 7→8, zero row deltas) → merge → manual deploy in runbook order → verify
+(gen 8 + integrity ok + counts ×4) → re-enable + confirm `true` ×4.
+**Live proof (real gateways, minted session, real HTTP):** probe group created on crow →
+synced to grackle; grackle STOPPED; delete on crow (W1: row+tombstone atomic, lamport
+4386); offline rename on grackle at lamport 9999; grackle restart → **strict delete-wins
+beat the newer rename** (row gone, tombstone 4387, exactly ONE truthful conflict row
+delete|4387|9999); second restart → **`W4: re-emitted 1 group tombstone delete(s)`** in
+the journal, crow no-oped, zero conflict growth. MPA converged as a free third instance.
+Probe artifacts cleaned; conflicts back to baseline 219/182/162/0.
+**Suite: 1769 tests / 3 known fails / 0 skips (new baseline: +31 tests).**
+Observations for follow-up (NOT defects introduced here): black-swan received neither
+the create nor the delete — its crow feed looks dormant (pre-existing; its HTTP signed
+fetches work per 2a-FU); `backfillProvidersForNewPeers`' per-peer flag survives
+revoke/re-pair (same class W4 avoids — pre-existing hole, own PR).
+
+<details><summary>Original 2b work order (historical)</summary>
+
 **2b. contact_groups offline-peer tombstones.** Group delete PROPAGATES live
 (`emitGroupDelete` exists and is wired at `panels/contacts/api-handlers.js:323`), so
 this is **a missing-tombstone gap, not a missing emit** — a peer OFFLINE at delete time
@@ -636,6 +669,8 @@ does not un-migrate.)
 and re-emits it; the tombstone wins on both sides. Live verify on crow↔grackle with a
 throwaway group. Post-deploy: `user_version` = new gen on all three boxes,
 `PRAGMA integrity_check` ok, `sync_conflicts` did not grow.
+
+</details>
 
 **2c. Lamport-preserving contact re-emit.** Boot backfills currently re-emit contacts
 with fresh lamports, creating a divergence window where a stale value can clobber a
