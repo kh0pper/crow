@@ -18,8 +18,8 @@ before(async () => {
     cwd: new URL("..", import.meta.url).pathname,
   });
   // init-db does NOT create identity.json (the instance seed). Seed it now so
-  // loadInstanceSeed(dirname(botsDbPath())) can derive bot keys. With CROW_DATA_DIR
-  // set and no CROW_DB_PATH, botsDbPath() = <dir>/crow.db, so dirname == <dir>.
+  // loadInstanceSeed(instanceSeedDir()) can derive bot keys. With CROW_DATA_DIR
+  // set, instanceSeedDir() == <dir>.
   const { loadOrCreateIdentity } = await import("../servers/sharing/identity.js");
   loadOrCreateIdentity(); // writes <dir>/identity.json (unencrypted)
   const { createDbClient } = await import("../servers/db.js");
@@ -102,12 +102,13 @@ test("getActiveInvite skips expired invites; returns valid non-expired invite", 
 });
 
 test("botIdentityFor matches the key the pi-bots adapter would subscribe under (parity)", async () => {
-  // The adapter derives via loadInstanceSeed(dirname(botsDbPath())); the admin
-  // helper MUST produce the identical crow_id, or shared invites are dead.
-  const { loadInstanceSeed, deriveBotIdentity } = await import("../servers/sharing/identity.js");
-  const { botsDbPath } = await import("../scripts/pi-bots/instance-paths.mjs");
-  const { dirname } = await import("node:path");
-  const adapterId = deriveBotIdentity(loadInstanceSeed(dirname(botsDbPath())), "bot1");
+  // Cross-MODULE parity: the identity is derived by the ADAPTER's own exported
+  // adapterBotIdentity() — the same function start() routes through — not by
+  // recomputing the formula here. If crow-messages.mjs ever drifts to a
+  // different seed anchor than the admin panel, THIS assertion goes red
+  // (recomputing the formula in-test would just prove determinism).
+  const { adapterBotIdentity } = await import("../scripts/pi-bots/gateways/crow-messages.mjs");
+  const adapterId = await adapterBotIdentity("bot1");
   const adminId = admin.botIdentityFor("bot1");
   assert.equal(adminId.crowId, adapterId.crowId, "crow_id parity admin vs adapter");
   assert.equal(adminId.secp256k1Pubkey, adapterId.secp256k1Pubkey, "secp key parity");

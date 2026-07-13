@@ -6,14 +6,13 @@
  * uses via libsql (db.execute). Same crow.db file — single-statement writes.
  *
  * Identity is derived (never stored): the gateway's own instance seed
- * (loadInstanceSeed(dirname(botsDbPath()))) + the bot id → deriveBotIdentity.
+ * (loadInstanceSeed(instanceSeedDir())) + the bot id → deriveBotIdentity.
  */
 import { randomBytes } from "node:crypto";
-import { dirname } from "node:path";
 import {
   loadInstanceSeed, deriveBotIdentity, generateBotInviteCode,
 } from "../../../../sharing/identity.js";
-import { botsDbPath } from "../../../../../scripts/pi-bots/instance-paths.mjs";
+import { instanceSeedDir } from "../../../../../scripts/pi-bots/instance-paths.mjs";
 
 const DEFAULT_RELAYS = ["wss://relay.damus.io", "wss://nos.lol"];
 
@@ -22,13 +21,13 @@ export function xOnly(hex) { const h = String(hex || ""); return h.length === 66
 
 /**
  * Derive this instance's identity for the given bot (pure; nothing stored).
- * Seed source = loadInstanceSeed(dirname(botsDbPath())) — the SAME anchor the
- * pi-bots adapter uses (crow-messages.mjs:75), so the editor's crow_id and the
- * adapter's subscription key are guaranteed identical. Read-only: throws (not
- * creates) if no identity.json exists beside the crow.db.
+ * Seed source = loadInstanceSeed(instanceSeedDir()) — the SAME anchor the
+ * pi-bots adapter uses (crow-messages.mjs start()), so the editor's crow_id and
+ * the adapter's subscription key are guaranteed identical. Read-only: throws
+ * (not creates) if the instance data dir has no identity.json.
  */
 export function botIdentityFor(botId) {
-  const seed = loadInstanceSeed(dirname(botsDbPath()));
+  const seed = loadInstanceSeed(instanceSeedDir());
   return deriveBotIdentity(seed, botId);
 }
 
@@ -184,7 +183,7 @@ export async function buildAdvertisementPayload(
   let skipped = 0;
   for (const b of await listAdvertisedBots(db)) {
     try {
-      const ident = _identityFor(b.botId); // throws if no identity.json beside crow.db
+      const ident = _identityFor(b.botId); // throws if the instance data dir has no identity.json
       const token = await getOrCreatePairedRosterInvite(db, b.botId);
       const inviteCode = await _buildInviteCode(db, b.botId, token);
       const entry = {
