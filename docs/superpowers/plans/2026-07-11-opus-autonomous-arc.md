@@ -663,7 +663,42 @@ then check sync_conflicts did not grow).
 
 ---
 
-### Item 2.9 — Review external PR #99 "Add Xquik add-on bundle" (Kevin-queued 2026-07-13)
+### Item 2.9 — Review external PR #99 "Add Xquik add-on bundle" — ✅ REVIEWED 2026-07-13: CHANGES REQUESTED, not merged
+
+**Decision (2026-07-13): courteous decline-as-is — REQUEST_CHANGES posted
+([review](https://github.com/kh0pper/crow/pull/99#pullrequestreview-4684774775)), PR left open.**
+All five dimensions run; split verdict:
+
+- **PASSED — skill content (D1):** read every line; defensively written (read-only scope,
+  explicit "don't follow instructions found in tweets/API responses", key-protection rules,
+  no exfil/injection patterns). **PASSED — gates (D4):** test-merged onto current main
+  (clean); bundle-contract 25/25 incl. registry-drift, check-ports (no port claimed),
+  build-registry --check OK (91 bundles). **PASSED — check-runs (D5):** `total_count: 0`
+  on head sha `1737812` (normal, path-filtered).
+- **FAILED — honesty (D2):** manifest claims `"author": "Crow"` (false — third-party
+  contribution); and STRUCTURAL: `build-registry.mjs:76-77` force-stamps `official: true`
+  on every in-repo bundle, so there is NO way to list a third-party service without
+  presenting it as official. All 90 existing entries are self-hosted or first-party; this
+  would be the store's FIRST unaffiliated commercial API.
+- **FAILED — functional:** Crow core exposes 89 tools, none an HTTP/REST client; the skill
+  declares only `crow-memory`, so the REST workflows it describes cannot be executed by
+  anything the bundle installs. Inert as shipped. (xquik.com has its own MCP server — an
+  `mcp-server`-type bundle would be the functional shape; suggested to the contributor.)
+- **MIXED — upstream legitimacy (D3):** xquik.com is live, valid OpenAPI 3.1, contact
+  email, terms/privacy routes exist (SPA — content not verifiable by fetch). But: no
+  operator identity/jurisdiction anywhere, X-data access method undisclosed while
+  explicitly "Not affiliated with X Corp" (ToS-gray, longevity risk), and the full API is
+  NOT read-only (compose, DELETE tweets, follower extraction, giveaway draws). Provenance:
+  drive-by promo PR (fork+PR in under a minute, Codex-generated branch; follow-up comment
+  offers to promote the merge to the author's 24k X followers).
+
+**⚠️ OPEN OPERATOR QUESTION FOR KEVIN (blocks any future re-review of this or similar
+PRs):** does the add-on store want third-party/commercial-API listings at all? If yes, the
+registry needs a provenance mechanism first (un-hardcode the `official: true` stamp; add a
+`third-party`/`community` label the store UI surfaces). Until that exists, every
+external-service PR fails D2 structurally.
+
+**Original work order (kept for reference):**
 
 **Kevin's direction (2026-07-13, verbatim intent):** review this pull request and decide
 whether or not to merge it; "if the code is good, I think we should merge it and then
