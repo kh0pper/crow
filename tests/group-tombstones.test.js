@@ -581,3 +581,137 @@ test("T10: delete_group on a ROOM routes to deleteRoom — room+members+room_mes
   // The plain group beside it is untouched.
   assert.ok(await groupRow(f.A, plain.uid), "the plain group survives");
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T6 — W3 (design §3.4): a NULL-uid legacy row whose DETERMINISTIC uid is
+// tombstoned means the logical group was deleted fleet-wide while this instance
+// was offline (or pre-C1) — the assignment pass must DELETE it, not regenerate
+// the dead uid. ⚠️ Seeding trap (design §5): the contact_groups_group_uid_ai
+// trigger makes a NULL-uid INSERT impossible — seed with INSERT then
+// UPDATE ... SET group_uid = NULL.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("T6: W3 — a legacy NULL-uid row whose deterministic uid is tombstoned is DELETED at assignment time (nothing emitted, tombstone stands); a non-tombstoned sibling is assigned normally", async () => {
+  const f = newFleet();
+
+  // Two legacy rows on B (INSERT then NULL the trigger-assigned uid — spec §5 trap).
+  await f.B.db.execute({ sql: "INSERT INTO contact_groups (name) VALUES ('Dead Legacy')", args: [] });
+  await f.B.db.execute({ sql: "INSERT INTO contact_groups (name) VALUES ('Live Legacy')", args: [] });
+  await f.B.db.execute("UPDATE contact_groups SET group_uid = NULL WHERE name IN ('Dead Legacy','Live Legacy')");
+  const nulls = Number((await f.B.db.execute(
+    "SELECT COUNT(*) c FROM contact_groups WHERE group_uid IS NULL")).rows[0].c);
+  assert.equal(nulls, 2, "setup: both legacy rows are NULL-uid");
+
+  // Tombstone the DETERMINISTIC uid of one — via the SAME derivation the code uses.
+  const deadUid = f.B.mgr.deterministicGroupUid("Dead Legacy");
+  const liveUid = f.B.mgr.deterministicGroupUid("Live Legacy");
+  await f.B.db.execute(groupTombstoneStatement(deadUid, 7));
+
+  const wireBefore = f.wire.length;
+  await f.B.mgr._assignDeterministicGroupUids();
+
+  // The tombstoned legacy row is GONE — deleted, not assigned.
+  const dead = (await f.B.db.execute({
+    sql: "SELECT * FROM contact_groups WHERE name = 'Dead Legacy'", args: [] })).rows;
+  assert.equal(dead.length, 0, "W3 deleted the tombstoned legacy row");
+  assert.equal(await groupRow(f.B, deadUid), null, "no row holds the tombstoned uid");
+  assert.ok(await tomb(f.B, deadUid), "the tombstone still stands");
+
+  // NEGATIVE CONTROL: the non-tombstoned sibling got its uid assigned normally.
+  const live = await groupRow(f.B, liveUid);
+  assert.ok(live, "negative control: non-tombstoned legacy row assigned its deterministic uid");
+  assert.equal(live.name, "Live Legacy");
+
+  assert.equal(f.wire.length, wireBefore, "nothing emitted for the W3 local delete (wire unchanged)");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T6b — fail-open (design §3.4 / G2 rationale): a group_tombstones read failure
+// (e.g. missing table on an un-migrated DB) means "not tombstoned" — it must
+// NEVER kill uid assignment for every group; and W4's re-emit must no-op
+// without throwing. Mutation check (c): letting the read error propagate out
+// of the W3 check reds this test.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("T6b: W3/W4 fail-open — group_tombstones reads that THROW do not kill uid assignment, and reemitGroupTombstones no-ops without throwing", async () => {
+  const f = newFleet();
+  await f.B.db.execute({ sql: "INSERT INTO contact_groups (name) VALUES ('Fail Open')", args: [] });
+  await f.B.db.execute("UPDATE contact_groups SET group_uid = NULL WHERE name = 'Fail Open'");
+
+  // Pass-through wrapper over the REAL db: any statement touching
+  // group_tombstones throws (the un-migrated-DB shape).
+  const realDb = f.B.db;
+  const throwingDb = {
+    execute: (arg) => {
+      const sql = typeof arg === "string" ? arg : arg.sql;
+      if (/group_tombstones/i.test(sql)) throw new Error("boom: group_tombstones unavailable");
+      return realDb.execute(arg);
+    },
+    batch: (stmts) => realDb.batch(stmts),
+  };
+  f.B.mgr.db = throwingDb;
+  try {
+    const n = await f.B.mgr._assignDeterministicGroupUids();
+    assert.equal(n, 1, "uid assignment proceeded despite throwing tombstone reads (fail-open)");
+    const reemitted = await f.B.mgr.reemitGroupTombstones();
+    assert.equal(reemitted, 0, "W4 re-emit no-ops (guarded) when the table read throws");
+  } finally {
+    f.B.mgr.db = realDb;
+  }
+
+  const uid = f.B.mgr.deterministicGroupUid("Fail Open");
+  assert.ok(await groupRow(f.B, uid), "the legacy row holds its deterministic uid");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T9 — W4 (design §3.7): FLAGLESS every-boot tombstone re-emit. Sync feeds are
+// born EMPTY at pairing, so a peer that pairs AFTER the delete never hears it —
+// B below stands in for that peer: it never received the delete entry (skimmed
+// off the wire) and holds a stale live copy of the group. A's boot re-emit must
+// converge it; a second re-emit (next boot) must change nothing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("T9: W4 flagless boot re-emit — a peer that paired after the delete converges (stale copy gone, tombstoned, exactly one delete-won conflict row); a second re-emit is idempotent", async () => {
+  const f = newFleet();
+
+  // A: a REAL prior delete (group created + deleted through the W1 shape).
+  const g = await createGroupAndEmit(f, f.A, "Ghost");
+  const d = await deleteGroupLocalW1(f, f.A, g.uid);
+  assert.ok(await tomb(f.A, g.uid), "setup: A holds the tombstone");
+  // B "paired after the delete": it never receives the create/delete entries.
+  f.skimWire();
+
+  // B: fresh peer seeded with a stale live copy of the group (same uid, direct
+  // INSERT then uid overwrite past the trigger) at a lamport ABOVE the delete's.
+  await f.B.db.execute({ sql: "INSERT INTO contact_groups (name, lamport_ts) VALUES ('Ghost', ?)", args: [d + 5] });
+  await f.B.db.execute({ sql: "UPDATE contact_groups SET group_uid = ? WHERE name = 'Ghost'", args: [g.uid] });
+  assert.ok(await groupRow(f.B, g.uid), "setup: B holds the stale live copy");
+  assert.equal(await tomb(f.B, g.uid), null, "setup: B never saw the delete (no tombstone)");
+  const c0 = { a: await conflicts(f.A), b: await conflicts(f.B) };
+
+  // A's boot re-emit (W4) → drain to B.
+  const wireBefore = f.wire.length;
+  const n1 = await f.A.mgr.reemitGroupTombstones();
+  assert.equal(n1, 1, "one tombstone re-emitted");
+  assert.ok(f.wire.length > wireBefore, "the re-emit reached the wire");
+  assert.equal(f.wire.at(-1).entry.op, "delete", "re-emit is an op=delete");
+  assert.equal(f.wire.at(-1).entry.row.group_uid, g.uid, "same wire shape as emitGroupDelete ({ group_uid })");
+  await f.deliver();
+
+  assert.equal(await groupRow(f.B, g.uid), null, "B: stale live copy deleted");
+  assert.ok(await tomb(f.B, g.uid), "B: tombstone standing");
+  assert.equal(await conflicts(f.B), c0.b + 1, "B: exactly one delete-won conflict row");
+  const cr = (await conflictRows(f.B)).at(-1);
+  assert.equal(cr.table_name, "contact_groups");
+  assert.equal(cr.op, "delete");
+  assert.equal(cr.winning_instance_id, A_ID, "winner = the (re-emitting) deleting instance");
+
+  // Idempotence: a second boot's re-emit produces NO further state change.
+  const n2 = await f.A.mgr.reemitGroupTombstones();
+  assert.equal(n2, 1, "re-emits every boot — deliberately flagless");
+  await f.deliver();
+  assert.equal(await groupRow(f.B, g.uid), null, "B: still deleted");
+  assert.ok(await tomb(f.B, g.uid), "B: tombstone intact");
+  assert.equal(await conflicts(f.B), c0.b + 1, "B: NO conflict growth on the second re-emit");
+  assert.equal(await conflicts(f.A), c0.a, "A: zero conflict growth throughout");
+});
