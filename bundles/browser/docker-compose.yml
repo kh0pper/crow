@@ -11,7 +11,7 @@ services:
       - CDP_PORT=9222
       - CHROME_PROXY=${CROW_BROWSER_PROXY:-}
     volumes:
-      - /home/kh0pp/.crow/browser-downloads:/downloads
+      - ${CROW_HOME:-${HOME}/.crow}/browser-downloads:/downloads
     init: true
     mem_limit: 2g
     shm_size: 1g

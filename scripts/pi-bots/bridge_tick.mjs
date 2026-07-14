@@ -16,14 +16,18 @@
 import Database from "better-sqlite3";
 import { execFile } from "node:child_process";
 import { openSync, closeSync, existsSync, statSync, unlinkSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { handleInbound } from "./bridge.mjs";
 import { reapStalePi } from "./pi_lifecycle.mjs";
+import { gmailSenderAllowed } from "./gateways/base.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { botRuntimeEnabledSync } from "./runtime-gate.mjs";
 
-const HOME = "/home/kh0pp";
-const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
-const GIO = HOME + "/crow/scripts/pi-bots/gmail_io.mjs";
+// gmail_io.mjs is dependency-free and lives beside this file — run it with
+// the SAME node running this tick (process.execPath) and derive its path from
+// our own location, never from an assumed /home/<user>/crow checkout.
+const NODE = process.execPath;
+const GIO = fileURLToPath(new URL("./gmail_io.mjs", import.meta.url));
 const CROW_DB = botsDbPath();
 const LOCK = "/tmp/pibot-bridge-tick.lock";
 
@@ -80,7 +84,7 @@ function acquireLock() {
     let def; try { def = JSON.parse(row.definition || "{}"); } catch { continue; }
     const gw = (def.gateways || []).find((g) => g.type === "gmail" && g.address);
     if (!gw) continue;
-    const alias = gw.address;                         // kevin.hopper+<x>@maestro.press
+    const alias = gw.address;                         // e.g. user+<x>@example.com
     const plus = (alias.match(/\+([^@]+)@/) || [])[1]; // <x>
 
     const srch = await gio(["search", "--query", `to:${alias} newer_than:2d`, "--max", "10"]);
@@ -107,21 +111,18 @@ function acquireLock() {
       const msgDate = Date.parse(newest.date || (newest.headers && newest.headers.date) || "") || Date.now();
 
       // Reply-recipient = actual sender of `newest` (so the bot's reply lands
-      // back in the user's inbox, not the bot's own mailbox). Was previously
-      // hardcoded to kevin.hopper@maestro.press which routed replies to the
-      // bot itself. The send-allowlist on gmail_send_threaded_to_self is also
-      // enforced here at the bridge level so we never even attempt to send to
-      // a non-allowlisted sender — that's the safety wall against a third
-      // party emailing the +alias and getting a bot reply.
-      const SENDER_ALLOWLIST = new Set([
-        "kevin.hopper1@gmail.com",
-        "kevin.hopper@maestro.press",
-      ]);
+      // back in the user's inbox, not the bot's own mailbox — it was once
+      // hardcoded to the operator's address, which routed replies to the bot
+      // itself). The sender wall derives from the bot def's per-gateway
+      // allowlist (gw.allowlist — the same field the Bot Builder edits) and
+      // FAILS CLOSED when unconfigured: an empty allowlist means nobody can
+      // trigger a bot reply, never everybody. That's the safety wall against
+      // a third party emailing the +alias and getting a bot reply.
       const fromHeader = String(newest.from || (newest.headers && newest.headers.from) || "");
       const fromMatch = fromHeader.match(/<([^>]+)>/);
       const replyTo = (fromMatch ? fromMatch[1] : fromHeader).trim().toLowerCase();
-      if (!SENDER_ALLOWLIST.has(replyTo)) {
-        console.log(`[tick] skip thread=${tid} — sender '${replyTo}' not in allowlist`);
+      if (!gmailSenderAllowed(gw.allowlist, replyTo)) {
+        console.log(`[tick] skip thread=${tid} — sender '${replyTo}' not in this gateway's allowlist${Array.isArray(gw.allowlist) && gw.allowlist.length ? "" : " (no allowlist configured — set one on the bot's Gateways tab)"}`);
         continue;
       }
 
@@ -142,7 +143,7 @@ function acquireLock() {
             // so when the user clicks Reply in Gmail, it routes back to the
             // bot's +alias (which bridge_tick monitors) rather than the
             // bot's bare From: address (which nothing monitors). Without
-            // this, the user's reply lands at kevin.hopper@maestro.press
+            // this, the user's reply lands at the bot's bare From: address
             // and the bot never sees the follow-up.
             await gio(["reply", "--to", replyTo,
               "--reply-to", alias,

@@ -19,8 +19,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 
-const HOME = "/home/kh0pp";
+const HOME = process.env.HOME || homedir();
 
 // Mirrors the live ~/.crow-mpa/mcp-addons.json launch config, but with the
 // db-path env set EXPLICITLY to the live MPA databases (the whole point of S0:

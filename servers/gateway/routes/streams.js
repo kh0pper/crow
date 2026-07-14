@@ -26,6 +26,9 @@ import { createDbClient } from "../../db.js";
 import bus from "../../shared/event-bus.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
 import { html, raw, sseTurbo } from "../streams/turbo-stream.js";
+// Instance-aware tasks.db resolution (CROW_TASKS_DB_PATH wins; else the db
+// sits beside the crow.db actually in use). Same resolver bot-board-api uses.
+import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 
 export default function streamsRouter(dashboardAuth) {
   const router = Router();
@@ -312,7 +315,7 @@ export default function streamsRouter(dashboardAuth) {
     const stream = openAuthedStream(req, res);
     if (!stream) return;
     const { sendRaw } = stream;
-    const TASKS_DB = process.env.CROW_TASKS_DB_PATH || "/home/kh0pp/.crow-mpa/data/tasks.db";
+    const TASKS_DB = tasksDbPath();
     const LOCK = new Set(["active", "waiting-user"]);
 
     // Resolve bot or project at connection time (once, not per tick)

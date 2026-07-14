@@ -10,7 +10,7 @@
  *     rejectFunneledMiddleware() already blocks it from Tailscale Funnel, so it
  *     is tailnet-only. It is NOT in PUBLIC_FUNNEL_PREFIXES (must never be).
  *   - Path is canonicalized with realpathSync (resolves .. and symlinks) and
- *     must land UNDER the allowlist root (default /home/kh0pp) and end in .md
+ *     must land UNDER the allowlist root (default: the user's home dir) and end in .md
  *     and be a regular file — otherwise 404. This defeats path traversal and
  *     symlink-escape.
  *   - renderMarkdown() (servers/blog/renderer.js) sanitizes the HTML.

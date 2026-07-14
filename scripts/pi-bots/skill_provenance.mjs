@@ -17,7 +17,6 @@
 import Database from "better-sqlite3";
 import { botsDbPath } from "./instance-paths.mjs";
 
-const HOME = "/home/kh0pp";
 const CROW_DB = botsDbPath();
 
 function db() { const d = new Database(CROW_DB); d.pragma("busy_timeout = 10000"); return d; }

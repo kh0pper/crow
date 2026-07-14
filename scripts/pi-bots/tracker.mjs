@@ -15,7 +15,6 @@
 import Database from "better-sqlite3";
 import { botsDbPath, tasksDbPath } from "./instance-paths.mjs";
 
-const HOME = "/home/kh0pp";
 const CROW_DB = botsDbPath();
 const TASKS_DB = tasksDbPath();
 

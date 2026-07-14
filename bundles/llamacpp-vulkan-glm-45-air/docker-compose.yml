@@ -17,9 +17,9 @@ services:
     entrypoint: ["llama-server"]
     command:
       # Pre-download (~55GB across 2 shards; llama.cpp auto-loads shard 2):
-      #   mkdir -p /home/kh0pp/llm/hf-cache/glm-45-air/
+      #   mkdir -p $LLM_CACHE/glm-45-air/
       #   for i in 1 2; do
-      #     curl -L -o /home/kh0pp/llm/hf-cache/glm-45-air/GLM-4.5-Air-Q5_K_M-0000${i}-of-00002.gguf \
+      #     curl -L -o $LLM_CACHE/glm-45-air/GLM-4.5-Air-Q5_K_M-0000${i}-of-00002.gguf \
       #       "https://huggingface.co/unsloth/GLM-4.5-Air-GGUF/resolve/main/Q5_K_M/GLM-4.5-Air-Q5_K_M-0000${i}-of-00002.gguf"
       #   done
       - -m

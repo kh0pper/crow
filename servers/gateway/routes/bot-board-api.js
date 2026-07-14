@@ -46,6 +46,8 @@
 import { Router } from "express";
 import { existsSync, readFileSync, writeFileSync, realpathSync, statSync, readdirSync, unlinkSync, mkdirSync, lstatSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
+import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { createDbClient } from "../../db.js";
 import { jsonError } from "./_error.js";
 import { listProvidersAll } from "../../shared/providers-db.js";
@@ -59,10 +61,10 @@ import { isStage, stageToStatus, effectiveStage } from "./board-stages.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
-const CROW_USER_SKILLS = "/home/kh0pp/.crow/skills";
+const CROW_USER_SKILLS = join(process.env.CROW_HOME || join(homedir(), ".crow"), "skills");
 
-const HOME = "/home/kh0pp";
-const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
+const HOME = process.env.HOME || homedir();
+const TASKS_DB = tasksDbPath();
 const CARD_STATUSES = new Set(["pending", "in_progress", "done", "cancelled"]);
 const PROJECT_STATUSES = new Set(["active", "paused", "completed", "archived"]);
 const LOCK_STATUSES = new Set(["active", "waiting-user"]);

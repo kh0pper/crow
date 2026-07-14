@@ -32,9 +32,10 @@
  * crowdb-wal-flip-new-consumers), same as bridge.mjs.
  */
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 
-const HOME = "/home/kh0pp";
+const HOME = process.env.HOME || homedir();
 const MODELS_JSON = process.env.PI_MODELS_JSON || HOME + "/.pi/agent/models.json";
 export const LOCAL_FALLBACK = "crow-local/qwen3.6-35b-a3b";
 

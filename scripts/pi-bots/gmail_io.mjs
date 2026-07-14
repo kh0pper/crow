@@ -2,12 +2,23 @@
 /**
  * Crow Bot Builder — Gmail I/O helper (the bridge's real Gmail adapter).
  *
- * Dependency-free MCP stdio client to the crow `google-workspace` server (the
- * same server + tools the production MPA bots use). Sends self-guarded mail
- * (gmail_send_to_self / gmail_send_threaded_to_self — recipients restricted to
- * kevin.hopper1@gmail.com / kevin.hopper@maestro.press; +pibot is a self-alias)
- * and reads threads (gmail_search_threads / gmail_get_thread). Used by the
- * bridge for outbound, and by bridge_gmail_e2e.mjs to drive the user side.
+ * Dependency-free MCP stdio client to the crow `google-workspace` server.
+ * Sends self-guarded mail (gmail_send_to_self / gmail_send_threaded_to_self —
+ * recipients restricted server-side to the authenticated account plus any
+ * addresses in GMAIL_SEND_TO_SELF_ALLOWLIST) and reads threads
+ * (gmail_search_threads / gmail_get_thread). Used by the bridge for outbound,
+ * and by bridge_gmail_e2e.mjs to drive the user side.
+ *
+ * Configuration (env; HOME-derived defaults):
+ *   PIBOT_GWS_MCP_DIR   — google-workspace-mcp checkout (default
+ *                         $HOME/spring-2026/google-workspace-mcp)
+ *   PIBOT_GWS_MCP_BIN   — server binary (default <dir>/.venv/bin/google-workspace-mcp)
+ *   GOOGLE_CREDENTIALS_FILE / GOOGLE_TOKEN_FILE — workspace-account creds
+ *                         (default $HOME/.config/google-workspace-mcp-mpa/…)
+ *   GOOGLE_PERSONAL_CREDENTIALS_FILE / GOOGLE_PERSONAL_TOKEN_FILE — personal-
+ *                         account creds (default $HOME/.config/google-workspace-mcp/…)
+ *   GMAIL_SEND_TO_SELF_ALLOWLIST — extra self-send addresses (comma-separated;
+ *                         passed through from the caller's env, never baked in)
  *
  * CLI:
  *   node gmail_io.mjs send  --to A --subject S --body B [--thread TID] [--reply-to R]
@@ -17,23 +28,43 @@
  * Prints the tool's JSON result (last line = RESULT <json>).
  */
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
-const GW = "/home/kh0pp/spring-2026/google-workspace-mcp";
-const BIN = GW + "/.venv/bin/google-workspace-mcp";
+const HOME = process.env.HOME || homedir();
+const GW = process.env.PIBOT_GWS_MCP_DIR || join(HOME, "spring-2026", "google-workspace-mcp");
+const BIN = process.env.PIBOT_GWS_MCP_BIN || join(GW, ".venv", "bin", "google-workspace-mcp");
+const CONF = join(HOME, ".config");
 const ENV = {
-  GOOGLE_CREDENTIALS_FILE: "/home/kh0pp/.config/google-workspace-mcp-mpa/credentials.json",
-  GOOGLE_TOKEN_FILE: "/home/kh0pp/.config/google-workspace-mcp-mpa/gws-token.json",
-  GOOGLE_PERSONAL_CREDENTIALS_FILE: "/home/kh0pp/.config/google-workspace-mcp/credentials.json",
-  GOOGLE_PERSONAL_TOKEN_FILE: "/home/kh0pp/.config/google-workspace-mcp/token.json",
-  // +pibot is a self-alias of kevin.hopper@maestro.press; sanctioned override
-  // (gmail.py:26 documents GMAIL_SEND_TO_SELF_ALLOWLIST for new self addresses)
-  GMAIL_SEND_TO_SELF_ALLOWLIST: "kevin.hopper1@gmail.com,kevin.hopper@maestro.press,kevin.hopper+pibot@maestro.press",
+  GOOGLE_CREDENTIALS_FILE: process.env.GOOGLE_CREDENTIALS_FILE || join(CONF, "google-workspace-mcp-mpa", "credentials.json"),
+  GOOGLE_TOKEN_FILE: process.env.GOOGLE_TOKEN_FILE || join(CONF, "google-workspace-mcp-mpa", "gws-token.json"),
+  GOOGLE_PERSONAL_CREDENTIALS_FILE: process.env.GOOGLE_PERSONAL_CREDENTIALS_FILE || join(CONF, "google-workspace-mcp", "credentials.json"),
+  GOOGLE_PERSONAL_TOKEN_FILE: process.env.GOOGLE_PERSONAL_TOKEN_FILE || join(CONF, "google-workspace-mcp", "token.json"),
+  // GMAIL_SEND_TO_SELF_ALLOWLIST intentionally NOT set here: it flows through
+  // from the caller's environment (process.env below). The server's own
+  // default (self-send to the authenticated address only) applies when unset.
 };
+
+// Honest failure when unconfigured: a missing server binary means this host
+// has no google-workspace-mcp install — say so and name the knobs, instead of
+// dying on a cryptic spawn ENOENT.
+if (!existsSync(BIN)) {
+  console.error(
+    `gmail_io: google-workspace-mcp not found at ${BIN}.\n` +
+    "The Gmail channel needs a google-workspace-mcp install: set PIBOT_GWS_MCP_DIR " +
+    "(checkout dir) or PIBOT_GWS_MCP_BIN (server binary), plus GOOGLE_CREDENTIALS_FILE / " +
+    "GOOGLE_TOKEN_FILE for its credentials."
+  );
+  process.exit(1);
+}
 
 function arg(name, def) { const i = process.argv.indexOf("--" + name); return i >= 0 ? process.argv[i + 1] : def; }
 const cmd = process.argv[2];
 
-const child = spawn(BIN, [], { cwd: GW, env: Object.assign({}, process.env, ENV), stdio: ["pipe", "pipe", "pipe"] });
+// cwd is best-effort: PIBOT_GWS_MCP_BIN may point at a binary outside the
+// default checkout dir; never fail the spawn on a missing cwd.
+const child = spawn(BIN, [], { cwd: existsSync(GW) ? GW : undefined, env: Object.assign({}, process.env, ENV), stdio: ["pipe", "pipe", "pipe"] });
 let buf = "", nextId = 1; const pending = new Map(); let stderr = "";
 child.stderr.on("data", (d) => { stderr += d.toString(); });
 child.stdout.on("data", (d) => {

@@ -34,7 +34,6 @@ import { chunkedSend, downloadImages, passesAllowlist, SerialQueue, typingHeartb
 import { botsDbPath } from "./instance-paths.mjs";
 import { runtimeGate } from "./runtime-gate.mjs";
 
-const HOME = "/home/kh0pp";
 const CROW_DB = botsDbPath();
 const MAX_QUEUE = 5;
 const CHUNK_LIMIT = 1990;        // safe margin under Discord's 2000-char hard limit

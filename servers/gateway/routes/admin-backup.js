@@ -26,10 +26,18 @@ import { performBackup, createDbClient } from "../../db.js";
 
 const DEFAULT_DIR = path.join(os.homedir(), "backups", "crow");
 
-function getInstanceLabel() {
+// Label for backup notifications. NTFY_TOPIC is used verbatim; an operator
+// whose topics share a personal prefix (e.g. "myname-mpa") can set
+// CROW_NTFY_LABEL_PREFIX=myname to have it stripped. Exported for tests.
+export function getInstanceLabel() {
   const topic = (process.env.NTFY_TOPIC || "").toLowerCase();
-  const m = topic.match(/^kevin-(.+)$/);
-  if (m) return m[1];
+  if (topic) {
+    const prefix = (process.env.CROW_NTFY_LABEL_PREFIX || "").toLowerCase();
+    if (prefix && topic.startsWith(prefix + "-") && topic.length > prefix.length + 1) {
+      return topic.slice(prefix.length + 1);
+    }
+    return topic;
+  }
   const dbPath = (process.env.CROW_DB_PATH || "").toLowerCase();
   if (dbPath.includes("crow-mpa")) return "mpa";
   if (dbPath.includes("home-finance")) return "finance";

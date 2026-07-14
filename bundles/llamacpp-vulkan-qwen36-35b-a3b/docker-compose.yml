@@ -28,7 +28,7 @@ services:
       - "${CROW_TAILSCALE_IP}:8003:8000"
     entrypoint: ["llama-server"]
     command:
-      # MTP GGUF + mmproj pre-downloaded to /home/kh0pp/llm/hf-cache/qwen36-35b-a3b-mtp/
+      # MTP GGUF + mmproj pre-downloaded to $LLM_CACHE/qwen36-35b-a3b-mtp/
       # from unsloth/Qwen3.6-35B-A3B-MTP-GGUF (UD-Q5_K_XL + mmproj-F16; Q6_K kept as fallback).
       - -m
       - /models/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf

@@ -115,6 +115,19 @@ export function passesAllowlist(senderId, allow) {
 }
 
 /**
+ * Gmail sender wall (bridge_tick): unlike passesAllowlist, an empty/absent
+ * allowlist FAILS CLOSED — the +alias is reachable by anyone on the internet,
+ * so "unconfigured" must mean "nobody triggers a bot reply", never "everybody".
+ * Comparison is case-insensitive (email addresses).
+ */
+export function gmailSenderAllowed(allow, sender) {
+  if (!Array.isArray(allow) || allow.length === 0) return false;
+  const s = String(sender || "").trim().toLowerCase();
+  if (!s) return false;
+  return allow.some((a) => String(a || "").trim().toLowerCase() === s);
+}
+
+/**
  * A per-bot FIFO serial queue: at most one turn runs at a time for a bot.
  * push() returns false (and invokes onFull) when the queue is at capacity, so
  * the caller can tell the user "still working". (Generalized from Discord's

@@ -264,7 +264,7 @@ export async function mountFeatureRoutes(app, deps) {
 
   // Markdown file viewer — read-only, auth-gated, tailnet-only. Under /dashboard/
   // so rejectFunneledMiddleware() blocks Funnel; renders allowlisted local .md
-  // files (default root /home/kh0pp) as sanitized HTML. NOT in PUBLIC_FUNNEL_PREFIXES.
+  // files (default root: the user's home dir) as sanitized HTML. NOT in PUBLIC_FUNNEL_PREFIXES.
   try {
     const { default: fileviewRouter } = await import("../routes/fileview.js");
     app.use(fileviewRouter(dashboardAuth));
