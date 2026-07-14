@@ -69,7 +69,7 @@ Todo lo técnico (la definición sin procesar, los diagnósticos) está guardado
 
 ## Paso 8 — Habla con tu bot
 
-Para un bot de Crow Messages: abre la pestaña **Gateways** del bot, pulsa **Compartir** y obtendrás un enlace + código QR. Abre el enlace (o abre **Mensajes** en la barra lateral) y salúdalo. Para otros canales, escríbele donde vive: mándale un correo, menciónalo en Discord, etcétera.
+Para un bot de Crow Messages: abre la pestaña **Gateways** del bot, pulsa **Compartir acceso** y obtendrás un enlace + código QR. Abre el enlace (o abre **Mensajes** en la barra lateral) y salúdalo. Para otros canales, escríbele donde vive: mándale un correo, menciónalo en Discord, etcétera.
 
 ## Limpieza
 
