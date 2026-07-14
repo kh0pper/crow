@@ -40,5 +40,11 @@ cd /workspaces
 # (${VAR:+--cors ${VAR}} would word-split into one --cors + stray positionals).
 set -- --port 4096
 for o in ${ROOKERY_CORS_ORIGINS:-}; do set -- "$@" --cors "$o"; done
+
+# Defense-in-depth: drop credential-shaped vars before OpenScience (and any
+# MCP child it spawns) can inherit them. The generated config already holds
+# everything the app needs. The allowlist wrapper (/app/wrapper-exec.sh) is
+# the primary mechanism for MCP children; this scrub is belt-and-suspenders.
+. /app/scrub-env.sh
 openscience "$@" &
 SHIM_LISTEN_HOST=0.0.0.0 exec node /app/host-shim.mjs 3061 4096
