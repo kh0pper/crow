@@ -60,7 +60,8 @@ test("mid-tour deep links still open in a new tab (deepLink is out of scope)", a
   const midTour = [
     [STEP_KEYS.indexOf("ai"), "/dashboard/settings?section=llm&amp;tab=providers"],
     [STEP_KEYS.indexOf("integrations"), "/dashboard/settings?section=integrations"],
-    [STEP_KEYS.indexOf("bot"), "/dashboard/bot-builder"],
+    // Item 5 PR1: the bot step deep-links into the guided creation wizard.
+    [STEP_KEYS.indexOf("bot"), "/dashboard/bot-builder?new=1"],
     [STEP_KEYS.indexOf("starter"), "/dashboard/extensions#collections"],
     [STEP_KEYS.indexOf("connect"), "/dashboard/connect"],
   ];

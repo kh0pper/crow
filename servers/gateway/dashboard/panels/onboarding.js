@@ -339,7 +339,8 @@ function renderStepBody(stem, lang, ctx = {}) {
       return body + callout(t("onboarding.integrationsNote", lang), "info")
         + linkWrap(deepLink(t("onboarding.openIntegrations", lang), "/dashboard/settings?section=integrations"));
     case "bot":
-      return body + linkWrap(deepLink(t("onboarding.openBotBuilder", lang), "/dashboard/bot-builder"));
+      // Item 5 PR1: deep-link into the guided creation wizard, not the raw panel.
+      return body + linkWrap(deepLink(t("onboarding.openBotBuilder", lang), "/dashboard/bot-builder?new=1"));
     case "connect":
       return body + callout(t("onboarding.connectNote", lang), "info")
         + linkWrap(deepLink(t("onboarding.openConnections", lang), "/dashboard/connect"));

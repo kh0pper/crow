@@ -50,10 +50,14 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
       `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(bt.bot_id)}&tab=ai">Edit</a>`,
     ];
   });
+  // Item 5 PR1 (spec §D1): the guided wizard is the primary creation path.
+  const lang = reqLang(req);
+  const wizCta =
+    `<p style="margin:0 0 1rem"><a class="btn btn-primary btn-md" href="/dashboard/bot-builder?new=1">${t("botbuilder.wizCta", lang)}</a></p>`;
   const list = section("Bots (pi_bot_defs)",
-    notice + (rows.length
+    notice + wizCta + (rows.length
       ? dataTable(["bot_id", "name", "state", "model", "project", "sessions", "updated", "board", ""], rows)
-      : "<p>No agents yet. Create one below.</p>"));
+      : `<p>${t("botbuilder.emptyListWizard", lang)} <a href="/dashboard/bot-builder?new=1">${t("botbuilder.emptyListWizardLink", lang)}</a></p>`));
   // Create form: project + model dropdowns (Phase 1, S3 plan review)
   let createProjects = [];
   try { createProjects = (await db.execute({ sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows; } catch {}
@@ -70,13 +74,15 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
   ).join("");
   // Empty/error model state: warn + link to provider settings, and disable
   // submit — never render a submittable form with an empty model select.
-  const lang = reqLang(req);
   const modelsUnavailable = !!createModelErr || createModelOpts.length === 0;
   const modelWarn = modelsUnavailable
     ? `<p class="btb-warn">${escapeHtml(createModelErr || "No providers configured.")} ` +
       `<a href="/dashboard/settings?section=llm&amp;tab=providers">${t("botbuilder.createProvidersLink", lang)}</a></p>`
     : "";
+  // Item 5 PR1: quick create collapses into an advanced disclosure — the
+  // wizard (CTA above) is the primary path. Form contents unchanged.
   const form = section("Create an agent",
+    `<details class="btb-quick-create"><summary>${t("botbuilder.quickCreateSummary", lang)}</summary>` +
     `<form method="POST" class="btb-form"><input type="hidden" name="action" value="create">${csrfInput(req)}` +
     formField("Bot id (slug)", "bot_id", { required: true, placeholder: "research-scout" }) +
     formField("Display name", "display_name", { required: true, placeholder: "Research Scout" }) +
@@ -86,7 +92,8 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
     `<div class="btb-group"><label>Model</label>` +
     `<select name="model" class="btb-select">${createOptGroups}</select></div>` +
     actionBar(`<button type="submit" class="btb-btn"${modelsUnavailable ? " disabled" : ""}>Create</button>`) + `</form>` +
-    `<p class="btb-hint">Creates a v0.1 bot with safe defaults; then use the tabbed editor (AI &middot; Tools &middot; Gateways &middot; Project &middot; Skills &middot; Permissions &middot; Triggers &middot; Review).</p>`);
+    `<p class="btb-hint">Creates a v0.1 bot with safe defaults; then use the tabbed editor (AI &middot; Tools &middot; Gateways &middot; Project &middot; Skills &middot; Permissions &middot; Triggers &middot; Review).</p>` +
+    `</details>`);
   // Run monitor — live bot_sessions (the bridge's runtime authority).
   // Initial server render + a poll-based SSE source (the bridge is a
   // separate process; /dashboard/streams/bot-sessions replaces the tbody

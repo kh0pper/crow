@@ -10,6 +10,8 @@ import {
   PI_BUILTIN, PI_EXT_ALLOWLIST,
   loadModelOptions, remoteInvocationOn, defaultDefinition, lines,
 } from "./data-queries.js";
+import { normalizeGatewayFields } from "./gateway-fields.js";
+import { handleWizardCreate } from "./wizard.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
 import { regenerateBotMcp } from "../bot-mcp-regen.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
@@ -25,15 +27,11 @@ function reqLang(req) {
   } catch { return "en"; }
 }
 
-export function buildCrowMessagesGatewayConfig(b) {
-  const gw = {
-    type: "crow-messages",
-    allow_paired_instances: b.gw_allow_paired_instances === "on" || b.gw_allow_paired_instances === "true",
-  };
-  const desc = typeof b.gw_description === "string" ? b.gw_description.trim() : "";
-  if (desc) gw.description = desc.slice(0, 140);
-  return gw;
-}
+// Moved to gateway-fields.js (Item 5 PR1 — it's normalization, and the wizard
+// consumes it without an import cycle); imported for local use AND re-exported
+// for existing importers (a bare `export ... from` creates no local binding).
+import { buildCrowMessagesGatewayConfig } from "./gateway-fields.js";
+export { buildCrowMessagesGatewayConfig };
 
 export async function handleBotBuilderPost(req, res, { db }) {
   const b = req.body || {};
@@ -58,17 +56,31 @@ export async function handleBotBuilderPost(req, res, { db }) {
     try {
       // M3b: project_id goes in the column, not the JSON. defaultDefinition
       // no longer includes it.
+      // Item 5 PR1 (spec §D1): plain INSERT, never upsert — the old
+      // ON CONFLICT DO UPDATE silently replaced an existing bot's entire
+      // definition with fresh defaults (data loss). Editing is what the
+      // editor is for; an existing id is rejected with a banner.
+      const existing = (await db.execute({ sql: "SELECT 1 FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
+      if (existing) {
+        return res.redirectAfterPost(
+          "/dashboard/bot-builder?error=" + encodeURIComponent(t("botbuilder.createExists", reqLang(req)).replace("{id}", botId))
+        );
+      }
       await db.execute({
-        sql:
-          "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES (?,?,?,?,1) " +
-          "ON CONFLICT(bot_id) DO UPDATE SET display_name=excluded.display_name, " +
-          "definition=excluded.definition, project_id=excluded.project_id, updated_at=datetime('now')",
+        sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES (?,?,?,?,1)",
         args: [botId, display, JSON.stringify(defaultDefinition(botId, projectId, model)), projectId],
       });
     } catch (e) {
       return res.redirectAfterPost("/dashboard/bot-builder?error=" + encodeURIComponent(String(e.message || e)));
     }
     return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=ai&saved=1`);
+  }
+
+  // ---- guided-creation wizard final submit (Item 5 PR1, spec §D1) ----
+  // PRG like every other action here; the intermediate wizard_step renders
+  // happen in the panel handler (bot-builder.js), which has layout/lang.
+  if (action === "wizard_create") {
+    return handleWizardCreate(req, res, { db, lang: reqLang(req) });
   }
 
   if (action === "toggle") {
@@ -180,42 +192,12 @@ export async function handleBotBuilderPost(req, res, { db }) {
       // flag off: leave any existing def.tools.remote_mcp untouched (don't wipe a prior selection)
     } else if (tab === "gateways") {
       const gwType = (b.gw_type || "gmail").trim();
-      if (gwType === "none") {
-        def.gateways = [];
-      } else if (gwType === "discord") {
-        def.gateways = [
-          {
-            type: "discord",
-            token: (b.gw_token || "").trim(),
-            guild_id: (b.gw_guild_id || "").trim() || undefined,
-            channel_ids: lines(b.gw_channel_ids),
-            allowlist: lines(b.gw_allowlist),
-          },
-        ];
-      } else if (gwType === "telegram") {
-        // Telegram long-poll adapter (gateways/telegram.mjs), run by the
-        // pibot-gateways host. allowlist = Telegram numeric user IDs.
-        def.gateways = [
-          {
-            type: "telegram",
-            token: (b.gw_token || "").trim(),
-            allowlist: lines(b.gw_allowlist),
-            chat_ids: lines(b.gw_chat_ids),
-          },
-        ];
-      } else if (gwType === "slack") {
-        // Slack socket-mode adapter (gateways/slack.mjs), run by the
-        // pibot-gateways host. Needs BOTH a bot token (xoxb-) and an
-        // app-level token (xapp-, connections:write).
-        def.gateways = [
-          {
-            type: "slack",
-            bot_token: (b.gw_bot_token || "").trim(),
-            app_token: (b.gw_app_token || "").trim(),
-            allowlist: lines(b.gw_allowlist),
-            channel_ids: lines(b.gw_channel_ids),
-          },
-        ];
+      // Simple types (gmail/discord/telegram/slack/none) normalize via the
+      // shared gateway-fields module (Item 5 PR1, spec §D3) — wizard_create
+      // maps the same field names through the same function.
+      const simpleGateways = normalizeGatewayFields(gwType, b);
+      if (simpleGateways) {
+        def.gateways = simpleGateways;
       } else if (gwType === "glasses") {
         // Slice B (B4): bind this bot to a meta-glasses device. The device's
         // bound_bot_id is the source of truth the voice turn reads; the
@@ -328,14 +310,6 @@ export async function handleBotBuilderPost(req, res, { db }) {
         } catch (err) {
           extraQ = "&warn=" + encodeURIComponent("companion binding incomplete: " + err.message);
         }
-      } else if (gwType === "gmail") {
-        def.gateways = [
-          {
-            type: "gmail",
-            address: (b.gw_address || "").trim(),
-            allowlist: lines(b.gw_allowlist),
-          },
-        ];
       } else if (gwType === "crow-messages") {
         // First-class P2P gateway (host adapter from Plan 1). Identity is derived
         // and invites/ACL live in their own tables (edited via gw_* actions); the
