@@ -931,6 +931,7 @@ export const translations = {
   "botbuilder.delRadiusMessaging": { en: "{acl} messaging permission(s) and {inv} invite link(s)", es: "{acl} permiso(s) de mensajería y {inv} enlace(s) de invitación" },
   "botbuilder.delRadiusDevices": { en: "Bound device(s) will be unbound: {names}", es: "Los dispositivos vinculados se desvincularán: {names}" },
   "botbuilder.delRadiusWorkspaceKept": { en: "Its workspace folder on disk is KEPT (delete it manually if you want it gone)", es: "Su carpeta de trabajo en disco se CONSERVA (bórrala manualmente si quieres eliminarla)" },
+  "botbuilder.delRadiusConversation": { en: "Your conversation history with this bot ({n} message(s)) and {g} contact-group membership(s)", es: "Tu historial de conversación con este bot ({n} mensaje(s)) y {g} membresía(s) de grupos de contactos" },
   "botbuilder.delLiveSessionsWarn": { en: "{n} session(s) are still active. The bridge will drop them; consider stopping them on the Sessions tab first.", es: "{n} sesión(es) siguen activas. El puente las abandonará; considera detenerlas primero en la pestaña Sesiones." },
   "botbuilder.delPermanent": { en: "This permanently deletes the bot and its history.", es: "Esto elimina permanentemente el bot y su historial." },
   "botbuilder.delConfirmBtn": { en: "Delete permanently", es: "Eliminar permanentemente" },

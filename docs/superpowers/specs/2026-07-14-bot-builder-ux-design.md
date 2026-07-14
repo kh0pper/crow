@@ -332,10 +332,17 @@ matches — devices are a JSON blob in `dashboard_settings` key
 helpers, never raw SQL. Also deleted: the bot's `contacts` row
 (`origin='local-bot'`) — via direct SQL, because the `contact-delete.js`
 helper deliberately refuses local-bot rows ("recreated at boot"), which no
-longer holds once the def is gone (round 2, MINOR-1). (No FK cascades exist
-anywhere here — every referencing table keys on bare TEXT bot_id — so the
-cleanup list above IS the integrity mechanism; an executable test asserts
-recreate-after-delete gets a clean slate. **Scope of that guarantee** (round
+longer holds once the def is gone (round 2, MINOR-1). (**Cascade correction, PR #191 review M1** — this passage
+previously claimed "no FK cascades exist anywhere here," which is false for
+the contacts row: the bot_id-keyed tables have no cascades, but
+`contacts(id)` has ON DELETE CASCADE children — `messages`, `shared_items`,
+`message_retry_queue`, `contact_group_members` — so deleting the local-bot
+contact also deletes the user's DM history with the bot and its group
+memberships. Decision: the cascade proceeds, consistent with contact
+deletion (PR #155), and the confirm page discloses the message +
+group-membership counts in the blast radius. For the bot_id-keyed tables the
+cleanup list above IS the integrity mechanism; executable tests assert
+recreate-after-delete gets a clean slate AND the disclosed cascade. **Scope of that guarantee** (round
 2, MINOR-2): the pi-bridge + messages + device surfaces listed here. The
 dormant MPA-orchestrator tables (`bot_conversations`, `bot_registry`,
 `bot_preferences`, `bot_runs`) are never populated for `pi_bot_defs` bots and

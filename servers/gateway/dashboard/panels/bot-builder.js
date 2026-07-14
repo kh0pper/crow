@@ -53,8 +53,9 @@ export default {
       `The bot runtime (Gmail/Telegram/Discord gateways) is enabled per-instance and is not active here yet.</p>`;
 
     const q = req.query || {};
+    // ?created= renders as the review tab's callout (editor.js), not here —
+    // both messages stacked read as a double banner (PR #191 review m2).
     const baseNotice = q.saved ? `<p class="btb-notice-ok">Saved.</p>`
-      : q.created ? `<p class="btb-notice-ok">Created <code>${escapeHtml(String(q.created))}</code>.</p>`
       : q.deleted ? `<p class="btb-notice-ok">Deleted <code>${escapeHtml(String(q.deleted))}</code>.</p>`
       : q.error ? `<p class="btb-notice-err">${escapeHtml(String(q.error))}</p>` : "";
     // Soft, non-blocking warning (e.g. AI-tab model pair not in models.json).
@@ -79,7 +80,7 @@ export default {
       try {
         row = (await db.execute({ sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id=?", args: [String(q.bot)] })).rows[0] || null;
       } catch { row = null; }
-      if (!row) return res.redirectAfterPost ? res.redirectAfterPost("/dashboard/bot-builder?error=unknown_bot") : res.send(layout({ title: "Bot Builder", content: PAGE_CSS }));
+      if (!row) return res.redirectAfterPost("/dashboard/bot-builder?error=unknown_bot");
       return renderDeleteConfirm(req, res, { db, layout, lang, PAGE_CSS, bot: row });
     }
 

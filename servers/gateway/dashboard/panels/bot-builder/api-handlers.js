@@ -94,7 +94,9 @@ export async function handleBotBuilderPost(req, res, { db }) {
     try {
       await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 1 - enabled, updated_at=datetime('now') WHERE bot_id=?", args: [b.bot_id] });
     } catch { /* ignore */ }
-    return res.redirectAfterPost("/dashboard/bot-builder");
+    // Back to the review tab (the toggle lives under the Status checklist
+    // row there) so the user sees the updated row — PR #191 review m3.
+    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(b.bot_id || "")}&tab=review`);
   }
 
   if (action === "toggle_peer_managed") {
