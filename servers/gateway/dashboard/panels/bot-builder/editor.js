@@ -113,13 +113,13 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<select name="model_default" class="btb-select">${optGroups((def.models || {}).default)}</select></div>` +
       `<div class="btb-group"><label>${t("botbuilder.labelEscalationModel", lang)}</label>` +
       `<select name="model_escalation" class="btb-select"><option value="">&mdash; none &mdash;</option>${optGroups((def.models || {}).escalation)}</select></div>` +
-      `<p class="btb-hint">Escalation only applies when an inbound message contains the <code>!escalate</code> token (operator-driven, per-turn). Otherwise the bot always runs on its Default model. The token is stripped before the model sees the message.</p>` +
+      `<p class="btb-hint">${t("botbuilder.hintEscalation", lang)}</p>` +
       `<hr class="btb-divider">` +
       `<div class="btb-group"><label>${t("botbuilder.labelFastVoiceModel", lang)}</label>` +
       `<select name="fast_voice_model" class="btb-select"><option value="">&mdash; (use Default model) &mdash;</option>${optGroups(def.fast_voice_model)}</select></div>` +
-      `<p class="btb-hint">Stored as a <code>provider_id/model_id</code> key. Drives the fast glasses voice turn when this bot is bound to a device (Slice B); resolved via <code>resolve-profile.js</code>.</p>` +
+      `<p class="btb-hint">${t("botbuilder.hintFastVoice", lang)}</p>` +
       `<div class="btb-group"><label>${t("botbuilder.labelVoiceProfiles", lang)}</label>` +
-      `<p class="btb-hint">STT/TTS/Vision plumbing from Settings &rarr; LLM. Bound per device in the glasses gateway (Slice B) — shown here so a bot's voice stack is visible while building.</p>` +
+      `<p class="btb-hint">${t("botbuilder.hintVoiceProfiles", lang)}</p>` +
       `<div class="btb-checkbox-group">` +
       `<label>STT&nbsp;${profileSelect("stt_profile_ref", sttProfiles)}</label>` +
       `<label>TTS&nbsp;${profileSelect("tts_profile_ref", ttsProfiles)}</label>` +
@@ -161,7 +161,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     let extToolsHtml = "";
     if (extProbes.length) {
       extToolsHtml += `<hr class="btb-divider"><div class="btb-group"><label>Extensions</label>` +
-        `<p class="btb-hint">Add-on MCP servers (mcp-addons.json) minted into this bot's <code>.mcp.json</code>. Work under pi (Slice A); voice availability is mapped in Slice B.</p>`;
+        `<p class="btb-hint">${t("botbuilder.hintExtTools", lang)}</p>`;
       for (const { ext, probe } of extProbes) {
         const cap = ext.capabilities ? `, ${escapeHtml(ext.group)}` : "";
         const badge = `<span class="btb-mcp-count">[installed: addon${cap}]</span>`;
@@ -188,7 +188,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     // bot's resolved model is MULTI_AGENT_CAPABLE AND Permissions →
     // Multi-agent is on.
     const subWarn = PI_EXT_ALLOWLIST.includes("subagent")
-      ? `<p class="btb-warn">&#9888; <code>subagent</code> is runtime-blocked unless this bot's resolved model is in MULTI_AGENT_CAPABLE <em>and</em> Permissions &rarr; Multi-agent is on. Capable models: <code>${escapeHtml(MULTI_AGENT_CAPABLE.join(", "))}</code>.</p>`
+      ? `<p class="btb-warn">&#9888; ${t("botbuilder.warnSubagent", lang).replace("{models}", `<code>${escapeHtml(MULTI_AGENT_CAPABLE.join(", "))}</code>`)}</p>`
       : "";
     const peerTools = await gatherPeerTools(db);
     const remoteOn = await remoteInvocationOn(db);
@@ -205,8 +205,8 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     const peerToolsHtml = remoteCaps.length === 0 ? "" :
       `<details class="btb-remote-caps"><summary>Peer instance capabilities (${new Set(remoteCaps.map((tb) => tb.instanceId)).size}) &#9656;</summary>` +
       (remoteOn
-        ? `<p class="btb-hint">Exposed peer capabilities are selectable. The peer enforces what's allowed (F4a Layer 2a).</p>`
-        : `<p class="btb-hint">Read-only — enable <strong>Settings &rarr; Remote Tool Invocation</strong> to wire these into a bot.</p>`) +
+        ? `<p class="btb-hint">${t("botbuilder.hintPeerCapsOn", lang)}</p>`
+        : `<p class="btb-hint">${t("botbuilder.hintPeerCapsOff", lang)}</p>`) +
       `<ul style="list-style:none;padding-left:0">` + remoteCaps.map((tb) => {
         const key = `${tb.instanceId}::${tb.canonicalId}`;
         const selectable = remoteOn && tb.exposed === true;
@@ -223,11 +223,11 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<div class="btb-group"><label>${t("botbuilder.labelPiBuiltin", lang)}</label>${builtinBoxes}</div>` +
       `<hr class="btb-divider">` +
       `<div class="btb-group"><label>${t("botbuilder.labelCrowMcpTools", lang)}</label>` +
-      `<p class="btb-hint">Live tools/list; &#9888; regex = non-blocking soft-warn, S4</p>${mcpHtml}</div>` +
+      `<p class="btb-hint">${t("botbuilder.hintMcpLive", lang)}</p>${mcpHtml}</div>` +
       extToolsHtml +
       `<hr class="btb-divider">` +
       `<div class="btb-group"><label>${t("botbuilder.labelPiExtensions", lang)}</label>` +
-      `<p class="btb-hint">Curated allowlist only; others need install-approval</p>${extBoxes}${subWarn}</div>` +
+      `<p class="btb-hint">${t("botbuilder.hintPiExtensions", lang)}</p>${extBoxes}${subWarn}</div>` +
       peerToolsHtml +
       actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveTools", lang)}</button>`) + `</form>`;
   } else if (tabId === "gateways") { // ---- gateways tab ----
@@ -242,10 +242,10 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       { value: "companion", label: "AI Companion (kiosk)", available: true },
       { value: "crow-messages", label: "Crow Messages", available: true },
       { value: "signal", label: "Signal", available: false },
-      { value: "none", label: "None (no gateway)", available: true },
+      { value: "none", label: t("botbuilder.gwOptNone", lang), available: true },
     ];
     const typeOpts = gwTypes.map((tb) =>
-      `<option value="${tb.value}"${gwType === tb.value ? " selected" : ""}${tb.available ? "" : " disabled"}>${escapeHtml(tb.label)}${tb.available ? "" : " — coming soon"}</option>`
+      `<option value="${tb.value}"${gwType === tb.value ? " selected" : ""}${tb.available ? "" : " disabled"}>${escapeHtml(tb.label)}${tb.available ? "" : ` — ${t("botbuilder.gwOptComingSoon", lang)}`}</option>`
     ).join("");
     // Server-rendered, type-aware fields. Changing the type auto-submits so
     // the form re-renders with the right fields for that gateway (any
@@ -308,15 +308,14 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         const unavailable = voiceUnavailableSelections(def);
         if (unavailable.length) {
           noVoiceWarn =
-            `<p class="btb-notice-warn">These selected tools have no voice equivalent and will NOT be available when driving this bot by voice (they still work under the pi runtime): ` +
-            `<code>${unavailable.map(escapeHtml).join("</code>, <code>")}</code>.</p>`;
+            `<p class="btb-notice-warn">${t("botbuilder.warnNoVoiceTools", lang).replace("{tools}", `<code>${unavailable.map(escapeHtml).join("</code>, <code>")}</code>`)}</p>`;
         }
       } catch { /* tool-executor unavailable: skip the warning */ }
 
       gwFields =
         `<div class="btb-group"><label>${t("botbuilder.gwLabelPairedDevice", lang)}</label>` +
         `<select name="gw_device_id" class="btb-select">${devOpts}</select></div>` +
-        (devices.length ? "" : `<p class="btb-hint">No paired glasses devices yet. Pair one in the Meta Glasses panel first.</p>`) +
+        (devices.length ? "" : `<p class="btb-hint">${t("botbuilder.hintNoGlassesDevices", lang)}</p>`) +
         `<div class="btb-group"><label>${t("botbuilder.gwLabelFastVoiceModel", lang)}</label>` +
         `<select name="gw_fast_voice_model" class="btb-select">${fvmOpts}</select></div>` +
         `<div class="btb-group"><label>${t("botbuilder.gwLabelVoicePlumbing", lang)}</label>` +
@@ -519,7 +518,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
           `<br><a href="${boardHref}">Open board &nearr;</a>` +
           `</div>`;
       } catch {
-        snap = `<p class="btb-hint">(Kanban snapshot unavailable.)</p>`;
+        snap = `<p class="btb-hint">${t("botbuilder.hintSnapshotUnavailable", lang)}</p>`;
       } finally {
         if (tdb) { try { tdb.close(); } catch {} }
       }
@@ -539,21 +538,21 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
             `</div>`;
         }
       } catch {
-        snap = `<p class="btb-hint">(Tracker snapshot unavailable.)</p>`;
+        snap = `<p class="btb-hint">${t("botbuilder.hintSnapshotUnavailable", lang)}</p>`;
       }
     }
     body =
       `<form method="POST" class="btb-form">${hidden("tracker")}` +
       `<div class="btb-group"><label>${t("botbuilder.labelLinkedProject", lang)}</label>` +
       `<select name="project_id" class="btb-select"><option value="">&mdash; none &mdash;</option>${projOpts}</select></div>` +
-      `<p class="btb-hint">Project determines workspace, tasks DB, and member ACL.</p>` +
+      `<p class="btb-hint">${t("botbuilder.hintProjectDetermines", lang)}</p>` +
       `<hr class="btb-divider">` +
       `<div class="btb-group"><label>${t("botbuilder.labelTrackerType", lang)}</label>` +
       `<select name="tracker_type" class="btb-select">` +
-      `<option value="kanban"${ttSel("kanban")}>Kanban (tasks_items board)</option>` +
-      `<option value="task-list"${ttSel("task-list")}>Task list (flat checklist)</option>` +
-      `<option value="custom"${ttSel("custom")}>Custom tracker (tracker_defs)</option>` +
-      `<option value="none"${ttSel("none")}>None (no tracker)</option>` +
+      `<option value="kanban"${ttSel("kanban")}>${t("botbuilder.trackerOptKanban", lang)}</option>` +
+      `<option value="task-list"${ttSel("task-list")}>${t("botbuilder.trackerOptTaskList", lang)}</option>` +
+      `<option value="custom"${ttSel("custom")}>${t("botbuilder.trackerOptCustom", lang)}</option>` +
+      `<option value="none"${ttSel("none")}>${t("botbuilder.trackerOptNone", lang)}</option>` +
       `</select></div>` +
       `<div id="custom-tracker-fields" style="${ttype !== "custom" ? "display:none" : ""}">` +
       `<div class="btb-group"><label>${t("botbuilder.labelTrackerSlug", lang)}</label>` +
@@ -588,13 +587,13 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         ).join("");
         return `<hr class="btb-divider">` +
           `<h4 style="margin:0 0 .5rem">Tracker definition: ${escapeHtml(selTracker.display_name)}</h4>` +
-          `<p class="btb-hint" style="margin:0 0 .75rem">Edit the tracker's column headers (statuses) and data fields. Changes apply to all items in this tracker.</p>` +
+          `<p class="btb-hint" style="margin:0 0 .75rem">${t("botbuilder.hintTrackerDefEdit", lang)}</p>` +
           `<div id="bb-tracker-def-msg" class="btb-tdef-msg"></div>` +
           `<div class="btb-group"><label>${t("botbuilder.tdefLabelDisplayName", lang)}</label>` +
           `<input id="bb-tdef-name" value="${escapeHtml(selTracker.display_name)}" class="btb-input" style="max-width:300px"></div>` +
           `<div class="btb-group"><label>${t("botbuilder.tdefLabelStatusColumns", lang)}</label>` +
           `<input id="bb-tdef-statuses" value="${escapeHtml(svText)}" class="btb-input" placeholder="pending, processing, received, done"></div>` +
-          `<p class="btb-hint" style="margin-top:-.5rem">These become the board columns. Changing them does not migrate existing items &mdash; items with removed statuses will appear in an "other" column.</p>` +
+          `<p class="btb-hint" style="margin-top:-.5rem">${t("botbuilder.hintTrackerColumns", lang)}</p>` +
           `<div class="btb-group"><label>${t("botbuilder.tdefLabelDataFields", lang)}</label>` +
           `<table class="btb-table">` +
           `<thead><tr><th>Key</th><th>Label</th><th>Type</th><th>Req</th></tr></thead>` +
@@ -764,7 +763,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
           `<td>${e.flags_json && e.flags_json !== "null" ? "&#9888;" : ""}</td></tr>`).join("");
         return `<hr class="btb-divider">` +
           `<div class="btb-group"><label>${t("botbuilder.labelSelfLearningHistory", lang)}</label>` +
-          `<p class="btb-hint">Post-turn review activity for this bot (<code>bot_skill_events</code>). <strong>auto-create/auto-patch</strong> went live in <code>~/.crow/skills</code>; <strong>proposed/downgraded</strong> are waiting for you above. &#9888; = guardrail phrasing was flagged.</p>` +
+          `<p class="btb-hint">${t("botbuilder.hintSelfLearningFeed", lang)}</p>` +
           (events.length
             ? `<table class="btb-table"><thead><tr><th>when</th><th>action</th><th>skill</th><th>mode</th><th>&#9888;</th></tr></thead><tbody>${rows}</tbody></table>`
             : `<p class="btb-hint">${t("botbuilder.noticeNoSelfLearning", lang)}</p>`) +
@@ -813,7 +812,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<form method="POST" class="btb-form">${hidden("triggers")}` +
       `<div class="btb-group"><label class="btb-checkbox"><input type="checkbox" name="tr_gateway"${tr.gateway ? " checked" : ""}> ${t("botbuilder.labelGatewayTriggered", lang)}</label></div>` +
       formField(t("botbuilder.labelCron", lang), "tr_cron", { value: tr.cron || "", placeholder: "*/15 * * * *" }) +
-      `<p class="btb-hint">The bridge runs its OWN timer over triggers.cron &mdash; NOT the schedules table / pipeline-runner (plan &sect;2).</p>` +
+      `<p class="btb-hint">${t("botbuilder.hintCronTimer", lang)}</p>` +
       actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveTriggers", lang)}</button>`) + `</form>`;
   } else if (tabId === "sessions") { // ---- sessions tab ----
     // S3: session resume UX — list, send-message, transcript viewer, stop
@@ -866,7 +865,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<div id="bb-sess-send-panel" class="btb-send-panel">` +
       `<label>${t("botbuilder.sessionSendLabelPrefix", lang)}<code id="bb-sess-thread"></code>)</label><br>` +
       `<textarea id="bb-sess-msg" rows="3" class="btb-textarea btb-textarea-wide"></textarea>` +
-      `<button id="bb-sess-send-btn" class="btb-btn">Send via bridge --inject</button>` +
+      `<button id="bb-sess-send-btn" class="btb-btn">${t("botbuilder.btnSendToBot", lang)}</button>` +
       `<span id="bb-sess-send-status" class="btb-send-status"></span>` +
       `</div>`;
     const sessScript = `<script>(function(){
@@ -936,7 +935,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         `<tr><td>isMultiAgentCapable(default)</td><td>${capable ? `<b class="btb-ok">true</b>` : `<span class="btb-err">false</span>`}</td></tr>` +
         `<tr><td>&rarr; <code>subagent</code> at runtime</td><td>${subAllowed ? `<b class="btb-ok">ALLOWED</b>` : `<b class="btb-err">BLOCKED</b> <span class="btb-muted">(${escapeHtml(!maOn ? "multi_agent off" : "model not MULTI_AGENT_CAPABLE")})</span>`}</td></tr>` +
         `</table>` +
-        `<p class="btb-hint">This mirrors the pi-lab gate (Phase 3.1): the bridge only offers <code>subagent</code> when both are true; the gate is the hard backstop. Escalation is per-turn via <code>!escalate</code> only.</p>`;
+        `<p class="btb-hint">${t("botbuilder.hintSubagentGate", lang)}</p>`;
     } catch (e) {
       effHtml = `<p class="btb-notice-warn">${escapeHtml(String(e.message || e))}</p>`;
     }
