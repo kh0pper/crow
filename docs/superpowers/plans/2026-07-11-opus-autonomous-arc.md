@@ -907,6 +907,16 @@ HARD pre-merge fleet gate in spec §2.1; F-ONBOARD-4's confirm field already
 exists). PR seams: 4-PR1 seed+bot-builder honesty → 4-PR2 wizard steps →
 4-PR3 identity backup → 4-PR4 hardcode sweep → 4-PR5 installer. No schema bumps.
 
+**4-PR1 SHIPPED 2026-07-14 (PR #184, main `5828708c`)** — fleet-deployed +
+soaked + prod-live-verified; fresh installs now seed ZERO providers (lab
+models.json removed, `CROW_MODELS_JSON` seam, hermetic reconcile-gate test);
+bot-builder create validates against the live registry, `defaultDefinition`
+carries no personal gateway/model/PI_PROVIDER. Suite baseline moved to
+**1794 pass / 3 known fails / 0 skips**. crow+grackle carry full
+`config/models.json` copies (the load-bearing per-instance location now).
+4-PR4 note: fold the dormant `pi-bots-phase1-setup.mjs` crow-local bake into
+the sweep. Ledger has the full record incl. 3 new harness lessons.
+
 **Why (Kevin, verbatim):** "his own personal preferences hardcoded into what is meant
 to be a generalized, user-customizable app"; install "isn't actually easy for
 non-technical users." Confirmed live on a fresh install (S3 walkthrough 2026-07-10):
