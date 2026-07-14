@@ -976,6 +976,7 @@ export const translations = {
   "botbuilder.monThCard": { en: "card", es: "tarjeta" },
   "botbuilder.monThThread": { en: "thread", es: "hilo" },
   "botbuilder.monThUpdated": { en: "updated", es: "actualizado" },
+  "botbuilder.tutorialLink": { en: "New to bots? Read the step-by-step tutorial", es: "¿Nuevo con los bots? Lee el tutorial paso a paso" },
   "botbuilder.delLiveSessionsWarn": { en: "{n} session(s) are still active. The bridge will drop them; consider stopping them on the Sessions tab first.", es: "{n} sesión(es) siguen activas. El puente las abandonará; considera detenerlas primero en la pestaña Sesiones." },
   "botbuilder.delPermanent": { en: "This permanently deletes the bot and its history.", es: "Esto elimina permanentemente el bot y su historial." },
   "botbuilder.delConfirmBtn": { en: "Delete permanently", es: "Eliminar permanentemente" },

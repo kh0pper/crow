@@ -4,6 +4,8 @@ title: Bot Builder
 
 # Bot Builder
 
+> ¿Nuevo con los bots? Empieza con el tutorial paso a paso [Tu primer bot](/es/guide/bot-builder-tutorial); esta página es la referencia completa.
+
 El Bot Builder es donde compones y ejecutas tus propios agentes de IA. Un agente (un "bot") es una persona más los skills, herramientas, gateways y permisos que le das. Todo se configura desde el dashboard Crow's Nest en un editor con pestañas, sin archivos de configuración que editar a mano y sin una herramienta de administración aparte.
 
 El Bot Builder es la columna vertebral agéntica de Crow. El mismo agente que construyes aquí puede responder tu correo, chatear en Discord o funcionar manos libres en tus lentes, apoyándose en la memoria, los proyectos, los archivos de Crow y cualquier integración que tengas instalada.
