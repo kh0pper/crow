@@ -75,6 +75,57 @@ panel's assemble form takes arbitrary host paths for report/data-dir BY
 DESIGN (it copies operator-named files into a workspace); it runs behind the
 dashboard session and is single-operator software.
 
+## Egress lock (Phase 2, optional but recommended)
+
+The upstream OpenScience binary makes an outbound vendor connection at
+launch (Cloudflare-fronted, observed over IPv6 pre-dockerization).
+`scripts/rookery-egress-lock.sh` installs a host-kernel allowlist so the
+container reaches **only the local model endpoint** — internet, tailnet
+peers, other containers, and host services are all dropped.
+
+```sh
+sudo ./scripts/rookery-egress-lock.sh          # install / refresh
+./scripts/rookery-egress-verify.sh             # behavioral verification
+sudo ./scripts/rookery-egress-lock.sh --remove # roll back
+./scripts/rookery-egress-lock.sh --dry-run     # inspect before installing
+```
+
+How it works (verified on crow 2026-07-14): the model endpoint is itself a
+docker-**published** port, so container→model traffic is DNAT'd in
+`nat/PREROUTING` to `<model-container-ip>:<container-port>` and traverses
+`FORWARD → DOCKER-USER` — not host `INPUT`. The script derives the bridge
+name, subnet, and DNAT target fresh from docker on every run and installs
+tagged (`-m comment rookery-lock`) chains: `ROOKERY-EGRESS` (model-only
+allow, then drop) and `ROOKERY-INGRESS` off `DOCKER-USER`, `ROOKERY-HOSTIN`
+off `INPUT`, plus ip6tables twins (the compose network is IPv4-only; the
+twins are insurance) and a subnet tripwire. Dropped packets log rate-limited
+with prefix `[ROOKERY-DROP-…]`.
+
+Operational notes:
+
+- **Re-run after**: reboot, `docker compose down/up` of the rookery *or the
+  model* stack (bridge names / subnets / the model container IP all change),
+  or a model-container recreate. `rookery-egress-verify.sh` run as root
+  detects stale rules (drift check).
+- **Reboot persistence**: `--print-systemd-unit` emits a oneshot unit that
+  re-runs the script after docker starts (a boot-time re-run is the correct
+  persistence — a saved rules file would go stale). If the model container
+  isn't up in time, the lock installs **drop-only** (fail-closed) and the
+  unit shows failed.
+- **ufw coexistence**: the script never touches `ufw-*` chains or policies;
+  `ufw reload`/`enable` rewrite only ufw's own chains, and docker preserves
+  `DOCKER-USER` across daemon restarts.
+- **DNS**: in-container resolution (127.0.0.11) is answered by dockerd,
+  whose upstream lookups run as a host process — names still resolve, but
+  every connection dies in `DOCKER-USER`. Accepted; no DNS allowance ships.
+- **Adding reachable ports later** (e.g. the crow API for the bridge MCP):
+  `ALLOW_HOST_TCP_PORTS="3006"` for host-local services (INPUT path),
+  `ALLOW_PUBLISHED_TCP_PORTS` for docker-published ones (DNAT path), then
+  re-run the script.
+- **Vendor-connection check**: the verify script's ESTAB inspection is most
+  meaningful right after `docker restart crow-rookery` — the vendor
+  check-in happens at launch and its socket closes soon after.
+
 ## Troubleshooting
 
 - **Model endpoint unreachable at start** — the UI still loads; OpenScience
