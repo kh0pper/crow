@@ -124,10 +124,10 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
   const monitor = section(t("botbuilder.monitorTitle", lang),
     `<turbo-stream-source src="/dashboard/streams/bot-sessions"></turbo-stream-source>` +
     `<table class="btb-monitor"><thead><tr>` +
-    `<th>id</th><th>bot</th><th>status</th>` +
-    `<th>model</th><th>esc</th>` +
-    `<th>control</th><th>card</th><th>thread</th>` +
-    `<th>updated</th></tr></thead>` +
+    `<th>${t("botbuilder.monThId", lang)}</th><th>${t("botbuilder.monThBot", lang)}</th><th>${t("botbuilder.monThStatus", lang)}</th>` +
+    `<th>${t("botbuilder.monThModel", lang)}</th><th>${t("botbuilder.monThEsc", lang)}</th>` +
+    `<th>${t("botbuilder.monThControl", lang)}</th><th>${t("botbuilder.monThCard", lang)}</th><th>${t("botbuilder.monThThread", lang)}</th>` +
+    `<th>${t("botbuilder.monThUpdated", lang)}</th></tr></thead>` +
     `<tbody id="pibot-sessions-tbody">${monRows}</tbody></table>`);
   return res.send(layout({ title: "Bot Builder", content: PAGE_CSS + list + monitor + form }));
 }
