@@ -773,7 +773,42 @@ either way). Record the decision here.
 
 ---
 
-### Item 3 — Messages/docs minors batch (one PR)
+### Item 3 — Messages/docs minors batch — ✅✅ SHIPPED 2026-07-13 (PR #182, main `fdbab2df`), fleet-deployed + live-verified
+
+Triage ran first against current main; **3 of 7 pooled candidates survived** (the §1 rot
+rule proved itself again — 4 dropped with recorded evidence, see the PR body for detail):
+- **SHIPPED — `findContactByPubkey` deterministic ORDER BY**: real `crow:` row beats
+  `req:` placeholder, then lowest id (the old arbitrary pick could double-store on the
+  catch-all DM path). RED-first test; RED run = mutation check.
+- **SHIPPED — onevent-test happens-after hardening**: `nostr-receive-health-hooks.test.js`
+  now polls via the block-onevent-guard `waitFor` pattern (`wrapped()` fires the handler
+  unawaited; the old assertions passed only because the stamps precede the first await).
+  Mutation-checked live (markInbound disabled → named test red).
+- **SHIPPED — F-UI-2 invite page**: light-mode `.code`/`button` were dark-on-dark
+  (contrast 1.07:1); now 15.25:1, dark mode unchanged. deploy-docs succeeded; **live URL
+  CDP-verified post-deploy** (evidence `~/.crow/p4/item3-minors/`). Rollback = revert
+  `docs/public/invite/index.html`, deploy-docs re-runs.
+- **DROPPED — null-syncManager no-heal**: DEAD — manager constructed unconditionally
+  (`mcp-mounts.js:28`) before the `:30` getter; `feedsDisabled` no-op is deliberate
+  (R2 MAJOR-A, `profile-heal.js` docblock).
+- **DROPPED — `req:`-row delete propagation**: deliberate per-instance design
+  (`messages/api-handlers.js:351`, `contact-delete.js` §D3); no resurrection bug
+  (`req:` rows never sync). Cross-instance dismissal = sync-layer design work, not a minor.
+- **STRUCK — F-SETTINGS-2**: the two live keys were fixed by #165; live sweep of all 27
+  registered settings sections = zero raw keys. Remaining missing labelKeys are in
+  UNREGISTERED legacy files (`panels/settings.js:52`) — dead code.
+- **NOT A DEFECT — black-swan dormant crow feed** (follow-up-pool item): the crow↔bswan
+  pairing was deliberately deleted at the messages-arc close (07-11); bswan runs its own
+  identity (`crow:3n6dimacvr`) and is not expected to receive instance-sync events.
+  Side observation for the operator re-pair (§0 out of scope): grackle still holds a
+  stale trusted "Cloud (black-swan)" instance row and dials bswan's tailnet-sync
+  endpoint ~1/min → `handshake sig invalid` spam in bswan's journal.
+
+Post-deploy soak: health ok ×4, integrity ok, sync_conflicts 219/182/162/0 (baseline),
+stash 4/17, auto-update `true` ×4, zero err-level log lines. Suite baseline unchanged:
+1769 pass / 3 known fails / 0 skips.
+
+<details><summary>Original work order (historical)</summary>
 
 Pooled accepted minors; batch them like PR #170. **Run a triage pass FIRST** — confirm
 each still reproduces, and drop the ones that don't (F-INSTALL-11 was already fixed;
@@ -794,6 +829,8 @@ expect others to be too). The batch PR contains only what survived triage.
 *Acceptance:* per-minor test where testable; CDP screenshot for any UI one; suite green
 (scratch env); one PR, merge, deploy, live verify. State plainly in the PR body which
 pooled items were dropped at triage and why.
+
+</details>
 
 ---
 
