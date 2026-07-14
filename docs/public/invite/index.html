@@ -10,7 +10,16 @@
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
          max-width: 560px; margin: 0 auto; padding: 24px 16px; line-height: 1.5;
          background: #0f1115; color: #e6e6e6; }
-  @media (prefers-color-scheme: light) { body { background: #fafafa; color: #1a1a1a; } .card { background:#fff !important; border-color:#ddd !important; } code { background:#eee !important; } }
+  @media (prefers-color-scheme: light) {
+    body { background: #fafafa; color: #1a1a1a; }
+    .card { background:#fff !important; border-color:#ddd !important; }
+    code { background:#eee !important; }
+    /* F-UI-2: these kept their dark backgrounds while the text color flipped
+       near-black — dark-on-dark invite code and buttons in light mode. */
+    .code { background:#eef0f4 !important; }
+    button { background:#eef0f4 !important; border-color:#c8ccd4 !important; }
+    a { color:#2456c8; }
+  }
   h1 { font-size: 1.3rem; } h2 { font-size: 1rem; margin-top: 1.4rem; }
   .card { background: #181b22; border: 1px solid #2a2f3a; border-radius: 10px; padding: 16px; margin: 14px 0; }
   code, .code { font-family: ui-monospace, Menlo, Consolas, monospace; }
