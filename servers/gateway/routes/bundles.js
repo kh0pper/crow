@@ -1674,7 +1674,7 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
  * stops a tampered file from one-click-installing a privileged, consent-required,
  * or host-networking bundle without the consent ceremony.
  */
-export function validateCollectionServerSide(collection) {
+export function validateCollectionServerSide(collection, { manifestFor = getManifest } = {}) {
   if (!collection || !Array.isArray(collection.members) || collection.members.length === 0) {
     return { ok: false, error: "Collection has no members" };
   }
@@ -1682,7 +1682,13 @@ export function validateCollectionServerSide(collection) {
   for (const m of collection.members) {
     if (!m?.id || !isValidBundleId(m.id)) return { ok: false, error: `Invalid member id '${m?.id}'` };
     if (!existsSync(join(APP_BUNDLES, m.id))) return { ok: false, error: `Member '${m.id}' is not a known bundle` };
-    const man = getManifest(m.id);
+    const man = manifestFor(m.id);
+    if (man?.origin === "community") {
+      // Provenance: curated collections are first-party only. A third-party
+      // listing must be installed individually, where the store surfaces its
+      // Community badge and caution (docs/developers/bundles.md).
+      return { ok: false, error: `Member '${m.id}' is a community bundle — install it individually` };
+    }
     if (man?.privileged === true || man?.consent_required === true) {
       return { ok: false, error: `Member '${m.id}' requires explicit consent — install it individually` };
     }
