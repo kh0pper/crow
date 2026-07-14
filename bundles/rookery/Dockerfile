@@ -5,7 +5,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g @synsci/openscience@1.3.2
 COPY host-shim.mjs /app/host-shim.mjs
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh \
+COPY wrapper-exec.sh /app/wrapper-exec.sh
+COPY scrub-env.sh /app/scrub-env.sh
+RUN chmod +x /app/entrypoint.sh /app/wrapper-exec.sh \
     && mkdir -p /data /workspaces \
     && chown -R 1000:1000 /data /workspaces /app
 ENV HOME=/data

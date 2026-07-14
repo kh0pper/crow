@@ -75,6 +75,27 @@ panel's assemble form takes arbitrary host paths for report/data-dir BY
 DESIGN (it copies operator-named files into a workspace); it runs behind the
 dashboard session and is single-operator software.
 
+## MCP env filtering (Phase 2)
+
+Upstream OpenScience spawns local (stdio) MCP servers with the **full
+unfiltered `process.env`** — provider keys included. Two layers ship here:
+
+- **`/app/wrapper-exec.sh` (the mechanism, allowlist)**: prefix every local
+  MCP's `command` with it —
+  `["/app/wrapper-exec.sh", "--allow", "VAR1,VAR2", "--", "server", ...]`.
+  It re-execs the server via `env -i` passing only `PATH`, `HOME`,
+  `WORKSPACES_DIR` plus the `--allow` list, and logs the exact env it passed
+  to stderr (credential-shaped values redacted). An MCP needing an
+  undocumented var fails until you add it to its `--allow` list — by design.
+- **`/app/scrub-env.sh` (belt-and-suspenders, denylist)**: sourced by the
+  entrypoint before OpenScience starts; drops credential-shaped vars
+  (`*_KEY`, `*_TOKEN`, `CROW_*`, `THK_*`, …) from the app process itself.
+  `MODEL_BASE_URL`/`MODEL_API_KEY` are dropped too — they've already landed
+  in the generated config by then.
+
+Both are baked into the image — changes require an image rebuild
+(`docker compose build`), not just a container restart.
+
 ## Egress lock (Phase 2, optional but recommended)
 
 The upstream OpenScience binary makes an outbound vendor connection at
