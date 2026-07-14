@@ -10,15 +10,16 @@
  * content (reenableProviderPreservingContent — parsed shape round-trip, no
  * models double-encode, R2-M2).
  *
- * Coverage strategy (models.json is read from module-level fixed search
- * paths, including $HOME/.pi/agent/models.json, so the file content cannot
- * be redirected per-test):
+ * Coverage strategy (Item 4 PR1: models.json search paths are redirected
+ * per-process via the CROW_MODELS_JSON seam — see
+ * servers/shared/models-json-paths.js — so this file is HERMETIC: it never
+ * reads the host's real models.json, which the repo no longer ships, and it
+ * never writes the live config/models.json or ~/.pi/agent/models.json):
  *   1. reconcileDecision — exported pure decision table, exhaustive matrix.
  *   2. reenableProviderPreservingContent — direct row insert + round-trip
  *      double-encode proof.
- *   3. syncProvidersFromModelsJson with injectable ownAddrs against the REAL
- *      merged models.json — expectations computed dynamically from the same
- *      files (never hardcoded entries).
+ *   3. syncProvidersFromModelsJson with injectable ownAddrs against a
+ *      FIXTURE models.json written into the per-test tmp dir.
  *   4. reconcileIntervalMs env-override parsing (D5).
  *
  * Harness: freshLibsql() pattern from providers-upsert-noop.test.js —
@@ -29,9 +30,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 import {
   reconcileDecision,
@@ -41,14 +42,32 @@ import {
 } from "../servers/shared/providers-db.js";
 import { reconcileIntervalMs } from "../servers/gateway/boot/admin-api.js";
 
+// Hermetic models.json fixture: two loopback entries (co-owned by every
+// instance) and three tailnet entries across two IPs, so "claim one IP"
+// moves exactly its entries out of skipped_unowned while another IP's entry
+// stays unowned. Written into each test's tmp dir and pointed at via the
+// CROW_MODELS_JSON seam — the host's real files are never read or written.
+const FIXTURE_PROVIDERS = {
+  "fx-loop-a": { baseUrl: "http://localhost:8011/v1", models: [{ id: "m-a" }] },
+  "fx-loop-b": { baseUrl: "http://127.0.0.1:8003/v1", models: [{ id: "m-b" }] },
+  "fx-tail-a": { baseUrl: "http://100.77.0.1:8011/v1", models: [{ id: "m-c" }] },
+  "fx-tail-b": { baseUrl: "http://100.77.0.1:8003/v1", models: [{ id: "m-d" }] },
+  "fx-tail-c": { baseUrl: "http://100.77.0.2:9100/v1", models: [{ id: "m-e" }] },
+};
+
 function freshLibsql() {
   const dir = mkdtempSync(join(tmpdir(), "providers-reconcile-gate-"));
   execFileSync(process.execPath, ["scripts/init-db.js"], {
-    env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe",
+    env: { ...process.env, CROW_DATA_DIR: dir, CROW_MODELS_JSON: "" },
+    stdio: "pipe",
     cwd: join(import.meta.dirname, ".."),
   });
+  const fixturePath = join(dir, "models.fixture.json");
+  writeFileSync(fixturePath, JSON.stringify({ providers: FIXTURE_PROVIDERS }));
   const prevDataDir = process.env.CROW_DATA_DIR;
+  const prevModelsJson = process.env.CROW_MODELS_JSON;
   process.env.CROW_DATA_DIR = dir;
+  process.env.CROW_MODELS_JSON = fixturePath;
   const db = createClient({ url: "file:" + join(dir, "crow.db") });
   return {
     dir, db,
@@ -56,6 +75,8 @@ function freshLibsql() {
       setProviderSyncManager(null);
       if (prevDataDir === undefined) delete process.env.CROW_DATA_DIR;
       else process.env.CROW_DATA_DIR = prevDataDir;
+      if (prevModelsJson === undefined) delete process.env.CROW_MODELS_JSON;
+      else process.env.CROW_MODELS_JSON = prevModelsJson;
       try { db.close(); } catch {}
       rmSync(dir, { recursive: true, force: true });
     },
@@ -68,24 +89,10 @@ function spySyncManager() {
   return calls;
 }
 
-// Replicate readModelsJson's merge (providers-db.js MODELS_JSON_SEARCH_PATHS)
-// so expectations track the REAL files this host carries — repo models.json,
-// repo config/models.json, $HOME/.pi/agent/models.json, later files override.
-const REPO = resolve(import.meta.dirname, "..");
-const HOME = process.env.HOME || "/home/kh0pp";
+// Expectations derive from the same fixture the seam feeds the reconciler —
+// deterministic, host-independent.
 function mergedModelsJsonEntries() {
-  const providers = {};
-  for (const p of [
-    resolve(REPO, "models.json"),
-    resolve(REPO, "config/models.json"),
-    resolve(HOME, ".pi/agent/models.json"),
-  ]) {
-    try {
-      const j = JSON.parse(readFileSync(p, "utf-8"));
-      if (j && j.providers) Object.assign(providers, j.providers);
-    } catch {}
-  }
-  return Object.entries(providers).filter(([id]) => !id.startsWith("$"));
+  return Object.entries(FIXTURE_PROVIDERS).filter(([id]) => !id.startsWith("$"));
 }
 
 const LOOPBACK = ["localhost", "127.0.0.1", "::1"];
@@ -210,7 +217,7 @@ test("reenableProviderPreservingContent: unknown id returns null, no write, no e
 
 test("ownership gate end-to-end: seed-all → loopback-only skips unowned → adding a tailnet IP claims its entries", async () => {
   const entries = mergedModelsJsonEntries();
-  assert.ok(entries.length > 0, "this host must carry at least one models.json entry");
+  assert.ok(entries.length > 0, "fixture sanity: at least one entry");
 
   const loopbackOnly = new Set(LOOPBACK);
   const loopbackIds = entries.filter(([, p]) => loopbackOnly.has(hostnameOf(p.baseUrl))).map(([id]) => id);
@@ -218,7 +225,7 @@ test("ownership gate end-to-end: seed-all → loopback-only skips unowned → ad
     const h = hostnameOf(p.baseUrl);
     return h !== null && !loopbackOnly.has(h);
   });
-  assert.ok(nonLoopback.length > 0, "repo models.json carries tailnet-addressed entries (crow-voice etc.)");
+  assert.ok(nonLoopback.length > 0, "fixture sanity: tailnet-addressed entries present");
 
   const { db, cleanup } = freshLibsql();
   try {
