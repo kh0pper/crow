@@ -12,6 +12,7 @@ import { handlePeerEdit } from "./bot-builder/peer-edit.js";
 import { handleBotBuilderPost } from "./bot-builder/api-handlers.js";
 import { renderBotEditor } from "./bot-builder/editor.js";
 import { renderBotList } from "./bot-builder/html.js";
+import { renderWizard } from "./bot-builder/wizard.js";
 
 const PAGE_CSS = botBuilderStyles();
 
@@ -58,6 +59,17 @@ export default {
     // Independent of the base notice so it can ride alongside a Saved.
     const warnNotice = q.warn ? `<p class="btb-notice-warn">${escapeHtml(String(q.warn))}</p>` : "";
     const notice = runtimeBanner + baseNotice + warnNotice;
+
+    // ---- guided-creation wizard (Item 5 PR1, spec §D1) ----
+    // GET ?new=1 renders step 0 fresh. POST action="wizard_step" renders the
+    // target step HERE (the POST path needs layout/lang, which api-handlers
+    // doesn't receive — spec round-2 MINOR-4); the review step's
+    // action="wizard_create" with nav="back" deliberately falls through
+    // handleBotBuilderPost without sending, and re-renders here too.
+    const bodyAction = req.method === "POST" ? String((req.body || {}).action || "") : "";
+    if (bodyAction === "wizard_step" || bodyAction === "wizard_create" || (req.method !== "POST" && q.new)) {
+      return renderWizard(req, res, { db, layout, lang, PAGE_CSS, notice });
+    }
 
     // ---- editor for one bot (C5: delegated to editor.js) ----
     if (q.bot) {

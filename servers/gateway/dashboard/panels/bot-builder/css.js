@@ -118,5 +118,16 @@ export function botBuilderStyles() {
   .btb-remote-caps summary{cursor:pointer;font-size:.88rem;font-weight:500}
   .btb-remote-caps ul{margin:.35rem 0 0 1rem;padding:0;font-size:.85rem}
   .btb-remote-caps .btb-muted{opacity:.7}
+
+  /* Guided-creation wizard (Item 5 PR1) */
+  .btb-wiz-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:.75rem;margin:.75rem 0}
+  .btb-wiz-card{display:flex;flex-direction:column;gap:.3rem;border:1px solid var(--crow-border);border-radius:8px;padding:.75rem;cursor:pointer;background:var(--crow-bg-elevated)}
+  .btb-wiz-card:hover{border-color:var(--crow-accent)}
+  .btb-wiz-card-sel{border-color:var(--crow-accent);box-shadow:0 0 0 1px var(--crow-accent)}
+  .btb-wiz-card input[type=radio]{margin:0 0 .2rem}
+  .btb-wiz-card-title{font-weight:600}
+  .btb-wiz-card-desc{font-size:.85rem;color:var(--crow-text-secondary)}
+  .btb-wiz-card-needs{font-size:.78rem;color:var(--crow-text-muted)}
+  .btb-quick-create summary{cursor:pointer;font-size:.9rem;color:var(--crow-text-secondary)}
 </style>`;
 }
