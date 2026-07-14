@@ -18,7 +18,7 @@
   "panelRoutes": "panel/routes.js",
   "requires": { "env": ["ROOKERY_MODEL_BASE_URL"], "min_ram_mb": 512, "min_disk_mb": 1600 },
   "env_vars": [
-    { "name": "ROOKERY_MODEL_BASE_URL", "description": "OpenAI-compatible endpoint for the reviewer model (e.g. a local llama.cpp/vLLM server; find your configured endpoint in Crow's AI settings). For a server on the Docker host use http://host.docker.internal:<port>/v1", "required": true },
+    { "name": "ROOKERY_MODEL_BASE_URL", "description": "OpenAI-compatible endpoint for the reviewer model (e.g. a local llama.cpp/vLLM server; find your configured endpoint in Crow's AI settings). If the host service binds a SPECIFIC IP (e.g. a Tailscale address), use that IP directly: http://<host-ip>:<port>/v1 — host.docker.internal only reaches services listening on 0.0.0.0 or the Docker bridge, and times out otherwise (verified 2026-07-14)", "required": true },
     { "name": "ROOKERY_MODEL_ID", "description": "Model id as reported by the endpoint's /v1/models", "default": "local-model", "required": true },
     { "name": "ROOKERY_MODEL_API_KEY", "description": "API key if the endpoint needs one (local servers usually ignore it)", "default": "local", "required": false, "secret": true },
     { "name": "ROOKERY_WORKSPACES_DIR", "description": "Host directory where audit workspaces are assembled (shared by the reviewer and the assemble tool)", "default": "~/.crow/data/rookery/workspaces", "required": false },

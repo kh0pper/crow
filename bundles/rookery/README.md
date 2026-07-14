@@ -20,9 +20,13 @@ a workspace list linking out to the reviewer).
 
 Install from the Extensions store (one-click). The form asks for
 `ROOKERY_MODEL_BASE_URL` (required — your OpenAI-compatible endpoint, e.g. a
-local llama.cpp/vLLM server; if it runs on the Docker **host** rather than in
-a container, use `http://host.docker.internal:<port>/v1` — compose adds
-`extra_hosts: host.docker.internal:host-gateway` so this resolves on Linux),
+local llama.cpp/vLLM server. If the host service binds a **specific IP**
+(e.g. a Tailscale address — check with `ss -tlnp`), use that IP directly:
+`http://<host-ip>:<port>/v1`. `http://host.docker.internal:<port>/v1` works
+ONLY when the service listens on 0.0.0.0 or the Docker bridge — against an
+IP-bound service it resolves (compose adds `extra_hosts:
+host.docker.internal:host-gateway`) but the connection times out; verified
+on a live install 2026-07-14),
 `ROOKERY_MODEL_ID` (as reported by the endpoint's `/v1/models`),
 `ROOKERY_MODEL_API_KEY` (only if your endpoint checks it; default `local`),
 `ROOKERY_WORKSPACES_DIR` (default `~/.crow/data/rookery/workspaces` is
