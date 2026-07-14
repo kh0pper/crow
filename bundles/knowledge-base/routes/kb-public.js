@@ -384,7 +384,7 @@ function kbPageShell({ title, lang, content, collection, breadcrumbs }) {
     ${content}
   </main>
   <footer class="kb-footer" role="contentinfo">
-    <p>Powered by <a href="https://github.com/kh0pp/crow">Crow</a></p>
+    <p>Powered by <a href="https://github.com/kh0pper/crow">Crow</a></p>
   </footer>
 </body>
 </html>`;

@@ -154,7 +154,7 @@ export default {
         <div class="vp-mode-section disabled" id="vpf-direct-section">
           <div class="vp-field">
             <label class="vp-label">Base URL</label>
-            <input type="text" id="vpf-url" placeholder="e.g. http://100.121.254.89:9102/v1" class="vp-input vp-input-mono">
+            <input type="text" id="vpf-url" placeholder="e.g. http://localhost:9102/v1" class="vp-input vp-input-mono">
           </div>
           <div class="vp-field">
             <label class="vp-label">API key (optional)</label>

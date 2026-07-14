@@ -106,7 +106,7 @@ export default {
 
     <form id="ss-form" class="ss-grid" onsubmit="return false">
       <label>Endpoint</label>
-      <input name="endpoint" type="text" value="${escapeHtml(cfg.endpoint)}" placeholder="100.118.41.122:9000" />
+      <input name="endpoint" type="text" value="${escapeHtml(cfg.endpoint)}" placeholder="localhost:9000" />
 
       <label>Use SSL</label>
       <div><input name="use_ssl" type="checkbox" ${cfg.useSSL ? "checked" : ""}/> <span style="font-size:0.85rem;color:var(--crow-text-muted)">HTTPS instead of HTTP</span></div>

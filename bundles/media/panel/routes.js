@@ -791,7 +791,7 @@ export function mediaPublicRouter() {
     <h1>${escapeHtml(playlist.name)}</h1>
     <div class="meta">${items.length} articles${playlist.description ? " \u00b7 " + escapeHtml(playlist.description) : ""}</div>
     <div>${itemsHtml || "<p style='color:#888'>This playlist is empty.</p>"}</div>
-    <p style="margin-top:2rem;font-size:0.75rem;color:#555">Powered by <a href="https://github.com/kh0pp/crow">Crow</a></p>
+    <p style="margin-top:2rem;font-size:0.75rem;color:#555">Powered by <a href="https://github.com/kh0pper/crow">Crow</a></p>
   </div>
 </body></html>`;
 

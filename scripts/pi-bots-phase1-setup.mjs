@@ -1,5 +1,13 @@
 #!/usr/bin/env node
 /**
+ * HISTORICAL — one-time Phase 1 (May 2026) bring-up fixture. NOT part of the
+ * product install path and NOT maintained: it bakes the original operator's
+ * instance paths, Gmail addresses, and a pre-Item-4 bot def
+ * (spawn_env.PI_PROVIDER, non-empty gateways) that the Bot Builder no longer
+ * generates (defaultDefinition ships gateways:[] and no PI_PROVIDER since
+ * PR #184). Kept only as a record of the v0.1 seed data shape. Do not run on
+ * a fresh install; create bots through the Bot Builder panel instead.
+ *
  * Crow Bot Builder — Phase 1 setup fixture (idempotent).
  *
  * Stands up the minimal v0.1 data the bridge + GUI operate on:

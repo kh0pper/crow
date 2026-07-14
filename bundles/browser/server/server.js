@@ -16,6 +16,7 @@ import { getRandomProfile } from "./profiles.js";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
 /**
@@ -124,7 +125,9 @@ export function createBrowserServer(options = {}) {
             composeFile = execFileSync("docker", ["inspect", "crow-browser", "--format", '{{index .Config.Labels "com.docker.compose.project.config_files"}}'], { timeout: 10000 }).toString().trim();
           } catch { /* fall through to error */ }
           if (!vncpw) return { content: [{ type: "text", text: "Could not read VNC password from the running container — set CROW_BROWSER_PROXY in the environment and recreate the container manually." }], isError: true };
-          if (!composeFile) composeFile = "/home/kh0pp/crow/bundles/browser/docker-compose.yml";
+          // Fallback: this bundle's own compose file, derived from our location
+          // (never an assumed checkout path).
+          if (!composeFile) composeFile = fileURLToPath(new URL("../docker-compose.yml", import.meta.url));
           try {
             execFileSync("docker", ["compose", "-f", composeFile, "up", "-d", "--force-recreate"], {
               timeout: 90000,

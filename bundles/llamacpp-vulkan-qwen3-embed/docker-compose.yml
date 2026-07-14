@@ -18,9 +18,9 @@ services:
     command:
       # Qwen3-Embedding-0.6B Q8_0 GGUF (~640 MB).
       # Pre-download once:
-      #   mkdir -p /home/kh0pp/llm/hf-cache/qwen3-embedding-0.6b/
+      #   mkdir -p $LLM_CACHE/qwen3-embedding-0.6b/
       #   curl -L \
-      #     -o /home/kh0pp/llm/hf-cache/qwen3-embedding-0.6b/Qwen3-Embedding-0.6B-Q8_0.gguf \
+      #     -o $LLM_CACHE/qwen3-embedding-0.6b/Qwen3-Embedding-0.6B-Q8_0.gguf \
       #     https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf
       - -m
       - /models/qwen3-embedding-0.6b/Qwen3-Embedding-0.6B-Q8_0.gguf

@@ -31,10 +31,11 @@
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
 
-const HOME = "/home/kh0pp";
+const HOME = process.env.HOME || homedir();
 export const CANONICAL_MCP_PATH = HOME + "/.pi/agent/mcp.json";
 
 export function readCanonicalMcp(path = CANONICAL_MCP_PATH) {

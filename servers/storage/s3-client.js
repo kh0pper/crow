@@ -127,7 +127,7 @@ export function defaultBucket() {
 
 /**
  * Browser-reachable origin for the configured storage endpoint — e.g.
- * "http://100.118.41.122:9000" or "https://s3.example.com:443". Returns
+ * "http://localhost:9000" or "https://s3.example.com:443". Returns
  * null when storage isn't configured. Used by the gateway CSP middleware
  * to allow <img src="..."> with presigned URLs without enabling a
  * blanket host. The origin is taken from the DB config if present; env

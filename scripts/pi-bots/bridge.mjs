@@ -21,7 +21,7 @@
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
@@ -42,7 +42,7 @@ import { statusToStage } from "../../servers/gateway/routes/board-stages.js";
 import { parsePlanRef, containedRealPath } from "../../servers/gateway/routes/plan-ref.js";
 import { extractPlanFileLine, buildPlanPrompt } from "./plan_dispatch.mjs";
 
-const HOME = "/home/kh0pp";
+const HOME = process.env.HOME || homedir();
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
 // Package was renamed from @mariozechner/pi-coding-agent to
 // @earendil-works/pi-coding-agent (still 'pi' binary; v0.74.2 verified).
@@ -105,7 +105,12 @@ export class PiRpc {
     // model_resolver.resolveModel() and passed in via opts.resolved — there
     // is NO hardcoded crow-local anywhere in the spawn path anymore.
     const resolved = opts.resolved;
-    const args = [PI_CLI, "--mode", "rpc", "--provider", resolved.provider, "--model", resolved.model,
+    this.resolved = resolved;
+    // Test seam: nodeBin/cliPath let tests drive the exit-surface path with a
+    // stub child instead of a real pi (which would wire live MCP servers).
+    const nodeBin = opts.nodeBin || NODE;
+    const cliPath = opts.cliPath || PI_CLI;
+    const args = [cliPath, "--mode", "rpc", "--provider", resolved.provider, "--model", resolved.model,
       "--session-dir", sessionDir + "/sessions"];
     // Phase 3.1 (R9/R11): multi-agent is allowed iff the operator opted in
     // (def.permission_policy.multi_agent) AND the POST-resolution model is
@@ -154,8 +159,14 @@ export class PiRpc {
     // the whole tree (pi + its MCP children). Without this, killing pi leaves
     // its MCP server children (brave-search, google-workspace, github, etc.)
     // running indefinitely — observed leak of ~5 MCP procs per turn.
-    this.proc = spawn(NODE, args, { cwd: sessionDir, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    this.proc = spawn(nodeBin, args, { cwd: sessionDir, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     this.events = []; this.responses = []; this.stderr = ""; this._b = ""; this._w = []; this.badStdout = 0;
+    this._exitCode = null;
+    // A write after pi died early (e.g. unknown provider on a fresh install)
+    // raises EPIPE on stdin asynchronously — without a listener that is an
+    // uncaught exception that kills the whole bridge. Swallow it; the exit
+    // handler below surfaces the real cause.
+    this.proc.stdin.on("error", () => {});
     this.proc.stdout.on("data", (c) => {
       this._b += c.toString("utf8");
       let nl;
@@ -169,14 +180,32 @@ export class PiRpc {
       }
     });
     this.proc.stderr.on("data", (d) => { this.stderr += d.toString(); });
-    this.exited = new Promise((res) => this.proc.on("exit", (c) => res(c == null ? -1 : c)));
+    this.exited = new Promise((res) => this.proc.on("exit", (c) => {
+      this._exitCode = c == null ? -1 : c;
+      // Fail any pending waiters NOW with the real cause instead of leaving
+      // them to time out cryptically (a fresh install resolving to a model
+      // no provider serves makes pi print "Unknown provider" and exit — the
+      // Gmail/Discord user must see that, fast, not a 60s "timeout:prompt-ack").
+      for (const w of this._w.splice(0)) if (w.j) w.j(this._exitError(w.label));
+      res(this._exitCode);
+    }));
   }
-  send(o) { this.proc.stdin.write(JSON.stringify(o) + "\n"); }
+  _exitError(label) {
+    const key = this.resolved && this.resolved.key;
+    return new Error("pi exited (code " + this._exitCode + ") before " + (label || "responding") +
+      " — the model " + key + " may not be available on this instance" +
+      " (configure providers in Settings → AI Models). pi said: " + (this.stderr.trim().slice(-300) || "(no stderr)"));
+  }
+  send(o) {
+    if (this._exitCode != null) throw this._exitError("send");
+    this.proc.stdin.write(JSON.stringify(o) + "\n");
+  }
   waitFor(p, ms, label) {
     return new Promise((resolve, reject) => {
       const hit = this.events.find(p) || this.responses.find(p);
       if (hit) return resolve(hit);
-      const w = { p, r: resolve }; this._w.push(w);
+      if (this._exitCode != null) return reject(this._exitError(label));
+      const w = { p, r: resolve, j: reject, label }; this._w.push(w);
       setTimeout(() => { const i = this._w.indexOf(w); if (i >= 0) { this._w.splice(i, 1); reject(new Error("timeout:" + label + " (stderr " + this.stderr.slice(-200) + ")")); } }, ms);
     });
   }
