@@ -1025,6 +1025,27 @@ infra, `shared/components.js`, `docs/guide/bot-builder.md` EN+ES.
 guided flow must be the discovery-driven one, not the hardcoded list.
 CDP proof of the full guided flow is the acceptance gate.
 
+**✅ ITEM 5 COMPLETE 2026-07-14 (PRs #190-#193, final main `079742cd`).** Spec
+`docs/superpowers/specs/2026-07-14-bot-builder-ux-design.md` (3 adversarial
+rounds: R1 REVISE resolveModel-fallback false-green + 4 majors; R2 REVISE
+Turbo-eats-render-on-POST + gmail-deaf-bot false-green; R3 APPROVE). Shipped:
+PR1 5-step guided wizard + templates-as-data + gateway-fields extraction +
+UPSERT→reject; PR2 readiness checklist (honesty: loadModelOptions never
+resolveModel; per-type required fields) + bot DELETE w/ blast radius incl.
+the disclosed contacts FK cascade (review caught the false "no cascades"
+claim — deleting the local-bot contact cascade-deletes DM history); PR3
+de-jargon sweep (17 hints + titles + 2 pre-existing keys) + EN/ES parity
+guard w/ anti-rot exceptions; PR4 non-technical tutorial EN+ES live at
+maestro.press/software/crow/guide/bot-builder-tutorial + docsUrl helper +
+dashboard links. CDP acceptance gate PASSED 31/31 (Turbo ON, Back mid-flow,
+ES leg via the DB language setting — panel lang is NOT the cookie; delete
+round-trip). Post-item bug-hunt round 18 pages / 0 FAIL
+(~/.crow/p4/bughunt-item5/). Suite baseline **1931/3-known/0**. Follow-ups
+recorded in ledger: integrations.js absolute docs URLs → docsUrl;
+secp256k1 placeholder (Advanced-context, spec-permitted); $-in-replacement
+nit; stripComments edge. **Queue: NEXT = 2c/2d (the remaining queued
+items).**
+
 ---
 
 ### Standing activity — drive-as-user CDP bug-hunt rounds
