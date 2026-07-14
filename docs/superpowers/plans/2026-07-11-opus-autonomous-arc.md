@@ -939,6 +939,15 @@ baseline **1849 / 3 known / 0 skips**. Operator notes in the ledger (ntfy label
 prefix, GMAIL_SEND_TO_SELF_ALLOWLIST). Next: 4-PR5 installer (last PR), then
 the full CDP bug-hunt round closes Item 4.
 
+**4-PR5 SHIPPED + ✅ ITEM 4 COMPLETE 2026-07-14 (PR #188, main `d2140f24`)** —
+installer platform gate + Tailscale offer + Docker point-of-use (412 before
+consent, shared 60s-cached probe, extensions banner). All 5 PRs of the theme
+merged/deployed/soaked; post-item bug-hunt round 15 pages 75 PASS / 0 FAIL
+(evidence `~/.crow/p4/bughunt-20260714/`). Suite baseline **1866 / 3 known /
+0 skips**. No schema bumps anywhere in the theme. Operator notes + follow-up
+pool additions in the ledger. **Queue: NEXT = Item 5 (Bot Builder THEME,
+planning session first — its 4a sequencing precondition is satisfied).**
+
 **Why (Kevin, verbatim):** "his own personal preferences hardcoded into what is meant
 to be a generalized, user-customizable app"; install "isn't actually easy for
 non-technical users." Confirmed live on a fresh install (S3 walkthrough 2026-07-10):
