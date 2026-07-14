@@ -727,11 +727,14 @@ All five dimensions run; split verdict:
   drive-by promo PR (fork+PR in under a minute, Codex-generated branch; follow-up comment
   offers to promote the merge to the author's 24k X followers).
 
-**⚠️ OPEN OPERATOR QUESTION FOR KEVIN (blocks any future re-review of this or similar
-PRs):** does the add-on store want third-party/commercial-API listings at all? If yes, the
-registry needs a provenance mechanism first (un-hardcode the `official: true` stamp; add a
-`third-party`/`community` label the store UI surfaces). Until that exists, every
-external-service PR fails D2 structurally.
+**✅ OPERATOR QUESTION ANSWERED (Kevin, 2026-07-13, verbatim intent):** *"yes, I'll take
+third-party listings … I am open to your recommendation for that, but I also see your
+skepticism about undisclosed x data for this app."* So: (1) third-party listings are
+WANTED → build the provenance mechanism (now queued as **Item 3.5** below, Kevin
+pre-authorized, mechanism design = executor's recommendation); (2) PR #99 itself STAYS
+declined-as-is — the upstream-transparency concern (undisclosed X-data access, no operator
+identity) stands independently of the mechanism; re-review only if the author reworks it
+per the posted review AND Item 3.5 has shipped.
 
 **Original work order (kept for reference):**
 
@@ -791,6 +794,32 @@ expect others to be too). The batch PR contains only what survived triage.
 *Acceptance:* per-minor test where testable; CDP screenshot for any UI one; suite green
 (scratch env); one PR, merge, deploy, live verify. State plainly in the PR body which
 pooled items were dropped at triage and why.
+
+---
+
+### Item 3.5 — Registry provenance for third-party listings (Kevin-authorized 2026-07-13)
+
+**Why (Kevin, verbatim intent):** "yes, I'll take third-party listings … I am open to
+your recommendation for that." First external offer was PR #99 (Item 2.9) — declined
+partly because the store STRUCTURALLY cannot list a third-party bundle honestly:
+`scripts/build-registry.mjs:76-77` strips any manifest `official` field and force-stamps
+`official: true` on every in-repo bundle.
+
+**Recommended design (executor's call per the grant — validate against current code
+first, §1 rule):** manifests gain an optional `origin` field (`"official"` default |
+`"community"`); build-registry honors it instead of force-stamping (`official:
+origin !== "community"` for back-compat, plus the `origin` field passed through);
+the Extensions store UI renders a visible "Community" badge (and a one-line "not
+maintained by Crow" note in the install modal) for community entries; bundle-contract
+test covers the field; docs (`docs/developers/bundles.md` or creating-addons) gain a
+"contributing a third-party bundle" section stating the bar: real upstream with
+disclosed operator + terms, accurate `author`, functional out of the box.
+*Acceptance:* a fixture community bundle round-trips through build-registry with
+`origin: "community"` and no `official: true`; existing 91 bundles unchanged
+byte-for-byte in the generated registry; CDP proof of the badge on a scratch gateway;
+suite + gates green. Small single PR.
+**Note:** PR #99 remains declined-as-is regardless (upstream transparency), per the
+Item 2.9 record.
 
 ---
 
