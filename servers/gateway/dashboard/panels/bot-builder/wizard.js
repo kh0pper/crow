@@ -18,7 +18,7 @@
  * (nav="reload") instead of an onchange auto-submit.
  */
 
-import { escapeHtml, section, stepper, button, callout } from "../../shared/components.js";
+import { escapeHtml, section, stepper, button, callout, docsUrl } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { t } from "../../shared/i18n.js";
 import { loadModelOptions, defaultDefinition, probeAll, loadSkills } from "./data-queries.js";
@@ -260,7 +260,10 @@ export async function renderWizard(req, res, { db, layout, lang, PAGE_CSS, notic
   let editing = [];
 
   if (stem === "template") {
-    body = `<p class="btb-hint">${t("botbuilder.wizTemplateIntro", lang)}</p>` + tplCards(state, lang);
+    const tutorialHref = docsUrl((lang === "es" ? "es/" : "") + "guide/bot-builder-tutorial");
+    body = `<p class="btb-hint">${t("botbuilder.wizTemplateIntro", lang)} ` +
+      `<a href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.tutorialLink", lang)}</a></p>` +
+      tplCards(state, lang);
     editing = ["tpl"];
   } else if (stem === "basics") {
     body =
