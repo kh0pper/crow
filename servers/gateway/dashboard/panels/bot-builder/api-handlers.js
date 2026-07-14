@@ -12,6 +12,7 @@ import {
 } from "./data-queries.js";
 import { normalizeGatewayFields } from "./gateway-fields.js";
 import { handleWizardCreate } from "./wizard.js";
+import { handleDeleteConfirm } from "./delete-bot.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
 import { regenerateBotMcp } from "../bot-mcp-regen.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
@@ -73,7 +74,8 @@ export async function handleBotBuilderPost(req, res, { db }) {
     } catch (e) {
       return res.redirectAfterPost("/dashboard/bot-builder?error=" + encodeURIComponent(String(e.message || e)));
     }
-    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=ai&saved=1`);
+    // Item 5 PR2 (spec §D4): land on the readiness checklist, not the raw AI tab.
+    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&created=${encodeURIComponent(botId)}`);
   }
 
   // ---- guided-creation wizard final submit (Item 5 PR1, spec §D1) ----
@@ -81,6 +83,11 @@ export async function handleBotBuilderPost(req, res, { db }) {
   // happen in the panel handler (bot-builder.js), which has layout/lang.
   if (action === "wizard_create") {
     return handleWizardCreate(req, res, { db, lang: reqLang(req) });
+  }
+
+  // ---- delete a bot (Item 5 PR2, spec §D5) — PRG; confirm page is a GET ----
+  if (action === "delete_confirm") {
+    return handleDeleteConfirm(req, res, { db });
   }
 
   if (action === "toggle") {

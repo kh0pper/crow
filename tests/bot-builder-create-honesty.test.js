@@ -147,7 +147,8 @@ test("create with a valid model inserts the row with that model", async () => {
   assert.ok(row, "row inserted for valid model: " + res.redirected);
   const def = JSON.parse(row.definition);
   assert.equal(def.models.default, "prov/m2");
-  assert.match(res.redirected, /saved=1/);
+  // Item 5 PR2 (spec §D4): create lands on the readiness checklist.
+  assert.match(res.redirected, /tab=review&created=good-bot/);
 });
 
 test("create error message is i18n-keyed (botbuilder.createModelInvalid, EN+ES)", async () => {
