@@ -243,7 +243,7 @@ function renderBackupSection(lang, ctx = {}) {
   }
   const rawError = req && req.query ? req.query.backup_error : "";
   const errorHtml = rawError
-    ? `<p style="color:var(--crow-danger);font-size:var(--crow-text-sm);margin-bottom:var(--crow-space-2)">${escapeHtml(String(rawError))}</p>`
+    ? `<p style="color:var(--crow-error);font-size:var(--crow-text-sm);margin-bottom:var(--crow-space-2)">${escapeHtml(String(rawError))}</p>`
     : "";
   const fieldStyle = "display:block;width:100%;max-width:320px;margin-top:2px;padding:0.4rem 0.6rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;color:var(--crow-text-primary)";
   const labelStyle = "display:block;font-size:var(--crow-text-sm);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-2)";
