@@ -847,9 +847,9 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
           const canStop = s.status === "active" || s.status === "waiting-user";
           const threadShort = (s.gateway_thread_id || "").slice(0, 20);
           const actions = [];
-          if (canSend) actions.push(`<button class="bb-sess-send btb-sess-btn" data-thread="${escapeHtml(s.gateway_thread_id || "")}">Send</button>`);
-          if (canStop) actions.push(`<button class="bb-sess-stop btb-sess-btn" data-thread="${escapeHtml(s.gateway_thread_id || "")}">Stop</button>`);
-          if (s.pi_session_id && s.pi_session_dir) actions.push(`<a href="/dashboard/bot-board-api/session/${s.id}/transcript" target="_blank" class="btb-sess-link">Transcript</a>`);
+          if (canSend) actions.push(`<button class="bb-sess-send btb-sess-btn" data-thread="${escapeHtml(s.gateway_thread_id || "")}">${t("botbuilder.sessBtnSend", lang)}</button>`);
+          if (canStop) actions.push(`<button class="bb-sess-stop btb-sess-btn" data-thread="${escapeHtml(s.gateway_thread_id || "")}">${t("botbuilder.sessBtnStop", lang)}</button>`);
+          if (s.pi_session_id && s.pi_session_dir) actions.push(`<a href="/dashboard/bot-board-api/session/${s.id}/transcript" target="_blank" class="btb-sess-link">${t("botbuilder.sessBtnTranscript", lang)}</a>`);
           return `<tr>
                 <td>${s.id}</td>
                 <td class="${cls}">${escapeHtml(s.status || "")}</td>

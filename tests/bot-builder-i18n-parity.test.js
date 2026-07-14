@@ -28,6 +28,10 @@ const SAME_OK = new Set([
   "botbuilder.labelExternalSend", // literal policy field name ("external_send")
   "botbuilder.thId",            // "ID" is identical in Spanish
   "botbuilder.skillsGroupGeneral", // "General" is identical in Spanish
+  "botbuilder.monThId",         // "id" — identical technical abbreviation
+  "botbuilder.monThBot",        // "bot" is identical in Spanish
+  "botbuilder.monThEsc",        // "esc" — identical abbreviation
+  "botbuilder.monThControl",    // "control" is identical in Spanish
 ]);
 
 test("every botbuilder.* key has non-empty en and es", () => {
