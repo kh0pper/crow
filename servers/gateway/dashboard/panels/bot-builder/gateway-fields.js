@@ -30,6 +30,10 @@ export const GATEWAY_REQUIRED_FIELDS = {
   telegram: ["token"],
   slack: ["bot_token", "app_token"],
   "crow-messages": [],
+  // Voice types work only once a device is bound (the voice turn reads
+  // device.bound_bot_id; a type-only record is a UI draft, W1-4).
+  glasses: ["device_id"],
+  companion: ["device_id"],
   none: [],
 };
 

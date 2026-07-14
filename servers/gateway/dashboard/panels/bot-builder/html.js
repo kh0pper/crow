@@ -24,6 +24,7 @@ function reqLang(req) {
 }
 
 export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) {
+  const lang = reqLang(req);
   let bots = [], sessions = [], sessRows = [];
   try {
     bots = (await db.execute({ sql: "SELECT bot_id, display_name, enabled, definition, project_id, datetime(updated_at) AS updated_at FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows;
@@ -48,15 +49,15 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
       escapeHtml(bt.updated_at || ""),
       boardLink,
       `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(bt.bot_id)}&tab=ai">Edit</a>`,
+      `<a class="btb-danger-link" href="/dashboard/bot-builder?bot=${encodeURIComponent(bt.bot_id)}&confirm_delete=1">${t("botbuilder.deleteBotLink", lang)}</a>`,
     ];
   });
   // Item 5 PR1 (spec §D1): the guided wizard is the primary creation path.
-  const lang = reqLang(req);
   const wizCta =
     `<p style="margin:0 0 1rem"><a class="btn btn-primary btn-md" href="/dashboard/bot-builder?new=1">${t("botbuilder.wizCta", lang)}</a></p>`;
   const list = section("Bots (pi_bot_defs)",
     notice + wizCta + (rows.length
-      ? dataTable(["bot_id", "name", "state", "model", "project", "sessions", "updated", "board", ""], rows)
+      ? dataTable(["bot_id", "name", "state", "model", "project", "sessions", "updated", "board", "", ""], rows)
       : `<p>${t("botbuilder.emptyListWizard", lang)} <a href="/dashboard/bot-builder?new=1">${t("botbuilder.emptyListWizardLink", lang)}</a></p>`));
   // Create form: project + model dropdowns (Phase 1, S3 plan review)
   let createProjects = [];
