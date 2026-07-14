@@ -8,7 +8,7 @@
 
 import { t } from "../shared/i18n.js";
 import { extensionStyles } from "./extensions/css.js";
-import { fetchRegistryData, fetchBundleStatus, fetchNeedsConfig } from "./extensions/data-queries.js";
+import { fetchRegistryData, fetchBundleStatus, fetchNeedsConfig, dockerAvailable } from "./extensions/data-queries.js";
 import { extensionsClientJS } from "./extensions/client.js";
 import { handleExtensionsPost } from "./extensions/api-handlers.js";
 import { buildExtensionsHTML } from "./extensions/html.js";
@@ -33,9 +33,12 @@ export default {
     // Config completeness is computed HERE, never in html.js (which stays pure and
     // is unit-tested without ~/.crow).
     const needsConfig = fetchNeedsConfig(installed);
+    // Docker banner state (Item 4-PR5): cached ~60s with a short probe timeout,
+    // so a hung docker daemon can never block the page render.
+    const dockerOk = await dockerAvailable();
 
     const { viewsHtml, addonRegistryScript, collectionsScript } = buildExtensionsHTML({
-      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, lang,
+      installed, available, collections, registrySource, communityStores, bundleStatus, needsConfig, dockerOk, lang,
     });
 
     // ─── Modal + client-side JavaScript ───

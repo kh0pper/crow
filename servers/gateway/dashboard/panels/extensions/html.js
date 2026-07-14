@@ -149,6 +149,10 @@ export function renderIcon(addon, size) {
  * operator's real ~/.crow.
  *
  * @param {Record<string,string[]>} [needsConfig] id → still-missing required key NAMES
+ * @param {boolean} [dockerOk] host docker-daemon availability (computed in
+ *   panels/extensions.js via data-queries' cached dockerAvailable() probe —
+ *   never probed here, same purity rule as needsConfig). Defaults true so the
+ *   pure render tests and any legacy caller show no banner.
  * @returns {{viewsHtml:string, addonRegistryScript:string, collectionsScript:string}}
  */
 export function buildExtensionsHTML({
@@ -159,6 +163,7 @@ export function buildExtensionsHTML({
   communityStores,
   bundleStatus,
   needsConfig = {},
+  dockerOk = true,
   lang,
 }) {
   const installedCount = Object.keys(installed).length;
@@ -219,6 +224,17 @@ export function buildExtensionsHTML({
           <div class="ext-card__footer">${installButton}</div>
         </div>`;
   };
+
+  // ─── Docker-unavailable banner (Item 4-PR5) ───
+  // Passive info banner: deploys-kind extensions can't install without a
+  // Docker daemon; the install API refuses them with docker_unavailable.
+  // Rendered above both views; purely informational (no dismissal state).
+  const dockerBannerHtml = dockerOk
+    ? ""
+    : `<div class="callout callout-info ext-docker-banner" id="ext-docker-banner" role="status">
+        <strong>${t("extensions.dockerUnavailable", lang)}</strong>
+        <p style="margin:0.25rem 0 0">${t("extensions.dockerUnavailableDesc", lang)}</p>
+      </div>`;
 
   // ─── Segmented control ───
   const viewTabsHtml = `<div class="ext-viewtabs" id="ext-viewtabs" role="tablist" aria-label="${t("extensions.pageTitle", lang)}">
@@ -389,7 +405,7 @@ export function buildExtensionsHTML({
       ${t("extensions.toCreateOwn", lang)} <a href="/crow/developers/creating-addons" style="color:var(--crow-accent)">${t("extensions.devGuide", lang)}</a>.
     </div>`;
 
-  const viewsHtml = `${viewTabsHtml}
+  const viewsHtml = `${dockerBannerHtml}${viewTabsHtml}
     <div class="ext-view" id="ext-view-browse" role="tabpanel">
       ${searchHtml}
       ${sourceNote}
