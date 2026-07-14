@@ -4,6 +4,10 @@
 #
 # Transforms a stock Raspberry Pi OS (or any Debian/Ubuntu) into a Crow appliance.
 #
+# Platform: Debian/Ubuntu family ONLY (the script drives apt end to end).
+# macOS, Windows, and other Linux distributions are not auto-installed —
+# follow the manual path in docs/getting-started/ instead.
+#
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
 #
@@ -99,11 +103,44 @@ ts_first_field() {
   fi
 }
 
+# check_platform [os_release_path] [apt_probe_cmd] — 0 when this host is a
+# Debian/Ubuntu family system with apt available, 1 otherwise (Item 4-PR5).
+# The script drives apt end to end, so anything else must be refused BEFORE
+# the first system mutation. Both params are test seams; they default to the
+# real /etc/os-release and apt-get.
+# shellcheck disable=SC2120  # params are test-only seams; the prod call passes none
+check_platform() {
+  local os_release="${1:-/etc/os-release}" apt_cmd="${2:-apt-get}"
+  local id="" id_like=""
+  if ! command -v "$apt_cmd" >/dev/null 2>&1; then
+    return 1
+  fi
+  if [ -r "$os_release" ]; then
+    id="$(sed -n 's/^ID=//p' "$os_release" | tr -d '"')"
+    id_like="$(sed -n 's/^ID_LIKE=//p' "$os_release" | tr -d '"')"
+  fi
+  case " $id $id_like " in
+    *" debian "*|*" ubuntu "*) return 0 ;;
+  esac
+  return 1
+}
+
 # Test seam: tests source the helpers without executing the install.
 if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
   # shellcheck disable=SC2317  # exit IS reachable: `return` fails when the
   # script is executed (not sourced), and the fallback exit then runs.
   return 0 2>/dev/null || exit 0
+fi
+
+# Platform gate (Item 4-PR5): refuse non-Debian/Ubuntu hosts before ANY
+# system mutation — a half-install on the wrong distro is worse than none.
+# shellcheck disable=SC2119  # defaults (real /etc/os-release, apt-get) are intended here
+if ! check_platform; then
+  error "Unsupported platform: this installer supports Debian/Ubuntu family systems only"
+  error "(Debian, Ubuntu, Raspberry Pi OS, and derivatives — it installs via apt)."
+  error "For macOS, Windows, or other Linux distributions, follow the manual setup"
+  error "path in docs/getting-started/ (https://github.com/kh0pper/crow/tree/main/docs/getting-started)."
+  exit 1
 fi
 
 # Check if running as root (we don't want that)
@@ -122,12 +159,15 @@ fi
 header "Crow Installer"
 
 echo ""
+echo "  Requires a Debian/Ubuntu family system (installs via apt)."
+echo ""
 echo "  This script will install:"
 echo "    - Node.js ${NODE_MAJOR}"
 echo "    - Docker + Docker Compose"
 echo "    - Caddy (reverse proxy)"
 echo "    - Crow"
 echo "    - Security hardening (UFW + fail2ban)"
+echo "    - Tailscale (offered if not installed — secure remote access)"
 echo "    - Tailscale hostname setup (if Tailscale is installed)"
 echo ""
 if ! ask_yn "Continue?" Y; then
@@ -428,8 +468,21 @@ if command -v tailscale &>/dev/null; then
 else
   echo ""
   warn "Tailscale is not installed"
-  echo "  Tip: Install Tailscale for secure remote access."
-  echo "  See docs/getting-started/tailscale-setup.md"
+  # Item 4-PR5: offer the official installer. Default Y is safe headlessly —
+  # installing is additive and inert until `sudo tailscale up` (no tailnet
+  # mutation without authentication; contrast the rename prompts, default N).
+  if ask_yn "Install Tailscale now (recommended for secure remote access)?" Y; then
+    if curl -fsSL https://tailscale.com/install.sh | sudo sh; then
+      log "Tailscale installed"
+      warn "Tailscale is installed but not authenticated"
+      warn "Run 'sudo tailscale up' to log in, then re-run this script to wire the hostname + HTTPS dashboard"
+    else
+      warn "Tailscale install failed — install manually later: https://tailscale.com/download"
+    fi
+  else
+    echo "  Tip: Install Tailscale for secure remote access."
+    echo "  See docs/getting-started/tailscale-setup.md"
+  fi
   echo ""
 fi
 

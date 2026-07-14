@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 const SCRIPT = resolve(import.meta.dirname, "..", "scripts", "crow-install.sh");
 const src = () => readFileSync(SCRIPT, "utf-8");
@@ -139,6 +140,97 @@ test("R2-I1: unit ordering matches prod (gateway runs docker compose and keys re
 
 test("F-11: OS hostname rename prompt defaults N", () => {
   assert.match(src(), /ask_yn "Set hostname to 'crow' \(enables crow\.local\)\?" N/);
+});
+
+// ─── Item 4-PR5: platform gate + Tailscale offer ───
+
+/** Write an os-release fixture and return its path. */
+function osReleaseFixture(contents) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-osrel-"));
+  const p = join(dir, "os-release");
+  writeFileSync(p, contents);
+  return p;
+}
+
+test("4c: check_platform accepts Debian/Ubuntu and their derivatives (os-release path seam)", () => {
+  const fixtures = [
+    "ID=ubuntu\nID_LIKE=debian\n",
+    "ID=debian\n",
+    "ID=raspbian\nID_LIKE=debian\n",
+    'ID="linuxmint"\nID_LIKE="ubuntu debian"\n', // quoted values, multi-word ID_LIKE
+  ];
+  for (const fx of fixtures) {
+    // Distinct tokens (not SUPPORTED/UNSUPPORTED — /SUPPORTED/ matches inside
+    // "UNSUPPORTED", which made the RED phase of this test pass vacuously).
+    const r = runWithHelpers(`if check_platform "${osReleaseFixture(fx)}"; then echo PLAT_OK; else echo PLAT_NO; fi`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /PLAT_OK/, `fixture should be supported:\n${fx}\ngot: ${r.stdout} ${r.stderr}`);
+  }
+});
+
+test("4c MUTATION (platform gate): check_platform REJECTS non-Debian os-release, a missing file, and a missing apt-get", () => {
+  // Deleting or inverting the gate's ID/ID_LIKE match or its apt probe turns
+  // at least one of these three UNSUPPORTED assertions red.
+  const fedora = runWithHelpers(`if check_platform "${osReleaseFixture("ID=fedora\n")}"; then echo PLAT_OK; else echo PLAT_NO; fi`);
+  assert.equal(fedora.status, 0, fedora.stderr);
+  assert.match(fedora.stdout, /PLAT_NO/, "fedora must be rejected");
+
+  const missing = runWithHelpers(`if check_platform "/definitely/not/os-release"; then echo PLAT_OK; else echo PLAT_NO; fi`);
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.match(missing.stdout, /PLAT_NO/, "missing os-release must be rejected");
+
+  // apt-probe seam: same debian fixture, but the apt command name can't resolve.
+  const noApt = runWithHelpers(`if check_platform "${osReleaseFixture("ID=debian\n")}" definitely-not-a-command; then echo PLAT_OK; else echo PLAT_NO; fi`);
+  assert.equal(noApt.status, 0, noApt.stderr);
+  assert.match(noApt.stdout, /PLAT_NO/, "absent apt-get must be rejected even on a debian ID");
+});
+
+test("4c: platform gate is defined above the source-only seam and CALLED below it, before Step 1 / any system mutation", () => {
+  const s = src();
+  const seamIdx = s.indexOf('CROW_INSTALL_SOURCE_ONLY');
+  const defIdx = s.indexOf("check_platform()");
+  const callMatch = s.match(/^if ! check_platform(;| )/m);
+  assert.ok(defIdx !== -1, "check_platform() must be defined");
+  assert.ok(callMatch, "the install body must gate on `if ! check_platform`");
+  assert.ok(defIdx < seamIdx, "definition must sit ABOVE the seam so tests can source it");
+  const callIdx = s.indexOf(callMatch[0]);
+  assert.ok(callIdx > seamIdx, "the call must sit BELOW the seam (in the install body)");
+  assert.ok(callIdx < s.indexOf("Step 1/9"), "the gate must run before Step 1 (first apt mutation)");
+  // The refusal must name the docs manual path and exit 1, not half-install.
+  const refusal = s.slice(callIdx, s.indexOf("fi", callIdx));
+  assert.match(refusal, /docs\/getting-started/, "refusal must point at the manual path");
+  assert.match(refusal, /exit 1/);
+});
+
+test("4c: Tailscale-not-installed branch offers the official installer (default Y), keeping the tip when declined", () => {
+  const s = src();
+  assert.match(s, /ask_yn "Install Tailscale now \(recommended for secure remote access\)\?" Y/);
+  // Official installer, sudo semantics consistent with get.docker.com (`| sudo sh`).
+  assert.match(s, /curl -fsSL https:\/\/tailscale\.com\/install\.sh \| sudo sh/);
+  // The offer lives inside the not-installed else branch.
+  const afterWarn = s.split('warn "Tailscale is not installed"')[1] || "";
+  assert.match(afterWarn.slice(0, 1200), /ask_yn "Install Tailscale now/);
+  // Post-install guidance: authenticate, then re-run.
+  assert.match(afterWarn.slice(0, 1200), /tailscale up/);
+  // Declining keeps the existing tip.
+  assert.match(afterWarn, /tailscale-setup\.md/);
+});
+
+test("4c MUTATION (tailscale offer default): headless resolution of the exact offer prompt is YES", () => {
+  // Flipping the offer's default to N (or breaking ask_yn's default handling)
+  // turns this red: a headless appliance install must still get Tailscale
+  // (inert until `tailscale up`, per the design spec §2.5).
+  const r = runWithHelpers(`if ask_yn "Install Tailscale now (recommended for secure remote access)?" Y; then echo INSTALL; else echo SKIP; fi`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /INSTALL/);
+});
+
+test("4c: header install list mentions Tailscale (offered) and the Debian/Ubuntu platform requirement", () => {
+  const s = src();
+  const header = s.slice(s.indexOf("This script will install:"), s.indexOf("Continue?"));
+  assert.match(header, /Tailscale/);
+  assert.match(header, /offered/i);
+  assert.match(s.slice(0, s.indexOf("set -euo pipefail")), /Debian\/Ubuntu/, "header comment states the platform requirement");
 });
 
 test("F-11: Caddy vhost and final URL follow the ACTUAL hostname (MDNS_HOST)", () => {
