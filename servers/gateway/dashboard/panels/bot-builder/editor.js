@@ -31,6 +31,7 @@ import {
   probeAll, probeExtensions, loadVisionProfiles, gatherPeerTools, remoteInvocationOn,
   loadModelOptions, loadSkills,
 } from "./data-queries.js";
+import { renderGatewayFields } from "./gateway-fields.js";
 
 // Tab id → i18n key map
 const TAB_KEYS = {
@@ -248,37 +249,14 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     // Server-rendered, type-aware fields. Changing the type auto-submits so
     // the form re-renders with the right fields for that gateway (any
     // not-yet-filled values save empty — a harmless draft until completed).
+    // Simple types (gmail/discord/telegram/slack/none) render via the shared
+    // gateway-fields module (Item 5 PR1, spec §D3) — the wizard's channel
+    // step uses the same renderer.
     let gwFields, gwHint, gwExtra = ""; // gwExtra renders OUTSIDE the main form (sibling)
-    if (gwType === "discord") {
-      gwFields =
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelBotTokenDiscord", lang)}</label>` +
-        `<input type="password" name="gw_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.token || "")}"></div>` +
-        formField("Guild ID (optional)", "gw_guild_id", { value: gw.guild_id || "" }) +
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelChannelIds", lang)}</label>` +
-        `<textarea name="gw_channel_ids" rows="3" class="btb-textarea">${escapeHtml((gw.channel_ids || []).join("\n"))}</textarea></div>` +
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelAllowlistDiscord", lang)}</label>` +
-        `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>`;
-      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintDiscord", lang)}</p>`;
-    } else if (gwType === "telegram") {
-      gwFields =
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelBotTokenTelegram", lang)}</label>` +
-        `<input type="password" name="gw_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.token || "")}"></div>` +
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelAllowlistTelegram", lang)}</label>` +
-        `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>` +
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelChatIds", lang)}</label>` +
-        `<textarea name="gw_chat_ids" rows="3" class="btb-textarea">${escapeHtml((gw.chat_ids || []).join("\n"))}</textarea></div>`;
-      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintTelegram", lang)}</p>`;
-    } else if (gwType === "slack") {
-      gwFields =
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelBotTokenSlack", lang)}</label>` +
-        `<input type="password" name="gw_bot_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.bot_token || "")}"></div>` +
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelAppToken", lang)}</label>` +
-        `<input type="password" name="gw_app_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.app_token || "")}"></div>` +
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelAllowlistSlack", lang)}</label>` +
-        `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>` +
-        `<div class="btb-group"><label>${t("botbuilder.gwLabelChannelIdsSlack", lang)}</label>` +
-        `<textarea name="gw_channel_ids" rows="3" class="btb-textarea">${escapeHtml((gw.channel_ids || []).join("\n"))}</textarea></div>`;
-      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintSlack", lang)}</p>`;
+    const simple = renderGatewayFields(gwType, gw, lang);
+    if (simple) {
+      gwFields = simple.fields;
+      gwHint = simple.hint;
     } else if (gwType === "glasses") {
       // Slice B (B4): bind this bot to a paired meta-glasses device. Saving
       // sets the device's bound_bot_id (the voice turn reads it) + the voice
@@ -489,15 +467,12 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         `</details>`;
 
       gwExtra = `<div class="btb-cm-manage">` + shareBlock + shareActions + aclList + advanced + `</div>`;
-    } else if (gwType === "none") {
-      gwFields = "";
-      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintNone", lang)}</p>`;
     } else {
-      gwFields =
-        formField("Gmail address (+alias)", "gw_address", { value: gw.address || "" }) +
-        `<div class="btb-group"><label>Allowlist (one address per line)</label>` +
-        `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>`;
-      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintGmail", lang)}</p>`;
+      // Unknown/coming-soon type in a stored def: fall back to the gmail
+      // fields, exactly as the pre-extraction else-branch did.
+      const fb = renderGatewayFields("gmail", gw, lang);
+      gwFields = fb.fields;
+      gwHint = fb.hint;
     }
     body =
       `<form method="POST" class="btb-form">${hidden("gateways")}` +
