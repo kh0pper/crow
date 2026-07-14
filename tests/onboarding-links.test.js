@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import onboardingPanel, {
   isInternalHref,
   cardLinkAttrs,
+  STEP_KEYS,
 } from "../servers/gateway/dashboard/panels/onboarding.js";
 
 // Same seam as tests/onboarding.test.js: drive the panel handler with a stub layout.
@@ -54,10 +55,14 @@ const CARD_HREFS = [
 // so the wizard stays alive behind it. If 1b's change bleeds into deepLink, this
 // goes red.
 test("mid-tour deep links still open in a new tab (deepLink is out of scope)", async () => {
+  // Keyed by stem, positions derived from STEP_KEYS: a future step insertion
+  // must not re-break this test. hrefs are as-rendered (button() escapes & to &amp;).
   const midTour = [
-    [1, "/dashboard/settings?section=integrations"],
-    [2, "/dashboard/bot-builder"],
-    [3, "/dashboard/connect"],
+    [STEP_KEYS.indexOf("ai"), "/dashboard/settings?section=llm&amp;tab=providers"],
+    [STEP_KEYS.indexOf("integrations"), "/dashboard/settings?section=integrations"],
+    [STEP_KEYS.indexOf("bot"), "/dashboard/bot-builder"],
+    [STEP_KEYS.indexOf("starter"), "/dashboard/extensions#collections"],
+    [STEP_KEYS.indexOf("connect"), "/dashboard/connect"],
   ];
   for (const [step, href] of midTour) {
     const a = anchorFor(await render(step), href);
@@ -68,7 +73,7 @@ test("mid-tour deep links still open in a new tab (deepLink is out of scope)", a
 
 // (b) The done-step cards are all internal today => no target, no rel.
 test("done-step action cards navigate in the same tab (no target attribute)", async () => {
-  const cards = actionCardsSlice(await render(4));
+  const cards = actionCardsSlice(await render(STEP_KEYS.indexOf("done")));
   for (const href of CARD_HREFS) {
     const a = anchorFor(cards, href);
     assert.doesNotMatch(a, /target=/, `internal card ${href} must not set target`);
@@ -80,7 +85,7 @@ test("done-step action cards navigate in the same tab (no target attribute)", as
 
 // (c) Whatever _blank survives anywhere in the tour must still be safe.
 test("every remaining target=_blank anchor carries rel=noopener", async () => {
-  for (const step of [0, 1, 2, 3, 4]) {
+  for (let step = 0; step < STEP_KEYS.length; step++) {
     for (const a of anchors(await render(step))) {
       if (a.includes('target="_blank"')) {
         assert.match(a, /rel="noopener"/, `step ${step}: _blank anchor without rel=noopener: ${a}`);

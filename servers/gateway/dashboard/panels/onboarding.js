@@ -9,12 +9,14 @@
  *   - Reaching the "done" step sets onboarding_completed_at (first time only)
  *   - Done step shows a subtle CSS-only celebration + "what to try" cards
  */
-import { stepper, section, callout, button } from "../shared/components.js";
+import { stepper, section, callout, button, escapeHtml } from "../shared/components.js";
 import { t, SUPPORTED_LANGS } from "../shared/i18n.js";
 import { parseCookies } from "../auth.js";
 import { upsertSetting, readSetting } from "../settings/registry.js";
+import { loadCollections } from "./extensions/collections.js";
 
-const STEP_KEYS = ["welcome", "integrations", "bot", "connect", "done"];
+/** Exported so tests derive step positions (indexOf/length) instead of pinning indices. */
+export const STEP_KEYS = ["welcome", "ai", "integrations", "bot", "starter", "connect", "done"];
 
 /**
  * Resolve language cookie-first. The panel-dispatch lang derives from the DB
@@ -99,7 +101,25 @@ function renderActionCards(lang) {
       ${button(t(c.actionKey, lang), { variant: "secondary", size: "sm", href: c.href, attrs: cardLinkAttrs(c.href) })}
     </div>`).join("");
 
-  return `<div class="onboarding-action-cards">${cardHtml}</div>`;
+  return `${CARD_CSS}<div class="onboarding-action-cards">${cardHtml}</div>`;
+}
+
+/**
+ * Starter-collection cards (4d): one card per registry/collections.json entry —
+ * title, description, member count. Orientation only: install UX lives on the
+ * extensions page, so the single deepLink below the grid is the only action.
+ * loadCollections() never throws (missing/corrupt file → []); empty → no grid.
+ */
+function renderStarterCards(lang) {
+  const collections = loadCollections();
+  if (!collections.length) return "";
+  const cardHtml = collections.map((c) => `
+    <div class="onboarding-action-card">
+      <div class="onboarding-action-card-title">${escapeHtml(c.name || c.id)}</div>
+      <div class="onboarding-action-card-body">${escapeHtml(c.description || "")}</div>
+      <div class="onboarding-action-card-count">${t("onboarding.starterMemberCount", lang).replace("{n}", String(c.members.length))}</div>
+    </div>`).join("");
+  return `${CARD_CSS}<div class="onboarding-action-cards">${cardHtml}</div>`;
 }
 
 /**
@@ -142,6 +162,16 @@ const CELEBRATION_CSS = `
   color: var(--crow-success);
   font-size: var(--crow-text-base);
 }
+</style>
+`;
+
+/**
+ * Action-card grid CSS — shared by the done step's "what to try" cards and the
+ * starter step's collection cards (each step is its own page, so emitting the
+ * <style> block per step never duplicates it in one document).
+ */
+const CARD_CSS = `
+<style>
 .onboarding-action-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -168,13 +198,56 @@ const CELEBRATION_CSS = `
   line-height: var(--crow-leading-relaxed);
   flex: 1;
 }
+.onboarding-action-card-count {
+  font-size: var(--crow-text-sm);
+  color: var(--crow-text-tertiary);
+}
 </style>
 `;
 
-function renderStepBody(stem, lang) {
+/**
+ * Count enabled rows in the providers table. Returns null when there is no db
+ * or the query fails — the caller renders no count claim at all in that case
+ * (asserting "nothing configured yet" on a db error could be a lie, and the
+ * wizard must never 500 over an orientation detail).
+ * @returns {Promise<number|null>}
+ */
+async function countProviders(db) {
+  if (!db) return null;
+  try {
+    const { rows } = await db.execute("SELECT COUNT(*) AS n FROM providers WHERE disabled = 0");
+    const n = Number(rows?.[0]?.n);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {string} stem - STEP_KEYS entry
+ * @param {string} lang
+ * @param {{providersCount?: number|null}} [ctx] - server-fetched data the step
+ *   body needs (only the ai step today); handler-populated so this stays sync.
+ */
+function renderStepBody(stem, lang, ctx = {}) {
   const body = `<p style="font-size:var(--crow-text-base);line-height:var(--crow-leading-relaxed);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-4)">${t(`onboarding.${stem}.body`, lang)}</p>`;
   const linkWrap = (html) => `<div style="margin-top:var(--crow-space-4)">${html}</div>`;
   switch (stem) {
+    case "ai": {
+      const n = ctx.providersCount;
+      let note = "";
+      if (n === 0) {
+        note = callout(t("onboarding.aiEmptyNote", lang), "info");
+      } else if (typeof n === "number" && n > 0) {
+        note = callout(t("onboarding.aiConfiguredNote", lang).replace("{n}", String(n)), "info");
+      }
+      // n == null (no db / query failed): no count claim either way.
+      return body + note
+        + linkWrap(deepLink(t("onboarding.openProviders", lang), "/dashboard/settings?section=llm&tab=providers"));
+    }
+    case "starter":
+      return body + renderStarterCards(lang)
+        + linkWrap(deepLink(t("onboarding.openCollections", lang), "/dashboard/extensions#collections"));
     case "integrations":
       return body + callout(t("onboarding.integrationsNote", lang), "info")
         + linkWrap(deepLink(t("onboarding.openIntegrations", lang), "/dashboard/settings?section=integrations"));
@@ -245,10 +318,14 @@ export default {
       } catch {}
     }
 
+    // The ai step's copy is conditional on whether any provider is configured;
+    // fetch the count server-side only when that step is the one rendering.
+    const ctx = stem === "ai" ? { providersCount: await countProviders(db) } : {};
+
     const steps = STEP_KEYS.map((k) => ({ label: t(`onboarding.${k}.title`, lang) }));
     const content =
       stepper(steps, current) +
-      section(t(`onboarding.${stem}.title`, lang), renderStepBody(stem, lang)) +
+      section(t(`onboarding.${stem}.title`, lang), renderStepBody(stem, lang, ctx)) +
       renderNav(current, lang);
 
     return layout({ title: t("onboarding.title", lang), content });
