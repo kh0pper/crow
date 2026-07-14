@@ -1,8 +1,9 @@
 # Bot Builder UX overhaul + non-technical tutorial — design spec
 
 **Date:** 2026-07-14 · **Arc item:** 5 (THEME, master plan
-`docs/superpowers/plans/2026-07-11-opus-autonomous-arc.md` §4) · **Status:** draft
-pending adversarial review
+`docs/superpowers/plans/2026-07-11-opus-autonomous-arc.md` §4) · **Status:**
+revised after adversarial round 1 (REVISE: 1 critical, 4 major — all folded in
+below; see §7)
 
 **Kevin's verbatim ask:** "can we make the bot builder interface easier to use?
 maybe make it all more intuitive, and a cleaner interface. i think we also need a
@@ -126,11 +127,31 @@ the rest of the panel). `STEP_KEYS = ["template", "basics", "model", "channel",
 4. **review** — plain-language summary (template, name, model, channel) +
    Create button. **No DB row exists until this POST.**
 
-**State carry:** each Next is a POST; prior answers re-emit as hidden inputs.
-No draft rows, no server-side wizard session. Secrets (gateway tokens) travel
-only in POST bodies, never query strings (same exposure class as the Gateways
-tab, which re-emits saved tokens into password inputs). Every step form carries
-`csrfInput(req)`.
+**State machine (explicit — this is a net-new mechanism; the onboarding wizard
+contributes only its *components* (`stepper()`, `button()`, `callout()`), not
+its navigation, which is stateless GET links and carries nothing):**
+
+- Every step renders ONE form that POSTs back to the wizard route with
+  `action="wizard_step"`, all previously-collected fields re-emitted as hidden
+  inputs, and **both Back and Next as submit buttons** (`name="nav"`,
+  `value="back"|"next"`) — so state survives navigation in either direction,
+  including secrets entered at the channel step. No GET deep-link into a middle
+  step is supported: a bare GET on `?new=1` (any step param) renders step 0
+  fresh.
+- No draft rows, no server-side wizard session. Secrets travel only in POST
+  bodies, never query strings (same exposure class as the Gateways tab, which
+  re-emits saved tokens into password inputs). Every step form carries
+  `csrfInput(req)`.
+- Refresh mid-wizard triggers the browser's re-submit prompt; harmless — the
+  re-POST re-renders the same step and creates nothing (no row exists until
+  final create). Accepted and documented.
+- **Final create is PRG + conflict-tolerant:** `wizard_create` redirects
+  (303) to the checklist on success. If the bot_id already exists at final
+  POST (double-click / re-submit race), it redirects to that bot's checklist
+  with a neutral "already created" notice instead of an error banner —
+  distinct from quick-create's collision error. (The slug was
+  collision-suffixed at the basics step, so a final-POST conflict is
+  practically always a duplicate submit on this single-operator dashboard.)
 
 **Final create** (`action="wizard_create"`): validates model against
 `loadModelOptions` exactly like plain create; applies the template overlay onto
@@ -183,24 +204,47 @@ uses), dropping missing servers/tools silently, exactly like `skills` presets
 are filtered against `loadSkills()`. A template can never make creation fail.
 Concrete names: personal-assistant adds `crow-memory/crow_search_memories`,
 `crow-memory/crow_store_memory`, `crow-memory/crow_recall_by_context` on top of
-the `crow-tasks/*` defaults. Permission policy is NOT overlaid: every template
+the `crow-tasks/*` defaults.
+
+**Probe semantics (round 1, m1):** filtering happens once, inside
+`wizard_create` (not during step renders — template cards are static copy, so
+no step blocks on the probe; the 5-min `probeAll()` cache absorbs the cost).
+When the canonical `~/.pi/agent/mcp.json` is absent entirely (truly fresh
+install), `probeAll()` returns `{_error}` — the filter then drops ALL template
+`crow_mcp` additions and keeps only `defaultDefinition()`'s baked preset,
+which is exactly what plain create produces today (parity, not a new failure
+mode). Creation itself never fails or blocks on probe state. Permission policy is NOT overlaid: every template
 inherits `defaultDefinition()`'s safe defaults (bash deny, external_send
 draft_only, self-learning off). `system_prompt` stays EN with a wizard note
 that it's editable (it's model-facing text, not UI copy).
 
 ### D3 — Shared gateway-fields renderer
 
-Extract the per-type field rendering from `editor.js`'s gateways tab
-(`gwFields`/`gwHint` for gmail/discord/telegram/slack/none — the credential/
-allowlist forms) into `panels/bot-builder/gateway-fields.js`, parameterized by
-`(gwType, gw, lang)`. The Gateways tab and the wizard channel step both call it
-— one source of truth, no forked field lists. The device-bound types (glasses,
-companion) and crow-messages' management UI (share links, ACL, QR) are NOT
-extracted: in the wizard those types render as type selection + an i18n'd
-"finish setup on the Gateways tab after creation" note (device pairing and
-share links need an existing bot). Save handling stays where it is
-(`save_gateways` for the tab; `wizard_create` maps the same field names through
-the same normalization helper).
+Extract BOTH halves of the gmail/discord/telegram/slack/none gateway handling
+into `panels/bot-builder/gateway-fields.js` (adversarial round 1, M2+M3 —
+there is no existing normalization helper; it lives inline in the
+`save_gateways` branch of `api-handlers.js:181-351`, so it must be pulled out,
+not "reused"):
+
+- `renderGatewayFields(gwType, gw, lang)` — the per-type credential/allowlist
+  form fields, extracted from `editor.js`'s gateways tab.
+- `normalizeGatewayFields(gwType, body)` — the form-body → gateway-record
+  mapping, extracted from the `save_gateways` inline branch.
+
+The Gateways tab and the wizard channel step / `wizard_create` both consume
+both functions — one source of truth, no forked field lists or mappings. The
+device-bound types (glasses, companion) and crow-messages' management UI
+(share links, ACL, QR) are NOT extracted: in the wizard those types render as
+type selection + an i18n'd "finish setup on the Gateways tab after creation"
+note (device pairing and share links need an existing bot).
+
+**Regression guard (round 1, M2):** the existing
+`bot-builder-gateway-draft.test.js` exercises only the save handler and only
+companion+glasses — it does NOT protect this refactor. PR1 adds a render- and
+normalize-parity test covering gmail/discord/telegram/slack/none: fixture
+gateway configs rendered through the extracted functions, asserting the field
+names/values match the pre-extraction markup (captured as fixtures at
+extraction time) and that save→re-render round-trips are lossless.
 
 ### D4 — Review tab → readiness checklist
 
@@ -208,9 +252,20 @@ The Review tab's default view becomes a checklist table, one row per readiness
 item, each with a status icon, plain-language copy (i18n EN+ES), and a link to
 the tab that fixes it:
 
+**Honesty rule for the Model row (adversarial round 1, C1):** `resolveModel()`
+NEVER reports failure — it fail-closes to the hardcoded `LOCAL_FALLBACK` key
+with `source:"fallback"` and is documented never-throws. A ✓/✗ built on "does
+it resolve" is therefore decorative: on a zero-provider fresh install it would
+render a green checkmark carrying the exact hardcoded model string Item 4
+removed. The row instead validates `def.models.default` against
+`loadModelOptions(db)` — the same source of truth as every picker — and
+renders the **configured** key, never the fallback key, in the not-ready
+state. An executable test asserts a zero-provider definition renders
+not-ready.
+
 | row | source | states |
 |---|---|---|
-| Model | `resolveModel(def)` (already computed here) | ✓ resolves (`key`) / ✗ can't run — fix on AI tab |
+| Model | `def.models.default` ∈ `loadModelOptions(db)` keys | ✓ ready (`configured key`) / ✗ "the configured model isn't available on this instance — fix on AI tab" (shows the configured key or "none set"; never `LOCAL_FALLBACK`) |
 | Channel | `def.gateways[0]` | ✓ type + one-line detail (address / N allowlisted / device) / ⚠ none — "reachable only from Sessions; add one on Gateways" |
 | Tools | selection counts | ✓ N tools (M servers) |
 | Skills & prompt | `def.skills`, `def.system_prompt` | ✓ N skills, prompt set / ⚠ no prompt |
@@ -231,12 +286,18 @@ radius — N `bot_sessions` rows (deleted), gateway type (connection removed),
 bound devices if any (unbound), crow-messages ACL/invite rows if any (deleted),
 and a note that the workspace directory on disk is **kept**. `action=
 "delete_confirm"` (CSRF + explicit hidden bot_id) then: deletes the
-`pi_bot_defs` row and the bot's `bot_sessions` rows; best-effort (try/catch
-per step, since these live in optional bundles/features): removes the bot's
-`bot_message_acl` and `bot_message_invites` rows, and unbinds any device whose
-`bound_bot_id` matches — devices are a JSON blob in `dashboard_settings` key
+`pi_bot_defs` row and the bot's `bot_sessions`, `bot_message_seen` (dedup —
+stale rows would make a *recreated* same-id bot silently ignore messages), and
+`bot_skill_events` rows; removes the bot_id from the `remote_managed_bots`
+settings JSON list; best-effort (try/catch per step, since these live in
+optional bundles/features): removes the bot's `bot_message_acl` and
+`bot_message_invites` rows, and unbinds any device whose `bound_bot_id`
+matches — devices are a JSON blob in `dashboard_settings` key
 `meta_glasses_devices`, so unbinding goes through the `device-store.js`
-helpers, never raw SQL. Entry points: a Delete button on the checklist tab
+helpers, never raw SQL. (No FK cascades exist anywhere here — every
+referencing table keys on bare TEXT bot_id — so the cleanup list above IS the
+integrity mechanism; an executable test asserts recreate-after-delete gets a
+clean slate.) Entry points: a Delete button on the checklist tab
 (Advanced section) and on the list page row. Live sessions: if any session is
 `active`/`waiting-user`, the confirm page says the bridge will orphan them and
 recommends stopping first (non-blocking — the reaper in `pi_lifecycle.mjs`
@@ -261,6 +322,14 @@ EN+ES. Rules:
   needs no client JS).
 - All new wizard/template/checklist/delete strings ship EN+ES from day one.
   Expected key growth: ~128 → ~210 `botbuilder.*` keys.
+- **Parity guard (round 1, M5):** no botbuilder-wide i18n parity test exists
+  today, and `t()` falls back `entry[lang] || entry.en || key` — so an
+  en-present/es-missing key renders *English* in Spanish mode, invisible to
+  any "no bare key leakage" CDP check. PR3 adds
+  `tests/bot-builder-i18n-parity.test.js`: for every `botbuilder.*` key, `es`
+  is present AND `es !== en`, with an explicit named-exceptions list for
+  intentionally identical strings (e.g. "Gmail"). The CDP ES pass remains as a
+  rendering smoke check, not the parity guard.
 
 ### D7 — Non-technical tutorial (EN+ES)
 
@@ -287,13 +356,15 @@ Four PRs, each independently shippable, suite-green, and deployable:
 
 - **PR1 — wizard + templates + shared gateway fields.** `wizard.js` (STEP_KEYS,
   step renderers, wizard_create), `templates.js`, `gateway-fields.js`
-  extraction (Gateways tab consumes it — behavior-identical, covered by
-  `bot-builder-gateway-draft.test.js`), UPSERT→reject fix on plain create,
-  list-page CTA + quick-create-into-details, onboarding bot-step retarget,
-  i18n EN+ES. Tests: wizard step rendering (derived from STEP_KEYS), slug
-  collision, model-empty honesty at step 2, template overlay correctness
-  (tools/skills filtering), wizard_create validation + no-clobber, gateway-tab
-  parity after extraction.
+  extraction (render + normalize per §D3 — the existing
+  `bot-builder-gateway-draft.test.js` does NOT cover this; the new parity
+  tests are part of this PR), UPSERT→reject fix on plain create, list-page
+  CTA + quick-create-into-details, onboarding bot-step retarget, i18n EN+ES.
+  Tests: wizard step rendering (derived from STEP_KEYS), slug collision,
+  model-empty honesty at step 2, template overlay correctness (tools/skills
+  filtering incl. the `{_error}` drop-all case), wizard_create validation +
+  no-clobber + conflict-redirect, gateway render/normalize parity
+  (gmail/discord/telegram/slack/none).
 - **PR2 — readiness checklist + delete.** Review-tab re-layering (checklist +
   Advanced disclosure), `created=1` callout, post-create redirect (wizard
   already targets it; plain create redirect also moves to `tab=review`),
@@ -354,3 +425,34 @@ runbook, then the next.
   crow-messages bots are testable from the Messages page today.
 - Follow-up pool items from the handoff (bridge NODE nvm-pin etc.) stay
   unqueued.
+
+---
+
+## 7. Review record
+
+**Round 1 (2026-07-14, fresh Opus subagent, adversarial):** verdict REVISE.
+Findings, all verified against code and folded in above:
+- **C1 (critical):** D4 Model row was built on `resolveModel()`, which
+  fail-closes to the hardcoded `LOCAL_FALLBACK` and never reports failure — the
+  row would have shown a false green with the exact hardcoded model string
+  Item 4 removed, on the exact beachhead persona (zero-provider fresh
+  install). Fixed: validate against `loadModelOptions(db)`; never render the
+  fallback key; executable zero-provider test required. (§D4)
+- **M1:** the POST-carry wizard state machine was mis-sold as "proven by
+  onboarding" (onboarding nav is stateless GET). Fixed: explicit state machine
+  — Back/Next as submit buttons in one form, no GET deep-links, refresh
+  semantics, conflict-tolerant PRG final create. (§D1)
+- **M2/M3:** the named regression guard (`bot-builder-gateway-draft.test.js`)
+  doesn't cover the extraction, and the "same normalization helper" didn't
+  exist. Fixed: extraction now covers render + normalize; parity tests added
+  to PR1 scope. (§D3)
+- **M4:** delete missed `bot_message_seen` (recreate-same-id bots would
+  silently ignore messages), `bot_skill_events`, `remote_managed_bots`.
+  Fixed. (§D5)
+- **M5:** ES parity had no real guard (`t()` en-fallback defeats bare-key
+  checks). Fixed: dedicated parity test in PR3. (§D6)
+- **m1:** probe latency/absent-canonical semantics pinned. (§D2)
+- Verified sound by the reviewer: UPSERT→reject (no caller depends on
+  create-as-upsert), delete is bridge-safe (tick loop re-queries
+  `WHERE enabled=1`; run monitor doesn't join `pi_bot_defs`), components
+  reuse, checklist won't crash on fresh installs.
