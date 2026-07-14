@@ -130,8 +130,12 @@ export async function fetchRegistryData() {
     ...localAddons,
   ];
 
-  // Merge official add-ons with community store add-ons
-  const officialAddons = mergedAddons.map((a) => ({ ...a, _community: false }));
+  // Merge registry add-ons with community store add-ons. A registry entry can
+  // itself be a third-party listing (manifest origin: "community" → the
+  // generated entry carries official: false) — those get the same Community
+  // badge + install-modal caution as community-store add-ons, so _community
+  // means "not maintained by Crow", not "came from a community store".
+  const officialAddons = mergedAddons.map((a) => ({ ...a, _community: a.official === false }));
   const communityStores = getStores();
   const communityResults = await Promise.all(communityStores.map((s) => fetchCommunityStore(s.url)));
   const communityAddons = communityResults.flatMap((r) => r.addons);
