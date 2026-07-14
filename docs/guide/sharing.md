@@ -143,26 +143,35 @@ If your Crow gateway is cloud-deployed (always online), you can volunteer as a r
 
 This is opt-in and only serves your existing contacts.
 
-## Device Migration
+## Identity Backup and Device Migration
 
-Moving Crow to a new device? Export your identity:
+Your identity is the master seed behind your Crow ID, contacts, and shared data — if the machine dies without a backup, contacts have to re-connect from scratch. There are two ways to make a backup, and both produce the same passphrase-encrypted format:
+
+**From the dashboard:** the first-run wizard's final step (replayable from Settings → Help & Setup → "Download identity backup") has a backup form. Choose a passphrase (minimum 12 characters), confirm it, and the browser downloads `crow-identity-backup.json`.
+
+**From the CLI:**
 
 ```bash
-# On the old device:
+# On the old device — prompts for a passphrase, prints a base64 blob:
 npm run identity:export
-# Saves encrypted archive to data/identity-export.enc
+# (non-interactive: npm run identity:export -- -- --passphrase <passphrase>)
 
-# On the new device:
-npm run identity:import
-# Prompts for passphrase, restores identity
+# On the new device — prompts for the same passphrase:
+npm run identity:import -- <base64-blob>
+# (a downloaded crow-identity-backup.json imports the same way:
+#  npm run identity:import -- "$(base64 -w0 crow-identity-backup.json)")
 ```
 
-Your Crow ID stays the same. Contacts don't need to re-connect.
+The backup keeps your Crow ID and public keys in the clear (so the file is identifiable), but the seed itself is encrypted with scrypt (N=16384, r=8, p=1) + AES-256-GCM under your passphrase — the plaintext seed never appears in the file. Without the passphrase the backup cannot be restored, so store both safely.
+
+Restoring **decrypts the backup and writes a plaintext-seed `identity.json`** — the file encryption protects the download, not the disk; the gateway can only boot from a plaintext seed. The import refuses to overwrite an existing `identity.json`. There is deliberately no dashboard restore flow: re-keying a running instance has sync and pairing implications, so restore is a CLI-on-a-fresh-install operation.
+
+Your Crow ID stays the same after a restore. Contacts don't need to re-connect.
 
 ## Security Notes
 
 - All shares are **end-to-end encrypted** — only the intended recipient can read them
-- Your identity seed is encrypted at rest with your passphrase
+- Identity **backups** are passphrase-encrypted (scrypt + AES-256-GCM); the on-disk `identity.json` keeps a plaintext seed so the gateway can boot unattended — protect the machine, and keep an encrypted backup
 - Invite codes expire after 24 hours and are single-use
 - Safety numbers let you verify connections weren't intercepted
 - Relays only see encrypted blobs — they cannot read your data

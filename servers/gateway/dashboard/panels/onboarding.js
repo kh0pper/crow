@@ -14,6 +14,9 @@ import { t, SUPPORTED_LANGS } from "../shared/i18n.js";
 import { parseCookies } from "../auth.js";
 import { upsertSetting, readSetting } from "../settings/registry.js";
 import { loadCollections } from "./extensions/collections.js";
+import { csrfInput } from "../shared/csrf.js";
+import { buildIdentityBackup, loadInstanceSeed, deriveInstanceIdentity } from "../../../sharing/identity.js";
+import { instanceSeedDir } from "../../../../scripts/pi-bots/instance-paths.mjs";
 
 /** Exported so tests derive step positions (indexOf/length) instead of pinning indices. */
 export const STEP_KEYS = ["welcome", "ai", "integrations", "bot", "starter", "connect", "done"];
@@ -206,6 +209,89 @@ const CARD_CSS = `
 `;
 
 /**
+ * The instance crowId for the done step's backup section, or null when there
+ * is no readable plaintext-seed identity.json (fresh install where the sharing
+ * server has not run yet, or an encrypted-at-rest identity). Null → the
+ * section renders an honest "no identity yet" note instead of the form; the
+ * wizard must never crash over it. Same seed anchor as the backup endpoint
+ * (identity.js's resolveDataDir, via instanceSeedDir()).
+ * @returns {string|null}
+ */
+function readInstanceCrowId() {
+  try {
+    const seed = loadInstanceSeed(instanceSeedDir());
+    return deriveInstanceIdentity(seed).crowId;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * "Back up your identity" section on the done step (4-PR3). Passphrase +
+ * confirm POST to the hand-registered /dashboard/onboarding/identity-backup
+ * route (dashboard-authed + CSRF-protected in dashboard/index.js). data-pw is
+ * carried for parity with the settings password-toggle pattern, but the wizard
+ * page has no toggle script — plain password fields by design.
+ * @param {string} lang
+ * @param {{crowId: string|null, req?: object}} ctx
+ */
+function renderBackupSection(lang, ctx = {}) {
+  const req = ctx.req || null;
+  const heading = `<h3 style="font-size:var(--crow-text-base);font-weight:600;margin:var(--crow-space-5) 0 var(--crow-space-2)">${t("onboarding.backup.title", lang)}</h3>`;
+  if (!ctx.crowId) {
+    return `${heading}<p style="font-size:var(--crow-text-sm);color:var(--crow-text-secondary)">${t("onboarding.backup.noIdentity", lang)}</p>`;
+  }
+  const rawError = req && req.query ? req.query.backup_error : "";
+  const errorHtml = rawError
+    ? `<p style="color:var(--crow-error);font-size:var(--crow-text-sm);margin-bottom:var(--crow-space-2)">${escapeHtml(String(rawError))}</p>`
+    : "";
+  const fieldStyle = "display:block;width:100%;max-width:320px;margin-top:2px;padding:0.4rem 0.6rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;color:var(--crow-text-primary)";
+  const labelStyle = "display:block;font-size:var(--crow-text-sm);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-2)";
+  return `${heading}
+    <p style="font-size:var(--crow-text-sm);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-2)">${t("onboarding.backup.crowIdLabel", lang)}: <code>${escapeHtml(ctx.crowId)}</code></p>
+    <p style="font-size:var(--crow-text-sm);color:var(--crow-text-secondary);line-height:var(--crow-leading-relaxed);margin-bottom:var(--crow-space-3)">${t("onboarding.backup.body", lang)}</p>
+    ${errorHtml}
+    <form method="POST" action="/dashboard/onboarding/identity-backup">
+      ${csrfInput(req)}
+      <label style="${labelStyle}">${t("onboarding.backup.passphraseLabel", lang)}
+        <input type="password" name="passphrase" data-pw minlength="12" required autocomplete="new-password" style="${fieldStyle}">
+      </label>
+      <label style="${labelStyle}">${t("onboarding.backup.confirmLabel", lang)}
+        <input type="password" name="confirm" data-pw minlength="12" required autocomplete="new-password" style="${fieldStyle}">
+      </label>
+      <p style="font-size:var(--crow-text-sm);color:var(--crow-text-tertiary);margin-bottom:var(--crow-space-3)">${t("onboarding.backup.hint", lang)}</p>
+      ${button(t("onboarding.backup.submit", lang), { variant: "secondary", size: "sm", type: "submit" })}
+    </form>`;
+}
+
+/**
+ * POST /dashboard/onboarding/identity-backup — hand-registered in
+ * dashboard/index.js BEHIND dashboardAuth + csrfMiddleware (same mounting slot
+ * as the fix-it action POST). Validates passphrase (minlength 12 + confirm
+ * match), then streams the buildIdentityBackup payload as an attachment.
+ * Never logs or echoes the passphrase; unexpected failures redirect with a
+ * generic message instead of 500ing.
+ */
+export async function handleIdentityBackupPost(req, res) {
+  const lang = resolveLang(req);
+  const doneIdx = STEP_KEYS.indexOf("done");
+  const back = (msgKey) =>
+    res.redirectAfterPost(`/dashboard/onboarding?step=${doneIdx}&backup_error=${encodeURIComponent(t(msgKey, lang))}`);
+  try {
+    const passphrase = typeof req.body?.passphrase === "string" ? req.body.passphrase : "";
+    const confirm = typeof req.body?.confirm === "string" ? req.body.confirm : "";
+    if (passphrase.length < 12) return back("onboarding.backup.errTooShort");
+    if (passphrase !== confirm) return back("onboarding.backup.errMismatch");
+    const payload = buildIdentityBackup(passphrase);
+    res.setHeader("Content-Disposition", 'attachment; filename="crow-identity-backup.json"');
+    return res.type("application/json").send(JSON.stringify(payload, null, 2));
+  } catch (err) {
+    console.error("[onboarding] identity backup failed:", err.message); // message only — never the passphrase
+    return back("onboarding.backup.errGeneric");
+  }
+}
+
+/**
  * Count enabled rows in the providers table. Returns null when there is no db
  * or the query fails — the caller renders no count claim at all in that case
  * (asserting "nothing configured yet" on a db error could be a lie, and the
@@ -226,8 +312,9 @@ async function countProviders(db) {
 /**
  * @param {string} stem - STEP_KEYS entry
  * @param {string} lang
- * @param {{providersCount?: number|null}} [ctx] - server-fetched data the step
- *   body needs (only the ai step today); handler-populated so this stays sync.
+ * @param {{providersCount?: number|null, crowId?: string|null, req?: object}} [ctx]
+ *   - server-fetched data the step body needs (ai: providersCount; done:
+ *     crowId + req for the backup form); handler-populated so this stays sync.
  */
 function renderStepBody(stem, lang, ctx = {}) {
   const body = `<p style="font-size:var(--crow-text-base);line-height:var(--crow-leading-relaxed);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-4)">${t(`onboarding.${stem}.body`, lang)}</p>`;
@@ -262,6 +349,7 @@ function renderStepBody(stem, lang, ctx = {}) {
         <span class="onboarding-celebrate-label">${t("onboarding.celebration", lang)}</span>
       </div>`;
       return celebrateHtml + body + callout(t("onboarding.doneNote", lang), "success")
+        + renderBackupSection(lang, ctx)
         + renderActionCards(lang);
     }
     case "welcome":
@@ -320,7 +408,11 @@ export default {
 
     // The ai step's copy is conditional on whether any provider is configured;
     // fetch the count server-side only when that step is the one rendering.
-    const ctx = stem === "ai" ? { providersCount: await countProviders(db) } : {};
+    // The done step needs the instance crowId (nullable) + req for the backup
+    // form (csrf token, backup_error query).
+    const ctx = stem === "ai" ? { providersCount: await countProviders(db) }
+      : stem === "done" ? { crowId: readInstanceCrowId(), req }
+      : {};
 
     const steps = STEP_KEYS.map((k) => ({ label: t(`onboarding.${k}.title`, lang) }));
     const content =
