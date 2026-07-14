@@ -6,9 +6,14 @@
  * is no render-on-POST concern; the destructive action is a PRG POST
  * (action="delete_confirm") handled in api-handlers.js.
  *
- * Cleanup list (spec §D5 — no FK cascades exist anywhere here, every
- * referencing table keys on bare TEXT bot_id, so THIS list is the integrity
- * mechanism):
+ * Cleanup list (spec §D5). The bot_id-keyed tables have NO FK cascades
+ * (bare TEXT bot_id), so this list is their integrity mechanism. The
+ * contacts row is DIFFERENT: contacts(id) has ON DELETE CASCADE children —
+ * messages, shared_items, message_retry_queue, contact_group_members — so
+ * deleting the local-bot contact also deletes the user's DM history with
+ * this bot and its group memberships. That is deliberate (a deleted bot's
+ * conversation references a dead endpoint) but MUST be disclosed on the
+ * confirm page (PR #191 review M1):
  *   - pi_bot_defs row
  *   - bot_sessions rows
  *   - bot_message_seen rows (stale dedup rows would make a RECREATED same-id
@@ -37,6 +42,20 @@ async function count(db, sql, args) {
   } catch { return 0; }
 }
 
+/** The bot's local-bot contacts row id, or null (identity may be unavailable). */
+async function localBotContactId(db, botId) {
+  try {
+    const admin = await import("./crow-messages-admin.js");
+    const crowId = admin.botIdentityFor(botId).crowId;
+    if (!crowId) return null;
+    const { rows } = await db.execute({
+      sql: "SELECT id FROM contacts WHERE crow_id=? AND origin='local-bot' LIMIT 1",
+      args: [crowId],
+    });
+    return rows[0] ? Number(rows[0].id) : null;
+  } catch { return null; }
+}
+
 /** Blast radius facts for the confirm page (all best-effort). */
 export async function deleteBlastRadius(db, botId) {
   const sessions = await count(db, "SELECT COUNT(*) AS n FROM bot_sessions WHERE bot_id=?", [botId]);
@@ -50,7 +69,15 @@ export async function deleteBlastRadius(db, botId) {
     const { listDevices } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
     boundDevices = (await listDevices(db).catch(() => [])).filter((d) => d.bound_bot_id === botId);
   } catch { boundDevices = []; }
-  return { sessions, liveSessions, acl, invites, seen, boundDevices };
+  // FK-cascade disclosure (review M1): deleting the local-bot contact takes
+  // the DM history and group memberships with it — count them for the page.
+  let messages = 0, groupMemberships = 0;
+  const contactId = await localBotContactId(db, botId);
+  if (contactId != null) {
+    messages = await count(db, "SELECT COUNT(*) AS n FROM messages WHERE contact_id=?", [contactId]);
+    groupMemberships = await count(db, "SELECT COUNT(*) AS n FROM contact_group_members WHERE contact_id=?", [contactId]);
+  }
+  return { sessions, liveSessions, acl, invites, seen, boundDevices, messages, groupMemberships };
 }
 
 /** GET ?bot=<id>&confirm_delete=1 — the confirmation page. */
@@ -70,6 +97,10 @@ export async function renderDeleteConfirm(req, res, { db, layout, lang, PAGE_CSS
     br.boundDevices.length
       ? li(t("botbuilder.delRadiusDevices", lang).replace("{names}",
           escapeHtml(br.boundDevices.map((d) => d.name || d.id).join(", "))))
+      : "",
+    (br.messages || br.groupMemberships)
+      ? li(t("botbuilder.delRadiusConversation", lang)
+          .replace("{n}", String(br.messages)).replace("{g}", String(br.groupMemberships)))
       : "",
     li(t("botbuilder.delRadiusWorkspaceKept", lang)),
   ].filter(Boolean).join("");

@@ -28,6 +28,10 @@ before(async () => {
   });
   const { createDbClient } = await import("../servers/db.js");
   db = createDbClient();
+  // botIdentityFor (used by the delete cascade + these tests) derives from
+  // the instance identity — create one in the scratch data dir first.
+  const { loadOrCreateIdentity } = await import("../servers/sharing/identity.js");
+  loadOrCreateIdentity("");
   ({ renderReadiness } = await import("../servers/gateway/dashboard/panels/bot-builder/checklist.js"));
   ({ deleteBlastRadius, handleDeleteConfirm, renderDeleteConfirm } =
     await import("../servers/gateway/dashboard/panels/bot-builder/delete-bot.js"));
@@ -144,19 +148,44 @@ async function seedBot(botId) {
     sql: "INSERT INTO bot_message_acl (bot_id, sender_pubkey) VALUES (?,?)",
     args: [botId, "ab".repeat(32)],
   });
+  await db.execute({
+    sql: "INSERT INTO bot_message_invites (bot_id, token) VALUES (?,?)",
+    args: [botId, "tok-" + botId],
+  });
   const { writeSetting } = await import("../servers/gateway/dashboard/settings/registry.js");
   await writeSetting(db, "remote_managed_bots", JSON.stringify([botId, "other-bot"]), { scope: "local" });
+  // Local-bot contact (same crow_id delete-bot derives) + a DM message —
+  // exercises the disclosed FK cascade (PR #191 review M1/m4).
+  const admin = await import("../servers/gateway/dashboard/panels/bot-builder/crow-messages-admin.js");
+  const crowId = admin.botIdentityFor(botId).crowId;
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, display_name, is_bot, secp256k1_pubkey, ed25519_pubkey, contact_type, origin) VALUES (?,?,1,?,?,'crow','local-bot')",
+    args: [crowId, "Doomed", "cd".repeat(32), "ef".repeat(32)],
+  });
+  const cid = Number((await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id=?", args: [crowId] })).rows[0].id);
+  await db.execute({
+    sql: "INSERT INTO messages (contact_id, content, direction) VALUES (?,?,'sent')",
+    args: [cid, "hello bot"],
+  });
+  // Bound device (JSON blob in dashboard_settings) — exercises unbind (m4).
+  const { pairDevice, updateDeviceProfiles } = await import("../bundles/meta-glasses/server/device-store.js");
+  await pairDevice(db, { id: "dev-" + botId, name: "Test Device", generation: "unknown" });
+  await updateDeviceProfiles(db, "dev-" + botId, { bound_bot_id: botId });
+  return { crowId, cid };
 }
 
 const countIn = async (table, botId) =>
   Number((await db.execute({ sql: `SELECT COUNT(*) AS n FROM ${table} WHERE bot_id=?`, args: [botId] })).rows[0].n);
 
-test("blast radius reports sessions/acl/seen counts", async () => {
+test("blast radius reports sessions/acl/seen/invites/messages/devices", async () => {
   await seedBot("doomed-bot");
   const br = await deleteBlastRadius(db, "doomed-bot");
   assert.equal(br.sessions, 1);
   assert.equal(br.acl, 1);
   assert.equal(br.seen, 1);
+  assert.equal(br.invites, 1);
+  assert.equal(br.messages, 1, "DM history count disclosed (review M1)");
+  assert.equal(br.boundDevices.length, 1, "bound device reported");
 });
 
 test("confirm page renders radius + CSRF + delete_confirm form; unknown bot handled upstream", async () => {
@@ -181,6 +210,18 @@ test("delete_confirm removes every in-scope row + the remote_managed_bots entry 
   const { readSetting } = await import("../servers/gateway/dashboard/settings/registry.js");
   const list = JSON.parse(await readSetting(db, "remote_managed_bots"));
   assert.deepEqual(list, ["other-bot"], "only the deleted bot leaves the managed list");
+  // Disclosed FK cascade fired: the local-bot contact and its DM history are gone.
+  const admin = await import("../servers/gateway/dashboard/panels/bot-builder/crow-messages-admin.js");
+  const crowId = admin.botIdentityFor("doomed-bot").crowId;
+  const contacts = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM contacts WHERE crow_id=?", args: [crowId] })).rows[0].n;
+  assert.equal(Number(contacts), 0, "local-bot contact deleted");
+  const msgs = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM messages m WHERE NOT EXISTS (SELECT 1 FROM contacts c WHERE c.id=m.contact_id)", args: [] })).rows[0].n;
+  assert.equal(Number(msgs), 0, "no orphan messages — cascade removed the DM history");
+  // Device unbound (best-effort step actually ran).
+  const { listDevices } = await import("../bundles/meta-glasses/server/device-store.js");
+  const dev = (await listDevices(db)).find((d) => d.id === "dev-doomed-bot");
+  assert.ok(dev, "device still paired");
+  assert.ok(!dev.bound_bot_id, "device unbound from the deleted bot");
   // Recreate same id: fresh insert works and sees zero stale rows.
   await db.execute({
     sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('doomed-bot','Reborn','{}',1)",
