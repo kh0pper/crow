@@ -43,6 +43,7 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 |---|---|---|
 | `CROW_ORCHESTRATOR_PROVIDER` / `CROW_ORCHESTRATOR_MODEL` | *(DB `providers` table first)* | Default provider/model for the orchestrator. Prefer configuring providers in Settings → AI. |
 | `CROW_PROVIDERS_RECONCILE_MS` | `3600000` | Interval for the models.json → providers-DB reconcile (owner-asserted rows only; skipped entirely on `--no-auth` companions). |
+| `CROW_MODELS_JSON` | *(unset = standard locations)* | Colon-separated override of the models.json search paths. Empty string = ignore all models.json files (hermetic tests / fresh-install audits). |
 | `CROW_DISABLE_NOSTR` | *(unset)* | `1` disables all Nostr relay dialing (messaging transport). For scratch/test gateways: set together with `CROW_DISABLE_INSTANCE_SYNC=1` for a fully-offline boot. |
 | `COMPANION_FAST_MODEL` | `crow-voice/qwen3.5-4b` | Fast voice-turn model for the AI Companion. |
 | `COMPANION_ESCALATION_MODEL` | `crow-chat/qwen3.6-35b-a3b` | Escalation model (`!escalate` / tool turns). |
@@ -52,6 +53,28 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 | `COMPANION_PORT` | `12393` | Companion (Open-LLM-VTuber) server port. |
 | `SDXL_SERVICE_URL` | `http://127.0.0.1:3005` | Image-generation service for storage tools. |
 | `GPU_IDLE_CHECK_INTERVAL_MS` / `GPU_IDLE_REVERT_MS` | `120000` / `1200000` | GPU orchestrator idle polling / revert window. |
+
+### Where model providers come from
+
+The `providers` table in the database is the canonical registry every model
+picker (Bot Builder, companion routing, the `/llm/v1` router) reads. It starts
+**empty** on a fresh install — Crow does not ship a provider list. Providers
+get in three ways:
+
+1. **Model bundles** — installing a model bundle from Extensions registers its
+   provider automatically (and uninstalling disables it).
+2. **Cloud providers** — add manually in Settings → AI Models → Providers
+   ("Add cloud provider").
+3. **`models.json`** (advanced / recovery) — an operator-maintained file at
+   `./models.json` or `./config/models.json` in the app tree (both gitignored;
+   the seed/sync path also reads `~/.pi/agent/models.json`). On first boot with
+   an empty providers table its entries seed the table; the "Sync bundle
+   providers" button re-upserts entries this instance owns. See
+   `models.example.json` in the repo root for the format. It is also the
+   gateway's disaster-recovery fallback if the database is unreadable.
+
+When no providers are configured, model pickers show an honest empty state and
+link here — there is no built-in fallback model list.
 
 ## Storage (MinIO / S3)
 
