@@ -1392,6 +1392,37 @@ export const translations = {
     en: "You can replay this guide anytime from Settings, Help and Setup.",
     es: "Puedes repetir esta guía cuando quieras desde Ajustes, Ayuda y configuración.",
   },
+  // 4-PR3 identity backup (done step + settings pointer)
+  "onboarding.backup.title": { en: "Back up your identity", es: "Respalda tu identidad" },
+  "onboarding.backup.crowIdLabel": { en: "This instance's Crow ID", es: "Crow ID de esta instancia" },
+  "onboarding.backup.body": {
+    en: "Your identity is the cryptographic key behind your Crow ID, contacts, and shared data. If this machine is lost, the identity is gone with it — contacts would have to re-connect from scratch. Download an encrypted backup now: choose a passphrase (12+ characters) and keep the file somewhere safe.",
+    es: "Tu identidad es la clave criptográfica detrás de tu Crow ID, tus contactos y tus datos compartidos. Si pierdes esta máquina, la identidad se pierde con ella y tus contactos tendrían que reconectarse desde cero. Descarga ahora un respaldo cifrado: elige una frase de contraseña (12+ caracteres) y guarda el archivo en un lugar seguro.",
+  },
+  "onboarding.backup.passphraseLabel": { en: "Passphrase (min 12 characters)", es: "Frase de contraseña (mín. 12 caracteres)" },
+  "onboarding.backup.confirmLabel": { en: "Confirm passphrase", es: "Confirma la frase de contraseña" },
+  "onboarding.backup.hint": {
+    en: "The passphrase encrypts the seed inside the file — without it, the backup cannot be restored.",
+    es: "La frase de contraseña cifra la semilla dentro del archivo: sin ella, el respaldo no se puede restaurar.",
+  },
+  "onboarding.backup.submit": { en: "Download encrypted backup", es: "Descargar respaldo cifrado" },
+  "onboarding.backup.noIdentity": {
+    en: "No identity has been created on this instance yet — the sharing server generates one on first start. Come back here (Settings, Help and Setup) once it exists.",
+    es: "Esta instancia aún no tiene una identidad: el servidor de compartición genera una en su primer arranque. Vuelve aquí (Ajustes, Ayuda y configuración) cuando exista.",
+  },
+  "onboarding.backup.errTooShort": {
+    en: "The passphrase must be at least 12 characters.",
+    es: "La frase de contraseña debe tener al menos 12 caracteres.",
+  },
+  "onboarding.backup.errMismatch": {
+    en: "The passphrases do not match.",
+    es: "Las frases de contraseña no coinciden.",
+  },
+  "onboarding.backup.errGeneric": {
+    en: "The backup could not be created. Check the gateway logs for details.",
+    es: "No se pudo crear el respaldo. Revisa los registros del gateway para más detalles.",
+  },
+  "onboarding.backup.settingsLink": { en: "Download identity backup", es: "Descargar respaldo de identidad" },
   "onboarding.btnNext": { en: "Next", es: "Siguiente" },
   "onboarding.btnBack": { en: "Back", es: "Atrás" },
   "onboarding.btnSkip": { en: "Skip to dashboard", es: "Ir al panel" },
