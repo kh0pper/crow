@@ -578,7 +578,9 @@ export async function pollResidency(opts = {}) {
     // window on each bad tick. Note the gate is "any provider present", not
     // "any alwaysResident present": a config that legitimately drops its last
     // alwaysResident provider still prunes. Defence-in-depth; loadProviders()
-    // falls back to the git-tracked models.json.
+    // falls back to an operator-provided models.json / config/models.json
+    // when the DB is unreadable (the repo no longer ships one — see
+    // models.example.json).
     if (Object.keys(cfg.providers || {}).length > 0) pruneResidency(declared);
   } catch (err) {
     // Edge-triggered so a persistently broken config warns once, not every

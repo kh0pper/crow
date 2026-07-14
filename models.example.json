@@ -1,0 +1,32 @@
+{
+  "_readme": [
+    "Optional per-instance provider config. Crow does NOT ship a models.json:",
+    "on a fresh install the providers table starts empty and you add providers",
+    "in the dashboard (Settings -> AI Models -> Providers) or by installing a",
+    "model bundle from Extensions, which registers its provider automatically.",
+    "",
+    "Advanced/recovery use only: copy this file to ./models.json or",
+    "./config/models.json (both are gitignored) and edit it. On first boot with",
+    "an EMPTY providers table its entries seed the table; afterwards the",
+    "Settings -> AI Models -> Providers -> 'Sync bundle providers' button",
+    "re-upserts entries you own. It is also the disaster-recovery fallback the",
+    "gateway reads if the database is unreachable.",
+    "",
+    "Each key under 'providers' is a provider id. baseUrl points at an",
+    "OpenAI-compatible endpoint. 'models' lists the model ids that endpoint",
+    "serves. Optional fields: apiKey, host ('local'|'cloud'), bundleId,",
+    "description, mutexGroup, alwaysResident, defaultMember.",
+    "",
+    "The CROW_MODELS_JSON env var (colon-separated paths) overrides where",
+    "these files are looked for; set it to an empty string to ignore them."
+  ],
+  "providers": {
+    "example-local": {
+      "baseUrl": "http://localhost:8080/v1",
+      "description": "Example: a llama.cpp/vLLM/ollama-style server on this machine",
+      "models": [
+        { "id": "example-model-id", "name": "Example Model" }
+      ]
+    }
+  }
+}
