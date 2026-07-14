@@ -69,7 +69,7 @@ Everything technical (the raw definition, diagnostics) is tucked under **Advance
 
 ## Step 8 — Talk to your bot
 
-For a Crow Messages bot: open the bot's **Gateways** tab, click **Share**, and you get a link + QR code. Open the link (or open **Messages** in the sidebar) and say hello. For other channels, message it where it lives — email it, mention it on Discord, and so on.
+For a Crow Messages bot: open the bot's **Gateways** tab, click **Share access**, and you get a link + QR code. Open the link (or open **Messages** in the sidebar) and say hello. For other channels, message it where it lives — email it, mention it on Discord, and so on.
 
 ## Cleaning up
 
