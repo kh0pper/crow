@@ -37,6 +37,22 @@ function encryptToUs(plaintext) {
   return nip44.v2.encrypt(plaintext, convKey);
 }
 
+// The captured onevent is resilient-subscribe.js's `wrapped()`, which invokes
+// the real async handler WITHOUT awaiting it (a relay callback must never
+// block on our work). `await onevent(event)` therefore gives no happens-after
+// guarantee for the handler's chain — today the health stamps happen before
+// the handler's first await, but that ordering is incidental, not contractual.
+// Poll for the eventually-consistent outcome instead (the
+// tests/block-onevent-guard.test.js pattern).
+async function waitFor(predicate, { timeoutMs = 2000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 test("_doConnectRelays mirrors relay count into receive-health", async () => {
   _resetReceiveHealth();
   const mgr = new NostrManager(identity, null);
@@ -57,7 +73,7 @@ test("subscribeToContact: successful decrypt stamps lastInboundAt", async () => 
   await relay.subscribeCalls[0].onevent({
     id: "e1", pubkey: theirPub, created_at: 1_700_000_000, content: encryptToUs("hello"),
   });
-  assert.notEqual(getReceiveHealth().lastInboundAt, null);
+  assert.ok(await waitFor(() => getReceiveHealth().lastInboundAt !== null), "lastInboundAt never stamped");
   assert.equal(getReceiveHealth().decryptFailures, 0);
   await mgr.destroy();
 });
@@ -71,7 +87,7 @@ test("subscribeToContact: failed decrypt increments decryptFailures, no inbound 
   await relay.subscribeCalls[0].onevent({
     id: "e2", pubkey: theirPub, created_at: 1_700_000_000, content: "not-nip44-garbage",
   });
-  assert.equal(getReceiveHealth().decryptFailures, 1);
+  assert.ok(await waitFor(() => getReceiveHealth().decryptFailures === 1), "decryptFailures never incremented");
   assert.equal(getReceiveHealth().lastInboundAt, null);
   await mgr.destroy();
 });
@@ -85,10 +101,10 @@ test("subscribeToIncoming: decrypt stamps inbound; garbage increments counter", 
   await relay.subscribeCalls[0].onevent({
     id: "e3", pubkey: theirPub, created_at: 1_700_000_000, content: encryptToUs("plain hi"),
   });
-  assert.notEqual(getReceiveHealth().lastInboundAt, null);
+  assert.ok(await waitFor(() => getReceiveHealth().lastInboundAt !== null), "lastInboundAt never stamped");
   await relay.subscribeCalls[0].onevent({
     id: "e4", pubkey: theirPub, created_at: 1_700_000_001, content: "garbage",
   });
-  assert.equal(getReceiveHealth().decryptFailures, 1);
+  assert.ok(await waitFor(() => getReceiveHealth().decryptFailures === 1), "decryptFailures never incremented");
   await mgr.destroy();
 });

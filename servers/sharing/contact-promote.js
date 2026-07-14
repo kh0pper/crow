@@ -144,8 +144,8 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
   // identical to today (MERGE/PROMOTE emit `update`, CREATE emits `insert`).
   const tomb = await readTombstone(db, crowId);
 
-  // Deterministic resolution — do NOT use findContactByPubkey (no ORDER BY →
-  // arbitrary single row). Get the crowId owner (unique) and ALL secp matches.
+  // Do NOT use findContactByPubkey here — it returns a single row, and the
+  // MERGE path below needs the crowId owner (unique) plus ALL secp matches.
   const byCrow = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] })).rows[0] || null;
   const secpRows = (await db.execute({
     sql: "SELECT * FROM contacts WHERE lower(substr(secp256k1_pubkey,-64)) = ? ORDER BY id ASC",
