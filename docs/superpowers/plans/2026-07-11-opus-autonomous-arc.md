@@ -931,6 +931,14 @@ NOT encrypted at rest). Security review zero blocking findings. Suite baseline
 **1830 / 3 known / 0 skips**. 4-PR4 sweep fold-ins: phase1-setup crow-local
 bake, legacy-import seed validation, multi-device.md stale export flow.
 
+**4-PR4 SHIPPED 2026-07-14 (PR #187, main `b5310126`)** — 43-file hardcode
+sweep: zero bare `kh0pp` in tracked runtime code; gmail sender wall fail-closed
+from `gw.allowlist`; PiRpc honest early-exit surface; browser bundle
+location-independent; primary's cross-instance tasks.db read fixed. Suite
+baseline **1849 / 3 known / 0 skips**. Operator notes in the ledger (ntfy label
+prefix, GMAIL_SEND_TO_SELF_ALLOWLIST). Next: 4-PR5 installer (last PR), then
+the full CDP bug-hunt round closes Item 4.
+
 **Why (Kevin, verbatim):** "his own personal preferences hardcoded into what is meant
 to be a generalized, user-customizable app"; install "isn't actually easy for
 non-technical users." Confirmed live on a fresh install (S3 walkthrough 2026-07-10):
