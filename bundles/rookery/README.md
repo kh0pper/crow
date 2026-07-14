@@ -96,6 +96,29 @@ unfiltered `process.env`** — provider keys included. Two layers ship here:
 Both are baked into the image — changes require an image rebuild
 (`docker compose build`), not just a container restart.
 
+## Bridge MCPs (Phase 2): crow projects + research tools
+
+Two remote MCPs can be registered into the reviewer app via env (both authed
+by the same crow local MCP token, `ROOKERY_MCP_CROW_TOKEN`):
+
+- **crow** (`ROOKERY_MCP_CROW_URL`) → the gateway's `/projects/mcp` mount:
+  sources, notes, bibliographies. **Least privilege matters here**: point it
+  at `/projects/mcp`, never `/router/mcp` — the router's `crow_tools`
+  category exposes every integration connected to the gateway (mail, drive,
+  web search), which both hands an untrusted-document-reading agent your
+  accounts and re-opens internet egress by proxy through the host.
+- **research** (`ROOKERY_MCP_RESEARCH_URL`) → the gateway's filtered
+  `/tools-rookery/mcp` mount: only this bundle's host tools —
+  `rookery_assemble_exp` and `rookery_search_openalex` (OpenAlex works
+  search, crow_add_source-ready results; optional
+  `ROOKERY_OPENALEX_MAILTO` joins the polite pool). The filtered mount
+  requires a one-time `clients.json` entry in the gateway home
+  (`{"rookery": {"allowSources": ["rookery"]}}`) and a gateway restart.
+
+The search runs in the HOST `uv` process (the gateway addon), so the
+container's egress lock is unaffected — the container reaches OpenAlex
+results only through the authed bridge, never the internet.
+
 ## Egress lock (Phase 2, optional but recommended)
 
 The upstream OpenScience binary makes an outbound vendor connection at

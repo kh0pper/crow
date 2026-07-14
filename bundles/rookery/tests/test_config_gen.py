@@ -87,9 +87,7 @@ def test_url_without_token_skips_loudly():
 
 
 def test_non_http_url_dies():
-    proc = run_gen(
-        {"MCP_CROW_URL": "file:///etc/passwd", "MCP_CROW_TOKEN": "t"}
-    )
+    proc = run_gen({"MCP_CROW_URL": "file:///etc/passwd", "MCP_CROW_TOKEN": "t"})
     assert proc.returncode == 1
     assert "must be http(s)" in proc.stderr
 
@@ -105,6 +103,34 @@ def test_json_injection_safe_token():
     assert cfg["mcp"]["crow"]["headers"]["Authorization"] == f"Bearer {hostile}"
     # provider block untouched by MCP config
     assert cfg["provider"]["crow-local"]["options"]["apiKey"] == "local"
+
+
+def test_research_slot_registers_alongside_crow():
+    cfg, _ = gen(
+        {
+            "MCP_CROW_URL": "http://100.118.41.122:3006/projects/mcp",
+            "MCP_RESEARCH_URL": "http://100.118.41.122:3006/tools-rookery/mcp",
+            "MCP_CROW_TOKEN": "tok123",
+        }
+    )
+    assert set(cfg["mcp"]) == {"crow", "research"}
+    for entry in cfg["mcp"].values():
+        assert entry["type"] == "remote"
+        assert entry["headers"]["Authorization"] == "Bearer tok123"
+    assert cfg["mcp"]["research"]["url"].endswith("/tools-rookery/mcp")
+
+
+def test_research_slot_alone_works_and_bad_url_dies():
+    cfg, _ = gen(
+        {
+            "MCP_RESEARCH_URL": "http://h:1/tools-rookery/mcp",
+            "MCP_CROW_TOKEN": "t",
+        }
+    )
+    assert set(cfg["mcp"]) == {"research"}
+    proc = run_gen({"MCP_RESEARCH_URL": "ftp://nope", "MCP_CROW_TOKEN": "t"})
+    assert proc.returncode == 1
+    assert "MCP_RESEARCH_URL" in proc.stderr
 
 
 def test_token_never_leaks_outside_headers():

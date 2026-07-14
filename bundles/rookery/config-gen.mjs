@@ -41,36 +41,45 @@ const cfg = {
   },
 };
 
-const crowUrl = env.MCP_CROW_URL || "";
+// Two remote-MCP slots, both authed by the same gateway local token:
+//   crow     (MCP_CROW_URL)     → the gateway /projects/mcp mount (sources/bib)
+//   research (MCP_RESEARCH_URL) → the filtered /tools-rookery/mcp mount
+//     (assemble + OpenAlex search; least-privilege — never /router/mcp, whose
+//     crow_tools category exposes every connected integration incl. mail).
 const crowToken = env.MCP_CROW_TOKEN || "";
-if (crowUrl) {
+const slots = [
+  ["crow", env.MCP_CROW_URL || ""],
+  ["research", env.MCP_RESEARCH_URL || ""],
+];
+for (const [name, url] of slots) {
+  if (!url) continue;
+  const envName = `MCP_${name.toUpperCase()}_URL`;
   let u;
   try {
-    u = new URL(crowUrl);
+    u = new URL(url);
   } catch {
-    die(`MCP_CROW_URL is not a valid URL: ${crowUrl}`);
+    die(`${envName} is not a valid URL: ${url}`);
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") {
-    die(`MCP_CROW_URL must be http(s), got ${u.protocol}//`);
+    die(`${envName} must be http(s), got ${u.protocol}//`);
   }
   if (!crowToken) {
-    // Loud skip, not a half-registration: /router/mcp requires a bearer
-    // token, and an MCP that 401s inside the app is opaque to debug.
+    // Loud skip, not a half-registration: the gateway MCP mounts require a
+    // bearer token, and an MCP that 401s inside the app is opaque to debug.
     console.error(
-      "[config-gen] WARN: MCP_CROW_URL set but MCP_CROW_TOKEN missing — " +
-        "crow bridge NOT registered (generate a local MCP token in the crow " +
+      `[config-gen] WARN: ${envName} set but MCP_CROW_TOKEN missing — ` +
+        `"${name}" NOT registered (generate a local MCP token in the crow ` +
         "dashboard Connect panel)",
     );
-  } else {
-    cfg.mcp = {
-      crow: {
-        type: "remote",
-        url: crowUrl,
-        enabled: true,
-        headers: { Authorization: `Bearer ${crowToken}` },
-      },
-    };
+    continue;
   }
+  cfg.mcp = cfg.mcp || {};
+  cfg.mcp[name] = {
+    type: "remote",
+    url,
+    enabled: true,
+    headers: { Authorization: `Bearer ${crowToken}` },
+  };
 }
 
 process.stdout.write(JSON.stringify(cfg, null, 2) + "\n");
