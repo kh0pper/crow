@@ -7,6 +7,7 @@ COPY host-shim.mjs /app/host-shim.mjs
 COPY entrypoint.sh /app/entrypoint.sh
 COPY wrapper-exec.sh /app/wrapper-exec.sh
 COPY scrub-env.sh /app/scrub-env.sh
+COPY config-gen.mjs /app/config-gen.mjs
 RUN chmod +x /app/entrypoint.sh /app/wrapper-exec.sh \
     && mkdir -p /data /workspaces \
     && chown -R 1000:1000 /data /workspaces /app

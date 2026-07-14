@@ -9,6 +9,8 @@ services:
       MODEL_ID: ${ROOKERY_MODEL_ID:-local-model}
       MODEL_API_KEY: ${ROOKERY_MODEL_API_KEY:-local}
       ROOKERY_CORS_ORIGINS: ${ROOKERY_CORS_ORIGINS:-}
+      MCP_CROW_URL: ${ROOKERY_MCP_CROW_URL:-}
+      MCP_CROW_TOKEN: ${ROOKERY_MCP_CROW_TOKEN:-}
     volumes:
       - ${HOME}/.crow/data/rookery:/data
       - ${ROOKERY_WORKSPACES_DIR:-${HOME}/.crow/data/rookery/workspaces}:/workspaces
