@@ -923,6 +923,14 @@ positional tests now derive), show-password toggle on all three auth forms,
 F-ONBOARD-3 verified already-fixed. Fleet-deployed + soaked + prod-verified.
 Suite baseline **1812 / 3 known / 0 skips**. Next: 4-PR3 identity backup.
 
+**4-PR3 SHIPPED 2026-07-14 (PR #186, main `441f6465`)** — encrypted identity
+backup live: wizard done-step download (scrypt+AES-256-GCM, plaintext seed
+provably absent), honest CLI export/import (also fixed the pre-existing bug
+where `npm run identity:import` never worked), sharing.md corrected (seed is
+NOT encrypted at rest). Security review zero blocking findings. Suite baseline
+**1830 / 3 known / 0 skips**. 4-PR4 sweep fold-ins: phase1-setup crow-local
+bake, legacy-import seed validation, multi-device.md stale export flow.
+
 **Why (Kevin, verbatim):** "his own personal preferences hardcoded into what is meant
 to be a generalized, user-customizable app"; install "isn't actually easy for
 non-technical users." Confirmed live on a fresh install (S3 walkthrough 2026-07-10):
