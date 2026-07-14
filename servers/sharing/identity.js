@@ -53,7 +53,7 @@ function deriveKey(seed, info, length = 32) {
 /**
  * Encrypt data with a passphrase using scrypt + AES-256-GCM.
  */
-function encryptSeed(seed, passphrase) {
+export function encryptSeed(seed, passphrase) {
   const salt = randomBytes(32);
   const key = scryptSync(passphrase, salt, 32, { N: 16384, r: 8, p: 1 });
   const iv = randomBytes(12);
@@ -71,7 +71,7 @@ function encryptSeed(seed, passphrase) {
 /**
  * Decrypt seed with passphrase.
  */
-function decryptSeed(encData, passphrase) {
+export function decryptSeed(encData, passphrase) {
   const salt = Buffer.from(encData.salt, "hex");
   const key = scryptSync(passphrase, salt, 32, { N: 16384, r: 8, p: 1 });
   const iv = Buffer.from(encData.iv, "hex");
@@ -230,6 +230,39 @@ export function loadInstanceSeed(dataDir) {
   if (stored.encrypted) throw new Error("loadInstanceSeed: encrypted identity requires a passphrase (unsupported in the gateway host)");
   if (!stored.seed) throw new Error("loadInstanceSeed: identity.json has no plaintext seed");
   return Buffer.from(stored.seed, "hex");
+}
+
+/**
+ * Build the passphrase-encrypted identity backup payload (4-PR3). Public
+ * identification fields (crowId, pubkeys, createdAt) stay in the CLEAR so a
+ * backup file is recognizable without the passphrase; the master seed is
+ * present ONLY inside the encryptSeed blob (scrypt N=16384,r=8,p=1 +
+ * AES-256-GCM). The plaintext seed hex must never appear in this object.
+ * Consumed by the onboarding download endpoint and `npm run identity:export`.
+ */
+export function buildIdentityBackup(passphrase) {
+  if (!passphrase || typeof passphrase !== "string") {
+    throw new Error("buildIdentityBackup requires a passphrase");
+  }
+  if (!existsSync(IDENTITY_PATH)) {
+    throw new Error(`No identity file at ${IDENTITY_PATH} — nothing to back up. Run \`npm run identity\` first.`);
+  }
+  const stored = JSON.parse(readFileSync(IDENTITY_PATH, "utf-8"));
+  if (!stored.seed) {
+    throw new Error("identity.json has no plaintext seed to back up (encrypted-at-rest identities are not supported by the gateway host)");
+  }
+  const seed = Buffer.from(stored.seed, "hex");
+  const identity = deriveIdentity(seed, stored);
+  return {
+    version: 1,
+    kind: "crow-identity-backup",
+    crowId: identity.crowId,
+    ed25519Pubkey: identity.ed25519Pubkey,
+    secp256k1Pubkey: identity.secp256k1Pubkey,
+    createdAt: stored.createdAt || new Date().toISOString(),
+    encrypted: encryptSeed(seed, passphrase),
+    _restore: "npm run identity:import -- <this whole file's JSON, base64-encoded>  (prompts for the passphrase)",
+  };
 }
 
 /**
@@ -433,27 +466,91 @@ export function displayIdentity() {
 }
 
 /**
- * Export encrypted identity (for `npm run identity:export`).
+ * CLI argument extraction. package.json runs these entry points via
+ * `node -e "import(...).then(...)"`, where user args start at process.argv[1]
+ * (there is no script path). Under a direct `node <file>.js` run they start at
+ * argv[2]. The old `slice(2)` silently dropped every arg under the npm path.
  */
-export function exportIdentity() {
+function cliArgs() {
+  const argv = process.argv;
+  const first = argv[1] || "";
+  const args = first.endsWith(".js") || first.endsWith(".mjs") ? argv.slice(2) : argv.slice(1);
+  // Node consumes leading `-…` args after `-e <script>` as its OWN options, so
+  // flag-first invocations need a `--` separator (e.g.
+  // `npm run identity:export -- -- --passphrase <p>`); drop any literal `--`.
+  return args.filter((a) => a !== "--");
+}
+
+/** Pull `--passphrase <value>` out of args (mutates args). Returns null if absent. */
+function takePassphraseArg(args) {
+  const i = args.indexOf("--passphrase");
+  if (i !== -1 && typeof args[i + 1] === "string") {
+    const [, value] = args.splice(i, 2);
+    return value;
+  }
+  return null;
+}
+
+/** Prompt for a passphrase on a TTY; returns null when non-interactive. */
+async function promptPassphrase(promptText) {
+  if (!process.stdin.isTTY) return null;
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const answer = await new Promise((resolveAnswer) => rl.question(promptText, resolveAnswer));
+  rl.close();
+  return answer || null;
+}
+
+/**
+ * Export encrypted identity (for `npm run identity:export`).
+ * Requires a passphrase (--passphrase <p>, or a TTY prompt); the output is a
+ * base64-encoded buildIdentityBackup payload — the seed is scrypt+AES-256-GCM
+ * encrypted, so the "Encrypted Identity Export" label is true.
+ */
+export async function exportIdentity() {
   if (!existsSync(IDENTITY_PATH)) {
     console.error("No identity found. Run `npm run identity` first.");
     process.exit(1);
   }
-  const data = readFileSync(IDENTITY_PATH, "utf-8");
-  const exportData = Buffer.from(data).toString("base64");
+  const args = cliArgs();
+  let passphrase = takePassphraseArg(args);
+  if (!passphrase) passphrase = await promptPassphrase("Passphrase to encrypt the backup (min 12 chars): ");
+  if (!passphrase) {
+    console.error("A passphrase is required: pass `--passphrase <passphrase>` or run interactively.");
+    process.exit(1);
+  }
+  if (passphrase.length < 12) {
+    console.error("Passphrase too short — use at least 12 characters (it protects your master seed offline).");
+    process.exit(1);
+  }
+  let payload;
+  try {
+    payload = buildIdentityBackup(passphrase);
+  } catch (err) {
+    console.error("Export failed:", err.message);
+    process.exit(1);
+  }
+  const exportData = Buffer.from(JSON.stringify(payload)).toString("base64");
   console.log("\n  Encrypted Identity Export\n");
-  console.log("  Copy this entire string to import on another device:\n");
+  console.log("  Copy this entire string to import on another device");
+  console.log("  (npm run identity:import -- <string> — it will prompt for the passphrase):\n");
   console.log(`  ${exportData}\n`);
 }
 
 /**
  * Import identity (for `npm run identity:import`).
+ * Accepts both formats, sniffed by JSON keys:
+ *   - crow-identity-backup (or any blob with an `encrypted` object): asks for
+ *     the passphrase, decrypts, and writes a PLAINTEXT-seed identity.json —
+ *     the gateway host cannot boot from an encrypted one (loadInstanceSeed).
+ *   - legacy plaintext-base64 identity.json content: written as-is.
+ * Refuses to overwrite an existing identity.json.
  */
-export function importIdentity() {
-  const args = process.argv.slice(2);
+export async function importIdentity() {
+  const args = cliArgs();
+  const passphraseArg = takePassphraseArg(args);
   if (args.length === 0) {
-    console.error("Usage: npm run identity:import -- <base64-encoded-identity>");
+    console.error("Usage: npm run identity:import -- <base64-encoded-identity> [--passphrase <passphrase>]");
     process.exit(1);
   }
 
@@ -462,9 +559,51 @@ export function importIdentity() {
     process.exit(1);
   }
 
-  mkdirSync(DATA_DIR, { recursive: true });
   const data = Buffer.from(args[0], "base64").toString("utf-8");
-  JSON.parse(data); // Validate JSON
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    console.error("Not a valid identity export (expected base64-encoded JSON).");
+    process.exit(1);
+  }
+
+  mkdirSync(DATA_DIR, { recursive: true });
+
+  const isEncryptedBackup = parsed && typeof parsed === "object"
+    && (parsed.kind === "crow-identity-backup" || (parsed.encrypted && !parsed.seed));
+
+  if (isEncryptedBackup) {
+    let passphrase = passphraseArg;
+    if (!passphrase) passphrase = await promptPassphrase("Passphrase to decrypt the backup: ");
+    if (!passphrase) {
+      console.error("This backup is passphrase-encrypted. Pass `--passphrase <passphrase>` or run interactively.");
+      process.exit(1);
+    }
+    let seed;
+    try {
+      seed = decryptSeed(parsed.encrypted, passphrase);
+    } catch {
+      console.error("Wrong passphrase (or corrupted backup) — could not decrypt the seed.");
+      process.exit(1);
+    }
+    // The gateway host boots only from a plaintext-seed identity.json — the
+    // backup's encryption protects the download, not the disk.
+    const identity = deriveIdentity(seed, null);
+    const toStore = {
+      version: 1,
+      crowId: identity.crowId,
+      ed25519Pubkey: identity.ed25519Pubkey,
+      secp256k1Pubkey: identity.secp256k1Pubkey,
+      createdAt: parsed.createdAt || new Date().toISOString(),
+      seed: seed.toString("hex"),
+    };
+    writeFileSync(IDENTITY_PATH, JSON.stringify(toStore, null, 2));
+    console.log(`Identity ${identity.crowId} imported successfully.`);
+    return;
+  }
+
+  // Legacy plaintext-base64 blob (already-valid identity.json content).
   writeFileSync(IDENTITY_PATH, data);
   console.log("Identity imported successfully.");
 }

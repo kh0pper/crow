@@ -74,7 +74,7 @@ import contactsPanel from "./panels/contacts.js";
 import botBuilderPanel from "./panels/bot-builder.js";
 import botBoardPanel from "./panels/bot-board.js";
 import designSystemPanel from "./panels/design-system.js";
-import onboardingPanel from "./panels/onboarding.js";
+import onboardingPanel, { handleIdentityBackupPost } from "./panels/onboarding.js";
 import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
@@ -645,6 +645,12 @@ export default function dashboardRouter(mcpAuthMiddleware) {
       try { db.close(); } catch {}
     }
   });
+
+  // 4-PR3: identity backup download (onboarding done step + Settings → Help &
+  // Setup). Hand-registered — panels expose GET handlers only — and mounted
+  // AFTER dashboardAuth + csrfMiddleware above, so it is session-authed and
+  // CSRF-protected exactly like the fix-it action POST.
+  router.post("/dashboard/onboarding/identity-backup", handleIdentityBackupPost);
 
   // Federation companion router (Phase 3) — session-authed, under dashboard
   // auth. Mounted AFTER dashboardAuth so session cookies are validated.

@@ -5,6 +5,7 @@
 import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { getProxyStatus } from "../../../proxy.js";
+import { STEP_KEYS } from "../../panels/onboarding.js";
 
 export default {
   id: "help-setup",
@@ -62,8 +63,12 @@ export default {
     const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
 
     const replayHtml = `<p style="margin-bottom:1rem"><a href="/dashboard/onboarding?step=0" style="color:var(--crow-accent);text-decoration:none;font-weight:600"><span aria-hidden="true">&#8635;</span> ${escapeHtml(t("onboarding.replayLink", currentLang))}</a></p>`;
+    // 4-PR3: identity backup lives on the wizard's done step; link straight to
+    // it (index derived from STEP_KEYS, never hardcoded).
+    const backupHtml = `<p style="margin-bottom:1rem"><a href="/dashboard/onboarding?step=${STEP_KEYS.indexOf("done")}" style="color:var(--crow-accent);text-decoration:none;font-weight:600"><span aria-hidden="true">&#8681;</span> ${escapeHtml(t("onboarding.backup.settingsLink", currentLang))}</a></p>`;
     return `
       ${replayHtml}
+      ${backupHtml}
       <h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${ht.connectGuide}</h4>
       <p style="font-size:0.85rem;line-height:1.6;margin-bottom:0.75rem">${ht.connectPointer}</p>
       <p><a href="/dashboard/connect" style="color:var(--crow-accent);text-decoration:none;font-weight:600">${ht.openWizard} &rarr;</a></p>
