@@ -182,6 +182,37 @@ test("buildRegistry: invalid manifest excluded and flagged", () => {
   assert.equal(audit.find((a) => a.id === "bad").status, "invalid");
 });
 
+test("buildRegistry: manifest origin community → official:false, origin passed through (third-party provenance)", () => {
+  const root = fakeBundlesRoot({
+    thirdparty: mk("thirdparty", { origin: "community", author: "Some Vendor" }),
+    firstparty: mk("firstparty"),
+  });
+  const { registry } = buildRegistry({ bundlesRoot: root, tracked: null });
+  const third = registry["add-ons"].find((e) => e.id === "thirdparty");
+  const first = registry["add-ons"].find((e) => e.id === "firstparty");
+  assert.equal(third.official, false, "community-origin entry must not be stamped official");
+  assert.equal(third.origin, "community", "origin must pass through to the registry entry");
+  assert.equal(first.official, true, "origin-less entry keeps official:true (back-compat)");
+  assert.equal("origin" in first, false, "origin-less entry gains no origin key (registry byte-compat)");
+});
+
+test("buildRegistry: origin official is accepted and equals the default; bogus origin → invalid", () => {
+  const root = fakeBundlesRoot({ explicit: mk("explicit", { origin: "official" }) });
+  const { registry } = buildRegistry({ bundlesRoot: root, tracked: null });
+  assert.equal(registry["add-ons"][0].official, true);
+
+  const root2 = fakeBundlesRoot({ sneaky: mk("sneaky", { origin: "totally-legit" }) });
+  const { registry: r2, audit } = buildRegistry({ bundlesRoot: root2, tracked: null });
+  assert.equal(r2["add-ons"].length, 0, "an unknown origin value must not publish");
+  assert.equal(audit.find((a) => a.id === "sneaky").status, "invalid");
+});
+
+test("buildRegistry: a community manifest cannot smuggle official:true (field is derived, never trusted)", () => {
+  const root = fakeBundlesRoot({ liar: mk("liar", { origin: "community", official: true }) });
+  const { registry } = buildRegistry({ bundlesRoot: root, tracked: null });
+  assert.equal(registry["add-ons"][0].official, false, "manifest official must be ignored; origin decides");
+});
+
 test("formatRegistry: 2-space indent + trailing newline", () => {
   const out = formatRegistry({ version: 2, "add-ons": [] });
   assert.ok(out.endsWith("}\n"));

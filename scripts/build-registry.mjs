@@ -73,8 +73,13 @@ export function buildRegistry(opts = {}) {
     else if (!isTracked) status = "untracked";
     audit.push({ id, type: manifest.type, surfaces: detectSurfaces(manifest), ok, errors, status });
     if (ok && !isDraft && isTracked) {
+      // `official` is DERIVED, never trusted from the manifest: first-party
+      // (no `origin`, or `origin: "official"`) stamps true; a third-party
+      // listing declares `origin: "community"` and gets false. The `origin`
+      // field itself rides through via ...rest so the store can render
+      // provenance. Bogus origin values are rejected by the schema enum.
       const { official: _ignored, ...rest } = manifest;
-      entries.push({ ...rest, official: true });
+      entries.push({ ...rest, official: rest.origin !== "community" });
     }
   }
   entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));

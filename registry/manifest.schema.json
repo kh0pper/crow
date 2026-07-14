@@ -15,6 +15,7 @@
     "author": { "type": "string", "minLength": 1 },
     "draft": { "type": "boolean" },
     "official": { "type": "boolean" },
+    "origin": { "type": "string", "enum": ["official", "community"] },
     "icon": { "type": "string" },
     "tags": { "type": "array", "items": { "type": "string" } },
     "notes": { "type": "string" },
