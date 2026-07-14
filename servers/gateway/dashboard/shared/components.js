@@ -44,6 +44,17 @@ export function dataTable(headers, rows) {
 /**
  * Form field.
  */
+/**
+ * Public docs-site URL for a docs path (Item 5 PR4, spec §D7). One exported
+ * base — never scattered absolute URLs. The canonical public docs host is
+ * maestro.press (VitePress base '/software/crow/' is only the path prefix).
+ * @param {string} path - docs path without leading slash, e.g. "guide/bot-builder-tutorial"
+ */
+export const DOCS_BASE = "https://maestro.press/software/crow/";
+export function docsUrl(path) {
+  return DOCS_BASE + String(path || "").replace(/^\/+/, "");
+}
+
 export function formField(label, name, opts = {}) {
   const { type = "text", value = "", placeholder = "", required = false, rows = 0 } = opts;
   const req = required ? "required" : "";

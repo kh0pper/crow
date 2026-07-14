@@ -8,7 +8,7 @@
  * tbody is VOLATILE-SKIP (replaced every 5s by routes/streams.js, spec rule 5).
  */
 
-import { escapeHtml, section, badge, dataTable, formField, actionBar } from "../../shared/components.js";
+import { escapeHtml, section, badge, dataTable, formField, actionBar, docsUrl } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { loadModelOptions } from "./data-queries.js";
 import { t, SUPPORTED_LANGS } from "../../shared/i18n.js";
@@ -53,8 +53,10 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
     ];
   });
   // Item 5 PR1 (spec §D1): the guided wizard is the primary creation path.
+  const tutorialHref = docsUrl((lang === "es" ? "es/" : "") + "guide/bot-builder-tutorial");
   const wizCta =
-    `<p style="margin:0 0 1rem"><a class="btn btn-primary btn-md" href="/dashboard/bot-builder?new=1">${t("botbuilder.wizCta", lang)}</a></p>`;
+    `<p style="margin:0 0 1rem"><a class="btn btn-primary btn-md" href="/dashboard/bot-builder?new=1">${t("botbuilder.wizCta", lang)}</a> ` +
+    `<a class="btb-hint" style="margin-left:.75rem" href="${escapeHtml(tutorialHref)}" target="_blank" rel="noopener">${t("botbuilder.tutorialLink", lang)}</a></p>`;
   const list = section(t("botbuilder.listTitle", lang),
     notice + wizCta + (rows.length
       ? dataTable(["bot_id", "name", "state", "model", "project", "sessions", "updated", "board", "", ""], rows)
