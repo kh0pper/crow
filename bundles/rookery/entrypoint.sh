@@ -21,19 +21,9 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openscience"
 mkdir -p "$CONFIG_DIR"
 mkdir -p /workspaces 2>/dev/null || true  # read path; content arrives via the mount
 
-cat > "$CONFIG_DIR/openscience.json" <<EOF
-{
-  "model": "crow-local/${MODEL_ID}",
-  "provider": {
-    "crow-local": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Crow Local",
-      "options": { "baseURL": "${MODEL_BASE_URL}", "apiKey": "${MODEL_API_KEY:-local}" },
-      "models": { "${MODEL_ID}": { "name": "${MODEL_ID}" } }
-    }
-  }
-}
-EOF
+# Config generation lives in config-gen.mjs (JSON.stringify is
+# injection-safe for operator-supplied URLs/tokens; a shell heredoc is not).
+node /app/config-gen.mjs > "$CONFIG_DIR/openscience.json"
 
 cd /workspaces
 # Build the argv list so EACH space-separated origin gets its own --cors flag
