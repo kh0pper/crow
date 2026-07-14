@@ -917,6 +917,12 @@ carries no personal gateway/model/PI_PROVIDER. Suite baseline moved to
 4-PR4 note: fold the dormant `pi-bots-phase1-setup.mjs` crow-local bake into
 the sweep. Ledger has the full record incl. 3 new harness lessons.
 
+**4-PR2 SHIPPED 2026-07-14 (PR #185, main `6e96cbf5`)** — wizard is 7 steps
+(ai provider step before bot; starter collections step; STEP_KEYS exported,
+positional tests now derive), show-password toggle on all three auth forms,
+F-ONBOARD-3 verified already-fixed. Fleet-deployed + soaked + prod-verified.
+Suite baseline **1812 / 3 known / 0 skips**. Next: 4-PR3 identity backup.
+
 **Why (Kevin, verbatim):** "his own personal preferences hardcoded into what is meant
 to be a generalized, user-customizable app"; install "isn't actually easy for
 non-technical users." Confirmed live on a fresh install (S3 walkthrough 2026-07-10):
