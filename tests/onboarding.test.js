@@ -7,9 +7,13 @@ import * as i18n from "../servers/gateway/dashboard/shared/i18n.js";
 const ONBOARDING_KEYS = [
   "onboarding.title",
   "onboarding.welcome.title", "onboarding.welcome.body",
+  "onboarding.ai.title", "onboarding.ai.body",
+  "onboarding.aiEmptyNote", "onboarding.aiConfiguredNote", "onboarding.openProviders",
   "onboarding.integrations.title", "onboarding.integrations.body",
   "onboarding.integrationsNote", "onboarding.openIntegrations",
   "onboarding.bot.title", "onboarding.bot.body", "onboarding.openBotBuilder",
+  "onboarding.starter.title", "onboarding.starter.body",
+  "onboarding.starterMemberCount", "onboarding.openCollections",
   "onboarding.connect.title", "onboarding.connect.body",
   "onboarding.connectNote", "onboarding.openConnections",
   "onboarding.done.title", "onboarding.done.body", "onboarding.doneNote",
@@ -26,7 +30,9 @@ test("every onboarding.* key has a non-empty en AND es value", () => {
   }
 });
 
-import onboardingPanel from "../servers/gateway/dashboard/panels/onboarding.js";
+import onboardingPanel, { STEP_KEYS } from "../servers/gateway/dashboard/panels/onboarding.js";
+
+const DONE_STEP = String(STEP_KEYS.indexOf("done"));
 
 // Invoke the panel handler with a stubbed layout (returns content for assertions).
 // parseCookies reads req.headers.cookie, so headers must always be an object.
@@ -45,29 +51,36 @@ test("panel identity: id / route / hidden", () => {
   assert.equal(onboardingPanel.hidden, true);
 });
 
-test("renders all 5 steps with the stepper and step-specific deep links", async () => {
-  const deepLinkPerStep = [
-    null,
-    "/dashboard/settings?section=integrations",
-    "/dashboard/bot-builder",
-    "/dashboard/connect",
-    null,
-  ];
-  const calloutSteps = [1, 3, 4]; // integrations, connect, done each render a callout
-  for (let step = 0; step < 5; step++) {
+test("renders every step with the stepper and step-specific deep links", async () => {
+  // Keyed by stem (not index) so a future step insertion doesn't re-break this.
+  const deepLinkPerStem = {
+    welcome: null,
+    // button() renders hrefs through escapeHtml, so & appears as &amp; in HTML.
+    ai: "/dashboard/settings?section=llm&amp;tab=providers",
+    integrations: "/dashboard/settings?section=integrations",
+    bot: "/dashboard/bot-builder",
+    starter: "/dashboard/extensions#collections",
+    connect: "/dashboard/connect",
+    done: null,
+  };
+  // integrations, connect, done each render a callout unconditionally.
+  // (The ai step's callout is db-dependent; tests/onboarding-steps.test.js covers it.)
+  const calloutStems = ["integrations", "connect", "done"];
+  for (let step = 0; step < STEP_KEYS.length; step++) {
+    const stem = STEP_KEYS[step];
     const html = await render({ step: String(step) });
-    assert.ok(html.includes("stepper"), `step ${step} renders the stepper`);
-    assert.ok(html.includes("step-active"), `step ${step} marks the active step`);
-    if (deepLinkPerStep[step]) {
-      assert.ok(html.includes(deepLinkPerStep[step]), `step ${step} links to ${deepLinkPerStep[step]}`);
-      assert.ok(html.includes('target="_blank"'), `step ${step} deep-link opens in a new tab`);
-      assert.ok(html.includes('rel="noopener"'), `step ${step} deep-link sets rel=noopener`);
+    assert.ok(html.includes("stepper"), `step ${stem} renders the stepper`);
+    assert.ok(html.includes("step-active"), `step ${stem} marks the active step`);
+    if (deepLinkPerStem[stem]) {
+      assert.ok(html.includes(deepLinkPerStem[stem]), `step ${stem} links to ${deepLinkPerStem[stem]}`);
+      assert.ok(html.includes('target="_blank"'), `step ${stem} deep-link opens in a new tab`);
+      assert.ok(html.includes('rel="noopener"'), `step ${stem} deep-link sets rel=noopener`);
     }
-    if (calloutSteps.includes(step)) {
-      assert.ok(html.includes("callout"), `step ${step} renders a callout`);
+    if (calloutStems.includes(stem)) {
+      assert.ok(html.includes("callout"), `step ${stem} renders a callout`);
     }
   }
-  const done = await render({ step: "4" });
+  const done = await render({ step: DONE_STEP });
   assert.ok(done.includes('href="/dashboard"'), "last step links to the dashboard");
 });
 
@@ -129,7 +142,7 @@ test("done step sets onboarding_completed_at exactly once", async () => {
   // First visit to done: flag absent -> a write (INSERT/UPDATE/REPLACE) must happen.
   const layout = ({ content }) => content;
   const res = { send() {}, setHeader() {} };
-  const req = { method: "GET", query: { step: "4" }, headers: {} };
+  const req = { method: "GET", query: { step: DONE_STEP }, headers: {} };
   calls.length = 0;
   await onboardingPanel.handler(req, res, { layout, lang: "en", db: mkDb(null) });
   assert.ok(

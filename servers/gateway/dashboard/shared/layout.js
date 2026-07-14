@@ -586,6 +586,34 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
 }
 
 /**
+ * Show/hide-password toggle (F-ONBOARD-4): a checkbox per form that flips every
+ * data-pw input in that form between type=password and type=text. These auth
+ * pages are outside the Turbo shell and otherwise ship no client JS, so a tiny
+ * inline <script> is the accepted mechanism (CSP allows 'unsafe-inline').
+ * Deliberately NO paste handling of any kind — paste blocking harms password
+ * managers and is a tested-against anti-pattern here.
+ */
+function pwToggle(lang) {
+  return `<label style="display:flex;align-items:center;gap:0.5rem;margin:0.25rem 0 0.5rem;font-size:0.85rem;color:var(--crow-text-secondary);cursor:pointer">
+          <input type="checkbox" class="pw-toggle"> ${escapeHtml(t("login.showPassword", lang))}
+        </label>`;
+}
+
+function pwToggleScript() {
+  return `<script>
+    document.querySelectorAll('.pw-toggle').forEach(function (cb) {
+      cb.addEventListener('change', function () {
+        var form = cb.closest('form');
+        if (!form) return;
+        form.querySelectorAll('input[data-pw]').forEach(function (inp) {
+          inp.type = cb.checked ? 'text' : 'password';
+        });
+      });
+    });
+  </script>`;
+}
+
+/**
  * Render the login page.
  * @param {object} opts
  * @param {string} [opts.error] - Error message to display
@@ -612,15 +640,17 @@ export function renderLogin({ error, isSetup, setupToken, lockoutHelp, lang } = 
       ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
       <form method="POST" action="/dashboard/login">
         ${isSetup ? `${setupToken ? `<input type="hidden" name="setup_token" value="${setupToken}">` : ""}
-        <input type="password" name="password" placeholder="${escapeHtml(t("login.choosePasswordPlaceholder", lang))}" required minlength="12" autofocus>
-        <input type="password" name="confirm" placeholder="${escapeHtml(t("login.confirmPlaceholder", lang))}" required minlength="12">` :
-        `<input type="password" name="password" placeholder="${escapeHtml(t("login.passwordPlaceholder", lang))}" required autofocus>`}
+        <input type="password" data-pw name="password" placeholder="${escapeHtml(t("login.choosePasswordPlaceholder", lang))}" required minlength="12" autofocus>
+        <input type="password" data-pw name="confirm" placeholder="${escapeHtml(t("login.confirmPlaceholder", lang))}" required minlength="12">` :
+        `<input type="password" data-pw name="password" placeholder="${escapeHtml(t("login.passwordPlaceholder", lang))}" required autofocus>`}
+        ${pwToggle(lang)}
         <button type="submit">${isSetup ? escapeHtml(t("login.setPasswordButton", lang)) : escapeHtml(t("login.loginButton", lang))}</button>
       </form>
       ${!isSetup ? `<p style="margin-top:1rem;font-size:0.8rem;color:var(--crow-text-tertiary)"><a href="/dashboard/reset">${escapeHtml(t("login.forgotPassword", lang))}</a></p>` : ""}
       ${lockoutHelp || ""}
     </div>
   </div>
+  ${pwToggleScript()}
 </body>
 </html>`;
 }
@@ -801,12 +831,14 @@ export function renderResetForm({ error, token, lang } = {}) {
       ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
       <form method="POST" action="/dashboard/reset/complete">
         <input type="hidden" name="token" value="${escapeHtml(token || "")}">
-        <input type="password" name="password" placeholder="${escapeHtml(t("login.choosePasswordPlaceholder", lang))}" required minlength="12" autofocus>
-        <input type="password" name="confirm" placeholder="${escapeHtml(t("login.confirmPlaceholder", lang))}" required minlength="12">
+        <input type="password" data-pw name="password" placeholder="${escapeHtml(t("login.choosePasswordPlaceholder", lang))}" required minlength="12" autofocus>
+        <input type="password" data-pw name="confirm" placeholder="${escapeHtml(t("login.confirmPlaceholder", lang))}" required minlength="12">
+        ${pwToggle(lang)}
         <button type="submit">${escapeHtml(t("login.resetPasswordButton", lang))}</button>
       </form>
     </div>
   </div>
+  ${pwToggleScript()}
 </body>
 </html>`;
 }

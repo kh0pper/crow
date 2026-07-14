@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import * as i18n from "../servers/gateway/dashboard/shared/i18n.js";
-import onboardingPanel from "../servers/gateway/dashboard/panels/onboarding.js";
+import onboardingPanel, { STEP_KEYS } from "../servers/gateway/dashboard/panels/onboarding.js";
 
 const SRC = readFileSync(new URL("../servers/gateway/dashboard/panels/onboarding.js", import.meta.url), "utf8");
 
@@ -25,7 +25,7 @@ async function render(query = {}) {
 }
 
 test("the rendered done step contains the collections card with its translated title and deep link", async () => {
-  const html = await render({ step: "4" });
+  const html = await render({ step: String(STEP_KEYS.indexOf("done")) });
   assert.ok(html.includes("/dashboard/extensions#collections"), "card links to the store's collections section");
   const title = i18n.t("onboarding.tryCollections.title", "en");
   assert.notEqual(title, "onboarding.tryCollections.title", "the title key must resolve to a translated string");
