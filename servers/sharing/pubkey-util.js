@@ -30,13 +30,19 @@ export function normalizePubkey(pk) {
  * 64 hex chars so a 66-hex compressed key and its 64-hex x-only tail
  * resolve to the same contact. Returns the row or null. Never throws
  * (bad/missing db, null/short pk, or a query error all resolve to null).
+ *
+ * Multi-row matches are legal (no unique index on secp256k1_pubkey — a real
+ * `crow:` contact and a `req:<secp>` placeholder coexist on the same key), so
+ * the pick must be deterministic: a real contact beats a `req:` placeholder
+ * (every caller wants the row that carries block status / receipts / the
+ * user-visible conversation), then lowest id as a stable tiebreak.
  */
 export async function findContactByPubkey(db, pk) {
   try {
     const normalized = normalizePubkey(pk);
     if (!normalized) return null;
     const { rows } = await db.execute({
-      sql: "SELECT * FROM contacts WHERE lower(substr(secp256k1_pubkey,-64)) = ?",
+      sql: "SELECT * FROM contacts WHERE lower(substr(secp256k1_pubkey,-64)) = ? ORDER BY (crow_id LIKE 'req:%') ASC, id ASC",
       args: [normalized],
     });
     return rows && rows.length > 0 ? rows[0] : null;
