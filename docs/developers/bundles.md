@@ -43,6 +43,34 @@ Unknown fields are allowed (the schema is lenient) — bundle-specific extras li
 - `"draft": true` excludes a bundle from the generated registry.
 - An **untracked** bundle dir (not committed to git) is treated as an implicit draft — excluded and reported, never auto-published. This keeps work-in-progress out of the registry.
 
+## Contributing a third-party bundle (provenance)
+
+Third-party contributions are welcome, and they are listed honestly — never presented
+as first-party. Declare provenance in the manifest:
+
+```json
+{ "origin": "community" }
+```
+
+- `origin: "community"` → the generated registry entry carries `official: false`
+  (plus the `origin` field), and the store renders a **Community** badge on the card
+  and a "not verified by Crow" caution in the install modal.
+- Omitting `origin` (or `origin: "official"`) keeps `official: true`. A manifest
+  `official` field is always ignored — the registry derives it; you cannot opt into
+  the Official badge by declaring it.
+- Community bundles are not eligible for `featured` placement or curated collections.
+
+The bar for a third-party listing (reviewers will check all of these):
+
+- A **real, reachable upstream** with a disclosed operator (who runs the service,
+  and under what terms — a public terms/privacy page counts; anonymity does not).
+- An **accurate `author`** — the contributor or vendor, never "Crow".
+- **Functional out of the box**: the bundle's declared surfaces (skills, server,
+  docker) must actually work with what the bundle installs. A skill describing API
+  workflows nothing in the bundle can execute is not functional.
+- Scope honesty: the skill/manifest must not claim less access than the upstream
+  API grants without saying so (e.g. "read-only" atop a write-capable key).
+
 ## Validate + generate
 
 ```bash

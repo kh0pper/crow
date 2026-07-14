@@ -35,6 +35,20 @@ test("HARD RULE: every member exists in the official registry and on disk", () =
   }
 });
 
+test("HARD RULE: every member is first-party — community-origin bundles are collection-ineligible", () => {
+  // Provenance (docs/developers/bundles.md): a third-party listing must be
+  // installed individually, where the store shows its Community badge and
+  // caution. The registry entry is the derived truth (official comes from
+  // manifest origin); validateCollectionServerSide enforces the same rule live.
+  for (const c of loadCollections()) {
+    for (const m of c.members) {
+      const entry = byId.get(m.id);
+      assert.notEqual(entry?.official, false, `${c.id}: '${m.id}' is a community bundle — not eligible for curated collections`);
+      assert.notEqual(manifestOf(m.id)?.origin, "community", `${c.id}: bundles/${m.id} declares origin community`);
+    }
+  }
+});
+
 test("HARD RULE: no member is privileged, consent_required, or GPU-gated", () => {
   for (const c of loadCollections()) {
     for (const m of c.members) {
