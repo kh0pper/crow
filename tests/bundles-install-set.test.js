@@ -44,3 +44,14 @@ test("needsConfigKeys reports manifest-required keys that are EMPTY in the writt
   assert.deepEqual(keys, ["JELLYFIN_API_KEY"]);
   assert.deepEqual(needsConfigKeys("jellyfin", { JELLYFIN_URL: "http://x", JELLYFIN_API_KEY: "abc" }), []);
 });
+
+test("server-side re-validation REFUSES a community-origin member (provenance: collections are first-party only)", () => {
+  // 'podcast' exists on disk (the existsSync gate must pass); the injected
+  // manifestFor stubs its manifest as a third-party listing. Community bundles
+  // must never ride the one-click install-set path — install individually,
+  // where the store shows the provenance caution.
+  const col = { id: "c", name: "C", description: "", icon: "home", members: [{ id: "podcast", kind: "deploys" }] };
+  const r = validateCollectionServerSide(col, { manifestFor: () => ({ origin: "community" }) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /community/i);
+});
