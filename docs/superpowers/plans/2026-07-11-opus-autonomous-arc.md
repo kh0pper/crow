@@ -898,6 +898,15 @@ Item 2.9 record.
 
 ### Item 4 — THEME: Generalization + first-run experience (planning session first)
 
+**PLANNING SESSION DONE 2026-07-13.** Reviewed spec (3 adversarial rounds, all
+findings folded): `docs/superpowers/specs/2026-07-13-generalization-firstrun-design.md`.
+**Build from the spec, not from the text below** — the spec's §1 rot report
+supersedes this item's 2026-07-11 claims (notably: 4c largely shipped already;
+the real 4a root is the repo-shipped `models.json` lab seed, which carries a
+HARD pre-merge fleet gate in spec §2.1; F-ONBOARD-4's confirm field already
+exists). PR seams: 4-PR1 seed+bot-builder honesty → 4-PR2 wizard steps →
+4-PR3 identity backup → 4-PR4 hardcode sweep → 4-PR5 installer. No schema bumps.
+
 **Why (Kevin, verbatim):** "his own personal preferences hardcoded into what is meant
 to be a generalized, user-customizable app"; install "isn't actually easy for
 non-technical users." Confirmed live on a fresh install (S3 walkthrough 2026-07-10):
