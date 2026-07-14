@@ -87,6 +87,8 @@ def assemble_exp(
 def main() -> None:
     from mcp.server.fastmcp import FastMCP
 
+    from rookery_mcp.openalex import search_openalex
+
     mcp = FastMCP("rookery")
 
     @mcp.tool()
@@ -98,6 +100,28 @@ def main() -> None:
         Returns the workspace path, its path inside the reviewer container,
         and the dashboard reviewer URL."""
         return assemble_exp(report_path, data_dir, phases, workspace_name)
+
+    @mcp.tool()
+    def rookery_search_openalex(
+        query: str,
+        per_page: int = 10,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        open_access: bool | None = None,
+    ) -> list[dict]:
+        """Search OpenAlex for scholarly works (lit-review workflow). Returns
+        crow_add_source-ready dicts (title, authors, publication_date,
+        publisher, doi, url, abstract, source_type, relevance_score,
+        cited_by_count, openalex_id) sorted by relevance — filter for
+        relevance, then pass kept items to crow_add_source."""
+        return search_openalex(
+            query,
+            per_page=per_page,
+            year_from=year_from,
+            year_to=year_to,
+            open_access=open_access,
+            mailto=os.environ.get("ROOKERY_OPENALEX_MAILTO"),
+        )
 
     mcp.run()
 

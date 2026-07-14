@@ -11,6 +11,7 @@ services:
       ROOKERY_CORS_ORIGINS: ${ROOKERY_CORS_ORIGINS:-}
       MCP_CROW_URL: ${ROOKERY_MCP_CROW_URL:-}
       MCP_CROW_TOKEN: ${ROOKERY_MCP_CROW_TOKEN:-}
+      MCP_RESEARCH_URL: ${ROOKERY_MCP_RESEARCH_URL:-}
     volumes:
       - ${HOME}/.crow/data/rookery:/data
       - ${ROOKERY_WORKSPACES_DIR:-${HOME}/.crow/data/rookery/workspaces}:/workspaces
