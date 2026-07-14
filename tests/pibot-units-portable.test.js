@@ -24,6 +24,13 @@ test("service units are instance-portable (no hardcoded ~/.crow-mpa, use Environ
   }
 });
 
+test("service units carry the operator-edited-template header (allowlisted personal values live behind it)", () => {
+  for (const u of units.filter((f) => f.endsWith(".service"))) {
+    const s = readFileSync(`${DIR}/${u}`, "utf8");
+    assert.ok(/OPERATOR-EDITED TEMPLATE/.test(s), `${u} missing the operator-edited-template header`);
+  }
+});
+
 test("installer is portable + idempotent-flavored", () => {
   const sh = readFileSync("scripts/pi-bots/install-runtime.sh", "utf8");
   assert.ok(!/\.crow-mpa/.test(sh), "installer hardcodes ~/.crow-mpa");
