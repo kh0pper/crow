@@ -55,7 +55,7 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
   // Item 5 PR1 (spec §D1): the guided wizard is the primary creation path.
   const wizCta =
     `<p style="margin:0 0 1rem"><a class="btn btn-primary btn-md" href="/dashboard/bot-builder?new=1">${t("botbuilder.wizCta", lang)}</a></p>`;
-  const list = section("Bots (pi_bot_defs)",
+  const list = section(t("botbuilder.listTitle", lang),
     notice + wizCta + (rows.length
       ? dataTable(["bot_id", "name", "state", "model", "project", "sessions", "updated", "board", "", ""], rows)
       : `<p>${t("botbuilder.emptyListWizard", lang)} <a href="/dashboard/bot-builder?new=1">${t("botbuilder.emptyListWizardLink", lang)}</a></p>`));
@@ -82,7 +82,7 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
     : "";
   // Item 5 PR1: quick create collapses into an advanced disclosure — the
   // wizard (CTA above) is the primary path. Form contents unchanged.
-  const form = section("Create an agent",
+  const form = section(t("botbuilder.quickCreateTitle", lang),
     `<details class="btb-quick-create"><summary>${t("botbuilder.quickCreateSummary", lang)}</summary>` +
     `<form method="POST" class="btb-form"><input type="hidden" name="action" value="create">${csrfInput(req)}` +
     formField("Bot id (slug)", "bot_id", { required: true, placeholder: "research-scout" }) +
@@ -93,7 +93,7 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
     `<div class="btb-group"><label>Model</label>` +
     `<select name="model" class="btb-select">${createOptGroups}</select></div>` +
     actionBar(`<button type="submit" class="btb-btn"${modelsUnavailable ? " disabled" : ""}>Create</button>`) + `</form>` +
-    `<p class="btb-hint">Creates a v0.1 bot with safe defaults; then use the tabbed editor (AI &middot; Tools &middot; Gateways &middot; Project &middot; Skills &middot; Permissions &middot; Triggers &middot; Review).</p>` +
+    `<p class="btb-hint">${t("botbuilder.hintQuickCreate", lang)}</p>` +
     `</details>`);
   // Run monitor — live bot_sessions (the bridge's runtime authority).
   // Initial server render + a poll-based SSE source (the bridge is a
@@ -120,8 +120,8 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
           `<td class="btb-muted">${escapeHtml(String(s.updated_at || ""))}</td>` +
           `</tr>`;
       }).join("")
-    : `<tr><td colspan="9" class="btb-muted" style="padding:.5rem">No bot sessions yet.</td></tr>`;
-  const monitor = section("Run monitor (bot_sessions — live, 5s)",
+    : `<tr><td colspan="9" class="btb-muted" style="padding:.5rem">${t("botbuilder.monitorEmpty", lang)}</td></tr>`;
+  const monitor = section(t("botbuilder.monitorTitle", lang),
     `<turbo-stream-source src="/dashboard/streams/bot-sessions"></turbo-stream-source>` +
     `<table class="btb-monitor"><thead><tr>` +
     `<th>id</th><th>bot</th><th>status</th>` +
