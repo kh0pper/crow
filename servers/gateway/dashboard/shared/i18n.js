@@ -49,6 +49,7 @@ export const translations = {
   "login.passwordPlaceholder": { en: "Password", es: "Contraseña" },
   "login.choosePasswordPlaceholder": { en: "Choose a password (12+ characters)", es: "Elige una contraseña (12+ caracteres)" },
   "login.confirmPlaceholder": { en: "Confirm password", es: "Confirmar contraseña" },
+  "login.showPassword": { en: "Show password", es: "Mostrar contraseña" },
   "login.loginButton": { en: "Login", es: "Iniciar sesión" },
   "login.setPasswordButton": { en: "Set Password", es: "Establecer contraseña" },
   "login.setupTokenError": { en: "Use the link you were sent to set up your password.", es: "Usa el enlace que te enviaron para establecer tu contraseña." },
@@ -1335,6 +1336,20 @@ export const translations = {
     en: "Crow is your persistent memory and research assistant. It remembers what matters and works across the AI clients you already use. This short tour points you to the few things worth setting up.",
     es: "Crow es tu asistente de memoria persistente e investigación. Recuerda lo importante y funciona con los clientes de IA que ya usas. Este breve recorrido te muestra las pocas cosas que vale la pena configurar.",
   },
+  "onboarding.ai.title": { en: "Set up an AI model", es: "Configura un modelo de IA" },
+  "onboarding.ai.body": {
+    en: "Agents, chat, and voice all need a model provider — a local model server or a cloud API key. You manage providers in Settings, and Crow routes each feature to the right one.",
+    es: "Los agentes, el chat y la voz necesitan un proveedor de modelos: un servidor de modelos local o una clave API en la nube. Administra los proveedores en Ajustes y Crow dirige cada función al adecuado.",
+  },
+  "onboarding.aiEmptyNote": {
+    en: "No model provider is configured yet, so AI features won't work until you add one.",
+    es: "Aún no hay ningún proveedor de modelos configurado, así que las funciones de IA no funcionarán hasta que agregues uno.",
+  },
+  "onboarding.aiConfiguredNote": {
+    en: "{n} model provider(s) are already available on this instance.",
+    es: "{n} proveedor(es) de modelos ya están disponibles en esta instancia.",
+  },
+  "onboarding.openProviders": { en: "Open Providers", es: "Abrir Proveedores" },
   "onboarding.integrations.title": { en: "Connect your tools", es: "Conecta tus herramientas" },
   "onboarding.integrations.body": {
     en: "Link services like Google, Slack, and GitHub so Crow can act on them for you. You add API keys in Settings, where each integration explains what it needs.",
@@ -1351,6 +1366,13 @@ export const translations = {
     es: "Crow puede ejecutar agentes en canales como Gmail y Discord, cada uno con su propia personalidad, habilidades y herramientas. Crea uno en el Bot Builder.",
   },
   "onboarding.openBotBuilder": { en: "Open Bot Builder", es: "Abrir Bot Builder" },
+  "onboarding.starter.title": { en: "Starter collections", es: "Colecciones iniciales" },
+  "onboarding.starter.body": {
+    en: "Themed collections bundle a few extensions that work well together — a one-click starting point instead of browsing the whole store. Install them from the Extensions page.",
+    es: "Las colecciones temáticas agrupan algunas extensiones que funcionan bien juntas: un punto de partida con un clic en lugar de explorar toda la tienda. Instálalas desde la página de Extensiones.",
+  },
+  "onboarding.starterMemberCount": { en: "{n} extensions", es: "{n} extensiones" },
+  "onboarding.openCollections": { en: "Browse collections", es: "Explorar colecciones" },
   "onboarding.connect.title": { en: "Connect an AI client", es: "Conecta un cliente de IA" },
   "onboarding.connect.body": {
     en: "Use Crow's memory and tools from Claude Code, claude.ai, and other clients over MCP.",
