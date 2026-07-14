@@ -80,6 +80,44 @@ test("findContactByPubkey: 66-hex compressed key stored, found by its 64-hex x-o
   assert.equal(notFound, null, "unknown key must resolve to null");
 });
 
+test("findContactByPubkey: multi-row pubkey match resolves deterministically — real crow: row beats req: placeholder, then lowest id", async () => {
+  // No unique index on secp256k1_pubkey (documented at instance-sync.js §GC
+  // tombstone notes): a real `crow:` contact and a `req:<secp>` placeholder
+  // legitimately coexist on the same key. Every boot.js caller wants the REAL
+  // contact (block status, receipts, display-name all live there; the
+  // catch-all DM path double-stores if it picks the placeholder).
+  const xonly = "d".repeat(64);
+  const compressed = "02" + xonly;
+
+  // Insert the placeholder FIRST so natural scan order would return it.
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, request_status) VALUES (?,?,?,?,?)",
+    args: ["req:" + xonly, "Request placeholder", "", compressed, "pending"],
+  });
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)",
+    args: ["crow:pubkeyutil-real", "Real Contact", "ed25519-placeholder", compressed],
+  });
+
+  const found = await findContactByPubkey(db, xonly);
+  assert.ok(found, "expected a contact");
+  assert.equal(found.crow_id, "crow:pubkeyutil-real", "real crow: row must beat the req: placeholder");
+
+  // Two real rows on the same key → lowest id wins (stable tiebreak, the
+  // contact-promote.js ORDER BY id ASC precedent).
+  const xonly2 = "e".repeat(64);
+  const a = await db.execute({
+    sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)",
+    args: ["crow:pubkeyutil-a", "A", "", "02" + xonly2],
+  });
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)",
+    args: ["crow:pubkeyutil-b", "B", "", "03" + xonly2],
+  });
+  const picked = await findContactByPubkey(db, xonly2);
+  assert.equal(Number(picked.id), Number(a.lastInsertRowid), "lowest id must win among equal-rank rows");
+});
+
 test("findContactByPubkey never throws on null/short input", async () => {
   assert.equal(await findContactByPubkey(db, null), null);
   assert.equal(await findContactByPubkey(db, ""), null);
