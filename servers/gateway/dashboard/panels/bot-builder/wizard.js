@@ -204,7 +204,23 @@ export async function renderWizard(req, res, { db, layout, lang, PAGE_CSS, notic
   // GET always starts fresh at step 0 (spec §D1: no GET deep-links).
   let step = 0;
   let error = "";
-  if (req.method === "POST") {
+  if (req.method === "POST" && String(b.action) === "wizard_create" && String(b.nav || "") === "create") {
+    // A create POST reaching the RENDER path means handleWizardCreate's
+    // server-side re-validation failed and deliberately sent nothing
+    // (review MINOR-2: a redirect to ?new=1 would discard everything the
+    // user typed). Re-derive the failure and re-render THAT step with the
+    // carry intact.
+    const { opts } = await loadModelOptions(db);
+    if (!(state.display_name || "").trim() || !slugifyBotId(state.bot_id || state.custom_bot_id || state.display_name)) {
+      step = WIZARD_STEP_KEYS.indexOf("basics");
+      error = t("botbuilder.wizNameRequired", lang);
+    } else if (!state.model || !opts.some((o) => o.key === state.model)) {
+      step = WIZARD_STEP_KEYS.indexOf("model");
+      error = t("botbuilder.createModelInvalid", lang);
+    } else {
+      step = last; // unexpected fall-through: re-render review, state intact
+    }
+  } else if (req.method === "POST") {
     const posted = Math.min(Math.max(parseInt(b.step, 10) || 0, 0), last);
     const nav = String(b.nav || "next");
     if (nav === "back") {
@@ -311,19 +327,17 @@ export async function handleWizardCreate(req, res, { db, lang }) {
   const b = req.body || {};
   if (String(b.nav || "") === "back") return; // fall through to render
 
+  // Validation failures return WITHOUT sending: the panel handler then falls
+  // through to renderWizard, which re-derives the failure and re-renders the
+  // failing step with the carry intact (review MINOR-2 — never discard what
+  // the user typed).
   const state = wizardStateFromBody(b);
   const display = (state.display_name || "").trim();
-  if (!display) {
-    return res.redirectAfterPost("/dashboard/bot-builder?new=1&error=" + encodeURIComponent(t("botbuilder.wizNameRequired", lang)));
-  }
+  if (!display) return;
   const { opts } = await loadModelOptions(db);
-  if (!state.model || !opts.some((o) => o.key === state.model)) {
-    return res.redirectAfterPost("/dashboard/bot-builder?new=1&error=" + encodeURIComponent(t("botbuilder.createModelInvalid", lang)));
-  }
+  if (!state.model || !opts.some((o) => o.key === state.model)) return;
   const botId = slugifyBotId(state.bot_id || state.custom_bot_id || display);
-  if (!botId) {
-    return res.redirectAfterPost("/dashboard/bot-builder?new=1&error=" + encodeURIComponent(t("botbuilder.wizNameRequired", lang)));
-  }
+  if (!botId) return;
 
   // Conflict tolerance (spec §D1): the slug was collision-suffixed at the
   // basics step, so an existing id at final POST is practically always a

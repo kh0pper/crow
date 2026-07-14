@@ -241,15 +241,33 @@ test("wizard_create conflict: duplicate submit redirects to the existing bot, ne
   await clearProviders();
 });
 
-test("wizard_create invalid model: PRG back to wizard with error, no row", async () => {
+test("wizard_create invalid model: sends nothing, no row (falls through to re-render)", async () => {
   await clearProviders();
   const res = mkRes();
-  await handleWizardCreate({ body: {
+  const body = {
     action: "wizard_create", nav: "create",
     tpl: "blank", display_name: "Nope", bot_id: "nope-bot", model: "ghost/model", gw_type: "none",
-  } }, res, { db, lang: "en" });
-  assert.match(res.redirected, /new=1&error=/);
+  };
+  await handleWizardCreate({ body }, res, { db, lang: "en" });
+  assert.equal(res.redirected, null, "validation failure must not redirect (state would be lost)");
+  assert.equal(res.html, null);
   assert.equal(await botRow("nope-bot"), null);
+  // ...and the panel-handler fall-through re-renders the MODEL step with the
+  // carry intact + an error callout (review MINOR-2: never discard input).
+  const html = await renderPost(body);
+  assert.match(html, /callout-error/);
+  assert.match(html, new RegExp(`name="step" value="${stepIdx("model")}"`), "re-renders the failing step");
+  assert.match(html, /<input type="hidden" name="display_name" value="Nope">/, "entered state preserved");
+});
+
+test("wizard_create missing name: falls through to the basics step with carry intact", async () => {
+  const body = { action: "wizard_create", nav: "create", tpl: "blank", display_name: "", bot_id: "", model: "x/y", gw_type: "none" };
+  const res = mkRes();
+  await handleWizardCreate({ body }, res, { db, lang: "en" });
+  assert.equal(res.redirected, null);
+  const html = await renderPost(body);
+  assert.match(html, /callout-error/);
+  assert.match(html, new RegExp(`name="step" value="${stepIdx("basics")}"`));
 });
 
 test("wizard_create with nav=back sends nothing (falls through to the step render)", async () => {
