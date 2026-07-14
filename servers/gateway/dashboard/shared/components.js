@@ -182,7 +182,9 @@ export function callout(content, type = "info") {
 export function stepper(steps, current = 0) {
   const items = (steps || []).map((s, i) => {
     const state = i < current ? "step-done" : i === current ? "step-active" : "step-upcoming";
-    return `<li class="step ${state}"><span class="step-num">${i + 1}</span><span class="step-label">${escapeHtml(s.label || "")}</span></li>`;
+    // aria-current marks the active step for AT (Item 5 PR2, spec §4 a11y).
+    const aria = i === current ? ` aria-current="step"` : "";
+    return `<li class="step ${state}"${aria}><span class="step-num">${i + 1}</span><span class="step-label">${escapeHtml(s.label || "")}</span></li>`;
   }).join("");
   return `<ol class="stepper">${items}</ol>`;
 }

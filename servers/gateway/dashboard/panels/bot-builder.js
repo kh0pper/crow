@@ -13,6 +13,7 @@ import { handleBotBuilderPost } from "./bot-builder/api-handlers.js";
 import { renderBotEditor } from "./bot-builder/editor.js";
 import { renderBotList } from "./bot-builder/html.js";
 import { renderWizard } from "./bot-builder/wizard.js";
+import { renderDeleteConfirm } from "./bot-builder/delete-bot.js";
 
 const PAGE_CSS = botBuilderStyles();
 
@@ -52,8 +53,10 @@ export default {
       `The bot runtime (Gmail/Telegram/Discord gateways) is enabled per-instance and is not active here yet.</p>`;
 
     const q = req.query || {};
+    // ?created= renders as the review tab's callout (editor.js), not here —
+    // both messages stacked read as a double banner (PR #191 review m2).
     const baseNotice = q.saved ? `<p class="btb-notice-ok">Saved.</p>`
-      : q.created ? `<p class="btb-notice-ok">Created <code>${escapeHtml(String(q.created))}</code>.</p>`
+      : q.deleted ? `<p class="btb-notice-ok">Deleted <code>${escapeHtml(String(q.deleted))}</code>.</p>`
       : q.error ? `<p class="btb-notice-err">${escapeHtml(String(q.error))}</p>` : "";
     // Soft, non-blocking warning (e.g. AI-tab model pair not in models.json).
     // Independent of the base notice so it can ride alongside a Saved.
@@ -69,6 +72,16 @@ export default {
     const bodyAction = req.method === "POST" ? String((req.body || {}).action || "") : "";
     if (bodyAction === "wizard_step" || bodyAction === "wizard_create" || (req.method !== "POST" && q.new)) {
       return renderWizard(req, res, { db, layout, lang, PAGE_CSS, notice });
+    }
+
+    // ---- delete confirmation page (Item 5 PR2, spec §D5) — plain GET ----
+    if (q.bot && q.confirm_delete) {
+      let row = null;
+      try {
+        row = (await db.execute({ sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id=?", args: [String(q.bot)] })).rows[0] || null;
+      } catch { row = null; }
+      if (!row) return res.redirectAfterPost("/dashboard/bot-builder?error=unknown_bot");
+      return renderDeleteConfirm(req, res, { db, layout, lang, PAGE_CSS, bot: row });
     }
 
     // ---- editor for one bot (C5: delegated to editor.js) ----

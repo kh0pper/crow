@@ -32,6 +32,7 @@ import {
   loadModelOptions, loadSkills,
 } from "./data-queries.js";
 import { renderGatewayFields } from "./gateway-fields.js";
+import { renderReadiness } from "./checklist.js";
 
 // Tab id → i18n key map
 const TAB_KEYS = {
@@ -939,8 +940,24 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     } catch (e) {
       effHtml = `<p class="btb-notice-warn">${escapeHtml(String(e.message || e))}</p>`;
     }
+    // Item 5 PR2 (spec §D4): the default view is a plain-language readiness
+    // checklist; everything the tab showed before (effective-decision table,
+    // raw JSON, regen) is preserved inside the Advanced disclosure.
+    const createdCallout = q.created
+      ? `<div class="callout callout-success">${t("botbuilder.checkCreatedCallout", lang)}</div>`
+      : "";
+    const checklist = await renderReadiness(db, bot, def, lang);
+    const toggleForm =
+      `<form method="POST" style="margin:.5rem 0"><input type="hidden" name="action" value="toggle"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">${csrfInput(req)}` +
+      `<button type="submit" class="btb-btn btb-btn-sec">${bot.enabled ? t("botbuilder.btnDisableBot", lang) : t("botbuilder.btnEnableBot", lang)}</button></form>`;
+    const deleteLink =
+      `<p style="margin:.75rem 0"><a class="btb-danger-link" href="/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&amp;confirm_delete=1">${t("botbuilder.deleteBotLink", lang)}</a></p>`;
     body =
       mcpMsg +
+      createdCallout +
+      checklist +
+      toggleForm +
+      `<details class="btb-advanced"><summary>${t("botbuilder.reviewAdvancedSummary", lang)}</summary>` +
       effHtml +
       `<hr class="btb-divider">` +
       `<div class="btb-group"><b>Computed definition</b> (pi_bot_defs.definition)</div>` +
@@ -949,9 +966,9 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin:.75rem 0">` +
       `<form method="POST"><input type="hidden" name="action" value="regen_mcp"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">${csrfInput(req)}` +
       `<button type="submit" class="btb-btn">${t("botbuilder.btnRegenMcp", lang)}</button></form>` +
-      `<form method="POST"><input type="hidden" name="action" value="toggle"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">${csrfInput(req)}` +
-      `<button type="submit" class="btb-btn btb-btn-sec">${bot.enabled ? t("botbuilder.btnDisableBot", lang) : t("botbuilder.btnEnableBot", lang)}</button></form>` +
       `</div>` +
+      deleteLink +
+      `</details>` +
       `<p class="btb-hint">${t("botbuilder.reviewHintSaving", lang)}</p>`;
   }
 

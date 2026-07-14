@@ -129,5 +129,17 @@ export function botBuilderStyles() {
   .btb-wiz-card-desc{font-size:.85rem;color:var(--crow-text-secondary)}
   .btb-wiz-card-needs{font-size:.78rem;color:var(--crow-text-muted)}
   .btb-quick-create summary{cursor:pointer;font-size:.9rem;color:var(--crow-text-secondary)}
+
+  /* Readiness checklist + delete (Item 5 PR2) */
+  .btb-checklist{border-collapse:collapse;width:100%;margin:.75rem 0}
+  .btb-checklist th{text-align:left;font-size:.78rem;color:var(--crow-text-muted);padding:.3rem .5rem;border-bottom:1px solid var(--crow-border)}
+  .btb-checklist td{padding:.45rem .5rem;border-bottom:1px solid var(--crow-border);font-size:.9rem;vertical-align:top}
+  .btb-check-icon{width:1.5rem;text-align:center}
+  .btb-advanced{margin:.9rem 0;padding:.5rem .75rem;border:1px solid var(--crow-border);border-radius:6px}
+  .btb-advanced summary{cursor:pointer;font-size:.88rem;font-weight:500}
+  .btb-danger-link{color:var(--crow-error)}
+  .btb-btn-danger{background:var(--crow-error);color:#fff}
+  .btb-del-radius{margin:.5rem 0 .75rem;padding-left:1.2rem;font-size:.9rem}
+  .btb-del-radius li{margin:.2rem 0}
 </style>`;
 }
