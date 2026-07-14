@@ -2,8 +2,8 @@
 
 **Date:** 2026-07-14 · **Arc item:** 5 (THEME, master plan
 `docs/superpowers/plans/2026-07-11-opus-autonomous-arc.md` §4) · **Status:**
-revised after adversarial round 1 (REVISE: 1 critical, 4 major — all folded in
-below; see §7)
+**APPROVED** — 3 adversarial rounds (R1 REVISE → R2 REVISE → R3 closure
+APPROVE); full record in §7
 
 **Kevin's verbatim ask:** "can we make the bot builder interface easier to use?
 maybe make it all more intuitive, and a cleaner interface. i think we also need a
@@ -145,9 +145,12 @@ its navigation, which is stateless GET links and carries nothing):**
   non-redirect top-level form response as an error ("Form responses must
   redirect to another location") and discards it: the wizard would simply not
   advance on default prod config, and the browser-less scratch suite cannot
-  see it. `data-turbo="false"` is the codebase's established escape hatch
-  (`shared/layout.js:167/176/257`). The final `wizard_create` stays PRG (303
-  via `redirectAfterPost`) and needs no opt-out.
+  see it. `data-turbo="false"` is the codebase's established escape hatch —
+  form-level render-on-POST precedent at `panels/contacts/html.js:119` and
+  `shared/peer-invite-ui.js:61/119`, with the CSRF pattern for classic form
+  posts documented at `layout.js:420`. The final `wizard_create` stays PRG
+  (303 via `redirectAfterPost`) and needs no opt-out (a native-followed 303
+  is functionally identical to a Turbo visit here).
 - **Where rendering lives (round 2, MINOR-4):** `handleBotBuilderPost` is
   called with only `{ db }` and its header advertises
   redirect-after-POST-only semantics. `wizard_step` rendering therefore
@@ -531,5 +534,14 @@ new findings, both verified and folded in:
   csrf/honesty tests unaffected by the `<details>` wrapper; no key-count test
   breaks on i18n growth.
 
-**Round 3 (closure check):** required because round 2 was REVISE — verifies
-the two blocker fixes are correctly specified and nothing regressed.
+**Round 3 (2026-07-14, fresh Opus subagent, closure check):** **APPROVE.**
+Verified against code: `data-turbo="false"` genuinely bypasses Turbo's form
+interception (`submissionIsNavigatable` → `elementIsNavigatable` walk in the
+vendored turbo-8.0.5), with existing form-level precedent
+(`contacts/html.js:119`, `peer-invite-ui.js`); the per-type required-field
+lists exactly match the adapters' gates — gmail's allowlist is fail-CLOSED
+(`gmailSenderAllowed`) while discord/telegram/slack's `passesAllowlist` is
+fail-OPEN on empty, so requiring allowlist only for gmail produces neither
+false-greens nor false-reds; `contacts` has no FTS shadow or delete triggers,
+so §D5's direct SQL is safe; docsUrl base confirmed against README. No
+contradictions introduced by any fix. Citation polish applied (§D1).
