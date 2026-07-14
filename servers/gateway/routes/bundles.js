@@ -37,6 +37,7 @@ import {
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { writeSetting } from "../dashboard/settings/registry.js";
 import { getCollection } from "../dashboard/panels/extensions/collections.js";
+import { dockerAvailable } from "../dashboard/panels/extensions/data-queries.js";
 import { beginInstallSet, endInstallSet, isInstallSetRunning } from "../install-lock.js";
 import {
   CROW_HOME,
@@ -130,6 +131,12 @@ const INSTALLED_PATH = join(CROW_HOME, "installed.json");
 const APP_ENV_PATH = join(APP_ROOT, ".env");
 
 export { needsConfigKeys, _setAppBundlesForTest };
+
+// Docker-availability probe (Item 4-PR5) — implemented in the extensions
+// panel's data-queries.js (the panel render path may not import this module;
+// see that file). Re-exported here so route-layer consumers share the ONE
+// cached probe with the extensions-page banner.
+export { dockerAvailable };
 
 // Test-only: override the collections.json path read by POST /install-set
 // (getCollection() defaults to the real registry/collections.json, which has
@@ -1072,13 +1079,14 @@ function getAiProviderConfig(bundleId, envVars) {
  * (Task 6) maps it to a per-member skip/fail entry. Semantics are identical to
  * the pre-refactor inline chain in POST /bundles/api/install (order matters:
  * id → source exists → already-installed → dependencies → hardware → GPU →
- * consent → hosted-host-networking refusal).
+ * docker-at-point-of-use → consent → hosted-host-networking refusal).
  *
  * @returns {Promise<
  *   { ok: true, manifest: object, installed: Array, consentVerified: boolean, hardwareWarning?: object }
  * | { ok: false, status: number, code: string, error: string, extra?: object }>}
  *   codes: invalid_id | not_found | already_installed | missing_dependencies |
- *          hardware_gate | gpu_arch_gate | consent_required | consent_invalid | hosted_forbidden
+ *          hardware_gate | gpu_arch_gate | docker_unavailable | consent_required |
+ *          consent_invalid | hosted_forbidden
  */
 export async function validateInstall(bundleId, { envVars = {}, consentToken = null, forceInstall = false } = {}) {
   if (!bundleId || !isValidBundleId(bundleId)) {
@@ -1151,6 +1159,25 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
     const gpuCheck = checkGpuArchCompatible(manifest);
     if (!gpuCheck.ok) {
       return { ok: false, status: 400, code: "gpu_arch_gate", error: gpuCheck.reason, extra: { gpu_arch_gate: gpuCheck } };
+    }
+  }
+
+  // Item 4-PR5: docker at point of use — a deploys-kind bundle (type "bundle"
+  // with a docker-compose.yml) needs a reachable Docker daemon. Refuse with an
+  // honest 4xx BEFORE any compose invocation (and before the consent check, so
+  // a doomed install never consumes a single-use consent token). No
+  // forceInstall bypass: the compose calls would just fail cryptically.
+  // connects/builtin add-ons (mcp-server/skill/panel, or no compose file)
+  // never hit this gate. The install-set runner shares this guard via its
+  // per-member validateInstall call (member skips with this reason).
+  {
+    const composePath = join(sourceDir, "docker-compose.yml");
+    if ((manifest?.type || "bundle") === "bundle" && existsSync(composePath) && !(await dockerAvailable())) {
+      return {
+        ok: false, status: 412, code: "docker_unavailable",
+        error: "Docker isn't available on this host, and this extension deploys containers. Install Docker and make sure the daemon is running and reachable by this service (on a Crow appliance, re-run scripts/crow-install.sh — it installs Docker and grants access), then try again.",
+        extra: { code: "docker_unavailable" },
+      };
     }
   }
 

@@ -6,7 +6,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { execFileSync } from "child_process";
+import { execFile, execFileSync } from "child_process";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
@@ -27,6 +27,51 @@ export const STORES_PATH = join(CROW_DIR, "stores.json");
 // Local fallback registry path (five levels up from panels/extensions/ to repo root)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const LOCAL_REGISTRY = join(__dirname, "../../../../../registry/add-ons.json");
+
+// ─── Docker daemon availability probe (Item 4-PR5) ───
+//
+// One probe, two consumers: the extensions page banner (this panel) and the
+// deploys-install guard in routes/bundles.js (which re-exports it). It lives
+// HERE, not in routes/bundles.js, because the panel render path must never
+// import routes/bundles.js (see the import note above) while routes/bundles.js
+// already imports from this panel dir.
+//
+// `docker info` is the reliable daemon-reachability check (`docker compose
+// version` is a client-side plugin probe and succeeds with the daemon down).
+// Short execFile timeout so a hung daemon can never block a page render; the
+// result is cached ~60s so repeated renders/installs don't re-spawn docker.
+const DOCKER_PROBE_TTL_MS = 60_000;
+const DOCKER_PROBE_TIMEOUT_MS = 3_000;
+let _dockerProbe = { ok: null, at: 0 };
+let _dockerProbeInflight = null;
+
+/** Test-only: clear the cached probe result (and any in-flight probe). */
+export function _resetDockerProbeForTest() {
+  _dockerProbe = { ok: null, at: 0 };
+  _dockerProbeInflight = null;
+}
+
+/**
+ * Is a Docker daemon reachable on this host? Cached ~60s; concurrent callers
+ * share one in-flight probe. Resolves false on: binary absent, daemon down,
+ * or probe timeout. Never rejects.
+ * @returns {Promise<boolean>}
+ */
+export function dockerAvailable() {
+  const now = Date.now();
+  if (_dockerProbe.ok !== null && now - _dockerProbe.at < DOCKER_PROBE_TTL_MS) {
+    return Promise.resolve(_dockerProbe.ok);
+  }
+  if (_dockerProbeInflight) return _dockerProbeInflight;
+  _dockerProbeInflight = new Promise((resolveProbe) => {
+    execFile("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: DOCKER_PROBE_TIMEOUT_MS }, (err) => {
+      _dockerProbe = { ok: !err, at: Date.now() };
+      _dockerProbeInflight = null;
+      resolveProbe(!err);
+    });
+  });
+  return _dockerProbeInflight;
+}
 
 export function getInstalled() {
   try {

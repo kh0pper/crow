@@ -27,6 +27,10 @@ One command installs Crow and all dependencies:
 curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
 ```
 
+::: warning Supported platforms
+The install script supports **Debian/Ubuntu family systems only** (Debian, Ubuntu, Raspberry Pi OS, and derivatives — it installs via `apt`) and exits early on anything else. On macOS, Windows, or other Linux distributions there is no auto-install: follow the manual path instead — [Full Setup](./full-setup) (Docker Compose) or [Desktop Install](./desktop-install).
+:::
+
 ::: tip Prefer to inspect the script first?
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh -o crow-install.sh
@@ -42,10 +46,15 @@ The installer takes 5-10 minutes and sets up:
 - systemd service for auto-start
 - HTTPS via self-signed certificate
 - Firewall (UFW) + fail2ban
+- Tailscale (offered during install if not already present)
+
+::: info Container extensions need Docker
+Extensions that deploy their own containers (media servers, local AI, and most of the store) require Docker. The install script installs it for you; if you set Crow up another way, install Docker yourself — the Extensions page will tell you when it's missing, and container installs are refused until it's available. Extensions that only *connect* to existing services don't need Docker.
+:::
 
 ## Remote Access with Tailscale
 
-Access your Crow from anywhere with [Tailscale](https://tailscale.com) (free for personal use):
+Access your Crow from anywhere with [Tailscale](https://tailscale.com) (free for personal use). The install script **offers to install Tailscale** if it isn't present (recommended — say yes, then authenticate with `sudo tailscale up` and re-run the script to wire up the hostname and HTTPS dashboard). To install it manually instead:
 
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
