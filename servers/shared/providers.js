@@ -11,16 +11,8 @@
  */
 
 import { readFileSync, existsSync, statSync } from "fs";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
 import { createDbClient } from "../db.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-const SEARCH_PATHS = [
-  resolve(__dirname, "../../models.json"),
-  resolve(__dirname, "../../config/models.json"),
-];
+import { repoModelsJsonSearchPaths } from "./models-json-paths.js";
 
 // -----------------------------------------------------------------------
 // Cache layer — providers are read many times per orchestration; cache DB
@@ -72,7 +64,7 @@ async function refreshCache() {
 }
 
 function loadFromModelsJson() {
-  for (const p of SEARCH_PATHS) {
+  for (const p of repoModelsJsonSearchPaths()) {
     try {
       const raw = readFileSync(p, "utf-8");
       const cfg = JSON.parse(raw);

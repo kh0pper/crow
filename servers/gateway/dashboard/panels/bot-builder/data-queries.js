@@ -188,9 +188,14 @@ export function defaultDefinition(botId, projectId, model) {
   // project number at creation time (it's just a string in the prompt; the
   // runtime project context block in bridge.mjs supersedes it).
   const sessionDir = pathJoin(botsWorkspaceRoot(), botId);
+  // Item 4 PR1 (§2.1): the model key is REQUIRED — the create action validates
+  // it against loadModelOptions() before ever calling this. No silent fallback
+  // to any specific model: a falsy model here means an upstream guard was
+  // bypassed, so throw (tripwire) instead of baking in someone's default.
+  if (!model) throw new Error("defaultDefinition: a validated model key is required");
   return {
     engine: "pi",
-    models: { default: model || "crow-local/qwen3.6-35b-a3b" },
+    models: { default: model },
     tools: {
       pi_builtin: ["read", "edit", "write"],
       crow_mcp: [
@@ -203,13 +208,9 @@ export function defaultDefinition(botId, projectId, model) {
       pi_extensions: [],
       skills: [],
     },
-    gateways: [
-      {
-        type: "gmail",
-        address: `kevin.hopper+${botId}@maestro.press`,
-        allowlist: ["kevin.hopper1@gmail.com", "kevin.hopper@maestro.press"],
-      },
-    ],
+    // Item 4 PR1 (§2.1): no baked-in gateway — the operator wires one up on
+    // the Gateways tab (a fresh install has no Gmail alias to poll).
+    gateways: [],
     permission_policy: { bash: "deny", bash_allow: [], write_paths: [sessionDir], external_send: "draft_only", confirm: [], self_authoring: false, skill_learning: "off" },
     triggers: { gateway: true, cron: "" },
     system_prompt:
@@ -221,7 +222,10 @@ export function defaultDefinition(botId, projectId, model) {
       `thread. Never send external email; never run bash. One card per request.`,
     skills: [],
     session_dir: sessionDir,
-    spawn_env: { CROW_JOURNAL_MODE: "DELETE", PI_PROVIDER: "crow-local" },
+    // No PI_PROVIDER here: the bridge sets PI_PROVIDER per turn from the
+    // model resolver, and bridge.mjs applies def.spawn_env LAST — a def-level
+    // value would override the resolved provider on every turn.
+    spawn_env: { CROW_JOURNAL_MODE: "DELETE" },
   };
 }
 

@@ -13,6 +13,17 @@ import {
 import { readSetting, writeSetting } from "../../settings/registry.js";
 import { regenerateBotMcp } from "../bot-mcp-regen.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
+import { t, SUPPORTED_LANGS } from "../../shared/i18n.js";
+import { parseCookies } from "../../auth.js";
+
+// Same crow_lang-cookie resolution the dashboard router uses (index.js);
+// defensive because POST handlers can be exercised with header-less reqs.
+function reqLang(req) {
+  try {
+    const c = parseCookies(req).crow_lang;
+    return SUPPORTED_LANGS.includes(c) ? c : "en";
+  } catch { return "en"; }
+}
 
 export function buildCrowMessagesGatewayConfig(b) {
   const gw = {
@@ -32,8 +43,18 @@ export async function handleBotBuilderPost(req, res, { db }) {
     const display = (b.display_name || "").trim();
     const botId = (b.bot_id || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
     const projectId = b.project_id ? Number(b.project_id) : null;
-    const model = (b.model || "crow-local/qwen3.6-35b-a3b").trim();
+    const model = (b.model || "").trim();
     if (!botId || !display) return res.redirectAfterPost("/dashboard/bot-builder?error=name_required");
+    // Item 4 PR1 (§2.1): the model must be one of THIS instance's provider
+    // models — no silent fallback to a hardcoded default. Reject-and-banner,
+    // never insert a row that can't run.
+    const { opts: validOpts } = await loadModelOptions(db);
+    const validModelKeys = new Set(validOpts.map((o) => o.key));
+    if (!model || !validModelKeys.has(model)) {
+      return res.redirectAfterPost(
+        "/dashboard/bot-builder?error=" + encodeURIComponent(t("botbuilder.createModelInvalid", reqLang(req)))
+      );
+    }
     try {
       // M3b: project_id goes in the column, not the JSON. defaultDefinition
       // no longer includes it.
@@ -137,7 +158,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
         if (def.fast_voice_model && !validKeys.has(def.fast_voice_model)) bad.push("fast_voice_model (" + def.fast_voice_model + ")");
         if (bad.length) {
           extraQ = "&warn=" + encodeURIComponent(
-            "not in provider registry: " + bad.join(", ") + " — saved anyway (runtime fails closed to crow-local).");
+            "not in provider registry: " + bad.join(", ") + " — saved anyway; runs will fail until this model is available on this instance.");
         }
       } catch {
         /* validation must never 500 the save */

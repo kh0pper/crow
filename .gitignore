@@ -63,3 +63,7 @@ bundles/*/docker-compose.override.yml
 # Manual backup snapshots (PRE-*.bak, *.bak-DATE, etc.)
 *.bak
 *.bak-*
+# Per-instance provider config (Item 4 PR1) — the repo ships models.example.json
+# instead; root-anchored so bundle-local models.json files are never swallowed.
+/models.json
+/config/models.json

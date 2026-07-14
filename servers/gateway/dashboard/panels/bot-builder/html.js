@@ -3,14 +3,25 @@
  *
  * Renders the bot list (pi_bot_defs), the Create an agent form,
  * and the Run monitor (bot_sessions — live, 5s Turbo replace).
- * No i18n in this module: all strings are operator-facing labels
- * and data-status values; the run-monitor tbody is VOLATILE-SKIP
- * (replaced every 5s by routes/streams.js, spec rule 5).
+ * Mostly literal English (operator-facing labels and data-status values);
+ * new user-facing copy (providers link) is i18n-keyed. The run-monitor
+ * tbody is VOLATILE-SKIP (replaced every 5s by routes/streams.js, spec rule 5).
  */
 
 import { escapeHtml, section, badge, dataTable, formField, actionBar } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { loadModelOptions } from "./data-queries.js";
+import { t, SUPPORTED_LANGS } from "../../shared/i18n.js";
+import { parseCookies } from "../../auth.js";
+
+// Same crow_lang-cookie resolution the dashboard router uses (index.js);
+// defensive because tests render with header-less reqs.
+function reqLang(req) {
+  try {
+    const c = parseCookies(req).crow_lang;
+    return SUPPORTED_LANGS.includes(c) ? c : "en";
+  } catch { return "en"; }
+}
 
 export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) {
   let bots = [], sessions = [], sessRows = [];
@@ -50,21 +61,31 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) 
   const { opts: createModelOpts, error: createModelErr } = await loadModelOptions(db);
   const createByProv = {};
   for (const o of createModelOpts) (createByProv[o.provider] = createByProv[o.provider] || []).push(o);
+  // Item 4 PR1 (§2.1): no hardcoded `selected` pin — the browser's natural
+  // first-option default is the honest choice on any install.
   const createOptGroups = Object.keys(createByProv).map((p) =>
     `<optgroup label="${escapeHtml(p)}">` +
-    createByProv[p].map((m) => `<option value="${escapeHtml(m.key)}"${m.key === "crow-local/qwen3.6-35b-a3b" ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("") +
+    createByProv[p].map((m) => `<option value="${escapeHtml(m.key)}">${escapeHtml(m.label)}</option>`).join("") +
     `</optgroup>`
   ).join("");
+  // Empty/error model state: warn + link to provider settings, and disable
+  // submit — never render a submittable form with an empty model select.
+  const lang = reqLang(req);
+  const modelsUnavailable = !!createModelErr || createModelOpts.length === 0;
+  const modelWarn = modelsUnavailable
+    ? `<p class="btb-warn">${escapeHtml(createModelErr || "No providers configured.")} ` +
+      `<a href="/dashboard/settings?section=llm&amp;tab=providers">${t("botbuilder.createProvidersLink", lang)}</a></p>`
+    : "";
   const form = section("Create an agent",
     `<form method="POST" class="btb-form"><input type="hidden" name="action" value="create">${csrfInput(req)}` +
     formField("Bot id (slug)", "bot_id", { required: true, placeholder: "research-scout" }) +
     formField("Display name", "display_name", { required: true, placeholder: "Research Scout" }) +
     `<div class="btb-group"><label>Linked project</label>` +
     `<select name="project_id" class="btb-select"><option value="">&mdash; none &mdash;</option>${projCreateOpts}</select></div>` +
-    (createModelErr ? `<p class="btb-warn">${escapeHtml(createModelErr)}</p>` : "") +
+    modelWarn +
     `<div class="btb-group"><label>Model</label>` +
     `<select name="model" class="btb-select">${createOptGroups}</select></div>` +
-    actionBar(`<button type="submit" class="btb-btn">Create</button>`) + `</form>` +
+    actionBar(`<button type="submit" class="btb-btn"${modelsUnavailable ? " disabled" : ""}>Create</button>`) + `</form>` +
     `<p class="btb-hint">Creates a v0.1 bot with safe defaults; then use the tabbed editor (AI &middot; Tools &middot; Gateways &middot; Project &middot; Skills &middot; Permissions &middot; Triggers &middot; Review).</p>`);
   // Run monitor — live bot_sessions (the bridge's runtime authority).
   // Initial server render + a poll-based SSE source (the bridge is a

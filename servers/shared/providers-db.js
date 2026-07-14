@@ -25,24 +25,15 @@
  */
 
 import { readFileSync } from "fs";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
 import { createDbClient } from "../db.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { getOwnAddresses, isLocallyOrchestratable } from "./locality.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const HOME = process.env.HOME || "/home/kh0pp";
-const MODELS_JSON_SEARCH_PATHS = [
-  resolve(__dirname, "../../models.json"),
-  resolve(__dirname, "../../config/models.json"),
-  resolve(HOME, ".pi/agent/models.json"),
-];
+import { modelsJsonSearchPaths } from "./models-json-paths.js";
 
 function readModelsJson() {
   const merged = { providers: {} };
   const paths = [];
-  for (const p of MODELS_JSON_SEARCH_PATHS) {
+  for (const p of modelsJsonSearchPaths()) {
     try {
       const j = JSON.parse(readFileSync(p, "utf-8"));
       if (j && j.providers) {
