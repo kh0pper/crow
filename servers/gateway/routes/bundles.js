@@ -1175,7 +1175,7 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
     if ((manifest?.type || "bundle") === "bundle" && existsSync(composePath) && !(await dockerAvailable())) {
       return {
         ok: false, status: 412, code: "docker_unavailable",
-        error: "Docker isn't available on this host, and this extension deploys containers. Install Docker and make sure the daemon is running (on a Crow appliance, re-run scripts/crow-install.sh — it installs Docker), then try again.",
+        error: "Docker isn't available on this host, and this extension deploys containers. Install Docker and make sure the daemon is running and reachable by this service (on a Crow appliance, re-run scripts/crow-install.sh — it installs Docker and grants access), then try again.",
         extra: { code: "docker_unavailable" },
       };
     }
