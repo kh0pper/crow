@@ -26,26 +26,25 @@ On `server-a`:
 ```bash
 cd ~/crow
 npm run identity:export
+# (non-interactive: npm run identity:export -- -- --passphrase <passphrase>)
 ```
 
-You'll be prompted for a passphrase to encrypt the export. The command outputs a file path — something like `~/.crow/identity-export.enc`.
+You'll be prompted for a passphrase (minimum 12 characters) to encrypt the export. The command prints a **base64 blob** to the terminal — the master seed inside it is scrypt + AES-256-GCM encrypted under your passphrase. Copy the whole string.
 
-Copy the file to `server-b`:
-
-```bash
-scp ~/.crow/identity-export.enc user@server-b:~/
-```
+Alternatively, download a backup file from the dashboard: the first-run wizard's final step (replayable from Settings → Help & Setup → "Download identity backup") saves `crow-identity-backup.json` in the same encrypted format.
 
 ## Step 3: Import Identity on Satellite
 
-On `server-b`:
+On `server-b` (before the first gateway start, while it has no identity yet — the import refuses to overwrite an existing `identity.json`):
 
 ```bash
 cd ~/crow
-npm run identity:import
+npm run identity:import -- <base64-blob>
+# (a downloaded crow-identity-backup.json imports the same way:
+#  npm run identity:import -- "$(base64 -w0 crow-identity-backup.json)")
 ```
 
-Enter the same passphrase you used during export. This replaces `server-b`'s identity with the shared one.
+You'll be prompted for the passphrase you chose during export. The import decrypts the backup and writes `server-b`'s `identity.json` with the shared identity. If `server-b` already created its own identity, move `~/.crow/data/identity.json` aside first.
 
 Verify both machines have the same Crow ID:
 

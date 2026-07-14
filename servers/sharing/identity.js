@@ -604,6 +604,14 @@ export async function importIdentity() {
   }
 
   // Legacy plaintext-base64 blob (already-valid identity.json content).
+  // Guard: the blob must actually carry a usable master seed (64 hex chars)
+  // before we write it as-is — a garbage blob would otherwise produce an
+  // identity.json the gateway can never boot from.
+  const legacySeed = parsed && typeof parsed === "object" ? parsed.seed : null;
+  if (typeof legacySeed !== "string" || !/^[0-9a-fA-F]{64}$/.test(legacySeed)) {
+    console.error("Not a valid identity export — a legacy blob must contain a 64-hex `seed`. Nothing was written.");
+    process.exit(1);
+  }
   writeFileSync(IDENTITY_PATH, data);
   console.log("Identity imported successfully.");
 }

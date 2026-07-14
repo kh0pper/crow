@@ -13,7 +13,12 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   const pj = projectId == null ? "null" : JSON.stringify(Number(projectId));
   const ts = trackerSlug ? JSON.stringify(String(trackerSlug)) : "null";
   const cf = contextFields ? JSON.stringify(contextFields) : "[]";
+  // Optional notes viewer base URL (e.g. "https://host/notes/"). When unset,
+  // the drawer shows plain "note #<id>" text — honest absence over a dead
+  // link to somebody's lab host.
+  const nb = JSON.stringify(String(process.env.CROW_BOT_BOARD_NOTES_URL || ""));
   return `<script>(function(){
+  var NOTES_BASE=${nb};
   var BOT_ID=${bi};
   var TRACKER_TYPE=${tt};
   var PROJECT=${pj};
@@ -171,7 +176,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
           fieldsDiv.appendChild(linkH);
           var linkDiv=document.createElement('div');
           if(data.pir_number){var pn=document.createElement('div');pn.style.fontWeight='600';pn.style.fontSize='.95rem';pn.textContent='PIR #'+data.pir_number;linkDiv.appendChild(pn);}
-          if(data.note_id){var nl=document.createElement('a');nl.className='bb-td-link';nl.href='http://10.0.0.39:8080/notes/'+data.note_id;nl.target='_blank';nl.textContent='View note \\u2192 #'+data.note_id;linkDiv.appendChild(nl);}
+          if(data.note_id){var nl;if(NOTES_BASE){nl=document.createElement('a');nl.className='bb-td-link';nl.href=NOTES_BASE+data.note_id;nl.target='_blank';nl.textContent='View note \\u2192 #'+data.note_id;}else{nl=document.createElement('span');nl.className='bb-td-link';nl.textContent='note #'+data.note_id;}linkDiv.appendChild(nl);}
           if(data.review_thread_id){var rt=document.createElement('div');rt.className='bb-td-link';rt.textContent='Thread: '+data.review_thread_id;rt.style.cursor='pointer';rt.title='Click to copy';rt.onclick=function(ev){ev.stopPropagation();navigator.clipboard.writeText(data.review_thread_id);msg($('bb-td-msg'),'Copied thread ID.','ok');};linkDiv.appendChild(rt);}
           fieldsDiv.appendChild(linkDiv);
         }
