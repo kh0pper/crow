@@ -18,7 +18,7 @@ for _scrub_v in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
       ;;  # required by the shell / the app
     *_KEY|*_TOKEN|*_SECRET|*_PASSWORD|*_CREDENTIAL|*_CREDENTIALS|\
     THK_*|CROW_*|ANTHROPIC_*|OPENAI_*|AWS_*|GH_*|GITHUB_*|NTFY_*|\
-    MODEL_BASE_URL)
+    MODEL_BASE_URL|MCP_CROW_URL)
       unset "$_scrub_v" 2>/dev/null || true
       ;;
   esac
