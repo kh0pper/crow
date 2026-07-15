@@ -294,3 +294,159 @@ test("G6b: a restarted manager (same dirs+DB, new objects) completes a rotation 
     b.mgr = b2mgr; // let cleanup close the live one
   } finally { await fleet.cleanup(); }
 });
+
+// ── Task 4 (C1): live swap gates ────────────────────────────────────────────
+// memories.id is INTEGER PRIMARY KEY — string ids fail silently (T1-review
+// correction). Use integer ids: G1 704000 (pre) / 704001 (post), G5 704100,
+// G12 704200-704202.
+
+test("G1: live rotation single actor -- B swaps without restart, new emits apply, conflicts flat", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    let link = await linkPeers(a, b);
+    await a.mgr.emitChange("memories", "insert", { id: 704000, content: "x", lamport_ts: null });
+    await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=704000" })).rows.length === 1);
+    const conflictsBefore = Number((await b.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n);
+    link.close();
+    // A rotates its out-feed to B (storage wiped, new key minted).
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKey = a.mgr.getOutFeedKey(b.id);
+    const oldFeed = b.mgr.inFeeds.get(a.id);
+    // Key delivered to B live (as every receipt point does) — NO b restart:
+    await b.mgr.initInstance(a.id, newKey);
+    assert.notEqual(b.mgr.inFeeds.get(a.id), oldFeed, "in-feed object must be swapped");
+    assert.equal(b.mgr.inFeeds.get(a.id).key.toString("hex"), newKey.toString("hex"));
+    // Replication resumes on a fresh link; post-rotation emit applies.
+    link = await linkPeers(a, b);
+    await a.mgr.emitChange("memories", "insert", { id: 704001, content: "y", lamport_ts: null });
+    const applied = await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=704001" })).rows.length === 1);
+    assert.equal(applied, true, "post-rotation emit must apply with no restart on B");
+    const conflictsAfter = Number((await b.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n);
+    assert.equal(conflictsAfter, conflictsBefore, "sync_conflicts flat");
+    link.close();
+  } finally { await fleet.cleanup(); }
+});
+
+test("G5: same-key re-exchange is a no-op -- feed identity and seq preserved", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    const link = await linkPeers(a, b);
+    await a.mgr.emitChange("memories", "insert", { id: 704100, content: "x", lamport_ts: null });
+    await until(async () => (await b.mgr._getLastAppliedSeq(a.id, b.mgr.inFeeds.get(a.id))) >= 1);
+    const feedBefore = b.mgr.inFeeds.get(a.id);
+    const seqBefore = await b.mgr._getLastAppliedSeq(a.id, feedBefore);
+    await b.mgr.initInstance(a.id, a.mgr.getOutFeedKey(b.id)); // same key again
+    assert.equal(b.mgr.inFeeds.get(a.id), feedBefore, "same feed object");
+    assert.equal(await b.mgr._getLastAppliedSeq(a.id, feedBefore), seqBefore, "seq untouched");
+    link.close();
+  } finally { await fleet.cleanup(); }
+});
+
+test("G6/G6c: hung close defers boundedly; reopen attempts do not throw; settle (resolve OR reject) un-defers and heals", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    b.mgr._rotationCloseCapMs = 200;
+    const link = await linkPeers(a, b);
+    const oldFeed = b.mgr.inFeeds.get(a.id);
+    // Injection seam (R3 F-G): wrap the REAL feed's close in a controllable promise.
+    let settle;
+    const gate = new Promise((res) => { settle = res; });
+    const realClose = oldFeed.close.bind(oldFeed);
+    oldFeed.close = () => gate.then(() => realClose());
+    // Rotate A, deliver the new key to B: close hangs → defer within the cap.
+    link.close();
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKey = a.mgr.getOutFeedKey(b.id);
+    const t0 = Date.now();
+    await b.mgr.initInstance(a.id, newKey);          // must return, not hang
+    assert.ok(Date.now() - t0 < 8000, "G6: bounded (5s cap + slack), no hang");
+    assert.equal(b.mgr.inFeeds.has(a.id), false, "deferred: no in-feed mapped");
+    assert.ok(b.mgr._deferredRotations.has(a.id), "deferred set");
+    // G6c: subsequent attempts (the C4-interval shape) must NOT throw.
+    await assert.doesNotReject(() => b.mgr.initInstance(a.id, newKey));
+    assert.equal(b.mgr.inFeeds.has(a.id), false, "still suppressed while lock held");
+    // Now the slow close settles → un-defer → next call completes the rotation.
+    settle();
+    await until(() => !b.mgr._deferredRotations.has(a.id));
+    await b.mgr.initInstance(a.id, newKey);
+    assert.equal(b.mgr.inFeeds.get(a.id)?.key.toString("hex"), newKey.toString("hex"), "healed after settle");
+  } finally { await fleet.cleanup(); }
+});
+
+test("G6c-reject: a REJECTING close un-defers with no unhandled rejection", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    b.mgr._rotationCloseCapMs = 200;
+    let link = await linkPeers(a, b);
+    link.close();
+    const oldFeed = b.mgr.inFeeds.get(a.id);
+    let reject;
+    const gate = new Promise((_, rej) => { reject = rej; });
+    oldFeed.close = () => gate; // close() = pending, then REJECTS
+    const unhandled = [];
+    const onUR = (err) => unhandled.push(err);
+    process.on("unhandledRejection", onUR);
+    try {
+      await a.mgr.closeInstanceFeeds(b.id);
+      rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+      await a.mgr.initInstance(b.id, null);
+      const newKey = a.mgr.getOutFeedKey(b.id);
+      await b.mgr.initInstance(a.id, newKey);           // defers
+      reject(new Error("close blew up"));               // the R3 F-A case
+      await until(() => !b.mgr._deferredRotations.has(a.id));
+      await new Promise((r) => setImmediate(r));        // let any UR surface
+      assert.equal(unhandled.length, 0, "no unhandled rejection from the abandoned close");
+      assert.equal(b.mgr._deferredRotations.has(a.id), false, "reject also un-defers (.finally)");
+    } finally { process.off("unhandledRejection", onUR); }
+  } finally { await fleet.cleanup(); }
+});
+
+test("G12: in-flight old-feed processing across the swap cannot corrupt the new record", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    const link = await linkPeers(a, b);
+    // Seed 2 entries and let B apply them (record {k:old, s:2}).
+    for (let i = 0; i < 2; i++) await a.mgr.emitChange("memories", "insert", { id: 704200 + i, content: "x", lamport_ts: null });
+    await until(async () => (await b.mgr._getLastAppliedSeq(a.id, b.mgr.inFeeds.get(a.id))) >= 2);
+    // Trap B's _applyEntry so the NEXT processing run parks mid-loop.
+    let releaseApply; const applyGate = new Promise((r) => { releaseApply = r; });
+    const realApply = b.mgr._applyEntry.bind(b.mgr);
+    let trapped = false;
+    b.mgr._applyEntry = async (...args) => { if (!trapped) { trapped = true; await applyGate; } return realApply(...args); };
+    // Third entry arrives → old-feed run starts and parks inside _applyEntry.
+    await a.mgr.emitChange("memories", "insert", { id: 704202, content: "x", lamport_ts: null });
+    await until(() => trapped);
+    link.close();
+    // Swap while the old-feed run is mid-flight.
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKey = a.mgr.getOutFeedKey(b.id);
+    await b.mgr.initInstance(a.id, newKey);
+    releaseApply();                                    // old run resumes, stamps {k:old}
+    await new Promise((r) => setTimeout(r, 100));      // let it finish its write
+    // The record must be usable by the NEW feed: either {k:new,...} already, or
+    // {k:old,...} which the key-gated read maps to 0 — NEVER {k:new, s:oldMark}.
+    const rec = await b.mgr._appliedSeqRecord(a.id);
+    if (rec.k === newKey.toString("hex")) {
+      assert.equal(rec.s, 0, "a new-key record written during the race must be the reset, not the old mark");
+    }
+    const effective = await b.mgr._getLastAppliedSeq(a.id, b.mgr.inFeeds.get(a.id));
+    assert.equal(effective === 0 || rec.k === newKey.toString("hex"), true,
+      "new feed must start from 0 -- the old run's stamp must not masquerade under the new key");
+    // And a queued post-swap run on the OLD feed must bail with no stamp:
+    const before = JSON.stringify(await b.mgr._appliedSeqRecord(a.id));
+    const oldFeedRef = { key: Buffer.from("cc".repeat(32), "hex"), length: 50, async get() { throw new Error("n/a"); } };
+    await b.mgr._processNewEntries(a.id, oldFeedRef);  // replaced feed → entry bail
+    assert.equal(JSON.stringify(await b.mgr._appliedSeqRecord(a.id)), before, "bailed run stamps nothing");
+  } finally { await fleet.cleanup(); }
+});
