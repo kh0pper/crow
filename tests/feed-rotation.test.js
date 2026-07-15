@@ -660,3 +660,45 @@ test("G13: stale-snapshot tailnet handshake cannot swap back a concurrently-rece
     await fleet.cleanup();
   }
 });
+
+// ── Task 8 (C4): 60s heal loop in refresh() ─────────────────────────────────
+
+test("C4: refresh heals sync_url drift for ALREADY-DIALING peers and survives initInstance throws", async () => {
+  const calls = [];
+  const stubMgr = {
+    localInstanceId: "me",
+    // Mirrors the real InstanceSyncManager.validateIncomingFeedKey contract
+    // (servers/sharing/instance-sync.js): a well-formed 64-hex-char key
+    // decodes to a Buffer; anything else is rejected as null. The brief's
+    // literal stub omits this method entirely, which under the heal call's
+    // `validateIncomingFeedKey?.(...) ?? null` optional-chaining would pass
+    // null (arm-only) for every peer -- failing this test's very first
+    // assertion (calls[0] expects the real hex key, not null). Giving the
+    // stub the real method's observable behavior keeps the test honest
+    // without dragging in a full InstanceSyncManager (Hypercore, inFeeds,
+    // on-disk dirs) that this unit test has no business needing.
+    validateIncomingFeedKey: (_peerId, hex) =>
+      typeof hex === "string" && /^[0-9a-fA-F]{64}$/.test(hex) ? Buffer.from(hex, "hex") : null,
+    initInstance: async (id, key) => {
+      calls.push([id, key ? key.toString("hex") : null]);
+      if (calls.length === 1) throw new Error("boom"); // first tick throws
+    },
+  };
+  const peerRow = { id: "peer1", gateway_url: "http://127.0.0.1:1", tailscale_ip: null, sync_url: "ab".repeat(32), status: "active" };
+  const stubDb = { execute: async () => ({ rows: [peerRow] }) };
+  const { startTailnetSyncClients } = await import("../servers/sharing/tailnet-sync.js");
+  const clients = await startTailnetSyncClients({ db: stubDb, instanceSyncManager: stubMgr, identity: {} });
+  try {
+    // First refresh already ran inside startTailnetSyncClients: the throw must
+    // not have escaped (this test completing IS the assertion), and the call
+    // must have carried the persisted key.
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], ["peer1", "ab".repeat(32)]);
+    assert.ok(clients.dialers.has("peer1"), "dialer was still created after the throw");
+    // Second refresh: peer is ALREADY dialing -- the heal call must still fire
+    // (placed BEFORE the dialers.has() continue; R3 F-C).
+    peerRow.sync_url = "cd".repeat(32);
+    await clients.__refreshForTest();
+    assert.deepEqual(calls[1], ["peer1", "cd".repeat(32)], "already-dialing peer still healed");
+  } finally { clients.stop(); }
+});
