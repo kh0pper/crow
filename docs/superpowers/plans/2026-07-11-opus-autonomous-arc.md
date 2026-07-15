@@ -704,7 +704,12 @@ stuck delete converged minutes later). Root-cause follow-ups recorded below.
 awaits generally (the caps bound the known two); [2c-F3] dashboard Restore button not disabled
 for contacts/contact_groups (backend refuses safely); [2c-F4] dead INSERT-branch group guard in
 `sync-conflict-resolve.js` needs an unreachable-pointer comment; [2c-F5] `_pendingPeerEmits`
-RAM on hosts with dead-but-not-revoked peers (256-cap/peer — watch on soak).
+RAM on hosts with dead-but-not-revoked peers (256-cap/peer — watch on soak); [2c-F6, Kevin-approved
+2026-07-15] XSS in capstone-tracker ereader (Kevin's WIP, flagged by automated security review):
+`bundles/capstone-tracker/src/templates/ereader.html` interpolates `{{ chapter.title|e }}` /
+`{{ source.title|e }}` inside a script block — replace the quoted `|e` interpolations with `|tojson`
+(drops the literal quotes; handles `</script` sequences). Coordinate with Kevin — the bundle is
+untracked WIP; fix rides whenever he commits it or hands it over.
 *Original acceptance (all delivered):* backfill re-emit does NOT advance lamports and cannot
 overwrite a higher-lamport peer row; #147 done:<n> semantics intact.
 
