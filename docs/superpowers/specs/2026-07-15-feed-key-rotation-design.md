@@ -1,6 +1,6 @@
 # Item 2d — In-feed key rotation: live swap + applied-seq integrity
 
-**Date:** 2026-07-15 · **Status:** rev 2 (R1 findings folded; awaiting round-2 review) · **Author:** autonomous arc session
+**Date:** 2026-07-15 · **Status:** rev 3 (R1+R2 findings folded; awaiting round-3 closure review) · **Author:** autonomous arc session
 **Plan doc:** `docs/superpowers/plans/2026-07-11-opus-autonomous-arc.md` §4 Item 2d
 **Prereq reading:** the 2a six-bug lesson (executable/multi-instance/mutual gates) and the 2c
 boot-liveness lesson (no unbounded boot awaits) — both shaped this design.
@@ -104,26 +104,50 @@ In `_initInstanceInner`, replace the in-feed guard with key-aware logic:
 const current = this.inFeeds.get(remoteInstanceId);
 if (current && theirFeedKey && !current.key.equals(theirFeedKey)) {
   // ROTATION: detach, unmap, bounded close, then open the new core in the same dir.
-  current.removeListener("append", <its handler>);   // stop new processing runs (R1 F8)
+  current.removeListener("append", this._inFeedListeners.get(id)); // per-peer stored ref (R2 #9)
+  current.on("error", () => {});                     // swallow late close-races (R2 #9)
   this.inFeeds.delete(remoteInstanceId);             // entry-bail kills queued runs (R1 F1)
   const closed = await boundedClose(current, 5_000); // Promise.race close vs cap
   if (!closed) {
-    // rocksdb lock still held by the zombie session — same-dir open would throw.
-    // Defer: loud log; sync_url is already persisted, so the next boot heals
-    // (multi-core store + C2 open-time reconcile). Do NOT hang the _initLocks chain.
+    // rocksdb lock still held by the zombie session — same-dir open below would
+    // throw. Defer: loud log; sync_url is already persisted, so the next boot
+    // heals (multi-core store + C2 open-time reconcile). Do NOT hang the chain.
     console.error(`[instance-sync] ROTATION DEFERRED for ${id}: old in-feed close timed out; restart will complete it`);
+    this._deferredRotations.add(remoteInstanceId);   // suppress repeat open attempts (R2 #1)
     return this.outFeeds.get(remoteInstanceId);
   }
   console.warn(`[instance-sync] in-feed ROTATED for ${id}: ${oldKey8}… → ${newKey8}…`);
 }
-if (!this.inFeeds.has(remoteInstanceId) && theirFeedKey) {
-  … open new Hypercore(dir, theirFeedKey) …
-  await this._reconcileAppliedSeqAtOpen(remoteInstanceId, inFeed);  // C2 — ALWAYS, every open
-  … wire append listener (handler kept referenceable for removeListener) …
-  … attach to tracked live streams (C3) …
-  this.inFeeds.set(remoteInstanceId, inFeed);
+if (!this.inFeeds.has(remoteInstanceId) && theirFeedKey
+    && !this._deferredRotations.has(remoteInstanceId)) {
+  try {
+    … open new Hypercore(dir, theirFeedKey), await ready() …
+    await this._reconcileAppliedSeqAtOpen(remoteInstanceId, inFeed);  // C2 — ALWAYS, every open
+    … wire append listener; store its ref in _inFeedListeners (R2 #9) …
+    … attach to tracked live streams (C3) …
+    this.inFeeds.set(remoteInstanceId, inFeed);
+  } catch (err) {
+    // R2 #1 (CRITICAL): an open failure must degrade to out-only, never throw
+    // out of initInstance. Without this, a still-held rocksdb lock after a
+    // deferred rotation turns every subsequent open attempt into a throw that
+    // kills the tailnet client's whole handshake (both directions dead,
+    // reconnect throw-loop) and, on the C4 interval, an unhandled rejection
+    // that would CRASH the gateway once a minute (no unhandledRejection
+    // handler exists in servers/).
+    console.error(`[instance-sync] in-feed open failed for ${id}: ${err.message} — continuing out-only`);
+  }
 }
 ```
+
+The `_deferredRotations` set suppresses repeated same-process open attempts against a dir
+whose rocksdb lock is still held by the zombie session. The abandoned close promise keeps
+a `.then(() => this._deferredRotations.delete(id))` attached — a close that was merely
+SLOW (resolves after the cap) releases the lock and un-defers the peer, so the next
+connection or C4 tick completes the rotation without a restart; a truly hung close keeps
+the suppression until the restart that also releases the lock. The try/catch is the real
+safety net: it also covers open failures from any other cause (disk, corruption) with the
+same out-only degradation the spec promises. C4's per-peer `initInstance` call is
+additionally wrapped in its own try/catch (defense in depth for the interval path).
 
 Properties:
 - Runs inside the existing `_initLocks` per-peer chain — no concurrent-swap races, and
@@ -138,11 +162,12 @@ Properties:
   The abandoned close promise's eventual resolution touches only the already-unmapped
   feed object (no Map access, no double-close hazard: `closeInstanceFeeds` tolerates
   closed feeds, and the swap already deleted the entry).
-- Key validation at all three receipt points' entry into `initInstance`: exactly 32 bytes
-  (64 hex chars), and **not equal to our own out-feed key for that peer** (a peer echoing
-  our key back would otherwise make us re-apply our own history — R1 F7; entries verify
-  against the *shared* identity so they would apply). Malformed/self keys are logged and
-  ignored.
+- Key validation via a shared helper called at all three receipt points **before the
+  `sync_url` persist** (R2 #8 — validating only at open would persist a poison key that
+  then fails every subsequent open): exactly 32 bytes (64 hex chars), and **not equal to
+  our own out-feed key for that peer** (a peer echoing our key back would otherwise make
+  us re-apply our own history — R1 F7; entries verify against the *shared* identity so
+  they would apply). Malformed/self keys are logged and ignored — no persist, no open.
 - **R1 F3 fix — the tailnet server's pre-exchange init no longer passes a key:**
   `tailnet-sync.js:238` becomes `initInstance(remoteInstanceId, null)`. That call's only
   job is arming the out-feed for `getOutFeedKey` (`:239`); passing the *snapshot*
@@ -174,9 +199,18 @@ callers (`tests/instance-sync.test.js:288-293` etc.) are migrated to pass a key 
 **Readers.** `_getLastAppliedSeq(peerId, feed)`:
 - record `k === feed.key.hex` → return `s`; `k ≠ feed.key.hex` → foreign record → return 0.
 - Display-only callers without a feed handle (`getSyncStatus` when the in-feed is not open)
-  pass `feed = null` and get the raw `s` back — cosmetic, never gates application.
+  pass `feed = null` and get the raw `s` back — cosmetic, never gates application. Every
+  `getSyncStatus` consumer of the blob unwraps `.s` (a raw-object read would make
+  `pendingEntries = length - {object} = NaN` — R2 #7).
 - A legacy numeric reaching a *processing* read is impossible after the open-time
   reconcile below; if seen (defensive), treat as foreign → 0.
+
+**SQL note (R2 #7):** the current writer uses `json_set(..., ?, CAST(? AS INTEGER))`
+(`:2691`); the object format requires `json_set(..., ?, json(?))` — keeping the CAST (or
+passing a pre-stringified object without `json()`) stores a JSON *string*, and every
+reader's `.s`/`.k` reads `undefined`. This is a named implementation checkpoint, mutation-
+covered by G2 (a string-stored record makes the key-gate read return 0 forever → visible
+as perpetual replay, and G4a's apply-count-0 assertion goes red).
 
 **Open-time reconcile — the decision is frozen once, at feed open (R1 F2).**
 `_reconcileAppliedSeqAtOpen(peerId, feed)` runs on EVERY in-feed open (boot, eager,
@@ -214,20 +248,31 @@ An in-flight `_processNewEntriesInner` bound to the OLD feed across a swap:
   the worst case is the new feed re-processing entries `0..m` it already applied: a fresh
   rotated feed replayed from 0 is safe (post-rotation history only; LWW + conflict-dedupe
   make re-application convergent), and the first new-feed checkpoint rewrites `{k: new}`.
-  Convergent under every interleaving; no divergence, bounded waste.
+  Convergent under every interleaving; no divergence, bounded waste. One honest caveat
+  (R2 #10): "the first new-feed checkpoint rewrites `{k:new}`" is not guaranteed terminal
+  within the session — a slow old-feed run can land the LAST write as `{k:old}`; in that
+  case convergence completes at the next reconcile (next open/boot) at the cost of one
+  extra fresh-feed reprocess. Safe either way.
 - Started post-swap (queued): `_processNewEntriesInner` **bails at entry** when
   `this.inFeeds.get(id) !== feed` (the swap deleted/replaced the entry) — no old-feed
   replay-from-0 (which WOULD have been the resurrection hazard), no stamp.
-- Mid-loop after close: `feed.get` on the closed feed throws per entry; the loop's
-  poison-skip advances. A per-iteration `inFeeds.get(id) !== feed` bail is added to cut
-  that churn short (correctness does not depend on it).
+- Mid-loop after close: probe-verified (R2 #5), `feed.length` reads **0** after `close()`
+  and `feed.get` throws `SESSION_CLOSED` — so an in-flight loop's `seq < feed.length`
+  condition goes false and it terminates immediately on its next iteration. No poison-skip
+  churn occurs; no per-iteration bail is needed (rev 2's was defending a mechanism that
+  doesn't exist — dropped, YAGNI). The old feed's `.key` remains readable after close
+  (probe-verified), so a post-close stamp still carries the OLD key and stays key-gated.
 
 ### C3 — Live-stream attach after swap
 
 `replicate(remoteInstanceId, stream)` records the stream in
-`_activeStreams: Map<peerId, Set<stream>>` (entry removed on the stream's `close` event).
-After a C1 swap, the new in-feed calls `.replicate(existingStream, {live:true})` on every
-tracked live stream. This closes the Hyperswarm ordering hole: `onInstanceConnected` may
+`_activeStreams: Map<peerId, Set<stream>>` (entry removed on the stream's `close` event,
+AND the peer's whole set dropped by `_closeInstanceFeedsInner` — R2 #2: revoke closes
+feeds but not transports, so without that teardown the set leaks per revoke/re-pair cycle
+and a later swap would attach the new feed to a stale stream whose cores were all closed).
+Memory bound: ≤ live transport connections per active peer, cleared on stream close and
+on revoke. After a C1 swap, the new in-feed calls `.replicate(existingStream, {live:true})`
+on every tracked live stream. This closes the Hyperswarm ordering hole: `onInstanceConnected` may
 `replicate()` *before* the challenge-response key reaches `onInstanceKeyReceived`, so the
 triggering connection would otherwise carry only the dead core. (On the tailnet paths the
 key exchange strictly precedes `replicate()`, so the triggering connection there picks up
@@ -244,16 +289,23 @@ refreshed peer. With C1's key-equality fast path this is a Map lookup + Buffer c
 minute per peer when nothing changed; when `sync_url` changed by any means (manual tool
 edit, missed exchange), the swap converges within 60s with no restart. Not a boot-path
 call (interval only). Passing `null` (peer with no stored key) never closes or swaps
-anything (verified: the swap branch requires `theirFeedKey`).
+anything (verified: the swap branch requires `theirFeedKey`). The call is wrapped in its
+own try/catch (R2 #1): `refresh()` runs on a bare `setInterval` and the repo has no
+`unhandledRejection` handler — an escaped rejection here would crash the gateway.
 
 ### C5 — Backfill-flag premise reset (fixes D4)
 
 At boot, **between** `eagerInitPairedPeers` and the once-backfill calls — concretely in
 `servers/gateway/boot/mcp-mounts.js` after `:62` and before `reemitSyncableSettingsOnce`
-(`:110`) / `backfillContactsOnce` (`:122`), the ordering R1 F4 requires — check: if any
-armed out-feed with a paired row has `length === 0` while `__contacts_backfill_v1` /
-`__sync_reemit_allowlist_v2` read `done:`, the flags' premise ("peers have received this")
-died with the feed → clear both flags so the once-backfills re-run **this same boot**.
+(`:110`) / `backfillContactsOnce` (`:122`) / `backfillGroupsOnce` (`:132`) /
+`backfillProvidersForNewPeers` (`:144`), the ordering R1 F4 requires — check each armed
+out-feed with a paired row for `length === 0`. For each such peer: delete its per-peer
+`__providers_backfill_v1:<peerId>` flag (R2 #4 — the providers backfill has the identical
+premise-death; skipping it would leave provider rows permanently missing on the rotated
+peer while everything else re-flows). If ANY such peer exists: clear the three global
+flags (`__contacts_backfill_v1`, `__sync_reemit_allowlist_v2`, `__groups_backfill_v1` —
+the groups flag has the same premise and was missed by both the original draft and R1/R2;
+folded here for completeness) so the once-backfills re-run **this same boot**.
 Post-2c this is safe by construction: re-emits are preserve-mode (no lamport fabrication),
 redelivery-noise-skipped on the receiving side, and conflict-deduped.
 
@@ -346,6 +398,7 @@ defects; that blindness is exactly what let D1/D2 ship).
 | G5 | Same-key re-exchange: no swap (feed object identity preserved), seq untouched | Remove equality fast-path → G5 red |
 | G6 | Hung old-feed close: `close()` never resolves → `initInstance` returns ≤ cap, no hang, loud defer log | Remove `boundedClose` cap → G6 red (timeout) |
 | G6b | After G6's defer, a restarted manager (new objects, same dirs+DB) completes the rotation and applies backlog | Remove open-time reconcile → G6b red |
+| G6c | **Defer-then-reopen (R2 #1):** after a defer with the lock still held, a subsequent `initInstance(id, newKey)` returns the out-feed WITHOUT throwing; a C4-style call wrapped the same way; when the slow close finally resolves, the next `initInstance` completes the rotation | Remove the open try/catch → G6c red (throw escapes); remove the `_deferredRotations` un-defer `.then` → G6c red (rotation never completes) |
 | G7 | Replay safety: rotated fresh feed carrying insert→delete converges deleted; locally-newer row survives an older replayed entry (LWW holds at seq 0) | (LWW gates pre-exist; case pins them under rotation) |
 | G8 | **Old core actively replicating on a real stream** → rotation (real bounded close of that core) → new feed attached to the SAME still-open stream → new data flows (R1 F5 preconditions) | Remove `_activeStreams` attach → G8 red |
 | G9 | Old core's blocks still readable after swap (open by old key, read block 0) | — acceptance pin, no guard |
@@ -353,13 +406,21 @@ defects; that blindness is exactly what let D1/D2 ship).
 | G11 | Malformed `feed_key_hex` (odd length, non-hex, 16 bytes) → ignored, logged, no swap, no crash | Remove validation → G11 red |
 | G11b | Peer echoes OUR out-feed key → rejected, no in-feed opened on our own key (R1 F7) | Remove self-key check → G11b red |
 | G12 | **Cross-chain interleave (R1 F1):** a `_processNewEntries` run in flight on the OLD feed across the swap → new feed's record ends `{k: new}` with no skipped entries; queued post-swap runs on the old feed bail with no stamp | Stamp with "current in-feed" key instead of processed-feed key → G12 red; remove entry bail → G12 red |
-| G13 | Stale-snapshot swap-back (R1 F3): hyperswarm-delivered new key + concurrent tailnet-server handshake holding the old snapshot → converges on the NEW key, exactly one swap | Restore `:238` snapshot-key init → G13 red |
+| G13 | Stale-snapshot swap-back (R1 F3): hyperswarm-delivered new key + concurrent tailnet-server handshake holding the old snapshot → converges on the NEW key, exactly one swap. **Must drive the REAL tailnet WS server** (R2 #6): the harness mounts `setupTailnetSyncServer` on a real local http server and dials it with a real signed WS handshake, pausing between the server's `:222` snapshot read and its `:238` init to land the hyperswarm-path key write — simulating the race by calling `initInstance` twice directly would not execute `:238` and the mutation could never go red | Restore `:238` snapshot-key init → G13 red |
 
 Full mutation matrix run recorded in the PR (the 2c precedent). The MUTUAL case (G3) is
-mandatory per the 2a lesson. **Existing-suite migration (R1 F6):**
-`tests/instance-sync.test.js`'s direct `_getLastAppliedSeq`/`_setLastAppliedSeq` callers
-(:243, :270, :288-293, :354) are updated to the new signatures in the same PR; the
-no-feed display read is pinned by a small case there.
+mandatory per the 2a lesson.
+
+**Existing-suite migration (R1 F6, scope corrected per R2 #3):** the change is NOT limited
+to the four direct `_getLastAppliedSeq`/`_setLastAppliedSeq` call lines — every test that
+drives `_processNewEntries` on a `makeStubFeed()` (`tests/instance-sync.test.js:98-107`,
+used at :240, :254, :333-334 and ~10 more sites) breaks, because the stub has no `.key`.
+`makeStubFeed` grows a synthetic 32-byte `.key` (deterministic per harness, overridable).
+**Non-vacuity guard:** Test 3's cross-restart resumption asserts seqs 0-1 are NOT
+re-applied — that only tests resumption when `feed2` and `feed` carry the SAME synthetic
+key; the migration must set that deliberately and comment it (different keys would make
+the key-gate return 0, replay from a fresh db2, and pass the assertion vacuously — the
+exact 2a vacuous-test tell). The no-feed display read is pinned by a small case there.
 
 ## 8. Non-goals / follow-ups
 
@@ -427,3 +488,41 @@ IMPORTANTs, one MINOR, two NOTEs; all folded into rev 2:
 - Reviewer verified-holds worth keeping: `boot.js:793-803` passes null (no thrash vector
   there); C4 null-key safety; feedsDisabled inertness; revoked/paused exclusion at every
   path; happy-path boot-liveness.
+
+**Round 2 (fresh Opus subagent, 2026-07-15) — verdict REVISE.** One CRITICAL, three
+IMPORTANTs, three MINORs, three NOTEs — concentrated, as predicted, in rev 2's own fixes;
+all folded into rev 3:
+- **#1 (CRITICAL)** the C1 defer branch left `inFeeds` absent with the rocksdb lock held;
+  the NEXT open attempt throws out of `initInstance` — killing the tailnet client's whole
+  handshake (both directions dead, reconnect throw-loop) and crashing the gateway via
+  unhandled rejection on the C4 interval. *Fixed:* try/catch around the in-feed open
+  (degrade out-only), `_deferredRotations` suppression with un-defer on late close
+  resolution, C4 per-peer wrap; gate G6c with two mutations.
+- **#2 (IMPORTANT)** `_activeStreams` leaked on revoke and could attach a swap to a stale
+  stream. *Fixed:* teardown in `_closeInstanceFeedsInner`; memory bound stated (C3).
+- **#3 (IMPORTANT)** F6 migration scope was understated (~10+ `makeStubFeed` sites break;
+  Test 3 could go vacuous under different synthetic keys). *Fixed:* scope corrected in §7
+  with an explicit non-vacuity guard.
+- **#4 (IMPORTANT)** C5 skipped the providers per-peer backfill flag (identical premise-
+  death → provider rows permanently missing post-rotation). *Fixed:* per-peer providers
+  flag reset folded into C5, plus the `__groups_backfill_v1` global flag both rounds
+  missed.
+- **#5 (MINOR)** §3.1's mid-loop poison-skip mechanism was wrong (probe: `length` reads 0
+  after close; loop exits immediately). *Fixed:* analysis corrected; rev 2's per-iteration
+  bail dropped (YAGNI — defended a nonexistent mechanism).
+- **#6 (MINOR)** G13 as written could be simulated into vacuity. *Fixed:* pinned to drive
+  the real `setupTailnetSyncServer` WS endpoint.
+- **#7 (MINOR)** `json_set` needs `json(?)` not `CAST` for the object format;
+  `getSyncStatus` must unwrap `.s`. *Fixed:* SQL note in C2.
+- **#8 (NOTE)** validate before persist. *Fixed:* shared helper gates the `sync_url`
+  write at all three receipt points.
+- **#9 (NOTE)** listener refs must be per-peer; add a no-op error listener during swap.
+  *Fixed* in C1.
+- **#10 (NOTE)** §3.1 finality overstated. *Fixed:* caveat added (next-boot reconcile is
+  the terminal guarantee).
+- R2 verified-holds worth keeping: §3.1 interleave convergence under the per-entry
+  checkpoint pattern; `json_set` single-statement atomicity (no cross-chain lost update);
+  open→reconcile→listen→attach ordering closes F2 airtight; reconcile runs on first key'd
+  open after null-key no-ops; `emitChange`/out-feed untouched by swap; C5's length read
+  ordering valid (`mcp-mounts.js:62` awaited); `.key` readable after close; boot stays
+  clean (fresh process holds no zombie lock).
