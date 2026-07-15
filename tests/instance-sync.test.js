@@ -1424,20 +1424,24 @@ test("2c-C1a. emitChange opts.lamportTs: envelope preserved, local row NOT re-st
   const { mgr, db } = makeManager("inst-2c-c1");
   const captured = [];
   mgr.outFeeds = new Map([["peer-x", { append: async (e) => captured.push(e) }]]);
+  // Row's own lamport_ts (9) diverges from opts.lamportTs (5) on purpose: this
+  // is the only way to tell "envelope preserves opts.lamportTs" apart from a
+  // bug where preserve-mode reuses the row's own current lamport instead.
   await db.execute({
-    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:c1a', '', 'a1', 'Old Name', 5)",
+    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:c1a', '', 'a1', 'Old Name', 9)",
     args: [],
   });
   const { rows: r0 } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:c1a'", args: [] });
   const ts = await mgr.emitChange("contacts", "update", r0[0], { lamportTs: 5 });
-  assert.equal(ts, 5, "returns the preserved envelope lamport");
+  assert.equal(ts, 5, "returns the preserved envelope lamport (opts.lamportTs), not the row's own lamport");
   assert.equal(captured.length, 1);
-  assert.equal(captured[0].lamport_ts, 5, "envelope carries the preserved lamport");
+  assert.equal(captured[0].lamport_ts, 5, "envelope carries the preserved opts.lamportTs, not the row's own lamport");
   const { rows: r1 } = await db.execute({ sql: "SELECT lamport_ts FROM contacts WHERE crow_id = 'crow:c1a'", args: [] });
-  assert.equal(Number(r1[0].lamport_ts), 5, "local row lamport NOT re-stamped");
-  // Counter floored: the next fresh mint must exceed the preserved value.
+  assert.equal(Number(r1[0].lamport_ts), 9, "local row lamport NOT re-stamped (stays at its original 9)");
+  // Counter floored: the next fresh mint must exceed BOTH the row's own
+  // lamport (9) and the preserved value (5) — i.e. > 9, the higher of the two.
   const fresh = await mgr._nextLamport();
-  assert.ok(fresh > 5, `next mint ${fresh} must exceed preserved 5`);
+  assert.ok(fresh > 9, `next mint ${fresh} must exceed row lamport 9`);
   db.close();
 });
 
@@ -1454,6 +1458,27 @@ test("2c-C1b. emitChange without opts: behavior unchanged (fresh mint + local st
   assert.ok(ts > 5, "fresh mint exceeds row lamport (counter floor)");
   const { rows: r1 } = await db.execute({ sql: "SELECT lamport_ts FROM contacts WHERE crow_id = 'crow:c1b'", args: [] });
   assert.equal(Number(r1[0].lamport_ts), ts, "local row re-stamped with the fresh mint");
+  db.close();
+});
+
+test("2c-C1c. emitChange opts.lamportTs === 0 (NULL-legacy sentinel): preserved not minted, local row stays NULL", async () => {
+  const { mgr, db } = makeManager("inst-2c-c1c");
+  const captured = [];
+  mgr.outFeeds = new Map([["peer-x", { append: async (e) => captured.push(e) }]]);
+  // lamport_ts explicitly NULL (the column has DEFAULT 0, so merely omitting
+  // it would NOT produce NULL) — this is the legacy-row sentinel that later
+  // tasks rely on.
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:c1c', '', 'c1', 'Legacy Name', NULL)",
+    args: [],
+  });
+  const { rows: r0 } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:c1c'", args: [] });
+  const ts = await mgr.emitChange("contacts", "update", r0[0], { lamportTs: 0 });
+  assert.equal(ts, 0, "returns the preserved envelope lamport (0), not a fresh mint");
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].lamport_ts, 0, "envelope carries the preserved 0, not a freshly minted value");
+  const { rows: r1 } = await db.execute({ sql: "SELECT lamport_ts FROM contacts WHERE crow_id = 'crow:c1c'", args: [] });
+  assert.equal(r1[0].lamport_ts, null, "local row lamport stays NULL (not re-stamped)");
   db.close();
 });
 
