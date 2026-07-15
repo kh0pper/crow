@@ -82,13 +82,23 @@ export async function sendNtfyNotification({ title, body, url, priority = "norma
     headers["Authorization"] = `Bearer ${authToken}`;
   }
 
+  // Bound the send (2c follow-up F2/C2a): createNotification awaits this
+  // sender from the instance-sync apply path — an unbounded hang on a
+  // half-open socket wedges boot or the live apply loop. A timed-out send
+  // lands in the same catch as any other failed send (already tolerated).
+  const timeoutMs = parseInt(process.env.CROW_PUSH_SEND_TIMEOUT_MS, 10) || 10_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     await fetch(ntfyUrl, {
       method: "POST",
       headers,
       body: body || title,
+      signal: controller.signal,
     });
   } catch {
-    // ntfy server not available — fail silently
+    // ntfy server not available or send timed out — fail silently
+  } finally {
+    clearTimeout(timer);
   }
 }
