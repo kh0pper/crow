@@ -1237,6 +1237,23 @@ export class InstanceSyncManager {
   }
 
   /**
+   * Validate a peer-advertised feed key BEFORE persisting or opening (2d C1;
+   * R2 #8 persist-gating, R1 F7 self-echo). Returns Buffer or null.
+   */
+  validateIncomingFeedKey(remoteInstanceId, feedKeyHex) {
+    if (typeof feedKeyHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(feedKeyHex)) {
+      console.warn(`[instance-sync] rejecting malformed feed key from ${String(remoteInstanceId).slice(0,12)}…`);
+      return null;
+    }
+    const ours = this.getOutFeedKey(remoteInstanceId);
+    if (ours && ours.toString("hex") === feedKeyHex.toLowerCase()) {
+      console.warn(`[instance-sync] rejecting self-echoed feed key from ${String(remoteInstanceId).slice(0,12)}… (would re-apply our own history)`);
+      return null;
+    }
+    return Buffer.from(feedKeyHex, "hex");
+  }
+
+  /**
    * Replicate feeds over a NoiseSecretStream-wrapped transport. Hyperswarm
    * connections are already NoiseSecretStream instances; for plain WebSocket
    * or other Duplex transports, wrap with `new NoiseSecretStream(isInitiator,

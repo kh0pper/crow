@@ -475,3 +475,19 @@ test("G12: in-flight old-feed processing across the swap cannot corrupt the new 
     assert.equal(JSON.stringify(await b.mgr._appliedSeqRecord(a.id)), before, "bailed run stamps nothing");
   } finally { await fleet.cleanup(); }
 });
+
+test("G11/G11b: malformed and self-echoed feed keys are rejected -- no persist-shape swap, no crash", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    await b.mgr.initInstance(a.id, null); // arm out-feed so self-key exists
+    for (const bad of ["zz".repeat(32), "aa".repeat(16), "aa".repeat(33), "", null, 42]) {
+      assert.equal(b.mgr.validateIncomingFeedKey(a.id, bad), null, `rejects ${String(bad).slice(0,8)}`);
+    }
+    const selfKey = b.mgr.getOutFeedKey(a.id).toString("hex");
+    assert.equal(b.mgr.validateIncomingFeedKey(a.id, selfKey), null, "G11b: self-echo rejected");
+    const good = "ab".repeat(32);
+    const buf = b.mgr.validateIncomingFeedKey(a.id, good);
+    assert.equal(buf?.toString("hex"), good, "valid key parses");
+  } finally { await fleet.cleanup(); }
+});
