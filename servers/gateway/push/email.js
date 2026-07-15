@@ -99,6 +99,13 @@ export async function sendEmailNotification({
   const text =
     (body || title) + (clickUrl ? `\n\nOpen in Crow: ${clickUrl}` : "");
 
+  // Bound the send (2c follow-up F2/C2a): createNotification awaits this
+  // sender from the instance-sync apply path — an unbounded hang on a
+  // half-open socket wedges boot or the live apply loop. A timed-out send
+  // lands in the same catch as any other failed send (already tolerated).
+  const timeoutMs = parseInt(process.env.CROW_PUSH_SEND_TIMEOUT_MS, 10) || 10_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -113,6 +120,7 @@ export async function sendEmailNotification({
         html,
         text,
       }),
+      signal: controller.signal,
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
@@ -120,5 +128,7 @@ export async function sendEmailNotification({
     }
   } catch (err) {
     console.warn(`[push/email] fetch failed: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
   }
 }

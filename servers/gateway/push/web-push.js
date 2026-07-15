@@ -49,31 +49,44 @@ export async function sendPushToAll(db, { title, body, url }) {
     return;
   }
 
-  for (const row of rows) {
-    const subscription = {
-      endpoint: row.endpoint,
-      keys: JSON.parse(row.keys_json),
-    };
-    try {
-      await webpush.sendNotification(
-        subscription,
-        JSON.stringify({ title, body: body || title, url: url || "/dashboard/nest" })
-      );
-      // Update last_seen
-      await db.execute({
-        sql: "UPDATE push_subscriptions SET last_seen = datetime('now') WHERE endpoint = ?",
-        args: [row.endpoint],
-      });
-    } catch (err) {
-      if (err.statusCode === 410 || err.statusCode === 404) {
-        // Stale subscription — auto-remove
+  // Bound each send (2c follow-up F2/C2a): createNotification awaits this
+  // fan-out from the instance-sync apply path — an unbounded hang on a
+  // half-open endpoint wedges boot or the live apply loop. `timeout` is a
+  // socket-idle timeout in ms (web-push@3.6.7); a timed-out send rejects
+  // into the same per-endpoint catch as any other failed send. The sends
+  // run in parallel (Promise.allSettled) so N bad endpoints cost ~one cap,
+  // not N×cap; push has no cross-endpoint ordering semantics, and the
+  // per-endpoint try/catch keeps the 410/404 prune and last_seen
+  // bookkeeping per-endpoint exactly as the serial loop did.
+  const timeoutMs = parseInt(process.env.CROW_PUSH_SEND_TIMEOUT_MS, 10) || 10_000;
+  await Promise.allSettled(
+    rows.map(async (row) => {
+      const subscription = {
+        endpoint: row.endpoint,
+        keys: JSON.parse(row.keys_json),
+      };
+      try {
+        await webpush.sendNotification(
+          subscription,
+          JSON.stringify({ title, body: body || title, url: url || "/dashboard/nest" }),
+          { timeout: timeoutMs }
+        );
+        // Update last_seen
         await db.execute({
-          sql: "DELETE FROM push_subscriptions WHERE endpoint = ?",
+          sql: "UPDATE push_subscriptions SET last_seen = datetime('now') WHERE endpoint = ?",
           args: [row.endpoint],
         });
+      } catch (err) {
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          // Stale subscription — auto-remove
+          await db.execute({
+            sql: "DELETE FROM push_subscriptions WHERE endpoint = ?",
+            args: [row.endpoint],
+          });
+        }
       }
-    }
-  }
+    })
+  );
 }
 
 /**
