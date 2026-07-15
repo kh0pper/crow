@@ -702,3 +702,43 @@ test("C4: refresh heals sync_url drift for ALREADY-DIALING peers and survives in
     assert.deepEqual(calls[1], ["peer1", "cd".repeat(32)], "already-dialing peer still healed");
   } finally { clients.stop(); }
 });
+
+// ── Task 9 (C5): backfill-flag premise reset at boot ────────────────────────
+
+test("G10: empty armed out-feed clears premise flags BEFORE the once-backfills; non-empty leaves them", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    await a.mgr.initInstance(b.id, null); // armed, length 0 (fresh = post-rotation shape)
+    const setFlag = (k, v) => a.db.execute({ sql: "INSERT OR REPLACE INTO dashboard_settings (key, value) VALUES (?, ?)", args: [k, v] });
+    await setFlag("__contacts_backfill_v1", "done:5");
+    await setFlag("__sync_reemit_allowlist_v2", "done:9");
+    await setFlag("__groups_backfill_v1", "done:2");
+    await setFlag(`__providers_backfill_v1:${b.id}`, "done:3");
+    const cleared = await a.mgr.resetBackfillPremiseFlags();
+    assert.equal(cleared, 4, "three globals + one per-peer flag cleared");
+    const read = async (k) => (await a.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [k] })).rows[0]?.value;
+    assert.equal(await read("__contacts_backfill_v1"), undefined);
+    assert.equal(await read(`__providers_backfill_v1:${b.id}`), undefined);
+    // Ordering semantics (G10 mutation target): flags cleared → the once-backfill
+    // re-runs in the same sequence. reemitSyncableSettingsOnce with the flag
+    // GONE returns >= 0 and re-stamps done:, proving it executed its body.
+    // (If mcp-mounts called reemitSyncableSettingsOnce BEFORE
+    // resetBackfillPremiseFlags, the flag would still read "done:9" here and
+    // the backfill would short-circuit on alreadyRan — this assertion is what
+    // would catch that wrong ordering.)
+    await setFlag("sync.allowlisted.example", "x"); // ensure at least a no-op run completes
+    await a.mgr.reemitSyncableSettingsOnce();
+    assert.match(String(await read("__sync_reemit_allowlist_v2")), /^done:/, "backfill re-ran this boot");
+    // Negative control: non-empty out-feed → flags untouched.
+    // memories.id is INTEGER PRIMARY KEY (real schema) — a string id like "g10"
+    // throws SQLITE datatype mismatch on emitChange's local INSERT and the
+    // whole call fails silently into the catch, leaving the out-feed at length
+    // 0 and defeating this control (established correction; see G0's comment
+    // for the same class of fix).
+    await a.mgr.emitChange("memories", "insert", { id: 709000, content: "x", lamport_ts: null });
+    await setFlag("__contacts_backfill_v1", "done:5");
+    assert.equal(await a.mgr.resetBackfillPremiseFlags(), 0, "non-empty feed: nothing cleared");
+    assert.equal(await read("__contacts_backfill_v1"), "done:5");
+  } finally { await fleet.cleanup(); }
+});
