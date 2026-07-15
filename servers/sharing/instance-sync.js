@@ -575,11 +575,13 @@ export class InstanceSyncManager {
       // this guard is scoped to the re-emit reconciliation only.
       if (PROFILE_SYNC_KEYS.includes(row.key) && (typeof row.value !== "string" || row.value.trim() === "")) continue;
       try {
+        // 2c C2: preserve the row's ORIGINAL lamport (already SELECTed) — a
+        // re-emit is redelivery and must not out-stamp a peer's newer save.
         await this.emitChange("dashboard_settings", "update", {
           key: row.key,
           value: row.value,
           instance_id: null,
-        });
+        }, { lamportTs: Number(row.lamport_ts) || 0 });
         emitted++;
       } catch (err) {
         console.warn(`[instance-sync] reemit ${row.key} failed: ${err.message}`);
@@ -670,7 +672,11 @@ export class InstanceSyncManager {
       try {
         // shouldSyncRow("contacts", …) is the final gate inside emitChange;
         // EXCLUDED_COLUMNS.contacts strips verified/last_seen/id/created_at.
-        await this.emitChange("contacts", "update", row);
+        // 2c C2: preserve the row's ORIGINAL lamport — a backfill is redelivery,
+        // not a new write; a fresh mint here fabricated recency over any peer
+        // write still in flight (I-B1). NULL-lamport legacy rows emit at 0: they
+        // land where the peer has nothing and lose everywhere else.
+        await this.emitChange("contacts", "update", row, { lamportTs: Number(row.lamport_ts) || 0 });
         emitted++;
       } catch (err) {
         console.warn(`[instance-sync] contacts backfill emit failed for ${row.crow_id}: ${err.message}`);
@@ -965,7 +971,7 @@ export class InstanceSyncManager {
     let emitted = 0;
     for (const row of rows) {
       try {
-        await emitGroupUpsert(this.db, row.id); // shouldSyncRow + room skip are the final gate
+        await emitGroupUpsert(this.db, row.id, { preserveLamport: true }); // 2c C2: backfill keeps original lamports; shouldSyncRow + room skip are the final gate
         emitted++;
       } catch (err) {
         console.warn(`[instance-sync] groups backfill emit failed for group ${row.id}: ${err.message}`);

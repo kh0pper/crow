@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import { __setEmitSinkForTest } from "../servers/sharing/contact-sync.js";
+import { emitGroupUpsert, __setEmitSinkForTest as __setGroupSink } from "../servers/sharing/group-sync.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
 
 // ── identities ───────────────────────────────────────────────────────────────
@@ -194,4 +195,165 @@ test("G3c: chain preserves emit order across the open transition; nothing duplic
   await Promise.all([drainP, liveP]);
   assert.deepEqual(appended, ["E1", "E2"], "E1 strictly before E2");
   assert.equal((f.A.mgr._pendingPeerEmits.get(f.B.id) || []).length, 0, "nothing stranded");
+});
+
+// ── Task 5 (C2): preserved-lamport re-emitters — G1/G2/G6/G6b/G7/G8 ────────────
+// The contacts/settings/groups backfills persist a #147 done-flag in the SHARED
+// on-disk DB; every backfill test clears its flag first so the run actually fires.
+// sync_conflicts also accumulates across tests on the shared file — every conflict
+// assertion is SCOPED to a per-test crow_id via the JSON row_id.
+const SYNCED_CONTACT_COLS = ["crow_id", "display_name", "ed25519_pubkey", "secp256k1_pubkey"];
+const CONTACTS_FLAG = "__contacts_backfill_v1";
+const clearBackfillFlag = async (db) =>
+  db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ?", args: [CONTACTS_FLAG] });
+const contactConflicts = async (db, crowId) =>
+  Number((await db.execute({
+    sql: "SELECT COUNT(*) AS n FROM sync_conflicts WHERE table_name = 'contacts' AND row_id = ? AND resolved = 0",
+    args: [JSON.stringify({ crow_id: crowId })],
+  })).rows[0].n);
+
+test("G1: backfill re-emit preserves lamport -- stale cannot clobber newer; mutual convergence", async () => {
+  const f = newFleet();
+  await clearBackfillFlag(f.A.db);
+  await f.A.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g1', '', 'g1aa', 'Stale Name', 5)", args: [] });
+  await f.B.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g1', '', 'g1aa', 'Newer Name', 10)", args: [] });
+  const emitted = await f.A.mgr.backfillContactsOnce();
+  assert.ok(emitted >= 1, "backfill ran and emitted");
+  const g1Wire = f.wire.filter((w) => w.from === f.A.id && w.entry.row?.crow_id === "crow:g1");
+  assert.equal(Number(g1Wire.at(-1).entry.lamport_ts), 5, "envelope preserved the row lamport");
+  await f.deliver(); // A→B: stale@5 vs local@10
+  const rowB = (await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g1'", args: [] })).rows[0];
+  assert.equal(rowB.display_name, "Newer Name", "B keeps its newer value");
+  assert.equal(Number(rowB.lamport_ts), 10);
+  const rowA0 = (await f.A.db.execute({ sql: "SELECT lamport_ts FROM contacts WHERE crow_id = 'crow:g1'", args: [] })).rows[0];
+  assert.equal(Number(rowA0.lamport_ts), 5, "A's local row was NOT re-stamped");
+  // B's live emit reaches A → mutual convergence over the synced projection.
+  const rowBFull = (await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g1'", args: [] })).rows[0];
+  await act(f.B, async () => { await f.B.mgr.emitChange("contacts", "update", rowBFull); });
+  await f.deliver();
+  const a = (await f.A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g1'", args: [] })).rows[0];
+  const b = (await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g1'", args: [] })).rows[0];
+  for (const col of SYNCED_CONTACT_COLS) {
+    assert.equal(String(a[col] ?? ""), String(b[col] ?? ""), `converged on ${col}`);
+  }
+});
+
+test("G2: mutual backfill converges; 1 conflict on the higher-lamport side; redelivery adds 0", async () => {
+  const f = newFleet();
+  await clearBackfillFlag(f.A.db);
+  await clearBackfillFlag(f.B.db);
+  await f.A.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g2', '', 'g2aa', 'A Name', 5)", args: [] });
+  await f.B.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g2', '', 'g2aa', 'B Name', 10)", args: [] });
+  const before = f.wire.length;
+  await f.A.mgr.backfillContactsOnce(); // emits g2@5
+  await f.B.mgr.backfillContactsOnce(); // emits g2@10
+  const g2Items = f.wire.slice(before).filter((w) => w.entry.row?.crow_id === "crow:g2");
+  await f.deliver(); // interleaved both ways
+  // Both converge to the @10 value.
+  const a = (await f.A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g2'", args: [] })).rows[0];
+  const b = (await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g2'", args: [] })).rows[0];
+  assert.equal(a.display_name, "B Name", "A converged to the winner");
+  assert.equal(Number(a.lamport_ts), 10);
+  assert.equal(b.display_name, "B Name", "B kept its winner");
+  assert.equal(Number(b.lamport_ts), 10);
+  // Exactly 1 conflict row total, on the HIGHER-lamport side (B), asserted by its columns.
+  assert.equal(await contactConflicts(f.A.db, "crow:g2"), 0, "no conflict on the lower-lamport side (A)");
+  assert.equal(await contactConflicts(f.B.db, "crow:g2"), 1, "1 conflict on the higher-lamport side (B)");
+  const conf = (await f.B.db.execute({
+    sql: "SELECT winning_lamport_ts, losing_lamport_ts FROM sync_conflicts WHERE table_name='contacts' AND row_id=? AND resolved=0",
+    args: [JSON.stringify({ crow_id: "crow:g2" })],
+  })).rows[0];
+  assert.equal(Number(conf.winning_lamport_ts), 10, "winning lamport is the local 10");
+  assert.equal(Number(conf.losing_lamport_ts), 5, "losing lamport is the stale 5");
+  // Re-deliver the SAME wire slice — Task 3 dedupe holds sync_conflicts flat.
+  for (const it of g2Items) await f.applyItem(f.other(it.from), it);
+  assert.equal(await contactConflicts(f.B.db, "crow:g2"), 1, "re-delivery added 0 conflict rows");
+});
+
+test("G6: NULL legacy re-emits at lamport 0 -- loses to a peer's real row, but lands where the peer has nothing", async () => {
+  const f = newFleet();
+  await clearBackfillFlag(f.A.db);
+  await f.A.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g6', '', 'g6aa', 'A Legacy', NULL)", args: [] });
+  await f.B.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g6', '', 'g6aa', 'B Real', 7)", args: [] });
+  await f.A.mgr.backfillContactsOnce();
+  const g6Item = f.wire.find((w) => w.from === f.A.id && w.entry.row?.crow_id === "crow:g6");
+  assert.equal(Number(g6Item.entry.lamport_ts), 0, "envelope lamport is 0 for a NULL-lamport legacy row");
+  await f.deliver(); // A@0 vs B@7 → B keeps its real row
+  const rowB = (await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g6'", args: [] })).rows[0];
+  assert.equal(rowB.display_name, "B Real", "B's real row is untouched");
+  assert.equal(Number(rowB.lamport_ts), 7);
+  const rowA = (await f.A.db.execute({ sql: "SELECT lamport_ts FROM contacts WHERE crow_id = 'crow:g6'", args: [] })).rows[0];
+  assert.equal(rowA.lamport_ts, null, "A's local row lamport stays NULL (no re-stamp)");
+  // A peer that lacks the row entirely receives it (insert-on-missing is lamport-independent).
+  await f.B.db.execute({ sql: "DELETE FROM contacts WHERE crow_id = 'crow:g6'", args: [] });
+  await f.applyItem(f.B, g6Item);
+  const rowB2 = (await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g6'", args: [] })).rows[0];
+  assert.ok(rowB2, "missing-row peer received the @0 row");
+  assert.equal(rowB2.display_name, "A Legacy");
+});
+
+test("G6b: MUTUAL NULL-vs-NULL divergent legacy -- accepted non-convergence, 1 conflict per side, second delivery adds 0", async () => {
+  const f = newFleet();
+  await clearBackfillFlag(f.A.db);
+  await clearBackfillFlag(f.B.db);
+  await f.A.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g6b', '', 'g6baa', 'A Value', NULL)", args: [] });
+  await f.B.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g6b', '', 'g6baa', 'B Value', NULL)", args: [] });
+  const before = f.wire.length;
+  await f.A.mgr.backfillContactsOnce();
+  await f.B.mgr.backfillContactsOnce();
+  const g6bItems = f.wire.slice(before).filter((w) => w.entry.row?.crow_id === "crow:g6b");
+  await f.deliver(); // both ways
+  const a = (await f.A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g6b'", args: [] })).rows[0];
+  const b = (await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g6b'", args: [] })).rows[0];
+  assert.equal(a.display_name, "A Value", "A keeps its value (0 > 0 is false)");
+  assert.equal(b.display_name, "B Value", "B keeps its value");
+  assert.equal(await contactConflicts(f.A.db, "crow:g6b"), 1, "exactly 1 conflict on A");
+  assert.equal(await contactConflicts(f.B.db, "crow:g6b"), 1, "exactly 1 conflict on B");
+  for (const it of g6bItems) await f.applyItem(f.other(it.from), it);
+  assert.equal(await contactConflicts(f.A.db, "crow:g6b"), 1, "second delivery added 0 on A");
+  assert.equal(await contactConflicts(f.B.db, "crow:g6b"), 1, "second delivery added 0 on B");
+});
+
+test("G7: #147 flag -- first backfill writes done:<n>, second emits 0 (wire unchanged)", async () => {
+  const f = newFleet();
+  await clearBackfillFlag(f.A.db);
+  await f.A.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g7', '', 'g7aa', 'G7', 3)", args: [] });
+  const e1 = await f.A.mgr.backfillContactsOnce();
+  assert.ok(e1 >= 1, "first run emitted");
+  const flag = (await f.A.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [CONTACTS_FLAG] })).rows[0];
+  assert.equal(flag.value, `done:${e1}`, "first run wrote the done:<n> flag");
+  const wireAfterFirst = f.wire.length;
+  const e2 = await f.A.mgr.backfillContactsOnce();
+  assert.equal(e2, 0, "second run emits 0 (flag terminal)");
+  assert.equal(f.wire.length, wireAfterFirst, "wire length unchanged on the second run");
+});
+
+test("G8: settings + groups re-emit preserve their lamport (envelope == L; local lamport unchanged)", async () => {
+  const f = newFleet();
+  // ── settings: an allowlisted key at lamport 40 ──
+  await f.A.db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value, lamport_ts) VALUES ('nav_groups', 'x', 40) ON CONFLICT(key) DO UPDATE SET value = excluded.value, lamport_ts = excluded.lamport_ts",
+    args: [],
+  });
+  await f.A.mgr.reemitSyncableSettingsOnce();
+  const setEntry = f.wire.filter((w) => w.from === f.A.id && w.entry.table === "dashboard_settings" && w.entry.row?.key === "nav_groups").at(-1);
+  assert.ok(setEntry, "settings re-emit rode the wire");
+  assert.equal(Number(setEntry.entry.lamport_ts), 40, "settings envelope lamport == 40 (not a fresh mint)");
+  const setLocal = (await f.A.db.execute({ sql: "SELECT lamport_ts FROM dashboard_settings WHERE key = 'nav_groups'", args: [] })).rows[0];
+  assert.equal(Number(setLocal.lamport_ts), 40, "settings local lamport unchanged");
+  // ── groups: a group_uid'd row at lamport 30 via its own sink ──
+  await f.A.db.execute({ sql: "INSERT INTO contact_groups (name, group_uid, lamport_ts) VALUES ('G8 Group', 'uid-g8', 30)", args: [] });
+  const gid = Number((await f.A.db.execute({ sql: "SELECT id FROM contact_groups WHERE group_uid = 'uid-g8'", args: [] })).rows[0].id);
+  const beforeG = f.wire.length;
+  __setGroupSink(f.A.mgr);
+  try {
+    await emitGroupUpsert(f.A.db, gid, { preserveLamport: true });
+  } finally {
+    __setGroupSink(null);
+  }
+  const grpEntry = f.wire.slice(beforeG).filter((w) => w.entry.table === "contact_groups" && w.entry.row?.group_uid === "uid-g8").at(-1);
+  assert.ok(grpEntry, "group re-emit rode the wire");
+  assert.equal(Number(grpEntry.entry.lamport_ts), 30, "group envelope lamport == 30 (not a fresh mint)");
+  const grpLocal = (await f.A.db.execute({ sql: "SELECT lamport_ts FROM contact_groups WHERE group_uid = 'uid-g8'", args: [] })).rows[0];
+  assert.equal(Number(grpLocal.lamport_ts), 30, "group local lamport unchanged");
 });
