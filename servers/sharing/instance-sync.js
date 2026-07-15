@@ -299,6 +299,13 @@ export class InstanceSyncManager {
     // Per-peer serialization for _processNewEntries — see D4 fix below.
     this._processLocks = new Map(); // remoteInstanceId → tail Promise
 
+    // 2c C3: per-peer ordered append pipeline. ALL writes toward a peer's outFeed
+    // flow through one FIFO promise chain (_appendLocks, the _initLocks pattern);
+    // entries emitted while the peer's feed is not yet armed park in
+    // _pendingPeerEmits and drain on arm — the boot-window fix (spec §3 C3).
+    this._appendLocks = new Map();      // remoteInstanceId → tail Promise
+    this._pendingPeerEmits = new Map(); // remoteInstanceId → [signed entries]
+
     // Flag that _ensureCounter has seeded the sync_state row at least once.
     // The DB row is the authority; this is only a cheap short-circuit.
     this._counterSeeded = false;
@@ -434,6 +441,11 @@ export class InstanceSyncManager {
       });
       await outFeed.ready();
       this.outFeeds.set(remoteInstanceId, outFeed);
+      // 2c C3: drain entries parked while this feed was unarmed. The enqueue MUST
+      // be synchronously adjacent to the set above (spec §3 C3) — an emit task
+      // slipping in between would append ahead of older parked entries.
+      const drainDone = this._drainPendingEmits(remoteInstanceId);
+      await drainDone.catch(() => {});
     }
 
     // Their incoming feed (writable by them)
@@ -1041,6 +1053,76 @@ export class InstanceSyncManager {
     if (inFeed) inFeed.replicate(stream, { live: true });
   }
 
+  /** Chain helper: run taskFn as the next link on peerId's append chain. */
+  async _chainAppendTask(peerId, taskFn) {
+    const prior = this._appendLocks.get(peerId) || Promise.resolve();
+    const next = prior.catch(() => {}).then(taskFn);
+    this._appendLocks.set(peerId, next);
+    try {
+      return await next;
+    } finally {
+      if (this._appendLocks.get(peerId) === next) this._appendLocks.delete(peerId);
+    }
+  }
+
+  /**
+   * Append an entry toward a peer, or park it while the feed is unarmed.
+   * The decision is made INSIDE the chained task, against current state — a
+   * check-then-push outside the chain can strand entries or reorder the feed
+   * (spec R2/F2). A failed append is logged and NOT retried (pre-existing
+   * semantics; deletes self-heal via the tombstone re-emit).
+   */
+  async _appendToPeer(peerId, entry) {
+    return this._chainAppendTask(peerId, async () => {
+      const feed = this.outFeeds.get(peerId);
+      if (feed) {
+        try {
+          await feed.append(entry);
+        } catch (err) {
+          console.warn(`[instance-sync] Failed to append to feed for ${peerId}:`, err.message);
+        }
+        return;
+      }
+      const slot = this._pendingPeerEmits.get(peerId) || [];
+      slot.push(entry);
+      if (slot.length > 256) {
+        slot.shift();
+        console.warn(`[instance-sync] pending emit queue overflow for ${peerId} — dropped oldest (LWW-safe direction)`);
+      }
+      this._pendingPeerEmits.set(peerId, slot);
+    });
+  }
+
+  /**
+   * Drain a peer's parked entries onto its (now armed) outFeed, FIFO. Chained,
+   * so a live emit can never interleave mid-drain. Enqueued by _initInstanceInner
+   * SYNCHRONOUSLY ADJACENT to outFeeds.set — no await between them (spec §3 C3
+   * MUST: an emit slipping into that gap would reorder the feed).
+   * @returns {Promise<number>} entries appended
+   */
+  async _drainPendingEmits(peerId) {
+    return this._chainAppendTask(peerId, async () => {
+      const slot = this._pendingPeerEmits.get(peerId);
+      this._pendingPeerEmits.delete(peerId);
+      if (!slot || slot.length === 0) return 0;
+      const feed = this.outFeeds.get(peerId);
+      if (!feed) {
+        this._pendingPeerEmits.set(peerId, slot); // feed vanished — re-park
+        return 0;
+      }
+      let n = 0;
+      for (const entry of slot) {
+        try {
+          await feed.append(entry);
+          n++;
+        } catch (err) {
+          console.warn(`[instance-sync] pending drain append failed for ${peerId}: ${err.message}`);
+        }
+      }
+      return n;
+    });
+  }
+
   /**
    * Emit a sync entry for a local data change.
    * Called by memory/context/sharing servers after mutations.
@@ -1127,14 +1209,23 @@ export class InstanceSyncManager {
       }
     }
 
-    // Append to all outgoing feeds (broadcast to all connected instances)
-    for (const [instanceId, feed] of this.outFeeds) {
-      try {
-        await feed.append(entry);
-      } catch (err) {
-        console.warn(`[instance-sync] Failed to append to feed for ${instanceId}:`, err.message);
-      }
+    // Broadcast through the per-peer chains: every PAIRED peer (armed or not)
+    // plus any armed feed not (yet) in the registry. Entries for unarmed paired
+    // peers park in _pendingPeerEmits and ride when the feed arms (2c C3 — the
+    // boot-window fix; previously they were silently dropped while the caller
+    // saw a valid lamport).
+    let pairedIds = [];
+    try {
+      const { rows } = await this.db.execute({
+        sql: "SELECT id FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+        args: [this.localInstanceId],
+      });
+      pairedIds = rows.map((r) => r.id);
+    } catch {
+      pairedIds = []; // degraded: armed feeds below still get the entry
     }
+    const targets = new Set([...pairedIds, ...this.outFeeds.keys()]);
+    await Promise.all([...targets].map((peerId) => this._appendToPeer(peerId, entry)));
 
     return lamportTs;
   }
@@ -2525,6 +2616,9 @@ export class InstanceSyncManager {
       try { await inFeed.close(); } catch {}
       this.inFeeds.delete(remoteInstanceId);
     }
+    // 2c C3: a closed/revoked peer keeps no parked entries or chain tail.
+    this._pendingPeerEmits.delete(remoteInstanceId);
+    this._appendLocks.delete(remoteInstanceId);
   }
 
   /**
