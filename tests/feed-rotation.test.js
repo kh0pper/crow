@@ -595,3 +595,68 @@ test("G9: old core blocks remain readable after the swap (acceptance pin)", asyn
     await reopened.close();
   } finally { await fleet.cleanup(); }
 });
+
+// ── Task 7 (F3): tailnet server pre-exchange init race ─────────────────────
+
+test("G13: stale-snapshot tailnet handshake cannot swap back a concurrently-received new key", async () => {
+  const fleet = await makeFleet();
+  const http = await import("node:http");
+  const { WebSocket } = await import("ws");
+  const { setupTailnetSyncServer } = await import("../servers/sharing/tailnet-sync.js");
+  const { sign } = await import("../servers/sharing/identity.js");
+  let server, ws;
+  try {
+    const { a, b } = fleet;
+    // B hosts the WS server. Seed B's row for A with the OLD key.
+    const oldLink = await linkPeers(a, b);
+    oldLink.close();
+    const oldKeyHex = a.mgr.getOutFeedKey(b.id).toString("hex");
+    await b.db.execute({ sql: "UPDATE crow_instances SET sync_url = ? WHERE id = ?", args: [oldKeyHex, a.id] });
+    // Barrier: park the server's :222 snapshot SELECT until the new key lands.
+    let releaseLookup; const lookupGate = new Promise((r) => { releaseLookup = r; });
+    let parked = false;
+    const realExec = b.db.execute.bind(b.db);
+    const dbWrapper = { ...b.db, execute: async (q) => {
+      if (!parked && typeof q?.sql === "string" && q.sql.includes("WHERE id = ? AND status IN ('active','offline') LIMIT 1")) {
+        parked = true;
+        // Capture the snapshot NOW (before the concurrent rotation lands) --
+        // the race is that the READ happens-before the rotation but the
+        // CALLER'S USE of that stale result happens after it. Delaying
+        // realExec() itself (rather than just the return) would make the
+        // query observe the already-rotated row and defeat the gate.
+        const result = await realExec(q);
+        await lookupGate; // hold the stale snapshot until the new key lands
+        return result;
+      }
+      return realExec(q);
+    }};
+    server = http.createServer();
+    setupTailnetSyncServer(server, { identity: b.mgr.identity, instanceSyncManager: b.mgr, db: dbWrapper });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    // Dial as A with a REAL signed handshake.
+    ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/api/instance-sync/stream`);
+    await new Promise((r) => ws.once("open", r));
+    const nonce = "00".repeat(16);
+    ws.send(JSON.stringify({ instance_id: a.id, nonce_hex: nonce, sig_hex: sign(`${a.id}:${nonce}`, a.mgr.identity.ed25519Priv) }));
+    await until(() => parked); // server is now parked holding the OLD snapshot
+    // Hyperswarm path lands A's rotated key on B.
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKey = a.mgr.getOutFeedKey(b.id);
+    await b.db.execute({ sql: "UPDATE crow_instances SET sync_url = ? WHERE id = ?", args: [newKey.toString("hex"), a.id] });
+    await b.mgr.initInstance(a.id, newKey);
+    const swappedFeed = b.mgr.inFeeds.get(a.id);
+    releaseLookup(); // server resumes with its stale snapshot -> hits :238
+    // Give the handler time to run its init + key-exchange frames.
+    ws.send(JSON.stringify({ feed_key_hex: newKey.toString("hex") }));
+    await new Promise((r) => setTimeout(r, 300)); // grace window for the handler's post-swap writes
+    assert.equal(b.mgr.inFeeds.get(a.id), swappedFeed,
+      "the stale-snapshot :238 init must NOT have swapped the in-feed back (F3)");
+    assert.equal(b.mgr.inFeeds.get(a.id).key.toString("hex"), newKey.toString("hex"));
+  } finally {
+    if (ws) try { ws.close(); } catch {}
+    if (server) await new Promise((r) => server.close(r));
+    await fleet.cleanup();
+  }
+});
