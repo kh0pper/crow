@@ -409,6 +409,31 @@ test("G6c-reject: a REJECTING close un-defers with no unhandled rejection", asyn
   } finally { await fleet.cleanup(); }
 });
 
+test("C1 open-degrade: unopenable successor key after a live rotation degrades to out-only, never throws", async () => {
+  // Committed guard for the open try/catch (R2 #1 / R3 F-D). A non-32-byte
+  // buffer passes the swap branch's Buffer.equals key-compare (length mismatch
+  // → keys differ → rotation proceeds, old feed closes fast) and then throws
+  // inside the try at `new Hypercore(...)` ("Must pass a 32 byte buffer") —
+  // exercising the CATCH, not an earlier guard. Removing the try/catch turns
+  // this red (initInstance rejects).
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    const link = await linkPeers(a, b);
+    link.close();
+    const oldFeed = b.mgr.inFeeds.get(a.id);
+    const badKey = Buffer.from("aa".repeat(5), "hex"); // unopenable: wrong length
+    await assert.doesNotReject(() => b.mgr.initInstance(a.id, badKey), "open failure must degrade, not throw");
+    assert.equal(b.mgr.inFeeds.has(a.id), false, "out-only degrade: no in-feed mapped");
+    assert.equal(b.mgr._inFeedListeners.has(a.id), false, "old append listener detached");
+    assert.equal(b.mgr._deferredRotations.has(a.id), false, "not deferred: the close succeeded, this is the degrade path");
+    assert.equal(oldFeed.closed, true, "old feed was detached and closed by the swap branch");
+    // The degrade is recoverable: a later valid key completes the rotation.
+    await b.mgr.initInstance(a.id, a.mgr.getOutFeedKey(b.id));
+    assert.equal(b.mgr.inFeeds.get(a.id)?.key.toString("hex"), a.mgr.getOutFeedKey(b.id).toString("hex"), "valid key heals");
+  } finally { await fleet.cleanup(); }
+});
+
 test("G12: in-flight old-feed processing across the swap cannot corrupt the new record", async () => {
   const fleet = await makeFleet();
   try {

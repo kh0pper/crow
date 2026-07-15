@@ -488,10 +488,12 @@ export class InstanceSyncManager {
       // Promise.race (repro: node:test's own "Promise resolution is still
       // pending but the event loop has already resolved" abort). Ref'd, the
       // race resolves deterministically every time.
+      let capTimer;
       const closed = await Promise.race([
         closePromise.then(() => true, () => true),
-        new Promise((res) => { setTimeout(() => res(false), this._rotationCloseCapMs ?? 5000); }),
+        new Promise((res) => { capTimer = setTimeout(() => res(false), this._rotationCloseCapMs ?? 5000); }),
       ]);
+      clearTimeout(capTimer); // no-op on the defer path; kills the stray timer on a real (fast) rotation
       if (!closed) {
         // rocksdb lock still held by the zombie session — a same-dir open
         // would throw. Defer loudly; sync_url is persisted, so a later settle
@@ -512,6 +514,9 @@ export class InstanceSyncManager {
         await inFeed.ready();
         // 2d C2: freeze the applied-seq decision BEFORE wiring the listener.
         await this._reconcileAppliedSeqAtOpen(remoteInstanceId, inFeed);
+        // 2d C1 review fix: a live-feed error on the successor must not become
+        // an uncaught exception (only the discarded old feed had a swallow).
+        inFeed.on("error", (err) => console.warn(`[instance-sync] in-feed error for ${remoteInstanceId.slice(0,12)}…: ${err.message}`));
         const onAppend = async () => { await this._processNewEntries(remoteInstanceId, inFeed); };
         inFeed.on("append", onAppend);
         this._inFeedListeners.set(remoteInstanceId, onAppend);
