@@ -1420,6 +1420,43 @@ test("18. crow_context emitChange stamps local row's lamport_ts (global and devi
   db.close();
 });
 
+test("2c-C1a. emitChange opts.lamportTs: envelope preserved, local row NOT re-stamped, counter floored", async () => {
+  const { mgr, db } = makeManager("inst-2c-c1");
+  const captured = [];
+  mgr.outFeeds = new Map([["peer-x", { append: async (e) => captured.push(e) }]]);
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:c1a', '', 'a1', 'Old Name', 5)",
+    args: [],
+  });
+  const { rows: r0 } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:c1a'", args: [] });
+  const ts = await mgr.emitChange("contacts", "update", r0[0], { lamportTs: 5 });
+  assert.equal(ts, 5, "returns the preserved envelope lamport");
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].lamport_ts, 5, "envelope carries the preserved lamport");
+  const { rows: r1 } = await db.execute({ sql: "SELECT lamport_ts FROM contacts WHERE crow_id = 'crow:c1a'", args: [] });
+  assert.equal(Number(r1[0].lamport_ts), 5, "local row lamport NOT re-stamped");
+  // Counter floored: the next fresh mint must exceed the preserved value.
+  const fresh = await mgr._nextLamport();
+  assert.ok(fresh > 5, `next mint ${fresh} must exceed preserved 5`);
+  db.close();
+});
+
+test("2c-C1b. emitChange without opts: behavior unchanged (fresh mint + local stamp)", async () => {
+  const { mgr, db } = makeManager("inst-2c-c1b");
+  const captured = [];
+  mgr.outFeeds = new Map([["peer-x", { append: async (e) => captured.push(e) }]]);
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, lamport_ts) VALUES ('crow:c1b', '', 'b1', 5)",
+    args: [],
+  });
+  const { rows: r0 } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:c1b'", args: [] });
+  const ts = await mgr.emitChange("contacts", "update", r0[0]);
+  assert.ok(ts > 5, "fresh mint exceeds row lamport (counter floor)");
+  const { rows: r1 } = await db.execute({ sql: "SELECT lamport_ts FROM contacts WHERE crow_id = 'crow:c1b'", args: [] });
+  assert.equal(Number(r1[0].lamport_ts), ts, "local row re-stamped with the fresh mint");
+  db.close();
+});
+
 // ── Test 19: Upsert (update for missing row) ──────────────────────────────────
 
 test("19. crow_context upsert: update for absent section creates row with lamport_ts=incomingTs; stale follow-up → conflict/skip not applied; partial old-sender entry missing content → skipped; resurrection case", async () => {
