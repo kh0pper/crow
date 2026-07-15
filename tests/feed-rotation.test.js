@@ -109,6 +109,15 @@ export async function linkPeers(a, b) {
   // Exchange feed keys the way the real handshake does, then replicate.
   await a.mgr.initInstance(b.id, b.mgr.getOutFeedKey(a.id));
   await b.mgr.initInstance(a.id, a.mgr.getOutFeedKey(b.id));
+  // Second round (2d T10): the first call above is one-way by construction —
+  // it fires before B has armed ITS out-feed to A, so getOutFeedKey(a.id) was
+  // still null and A never got an in-feed for B. Now that B's out-feed IS
+  // armed (the line above), give A a fresh chance at B's real key. On a link
+  // that was already bidirectional (or a second linkPeers call after a prior
+  // link), both keys are already current, so T4's key-aware init treats this
+  // as a same-key no-op — existing single-direction (A -> B) tests are
+  // unaffected.
+  await a.mgr.initInstance(b.id, b.mgr.getOutFeedKey(a.id));
   await a.mgr.replicate(b.id, nsA);
   await b.mgr.replicate(a.id, nsB);
   // 2d C3 (G8): expose per-side handles so a test can re-replicate one side's
@@ -553,7 +562,7 @@ test("C3 churn: a lingering old stream's late close must not drop a re-paired pe
     // stale Set A. Without the identity guard it would delete the map entry —
     // destroying live Set B.
     link1.close();
-    await until(() => oldStream.destroyed);
+    assert.equal(await until(() => oldStream.destroyed), true, "old stream must actually close");
     await new Promise((r) => setImmediate(r)); // let the close listener run after destroy settles
     const liveSet = b.mgr._activeStreams.get(a.id);
     assert.ok(liveSet, "fresh stream set must survive the stale stream's late close");
@@ -741,4 +750,153 @@ test("G10: empty armed out-feed clears premise flags BEFORE the once-backfills; 
     assert.equal(await a.mgr.resetBackfillPremiseFlags(), 0, "non-empty feed: nothing cleared");
     assert.equal(await read("__contacts_backfill_v1"), "done:5");
   } finally { await fleet.cleanup(); }
+});
+
+// ── Task 10: integration closers ────────────────────────────────────────────
+// memories.id is INTEGER PRIMARY KEY — G2 710000-710002 (+710010 pre-row),
+// G3 710300-710303, G7 710100 (insert/delete half) + 710200 (LWW half).
+
+test("G2: rotation resets the mark -- fresh feed seqs 0..2 all apply despite an old high mark", async () => {
+  const fleet = await makeFleet();
+  let link; // declared outside the try -- an assertion throw must not strand
+            // the NoiseSecretStream/TCP sockets open (G0/G4c footgun)
+  try {
+    const { a, b } = fleet;
+    link = await linkPeers(a, b);
+    // Pre-row: prove the link works before rotating.
+    await a.mgr.emitChange("memories", "insert", { id: 710010, content: "pre", lamport_ts: null });
+    await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=710010" })).rows.length === 1);
+    const oldKeyHex = a.mgr.getOutFeedKey(b.id).toString("hex");
+    link.close();
+    // A rotates its out-feed to B (storage wiped, new key minted) -- G1-style.
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKey = a.mgr.getOutFeedKey(b.id);
+    // BEFORE delivering the new key to B, force B's record HIGH under the OLD
+    // key -- if the applied-seq gate were peer-keyed instead of feed-keyed,
+    // this forged mark would suppress every entry on the fresh feed below.
+    await b.mgr._setLastAppliedSeq(a.id, 40, oldKeyHex);
+    const forced = await b.mgr._appliedSeqRecord(a.id);
+    assert.deepEqual({ k: forced.k, s: forced.s }, { k: oldKeyHex, s: 40 }, "precondition: mark forced high under the old key");
+    // Deliver the new key -- live swap; reconcile-at-open must reset for the
+    // NEW key rather than inherit s:40 (which belongs to the dead feed).
+    await b.mgr.initInstance(a.id, newKey);
+    const recAfterSwap = await b.mgr._appliedSeqRecord(a.id);
+    assert.deepEqual({ k: recAfterSwap.k, s: recAfterSwap.s }, { k: newKey.toString("hex"), s: 0 },
+      "swap resets the mark for the new key -- s:40 does not carry over");
+    link = await linkPeers(a, b); // relink over a fresh stream pair
+    for (let i = 0; i < 3; i++) {
+      await a.mgr.emitChange("memories", "insert", { id: 710000 + i, content: "x", lamport_ts: null });
+    }
+    const allApplied = await until(async () => {
+      const { rows } = await b.db.execute({ sql: "SELECT COUNT(*) AS n FROM memories WHERE id BETWEEN 710000 AND 710002" });
+      return Number(rows[0].n) === 3;
+    });
+    assert.equal(allApplied, true, "all 3 rows on the fresh feed apply despite the old high mark -- the mark followed the FEED, not the peer");
+  } finally {
+    if (link) link.close();
+    await fleet.cleanup();
+  }
+});
+
+test("G3 MUTUAL: both sides rotate simultaneously -- both swap, both directions converge, conflicts flat", async () => {
+  const fleet = await makeFleet();
+  let link; // declared outside the try -- see G2's comment
+  try {
+    const { a, b } = fleet;
+    link = await linkPeers(a, b);
+    // Baseline: prove BOTH directions work before rotating (2a lesson --
+    // the mutual case is where convergence designs die; establish the
+    // starting condition is genuinely bidirectional, not a fluke).
+    await a.mgr.emitChange("memories", "insert", { id: 710300, content: "pre-a", lamport_ts: null });
+    await b.mgr.emitChange("memories", "insert", { id: 710301, content: "pre-b", lamport_ts: null });
+    const preAtoB = await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=710300" })).rows.length === 1);
+    const preBtoA = await until(async () => (await a.db.execute({ sql: "SELECT id FROM memories WHERE id=710301" })).rows.length === 1);
+    assert.equal(preAtoB, true, "precondition: A -> B works before rotation");
+    assert.equal(preBtoA, true, "precondition: B -> A works before rotation");
+    const conflictsBeforeA = Number((await a.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n);
+    const conflictsBeforeB = Number((await b.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n);
+    link.close();
+    // BOTH sides rotate their own out-feed to the peer.
+    await a.mgr.closeInstanceFeeds(b.id);
+    await b.mgr.closeInstanceFeeds(a.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    rmSync(join(b.mgr.dataDir, a.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    await b.mgr.initInstance(a.id, null);
+    const newKeyForB = a.mgr.getOutFeedKey(b.id); // A's new out-feed -- becomes B's in-feed
+    const newKeyForA = b.mgr.getOutFeedKey(a.id); // B's new out-feed -- becomes A's in-feed
+    // Exchange the two new keys CONCURRENTLY -- the mandatory mutual case:
+    // each side delivers the OTHER's new key at the same time, not in sequence.
+    await Promise.all([
+      a.mgr.initInstance(b.id, newKeyForA),
+      b.mgr.initInstance(a.id, newKeyForB),
+    ]);
+    assert.equal(a.mgr.inFeeds.get(b.id)?.key.toString("hex"), newKeyForA.toString("hex"), "A's in-feed swapped to B's new key");
+    assert.equal(b.mgr.inFeeds.get(a.id)?.key.toString("hex"), newKeyForB.toString("hex"), "B's in-feed swapped to A's new key");
+    link = await linkPeers(a, b); // relink over a fresh stream pair
+    await a.mgr.emitChange("memories", "insert", { id: 710302, content: "post-a", lamport_ts: null });
+    await b.mgr.emitChange("memories", "insert", { id: 710303, content: "post-b", lamport_ts: null });
+    const aToB = await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=710302" })).rows.length === 1);
+    const bToA = await until(async () => (await a.db.execute({ sql: "SELECT id FROM memories WHERE id=710303" })).rows.length === 1);
+    assert.equal(aToB, true, "post-mutual-rotation A -> B converges");
+    assert.equal(bToA, true, "post-mutual-rotation B -> A converges");
+    const conflictsAfterA = Number((await a.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n);
+    const conflictsAfterB = Number((await b.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n);
+    assert.equal(conflictsAfterA, conflictsBeforeA, "A's sync_conflicts flat across the mutual rotation");
+    assert.equal(conflictsAfterB, conflictsBeforeB, "B's sync_conflicts flat across the mutual rotation");
+  } finally {
+    if (link) link.close();
+    await fleet.cleanup();
+  }
+});
+
+test("G7: replay safety at seq 0 -- insert-then-delete converges deleted; newer local row survives older replayed entry", async () => {
+  const fleet = await makeFleet();
+  let link; // declared outside the try -- see G2's comment
+  try {
+    const { a, b } = fleet;
+    link = await linkPeers(a, b);
+    link.close();
+    // A rotates its out-feed to B -- fresh feed, next entry lands at seq 0.
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKey = a.mgr.getOutFeedKey(b.id);
+    await b.mgr.initInstance(a.id, newKey);
+    link = await linkPeers(a, b);
+
+    // (a) insert-then-delete on the rotated fresh feed (seq 0, seq 1) --
+    // B must converge to NO row, not resurrect it via a replay artifact.
+    await a.mgr.emitChange("memories", "insert", { id: 710100, content: "will-be-deleted", lamport_ts: null });
+    await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=710100" })).rows.length === 1);
+    await a.mgr.emitChange("memories", "delete", { id: 710100 });
+    const deleted = await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=710100" })).rows.length === 0);
+    assert.equal(deleted, true, "B converges to NO row after insert-then-delete replayed on the rotated fresh feed");
+
+    // (b) LWW at reset-replay: B holds a LOCAL row at a HIGH lamport; A's
+    // rotated feed (seq 2) replays an OLDER update for the same id -- the
+    // LWW gate must hold even though the feed itself just reset to seq 0.
+    const HIGH_LAMPORT = 999999;
+    await b.db.execute({
+      sql: "INSERT INTO memories (id, content, lamport_ts) VALUES (?, ?, ?)",
+      args: [710200, "B's newer content", HIGH_LAMPORT],
+    });
+    await b.mgr._advanceCounter(HIGH_LAMPORT); // keep B's own counter consistent with the stamped row
+    const OLD_LAMPORT = 5; // strictly less than HIGH_LAMPORT
+    await a.mgr.emitChange("memories", "update", { id: 710200, content: "A's older replayed content" }, { lamportTs: OLD_LAMPORT });
+    // Wait for the older entry to actually be ATTEMPTED (checkpoint advances
+    // unconditionally, per-entry, outside the apply try/catch -- see
+    // _processNewEntriesInner) rather than a flat sleep: this targets the
+    // real mechanism instead of racing an arbitrary timeout.
+    const attempted = await until(async () => (await b.mgr._getLastAppliedSeq(a.id, b.mgr.inFeeds.get(a.id))) >= 3);
+    assert.equal(attempted, true, "the older replayed update must have been attempted before asserting LWW held");
+    const bRow = (await b.db.execute({ sql: "SELECT content, lamport_ts FROM memories WHERE id=710200" })).rows[0];
+    assert.equal(bRow.content, "B's newer content", "B's newer content survives the older replayed entry (LWW gate holds at reset-replay)");
+    assert.equal(Number(bRow.lamport_ts), HIGH_LAMPORT, "B's lamport_ts unchanged by the stale replay");
+  } finally {
+    if (link) link.close();
+    await fleet.cleanup();
+  }
 });
