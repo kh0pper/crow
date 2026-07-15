@@ -25,6 +25,7 @@ import * as nip44 from "nostr-tools/nip44";
 import { Relay, useWebSocketImplementation } from "nostr-tools/relay";
 import { safeRelayPublish } from "../../../servers/sharing/safe-relay-publish.js";
 import { makeResilientSub } from "../../../servers/sharing/resilient-subscribe.js";
+import { installNostrCrashGuard } from "../../../servers/sharing/nostr-crash-guard.js";
 // Pin the implementation explicitly (survives a future nostr-tools that drops
 // the constructor-time `|| WebSocket` fallback).
 if (globalThis.WebSocket) { try { useWebSocketImplementation(globalThis.WebSocket); } catch { /* older nostr-tools: runtime fallback covers it */ } }
@@ -73,6 +74,10 @@ export function openDM(recipientPriv, senderXOnlyPubkey, content) {
 
 /** Connect to relays; returns a Map<url, Relay> of those that connected. */
 export async function connectRelays(urls, timeoutMs = 10000) {
+  // Narrow process-level net for nostr-tools' orphaned close-race rejection
+  // (2c-F1 C1b). Idempotent; the connect path is the choke point every pi-bots
+  // host (bridge_tick, discord_gateway) passes through before touching relays.
+  installNostrCrashGuard();
   const relays = new Map();
   const results = await Promise.allSettled(urls.map(async (url) => {
     const relay = await Promise.race([
@@ -93,6 +98,10 @@ export async function connectRelays(urls, timeoutMs = 10000) {
 export function subscribe(relays, filter, onevent) {
   const subs = [];
   for (const [, relay] of relays) {
+    // A dropped relay's subscribe() orphans an ASYNC rejected send()
+    // (SendingOnClosedConnection) that the catch below cannot see — skip it
+    // (no await between check and call; callers tolerate per-relay skips).
+    if (!relay.connected) continue;
     try { subs.push(relay.subscribe([filter], { onevent })); } catch { /* per-relay */ }
   }
   return subs;

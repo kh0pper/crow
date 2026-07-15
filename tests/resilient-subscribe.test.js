@@ -5,13 +5,12 @@ import { makeDedupeGate } from "../scripts/pi-bots/gateways/nostr-client.mjs";
 
 // Stub nostr-tools Relay. NOTE on fidelity: the real relay.subscribe() does NOT
 // throw on a closed connection — it returns a sub handle and leaks an un-awaited
-// rejected send(). We model "subscribe while down" as a SYNCHRONOUS throw purely
-// for testability (it drives sub=null in the busy-guard test). This is safe
-// because production never calls doSubscribe() while disconnected: at
-// construction the relay is connected, and in ensureHealthy() the synchronous
-// subscribe is gated by `if (!relay.connected) return` with no await between the
-// check and the call. drop() simulates a socket loss: connected=false + fire the
-// live sub's onclose. deliver() pushes an event to the latest live sub.
+// rejected send(). Since 2c-F1 (C1a), doSubscribe() itself guards on
+// `relay.connected` and never reaches relay.subscribe() while disconnected, so
+// this stub's synchronous throw is unreachable belt-and-braces; the async-leak
+// shape is exercised in tests/nostr-crash-guard.test.js. drop() simulates a
+// socket loss: connected=false + fire the live sub's onclose. deliver() pushes
+// an event to the latest live sub.
 function makeStubRelay({ connected = true } = {}) {
   const relay = {
     connected,
@@ -116,7 +115,7 @@ test("close() during an in-flight reconnect prevents a post-close resubscribe", 
   const relay = makeStubRelay({ connected: false });
   let release;
   relay.connect = async () => { relay.connectCalls++; await new Promise((r) => { release = r; }); relay.connected = true; };
-  const h = makeResilientSub(relay, { kinds: [4] }, () => {}, {}); // initial subscribe throws (disconnected) → sub=null
+  const h = makeResilientSub(relay, { kinds: [4] }, () => {}, {}); // initial subscribe skipped by the connected guard → sub=null
   assert.equal(relay.subscribeCalls.length, 0);
   const p = h.ensureHealthy(); // enters connect branch, awaits
   h.close();                   // teardown races the in-flight reconnect
@@ -129,7 +128,7 @@ test("overlapping ensureHealthy ticks do not double-subscribe (busy guard)", asy
   const relay = makeStubRelay({ connected: false });
   let release;
   relay.connect = async () => { relay.connectCalls++; await new Promise((r) => { release = r; }); relay.connected = true; };
-  const h = makeResilientSub(relay, { kinds: [4] }, () => {}, {}); // initial subscribe throws (disconnected) → sub=null
+  const h = makeResilientSub(relay, { kinds: [4] }, () => {}, {}); // initial subscribe skipped by the connected guard → sub=null
   const p1 = h.ensureHealthy(); // enters, awaits connect → busy
   const p2 = h.ensureHealthy(); // busy → returns immediately
   release();
