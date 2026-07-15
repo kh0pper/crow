@@ -1477,6 +1477,22 @@ export class InstanceSyncManager {
   }
 
   /**
+   * Snapshot of parked emit-queue sizes: plain object {peerId: count} for
+   * NON-EMPTY slots only (2c follow-up F5 — RAM observability BEFORE the
+   * 256-cap overflow warn fires). HARD REQUIREMENT: fully synchronous — a
+   * plain loop over the Map with no await points, so it cannot interleave
+   * with ANY writer (the _chainAppendTask append/drain tasks, or the
+   * revoke-path delete); adding an await here would break that guarantee.
+   */
+  pendingEmitStats() {
+    const stats = {};
+    for (const [peerId, slot] of this._pendingPeerEmits) {
+      if (slot && slot.length > 0) stats[peerId] = slot.length;
+    }
+    return stats;
+  }
+
+  /**
    * Emit a sync entry for a local data change.
    * Called by memory/context/sharing servers after mutations.
    *
