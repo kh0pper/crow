@@ -97,6 +97,7 @@ link here — there is no built-in fallback model list.
 | `NTFY_AUTH_TOKEN` / `NTFY_EXTERNAL_URL` / `NTFY_EXTRA_TOPICS` | *(unset)* | Auth, external URL for links, extra topics. |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | *(unset = PWA push disabled)* | Web Push keys (`npx web-push generate-vapid-keys`). |
 | `VAPID_EMAIL` | `mailto:admin@localhost` | VAPID contact. |
+| `CROW_PUSH_SEND_TIMEOUT_MS` | `10000` | Per-send cap for ntfy / email / web-push (a hung endpoint can no longer wedge notification delivery). |
 | `RESEND_API_KEY` / `MPA_EMAIL_FROM` / `MPA_EMAIL_TO` | *(unset)* | Email notifications via Resend. |
 
 ## Sharing, P2P & calls
