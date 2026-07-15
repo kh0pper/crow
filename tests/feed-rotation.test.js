@@ -531,6 +531,37 @@ test("G8: rotation while a stream is actively replicating -- new feed attaches t
   } finally { await fleet.cleanup(); }
 });
 
+test("C3 churn: a lingering old stream's late close must not drop a re-paired peer's fresh stream set", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    // Track an OLD stream (Set A) on B for peer A.
+    const link1 = await linkPeers(a, b);
+    const oldStream = link1.nsB;
+    assert.equal(b.mgr._activeStreams.get(a.id)?.has(oldStream), true, "old stream tracked");
+    // Revoke: map entry deleted, but oldStream's close listener still holds Set A.
+    await b.mgr.closeInstanceFeeds(a.id);
+    assert.equal(b.mgr._activeStreams.has(a.id), false, "revoke tears down the tracked set");
+    // Re-pair: a NEW stream creates a FRESH Set B in the map.
+    const link2 = await linkPeers(a, b);
+    const newStream = link2.nsB;
+    assert.equal(b.mgr._activeStreams.get(a.id)?.has(newStream), true, "fresh set holds the new stream");
+    // Precondition for non-vacuousness: the OLD stream must still be open when
+    // the fresh set exists — its close has not fired yet.
+    assert.equal(oldStream.destroyed, false, "precondition: old stream still open when the fresh set is created");
+    // The old stream's socket finally tears down → its drop() runs, emptying
+    // stale Set A. Without the identity guard it would delete the map entry —
+    // destroying live Set B.
+    link1.close();
+    await until(() => oldStream.destroyed);
+    await new Promise((r) => setImmediate(r)); // let the close listener run after destroy settles
+    const liveSet = b.mgr._activeStreams.get(a.id);
+    assert.ok(liveSet, "fresh stream set must survive the stale stream's late close");
+    assert.equal(liveSet.has(newStream), true, "fresh set still contains the new stream");
+    link2.close();
+  } finally { await fleet.cleanup(); }
+});
+
 test("G9: old core blocks remain readable after the swap (acceptance pin)", async () => {
   const fleet = await makeFleet();
   try {
@@ -550,6 +581,8 @@ test("G9: old core blocks remain readable after the swap (acceptance pin)", asyn
     // probed rocksdb fd-lock is process-wide per directory, so a standalone
     // reopen below would otherwise collide with B's still-open NEW in-feed
     // session even though it targets a DIFFERENT key (old vs new core).
+    // NOTE: this narrows what G9 proves — old blocks survive rotation and are
+    // readable once sessions close, NOT concurrent-session coexistence.
     await b.mgr.closeInstanceFeeds(a.id);
     // Acceptance pin: the OLD in-feed's on-disk blocks are still directly readable
     // by reopening the SAME "in" dir keyed with the OLD key -- the swap discards

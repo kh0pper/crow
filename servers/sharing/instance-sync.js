@@ -1287,7 +1287,13 @@ export class InstanceSyncManager {
       set.add(stream);
       const drop = () => {
         set.delete(stream);
-        if (set.size === 0) this._activeStreams.delete(remoteInstanceId);
+        // Identity-guard the map-level delete: after a revoke→re-pair churn the
+        // map may hold a FRESH Set while this closure still captures the stale
+        // one — an unguarded delete here would destroy the live Set and a later
+        // rotation's attach loop would silently attach to nothing.
+        if (set.size === 0 && this._activeStreams.get(remoteInstanceId) === set) {
+          this._activeStreams.delete(remoteInstanceId);
+        }
       };
       stream.on("close", drop);
       stream.on("error", () => {}); // never let a tracked stream's error escape
