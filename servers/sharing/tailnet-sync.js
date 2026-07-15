@@ -247,15 +247,18 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
     return;
   }
   if (peerKeyMsg?.feed_key_hex && peerKeyMsg.feed_key_hex !== peerRow.sync_url) {
-    try {
-      await db.execute({
-        sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
-        args: [peerKeyMsg.feed_key_hex, remoteInstanceId],
-      });
-      await instanceSyncManager.initInstance(remoteInstanceId, Buffer.from(peerKeyMsg.feed_key_hex, "hex"));
-      console.log(`[tailnet-sync] persisted feed key from peer ${remoteInstanceId.slice(0,12)}…`);
-    } catch (err) {
-      log.warn?.(`[tailnet-sync] persisting feed key failed: ${err.message}`);
+    const keyBuf = instanceSyncManager.validateIncomingFeedKey(remoteInstanceId, peerKeyMsg.feed_key_hex);
+    if (keyBuf) {
+      try {
+        await db.execute({
+          sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [peerKeyMsg.feed_key_hex, remoteInstanceId],
+        });
+        await instanceSyncManager.initInstance(remoteInstanceId, keyBuf);
+        console.log(`[tailnet-sync] persisted feed key from peer ${remoteInstanceId.slice(0,12)}…`);
+      } catch (err) {
+        log.warn?.(`[tailnet-sync] persisting feed key failed: ${err.message}`);
+      }
     }
   }
 
@@ -431,13 +434,15 @@ export class PeerDialer {
 
         // Receive server's feed key.
         const peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
-        const incomingKeyBuf = peerKeyMsg?.feed_key_hex ? Buffer.from(peerKeyMsg.feed_key_hex, "hex") : null;
+        const incomingKeyBuf = peerKeyMsg?.feed_key_hex
+          ? instanceSyncManager.validateIncomingFeedKey(remoteInstanceId, peerKeyMsg.feed_key_hex)
+          : null;
         await instanceSyncManager.initInstance(remoteInstanceId, incomingKeyBuf);
         const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
         ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
 
-        // Persist peer key if new.
-        if (peerKeyMsg?.feed_key_hex) {
+        // Persist peer key if new (gated on the same validation result used for init above).
+        if (incomingKeyBuf) {
           const { rows } = await db.execute({
             sql: "SELECT sync_url FROM crow_instances WHERE id = ?",
             args: [remoteInstanceId],
