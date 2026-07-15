@@ -322,10 +322,15 @@ test("G7: #147 flag -- first backfill writes done:<n>, second emits 0 (wire unch
   assert.ok(e1 >= 1, "first run emitted");
   const flag = (await f.A.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [CONTACTS_FLAG] })).rows[0];
   assert.equal(flag.value, `done:${e1}`, "first run wrote the done:<n> flag");
-  const wireAfterFirst = f.wire.length;
+  // Scope to crow:g7: Task 6's C4 wrapped backfillContactsOnce with a FLAGLESS
+  // per-boot tombstone re-emit (finally), which legitimately appends standing
+  // authoritative tombstones (e.g. crow:g3 from G3) to the shared wire on EVERY
+  // call. The #147 flag governs the GATED BODY's contact re-emits only, so assert
+  // no NEW crow:g7 entry rides on the second run rather than a total wire length.
+  const g7WireAfterFirst = f.wire.filter((w) => w.entry.row?.crow_id === "crow:g7").length;
   const e2 = await f.A.mgr.backfillContactsOnce();
   assert.equal(e2, 0, "second run emits 0 (flag terminal)");
-  assert.equal(f.wire.length, wireAfterFirst, "wire length unchanged on the second run");
+  assert.equal(f.wire.filter((w) => w.entry.row?.crow_id === "crow:g7").length, g7WireAfterFirst, "no new crow:g7 entry rode on the second run (gated body flag-terminal)");
 });
 
 test("G8: settings + groups re-emit preserve their lamport (envelope == L; local lamport unchanged)", async () => {
@@ -356,4 +361,113 @@ test("G8: settings + groups re-emit preserve their lamport (envelope == L; local
   assert.equal(Number(grpEntry.entry.lamport_ts), 30, "group envelope lamport == 30 (not a fresh mint)");
   const grpLocal = (await f.A.db.execute({ sql: "SELECT lamport_ts FROM contact_groups WHERE group_uid = 'uid-g8'", args: [] })).rows[0];
   assert.equal(Number(grpLocal.lamport_ts), 30, "group local lamport unchanged");
+});
+
+// ── Task 6 (C4): flagless per-boot contact-tombstone re-emit — G4/G4b/G5/G5b ───
+// backfillContactsOnce is now a thin wrapper: the #147-gated body no-ops on a
+// `done:` flag, and a `finally` runs reemitContactTombstones() on EVERY boot —
+// mirroring W4's backfillGroupsOnce/reemitGroupTombstones. These cases seed the
+// done-flag so ONLY the finally-path re-emit fires (the true boot semantics).
+// The shared on-disk DBs accumulate authoritative tombstones across tests, so
+// every re-emit assertion is SCOPED to a per-test crow_id.
+const setBackfillDone = async (db) =>
+  db.execute({ sql: "INSERT INTO dashboard_settings (key, value) VALUES ('__contacts_backfill_v1', 'done:0') ON CONFLICT(key) DO UPDATE SET value = 'done:0'", args: [] });
+
+test("G4: tombstone re-emit heals a peer that never received the delete", async () => {
+  const f = newFleet();
+  for (const inst of [f.A, f.B]) {
+    await inst.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g4', '', 'g4aa', 'G4', 5)", args: [] });
+  }
+  const { deleteContactLocal } = await import("../servers/sharing/contact-delete.js");
+  const rowsA = (await f.A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g4'", args: [] })).rows;
+  await act(f.A, () => deleteContactLocal(f.A.db, {}, rowsA[0]));
+  f.skimWire(); // the live delete is LOST (never delivered) — the D-C scenario
+  // Seed a 'prune' tombstone too: it must NOT ride (kind IS NULL filter).
+  await f.A.db.execute({ sql: "INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind) VALUES ('crow:g4prune', 3, 1, 'prune')", args: [] });
+  // Mark the gated backfill done so ONLY the finally-path re-emit can deliver.
+  await setBackfillDone(f.A.db);
+  const before = f.wire.length;
+  await f.A.mgr.backfillContactsOnce(); // boot path: gated body no-ops, finally re-emits
+  const rode = f.wire.slice(before);
+  assert.equal(rode.filter((w) => w.entry.op === "delete" && w.entry.row.crow_id === "crow:g4").length, 1, "authoritative tombstone rode");
+  assert.equal(rode.filter((w) => w.entry.row.crow_id === "crow:g4prune").length, 0, "prune tombstone did NOT ride");
+  await f.deliver();
+  assert.equal((await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g4'", args: [] })).rows.length, 0, "B healed: row deleted");
+});
+
+test("G4b: C4 live-row filter -- a tombstone coexisting with a live row does NOT ride; a row-less one in the same run does", async () => {
+  const f = newFleet();
+  // Anomalous state on A: an authoritative tombstone AND a live contacts row, same crow_id.
+  await f.A.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g4b', '', 'g4baa', 'G4b Live', 5)", args: [] });
+  await f.A.db.execute({ sql: "INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind) VALUES ('crow:g4b', 9, 1, NULL)", args: [] });
+  // A second, row-less authoritative tombstone in the SAME run — MUST ride (the filter is per-row).
+  await f.A.db.execute({ sql: "INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind) VALUES ('crow:g4b2', 9, 1, NULL)", args: [] });
+  await setBackfillDone(f.A.db);
+  const before = f.wire.length;
+  await f.A.mgr.backfillContactsOnce();
+  const rode = f.wire.slice(before);
+  assert.equal(rode.filter((w) => w.entry.op === "delete" && w.entry.row.crow_id === "crow:g4b").length, 0, "tombstone coexisting with a live row did NOT ride");
+  assert.equal(rode.filter((w) => w.entry.op === "delete" && w.entry.row.crow_id === "crow:g4b2").length, 1, "the row-less tombstone in the same run DID ride");
+});
+
+test("G5: preserved-lamport re-emit -- a genuine re-add survives; C5 holds conflicts flat across a last_seen bump; insert clears the tombstone", async () => {
+  const f = newFleet();
+  // A: authoritative tombstone@10, row-less. B: the contact re-added, live@20.
+  await f.A.db.execute({ sql: "INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind) VALUES ('crow:g5', 10, 1, NULL)", args: [] });
+  await f.B.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts, last_seen) VALUES ('crow:g5', '', 'g5aa', 'G5 ReAdd', 20, 100)", args: [] });
+  // A's counter well ABOVE B's row lamport (20): if the re-emit MINTED a fresh
+  // lamport instead of preserving the tombstone's 10, the delete would ride above
+  // 20 and WIPE B's re-add — this makes the "mint instead of preserve" mutation
+  // actually turn G5 red (2a lesson 3: the mutation must reach the mechanism).
+  await f.A.mgr._advanceCounter(30);
+  const bootA = async () => { await setBackfillDone(f.A.db); await f.A.mgr.backfillContactsOnce(); };
+  // Boot 1: A re-emits delete@10 → loses LWW to B's row@20 → 1 conflict on B, re-add survives.
+  await bootA();
+  await f.deliver();
+  assert.equal((await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5'", args: [] })).rows.length, 1, "B's re-add survived boot 1");
+  assert.equal(await contactConflicts(f.B.db, "crow:g5"), 1, "boot 1 logged exactly 1 conflict on B");
+  // Bump last_seen (a non-lamport, never-synced column) between boots — C5's stable key must ignore it.
+  await f.B.db.execute({ sql: "UPDATE contacts SET last_seen = 999 WHERE crow_id = 'crow:g5'", args: [] });
+  // Boot 2: re-emit delete@10 again → C5 dedupe → 0 new conflicts despite the last_seen change.
+  await bootA();
+  await f.deliver();
+  assert.equal((await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5'", args: [] })).rows.length, 1, "B's re-add survived boot 2");
+  assert.equal(await contactConflicts(f.B.db, "crow:g5"), 1, "boot 2 added 0 conflicts (C5 ignores last_seen)");
+  // B's re-add rides to A as op=insert (contact-promote semantics) → 20 > 10 → A applies it, clears the tombstone.
+  const rowBFull = (await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5'", args: [] })).rows[0];
+  await f.B.mgr.emitChange("contacts", "insert", rowBFull, { lamportTs: 20 });
+  await f.deliver();
+  assert.equal((await f.A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5'", args: [] })).rows.length, 1, "A applied the re-add insert (20 > 10)");
+  assert.equal((await f.A.db.execute({ sql: "SELECT * FROM contact_tombstones WHERE crow_id = 'crow:g5'", args: [] })).rows.length, 0, "A cleared the tombstone (clearTombAfterApply)");
+  // Boot 3: A now holds a live row and no tombstone → nothing rides for crow:g5.
+  const before3 = f.wire.length;
+  await bootA();
+  const rode3 = f.wire.slice(before3).filter((w) => w.entry.row?.crow_id === "crow:g5" && w.entry.op === "delete");
+  assert.equal(rode3.length, 0, "boot 3 re-emitted nothing for crow:g5");
+});
+
+test("G5b: concurrent edit-vs-delete stays divergent -- B's update is dropped on A, B keeps its row; exactly 1 conflict on B; accepted #155 semantics", async () => {
+  const f = newFleet();
+  // A: authoritative tombstone@10, row-less. B: the contact edited, live@12.
+  await f.A.db.execute({ sql: "INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind) VALUES ('crow:g5b', 10, 1, NULL)", args: [] });
+  await f.B.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g5b', '', 'g5baa', 'B Edit', 12)", args: [] });
+  const bootA = async () => { await setBackfillDone(f.A.db); await f.A.mgr.backfillContactsOnce(); };
+  // Boot 1: A re-emits delete@10. B concurrently rides its newer edit as op=update@12.
+  await bootA();
+  const rowBFull = (await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5b'", args: [] })).rows[0];
+  await f.B.mgr.emitChange("contacts", "update", rowBFull, { lamportTs: 12 });
+  await f.deliver(); // both ways
+  // A dropped B's update (delete-wins over a concurrent update, #155): no row, tombstone stands.
+  assert.equal((await f.A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5b'", args: [] })).rows.length, 0, "A has no row (B's update was DROPPED, delete wins)");
+  assert.equal((await f.A.db.execute({ sql: "SELECT * FROM contact_tombstones WHERE crow_id = 'crow:g5b'", args: [] })).rows.length, 1, "A's tombstone stands");
+  // B kept its row (delete@10 lost to row@12); exactly 1 conflict logged on B.
+  assert.equal((await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5b'", args: [] })).rows.length, 1, "B kept its row (delete@10 loses)");
+  assert.equal(await contactConflicts(f.B.db, "crow:g5b"), 1, "1 conflict on B after boot 1");
+  // Two more boots: C5 dedupe holds sync_conflicts flat on B.
+  await bootA(); await f.deliver();
+  await bootA(); await f.deliver();
+  assert.equal(await contactConflicts(f.B.db, "crow:g5b"), 1, "still exactly 1 conflict on B across all boots (C5)");
+  // Divergence PERSISTS — the accepted #155 edit-vs-delete semantics, asserted explicitly.
+  assert.equal((await f.A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5b'", args: [] })).rows.length, 0, "divergence persists: A gone");
+  assert.equal((await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5b'", args: [] })).rows.length, 1, "divergence persists: B present");
 });

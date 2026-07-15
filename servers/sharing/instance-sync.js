@@ -604,6 +604,27 @@ export class InstanceSyncManager {
   }
 
   /**
+   * 2c C4 (design §3): contacts mirror of W4's flagless group-tombstone re-emit.
+   * Thin wrapper — the #147-gated body (`_backfillContactsOnceGated`) runs at most
+   * once per instance lifetime, but the `finally` runs `reemitContactTombstones()`
+   * on EVERY boot. External contract is UNCHANGED (returns the gated body's count):
+   * mcp-mounts.js and tests/messages-contacts-backfill.test.js call this wrapper.
+   *
+   * Only safe because the tombstone re-emit preserves each delete's ORIGINAL global
+   * lamport (preserve-mode) — a fresh mint here would beat a peer's genuinely-newer
+   * re-add and wipe it (contacts allow re-add-after-delete, unlike groups: G5).
+   */
+  async backfillContactsOnce() {
+    try {
+      return await this._backfillContactsOnceGated();
+    } finally {
+      // W4 pattern (mirrors backfillGroupsOnce): FLAGLESS every-boot tombstone
+      // re-emit on EVERY exit path of the gated body. Guarded — never throws.
+      await this.reemitContactTombstones();
+    }
+  }
+
+  /**
    * One-shot idempotent backfill (Phase 3 PR-B / I-4): re-emit every existing
    * SYNCABLE full contact so a peer can resolve crow_id → local contact_id for
    * contacts that predate PR-A (they never emitted a contact-sync entry, so
@@ -614,8 +635,11 @@ export class InstanceSyncManager {
    * an unchanged re-emit as an effective no-op (fresh lamport → UPDATE with
    * identical values; onContactSynced re-subscribe is idempotent). Mirrors
    * reemitSyncableSettingsOnce(). Never throws out of the loop.
+   *
+   * The gated BODY of backfillContactsOnce() (2c C4 wrapped it with a finally-path
+   * tombstone re-emit; return value contract is unchanged).
    */
-  async backfillContactsOnce() {
+  async _backfillContactsOnceGated() {
     const FLAG_KEY = "__contacts_backfill_v1";
     // Only a real completed run ("done:<n>") is terminal. The boot call races
     // the async sharing boot that opens the sync feeds — on a slow host the
@@ -696,6 +720,72 @@ export class InstanceSyncManager {
     if (emitted > 0) {
       console.log(`[instance-sync] one-shot contacts backfill: ${emitted} contact(s) re-emitted → peers resolve legacy contacts`);
     }
+    return emitted;
+  }
+
+  /**
+   * 2c C4 (design §3): the W4 mirror for contacts. Re-emit every AUTHORITATIVE
+   * contact tombstone as an op=delete on EVERY boot — deliberately NO flag. Sync
+   * feeds are born EMPTY at pairing (no history replay, see _initInstanceInner),
+   * so a delete that missed its peers — a crash inside the boot window, a re-pair,
+   * a secondary-process delete whose feeds never armed — is otherwise never
+   * re-delivered (silent divergence, defect D-C). Groups solved exactly this with
+   * reemitGroupTombstones; contacts had no mirror.
+   *
+   * Unlike groups (strict delete-wins, re-adds LOSE by design), this mirror is
+   * ONLY safe with lamport PRESERVATION: the envelope carries the tombstone's
+   * ORIGINAL global delete lamport, so the re-emit beats exactly what the original
+   * broadcast would have — no more. A fresh mint would beat a peer's genuinely-newer
+   * re-add and wipe it (contacts allow re-add-after-delete; G5).
+   *
+   * Filters (both load-bearing):
+   *   - kind IS NULL: authoritative user deletes ONLY. A `kind='prune'` tombstone
+   *     is local GC (2a) and must NEVER ride the wire.
+   *   - no coexisting live `contacts` row (LEFT JOIN): the anomalous
+   *     row-beside-tombstone state is reachable via races/manual edits; never
+   *     broadcast a delete for a contact this instance still holds (m-3; mirrors
+   *     emitGroupUpsert's belt-and-braces).
+   *
+   * Drains inbound FIRST (I-B1, load-bearing here): an already-delivered
+   * re-add-as-insert must clear our tombstone BEFORE we re-emit it. Guarded —
+   * never throws; a missing contact_tombstones table (un-migrated DB) is a no-op.
+   */
+  async reemitContactTombstones() {
+    if (this.feedsDisabled) return 0;
+    if (this.outFeeds.size === 0) return 0; // no peers armed yet — retry next boot; flagless by design (W4 rationale)
+    // I-B1 drain: apply the peer's already-replicated backlog so a genuine
+    // re-add-as-insert clears our tombstone before we re-emit it (rule order is
+    // load-bearing; design §3 C4).
+    try {
+      for (const [peerId, inFeed] of this.inFeeds) {
+        await this._processNewEntries(peerId, inFeed);
+      }
+    } catch (err) {
+      console.warn(`[instance-sync] contact tombstone re-emit drain failed: ${err.message}`);
+    }
+    let rows = [];
+    try {
+      const r = await this.db.execute({
+        sql: `SELECT t.crow_id, t.lamport_ts FROM contact_tombstones t
+               LEFT JOIN contacts c ON c.crow_id = t.crow_id
+               WHERE t.kind IS NULL AND c.crow_id IS NULL`,
+      });
+      rows = r.rows || [];
+    } catch {
+      return 0; // missing table / read failure → no-op (never throw at boot)
+    }
+    let emitted = 0;
+    for (const row of rows) {
+      try {
+        // 2c C2/C4: preserve the delete's ORIGINAL global lamport (no fresh mint).
+        const ts = await this.emitChange("contacts", "delete", { crow_id: row.crow_id },
+          { lamportTs: Number(row.lamport_ts) || 0 });
+        if (ts != null) emitted++;
+      } catch (err) {
+        console.warn(`[instance-sync] contact tombstone re-emit failed for ${row.crow_id}: ${err.message}`);
+      }
+    }
+    if (emitted > 0) console.log(`[instance-sync] re-emitted ${emitted} contact tombstone delete(s) to all peers`);
     return emitted;
   }
 
