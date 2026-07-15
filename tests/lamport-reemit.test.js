@@ -601,3 +601,60 @@ test("G10: restoreConflict refuses ALL natural-key tables (contacts, contact_gro
   assert.equal(ctxAfter.winning_data, ctxSeed.winning_data,
     "crow_context winning_data byte-identical (regression check)");
 });
+
+// ── 2c hotfix (boot-liveness): bounded awaits — G11/G12 ────────────────────────
+// PR #194 put reemitContactTombstones on the boot-to-HTTP-listen path (its drain
+// awaits _processNewEntries). On grackle a contact-delete apply WEDGED FOREVER
+// (hypercore feed-close / hyperswarm-leave never resolving) ⇒ the gateway never
+// reached listen ⇒ prod down. Two bounded-await caps fix it. These gates prove the
+// caps unblock a wedged chain and still do their real work (re-emit / step-tolerant).
+
+/** Await `promise`, but reject with `msg` after `ms` — so a broken cap fails cleanly
+ *  instead of hanging the whole test file forever. clears its timer either way. */
+async function withDeadline(promise, ms, msg) {
+  let timer;
+  const guard = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(msg)), ms); });
+  try { return await Promise.race([promise, guard]); }
+  finally { clearTimeout(timer); }
+}
+
+test("G11: boot-drain cap -- a wedged apply chain cannot block tombstone re-emit", async () => {
+  const f = newFleet();
+  // An authoritative, row-less tombstone: it MUST re-emit as op=delete on boot.
+  await f.A.db.execute({ sql: "INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind) VALUES ('crow:g11', 12, 1, NULL)", args: [] });
+  // Gated backfill body done ⇒ ONLY the finally-path reemitContactTombstones fires.
+  await setBackfillDone(f.A.db);
+  // Wedge the inbound drain: _processNewEntries never resolves (the grackle class).
+  f.A.mgr._processNewEntries = () => new Promise(() => {});
+  f.A.mgr._drainCapMs = 200;
+  // Arm an inFeeds entry so the drain loop actually iterates and awaits the wedge.
+  f.A.mgr.inFeeds.set(f.B.id, { length: 0 });
+  const before = f.wire.length;
+  const t0 = Date.now();
+  // Without the cap this await never resolves ⇒ withDeadline rejects at 5s (red).
+  await withDeadline(f.A.mgr.backfillContactsOnce(), 5000,
+    "boot-drain cap did not fire: contact tombstone re-emit blocked >5s by a wedged drain");
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 4000, `re-emit completed under the wedge in ${elapsed}ms (cap ~200ms)`);
+  const rode = f.wire.slice(before);
+  assert.equal(rode.filter((w) => w.entry.op === "delete" && w.entry.row.crow_id === "crow:g11").length, 1,
+    "tombstone re-emitted despite the wedged (capped) drain");
+});
+
+test("G12: unwireContact caps each hung teardown step -- never wedges the apply chain", async () => {
+  const { unwireContact } = await import("../servers/sharing/contact-delete.js");
+  const hung = () => new Promise(() => {});
+  const t0 = Date.now();
+  // All three steps hang forever; each must be capped at 100ms ⇒ resolves ~300ms.
+  // Remove any one race → that step hangs → withDeadline rejects at 2s (red).
+  await withDeadline(
+    unwireContact({
+      nostrManager: { unsubscribeFromContact: hung },
+      syncManager: { closeContactFeeds: hung },
+      peerManager: { leaveContact: hung },
+    }, { id: 1, crow_id: "crow:g12" }, { stepCapMs: 100 }),
+    2000,
+    "unwireContact step cap did not fire: a hung teardown step blocked >2s");
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 2000, `unwireContact resolved under three hung steps in ${elapsed}ms`);
+});
