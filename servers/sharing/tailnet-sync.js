@@ -525,6 +525,21 @@ export async function startTailnetSyncClients(ctx) {
     const seenIds = new Set();
     for (const peer of rows) {
       seenIds.add(peer.id);
+      // 2d C4: converge the in-feed with the persisted sync_url every rescan —
+      // heals manual crow_update_instance edits and any missed key exchange
+      // within 60s, no restart. Cheap fast-path (Map lookup + Buffer compare)
+      // when nothing changed. Own try/catch: refresh runs on a bare
+      // setInterval and an escaped rejection would crash the gateway (no
+      // unhandledRejection handler exists in servers/). Placed BEFORE both
+      // continues below (R3 F-C): after the dialers.has() continue it would
+      // never heal the steady state, which is exactly the case that needs
+      // healing (an already-dialing peer whose row drifted).
+      try {
+        const keyBuf = peer.sync_url ? instanceSyncManager.validateIncomingFeedKey?.(peer.id, peer.sync_url) ?? null : null;
+        await instanceSyncManager.initInstance(peer.id, keyBuf);
+      } catch (err) {
+        console.warn(`[tailnet-sync] refresh heal for ${peer.id.slice(0,12)}…: ${err.message}`);
+      }
       if (!peer.gateway_url) continue;
       if (dialers.has(peer.id)) {
         // #144 minor: keep the dialer's row snapshot fresh — a changed
@@ -551,6 +566,7 @@ export async function startTailnetSyncClients(ctx) {
 
   return {
     dialers,
+    __refreshForTest: refresh,
     stop() {
       clearInterval(rescan);
       for (const d of dialers.values()) d.stop();
