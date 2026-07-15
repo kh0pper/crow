@@ -380,6 +380,10 @@ test("G4: tombstone re-emit heals a peer that never received the delete", async 
   }
   const { deleteContactLocal } = await import("../servers/sharing/contact-delete.js");
   const rowsA = (await f.A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g4'", args: [] })).rows;
+  // Rows were INSERTed directly (counter never advanced) — in prod an instance
+  // converged at lamport 5 has a counter past 5. Without this the delete mints
+  // low and loses the #155 LWW gate in isolation runs (same as G3/G5).
+  await f.A.mgr._advanceCounter(6);
   await act(f.A, () => deleteContactLocal(f.A.db, {}, rowsA[0]));
   f.skimWire(); // the live delete is LOST (never delivered) — the D-C scenario
   // Seed a 'prune' tombstone too: it must NOT ride (kind IS NULL filter).
