@@ -852,6 +852,83 @@ test("G3 MUTUAL: both sides rotate simultaneously -- both swap, both directions 
   }
 });
 
+// G3b exists because G3 above pins mutual FRESH-REPAIR, not mutual LIVE-SWAP:
+// its closeInstanceFeeds calls tear down each side's in-feed too, so both
+// post-rotation key deliveries take initInstance's fresh-open branch, never
+// the live-swap branch. The realistic mutual scenario — both peers rotate
+// while each still HOLDS a live old in-feed for the other, then each receives
+// the other's new key and must swap the live feed — is what G3b pins.
+// Integer ids 710400-710403 (710300-710303 belong to G3).
+test("G3b MUTUAL live-swap: both sides swap live in-feeds concurrently", async () => {
+  const fleet = await makeFleet();
+  let link; // declared outside the try -- see G2's comment
+  try {
+    const { a, b } = fleet;
+    link = await linkPeers(a, b);
+    // Baseline: converge one row each way (bidirectional linkPeers).
+    await a.mgr.emitChange("memories", "insert", { id: 710400, content: "pre-a", lamport_ts: null });
+    await b.mgr.emitChange("memories", "insert", { id: 710401, content: "pre-b", lamport_ts: null });
+    assert.equal(await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=710400" })).rows.length === 1),
+      true, "precondition: A -> B works before rotation");
+    assert.equal(await until(async () => (await a.db.execute({ sql: "SELECT id FROM memories WHERE id=710401" })).rows.length === 1),
+      true, "precondition: B -> A works before rotation");
+    const oldKeyA = Buffer.from(a.mgr.getOutFeedKey(b.id)); // A's old out-feed key (B's old in-feed)
+    const oldKeyB = Buffer.from(b.mgr.getOutFeedKey(a.id)); // B's old out-feed key (A's old in-feed)
+    const conflictsBeforeA = Number((await a.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n);
+    const conflictsBeforeB = Number((await b.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n);
+    link.close();
+    // A rotates its OUT-feed, then RE-ARMS its in-feed with B's OLD key
+    // (opening an in-feed needs no online writer) — A now holds a LIVE old
+    // in-feed alongside its new out-feed, the pre-swap state a real peer is
+    // in when the other side's rotation announcement arrives.
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKeyA = a.mgr.getOutFeedKey(b.id);
+    await a.mgr.initInstance(b.id, oldKeyB); // re-arm in-feed on the OLD key
+    assert.equal(a.mgr.inFeeds.get(b.id)?.key.toString("hex"), oldKeyB.toString("hex"),
+      "A holds a live in-feed on B's OLD key before the concurrent delivery");
+    // B: same shape.
+    await b.mgr.closeInstanceFeeds(a.id);
+    rmSync(join(b.mgr.dataDir, a.id, "out"), { recursive: true, force: true });
+    await b.mgr.initInstance(a.id, null);
+    const newKeyB = b.mgr.getOutFeedKey(a.id);
+    await b.mgr.initInstance(a.id, oldKeyA); // re-arm in-feed on the OLD key
+    assert.equal(b.mgr.inFeeds.get(a.id)?.key.toString("hex"), oldKeyA.toString("hex"),
+      "B holds a live in-feed on A's OLD key before the concurrent delivery");
+    // Capture in-feed object identities, then deliver both new keys
+    // CONCURRENTLY — both sides must take the LIVE-SWAP branch (old feed
+    // detached+closed bounded, successor opened) at the same time.
+    const oldInFeedOnA = a.mgr.inFeeds.get(b.id);
+    const oldInFeedOnB = b.mgr.inFeeds.get(a.id);
+    await Promise.all([
+      a.mgr.initInstance(b.id, newKeyB),
+      b.mgr.initInstance(a.id, newKeyA),
+    ]);
+    // Identity assertions — the distinctly-G3b pins (redden under T4's
+    // mutation 1, the key-compare skip, in BOTH directions):
+    assert.notEqual(a.mgr.inFeeds.get(b.id), oldInFeedOnA, "A's in-feed object must be live-swapped");
+    assert.notEqual(b.mgr.inFeeds.get(a.id), oldInFeedOnB, "B's in-feed object must be live-swapped");
+    assert.equal(a.mgr.inFeeds.get(b.id)?.key.toString("hex"), newKeyB.toString("hex"), "A's in-feed carries B's NEW key");
+    assert.equal(b.mgr.inFeeds.get(a.id)?.key.toString("hex"), newKeyA.toString("hex"), "B's in-feed carries A's NEW key");
+    // Convergence over a fresh link, both directions, conflicts flat.
+    link = await linkPeers(a, b);
+    await a.mgr.emitChange("memories", "insert", { id: 710402, content: "post-a", lamport_ts: null });
+    await b.mgr.emitChange("memories", "insert", { id: 710403, content: "post-b", lamport_ts: null });
+    assert.equal(await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=710402" })).rows.length === 1),
+      true, "post-mutual-live-swap A -> B converges");
+    assert.equal(await until(async () => (await a.db.execute({ sql: "SELECT id FROM memories WHERE id=710403" })).rows.length === 1),
+      true, "post-mutual-live-swap B -> A converges");
+    assert.equal(Number((await a.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n),
+      conflictsBeforeA, "A's sync_conflicts flat across the mutual live swap");
+    assert.equal(Number((await b.db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts" })).rows[0].n),
+      conflictsBeforeB, "B's sync_conflicts flat across the mutual live swap");
+  } finally {
+    if (link) link.close();
+    await fleet.cleanup();
+  }
+});
+
 test("G7: replay safety at seq 0 -- insert-then-delete converges deleted; newer local row survives older replayed entry", async () => {
   const fleet = await makeFleet();
   let link; // declared outside the try -- see G2's comment
