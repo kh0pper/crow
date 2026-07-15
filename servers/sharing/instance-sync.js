@@ -313,6 +313,15 @@ export class InstanceSyncManager {
     this._appendLocks = new Map();      // remoteInstanceId → tail Promise
     this._pendingPeerEmits = new Map(); // remoteInstanceId → [signed entries]
 
+    // 2d C1: live in-feed key-rotation bookkeeping.
+    this._inFeedListeners = new Map();  // remoteInstanceId → append handler (2d C1: removable on swap)
+    this._deferredRotations = new Set(); // remoteInstanceId → swap deferred, old close still pending (2d C1)
+    // Hard cap on how long a rotation swap will race the old in-feed's close()
+    // before deferring loudly (rocksdb fd-lock: a second core in the same
+    // multi-core dir cannot open while the old session's close is still
+    // pending). Overridable in tests.
+    this._rotationCloseCapMs = 5000;
+
     // Flag that _ensureCounter has seeded the sync_state row at least once.
     // The DB row is the authority; this is only a cheap short-circuit.
     this._counterSeeded = false;
@@ -455,22 +464,66 @@ export class InstanceSyncManager {
       await drainDone.catch(() => {});
     }
 
+    // 2d C1: key-aware — a changed key swaps the open in-feed live.
+    const currentIn = this.inFeeds.get(remoteInstanceId);
+    if (currentIn && theirFeedKey && !Buffer.from(currentIn.key).equals(theirFeedKey)) {
+      const oldKey8 = Buffer.from(currentIn.key).toString("hex").slice(0, 8);
+      const newKey8 = theirFeedKey.toString("hex").slice(0, 8);
+      const handler = this._inFeedListeners.get(remoteInstanceId);
+      if (handler) currentIn.removeListener("append", handler);
+      this._inFeedListeners.delete(remoteInstanceId);
+      currentIn.on("error", () => {}); // swallow late close-races (R3/R2 #9)
+      this.inFeeds.delete(remoteInstanceId); // entry-bail kills queued runs (R1 F1)
+      const closePromise = currentIn.close();
+      // .finally, NOT .then: a REJECTING close must also un-defer, and the
+      // derived promise must never become an unhandled rejection (R3 F-A).
+      closePromise.catch(() => {}).finally(() => this._deferredRotations.delete(remoteInstanceId));
+      // NOTE (T4 deviation from brief's literal `t.unref?.()`): this timer is
+      // deliberately left ref'd. It's bounded (capMs, default 5000/test 200)
+      // either way, so ref'd costs at most one capped tick of process-exit
+      // delay -- but unref'd, it is provably wrong: proven via a controlled
+      // A/B run in this exact harness (link closed, no other live handles),
+      // an unref'd sole timer let the event loop consider itself idle and
+      // exit BEFORE the timer fired, permanently stranding the awaited
+      // Promise.race (repro: node:test's own "Promise resolution is still
+      // pending but the event loop has already resolved" abort). Ref'd, the
+      // race resolves deterministically every time.
+      const closed = await Promise.race([
+        closePromise.then(() => true, () => true),
+        new Promise((res) => { setTimeout(() => res(false), this._rotationCloseCapMs ?? 5000); }),
+      ]);
+      if (!closed) {
+        // rocksdb lock still held by the zombie session — a same-dir open
+        // would throw. Defer loudly; sync_url is persisted, so a later settle
+        // (via the .finally above) or a restart completes the rotation.
+        console.error(`[instance-sync] ROTATION DEFERRED for ${remoteInstanceId.slice(0,12)}…: old in-feed close timed out (cap ${this._rotationCloseCapMs ?? 5000}ms); will retry after close settles or on restart`);
+        this._deferredRotations.add(remoteInstanceId);
+        return this.outFeeds.get(remoteInstanceId);
+      }
+      console.warn(`[instance-sync] in-feed ROTATED for ${remoteInstanceId.slice(0,12)}…: ${oldKey8}… → ${newKey8}…`);
+    }
+
     // Their incoming feed (writable by them)
-    if (!this.inFeeds.has(remoteInstanceId) && theirFeedKey) {
-      const inFeed = new Hypercore(resolve(dir, "in"), theirFeedKey, {
-        valueEncoding: "json",
-      });
-      await inFeed.ready();
-      // 2d C2: freeze the applied-seq decision for this feed BEFORE any
-      // replication can grow it (listener not wired yet; feed unattached).
-      await this._reconcileAppliedSeqAtOpen(remoteInstanceId, inFeed);
-
-      // Listen for new entries
-      inFeed.on("append", async () => {
-        await this._processNewEntries(remoteInstanceId, inFeed);
-      });
-
-      this.inFeeds.set(remoteInstanceId, inFeed);
+    if (!this.inFeeds.has(remoteInstanceId) && theirFeedKey
+        && !this._deferredRotations.has(remoteInstanceId)) {
+      let inFeed = null;
+      try {
+        inFeed = new Hypercore(resolve(dir, "in"), theirFeedKey, { valueEncoding: "json" });
+        await inFeed.ready();
+        // 2d C2: freeze the applied-seq decision BEFORE wiring the listener.
+        await this._reconcileAppliedSeqAtOpen(remoteInstanceId, inFeed);
+        const onAppend = async () => { await this._processNewEntries(remoteInstanceId, inFeed); };
+        inFeed.on("append", onAppend);
+        this._inFeedListeners.set(remoteInstanceId, onAppend);
+        this.inFeeds.set(remoteInstanceId, inFeed);
+      } catch (err) {
+        // 2d C1 (R2 #1): open failure degrades to out-only — NEVER throws out
+        // of initInstance (a still-held lock after a deferred rotation would
+        // otherwise kill the tailnet client handshake and, on the C4 interval,
+        // crash the gateway via unhandled rejection).
+        console.error(`[instance-sync] in-feed open failed for ${remoteInstanceId.slice(0,12)}…: ${err.message} — continuing out-only`);
+        if (inFeed) inFeed.close().catch(() => {}); // release partial handle/fd (R3 F-D)
+      }
     }
 
     return this.outFeeds.get(remoteInstanceId);
@@ -2818,6 +2871,10 @@ export class InstanceSyncManager {
       try { await inFeed.close(); } catch {}
       this.inFeeds.delete(remoteInstanceId);
     }
+    this._inFeedListeners.delete(remoteInstanceId);
+    // 2d C1 (R3 F-B): a deferred peer that is revoked then re-paired must not
+    // stay suppressed forever.
+    this._deferredRotations.delete(remoteInstanceId);
     // 2c C3: a closed/revoked peer keeps no parked entries or chain tail.
     this._pendingPeerEmits.delete(remoteInstanceId);
     this._appendLocks.delete(remoteInstanceId);
