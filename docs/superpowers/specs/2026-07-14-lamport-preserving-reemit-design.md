@@ -1,7 +1,8 @@
 # Item 2c — Lamport-preserving re-emit + boot-window emit loss (design)
 
-**Date:** 2026-07-14 · **Status:** REV 2 — round-1 adversarial findings folded (2 CRITICAL,
-3 MAJOR, 3 MINOR — see §8); pending round-2 review
+**Date:** 2026-07-14 · **Status:** REV 3 — round-1 (2 CRITICAL, 3 MAJOR, 3 MINOR) and
+round-2 (3 MAJOR, 4 MINOR, 1 latent-bug observation) findings folded — see §8; pending
+round-3 closure check
 **Scope:** `servers/sharing/instance-sync.js`, `servers/sharing/contact-sync.js`,
 `servers/sharing/group-sync.js`, `tests/` (new two-instance gate + one harness fix).
 **No schema change. No wire-format change.** The migration rail is NOT needed.
@@ -156,22 +157,40 @@ The #147 `done:<n>` flag logic is untouched (only a completed armed run writes i
 
 In `emitChange`, after the entry is built and signed: fetch the paired-peer id set
 (`SELECT id FROM crow_instances WHERE status IN ('active','offline') AND id != ?` —
-the same predicate `eagerInitPairedPeers` uses). For every paired id **without an open
-outFeed**, push the signed entry onto `this._pendingPeerEmits` (Map peerId → FIFO
-array, capped at 256 entries per peer; on overflow drop the oldest with a one-line
-warn — LWW makes oldest-first the safe drop direction). Append to open feeds as today. Return the
-envelope lamport (delivery is now pending, not lost — the return stays honest).
+the same predicate `eagerInitPairedPeers` uses), then hand the entry to a **per-peer
+ordered append chain** for every target peer. `emitChange` returns the envelope
+lamport (delivery is now pending, not lost — the return stays honest).
 
-Drain — **explicit, testable seam (R1/C-2):** a dedicated method
-`_drainPendingEmits(peerId)` appends that peer's pending entries FIFO to
-`this.outFeeds.get(peerId)` and clears the slot; `_initInstanceInner` calls it
-immediately after the peer's outFeed is armed. Because the drain writes through
-`outFeeds.get(...)`, the two-instance harness's stub feeds capture drained entries on
-the same wire as live emits — the REAL drain code path runs in the gate, and a spy
-asserts `_initInstanceInner` invokes it (see G3). `initInstance` is the single choke
-point every feed-open path converges on (boot loop, `eagerInitPairedPeers`, hyperswarm
-connect, tailnet-sync, handshake), so the drain covers all of them. On instance
-revoke, drop the peer's pending slot.
+**Per-peer append chain (R2/F2 — the ordering + TOCTOU fix).** All writes toward a
+peer's outFeed flow through one FIFO promise chain per peer (`_appendLocks` — the
+`_initLocks`/`_processLocks` pattern already in the file). A chained task, when it
+executes, decides against *current* state: outFeed open → `feed.append(entry)`;
+closed → push onto `this._pendingPeerEmits[peerId]` (FIFO, capped at 256 entries per
+peer; on overflow drop the oldest with a one-line warn — LWW makes oldest-first the
+safe drop direction). `_drainPendingEmits(peerId)` — the explicit, testable seam
+(R1/C-2) — is itself a chained task: it splices the pending slot and appends its
+entries FIFO through `outFeeds.get(peerId)`; `_initInstanceInner` enqueues it
+immediately after arming the peer's outFeed. Chaining gives two invariants the naive
+check-then-push design lacks (both breakable by interleaving `emitChange`'s awaits
+against `initInstance` — R2/F2): **(i) no stranding** — an emit that decided "closed"
+before the arm is either ahead of the drain in the chain (its pending push is picked
+up by the drain) or behind it (it executes after the arm and appends directly);
+**(ii) per-feed emit-order preservation** — a queued older entry can never land after
+a newer live append, because both flow through the same chain, and the receive path
+is order-sensitive (`_processNewEntriesInner` applies in seq order; `:1663` drops
+updates behind tombstones — arrival order changes the final state).
+
+Because the drain writes through `outFeeds.get(...)`, the two-instance harness's stub
+feeds capture drained entries on the same wire as live emits — the REAL drain code
+path runs in the gate, and G3's wiring variant runs the REAL `initInstance` with
+`mgr.dataDir` redirected to a mkdtemp scratch dir (in-repo precedent:
+`tests/instance-sync-noauth-feeds.test.js:71`) so the spy on `_drainPendingEmits` is
+meaningful without touching `~/.crow` (R2/F3). `initInstance` is the single choke
+point every feed-open path converges on (boot loop, `eagerInitPairedPeers`,
+hyperswarm connect, tailnet-sync, handshake), so the drain covers all of them. On
+instance revoke, drop the peer's pending slot and its chain; an enqueue racing the
+revoke can recreate a slot that is never drained (R2/F7) — bounded by the 256 cap,
+cleared at next revoke/boot; documented residual.
 
 Residuals (documented, accepted): entries queued in a process that exits before its
 feeds open are lost — for **deletes** C4 heals this on the next gateway boot; for
@@ -222,26 +241,58 @@ flat across boots). Gate case G5b proves the boundedness executably.
 
 ### C5 — Repeat-delivery conflict dedupe (STABLE key — R1/C-1)
 
-`_insertConflictRow` gains a pre-check: skip the INSERT when a row with identical
-(`table_name`, `row_id`, `op`, `winning_lamport_ts`, `losing_lamport_ts`) already
-exists. The data blobs are deliberately EXCLUDED from the key: `winning_data` is
-`JSON.stringify(localRow)` and carries volatile never-synced columns —
-`contacts.last_seen` is bumped on every inbound DM (`servers/sharing/boot.js:889`)
-*without* moving `lamport_ts` — so a data-inclusive key would treat every boot's
-redelivery as "new" and grow `sync_conflicts` (the fleet's red-flag metric) forever.
-The lamport pair alone is the correct identity: any *material* change to either side
-rides an emit and therefore moves a lamport (the only non-emitting local writes are
-excluded-column bumps — exactly the noise to suppress); a genuinely new conflict
-always presents a new lamport pair. `_notifyConflict` is only called after a real
-insert (both call sites follow the insert), so notification behavior follows
-automatically. The gate mutates `last_seen` between two redeliveries and asserts
-zero new rows (G5).
+`_insertConflictRow` gains a pre-check: skip the INSERT when an **unresolved**
+(`resolved = 0`) row with identical (`table_name`, `row_id`, `op`,
+`winning_lamport_ts`, `losing_lamport_ts`, **`losing_instance_id`**) already exists.
+
+- The data blobs are deliberately EXCLUDED: `winning_data` is
+  `JSON.stringify(localRow)` and carries volatile never-synced columns —
+  `contacts.last_seen` is bumped on every inbound DM (`servers/sharing/boot.js:889`)
+  *without* moving `lamport_ts` — so a data-inclusive key would treat every boot's
+  redelivery as "new" and grow `sync_conflicts` (the fleet's red-flag metric) forever
+  (R1/C-1).
+- `losing_instance_id` is INCLUDED (R2/F1): lamport counters are per-instance, so two
+  different peers can present the same lamport pair for the same row with *different*
+  divergent values — collapsing them would hide the second peer's divergence. The
+  origin id is stable per peer, so same-peer redelivery still dedupes.
+- Scoped to `resolved = 0` (R2/F5): resolving a conflict does not fix the underlying
+  divergence; if the same conflict re-presents after an operator resolved it, it
+  re-surfaces exactly once (a new unresolved row, which then dedupes future
+  redeliveries). Silence-after-resolve would let the operator believe a
+  still-divergent pair was settled.
+- Legacy-DB guard (R2/F4): `_insertConflictRow` already degrades when the `op` column
+  is missing (pre-migration window); the pre-check must degrade identically — on
+  `no such column: op`, retry the pre-check without the `op` predicate rather than
+  letting the error escape (which would turn EVERY conflict log into a silent
+  failure, worse than today).
+- No new index: `sync_conflicts` is small (hundreds of rows fleet-wide) and indexed
+  on `table_name`; a composite index is a recorded follow-up if C4's re-emit volume
+  ever makes the pre-check measurable.
+
+The lamport pair + origin is the correct identity: any *material* change to either
+side rides an emit and therefore moves a lamport (the only non-emitting local writes
+are excluded-column bumps — exactly the noise to suppress). `_notifyConflict` is only
+called after a real insert (both call sites follow the insert), so notification
+behavior follows automatically. The gate mutates `last_seen` between two redeliveries
+and asserts zero new rows (G5), and proves the two-peer distinctness case (G2b).
 
 ### C6 — Test-18 harness fix
 
 `makeManager` (`tests/instance-sync.test.js:73`) sets `mgr.feedsDisabled = false`
 after construction, with a comment citing the 2b fixture precedent. Verify test 18
 passes and record the new suite baseline (expected 1932/2/0).
+
+### C7 — `restoreConflict` refuses natural-key tables (R2/F8 — latent corruption made reachable)
+
+`sync-conflict-resolve.js` already refuses `op=insert` and `table=crow_context`
+(JSON-composite `row_id`), but not `contacts`, whose conflict `row_id` is ALSO JSON
+(`JSON.stringify({crow_id})`, `instance-sync.js:1572`). Its stale-snapshot guard runs
+`SELECT * FROM contacts WHERE id = '{"crow_id":…}'` → 0 rows → overwrites
+`winning_data` with `'null'` (destroying the recorded snapshot) and its delete branch
+no-ops. Pre-existing latent bug; C4 turns contacts delete-conflicts into a routine
+operator-visible class (G5b), so the Restore button must refuse contacts the same way
+it refuses crow_context, with a test. (A real restore path for natural-key tables is
+out of scope — recorded follow-up.)
 
 ---
 
@@ -287,7 +338,10 @@ through `contact-sync.js`'s `__setEmitSinkForTest`). NEVER pointed at `~/.crow`.
 |---|---|---|
 | G1 | A stale contact@5, B same crow_id newer@10, divergent values; A runs backfill; deliver both ways | B keeps its @10 values; **A's local row still @5** (no re-stamp); A converges to B's @10; final rows equal over the **synced-column projection** (wire columns only — `id`/`created_at`/`last_seen`/`verified` are per-instance and legitimately differ, R1/M-3) |
 | G2 | BOTH sides backfill concurrently (same divergent pair), deliver interleaved; then re-deliver the same wire again | Both converge to @10; exactly 1 conflict row total, **on the higher-lamport side** (R1/M-2), asserted via its `winning_lamport_ts=10`/`losing_lamport_ts=5` columns, not by guessing the DB; **re-delivery adds 0 rows** (C5) |
-| G3 | B paired in A's `crow_instances` but A's outFeeds EMPTY; `deleteContactLocal` on A; then arm A's stub outFeed and call the REAL `_drainPendingEmits` (R1/C-2); separately a spy asserts `_initInstanceInner` invokes `_drainPendingEmits` after arming | Wire empty at delete time; entry rides on drain with its original envelope lamport; B's row deleted + tombstoned; A's tombstone lamport == envelope lamport; spy fired |
+| G2b | Receiver B@12 gets the same row at the same lamport pair from TWO different origin instances with different values (R2/F1) | BOTH conflicts logged (`losing_instance_id` distinguishes); redelivery from EITHER origin adds 0 |
+| G3 | B paired in A's `crow_instances` but A's outFeeds EMPTY; `deleteContactLocal` on A; then arm A's stub outFeed and let the chained `_drainPendingEmits` run (R1/C-2) | Wire empty at delete time; entry rides on drain with its original envelope lamport; B's row deleted + tombstoned; A's tombstone lamport == envelope lamport |
+| G3b | WIRING variant (R2/F3): real `mgr.initInstance` with `mgr.dataDir` redirected to mkdtemp (precedent `tests/instance-sync-noauth-feeds.test.js:71`), pending entry queued beforehand; feeds closed + scratch dir removed after | Spy proves `_initInstanceInner` invoked `_drainPendingEmits` after arming; the pending entry is readable from the REAL Hypercore |
+| G3c | ORDERING (R2/F2): entry E1 enqueued while the feed is closed; concurrently arm the feed (chained drain) and emit a later entry E2 while the drain is still in flight | E1 lands on the feed strictly BEFORE E2 (chain preserves emit order across the open transition); no entry appears twice; nothing is stranded in the pending slot afterwards |
 | G4 | A deletes (delivered to nobody — skimWire); A restarts; gated backfill already `done:`; a seeded `kind='prune'` tombstone also present | `finally`-path tombstone re-emit delivers the authoritative delete; the `'prune'` tombstone does NOT ride; B (row@old) deletes + tombstones; both sides converged |
 | G5 | A tombstone@10; B re-added@20 via **insert** (not yet synced); A boots twice, with B's row `last_seen` mutated between boots (R1/C-1); then B's re-add delivers to A | B's re-add SURVIVES both boots; boot 1 logs exactly 1 conflict row, **boot 2 logs 0 despite the `last_seen` change** (C5 stable key); A applies the insert, clears tombstone (`clearTombAfterApply`); boot 3 re-emits nothing |
 | G5b | A tombstone@10; B edits the contact as **op=update**@12 (concurrent edit-vs-delete, R1/M-1); deliver both ways; A boots twice more | B's update is DROPPED on A (tombstone stands); B keeps its row (delete@10 loses); exactly 1 conflict row total on B across all boots (C5); divergence persists — asserted explicitly as the accepted #155 semantics |
@@ -299,13 +353,16 @@ through `contact-sync.js`'s `__setEmitSinkForTest`). NEVER pointed at `~/.crow`.
 
 **Mutation matrix (every guard, per 2a lesson 3 — verify the harness actually reaches
 the mechanism):** revert C2's opts on contacts → G1/G2 red. Delete the
-`_drainPendingEmits` call from `_initInstanceInner` → G3's spy assertion red; gut
-`_drainPendingEmits`' append → G3's delivery assertion red. Remove the `finally`
-re-emit → G4 red. Re-emit with minted lamport instead of the tombstone's → G5 red
-(re-add wiped). Remove C5 dedupe → G5-boot-2 red. Remove the `kind IS NULL` filter →
-G4's prune assertion red. Remove the live-row LEFT JOIN filter (C4/m-3) → dedicated
-assertion red (seed the anomalous row-beside-tombstone state; no delete may ride).
-Each mutation checked against the NAMED test before restore.
+`_drainPendingEmits` call from `_initInstanceInner` → G3b's spy red; gut
+`_drainPendingEmits`' append → G3's delivery assertion red. Bypass the append chain
+(append directly) → G3c's ordering assertion red. Remove the `finally` re-emit → G4
+red. Re-emit with minted lamport instead of the tombstone's → G5 red (re-add wiped).
+Remove C5 dedupe → G5-boot-2 red. Drop `losing_instance_id` from the C5 key → G2b
+red. Drop the `resolved = 0` scope → dedicated resolve-then-redeliver assertion red.
+Remove the `kind IS NULL` filter → G4's prune assertion red. Remove the live-row
+LEFT JOIN filter (C4/m-3) → dedicated assertion red (seed the anomalous
+row-beside-tombstone state; no delete may ride). Remove C7's contacts refusal → its
+named test red. Each mutation checked against the NAMED test before restore.
 
 ## 6. Non-goals, follow-ups, risks
 
@@ -331,6 +388,14 @@ Each mutation checked against the NAMED test before restore.
 - **R-3 emit hot-path cost:** one extra indexed SELECT on `crow_instances` per emit
   (a small table; emits are mutation-rate). Acceptable; measured in review if
   contested.
+- **R-4 outFeed growth (R2/F6):** the per-boot tombstone re-emit appends one entry
+  per standing tombstone per peer per boot to append-only Hypercores that are never
+  truncated. Bounded in practice (authoritative tombstones = rare user deletes; boots
+  = deploys), shared with the shipped W4 pattern, but a standing never-cleared
+  tombstone (G5b divergence) accretes forever. Accepted residual; a feed-compaction
+  story is a recorded follow-up (pre-existing need — W4 has the same shape).
+- **R-5 conflict-index follow-up:** composite index on `sync_conflicts(table_name,
+  row_id, op)` only if C5's pre-check ever shows up in profiles (table is tiny).
 
 ## 7. Live verification plan (crow↔grackle, real rows)
 
@@ -375,3 +440,26 @@ Each mutation checked against the NAMED test before restore.
   providers exclusion, W4 fresh-mint rationale, wire compat incl. `row.lamport_ts`
   redundancy, counter-floor invariant, C3 queue race soundness in the in-process
   model, `req:`/prune tombstone handling).
+
+**Round 2 (2026-07-14, fresh Opus subagent): REVISE — folded in this revision.**
+- **F1 (MAJOR)** C5 key without origin collapsed two different peers' divergences at
+  the same lamport pair. Fixed: `losing_instance_id` added to the key + G2b.
+- **F2 (MAJOR)** naive check-then-push raced `initInstance`: entries strandable until
+  reboot, and drain-vs-live-append could reorder a feed (receive path is
+  order-sensitive). Fixed: per-peer ordered append chain (`_appendLocks`) through
+  which live appends, pending pushes, and the drain all flow + G3c.
+- **F3 (MAJOR)** G3's spy needed the real `_initInstanceInner`, which writes
+  Hypercores to the process-default data dir — prod-polluting or vacuous as specced.
+  Fixed: G3b wiring variant with `mgr.dataDir` → mkdtemp
+  (`tests/instance-sync-noauth-feeds.test.js:71` precedent).
+- **F4** C5 pre-check must mirror the op-column-absent fallback or pre-migration DBs
+  lose ALL conflict logging. Folded. **F5** pre-check scoped to `resolved = 0`
+  (re-surface once after resolution) + index deferred (R-5). **F6** outFeed growth
+  residual documented (R-4). **F7** revoke-race pending-slot leak bounded +
+  documented (C3).
+- **F8 (latent bug, folded as C7):** `restoreConflict` corrupts contacts conflict
+  rows (JSON row_id treated as scalar id) — refusal guard + test added to scope.
+- Reviewer re-verified sound: C4's live-row filter, §7.4 no-op re-emit claim
+  (`_afterContactApplied` fires only on winning branches), same-lamport cross-peer
+  independence, null-`theirFeedKey` drain correctness, the gated-backfill refactor's
+  return contract, counter floor, delete-wins termination, settings tie residual.
