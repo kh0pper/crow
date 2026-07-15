@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
 import NoiseSecretStream from "@hyperswarm/secret-stream";
+import Hypercore from "hypercore";
 import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
@@ -110,7 +111,10 @@ export async function linkPeers(a, b) {
   await b.mgr.initInstance(a.id, a.mgr.getOutFeedKey(b.id));
   await a.mgr.replicate(b.id, nsA);
   await b.mgr.replicate(a.id, nsB);
-  return { streams: [nsA, nsB], close: () => { nsA.destroy(); nsB.destroy(); } };
+  // 2d C3 (G8): expose per-side handles so a test can re-replicate one side's
+  // NEW feed onto the SAME still-open stream after that side's own rotation,
+  // without tearing down the link — non-breaking addition alongside `streams`.
+  return { streams: [nsA, nsB], nsA, nsB, close: () => { nsA.destroy(); nsB.destroy(); } };
 }
 
 /** Await until fn() is truthy or the deadline passes — condition-based, no bare sleeps. */
@@ -489,5 +493,72 @@ test("G11/G11b: malformed and self-echoed feed keys are rejected -- no persist-s
     const good = "ab".repeat(32);
     const buf = b.mgr.validateIncomingFeedKey(a.id, good);
     assert.equal(buf?.toString("hex"), good, "valid key parses");
+  } finally { await fleet.cleanup(); }
+});
+
+// ── Task 6 (C3): live-stream tracking + post-swap attach ────────────────────
+// memories.id is INTEGER PRIMARY KEY — G8 706000 (pre) / 706001 (post), G9 706100+.
+
+test("G8: rotation while a stream is actively replicating -- new feed attaches to the SAME stream", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    const link = await linkPeers(a, b); // old core actively replicating on this stream
+    let streamErrors = 0;
+    link.nsA.on("error", () => { streamErrors++; });
+    link.nsB.on("error", () => { streamErrors++; });
+    await a.mgr.emitChange("memories", "insert", { id: 706000, content: "x", lamport_ts: null });
+    await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=706000" })).rows.length === 1);
+    // A rotates; the key is delivered to B while the ORIGINAL stream stays open.
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKey = a.mgr.getOutFeedKey(b.id);
+    // A's side of the SAME stream: A's out-feed was closed+recreated, so A must
+    // re-attach its own side explicitly (this harness action, not C3's job).
+    await a.mgr.replicate(b.id, link.nsA);
+    await b.mgr.initInstance(a.id, newKey); // swap: real bounded close of old core, then attach
+    await a.mgr.emitChange("memories", "insert", { id: 706001, content: "y", lamport_ts: null });
+    const applied = await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=706001" })).rows.length === 1);
+    assert.equal(applied, true, "post-rotation data must flow over the pre-existing stream");
+    // The out-feed side (A -> B, re-attached above) must not have been disturbed
+    // by B's in-feed swap on the same stream: the pre-rotation row must still be
+    // there and the stream must not have thrown/reset underneath either side.
+    const preStillThere = (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=706000" })).rows.length === 1;
+    assert.equal(preStillThere, true, "pre-rotation row undisturbed by the swap");
+    assert.equal(streamErrors, 0, "out-feed replication over the SAME stream must not surface errors during the swap");
+    link.close();
+  } finally { await fleet.cleanup(); }
+});
+
+test("G9: old core blocks remain readable after the swap (acceptance pin)", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    const link = await linkPeers(a, b);
+    await a.mgr.emitChange("memories", "insert", { id: 706100, content: "x", lamport_ts: null });
+    await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=706100" })).rows.length === 1);
+    const oldKey = Buffer.from(b.mgr.inFeeds.get(a.id).key);
+    link.close();
+    // A rotates its out-feed to B (storage wiped, new key minted) -- G1-style.
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKey = a.mgr.getOutFeedKey(b.id);
+    await b.mgr.initInstance(a.id, newKey); // live swap, no restart -- old session closes (bounded)
+    // Release B's own live sessions on this peer's corestore dir first: the
+    // probed rocksdb fd-lock is process-wide per directory, so a standalone
+    // reopen below would otherwise collide with B's still-open NEW in-feed
+    // session even though it targets a DIFFERENT key (old vs new core).
+    await b.mgr.closeInstanceFeeds(a.id);
+    // Acceptance pin: the OLD in-feed's on-disk blocks are still directly readable
+    // by reopening the SAME "in" dir keyed with the OLD key -- the swap discards
+    // only the live Hypercore session, never the storage (probed fact: a feed dir
+    // is a multi-core store; old blocks stay readable after the old session closes).
+    const reopened = new Hypercore(join(b.mgr.dataDir, a.id, "in"), oldKey, { valueEncoding: "json" });
+    await reopened.ready();
+    assert.ok(reopened.length >= 1, "old block(s) still present on disk");
+    assert.ok(await reopened.get(0), "old block 0 still readable");
+    await reopened.close();
   } finally { await fleet.cleanup(); }
 });
