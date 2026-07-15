@@ -180,3 +180,117 @@ test("C2 unit: set writes {k,s} object; get is key-gated; null-feed coerces both
     assert.equal(await mgr._getLastAppliedSeq(PEER, null), 42, "legacy bare number coerces");
   } finally { await fleet.cleanup(); }
 });
+
+// ── C2 reconcile-at-open (2d Task 3) ───────────────────────────────────────────
+// NOTE ids: memories.id is INTEGER PRIMARY KEY — the brief's string ids
+// (g4-*, g4c-*, g6b-pre) throw a silent datatype-mismatch on the receiving
+// INSERT, which until() only observes as a timeout. Use unique integer ids:
+// G4a/G4b range 703000-703009, G4c range 703100-703104, G6b uses 703200.
+
+test("G4a/G4b: legacy numeric adopted when n <= length at open; reset when n > length", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    // Build a real feed pair, replicate 3 entries so B's in-feed has length 3.
+    const link = await linkPeers(a, b);
+    for (let i = 0; i < 3; i++) {
+      await a.mgr.emitChange("memories", "insert", { id: 703000 + i, content: "x", lamport_ts: null });
+    }
+    // Wait for the real applied-seq record to settle at s:3, not just for
+    // feed.length to reach 3 — feed.length only proves the bytes landed, not
+    // that the receiving side's per-entry processing pipeline (which writes
+    // its OWN {k,s} checkpoint) has finished. Waiting on length alone races
+    // the pipeline's checkpoint writes against this test's manual override
+    // below (observed: the pipeline's write landed AFTER the manual override
+    // and silently clobbered it, corrupting the RED evidence for G4a).
+    await until(async () => {
+      const r = await b.mgr._appliedSeqRecord(a.id);
+      return typeof r === "object" && r !== null && r.s === 3;
+    });
+    link.close();
+    // Simulate legacy state: overwrite B's record with a bare number, then
+    // force a re-open (close feeds, re-init) — reconcile must run at open.
+    const K = b.mgr.inFeeds.get(a.id).key.toString("hex");
+    await b.db.execute({
+      sql: `UPDATE sync_state SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer,'{}'), ?, 2) WHERE instance_id = ?`,
+      args: [`$."${a.id}"`, b.mgr.localInstanceId] });
+    await b.mgr.closeInstanceFeeds(a.id);
+    await b.mgr.initInstance(a.id, Buffer.from(K, "hex"));   // n=2 <= length 3 → adopt
+    let rec = await b.mgr._appliedSeqRecord(a.id);
+    assert.deepEqual({ k: rec.k, s: rec.s }, { k: K, s: 2 }, "G4a: adopted as {k, s:n}");
+    // G4b: n > length → provably foreign → reset to 0.
+    await b.db.execute({
+      sql: `UPDATE sync_state SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer,'{}'), ?, 99) WHERE instance_id = ?`,
+      args: [`$."${a.id}"`, b.mgr.localInstanceId] });
+    await b.mgr.closeInstanceFeeds(a.id);
+    await b.mgr.initInstance(a.id, Buffer.from(K, "hex"));
+    rec = await b.mgr._appliedSeqRecord(a.id);
+    assert.deepEqual({ k: rec.k, s: rec.s }, { k: K, s: 0 }, "G4b: impossible mark reset to 0");
+  } finally { await fleet.cleanup(); }
+});
+
+test("G4c burst-crossing: legacy n vs fresh rotated feed that replicates a backlog past n in one link", async () => {
+  const fleet = await makeFleet();
+  let link;
+  try {
+    const { a, b } = fleet;
+    // A pre-populates FIVE entries in its out-feed to B while UNLINKED (so the
+    // whole backlog arrives as one burst after B opens its fresh in-feed).
+    await a.mgr.initInstance(b.id, null);
+    for (let i = 0; i < 5; i++) {
+      await a.mgr.emitChange("memories", "insert", { id: 703100 + i, content: "x", lamport_ts: null });
+    }
+    // B holds a stale legacy mark n=3 for A (as if earned on a long-dead feed).
+    await b.db.execute({
+      sql: `UPDATE sync_state SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer,'{}'), ?, 3) WHERE instance_id = ?`,
+      args: [`$."${a.id}"`, b.mgr.localInstanceId] });
+    // B opens A's feed fresh (length 0 at open → reset to {k,s:0}), THEN the
+    // burst replicates. Lazy evaluation would flip to "trust 3" once length=5.
+    link = await linkPeers(a, b);
+    // Right-reason check (mandatory per T1 review): the record must already be
+    // frozen at {k, s:0} the instant the feed opened, BEFORE the burst lands —
+    // otherwise a pass here could mean "everything happened to apply anyway"
+    // rather than "the impossible mark was actually discarded at open".
+    const K = b.mgr.inFeeds.get(a.id).key.toString("hex");
+    const recAtOpen = await b.mgr._appliedSeqRecord(a.id);
+    assert.deepEqual(recAtOpen && { k: recAtOpen.k, s: recAtOpen.s }, { k: K, s: 0 },
+      "G4c right-reason: record frozen at {k,s:0} at open, before the burst lands");
+    const allApplied = await until(async () => {
+      const { rows } = await b.db.execute({
+        sql: "SELECT COUNT(*) AS n FROM memories WHERE id BETWEEN 703100 AND 703104" });
+      return Number(rows[0].n) === 5;
+    });
+    assert.equal(allApplied, true, "entries 0..2 must NOT be skipped (burst-crossing, R1 F2)");
+  } finally {
+    // link.close() BEFORE fleet.cleanup(), same footgun as G0: an assertion
+    // throw must not strand the NoiseSecretStream/TCP sockets open.
+    if (link) link.close();
+    await fleet.cleanup();
+  }
+});
+
+test("G6b: a restarted manager (same dirs+DB, new objects) completes a rotation via reconcile", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { a, b } = fleet;
+    const link = await linkPeers(a, b);
+    await a.mgr.emitChange("memories", "insert", { id: 703200, content: "x", lamport_ts: null });
+    await until(async () => (await b.db.execute({ sql: "SELECT id FROM memories WHERE id=703200" })).rows.length === 1);
+    link.close();
+    // A "rotates": wipe its out-feed dir for B and re-init → new key minted.
+    await a.mgr.closeInstanceFeeds(b.id);
+    rmSync(join(a.mgr.dataDir, b.id, "out"), { recursive: true, force: true });
+    await a.mgr.initInstance(b.id, null);
+    const newKey = a.mgr.getOutFeedKey(b.id);
+    // B "restarts": build a NEW manager over B's same db+dataDir, sync_url = new key.
+    await b.mgr.close();
+    const b2mgr = new (b.mgr.constructor)(b.mgr.identity, b.db, b.mgr.localInstanceId);
+    b2mgr.dataDir = b.mgr.dataDir; b2mgr.feedsDisabled = false;
+    await b2mgr.initInstance(a.id, newKey); // reconcile: k differs → {k:new, s:0}
+    const rec = await b2mgr._appliedSeqRecord(a.id);
+    assert.equal(rec.k, newKey.toString("hex"));
+    assert.equal(rec.s, 0, "restart completes rotation: record reset for the new feed");
+    await b2mgr.close();
+    b.mgr = b2mgr; // let cleanup close the live one
+  } finally { await fleet.cleanup(); }
+});
