@@ -235,7 +235,12 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   }
 
   // Ensure our outFeed exists, then exchange feed keys.
-  await instanceSyncManager.initInstance(remoteInstanceId, peerRow.sync_url ? Buffer.from(peerRow.sync_url, "hex") : null);
+  // 2d F3: pass NO key here. This call's only job is arming the out-feed for
+  // getOutFeedKey below. Passing the :222 snapshot's sync_url was harmless
+  // when a mismatched key no-oped, but under key-aware initInstance a stale
+  // snapshot would swap a concurrently-rotated in-feed BACK to its dead key.
+  // The authenticated receipt at the feed-key exchange below drives any swap.
+  await instanceSyncManager.initInstance(remoteInstanceId, null);
   const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
   ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
 
