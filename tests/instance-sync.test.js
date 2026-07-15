@@ -72,7 +72,13 @@ const REMOTE_ID = "bbbbbbbb-0000-0000-0000-000000000002";
  */
 function makeManager(instanceId = LOCAL_ID) {
   const db = createDbClient(DB_PATH);
-  return { mgr: new InstanceSyncManager(IDENTITY, db, instanceId), db };
+  const mgr = new InstanceSyncManager(IDENTITY, db, instanceId);
+  // The scratch suite env sets CROW_DISABLE_INSTANCE_SYNC=1, which the constructor
+  // reads into feedsDisabled — emitChange would return before stamping and every
+  // emit-path assertion would go vacuous. These tests drive stub feeds, never real
+  // Hypercores, so force-enable (same as tests/group-tombstones.test.js:80).
+  mgr.feedsDisabled = false;
+  return { mgr, db };
 }
 
 /**
