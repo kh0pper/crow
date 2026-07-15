@@ -24,6 +24,41 @@
 
 import { SYNCED_TABLES, rowsEquivalent } from "./instance-sync.js";
 
+// ── Natural-key restore refusals (2c C7 / 2c-F3) ─────────────────────────────
+// These tables key their conflict row_id on a JSON natural key (crow_context:
+// {section_key,device_id,project_id}; contacts: {crow_id}; contact_groups:
+// {group_uid}), not a numeric id, so the id-keyed stale-snapshot guard in
+// restoreConflict() would run SELECT ... WHERE id = '{...}', find nothing,
+// re-snapshot winning_data to 'null', and silently destroy the recorded local
+// snapshot (2c C7 / spec R3-Q4). Restore is therefore refused for them.
+//
+// SINGLE SOURCE OF TRUTH: the dashboard (settings/sections/sync-conflicts.js
+// renderConflictRow) derives its Restore-button disable from this set, so UI
+// and backend cannot drift. Invariant: set membership ⟺ a per-table refusal
+// message exists in NATURAL_KEY_RESTORE_REFUSALS below.
+export const NATURAL_KEY_RESTORE_TABLES = new Set([
+  "crow_context",
+  "contacts",
+  "contact_groups",
+]);
+
+// Per-table operator-facing refusal messages. Every NATURAL_KEY_RESTORE_TABLES
+// member must have an entry here (and vice versa).
+const NATURAL_KEY_RESTORE_REFUSALS = {
+  crow_context:
+    "This version cannot be restored automatically. crow_context rows are keyed " +
+    "by a composite key (section_key, device_id, project_id), not a single id. " +
+    "Use crow_update_context_section to apply the values shown below.",
+  contacts:
+    "This version cannot be restored automatically. Contact conflicts are keyed " +
+    "by crow_id, not a numeric id. Review the values shown below and re-apply " +
+    "the change manually from the Contacts panel.",
+  contact_groups:
+    "This version cannot be restored automatically. Group conflicts are keyed " +
+    "by group_uid, not a numeric id. Review the values shown below and re-apply " +
+    "the change manually from the Groups panel.",
+};
+
 // ── Outcomes ─────────────────────────────────────────────────────────────────
 
 /**
@@ -123,27 +158,11 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
   const table = conflict.table_name;
   const rowId = conflict.row_id;
 
-  // Natural-key tables cannot be auto-restored: their conflict row_id is a JSON
-  // key (crow_context: {section_key,device_id,project_id}; contacts: {crow_id};
-  // contact_groups: {group_uid}), not a numeric id, so the id-keyed stale-snapshot
-  // guard below would run SELECT ... WHERE id = '{...}', find nothing, re-snapshot
-  // winning_data to 'null', and silently destroy the recorded local snapshot
-  // (2c C7 / spec R3-Q4). Placement BEFORE the stale guard is load-bearing.
-  const NATURAL_KEY_RESTORE_REFUSALS = {
-    crow_context:
-      "This version cannot be restored automatically. crow_context rows are keyed " +
-      "by a composite key (section_key, device_id, project_id), not a single id. " +
-      "Use crow_update_context_section to apply the values shown below.",
-    contacts:
-      "This version cannot be restored automatically. Contact conflicts are keyed " +
-      "by crow_id, not a numeric id. Review the values shown below and re-apply " +
-      "the change manually from the Contacts panel.",
-    contact_groups:
-      "This version cannot be restored automatically. Group conflicts are keyed " +
-      "by group_uid, not a numeric id. Review the values shown below and re-apply " +
-      "the change manually from the Groups panel.",
-  };
-  if (NATURAL_KEY_RESTORE_REFUSALS[table]) {
+  // Natural-key tables cannot be auto-restored — see NATURAL_KEY_RESTORE_TABLES
+  // at module scope for the full rationale (2c C7 / spec R3-Q4). Placement
+  // BEFORE the stale guard is load-bearing: the id-keyed stale-snapshot re-read
+  // below would destroy the recorded snapshot for these tables.
+  if (NATURAL_KEY_RESTORE_TABLES.has(table)) {
     return { status: "refused", message: NATURAL_KEY_RESTORE_REFUSALS[table] };
   }
 
@@ -311,6 +330,13 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
       const placeholders = insertKeys.map(() => "?").join(", ");
       const values = insertKeys.map((k) => losingData[k] ?? null);
       if (table === "contact_groups") {
+        // NOTE (2c-F4): currently UNREACHABLE — contact_groups is refused upstream by
+        // the NATURAL_KEY_RESTORE_TABLES gate (search this file) before the stale guard / INSERT
+        // branch. KEEP THIS GUARD: if that refusal is ever relaxed (e.g. natural-key restore
+        // gets implemented), this statement-level tombstone check becomes load-bearing again —
+        // without it, Restore re-inserts a tombstoned group_uid and manufactures the
+        // resurrection zombie (2b design R2 F3').
+        //
         // G3 (2b design R2 F3'): an operator clicking Restore on an old
         // contact_groups conflict must NOT re-insert a tombstoned group_uid —
         // that would manufacture the resurrection zombie through a SUPPORTED
