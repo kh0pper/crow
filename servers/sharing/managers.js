@@ -12,6 +12,7 @@ import { PeerManager } from "./peer-manager.js";
 import { SyncManager } from "./sync.js";
 import { InstanceSyncManager } from "./instance-sync.js";
 import { NostrManager } from "./nostr.js";
+import { installNostrCrashGuard } from "./nostr-crash-guard.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 
 // Singleton sharing managers — Hyperswarm and Nostr connections are shared across
@@ -26,6 +27,10 @@ export function getSharedManagers(dbPath) {
   const peerManager = new PeerManager(identity);
   const syncManager = new SyncManager(identity);
   const nostrManager = new NostrManager(identity, db);
+  // Narrow process-level net for nostr-tools' orphaned close-race rejection
+  // (2c-F1 C1b): swallows SendingOnClosedConnection, RETHROWS everything else.
+  // Idempotent; installed once with the singleton that owns all relay use.
+  installNostrCrashGuard();
 
   // Instance sync manager for cross-instance replication
   const localInstanceId = getOrCreateLocalInstanceId();
