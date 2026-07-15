@@ -672,12 +672,41 @@ throwaway group. Post-deploy: `user_version` = new gen on all three boxes,
 
 </details>
 
-**2c. Lamport-preserving contact re-emit.** Boot backfills currently re-emit contacts
-with fresh lamports, creating a divergence window where a stale value can clobber a
-newer peer write (the I-B1 exposure class). Spec: re-emit preserving the row's
-existing lamport (or emit-if-newer semantics).
-*Acceptance:* test — a backfill re-emit does NOT advance lamport and cannot overwrite
-a peer row with a higher lamport; the #147 done:<n> flag semantics stay intact.
+**2c. Lamport-preserving contact re-emit. — ✅ SHIPPED 2026-07-15 (PR #194 `d85c82d8` +
+hotfix PR #195 `73c9e6b8`), fleet-deployed + live-verified.**
+Spec (rev 4, 3 adversarial rounds): `docs/superpowers/specs/2026-07-14-lamport-preserving-reemit-design.md`;
+plan: `docs/superpowers/plans/2026-07-14-item2c-lamport-preserving-reemit.md`.
+Shipped: C1 `emitChange` preserve-mode (`opts.lamportTs`) · C2 contacts/settings/groups
+re-emitters preserve row lamports (providers untouched — INSERT OR IGNORE is clobber-proof) ·
+C3 per-peer ordered append chain + pending queue + drain-on-arm (the folded zero-outFeeds
+Item-3 bug: boot-window emits now ride instead of silently dropping) · C4 flagless per-boot
+`reemitContactTombstones` at ORIGINAL tombstone lamports (lost/re-pair-skipped deletes heal;
+newer re-adds survive) · C5 `sync_conflicts` repeat-delivery dedupe (stable key: lamport pair +
+losing origin, resolved=0-scoped) · C6 test-18 harness fix · C7 `restoreConflict` refuses all
+natural-key tables (contacts/contact_groups `winning_data` corruption killed). Executable gate:
+`tests/lamport-reemit.test.js` (17 cases G1–G12) + full 12-mutation matrix red-then-green.
+Suite baseline moved **1931/3/0 → 1953/2/0** (test 18 was a harness-env artifact; only the 2
+bundles-validate-install known-fails remain).
+*Live proof:* real-row create → 3-instance convergence at identical lamport (4391); backfill
+re-run left MPA lamports byte-identical AND healed a real pre-existing grackle divergence
+(missing contact delivered at its ORIGINAL lamport 3581); delete → converged ×3 with tombstone
+@4393; per-boot re-emit idempotent; `sync_conflicts` flat at 219/182/162/0 throughout.
+**⚠ Incident during deploy (resolved, PR #195):** 2c's every-boot inbound drain made grackle's
+boot await a PRE-EXISTING wedge — a contact-delete apply's `unwireContact` teardown (hypercore
+close / swarm leave, unbounded await) never resolved → gateway never reached HTTP listen →
+public blog 502 (~40 min). Fix: bounded awaits (10s boot-drain cap; 5s per teardown step —
+semantically the already-tolerated step-failure case). The cap fired live on grackle's next
+boot, boot completed in 6s, and the capped teardown then unwedged the background chain (the
+stuck delete converged minutes later). Root-cause follow-ups recorded below.
+*New follow-ups (pool):* [2c-F1, URGENT-ish] uncaught `SendingOnClosedConnection` from
+`resilient-subscribe`→nostr-tools crashes the gateway when a relay closes mid-subscribe
+(crashed grackle once, stack in ledger); [2c-F2] apply-path hooks still carry unbounded network
+awaits generally (the caps bound the known two); [2c-F3] dashboard Restore button not disabled
+for contacts/contact_groups (backend refuses safely); [2c-F4] dead INSERT-branch group guard in
+`sync-conflict-resolve.js` needs an unreachable-pointer comment; [2c-F5] `_pendingPeerEmits`
+RAM on hosts with dead-but-not-revoked peers (256-cap/peer — watch on soak).
+*Original acceptance (all delivered):* backfill re-emit does NOT advance lamports and cannot
+overwrite a higher-lamport peer row; #147 done:<n> semantics intact.
 
 **2d. Tailnet in-feed key rotation.** When an instance rotates keys, peers keep the
 stale-keyed in-feed until restart. Spec: detect key change and recreate the affected
