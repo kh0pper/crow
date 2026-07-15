@@ -313,6 +313,11 @@ export class InstanceSyncManager {
     this._appendLocks = new Map();      // remoteInstanceId → tail Promise
     this._pendingPeerEmits = new Map(); // remoteInstanceId → [signed entries]
 
+    // 2d C3: live replication streams per peer, so a rotation can attach the
+    // successor feed to connections that predate the key receipt (hyperswarm
+    // delivers keys and streams in either order — this closes that hole).
+    this._activeStreams = new Map(); // remoteInstanceId → Set<stream>
+
     // 2d C1: live in-feed key-rotation bookkeeping.
     this._inFeedListeners = new Map();  // remoteInstanceId → append handler (2d C1: removable on swap)
     this._deferredRotations = new Set(); // remoteInstanceId → swap deferred, old close still pending (2d C1)
@@ -511,16 +516,27 @@ export class InstanceSyncManager {
       let inFeed = null;
       try {
         inFeed = new Hypercore(resolve(dir, "in"), theirFeedKey, { valueEncoding: "json" });
+        // 2d C1 review fix (moved ahead of ready()/reconcile — T6 re-review):
+        // a live-feed error on the successor must not become an uncaught
+        // exception (only the discarded old feed had a swallow), and a
+        // reconcile-throw below must not leave a partially-opened feed
+        // without this listener attached.
+        inFeed.on("error", (err) => console.warn(`[instance-sync] in-feed error for ${remoteInstanceId.slice(0,12)}…: ${err.message}`));
         await inFeed.ready();
         // 2d C2: freeze the applied-seq decision BEFORE wiring the listener.
         await this._reconcileAppliedSeqAtOpen(remoteInstanceId, inFeed);
-        // 2d C1 review fix: a live-feed error on the successor must not become
-        // an uncaught exception (only the discarded old feed had a swallow).
-        inFeed.on("error", (err) => console.warn(`[instance-sync] in-feed error for ${remoteInstanceId.slice(0,12)}…: ${err.message}`));
         const onAppend = async () => { await this._processNewEntries(remoteInstanceId, inFeed); };
         inFeed.on("append", onAppend);
         this._inFeedListeners.set(remoteInstanceId, onAppend);
         this.inFeeds.set(remoteInstanceId, inFeed);
+        // 2d C3: attach the successor feed to every live stream for this peer
+        // (hyperswarm may have delivered the new key AFTER a stream that
+        // already carried the old feed — that stream must not go dark).
+        for (const s of this._activeStreams.get(remoteInstanceId) ?? []) {
+          try { inFeed.replicate(s, { live: true }); } catch (err) {
+            console.warn(`[instance-sync] post-swap stream attach failed for ${remoteInstanceId.slice(0,12)}…: ${err.message}`);
+          }
+        }
       } catch (err) {
         // 2d C1 (R2 #1): open failure degrades to out-only — NEVER throws out
         // of initInstance (a still-held lock after a deferred rotation would
@@ -1263,6 +1279,19 @@ export class InstanceSyncManager {
    * @param {object} stream - NoiseSecretStream (Hypercore reads .noiseStream from it)
    */
   async replicate(remoteInstanceId, stream) {
+    // 2d C3: track live streams so a rotation can attach the successor feed
+    // to connections that predate the key receipt (hyperswarm ordering hole).
+    let set = this._activeStreams.get(remoteInstanceId);
+    if (!set) { set = new Set(); this._activeStreams.set(remoteInstanceId, set); }
+    if (!set.has(stream)) {
+      set.add(stream);
+      const drop = () => {
+        set.delete(stream);
+        if (set.size === 0) this._activeStreams.delete(remoteInstanceId);
+      };
+      stream.on("close", drop);
+      stream.on("error", () => {}); // never let a tracked stream's error escape
+    }
     const outFeed = this.outFeeds.get(remoteInstanceId);
     const inFeed = this.inFeeds.get(remoteInstanceId);
 
@@ -2900,6 +2929,8 @@ export class InstanceSyncManager {
     // 2c C3: a closed/revoked peer keeps no parked entries or chain tail.
     this._pendingPeerEmits.delete(remoteInstanceId);
     this._appendLocks.delete(remoteInstanceId);
+    // 2d C3: a closed/revoked peer keeps no tracked live streams either.
+    this._activeStreams.delete(remoteInstanceId);
   }
 
   /**
