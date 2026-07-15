@@ -299,6 +299,13 @@ export class InstanceSyncManager {
     // Per-peer serialization for _processNewEntries — see D4 fix below.
     this._processLocks = new Map(); // remoteInstanceId → tail Promise
 
+    // 2c C3: per-peer ordered append pipeline. ALL writes toward a peer's outFeed
+    // flow through one FIFO promise chain (_appendLocks, the _initLocks pattern);
+    // entries emitted while the peer's feed is not yet armed park in
+    // _pendingPeerEmits and drain on arm — the boot-window fix (spec §3 C3).
+    this._appendLocks = new Map();      // remoteInstanceId → tail Promise
+    this._pendingPeerEmits = new Map(); // remoteInstanceId → [signed entries]
+
     // Flag that _ensureCounter has seeded the sync_state row at least once.
     // The DB row is the authority; this is only a cheap short-circuit.
     this._counterSeeded = false;
@@ -434,6 +441,11 @@ export class InstanceSyncManager {
       });
       await outFeed.ready();
       this.outFeeds.set(remoteInstanceId, outFeed);
+      // 2c C3: drain entries parked while this feed was unarmed. The enqueue MUST
+      // be synchronously adjacent to the set above (spec §3 C3) — an emit task
+      // slipping in between would append ahead of older parked entries.
+      const drainDone = this._drainPendingEmits(remoteInstanceId);
+      await drainDone.catch(() => {});
     }
 
     // Their incoming feed (writable by them)
@@ -563,11 +575,13 @@ export class InstanceSyncManager {
       // this guard is scoped to the re-emit reconciliation only.
       if (PROFILE_SYNC_KEYS.includes(row.key) && (typeof row.value !== "string" || row.value.trim() === "")) continue;
       try {
+        // 2c C2: preserve the row's ORIGINAL lamport (already SELECTed) — a
+        // re-emit is redelivery and must not out-stamp a peer's newer save.
         await this.emitChange("dashboard_settings", "update", {
           key: row.key,
           value: row.value,
           instance_id: null,
-        });
+        }, { lamportTs: Number(row.lamport_ts) || 0 });
         emitted++;
       } catch (err) {
         console.warn(`[instance-sync] reemit ${row.key} failed: ${err.message}`);
@@ -590,6 +604,27 @@ export class InstanceSyncManager {
   }
 
   /**
+   * 2c C4 (design §3): contacts mirror of W4's flagless group-tombstone re-emit.
+   * Thin wrapper — the #147-gated body (`_backfillContactsOnceGated`) runs at most
+   * once per instance lifetime, but the `finally` runs `reemitContactTombstones()`
+   * on EVERY boot. External contract is UNCHANGED (returns the gated body's count):
+   * mcp-mounts.js and tests/messages-contacts-backfill.test.js call this wrapper.
+   *
+   * Only safe because the tombstone re-emit preserves each delete's ORIGINAL global
+   * lamport (preserve-mode) — a fresh mint here would beat a peer's genuinely-newer
+   * re-add and wipe it (contacts allow re-add-after-delete, unlike groups: G5).
+   */
+  async backfillContactsOnce() {
+    try {
+      return await this._backfillContactsOnceGated();
+    } finally {
+      // W4 pattern (mirrors backfillGroupsOnce): FLAGLESS every-boot tombstone
+      // re-emit on EVERY exit path of the gated body. Guarded — never throws.
+      await this.reemitContactTombstones();
+    }
+  }
+
+  /**
    * One-shot idempotent backfill (Phase 3 PR-B / I-4): re-emit every existing
    * SYNCABLE full contact so a peer can resolve crow_id → local contact_id for
    * contacts that predate PR-A (they never emitted a contact-sync entry, so
@@ -600,8 +635,11 @@ export class InstanceSyncManager {
    * an unchanged re-emit as an effective no-op (fresh lamport → UPDATE with
    * identical values; onContactSynced re-subscribe is idempotent). Mirrors
    * reemitSyncableSettingsOnce(). Never throws out of the loop.
+   *
+   * The gated BODY of backfillContactsOnce() (2c C4 wrapped it with a finally-path
+   * tombstone re-emit; return value contract is unchanged).
    */
-  async backfillContactsOnce() {
+  async _backfillContactsOnceGated() {
     const FLAG_KEY = "__contacts_backfill_v1";
     // Only a real completed run ("done:<n>") is terminal. The boot call races
     // the async sharing boot that opens the sync feeds — on a slow host the
@@ -658,7 +696,11 @@ export class InstanceSyncManager {
       try {
         // shouldSyncRow("contacts", …) is the final gate inside emitChange;
         // EXCLUDED_COLUMNS.contacts strips verified/last_seen/id/created_at.
-        await this.emitChange("contacts", "update", row);
+        // 2c C2: preserve the row's ORIGINAL lamport — a backfill is redelivery,
+        // not a new write; a fresh mint here fabricated recency over any peer
+        // write still in flight (I-B1). NULL-lamport legacy rows emit at 0: they
+        // land where the peer has nothing and lose everywhere else.
+        await this.emitChange("contacts", "update", row, { lamportTs: Number(row.lamport_ts) || 0 });
         emitted++;
       } catch (err) {
         console.warn(`[instance-sync] contacts backfill emit failed for ${row.crow_id}: ${err.message}`);
@@ -678,6 +720,72 @@ export class InstanceSyncManager {
     if (emitted > 0) {
       console.log(`[instance-sync] one-shot contacts backfill: ${emitted} contact(s) re-emitted → peers resolve legacy contacts`);
     }
+    return emitted;
+  }
+
+  /**
+   * 2c C4 (design §3): the W4 mirror for contacts. Re-emit every AUTHORITATIVE
+   * contact tombstone as an op=delete on EVERY boot — deliberately NO flag. Sync
+   * feeds are born EMPTY at pairing (no history replay, see _initInstanceInner),
+   * so a delete that missed its peers — a crash inside the boot window, a re-pair,
+   * a secondary-process delete whose feeds never armed — is otherwise never
+   * re-delivered (silent divergence, defect D-C). Groups solved exactly this with
+   * reemitGroupTombstones; contacts had no mirror.
+   *
+   * Unlike groups (strict delete-wins, re-adds LOSE by design), this mirror is
+   * ONLY safe with lamport PRESERVATION: the envelope carries the tombstone's
+   * ORIGINAL global delete lamport, so the re-emit beats exactly what the original
+   * broadcast would have — no more. A fresh mint would beat a peer's genuinely-newer
+   * re-add and wipe it (contacts allow re-add-after-delete; G5).
+   *
+   * Filters (both load-bearing):
+   *   - kind IS NULL: authoritative user deletes ONLY. A `kind='prune'` tombstone
+   *     is local GC (2a) and must NEVER ride the wire.
+   *   - no coexisting live `contacts` row (LEFT JOIN): the anomalous
+   *     row-beside-tombstone state is reachable via races/manual edits; never
+   *     broadcast a delete for a contact this instance still holds (m-3; mirrors
+   *     emitGroupUpsert's belt-and-braces).
+   *
+   * Drains inbound FIRST (I-B1, load-bearing here): an already-delivered
+   * re-add-as-insert must clear our tombstone BEFORE we re-emit it. Guarded —
+   * never throws; a missing contact_tombstones table (un-migrated DB) is a no-op.
+   */
+  async reemitContactTombstones() {
+    if (this.feedsDisabled) return 0;
+    if (this.outFeeds.size === 0) return 0; // no peers armed yet — retry next boot; flagless by design (W4 rationale)
+    // I-B1 drain: apply the peer's already-replicated backlog so a genuine
+    // re-add-as-insert clears our tombstone before we re-emit it (rule order is
+    // load-bearing; design §3 C4).
+    try {
+      for (const [peerId, inFeed] of this.inFeeds) {
+        await this._processNewEntries(peerId, inFeed);
+      }
+    } catch (err) {
+      console.warn(`[instance-sync] contact tombstone re-emit drain failed: ${err.message}`);
+    }
+    let rows = [];
+    try {
+      const r = await this.db.execute({
+        sql: `SELECT t.crow_id, t.lamport_ts FROM contact_tombstones t
+               LEFT JOIN contacts c ON c.crow_id = t.crow_id
+               WHERE t.kind IS NULL AND c.crow_id IS NULL`,
+      });
+      rows = r.rows || [];
+    } catch {
+      return 0; // missing table / read failure → no-op (never throw at boot)
+    }
+    let emitted = 0;
+    for (const row of rows) {
+      try {
+        // 2c C2/C4: preserve the delete's ORIGINAL global lamport (no fresh mint).
+        const ts = await this.emitChange("contacts", "delete", { crow_id: row.crow_id },
+          { lamportTs: Number(row.lamport_ts) || 0 });
+        if (ts != null) emitted++;
+      } catch (err) {
+        console.warn(`[instance-sync] contact tombstone re-emit failed for ${row.crow_id}: ${err.message}`);
+      }
+    }
+    if (emitted > 0) console.log(`[instance-sync] re-emitted ${emitted} contact tombstone delete(s) to all peers`);
     return emitted;
   }
 
@@ -953,7 +1061,7 @@ export class InstanceSyncManager {
     let emitted = 0;
     for (const row of rows) {
       try {
-        await emitGroupUpsert(this.db, row.id); // shouldSyncRow + room skip are the final gate
+        await emitGroupUpsert(this.db, row.id, { preserveLamport: true }); // 2c C2: backfill keeps original lamports; shouldSyncRow + room skip are the final gate
         emitted++;
       } catch (err) {
         console.warn(`[instance-sync] groups backfill emit failed for group ${row.id}: ${err.message}`);
@@ -1041,6 +1149,76 @@ export class InstanceSyncManager {
     if (inFeed) inFeed.replicate(stream, { live: true });
   }
 
+  /** Chain helper: run taskFn as the next link on peerId's append chain. */
+  async _chainAppendTask(peerId, taskFn) {
+    const prior = this._appendLocks.get(peerId) || Promise.resolve();
+    const next = prior.catch(() => {}).then(taskFn);
+    this._appendLocks.set(peerId, next);
+    try {
+      return await next;
+    } finally {
+      if (this._appendLocks.get(peerId) === next) this._appendLocks.delete(peerId);
+    }
+  }
+
+  /**
+   * Append an entry toward a peer, or park it while the feed is unarmed.
+   * The decision is made INSIDE the chained task, against current state — a
+   * check-then-push outside the chain can strand entries or reorder the feed
+   * (spec R2/F2). A failed append is logged and NOT retried (pre-existing
+   * semantics; deletes self-heal via the tombstone re-emit).
+   */
+  async _appendToPeer(peerId, entry) {
+    return this._chainAppendTask(peerId, async () => {
+      const feed = this.outFeeds.get(peerId);
+      if (feed) {
+        try {
+          await feed.append(entry);
+        } catch (err) {
+          console.warn(`[instance-sync] Failed to append to feed for ${peerId}:`, err.message);
+        }
+        return;
+      }
+      const slot = this._pendingPeerEmits.get(peerId) || [];
+      slot.push(entry);
+      if (slot.length > 256) {
+        slot.shift();
+        console.warn(`[instance-sync] pending emit queue overflow for ${peerId} — dropped oldest (LWW-safe direction)`);
+      }
+      this._pendingPeerEmits.set(peerId, slot);
+    });
+  }
+
+  /**
+   * Drain a peer's parked entries onto its (now armed) outFeed, FIFO. Chained,
+   * so a live emit can never interleave mid-drain. Enqueued by _initInstanceInner
+   * SYNCHRONOUSLY ADJACENT to outFeeds.set — no await between them (spec §3 C3
+   * MUST: an emit slipping into that gap would reorder the feed).
+   * @returns {Promise<number>} entries appended
+   */
+  async _drainPendingEmits(peerId) {
+    return this._chainAppendTask(peerId, async () => {
+      const slot = this._pendingPeerEmits.get(peerId);
+      this._pendingPeerEmits.delete(peerId);
+      if (!slot || slot.length === 0) return 0;
+      const feed = this.outFeeds.get(peerId);
+      if (!feed) {
+        this._pendingPeerEmits.set(peerId, slot); // feed vanished — re-park
+        return 0;
+      }
+      let n = 0;
+      for (const entry of slot) {
+        try {
+          await feed.append(entry);
+          n++;
+        } catch (err) {
+          console.warn(`[instance-sync] pending drain append failed for ${peerId}: ${err.message}`);
+        }
+      }
+      return n;
+    });
+  }
+
   /**
    * Emit a sync entry for a local data change.
    * Called by memory/context/sharing servers after mutations.
@@ -1049,23 +1227,32 @@ export class InstanceSyncManager {
    * @param {"insert"|"update"|"delete"} op - Operation type
    * @param {object} row - The row data (for insert/update) or { id } (for delete)
    */
-  async emitChange(table, op, row) {
+  async emitChange(table, op, row, opts = {}) {
     // --no-auth companion doesn't drive fleet sync (and has no outFeeds).
     if (this.feedsDisabled) return null;
     if (!SYNCED_TABLES.includes(table)) return null;
     if (!shouldSyncRow(table, row)) return null; // local-only row; don't broadcast
 
-    // Envelope counter floor: after a sync_state reset (e.g. DB recovery) the
-    // local counter can sit BELOW lamports already stamped on rows; an emit
-    // would then look stale to peers (they order on the envelope) and the
-    // divergence is silent and permanent. Floor the counter at the outgoing
-    // row's own lamport first — _advanceCounter is an atomic
-    // MAX(counter, ts+1), so the _nextLamport below strictly exceeds it.
+    // 2c C1: a re-emit passes opts.lamportTs to preserve the row's ORIGINAL emit
+    // lamport — a redelivery must never fabricate recency over a peer's newer
+    // write. Preserve-mode skips the mint AND the local re-stamp; the counter is
+    // still floored so future fresh mints strictly exceed every re-emitted value.
+    // Live mutations MUST NOT pass opts.lamportTs.
+    const preservedTs =
+      opts != null && Number.isFinite(Number(opts.lamportTs)) && Number(opts.lamportTs) >= 0
+        ? Number(opts.lamportTs)
+        : null;
+
+    // Envelope counter floor (see original comment): floor at the outgoing row's
+    // own lamport, and in preserve-mode also at the preserved envelope value.
     const rowTs = Number(row?.lamport_ts);
     if (Number.isFinite(rowTs) && rowTs > 0) {
       await this._advanceCounter(rowTs);
     }
-    const lamportTs = await this._nextLamport();
+    if (preservedTs !== null && preservedTs > 0) {
+      await this._advanceCounter(preservedTs);
+    }
+    const lamportTs = preservedTs !== null ? preservedTs : await this._nextLamport();
 
     // Strip excluded columns
     const excluded = EXCLUDED_COLUMNS[table] || [];
@@ -1089,8 +1276,9 @@ export class InstanceSyncManager {
     const payload = JSON.stringify(entry);
     entry.signature = sign(payload, this.identity.ed25519Priv);
 
-    // Update the row's lamport_ts in the local database
-    if (op !== "delete") {
+    // Update the row's lamport_ts in the local database (NEVER in preserve-mode —
+    // the row keeps its original lamport; 2c C1).
+    if (op !== "delete" && preservedTs === null) {
       try {
         if (table === "dashboard_settings" && row.key !== undefined) {
           await this.db.execute({
@@ -1117,14 +1305,23 @@ export class InstanceSyncManager {
       }
     }
 
-    // Append to all outgoing feeds (broadcast to all connected instances)
-    for (const [instanceId, feed] of this.outFeeds) {
-      try {
-        await feed.append(entry);
-      } catch (err) {
-        console.warn(`[instance-sync] Failed to append to feed for ${instanceId}:`, err.message);
-      }
+    // Broadcast through the per-peer chains: every PAIRED peer (armed or not)
+    // plus any armed feed not (yet) in the registry. Entries for unarmed paired
+    // peers park in _pendingPeerEmits and ride when the feed arms (2c C3 — the
+    // boot-window fix; previously they were silently dropped while the caller
+    // saw a valid lamport).
+    let pairedIds = [];
+    try {
+      const { rows } = await this.db.execute({
+        sql: "SELECT id FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+        args: [this.localInstanceId],
+      });
+      pairedIds = rows.map((r) => r.id);
+    } catch {
+      pairedIds = []; // degraded: armed feeds below still get the entry
     }
+    const targets = new Set([...pairedIds, ...this.outFeeds.keys()]);
+    await Promise.all([...targets].map((peerId) => this._appendToPeer(peerId, entry)));
 
     return lamportTs;
   }
@@ -1420,14 +1617,14 @@ export class InstanceSyncManager {
       // stale delete → conflict, local kept
       const rowIdJson = JSON.stringify({ section_key: sk, device_id: devId, project_id: projId });
       try {
-        await this._insertConflictRow(
+        const inserted = await this._insertConflictRow(
           "crow_context", rowIdJson,
           localRow.instance_id || this.localInstanceId, instanceId,
           localTs, lamportTs,
           JSON.stringify(localRow), JSON.stringify(filteredRow),
           "delete",
         );
-        await this._notifyConflict();
+        if (inserted) await this._notifyConflict();
       } catch (err) {
         console.warn(`[instance-sync] crow_context conflict LOGGING failed (local data preserved):`, err.message);
       }
@@ -1495,14 +1692,14 @@ export class InstanceSyncManager {
     // Real conflict (includes tie + different data): local kept
     const rowIdJson = JSON.stringify({ section_key: sk, device_id: devId, project_id: projId });
     try {
-      await this._insertConflictRow(
+      const inserted = await this._insertConflictRow(
         "crow_context", rowIdJson,
         localRow.instance_id || this.localInstanceId, instanceId,
         localTs, lamportTs,
         JSON.stringify(localRow), JSON.stringify(filteredRow),
         op || "update",
       );
-      await this._notifyConflict();
+      if (inserted) await this._notifyConflict();
     } catch (err) {
       console.warn(`[instance-sync] crow_context conflict LOGGING failed (local data preserved):`, err.message);
     }
@@ -1623,10 +1820,10 @@ export class InstanceSyncManager {
         return;
       }
       try {
-        await this._insertConflictRow("contacts", rowIdJson,
+        const inserted = await this._insertConflictRow("contacts", rowIdJson,
           localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
           JSON.stringify(localRow), JSON.stringify(filtered), "delete");
-        await this._notifyConflict();
+        if (inserted) await this._notifyConflict();
       } catch (err) {
         console.warn("[instance-sync] contacts delete conflict LOGGING failed (local kept):", err.message);
       }
@@ -1783,10 +1980,10 @@ export class InstanceSyncManager {
     // incomingTs <= localTs
     if (rowsEquivalent(localRow, filtered)) return; // re-delivery noise
     try {
-      await this._insertConflictRow("contacts", rowIdJson,
+      const inserted = await this._insertConflictRow("contacts", rowIdJson,
         localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
         JSON.stringify(localRow), JSON.stringify(filtered), op || "update");
-      await this._notifyConflict();
+      if (inserted) await this._notifyConflict();
     } catch (err) {
       console.warn("[instance-sync] contacts conflict LOGGING failed (local kept):", err.message);
     }
@@ -1995,10 +2192,10 @@ export class InstanceSyncManager {
         // WINNER, the discarded local edit the LOSER — this row is the only
         // surviving record of the edit that lost (e.g. B's offline rename).
         try {
-          await this._insertConflictRow("contact_groups", rowIdJson,
+          const inserted = await this._insertConflictRow("contact_groups", rowIdJson,
             instanceId, localRow.instance_id || this.localInstanceId, lamportTs, localTs,
             JSON.stringify(filtered), JSON.stringify(localRow), "delete");
-          await this._notifyConflict();
+          if (inserted) await this._notifyConflict();
         } catch (err) {
           console.warn("[instance-sync] contact_groups delete-won conflict LOGGING failed (delete applied):", err.message);
         }
@@ -2058,10 +2255,10 @@ export class InstanceSyncManager {
     // in Known limitations — acceptable for a single user's low-contention groups).
     if (rowsEquivalent(localRow, filtered)) return; // re-delivery noise
     try {
-      await this._insertConflictRow("contact_groups", rowIdJson,
+      const inserted = await this._insertConflictRow("contact_groups", rowIdJson,
         localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
         JSON.stringify(localRow), JSON.stringify(filtered), op || "update");
-      await this._notifyConflict();
+      if (inserted) await this._notifyConflict();
     } catch (err) {
       console.warn("[instance-sync] contact_groups conflict LOGGING failed (local kept):", err.message);
     }
@@ -2177,14 +2374,14 @@ export class InstanceSyncManager {
       // differs) — a failure to LOG must not flip it to "apply" and overwrite
       // newer local data, so logging gets its own guard and we skip regardless.
       try {
-        await this._insertConflictRow(
+        const inserted = await this._insertConflictRow(
           table, String(rowId),
           localRow.instance_id || this.localInstanceId, incomingInstanceId,
           localTs, incomingTs,
           JSON.stringify(localRow), JSON.stringify(incomingRow),
           op || "update",
         );
-        await this._notifyConflict();
+        if (inserted) await this._notifyConflict();
       } catch (err) {
         console.warn(`[instance-sync] Conflict LOGGING failed for ${table}:${rowId} (local data still preserved):`, err.message);
       }
@@ -2203,8 +2400,44 @@ export class InstanceSyncManager {
    * the gateway-boot migration also closes this, but a non-gateway host or a
    * mid-boot race must not lose the conflict trace, and in _checkConflict a
    * thrown INSERT must never cascade into applying a stale row).
+   *
+   * @returns {Promise<boolean>} true when a row was inserted; false when an
+   * identical unresolved conflict already exists (repeat delivery — 2c C5).
+   * Stable key (table_name,row_id,op,winning_lamport_ts,losing_lamport_ts,
+   * losing_instance_id): data blobs are EXCLUDED (winning_data carries volatile
+   * never-synced columns — contacts.last_seen moves without lamport movement),
+   * origin is INCLUDED (per-instance counters collide across peers; spec §3 C5).
    */
   async _insertConflictRow(tableName, rowId, winInst, loseInst, winTs, loseTs, winData, loseData, conflictOp) {
+    const dedupeArgs = [tableName, rowId, winTs, loseTs, loseInst];
+    try {
+      const { rows } = await this.db.execute({
+        sql: `SELECT id FROM sync_conflicts
+               WHERE table_name = ? AND row_id = ? AND winning_lamport_ts = ?
+                 AND losing_lamport_ts = ? AND losing_instance_id = ?
+                 AND op IS ? AND resolved = 0 LIMIT 1`,
+        args: [...dedupeArgs, conflictOp ?? null],
+      });
+      if (rows.length > 0) return false;
+    } catch (err) {
+      // Pre-migration DB without the op column: degrade like the INSERT fallback
+      // below — dedupe without the op predicate rather than letting the error
+      // escape (which would silently kill ALL conflict logging; spec R2/F4).
+      if (/no such column: op|no column named op/i.test(err.message || "")) {
+        try {
+          const { rows } = await this.db.execute({
+            sql: `SELECT id FROM sync_conflicts
+                   WHERE table_name = ? AND row_id = ? AND winning_lamport_ts = ?
+                     AND losing_lamport_ts = ? AND losing_instance_id = ?
+                     AND resolved = 0 LIMIT 1`,
+            args: dedupeArgs,
+          });
+          if (rows.length > 0) return false;
+        } catch { /* dedupe is best-effort; fall through to insert */ }
+      }
+      // Any other pre-check error: fall through — logging the conflict matters
+      // more than deduping it.
+    }
     const legacyCols = `table_name, row_id, winning_instance_id, losing_instance_id,
                  winning_lamport_ts, losing_lamport_ts, winning_data, losing_data`;
     const legacyArgs = [tableName, rowId, winInst, loseInst, winTs, loseTs, winData, loseData];
@@ -2220,6 +2453,7 @@ export class InstanceSyncManager {
         args: legacyArgs,
       });
     }
+    return true;
   }
 
   /**
@@ -2318,7 +2552,7 @@ export class InstanceSyncManager {
 
       // Id collision with different data — surface it (D7 minimal fix).
       // The incoming insert is still not applied; the trace is preserved.
-      await this._insertConflictRow(
+      const inserted = await this._insertConflictRow(
         table, String(row.id),
         localRow.instance_id || this.localInstanceId, instanceId,
         localRow.lamport_ts || 0, lamportTs,
@@ -2326,7 +2560,7 @@ export class InstanceSyncManager {
         "insert",
       );
 
-      await this._notifyConflict();
+      if (inserted) await this._notifyConflict();
     }
   }
 
@@ -2478,6 +2712,9 @@ export class InstanceSyncManager {
       try { await inFeed.close(); } catch {}
       this.inFeeds.delete(remoteInstanceId);
     }
+    // 2c C3: a closed/revoked peer keeps no parked entries or chain tail.
+    this._pendingPeerEmits.delete(remoteInstanceId);
+    this._appendLocks.delete(remoteInstanceId);
   }
 
   /**

@@ -34,7 +34,7 @@ async function sink() {
  * group_uid, attach the full member-crow_id wire-map, forward the FULL local row
  * (id retained for emitChange's lamport stamp). Never throws.
  */
-export async function emitGroupUpsert(db, groupId) {
+export async function emitGroupUpsert(db, groupId, opts = {}) {
   try {
     if (!db || !groupId) return;
     const { rows } = await db.execute({
@@ -64,7 +64,13 @@ export async function emitGroupUpsert(db, groupId) {
       args: [groupId],
     });
     row.members = mem.map((r) => r.crow_id).filter(Boolean);
-    await (await sink())?.emitChange("contact_groups", "update", row);
+    // 2c C2: a boot backfill (the only caller passing preserveLamport) is
+    // redelivery — keep the row's ORIGINAL lamport so it cannot fabricate
+    // recency over a peer's newer group edit. Live create/rename paths mint.
+    const emitOpts = opts && opts.preserveLamport === true
+      ? { lamportTs: Number(row.lamport_ts) || 0 }
+      : undefined;
+    await (await sink())?.emitChange("contact_groups", "update", row, emitOpts);
   } catch { /* never throw — group sync is best-effort */ }
 }
 
