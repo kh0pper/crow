@@ -1762,3 +1762,24 @@ test("22b. crow_update_context_section emits post-UPDATE values (not pre-update 
   await client.close();
   rmSync(testDir, { recursive: true, force: true });
 });
+
+test("2c-C5a. conflict dedupe: identical redelivery adds no row; losing_instance_id distinguishes peers; resolved=1 re-surfaces once", async () => {
+  const { mgr, db } = makeManager("inst-2c-c5");
+  const count = async () => Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM sync_conflicts", args: [] })).rows[0].n);
+  const args = ["contacts", '{"crow_id":"crow:c5"}', "inst-2c-c5", "peer-A", 12, 10, '{"v":1}', '{"v":0}', "update"];
+  assert.equal(await mgr._insertConflictRow(...args), true, "first insert rides");
+  const base = await count();
+  // Identical redelivery — even with DIFFERENT winning_data (volatile last_seen class)
+  const argsVolatile = [...args]; argsVolatile[6] = '{"v":1,"last_seen":"moved"}';
+  assert.equal(await mgr._insertConflictRow(...argsVolatile), false, "stable key ignores data blobs");
+  assert.equal(await count(), base, "no growth on redelivery");
+  // Different origin peer, same lamport pair → genuinely distinct → logs (G2b)
+  const argsPeerB = [...args]; argsPeerB[3] = "peer-B";
+  assert.equal(await mgr._insertConflictRow(...argsPeerB), true, "losing_instance_id distinguishes");
+  assert.equal(await count(), base + 1);
+  // Resolve the peer-A row, redeliver → re-surfaces EXACTLY once (G5c)
+  await db.execute({ sql: "UPDATE sync_conflicts SET resolved = 1 WHERE losing_instance_id = 'peer-A'", args: [] });
+  assert.equal(await mgr._insertConflictRow(...args), true, "re-surfaces once after resolve");
+  assert.equal(await mgr._insertConflictRow(...args), false, "then dedupes against the new unresolved row");
+  db.close();
+});

@@ -1430,14 +1430,14 @@ export class InstanceSyncManager {
       // stale delete → conflict, local kept
       const rowIdJson = JSON.stringify({ section_key: sk, device_id: devId, project_id: projId });
       try {
-        await this._insertConflictRow(
+        const inserted = await this._insertConflictRow(
           "crow_context", rowIdJson,
           localRow.instance_id || this.localInstanceId, instanceId,
           localTs, lamportTs,
           JSON.stringify(localRow), JSON.stringify(filteredRow),
           "delete",
         );
-        await this._notifyConflict();
+        if (inserted) await this._notifyConflict();
       } catch (err) {
         console.warn(`[instance-sync] crow_context conflict LOGGING failed (local data preserved):`, err.message);
       }
@@ -1505,14 +1505,14 @@ export class InstanceSyncManager {
     // Real conflict (includes tie + different data): local kept
     const rowIdJson = JSON.stringify({ section_key: sk, device_id: devId, project_id: projId });
     try {
-      await this._insertConflictRow(
+      const inserted = await this._insertConflictRow(
         "crow_context", rowIdJson,
         localRow.instance_id || this.localInstanceId, instanceId,
         localTs, lamportTs,
         JSON.stringify(localRow), JSON.stringify(filteredRow),
         op || "update",
       );
-      await this._notifyConflict();
+      if (inserted) await this._notifyConflict();
     } catch (err) {
       console.warn(`[instance-sync] crow_context conflict LOGGING failed (local data preserved):`, err.message);
     }
@@ -1633,10 +1633,10 @@ export class InstanceSyncManager {
         return;
       }
       try {
-        await this._insertConflictRow("contacts", rowIdJson,
+        const inserted = await this._insertConflictRow("contacts", rowIdJson,
           localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
           JSON.stringify(localRow), JSON.stringify(filtered), "delete");
-        await this._notifyConflict();
+        if (inserted) await this._notifyConflict();
       } catch (err) {
         console.warn("[instance-sync] contacts delete conflict LOGGING failed (local kept):", err.message);
       }
@@ -1793,10 +1793,10 @@ export class InstanceSyncManager {
     // incomingTs <= localTs
     if (rowsEquivalent(localRow, filtered)) return; // re-delivery noise
     try {
-      await this._insertConflictRow("contacts", rowIdJson,
+      const inserted = await this._insertConflictRow("contacts", rowIdJson,
         localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
         JSON.stringify(localRow), JSON.stringify(filtered), op || "update");
-      await this._notifyConflict();
+      if (inserted) await this._notifyConflict();
     } catch (err) {
       console.warn("[instance-sync] contacts conflict LOGGING failed (local kept):", err.message);
     }
@@ -2005,10 +2005,10 @@ export class InstanceSyncManager {
         // WINNER, the discarded local edit the LOSER — this row is the only
         // surviving record of the edit that lost (e.g. B's offline rename).
         try {
-          await this._insertConflictRow("contact_groups", rowIdJson,
+          const inserted = await this._insertConflictRow("contact_groups", rowIdJson,
             instanceId, localRow.instance_id || this.localInstanceId, lamportTs, localTs,
             JSON.stringify(filtered), JSON.stringify(localRow), "delete");
-          await this._notifyConflict();
+          if (inserted) await this._notifyConflict();
         } catch (err) {
           console.warn("[instance-sync] contact_groups delete-won conflict LOGGING failed (delete applied):", err.message);
         }
@@ -2068,10 +2068,10 @@ export class InstanceSyncManager {
     // in Known limitations — acceptable for a single user's low-contention groups).
     if (rowsEquivalent(localRow, filtered)) return; // re-delivery noise
     try {
-      await this._insertConflictRow("contact_groups", rowIdJson,
+      const inserted = await this._insertConflictRow("contact_groups", rowIdJson,
         localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
         JSON.stringify(localRow), JSON.stringify(filtered), op || "update");
-      await this._notifyConflict();
+      if (inserted) await this._notifyConflict();
     } catch (err) {
       console.warn("[instance-sync] contact_groups conflict LOGGING failed (local kept):", err.message);
     }
@@ -2187,14 +2187,14 @@ export class InstanceSyncManager {
       // differs) — a failure to LOG must not flip it to "apply" and overwrite
       // newer local data, so logging gets its own guard and we skip regardless.
       try {
-        await this._insertConflictRow(
+        const inserted = await this._insertConflictRow(
           table, String(rowId),
           localRow.instance_id || this.localInstanceId, incomingInstanceId,
           localTs, incomingTs,
           JSON.stringify(localRow), JSON.stringify(incomingRow),
           op || "update",
         );
-        await this._notifyConflict();
+        if (inserted) await this._notifyConflict();
       } catch (err) {
         console.warn(`[instance-sync] Conflict LOGGING failed for ${table}:${rowId} (local data still preserved):`, err.message);
       }
@@ -2213,8 +2213,44 @@ export class InstanceSyncManager {
    * the gateway-boot migration also closes this, but a non-gateway host or a
    * mid-boot race must not lose the conflict trace, and in _checkConflict a
    * thrown INSERT must never cascade into applying a stale row).
+   *
+   * @returns {Promise<boolean>} true when a row was inserted; false when an
+   * identical unresolved conflict already exists (repeat delivery — 2c C5).
+   * Stable key (table_name,row_id,op,winning_lamport_ts,losing_lamport_ts,
+   * losing_instance_id): data blobs are EXCLUDED (winning_data carries volatile
+   * never-synced columns — contacts.last_seen moves without lamport movement),
+   * origin is INCLUDED (per-instance counters collide across peers; spec §3 C5).
    */
   async _insertConflictRow(tableName, rowId, winInst, loseInst, winTs, loseTs, winData, loseData, conflictOp) {
+    const dedupeArgs = [tableName, rowId, winTs, loseTs, loseInst];
+    try {
+      const { rows } = await this.db.execute({
+        sql: `SELECT id FROM sync_conflicts
+               WHERE table_name = ? AND row_id = ? AND winning_lamport_ts = ?
+                 AND losing_lamport_ts = ? AND losing_instance_id = ?
+                 AND op IS ? AND resolved = 0 LIMIT 1`,
+        args: [...dedupeArgs, conflictOp ?? null],
+      });
+      if (rows.length > 0) return false;
+    } catch (err) {
+      // Pre-migration DB without the op column: degrade like the INSERT fallback
+      // below — dedupe without the op predicate rather than letting the error
+      // escape (which would silently kill ALL conflict logging; spec R2/F4).
+      if (/no such column: op|no column named op/i.test(err.message || "")) {
+        try {
+          const { rows } = await this.db.execute({
+            sql: `SELECT id FROM sync_conflicts
+                   WHERE table_name = ? AND row_id = ? AND winning_lamport_ts = ?
+                     AND losing_lamport_ts = ? AND losing_instance_id = ?
+                     AND resolved = 0 LIMIT 1`,
+            args: dedupeArgs,
+          });
+          if (rows.length > 0) return false;
+        } catch { /* dedupe is best-effort; fall through to insert */ }
+      }
+      // Any other pre-check error: fall through — logging the conflict matters
+      // more than deduping it.
+    }
     const legacyCols = `table_name, row_id, winning_instance_id, losing_instance_id,
                  winning_lamport_ts, losing_lamport_ts, winning_data, losing_data`;
     const legacyArgs = [tableName, rowId, winInst, loseInst, winTs, loseTs, winData, loseData];
@@ -2230,6 +2266,7 @@ export class InstanceSyncManager {
         args: legacyArgs,
       });
     }
+    return true;
   }
 
   /**
@@ -2328,7 +2365,7 @@ export class InstanceSyncManager {
 
       // Id collision with different data — surface it (D7 minimal fix).
       // The incoming insert is still not applied; the trace is preserved.
-      await this._insertConflictRow(
+      const inserted = await this._insertConflictRow(
         table, String(row.id),
         localRow.instance_id || this.localInstanceId, instanceId,
         localRow.lamport_ts || 0, lamportTs,
@@ -2336,7 +2373,7 @@ export class InstanceSyncManager {
         "insert",
       );
 
-      await this._notifyConflict();
+      if (inserted) await this._notifyConflict();
     }
   }
 
