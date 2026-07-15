@@ -21,7 +21,11 @@
 
 import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
-import { resolveConflict, restoreConflict } from "../../../../sharing/sync-conflict-resolve.js";
+import {
+  resolveConflict,
+  restoreConflict,
+  NATURAL_KEY_RESTORE_TABLES,
+} from "../../../../sharing/sync-conflict-resolve.js";
 import { getInstanceSyncManager } from "../../../../sharing/server.js";
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
@@ -68,21 +72,31 @@ function renderConflictRow(r, lang, csrfToken) {
   const lId = shortId(r.losing_instance_id);
   const isInsert = (r.op === "insert");
   const isDelete = (r.op === "delete");
-  const isCrowContext = (r.table_name === "crow_context");
+  // Natural-key tables (crow_context, contacts, contact_groups): the backend
+  // refuses restore for these (NATURAL_KEY_RESTORE_TABLES is the single source
+  // of truth in sync-conflict-resolve.js), so the button is disabled upfront
+  // instead of click → refused flash (2c-F3).
+  const isNaturalKey = NATURAL_KEY_RESTORE_TABLES.has(r.table_name);
   const resolved = !!r.resolved;
 
   const winJson = prettyJson(r.winning_data);
   const loseJson = prettyJson(r.losing_data);
 
-  // Restore button is disabled for op='insert' conflicts per spec §6.
-  // Also disabled for crow_context (composite key — spec §4).
+  // Restore button is disabled for op='insert' conflicts per spec §6
+  // (precedence FIRST — matches the backend's refusal order), then for
+  // natural-key tables. crow_context keeps its composite-key wording.
   const restoreBtn = isInsert
     ? `<span style="font-size:0.78rem;color:var(--crow-text-muted);font-style:italic">
          ${escapeHtml(t("syncConflicts.insertRestoreDisabled", lang))}
        </span>`
-    : isCrowContext
+    : isNaturalKey
     ? `<span style="font-size:0.78rem;color:var(--crow-text-muted);font-style:italic">
-         ${escapeHtml(t("syncConflicts.compositeRestoreDisabled", lang))}
+         ${escapeHtml(t(
+           r.table_name === "crow_context"
+             ? "syncConflicts.compositeRestoreDisabled"
+             : "syncConflicts.naturalKeyRestoreDisabled",
+           lang,
+         ))}
        </span>`
     : `<form method="POST" action="/dashboard/settings" style="display:inline">
          <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}" />
