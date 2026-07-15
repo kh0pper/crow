@@ -313,6 +313,20 @@ export class InstanceSyncManager {
     this._appendLocks = new Map();      // remoteInstanceId → tail Promise
     this._pendingPeerEmits = new Map(); // remoteInstanceId → [signed entries]
 
+    // 2d C3: live replication streams per peer, so a rotation can attach the
+    // successor feed to connections that predate the key receipt (hyperswarm
+    // delivers keys and streams in either order — this closes that hole).
+    this._activeStreams = new Map(); // remoteInstanceId → Set<stream>
+
+    // 2d C1: live in-feed key-rotation bookkeeping.
+    this._inFeedListeners = new Map();  // remoteInstanceId → append handler (2d C1: removable on swap)
+    this._deferredRotations = new Set(); // remoteInstanceId → swap deferred, old close still pending (2d C1)
+    // Hard cap on how long a rotation swap will race the old in-feed's close()
+    // before deferring loudly (rocksdb fd-lock: a second core in the same
+    // multi-core dir cannot open while the old session's close is still
+    // pending). Overridable in tests.
+    this._rotationCloseCapMs = 5000;
+
     // Flag that _ensureCounter has seeded the sync_state row at least once.
     // The DB row is the authority; this is only a cheap short-circuit.
     this._counterSeeded = false;
@@ -455,19 +469,82 @@ export class InstanceSyncManager {
       await drainDone.catch(() => {});
     }
 
+    // 2d C1: key-aware — a changed key swaps the open in-feed live.
+    const currentIn = this.inFeeds.get(remoteInstanceId);
+    if (currentIn && theirFeedKey && !Buffer.from(currentIn.key).equals(theirFeedKey)) {
+      const oldKey8 = Buffer.from(currentIn.key).toString("hex").slice(0, 8);
+      const newKey8 = theirFeedKey.toString("hex").slice(0, 8);
+      const handler = this._inFeedListeners.get(remoteInstanceId);
+      if (handler) currentIn.removeListener("append", handler);
+      this._inFeedListeners.delete(remoteInstanceId);
+      currentIn.on("error", () => {}); // swallow late close-races (R3/R2 #9)
+      this.inFeeds.delete(remoteInstanceId); // entry-bail kills queued runs (R1 F1)
+      const closePromise = currentIn.close();
+      // .finally, NOT .then: a REJECTING close must also un-defer, and the
+      // derived promise must never become an unhandled rejection (R3 F-A).
+      closePromise.catch(() => {}).finally(() => this._deferredRotations.delete(remoteInstanceId));
+      // NOTE (T4 deviation from brief's literal `t.unref?.()`): this timer is
+      // deliberately left ref'd. It's bounded (capMs, default 5000/test 200)
+      // either way, so ref'd costs at most one capped tick of process-exit
+      // delay -- but unref'd, it is provably wrong: proven via a controlled
+      // A/B run in this exact harness (link closed, no other live handles),
+      // an unref'd sole timer let the event loop consider itself idle and
+      // exit BEFORE the timer fired, permanently stranding the awaited
+      // Promise.race (repro: node:test's own "Promise resolution is still
+      // pending but the event loop has already resolved" abort). Ref'd, the
+      // race resolves deterministically every time.
+      let capTimer;
+      const closed = await Promise.race([
+        closePromise.then(() => true, () => true),
+        new Promise((res) => { capTimer = setTimeout(() => res(false), this._rotationCloseCapMs ?? 5000); }),
+      ]);
+      clearTimeout(capTimer); // no-op on the defer path; kills the stray timer on a real (fast) rotation
+      if (!closed) {
+        // rocksdb lock still held by the zombie session — a same-dir open
+        // would throw. Defer loudly; sync_url is persisted, so a later settle
+        // (via the .finally above) or a restart completes the rotation.
+        console.error(`[instance-sync] ROTATION DEFERRED for ${remoteInstanceId.slice(0,12)}…: old in-feed close timed out (cap ${this._rotationCloseCapMs ?? 5000}ms); will retry after close settles or on restart`);
+        this._deferredRotations.add(remoteInstanceId);
+        return this.outFeeds.get(remoteInstanceId);
+      }
+      console.warn(`[instance-sync] in-feed ROTATED for ${remoteInstanceId.slice(0,12)}…: ${oldKey8}… → ${newKey8}…`);
+    }
+
     // Their incoming feed (writable by them)
-    if (!this.inFeeds.has(remoteInstanceId) && theirFeedKey) {
-      const inFeed = new Hypercore(resolve(dir, "in"), theirFeedKey, {
-        valueEncoding: "json",
-      });
-      await inFeed.ready();
-
-      // Listen for new entries
-      inFeed.on("append", async () => {
-        await this._processNewEntries(remoteInstanceId, inFeed);
-      });
-
-      this.inFeeds.set(remoteInstanceId, inFeed);
+    if (!this.inFeeds.has(remoteInstanceId) && theirFeedKey
+        && !this._deferredRotations.has(remoteInstanceId)) {
+      let inFeed = null;
+      try {
+        inFeed = new Hypercore(resolve(dir, "in"), theirFeedKey, { valueEncoding: "json" });
+        // 2d C1 review fix (moved ahead of ready()/reconcile — T6 re-review):
+        // a live-feed error on the successor must not become an uncaught
+        // exception (only the discarded old feed had a swallow), and a
+        // reconcile-throw below must not leave a partially-opened feed
+        // without this listener attached.
+        inFeed.on("error", (err) => console.warn(`[instance-sync] in-feed error for ${remoteInstanceId.slice(0,12)}…: ${err.message}`));
+        await inFeed.ready();
+        // 2d C2: freeze the applied-seq decision BEFORE wiring the listener.
+        await this._reconcileAppliedSeqAtOpen(remoteInstanceId, inFeed);
+        const onAppend = async () => { await this._processNewEntries(remoteInstanceId, inFeed); };
+        inFeed.on("append", onAppend);
+        this._inFeedListeners.set(remoteInstanceId, onAppend);
+        this.inFeeds.set(remoteInstanceId, inFeed);
+        // 2d C3: attach the successor feed to every live stream for this peer
+        // (hyperswarm may have delivered the new key AFTER a stream that
+        // already carried the old feed — that stream must not go dark).
+        for (const s of this._activeStreams.get(remoteInstanceId) ?? []) {
+          try { inFeed.replicate(s, { live: true }); } catch (err) {
+            console.warn(`[instance-sync] post-swap stream attach failed for ${remoteInstanceId.slice(0,12)}…: ${err.message}`);
+          }
+        }
+      } catch (err) {
+        // 2d C1 (R2 #1): open failure degrades to out-only — NEVER throws out
+        // of initInstance (a still-held lock after a deferred rotation would
+        // otherwise kill the tailnet client handshake and, on the C4 interval,
+        // crash the gateway via unhandled rejection).
+        console.error(`[instance-sync] in-feed open failed for ${remoteInstanceId.slice(0,12)}…: ${err.message} — continuing out-only`);
+        if (inFeed) inFeed.close().catch(() => {}); // release partial handle/fd (R3 F-D)
+      }
     }
 
     return this.outFeeds.get(remoteInstanceId);
@@ -522,6 +599,36 @@ export class InstanceSyncManager {
       console.log(`[instance-sync] eagerly opened ${opened} peer feed(s) — emit pipeline armed`);
     }
     return opened;
+  }
+
+  /**
+   * 2d C5 (D4): a length-0 armed out-feed means the once-backfill flags'
+   * premise ("peers already received this") died with the feed — rotation,
+   * or a brand-new pairing (desirable re-run either way; a never-emitted-to
+   * peer re-triggers this each boot until a first emit lands — accepted,
+   * re-runs are preserve-mode + deduped no-ops). MUST run between
+   * eagerInitPairedPeers and the once-backfill calls (mcp-mounts ordering,
+   * R1 F4). Returns the number of flags cleared.
+   */
+  async resetBackfillPremiseFlags() {
+    if (this.feedsDisabled || this.outFeeds.size === 0) return 0;
+    const emptyPeers = [...this.outFeeds.entries()]
+      .filter(([, feed]) => feed.length === 0)
+      .map(([peerId]) => peerId);
+    if (emptyPeers.length === 0) return 0;
+    let cleared = 0;
+    const del = async (key) => {
+      try {
+        const r = await this.db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ? AND value LIKE 'done:%'", args: [key] });
+        if ((r.rowsAffected ?? 0) > 0) cleared++;
+      } catch (err) { console.warn(`[instance-sync] flag reset ${key}: ${err.message}`); }
+    };
+    for (const peerId of emptyPeers) await del(`__providers_backfill_v1:${peerId}`);
+    for (const key of ["__contacts_backfill_v1", "__sync_reemit_allowlist_v2", "__groups_backfill_v1"]) await del(key);
+    if (cleared > 0) {
+      console.warn(`[instance-sync] C5: ${cleared} backfill premise flag(s) reset — empty out-feed(s) for ${emptyPeers.map((p) => p.slice(0, 12)).join(", ")}; once-backfills will re-run this boot`);
+    }
+    return cleared;
   }
 
   /**
@@ -1176,6 +1283,23 @@ export class InstanceSyncManager {
   }
 
   /**
+   * Validate a peer-advertised feed key BEFORE persisting or opening (2d C1;
+   * R2 #8 persist-gating, R1 F7 self-echo). Returns Buffer or null.
+   */
+  validateIncomingFeedKey(remoteInstanceId, feedKeyHex) {
+    if (typeof feedKeyHex !== "string" || !/^[0-9a-fA-F]{64}$/.test(feedKeyHex)) {
+      console.warn(`[instance-sync] rejecting malformed feed key from ${String(remoteInstanceId).slice(0,12)}…`);
+      return null;
+    }
+    const ours = this.getOutFeedKey(remoteInstanceId);
+    if (ours && ours.toString("hex") === feedKeyHex.toLowerCase()) {
+      console.warn(`[instance-sync] rejecting self-echoed feed key from ${String(remoteInstanceId).slice(0,12)}… (would re-apply our own history)`);
+      return null;
+    }
+    return Buffer.from(feedKeyHex, "hex");
+  }
+
+  /**
    * Replicate feeds over a NoiseSecretStream-wrapped transport. Hyperswarm
    * connections are already NoiseSecretStream instances; for plain WebSocket
    * or other Duplex transports, wrap with `new NoiseSecretStream(isInitiator,
@@ -1185,6 +1309,25 @@ export class InstanceSyncManager {
    * @param {object} stream - NoiseSecretStream (Hypercore reads .noiseStream from it)
    */
   async replicate(remoteInstanceId, stream) {
+    // 2d C3: track live streams so a rotation can attach the successor feed
+    // to connections that predate the key receipt (hyperswarm ordering hole).
+    let set = this._activeStreams.get(remoteInstanceId);
+    if (!set) { set = new Set(); this._activeStreams.set(remoteInstanceId, set); }
+    if (!set.has(stream)) {
+      set.add(stream);
+      const drop = () => {
+        set.delete(stream);
+        // Identity-guard the map-level delete: after a revoke→re-pair churn the
+        // map may hold a FRESH Set while this closure still captures the stale
+        // one — an unguarded delete here would destroy the live Set and a later
+        // rotation's attach loop would silently attach to nothing.
+        if (set.size === 0 && this._activeStreams.get(remoteInstanceId) === set) {
+          this._activeStreams.delete(remoteInstanceId);
+        }
+      };
+      stream.on("close", drop);
+      stream.on("error", () => {}); // never let a tracked stream's error escape
+    }
     const outFeed = this.outFeeds.get(remoteInstanceId);
     const inFeed = this.inFeeds.get(remoteInstanceId);
 
@@ -1402,8 +1545,14 @@ export class InstanceSyncManager {
    * skipping one bad entry. The trailing whole-batch checkpoint is removed.
    */
   async _processNewEntriesInner(remoteInstanceId, feed) {
+    // 2d C1/C2 (R1 F1): a run bound to a REPLACED feed must not read or stamp
+    // the successor's record. `undefined` (peer unmapped / stub-feed harness)
+    // still processes — only a swapped-out feed bails.
+    const current = this.inFeeds.get(remoteInstanceId);
+    if (current !== undefined && current !== feed) return;
+    const feedKeyHex = feed.key ? Buffer.from(feed.key).toString("hex") : null;
     // Re-read lastSeq inside the lock — the prior chained run may have advanced it.
-    const lastSeq = await this._getLastAppliedSeq(remoteInstanceId);
+    const lastSeq = await this._getLastAppliedSeq(remoteInstanceId, feed);
 
     for (let seq = lastSeq; seq < feed.length; seq++) {
       try {
@@ -1415,7 +1564,10 @@ export class InstanceSyncManager {
       }
       // Checkpoint after every attempted entry — outside the try so it advances
       // even when _applyEntry threw (intentional skip-log-advance semantics).
-      await this._setLastAppliedSeq(remoteInstanceId, seq + 1);
+      // Stamp with the PROCESSED feed's key (2d C2 / R1 F1) — never "the
+      // current in-feed": a stale run must leave a record the successor's
+      // key-gated reads ignore.
+      await this._setLastAppliedSeq(remoteInstanceId, seq + 1, feedKeyHex);
     }
   }
 
@@ -2647,22 +2799,38 @@ export class InstanceSyncManager {
   }
 
   /**
-   * Get the last applied sequence number for a remote instance's feed.
+   * Applied-seq record, keyed to the feed it was earned on (2d C2).
+   * Shape: {"k": "<feedKeyHex>", "s": <nextUnprocessedSeq>}. Legacy bare
+   * numbers exist on disk until _reconcileAppliedSeqAtOpen upgrades them.
    */
-  async _getLastAppliedSeq(remoteInstanceId) {
+  async _appliedSeqRecord(remoteInstanceId) {
     try {
       const { rows } = await this.db.execute({
         sql: "SELECT last_applied_seq_per_peer FROM sync_state WHERE instance_id = ?",
         args: [this.localInstanceId],
       });
-
       if (rows.length > 0 && rows[0].last_applied_seq_per_peer) {
-        const seqs = JSON.parse(rows[0].last_applied_seq_per_peer);
-        return seqs[remoteInstanceId] || 0;
+        const rec = JSON.parse(rows[0].last_applied_seq_per_peer)[remoteInstanceId];
+        return rec === undefined ? null : rec;
       }
     } catch {}
+    return null;
+  }
 
-    return 0;
+  /**
+   * Key-gated read (2d C2). feed=null is the display path: coerce BOTH shapes
+   * (legacy bare number → itself; {k,s} → s) — never used to gate application.
+   * A record whose k differs from the feed's key belongs to a dead feed → 0.
+   * A legacy numeric reaching a keyed read is treated as foreign (defensive;
+   * reconcile-at-open makes it unreachable in production).
+   */
+  async _getLastAppliedSeq(remoteInstanceId, feed = null) {
+    const rec = await this._appliedSeqRecord(remoteInstanceId);
+    if (rec === null) return 0;
+    if (feed == null) return typeof rec === "number" ? rec : Number(rec.s) || 0;
+    if (typeof rec !== "object") return 0;
+    const feedKeyHex = feed.key ? Buffer.from(feed.key).toString("hex") : null;
+    return rec.k === feedKeyHex ? Number(rec.s) || 0 : 0;
   }
 
   /**
@@ -2676,9 +2844,11 @@ export class InstanceSyncManager {
    *
    * Semantics unchanged: `seq` is the NEXT unprocessed sequence number
    * (i.e. the last successfully attempted seq + 1). getSyncStatus and
-   * _getLastAppliedSeq consume the same blob.
+   * _getLastAppliedSeq consume the same blob. 2d C2: the record is now
+   * feed-keyed — {"k": feedKeyHex, "s": seq} — so a rotated feed never
+   * inherits a stale mark from its predecessor.
    */
-  async _setLastAppliedSeq(remoteInstanceId, seq) {
+  async _setLastAppliedSeq(remoteInstanceId, seq, feedKeyHex) {
     // Guard: a `"` in the id would break the json_set path literal.
     if (remoteInstanceId.includes('"')) {
       console.warn(`[instance-sync] _setLastAppliedSeq: skipping id with quote char: ${remoteInstanceId}`);
@@ -2686,16 +2856,49 @@ export class InstanceSyncManager {
     }
     try {
       await this._ensureCounter();
+      // json(?) — NOT CAST — so the object lands as JSON, not a quoted string
+      // (spec C2 SQL note): json_set with a plain string param stores a string
+      // and every reader's .k/.s would be undefined.
       await this.db.execute({
         sql: `UPDATE sync_state
-              SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer, '{}'), ?, CAST(? AS INTEGER)),
+              SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer, '{}'), ?, json(?)),
                   updated_at = datetime('now')
               WHERE instance_id = ?`,
-        args: [`$."${remoteInstanceId}"`, seq, this.localInstanceId],
+        args: [`$."${remoteInstanceId}"`, JSON.stringify({ k: feedKeyHex ?? null, s: Number(seq) }), this.localInstanceId],
       });
     } catch (err) {
       console.warn(`[instance-sync] Failed to update checkpoint for ${remoteInstanceId}:`, err.message);
     }
+  }
+
+  /**
+   * Freeze the applied-seq decision for THIS feed, once, at open (2d C2 /
+   * R1 F2). Runs inside the _initLocks chain before the append listener is
+   * wired, so feed.length cannot grow concurrently:
+   *   {k,s} k matches   → keep (normal restart)
+   *   {k,s} k differs   → rotated → {k: this feed, s: 0}
+   *   legacy numeric n  → n <= length: plausibly ours → adopt {k, s:n}
+   *                       n >  length: provably foreign (a mark earned on F
+   *                       satisfies n <= F.length) → {k, s:0}
+   * NEVER re-derived later: lazy evaluation flips to "trust" once a burst
+   * pushes length past n (R1 F2's hole).
+   */
+  async _reconcileAppliedSeqAtOpen(remoteInstanceId, feed) {
+    const feedKeyHex = feed.key ? Buffer.from(feed.key).toString("hex") : null;
+    const rec = await this._appliedSeqRecord(remoteInstanceId);
+    if (rec === null) { await this._setLastAppliedSeq(remoteInstanceId, 0, feedKeyHex); return; }
+    if (typeof rec === "object") {
+      if (rec.k === feedKeyHex) return; // normal restart — keep
+      console.warn(`[instance-sync] applied-seq record for ${remoteInstanceId.slice(0,12)}… belonged to a dead feed — reset to 0`);
+      await this._setLastAppliedSeq(remoteInstanceId, 0, feedKeyHex);
+      return;
+    }
+    const n = Number(rec) || 0;
+    const adopted = n <= feed.length ? n : 0;
+    if (adopted !== n) {
+      console.warn(`[instance-sync] legacy applied-seq ${n} > feed length ${feed.length} for ${remoteInstanceId.slice(0,12)}… — provably foreign, reset to 0`);
+    }
+    await this._setLastAppliedSeq(remoteInstanceId, adopted, feedKeyHex);
   }
 
   /**
@@ -2706,7 +2909,7 @@ export class InstanceSyncManager {
 
     for (const [instanceId, feed] of this.outFeeds) {
       const inFeed = this.inFeeds.get(instanceId);
-      const lastSeq = await this._getLastAppliedSeq(instanceId);
+      const lastSeq = await this._getLastAppliedSeq(instanceId, inFeed ?? null);
 
       status.push({
         instanceId,
@@ -2755,9 +2958,15 @@ export class InstanceSyncManager {
       try { await inFeed.close(); } catch {}
       this.inFeeds.delete(remoteInstanceId);
     }
+    this._inFeedListeners.delete(remoteInstanceId);
+    // 2d C1 (R3 F-B): a deferred peer that is revoked then re-paired must not
+    // stay suppressed forever.
+    this._deferredRotations.delete(remoteInstanceId);
     // 2c C3: a closed/revoked peer keeps no parked entries or chain tail.
     this._pendingPeerEmits.delete(remoteInstanceId);
     this._appendLocks.delete(remoteInstanceId);
+    // 2d C3: a closed/revoked peer keeps no tracked live streams either.
+    this._activeStreams.delete(remoteInstanceId);
   }
 
   /**

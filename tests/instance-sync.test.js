@@ -23,6 +23,7 @@
 import { test, after, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -95,8 +96,9 @@ function signEntry(entry) {
  * Append entries with stubFeed.push(entry).
  * entries array is exposed for direct mutation in tests (e.g. corrupting signatures).
  */
-function makeStubFeed() {
+function makeStubFeed(keyHex = randomBytes(32).toString("hex")) {
   const feed = {
+    key: Buffer.from(keyHex, "hex"),
     entries: [],
     get length() { return feed.entries.length; },
     async get(seq) { return feed.entries[seq]; },
@@ -236,11 +238,13 @@ test("3. Per-entry checkpoint: crash after seqs 0-1 resumes at seq 2; seqs 0-1 n
 
   // "Crash" after processing only seqs 0-1 by limiting feed length.
   // We simulate this by manipulating lastSeq manually — process a 2-item feed.
-  const feed2 = { length: 2, get: async (seq) => feed.entries[seq] };
+  // SAME key as feed: different keys would make the key-gate return 0 and the
+  // "seqs 0-1 not re-applied" assertion pass vacuously (2a vacuous-test tell).
+  const feed2 = { key: feed.key, length: 2, get: async (seq) => feed.entries[seq] };
   await mgr._processNewEntries(REMOTE, feed2);
 
   // Checkpoint for REMOTE should now be 2
-  const cp2 = await mgr._getLastAppliedSeq(REMOTE);
+  const cp2 = await mgr._getLastAppliedSeq(REMOTE, feed2);
   assert.equal(cp2, 2, "checkpoint after 2 entries should be 2");
 
   // Content should reflect seq1 (lamport_ts=20)
@@ -267,7 +271,7 @@ test("3. Per-entry checkpoint: crash after seqs 0-1 resumes at seq 2; seqs 0-1 n
   assert.equal(rowsFinal[0].content, "seq4", "content should be from seq4 after full run");
 
   // Checkpoint advanced to feed.length (5)
-  const cpFinal = await mgr2._getLastAppliedSeq(REMOTE);
+  const cpFinal = await mgr2._getLastAppliedSeq(REMOTE, feed);
   assert.equal(cpFinal, 5, "checkpoint should be 5 after full processing");
 
   db.close();
@@ -285,12 +289,14 @@ test("4. Checkpoint blob concurrency: concurrent _setLastAppliedSeq for two peer
 
   // Both fire at the same time
   await Promise.all([
-    mgr._setLastAppliedSeq(PEER_A, 7),
-    mgr._setLastAppliedSeq(PEER_B, 13),
+    mgr._setLastAppliedSeq(PEER_A, 7, "aa".repeat(32)),
+    mgr._setLastAppliedSeq(PEER_B, 13, "bb".repeat(32)),
   ]);
 
-  const seqA = await mgr._getLastAppliedSeq(PEER_A);
-  const seqB = await mgr._getLastAppliedSeq(PEER_B);
+  // No feed context for this test — display path (feed=null) coerces
+  // regardless of key.
+  const seqA = await mgr._getLastAppliedSeq(PEER_A, null);
+  const seqB = await mgr._getLastAppliedSeq(PEER_B, null);
 
   assert.equal(seqA, 7, "peer A checkpoint should be 7");
   assert.equal(seqB, 13, "peer B checkpoint should be 13");
@@ -351,7 +357,7 @@ test("5. Per-peer serialization: two concurrent _processNewEntries on same feed 
   assert.equal(rows[0].content, "step-6", "last update wins");
 
   // Checkpoint should be 6 (all entries processed once)
-  const cp = await mgr._getLastAppliedSeq(REMOTE);
+  const cp = await mgr._getLastAppliedSeq(REMOTE, feed);
   assert.equal(cp, 6, "checkpoint = feed.length");
 
   db.close();

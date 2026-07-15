@@ -235,7 +235,12 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   }
 
   // Ensure our outFeed exists, then exchange feed keys.
-  await instanceSyncManager.initInstance(remoteInstanceId, peerRow.sync_url ? Buffer.from(peerRow.sync_url, "hex") : null);
+  // 2d F3: pass NO key here. This call's only job is arming the out-feed for
+  // getOutFeedKey below. Passing the :222 snapshot's sync_url was harmless
+  // when a mismatched key no-oped, but under key-aware initInstance a stale
+  // snapshot would swap a concurrently-rotated in-feed BACK to its dead key.
+  // The authenticated receipt at the feed-key exchange below drives any swap.
+  await instanceSyncManager.initInstance(remoteInstanceId, null);
   const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
   ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
 
@@ -247,15 +252,18 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
     return;
   }
   if (peerKeyMsg?.feed_key_hex && peerKeyMsg.feed_key_hex !== peerRow.sync_url) {
-    try {
-      await db.execute({
-        sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
-        args: [peerKeyMsg.feed_key_hex, remoteInstanceId],
-      });
-      await instanceSyncManager.initInstance(remoteInstanceId, Buffer.from(peerKeyMsg.feed_key_hex, "hex"));
-      console.log(`[tailnet-sync] persisted feed key from peer ${remoteInstanceId.slice(0,12)}…`);
-    } catch (err) {
-      log.warn?.(`[tailnet-sync] persisting feed key failed: ${err.message}`);
+    const keyBuf = instanceSyncManager.validateIncomingFeedKey(remoteInstanceId, peerKeyMsg.feed_key_hex);
+    if (keyBuf) {
+      try {
+        await db.execute({
+          sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [peerKeyMsg.feed_key_hex, remoteInstanceId],
+        });
+        await instanceSyncManager.initInstance(remoteInstanceId, keyBuf);
+        console.log(`[tailnet-sync] persisted feed key from peer ${remoteInstanceId.slice(0,12)}…`);
+      } catch (err) {
+        log.warn?.(`[tailnet-sync] persisting feed key failed: ${err.message}`);
+      }
     }
   }
 
@@ -431,13 +439,15 @@ export class PeerDialer {
 
         // Receive server's feed key.
         const peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
-        const incomingKeyBuf = peerKeyMsg?.feed_key_hex ? Buffer.from(peerKeyMsg.feed_key_hex, "hex") : null;
+        const incomingKeyBuf = peerKeyMsg?.feed_key_hex
+          ? instanceSyncManager.validateIncomingFeedKey(remoteInstanceId, peerKeyMsg.feed_key_hex)
+          : null;
         await instanceSyncManager.initInstance(remoteInstanceId, incomingKeyBuf);
         const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
         ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
 
-        // Persist peer key if new.
-        if (peerKeyMsg?.feed_key_hex) {
+        // Persist peer key if new (gated on the same validation result used for init above).
+        if (incomingKeyBuf) {
           const { rows } = await db.execute({
             sql: "SELECT sync_url FROM crow_instances WHERE id = ?",
             args: [remoteInstanceId],
@@ -515,6 +525,21 @@ export async function startTailnetSyncClients(ctx) {
     const seenIds = new Set();
     for (const peer of rows) {
       seenIds.add(peer.id);
+      // 2d C4: converge the in-feed with the persisted sync_url every rescan —
+      // heals manual crow_update_instance edits and any missed key exchange
+      // within 60s, no restart. Cheap fast-path (Map lookup + Buffer compare)
+      // when nothing changed. Own try/catch: refresh runs on a bare
+      // setInterval and an escaped rejection would crash the gateway (no
+      // unhandledRejection handler exists in servers/). Placed BEFORE both
+      // continues below (R3 F-C): after the dialers.has() continue it would
+      // never heal the steady state, which is exactly the case that needs
+      // healing (an already-dialing peer whose row drifted).
+      try {
+        const keyBuf = peer.sync_url ? instanceSyncManager.validateIncomingFeedKey?.(peer.id, peer.sync_url) ?? null : null;
+        await instanceSyncManager.initInstance(peer.id, keyBuf);
+      } catch (err) {
+        console.warn(`[tailnet-sync] refresh heal for ${peer.id.slice(0,12)}…: ${err.message}`);
+      }
       if (!peer.gateway_url) continue;
       if (dialers.has(peer.id)) {
         // #144 minor: keep the dialer's row snapshot fresh — a changed
@@ -541,6 +566,7 @@ export async function startTailnetSyncClients(ctx) {
 
   return {
     dialers,
+    __refreshForTest: refresh,
     stop() {
       clearInterval(rescan);
       for (const d of dialers.values()) d.stop();
