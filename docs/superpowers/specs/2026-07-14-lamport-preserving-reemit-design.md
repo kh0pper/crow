@@ -1,8 +1,8 @@
 # Item 2c — Lamport-preserving re-emit + boot-window emit loss (design)
 
-**Date:** 2026-07-14 · **Status:** REV 3 — round-1 (2 CRITICAL, 3 MAJOR, 3 MINOR) and
-round-2 (3 MAJOR, 4 MINOR, 1 latent-bug observation) findings folded — see §8; pending
-round-3 closure check
+**Date:** 2026-07-14 · **Status:** REV 4 — **APPROVED FOR BUILD** (round-3 closure
+passed; its one required revision — C7 extended to `contact_groups` — and three
+precision notes are folded in this revision; see §8)
 **Scope:** `servers/sharing/instance-sync.js`, `servers/sharing/contact-sync.js`,
 `servers/sharing/group-sync.js`, `tests/` (new two-instance gate + one harness fix).
 **No schema change. No wire-format change.** The migration rail is NOT needed.
@@ -170,7 +170,13 @@ peer; on overflow drop the oldest with a one-line warn — LWW makes oldest-firs
 safe drop direction). `_drainPendingEmits(peerId)` — the explicit, testable seam
 (R1/C-2) — is itself a chained task: it splices the pending slot and appends its
 entries FIFO through `outFeeds.get(peerId)`; `_initInstanceInner` enqueues it
-immediately after arming the peer's outFeed. Chaining gives two invariants the naive
+immediately after arming the peer's outFeed — **the `outFeeds.set(...)` and the
+drain-enqueue MUST be synchronously adjacent (no `await` between them)**, or an emit
+task can slip onto the chain in the gap and append ahead of a still-pending older
+entry (R3/Q2 — invariant (ii) and G3c depend on this adjacency). A chained append
+task retains the current per-append `console.warn` on `feed.append` failure
+(`:1124-1126`): the chain's `.catch(() => {})` keeps later tasks flowing, but a
+swallowed append must at least be logged (R3/Q2). Chaining gives two invariants the naive
 check-then-push design lacks (both breakable by interleaving `emitChange`'s awaits
 against `initInstance` — R2/F2): **(i) no stranding** — an emit that decided "closed"
 before the arm is either ahead of the drain in the chain (its pending push is picked
@@ -285,14 +291,22 @@ passes and record the new suite baseline (expected 1932/2/0).
 ### C7 — `restoreConflict` refuses natural-key tables (R2/F8 — latent corruption made reachable)
 
 `sync-conflict-resolve.js` already refuses `op=insert` and `table=crow_context`
-(JSON-composite `row_id`), but not `contacts`, whose conflict `row_id` is ALSO JSON
-(`JSON.stringify({crow_id})`, `instance-sync.js:1572`). Its stale-snapshot guard runs
-`SELECT * FROM contacts WHERE id = '{"crow_id":…}'` → 0 rows → overwrites
-`winning_data` with `'null'` (destroying the recorded snapshot) and its delete branch
-no-ops. Pre-existing latent bug; C4 turns contacts delete-conflicts into a routine
-operator-visible class (G5b), so the Restore button must refuse contacts the same way
-it refuses crow_context, with a test. (A real restore path for natural-key tables is
-out of scope — recorded follow-up.)
+(JSON-composite `row_id`), but THREE synced tables produce JSON natural-key `row_id`
+conflict rows, and only one is refused (R3/Q4):
+
+- `crow_context` (`{section_key,device_id,project_id}`) — refused today ✓
+- `contacts` (`{crow_id}`, `instance-sync.js:1572`) — NOT refused
+- `contact_groups` (`{group_uid}`, `instance-sync.js:1977`, conflicts at
+  `:1998`/`:2061`) — NOT refused
+
+For the two unrefused tables, the stale-snapshot guard runs
+`SELECT * FROM <table> WHERE id = '<json>'` → 0 rows → overwrites `winning_data` with
+`'null'` (destroying the recorded snapshot) and the delete branch no-ops. Pre-existing
+latent corruption on a supported UI path; C4/C2 turn contacts and groups conflicts
+into routine operator-visible classes (G5b, G8), so the Restore button must refuse
+**by the natural-key property** — one rule covering all three tables (and any future
+JSON-`row_id` table), not per-table special cases — with a named test per table. (A
+real restore path for natural-key tables is out of scope — recorded follow-up.)
 
 ---
 
@@ -347,9 +361,12 @@ through `contact-sync.js`'s `__setEmitSinkForTest`). NEVER pointed at `~/.crow`.
 | G5b | A tombstone@10; B edits the contact as **op=update**@12 (concurrent edit-vs-delete, R1/M-1); deliver both ways; A boots twice more | B's update is DROPPED on A (tombstone stands); B keeps its row (delete@10 loses); exactly 1 conflict row total on B across all boots (C5); divergence persists — asserted explicitly as the accepted #155 semantics |
 | G6 | A legacy row lamport NULL; B holds same crow_id @7 with different values; A backfills; then the same emit against a peer that lacks the row entirely | Envelope lamport 0; B's row untouched; A's row lamport stays NULL; the missing-row peer receives the row |
 | G6b | MUTUAL legacy: A and B hold the same crow_id, divergent values, BOTH lamport NULL; both backfill; deliver both ways twice (R1/m-1) | Neither side changes values (accepted non-convergence); exactly 1 conflict row per side; second delivery adds 0 (C5) |
+| G4b | C4 live-row filter (m-3): seed the anomalous state — an authoritative tombstone AND a live row for the same crow_id — then boot | No delete rides for that crow_id; a second, row-less tombstone in the same run DOES ride (the filter is per-row, not global) |
+| G5c | C5 resolve-scope (R2/F5): log a conflict, mark it `resolved = 1`, redeliver the identical entry | Exactly one NEW unresolved row appears (re-surfaced once); a further redelivery adds 0 (dedupes against the new row) |
 | G7 | #147 flag: run G1's backfill twice | First run writes `done:<n>`; second run emits 0 entries (wire length unchanged) |
 | G8 | Settings + groups preserve: rows@L re-emitted via their one-shots | Envelope lamport == L (not fresh); local lamports unchanged |
 | G9 | Suite: test 18 | Green under scratch env; suite baseline recorded 1932/2/0 |
+| G10 | C7: `restoreConflict` against a seeded conflict row for each of `contacts` and `contact_groups` (JSON row_id) | Refused (no write); `winning_data` byte-identical before and after (the C3-style assertion from test 21's precedent); `crow_context` refusal still green |
 
 **Mutation matrix (every guard, per 2a lesson 3 — verify the harness actually reaches
 the mechanism):** revert C2's opts on contacts → G1/G2 red. Delete the
@@ -358,11 +375,10 @@ the mechanism):** revert C2's opts on contacts → G1/G2 red. Delete the
 (append directly) → G3c's ordering assertion red. Remove the `finally` re-emit → G4
 red. Re-emit with minted lamport instead of the tombstone's → G5 red (re-add wiped).
 Remove C5 dedupe → G5-boot-2 red. Drop `losing_instance_id` from the C5 key → G2b
-red. Drop the `resolved = 0` scope → dedicated resolve-then-redeliver assertion red.
-Remove the `kind IS NULL` filter → G4's prune assertion red. Remove the live-row
-LEFT JOIN filter (C4/m-3) → dedicated assertion red (seed the anomalous
-row-beside-tombstone state; no delete may ride). Remove C7's contacts refusal → its
-named test red. Each mutation checked against the NAMED test before restore.
+red. Drop the `resolved = 0` scope → G5c red. Remove the `kind IS NULL` filter →
+G4's prune assertion red. Remove the live-row LEFT JOIN filter (C4/m-3) → G4b red.
+Remove C7's natural-key refusal → G10 red (per table: contacts AND contact_groups).
+Each mutation checked against the NAMED test before restore.
 
 ## 6. Non-goals, follow-ups, risks
 
@@ -463,3 +479,20 @@ named test red. Each mutation checked against the NAMED test before restore.
   (`_afterContactApplied` fires only on winning branches), same-lamport cross-peer
   independence, null-`theirFeedKey` drain correctness, the gated-backfill refactor's
   return contract, counter floor, delete-wins termination, settings tie residual.
+
+**Round 3 (2026-07-14, fresh Opus subagent): APPROVED FOR BUILD — conditions folded
+in this revision.**
+- Verified: C5's key columns exist (`init-db.js:1644-1657`, `losing_instance_id`
+  NOT NULL, `resolved` default 0, `op` added by `addColumnIfMissing:1665` — so the
+  op-absent fallback is real); no remaining repeat-delivery growth and no
+  wrongly-suppressed new conflict; the `_appendLocks` chain is a faithful mirror of
+  `_initLocks`/`_processLocks` and delivers both invariants; G3b is runnable today
+  (the `instance-sync-noauth-feeds.test.js:71` precedent passes in-suite); G2b/G3c
+  mutations meaningful; no internal contradictions.
+- **Required revision (folded):** C7 covered only 2 of the 3 JSON-`row_id` tables —
+  `contact_groups` (`:1977`, conflicts `:1998`/`:2061`) hits the identical
+  `winning_data → 'null'` corruption. C7 now refuses by the natural-key property
+  (all three tables, one rule) + G10.
+- **Precision notes (folded):** arm + drain-enqueue synchronous adjacency made an
+  explicit MUST (C3); chained appends keep the per-append `console.warn`; the three
+  mutation-matrix tests that had no gate rows are now G4b / G5c / G10.
