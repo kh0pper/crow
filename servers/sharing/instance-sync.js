@@ -1402,8 +1402,14 @@ export class InstanceSyncManager {
    * skipping one bad entry. The trailing whole-batch checkpoint is removed.
    */
   async _processNewEntriesInner(remoteInstanceId, feed) {
+    // 2d C1/C2 (R1 F1): a run bound to a REPLACED feed must not read or stamp
+    // the successor's record. `undefined` (peer unmapped / stub-feed harness)
+    // still processes — only a swapped-out feed bails.
+    const current = this.inFeeds.get(remoteInstanceId);
+    if (current !== undefined && current !== feed) return;
+    const feedKeyHex = feed.key ? Buffer.from(feed.key).toString("hex") : null;
     // Re-read lastSeq inside the lock — the prior chained run may have advanced it.
-    const lastSeq = await this._getLastAppliedSeq(remoteInstanceId);
+    const lastSeq = await this._getLastAppliedSeq(remoteInstanceId, feed);
 
     for (let seq = lastSeq; seq < feed.length; seq++) {
       try {
@@ -1415,7 +1421,10 @@ export class InstanceSyncManager {
       }
       // Checkpoint after every attempted entry — outside the try so it advances
       // even when _applyEntry threw (intentional skip-log-advance semantics).
-      await this._setLastAppliedSeq(remoteInstanceId, seq + 1);
+      // Stamp with the PROCESSED feed's key (2d C2 / R1 F1) — never "the
+      // current in-feed": a stale run must leave a record the successor's
+      // key-gated reads ignore.
+      await this._setLastAppliedSeq(remoteInstanceId, seq + 1, feedKeyHex);
     }
   }
 
@@ -2647,22 +2656,38 @@ export class InstanceSyncManager {
   }
 
   /**
-   * Get the last applied sequence number for a remote instance's feed.
+   * Applied-seq record, keyed to the feed it was earned on (2d C2).
+   * Shape: {"k": "<feedKeyHex>", "s": <nextUnprocessedSeq>}. Legacy bare
+   * numbers exist on disk until _reconcileAppliedSeqAtOpen upgrades them.
    */
-  async _getLastAppliedSeq(remoteInstanceId) {
+  async _appliedSeqRecord(remoteInstanceId) {
     try {
       const { rows } = await this.db.execute({
         sql: "SELECT last_applied_seq_per_peer FROM sync_state WHERE instance_id = ?",
         args: [this.localInstanceId],
       });
-
       if (rows.length > 0 && rows[0].last_applied_seq_per_peer) {
-        const seqs = JSON.parse(rows[0].last_applied_seq_per_peer);
-        return seqs[remoteInstanceId] || 0;
+        const rec = JSON.parse(rows[0].last_applied_seq_per_peer)[remoteInstanceId];
+        return rec === undefined ? null : rec;
       }
     } catch {}
+    return null;
+  }
 
-    return 0;
+  /**
+   * Key-gated read (2d C2). feed=null is the display path: coerce BOTH shapes
+   * (legacy bare number → itself; {k,s} → s) — never used to gate application.
+   * A record whose k differs from the feed's key belongs to a dead feed → 0.
+   * A legacy numeric reaching a keyed read is treated as foreign (defensive;
+   * reconcile-at-open makes it unreachable in production).
+   */
+  async _getLastAppliedSeq(remoteInstanceId, feed = null) {
+    const rec = await this._appliedSeqRecord(remoteInstanceId);
+    if (rec === null) return 0;
+    if (feed == null) return typeof rec === "number" ? rec : Number(rec.s) || 0;
+    if (typeof rec !== "object") return 0;
+    const feedKeyHex = feed.key ? Buffer.from(feed.key).toString("hex") : null;
+    return rec.k === feedKeyHex ? Number(rec.s) || 0 : 0;
   }
 
   /**
@@ -2676,9 +2701,11 @@ export class InstanceSyncManager {
    *
    * Semantics unchanged: `seq` is the NEXT unprocessed sequence number
    * (i.e. the last successfully attempted seq + 1). getSyncStatus and
-   * _getLastAppliedSeq consume the same blob.
+   * _getLastAppliedSeq consume the same blob. 2d C2: the record is now
+   * feed-keyed — {"k": feedKeyHex, "s": seq} — so a rotated feed never
+   * inherits a stale mark from its predecessor.
    */
-  async _setLastAppliedSeq(remoteInstanceId, seq) {
+  async _setLastAppliedSeq(remoteInstanceId, seq, feedKeyHex) {
     // Guard: a `"` in the id would break the json_set path literal.
     if (remoteInstanceId.includes('"')) {
       console.warn(`[instance-sync] _setLastAppliedSeq: skipping id with quote char: ${remoteInstanceId}`);
@@ -2686,12 +2713,15 @@ export class InstanceSyncManager {
     }
     try {
       await this._ensureCounter();
+      // json(?) — NOT CAST — so the object lands as JSON, not a quoted string
+      // (spec C2 SQL note): json_set with a plain string param stores a string
+      // and every reader's .k/.s would be undefined.
       await this.db.execute({
         sql: `UPDATE sync_state
-              SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer, '{}'), ?, CAST(? AS INTEGER)),
+              SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer, '{}'), ?, json(?)),
                   updated_at = datetime('now')
               WHERE instance_id = ?`,
-        args: [`$."${remoteInstanceId}"`, seq, this.localInstanceId],
+        args: [`$."${remoteInstanceId}"`, JSON.stringify({ k: feedKeyHex ?? null, s: Number(seq) }), this.localInstanceId],
       });
     } catch (err) {
       console.warn(`[instance-sync] Failed to update checkpoint for ${remoteInstanceId}:`, err.message);
@@ -2706,7 +2736,7 @@ export class InstanceSyncManager {
 
     for (const [instanceId, feed] of this.outFeeds) {
       const inFeed = this.inFeeds.get(instanceId);
-      const lastSeq = await this._getLastAppliedSeq(instanceId);
+      const lastSeq = await this._getLastAppliedSeq(instanceId, inFeed ?? null);
 
       status.push({
         instanceId,

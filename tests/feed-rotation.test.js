@@ -150,3 +150,33 @@ test("G0 baseline: real replication applies an emitted row across the socketpair
     await fleet.cleanup();
   }
 });
+
+// ── unit tests ────────────────────────────────────────────────────────────────
+
+test("C2 unit: set writes {k,s} object; get is key-gated; null-feed coerces both shapes", async () => {
+  const fleet = await makeFleet();
+  try {
+    const { mgr, db } = fleet.a;
+    const PEER = fleet.b.id;
+    const keyX = "aa".repeat(32), keyY = "bb".repeat(32);
+    await mgr._setLastAppliedSeq(PEER, 7, keyX);
+    // Raw storage shape: a JSON object, not a string (spec C2 SQL note / R2 #7).
+    const { rows } = await db.execute({
+      sql: "SELECT last_applied_seq_per_peer AS b FROM sync_state WHERE instance_id = ?",
+      args: [mgr.localInstanceId] });
+    const rec = JSON.parse(rows[0].b)[PEER];
+    assert.equal(typeof rec, "object", "must store an object, not a JSON string");
+    assert.equal(rec.k, keyX); assert.equal(rec.s, 7);
+    // Key-gated reads:
+    assert.equal(await mgr._getLastAppliedSeq(PEER, { key: Buffer.from(keyX, "hex") }), 7);
+    assert.equal(await mgr._getLastAppliedSeq(PEER, { key: Buffer.from(keyY, "hex") }), 0,
+      "foreign-key record must read 0");
+    // Display path (feed=null) coerces the object:
+    assert.equal(await mgr._getLastAppliedSeq(PEER, null), 7);
+    // Legacy numeric display coercion (R3 F-F): write a bare number the old way.
+    await db.execute({
+      sql: `UPDATE sync_state SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer,'{}'), ?, 42) WHERE instance_id = ?`,
+      args: [`$."${PEER}"`, mgr.localInstanceId] });
+    assert.equal(await mgr._getLastAppliedSeq(PEER, null), 42, "legacy bare number coerces");
+  } finally { await fleet.cleanup(); }
+});
