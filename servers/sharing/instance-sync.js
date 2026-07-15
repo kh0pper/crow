@@ -602,6 +602,36 @@ export class InstanceSyncManager {
   }
 
   /**
+   * 2d C5 (D4): a length-0 armed out-feed means the once-backfill flags'
+   * premise ("peers already received this") died with the feed — rotation,
+   * or a brand-new pairing (desirable re-run either way; a never-emitted-to
+   * peer re-triggers this each boot until a first emit lands — accepted,
+   * re-runs are preserve-mode + deduped no-ops). MUST run between
+   * eagerInitPairedPeers and the once-backfill calls (mcp-mounts ordering,
+   * R1 F4). Returns the number of flags cleared.
+   */
+  async resetBackfillPremiseFlags() {
+    if (this.feedsDisabled || this.outFeeds.size === 0) return 0;
+    const emptyPeers = [...this.outFeeds.entries()]
+      .filter(([, feed]) => feed.length === 0)
+      .map(([peerId]) => peerId);
+    if (emptyPeers.length === 0) return 0;
+    let cleared = 0;
+    const del = async (key) => {
+      try {
+        const r = await this.db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ? AND value LIKE 'done:%'", args: [key] });
+        if ((r.rowsAffected ?? 0) > 0) cleared++;
+      } catch (err) { console.warn(`[instance-sync] flag reset ${key}: ${err.message}`); }
+    };
+    for (const peerId of emptyPeers) await del(`__providers_backfill_v1:${peerId}`);
+    for (const key of ["__contacts_backfill_v1", "__sync_reemit_allowlist_v2", "__groups_backfill_v1"]) await del(key);
+    if (cleared > 0) {
+      console.warn(`[instance-sync] C5: ${cleared} backfill premise flag(s) reset — empty out-feed(s) for ${emptyPeers.map((p) => p.slice(0, 12)).join(", ")}; once-backfills will re-run this boot`);
+    }
+    return cleared;
+  }
+
+  /**
    * One-shot reconciliation: re-emit every sync-allowlisted dashboard_settings
    * row so that peers whose pre-fix outFeed dropped entries can catch up.
    * Guarded by a flag row so it runs once per instance lifetime (post-fix).
