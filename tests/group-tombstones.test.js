@@ -705,62 +705,67 @@ test("G2: emitGroupUpsert on a live-row-beside-tombstone zombie emits NOTHING; a
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// T11 — G3 (design R2 F3'): the sync-conflicts RESTORE button must not
-// re-INSERT a tombstoned uid. The conflict row is seeded in the EXACT shape
-// _insertConflictRow writes on the local-wins path (op="update": row_id = JSON
-// {group_uid}, losing_data = the filtered wire row — the shape T1 asserts).
-// Driven the way the settings UI does (sync-conflicts.js handleAction →
-// restoreConflict): the first call trips the stale-snapshot guard (the
-// winning_data snapshot vs. the now-gone row) and re-snapshots — the UI's
-// confirm-again flow; the SECOND call reaches the INSERT branch G3 guards.
+// T11 — superseded by 2c C7 (design spec §3 C7 "required revision (folded)"):
+// restoreConflict now refuses ALL natural-key tables (crow_context, contacts,
+// contact_groups) by table property, BEFORE the id-keyed stale-snapshot guard
+// even runs. contact_groups conflicts are JSON-row_id (`{group_uid}`), so they
+// now hit that refusal unconditionally — the tombstone-specific G3 statement-
+// level guard below (the `INSERT ... SELECT WHERE NOT EXISTS` in
+// sync-conflict-resolve.js) sits further down in the op='update' INSERT branch
+// and is no longer reachable via restoreConflict (contact_groups never gets
+// that far). It's left in place as defense-in-depth for a future real
+// natural-key restore path (spec §3 C7: "recorded follow-up"), but these two
+// tests — which drove that INSERT branch via a first-click "stale" re-snapshot
+// then a second click — now updated to assert the actual (and correct, per C7)
+// behavior: refused on the FIRST call, unconditionally, tombstoned or not.
+// See tests/lamport-reemit.test.js G10 for the executable C7 gate.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Seed a contact_groups op="update" conflict + drive restore twice (stale → outcome). */
-async function seedConflictAndRestore(inst, uid, tombstoned) {
+/** Seed a contact_groups op="update" conflict in the EXACT shape _insertConflictRow
+ * writes on the local-wins path (row_id = JSON {group_uid}). Returns {id, winning_data}. */
+async function seedGroupConflict(inst, uid) {
   const losing = { group_uid: uid, name: "Restored Zombie" };
   const winning = { id: 950, group_uid: uid, name: "Local Winner", lamport_ts: 9 };
   await inst.mgr._insertConflictRow("contact_groups", JSON.stringify({ group_uid: uid }),
     A_ID, B_ID, 9, 12, JSON.stringify(winning), JSON.stringify(losing), "update");
-  const conflictId = (await inst.db.execute(
-    "SELECT id FROM sync_conflicts ORDER BY id DESC LIMIT 1")).rows[0].id;
-  if (tombstoned) await inst.db.execute(groupTombstoneStatement(uid, 12));
-
-  const first = await restoreConflict(inst.db, String(conflictId), { instanceSync: null });
-  assert.equal(first.status, "stale", "first click re-snapshots (the UI's double-confirm flow)");
-  const second = await restoreConflict(inst.db, String(conflictId), { instanceSync: null });
-  return { conflictId, outcome: second };
+  return (await inst.db.execute(
+    "SELECT id, winning_data FROM sync_conflicts ORDER BY id DESC LIMIT 1")).rows[0];
 }
 
-test("T11: restoring a contact_groups conflict whose uid is TOMBSTONED is REFUSED — no row inserted, tombstone intact, conflict left unresolved", async () => {
+test("T11: restoring a contact_groups conflict whose uid is TOMBSTONED is REFUSED by the C7 natural-key guard — no row inserted, tombstone intact, winning_data byte-identical, conflict left unresolved", async () => {
   const f = newFleet();
   const uid = "t11-" + "0".repeat(28);
+  await f.A.db.execute(groupTombstoneStatement(uid, 12));
 
-  const { conflictId, outcome } = await seedConflictAndRestore(f.A, uid, true);
+  const seed = await seedGroupConflict(f.A, uid);
+  const outcome = await restoreConflict(f.A.db, String(seed.id), { instanceSync: null });
 
-  assert.equal(outcome.status, "refused", "G3 refuses the restore (not applied, not error)");
-  assert.match(outcome.message || "", /deleted fleet-wide/i,
-    "the refusal surfaces the reason instead of claiming success");
+  assert.equal(outcome.status, "refused", "C7 natural-key guard refuses the restore (not applied, not error)");
+  assert.match(outcome.message || "", /group_uid/i,
+    "the refusal names the natural key (group_uid), not a numeric id");
   assert.equal(await groupRow(f.A, uid), null, "NO contact_groups row was inserted");
   assert.ok(await tomb(f.A, uid), "tombstone intact");
   const c = (await f.A.db.execute({
-    sql: "SELECT resolved FROM sync_conflicts WHERE id = ?", args: [conflictId] })).rows[0];
+    sql: "SELECT winning_data, resolved FROM sync_conflicts WHERE id = ?", args: [seed.id] })).rows[0];
   assert.equal(Number(c.resolved), 0,
     "conflict left UNRESOLVED on refusal (the data stays visible, like the D7 refusal)");
+  assert.equal(c.winning_data, seed.winning_data,
+    "winning_data byte-identical — not corrupted to the JSON string 'null' by the id-keyed stale guard (2c C7)");
 });
 
-test("T11 negative control: the SAME conflict WITHOUT a tombstone restores — row inserted, conflict resolved (proves the harness reaches the INSERT branch)", async () => {
+test("T11 negative control: the SAME conflict WITHOUT a tombstone is ALSO refused — the C7 refusal is unconditional on the table's natural-key property, independent of tombstone state", async () => {
   const f = newFleet();
   const uid = "t11-neg-" + "0".repeat(24);
 
-  const { conflictId, outcome } = await seedConflictAndRestore(f.A, uid, false);
+  const seed = await seedGroupConflict(f.A, uid);
+  const outcome = await restoreConflict(f.A.db, String(seed.id), { instanceSync: null });
 
-  assert.equal(outcome.status, "applied", "non-tombstoned restore succeeds");
-  const row = await groupRow(f.A, uid);
-  assert.ok(row, "the losing row was re-INSERTed");
-  assert.equal(row.name, "Restored Zombie", "restored with the losing_data values");
+  assert.equal(outcome.status, "refused", "still refused even without a tombstone — C7 does not consult tombstone state");
+  assert.equal(await groupRow(f.A, uid), null, "no row inserted regardless of tombstone state");
   const c = (await f.A.db.execute({
-    sql: "SELECT resolved FROM sync_conflicts WHERE id = ?", args: [conflictId] })).rows[0];
-  assert.equal(Number(c.resolved), 1, "conflict marked resolved on success");
+    sql: "SELECT winning_data, resolved FROM sync_conflicts WHERE id = ?", args: [seed.id] })).rows[0];
+  assert.equal(Number(c.resolved), 0, "conflict left unresolved");
+  assert.equal(c.winning_data, seed.winning_data, "winning_data byte-identical");
 });
 
 test("T9: W4 flagless boot re-emit — a peer that paired after the delete converges (stale copy gone, tombstoned, exactly one delete-won conflict row); a second re-emit is idempotent", async () => {

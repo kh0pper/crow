@@ -123,20 +123,28 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
   const table = conflict.table_name;
   const rowId = conflict.row_id;
 
-  // crow_context conflicts cannot be auto-restored: the row_id is a JSON composite
-  // key, not a numeric id, so the id-keyed stale-snapshot guard below would run
-  // SELECT … WHERE id = '{…}', find nothing, re-snapshot to 'null', and silently
-  // destroy the recorded local snapshot.  Use crow_update_context_section to apply
-  // the losing data manually.  (Placement BEFORE the stale guard is load-bearing —
-  // see spec §4 C3.)
-  if (table === "crow_context") {
-    return {
-      status: "refused",
-      message:
-        "This version cannot be restored automatically. crow_context rows are keyed " +
-        "by a composite key (section_key, device_id, project_id), not a single id. " +
-        "Use crow_update_context_section to apply the values shown below.",
-    };
+  // Natural-key tables cannot be auto-restored: their conflict row_id is a JSON
+  // key (crow_context: {section_key,device_id,project_id}; contacts: {crow_id};
+  // contact_groups: {group_uid}), not a numeric id, so the id-keyed stale-snapshot
+  // guard below would run SELECT ... WHERE id = '{...}', find nothing, re-snapshot
+  // winning_data to 'null', and silently destroy the recorded local snapshot
+  // (2c C7 / spec R3-Q4). Placement BEFORE the stale guard is load-bearing.
+  const NATURAL_KEY_RESTORE_REFUSALS = {
+    crow_context:
+      "This version cannot be restored automatically. crow_context rows are keyed " +
+      "by a composite key (section_key, device_id, project_id), not a single id. " +
+      "Use crow_update_context_section to apply the values shown below.",
+    contacts:
+      "This version cannot be restored automatically. Contact conflicts are keyed " +
+      "by crow_id, not a numeric id. Review the values shown below and re-apply " +
+      "the change manually from the Contacts panel.",
+    contact_groups:
+      "This version cannot be restored automatically. Group conflicts are keyed " +
+      "by group_uid, not a numeric id. Review the values shown below and re-apply " +
+      "the change manually from the Groups panel.",
+  };
+  if (NATURAL_KEY_RESTORE_REFUSALS[table]) {
+    return { status: "refused", message: NATURAL_KEY_RESTORE_REFUSALS[table] };
   }
 
   // ── 2. Validate table ─────────────────────────────────────────────────────

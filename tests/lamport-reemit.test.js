@@ -29,6 +29,7 @@ import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager } from "../servers/sharing/instance-sync.js";
 import { __setEmitSinkForTest } from "../servers/sharing/contact-sync.js";
 import { emitGroupUpsert, __setEmitSinkForTest as __setGroupSink } from "../servers/sharing/group-sync.js";
+import { restoreConflict } from "../servers/sharing/sync-conflict-resolve.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
 
 // ── identities ───────────────────────────────────────────────────────────────
@@ -474,4 +475,81 @@ test("G5b: concurrent edit-vs-delete stays divergent -- B's update is dropped on
   // Divergence PERSISTS — the accepted #155 edit-vs-delete semantics, asserted explicitly.
   assert.equal((await f.A.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5b'", args: [] })).rows.length, 0, "divergence persists: A gone");
   assert.equal((await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5b'", args: [] })).rows.length, 1, "divergence persists: B present");
+});
+
+// ── G10: C7 -- restoreConflict refuses ALL natural-key tables ──────────────────
+// crow_context, contacts, and contact_groups all key their sync_conflicts row_id
+// as a JSON object, not a numeric id. Without the natural-key refusal placed
+// BEFORE the stale-snapshot guard, `SELECT ... WHERE id = '{"crow_id":...}'`
+// finds nothing, and the guard "helpfully" re-snapshots winning_data to the JSON
+// string 'null' -- silently destroying the recorded winning-side snapshot. This
+// gate proves the refusal fires for all three tables and that winning_data
+// survives byte-identical (design spec C7 / gate row G10).
+
+/** Seed a sync_conflicts row with a JSON row_id and return {id, winning_data}. */
+async function seedNaturalKeyConflict(db, table, rowIdObj, winningData, losingData) {
+  const rowIdJson = JSON.stringify(rowIdObj);
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+          VALUES (?, ?, ?, ?, 50, 10, ?, ?, 'update')`,
+    args: [table, rowIdJson, A_ID, B_ID, JSON.stringify(winningData), JSON.stringify(losingData)],
+  });
+  const { rows } = await db.execute({
+    sql: "SELECT id, winning_data FROM sync_conflicts WHERE table_name = ? AND row_id = ? ORDER BY id DESC LIMIT 1",
+    args: [table, rowIdJson],
+  });
+  return rows[0];
+}
+
+test("G10: restoreConflict refuses ALL natural-key tables (contacts, contact_groups join crow_context) -- C7", async () => {
+  const f = newFleet();
+
+  // contacts: row_id = {crow_id}
+  const contactsSeed = await seedNaturalKeyConflict(
+    f.A.db, "contacts",
+    { crow_id: "crow:g10" },
+    { crow_id: "crow:g10", display_name: "Local Winner", lamport_ts: 50 },
+    { crow_id: "crow:g10", display_name: "Remote Loser", lamport_ts: 10 },
+  );
+  const contactsOutcome = await restoreConflict(f.A.db, contactsSeed.id, { instanceSync: null });
+  assert.equal(contactsOutcome.status, "refused", "contacts restore refused (C7)");
+  const contactsAfter = (await f.A.db.execute({
+    sql: "SELECT winning_data, resolved FROM sync_conflicts WHERE id = ?", args: [contactsSeed.id],
+  })).rows[0];
+  assert.equal(contactsAfter.winning_data, contactsSeed.winning_data,
+    "contacts winning_data byte-identical (not corrupted to the JSON string 'null')");
+  assert.equal(Number(contactsAfter.resolved), 0, "contacts conflict stays unresolved after refused restore");
+
+  // contact_groups: row_id = {group_uid}
+  const groupsSeed = await seedNaturalKeyConflict(
+    f.A.db, "contact_groups",
+    { group_uid: "g10-uid-0000000000000000000000" },
+    { group_uid: "g10-uid-0000000000000000000000", name: "Local Winner", lamport_ts: 50 },
+    { group_uid: "g10-uid-0000000000000000000000", name: "Remote Loser", lamport_ts: 10 },
+  );
+  const groupsOutcome = await restoreConflict(f.A.db, groupsSeed.id, { instanceSync: null });
+  assert.equal(groupsOutcome.status, "refused", "contact_groups restore refused (C7)");
+  const groupsAfter = (await f.A.db.execute({
+    sql: "SELECT winning_data, resolved FROM sync_conflicts WHERE id = ?", args: [groupsSeed.id],
+  })).rows[0];
+  assert.equal(groupsAfter.winning_data, groupsSeed.winning_data,
+    "contact_groups winning_data byte-identical (not corrupted to the JSON string 'null')");
+  assert.equal(Number(groupsAfter.resolved), 0, "contact_groups conflict stays unresolved after refused restore");
+
+  // crow_context: no regression -- still refused, still byte-identical.
+  const ctxSeed = await seedNaturalKeyConflict(
+    f.A.db, "crow_context",
+    { section_key: "g10_ctx", device_id: null, project_id: null },
+    { section_key: "g10_ctx", content: "local-kept", lamport_ts: 50 },
+    { section_key: "g10_ctx", content: "remote-version", lamport_ts: 10 },
+  );
+  const ctxOutcome = await restoreConflict(f.A.db, ctxSeed.id, { instanceSync: null });
+  assert.equal(ctxOutcome.status, "refused", "crow_context restore still refused (no regression)");
+  const ctxAfter = (await f.A.db.execute({
+    sql: "SELECT winning_data FROM sync_conflicts WHERE id = ?", args: [ctxSeed.id],
+  })).rows[0];
+  assert.equal(ctxAfter.winning_data, ctxSeed.winning_data,
+    "crow_context winning_data byte-identical (regression check)");
 });
