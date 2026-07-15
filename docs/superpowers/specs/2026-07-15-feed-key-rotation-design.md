@@ -1,6 +1,6 @@
 # Item 2d — In-feed key rotation: live swap + applied-seq integrity
 
-**Date:** 2026-07-15 · **Status:** rev 3 (R1+R2 findings folded; awaiting round-3 closure review) · **Author:** autonomous arc session
+**Date:** 2026-07-15 · **Status:** rev 4 — **READY FOR IMPLEMENTATION PLANNING** (R3 closure verdict; R3's three mandatory fixes folded below) · **Author:** autonomous arc session
 **Plan doc:** `docs/superpowers/plans/2026-07-11-opus-autonomous-arc.md` §4 Item 2d
 **Prereq reading:** the 2a six-bug lesson (executable/multi-instance/mutual gates) and the 2c
 boot-liveness lesson (no unbounded boot awaits) — both shaped this design.
@@ -141,12 +141,20 @@ if (!this.inFeeds.has(remoteInstanceId) && theirFeedKey
 
 The `_deferredRotations` set suppresses repeated same-process open attempts against a dir
 whose rocksdb lock is still held by the zombie session. The abandoned close promise keeps
-a `.then(() => this._deferredRotations.delete(id))` attached — a close that was merely
-SLOW (resolves after the cap) releases the lock and un-defers the peer, so the next
+a **`.finally(() => this._deferredRotations.delete(id))`** attached — `.finally`, NOT
+`.then` (R3 F-A: a bare `.then` does nothing on a REJECTED close and its derived promise
+becomes an unhandled rejection — the exact gateway-crash class R2 #1 killed, reintroduced
+by the fix's own sub-mechanism; G6c gains a rejecting-close sub-case). A close that was
+merely SLOW (settles after the cap) releases the lock and un-defers the peer, so the next
 connection or C4 tick completes the rotation without a restart; a truly hung close keeps
-the suppression until the restart that also releases the lock. The try/catch is the real
-safety net: it also covers open failures from any other cause (disk, corruption) with the
-same out-only degradation the spec promises. C4's per-peer `initInstance` call is
+the suppression until the restart that also releases the lock. `_closeInstanceFeedsInner`
+also deletes the peer's `_deferredRotations` entry (R3 F-B: a deferred peer that is
+revoked then re-paired with the same id must not stay suppressed forever — the same
+revoke-survival class as D4). The try/catch is the real safety net: it also covers open
+failures from any other cause (disk, corruption) with the same out-only degradation the
+spec promises — and its catch closes the partial handle (`inFeed.close().catch(()=>{})`,
+R3 F-D: a `ready()` failure after lock acquisition would otherwise turn every retry into
+a lock error and leak an fd per C4 tick). C4's per-peer `initInstance` call is
 additionally wrapped in its own try/catch (defense in depth for the interval path).
 
 Properties:
@@ -168,6 +176,9 @@ Properties:
   our own out-feed key for that peer** (a peer echoing our key back would otherwise make
   us re-apply our own history — R1 F7; entries verify against the *shared* identity so
   they would apply). Malformed/self keys are logged and ignored — no persist, no open.
+  On the tailnet *client* path the helper gates before `initInstance` at `:435` as well
+  as before the persist at `:446` (R3 F-E: that path inits before persisting, so
+  persist-side validation alone would still let a poison key reach the open).
 - **R1 F3 fix — the tailnet server's pre-exchange init no longer passes a key:**
   `tailnet-sync.js:238` becomes `initInstance(remoteInstanceId, null)`. That call's only
   job is arming the out-feed for `getOutFeedKey` (`:239`); passing the *snapshot*
@@ -199,9 +210,10 @@ callers (`tests/instance-sync.test.js:288-293` etc.) are migrated to pass a key 
 **Readers.** `_getLastAppliedSeq(peerId, feed)`:
 - record `k === feed.key.hex` → return `s`; `k ≠ feed.key.hex` → foreign record → return 0.
 - Display-only callers without a feed handle (`getSyncStatus` when the in-feed is not open)
-  pass `feed = null` and get the raw `s` back — cosmetic, never gates application. Every
-  `getSyncStatus` consumer of the blob unwraps `.s` (a raw-object read would make
-  `pendingEntries = length - {object} = NaN` — R2 #7).
+  pass `feed = null` and get the numeric position back — coercing BOTH shapes (legacy bare
+  number → itself; `{k,s}` → `s`; R3 F-F: the live blob is all-legacy until reconcile, so
+  an `.s`-only read would yield `undefined` → `pendingEntries = NaN` in the window). Every
+  `getSyncStatus` consumer of the blob goes through this coercion (R2 #7).
 - A legacy numeric reaching a *processing* read is impossible after the open-time
   reconcile below; if seen (defensive), treat as foreign → 0.
 
@@ -285,7 +297,9 @@ exactly that precondition (G8, tightened per R1 F5).
 
 `startTailnetSyncClients`' existing 60s `refresh()` (`tailnet-sync.js:503`) already re-reads
 each peer's row. Add: `instanceSyncManager.initInstance(peer.id, syncUrlKeyOrNull)` per
-refreshed peer. With C1's key-equality fast path this is a Map lookup + Buffer compare per
+refreshed peer — placed **before** the `dialers.has(peer.id) → continue` short-circuit at
+`:519-526` (R3 F-C: after the `continue`, an already-dialing peer — the common steady
+state — would never be healed, defeating D3's primary case). With C1's key-equality fast path this is a Map lookup + Buffer compare per
 minute per peer when nothing changed; when `sync_url` changed by any means (manual tool
 edit, missed exchange), the swap converges within 60s with no restart. Not a boot-path
 call (interval only). Passing `null` (peer with no stored key) never closes or swaps
@@ -398,7 +412,7 @@ defects; that blindness is exactly what let D1/D2 ship).
 | G5 | Same-key re-exchange: no swap (feed object identity preserved), seq untouched | Remove equality fast-path → G5 red |
 | G6 | Hung old-feed close: `close()` never resolves → `initInstance` returns ≤ cap, no hang, loud defer log | Remove `boundedClose` cap → G6 red (timeout) |
 | G6b | After G6's defer, a restarted manager (new objects, same dirs+DB) completes the rotation and applies backlog | Remove open-time reconcile → G6b red |
-| G6c | **Defer-then-reopen (R2 #1):** after a defer with the lock still held, a subsequent `initInstance(id, newKey)` returns the out-feed WITHOUT throwing; a C4-style call wrapped the same way; when the slow close finally resolves, the next `initInstance` completes the rotation | Remove the open try/catch → G6c red (throw escapes); remove the `_deferredRotations` un-defer `.then` → G6c red (rotation never completes) |
+| G6c | **Defer-then-reopen (R2 #1):** after a defer with the lock still held, a subsequent `initInstance(id, newKey)` returns the out-feed WITHOUT throwing; a C4-style call wrapped the same way; when the slow close finally SETTLES — one sub-case resolving, one sub-case **rejecting** (R3 F-A) — no unhandled rejection escapes and the next `initInstance` completes the rotation | Remove the open try/catch → G6c red (throw escapes); replace `.finally` un-defer with `.then` → G6c-reject red (unhandled rejection / never heals); remove un-defer entirely → G6c red (rotation never completes) |
 | G7 | Replay safety: rotated fresh feed carrying insert→delete converges deleted; locally-newer row survives an older replayed entry (LWW holds at seq 0) | (LWW gates pre-exist; case pins them under rotation) |
 | G8 | **Old core actively replicating on a real stream** → rotation (real bounded close of that core) → new feed attached to the SAME still-open stream → new data flows (R1 F5 preconditions) | Remove `_activeStreams` attach → G8 red |
 | G9 | Old core's blocks still readable after swap (open by old key, read block 0) | — acceptance pin, no guard |
@@ -409,7 +423,11 @@ defects; that blindness is exactly what let D1/D2 ship).
 | G13 | Stale-snapshot swap-back (R1 F3): hyperswarm-delivered new key + concurrent tailnet-server handshake holding the old snapshot → converges on the NEW key, exactly one swap. **Must drive the REAL tailnet WS server** (R2 #6): the harness mounts `setupTailnetSyncServer` on a real local http server and dials it with a real signed WS handshake, pausing between the server's `:222` snapshot read and its `:238` init to land the hyperswarm-path key write — simulating the race by calling `initInstance` twice directly would not execute `:238` and the mutation could never go red | Restore `:238` snapshot-key init → G13 red |
 
 Full mutation matrix run recorded in the PR (the 2c precedent). The MUTUAL case (G3) is
-mandatory per the 2a lesson.
+mandatory per the 2a lesson. **Harness seams (R3 F-G):** G6/G6b/G6c force the hung/slow/
+rejecting close by wrapping the REAL feed's `close` (injection seam, not a stub feed);
+G13 uses an explicit barrier between the server's `:222` snapshot read and its `:238`
+init (plus a swap counter) — barriers and wrapped promises, never sleeps, to keep the
+suite deterministic.
 
 **Existing-suite migration (R1 F6, scope corrected per R2 #3):** the change is NOT limited
 to the four direct `_getLastAppliedSeq`/`_setLastAppliedSeq` call lines — every test that
@@ -526,3 +544,24 @@ all folded into rev 3:
   open after null-key no-ops; `emitChange`/out-feed untouched by swap; C5's length read
   ordering valid (`mcp-mounts.js:62` awaited); `.key` readable after close; boot stays
   clean (fresh process holds no zombie lock).
+
+**Round 3 — closure (fresh Opus subagent, 2026-07-15) — verdict: READY FOR IMPLEMENTATION
+PLANNING.** Three mandatory build fixes + four build notes, all folded into rev 4 (no
+further spec round required):
+- **F-A (HIGH)** rev 3's un-defer `.then` missed close REJECTION → unhandled rejection =
+  the same gateway-crash class R2 #1 killed, reintroduced by the fix itself; and G6c was
+  blind to it. *Folded:* `.finally` un-defer; G6c rejecting-close sub-case + `.then`
+  mutation.
+- **F-B (MEDIUM)** deferred peer revoked then re-paired stayed suppressed forever.
+  *Folded:* `_closeInstanceFeedsInner` clears `_deferredRotations`.
+- **F-C (MEDIUM)** C4's call placed after `refresh()`'s `dialers.has() → continue` would
+  never heal an already-dialing peer (D3's primary case). *Folded:* placement pinned
+  before the continue.
+- **F-D/F-E/F-F/F-G (build notes, folded):** close the partial handle in the open catch;
+  validate before init on the tailnet client path; `feed=null` display read coerces both
+  legacy and `{k,s}` shapes; harness uses injection seams/barriers, not sleeps.
+- R3 verified-folds: R1-F1/F2/F3 groundings all re-checked against code and hold; C5's
+  mcp-mounts ordering + per-peer providers scoping correct; clearing
+  `__groups_backfill_v1` has no tombstone side effect (tombstone re-emit is flagless,
+  every boot); F6 migration scope + Test-3 vacuity trap confirmed; §3.1 convergence,
+  boot-liveness, and the F2 closure are unbroken by rev 3.
