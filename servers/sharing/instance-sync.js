@@ -299,6 +299,13 @@ export class InstanceSyncManager {
     // Per-peer serialization for _processNewEntries — see D4 fix below.
     this._processLocks = new Map(); // remoteInstanceId → tail Promise
 
+    // 2c hotfix: hard cap on how long the boot-path contact-tombstone re-emit
+    // will AWAIT a per-peer inbound drain (reemitContactTombstones). A wedged
+    // apply chain (grackle 2026-07-15: a contact-delete apply awaiting a
+    // hypercore feed-close / hyperswarm-leave that never resolves) must never
+    // block the gateway from reaching HTTP listen. Overridable in tests.
+    this._drainCapMs = 10_000;
+
     // 2c C3: per-peer ordered append pipeline. ALL writes toward a peer's outFeed
     // flow through one FIFO promise chain (_appendLocks, the _initLocks pattern);
     // entries emitted while the peer's feed is not yet armed park in
@@ -755,13 +762,23 @@ export class InstanceSyncManager {
     if (this.outFeeds.size === 0) return 0; // no peers armed yet — retry next boot; flagless by design (W4 rationale)
     // I-B1 drain: apply the peer's already-replicated backlog so a genuine
     // re-add-as-insert clears our tombstone before we re-emit it (rule order is
-    // load-bearing; design §3 C4).
-    try {
-      for (const [peerId, inFeed] of this.inFeeds) {
-        await this._processNewEntries(peerId, inFeed);
+    // load-bearing; design §3 C4). BUT each per-peer drain await is CAPPED at
+    // this._drainCapMs (2c hotfix): this runs on the boot-to-HTTP-listen path
+    // (backfillContactsOnce's finally), and on grackle a contact-delete apply
+    // WEDGED FOREVER (its onContactDeleted → unwireContact → hypercore feed-close
+    // / hyperswarm-leave never resolved) ⇒ the gateway never listened ⇒ prod down.
+    // Pre-2c the backfill early-returned before draining, so this await was never
+    // on the boot path. On cap we PROCEED without the drain; the I-B1 ordering it
+    // provides degrades to the already-analyzed truthful-conflict case (spec §4.4),
+    // which sync_conflicts records — safe by design. We do NOT cancel the
+    // underlying _processNewEntries promise: it stays chained in the background
+    // exactly as pre-2c.
+    for (const [peerId, inFeed] of this.inFeeds) {
+      try {
+        await this._drainInboundCapped(peerId, inFeed);
+      } catch (err) {
+        console.warn(`[instance-sync] contact tombstone re-emit drain failed: ${err.message}`);
       }
-    } catch (err) {
-      console.warn(`[instance-sync] contact tombstone re-emit drain failed: ${err.message}`);
     }
     let rows = [];
     try {
@@ -787,6 +804,32 @@ export class InstanceSyncManager {
     }
     if (emitted > 0) console.log(`[instance-sync] re-emitted ${emitted} contact tombstone delete(s) to all peers`);
     return emitted;
+  }
+
+  /**
+   * 2c hotfix: await a per-peer inbound drain but never longer than
+   * this._drainCapMs. If the underlying apply chain is wedged (grackle: a
+   * contact-delete apply awaiting a hypercore feed-close / hyperswarm-leave that
+   * never resolves), we stop AWAITING it and proceed — the _processNewEntries
+   * promise stays chained in the background exactly as pre-2c (we do NOT cancel
+   * it). Returns true if the drain completed within the cap, false if capped.
+   */
+  async _drainInboundCapped(peerId, inFeed) {
+    let timer;
+    const cap = new Promise((resolve) => { timer = setTimeout(() => resolve("__cap__"), this._drainCapMs); });
+    try {
+      const outcome = await Promise.race([
+        this._processNewEntries(peerId, inFeed).then(() => "__done__"),
+        cap,
+      ]);
+      if (outcome === "__cap__") {
+        console.warn(`[instance-sync] contact tombstone re-emit: inbound drain for ${peerId} exceeded ${this._drainCapMs}ms — proceeding without it (wedged apply chain?)`);
+        return false;
+      }
+      return true;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**

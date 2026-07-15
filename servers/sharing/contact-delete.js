@@ -141,20 +141,50 @@ async function loadSyncMod() {
 }
 
 /**
+ * 2c hotfix: per-step cap for unwireContact. On grackle (2026-07-15) a contact-
+ * delete apply awaited a teardown step (hypercore feed-close / hyperswarm-leave)
+ * that NEVER resolved. Because this teardown runs inside the inbound apply chain
+ * (onContactDeleted), a step that never resolves wedges ALL subsequent sync from
+ * that peer until restart — strictly worse than a leaked background promise, and
+ * on the boot path it took the whole gateway down. Cap each step; abandon a hung
+ * one. Overridable per-call via opts.stepCapMs (tests).
+ */
+const UNWIRE_STEP_CAP_MS = 5_000;
+
+/**
+ * Await one teardown step, capped at `cap` ms. Each step is ALREADY
+ * try/caught by unwireContact (a failed step is designed-tolerated — the
+ * `wireFullContact` convention), so an abandoned hung step is semantically just a
+ * step failure. Never rejects (a rejected step resolves the same as a completed
+ * one); we do NOT cancel the underlying op, only stop awaiting it. Warns on cap.
+ */
+function withStepCap(promise, cap, step) {
+  let timer;
+  const guard = new Promise((resolve) => { timer = setTimeout(() => resolve("__cap__"), cap); });
+  const done = Promise.resolve(promise).then(() => "__ok__", () => "__ok__");
+  return Promise.race([done, guard])
+    .then((r) => { if (r === "__cap__") console.warn(`[contact-delete] unwireContact: ${step} exceeded ${cap}ms — abandoning (hung teardown?)`); })
+    .finally(() => clearTimeout(timer));
+}
+
+/**
  * Tear down a contact's live wiring BEFORE its row is removed (design §4.1).
  * Each step is independently guarded — the `wireFullContact` convention
- * (contact-promote.js:76). A partial `managers` object (e.g. missing peerManager
- * in tests) must not throw. Load-bearing ordering: unwire runs before the DELETE
- * so an in-flight `subscribeToContact` onevent INSERT against a deleted
- * contact_id cannot raise FOREIGN KEY constraint failed.
+ * (contact-promote.js:76) — AND capped (2c hotfix, see withStepCap). A partial
+ * `managers` object (e.g. missing peerManager in tests) must not throw.
+ * Load-bearing ordering: unwire runs before the DELETE so an in-flight
+ * `subscribeToContact` onevent INSERT against a deleted contact_id cannot raise
+ * FOREIGN KEY constraint failed.
  * @param {object} managers { nostrManager?, syncManager?, peerManager? }
  * @param {{id:number, crow_id:string}} row the contact being deleted
+ * @param {{stepCapMs?:number}} [opts] override the per-step cap (tests)
  */
-export async function unwireContact(managers, row) {
+export async function unwireContact(managers, row, opts = {}) {
+  const cap = Number(opts.stepCapMs) > 0 ? Number(opts.stepCapMs) : UNWIRE_STEP_CAP_MS;
   const { nostrManager, syncManager, peerManager } = managers || {};
-  try { if (nostrManager) await nostrManager.unsubscribeFromContact(row.crow_id); } catch { /* guarded */ }
-  try { if (syncManager) await syncManager.closeContactFeeds(row.id); } catch { /* guarded */ }
-  try { if (peerManager) await peerManager.leaveContact(row.crow_id); } catch { /* guarded */ }
+  try { if (nostrManager) await withStepCap(nostrManager.unsubscribeFromContact(row.crow_id), cap, "nostr unsubscribe"); } catch { /* guarded */ }
+  try { if (syncManager) await withStepCap(syncManager.closeContactFeeds(row.id), cap, "closeContactFeeds"); } catch { /* guarded */ }
+  try { if (peerManager) await withStepCap(peerManager.leaveContact(row.crow_id), cap, "leaveContact"); } catch { /* guarded */ }
 }
 
 /**
