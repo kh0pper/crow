@@ -434,7 +434,7 @@ on prod read-only).
 
 ---
 
-### Item 2 — Sync-layer design leftovers — 2a ✅ / 2a-FU ✅ SHIPPED; **2b is NEXT**, then 2c/2d
+### Item 2 — Sync-layer design leftovers — ✅✅ ALL SHIPPED: 2a / 2a-FU / 2b / 2c (#194+#195) / 2d (#197, 2026-07-15) — the queue is COMPLETE
 
 These were explicitly deferred as "design-shaped, own session each." Each gets a spec
 + 2-round adversarial review (this layer has bitten us repeatedly — key-rebind,
@@ -713,18 +713,39 @@ untracked WIP; fix rides whenever he commits it or hands it over.
 *Original acceptance (all delivered):* backfill re-emit does NOT advance lamports and cannot
 overwrite a higher-lamport peer row; #147 done:<n> semantics intact.
 
-**2d. Tailnet in-feed key rotation.** When an instance rotates keys, peers keep the
-stale-keyed in-feed until restart. Spec: detect key change and recreate the affected
-feed/storage live (the "storage-recreate on key change" note from #144's follow-ups).
-**Under-specified on purpose — this one is NOT queueable until its spec answers:** which
-key rotates (instance identity? feed/Hypercore key? Noise static?), what event or code
-path performs the rotation today, how a peer currently detects it (if at all), and what
-"recreate the storage" means concretely for an open Hypercore. If the spec cannot answer
-those from the code, the honest output of the session is the spec + a recommendation,
-not a rushed fix.
-*Acceptance:* two-instance test — rotate the key, replication resumes WITHOUT a restart
-on either side; no feed corruption (existing blocks still readable); `sync_conflicts`
-does not grow. Live crow↔grackle verification with a real rotation.
+**2d. Tailnet in-feed key rotation. — ✅✅ SHIPPED 2026-07-15 (PR #197, main `20a5d6e4`),
+fleet-deployed + LIVE-PROVEN.** Spec `docs/superpowers/specs/2026-07-15-feed-key-rotation-design.md`
+(rev 4, 3 adversarial rounds); plan `docs/superpowers/plans/2026-07-15-item2d-feed-key-rotation.md`
+(10 TDD tasks, subagent-driven, per-task review + whole-branch opus review = READY TO MERGE).
+The rotating key = per-peer outbound Hypercore feed keypair (minted at first out/ create; rotation
+= implicit out/ storage loss). Closed D1 (stale in-feed until restart → C1 key-aware live swap w/
+5s-capped close + defer machinery), D2 (peer-keyed applied-seq skipping fresh-feed entries FOREVER
+→ C2 feed-keyed {k,s} + reconcile-frozen-at-open), D3 (streams predating key receipt → C3
+_activeStreams + post-swap attach), D4 (dead once-backfill premises → C5 flag reset before the
+settings-scope heals — that ordering is load-bearing), F3 (stale tailnet snapshot swap-back →
+null pre-exchange init, gate G13 real-WS race). Gate file `tests/feed-rotation.test.js`: 22 tests
+on REAL Hypercores + REAL NoiseSecretStream over TCP socketpairs, incl. G3 mutual fresh-repair AND
+G3b mutual live-swap; ~25-row mutation matrix recorded. Suite baseline NOW **1974/2/0**.
+*Acceptance delivered live 2026-07-15:* grackle out-feed wiped in a deadman-guarded stop window →
+crow logged `in-feed ROTATED 81674338…→0554870b…` with NO crow restart, sync_url updated,
+applied-seq reset {k:new, s:0}→45 advancing, throwaway grackle row converged on crow, old blocks
+kept (`out.pre2d-keep`), grackle C5 reset 4 flags + backfills repopulated the fresh feed same boot,
+integrity ok ×4, zero new err classes, 408/0 CDP bug-hunt. `sync_conflicts` 219/183/162/0 — MPA +1
+is the throwaway row itself (id-256 INTEGER-PK collision with an April MPA row; LWW kept the local
+row and logged it — pre-existing cross-instance id-collision behavior, NOT a 2d defect; throwaway
+row deliberately left in place, deleting could tombstone MPA's unrelated row). **NEW MPA conflicts
+baseline = 183.** ⚠ Operator notes: (1) 2d is a ONE-WAY applied-seq migration — first 2d boot
+upgrades legacy numeric marks to {k,s} (verified live: grackle 2412→adopted, MPA 1109→adopted);
+rolling back to pre-2d binaries against the same DB silently stalls inbound sync (no crash, heals
+on re-deploy) — fix-forward only. (2) No schema bump — no rail, auto-update stayed ON.
+*Build lessons (the 2a fixes-breed-bugs pattern fired in the PLAN's own code twice):* T6 review
+caught drop()'s by-key Set delete orphaning a re-paired peer's fresh streams (identity guard +
+churn gate added); T7 implementer caught the G13 barrier being vacuous as written (delay-the-call
+vs capture-now-delay-delivery — better-sqlite3 is synchronous under the async wrapper); T10 review
+caught G3 exercising fresh-repair not live-swap → G3b added. Full record:
+`.superpowers/sdd/progress.md` (2d section) + task reports `.superpowers/sdd/task-{1..10}-report.md`.
+*Original acceptance (all delivered):* two-instance rotation, replication resumes WITHOUT restart
+on either side; old blocks readable; conflicts growth explained-or-zero. Live crow↔grackle proof.
 
 Each PR: full pipeline, deploy, live crow↔grackle verification (these are exactly the
 changes where "tests pass" ≠ "fleet converges" — prove convergence with real rows,
