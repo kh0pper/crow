@@ -1,6 +1,7 @@
 # Item 2c — Lamport-preserving re-emit + boot-window emit loss (design)
 
-**Date:** 2026-07-14 · **Status:** DRAFT (pending 2-round adversarial review)
+**Date:** 2026-07-14 · **Status:** REV 2 — round-1 adversarial findings folded (2 CRITICAL,
+3 MAJOR, 3 MINOR — see §8); pending round-2 review
 **Scope:** `servers/sharing/instance-sync.js`, `servers/sharing/contact-sync.js`,
 `servers/sharing/group-sync.js`, `tests/` (new two-instance gate + one harness fix).
 **No schema change. No wire-format change.** The migration rail is NOT needed.
@@ -134,6 +135,20 @@ use it.
 Legacy rows with `lamport_ts` NULL emit at **0**: they land where the peer has nothing
 (the upsert-on-missing branch `:1669` inserts regardless of lamport) and lose
 everywhere else — which is the point: a row nobody ever emitted has no recency claim.
+**Accepted non-convergence (R1/m-1):** two instances holding the same legacy crow_id
+with *divergent values, both NULL lamports*, do not converge — each side's @0 re-emit
+loses to the other's local row (`0 > 0` is false), each logs one deduped conflict row,
+and both keep their local values until a real edit (fresh mint) breaks the tie. This
+is strictly better than today's fresh-mint behavior (nondeterministic clobber of one
+side); the divergence is surfaced, not silent. Gate case G6b.
+
+**Settings tie residual (R1/m-2):** `_applyDashboardSetting` resolves a lamport TIE
+with different values as incoming-wins (pre-existing, by design). Lamport counters are
+per-instance, so ties are reachable; a preserved-lamport settings re-emit that ties a
+peer's independently-written row still overwrites it silently. Pre-existing exposure,
+narrowed (a fresh mint used to beat *everything* in flight, a preserved lamport beats
+only ties at exactly L); not fully closed. Documented, out of scope to close.
+
 The #147 `done:<n>` flag logic is untouched (only a completed armed run writes it,
 `:668-676`).
 
@@ -147,11 +162,16 @@ array, capped at 256 entries per peer; on overflow drop the oldest with a one-li
 warn — LWW makes oldest-first the safe drop direction). Append to open feeds as today. Return the
 envelope lamport (delivery is now pending, not lost — the return stays honest).
 
-Drain: at the end of `initInstance`'s inner body, when an outFeed for that peer is
-(newly or already) open, append that peer's pending entries FIFO and clear the slot.
-`initInstance` is the single choke point every feed-open path converges on (boot loop,
-`eagerInitPairedPeers`, hyperswarm connect, tailnet-sync, handshake), so the drain
-covers all of them. On instance revoke, drop the peer's pending slot.
+Drain — **explicit, testable seam (R1/C-2):** a dedicated method
+`_drainPendingEmits(peerId)` appends that peer's pending entries FIFO to
+`this.outFeeds.get(peerId)` and clears the slot; `_initInstanceInner` calls it
+immediately after the peer's outFeed is armed. Because the drain writes through
+`outFeeds.get(...)`, the two-instance harness's stub feeds capture drained entries on
+the same wire as live emits — the REAL drain code path runs in the gate, and a spy
+asserts `_initInstanceInner` invokes it (see G3). `initInstance` is the single choke
+point every feed-open path converges on (boot loop, `eagerInitPairedPeers`, hyperswarm
+connect, tailnet-sync, handshake), so the drain covers all of them. On instance
+revoke, drop the peer's pending slot.
 
 Residuals (documented, accepted): entries queued in a process that exits before its
 feeds open are lost — for **deletes** C4 heals this on the next gateway boot; for
@@ -166,31 +186,56 @@ Flagless, every boot, mirroring `backfillGroupsOnce`'s shape exactly: wrap the c
 a `finally` (`:902-922` pattern), so the mcp-mounts call site is unchanged.
 
 Body: if `feedsDisabled` or `outFeeds.size === 0` → return 0 (retry next boot,
-flagless). Drain inbound first (I-B1 — load-bearing here: an already-delivered re-add
-must clear our tombstone via rule (a) *before* we re-emit it). Then for every
+flagless). Drain inbound first (I-B1 — load-bearing here: an already-delivered
+re-add-as-insert must clear our tombstone *before* we re-emit it). Then select every
 `contact_tombstones` row **`WHERE kind IS NULL`** (authoritative user deletes ONLY —
-`kind='prune'` is local GC and must never ride the wire, 2a):
-`emitChange("contacts", "delete", { crow_id }, { lamportTs: tomb.lamport_ts })`.
+`kind='prune'` is local GC and must never ride the wire, 2a) **AND with no coexisting
+live `contacts` row** (LEFT JOIN filter — the anomalous row-beside-tombstone state is
+reachable via races/manual edits; never broadcast a delete for a contact we still
+hold live; mirrors `emitGroupUpsert`'s belt-and-braces, `group-sync.js:46-54`)
+(R1/m-3). For each: `emitChange("contacts", "delete", { crow_id },
+{ lamportTs: tomb.lamport_ts })`.
 
 The preserved lamport is the original global delete lamport, so the re-emit beats
 exactly what the original broadcast would have beaten — no more, no less. Receiver
 outcomes (`_applyContact`): no local row → tombstone UPSERT, same-kind MAX (`:1608`,
 idempotent); older local row → delete + tombstone (heals the divergence D-B/D-C
-created, including re-pairs); **newer local row (a genuine re-add) → survives** with
-one conflict row (`:1626`), and when the re-add syncs back, rule (a) (`:1584-1587`)
-clears our tombstone and the re-emit stops. Volume: authoritative tombstones are
-user deletes — rare, never pruned (`contact-delete.js:10`), one tiny SELECT per boot.
+created, including re-pairs); **newer local row → survives** with one conflict row
+(`:1626`), deduped across boots (C5). Volume: authoritative tombstones are user
+deletes — rare, never pruned (`contact-delete.js:10`), one tiny SELECT per boot.
 
-### C5 — Exact-repeat conflict dedupe
+**Termination — precise, qualified (R1/M-1):** the re-emit stops when this instance's
+tombstone clears, and the clear paths are: an inbound **`op="insert"`** for the
+crow_id with lamport > tombstone (the `clearTombAfterApply` block, `:1661-1666` +
+`:1733`/`:1748` — `contact-promote.js` emits re-adds as `insert`, so the genuine
+re-add flow clears us), or any local path that re-creates the row (rule (a),
+`:1584-1587`, fires on the *next* inbound entry once a local row exists). An inbound
+**`op="update"`** carrying a newer edit does NOT clear the tombstone — it is dropped
+unconditionally (`:1663`, the #155 delete-wins-over-updates rule, deliberate: every
+resurrection defect was an update). So a concurrent edit-vs-delete pair (A deletes
+X@10 while B renames X@12 without having seen the delete) stays divergent: B keeps
+its row (the re-emitted delete@10 loses LWW there), A keeps its tombstone, and the
+re-emit repeats each boot. **This divergence is pre-existing #155 semantics, not
+introduced by C4** — today it is silent and permanent; with C4 it is *visible*
+(exactly one deduped conflict row on B) and *bounded* (C5 holds `sync_conflicts`
+flat across boots). Gate case G5b proves the boundedness executably.
+
+### C5 — Repeat-delivery conflict dedupe (STABLE key — R1/C-1)
 
 `_insertConflictRow` gains a pre-check: skip the INSERT when a row with identical
-(`table_name`, `row_id`, `op`, `winning_lamport_ts`, `losing_lamport_ts`,
-`winning_data`, `losing_data`) already exists. Full-identity match: only *literal
-redeliveries* are suppressed; any evolution of either side (new lamport, new data)
-still logs. Without this, C4's per-boot re-emit against a still-divergent peer (the
-G5 window) would grow `sync_conflicts` — the fleet's red-flag metric — on every boot.
-`_notifyConflict` is only called after a real insert (both call sites follow the
-insert), so notification behavior follows automatically.
+(`table_name`, `row_id`, `op`, `winning_lamport_ts`, `losing_lamport_ts`) already
+exists. The data blobs are deliberately EXCLUDED from the key: `winning_data` is
+`JSON.stringify(localRow)` and carries volatile never-synced columns —
+`contacts.last_seen` is bumped on every inbound DM (`servers/sharing/boot.js:889`)
+*without* moving `lamport_ts` — so a data-inclusive key would treat every boot's
+redelivery as "new" and grow `sync_conflicts` (the fleet's red-flag metric) forever.
+The lamport pair alone is the correct identity: any *material* change to either side
+rides an emit and therefore moves a lamport (the only non-emitting local writes are
+excluded-column bumps — exactly the noise to suppress); a genuinely new conflict
+always presents a new lamport pair. `_notifyConflict` is only called after a real
+insert (both call sites follow the insert), so notification behavior follows
+automatically. The gate mutates `last_seen` between two redeliveries and asserts
+zero new rows (G5).
 
 ### C6 — Test-18 harness fix
 
@@ -209,17 +254,23 @@ passes and record the new suite baseline (expected 1932/2/0).
    newer peers keep their rows.
 2. **Mutual backfill converges.** A and B backfill simultaneously with divergent rows:
    each side's re-emit carries its row's own lamport; the higher one wins on both
-   sides; the lower side logs exactly one truthful conflict row; redelivery adds
-   nothing (C5).
+   sides; exactly one truthful conflict row is logged **on the higher-lamport side**
+   (the receiver whose local row beats the incoming stale value, `:1784-1788` —
+   R1/M-2); redelivery adds nothing (C5).
 3. **Boot-window emits are delivered, not dropped.** The entry (with its already-minted
    lamport, already signed) is appended verbatim when the peer's feed opens; the
    counter floor keeps subsequent live mints strictly above it, so causality on the
    feed is preserved.
-4. **Tombstone re-emit is self-limiting.** Divergent peer with newer re-add: re-emit
-   loses (row survives), re-add syncs back, rule (a) clears the tombstone, next boot
-   re-emits nothing. Mutual concurrent deletes: same-kind MAX upsert on both sides,
-   idempotent. Converged peers: tombstone UPSERT is a no-op row-wise and writes no
-   conflicts.
+4. **Tombstone re-emit is self-limiting for the insert-carried re-add, and bounded
+   otherwise (R1/M-1).** Genuine re-add (rides as `op="insert"`, per
+   `contact-promote.js`): the re-emit loses on the peer (row survives), the re-add
+   syncs back and clears our tombstone via `clearTombAfterApply`
+   (`:1661-1666`/`:1748`), next boot re-emits nothing. Update-carried newer edit:
+   never clears the tombstone (dropped at `:1663`, #155 delete-wins) — the divergence
+   persists (pre-existing semantics), the re-emit repeats each boot, and C5 bounds
+   the observable cost to one conflict row total. Mutual concurrent deletes:
+   same-kind MAX upsert on both sides, idempotent. Converged peers: tombstone UPSERT
+   is a no-op row-wise and writes no conflicts.
 5. **#147 flag semantics intact.** Preserve-mode changes neither the flag read
    (`done:` prefix is terminal) nor the write (UPSERT after a completed armed run);
    the tombstone re-emit is deliberately flagless (W4 rationale: per-peer flags
@@ -234,22 +285,27 @@ through `contact-sync.js`'s `__setEmitSinkForTest`). NEVER pointed at `~/.crow`.
 
 | # | Case (MUTUAL where meaningful) | Red-line assertion |
 |---|---|---|
-| G1 | A stale contact@5, B same crow_id newer@10, divergent values; A runs backfill; deliver both ways | B keeps its @10 values; **A's local row still @5** (no re-stamp); A converges to B's @10; final rows byte-equal |
-| G2 | BOTH sides backfill concurrently (same divergent pair), deliver interleaved; then re-deliver the same wire again | Both converge to @10; exactly 1 conflict row total (on the stale side); **re-delivery adds 0 rows** (C5) |
-| G3 | B paired in A's `crow_instances` but A's outFeeds EMPTY; `deleteContactLocal` on A; then arm A's feed for B and drain | Wire empty at delete time; entry rides on arm; B's row deleted + tombstoned; A's tombstone lamport == envelope lamport |
-| G4 | A deletes (delivered to nobody — skimWire); A restarts; gated backfill already `done:` | `finally`-path tombstone re-emit delivers; B (row@old) deletes + tombstones; both sides converged |
-| G5 | A tombstone@10; B re-added@20 (not yet synced); A boots twice; then B's re-add delivers to A | B's re-add SURVIVES both boots; boot 1 logs exactly 1 conflict row, **boot 2 logs 0** (C5); A applies re-add, clears tombstone; boot 3 re-emits nothing |
+| G1 | A stale contact@5, B same crow_id newer@10, divergent values; A runs backfill; deliver both ways | B keeps its @10 values; **A's local row still @5** (no re-stamp); A converges to B's @10; final rows equal over the **synced-column projection** (wire columns only — `id`/`created_at`/`last_seen`/`verified` are per-instance and legitimately differ, R1/M-3) |
+| G2 | BOTH sides backfill concurrently (same divergent pair), deliver interleaved; then re-deliver the same wire again | Both converge to @10; exactly 1 conflict row total, **on the higher-lamport side** (R1/M-2), asserted via its `winning_lamport_ts=10`/`losing_lamport_ts=5` columns, not by guessing the DB; **re-delivery adds 0 rows** (C5) |
+| G3 | B paired in A's `crow_instances` but A's outFeeds EMPTY; `deleteContactLocal` on A; then arm A's stub outFeed and call the REAL `_drainPendingEmits` (R1/C-2); separately a spy asserts `_initInstanceInner` invokes `_drainPendingEmits` after arming | Wire empty at delete time; entry rides on drain with its original envelope lamport; B's row deleted + tombstoned; A's tombstone lamport == envelope lamport; spy fired |
+| G4 | A deletes (delivered to nobody — skimWire); A restarts; gated backfill already `done:`; a seeded `kind='prune'` tombstone also present | `finally`-path tombstone re-emit delivers the authoritative delete; the `'prune'` tombstone does NOT ride; B (row@old) deletes + tombstones; both sides converged |
+| G5 | A tombstone@10; B re-added@20 via **insert** (not yet synced); A boots twice, with B's row `last_seen` mutated between boots (R1/C-1); then B's re-add delivers to A | B's re-add SURVIVES both boots; boot 1 logs exactly 1 conflict row, **boot 2 logs 0 despite the `last_seen` change** (C5 stable key); A applies the insert, clears tombstone (`clearTombAfterApply`); boot 3 re-emits nothing |
+| G5b | A tombstone@10; B edits the contact as **op=update**@12 (concurrent edit-vs-delete, R1/M-1); deliver both ways; A boots twice more | B's update is DROPPED on A (tombstone stands); B keeps its row (delete@10 loses); exactly 1 conflict row total on B across all boots (C5); divergence persists — asserted explicitly as the accepted #155 semantics |
 | G6 | A legacy row lamport NULL; B holds same crow_id @7 with different values; A backfills; then the same emit against a peer that lacks the row entirely | Envelope lamport 0; B's row untouched; A's row lamport stays NULL; the missing-row peer receives the row |
+| G6b | MUTUAL legacy: A and B hold the same crow_id, divergent values, BOTH lamport NULL; both backfill; deliver both ways twice (R1/m-1) | Neither side changes values (accepted non-convergence); exactly 1 conflict row per side; second delivery adds 0 (C5) |
 | G7 | #147 flag: run G1's backfill twice | First run writes `done:<n>`; second run emits 0 entries (wire length unchanged) |
 | G8 | Settings + groups preserve: rows@L re-emitted via their one-shots | Envelope lamport == L (not fresh); local lamports unchanged |
 | G9 | Suite: test 18 | Green under scratch env; suite baseline recorded 1932/2/0 |
 
 **Mutation matrix (every guard, per 2a lesson 3 — verify the harness actually reaches
-the mechanism):** revert C2's opts on contacts → G1/G2 red. Remove C3's drain-on-arm →
-G3 red. Remove the `finally` re-emit → G4 red. Re-emit with minted lamport instead of
-tombstone's → G5 red (re-add wiped). Remove C5 dedupe → G5-boot-2 red. Remove the
-`kind IS NULL` filter → new assertion in G4 red (seed a `'prune'` tombstone; it must
-NOT ride). Each mutation checked against the NAMED test before restore.
+the mechanism):** revert C2's opts on contacts → G1/G2 red. Delete the
+`_drainPendingEmits` call from `_initInstanceInner` → G3's spy assertion red; gut
+`_drainPendingEmits`' append → G3's delivery assertion red. Remove the `finally`
+re-emit → G4 red. Re-emit with minted lamport instead of the tombstone's → G5 red
+(re-add wiped). Remove C5 dedupe → G5-boot-2 red. Remove the `kind IS NULL` filter →
+G4's prune assertion red. Remove the live-row LEFT JOIN filter (C4/m-3) → dedicated
+assertion red (seed the anomalous row-beside-tombstone state; no delete may ride).
+Each mutation checked against the NAMED test before restore.
 
 ## 6. Non-goals, follow-ups, risks
 
@@ -290,3 +346,32 @@ NOT ride). Each mutation checked against the NAMED test before restore.
    tombstones both sides). Restart crow → `reemitContactTombstones` fires (log line),
    grackle row count and conflicts UNCHANGED across the restart.
 6. Post-item CDP bug-hunt round per the standing directive.
+
+---
+
+## 8. Review log
+
+**Round 1 (2026-07-14, fresh Opus subagent): REVISE — folded in this revision.**
+- **C-1** dedupe key carried volatile `winning_data` (`last_seen` bumps at
+  `servers/sharing/boot.js:889` without lamport movement) → conflicts would grow per
+  boot in prod while the frozen-clock harness passed. Fixed: C5 stable lamport-pair
+  key + G5 mutates `last_seen` between boots.
+- **C-2** the reused harness never calls `initInstance`, so the drain-on-arm was
+  untestable (vacuous G3). Fixed: `_drainPendingEmits(peerId)` seam writing through
+  `outFeeds.get(...)`, real drain exercised against stub feeds + spy on the
+  `_initInstanceInner` call.
+- **M-1** "self-limiting" tombstone re-emit cited the wrong clear path and omitted the
+  update-carried-edit case (never clears, `:1663`). Fixed: C4 termination rewritten +
+  §4.4 qualified + G5b added; the persistent divergence is pre-existing #155
+  delete-wins semantics, now visible and C5-bounded.
+- **M-2** conflict row lands on the higher-lamport side, not "the stale side". Fixed
+  in G2/§4.2 + lamport-column assertions.
+- **M-3** "byte-equal" unsatisfiable (per-instance columns). Fixed: synced-column
+  projection.
+- **m-1** NULL-vs-NULL divergent legacy rows: accepted non-convergence documented +
+  G6b. **m-2** settings lamport-tie residual documented (C2). **m-3** C4 gains the
+  live-row LEFT JOIN belt-and-braces + mutation entry.
+- Reviewer verified 10 spec claims correct against code (D-A..D-D mechanisms,
+  providers exclusion, W4 fresh-mint rationale, wire compat incl. `row.lamport_ts`
+  redundancy, counter-floor invariant, C3 queue race soundness in the in-process
+  model, `req:`/prune tombstone handling).
