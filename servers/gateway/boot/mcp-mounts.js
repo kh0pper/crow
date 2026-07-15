@@ -65,6 +65,21 @@ export async function mountMcpServers(app, deps) {
     console.warn(`[instance-sync] eagerInitPairedPeers at boot failed: ${err.message}`);
   }
 
+  // 2d C5: reset once-backfill flags whose premise died with a lost out-feed
+  // (rotation / restore-from-backup). MUST run BEFORE the once-backfills
+  // below so they re-run this same boot (spec §3 C5 / R1 F4 ordering).
+  // Also MUST precede the settings-scope heal blocks below: once
+  // setSettingsSyncManager wires the manager (just below), those heals emit
+  // via writeSetting — a post-heal C5 would see that emission and
+  // false-negative the exact rotation-boot premise it exists to catch (T9 review).
+  try {
+    if (syncManager?.resetBackfillPremiseFlags) {
+      await syncManager.resetBackfillPremiseFlags();
+    }
+  } catch (err) {
+    console.warn(`[instance-sync] resetBackfillPremiseFlags failed: ${err.message}`);
+  }
+
   // Scoped-settings sync: wire the registry's writeSetting to emitChange so
   // operator edits on one instance propagate to paired peers. MUST happen
   // BEFORE the heal/re-emit one-shots below (R1 MAJOR-1): the heal promotes

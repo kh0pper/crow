@@ -854,6 +854,8 @@ export async function initSharingRuntime(managers, helpers) {
         args: [remoteInstanceId, instanceSyncManager.localInstanceId],
       });
       if (rows.length === 0) return; // Not paired with this instance_id — drop
+      const keyBuf = instanceSyncManager.validateIncomingFeedKey(remoteInstanceId, feedKeyHex);
+      if (!keyBuf) return; // malformed or self-echoed — skip persist AND init
       if (rows[0].sync_url === feedKeyHex) return; // unchanged — skip
       await db.execute({
         sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
@@ -864,7 +866,7 @@ export async function initSharingRuntime(managers, helpers) {
       // idempotent — re-calling with a non-null feedKey adds the inFeed
       // without disturbing the already-open outFeed.
       try {
-        await instanceSyncManager.initInstance(remoteInstanceId, Buffer.from(feedKeyHex, "hex"));
+        await instanceSyncManager.initInstance(remoteInstanceId, keyBuf);
       } catch (err) {
         console.warn(`[sharing] Failed to open inbound feed after key exchange: ${err.message}`);
       }
