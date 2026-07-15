@@ -461,6 +461,9 @@ export class InstanceSyncManager {
         valueEncoding: "json",
       });
       await inFeed.ready();
+      // 2d C2: freeze the applied-seq decision for this feed BEFORE any
+      // replication can grow it (listener not wired yet; feed unattached).
+      await this._reconcileAppliedSeqAtOpen(remoteInstanceId, inFeed);
 
       // Listen for new entries
       inFeed.on("append", async () => {
@@ -2726,6 +2729,36 @@ export class InstanceSyncManager {
     } catch (err) {
       console.warn(`[instance-sync] Failed to update checkpoint for ${remoteInstanceId}:`, err.message);
     }
+  }
+
+  /**
+   * Freeze the applied-seq decision for THIS feed, once, at open (2d C2 /
+   * R1 F2). Runs inside the _initLocks chain before the append listener is
+   * wired, so feed.length cannot grow concurrently:
+   *   {k,s} k matches   → keep (normal restart)
+   *   {k,s} k differs   → rotated → {k: this feed, s: 0}
+   *   legacy numeric n  → n <= length: plausibly ours → adopt {k, s:n}
+   *                       n >  length: provably foreign (a mark earned on F
+   *                       satisfies n <= F.length) → {k, s:0}
+   * NEVER re-derived later: lazy evaluation flips to "trust" once a burst
+   * pushes length past n (R1 F2's hole).
+   */
+  async _reconcileAppliedSeqAtOpen(remoteInstanceId, feed) {
+    const feedKeyHex = feed.key ? Buffer.from(feed.key).toString("hex") : null;
+    const rec = await this._appliedSeqRecord(remoteInstanceId);
+    if (rec === null) { await this._setLastAppliedSeq(remoteInstanceId, 0, feedKeyHex); return; }
+    if (typeof rec === "object") {
+      if (rec.k === feedKeyHex) return; // normal restart — keep
+      console.warn(`[instance-sync] applied-seq record for ${remoteInstanceId.slice(0,12)}… belonged to a dead feed — reset to 0`);
+      await this._setLastAppliedSeq(remoteInstanceId, 0, feedKeyHex);
+      return;
+    }
+    const n = Number(rec) || 0;
+    const adopted = n <= feed.length ? n : 0;
+    if (adopted !== n) {
+      console.warn(`[instance-sync] legacy applied-seq ${n} > feed length ${feed.length} for ${remoteInstanceId.slice(0,12)}… — provably foreign, reset to 0`);
+    }
+    await this._setLastAppliedSeq(remoteInstanceId, adopted, feedKeyHex);
   }
 
   /**
