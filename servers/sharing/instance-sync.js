@@ -1049,23 +1049,32 @@ export class InstanceSyncManager {
    * @param {"insert"|"update"|"delete"} op - Operation type
    * @param {object} row - The row data (for insert/update) or { id } (for delete)
    */
-  async emitChange(table, op, row) {
+  async emitChange(table, op, row, opts = {}) {
     // --no-auth companion doesn't drive fleet sync (and has no outFeeds).
     if (this.feedsDisabled) return null;
     if (!SYNCED_TABLES.includes(table)) return null;
     if (!shouldSyncRow(table, row)) return null; // local-only row; don't broadcast
 
-    // Envelope counter floor: after a sync_state reset (e.g. DB recovery) the
-    // local counter can sit BELOW lamports already stamped on rows; an emit
-    // would then look stale to peers (they order on the envelope) and the
-    // divergence is silent and permanent. Floor the counter at the outgoing
-    // row's own lamport first — _advanceCounter is an atomic
-    // MAX(counter, ts+1), so the _nextLamport below strictly exceeds it.
+    // 2c C1: a re-emit passes opts.lamportTs to preserve the row's ORIGINAL emit
+    // lamport — a redelivery must never fabricate recency over a peer's newer
+    // write. Preserve-mode skips the mint AND the local re-stamp; the counter is
+    // still floored so future fresh mints strictly exceed every re-emitted value.
+    // Live mutations MUST NOT pass opts.lamportTs.
+    const preservedTs =
+      opts != null && Number.isFinite(Number(opts.lamportTs)) && Number(opts.lamportTs) >= 0
+        ? Number(opts.lamportTs)
+        : null;
+
+    // Envelope counter floor (see original comment): floor at the outgoing row's
+    // own lamport, and in preserve-mode also at the preserved envelope value.
     const rowTs = Number(row?.lamport_ts);
     if (Number.isFinite(rowTs) && rowTs > 0) {
       await this._advanceCounter(rowTs);
     }
-    const lamportTs = await this._nextLamport();
+    if (preservedTs !== null && preservedTs > 0) {
+      await this._advanceCounter(preservedTs);
+    }
+    const lamportTs = preservedTs !== null ? preservedTs : await this._nextLamport();
 
     // Strip excluded columns
     const excluded = EXCLUDED_COLUMNS[table] || [];
@@ -1089,8 +1098,9 @@ export class InstanceSyncManager {
     const payload = JSON.stringify(entry);
     entry.signature = sign(payload, this.identity.ed25519Priv);
 
-    // Update the row's lamport_ts in the local database
-    if (op !== "delete") {
+    // Update the row's lamport_ts in the local database (NEVER in preserve-mode —
+    // the row keeps its original lamport; 2c C1).
+    if (op !== "delete" && preservedTs === null) {
       try {
         if (table === "dashboard_settings" && row.key !== undefined) {
           await this.db.execute({
