@@ -68,6 +68,10 @@ export async function mountMcpServers(app, deps) {
   // 2d C5: reset once-backfill flags whose premise died with a lost out-feed
   // (rotation / restore-from-backup). MUST run BEFORE the once-backfills
   // below so they re-run this same boot (spec §3 C5 / R1 F4 ordering).
+  // Also MUST precede the settings-scope heal blocks below: once
+  // setSettingsSyncManager wires the manager (just below), those heals emit
+  // via writeSetting — a post-heal C5 would see that emission and
+  // false-negative the exact rotation-boot premise it exists to catch (T9 review).
   try {
     if (syncManager?.resetBackfillPremiseFlags) {
       await syncManager.resetBackfillPremiseFlags();
