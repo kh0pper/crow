@@ -477,6 +477,54 @@ test("G5b: concurrent edit-vs-delete stays divergent -- B's update is dropped on
   assert.equal((await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5b'", args: [] })).rows.length, 1, "divergence persists: B present");
 });
 
+test("G5c: C5 resolve-scope -- resolving a conflict row re-surfaces the divergence exactly once on redelivery, then dedupes again", async () => {
+  const f = newFleet();
+  // A: authoritative tombstone@10, row-less. B: the contact re-added, live@20
+  // (G5 shape) -- A's re-emit of the tombstone loses LWW to B's row every boot,
+  // producing a real, repeatable conflict row on B to exercise the resolve-scope.
+  await f.A.db.execute({ sql: "INSERT INTO contact_tombstones (crow_id, lamport_ts, deleted_at, kind) VALUES ('crow:g5c', 10, 1, NULL)", args: [] });
+  await f.B.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, lamport_ts) VALUES ('crow:g5c', '', 'g5caa', 'G5c ReAdd', 20)", args: [] });
+  // A's counter well above B's row lamport (20), same rationale as G5: the
+  // tombstone re-emit must preserve@10, not mint fresh, or it would wipe B's row
+  // and never produce a conflict to resolve in the first place.
+  await f.A.mgr._advanceCounter(30);
+  const bootA = async () => { await setBackfillDone(f.A.db); await f.A.mgr.backfillContactsOnce(); };
+  const totalConflicts = async (db, crowId) =>
+    Number((await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM sync_conflicts WHERE table_name = 'contacts' AND row_id = ?",
+      args: [JSON.stringify({ crow_id: crowId })],
+    })).rows[0].n);
+
+  // Boot 1: A re-emits delete@10 -> loses LWW to B's row@20 -> 1 unresolved conflict on B.
+  await bootA();
+  await f.deliver();
+  assert.equal((await f.B.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:g5c'", args: [] })).rows.length, 1, "B's row survived boot 1");
+  assert.equal(await contactConflicts(f.B.db, "crow:g5c"), 1, "boot 1 logged exactly 1 unresolved conflict on B");
+  assert.equal(await totalConflicts(f.B.db, "crow:g5c"), 1, "total conflict rows = 1 after boot 1");
+
+  // Operator resolves it (dashboard Resolve action, modeled directly).
+  await f.B.db.execute({
+    sql: "UPDATE sync_conflicts SET resolved = 1 WHERE table_name = 'contacts' AND row_id = ?",
+    args: [JSON.stringify({ crow_id: "crow:g5c" })],
+  });
+  assert.equal(await contactConflicts(f.B.db, "crow:g5c"), 0, "resolved row no longer counts as unresolved");
+
+  // Boot 2: A re-emits the IDENTICAL delete@10 entry again. The underlying
+  // divergence is still live (resolving didn't fix it) -- C5's dedupe pre-check
+  // is scoped to resolved=0 (R2/F5), so it finds no unresolved match against the
+  // now-resolved row and inserts a NEW one: exactly one re-surfaced row, once.
+  await bootA();
+  await f.deliver();
+  assert.equal(await contactConflicts(f.B.db, "crow:g5c"), 1, "exactly one NEW unresolved row re-surfaced");
+  assert.equal(await totalConflicts(f.B.db, "crow:g5c"), 2, "total rows = 2 (the resolved one + the new one)");
+
+  // Boot 3: redeliver again -> C5 dedupes against the NEW unresolved row -> 0 new rows.
+  await bootA();
+  await f.deliver();
+  assert.equal(await contactConflicts(f.B.db, "crow:g5c"), 1, "still exactly 1 unresolved (deduped against the re-surfaced row)");
+  assert.equal(await totalConflicts(f.B.db, "crow:g5c"), 2, "total rows unchanged at 2 (redelivery added 0)");
+});
+
 // ── G10: C7 -- restoreConflict refuses ALL natural-key tables ──────────────────
 // crow_context, contacts, and contact_groups all key their sync_conflicts row_id
 // as a JSON object, not a numeric id. Without the natural-key refusal placed
