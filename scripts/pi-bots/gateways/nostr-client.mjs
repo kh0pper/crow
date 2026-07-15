@@ -75,8 +75,8 @@ export function openDM(recipientPriv, senderXOnlyPubkey, content) {
 /** Connect to relays; returns a Map<url, Relay> of those that connected. */
 export async function connectRelays(urls, timeoutMs = 10000) {
   // Narrow process-level net for nostr-tools' orphaned close-race rejection
-  // (2c-F1 C1b). Idempotent; the connect path is the choke point every pi-bots
-  // host (bridge_tick, discord_gateway) passes through before touching relays.
+  // (2c-F1 C1b). Idempotent; connectRelays is the choke point of the one
+  // pi-bots process that talks nostr (crow-messages via gateway_runner).
   installNostrCrashGuard();
   const relays = new Map();
   const results = await Promise.allSettled(urls.map(async (url) => {
