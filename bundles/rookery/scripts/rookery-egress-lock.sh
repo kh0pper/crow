@@ -298,7 +298,8 @@ Wants=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-$(for v in ${CALLER_SET[@]+"${CALLER_SET[@]}"}; do printf 'Environment="%s=%s"\n' "$v" "${!v}"; done)# --wait rides out slow container starts; on timeout the lock still installs
+$(for v in ${CALLER_SET[@]+"${CALLER_SET[@]}"}; do printf 'Environment="%s=%s"\n' "$v" "${!v}"; done)
+# --wait rides out slow container starts; on timeout the lock still installs
 # drop-only (fail-closed, no model allow) and exits nonzero so the unit
 # shows failed.
 ExecStart=$script_path --wait 300

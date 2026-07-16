@@ -225,3 +225,14 @@ def test_unit_without_config_env_bakes_nothing():
     proc = run_unit()
     assert proc.returncode == 0, proc.stderr
     assert "Environment=" not in proc.stdout
+
+
+def test_unit_environment_lines_are_whole_lines():
+    """Regression: the $(...) emitting Environment= lines swallowed its
+    trailing newline, gluing the last Environment= line to the '# --wait'
+    comment — systemd misparses 'Environment="..."# comment'. Every
+    Environment= line must be a whole line of its own."""
+    proc = run_unit({"ALLOW_HOST_TCP_PORTS": "3006"})
+    lines = proc.stdout.splitlines()
+    assert 'Environment="ALLOW_HOST_TCP_PORTS=3006"' in lines
+    assert not any("Environment=" in l and "#" in l for l in lines)
