@@ -20,7 +20,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"   # so a host-local model endpoint is reachable on Linux
     init: true
-    mem_limit: 1g
+    # 2g: a long audit/review session OOM-killed the app at 1g (observed
+    # 2026-07-15 — docker restarted the container, the shim 502'd, and the
+    # in-memory session transcript was lost mid-audit).
+    mem_limit: 2g
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:3061/ || exit 1"]
