@@ -529,8 +529,10 @@ export async function startTailnetSyncClients(ctx) {
       // heals manual crow_update_instance edits and any missed key exchange
       // within 60s, no restart. Cheap fast-path (Map lookup + Buffer compare)
       // when nothing changed. Own try/catch: refresh runs on a bare
-      // setInterval and an escaped rejection would crash the gateway (no
-      // unhandledRejection handler exists in servers/). Placed BEFORE both
+      // setInterval and an escaped rejection would still crash the gateway —
+      // the nostr crash guard (nostr-crash-guard.js) swallows ONLY
+      // SendingOnClosedConnection and RETHROWS everything else, so this local
+      // catch stays load-bearing. Placed BEFORE both
       // continues below (R3 F-C): after the dialers.has() continue it would
       // never heal the steady state, which is exactly the case that needs
       // healing (an already-dialing peer whose row drifted).
@@ -556,6 +558,23 @@ export async function startTailnetSyncClients(ctx) {
     // Stop dialers for peers no longer in scope (revoked, etc.)
     for (const [id, dialer] of dialers) {
       if (!seenIds.has(id)) { dialer.stop(); dialers.delete(id); }
+    }
+    // F5 gauge: parked emit-queue sizes ({peerId: count}), visible BEFORE the
+    // 256-cap overflow warn drops entries. Placed AFTER the per-peer loop so a
+    // zero-peer refresh still reports (R2 Q7). Own try/catch: refresh runs on
+    // a bare setInterval, and the process-level nostr crash guard RETHROWS
+    // non-nostr errors — an escaped throw here would crash the gateway.
+    // Optional chaining guards older/stub managers that lack the method.
+    try {
+      const stats = instanceSyncManager.pendingEmitStats?.();
+      const parts = stats
+        ? Object.entries(stats).map(([id, n]) => `${String(id).slice(0, 12)}=${n}`)
+        : [];
+      if (parts.length > 0) {
+        console.warn(`[instance-sync] pending emit queues: ${parts.join(", ")}`);
+      }
+    } catch (err) {
+      console.warn(`[tailnet-sync] pending-emit gauge failed: ${err.message}`);
     }
   }
 
