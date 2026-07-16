@@ -18,6 +18,9 @@
 #
 # Exit 0 = all checks passed. Config env mirrors rookery-egress-lock.sh:
 #   ROOKERY_NETWORK, MODEL_PUBLISH, CONTAINER (default crow-rookery),
+#   ALLOW_HOST_TCP_PORTS (same value the lock was installed with — check 6
+#   exempts ESTABLISHED sockets to those ports on the model's host IP, i.e.
+#   the MCP bridge; without it check 6 false-fails once the app connects),
 #   UI_URL (default http://127.0.0.1:3061/),
 #   PROBE_INTERNET (default 1.1.1.1:443), PROBE_TAILNET (default
 #   100.121.254.89:3002), PROBE_PUBLISHED (default 100.118.41.122:8003)
@@ -97,10 +100,16 @@ else
   warn "could not derive bridge gateway — skipping host INPUT probe"
 fi
 
-# 6. vendor ESTAB absent (runbook §6, from the container's own netns)
+# 6. vendor ESTAB absent (runbook §6, from the container's own netns).
+# Sockets the LOCK itself allows are not offenders: the model, plus
+# ALLOW_HOST_TCP_PORTS on the model's host IP (the MCP bridge lives there —
+# without this the check false-fails the moment the app connects its MCPs).
 ESTAB_OUT=$(docker exec "$CONTAINER" node -e '
 const fs = require("fs");
-const [modelIp, modelPort] = process.argv.slice(1);
+const [modelIp, modelPort, allowedCsv] = process.argv.slice(1);
+const allowedHostPorts = new Set(
+  (allowedCsv || "").split(/[\s,]+/).filter(Boolean).map(Number)
+);
 function hex4(ip) { // v4 little-endian hex → dotted
   return ip.match(/../g).reverse().map(h => parseInt(h, 16)).join(".");
 }
@@ -121,6 +130,7 @@ for (const [file, v6] of [["/proc/net/tcp", false], ["/proc/net/tcp6", true]]) {
       rip = hex4(remA);
     }
     if (rip === modelIp && rport === +modelPort) continue;    // the model
+    if (rip === modelIp && allowedHostPorts.has(rport)) continue; // lock-allowed host ports (MCP bridge)
     if (lport === 3061) continue;                             // inbound UI
     if (rip.startsWith("127.") || rip === "v6:" + "0".repeat(32)) continue;
     offenders.push(`${rip}:${rport} (local :${lport})`);
@@ -128,11 +138,11 @@ for (const [file, v6] of [["/proc/net/tcp", false], ["/proc/net/tcp6", true]]) {
 }
 if (offenders.length) { console.log("OFFENDERS " + offenders.join(", ")); process.exit(1); }
 console.log("CLEAN");
-' "${MODEL_PUBLISH%:*}" "${MODEL_PUBLISH##*:}" 2>/dev/null)
+' "${MODEL_PUBLISH%:*}" "${MODEL_PUBLISH##*:}" "${ALLOW_HOST_TCP_PORTS:-}" 2>/dev/null)
 if [[ $ESTAB_OUT == CLEAN ]]; then
   pass "no vendor/foreign ESTABLISHED sockets in the container netns"
 else
-  fail "foreign ESTABLISHED sockets present: ${ESTAB_OUT#OFFENDERS }"
+  fail "foreign ESTABLISHED sockets present: ${ESTAB_OUT#OFFENDERS } (if these are the MCP bridge, re-run with ALLOW_HOST_TCP_PORTS=<ports> matching the installed lock)"
 fi
 
 # 7. rule presence + drift (root only)

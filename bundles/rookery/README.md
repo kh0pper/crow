@@ -153,9 +153,13 @@ Operational notes:
   detects stale rules (drift check).
 - **Reboot persistence**: `--print-systemd-unit` emits a oneshot unit that
   re-runs the script after docker starts (a boot-time re-run is the correct
-  persistence — a saved rules file would go stale). If the model container
-  isn't up in time, the lock installs **drop-only** (fail-closed) and the
-  unit shows failed.
+  persistence — a saved rules file would go stale). Print it with the SAME
+  env the lock is deployed with (e.g. `ALLOW_HOST_TCP_PORTS=3006
+  ./rookery-egress-lock.sh --print-systemd-unit`): every config var set at
+  print time is baked into the unit as an `Environment=` line, so the boot
+  re-run reproduces the deployed posture instead of silently dropping the
+  MCP-bridge allowance. If the model container isn't up in time, the lock
+  installs **drop-only** (fail-closed) and the unit shows failed.
 - **ufw coexistence**: the script never touches `ufw-*` chains or policies;
   `ufw reload`/`enable` rewrite only ufw's own chains, and docker preserves
   `DOCKER-USER` across daemon restarts.
