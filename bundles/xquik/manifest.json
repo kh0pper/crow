@@ -2,10 +2,11 @@
   "id": "xquik",
   "name": "Xquik",
   "version": "1.0.0",
-  "description": "Read-only X data workflows for tweet search, tweet lookup, user search, user lookup, trends, and radar research via the public Xquik REST API.",
-  "type": "bundle",
-  "author": "Crow",
-  "category": "social-data",
+  "description": "Read-only X data research through Xquik's remote MCP server.",
+  "type": "mcp-server",
+  "author": "kriptoburak",
+  "origin": "community",
+  "category": "social",
   "tags": [
     "x",
     "twitter",
@@ -14,7 +15,20 @@
     "trends",
     "research"
   ],
-  "icon": "search",
+  "icon": "message-circle",
+  "server": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-remote@0.1.38",
+      "https://xquik.com/mcp",
+      "--header",
+      "x-api-key: ${XQUIK_API_KEY}"
+    ],
+    "envKeys": [
+      "XQUIK_API_KEY"
+    ]
+  },
   "skills": [
     "skills/xquik.md"
   ],
@@ -26,17 +40,11 @@
   "env_vars": [
     {
       "name": "XQUIK_API_KEY",
-      "description": "Xquik API key used by the configured REST client.",
+      "description": "Xquik API key passed to the remote MCP server.",
       "required": true,
       "secret": true
-    },
-    {
-      "name": "XQUIK_API_BASE_URL",
-      "description": "Xquik REST API base URL.",
-      "default": "https://xquik.com",
-      "required": false
     }
   ],
   "webUI": null,
-  "notes": "Skill-only add-on. Configure a REST client with XQUIK_API_KEY before using the workflows."
+  "notes": "Community integration that connects Crow to Xquik's remote MCP server. Review Xquik's public terms before use."
 }
