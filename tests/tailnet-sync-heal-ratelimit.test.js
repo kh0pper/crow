@@ -32,8 +32,10 @@ function captureWarns() {
   return { lines, restore: () => { console.warn = orig; } };
 }
 
-const healLines = (lines) => lines.filter((l) => l.includes("refresh heal for") && !l.includes("recovered"));
-const recoveryLines = (lines) => lines.filter((l) => l.includes("recovered after"));
+// The recovery line deliberately does NOT contain the failure-class string
+// "refresh heal for" (grep/alert de-collision — see tailnet-sync.js comment).
+const healLines = (lines) => lines.filter((l) => l.includes("refresh heal for"));
+const recoveryLines = (lines) => lines.filter((l) => l.includes("heal recovered for"));
 
 test("persistently failing heal logs at #1 and #10 only across 12 refreshes", async () => {
   const ctx = makeCtx({ initInstance: async () => { throw new Error("rocksdb lock held"); } });
