@@ -20,8 +20,16 @@ live state before building (see "Anti-archaeology rule").
   (blocked on a real Together invoice); Wave-3 Android operator actions (Meta DAT
   fingerprint, APK attach, keystore password); v1-refoundation social-preview PNG;
   maker-lab learner-data recovery (Kevin decided 2026-07-11: **no recovery**);
-  black-swan↔grackle re-pair ceremony (operator matter — grackle's providers backfill
-  sits in its feed pending re-pair).
+  ~~black-swan↔grackle re-pair ceremony~~ — **DONE 2026-07-16** (Kevin-approved, each
+  credential write individually named+approved): fleet identity restored on bswan
+  (old instance-id 77ac9c01 resumed; throwaway crow:3n6dimacvr identity backed up as
+  .pre-repair-20260716.bak), peer-tokens + crow_instances rows reconstructed both
+  sides (zero grackle restarts — instanceAuthMiddleware hashes per-request),
+  grackle↔bswan tailnet-sync replicating live, dial spam dead, parked providers
+  backfill drained (bswan providers=9, flags done). bswan sync_conflicts baseline
+  now **3** (local newer provider rows correctly beat grackle's older backfill
+  copies — surfaced LWW, explained). crow/MPA remain deliberately unpaired with
+  bswan.
 - **One item at a time**, in queue order (§4). Each item is independently shippable.
   Do not interleave items; finish (merge + deploy + live verify + record) before
   starting the next.
@@ -107,12 +115,10 @@ session at the front.
    and `fuser ~/.crow/data/crow.db` first to confirm no stale writer. Individual tests
    that need prod-shaped state must set it up in the scratch dir themselves.
 
-   **Check-ports has a known permanent error — make the check mechanical, not
-   eyeball-based.** Kevin's untracked `bundles/capstone-tracker/` WIP (0 tracked files,
-   invisible to CI on the merged tree) makes `check-port-allocation.js` exit 1. The
-   gate is green iff the error block contains **exactly one** line and it is
-   `Port 8090 (capstone-tracker)`. Any second line, or a different port, is real drift
-   — stop. Do not "fix" or touch his WIP.
+   **Check-ports is FULLY green as of 2026-07-16** (PR #203 committed capstone-tracker
+   and documented port 8090) — the old "exactly one known error line: Port 8090
+   (capstone-tracker)" carve-out is retired. ANY error line from
+   `check-port-allocation.js` is now real drift — stop and investigate.
    **Post-merge, watch the docs deploy.** `.github/workflows/deploy-docs.yml` fires on
    any push to main touching `docs/**` → rebuilds the **public** VitePress site on
    GitHub Pages. §5 asks you to update THIS plan doc (which lives under `docs/`) as part
@@ -712,6 +718,19 @@ placed. F5 `pendingEmitStats()` + 60s gauge (soak: queues empty fleet-wide). F6 
 Kevin's untracked WIP tree only (11 `|tojson` sites; real bug — JSON.parse died on titles with
 a double-quote), zero capstone paths committed. Known adjacent gap recorded in spec §F2:
 `onSocialMessage` room fan-out publish stall (not apply-path; future pool).
+*Residual minor pool: ✅ SHIPPED 2026-07-16 — PR #202 (Kevin-approved merge), fleet-deployed
+same day.* Spec `docs/superpowers/specs/2026-07-16-minor-pool-3-design.md`. (1) tailnet
+heal-warn rate-limit #1/#10/#100… + one `heal recovered for` line per episode (distinct
+wording — the failure-class grep `refresh heal for` cannot match recoveries); (2) room
+`fanOut()` per-send 10s cap + allSettled (review-corrected framing: nostr-tools dispatches
+`onevent` un-awaited — the old defect wedged ONE message's chain + leaked promises, not
+the subscription); (3) peer-manager `feed-key-announce` dead case deleted (no sender
+exists; passed crow_id where an instance id is required — provably a no-op) + regression
+pin. Also carried the rookery-Phase-2 registry regen (main's `build-registry --check` was
+red). PR #203 (same day) committed Kevin's capstone-tracker WIP verbatim — F6 rides, port
+8090 documented, **check-ports now FULLY green (zero expected error lines — update the §2
+gate expectation)**; heads-up recorded: the bundle registers as a PUBLISHED add-on
+(no draft flag). Suite baseline now **2009/2/0** (main also gained #200 + rookery tests).
 Original pool text follows for the record: [2c-F1, URGENT-ish] uncaught `SendingOnClosedConnection` from
 `resilient-subscribe`→nostr-tools crashes the gateway when a relay closes mid-subscribe
 (crashed grackle once, stack in ledger); [2c-F2] apply-path hooks still carry unbounded network
