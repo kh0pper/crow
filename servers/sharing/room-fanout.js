@@ -32,9 +32,11 @@ export function buildRoomJoinEnvelope({ roomUid, roomName, hostCrowId, members =
  *
  * Every send is capped at `capMs` and the members run in parallel
  * (Promise.allSettled), so N wedged sends cost ~one cap, not N×. This runs
- * INSIDE the relay's inbound message loop (nostr.js subscribeToIncoming →
- * onSocialMessage → room-inbound → fanOut): an unbounded relay.publish() on a
- * half-open socket used to freeze inbound processing for that subscription.
+ * inside a relay message's handler chain (nostr.js subscribeToIncoming →
+ * onSocialMessage → room-inbound → fanOut). nostr-tools dispatches onevent
+ * WITHOUT awaiting it, so a wedged send never froze the whole subscription —
+ * but it did wedge THAT message's handling forever (serial per-member
+ * compounding) and leaked a pending promise per member. The cap bounds both.
  * A capped member counts as failed; the abandoned sendControl's eventual
  * rejection is absorbed by the race (reaction attached at race time — it can
  * never reach the process crash guard). sent/failed are completion-ordered.

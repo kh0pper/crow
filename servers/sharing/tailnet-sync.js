@@ -549,7 +549,9 @@ export async function startTailnetSyncClients(ctx) {
         await instanceSyncManager.initInstance(peer.id, keyBuf);
         const failures = healFailures.get(peer.id);
         if (failures) {
-          console.warn(`[tailnet-sync] refresh heal for ${peer.id.slice(0,12)}… recovered after ${failures} failure(s)`);
+          // Distinct wording on purpose: greps/alerts keyed on the failure
+          // class "refresh heal for" must not also match recoveries.
+          console.warn(`[tailnet-sync] heal recovered for ${peer.id.slice(0,12)}… after ${failures} failure(s)`);
           healFailures.delete(peer.id);
         }
       } catch (err) {

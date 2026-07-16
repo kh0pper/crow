@@ -53,10 +53,11 @@ test("a hung sendControl is capped: fanOut resolves, hung member fails, healthy 
 
 test("N hung members cost ~one cap, not N× (parallel fan-out, not a serial capped loop)", async () => {
   const nostrManager = { sendControl: () => new Promise(() => {}) };
+  const capMs = 200; // serial would take >= 3*capMs (600ms); parallel ~1 cap.
   const start = performance.now();
-  const res = await fanOut({ nostrManager, members: [{ id: 1 }, { id: 2 }, { id: 3 }], envelope: "{}", capMs: 100 });
+  const res = await fanOut({ nostrManager, members: [{ id: 1 }, { id: 2 }, { id: 3 }], envelope: "{}", capMs });
   const elapsed = performance.now() - start;
   assert.deepEqual(res.sent, []);
   assert.deepEqual(res.failed.sort(), [1, 2, 3]);
-  assert.ok(elapsed < 250, `3 hung members should cost ~1 cap (100ms), took ${Math.round(elapsed)}ms`);
+  assert.ok(elapsed < 2.5 * capMs, `3 hung members should cost ~1 cap (${capMs}ms), took ${Math.round(elapsed)}ms`);
 });
