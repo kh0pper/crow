@@ -30,11 +30,51 @@ const SOURCE_TYPES = [
   "dataset", "other",
 ];
 
-function generateAPA({ authors, title, publication_date, publisher, url, source_type, doi }) {
+// publication_date is free-form TEXT ("1993", "2005-07", "2023-05-14",
+// occasionally prose like "May 14, 2023"). new Date() parses the ISO
+// date-only forms as UTC midnight, and getFullYear()/toLocaleDateString()
+// read them back in the server's LOCAL zone — west of UTC a bare year
+// rendered as year − 1 and a full date as the previous day. Take the
+// fields from the string itself; only non-ISO forms (which Date parses
+// as local time, no shift) fall back to Date.
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+
+function parseDateParts(value) {
+  if (value == null || value === "") return null;
+  const s = String(value).trim();
+  const m = s.match(/^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?(?:[T ].*)?$/);
+  if (m) {
+    const month = m[2] ? Number(m[2]) : null;
+    const day = m[3] ? Number(m[3]) : null;
+    const monthOk = month !== null && month >= 1 && month <= 12;
+    return {
+      year: Number(m[1]),
+      month: monthOk ? month : null,
+      day: monthOk && day !== null && day >= 1 && day <= 31 ? day : null,
+    };
+  }
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+}
+
+function citationYear(value) {
+  const p = parseDateParts(value);
+  return p ? String(p.year) : "n.d.";
+}
+
+function citationLongDate(value) {
+  const p = parseDateParts(value);
+  if (!p) return "n.d.";
+  if (!p.month) return String(p.year);
+  const month = MONTH_NAMES[p.month - 1];
+  return p.day ? `${month} ${p.day}, ${p.year}` : `${month} ${p.year}`;
+}
+
+export function generateAPA({ authors, title, publication_date, publisher, url, source_type, doi }) {
   const authorStr = authors || "Unknown Author";
-  const year = publication_date
-    ? `(${new Date(publication_date).getFullYear()})`
-    : "(n.d.)";
+  const year = `(${citationYear(publication_date)})`;
   const titleStr = title || "Untitled";
 
   switch (source_type) {
@@ -57,12 +97,10 @@ function generateAPA({ authors, title, publication_date, publisher, url, source_
   }
 }
 
-function generateMLA({ authors, title, publication_date, publisher, url, source_type }) {
+export function generateMLA({ authors, title, publication_date, publisher, url, source_type }) {
   const authorStr = authors || "Unknown Author";
   const titleStr = title || "Untitled";
-  const pubDate = publication_date
-    ? new Date(publication_date).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
-    : "n.d.";
+  const pubDate = citationLongDate(publication_date);
 
   switch (source_type) {
     case "book":
@@ -84,15 +122,11 @@ function generateMLA({ authors, title, publication_date, publisher, url, source_
   }
 }
 
-function generateChicago({ authors, title, publication_date, publisher, url, source_type, doi }) {
+export function generateChicago({ authors, title, publication_date, publisher, url, source_type, doi }) {
   const authorStr = authors || "Unknown Author";
   const titleStr = title || "Untitled";
-  const pubDate = publication_date
-    ? new Date(publication_date).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
-    : "n.d.";
-  const year = publication_date
-    ? new Date(publication_date).getFullYear()
-    : "n.d.";
+  const pubDate = citationLongDate(publication_date);
+  const year = citationYear(publication_date);
 
   switch (source_type) {
     case "book":
