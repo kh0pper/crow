@@ -1375,6 +1375,10 @@ export const translations = {
     en: "Auto-restore not available (composite key — use crow_update_context_section to apply the values shown).",
     es: "Restauración automática no disponible (clave compuesta — usa crow_update_context_section para aplicar los valores mostrados).",
   },
+  "syncConflicts.naturalKeyRestoreDisabled": {
+    en: "Auto-restore not available (natural key — review the data above and re-apply the change from its panel).",
+    es: "Restauración automática no disponible (clave natural — revisa los datos arriba y vuelve a aplicar el cambio desde su panel).",
+  },
   "syncConflicts.resolveAll": { en: "Resolve all (keep current versions)", es: "Resolver todos (mantener versiones actuales)" },
   "syncConflicts.resolveAllConfirm": {
     en: "Mark all unresolved conflicts as resolved? The current (winning) version of each item will be kept.",

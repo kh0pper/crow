@@ -19,7 +19,7 @@
  * same code usable from the pi-bots adapter (better-sqlite3) and NostrManager
  * (libsql) unchanged.
  *
- * @param {object} relay  connected nostr-tools Relay (or a stub)
+ * @param {object} relay  nostr-tools Relay (or a stub); may already have dropped — subscribe defers to ensureHealthy()
  * @param {object} filter Nostr filter WITHOUT `since` (this injects `since`)
  * @param {function} onevent  called with each event (the caller dedups/decodes)
  * @param {{initialSince?:number, skewSec?:number, connectTimeoutMs?:number}} opts
@@ -48,6 +48,12 @@ export function makeResilientSub(relay, filter, onevent, opts = {}) {
   };
 
   function doSubscribe() {
+    // nostr-tools' subscribe() on a dropped relay orphans an ASYNC rejected
+    // send() (SendingOnClosedConnection) that the try/catch below cannot see —
+    // process-fatal under default --unhandled-rejections=throw. Check-then-call
+    // with no await between is safe: connected ⇒ connectionPromise non-null,
+    // single-threaded (same invariant as safe-relay-publish.js).
+    if (!relay.connected) { sub = null; return; } // ensureHealthy retries next tick
     const since = lastSeen !== null ? lastSeen - skewSec : initialSince;
     const f = since !== null ? { ...filter, since } : { ...filter };
     try {
@@ -57,8 +63,10 @@ export function makeResilientSub(relay, filter, onevent, opts = {}) {
     }
   }
 
-  // Subscribe immediately (relay is connected at construction) so listening
-  // starts right away, exactly like the pre-hardening one-shot subscribe.
+  // Subscribe immediately when the relay is still connected (the usual case
+  // at construction) so listening starts right away. If it dropped between
+  // connect and construction, the connected guard skips this and the caller's
+  // periodic ensureHealthy() loop establishes the subscription on reconnect.
   doSubscribe();
 
   async function ensureHealthy() {

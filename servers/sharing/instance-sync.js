@@ -779,15 +779,21 @@ export class InstanceSyncManager {
 
     // I-B1 ordering guard: drain the locally-replicated inbound backlog FIRST,
     // so a peer's already-delivered newer edit (e.g. a block) is applied before
-    // we re-emit with a fresh lamport and fabricate recency over it.
+    // we re-emit and fabricate recency over it.
     // _processNewEntries' per-peer promise-chain serializes this safely with
     // any concurrent append-listener run; checkpointing makes it idempotent.
-    try {
-      for (const [peerId, inFeed] of this.inFeeds) {
-        await this._processNewEntries(peerId, inFeed);
+    // T3 (F2/C2b): each per-peer await is BOUNDED by _drainInboundCapped — this
+    // runs on the boot-to-HTTP-listen path (mcp-mounts.js) and a wedged apply
+    // chain must never block listen. Capped or not we PROCEED exactly as
+    // before: the re-emit below is lamport-PRESERVING, so a capped drain
+    // degrades to truthful deferred convergence (spec R1-2.4, the #195
+    // semantics) — unlike the fresh-mint providers backfill, which defers.
+    for (const [peerId, inFeed] of this.inFeeds) {
+      try {
+        await this._drainInboundCapped(peerId, inFeed, "contacts backfill");
+      } catch (err) {
+        console.warn(`[instance-sync] contacts backfill drain failed: ${err.message}`);
       }
-    } catch (err) {
-      console.warn(`[instance-sync] contacts backfill drain failed: ${err.message}`);
     }
 
     let rows = [];
@@ -920,8 +926,13 @@ export class InstanceSyncManager {
    * never resolves), we stop AWAITING it and proceed — the _processNewEntries
    * promise stays chained in the background exactly as pre-2c (we do NOT cancel
    * it). Returns true if the drain completed within the cap, false if capped.
+   *
+   * T3 (2c follow-up F2/C2b): now shared by all four boot-path pre-drains
+   * (tombstone re-emit, contacts/groups/providers backfills) — `label` names
+   * the caller in the cap warning. Contract unchanged: the tombstone caller
+   * still ignores the return value; providers consumes it (defer-on-cap).
    */
-  async _drainInboundCapped(peerId, inFeed) {
+  async _drainInboundCapped(peerId, inFeed, label = "contact tombstone re-emit") {
     let timer;
     const cap = new Promise((resolve) => { timer = setTimeout(() => resolve("__cap__"), this._drainCapMs); });
     try {
@@ -930,7 +941,7 @@ export class InstanceSyncManager {
         cap,
       ]);
       if (outcome === "__cap__") {
-        console.warn(`[instance-sync] contact tombstone re-emit: inbound drain for ${peerId} exceeded ${this._drainCapMs}ms — proceeding without it (wedged apply chain?)`);
+        console.warn(`[instance-sync] ${label}: inbound drain for ${peerId} exceeded ${this._drainCapMs}ms — proceeding without it (wedged apply chain?)`);
         return false;
       }
       return true;
@@ -956,7 +967,10 @@ export class InstanceSyncManager {
    * (feeds may not have opened yet this boot — retry next boot; contacts
    * lesson, observed live on grackle 2026-07-06). Inbound backlog is drained
    * first (I-B1) so a peer's already-delivered newer provider edit is applied
-   * before we re-emit with a fresh lamport.
+   * before we re-emit with a fresh lamport. T3 (F2/C2b): that drain is now
+   * CAPPED; a capped (incomplete) drain defers the whole backfill with a
+   * per-peer `deferred:<n>` flag (retryable), escaping to emit-anyway + done
+   * on the 3rd consecutive deferral (spec R2-1) — see the body.
    *
    * emitChange broadcasts to ALL peers as op="insert": fresh peers land the
    * row via _applyInsert's INSERT OR IGNORE; already-current peers IGNORE and
@@ -981,30 +995,83 @@ export class InstanceSyncManager {
       return 0;
     }
 
-    // Which armed peers still need a backfill? Only "done:*" is terminal.
+    // Which armed peers still need a backfill? Only "done:*" is terminal — a
+    // `deferred:<n>` value (T3 defer-on-cap, below) stays retryable. Raw flag
+    // values are kept for the deferral-count parse.
     const newPeers = [];
+    const flagValues = new Map(); // peerId → raw flag value (or null)
     for (const peerId of this.outFeeds.keys()) {
-      let done = false;
+      let value = null;
       try {
         const { rows } = await this.db.execute({
           sql: "SELECT value FROM dashboard_settings WHERE key = ?",
           args: [FLAG_PREFIX + peerId],
         });
-        done = typeof rows?.[0]?.value === "string" && rows[0].value.startsWith("done:");
+        if (typeof rows?.[0]?.value === "string") value = rows[0].value;
       } catch {}
-      if (!done) newPeers.push(peerId);
+      if (value !== null && value.startsWith("done:")) continue;
+      newPeers.push(peerId);
+      flagValues.set(peerId, value);
     }
     if (newPeers.length === 0) return 0; // every armed peer already covered
 
     // I-B1 ordering guard: drain the locally-replicated inbound backlog FIRST,
     // so a peer's already-delivered newer provider edit is applied before we
     // re-emit with a fresh lamport and fabricate recency over it.
-    try {
-      for (const [peerId, inFeed] of this.inFeeds) {
-        await this._processNewEntries(peerId, inFeed);
+    // T3 (F2/C2b): each per-peer await is BOUNDED by _drainInboundCapped (boot
+    // path). Unlike contacts/groups, this backfill re-emits with a FRESH mint,
+    // so a CAPPED (incomplete) drain must not proceed — it would fabricate
+    // recency over the peer's undrained newer edit and manufacture spurious
+    // sync_conflicts rows. Capped ⇒ defer (below). A drain that THROWS keeps
+    // today's proceed-to-emit semantics — the cap must not widen the existing
+    // throw exposure (spec A2-2).
+    let drainCompleted = true;
+    for (const [peerId, inFeed] of this.inFeeds) {
+      try {
+        if (!(await this._drainInboundCapped(peerId, inFeed, "providers backfill"))) {
+          drainCompleted = false;
+        }
+      } catch (err) {
+        console.warn(`[instance-sync] providers backfill drain failed: ${err.message}`);
       }
-    } catch (err) {
-      console.warn(`[instance-sync] providers backfill drain failed: ${err.message}`);
+    }
+
+    if (!drainCompleted) {
+      // T3 defer-on-cap (spec R2-1): record a deferral per pending peer as
+      // `deferred:<n>` (UPSERT; non-terminal — only done:* is, so the next
+      // boot retries). Malformed/absent prior value parses as 0.
+      // ESCAPE HATCH: on the 3rd consecutive deferral, PROCEED to emit anyway
+      // and mark done — without it, one permanently-wedged inbound feed would
+      // block providers backfill to EVERY new peer forever (a functional
+      // regression vs today's emit-on-drain-failure; peer B could never route
+      // to this instance's models). Worst case is one boot's worth of
+      // truthfully-labeled conflict rows — today's tolerated exposure.
+      const MAX_DEFERRALS = 3;
+      let escape = false;
+      const deferrals = new Map();
+      for (const peerId of newPeers) {
+        const m = /^deferred:(\d+)$/.exec(flagValues.get(peerId) ?? "");
+        const n = (m ? Number(m[1]) : 0) + 1;
+        deferrals.set(peerId, n);
+        if (n >= MAX_DEFERRALS) escape = true;
+      }
+      if (!escape) {
+        for (const [peerId, n] of deferrals) {
+          try {
+            await this.db.execute({
+              sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+              args: [FLAG_PREFIX + peerId, `deferred:${n}`],
+            });
+          } catch {}
+        }
+        console.warn(`[instance-sync] providers backfill deferred (inbound drain capped) for ${newPeers.length} peer(s) — retrying next boot`);
+        return 0;
+      }
+      // Escape: fall through to the emit. The emit is a BROADCAST to every
+      // armed peer, so ALL pending peers are marked done below — writing
+      // deferred for the non-escaped ones would just schedule a redundant
+      // re-emit (more conflict noise) for rows they already received.
+      console.warn(`[instance-sync] providers backfill escape hatch: ${MAX_DEFERRALS} consecutive capped drains — emitting anyway (spec R2-1)`);
     }
 
     let rows = [];
@@ -1191,12 +1258,16 @@ export class InstanceSyncManager {
     if (this.outFeeds.size === 0) return 0; // no peers armed yet — retry next boot; do NOT mark
 
     // I-B1 ordering guard: apply the peer's already-replicated backlog first.
-    try {
-      for (const [peerId, inFeed] of this.inFeeds) {
-        await this._processNewEntries(peerId, inFeed);
+    // T3 (F2/C2b): each per-peer await is BOUNDED by _drainInboundCapped (boot
+    // path — see the contacts backfill note). Capped or not we PROCEED: the
+    // re-emit is lamport-preserving (emitGroupUpsert preserveLamport), so a
+    // capped drain is truthful deferred convergence; flag written as before.
+    for (const [peerId, inFeed] of this.inFeeds) {
+      try {
+        await this._drainInboundCapped(peerId, inFeed, "groups backfill");
+      } catch (err) {
+        console.warn(`[instance-sync] groups backfill drain failed: ${err.message}`);
       }
-    } catch (err) {
-      console.warn(`[instance-sync] groups backfill drain failed: ${err.message}`);
     }
 
     let rows = [];
@@ -1403,6 +1474,22 @@ export class InstanceSyncManager {
       }
       return n;
     });
+  }
+
+  /**
+   * Snapshot of parked emit-queue sizes: plain object {peerId: count} for
+   * NON-EMPTY slots only (2c follow-up F5 — RAM observability BEFORE the
+   * 256-cap overflow warn fires). HARD REQUIREMENT: fully synchronous — a
+   * plain loop over the Map with no await points, so it cannot interleave
+   * with ANY writer (the _chainAppendTask append/drain tasks, or the
+   * revoke-path delete); adding an await here would break that guarantee.
+   */
+  pendingEmitStats() {
+    const stats = {};
+    for (const [peerId, slot] of this._pendingPeerEmits) {
+      if (slot && slot.length > 0) stats[peerId] = slot.length;
+    }
+    return stats;
   }
 
   /**

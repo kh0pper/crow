@@ -12,6 +12,13 @@ import { shouldInitInstanceSync } from "./instance-sync.js";
 import { createHash, randomBytes } from "node:crypto";
 import { sign, verify } from "./identity.js";
 
+// 2c follow-up (spec §F2 C2c): hard cap on awaiting the DHT announce
+// confirmation (`discovery.flushed()`) in joinContact. An unresponsive DHT
+// must not wedge the boot per-contact join loop (boot.js) or the inbound
+// sync apply chain (wireFullContact → joinContact). Overridable per-call via
+// opts.flushedCapMs (tests).
+const FLUSHED_CAP_MS = 10_000;
+
 /**
  * Create a deterministic topic for a contact pair.
  * topic = sha256(sorted(myPubkey, theirPubkey))
@@ -63,10 +70,13 @@ export class PeerManager {
 
   /**
    * Join the DHT topic for a specific contact.
+   * @param {{crowId?:string, crow_id?:string, ed25519Pubkey:string}} contact
+   * @param {{flushedCapMs?:number}} [opts] override the flushed() cap (tests)
    */
-  async joinContact(contact) {
+  async joinContact(contact, opts = {}) {
     if (this.p2pDisabled) return null; // --no-auth companion: no DHT topics
     if (!this.swarm) throw new Error("PeerManager not started");
+    const cap = Number(opts.flushedCapMs) > 0 ? Number(opts.flushedCapMs) : FLUSHED_CAP_MS;
 
     const topic = computeTopic(
       this.identity.ed25519Pubkey,
@@ -76,7 +86,23 @@ export class PeerManager {
     this.topics.set(contact.crow_id || contact.crowId, topic);
 
     const discovery = this.swarm.join(topic, { server: true, client: true });
-    await discovery.flushed();
+    // Cap ONLY the announce-confirmation await (C2c). The topic registration
+    // (topics.set above) and the announce (swarm.join above) have already
+    // fired — flushed() merely confirms the announce reached the DHT. On cap
+    // we proceed: only the confirmation is abandoned, never the announce.
+    // Timer is cleared when flushed() wins (no dangling timer).
+    let timer;
+    const guard = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("__flushed_cap__"), cap);
+    });
+    try {
+      const r = await Promise.race([discovery.flushed(), guard]);
+      if (r === "__flushed_cap__") {
+        console.warn(`[peer-manager] joinContact: discovery.flushed() exceeded ${cap}ms — proceeding without DHT announce confirmation`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
 
     return topic;
   }
@@ -101,17 +127,36 @@ export class PeerManager {
    * Join the instance sync DHT topic.
    * All instances owned by the same Crow ID join this topic for P2P discovery.
    * topic = sha256(crowId + "instance-sync")
+   * @param {{flushedCapMs?:number}} [opts] override the flushed() cap (tests)
    */
-  async joinInstanceSync() {
+  async joinInstanceSync(opts = {}) {
     if (this.p2pDisabled) return null; // --no-auth companion: no instance-sync topic
     if (!this.swarm) throw new Error("PeerManager not started");
+    const cap = Number(opts.flushedCapMs) > 0 ? Number(opts.flushedCapMs) : FLUSHED_CAP_MS;
 
     this.instanceSyncTopic = createHash("sha256")
       .update(this.identity.crowId + "instance-sync")
       .digest();
 
     const discovery = this.swarm.join(this.instanceSyncTopic, { server: true, client: true });
-    await discovery.flushed();
+    // Cap ONLY the announce-confirmation await (C2c, same shape as
+    // joinContact). The topic registration (instanceSyncTopic above) and the
+    // announce (swarm.join above) have already fired — flushed() merely
+    // confirms the announce reached the DHT. On cap we proceed: only the
+    // confirmation is abandoned, never the announce. Timer is cleared when
+    // flushed() wins (no dangling timer).
+    let timer;
+    const guard = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("__flushed_cap__"), cap);
+    });
+    try {
+      const r = await Promise.race([discovery.flushed(), guard]);
+      if (r === "__flushed_cap__") {
+        console.warn(`[peer-manager] joinInstanceSync: discovery.flushed() exceeded ${cap}ms — proceeding without DHT announce confirmation`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
 
     console.log(`[peer-manager] Joined instance sync topic for ${this.identity.crowId}`);
     return this.instanceSyncTopic;
