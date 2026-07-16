@@ -51,7 +51,10 @@ function tokenConfig(endpoint, token) {
 }
 
 function tokenForm(action, label, variant, csrf) {
-  return `<form method="POST" action="/dashboard/connect" style="display:inline-block;margin:0">`
+  // data-turbo="false": Turbo 8 intercepts form submissions and silently
+  // drops a non-redirect 200 response — the token rotates server-side but
+  // the one-time reveal page never renders. Full navigation shows it.
+  return `<form method="POST" action="/dashboard/connect" data-turbo="false" style="display:inline-block;margin:0">`
     + `<input type="hidden" name="_csrf" value="${escapeHtml(csrf || "")}">`
     + `<input type="hidden" name="action" value="${escapeHtml(action)}">`
     + button(label, { variant, type: "submit" })
