@@ -30,3 +30,34 @@ test("fanOut sends to every member except the excluded origin; returns sent/fail
   assert.deepEqual(res.sent.sort(), [1, 2]);
   assert.deepEqual(res.failed, [3]);
 });
+
+// Minor-pool item 2 (2026-07-16 spec): fanOut runs INSIDE the relay's inbound
+// message loop (nostr.js subscribeToIncoming → onSocialMessage → room-inbound →
+// fanOut); an unbounded sendControl (half-open relay socket mid-publish) used to
+// stall inbound processing indefinitely, compounded serially per member.
+test("a hung sendControl is capped: fanOut resolves, hung member fails, healthy member sends", async () => {
+  const nostrManager = { sendControl(contact) {
+    if (contact.id === 1) return new Promise(() => {}); // half-open socket: never settles
+    return Promise.resolve({ eventId: "e", relays: ["wss://x"] });
+  } };
+  const fails = [];
+  const res = await Promise.race([
+    fanOut({ nostrManager, members: [{ id: 1 }, { id: 2 }], envelope: "{}", log: (m) => fails.push(m), capMs: 50 }),
+    new Promise((resolve) => { const t = setTimeout(() => resolve("__hung__"), 2_000); t.unref?.(); }),
+  ]);
+  assert.notEqual(res, "__hung__", "fanOut must resolve despite a never-settling sendControl");
+  assert.deepEqual(res.sent, [2]);
+  assert.deepEqual(res.failed, [1]);
+  assert.ok(fails.some((m) => m.includes("contact=1")), "capped member must be logged through the log callback");
+});
+
+test("N hung members cost ~one cap, not N× (parallel fan-out, not a serial capped loop)", async () => {
+  const nostrManager = { sendControl: () => new Promise(() => {}) };
+  const capMs = 200; // serial would take >= 3*capMs (600ms); parallel ~1 cap.
+  const start = performance.now();
+  const res = await fanOut({ nostrManager, members: [{ id: 1 }, { id: 2 }, { id: 3 }], envelope: "{}", capMs });
+  const elapsed = performance.now() - start;
+  assert.deepEqual(res.sent, []);
+  assert.deepEqual(res.failed.sort(), [1, 2, 3]);
+  assert.ok(elapsed < 2.5 * capMs, `3 hung members should cost ~1 cap (${capMs}ms), took ${Math.round(elapsed)}ms`);
+});
