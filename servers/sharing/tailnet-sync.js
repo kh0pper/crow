@@ -509,6 +509,14 @@ export class PeerDialer {
 export async function startTailnetSyncClients(ctx) {
   const { db, instanceSyncManager } = ctx;
   const dialers = new Map();
+  // Per-peer heal-failure counters (peerId → consecutive failure count). A
+  // wedged initInstance (e.g. a held rocksdb dir lock) used to warn on EVERY
+  // 60s rescan — one line per minute per peer, forever. Same observability
+  // contract as the nostr crash guard: log at #1, #10, #100, …, plus one
+  // "recovered" line when a failing peer heals (episode boundary visible,
+  // next episode logs #1 immediately). Entries are dropped alongside the
+  // peer's dialer when it leaves scope, so re-pair churn cannot grow the Map.
+  const healFailures = new Map();
 
   async function refresh() {
     let rows;
@@ -539,8 +547,17 @@ export async function startTailnetSyncClients(ctx) {
       try {
         const keyBuf = peer.sync_url ? instanceSyncManager.validateIncomingFeedKey?.(peer.id, peer.sync_url) ?? null : null;
         await instanceSyncManager.initInstance(peer.id, keyBuf);
+        const failures = healFailures.get(peer.id);
+        if (failures) {
+          console.warn(`[tailnet-sync] refresh heal for ${peer.id.slice(0,12)}… recovered after ${failures} failure(s)`);
+          healFailures.delete(peer.id);
+        }
       } catch (err) {
-        console.warn(`[tailnet-sync] refresh heal for ${peer.id.slice(0,12)}…: ${err.message}`);
+        const n = (healFailures.get(peer.id) || 0) + 1;
+        healFailures.set(peer.id, n);
+        if (Number.isInteger(Math.log10(n))) {
+          console.warn(`[tailnet-sync] refresh heal for ${peer.id.slice(0,12)}…: ${err.message} (#${n})`);
+        }
       }
       if (!peer.gateway_url) continue;
       if (dialers.has(peer.id)) {
@@ -558,6 +575,9 @@ export async function startTailnetSyncClients(ctx) {
     // Stop dialers for peers no longer in scope (revoked, etc.)
     for (const [id, dialer] of dialers) {
       if (!seenIds.has(id)) { dialer.stop(); dialers.delete(id); }
+    }
+    for (const id of healFailures.keys()) {
+      if (!seenIds.has(id)) healFailures.delete(id);
     }
     // F5 gauge: parked emit-queue sizes ({peerId: count}), visible BEFORE the
     // 256-cap overflow warn drops entries. Placed AFTER the per-peer loop so a

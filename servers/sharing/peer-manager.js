@@ -339,15 +339,14 @@ export class PeerManager {
         break;
       }
 
-      case "feed-key-announce": {
-        // Peer advertises the Hypercore feed key they use to write to us.
-        // We persist it so future gateway starts can open the inbound feed
-        // without waiting for a fresh Hyperswarm handshake.
-        if (state.authenticated && state.remoteCrowId && this.onInstanceKeyReceived && msg.feed_key_hex) {
-          this.onInstanceKeyReceived(state.remoteCrowId, msg.feed_key_hex);
-        }
-        break;
-      }
+      // NOTE: a "feed-key-announce" case lived here until 2026-07. Nothing in
+      // the codebase ever SENT that message type (feed keys ride the
+      // challenge/challenge-response piggyback above; rotation rides
+      // tailnet-sync's in-band exchange, 2d), and the handler passed
+      // state.remoteCrowId where onInstanceKeyReceived requires an INSTANCE
+      // id — crow_id is shared fleet-wide and can never key a crow_instances
+      // row. If an announce message is ever actually needed, it must carry
+      // the sender's instance_id (see the challenge-response case).
     }
   }
 
