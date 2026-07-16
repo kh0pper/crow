@@ -115,3 +115,16 @@ test("Connections section points at the connect wizard", async () => {
   assert.ok(html.includes("/dashboard/connect"), "links to the connect wizard");
   assert.ok(html.includes(i18n.t("connect.openWizard", "en")), "uses the wizard link label");
 });
+
+test("token forms opt out of Turbo (one-time reveal must not be dropped)", async () => {
+  // Turbo 8 intercepts form submissions and silently discards a non-redirect
+  // 200 response, so the POST "succeeded" (token rotated!) but the one-time
+  // reveal never rendered. data-turbo="false" makes the browser do a full
+  // navigation and show the response page.
+  const html = await render();
+  const forms = html.match(/<form\b[^>]*method="POST"[^>]*>/g) || [];
+  assert.ok(forms.length > 0, "connect panel renders at least one POST form");
+  for (const form of forms) {
+    assert.match(form, /data-turbo="false"/, `form missing data-turbo="false": ${form}`);
+  }
+});
