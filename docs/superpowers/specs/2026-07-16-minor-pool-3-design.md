@@ -37,12 +37,15 @@ one peer row without `gateway_url` so no PeerDialer spawns; stub manager whose
 **Defect.** `fanOut()` (`servers/sharing/room-fanout.js`) serially awaits
 `nostrManager.sendControl(c, envelope)` per member with NO time bound. The call chain is
 `nostr.js subscribeToIncoming → await onSocialMessage → room-inbound
-handleRoomMessageInbound → await fanOut` — i.e. it runs INSIDE the relay's inbound
-message loop. `sendControl → _sendControlEvent → safeRelayPublish → relay.publish()`
-waits for the relay's OK frame; a half-open socket stalls it indefinitely, and the
-serial loop compounds it per member. One wedged relay send freezes inbound message
-processing for that subscription. (Recorded as deliberately out of scope in 2c §F2 —
-"candidate for a future pool" — this is that pool.)
+handleRoomMessageInbound → await fanOut`. `sendControl → _sendControlEvent →
+safeRelayPublish → relay.publish()` waits for the relay's OK frame; a half-open socket
+stalls it indefinitely, and the serial loop compounds it per member. **Review
+correction (R1 finding 1):** nostr-tools dispatches `onevent` WITHOUT awaiting it
+(abstract-relay.js:423), so a wedged fan-out never froze the whole subscription — the
+real damage is that ONE message's handling wedges forever with N× serial compounding,
+plus a leaked pending promise per member. Still worth bounding; the "freezes the
+subscription" framing in earlier drafts was wrong. (Recorded as deliberately out of
+scope in 2c §F2 — "candidate for a future pool" — this is that pool.)
 
 **Fix.** Same sender-bounding pattern as 2c C2a/C2b, applied inside `fanOut`:
 - Per-member cap: `Promise.race([sendControl(...), capTimer])`, default `capMs = 10_000`,
@@ -56,8 +59,10 @@ processing for that subscription. (Recorded as deliberately out of scope in 2c �
   send rule; push precedent `servers/gateway/push/web-push.js:57`).
 - Preserved semantics: `excludeContactId` skip, best-effort per member, `{sent, failed}`
   return shape, per-failure `log` line. Rooms have no cross-member ordering semantics
-  (mirror of push). `sent`/`failed` become completion-ordered — the one existing consumer
-  (`room-inbound.js:113`) ignores the result, and the existing test already sorts.
+  (mirror of push). `sent`/`failed` become completion-ordered — all four call sites
+  (`room-inbound.js:113`, `room-send.js:26` and `:30`,
+  `dashboard/panels/messages/api-handlers.js:310`) ignore the result, and the existing
+  test already sorts (R1 finding 5 corrected the earlier "one consumer" claim).
 
 **Tests** (existing direct-import harness in `tests/room-fanout.test.js`):
 - T2a RED: one member's `sendControl` never settles (`capMs: 50`) → old fanOut never
