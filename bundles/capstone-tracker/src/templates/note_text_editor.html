@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}{{ note.title }} - Notes{% endblock %}
+
+{% block viewport %}<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ request.url_for('static', path='css/notes.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="text-editor-page" id="text-editor-page">
+    <!-- Top bar -->
+    <div class="editor-toolbar">
+        <div class="toolbar-left">
+            <a href="{{ request.url_for('notes_index') }}" class="btn-back" title="Back to notes">&larr;</a>
+            <input type="text" class="note-title-input" id="note-title"
+                   value="{{ note.title }}" placeholder="Untitled Note">
+        </div>
+        <div class="toolbar-center">
+            <div class="tag-chips" id="tag-chips">
+                {% for tag in note.tags %}
+                <span class="tag-chip removable" data-tag="{{ tag }}">
+                    {{ tag }} <button class="tag-remove">&times;</button>
+                </span>
+                {% endfor %}
+                <button class="tag-add-btn" id="btn-add-tag" title="Add tag">+</button>
+            </div>
+        </div>
+        <div class="toolbar-right">
+            <div class="editor-tabs" id="editor-tabs">
+                <button class="editor-tab active" data-tab="edit">Edit</button>
+                <button class="editor-tab" data-tab="preview">Preview</button>
+                <button class="editor-tab" data-tab="listen">Listen</button>
+            </div>
+            <span class="save-status" id="save-status">Saved</span>
+            <div class="dropdown">
+                <button class="btn btn-sm dropdown-toggle">&#8942;</button>
+                <ul class="dropdown-menu">
+                    <li><a href="#" id="btn-move-note">Move to folder...</a></li>
+                    <li><a href="#" id="btn-delete-note" class="danger">Delete note</a></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Editor body -->
+    <div class="text-editor-body">
+        <textarea class="text-editor-textarea" id="text-editor-textarea"
+                  placeholder="Start writing in markdown..."></textarea>
+        <div class="text-editor-preview markdown-body" id="text-editor-preview"
+             style="display:none;"></div>
+        <div class="note-tts-pane" id="note-tts-pane" style="display:none;">
+            <div class="note-tts-content" id="note-tts-content"></div>
+        </div>
+    </div>
+</div>
+
+<!-- TTS Audio Bar (hidden by default) -->
+<div class="note-tts-audio-bar" id="note-tts-audio-bar" style="display:none;">
+    <div class="note-tts-audio-inner">
+        <div class="note-tts-transport">
+            <button class="note-tts-btn" id="note-tts-prev" title="Previous paragraph">&#9664;&#9664;</button>
+            <button class="note-tts-btn note-tts-btn-play" id="note-tts-play" title="Play/Pause">&#9654;</button>
+            <button class="note-tts-btn" id="note-tts-next" title="Next paragraph">&#9654;&#9654;</button>
+        </div>
+        <div class="note-tts-progress-wrap">
+            <span class="note-tts-time" id="note-tts-time-current">0:00</span>
+            <div class="note-tts-progress-bar" id="note-tts-progress-bar">
+                <div class="note-tts-progress-fill" id="note-tts-progress-fill"></div>
+            </div>
+            <span class="note-tts-time" id="note-tts-time-total">0:00</span>
+        </div>
+        <span class="note-tts-para-indicator" id="note-tts-para-indicator"></span>
+        <button class="note-tts-speed-btn" id="note-tts-speed" title="Playback speed">1x</button>
+        <select class="note-tts-voice-select" id="note-tts-voice" title="Voice">
+            {% if voices %}
+            {% for v in voices %}
+            <option value="{{ v.name }}">{{ v.display }}</option>
+            {% endfor %}
+            {% endif %}
+        </select>
+    </div>
+</div>
+
+<script>
+    window.NOTE_DATA = {{ note | tojson }};
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ request.url_for('static', path='js/note-text-editor.js') }}"></script>
+{% endblock %}

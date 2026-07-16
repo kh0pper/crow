@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Notes - Capstone Companion{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ request.url_for('static', path='css/notes.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="notes-page">
+    <!-- Mobile header (visible only ≤768px) -->
+    <div class="notes-mobile-header" id="notes-mobile-header">
+        <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <line x1="3" y1="5" x2="17" y2="5"/>
+                <line x1="3" y1="10" x2="17" y2="10"/>
+                <line x1="3" y1="15" x2="17" y2="15"/>
+            </svg>
+        </button>
+        <span class="notes-mobile-title">Notes</span>
+    </div>
+    <div class="notes-layout">
+        <!-- Sidebar -->
+        <aside class="notes-sidebar" id="notes-sidebar">
+            <div class="sidebar-header">
+                <button class="sidebar-close-btn" id="sidebar-close-btn" aria-label="Close sidebar">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                        <line x1="5" y1="5" x2="15" y2="15"/>
+                        <line x1="15" y1="5" x2="5" y2="15"/>
+                    </svg>
+                </button>
+                <input type="search" id="notes-search" class="notes-search"
+                       placeholder="Search notes..." autocomplete="off">
+            </div>
+            <div class="sidebar-actions">
+                <button class="btn btn-sm btn-primary" id="btn-new-folder" title="New Folder">
+                    + Folder
+                </button>
+                <button class="btn btn-sm btn-primary" id="btn-new-drawing" title="New Drawing">
+                    + Drawing
+                </button>
+                <button class="btn btn-sm btn-primary" id="btn-new-text" title="New Text Note">
+                    + Text
+                </button>
+            </div>
+            <div class="folder-tree" id="folder-tree">
+                <!-- Populated by JS -->
+            </div>
+            <div class="tag-filter" id="tag-filter">
+                <h4>Tags</h4>
+                <div class="tag-list">
+                    {% for tag in tags %}
+                    <span class="tag-chip" data-tag="{{ tag.name }}">{{ tag.name }}</span>
+                    {% endfor %}
+                </div>
+            </div>
+        </aside>
+        <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
+        <!-- Main area -->
+        <main class="notes-main" id="notes-main">
+            <div class="notes-grid" id="notes-grid">
+                <p class="empty-state">Select a folder or search to view notes.</p>
+            </div>
+        </main>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ request.url_for('static', path='js/notes.js') }}"></script>
+{% endblock %}

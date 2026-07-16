@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+
+{% block title %}{{ note.title }} - Notes{% endblock %}
+
+{% block viewport %}<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ request.url_for('static', path='css/notes.css') }}">
+<script type="importmap">
+{
+    "imports": {
+        "perfect-freehand": "https://cdn.jsdelivr.net/npm/perfect-freehand@1.2.2/dist/esm/index.mjs"
+    }
+}
+</script>
+<!-- Fabric.js for canvas object model -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="editor-page" id="editor-page">
+    <!-- Top bar -->
+    <div class="editor-toolbar">
+        <div class="toolbar-left">
+            <a href="{{ request.url_for('notes_index') }}" class="btn-back" title="Back to notes">&larr;</a>
+            <input type="text" class="note-title-input" id="note-title"
+                   value="{{ note.title }}" placeholder="Untitled Note">
+        </div>
+        <div class="toolbar-center">
+            <div class="tag-chips" id="tag-chips">
+                {% for tag in note.tags %}
+                <span class="tag-chip removable" data-tag="{{ tag }}">
+                    {{ tag }} <button class="tag-remove">&times;</button>
+                </span>
+                {% endfor %}
+                <button class="tag-add-btn" id="btn-add-tag" title="Add tag">+</button>
+            </div>
+        </div>
+        <div class="toolbar-right">
+            <button class="tool-btn topbar-action" id="btn-undo" title="Undo (Ctrl+Z)" disabled>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="1 4 1 10 7 10"></polyline>
+                    <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+                </svg>
+            </button>
+            <button class="tool-btn topbar-action" id="btn-redo" title="Redo (Ctrl+Shift+Z)" disabled>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 4 23 10 17 10"></polyline>
+                    <path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"></path>
+                </svg>
+            </button>
+            <span class="save-status" id="save-status">Saved</span>
+            <button class="btn btn-sm btn-kb-pill" id="btn-index-kb" title="OCR &amp; Index to Knowledge Base">
+                Index to KB
+            </button>
+            <div class="dropdown">
+                <button class="btn btn-sm dropdown-toggle">&#8942;</button>
+                <ul class="dropdown-menu">
+                    <li><a href="#" id="btn-move-note">Move to folder...</a></li>
+                    <li><a href="#" id="btn-delete-note" class="danger">Delete note</a></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Side toolbar + Canvas -->
+    <div class="editor-body">
+        <div class="side-toolbar" id="side-toolbar">
+            <!-- Tools + Shapes group -->
+            <div class="toolbar-group">
+                <button class="tool-btn active" data-tool="pen" title="Pen">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 19l7-7 3 3-7 7-3-3z"></path>
+                        <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"></path>
+                        <path d="M2 2l7.586 7.586"></path>
+                        <circle cx="11" cy="11" r="2"></circle>
+                    </svg>
+                </button>
+                <button class="tool-btn" data-tool="highlighter" title="Highlighter">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 11l-6 6v3h9l3-3"></path>
+                        <path d="M22 12l-4.6 4.6a2 2 0 01-2.8 0l-5.2-5.2a2 2 0 010-2.8L14 4"></path>
+                    </svg>
+                </button>
+                <button class="tool-btn" data-tool="eraser" title="Eraser">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M20 20H7L3 16c-.8-.8-.8-2 0-2.8L14.8 1.4c.8-.8 2-.8 2.8 0l5 5c.8.8.8 2 0 2.8L11 20"></path>
+                    </svg>
+                </button>
+                <button class="tool-btn" data-tool="select" title="Select">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"></path>
+                        <path d="M13 13l6 6"></path>
+                    </svg>
+                </button>
+                <button class="tool-btn" data-tool="text" title="Text">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="4 7 4 4 20 4 20 7"></polyline>
+                        <line x1="9" y1="20" x2="15" y2="20"></line>
+                        <line x1="12" y1="4" x2="12" y2="20"></line>
+                    </svg>
+                </button>
+                <button class="tool-btn" data-tool="image" title="Image">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                        <polyline points="21 15 16 10 5 21"></polyline>
+                    </svg>
+                </button>
+                <button class="tool-btn" data-tool="shape" data-shape="line" title="Line">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="5" y1="19" x2="19" y2="5"></line>
+                    </svg>
+                </button>
+                <button class="tool-btn" data-tool="shape" data-shape="rect" title="Rectangle">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                    </svg>
+                </button>
+                <button class="tool-btn" data-tool="shape" data-shape="circle" title="Circle">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Colors group -->
+            <div class="toolbar-group">
+                <div class="color-grid">
+                    <button class="color-swatch active" data-color="#000000" style="background:#000000;" title="Black"></button>
+                    <button class="color-swatch" data-color="#e53e3e" style="background:#e53e3e;" title="Red"></button>
+                    <button class="color-swatch" data-color="#3182ce" style="background:#3182ce;" title="Blue"></button>
+                    <button class="color-swatch" data-color="#38a169" style="background:#38a169;" title="Green"></button>
+                    <button class="color-swatch" data-color="#d69e2e" style="background:#d69e2e;" title="Yellow"></button>
+                    <button class="color-swatch" data-color="#805ad5" style="background:#805ad5;" title="Purple"></button>
+                    <button class="color-swatch" data-color="#dd6b20" style="background:#dd6b20;" title="Orange"></button>
+                    <button class="color-swatch" data-color="#718096" style="background:#718096;" title="Gray"></button>
+                </div>
+            </div>
+
+            <!-- Sizes group -->
+            <div class="toolbar-group">
+                <button class="size-btn active" data-size="2" title="Fine">
+                    <span class="size-dot size-fine"></span>
+                </button>
+                <button class="size-btn" data-size="4" title="Medium">
+                    <span class="size-dot size-medium"></span>
+                </button>
+                <button class="size-btn" data-size="8" title="Thick">
+                    <span class="size-dot size-thick"></span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Whiteboard canvas -->
+        <div class="whiteboard-area" id="whiteboard-area">
+            <canvas id="whiteboard-canvas"></canvas>
+            <div class="zoom-indicator" id="zoom-indicator" title="Click to reset zoom">100%</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Pass note data to JS
+    window.NOTE_DATA = {{ note | tojson }};
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="{{ request.url_for('static', path='js/note-editor.js') }}"></script>
+{% endblock %}

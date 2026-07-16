@@ -1,0 +1,757 @@
+{% extends "base.html" %}
+
+{% block title %}PIR Tracker - Capstone Companion{% endblock %}
+
+{% block content %}
+<div class="pir-page">
+    <header class="page-header">
+        <div class="page-header-row">
+            <div>
+                <h1>PIR Tracker</h1>
+                <p class="subtitle">Public Information Requests for capstone research</p>
+            </div>
+            <button class="btn btn-primary" onclick="openAddModal()">+ Add PIR</button>
+        </div>
+    </header>
+
+    <!-- Summary Cards -->
+    <div class="pir-stats">
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.total }}</div>
+            <div class="stat-label">Total</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.pending }}</div>
+            <div class="stat-label">Pending</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.clarification }}</div>
+            <div class="stat-label">Clar./Resp.</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.processing }}</div>
+            <div class="stat-label">Processing</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value">{{ stats.received }}</div>
+            <div class="stat-label">Received</div>
+        </div>
+        <div class="stat-card {% if stats.overdue > 0 %}stat-danger{% endif %}">
+            <div class="stat-value">{{ stats.overdue }}</div>
+            <div class="stat-label">Overdue</div>
+        </div>
+        <div class="stat-card {% if stats.action_needed > 0 %}stat-action{% endif %}">
+            <div class="stat-value">{{ stats.action_needed }}</div>
+            <div class="stat-label">Action Needed</div>
+        </div>
+        <div class="stat-card {% if stats.followup_due > 0 %}stat-warning{% endif %}">
+            <div class="stat-value">{{ stats.followup_due }}</div>
+            <div class="stat-label">Follow-up Due</div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="filters card">
+        <form method="get" action="{{ request.url_for('pir_index') }}" class="pir-filters-form">
+            <label>
+                Group by
+                <select name="group_by" onchange="this.form.submit()">
+                    <option value="research_question" {% if group_by == 'research_question' %}selected{% endif %}>Research Question</option>
+                    <option value="recipient" {% if group_by == 'recipient' %}selected{% endif %}>Recipient</option>
+                    <option value="status" {% if group_by == 'status' %}selected{% endif %}>Status</option>
+                </select>
+            </label>
+            <label>
+                Status
+                <select name="status" onchange="this.form.submit()">
+                    <option value="all" {% if current_status == 'all' %}selected{% endif %}>All</option>
+                    <option value="pending" {% if current_status == 'pending' %}selected{% endif %}>Pending</option>
+                    <option value="clarification" {% if current_status == 'clarification' %}selected{% endif %}>Clarification</option>
+                    <option value="responded" {% if current_status == 'responded' %}selected{% endif %}>Responded</option>
+                    <option value="processing" {% if current_status == 'processing' %}selected{% endif %}>Processing</option>
+                    <option value="received" {% if current_status == 'received' %}selected{% endif %}>Received</option>
+                    <option value="overdue" {% if current_status == 'overdue' %}selected{% endif %}>Overdue</option>
+                </select>
+            </label>
+            <label>
+                Sub-Q
+                <select name="sq" onchange="this.form.submit()">
+                    <option value="" {% if current_sq == '' %}selected{% endif %}>All</option>
+                    <option value="sq1" {% if current_sq == 'sq1' %}selected{% endif %}>SQ1: Charter/ISD</option>
+                    <option value="sq2" {% if current_sq == 'sq2' %}selected{% endif %}>SQ2: Bond</option>
+                    <option value="sq3" {% if current_sq == 'sq3' %}selected{% endif %}>SQ3: ARC</option>
+                    <option value="sq4" {% if current_sq == 'sq4' %}selected{% endif %}>SQ4: TIA</option>
+                </select>
+            </label>
+        </form>
+    </div>
+
+    <!-- Grouped PIR Tables -->
+    {% for group in groups %}
+    <div class="card pir-group">
+        <h3 class="pir-group-title">{{ group.label }}</h3>
+
+        <div class="pir-table-wrapper">
+            <table class="pir-table">
+                <thead>
+                    <tr>
+                        <th class="col-num">#</th>
+                        <th class="col-recipient">Recipient</th>
+                        <th class="col-desc">Description</th>
+                        <th class="col-date">Filed</th>
+                        <th class="col-date">Due</th>
+                        <th class="col-status">Status</th>
+                        <th class="col-priority">Pri</th>
+                        <th class="col-actions">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for entry in group.entries %}
+                    {% set p = entry.pir %}
+                    <tr id="pir-row-{{ p.id }}" class="{% if entry.is_overdue %}pir-overdue{% elif entry.is_urgent %}pir-urgent{% endif %}">
+                        <td class="col-num">
+                            <span class="pir-number">{{ p.pir_number }}</span>
+                        </td>
+                        <td class="col-recipient">{{ p.recipient }}</td>
+                        <td class="col-desc">
+                            <span class="pir-label">{{ p.label }}</span>
+                            {% if p.reference_number %}
+                            <span class="pir-ref">Ref: {{ p.reference_number }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="col-date">{{ p.filed_date.strftime('%b %d') }}</td>
+                        <td class="col-date {% if entry.is_overdue %}date-overdue{% elif entry.is_urgent %}date-urgent{% endif %}">
+                            {{ p.response_due.strftime('%b %d') }}
+                        </td>
+                        <td class="col-status">
+                            <span class="badge badge-{{ 'overdue' if entry.is_overdue else p.status }}">
+                                {{ 'Overdue' if entry.is_overdue else p.status.title() }}
+                            </span>
+                        </td>
+                        <td class="col-priority">
+                            <span class="priority-badge priority-{{ p.priority|lower|replace('-', '') }}">{{ p.priority }}</span>
+                        </td>
+                        <td class="col-actions">
+                            <div class="pir-action-btns">
+                                <button class="btn btn-small btn-outline" onclick="openEditModal({{ p.id }})">Edit</button>
+                                {% if p.note_id %}
+                                <a href="{{ request.url_for('note_view', note_id=p.note_id) }}" target="_blank" class="btn btn-small btn-outline" title="View Note">Note</a>
+                                {% endif %}
+                                <button class="btn btn-small btn-outline" onclick="openStatusModal({{ p.id }}, '{{ p.status }}')">Status</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% if entry.needs_our_action or entry.followup_overdue %}
+                    <tr class="pir-action-row">
+                        <td></td>
+                        <td colspan="7">
+                            {% if entry.needs_our_action %}
+                            <span class="pir-action-badge">ACTION: {{ p.action_needed }}</span>
+                            {% endif %}
+                            {% if entry.followup_overdue %}
+                            <span class="pir-followup-badge">FOLLOW-UP DUE: {{ p.next_followup_date.strftime('%b %d') }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endif %}
+                    {% if p.status_notes %}
+                    <tr class="pir-notes-row">
+                        <td></td>
+                        <td colspan="7" class="pir-status-notes">{{ p.status_notes }}</td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endfor %}
+
+    {% if not groups %}
+    <div class="card">
+        <p class="empty-state">No PIRs match the current filters.</p>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Add/Edit Modal -->
+<div id="pir-modal" class="modal" style="display: none;">
+    <div class="modal-backdrop" onclick="closeModal()"></div>
+    <div class="modal-content modal-wide">
+        <div class="modal-header">
+            <h3 id="modal-title">Add PIR</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div id="modal-body">
+            <p class="loading-text">Loading...</p>
+        </div>
+    </div>
+</div>
+
+<!-- Status Update Modal -->
+<div id="status-modal" class="modal" style="display: none;">
+    <div class="modal-backdrop" onclick="closeStatusModalFn()"></div>
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Update Status</h3>
+            <button class="modal-close" onclick="closeStatusModalFn()">&times;</button>
+        </div>
+        <div id="status-modal-body">
+            <form id="status-form" hx-ext="json-enc" hx-swap="innerHTML" hx-target="#status-modal-body">
+                <div class="form-group">
+                    <label for="status-select">Status</label>
+                    <select id="status-select" name="status" class="form-input">
+                        <option value="pending">Pending</option>
+                        <option value="clarification">Clarification</option>
+                        <option value="responded">Responded</option>
+                        <option value="processing">Processing</option>
+                        <option value="partial">Partial</option>
+                        <option value="received">Received</option>
+                        <option value="withdrawn">Withdrawn</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="status-notes-input">Notes</label>
+                    <textarea id="status-notes-input" name="status_notes" rows="3"
+                        placeholder="Status update details" class="form-input"></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeStatusModalFn()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Update</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+.pir-page .page-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* Summary cards */
+.pir-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+}
+
+.stat-card {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    text-align: center;
+}
+
+.stat-card.stat-danger {
+    border-color: var(--color-danger);
+    background: rgba(229, 62, 62, 0.05);
+}
+
+.stat-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 0.25rem;
+}
+
+.stat-danger .stat-value {
+    color: var(--color-danger);
+}
+
+.stat-action {
+    border-color: #805ad5;
+    background: rgba(128, 90, 213, 0.05);
+}
+
+.stat-action .stat-value {
+    color: #805ad5;
+}
+
+.stat-warning {
+    border-color: var(--color-warning);
+    background: rgba(237, 137, 54, 0.05);
+}
+
+.stat-warning .stat-value {
+    color: var(--color-warning);
+}
+
+.stat-label {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Filters */
+.pir-filters-form {
+    display: flex;
+    gap: 1rem;
+    align-items: end;
+    flex-wrap: wrap;
+}
+
+.pir-filters-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-text-muted);
+}
+
+.pir-filters-form select {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-bg-secondary);
+    color: var(--color-text);
+    font-size: 0.875rem;
+}
+
+/* PIR group */
+.pir-group {
+    margin-bottom: 1.5rem;
+}
+
+.pir-group-title {
+    margin: 0 0 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 2px solid var(--color-primary);
+    font-size: 1rem;
+    color: var(--color-primary);
+}
+
+/* PIR table */
+.pir-table-wrapper {
+    overflow-x: auto;
+}
+
+.pir-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+}
+
+.pir-table th {
+    text-align: left;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+    white-space: nowrap;
+}
+
+.pir-table td {
+    padding: 0.625rem 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+    vertical-align: top;
+}
+
+.pir-table tbody tr:hover {
+    background: var(--color-bg-secondary);
+}
+
+.col-num { width: 3rem; }
+.col-recipient { width: 10rem; }
+.col-date { width: 5rem; white-space: nowrap; }
+.col-status { width: 6rem; }
+.col-priority { width: 4rem; }
+.col-actions { width: 10rem; }
+
+.pir-number {
+    font-weight: 600;
+    font-family: var(--font-mono, 'Fira Code', monospace);
+}
+
+.pir-label {
+    display: block;
+    font-size: 0.8125rem;
+    color: var(--color-text-muted);
+}
+
+.pir-ref {
+    display: block;
+    font-size: 0.6875rem;
+    color: var(--color-text-muted);
+    opacity: 0.7;
+    font-family: var(--font-mono, 'Fira Code', monospace);
+}
+
+/* Action needed row */
+.pir-action-row td {
+    padding: 0.375rem 0.75rem;
+    border-bottom: none;
+}
+
+.pir-action-badge {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    border-radius: var(--radius);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    background: rgba(128, 90, 213, 0.12);
+    color: #805ad5;
+    margin-right: 0.5rem;
+}
+
+.pir-followup-badge {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    border-radius: var(--radius);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    background: rgba(237, 137, 54, 0.12);
+    color: var(--color-warning);
+}
+
+/* Status notes row */
+.pir-notes-row td {
+    padding: 0 0.75rem 0.625rem;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.pir-status-notes {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    font-style: italic;
+    padding-left: 0.5rem;
+    border-left: 2px solid var(--color-border);
+}
+
+/* Overdue & urgent rows */
+.pir-overdue {
+    background: rgba(229, 62, 62, 0.04);
+}
+
+.pir-urgent {
+    background: rgba(237, 137, 54, 0.04);
+}
+
+.date-overdue {
+    color: var(--color-danger);
+    font-weight: 600;
+}
+
+.date-urgent {
+    color: var(--color-warning);
+    font-weight: 600;
+}
+
+/* Badges */
+.badge {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+}
+
+.badge-pending {
+    background: rgba(66, 153, 225, 0.12);
+    color: var(--color-info);
+}
+
+.badge-clarification {
+    background: rgba(237, 137, 54, 0.12);
+    color: var(--color-warning);
+}
+
+.badge-responded {
+    background: rgba(237, 137, 54, 0.18);
+    color: #c05621;
+}
+
+[data-theme="dark"] .badge-responded {
+    color: var(--color-warning);
+}
+
+.badge-processing {
+    background: rgba(74, 155, 155, 0.12);
+    color: var(--color-primary);
+}
+
+.badge-received {
+    background: rgba(72, 187, 120, 0.12);
+    color: var(--color-success);
+}
+
+.badge-partial {
+    background: rgba(72, 187, 120, 0.08);
+    color: var(--color-success);
+}
+
+.badge-overdue {
+    background: rgba(229, 62, 62, 0.12);
+    color: var(--color-danger);
+}
+
+.badge-withdrawn {
+    background: rgba(113, 128, 150, 0.12);
+    color: var(--color-text-muted);
+}
+
+/* Priority badges */
+.priority-badge {
+    font-size: 0.625rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.0625rem 0.375rem;
+    border-radius: var(--radius);
+}
+
+.priority-high {
+    color: var(--color-danger);
+}
+
+.priority-medhi {
+    color: var(--color-warning);
+}
+
+.priority-medium {
+    color: var(--color-text-muted);
+}
+
+.priority-low {
+    color: var(--color-text-muted);
+    opacity: 0.6;
+}
+
+/* Action buttons */
+.pir-action-btns {
+    display: flex;
+    gap: 0.25rem;
+    flex-wrap: wrap;
+}
+
+.pir-action-btns .btn-small {
+    padding: 0.125rem 0.5rem;
+    font-size: 0.6875rem;
+}
+
+/* Modal */
+.modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.modal-content {
+    position: relative;
+    background: var(--color-card);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    width: 100%;
+    max-width: 500px;
+    margin: 1rem;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.modal-wide {
+    max-width: 640px;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 1.25rem;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    padding: 0;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    color: var(--color-text);
+}
+
+#modal-body, #status-modal-body {
+    padding: 1.5rem;
+}
+
+.loading-text {
+    text-align: center;
+    color: var(--color-text-muted);
+}
+
+.success-text {
+    text-align: center;
+    color: var(--color-success);
+    font-weight: 500;
+}
+
+/* Form styles (shared with partial) */
+.form-group {
+    margin-bottom: 1rem;
+}
+
+.form-group label {
+    display: block;
+    font-weight: 500;
+    margin-bottom: 0.375rem;
+    font-size: 0.875rem;
+}
+
+.form-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    font-size: 0.875rem;
+    background: var(--color-bg-secondary);
+    color: var(--color-text);
+}
+
+.form-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-light);
+}
+
+textarea.form-input {
+    resize: vertical;
+    min-height: 60px;
+}
+
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+.form-row-3 {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 1rem;
+}
+
+.form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--color-border);
+}
+
+.checkbox-group {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+}
+
+.checkbox-group label {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    font-weight: 400;
+    margin-bottom: 0;
+    cursor: pointer;
+}
+
+.checkbox-group input[type="checkbox"] {
+    accent-color: var(--color-primary);
+}
+</style>
+
+<script>
+function openAddModal() {
+    const modal = document.getElementById('pir-modal');
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+
+    title.textContent = 'Add PIR';
+    body.textContent = 'Loading...';
+    modal.style.display = 'flex';
+
+    htmx.ajax('GET', '/pir/add', {target: '#modal-body', swap: 'innerHTML'});
+}
+
+function openEditModal(id) {
+    const modal = document.getElementById('pir-modal');
+    const title = document.getElementById('modal-title');
+    const body = document.getElementById('modal-body');
+
+    title.textContent = 'Edit PIR';
+    body.textContent = 'Loading...';
+    modal.style.display = 'flex';
+
+    htmx.ajax('GET', '/pir/' + id + '/edit', {target: '#modal-body', swap: 'innerHTML'});
+}
+
+function closeModal() {
+    document.getElementById('pir-modal').style.display = 'none';
+}
+
+function openStatusModal(id, currentStatus) {
+    const modal = document.getElementById('status-modal');
+    const form = document.getElementById('status-form');
+    const select = document.getElementById('status-select');
+
+    form.setAttribute('hx-post', '/pir/' + id + '/status');
+    htmx.process(form);
+    select.value = currentStatus;
+    document.getElementById('status-notes-input').value = '';
+    modal.style.display = 'flex';
+}
+
+function closeStatusModalFn() {
+    document.getElementById('status-modal').style.display = 'none';
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closeModal();
+        closeStatusModalFn();
+    }
+});
+
+// Reload page after successful form submission
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    const target = evt.detail.target;
+    if ((target.id === 'modal-body' || target.id === 'status-modal-body') && evt.detail.successful) {
+        if (evt.detail.requestConfig.verb !== 'get') {
+            setTimeout(function() {
+                window.location.reload();
+            }, 300);
+        }
+    }
+});
+</script>
+{% endblock %}
