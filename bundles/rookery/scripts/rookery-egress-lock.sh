@@ -75,6 +75,16 @@
 
 set -euo pipefail
 
+# Record which config vars the CALLER set (before defaulting) so
+# --print-systemd-unit can bake them into the unit — a bare boot-time re-run
+# would otherwise drop the deployed posture (live gap 2026-07-16: the unit
+# reinstalled the lock without ALLOW_HOST_TCP_PORTS=3006, silently killing
+# the MCP bridge after reboot).
+CALLER_SET=()
+for v in MODEL_PUBLISH ALLOW_PUBLISHED_TCP_PORTS ALLOW_HOST_TCP_PORTS ROOKERY_NETWORK; do
+  [[ -n ${!v:-} ]] && CALLER_SET+=("$v")
+done
+
 ROOKERY_NETWORK=${ROOKERY_NETWORK:-rookery_default}
 MODEL_PUBLISH=${MODEL_PUBLISH:-100.118.41.122:8010}
 ALLOW_HOST_TCP_PORTS=${ALLOW_HOST_TCP_PORTS:-}
@@ -288,7 +298,7 @@ Wants=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# --wait rides out slow container starts; on timeout the lock still installs
+$(for v in ${CALLER_SET[@]+"${CALLER_SET[@]}"}; do printf 'Environment="%s=%s"\n' "$v" "${!v}"; done)# --wait rides out slow container starts; on timeout the lock still installs
 # drop-only (fail-closed, no model allow) and exits nonzero so the unit
 # shows failed.
 ExecStart=$script_path --wait 300
