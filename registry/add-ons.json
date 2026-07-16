@@ -4882,7 +4882,8 @@
         "envKeys": [
           "ROOKERY_WORKSPACES_DIR",
           "ROOKERY_REVIEWER_URL",
-          "UV_NO_CACHE"
+          "UV_NO_CACHE",
+          "ROOKERY_OPENALEX_MAILTO"
         ]
       },
       "panel": "panel/rookery.js",
@@ -4897,7 +4898,7 @@
       "env_vars": [
         {
           "name": "ROOKERY_MODEL_BASE_URL",
-          "description": "OpenAI-compatible endpoint for the reviewer model (e.g. a local llama.cpp/vLLM server; find your configured endpoint in Crow's AI settings). For a server on the Docker host use http://host.docker.internal:<port>/v1",
+          "description": "OpenAI-compatible endpoint for the reviewer model (e.g. a local llama.cpp/vLLM server; find your configured endpoint in Crow's AI settings). If the host service binds a SPECIFIC IP (e.g. a Tailscale address), use that IP directly: http://<host-ip>:<port>/v1 — host.docker.internal only reaches services listening on 0.0.0.0 or the Docker bridge, and times out otherwise (verified 2026-07-14)",
           "required": true
         },
         {
@@ -4934,6 +4935,27 @@
           "description": "Disable uv's download cache for the host MCP process (prevents multi-GB cache growth)",
           "default": "1",
           "required": false
+        },
+        {
+          "name": "ROOKERY_MCP_CROW_URL",
+          "description": "Optional: crow gateway PROJECTS MCP mount, registered in-app as a remote MCP so the reviewer can file sources/bibliographies into crow projects. Use the least-privilege /projects/mcp mount, NOT /router/mcp (the router's crow_tools category exposes every connected integration). Use an IP the CONTAINER can route to the host (e.g. http://<host-tailscale-ip>:3006/projects/mcp — NOT localhost, that's the container itself). With the egress lock installed, re-run it with ALLOW_HOST_TCP_PORTS=<port> to open this one path",
+          "required": false
+        },
+        {
+          "name": "ROOKERY_MCP_RESEARCH_URL",
+          "description": "Optional: the gateway's FILTERED tools mount for this bundle (http://<host-ip>:<port>/tools-rookery/mcp — requires a clients.json entry {\"rookery\":{\"allowSources\":[\"rookery\"]}} and a gateway restart). Exposes only this bundle's host tools: rookery_assemble_exp + rookery_search_openalex. Shares ROOKERY_MCP_CROW_TOKEN",
+          "required": false
+        },
+        {
+          "name": "ROOKERY_OPENALEX_MAILTO",
+          "description": "Optional email for OpenAlex's polite pool (faster rate limits for rookery_search_openalex). Host-side only",
+          "required": false
+        },
+        {
+          "name": "ROOKERY_MCP_CROW_TOKEN",
+          "description": "Crow local MCP token for the router endpoint (dashboard → Connect panel → local MCP token; shown once at generation). Required when ROOKERY_MCP_CROW_URL is set; rides the generated config's headers, never a child process env",
+          "required": false,
+          "secret": true
         }
       ],
       "ports": [
