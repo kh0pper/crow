@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block title %}Advocacy Tracker - Capstone Companion{% endblock %}
+
+{% block content %}
+<div class="advocacy-page">
+    <header class="page-header">
+        <div class="page-header-row">
+            <div>
+                <h1>Advocacy Communications Tracker</h1>
+                <p class="subtitle">Maestro Press / capstone advocacy correspondence — per-comm log (drafts, sends, replies, meetings).</p>
+            </div>
+        </div>
+    </header>
+
+    <div class="pir-stats">
+        <div class="stat-card"><div class="stat-value">{{ stats.total }}</div><div class="stat-label">Total</div></div>
+        <div class="stat-card"><div class="stat-value">{{ stats.drafted }}</div><div class="stat-label">Drafted</div></div>
+        <div class="stat-card"><div class="stat-value">{{ stats.sent }}</div><div class="stat-label">Sent</div></div>
+        <div class="stat-card"><div class="stat-value">{{ stats.awaiting }}</div><div class="stat-label">Awaiting Reply</div></div>
+        <div class="stat-card"><div class="stat-value">{{ stats.replied }}</div><div class="stat-label">Replied</div></div>
+        <div class="stat-card"><div class="stat-value">{{ stats.stalled }}</div><div class="stat-label">Stalled</div></div>
+    </div>
+
+    <form method="get" class="advocacy-filters">
+        <label>Status:
+            <select name="status" onchange="this.form.submit()">
+                <option value="">All</option>
+                {% for s in statuses %}
+                <option value="{{ s }}" {% if filter_status == s %}selected{% endif %}>{{ s }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>Phase:
+            <select name="phase" onchange="this.form.submit()">
+                <option value="">All</option>
+                {% for p in phases %}
+                <option value="{{ p }}" {% if filter_phase == p %}selected{% endif %}>{{ p }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>Org:
+            <select name="contact_org" onchange="this.form.submit()">
+                <option value="">All</option>
+                {% for o in orgs %}
+                <option value="{{ o }}" {% if filter_org == o %}selected{% endif %}>{{ o }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        {% if filter_status or filter_phase or filter_org %}
+        <a href="{{ request.url_for('advocacy_index') }}" class="btn btn-secondary">Clear filters</a>
+        {% endif %}
+    </form>
+
+    <table class="advocacy-table">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Contact</th>
+                <th>Org</th>
+                <th>Channel</th>
+                <th>Type</th>
+                <th>Subject / Ask / Response</th>
+                <th>From</th>
+                <th>Status</th>
+                <th>Phase</th>
+                <th>Thread</th>
+                <th>Follow-up</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in comms %}
+            <tr>
+                <td>{% if c.sent_date %}{{ c.sent_date.strftime("%Y-%m-%d") }}{% elif c.created_at %}{{ c.created_at.strftime("%Y-%m-%d") }}{% endif %}</td>
+                <td>{{ c.contact_name }}</td>
+                <td>{{ c.contact_org or "" }}</td>
+                <td>{{ c.channel }}</td>
+                <td>{{ c.comm_type }}</td>
+                <td>
+                    {% if c.subject %}<strong>{{ c.subject }}</strong>{% endif %}
+                    {% if c.ask %}<div class="ask-text"><em>Ask:</em> {{ c.ask }}</div>{% endif %}
+                    {% if c.response_summary %}<div class="response-text"><em>Response:</em> {{ c.response_summary }}</div>{% endif %}
+                    {% if c.status_notes %}<div class="status-notes-text"><em>Notes:</em> {{ c.status_notes }}</div>{% endif %}
+                </td>
+                <td class="sender-cell">{{ c.sender_account or "" }}</td>
+                <td><span class="status-badge status-{{ c.status }}">{{ c.status }}</span></td>
+                <td>{{ c.phase or "" }}</td>
+                <td>{% if c.thread_id %}<code class="thread-id">{{ c.thread_id }}</code>{% endif %}</td>
+                <td>{% if c.next_followup_date %}{{ c.next_followup_date.strftime("%Y-%m-%d") }}{% endif %}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="11" class="empty-row">No communications logged yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<style>
+.advocacy-page { padding: 1rem; }
+.advocacy-filters { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin: 1.5rem 0; padding: 1rem; background: var(--bg-secondary, #f8f9fa); border-radius: 0.5rem; border: 1px solid var(--border-color, #e5e7eb); }
+.advocacy-filters label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; }
+.advocacy-filters select { padding: 0.35rem 0.5rem; border: 1px solid var(--border-color, #ccc); border-radius: 0.25rem; }
+.advocacy-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.88rem; }
+.advocacy-table th { text-align: left; padding: 0.6rem 0.5rem; border-bottom: 2px solid var(--border-color, #ddd); background: var(--bg-secondary, #f5f5f5); position: sticky; top: 0; }
+.advocacy-table td { padding: 0.6rem 0.5rem; border-bottom: 1px solid var(--border-color, #ddd); vertical-align: top; }
+.advocacy-table tr:hover td { background: var(--bg-hover, #f9fafb); }
+.ask-text, .response-text, .status-notes-text { color: var(--text-secondary, #555); font-size: 0.82rem; margin-top: 0.25rem; line-height: 1.35; }
+.thread-id { font-size: 0.75rem; color: var(--text-secondary, #666); }
+.sender-cell { font-size: 0.82rem; color: var(--text-secondary, #555); }
+.empty-row { text-align: center; padding: 2rem; color: var(--text-secondary, #888); }
+.status-badge { padding: 0.2rem 0.5rem; border-radius: 0.25rem; font-size: 0.78rem; font-weight: 500; white-space: nowrap; }
+.status-drafted { background: #fef3c7; color: #92400e; }
+.status-sent { background: #d1fae5; color: #065f46; }
+.status-awaiting-reply { background: #dbeafe; color: #1e40af; }
+.status-replied { background: #e0e7ff; color: #3730a3; }
+.status-declined { background: #fee2e2; color: #991b1b; }
+.status-stalled { background: #f3f4f6; color: #6b7280; }
+.status-done { background: #d1fae5; color: #065f46; }
+.status-scheduled { background: #fef3c7; color: #92400e; }
+</style>
+{% endblock %}

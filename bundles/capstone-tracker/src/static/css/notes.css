@@ -1,0 +1,1454 @@
+/* Notes App - Browser & Editor Stylesheet */
+
+/* ========================================
+   1. Notes Browser Layout
+   ======================================== */
+
+.notes-page {
+    height: calc(100vh - 60px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.notes-layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    flex: 1;
+    overflow: hidden;
+}
+
+.notes-sidebar {
+    overflow-y: auto;
+    border-right: 1px solid var(--color-border);
+    background: var(--color-card);
+    display: flex;
+    flex-direction: column;
+}
+
+.notes-main {
+    overflow-y: auto;
+    padding: 1.5rem;
+}
+
+/* Mobile header — hidden on desktop */
+.notes-mobile-header {
+    display: none;
+}
+
+/* Close button inside sidebar header — hidden on desktop */
+.sidebar-close-btn {
+    display: none;
+}
+
+.sidebar-backdrop {
+    display: none;
+}
+
+@media (max-width: 768px) {
+    .notes-mobile-header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem 1rem;
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-card);
+        flex-shrink: 0;
+    }
+
+    .sidebar-toggle {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        border: none;
+        background: transparent;
+        color: var(--color-text);
+        cursor: pointer;
+        border-radius: var(--radius-sm);
+        transition: background var(--transition-fast);
+    }
+
+    .sidebar-toggle:hover {
+        background: var(--color-bg-secondary);
+    }
+
+    .notes-mobile-title {
+        font-weight: 600;
+        font-size: 1rem;
+        color: var(--color-text);
+    }
+
+    .notes-layout {
+        grid-template-columns: 1fr;
+    }
+
+    /* Sidebar header: row with close button + search on mobile */
+    .sidebar-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .sidebar-close-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        min-width: 40px;
+        border: none;
+        background: transparent;
+        color: var(--color-text);
+        cursor: pointer;
+        border-radius: var(--radius-sm);
+        transition: background var(--transition-fast);
+    }
+
+    .sidebar-close-btn:hover {
+        background: var(--color-bg-secondary);
+    }
+
+    /* Sidebar: slides in from left, covers mobile header */
+    .notes-sidebar {
+        position: fixed;
+        top: 60px;
+        left: 0;
+        bottom: 0;
+        width: 85%;
+        max-width: 320px;
+        z-index: 50;
+        border-right: none;
+        transform: translateX(-100%);
+        visibility: hidden;
+        transition: transform 0.3s ease, visibility 0.3s, box-shadow 0.3s ease;
+        box-shadow: none;
+    }
+
+    .notes-sidebar.open {
+        transform: translateX(0);
+        visibility: visible;
+        box-shadow: var(--shadow-lg);
+    }
+
+    /* Folder tree scrolls within the sidebar */
+    .notes-sidebar .folder-tree {
+        flex: 1;
+        overflow-y: auto;
+        min-height: 0;
+    }
+
+    /* Backdrop: fades in/out */
+    .sidebar-backdrop {
+        display: block;
+        position: fixed;
+        top: 60px;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.4);
+        z-index: 49;
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+        transition: opacity 0.3s ease, visibility 0.3s;
+    }
+
+    .sidebar-backdrop.active {
+        opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
+    }
+
+    .notes-main {
+        padding: 1rem;
+    }
+}
+
+/* ========================================
+   2. Sidebar Components
+   ======================================== */
+
+.sidebar-header {
+    padding: 1rem;
+    border-bottom: 1px solid var(--color-border);
+}
+
+.sidebar-header h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.notes-search {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-bg-secondary);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    outline: none;
+    transition: border-color var(--transition-fast);
+}
+
+.notes-search:focus {
+    border-color: var(--color-primary);
+}
+
+.notes-search::placeholder {
+    color: var(--color-text-muted);
+}
+
+.sidebar-actions {
+    display: flex;
+    flex-direction: row;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+}
+
+.btn-sm {
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+    background: var(--color-card);
+    color: var(--color-text);
+    cursor: pointer;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition-fast);
+}
+
+.btn-sm.btn-primary {
+    background: var(--color-primary);
+    color: #fff;
+    border-color: var(--color-primary);
+}
+
+.btn-sm.btn-primary:hover {
+    background: var(--color-primary-dark);
+    border-color: var(--color-primary-dark);
+}
+
+.folder-tree {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.folder-tree ul {
+    list-style: none;
+    margin: 0;
+    padding-left: 1.25rem;
+}
+
+.folder-item {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    color: var(--color-text);
+    transition: background var(--transition-fast);
+    min-height: 44px;
+    font-size: 0.875rem;
+    border-radius: 0;
+}
+
+.folder-item:hover {
+    background: var(--color-bg-secondary);
+}
+
+.folder-item.active {
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+    font-weight: 600;
+}
+
+.folder-item .folder-icon {
+    flex-shrink: 0;
+    width: 1.25rem;
+    text-align: center;
+}
+
+.folder-item .folder-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.folder-item .folder-count {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    background: var(--color-bg-secondary);
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    min-width: 1.5rem;
+    text-align: center;
+}
+
+.tag-filter {
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--color-border);
+    margin-top: auto;
+}
+
+.tag-filter h4 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-muted);
+}
+
+.tag-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.25rem 0.625rem;
+    font-size: 0.75rem;
+    border-radius: 999px;
+    background: var(--color-bg-secondary);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    border: 1px solid transparent;
+    min-height: 32px;
+}
+
+.tag-chip:hover {
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+}
+
+.tag-chip.active {
+    background: var(--color-primary);
+    color: #fff;
+}
+
+/* ========================================
+   3. Notes Grid
+   ======================================== */
+
+.notes-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 1rem;
+}
+
+.note-card {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    cursor: pointer;
+    transition: all var(--transition-base);
+}
+
+.note-card:hover {
+    box-shadow: var(--shadow-md);
+    border-color: var(--color-primary);
+    transform: translateY(-2px);
+}
+
+.note-card .note-thumbnail {
+    height: 150px;
+    background: var(--color-bg-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.note-card .note-thumbnail img,
+.note-card .note-thumbnail canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.note-card .note-thumbnail .placeholder-icon {
+    font-size: 2rem;
+    color: var(--color-text-muted);
+}
+
+.note-card .note-info {
+    padding: 0.75rem;
+}
+
+.note-card .note-title {
+    margin: 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.note-card .note-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+}
+
+.note-card .note-meta .note-tags {
+    display: flex;
+    gap: 0.25rem;
+    overflow: hidden;
+}
+
+.note-card .note-meta .note-date {
+    white-space: nowrap;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--color-text-muted);
+}
+
+.empty-state .empty-icon {
+    font-size: 3rem;
+    margin-bottom: 1rem;
+}
+
+.empty-state p {
+    margin: 0.25rem 0;
+}
+
+/* ========================================
+   4. Whiteboard Editor Layout
+   ======================================== */
+
+/* Lock the page — prevent any scroll/bounce/resize on the editor */
+html:has(.editor-page),
+html:has(.editor-page) body,
+html:has(.text-editor-page),
+html:has(.text-editor-page) body {
+    overflow: hidden;
+    position: fixed;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    overscroll-behavior: none;
+}
+
+.editor-page {
+    height: 100vh;
+    height: 100dvh; /* dynamic viewport height — excludes ChromeOS shelf/keyboard */
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    touch-action: none;
+    overscroll-behavior: none;
+}
+
+.editor-toolbar {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(var(--color-card-rgb, 255, 255, 255), 0.92);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--color-border);
+    z-index: 100;
+    padding: 0 1rem;
+    height: 48px;
+    flex-shrink: 0;
+}
+
+.toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.toolbar-center {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    padding: 0 1rem;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.btn-back {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+    color: var(--color-text-muted);
+    padding: 0.375rem;
+    border-radius: var(--radius-sm);
+    min-height: 36px;
+    min-width: 36px;
+    justify-content: center;
+    transition: color var(--transition-fast);
+    font-size: 1.125rem;
+}
+
+.btn-back:hover {
+    color: var(--color-primary);
+}
+
+.note-title-input {
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 1.1rem;
+    font-weight: 600;
+    font-family: var(--font-sans);
+    color: var(--color-text);
+    width: 100%;
+    padding: 0.25rem 0;
+    min-width: 0;
+}
+
+.note-title-input::placeholder {
+    color: var(--color-text-muted);
+}
+
+.save-status {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    transition: opacity var(--transition-base);
+    white-space: nowrap;
+}
+
+.save-status.saved {
+    color: var(--color-success);
+}
+
+.save-status.saving {
+    color: var(--color-warning);
+}
+
+.save-status.error {
+    color: var(--color-danger);
+}
+
+/* Undo/redo in top bar */
+.topbar-action {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+}
+
+.btn-kb-pill {
+    padding: 0.25rem 0.75rem;
+    font-size: 0.75rem;
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+    background: var(--color-card);
+    color: var(--color-text);
+    cursor: pointer;
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    transition: all var(--transition-fast);
+}
+
+.btn-kb-pill:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
+/* Editor body: side toolbar + canvas */
+.editor-body {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+}
+
+/* ========================================
+   5. Side Toolbar
+   ======================================== */
+
+.side-toolbar {
+    width: 48px;
+    flex-shrink: 0;
+    background: var(--color-card);
+    border-right: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4px 0;
+    gap: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    z-index: 10;
+}
+
+.toolbar-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    padding: 4px 0;
+    width: 100%;
+}
+
+.toolbar-group + .toolbar-group {
+    border-top: 1px solid var(--color-border);
+}
+
+.tool-btn {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    color: var(--color-text);
+    transition: all var(--transition-fast);
+}
+
+.tool-btn:hover {
+    background: var(--color-bg-secondary);
+}
+
+.tool-btn.active {
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+}
+
+.tool-btn[disabled] {
+    opacity: 0.3;
+    pointer-events: none;
+}
+
+/* Color grid: 2-column layout */
+.color-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px;
+    padding: 0 6px;
+}
+
+.color-swatch {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    padding: 0;
+    box-sizing: border-box;
+}
+
+.color-swatch:hover {
+    transform: scale(1.2);
+}
+
+.color-swatch.active {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 2px var(--color-primary);
+}
+
+/* Size buttons with dot indicators */
+.size-btn {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    color: var(--color-text);
+    transition: all var(--transition-fast);
+}
+
+.size-btn:hover {
+    background: var(--color-bg-secondary);
+}
+
+.size-btn.active {
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+}
+
+.size-dot {
+    display: block;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.size-dot.size-fine {
+    width: 4px;
+    height: 4px;
+}
+
+.size-dot.size-medium {
+    width: 8px;
+    height: 8px;
+}
+
+.size-dot.size-thick {
+    width: 14px;
+    height: 14px;
+}
+
+/* ========================================
+   6. Whiteboard Area
+   ======================================== */
+
+.whiteboard-area {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background: #ffffff;
+    touch-action: none;
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: auto;
+}
+
+.whiteboard-area canvas {
+    display: block;
+}
+
+/* Zoom indicator pill */
+.zoom-indicator {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    padding: 4px 12px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    background: rgba(var(--color-card-rgb, 255, 255, 255), 0.85);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+    user-select: none;
+    z-index: 10;
+    transition: all var(--transition-fast);
+}
+
+.zoom-indicator:hover {
+    background: var(--color-card);
+    color: var(--color-text);
+}
+
+/* Cursor styles per tool */
+.whiteboard-area[data-tool="pen"] .upper-canvas,
+.whiteboard-area[data-tool="highlighter"] .upper-canvas,
+.whiteboard-area[data-tool="shape"] .upper-canvas {
+    cursor: crosshair !important;
+}
+
+.whiteboard-area[data-tool="text"] .upper-canvas {
+    cursor: text !important;
+}
+
+.whiteboard-area[data-tool="select"] .upper-canvas {
+    cursor: default !important;
+}
+
+.whiteboard-area[data-tool="eraser"] .upper-canvas {
+    cursor: crosshair !important;
+}
+
+.whiteboard-area.panning .upper-canvas {
+    cursor: grab !important;
+}
+
+.whiteboard-area.panning:active .upper-canvas {
+    cursor: grabbing !important;
+}
+
+/* ========================================
+   7. Tag Chips in Editor
+   ======================================== */
+
+.tag-chips {
+    display: flex;
+    flex-direction: row;
+    gap: 0.25rem;
+    flex-wrap: nowrap;
+    align-items: center;
+    overflow: hidden;
+}
+
+.tag-chip.removable {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.25rem;
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+
+.tag-remove {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    padding: 0;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    transition: color var(--transition-fast);
+}
+
+.tag-remove:hover {
+    color: var(--color-danger);
+}
+
+.tag-add-btn {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px dashed var(--color-border);
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+}
+
+.tag-add-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
+/* ========================================
+   8. Dropdown Menu in Editor
+   ======================================== */
+
+.editor-toolbar .dropdown {
+    position: relative;
+}
+
+.dropdown-toggle {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text);
+    padding: 0.375rem;
+    border-radius: var(--radius-sm);
+    min-height: 36px;
+    min-width: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.125rem;
+    transition: background var(--transition-fast);
+}
+
+.dropdown-toggle:hover {
+    background: var(--color-bg-secondary);
+}
+
+.dropdown-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    background: var(--color-card);
+    box-shadow: var(--shadow-lg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    min-width: 200px;
+    display: none;
+    z-index: 200;
+    padding: 0.25rem 0;
+    margin-top: 0.25rem;
+    list-style: none;
+}
+
+.dropdown:hover .dropdown-menu,
+.dropdown-menu.show {
+    display: block;
+}
+
+.dropdown-menu li a {
+    display: flex;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    color: var(--color-text);
+    text-decoration: none;
+    font-size: 0.875rem;
+    transition: background var(--transition-fast);
+    min-height: 40px;
+    white-space: nowrap;
+}
+
+.dropdown-menu li a:hover {
+    background: var(--color-bg-secondary);
+}
+
+.dropdown-menu li a.danger {
+    color: var(--color-danger);
+}
+
+.dropdown-menu li a.danger:hover {
+    background: rgba(229, 62, 62, 0.1);
+}
+
+/* ========================================
+   9. Text Editor Layout
+   ======================================== */
+
+.text-editor-page {
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    touch-action: auto;
+}
+
+.text-editor-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.text-editor-textarea {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    border: none;
+    outline: none;
+    resize: none;
+    padding: 1.5rem 2rem;
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.9375rem;
+    line-height: 1.7;
+    color: var(--color-text);
+    background: var(--color-bg);
+    overflow-y: auto;
+    touch-action: auto;
+    tab-size: 4;
+}
+
+.text-editor-textarea::placeholder {
+    color: var(--color-text-muted);
+}
+
+.text-editor-preview {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem 2rem;
+    background: var(--color-bg);
+}
+
+/* Editor tab toggle */
+.editor-tabs {
+    display: flex;
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-sm);
+    padding: 2px;
+    gap: 2px;
+}
+
+.editor-tab {
+    padding: 0.25rem 0.75rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    min-height: 28px;
+}
+
+.editor-tab:hover {
+    color: var(--color-text);
+}
+
+.editor-tab.active {
+    background: var(--color-card);
+    color: var(--color-text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* Markdown body rendering */
+.markdown-body {
+    color: var(--color-text);
+    line-height: 1.7;
+    max-width: 72ch;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+.markdown-body h1 { font-size: 1.5rem; }
+.markdown-body h2 { font-size: 1.3rem; }
+.markdown-body h3 { font-size: 1.1rem; }
+.markdown-body h4 { font-size: 1rem; }
+
+.markdown-body p {
+    margin: 0.75em 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+    margin: 0.75em 0;
+    padding-left: 1.5em;
+}
+
+.markdown-body li {
+    margin: 0.25em 0;
+}
+
+.markdown-body a {
+    color: var(--color-primary);
+    text-decoration: underline;
+}
+
+.markdown-body code {
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    font-size: 0.875em;
+    background: var(--color-bg-secondary);
+    padding: 0.125em 0.375em;
+    border-radius: var(--radius-sm);
+}
+
+.markdown-body pre {
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    overflow-x: auto;
+    margin: 1em 0;
+}
+
+.markdown-body pre code {
+    background: transparent;
+    padding: 0;
+}
+
+.markdown-body blockquote {
+    border-left: 3px solid var(--color-primary);
+    margin: 1em 0;
+    padding: 0.5em 1em;
+    color: var(--color-text-muted);
+}
+
+.markdown-body hr {
+    border: none;
+    border-top: 1px solid var(--color-border);
+    margin: 1.5em 0;
+}
+
+.markdown-body strong {
+    font-weight: 600;
+}
+
+/* Text note thumbnail in browser */
+.note-card-thumbnail.text-note-thumb {
+    padding: 0.75rem;
+    font-size: 0.6875rem;
+    line-height: 1.4;
+    color: var(--color-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 6;
+    -webkit-box-orient: vertical;
+    font-family: var(--font-sans);
+    text-align: left;
+    align-items: flex-start;
+}
+
+@media (max-width: 768px) {
+    .text-editor-textarea {
+        padding: 1rem;
+        font-size: 1rem;
+    }
+
+    .text-editor-preview {
+        padding: 1rem;
+    }
+
+    .toolbar-center {
+        display: none;
+    }
+}
+
+/* ========================================
+   10. Note TTS Player
+   ======================================== */
+
+/* TTS pane */
+.note-tts-pane {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem 2rem 5rem;
+    background: var(--color-bg);
+}
+
+.note-tts-content {
+    max-width: 680px;
+    margin: 0 auto;
+    line-height: 1.8;
+    color: var(--color-text);
+    font-size: 0.9375rem;
+}
+
+.note-tts-para {
+    margin: 0.75rem 0;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius);
+    transition: background var(--transition-fast);
+}
+
+.note-tts-para.playing {
+    background: var(--color-primary-light);
+}
+
+.note-tts-para .word {
+    transition: background 0.1s, color 0.1s;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+.note-tts-para .word.active {
+    background: var(--color-primary);
+    color: #fff;
+}
+
+/* Audio bar */
+.note-tts-audio-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--color-card);
+    border-top: 1px solid var(--color-border);
+    box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.08);
+    z-index: 200;
+    padding: 0.5rem 1rem;
+}
+
+.note-tts-audio-inner {
+    max-width: 900px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.note-tts-transport {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+}
+
+.note-tts-btn {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    color: var(--color-text);
+    cursor: pointer;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    transition: background var(--transition-fast);
+}
+
+.note-tts-btn:hover {
+    background: var(--color-bg-secondary);
+}
+
+.note-tts-btn-play {
+    width: 40px;
+    height: 40px;
+    font-size: 1rem;
+    background: var(--color-primary);
+    color: #fff;
+}
+
+.note-tts-btn-play:hover {
+    background: var(--color-primary-dark);
+}
+
+.note-tts-progress-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.note-tts-time {
+    font-size: 0.6875rem;
+    color: var(--color-text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    min-width: 2.5rem;
+    text-align: center;
+}
+
+.note-tts-progress-bar {
+    flex: 1;
+    height: 4px;
+    background: var(--color-bg-secondary);
+    border-radius: 2px;
+    cursor: pointer;
+    position: relative;
+    min-width: 60px;
+}
+
+.note-tts-progress-fill {
+    height: 100%;
+    background: var(--color-primary);
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.1s linear;
+}
+
+.note-tts-para-indicator {
+    font-size: 0.6875rem;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.note-tts-speed-btn {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    border: 1px solid var(--color-border);
+    background: transparent;
+    color: var(--color-text);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+    min-height: 28px;
+    transition: all var(--transition-fast);
+}
+
+.note-tts-speed-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
+.note-tts-voice-select {
+    font-size: 0.6875rem;
+    padding: 0.25rem 0.375rem;
+    border: 1px solid var(--color-border);
+    background: var(--color-card);
+    color: var(--color-text);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    min-height: 28px;
+    max-width: 120px;
+}
+
+/* Responsive: hide progress on mobile */
+@media (max-width: 600px) {
+    .note-tts-progress-wrap {
+        display: none;
+    }
+
+    .note-tts-pane {
+        padding: 1rem 1rem 5rem;
+    }
+}
+
+/* ========================================
+   11. Dark Mode Overrides
+   ======================================== */
+
+[data-theme="dark"] .text-editor-textarea {
+    background: var(--color-bg);
+    color: var(--color-text);
+}
+
+[data-theme="dark"] .text-editor-preview {
+    background: var(--color-bg);
+}
+
+[data-theme="dark"] .markdown-body code {
+    background: var(--color-bg-secondary);
+}
+
+[data-theme="dark"] .markdown-body pre {
+    background: var(--color-bg-secondary);
+    border-color: var(--color-border);
+}
+
+[data-theme="dark"] .note-card-thumbnail.text-note-thumb {
+    color: var(--color-text-muted);
+}
+
+[data-theme="dark"] .whiteboard-area {
+    background: #1e1e2e;
+}
+
+[data-theme="dark"] .side-toolbar {
+    background: var(--color-card);
+    border-right-color: var(--color-border);
+}
+
+[data-theme="dark"] .editor-toolbar {
+    background: rgba(30, 30, 46, 0.92);
+    border-bottom-color: var(--color-border);
+}
+
+[data-theme="dark"] .notes-sidebar {
+    background: var(--color-card);
+}
+
+[data-theme="dark"] .color-swatch.active {
+    border-color: var(--color-primary);
+}
+
+[data-theme="dark"] .notes-search {
+    background: var(--color-bg);
+    border-color: var(--color-border);
+    color: var(--color-text);
+}
+
+[data-theme="dark"] .note-title-input {
+    color: var(--color-text);
+}
+
+[data-theme="dark"] .note-card {
+    background: var(--color-card);
+    border-color: var(--color-border);
+}
+
+[data-theme="dark"] .note-card .note-thumbnail {
+    background: var(--color-bg);
+}
+
+[data-theme="dark"] .folder-item .folder-count {
+    background: var(--color-bg);
+}
+
+[data-theme="dark"] .zoom-indicator {
+    background: rgba(30, 30, 46, 0.85);
+    border-color: var(--color-border);
+}
+
+[data-theme="dark"] .note-tts-pane {
+    background: var(--color-bg);
+}
+
+[data-theme="dark"] .note-tts-audio-bar {
+    background: var(--color-card);
+    border-top-color: var(--color-border);
+    box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme="dark"] .note-tts-btn {
+    color: var(--color-text);
+}
+
+[data-theme="dark"] .note-tts-progress-bar {
+    background: var(--color-bg);
+}
+
+[data-theme="dark"] .note-tts-voice-select {
+    background: var(--color-bg);
+    border-color: var(--color-border);
+    color: var(--color-text);
+}
+
+[data-theme="dark"] .note-tts-para.playing {
+    background: rgba(99, 102, 241, 0.15);
+}
+
+[data-theme="dark"] .note-tts-para .word.active {
+    background: var(--color-primary);
+    color: #fff;
+}
+
+/* ========================================
+   12. Responsive: Side Toolbar → Bottom Bar
+   ======================================== */
+
+@media (max-width: 768px) {
+    .editor-body {
+        flex-direction: column-reverse;
+    }
+
+    .side-toolbar {
+        width: 100%;
+        height: 48px;
+        flex-direction: row;
+        border-right: none;
+        border-top: 1px solid var(--color-border);
+        padding: 0 4px;
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
+
+    .toolbar-group {
+        flex-direction: row;
+        padding: 0 4px;
+    }
+
+    .toolbar-group + .toolbar-group {
+        border-top: none;
+        border-left: 1px solid var(--color-border);
+    }
+
+    .color-grid {
+        display: flex;
+        flex-direction: row;
+        gap: 2px;
+        padding: 0;
+    }
+
+    .toolbar-center {
+        display: none;
+    }
+
+    .note-title-input {
+        font-size: 1rem;
+    }
+}

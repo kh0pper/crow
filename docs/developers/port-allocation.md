@@ -70,6 +70,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8085 | 127.0.0.1 | miniflux (existing) | existing |
 | 8086 | 127.0.0.1 | shiori (existing) | existing |
 | 8088 | 127.0.0.1 | trilium (existing) | existing |
+| 8090 | 127.0.0.1 | capstone-tracker | shipped |
 | 8091 | 127.0.0.1 | crowdsec (LAPI) | MVP PR 4 |
 | 8092 | 127.0.0.1 | stirling-pdf | MVP PR 1 |
 | 8094 | 127.0.0.1 | gatus | MVP PR 2 |

@@ -1,0 +1,213 @@
+<form id="pir-form"
+    hx-ext="json-enc"
+    {% if pir %}
+    hx-put="{{ request.url_for('pir_update', pir_id=pir.id) }}"
+    {% else %}
+    hx-post="{{ request.url_for('pir_create') }}"
+    {% endif %}
+    hx-target="#modal-body"
+    hx-swap="innerHTML">
+
+    <div class="form-row">
+        <div class="form-group">
+            <label for="pir_number">PIR Number *</label>
+            <input type="text" id="pir_number" name="pir_number"
+                value="{{ pir.pir_number if pir else '' }}"
+                required placeholder="e.g., 1, 3F, P1"
+                class="form-input">
+        </div>
+        <div class="form-group">
+            <label for="priority">Priority</label>
+            <select id="priority" name="priority" class="form-input">
+                <option value="HIGH" {% if pir and pir.priority == 'HIGH' %}selected{% endif %}>HIGH</option>
+                <option value="MED-HI" {% if pir and pir.priority == 'MED-HI' %}selected{% endif %}>MED-HI</option>
+                <option value="MEDIUM" {% if not pir or pir.priority == 'MEDIUM' %}selected{% endif %}>MEDIUM</option>
+                <option value="LOW" {% if pir and pir.priority == 'LOW' %}selected{% endif %}>LOW</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label for="label">Label *</label>
+        <input type="text" id="label" name="label"
+            value="{{ pir.label if pir else '' }}"
+            required placeholder="e.g., Cleveland ISD -- Bond Data"
+            class="form-input">
+    </div>
+
+    <div class="form-row">
+        <div class="form-group">
+            <label for="recipient">Recipient *</label>
+            <input type="text" id="recipient" name="recipient"
+                value="{{ pir.recipient if pir else '' }}"
+                required placeholder="e.g., Cleveland ISD"
+                class="form-input">
+        </div>
+        <div class="form-group">
+            <label for="recipient_email">Email</label>
+            <input type="email" id="recipient_email" name="recipient_email"
+                value="{{ pir.recipient_email if pir and pir.recipient_email else '' }}"
+                placeholder="pir@example.gov"
+                class="form-input">
+        </div>
+    </div>
+
+    <div class="form-row-3">
+        <div class="form-group">
+            <label for="tea_id">TEA ID</label>
+            <input type="text" id="tea_id" name="tea_id"
+                value="{{ pir.tea_id if pir and pir.tea_id else '' }}"
+                placeholder="e.g., 146901"
+                class="form-input">
+        </div>
+        <div class="form-group">
+            <label for="reference_number">Reference #</label>
+            <input type="text" id="reference_number" name="reference_number"
+                value="{{ pir.reference_number if pir and pir.reference_number else '' }}"
+                placeholder="Assigned by recipient"
+                class="form-input">
+        </div>
+        <div class="form-group">
+            <label for="note_id">Linked Note ID</label>
+            <input type="number" id="note_id" name="note_id"
+                value="{{ pir.note_id if pir and pir.note_id else '' }}"
+                placeholder="Note #"
+                class="form-input">
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label>Sub-Questions</label>
+        <div class="checkbox-group">
+            <label>
+                <input type="checkbox" name="sq1" value="true"
+                    {% if pir and pir.sq1 %}checked{% endif %}
+                    onchange="this.value = this.checked ? 'true' : 'false'; if(!this.checked) this.removeAttribute('name')">
+                SQ1: Charter/ISD
+            </label>
+            <label>
+                <input type="checkbox" name="sq2" value="true"
+                    {% if pir and pir.sq2 %}checked{% endif %}
+                    onchange="this.value = this.checked ? 'true' : 'false'; if(!this.checked) this.removeAttribute('name')">
+                SQ2: Bond
+            </label>
+            <label>
+                <input type="checkbox" name="sq3" value="true"
+                    {% if pir and pir.sq3 %}checked{% endif %}
+                    onchange="this.value = this.checked ? 'true' : 'false'; if(!this.checked) this.removeAttribute('name')">
+                SQ3: ARC
+            </label>
+            <label>
+                <input type="checkbox" name="sq4" value="true"
+                    {% if pir and pir.sq4 %}checked{% endif %}
+                    onchange="this.value = this.checked ? 'true' : 'false'; if(!this.checked) this.removeAttribute('name')">
+                SQ4: TIA
+            </label>
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label for="pir-status">Status</label>
+        <select id="pir-status" name="status" class="form-input">
+            <option value="pending" {% if not pir or pir.status == 'pending' %}selected{% endif %}>Pending</option>
+            <option value="clarification" {% if pir and pir.status == 'clarification' %}selected{% endif %}>Clarification</option>
+            <option value="responded" {% if pir and pir.status == 'responded' %}selected{% endif %}>Responded</option>
+            <option value="processing" {% if pir and pir.status == 'processing' %}selected{% endif %}>Processing</option>
+            <option value="partial" {% if pir and pir.status == 'partial' %}selected{% endif %}>Partial</option>
+            <option value="received" {% if pir and pir.status == 'received' %}selected{% endif %}>Received</option>
+            <option value="withdrawn" {% if pir and pir.status == 'withdrawn' %}selected{% endif %}>Withdrawn</option>
+        </select>
+    </div>
+
+    <div class="form-row-3">
+        <div class="form-group">
+            <label for="filed_date">Filed Date *</label>
+            <input type="date" id="filed_date" name="filed_date"
+                value="{{ pir.filed_date.strftime('%Y-%m-%d') if pir else '' }}"
+                required class="form-input">
+        </div>
+        <div class="form-group">
+            <label for="response_due">Response Due *</label>
+            <input type="date" id="response_due" name="response_due"
+                value="{{ pir.response_due.strftime('%Y-%m-%d') if pir else '' }}"
+                required class="form-input">
+        </div>
+        <div class="form-group">
+            <label for="received_date">Received Date</label>
+            <input type="date" id="received_date" name="received_date"
+                value="{{ pir.received_date.strftime('%Y-%m-%d') if pir and pir.received_date else '' }}"
+                class="form-input">
+        </div>
+    </div>
+
+    <div class="form-group">
+        <label for="description">Description</label>
+        <textarea id="description" name="description" rows="2"
+            placeholder="What was requested"
+            class="form-input">{{ pir.description if pir and pir.description else '' }}</textarea>
+    </div>
+
+    <div class="form-group">
+        <label for="status_notes">Status Notes</label>
+        <textarea id="status_notes" name="status_notes" rows="2"
+            placeholder="Latest update"
+            class="form-input">{{ pir.status_notes if pir and pir.status_notes else '' }}</textarea>
+    </div>
+
+    <div class="form-group">
+        <label for="action_needed">Action Needed (our next step)</label>
+        <input type="text" id="action_needed" name="action_needed"
+            value="{{ pir.action_needed if pir and pir.action_needed else '' }}"
+            placeholder="e.g., Mail $23.50 money order to Cleveland ISD"
+            class="form-input">
+    </div>
+
+    <div class="form-group">
+        <label for="next_followup_date">Next Follow-up Date</label>
+        <input type="date" id="next_followup_date" name="next_followup_date"
+            value="{{ pir.next_followup_date.strftime('%Y-%m-%d') if pir and pir.next_followup_date else '' }}"
+            class="form-input">
+    </div>
+
+    <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        {% if pir %}
+        <button type="button" class="btn btn-danger"
+            hx-delete="{{ request.url_for('pir_delete', pir_id=pir.id) }}"
+            hx-target="#pir-row-{{ pir.id }}"
+            hx-swap="outerHTML"
+            hx-confirm="Delete this PIR?"
+            onclick="closeModal()">Delete</button>
+        {% endif %}
+        <button type="submit" class="btn btn-primary">
+            {% if pir %}Save Changes{% else %}Add PIR{% endif %}
+        </button>
+    </div>
+</form>
+
+<script>
+// Handle checkbox serialization for json-enc
+document.getElementById('pir-form').addEventListener('htmx:configRequest', function(evt) {
+    const checkboxes = ['sq1', 'sq2', 'sq3', 'sq4'];
+    checkboxes.forEach(function(name) {
+        const cb = document.querySelector('#pir-form [name="' + name + '"]');
+        if (cb) {
+            evt.detail.parameters[name] = cb.checked;
+        } else {
+            evt.detail.parameters[name] = false;
+        }
+    });
+    // Convert note_id to int or null
+    if (evt.detail.parameters.note_id === '') {
+        evt.detail.parameters.note_id = null;
+    } else if (evt.detail.parameters.note_id) {
+        evt.detail.parameters.note_id = parseInt(evt.detail.parameters.note_id);
+    }
+    // Convert empty optional strings to empty string (backend handles None)
+    ['recipient_email', 'tea_id', 'reference_number', 'received_date', 'description', 'status_notes', 'action_needed', 'next_followup_date'].forEach(function(f) {
+        if (!(f in evt.detail.parameters)) {
+            evt.detail.parameters[f] = '';
+        }
+    });
+});
+</script>

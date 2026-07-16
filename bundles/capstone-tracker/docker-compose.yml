@@ -1,0 +1,31 @@
+services:
+  capstone-tracker:
+    build: .
+    container_name: crow-capstone-tracker
+    env_file:
+      - ${HOME}/.crow/env/capstone-tracker.env
+    environment:
+      EREADER_KB_DB: /data/external/kb.db
+      EREADER_RES_DB: /data/external/research.db
+      EREADER_CACHE: /data/external/cache
+    volumes:
+      - ${HOME}/.crow/data/capstone-tracker:/data
+      # E-Reader full-text + KB snapshot, rsynced daily from grackle by
+      # ~/lab-maintenance/scripts/sync-kb-to-crow.sh — read-only mount.
+      - ${HOME}/.crow/data/capstone-tracker/external:/data/external:ro
+      # Generated TTS audio + extracted PDF images cache (persistent).
+      # Bind-mounted onto the image's static dir so /static/audio/* and
+      # /static/images/* URLs serve them without code changes.
+      - ${HOME}/.crow/data/capstone-tracker/ereader-cache/audio:/app/src/static/audio
+      - ${HOME}/.crow/data/capstone-tracker/ereader-cache/images:/app/src/static/images
+    ports:
+      - "127.0.0.1:8090:8000"
+    init: true
+    mem_limit: 2g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s

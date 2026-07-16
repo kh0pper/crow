@@ -1,0 +1,1224 @@
+{% extends "base.html" %}
+
+{% block title %}
+{% if mode == 'reader' and content_type == 'textbook' %}
+Ch. {{ chapter.chapter_number }}: {{ chapter.title }} - E-Reader
+{% elif mode == 'reader' and content_type == 'document' %}
+Sec. {{ section.section_number }}: {{ section.title }} - E-Reader
+{% elif mode == 'reader' and content_type == 'source' %}
+{{ source.title|truncate(40) }} - E-Reader
+{% elif mode == 'document_toc' %}
+{{ document.title }} - E-Reader
+{% elif mode == 'toc' %}
+{{ textbook.title }} - E-Reader
+{% else %}
+E-Reader Library - Capstone Companion
+{% endif %}
+{% endblock %}
+
+{% block head %}
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+/* ── E-Reader Scoped Styles ────────────────────────────────── */
+
+/* Library Mode */
+.er-library { max-width: 960px; margin: 0 auto; }
+
+.er-library-header {
+    margin-bottom: 2rem;
+}
+.er-library-header h1 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+.er-library-header .subtitle {
+    color: var(--color-text-muted);
+    margin-top: 0.25rem;
+}
+
+.er-section-title {
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+    margin: 2rem 0 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--color-border);
+}
+
+.er-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+.er-book-card {
+    display: flex;
+    flex-direction: column;
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: 1.25rem;
+    transition: all var(--transition-base);
+    text-decoration: none;
+    color: var(--color-text);
+    position: relative;
+    overflow: hidden;
+}
+.er-book-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+    background: var(--color-primary);
+    opacity: 0;
+    transition: opacity var(--transition-base);
+}
+.er-book-card:hover {
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow-md);
+    transform: translateY(-2px);
+    text-decoration: none;
+    color: var(--color-text);
+}
+.er-book-card:hover::before { opacity: 1; }
+
+.er-book-card h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0 0 0.5rem;
+    line-height: 1.35;
+}
+.er-book-card .er-meta {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-top: auto;
+    padding-top: 0.75rem;
+}
+.er-book-card .er-meta span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+/* Tag filter bar */
+.er-tag-filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin-bottom: 1.5rem;
+    padding: 0.75rem;
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+}
+.er-tag-filter-bar .tag-chip {
+    cursor: pointer;
+    border: none;
+    font-size: 0.8rem;
+}
+.er-tag-count {
+    font-size: 0.7rem;
+    opacity: 0.6;
+    margin-left: 0.25rem;
+}
+.er-clear-filters {
+    background: var(--color-danger, #dc3545) !important;
+    color: #fff !important;
+}
+
+/* Type badges */
+.er-type-badge {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.125rem 0.5rem;
+    border-radius: 99px;
+    background: var(--color-border);
+    color: var(--color-text-muted);
+    margin-bottom: 0.375rem;
+}
+.er-type-badge.textbook { background: #e3f2fd; color: #1565c0; }
+.er-type-badge.document { background: #f3e5f5; color: #7b1fa2; }
+.er-type-badge.source { background: #e8f5e9; color: #2e7d32; }
+[data-theme="dark"] .er-type-badge.textbook { background: #1a3a5c; color: #90caf9; }
+[data-theme="dark"] .er-type-badge.document { background: #3a1a4c; color: #ce93d8; }
+[data-theme="dark"] .er-type-badge.source { background: #1a3c2a; color: #a5d6a7; }
+
+/* Pin button */
+.er-pin-btn {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    background: none;
+    border: none;
+    font-size: 1rem;
+    cursor: pointer;
+    opacity: 0.4;
+    transition: opacity 0.2s;
+    padding: 0.25rem;
+    line-height: 1;
+    z-index: 2;
+}
+.er-pin-btn:hover { opacity: 1; }
+.er-pin-btn.pinned { opacity: 1; }
+
+/* Card tags */
+.er-card-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-top: 0.5rem;
+}
+.er-card-tags .tag-chip {
+    font-size: 0.7rem;
+    padding: 0.125rem 0.375rem;
+    min-height: auto;
+    cursor: default;
+}
+
+/* Pinned section */
+.er-pinned-section .er-section-title {
+    margin-top: 0;
+}
+
+/* Continue reading section */
+.er-continue-section {
+    margin-bottom: 1.5rem;
+}
+.er-continue-section h2 {
+    margin: 0 0 0.75rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+}
+.er-continue-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.er-continue-card {
+    background: var(--color-primary-light);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius-lg);
+    padding: 1rem 1.25rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    cursor: pointer;
+    transition: all var(--transition-base);
+    position: relative;
+}
+.er-continue-card:hover {
+    box-shadow: var(--shadow-md);
+}
+.er-continue-card .er-continue-icon {
+    font-size: 1.5rem;
+    flex-shrink: 0;
+}
+.er-continue-card .er-continue-info {
+    flex: 1;
+    min-width: 0;
+}
+.er-continue-card .er-continue-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.er-continue-card .er-continue-detail {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    margin-top: 0.15rem;
+}
+.er-continue-remove {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 1.2rem;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+    padding: 0;
+    line-height: 1;
+}
+.er-continue-remove:hover {
+    opacity: 1;
+    color: var(--color-danger, #dc3545);
+}
+
+/* ── TOC Mode ────────────────────────────────────────────── */
+.er-toc { max-width: 720px; margin: 0 auto; }
+
+.er-toc-header {
+    margin-bottom: 1.5rem;
+}
+.er-toc-header h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.er-chapter-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.er-chapter-item {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.875rem 1rem;
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    text-decoration: none;
+    color: var(--color-text);
+    transition: all var(--transition-base);
+}
+.er-chapter-item:hover {
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow);
+    text-decoration: none;
+    color: var(--color-text);
+}
+.er-chapter-item.no-content {
+    opacity: 0.5;
+    pointer-events: none;
+}
+.er-chapter-num {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--color-primary);
+    min-width: 2.5rem;
+    text-align: center;
+    flex-shrink: 0;
+}
+.er-chapter-title {
+    flex: 1;
+    font-weight: 500;
+    font-size: 0.95rem;
+}
+.er-chapter-words {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+}
+
+/* ── Reader Mode ─────────────────────────────────────────── */
+.er-reader-layout {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 0;
+    min-height: calc(100vh - 160px);
+    max-width: 1100px;
+    margin: -2rem auto 0; /* pull up into container padding */
+    padding: 0;
+}
+
+/* Sidebar */
+.er-sidebar {
+    background: var(--color-card);
+    border-right: 1px solid var(--color-border);
+    padding: 1.25rem 0;
+    overflow-y: auto;
+    max-height: calc(100vh - 160px);
+    position: sticky;
+    top: 52px; /* below navbar */
+}
+.er-sidebar-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+    padding: 0 1rem 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+    margin-bottom: 0.5rem;
+}
+.er-sidebar-item {
+    display: block;
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    text-decoration: none;
+    border-left: 3px solid transparent;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.er-sidebar-item:hover {
+    color: var(--color-text);
+    background: var(--color-primary-light);
+    text-decoration: none;
+}
+.er-sidebar-item.active {
+    color: var(--color-primary);
+    border-left-color: var(--color-primary);
+    font-weight: 600;
+    background: var(--color-primary-light);
+}
+.er-sidebar-item.no-content {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+/* Reading pane */
+.er-reading-pane {
+    padding: 2rem 2.5rem 8rem; /* extra bottom for audio bar */
+    overflow-y: auto;
+    max-height: calc(100vh - 160px);
+    scroll-behavior: smooth;
+}
+.er-reading-header {
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--color-border);
+}
+.er-reading-header .breadcrumb {
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    margin-bottom: 0.5rem;
+}
+.er-reading-header .breadcrumb a {
+    color: var(--color-text-muted);
+}
+.er-reading-header h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.3;
+    margin: 0;
+}
+
+/* Reading tags in reader header */
+.er-reading-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin-top: 0.75rem;
+    align-items: center;
+}
+.er-reading-tags .tag-chip {
+    font-size: 0.8rem;
+}
+.er-reading-tags .tag-remove {
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0 0 0 0.25rem;
+    line-height: 1;
+    opacity: 0.6;
+}
+.er-reading-tags .tag-remove:hover { opacity: 1; }
+.er-add-tag-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px dashed var(--color-border);
+    background: none;
+    color: var(--color-text-muted);
+    font-size: 1.1rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition-fast);
+}
+.er-add-tag-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+    background: var(--color-primary-light);
+}
+
+/* Paragraph content */
+.er-content {
+    max-width: 680px;
+    font-size: 1.05rem;
+    line-height: 1.8;
+    color: var(--color-text);
+}
+.er-para {
+    margin-bottom: 1.25rem;
+    padding: 0.25rem 0.375rem;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+}
+.er-para.playing {
+    background: var(--color-primary-light);
+}
+
+/* Word highlighting */
+.er-para .word {
+    transition: background 0.08s ease, color 0.08s ease;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+.er-para .word.active {
+    background: var(--color-primary);
+    color: white;
+    border-radius: 3px;
+    padding: 1px 2px;
+}
+
+/* Table paragraphs */
+.er-para.er-table {
+    overflow-x: auto;
+    padding: 0.5rem 0;
+    margin-bottom: 1.5rem;
+}
+.er-table-content table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+.er-table-content th,
+.er-table-content td {
+    border: 1px solid var(--color-border);
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    vertical-align: top;
+}
+.er-table-content th {
+    background: var(--color-card);
+    font-weight: 600;
+}
+.er-table-content tr:nth-child(even) td {
+    background: rgba(0, 0, 0, 0.02);
+}
+[data-theme="dark"] .er-table-content tr:nth-child(even) td {
+    background: rgba(255, 255, 255, 0.03);
+}
+/* Image paragraphs */
+.er-para.er-image { text-align: center; padding: 1rem 0; margin-bottom: 1.5rem; }
+.er-image-content img {
+    max-width: 100%; height: auto;
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+}
+
+@media (max-width: 768px) {
+    .er-para.er-table {
+        margin-left: -0.5rem;
+        margin-right: -0.5rem;
+    }
+    .er-table-content table {
+        min-width: 500px;
+    }
+}
+
+/* Resume banner in reader */
+.er-resume-banner {
+    display: none; /* shown by JS */
+    background: var(--color-primary-light);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem;
+    margin-bottom: 1.5rem;
+    font-size: 0.85rem;
+    align-items: center;
+    gap: 0.75rem;
+}
+.er-resume-banner button {
+    background: var(--color-primary);
+    color: white;
+    border: none;
+    padding: 0.375rem 0.875rem;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 500;
+    white-space: nowrap;
+}
+.er-resume-banner button:hover {
+    background: var(--color-primary-dark);
+}
+.er-resume-dismiss {
+    background: none !important;
+    color: var(--color-text-muted) !important;
+    padding: 0.25rem !important;
+    font-size: 1rem !important;
+}
+
+/* ── Audio Controls Bar ──────────────────────────────────── */
+.er-audio-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--color-card);
+    border-top: 1px solid var(--color-border);
+    box-shadow: 0 -2px 12px rgba(0,0,0,0.08);
+    z-index: 90;
+    padding: 0.625rem 1.25rem;
+    display: none; /* shown when in reader mode */
+}
+.er-audio-bar.visible { display: block; }
+
+.er-audio-inner {
+    max-width: 900px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+/* Transport buttons */
+.er-transport {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+}
+.er-btn {
+    background: none;
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition-fast);
+    font-size: 0.9rem;
+    padding: 0;
+}
+.er-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+    background: var(--color-primary-light);
+}
+.er-btn-play {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    color: white;
+    border: none;
+    font-size: 1.1rem;
+}
+.er-btn-play:hover {
+    background: var(--color-primary-dark);
+    color: white;
+}
+
+/* Progress bar */
+.er-progress-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+.er-progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--color-border);
+    border-radius: 3px;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+}
+.er-progress-fill {
+    height: 100%;
+    background: var(--color-primary);
+    border-radius: 3px;
+    width: 0%;
+    transition: width 0.1s linear;
+}
+.er-progress-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+}
+
+/* Controls right side */
+.er-controls-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+.er-speed-btn {
+    background: none;
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 600;
+    min-width: 42px;
+    text-align: center;
+    transition: all var(--transition-fast);
+}
+.er-speed-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+}
+
+.er-voice-select {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.75rem;
+    cursor: pointer;
+    max-width: 130px;
+}
+
+/* ── Mobile ──────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    .er-reader-layout {
+        grid-template-columns: 1fr;
+    }
+    .er-sidebar {
+        display: none;
+    }
+    .er-sidebar.open {
+        display: block;
+        position: fixed;
+        top: 52px;
+        left: 0;
+        bottom: 0;
+        width: 260px;
+        z-index: 80;
+        box-shadow: var(--shadow-lg);
+    }
+    .er-reading-pane {
+        padding: 1.25rem 1rem 7rem;
+    }
+    .er-content {
+        font-size: 1rem;
+    }
+    .er-audio-inner {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    .er-progress-wrap {
+        order: -1;
+        width: 100%;
+    }
+    .er-controls-right {
+        margin-left: auto;
+    }
+    .er-card-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Dark mode audio bar shadow */
+[data-theme="dark"] .er-audio-bar {
+    box-shadow: 0 -2px 12px rgba(0,0,0,0.3);
+}
+</style>
+{% endblock %}
+
+{% block content %}
+
+{% if mode == 'library' %}
+<!-- ═══════════════════ LIBRARY MODE ═══════════════════ -->
+<div class="er-library">
+    <header class="er-library-header">
+        <h1>E-Reader</h1>
+        <p class="subtitle">Read textbooks and research sources with audio narration</p>
+    </header>
+
+    <!-- Tag filter bar -->
+    {% if all_tags %}
+    <div class="er-tag-filter-bar" id="er-tag-filter-bar">
+        {% for tag in all_tags %}
+        <button class="tag-chip" data-tag="{{ tag.name }}" onclick="EReader.toggleTagFilter(this)">
+            {{ tag.name }} <span class="er-tag-count">{{ tag.count }}</span>
+        </button>
+        {% endfor %}
+        <button class="tag-chip er-clear-filters" id="er-clear-filters" style="display:none"
+                onclick="EReader.clearFilters()">Clear</button>
+    </div>
+    {% endif %}
+
+    <!-- Continue reading (populated by JS) -->
+    <div class="er-continue-section" id="er-continue-section" style="display: none;">
+        <h2>Continue Reading</h2>
+        <div class="er-continue-grid" id="er-continue-grid"></div>
+    </div>
+
+    <!-- Pinned materials -->
+    <div class="er-pinned-section" id="er-pinned-section" style="display: none;">
+        <h2 class="er-section-title">Pinned</h2>
+        <div class="er-card-grid" id="er-pinned-grid"></div>
+    </div>
+
+    <!-- All Materials -->
+    <h2 class="er-section-title" id="er-all-title">All Materials</h2>
+    <div class="er-card-grid" id="er-all-grid"></div>
+
+    {% if not all_materials %}
+    <div class="card">
+        <p>No readable content found. Index textbook chapters or fetch research full text first.</p>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Materials data for JS -->
+<script id="er-library-data" type="application/json">
+{{ all_materials|tojson }}
+</script>
+
+{% elif mode == 'toc' %}
+<!-- ═══════════════════ TOC MODE ═══════════════════ -->
+<div class="er-toc">
+    <header class="er-toc-header">
+        <div class="breadcrumb"><a href="/ereader">E-Reader</a> / {{ textbook.short_title }}</div>
+        <h1>{{ textbook.title }}</h1>
+    </header>
+
+    <div class="er-chapter-list">
+        {% for ch in chapters %}
+        <a href="{% if ch.word_count > 0 %}/ereader/textbook/{{ textbook.short_title }}/{{ ch.chapter_number }}{% else %}#{% endif %}"
+           class="er-chapter-item{% if ch.word_count == 0 %} no-content{% endif %}">
+            <span class="er-chapter-num">Ch {{ ch.chapter_number }}</span>
+            <span class="er-chapter-title">{{ ch.title }}</span>
+            {% if ch.word_count > 0 %}
+            <span class="er-chapter-words">{{ "{:,}".format(ch.word_count) }} words</span>
+            {% else %}
+            <span class="er-chapter-words" style="font-style: italic;">not indexed</span>
+            {% endif %}
+        </a>
+        {% endfor %}
+    </div>
+</div>
+
+{% elif mode == 'document_toc' %}
+<!-- ═══════════════════ DOCUMENT TOC MODE ═══════════════════ -->
+<div class="er-toc">
+    <header class="er-toc-header">
+        <div class="breadcrumb"><a href="/ereader">E-Reader</a> / {{ document.short_title }}</div>
+        <h1>{{ document.title }}</h1>
+        {% if document.authors_short or document.publication_year or document.document_type %}
+        <div style="color: var(--color-text-muted); font-size: 0.9rem; margin-top: 0.25rem;">
+            {% if document.authors_short %}{{ document.authors_short }}{% endif %}
+            {% if document.publication_year %} ({{ document.publication_year }}){% endif %}
+            {% if document.document_type %} &middot; {{ document.document_type }}{% endif %}
+        </div>
+        {% endif %}
+    </header>
+
+    <div class="er-chapter-list">
+        {% for sec in sections %}
+        <a href="{% if sec.word_count > 0 %}/ereader/document/{{ document.short_title }}/{{ sec.section_number }}{% else %}#{% endif %}"
+           class="er-chapter-item{% if sec.word_count == 0 %} no-content{% endif %}">
+            <span class="er-chapter-num">{{ sec.section_number }}</span>
+            <span class="er-chapter-title">{{ sec.title }}</span>
+            {% if sec.word_count > 0 %}
+            <span class="er-chapter-words">{{ "{:,}".format(sec.word_count) }} words</span>
+            {% else %}
+            <span class="er-chapter-words" style="font-style: italic;">not indexed</span>
+            {% endif %}
+        </a>
+        {% endfor %}
+    </div>
+</div>
+
+{% elif mode == 'reader' %}
+<!-- ═══════════════════ READER MODE ═══════════════════ -->
+<div class="er-reader-layout">
+    <!-- Sidebar -->
+    <aside class="er-sidebar" id="er-sidebar">
+        {% if content_type == 'textbook' %}
+        <div class="er-sidebar-title">{{ textbook.short_title }}</div>
+        {% for ch in chapters %}
+        <a href="/ereader/textbook/{{ textbook.short_title }}/{{ ch.chapter_number }}"
+           class="er-sidebar-item{% if ch.chapter_number == chapter.chapter_number %} active{% endif %}{% if ch.word_count == 0 %} no-content{% endif %}">
+            Ch {{ ch.chapter_number }}: {{ ch.title }}
+        </a>
+        {% endfor %}
+        {% elif content_type == 'document' %}
+        <div class="er-sidebar-title">{{ document.short_title }}</div>
+        {% for sec in sections %}
+        <a href="/ereader/document/{{ document.short_title }}/{{ sec.section_number }}"
+           class="er-sidebar-item{% if sec.section_number == section.section_number %} active{% endif %}{% if sec.word_count == 0 %} no-content{% endif %}">
+            {{ sec.section_number }}. {{ sec.title }}
+        </a>
+        {% endfor %}
+        {% else %}
+        <div class="er-sidebar-title">Source Info</div>
+        <div style="padding: 0.5rem 1rem; font-size: 0.85rem; color: var(--color-text-muted);">
+            {% if source.publication_year %}{{ source.publication_year }}{% endif %}
+            {% if source.status %}<br><span class="badge {{ source.status }}">{{ source.status }}</span>{% endif %}
+        </div>
+        {% endif %}
+    </aside>
+
+    <!-- Reading Pane -->
+    <div class="er-reading-pane" id="er-reading-pane">
+        <div class="er-reading-header">
+            {% if content_type == 'textbook' %}
+            <div class="breadcrumb">
+                <a href="/ereader">E-Reader</a> /
+                <a href="/ereader/textbook/{{ textbook.short_title }}">{{ textbook.short_title }}</a> /
+                Ch {{ chapter.chapter_number }}
+            </div>
+            <h1>{{ chapter.title }}</h1>
+            {% elif content_type == 'document' %}
+            <div class="breadcrumb">
+                <a href="/ereader">E-Reader</a> /
+                <a href="/ereader/document/{{ document.short_title }}">{{ document.short_title }}</a> /
+                Section {{ section.section_number }}
+            </div>
+            <h1>{{ section.title }}</h1>
+            {% else %}
+            <div class="breadcrumb">
+                <a href="/ereader">E-Reader</a> /
+                <a href="/research?highlight={{ source.source_id }}">Research</a> /
+                Source
+            </div>
+            <h1>{{ source.title }}</h1>
+            {% endif %}
+
+            <!-- Material tags -->
+            <div class="er-reading-tags" id="er-reading-tags">
+                {% for tag in material_tags|default([]) %}
+                <span class="tag-chip removable" data-tag="{{ tag }}">
+                    {{ tag }}
+                    <button class="tag-remove" onclick="EReader.removeReaderTag('{{ tag }}')">&times;</button>
+                </span>
+                {% endfor %}
+                <button class="er-add-tag-btn" id="btn-add-tag" onclick="EReader.addReaderTag()" title="Add tag">+</button>
+            </div>
+        </div>
+
+        <!-- Resume banner -->
+        <div class="er-resume-banner" id="er-resume-banner">
+            <span>Resume from where you left off?</span>
+            <button onclick="EReader.resumeBookmark()">Resume</button>
+            <button class="er-resume-dismiss" onclick="document.getElementById('er-resume-banner').style.display='none'">&times;</button>
+        </div>
+
+        <!-- Content paragraphs -->
+        <div class="er-content" id="er-content">
+            {% for para in paragraphs %}
+            <div class="er-para" data-para="{{ loop.index0 }}">{{ para }}</div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- Audio Controls Bar -->
+<div class="er-audio-bar visible" id="er-audio-bar">
+    <div class="er-audio-inner">
+        <div class="er-transport">
+            <button class="er-btn" id="er-prev" title="Previous paragraph">&#9664;&#9664;</button>
+            <button class="er-btn er-btn-play" id="er-play" title="Play / Pause">&#9654;</button>
+            <button class="er-btn" id="er-next" title="Next paragraph">&#9654;&#9654;</button>
+        </div>
+
+        <div class="er-progress-wrap">
+            <div class="er-progress-bar" id="er-progress-bar">
+                <div class="er-progress-fill" id="er-progress-fill"></div>
+            </div>
+            <div class="er-progress-labels">
+                <span id="er-time-current">0:00</span>
+                <span id="er-para-indicator">Para 1 / {{ paragraphs|length }}</span>
+                <span id="er-time-total">0:00</span>
+            </div>
+        </div>
+
+        <div class="er-controls-right">
+            <button class="er-speed-btn" id="er-speed" title="Playback speed">1.0x</button>
+            <select class="er-voice-select" id="er-voice" title="Voice">
+                {% for v in voices %}
+                <option value="{{ v.name }}" {% if v.name == 'en-US-BrianNeural' %}selected{% endif %}>{{ v.display }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+</div>
+
+<!-- Hidden data for JS -->
+<script id="er-data" type="application/json">
+{
+    "contentType": {{ content_type|tojson }},
+    "materialType": {{ material_type|tojson }},
+    "materialKey": {{ material_key|tojson }},
+    {% if content_type == 'textbook' %}
+    "shortTitle": {{ textbook.short_title|tojson }},
+    "chapterNum": {{ chapter.chapter_number }},
+    "chapterTitle": {{ chapter.title|tojson }},
+    "bookTitle": {{ textbook.title|tojson }},
+    {% elif content_type == 'document' %}
+    "shortTitle": {{ document.short_title|tojson }},
+    "sectionNum": {{ section.section_number }},
+    "sectionTitle": {{ section.title|tojson }},
+    "documentTitle": {{ document.title|tojson }},
+    {% else %}
+    "sourceId": {{ source.source_id|tojson }},
+    "sourceTitle": {{ source.title|tojson }},
+    {% endif %}
+    "cacheKey": {{ cache_key|tojson }},
+    "totalParagraphs": {{ paragraphs|length }},
+    "paragraphs": {{ paragraphs|tojson }}
+}
+</script>
+
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+{% if mode == 'reader' %}
+<script src="/static/js/ereader.js"></script>
+{% elif mode == 'library' %}
+<script>
+window.EReader = window.EReader || {};
+
+// ── Library data & state ──
+EReader.materials = JSON.parse(document.getElementById('er-library-data').textContent);
+EReader.selectedTags = [];
+
+// ── Bookmarks ──
+EReader.getAllBookmarks = function() {
+    var bookmarks = [];
+    for (var i = 0; i < localStorage.length; i++) {
+        var key = localStorage.key(i);
+        if (key && key.startsWith('ereader-bookmark-')) {
+            try {
+                var bm = JSON.parse(localStorage.getItem(key));
+                if (bm && bm.para >= 2) {
+                    bm._key = key;
+                    bookmarks.push(bm);
+                }
+            } catch (e) {}
+        }
+    }
+    bookmarks.sort(function(a, b) { return (b.savedAt || 0) - (a.savedAt || 0); });
+    return bookmarks;
+};
+
+EReader.removeBookmark = function(key, event) {
+    event.stopPropagation();
+    localStorage.removeItem(key);
+    if (localStorage.getItem('ereader-last-opened') === key) {
+        localStorage.removeItem('ereader-last-opened');
+    }
+    EReader.renderBookmarks();
+};
+
+EReader.renderBookmarks = function() {
+    var section = document.getElementById('er-continue-section');
+    var grid = document.getElementById('er-continue-grid');
+    var bookmarks = EReader.getAllBookmarks();
+
+    if (!bookmarks.length) { section.style.display = 'none'; return; }
+    while (grid.firstChild) grid.removeChild(grid.firstChild);
+
+    bookmarks.forEach(function(bm) {
+        var card = document.createElement('div');
+        card.className = 'er-continue-card';
+        var href = '', title = '', detail = '';
+        if (bm.type === 'textbook') {
+            href = '/ereader/textbook/' + encodeURIComponent(bm.shortTitle) + '/' + bm.chapter;
+            title = bm.bookTitle || bm.shortTitle;
+            detail = 'Chapter ' + bm.chapter + ', paragraph ' + (bm.para + 1);
+        } else if (bm.type === 'document') {
+            href = '/ereader/document/' + encodeURIComponent(bm.shortTitle) + '?section=' + bm.section;
+            title = bm.documentTitle || bm.shortTitle;
+            detail = 'Section ' + bm.section + ', paragraph ' + (bm.para + 1);
+        } else {
+            href = '/ereader/source/' + encodeURIComponent(bm.sourceId);
+            title = bm.sourceTitle || 'Research Source';
+            detail = 'Paragraph ' + (bm.para + 1);
+        }
+        var icon = document.createElement('span');
+        icon.className = 'er-continue-icon';
+        icon.textContent = '\u25B6';
+        var info = document.createElement('div');
+        info.className = 'er-continue-info';
+        var titleEl = document.createElement('div');
+        titleEl.className = 'er-continue-title';
+        titleEl.textContent = title;
+        var detailEl = document.createElement('div');
+        detailEl.className = 'er-continue-detail';
+        detailEl.textContent = detail;
+        info.appendChild(titleEl);
+        info.appendChild(detailEl);
+        var removeBtn = document.createElement('button');
+        removeBtn.className = 'er-continue-remove';
+        removeBtn.textContent = '\u00D7';
+        removeBtn.title = 'Remove bookmark';
+        removeBtn.onclick = function(e) { EReader.removeBookmark(bm._key, e); };
+        card.appendChild(icon);
+        card.appendChild(info);
+        card.appendChild(removeBtn);
+        card.onclick = function() { window.location.href = href; };
+        grid.appendChild(card);
+    });
+    section.style.display = 'block';
+};
+
+// ── Tag filtering ──
+EReader.toggleTagFilter = function(btn) {
+    var tag = btn.getAttribute('data-tag');
+    var idx = EReader.selectedTags.indexOf(tag);
+    if (idx >= 0) {
+        EReader.selectedTags.splice(idx, 1);
+        btn.classList.remove('active');
+    } else {
+        EReader.selectedTags.push(tag);
+        btn.classList.add('active');
+    }
+    document.getElementById('er-clear-filters').style.display =
+        EReader.selectedTags.length ? 'inline-flex' : 'none';
+    EReader.renderMaterials();
+};
+
+EReader.clearFilters = function() {
+    EReader.selectedTags = [];
+    document.querySelectorAll('.er-tag-filter-bar .tag-chip').forEach(function(c) {
+        c.classList.remove('active');
+    });
+    document.getElementById('er-clear-filters').style.display = 'none';
+    EReader.renderMaterials();
+};
+
+// ── Pin toggle ──
+EReader.togglePin = function(type, key, btn, event) {
+    event.preventDefault();
+    event.stopPropagation();
+    var mat = EReader.materials.find(function(m) { return m.type === type && m.key === key; });
+    if (!mat) return;
+    var wasPinned = mat.pinned;
+    var method = wasPinned ? 'DELETE' : 'POST';
+    fetch('/api/ereader/' + encodeURIComponent(type) + '/' + encodeURIComponent(key) + '/pin', {
+        method: method
+    }).then(function() {
+        mat.pinned = !wasPinned;
+        EReader.renderMaterials();
+    });
+};
+
+// ── Build a material card ──
+EReader.buildCard = function(mat, showPin) {
+    var card = document.createElement('a');
+    card.href = mat.href;
+    card.className = 'er-book-card';
+
+    // Pin button
+    if (showPin) {
+        var pinBtn = document.createElement('button');
+        pinBtn.className = 'er-pin-btn' + (mat.pinned ? ' pinned' : '');
+        pinBtn.textContent = mat.pinned ? '\uD83D\uDCCC' : '\uD83D\uDCCC'; // 📌
+        pinBtn.style.opacity = mat.pinned ? '1' : '';
+        pinBtn.title = mat.pinned ? 'Unpin' : 'Pin to library';
+        pinBtn.onclick = function(e) { EReader.togglePin(mat.type, mat.key, pinBtn, e); };
+        card.appendChild(pinBtn);
+    }
+
+    // Type badge
+    var badge = document.createElement('span');
+    badge.className = 'er-type-badge ' + mat.type;
+    badge.textContent = mat.type.charAt(0).toUpperCase() + mat.type.slice(1);
+    card.appendChild(badge);
+
+    // Title
+    var h3 = document.createElement('h3');
+    h3.textContent = mat.title;
+    card.appendChild(h3);
+
+    // Meta
+    if (mat.meta) {
+        var metaDiv = document.createElement('div');
+        metaDiv.className = 'er-meta';
+        var metaSpan = document.createElement('span');
+        metaSpan.textContent = mat.meta;
+        metaDiv.appendChild(metaSpan);
+        card.appendChild(metaDiv);
+    }
+
+    // Tags
+    if (mat.tags && mat.tags.length) {
+        var tagsDiv = document.createElement('div');
+        tagsDiv.className = 'er-card-tags';
+        mat.tags.forEach(function(t) {
+            var chip = document.createElement('span');
+            chip.className = 'tag-chip';
+            chip.textContent = t;
+            tagsDiv.appendChild(chip);
+        });
+        card.appendChild(tagsDiv);
+    }
+
+    return card;
+};
+
+// ── Render materials ──
+EReader.renderMaterials = function() {
+    var allGrid = document.getElementById('er-all-grid');
+    var pinnedGrid = document.getElementById('er-pinned-grid');
+    var pinnedSection = document.getElementById('er-pinned-section');
+    var allTitle = document.getElementById('er-all-title');
+
+    while (allGrid.firstChild) allGrid.removeChild(allGrid.firstChild);
+    while (pinnedGrid.firstChild) pinnedGrid.removeChild(pinnedGrid.firstChild);
+
+    var selected = EReader.selectedTags;
+    var filtered = EReader.materials;
+    if (selected.length) {
+        filtered = EReader.materials.filter(function(m) {
+            return selected.every(function(tag) { return m.tags.indexOf(tag) >= 0; });
+        });
+    }
+
+    // Pinned (always show all pinned, not filtered)
+    var pinned = EReader.materials.filter(function(m) { return m.pinned; });
+    if (pinned.length) {
+        pinned.forEach(function(m) { pinnedGrid.appendChild(EReader.buildCard(m, true)); });
+        pinnedSection.style.display = 'block';
+    } else {
+        pinnedSection.style.display = 'none';
+    }
+
+    // All materials (filtered)
+    var count = 0;
+    filtered.forEach(function(m) {
+        allGrid.appendChild(EReader.buildCard(m, true));
+        count++;
+    });
+    allTitle.textContent = selected.length
+        ? 'Materials (' + count + ')'
+        : 'All Materials (' + count + ')';
+};
+
+// ── Init ──
+document.addEventListener('DOMContentLoaded', function() {
+    EReader.renderBookmarks();
+    EReader.renderMaterials();
+});
+</script>
+{% endif %}
+{% endblock %}

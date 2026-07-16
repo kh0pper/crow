@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    {% block viewport %}<meta name="viewport" content="width=device-width, initial-scale=1.0">{% endblock %}
+    <title>{% block title %}Capstone Tracker{% endblock %}</title>
+    <!-- Subpath base URL: window.BASE_URL holds the gateway proxy prefix
+         (e.g. "/proxy/capstone-tracker") so absolute fetches in JS prepend
+         it. set via FastAPI root_path in src/server.py. -->
+    <script>
+        window.BASE_URL = {{ request.scope.get('root_path', '') | tojson }};
+    </script>
+    <!-- Flicker prevention: apply theme before CSS loads -->
+    <script>
+        (function() {
+            var theme = localStorage.getItem('capstone-tracker-theme');
+            if (!theme) {
+                theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            }
+            document.documentElement.setAttribute('data-theme', theme);
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='css/style.css') }}">
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/json-enc.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <a href="{{ request.url_for('pir_index') }}">📚 Capstone Tracker</a>
+        </div>
+        <ul class="nav-links">
+            <li><a href="{{ request.url_for('pir_index') }}" {% if '/pir' in request.url.path %}class="active"{% endif %}>PIR</a></li>
+            <li><a href="{{ request.url_for('notes_index') }}" {% if '/notes' in request.url.path %}class="active"{% endif %}>Notes</a></li>
+            <li><a href="{{ request.url_for('advocacy_index') }}" {% if '/advocacy' in request.url.path %}class="active"{% endif %}>Advocacy</a></li>
+            <li><a href="{{ request.url_for('ereader_library') }}" {% if '/ereader' in request.url.path %}class="active"{% endif %}>E-Reader</a></li>
+            <li>
+                <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">
+                    <svg class="theme-icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                    </svg>
+                </button>
+            </li>
+        </ul>
+    </nav>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+        <div class="footer-content">
+            <span class="footer-brand">Capstone Tracker v1.0.0</span>
+            <nav class="footer-nav">
+                <a href="/health">Health</a>
+            </nav>
+        </div>
+    </footer>
+
+    {% block scripts %}{% endblock %}
+
+    <script src="{{ request.url_for('static', path='js/theme.js') }}"></script>
+</body>
+</html>
