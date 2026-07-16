@@ -1,5 +1,6 @@
 {
   "id": "capstone-tracker",
+  "draft": true,
   "name": "Capstone Tracker",
   "version": "1.0.0",
   "description": "PIR / notes / advocacy subsystems extracted from canvas-companion. Custom FastAPI bundle with bundle-owned SQLite at ~/.crow/data/capstone-tracker/capstone.db. E-reader deferred to Phase 4a.5.",
