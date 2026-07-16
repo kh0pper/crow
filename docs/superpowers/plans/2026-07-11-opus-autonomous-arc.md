@@ -698,7 +698,21 @@ public blog 502 (~40 min). Fix: bounded awaits (10s boot-drain cap; 5s per teard
 semantically the already-tolerated step-failure case). The cap fired live on grackle's next
 boot, boot completed in 6s, and the capped teardown then unwedged the background chain (the
 stuck delete converged minutes later). Root-cause follow-ups recorded below.
-*New follow-ups (pool):* [2c-F1, URGENT-ish] uncaught `SendingOnClosedConnection` from
+*New follow-ups (pool): ✅ ALL SIX SHIPPED 2026-07-15 — PR #198 (main `6347af19`), Kevin-approved
+batch, fleet-deployed + live-verified same day.* Spec `docs/superpowers/specs/2026-07-15-2c-followups-design.md`
+(rev 3, 2 adversarial rounds); plan `docs/superpowers/plans/2026-07-15-2c-followups.md`; 20 new
+RED-first tests, suite baseline now **1994/2/0**. F1 = 3 guards + narrow process crash-guard
+(rethrows non-nostr; also covers the pi-bots raw subscribe + gateway_runner install site).
+F2 grew from the audit: C2a sender caps + allSettled push fan-out (`CROW_PUSH_SEND_TIMEOUT_MS`,
+documented); C2b all three boot drains capped, providers defer-on-cap (`deferred:n`, 3-deferral
+escape hatch); C2c flushed() caps on BOTH joinContact and joinInstanceSync (twin hazard found
+in-build; initContact deliberately uncapped — rocksdb-lock hazard). F3 via exported
+`NATURAL_KEY_RESTORE_TABLES` (UI ⟺ backend cannot drift) + CDP real-browser proof. F4 comment
+placed. F5 `pendingEmitStats()` + 60s gauge (soak: queues empty fleet-wide). F6 applied to
+Kevin's untracked WIP tree only (11 `|tojson` sites; real bug — JSON.parse died on titles with
+a double-quote), zero capstone paths committed. Known adjacent gap recorded in spec §F2:
+`onSocialMessage` room fan-out publish stall (not apply-path; future pool).
+Original pool text follows for the record: [2c-F1, URGENT-ish] uncaught `SendingOnClosedConnection` from
 `resilient-subscribe`→nostr-tools crashes the gateway when a relay closes mid-subscribe
 (crashed grackle once, stack in ledger); [2c-F2] apply-path hooks still carry unbounded network
 awaits generally (the caps bound the known two); [2c-F3] dashboard Restore button not disabled
