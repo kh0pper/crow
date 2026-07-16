@@ -178,3 +178,50 @@ def test_live_derivation_matches_docker():
         timeout=30,
     ).stdout.strip()
     assert f"br-{net_id[:12]}" in proc.stdout
+
+
+BAKEABLE = ("MODEL_PUBLISH", "ALLOW_PUBLISHED_TCP_PORTS", "ALLOW_HOST_TCP_PORTS", "ROOKERY_NETWORK")
+
+
+def run_unit(extra_env=None):
+    env = {k: v for k, v in os.environ.items() if k not in BAKEABLE}
+    env.update(extra_env or {})
+    return subprocess.run(
+        [str(SCRIPT), "--print-systemd-unit"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+
+def test_unit_bakes_allow_host_tcp_ports():
+    """The 2026-07-16 live gap: the deployed lock ran with
+    ALLOW_HOST_TCP_PORTS=3006 (MCP bridge), but the printed unit re-ran the
+    script bare at boot — silently killing the bridge after every reboot.
+    The printed unit must reproduce the posture it was printed under."""
+    proc = run_unit({"ALLOW_HOST_TCP_PORTS": "3006"})
+    assert proc.returncode == 0, proc.stderr
+    assert 'Environment="ALLOW_HOST_TCP_PORTS=3006"' in proc.stdout
+    svc = proc.stdout.split("[Service]", 1)[1]
+    assert svc.index('Environment="ALLOW_HOST_TCP_PORTS=3006"') < svc.index("ExecStart=")
+
+
+def test_unit_bakes_every_set_config_var():
+    proc = run_unit({
+        "MODEL_PUBLISH": "10.0.0.5:9000",
+        "ALLOW_PUBLISHED_TCP_PORTS": "8011",
+        "ALLOW_HOST_TCP_PORTS": "3006,3007",
+        "ROOKERY_NETWORK": "other_net",
+    })
+    assert proc.returncode == 0, proc.stderr
+    assert 'Environment="MODEL_PUBLISH=10.0.0.5:9000"' in proc.stdout
+    assert 'Environment="ALLOW_PUBLISHED_TCP_PORTS=8011"' in proc.stdout
+    assert 'Environment="ALLOW_HOST_TCP_PORTS=3006,3007"' in proc.stdout
+    assert 'Environment="ROOKERY_NETWORK=other_net"' in proc.stdout
+
+
+def test_unit_without_config_env_bakes_nothing():
+    proc = run_unit()
+    assert proc.returncode == 0, proc.stderr
+    assert "Environment=" not in proc.stdout
