@@ -72,6 +72,9 @@ const KEYS = [
   "OUTLOOK_INGEST_MAX_AGE_MIN",
   "OUTLOOK_DRIVE_FOLDER_ID",
   "OUTLOOK_TZ",
+  "PLANNER_DRIVE_FOLDER_ID",
+  "PLANNER_CATEGORY",
+  "PLANNER_CRON",
   "CROW_GATEWAY_URL",
   "CROW_GATEWAY_ALT_URLS",
   "CROW_TASKS_DB_PATH",
@@ -101,6 +104,7 @@ export function loadConfig() {
     DIGEST_CRON: merged.DIGEST_CRON || "0 7 * * *",
     SYNC_CRON: merged.SYNC_CRON || "*/15 * * * *",
     SMTP_PORT: merged.SMTP_PORT || "587",
+    PLANNER_CRON: merged.PLANNER_CRON || "*/15 * * * *",
     OCR_VISION_API_KEY: merged.OCR_VISION_API_KEY || "none",
     NTFY_URL: merged.NTFY_URL || "https://ntfy.sh",
   };

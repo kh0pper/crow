@@ -14,6 +14,7 @@ import { googleSections } from "./adapters/google.js";
 import { mondayLocalSection } from "./adapters/monday-local.js";
 import { boxSection } from "./adapters/box.js";
 import { outlookSections } from "./adapters/outlook.js";
+import { plannerSection } from "../planner.js";
 import { renderDigest } from "./render.js";
 import { send as sendMail, smtpConfigured } from "../mailer.js";
 
@@ -50,6 +51,7 @@ export async function assembleDigest(db, config) {
   push(await guarded(() => googleSections(config), "Google"));
   push(await guarded(() => boxSection(config), "Box"));
   push(await guarded(() => outlookSections(config), "Outlook"));
+  push(await guarded(() => plannerSection(db), "Planner"));
 
   return { date: localDate(), sections };
 }
