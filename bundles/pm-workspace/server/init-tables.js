@@ -93,6 +93,31 @@ export async function initPmTables(db) {
     CREATE INDEX IF NOT EXISTS idx_pm_sync_state_local ON pm_sync_state(local_kind, local_id);
   `);
 
+  await initTable(db, "pm_planned_events", `
+    CREATE TABLE IF NOT EXISTS pm_planned_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      uid TEXT UNIQUE,
+      title TEXT NOT NULL,
+      start_utc TEXT NOT NULL,
+      end_utc TEXT NOT NULL,
+      location TEXT,
+      body TEXT,
+      source TEXT,
+      source_ref TEXT,
+      status TEXT DEFAULT 'proposed'
+        CHECK(status IN ('proposed','approved','rejected','exported','confirmed','cancelled')),
+      decided_at TEXT,
+      decided_via TEXT,
+      exported_at TEXT,
+      feed_file TEXT,
+      confirmed_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pm_planned_events_status ON pm_planned_events(status, start_utc);
+  `);
+
   await initTable(db, "pm_sync_log", `
     CREATE TABLE IF NOT EXISTS pm_sync_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

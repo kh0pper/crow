@@ -32,7 +32,10 @@
       "NTFY_URL",
       "GOOGLE_TOKEN_FILE",
       "CROW_GATEWAY_URL",
-      "CROW_TASKS_DB_PATH"
+      "CROW_TASKS_DB_PATH",
+      "PLANNER_DRIVE_FOLDER_ID",
+      "PLANNER_CATEGORY",
+      "PLANNER_CRON"
     ]
   },
   "panel": "panel/pm-workspace.js",
@@ -63,7 +66,10 @@
     { "name": "NTFY_URL", "description": "Alternate ntfy base URL (default https://ntfy.sh)", "required": false },
     { "name": "GOOGLE_TOKEN_FILE", "description": "Path to a Google OAuth2 authorized_user JSON for calendar/drive digest sections", "required": false },
     { "name": "CROW_GATEWAY_URL", "description": "Public gateway URL used in digest footer links", "required": false },
-    { "name": "CROW_TASKS_DB_PATH", "description": "Path to the kanban tasks DB (default $CROW_DATA_DIR/tasks.db)", "required": false }
+    { "name": "CROW_TASKS_DB_PATH", "description": "Path to the kanban tasks DB (default $CROW_DATA_DIR/tasks.db)", "required": false },
+    { "name": "PLANNER_DRIVE_FOLDER_ID", "description": "Drive folder where approved planned-events feed files are written for an external agent (e.g. Power Automate) to create real calendar events", "required": false },
+    { "name": "PLANNER_CATEGORY", "description": "Marker category stamped on planner-created calendar events; the reconcile loop-guard matches on it (default: Crow Plan)", "required": false },
+    { "name": "PLANNER_CRON", "description": "Cron expression for planner export/reconcile runs (default: */15 * * * *)", "required": false }
   ],
   "notes": "Notes (markdown + pressure-sensitive drawing with OCR), a daily digest, and deterministic Monday.com sync. Boards/kanban remain the job of the tasks bundle and Bot Board tracker tools — this bundle reads them for the digest and writes them only via the sync engine."
 }
