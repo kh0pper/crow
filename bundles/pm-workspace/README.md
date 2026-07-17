@@ -43,6 +43,7 @@ secrets file works as-is.
 | `OUTLOOK_INGEST_URL` / `OUTLOOK_INGEST_TOKEN` | Optional (alternative to the Drive drop). Pull the summary from a bearer-authed HTTP endpoint the agent POSTs to. Used only when `OUTLOOK_DRIVE_FOLDER_ID` is unset |
 | `OUTLOOK_INGEST_MAX_AGE_MIN` | Optional. Label the Outlook section stale if the summary is older than this many minutes (default 1440). Drive uses the file's `modifiedTime`; HTTP uses the wrapper's `received_at` |
 | `CROW_GATEWAY_URL` | Used for the digest footer link |
+| `CROW_GATEWAY_ALT_URLS` | Optional comma-separated extra bases (e.g. a public proxy) — the footer links all of them |
 | `CROW_TASKS_DB_PATH` | Kanban tasks DB, default `$CROW_DATA_DIR/tasks.db` |
 
 The Outlook summary shape (either source) is
