@@ -497,7 +497,14 @@ export function extensionsClientJS(lang) {
             var metaByName = {};
             (addon.env_vars || []).forEach(function(ev) { metaByName[ev.name] = ev; });
             var scopedEnvVars = keys.map(function(key) {
-              return metaByName[key] || { name: key, required: true };
+              // Undeclared key (installed-but-unregistered bundle): the registry
+              // can't tell us the secret flag, so infer it from the name — otherwise
+              // a credential renders as a visible type=text input.
+              return metaByName[key] || {
+                name: key,
+                required: true,
+                secret: /(KEY|TOKEN|SECRET|PASS|CREDENTIAL|JWT|HASH)/i.test(key),
+              };
             });
 
             showInstallModal(
