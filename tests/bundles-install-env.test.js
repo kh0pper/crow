@@ -30,9 +30,10 @@ test("UI install with zero usable values falls back to .env.example (the dead-fa
   assert.equal(readFileSync(join(dest, ".env"), "utf8"), "REQ_KEY=\n# fill me in\n");
 });
 
-test("frigate shape: zero values, NO .env.example, manifest declares env vars → placeholder .env (managed evidence)", () => {
+test("vaultwarden shape: zero values, NO .env.example, manifest declares env vars → placeholder .env (managed evidence)", () => {
   // Without ANY .env the needs-setup badge fails closed (resolveEffectiveEnv
-  // managed:false) and the bundle can never badge — frigate was the live case.
+  // managed:false) and the bundle can never badge — ~20 shipped bundles have a
+  // required-no-default key and no .env.example (vaultwarden, gitea, immich, …).
   const dest = scratchDest();
   writeInstallEnv(dest, {}, { env_vars: [{ name: "MQTT_HOST", required: true }] });
   assert.ok(existsSync(join(dest, ".env")), "placeholder .env must be written so the bundle can badge");

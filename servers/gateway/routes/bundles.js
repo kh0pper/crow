@@ -1248,9 +1248,11 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  *   3. Still nothing, but the manifest declares env vars → a comment-only
  *      placeholder .env. Without ANY .env the needs-setup badge fails closed
  *      (resolveEffectiveEnv managed:false — bundles-config.js) and a bundle
- *      whose required key has no default can NEVER badge (frigate was the
- *      live case). Comment-only on purpose: `KEY=` lines would set empty-string
- *      env vars in the container, which is not the same as unset.
+ *      whose required key has no default AND no .env.example can NEVER badge
+ *      (vaultwarden, gitea, immich, adguard-home, … — roughly twenty such
+ *      bundles ship today; NOT frigate, whose .env.example takes rung 2).
+ *      Comment-only on purpose: `KEY=` lines would set empty-string env vars
+ *      in the container, which is not the same as unset.
  * Never clobbers an existing .env via the fallback paths.
  *
  * @param {string} destDir           installed bundle dir (~/.crow/bundles/<id>)
