@@ -22,24 +22,26 @@
  *   } }
  *
  * The payload is producer-defined; this adapter renders whatever known fields
- * are present and never throws on missing ones.
+ * are present and never throws on missing ones. Emitted section items use the
+ * digest renderer's { label, detail? } shape (see render.js).
  */
 
 const HTTP_TIMEOUT_MS = 15_000;
 
+// Digest sections render items as { label, detail? } (see render.js).
 function fmtCalendar(items) {
   return items.slice(0, 20).map((e) => {
     const when = [e.start, e.end].filter(Boolean).join("–");
     const where = e.location ? ` @ ${e.location}` : "";
-    return { text: `${when ? when + "  " : ""}${e.subject || "(no subject)"}${where}` };
+    return { label: `${e.subject || "(no subject)"}${where}`, detail: when || undefined };
   });
 }
 
 function fmtMessages(items) {
-  return items.slice(0, 20).map((m) => {
-    const from = m.from ? `${m.from}: ` : "";
-    return { text: `${from}${m.subject || "(no subject)"}` };
-  });
+  return items.slice(0, 20).map((m) => ({
+    label: m.subject || "(no subject)",
+    detail: m.from || undefined,
+  }));
 }
 
 export async function outlookSections(config) {
@@ -94,14 +96,14 @@ export async function outlookSections(config) {
     cal.available = true;
     cal.items = fmtCalendar(payload.calendar);
     cal.title = `Outlook calendar (today)${staleNote}`;
-    if (cal.items.length === 0) cal.items = [{ text: "No events." }];
+    if (cal.items.length === 0) cal.items = [{ label: "No events." }];
   } else {
     cal.reason = "summary has no calendar field";
   }
 
   const mailBits = [];
   if (typeof payload.unread_count === "number") {
-    mailBits.push({ text: `Unread: ${payload.unread_count}` });
+    mailBits.push({ label: `Unread: ${payload.unread_count}` });
   }
   if (Array.isArray(payload.messages)) mailBits.push(...fmtMessages(payload.messages));
   if (mailBits.length) {
