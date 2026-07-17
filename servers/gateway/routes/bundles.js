@@ -1239,6 +1239,50 @@ export async function validateInstall(bundleId, { envVars = {}, consentToken = n
  * @param {object} opts.manifest          the on-disk manifest
  * @returns {Promise<{ok:true, needsRestart:boolean}|{ok:false, reason:string}>}
  */
+/**
+ * Write the bundle's .env at install time. Ladder:
+ *   1. Provided non-empty values → written verbatim.
+ *   2. Zero usable values → copy .env.example if present (this fallback was
+ *      previously dead for UI installs: the install modal always sends an
+ *      env_vars OBJECT, and the old `else if` only ran for non-objects).
+ *   3. Still nothing, but the manifest declares env vars → a comment-only
+ *      placeholder .env. Without ANY .env the needs-setup badge fails closed
+ *      (resolveEffectiveEnv managed:false — bundles-config.js) and a bundle
+ *      whose required key has no default can NEVER badge (frigate was the
+ *      live case). Comment-only on purpose: `KEY=` lines would set empty-string
+ *      env vars in the container, which is not the same as unset.
+ * Never clobbers an existing .env via the fallback paths.
+ *
+ * @param {string} destDir           installed bundle dir (~/.crow/bundles/<id>)
+ * @param {object|null} envVars      values from the install modal / CLI
+ * @param {object|null} manifest     the bundle manifest (for env_vars)
+ * @param {(msg:string)=>void} [log] install-job logger
+ */
+export function writeInstallEnv(destDir, envVars, manifest, log = () => {}) {
+  const envPath = join(destDir, ".env");
+  const examplePath = join(destDir, ".env.example");
+  const envLines = (envVars && typeof envVars === "object")
+    ? Object.entries(envVars)
+        .filter(([, v]) => v !== undefined && v !== "")
+        .map(([k, v]) => `${k}=${v}`)
+    : [];
+  if (envLines.length > 0) {
+    writeFileSync(envPath, envLines.join("\n") + "\n");
+    log(`Wrote ${envLines.length} env vars`);
+    return;
+  }
+  if (existsSync(envPath)) return;
+  if (existsSync(examplePath)) {
+    cpSync(examplePath, envPath);
+    log("Created .env from .env.example");
+    return;
+  }
+  if ((manifest?.env_vars || []).length > 0) {
+    writeFileSync(envPath, "# Managed by Crow — no values provided at install; configure via the dashboard Extensions panel.\n");
+    log("Wrote placeholder .env (no values provided — configure via Extensions)");
+  }
+}
+
 export async function runInstallJob(bundleId, envVars, { job, installedSnapshot, consentVerified, manifest }) {
   let needsRestart = false;
   try {
@@ -1275,19 +1319,9 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       }
     }
 
-    // 2. Write env vars if provided
-    if (envVars && typeof envVars === "object") {
-      const envLines = Object.entries(envVars)
-        .filter(([, v]) => v !== undefined && v !== "")
-        .map(([k, v]) => `${k}=${v}`);
-      if (envLines.length > 0) {
-        writeFileSync(join(destDir, ".env"), envLines.join("\n") + "\n");
-        appendLog(job, `Wrote ${envLines.length} env vars`);
-      }
-    } else if (existsSync(join(destDir, ".env.example")) && !existsSync(join(destDir, ".env"))) {
-      cpSync(join(destDir, ".env.example"), join(destDir, ".env"));
-      appendLog(job, "Created .env from .env.example");
-    }
+    // 2. Write env vars (provided values → .env.example fallback → manifest
+    // placeholder). Extracted so the fallback ladder is unit-testable.
+    writeInstallEnv(destDir, envVars, manifest, (msg) => appendLog(job, msg));
 
     // 2.5 Inject shared-storage vars if bundle declares a translator.
     // Gateway owns the translation in-process (configure-storage.mjs is not
