@@ -6,6 +6,8 @@
  *   notes    — note list + links to the drawing/markdown editors
  *   digests  — digest history; ?view=digests&id=N shows one digest's HTML
  *   sync     — pm_sync_log tail + manual "Run sync now" button
+ *   planner  — approval queue for proposed calendar blocks (the dashboard
+ *              gate surface), plus export/reconcile state
  *
  * Bundle-compatible: dynamic imports resolved from $CROW_HOME/bundles/
  * pm-workspace inside try/catch — the panel renders (degraded) even if
@@ -244,12 +246,95 @@ export default {
         </table>`;
     }
 
+    // ── PLANNER (approval queue) ──
+    if (view === "planner") {
+      let tz = "America/Chicago";
+      try {
+        const configMod = await bundleImport("server/config.js");
+        if (configMod) tz = configMod.loadConfig().OUTLOOK_TZ || tz;
+      } catch { /* default tz */ }
+
+      const fmtWhen = (startUtc, endUtc) => {
+        try {
+          const opts = { timeZone: tz, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+          const s = new Date(startUtc).toLocaleString("en-US", opts);
+          const e = new Date(endUtc).toLocaleString("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" });
+          return `${s} – ${e}`;
+        } catch {
+          return `${startUtc} – ${endUtc}`;
+        }
+      };
+
+      let queue = [];
+      let approved = [];
+      let exported = [];
+      let history = [];
+      let plannerErr = null;
+      try {
+        const plannerMod = await bundleImport("server/planner.js");
+        if (!plannerMod) throw new Error("planner module not available");
+        queue = await plannerMod.list(db, { status: "proposed", limit: 100 });
+        approved = await plannerMod.list(db, { status: "approved", limit: 100 });
+        exported = await plannerMod.list(db, { status: "exported", limit: 100 });
+        const all = await plannerMod.list(db, { limit: 60 });
+        history = all.filter((e) => ["confirmed", "rejected", "cancelled"].includes(e.status)).slice(0, 20);
+      } catch (err) {
+        plannerErr = err.message;
+      }
+
+      const eventRow = (e, actions) => `
+        <tr>
+          <td><strong>${escapeHtml(e.title)}</strong>${e.location ? `<div class="pm-muted">${escapeHtml(e.location)}</div>` : ""}</td>
+          <td>${escapeHtml(fmtWhen(e.start_utc, e.end_utc))}</td>
+          <td class="pm-muted">${escapeHtml(e.source || "")}</td>
+          <td>${actions}</td>
+        </tr>`;
+
+      const queueHtml = queue.map((e) => eventRow(e, `
+        <button class="pm-btn" onclick="pmPlanDecide('${escapeHtml(e.uid)}','approved')">Approve</button>
+        <button class="pm-btn pm-btn-danger" onclick="pmPlanDecide('${escapeHtml(e.uid)}','rejected')">Reject</button>`)).join("");
+
+      const approvedHtml = approved.map((e) => eventRow(e, `
+        <span class="pm-muted">approved ${escapeHtml((e.decided_at || "").slice(0, 16))} via ${escapeHtml(e.decided_via || "?")}</span>
+        <button class="pm-btn pm-btn-danger" onclick="pmPlanDecide('${escapeHtml(e.uid)}','cancelled')">Cancel</button>`)).join("");
+
+      const exportedHtml = exported.map((e) => eventRow(e, `
+        <span class="pm-muted">exported ${escapeHtml((e.exported_at || "").slice(0, 16))} — awaiting confirmation</span>`)).join("");
+
+      const historyHtml = history.map((e) => eventRow(e, `
+        <span class="pm-muted">${escapeHtml(e.status)}${e.decided_via ? ` via ${escapeHtml(e.decided_via)}` : ""}</span>`)).join("");
+
+      const table = (rows, empty) => `
+        <table class="pm-table">
+          <thead><tr><th>Block</th><th>When (${escapeHtml(tz)})</th><th>Source</th><th></th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="4" class="pm-muted" style="text-align:center;padding:1.5rem">${empty}</td></tr>`}</tbody>
+        </table>`;
+
+      body = plannerErr
+        ? `<p class="pm-muted">planner unavailable: ${escapeHtml(plannerErr)}</p>`
+        : `
+        <div style="margin-bottom:1rem">
+          <button class="pm-btn" onclick="pmPlanExport()">Export approved to feed now</button>
+          <button class="pm-btn" onclick="pmPlanReconcile()">Reconcile confirmations</button>
+          <span id="pm-plan-status" class="pm-muted"></span>
+        </div>
+        <h3>Awaiting your decision (${queue.length})</h3>
+        ${table(queueHtml, "Nothing waiting — proposals land here.")}
+        <h3>Approved, next export (${approved.length})</h3>
+        ${table(approvedHtml, "Nothing approved and unexported.")}
+        <h3>Exported, awaiting calendar confirmation (${exported.length})</h3>
+        ${table(exportedHtml, "Nothing in flight.")}
+        <h3>Recent history</h3>
+        ${table(historyHtml, "No decided events yet.")}`;
+    }
+
     // ── Nav + shell ──
     const views = [
       { id: "overview", label: "Overview" },
       { id: "notes", label: "Notes" },
       { id: "digests", label: "Digests" },
       { id: "sync", label: "Sync" },
+      { id: "planner", label: "Planner" },
     ];
     const nav = views.map((v) => {
       const active = v.id === view;
@@ -272,6 +357,7 @@ export default {
         .pm-card.pm-urgent, tr.pm-urgent td { border-left:3px solid var(--crow-error, #e74c3c); }
         .pm-log-row { padding:0.3rem 0; border-bottom:1px solid var(--crow-border); font-size:0.9rem; }
         .pm-btn { display:inline-block; padding:0.4rem 0.9rem; background:var(--crow-accent); color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:0.85rem; text-decoration:none; }
+        .pm-btn-danger { background:var(--crow-error, #e74c3c); }
         h3 { margin:1.25rem 0 0.5rem; }
       </style>
       <nav class="pm-tabs" aria-label="PM Workspace sections">${nav}</nav>
@@ -308,6 +394,23 @@ export default {
             }
           } catch (e) { el.textContent = 'Error: ' + e.message; }
         }
+        async function pmPlanApi(path, payload, label) {
+          const el = document.getElementById('pm-plan-status');
+          if (el) el.textContent = label + '…';
+          try {
+            const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {}) });
+            const data = await res.json();
+            if (!res.ok) { if (el) el.textContent = 'Failed: ' + (data.error || res.status); return; }
+            if (el) el.textContent = 'Done';
+            setTimeout(() => location.reload(), 600);
+          } catch (e) { if (el) el.textContent = 'Error: ' + e.message; }
+        }
+        function pmPlanDecide(uid, decision) {
+          if (decision !== 'approved' && !confirm('Mark this block ' + decision + '?')) return;
+          pmPlanApi('/api/pm/plan/decide', { uid, decision }, decision);
+        }
+        function pmPlanExport() { pmPlanApi('/api/pm/plan/export', {}, 'Exporting'); }
+        function pmPlanReconcile() { pmPlanApi('/api/pm/plan/reconcile', {}, 'Reconciling'); }
       </script>`;
 
     res.send(layout({ title: "PM Workspace", content }));
