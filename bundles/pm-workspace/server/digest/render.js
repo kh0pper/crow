@@ -80,12 +80,25 @@ function renderSectionHtml(section) {
 /**
  * Render the full digest.
  * @param {{date:string, sections:Array}} digest
- * @param {object} config loadConfig() result (for CROW_GATEWAY_URL)
+ * @param {object} config loadConfig() result (for CROW_GATEWAY_URL / CROW_GATEWAY_ALT_URLS)
  * @returns {{html:string, text:string, summary:string}}
  */
 export function renderDigest(digest, config = {}) {
-  const gatewayUrl = (config.CROW_GATEWAY_URL || "").replace(/\/+$/, "");
-  const panelUrl = gatewayUrl ? `${gatewayUrl}/dashboard/pm-workspace` : "/dashboard/pm-workspace";
+  // The workspace may be reachable at several bases (e.g. tailnet + a public
+  // proxy); CROW_GATEWAY_ALT_URLS is a comma-separated list of extra bases.
+  const bases = [config.CROW_GATEWAY_URL, ...String(config.CROW_GATEWAY_ALT_URLS || "").split(",")]
+    .map((s) => String(s || "").trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+  const panelUrls = bases.length
+    ? bases.map((b) => `${b}/dashboard/pm-workspace`)
+    : ["/dashboard/pm-workspace"];
+  const linkLabel = (u) => {
+    try {
+      return new URL(u).host;
+    } catch {
+      return "Open PM Workspace";
+    }
+  };
 
   const html = [
     "<!DOCTYPE html>",
@@ -93,7 +106,9 @@ export function renderDigest(digest, config = {}) {
     `<h1 style="${S.h1}">PM Workspace</h1>`,
     `<p style="${S.date}">Daily Digest — ${escapeHtml(digest.date)}</p>`,
     ...digest.sections.map(renderSectionHtml),
-    `<div style="${S.footer}"><a href="${escapeHtml(panelUrl)}" style="color:#3498db">Open PM Workspace</a></div>`,
+    `<div style="${S.footer}">Open PM Workspace: ${panelUrls
+      .map((u) => `<a href="${escapeHtml(u)}" style="color:#3498db">${escapeHtml(linkLabel(u))}</a>`)
+      .join(" · ")}</div>`,
     "</body></html>",
   ].join("\n");
 
@@ -125,7 +140,7 @@ export function renderDigest(digest, config = {}) {
     }
   }
   text.push("");
-  text.push(`Open PM Workspace: ${panelUrl}`);
+  for (const u of panelUrls) text.push(`Open PM Workspace: ${u}`);
 
   // Short summary line (for ntfy + pm_digests.summary)
   const parts = [];
