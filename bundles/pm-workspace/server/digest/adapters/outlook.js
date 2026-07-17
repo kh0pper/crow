@@ -1,32 +1,38 @@
 /**
- * Digest adapter — Outlook / Microsoft 365 via an HTTP "ingest" pull.
+ * Digest adapter — Outlook / Microsoft 365 via an "ingest" the digest pulls.
  *
  * Some tenants disable OAuth user-consent, so a direct Graph token for
- * mail/calendar is unavailable. This adapter instead PULLS a summary that an
- * external agent (e.g. a Power Automate scheduled flow) has already posted to a
- * small ingest endpoint. The digest simply reads the latest posted payload.
+ * mail/calendar is unavailable. This adapter instead reads a summary that an
+ * external agent (e.g. a Power Automate scheduled flow) has already dropped
+ * somewhere the digest can reach. Two sources are supported, in priority:
  *
- * Env:
- *   OUTLOOK_INGEST_URL   — GET here for the latest summary (bearer-authed).
- *   OUTLOOK_INGEST_TOKEN — bearer token sent as `Authorization: Bearer …`.
- *   OUTLOOK_INGEST_MAX_AGE_MIN — optional; if the payload's received_at is
- *                          older than this many minutes, the section is labeled
- *                          stale (default 1440 = 24h).
+ *   1. Google Drive drop — the flow writes a JSON file into a Drive folder the
+ *      digest can read with an existing Google token. Set:
+ *        OUTLOOK_DRIVE_FOLDER_ID — Drive folder to read the newest file from.
+ *        GOOGLE_TOKEN_FILE       — Google OAuth2 authorized_user JSON (reused
+ *                                  from the Google adapter; Drive read scope).
+ *   2. HTTP pull — the flow POSTs to a small endpoint the digest GETs. Set:
+ *        OUTLOOK_INGEST_URL / OUTLOOK_INGEST_TOKEN (bearer).
  *
- * Expected response shape (the ingest receiver wraps the posted body):
- *   { received_at: ISO8601, payload: {
- *       calendar?: [{ start?, end?, subject?, location? }],
- *       messages?: [{ from?, subject?, received? }],
- *       unread_count?: number,
- *       note?: string
- *   } }
+ *   OUTLOOK_INGEST_MAX_AGE_MIN — optional; label the section stale if the
+ *                          summary is older than this many minutes (default
+ *                          1440 = 24h). Drive uses the file's modifiedTime;
+ *                          HTTP uses the wrapper's received_at.
  *
- * The payload is producer-defined; this adapter renders whatever known fields
- * are present and never throws on missing ones. Emitted section items use the
- * digest renderer's { label, detail? } shape (see render.js).
+ * Summary payload shape (either source):
+ *   { calendar?: [{ start?, end?, subject?, location? }],
+ *     messages?: [{ from?, subject? }],
+ *     unread_count?: number }
+ * (The HTTP source wraps it as { received_at, payload }.)
+ *
+ * Renders whatever known fields are present, never throws on missing ones.
+ * Emitted section items use the renderer's { label, detail? } shape.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+
 const HTTP_TIMEOUT_MS = 15_000;
+const DRIVE = "https://www.googleapis.com/drive/v3";
 
 // Digest sections render items as { label, detail? } (see render.js).
 function fmtCalendar(items) {
@@ -44,42 +50,104 @@ function fmtMessages(items) {
   }));
 }
 
+/** Mint a Google access token from an authorized_user JSON (in memory). */
+async function mintGoogleToken(tokenFile) {
+  const raw = JSON.parse(readFileSync(tokenFile, "utf8"));
+  if (!raw.refresh_token || !raw.client_id || !raw.client_secret) {
+    if (raw.token) return raw.token;
+    throw new Error("token file missing refresh_token/client_id/client_secret");
+  }
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: raw.client_id,
+      client_secret: raw.client_secret,
+      refresh_token: raw.refresh_token,
+      grant_type: "refresh_token",
+    }),
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`token refresh HTTP ${res.status}`);
+  const json = await res.json();
+  if (!json.access_token) throw new Error("refresh grant returned no access_token");
+  return json.access_token;
+}
+
+/**
+ * Read the newest file in a Drive folder → { payload, receivedAt }.
+ * Returns { empty: true } when the folder has no files yet.
+ */
+async function readDriveDrop(config) {
+  const token = await mintGoogleToken(config.GOOGLE_TOKEN_FILE);
+  const auth = { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) };
+  const folderId = config.OUTLOOK_DRIVE_FOLDER_ID;
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+  const listUrl = `${DRIVE}/files?q=${q}&orderBy=modifiedTime desc&pageSize=1&fields=files(id,name,modifiedTime)`;
+  const listRes = await fetch(listUrl, auth);
+  if (!listRes.ok) throw new Error(`Drive list HTTP ${listRes.status}`);
+  const { files } = await listRes.json();
+  if (!files || files.length === 0) return { empty: true };
+
+  const file = files[0];
+  const getRes = await fetch(`${DRIVE}/files/${file.id}?alt=media`, auth);
+  if (!getRes.ok) throw new Error(`Drive download HTTP ${getRes.status}`);
+  const text = await getRes.text();
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    throw new Error("drop file is not valid JSON");
+  }
+  // The flow may write the summary bare, or wrapped as { payload }.
+  if (payload && typeof payload === "object" && payload.payload) payload = payload.payload;
+  return { payload, receivedAt: file.modifiedTime || null };
+}
+
+/** Fetch the HTTP ingest → { payload, receivedAt } or { empty: true }. */
+async function readHttpIngest(config) {
+  const res = await fetch(config.OUTLOOK_INGEST_URL, {
+    headers: { Authorization: `Bearer ${config.OUTLOOK_INGEST_TOKEN}` },
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+  });
+  if (res.status === 404) return { empty: true };
+  if (!res.ok) throw new Error(`ingest HTTP ${res.status}`);
+  const record = await res.json();
+  return { payload: (record && record.payload) || {}, receivedAt: record && record.received_at };
+}
+
 export async function outlookSections(config) {
   const cal = { title: "Outlook calendar (today)", available: false, items: [] };
   const mail = { title: "Outlook mail", available: false, items: [] };
 
-  const url = config.OUTLOOK_INGEST_URL;
-  const token = config.OUTLOOK_INGEST_TOKEN;
-  if (!url || !token) {
-    const reason = "not configured (OUTLOOK_INGEST_URL/OUTLOOK_INGEST_TOKEN unset)";
+  const driveMode = Boolean(config.OUTLOOK_DRIVE_FOLDER_ID && config.GOOGLE_TOKEN_FILE && existsSync(config.GOOGLE_TOKEN_FILE));
+  const httpMode = Boolean(config.OUTLOOK_INGEST_URL && config.OUTLOOK_INGEST_TOKEN);
+  if (!driveMode && !httpMode) {
+    const reason = "not configured (set OUTLOOK_DRIVE_FOLDER_ID+GOOGLE_TOKEN_FILE, or OUTLOOK_INGEST_URL+TOKEN)";
     cal.reason = reason;
     mail.reason = reason;
     return [cal, mail];
   }
 
-  let record;
+  let result;
   try {
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    });
-    if (res.status === 404) {
-      const reason = "no Outlook summary posted yet";
-      cal.reason = reason;
-      mail.reason = reason;
-      return [cal, mail];
-    }
-    if (!res.ok) throw new Error(`ingest HTTP ${res.status}`);
-    record = await res.json();
+    result = driveMode ? await readDriveDrop(config) : await readHttpIngest(config);
   } catch (err) {
-    const reason = `ingest fetch failed: ${err.message}`;
+    const reason = `Outlook ingest failed: ${err.message}`;
     cal.reason = reason;
     mail.reason = reason;
     return [cal, mail];
   }
 
-  const payload = (record && record.payload) || {};
-  const receivedAt = record && record.received_at ? record.received_at : null;
+  if (result.empty) {
+    const reason = "no Outlook summary posted yet";
+    cal.reason = reason;
+    mail.reason = reason;
+    return [cal, mail];
+  }
+
+  const payload = result.payload || {};
+  const receivedAt = result.receivedAt || null;
 
   // Staleness label (does not suppress the section — better to show old data
   // labeled than to hide it).
