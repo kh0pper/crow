@@ -170,7 +170,9 @@ propagated. Every action lands in `pm_sync_log`.
 ## Panel
 
 `/dashboard/pm-workspace` — overview (due/overdue, last digest, sync
-health), notes (list + editors), digests (history + preview/run), sync
+health), notes (list + editors), digests (history + preview/run),
+planner (the approval queue: approve/reject proposed blocks, cancel
+approved-unexported ones, force export/reconcile), sync
 (log tail + manual run). Editors live at `/pm/notes/new` (drawing) and
 `/pm/notes/new-md` (markdown); they autosave and post large drawing
 snapshots as `text/plain` JSON to stay under the gateway's 1mb JSON

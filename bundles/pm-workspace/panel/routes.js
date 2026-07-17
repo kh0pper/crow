@@ -65,7 +65,7 @@ export default function pmWorkspaceRouter(dashboardAuth) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, notesMod, ocrMod, memMod, configMod, digestMod, syncMod] = await Promise.all([
+      const [dbMod, notesMod, ocrMod, memMod, configMod, digestMod, syncMod, plannerMod] = await Promise.all([
         importBundleModule("server/db.js"),
         importBundleModule("server/notes.js"),
         importBundleModule("server/ocr.js"),
@@ -73,12 +73,13 @@ export default function pmWorkspaceRouter(dashboardAuth) {
         importBundleModule("server/config.js"),
         importBundleModule("server/digest/index.js"),
         importBundleModule("server/sync/monday.js"),
+        importBundleModule("server/planner.js"),
       ]);
       if (!dbMod || !notesMod || !configMod) {
         res.status(500).json({ error: "pm-workspace bundle modules not available" });
         return false;
       }
-      mods = { dbMod, notesMod, ocrMod, memMod, configMod, digestMod, syncMod };
+      mods = { dbMod, notesMod, ocrMod, memMod, configMod, digestMod, syncMod, plannerMod };
     }
     if (!db) db = mods.dbMod.createDbClient();
     return true;
@@ -278,6 +279,67 @@ ${isDrawing
         ? await mods.digestMod.preview(db, config)
         : await mods.digestMod.runDigest(db, config, { force: Boolean(body.force) });
       res.json({ ok: true, result: body.preview ? { date: result.date, summary: result.summary, text: result.text } : result });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Planner API (approval queue) ──
+
+  function requirePlanner(res) {
+    if (!mods.plannerMod) {
+      res.status(500).json({ error: "planner module not available (bundle out of date?)" });
+      return false;
+    }
+    return true;
+  }
+
+  router.get("/api/pm/plan/list", async (req, res) => {
+    if (!(await ensureLoaded(res)) || !requirePlanner(res)) return;
+    try {
+      const status = req.query.status || undefined;
+      const rows = await mods.plannerMod.list(db, { status, limit: 100 });
+      res.json({ ok: true, events: rows });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // The dashboard queue is a decision surface: {uid, decision} with
+  // decision approved | rejected | cancelled. decided_via is stamped
+  // "dashboard" here — the chat gate stamps its own via the MCP tool.
+  router.post("/api/pm/plan/decide", async (req, res) => {
+    if (!(await ensureLoaded(res)) || !requirePlanner(res)) return;
+    try {
+      const body = parseBody(req);
+      const row = await mods.plannerMod.decide(db, {
+        uid: String(body.uid || ""),
+        decision: String(body.decision || ""),
+        via: "dashboard",
+      });
+      res.json({ ok: true, event: row });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  router.post("/api/pm/plan/export", async (req, res) => {
+    if (!(await ensureLoaded(res)) || !requirePlanner(res)) return;
+    try {
+      const config = mods.configMod.loadConfig();
+      const result = await mods.plannerMod.exportApproved(db, config);
+      res.json({ ok: true, result });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post("/api/pm/plan/reconcile", async (req, res) => {
+    if (!(await ensureLoaded(res)) || !requirePlanner(res)) return;
+    try {
+      const config = mods.configMod.loadConfig();
+      const result = await mods.plannerMod.reconcile(db, config);
+      res.json({ ok: true, result });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
