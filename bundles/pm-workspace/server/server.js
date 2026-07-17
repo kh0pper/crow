@@ -19,6 +19,7 @@ import { smtpConfigured } from "./mailer.js";
 import { preview, runDigest } from "./digest/index.js";
 import { runSync } from "./sync/monday.js";
 import { loadSyncConfig } from "./sync/mapping.js";
+import * as planner from "./planner.js";
 
 function text(t) {
   return { content: [{ type: "text", text: t }] };
@@ -199,6 +200,91 @@ export function createPmWorkspaceServer(db, options = {}) {
     }
   );
 
+  // ── Planner (calendar-block proposals + planned-events feed) ──
+
+  server.tool(
+    "crow_pm_plan_propose",
+    "Propose a calendar time block (status 'proposed'). Nothing reaches the feed until a human approves it via crow_pm_plan_decide or the dashboard queue. Datetimes are ISO; bare datetimes are treated as UTC.",
+    {
+      title: z.string().min(1).max(300).describe("Event subject (kept clean — the marker is a category, not a title tag)"),
+      start: z.string().describe("Start datetime, ISO (UTC if no offset)"),
+      end: z.string().describe("End datetime, ISO (UTC if no offset)"),
+      location: z.string().max(300).optional().describe("Location"),
+      body: z.string().max(5000).optional().describe("Event body/description"),
+      source: z.string().max(100).optional().describe("Where the proposal came from, e.g. 'monday:12345678' or 'chat'"),
+      source_ref: z.string().max(500).optional().describe("Optional URL or reference for the source item"),
+    },
+    async (input) => {
+      try {
+        const row = await planner.propose(db, input);
+        return text(JSON.stringify(row, null, 2));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    }
+  );
+
+  server.tool(
+    "crow_pm_plan_list",
+    "List planned events, optionally by status (proposed | approved | rejected | exported | confirmed | cancelled).",
+    {
+      status: z.enum(["proposed", "approved", "rejected", "exported", "confirmed", "cancelled"]).optional(),
+      limit: z.number().int().min(1).max(200).default(50),
+    },
+    async ({ status, limit }) => {
+      const rows = await planner.list(db, { status, limit });
+      return text(JSON.stringify(rows, null, 2));
+    }
+  );
+
+  server.tool(
+    "crow_pm_plan_decide",
+    "Record a human decision on a proposal: approved | rejected | cancelled. This is the chat gate — only call it when the human has explicitly decided. Approved events are exported to the feed on the next planner cron tick (or crow_pm_plan_export).",
+    {
+      uid: z.string().describe("Planned-event uid (pe-…)"),
+      decision: z.enum(["approved", "rejected", "cancelled"]),
+      via: z.string().max(50).default("chat").describe("Gate surface recorded on the row"),
+    },
+    async ({ uid, decision, via }) => {
+      try {
+        const row = await planner.decide(db, { uid, decision, via });
+        return text(JSON.stringify(row, null, 2));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    }
+  );
+
+  server.tool(
+    "crow_pm_plan_export",
+    "Export all approved events NOW as one planned-events feed file in the configured Drive folder (instead of waiting for the planner cron). Each event is exported exactly once.",
+    {},
+    async () => {
+      try {
+        const config = loadConfig();
+        const result = await planner.exportApproved(db, config);
+        return text(JSON.stringify(result, null, 2));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    }
+  );
+
+  server.tool(
+    "crow_pm_plan_reconcile",
+    "Match exported events against the newest calendar ingest drop (marker category + subject + start ±5 min) and mark hits 'confirmed'. Also runs automatically on the planner cron.",
+    {},
+    async () => {
+      try {
+        const config = loadConfig();
+        const result = await planner.reconcile(db, config);
+        return text(JSON.stringify(result, null, 2));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    }
+  );
+
   // ── Status ──
 
   server.tool(
@@ -223,6 +309,7 @@ export function createPmWorkspaceServer(db, options = {}) {
           enabled: config.PM_RUN_CRON === "1",
           digest_cron: config.DIGEST_CRON,
           sync_cron: config.SYNC_CRON,
+          planner_cron: config.PLANNER_CRON,
         },
         adapters: {
           smtp: smtpConfigured(config),
@@ -230,6 +317,7 @@ export function createPmWorkspaceServer(db, options = {}) {
           google: Boolean(config.GOOGLE_TOKEN_FILE && existsSync(config.GOOGLE_TOKEN_FILE)),
           box: false,
           outlook: false,
+          planner: planner.plannerConfigured(config),
         },
         ocr: {
           configured: Boolean(config.OCR_VISION_URL && config.OCR_VISION_MODEL),

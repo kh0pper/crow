@@ -13,6 +13,14 @@ Personal PM workspace bundle for Crow:
 - **Monday.com sync** — deterministic pull/merge engine: `mirror` boards
   copy into a Bot Board tracker; `twoway` boards three-way merge with
   the kanban tasks DB. Deletions are never propagated (flagged only).
+- **Planner** — human-gated calendar-block proposals. An assistant
+  proposes time blocks (`crow_pm_plan_propose`); a human approves or
+  rejects each one (`crow_pm_plan_decide`, or the dashboard queue);
+  approved blocks are exported as a **planned-events feed** — a JSON
+  file in a Drive folder an external agent (e.g. a Power Automate flow)
+  consumes to create REAL calendar events, stamped with a marker
+  category. The calendar ingest drop closes the loop: exported events
+  seen back with the marker category become `confirmed`.
 
 Boards/kanban UI stays with the existing tasks bundle and Bot Board —
 this bundle deliberately ships **no tracker tables and no board UI**.
@@ -45,11 +53,24 @@ secrets file works as-is.
 | `CROW_GATEWAY_URL` | Used for the digest footer link |
 | `CROW_GATEWAY_ALT_URLS` | Optional comma-separated extra bases (e.g. a public proxy) — the footer links all of them |
 | `CROW_TASKS_DB_PATH` | Kanban tasks DB, default `$CROW_DATA_DIR/tasks.db` |
+| `PLANNER_DRIVE_FOLDER_ID` | Drive folder where approved planned-events feed files are written (enables the planner) |
+| `PLANNER_CATEGORY` | Marker category for planner-created events; reconcile matches on it (default `Crow Plan`) |
+| `PLANNER_CRON` | Planner export/reconcile schedule, default `*/15 * * * *` |
 
 The Outlook summary shape (either source) is
 `{ calendar?: [{start,end,subject,location}], messages?: [{from,subject}], unread_count? }`
 (the HTTP source wraps it as `{ received_at, payload }`). The adapter renders whatever known
 fields are present.
+
+The planned-events feed file (`planned-events-<utc-stamp>.json`) is
+`{ generated_at, generator, category, events: [{ uid, subject, start, end, location, body }] }`
+with `start`/`end` as UTC ISO datetimes. The consuming agent should create
+one calendar event per entry and set `category` on it — that marker is what
+`reconcile` (cron or `crow_pm_plan_reconcile`) matches in the ingest drop
+(subject equal + start within ±5 min) to flip `exported` → `confirmed`.
+Every feed file contains only newly-approved events, so processing a file
+exactly once (e.g. a Drive "when a file is created" trigger) is naturally
+idempotent.
 
 Reserved for later phases (adapters currently stubs): `BOX_CLIENT_ID`,
 `BOX_CLIENT_SECRET`, `BOX_FOLDER_IDS`.
