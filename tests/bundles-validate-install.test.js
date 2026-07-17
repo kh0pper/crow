@@ -1,11 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { validateInstall } from "../servers/gateway/routes/bundles.js";
+import { createDbClient } from "../servers/db.js";
 
-const INSTALLED_PATH = join(homedir(), ".crow", "installed.json");
+// Honor CROW_HOME like the code under test does (routes/bundles.js resolves its
+// paths from it) — under the scratch suite env this points at the throwaway dir,
+// NOT the operator's real ~/.crow.
+const CROW_HOME = process.env.CROW_HOME || join(homedir(), ".crow");
+const INSTALLED_PATH = join(CROW_HOME, "installed.json");
 
 test("invalid bundle id → 400 invalid_id", async () => {
   const r = await validateInstall("../../etc/passwd");
@@ -37,6 +42,31 @@ test("consent bundle with an invalid/bogus token → 403 consent_invalid", async
   // 'caddy' again, but this time with a token that cannot possibly match a
   // row in install_consents — never minted, so validateConsentToken's
   // UPDATE...RETURNING finds nothing and consentVerified stays false.
+  //
+  // validateInstall opens its own createDbClient() for the consent check. On a
+  // scratch CROW_DATA_DIR that DB is table-less (init-db never ran), so the
+  // UPDATE used to throw instead of returning consent_invalid — this test was
+  // one of the suite's standing "known fails" under the scratch env. Create
+  // the one table the path touches (same DDL as scripts/init-db.js; IF NOT
+  // EXISTS makes it a no-op on a fully-initialized host DB). better-sqlite3
+  // won't mkdir, so provision the scratch data dir first (real hosts have it).
+  if (process.env.CROW_DATA_DIR) mkdirSync(process.env.CROW_DATA_DIR, { recursive: true });
+  const db = createDbClient();
+  try {
+    await db.execute({
+      sql: `CREATE TABLE IF NOT EXISTS install_consents (
+              token TEXT PRIMARY KEY,
+              bundle_id TEXT NOT NULL,
+              schema_version INTEGER NOT NULL DEFAULT 1,
+              created_at INTEGER NOT NULL,
+              expires_at INTEGER NOT NULL,
+              consumed INTEGER NOT NULL DEFAULT 0
+            )`,
+      args: [],
+    });
+  } finally {
+    try { db.close(); } catch {}
+  }
   const r = await validateInstall("caddy", {
     forceInstall: true,
     consentToken: "not-a-real-token",
@@ -91,26 +121,42 @@ test("bundle with a missing required dependency bundle → 400 missing_dependenc
   assert.ok(r.extra.missing_dependencies.includes("caddy"));
 });
 
-test("a bundle already present in ~/.crow/installed.json → 409 already_installed", async () => {
-  // Reads the REAL, live installed.json to pick an id that's genuinely
-  // installed on this host — does not write to it. If nothing usable is
-  // installed (fresh host), skip honestly rather than faking a fixture.
+test("a bundle already present in installed.json → 409 already_installed", async () => {
+  // On the operator's host: reads the REAL installed.json to pick an id that's
+  // genuinely installed — never writes it. Under a scratch CROW_HOME (the suite
+  // env) installed.json doesn't exist, and this test used to skip on prod /
+  // fail closed on scratch (the candidate came from prod state the code under
+  // test couldn't see). Scratch is disposable, so seed the fixture there and
+  // make the 409 deterministic; remove it after so parallel test files see the
+  // same empty scratch they started with.
+  let seeded = false;
   if (!existsSync(INSTALLED_PATH)) {
-    console.log("  (skipped: no ~/.crow/installed.json on this host)");
-    return;
+    if (!process.env.CROW_HOME) {
+      // Real ~/.crow without an installed.json (fresh host): never write there.
+      console.log("  (skipped: no installed.json and no scratch CROW_HOME to seed)");
+      return;
+    }
+    writeFileSync(INSTALLED_PATH, JSON.stringify([
+      { id: "uptime-kuma", installed_at: "2026-01-01T00:00:00Z" },
+    ]));
+    seeded = true;
   }
-  const installed = JSON.parse(readFileSync(INSTALLED_PATH, "utf8"));
-  const candidate = (Array.isArray(installed) ? installed : [])
-    .map((i) => i.id)
-    .find((id) => existsSync(join(process.cwd(), "bundles", id)));
-  if (!candidate) {
-    console.log("  (skipped: no installed bundle also present in the bundles/ registry)");
-    return;
+  try {
+    const installed = JSON.parse(readFileSync(INSTALLED_PATH, "utf8"));
+    const candidate = (Array.isArray(installed) ? installed : [])
+      .map((i) => i.id)
+      .find((id) => existsSync(join(process.cwd(), "bundles", id)));
+    if (!candidate) {
+      console.log("  (skipped: no installed bundle also present in the bundles/ registry)");
+      return;
+    }
+    const r = await validateInstall(candidate, { forceInstall: true });
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 409);
+    assert.equal(r.code, "already_installed");
+  } finally {
+    if (seeded) rmSync(INSTALLED_PATH, { force: true });
   }
-  const r = await validateInstall(candidate, { forceInstall: true });
-  assert.equal(r.ok, false);
-  assert.equal(r.status, 409);
-  assert.equal(r.code, "already_installed");
 });
 
 test("a plain, non-consent, non-GPU bundle passes and returns its manifest + installed snapshot", async () => {
