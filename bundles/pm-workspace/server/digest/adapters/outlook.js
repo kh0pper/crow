@@ -33,11 +33,33 @@ import { existsSync, readFileSync } from "node:fs";
 
 const HTTP_TIMEOUT_MS = 15_000;
 const DRIVE = "https://www.googleapis.com/drive/v3";
+const DEFAULT_TZ = "America/Chicago";
+
+/**
+ * Render an event timestamp as a short local time (e.g. "1:00 PM").
+ * The Office 365 "Get calendar view (V3)" connector returns UTC with no offset
+ * by default, so a bare `YYYY-MM-DDTHH:MM:SS[.fffffff]` is treated as UTC and
+ * converted to `tz`. Anything that isn't a recognizable datetime is returned
+ * unchanged (already-formatted strings pass through).
+ */
+function toLocalTime(v, tz) {
+  if (typeof v !== "string") return v;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v)) return v;
+  let iso = v.replace(/\.\d+/, ""); // drop fractional seconds (JS Date rejects 7-digit)
+  if (!/(Z|[+-]\d{2}:\d{2})$/.test(iso)) iso += "Z"; // no offset → assume UTC (connector default)
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return v;
+  try {
+    return d.toLocaleString("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" });
+  } catch {
+    return v;
+  }
+}
 
 // Digest sections render items as { label, detail? } (see render.js).
-function fmtCalendar(items) {
+function fmtCalendar(items, tz) {
   return items.slice(0, 20).map((e) => {
-    const when = [e.start, e.end].filter(Boolean).join("–");
+    const when = [e.start, e.end].map((t) => toLocalTime(t, tz)).filter(Boolean).join("–");
     const where = e.location ? ` @ ${e.location}` : "";
     return { label: `${e.subject || "(no subject)"}${where}`, detail: when || undefined };
   });
@@ -162,7 +184,7 @@ export async function outlookSections(config) {
 
   if (Array.isArray(payload.calendar)) {
     cal.available = true;
-    cal.items = fmtCalendar(payload.calendar);
+    cal.items = fmtCalendar(payload.calendar, config.OUTLOOK_TZ || DEFAULT_TZ);
     cal.title = `Outlook calendar (today)${staleNote}`;
     if (cal.items.length === 0) cal.items = [{ label: "No events." }];
   } else {
