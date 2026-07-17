@@ -42,6 +42,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3002 | 127.0.0.1 | Crow gateway (alt) | core |
 | 3004 | 127.0.0.1 | Crow gateway (alt) | core |
 | 3007 | 127.0.0.1 | uptime-kuma | MVP PR 1 |
+| 3008 | 127.0.0.1 | Crow gateway (alt) | core |
 | 3020 | 127.0.0.1 | adguard-home (admin UI) | MVP PR 3 |
 | 3030 | 127.0.0.1 | homepage | MVP PR 1 |
 | 3040 | 127.0.0.1 | gitea (web) | MVP PR 5 |

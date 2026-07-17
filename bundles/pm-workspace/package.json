@@ -1,0 +1,14 @@
+{
+  "name": "crow-pm-workspace",
+  "version": "1.0.0",
+  "description": "Crow PM Workspace — notes with OCR, daily digest, deterministic Monday.com sync.",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "cron-parser": "^4.9.0",
+    "nodemailer": "^6.9.16",
+    "zod": "^3.24.0"
+  }
+}
