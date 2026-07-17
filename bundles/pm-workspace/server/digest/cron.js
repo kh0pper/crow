@@ -17,6 +17,7 @@
 import parser from "cron-parser";
 import { runDigest, localDate } from "./index.js";
 import { runSync } from "../sync/monday.js";
+import { exportApproved, reconcile, plannerConfigured } from "../planner.js";
 
 const TICK_MS = 60_000;
 
@@ -33,8 +34,10 @@ function prevOccurrence(expr, now = new Date()) {
 export function startCrons(db, loadConfig) {
   const state = {
     lastSyncRun: null, // Date
+    lastPlannerRun: null, // Date
     digestRunning: false,
     syncRunning: false,
+    plannerRunning: false,
     timer: null,
   };
 
@@ -90,6 +93,28 @@ export function startCrons(db, loadConfig) {
           console.error(`[pm-workspace cron] sync failed: ${err.message}`);
         } finally {
           state.syncRunning = false;
+        }
+      }
+    }
+    // ── Planner (export approved → feed file, reconcile confirmations) ──
+    if (!state.plannerRunning && plannerConfigured(config)) {
+      const prev = prevOccurrence(config.PLANNER_CRON, now);
+      if (prev && (!state.lastPlannerRun || prev > state.lastPlannerRun)) {
+        state.plannerRunning = true;
+        state.lastPlannerRun = now;
+        try {
+          const exported = await exportApproved(db, config);
+          if (exported.exported > 0) {
+            console.log(`[pm-workspace cron] planner exported ${exported.exported} → ${exported.file}`);
+          }
+          const rec = await reconcile(db, config);
+          if (rec.confirmed > 0) {
+            console.log(`[pm-workspace cron] planner confirmed ${rec.confirmed} event(s)`);
+          }
+        } catch (err) {
+          console.error(`[pm-workspace cron] planner failed: ${err.message}`);
+        } finally {
+          state.plannerRunning = false;
         }
       }
     }

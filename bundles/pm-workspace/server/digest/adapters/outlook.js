@@ -29,10 +29,10 @@
  * Emitted section items use the renderer's { label, detail? } shape.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { mintGoogleToken, newestFileInFolder, downloadJson } from "../../google-drive.js";
 
 const HTTP_TIMEOUT_MS = 15_000;
-const DRIVE = "https://www.googleapis.com/drive/v3";
 const DEFAULT_TZ = "America/Chicago";
 
 /**
@@ -92,55 +92,16 @@ function fmtMessages(items) {
   }));
 }
 
-/** Mint a Google access token from an authorized_user JSON (in memory). */
-async function mintGoogleToken(tokenFile) {
-  const raw = JSON.parse(readFileSync(tokenFile, "utf8"));
-  if (!raw.refresh_token || !raw.client_id || !raw.client_secret) {
-    if (raw.token) return raw.token;
-    throw new Error("token file missing refresh_token/client_id/client_secret");
-  }
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: raw.client_id,
-      client_secret: raw.client_secret,
-      refresh_token: raw.refresh_token,
-      grant_type: "refresh_token",
-    }),
-    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-  });
-  if (!res.ok) throw new Error(`token refresh HTTP ${res.status}`);
-  const json = await res.json();
-  if (!json.access_token) throw new Error("refresh grant returned no access_token");
-  return json.access_token;
-}
-
 /**
- * Read the newest file in a Drive folder → { payload, receivedAt }.
- * Returns { empty: true } when the folder has no files yet.
+ * Read the newest file in the ingest Drive folder → { payload, receivedAt }.
+ * Returns { empty: true } when the folder has no files yet. Exported so the
+ * planner can reconcile its exported events against the same drop.
  */
-async function readDriveDrop(config) {
+export async function readDriveDrop(config) {
   const token = await mintGoogleToken(config.GOOGLE_TOKEN_FILE);
-  const auth = { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) };
-  const folderId = config.OUTLOOK_DRIVE_FOLDER_ID;
-  const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const listUrl = `${DRIVE}/files?q=${q}&orderBy=modifiedTime desc&pageSize=1&fields=files(id,name,modifiedTime)`;
-  const listRes = await fetch(listUrl, auth);
-  if (!listRes.ok) throw new Error(`Drive list HTTP ${listRes.status}`);
-  const { files } = await listRes.json();
-  if (!files || files.length === 0) return { empty: true };
-
-  const file = files[0];
-  const getRes = await fetch(`${DRIVE}/files/${file.id}?alt=media`, auth);
-  if (!getRes.ok) throw new Error(`Drive download HTTP ${getRes.status}`);
-  const text = await getRes.text();
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    throw new Error("drop file is not valid JSON");
-  }
+  const file = await newestFileInFolder(token, config.OUTLOOK_DRIVE_FOLDER_ID);
+  if (!file) return { empty: true };
+  let payload = await downloadJson(token, file.id);
   // The flow may write the summary bare, or wrapped as { payload }.
   if (payload && typeof payload === "object" && payload.payload) payload = payload.payload;
   return { payload, receivedAt: file.modifiedTime || null };

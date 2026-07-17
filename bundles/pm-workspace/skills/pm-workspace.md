@@ -13,6 +13,10 @@ triggers:
   - sync monday
   - pm workspace
   - project notes
+  - plan a block
+  - calendar block
+  - planned events
+  - approve proposal
 tools:
   - crow-pm-workspace
 ---
@@ -39,6 +43,11 @@ tools:
 | Run a Monday sync pass | `crow_pm_sync_run` |
 | Check sync health / conflicts | `crow_pm_sync_status` |
 | What's configured? | `crow_pm_status` (adapters, endpoints, cron state, DB paths) |
+| Propose a calendar block | `crow_pm_plan_propose` (status `proposed`; goes nowhere without a human decision) |
+| List proposals / feed state | `crow_pm_plan_list` |
+| Record the human's approve/reject | `crow_pm_plan_decide` (ONLY after an explicit human decision) |
+| Push approved blocks to the feed now | `crow_pm_plan_export` (otherwise the planner cron does it) |
+| Check which exports became real events | `crow_pm_plan_reconcile` |
 
 ## Boundaries — important
 - **Boards and kanban are NOT this server's job.** Task/board CRUD is done
@@ -51,6 +60,11 @@ tools:
 - Drawing notes need a saved PNG snapshot before OCR works; if
   `crow_pm_ocr_note` says there is no snapshot, the user should open the
   note in the panel editor and let it autosave first.
+- **The planner gate is a human gate.** Never call `crow_pm_plan_decide`
+  with `approved` unless the human explicitly approved that specific
+  block (in chat, or they used the dashboard queue). Proposals are cheap;
+  approvals are not yours to make. Keep event titles clean — the marker
+  is a calendar category, not a title tag.
 
 ## Workflow notes
 - After OCR, the transcription is FTS-searchable immediately and is also
