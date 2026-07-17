@@ -56,6 +56,26 @@ function toLocalTime(v, tz) {
   }
 }
 
+/**
+ * True when the event's start falls on today's date in `tz`. The ingest
+ * window may span several days (rolling look-ahead for weekly planning);
+ * the digest's calendar section renders only today's slice. Events whose
+ * start can't be parsed are kept — better to over-show than silently drop.
+ */
+function isToday(v, tz) {
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v)) return true;
+  let iso = v.replace(/\.\d+/, "");
+  if (!/(Z|[+-]\d{2}:\d{2})$/.test(iso)) iso += "Z"; // no offset → assume UTC (connector default)
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return true;
+  try {
+    const day = (x) => x.toLocaleDateString("en-CA", { timeZone: tz });
+    return day(d) === day(new Date());
+  } catch {
+    return true;
+  }
+}
+
 // Digest sections render items as { label, detail? } (see render.js).
 function fmtCalendar(items, tz) {
   return items.slice(0, 20).map((e) => {
@@ -184,7 +204,8 @@ export async function outlookSections(config) {
 
   if (Array.isArray(payload.calendar)) {
     cal.available = true;
-    cal.items = fmtCalendar(payload.calendar, config.OUTLOOK_TZ || DEFAULT_TZ);
+    const tz = config.OUTLOOK_TZ || DEFAULT_TZ;
+    cal.items = fmtCalendar(payload.calendar.filter((e) => isToday(e.start, tz)), tz);
     cal.title = `Outlook calendar (today)${staleNote}`;
     if (cal.items.length === 0) cal.items = [{ label: "No events." }];
   } else {
