@@ -39,12 +39,17 @@ secrets file works as-is.
 | `SYNC_CONFIG_FILE` | Path to the sync config JSON (below) |
 | `NTFY_TOPIC` / `NTFY_URL` | Optional ntfy push of the digest summary (default base `https://ntfy.sh`) |
 | `GOOGLE_TOKEN_FILE` | Google OAuth2 `authorized_user` JSON (the format google-workspace-mcp writes). Access tokens are minted in memory via the refresh grant; nothing is written back |
+| `OUTLOOK_INGEST_URL` / `OUTLOOK_INGEST_TOKEN` | Optional. Pull an Outlook calendar/mail summary an external agent (e.g. a Power Automate flow) has POSTed to an ingest endpoint. GET is bearer-authed with the token. Lets tenants that block Graph user-consent still feed Outlook into the digest |
+| `OUTLOOK_INGEST_MAX_AGE_MIN` | Optional. Label the Outlook section stale if the posted summary is older than this many minutes (default 1440) |
 | `CROW_GATEWAY_URL` | Used for the digest footer link |
 | `CROW_TASKS_DB_PATH` | Kanban tasks DB, default `$CROW_DATA_DIR/tasks.db` |
 
+The Outlook ingest payload the endpoint should return is
+`{ received_at, payload: { calendar?: [{start,end,subject,location}], messages?: [{from,subject}], unread_count? } }`;
+the adapter renders whatever known fields are present.
+
 Reserved for later phases (adapters currently stubs): `BOX_CLIENT_ID`,
-`BOX_CLIENT_SECRET`, `BOX_FOLDER_IDS`, `MSGRAPH_CLIENT_ID`,
-`MSGRAPH_CLIENT_SECRET`, `MSGRAPH_TENANT_ID`, `MSGRAPH_TOKEN_FILE`.
+`BOX_CLIENT_SECRET`, `BOX_FOLDER_IDS`.
 
 ## How digest cron gating works
 
