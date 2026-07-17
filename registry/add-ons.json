@@ -4753,6 +4753,175 @@
       "official": true
     },
     {
+      "id": "pm-workspace",
+      "name": "PM Workspace",
+      "version": "1.0.0",
+      "description": "Personal PM workspace — markdown + handwritten drawing notes with OCR, a daily digest email assembled from local boards/trackers and optional cloud adapters, and deterministic Monday.com board sync (mirror or two-way)",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "notes",
+        "drawing",
+        "ocr",
+        "digest",
+        "monday",
+        "sync",
+        "pm"
+      ],
+      "icon": "book",
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "PM_SECRETS_FILE",
+          "PM_RUN_CRON",
+          "OCR_VISION_URL",
+          "OCR_VISION_MODEL",
+          "OCR_VISION_API_KEY",
+          "PM_EMBED_URL",
+          "PM_EMBED_MODEL",
+          "SMTP_HOST",
+          "SMTP_PORT",
+          "SMTP_USER",
+          "SMTP_PASS",
+          "DIGEST_TO",
+          "DIGEST_CRON",
+          "SYNC_CRON",
+          "MONDAY_TOKEN",
+          "SYNC_CONFIG_FILE",
+          "NTFY_TOPIC",
+          "NTFY_URL",
+          "GOOGLE_TOKEN_FILE",
+          "CROW_GATEWAY_URL",
+          "CROW_TASKS_DB_PATH"
+        ]
+      },
+      "panel": "panel/pm-workspace.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/pm-workspace.md"
+      ],
+      "requires": {
+        "min_ram_mb": 128,
+        "min_disk_mb": 100
+      },
+      "env_vars": [
+        {
+          "name": "PM_SECRETS_FILE",
+          "description": "Optional path to a KEY=VALUE secrets file loaded after $CROW_HOME/env/pm-workspace.env (process.env still wins)",
+          "required": false
+        },
+        {
+          "name": "PM_RUN_CRON",
+          "description": "Set to 1 to run the digest/sync schedulers inside this server process (enable on exactly ONE registration)",
+          "required": false
+        },
+        {
+          "name": "OCR_VISION_URL",
+          "description": "OpenAI-style vision endpoint base URL for handwriting OCR (POSTs to <url>/chat/completions)",
+          "required": false
+        },
+        {
+          "name": "OCR_VISION_MODEL",
+          "description": "Model name for the OCR vision endpoint",
+          "required": false
+        },
+        {
+          "name": "OCR_VISION_API_KEY",
+          "description": "API key for the OCR vision endpoint (default: none)",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "PM_EMBED_URL",
+          "description": "OpenAI-style embeddings base URL for best-effort note embedding (POSTs to <url>/embeddings)",
+          "required": false
+        },
+        {
+          "name": "PM_EMBED_MODEL",
+          "description": "Embedding model name",
+          "required": false
+        },
+        {
+          "name": "SMTP_HOST",
+          "description": "SMTP host for digest email",
+          "required": false
+        },
+        {
+          "name": "SMTP_PORT",
+          "description": "SMTP port (default 587)",
+          "required": false
+        },
+        {
+          "name": "SMTP_USER",
+          "description": "SMTP username; also the From address",
+          "required": false
+        },
+        {
+          "name": "SMTP_PASS",
+          "description": "SMTP password",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "DIGEST_TO",
+          "description": "Recipient address for the daily digest email",
+          "required": false
+        },
+        {
+          "name": "DIGEST_CRON",
+          "description": "Cron expression for the daily digest (default: 0 7 * * *)",
+          "required": false
+        },
+        {
+          "name": "SYNC_CRON",
+          "description": "Cron expression for Monday sync runs (default: */15 * * * *)",
+          "required": false
+        },
+        {
+          "name": "MONDAY_TOKEN",
+          "description": "Monday.com API v2 token for board sync",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "SYNC_CONFIG_FILE",
+          "description": "Path to the sync config JSON (boards, column maps, status maps)",
+          "required": false
+        },
+        {
+          "name": "NTFY_TOPIC",
+          "description": "ntfy.sh topic for a short digest push notification",
+          "required": false
+        },
+        {
+          "name": "NTFY_URL",
+          "description": "Alternate ntfy base URL (default https://ntfy.sh)",
+          "required": false
+        },
+        {
+          "name": "GOOGLE_TOKEN_FILE",
+          "description": "Path to a Google OAuth2 authorized_user JSON for calendar/drive digest sections",
+          "required": false
+        },
+        {
+          "name": "CROW_GATEWAY_URL",
+          "description": "Public gateway URL used in digest footer links",
+          "required": false
+        },
+        {
+          "name": "CROW_TASKS_DB_PATH",
+          "description": "Path to the kanban tasks DB (default $CROW_DATA_DIR/tasks.db)",
+          "required": false
+        }
+      ],
+      "notes": "Notes (markdown + pressure-sensitive drawing with OCR), a daily digest, and deterministic Monday.com sync. Boards/kanban remain the job of the tasks bundle and Bot Board tracker tools — this bundle reads them for the digest and writes them only via the sync engine.",
+      "official": true
+    },
+    {
       "id": "podcast",
       "name": "Podcasts",
       "version": "1.1.0",
