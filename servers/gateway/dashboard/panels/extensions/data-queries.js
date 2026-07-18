@@ -16,7 +16,6 @@ import { loadCollections } from "./collections.js";
 // panel's render path (it already imports ./collections.js, so that knot is real).
 import { needsConfigKeys } from "../../../bundles-config.js";
 
-export const REGISTRY_URL = "https://raw.githubusercontent.com/kh0pper/crow-addons/main/registry.json";
 // Respect the instance's CROW_HOME (matches bundles.js / proxy.js resolveCrowHome).
 // Without this, an alternate instance (CROW_HOME=~/.crow-mpa, ~/.crow-finance) reads
 // the MAIN ~/.crow's installed.json/stores.json instead of its own.
@@ -149,51 +148,37 @@ export async function fetchCommunityStore(storeUrl) {
   }
 }
 
+// A registry entry can itself be a third-party listing (manifest origin:
+// "community" → the generated entry carries official: false) — those get the
+// same Community badge + install-modal caution as community-store add-ons, so
+// _community means "not maintained by Crow", not "came from a community store".
+// An ABSENT official field defaults to first-party: never falsely badge.
+export function withProvenance(addons) {
+  return addons.map((a) => ({ ...a, _community: a.official === false }));
+}
+
 /**
- * Fetch and merge remote + local registry into the available add-ons list.
+ * Load the in-repo registry + community stores into the available add-ons list.
+ * The in-repo registry (registry/add-ons.json) is the sole source of truth —
+ * the remote crow-addons mirror was retired 2026-07-18 (it was listing-only:
+ * installs always need the local checkout, so remote-only entries could only
+ * ever render as phantom, uninstallable cards).
  * Returns { installed, available, collections, registrySource, communityStores }.
  */
 export async function fetchRegistryData() {
   const installed = getInstalled();
 
-  // Load remote registry + merge with local (local entries override/supplement remote)
-  let remoteAddons = [];
   let localAddons = [];
   let registrySource = "none";
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const resp = await fetch(REGISTRY_URL, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (resp.ok) {
-      const remote = await resp.json();
-      remoteAddons = remote["add-ons"] || [];
-      registrySource = "remote";
-    }
-  } catch {}
-
   try {
     if (existsSync(LOCAL_REGISTRY)) {
       const local = JSON.parse(readFileSync(LOCAL_REGISTRY, "utf8"));
       localAddons = local["add-ons"] || [];
-      if (registrySource === "none") registrySource = "local";
-      else registrySource += "+local";
+      registrySource = "local";
     }
   } catch {}
 
-  // Merge: local entries override remote for matching IDs, new local entries are appended
-  const localIds = new Set(localAddons.map((a) => a.id));
-  const mergedAddons = [
-    ...remoteAddons.filter((a) => !localIds.has(a.id)),
-    ...localAddons,
-  ];
-
-  // Merge registry add-ons with community store add-ons. A registry entry can
-  // itself be a third-party listing (manifest origin: "community" → the
-  // generated entry carries official: false) — those get the same Community
-  // badge + install-modal caution as community-store add-ons, so _community
-  // means "not maintained by Crow", not "came from a community store".
-  const officialAddons = mergedAddons.map((a) => ({ ...a, _community: a.official === false }));
+  const officialAddons = withProvenance(localAddons);
   const communityStores = getStores();
   const communityResults = await Promise.all(communityStores.map((s) => fetchCommunityStore(s.url)));
   const communityAddons = communityResults.flatMap((r) => r.addons);
