@@ -11,12 +11,18 @@ Crow includes a built-in auto-updater that checks for new versions, pulls change
 The auto-updater runs as a background task inside the gateway process:
 
 1. **Fetch** — runs `git fetch origin main` to check for new commits
-2. **Stash** — if there are local changes (modified files, uncommitted work), stashes them automatically
-3. **Pull** — runs `git pull --ff-only origin main` (fast-forward only, no merge commits)
-4. **Dependencies** — runs `npm install` if `package.json` or `package-lock.json` changed
-5. **Migrations** — runs `node scripts/init-db.js` for any schema changes
-6. **Restore** — pops the stash to restore local changes. If there are conflicts, restores a clean state and logs a warning
-7. **Restart** — gracefully closes the HTTP server and exits so systemd restarts the process
+2. **CI gate** — checks the target commit's required CI results on GitHub
+   (`suite`, `static-checks`, `audit`). A red or still-running build skips the
+   update until the next check; forks without those CI checks are unaffected.
+   Disable with `CROW_UPDATE_CI_GATE=0`.
+3. **Stash** — if there are local changes (modified files, uncommitted work), stashes them automatically
+4. **Pull** — runs `git pull --ff-only origin main` (fast-forward only, no merge commits)
+5. **Dependencies** — runs `npm install` if `package.json` or `package-lock.json` changed
+6. **Migrations** — runs `node scripts/init-db.js` for any schema changes, wrapped in
+   the migration guard (automatic pre-migration backup + data-loss protection — see
+   the [database recovery guide](../developers/db-recovery.md))
+7. **Restore** — pops the stash to restore local changes. If there are conflicts, restores a clean state and logs a warning
+8. **Restart** — gracefully closes the HTTP server and exits so systemd restarts the process
 
 ## Configuration
 
