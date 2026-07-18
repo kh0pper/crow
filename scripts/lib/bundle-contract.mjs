@@ -6,8 +6,8 @@
  * (2) filesystem referential integrity (declared surface files exist, id ==
  * dirname, dependency bundles exist) — which JSON Schema cannot express.
  */
-import { readFileSync, existsSync } from "node:fs";
-import { join, isAbsolute, basename } from "node:path";
+import { readFileSync, existsSync, realpathSync } from "node:fs";
+import { join, isAbsolute, basename, relative, resolve, sep } from "node:path";
 import Ajv from "ajv";
 
 const schema = JSON.parse(
@@ -28,9 +28,22 @@ export function detectSurfaces(manifest) {
 }
 
 function fileExists(bundleDir, rel) {
-  if (typeof rel !== "string" || !rel) return false;
-  const p = isAbsolute(rel) ? rel : join(bundleDir, rel);
-  return existsSync(p);
+  if (typeof rel !== "string" || !rel || isAbsolute(rel)) return false;
+
+  const bundleRoot = realpathSync(bundleDir);
+  const candidate = resolve(bundleRoot, rel);
+  const relativePath = relative(bundleRoot, candidate);
+  if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    return false;
+  }
+  if (!existsSync(candidate)) return false;
+
+  const realCandidate = realpathSync(candidate);
+  const realRelativePath = relative(bundleRoot, realCandidate);
+  return Boolean(realRelativePath)
+    && realRelativePath !== ".."
+    && !realRelativePath.startsWith(`..${sep}`)
+    && !isAbsolute(realRelativePath);
 }
 
 /**

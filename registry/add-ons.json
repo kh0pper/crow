@@ -6337,57 +6337,6 @@
       "webUI": null,
       "notes": "No host port publish. Expose via Caddy after install: caddy_add_federation_site { domain: WF_HOST, upstream: 'writefreely:8080', profile: 'activitypub' }. On first-run the admin account is created via the web UI; there is no CLI bootstrap.",
       "official": true
-    },
-    {
-      "id": "xquik",
-      "name": "Xquik",
-      "version": "1.0.0",
-      "description": "Read-only X data research through Xquik's remote MCP server.",
-      "type": "mcp-server",
-      "author": "kriptoburak",
-      "origin": "community",
-      "category": "social",
-      "tags": [
-        "x",
-        "twitter",
-        "social-data",
-        "tweet-search",
-        "trends",
-        "research"
-      ],
-      "icon": "message-circle",
-      "server": {
-        "command": "npx",
-        "args": [
-          "-y",
-          "mcp-remote@0.1.38",
-          "https://xquik.com/mcp",
-          "--header",
-          "x-api-key: ${XQUIK_API_KEY}"
-        ],
-        "envKeys": [
-          "XQUIK_API_KEY"
-        ]
-      },
-      "skills": [
-        "skills/xquik.md"
-      ],
-      "requires": {
-        "env": [
-          "XQUIK_API_KEY"
-        ]
-      },
-      "env_vars": [
-        {
-          "name": "XQUIK_API_KEY",
-          "description": "Xquik API key passed to the remote MCP server.",
-          "required": true,
-          "secret": true
-        }
-      ],
-      "webUI": null,
-      "notes": "Community integration that connects Crow to Xquik's remote MCP server. Review Xquik's public terms before use.",
-      "official": false
     }
   ]
 }

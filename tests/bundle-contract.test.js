@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateManifest, detectSurfaces } from "../scripts/lib/bundle-contract.mjs";
@@ -63,6 +63,25 @@ test("declared skill file must exist", () => {
   assert.equal(validateManifest({ ...VALID, skills: ["skills/x.md"] }, withFile.dir).ok, true);
   const without = tmpBundle("demo");
   assert.equal(validateManifest({ ...VALID, skills: ["skills/missing.md"] }, without.dir).ok, false);
+});
+
+test("declared files must stay inside their bundle directory", () => {
+  const { root, dir } = tmpBundle("demo");
+  const outside = join(root, "outside.md");
+  writeFileSync(outside, "outside");
+
+  assert.equal(validateManifest({ ...VALID, skills: [outside] }, dir).ok, false, "absolute paths must fail");
+  assert.equal(validateManifest({ ...VALID, skills: ["../outside.md"] }, dir).ok, false, "parent traversal must fail");
+  assert.equal(validateManifest({ ...VALID, skills: ["."] }, dir).ok, false, "bundle root is not a file reference");
+});
+
+test("declared files cannot escape through symlinks", () => {
+  const { root, dir } = tmpBundle("demo");
+  const outside = join(root, "outside.md");
+  writeFileSync(outside, "outside");
+  symlinkSync(outside, join(dir, "linked.md"));
+
+  assert.equal(validateManifest({ ...VALID, skills: ["linked.md"] }, dir).ok, false);
 });
 
 test("docker composefile must exist", () => {
