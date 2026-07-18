@@ -8,7 +8,7 @@ Built on the open [Model Context Protocol](https://modelcontextprotocol.io) stan
 
 ## Use it two ways — or both at once
 
-As an **agentic framework**, build and run your own agents (the Bot Builder) over email, Discord, and voice — local and operator-gated. As an **MCP platform**, connect Crow to the AI client you already pay for (Claude Code, claude.ai, Cursor, opencode) as a native MCP server.
+As an **agentic framework**, build and run your own agents (the Bot Builder) over email, Discord, and voice — local and operator-gated. As an **MCP platform**, connect Crow to the AI client you already pay for (Claude Code, Claude Desktop, Cursor, opencode) as a native MCP server.
 
 **It rides your existing subscription as a first-class connector — the supported extension point, not a third-party harness you run instead of your client.**
 
@@ -69,7 +69,7 @@ Learn more: **[Sharing Guide](https://maestro.press/software/crow/guide/sharing)
 
 The same framework points in very specific directions depending on what you do. Each cut below describes capabilities Crow ships today.
 
-- **Education**: A private AI workspace for students, teachers, and researchers. Crow remembers your work across sessions, manages sources with real citations and bibliographies, and connects to course tools and public datasets. Built for FERPA-sensitive settings, your data stays on infrastructure you control.
+- **Education**: A private AI workspace for students, teachers, and researchers. Crow remembers your work across sessions, manages sources with real citations and bibliographies, and connects to course tools and public datasets. Self-hosted, your data never leaves infrastructure you control — suitable for FERPA-sensitive contexts, though Crow does not itself implement FERPA controls.
 - **Law**: A self-hosted agentic assistant for legal work: matter organization, document research, and citation tracking, with privileged material kept on hardware you own. No third-party AI vendor sees the file.
 - **Home entertainment**: Turn a home server into an agentic hub for your media. Voice-controlled music and video across your devices, even your glasses, drawing on your own library. Your collection, your rules, nothing tracking your habits.
 - **Enterprise**: A self-hosted agentic platform for teams that handle regulated data. Build internal assistants, connect the tools your team already uses, and keep every byte inside your own network, with operator-approval gates on anything an agent does.
@@ -80,9 +80,13 @@ Crow connects to the AI clients you already use as a native MCP server — not a
 
 ### Works With
 
-| Claude | ChatGPT | Gemini | Grok | Cursor | Windsurf | Cline | Claude Code |
+Local apps, CLIs, and IDEs connect directly to your instance. These work on a standard self-hosted install with no extra exposure:
+
+| Claude Code | Claude Desktop | Cursor | Windsurf | Cline | Gemini CLI | Qwen Coder | opencode |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Web, Mobile, Desktop | Apps/Connectors | CLI, AI Studio | Remote MCP | IDE | IDE | VS Code | CLI |
+| CLI | Desktop app | IDE | IDE | VS Code | CLI | CLI | CLI |
+
+**Cloud web clients** (claude.ai on web/mobile, ChatGPT, Grok, Gemini on the web) are different: their servers have to reach your Crow from the public internet, and a self-hosted Crow deliberately does not expose its MCP endpoints publicly — your instance stays private on your LAN or tailnet. That is a security posture, not a missing feature. If you choose to operate a publicly reachable gateway, the [platform guides](https://maestro.press/software/crow/platforms/) cover the OAuth-based setup each cloud client uses — read [SECURITY.md](SECURITY.md#whats-public-by-default) first.
 
 ## Crow's Nest
 
@@ -99,12 +103,6 @@ Use the Crow's Nest as a chat frontend with your own AI provider: OpenAI, Anthro
 ## Quick Start
 
 For a guided setup instead of the CLI flows below: the first-run wizard and the connect wizard (Settings → Connections) walk you through initial setup and connecting your first AI client — no config files required.
-
-### Managed Hosting
-
-A pre-configured Crow instance with no setup and no maintenance.
-
-> **[Get managed hosting →](https://maestro.press/hosting/)**
 
 ### Oracle Cloud Free Tier (Recommended Free)
 
@@ -183,8 +181,7 @@ Full documentation at **[maestro.press/software/crow](https://maestro.press/soft
 
 - [Bot Builder](https://maestro.press/software/crow/guide/bot-builder): Build agents with personas, tools, skills, gateways, and permissions
 - [Meta Glasses](https://maestro.press/software/crow/guide/meta-glasses): Run an agent hands-free on Ray-Ban Meta glasses
-- [Managed Hosting](https://maestro.press/hosting/): Pre-configured Crow instance, no setup required
-- [Platform Guides](https://maestro.press/software/crow/platforms/): Setup for Claude, ChatGPT, Gemini, Grok, Cursor, Windsurf, Cline
+- [Platform Guides](https://maestro.press/software/crow/platforms/): Client-by-client setup — Claude Code, Claude Desktop, Cursor, Windsurf, Cline, Gemini CLI, and the cloud web clients with their reachability requirements
 - [Integrations](https://maestro.press/software/crow/integrations/): All 20+ services with API key setup instructions
 - [Sharing & Social](https://maestro.press/software/crow/guide/sharing): P2P encrypted sharing, messaging, and collaboration
 - [Storage](https://maestro.press/software/crow/guide/storage): S3-compatible file storage with quotas and presigned URLs
