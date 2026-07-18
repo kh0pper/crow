@@ -234,6 +234,59 @@ export async function checkForUpdates() {
 const QUARANTINE_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 let _quarantineAlertAt = 0;
 
+// ---------------------------------------------------------------------------
+// A5: CI gate — never pull a commit whose required CI is red or still running.
+// Q6 gates merges; this gates DEPLOYS (a direct admin push to main previously
+// reached every instance within 6h regardless of CI state).
+// ---------------------------------------------------------------------------
+
+// The three branch-protection context names (the A1 contract). Other runs
+// (deploy-docs, build, image-freshness) never block updates.
+const CI_GATE_CONTEXTS = ["suite", "static-checks", "audit"];
+
+/**
+ * Pure classification of a GitHub check-runs payload for the target sha.
+ * "unknown" (no named runs — a fork without our CI, or an API oddity) FAILS
+ * OPEN: strangers' forks and non-GitHub deployments must still update; the
+ * gate only defends against a KNOWABLY red main.
+ */
+export function classifyCheckRuns(payload) {
+  const runs = (payload?.check_runs || []).filter((r) => CI_GATE_CONTEXTS.includes(r?.name));
+  if (runs.length === 0) return "unknown";
+  if (runs.some((r) => r.status !== "completed")) return "pending";
+  const ok = ["success", "neutral", "skipped"];
+  return runs.every((r) => ok.includes(r.conclusion)) ? "green" : "red";
+}
+
+let _ciVerdictOverride = null;
+/** Test hook: force the CI-gate verdict (fixture repos have non-GitHub
+ *  remotes, so the real fetch path naturally skips). */
+export function _setCiVerdictForTest(v) { _ciVerdictOverride = v; }
+
+/**
+ * Resolve the CI verdict for the sha the pull would land on. Fail-open
+ * ("unknown") on: non-GitHub origin, network failure, non-200, bad JSON.
+ * One unauthenticated call per update tick — far under the anonymous limit.
+ */
+async function resolveCiVerdict(remoteUrl, sha) {
+  if (_ciVerdictOverride) return _ciVerdictOverride;
+  const m = /github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?$/.exec(remoteUrl || "");
+  if (!m) return "unknown";
+  try {
+    const resp = await fetch(
+      `https://api.github.com/repos/${m[1]}/${m[2]}/commits/${sha}/check-runs`,
+      {
+        headers: { Accept: "application/vnd.github+json", "User-Agent": "crow-auto-update" },
+        signal: AbortSignal.timeout(15000),
+      },
+    );
+    if (!resp.ok) return "unknown";
+    return classifyCheckRuns(await resp.json());
+  } catch {
+    return "unknown";
+  }
+}
+
 /** The mutating sequence; exported ONLY as the test seam for the under-lock
  *  branch re-check (spec D3b — the outer guard would abort a branch fixture
  *  before the lock). */
@@ -302,6 +355,24 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   }
 
   log(`${behindCount} new commit(s) available. Updating...`);
+
+  // A5: consult the target sha's required check-runs before pulling. Red or
+  // still-running CI skips this tick (self-heals when main is fixed or CI
+  // completes); unknown fails open. CROW_UPDATE_CI_GATE=0 disables.
+  if (process.env.CROW_UPDATE_CI_GATE !== "0") {
+    const remote = await run("git", ["remote", "get-url", "origin"]);
+    const targetSha = (await run("git", ["rev-parse", "origin/main"])).stdout;
+    const ci = await resolveCiVerdict(remote.stdout, targetSha);
+    if (ci === "red" || ci === "pending") {
+      const msg = ci === "red"
+        ? `Skipped: CI is RED on origin/main (${targetSha.slice(0, 9)}) — not deploying a failing build; will retry next tick`
+        : `Skipped: CI still running on origin/main (${targetSha.slice(0, 9)}) — will retry next tick`;
+      log(msg);
+      await saveSetting("auto_update_last_check", new Date().toISOString());
+      await saveSetting("auto_update_last_result", msg);
+      return { updated: false, skipped: ci === "red" ? "ci-red" : "ci-pending", message: msg };
+    }
+  }
 
   // D3b: re-check the branch UNDER the lock, immediately before the pull —
   // a parallel session's raw `git checkout` races the outer guard across the
