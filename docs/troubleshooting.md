@@ -86,10 +86,6 @@ The FTS5 virtual tables and sync triggers are created by `init-db`. If search re
 | Too many tools loaded | Each server exposes its full tool set | Use `/router/mcp` (gateway) or `crow-core` (stdio) to reduce from 126+ tools to 10 category tools. See the [Context & Performance guide](/guide/context-performance). |
 | Tool not found in router mode | The router uses category tools that dispatch to underlying servers | Use `crow_discover` to check available actions within a category. The tool may be accessible via a different category name. |
 
-## Still Stuck?
-
-If you're spending more time on infrastructure than on your actual work, consider [managed hosting](./getting-started/managed-hosting) — a pre-configured Crow instance with zero setup for $15/mo.
-
 ## Getting Help
 
 - Check the [GitHub Issues](https://github.com/kh0pper/crow/issues) for known problems

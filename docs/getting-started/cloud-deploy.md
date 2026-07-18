@@ -3,7 +3,7 @@
 ::: danger Archived — Legacy Deployment Path
 This page documents the Render + Turso deployment method, which is **no longer supported** and is kept for reference only. Turso cloud database support has been removed from Crow. Multi-device sync is now handled by Hypercore P2P replication with local SQLite. This guide is no longer maintained.
 
-For a permanent free server, use the [Oracle Cloud Free Tier guide](./oracle-cloud). For a managed option, see [managed hosting](https://maestro.press/hosting/).
+For a permanent free server, use the [Oracle Cloud Free Tier guide](./oracle-cloud).
 :::
 
 ---

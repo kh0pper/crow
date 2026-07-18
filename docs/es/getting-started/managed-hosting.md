@@ -1,5 +1,9 @@
 # Hosting Administrado
 
+::: warning No disponible actualmente
+El hosting administrado no es una oferta activa en este momento. Esta página se conserva como referencia; para una instalación que funcione hoy, consulta las [rutas de primeros pasos](./index.md).
+:::
+
 Omite la configuración por completo. Obtén una instancia de Crow completamente configurada alojada por [Maestro Press](https://maestro.press) — $15/mes o $120/año.
 
 ## Qué Incluye
