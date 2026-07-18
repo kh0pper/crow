@@ -41,7 +41,6 @@ export default defineConfig({
               { text: 'Docker', link: '/es/getting-started/docker' },
               { text: 'Instalación Completa', link: '/es/getting-started/full-setup' },
               { text: 'Hosting Gratuito', link: '/es/getting-started/free-hosting' },
-              { text: 'Hosting Administrado', link: '/es/getting-started/managed-hosting' },
               { text: 'Configuración de Tailscale', link: '/es/getting-started/tailscale-setup' },
               { text: 'Dominio Personalizado', link: '/es/getting-started/custom-domain' },
               { text: 'Multidispositivo', link: '/es/getting-started/multi-device' },
@@ -219,7 +218,6 @@ export default defineConfig({
           { text: 'Google Cloud Free Tier', link: '/getting-started/google-cloud' },
           { text: 'Home Server', link: '/getting-started/home-server' },
           { text: 'Desktop Install', link: '/getting-started/desktop-install' },
-          { text: 'Managed Hosting', link: '/getting-started/managed-hosting' },
           { text: 'Tailscale Remote Access', link: '/getting-started/tailscale-setup' },
           { text: 'Custom Domain', link: '/getting-started/custom-domain' },
           { text: 'Docker', link: '/getting-started/docker' },
@@ -403,7 +401,6 @@ export default defineConfig({
       {
         text: 'Legal',
         items: [
-          { text: 'Managed Hosting Terms', link: '/legal/managed-hosting-terms' },
         ],
       },
       {

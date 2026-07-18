@@ -58,5 +58,5 @@ features:
   - icon:
       src: /icon-platforms.svg
     title: Administrado, en la Nube o Autoalojado
-    details: Usa hosting administrado, despliégalo gratis en Oracle Cloud o ejecútalo en una Raspberry Pi. La sincronización multi-instancia agrupa todos tus dispositivos en una sola interfaz — accede y controla cada instancia conectada desde la app Android de código abierto o desde el panel de control. Código abierto, desarrolladores bienvenidos.
+    details: Despliégalo gratis en Oracle Cloud o ejecútalo en una Raspberry Pi. La sincronización multi-instancia agrupa todos tus dispositivos en una sola interfaz — accede y controla cada instancia conectada desde la app Android de código abierto o desde el panel de control. Código abierto, desarrolladores bienvenidos.
 ---

@@ -58,5 +58,5 @@ features:
   - icon:
       src: /icon-platforms.svg
     title: Managed, Cloud, or Self-Host
-    details: Self-host on Oracle Cloud for free, run on a Raspberry Pi, or use managed hosting. Multi-instance sync pulls all your devices into one interface — access and control every connected instance from the open-source Android app or the dashboard. Open source, developers welcome.
+    details: Self-host on Oracle Cloud for free or run on a Raspberry Pi. Multi-instance sync pulls all your devices into one interface — access and control every connected instance from the open-source Android app or the dashboard. Open source, developers welcome.
 ---

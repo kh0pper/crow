@@ -2,12 +2,12 @@
 
 **¿No sabes por dónde empezar? Elige tu situación:**
 
-- Sin configuración técnica, solo quiero que funcione → [Hosting Administrado](./managed-hosting)
 - Servidor en la nube gratuito y permanente, sin problema con una configuración inicial → [Oracle Cloud Nivel Gratuito](./oracle-cloud)
 - Tengo hardware propio (Raspberry Pi, NUC, laptop vieja) → [Servidor en Casa](./home-server)
 - Solo mi computadora, uso local, sin servidor → [Instalación de Escritorio](./desktop-install)
 - Desarrollador, prefiero Docker → [Docker](/es/getting-started/docker)
 - Ya tengo Crow y quiero agregar una segunda instancia → [Google Cloud](./google-cloud) + [guía multidispositivo](/es/getting-started/multi-device)
+- Mi instancia ya está en marcha y ahora quiero conectar mi cliente de IA → [Guías de Plataformas](/es/platforms/)
 
 ## Elige Tu Camino
 
@@ -29,11 +29,9 @@ Ejecuta Crow localmente, conectado directamente a Claude Desktop, Claude Code, C
 
 > [Guía de Instalación de Escritorio](./desktop-install)
 
-### Hosting Administrado (Lo más fácil)
+## Instalar Es la Mitad — Conecta Tu Cliente
 
-Instancia de Crow preconfigurada — sin configuración, sin mantenimiento. Tu propio subdominio en `usuario.crow.maestro.press` con Crow's Nest, blog, integraciones de IA, respaldos diarios y SSL incluidos.
-
-> [Guía de Hosting Administrado](./managed-hosting)
+El valor de Crow aparece cuando un cliente de IA está conectado. Con tu instancia en marcha, conecta el cliente que uses — el asistente de conexión del panel (Ajustes → Conexiones) te guía, y las [Guías de Plataformas](/es/platforms/) cubren cada cliente paso a paso.
 
 ## Lo Que Obtendrás
 

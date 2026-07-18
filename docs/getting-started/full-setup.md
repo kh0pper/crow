@@ -4,10 +4,6 @@ title: Full Setup
 
 # Full Setup
 
-::: tip Don't want to manage infrastructure?
-Try [managed hosting](./managed-hosting) — $15/mo, no setup required.
-:::
-
 Run the complete Crow platform — gateway, MinIO storage, blog, and Crow's Nest — with a single Docker Compose command.
 
 ## What is this?

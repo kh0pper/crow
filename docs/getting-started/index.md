@@ -2,12 +2,12 @@
 
 **Not sure where to start? Pick your situation:**
 
-- Zero technical setup, just want it working → [Managed Hosting](./managed-hosting)
 - Free always-on cloud server, okay with a one-time setup → [Oracle Cloud Free Tier](./oracle-cloud)
 - Own hardware (Raspberry Pi, NUC, old laptop) → [Home Server](./home-server)
 - Just my computer, local only, no server → [Desktop Install](./desktop-install)
 - Developer, prefer Docker → [Docker](./docker)
 - Already have Crow, adding a second instance → [Google Cloud](./google-cloud) + [multi-device guide](./multi-device)
+- Instance already running, now connecting my AI client → [Platform Guides](../platforms/)
 
 ## Choose Your Path
 
@@ -35,12 +35,6 @@ Run Crow locally, connected directly to Claude Desktop, Claude Code, Cursor, and
 
 > [Desktop Install Guide](./desktop-install)
 
-### Managed Hosting (Easiest)
-
-Pre-configured Crow instance — no setup, no maintenance. Your own subdomain at `username.crow.maestro.press` with Crow's Nest, blog, AI integrations, daily backups, and SSL included.
-
-> [Managed Hosting Guide](./managed-hosting)
-
 ### Other Options
 
 - **[Docker](./docker)** — Self-host the gateway with Docker Compose. Best for developers who want full control.
@@ -49,6 +43,10 @@ Pre-configured Crow instance — no setup, no maintenance. Your own subdomain at
 ::: info Multi-Instance Chaining
 Run Crow on **multiple free-tier clouds** and chain them together. Your memories sync automatically, and you can call tools on any instance from any other. Set up [Oracle Cloud](./oracle-cloud) + [Google Cloud](./google-cloud), then [chain them](./multi-device).
 :::
+
+## Installing Is Half — Connect Your Client
+
+Crow's value shows up when an AI client is talking to it. Once your instance is running, connect the client you use — the dashboard's connect wizard (Settings → Connections) walks you through it, and the [Platform Guides](../platforms/) cover each client (Claude Code, Claude Desktop, Cursor, Windsurf, Cline, Gemini CLI, and more) step by step.
 
 ## What You'll Get
 

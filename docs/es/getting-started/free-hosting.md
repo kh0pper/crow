@@ -10,7 +10,6 @@ Crow puede desplegarse gratis en varias plataformas. Así se comparan:
 | **[Google Cloud](./google-cloud)** | e2-micro (0.25 vCPU) | 1 GB | 30 GB | Sí | No (SQLite local) | Instancia secundaria/satélite |
 | **[Servidor en Casa](./home-server)** | Varía | 4-32 GB | Ilimitado | Sí | No (SQLite local) | Control total, todos los complementos |
 | **[Instalación de Escritorio](./desktop-install)** | Tu PC | Tu PC | Tu PC | Mientras corre | No (SQLite local) | Inicio rápido, una sola máquina |
-| **[Hosting Administrado](./managed-hosting)** | Compartido | Compartido | Incluido | Sí | No | Cero mantenimiento ($15/mes) |
 | **Render** *(legado)* | Compartido | 512 MB | Efímero | No (se duerme) | N/A | No recomendado |
 
 ## Nivel Gratuito de Oracle Cloud (Recomendado)
@@ -33,18 +32,11 @@ Ejecuta todo localmente en tu computadora personal. Se conecta directamente a Cl
 
 > [Guía de Instalación de Escritorio →](./desktop-install)
 
-## Hosting Administrado
-
-Olvídate de toda la infraestructura. Por $15/mes o $120/año obtienes una instancia de Crow preconfigurada con actualizaciones automáticas, respaldos diarios y SSL — sin configuración requerida.
-
-> [Guía de Hosting Administrado →](./managed-hosting)
-
 ## ¿Cuál Debería Elegir?
 
 - **¿Quieres un servidor gratuito permanente?** → [Oracle Cloud](./oracle-cloud). Nunca se duerme, SQLite local, 47 GB de disco.
 - **¿Tienes una Raspberry Pi o una laptop vieja?** → [Servidor en Casa](./home-server). Control total, todos los complementos soportados.
 - **¿Solo quieres probar Crow?** → [Instalación de Escritorio](./desktop-install). Clona, configura, conecta — listo en 5 minutos.
-- **¿No quieres gestionar nada?** → [Hosting Administrado](./managed-hosting). Cero mantenimiento, en línea en minutos.
 
 **Nuestra recomendación:** Empieza con [Oracle Cloud](./oracle-cloud) como tu instancia principal — tiene más RAM y está disponible de forma confiable. Luego agrega [Google Cloud](./google-cloud) como satélite y [encadénalas](./multi-device) para tener redundancia y federación. Dos nubes siempre gratuitas, sincronizadas automáticamente.
 

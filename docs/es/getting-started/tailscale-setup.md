@@ -133,7 +133,7 @@ sudo tailscale serve --bg --https=8444 http://localhost:3001
 Luego llega al Nest en `https://<your-tailnet>.ts.net:8444/dashboard` desde cualquier dispositivo de tu tailnet.
 
 ::: warning Limitaciones de Tailscale Funnel
-Tailscale Funnel está diseñado para **uso personal y de aficionados**. Tiene límites de ancho de banda y no está pensado como solución de hosting de producción. Si planeas monetizar tu blog o podcast (anuncios, suscripciones, contenido de pago), usa un proxy inverso apropiado con un dominio propio (Opción B abajo) o considera el [hosting administrado](./managed-hosting).
+Tailscale Funnel está diseñado para **uso personal y de aficionados**. Tiene límites de ancho de banda y no está pensado como solución de hosting de producción. Si planeas monetizar tu blog o podcast (anuncios, suscripciones, contenido de pago), usa un proxy inverso apropiado con un dominio propio (Opción B abajo).
 :::
 
 ### Opción B: Proxy Inverso con Caddy (Recomendado para Producción)

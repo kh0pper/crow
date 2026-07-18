@@ -1,9 +1,5 @@
 # Configuración con Docker
 
-::: tip ¿No quieres administrar infraestructura?
-Prueba el [hosting administrado](./managed-hosting) — $15/mes, sin configuración requerida.
-:::
-
 Ejecuta el gateway de Crow en Docker para despliegues autoalojados.
 
 ## Requisitos previos

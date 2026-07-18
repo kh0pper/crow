@@ -1,5 +1,9 @@
 # Managed Hosting Terms of Service
 
+::: warning Not currently offered
+Managed hosting is not an active offering right now. This page is kept for reference; for a working install today, see the [getting-started paths](../getting-started/index.md).
+:::
+
 *Draft — Effective: March 2026 | Maestro Press. This document is a draft and should be reviewed by a lawyer before being treated as binding.*
 
 ---
