@@ -11,12 +11,18 @@ Crow incluye un actualizador automático integrado que busca nuevas versiones, d
 El actualizador automático se ejecuta como una tarea en segundo plano dentro del proceso del gateway:
 
 1. **Fetch** — ejecuta `git fetch origin main` para buscar nuevos commits
-2. **Stash** — si hay cambios locales (archivos modificados, trabajo sin commitear), los guarda automáticamente en un stash
-3. **Pull** — ejecuta `git pull --ff-only origin main` (solo fast-forward, sin commits de merge)
-4. **Dependencias** — ejecuta `npm install` si `package.json` o `package-lock.json` cambiaron
-5. **Migraciones** — ejecuta `node scripts/init-db.js` para cualquier cambio de esquema
-6. **Restauración** — aplica el stash para restaurar los cambios locales. Si hay conflictos, restaura un estado limpio y registra una advertencia
-7. **Reinicio** — cierra el servidor HTTP de forma ordenada y sale para que systemd reinicie el proceso
+2. **Puerta de CI** — consulta en GitHub los resultados de CI requeridos del commit
+   destino (`suite`, `static-checks`, `audit`). Una compilación en rojo o aún en
+   ejecución pospone la actualización hasta la próxima comprobación; los forks sin
+   esos checks no se ven afectados. Se desactiva con `CROW_UPDATE_CI_GATE=0`.
+3. **Stash** — si hay cambios locales (archivos modificados, trabajo sin commitear), los guarda automáticamente en un stash
+4. **Pull** — ejecuta `git pull --ff-only origin main` (solo fast-forward, sin commits de merge)
+5. **Dependencias** — ejecuta `npm install` si `package.json` o `package-lock.json` cambiaron
+6. **Migraciones** — ejecuta `node scripts/init-db.js` para cualquier cambio de esquema,
+   envuelto en la guarda de migraciones (copia de seguridad automática previa +
+   protección contra pérdida de datos)
+7. **Restauración** — aplica el stash para restaurar los cambios locales. Si hay conflictos, restaura un estado limpio y registra una advertencia
+8. **Reinicio** — cierra el servidor HTTP de forma ordenada y sale para que systemd reinicie el proceso
 
 ## Configuración
 
