@@ -29,7 +29,6 @@ Crow's core servers expose over 110 tools total:
 | Blog | 23 | `crow_create_post`, `crow_publish_post`, `crow_blog_settings` |
 | Sharing | 33 | `crow_generate_invite`, `crow_share`, `crow_inbox` |
 | Storage | 8 | `crow_upload_file`, `crow_list_files`, `crow_delete_file` |
-| Consulting | 6 | `crow_consulting_get`, `crow_consulting_stats` |
 | **Total** | **117** | |
 
 Each external integration (Obsidian, Home Assistant, Ollama, etc.) adds 5-20+ more tools on top of this.
@@ -46,7 +45,7 @@ Crow offers three configuration modes that trade off between context efficiency 
 
 ### Gateway Router
 
-The gateway exposes a single MCP endpoint at `/router/mcp` with one consolidated **category tool per server** — 9 tools on a full install: `crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, `crow_consulting`, plus `crow_tools` (external integrations and remote instances) and `crow_discover` (schema lookup). Instead of loading 117 tool definitions upfront, the AI calls a category tool with an `action` parameter — `crow_memory` with `action: "store_memory"`, for example — and uses `crow_discover` to look up available actions and their full schemas on demand. Tool definitions only enter context when actually needed.
+The gateway exposes a single MCP endpoint at `/router/mcp` with one consolidated **category tool per server** — 8 tools on a full install: `crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, plus `crow_tools` (external integrations and remote instances) and `crow_discover` (schema lookup). Instead of loading 117 tool definitions upfront, the AI calls a category tool with an `action` parameter — `crow_memory` with `action: "store_memory"`, for example — and uses `crow_discover` to look up available actions and their full schemas on demand. Tool definitions only enter context when actually needed.
 
 ### Combined Core
 
