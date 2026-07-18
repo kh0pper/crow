@@ -1,109 +1,49 @@
 # Roadmap
 
-Crow's development follows a milestone-based roadmap. Each milestone builds on the previous one, expanding the platform's project types, skills, and data backend integrations.
+*Rewritten July 2026. This page describes where Crow actually is and where it is deliberately going — not an aspirational feature list.*
 
-## Milestone 1: Project Type System + Data Backend Registry (Current)
+## What v1 means
 
-The foundation for everything that follows. The research server has been generalized into a project server that supports typed projects and pluggable data backends.
+Crow's version number stays at 0.x until all of the following are true:
 
-**What shipped:**
+- A newcomer on supported hardware reaches first value — a connected AI client using Crow's memory, or a working agent — within 30 minutes of starting the installer, without help from the maintainer.
+- CI defines what is mergeable: the full test suite runs on every pull request and every push to `main`, and a red run blocks merge for everyone.
+- Every capability claim in the README and docs is demonstrably true on a fresh install, or explicitly labeled as planned.
+- The release is tagged 1.0.0.
 
-- **Project types** -- Projects now have a `type` field (`research`, `data_connector`) that determines their workflow
-- **Data backend registry** -- Register external MCP servers as queryable data sources (`crow_register_backend`, `crow_list_backends`, `crow_remove_backend`, `crow_backend_schema`)
-- **`data_backends` table** -- New database table for storing backend registrations
-- **Backward compatibility** -- `crow-research` server name, `/research/mcp` endpoints, `createResearchServer` factory, and `crow_research` router category all continue to work as aliases
-- **Renamed server** -- `crow-projects` is the canonical server name; `crow_project_stats` replaces `crow_research_stats`
+Everything aspirational — FERPA-specific tooling, education verticals, cloud web clients reaching self-hosted instances — is explicitly post-v1 or explicitly parked (see below).
 
-**Prerequisites for next milestones:**
+## Shipped in 2026
 
-- Stable data backend protocol (register, query, capture)
-- Project type system extensible for new verticals
+The original 2026 roadmap on this page listed four education-focused milestones. Milestone 1 (typed projects + the data-backend registry) shipped; development then deliberately pivoted to the platform itself. What actually shipped:
 
-## Milestone 2: LMS Vertical
+- **Messages & federation** — encrypted P2P messaging over Nostr, contact and group management that follows the user across instances, delete-wins tombstones, live in-feed key rotation, and a multi-instance sync mesh proven by executable multi-instance tests rather than by hand.
+- **Extensions** — the add-on store with provenance badges (official vs community), themed collections with one-click install sets, community stores for third-party listings, and ~90 published add-ons.
+- **Bot Builder** — a guided agent-creation wizard with templates, a readiness checklist, per-agent tool scoping and permission policies, EN/ES localization, and channels for Gmail, Discord, and voice (Meta glasses / companion).
+- **Install & first-run** — a one-line installer with a platform gate and point-of-use Docker/Tailscale offers, a first-run wizard with identity backup, honest empty states, and a connect wizard for pairing AI clients.
+- **Project spaces** — the shareable project redesign: membership, roles, per-member capability overrides, and an audit log.
+- **Engineering floor (July 2026)** — CI on every PR and push with branch protection that binds the maintainer too, a runtime database-migration guard with automatic backup and quarantine, and fleet auto-update that refuses to pull a red or unverified `main`.
 
-Bring learning management system data into Crow through purpose-built project types and backends.
+## Current focus: proving v1
 
-**Planned:**
+The active arc converts "works on the maintainer's fleet" into "works for a stranger":
 
-- **`lms_course` project type** -- Projects scoped to a specific course, with semester, section, and enrollment metadata
-- **Canvas LMS backend** -- Pre-built data backend for Canvas (assignments, grades, modules, announcements, student submissions)
-- **LMS skill** -- Behavioral prompt that teaches the AI how to work with course data, generate reports, and track student progress
-- **Grade analysis tools** -- Tools for computing statistics, identifying at-risk students, and generating grade distribution reports
-- **Assignment workflow** -- Create assignments, rubrics, and feedback drafts from project notes
+- **Truth & identity** — reconcile every README/docs claim with reality (this page's rewrite is part of that work).
+- **First 30 minutes** — design work on reaching first value inside the setup wizard: a free-path AI provider quickstart, a guided first agent, and folding the remaining CLI post-install steps into the dashboard.
+- **Model catalog** — a curated local-model catalog with Hugging Face downloads (llama.cpp-first) instead of hardcoded model lists.
 
-**Prerequisites:**
+## Deliberately parked
 
-- Milestone 1 complete
-- Canvas MCP server operational (already listed as an external integration)
+These are conscious decisions, not TODOs:
 
-## Milestone 3: Instructional Tools
+- **Education verticals (old Milestones 2–4)** — LMS course projects, Canvas backends, curriculum and institutional tooling. Parked until validated education users exist. The data-backend registry that would power them remains in place.
+- **FERPA enforcement** — Self-hosted Crow keeps data on infrastructure you control, which suits FERPA-sensitive contexts; Crow does not itself implement FERPA controls, and none are currently planned.
+- **Cloud web clients on self-hosted instances** — claude.ai on the web, ChatGPT, and similar clients require a publicly reachable endpoint, which a private Crow deliberately does not expose. Whether to offer a hardened public path is an open strategy decision, not a scheduled feature.
+- **Managed hosting** — not an active offering.
+- **crowdsec-firewall-bouncer bundle** — the one bundle from the 2026-04 MVP expansion that never shipped (upstream publishes no Docker image; a safe install needs the privileged-install consent gate plus a tested unwind path). Parked until that machinery has been exercised.
 
-Tools for course design, content creation, and pedagogical workflows.
+## Add-on registry disposition (July 2026)
 
-**Planned:**
+The in-repo registry (`registry/add-ons.json`) is the source of truth and ships with every install. The separate remote registry repository (`crow-addons`) was only ever a listing mirror — it drifted to less than half the real catalog and is being retired. Third-party add-ons are the community-stores mechanism's job.
 
-- **`curriculum` project type** -- Projects for designing course sequences, learning objectives, and assessment strategies
-- **Syllabus generator** -- Skill that produces formatted syllabi from project notes and institutional templates
-- **Learning objective alignment** -- Tools to map assignments to learning outcomes (Bloom's taxonomy tagging)
-- **Content scaffolding** -- Break lecture topics into scaffolded learning sequences with suggested activities
-- **Assessment builder** -- Generate quiz and exam items from source material, tagged by difficulty and objective
-
-**Prerequisites:**
-
-- Milestone 2 complete (LMS data informs curriculum decisions)
-- Stable knowledge capture workflow from data backends
-
-## Milestone 4: Administrative and Institutional
-
-Expand beyond individual courses to department-level and institutional workflows.
-
-**Planned:**
-
-- **`program_review` project type** -- Projects for accreditation, program assessment, and institutional reporting
-- **Multi-course analytics** -- Aggregate data across courses for department-level insights (retention, DFW rates, enrollment trends)
-- **Accreditation evidence** -- Tools to collect and organize evidence for accreditation standards (mapped to common frameworks like HLC, SACSCOC)
-- **Faculty workload** -- Track teaching loads, committee assignments, and service obligations
-- **Institutional data backends** -- Pre-built backends for SIS (Student Information System), HR, and financial systems
-
-**Prerequisites:**
-
-- Milestones 2 and 3 complete
-- Institutional data access agreements and backend implementations
-- Multi-user sharing workflows stable (Milestone 1 sharing already supports project collaboration)
-
-## Extension Ecosystem: Bundle MVP Follow-ups
-
-Parallel track to the vertical milestones above. The 15-bundle MVP expansion merged 2026-04-12 across 7 PRs (PR 0 through PR 5; see git history on `main`). 13 bundles shipped; these are the remaining threads.
-
-### PR 4.5 -- crowdsec-firewall-bouncer (blocked on Pi availability)
-
-The only MVP bundle that didn't ship. CrowdSec upstream does not publish a Docker image for their firewall-bouncer -- `cs-firewall-bouncer`, `firewall-bouncer`, and the iptables/nftables variants all 404 on Docker Hub. Their install path is a host apt package + systemd service.
-
-**Plan when resumed:**
-
-- Custom `Dockerfile` in `bundles/crowdsec-firewall-bouncer/` using the statically compiled binary from GitHub releases
-- `network_mode: host`, `cap_add: [NET_ADMIN, NET_RAW]`, `privileged: true` in the manifest
-- First bundle to exercise PR 0's privileged install path and the typed-INSTALL consent gate
-- **Must include a tested unwind command** verified end-to-end on a throwaway host (colibri or mockingbird). A broken install can lock the operator out of iptables; dry-running the unwind before any grackle deploy is non-negotiable
-
-### Async install job silent-failure
-
-During the consent-modal smoke test on the `--no-auth` gateway (port 3004), a Netdata install returned `{ok: true, job_id: "1"}` but nothing appeared in `installed.json` or `docker ps`. Dozzle installed fine on the auth'd gateway (3002), so it may be specific to the `--no-auth` configuration -- but worth diagnosing before adding more bundles.
-
-### End-to-end consent-modal UX coverage
-
-Dozzle was verified manually through the browser; Netdata's token round-trip was verified via curl (token mint → consent check → atomic single-consume → replay rejection). Still want eyes on:
-
-- **Caddy** -- ports 80/443 may conflict on a host already running a web server; test on a clean VM
-- **Vaultwarden** -- requires generating `VAULTWARDEN_ADMIN_TOKEN` before install succeeds
-- **CrowdSec** -- requires `docker exec crow-crowdsec cscli bouncers add crow-mcp` post-install to produce the bouncer API key
-
-Each should render the EN/ES localized consent message and the checkbox-only gate.
-
-### Typed-INSTALL gate coverage
-
-Zero bundle-level exercise today. The gate is only shown for `privileged: true` manifests, and no MVP bundle declares that yet. First real exercise lands with PR 4.5.
-
-### Registry mirror automation
-
-The `crow-addons` registry is mirrored manually per PR today (flagged for Phase 2 in the plan hand-off). 13 bundles accumulated across the MVP merge are still pending mirror: caddy, uptime-kuma, stirling-pdf, changedetection, homepage, netdata, dozzle, adguard-home, crowdsec, gitea, forgejo, vaultwarden, searxng.
+Remaining engineering follow-ups from the 2026-04 bundle MVP (privileged-install gate exercise, install-flow QA coverage) are tracked in the maintainer's engineering backlog, not on this page.
