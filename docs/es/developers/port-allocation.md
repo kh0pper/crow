@@ -105,5 +105,5 @@ Estos bundles usan `network_mode: host`. Consumen directamente en el host los pu
 
 1. Elige un puerto sin asignar en un rango razonable (UIs de administración en 3000-3099, APIs de backend en 8000-8099, métricas en 19000-19999).
 2. Agrega una fila a la tabla con el nombre del bundle y el PR/estado.
-3. La verificación de colisión de puertos del CI (`.github/workflows/port-allocation.yml`) comprueba que tu puerto nuevo no choque con otro.
+3. La verificación de colisión de puertos del CI (el job `static-checks` en `.github/workflows/test.yml`) comprueba que tu puerto nuevo no choque con otro.
 4. Referencia este archivo en la descripción del PR de tu bundle.
