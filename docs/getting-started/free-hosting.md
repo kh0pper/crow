@@ -10,7 +10,6 @@ Crow can be deployed for free on several platforms. Here's how they compare:
 | **[Google Cloud](./google-cloud)** | e2-micro (0.25 vCPU) | 1 GB | 30 GB | Yes | No (local SQLite) | Secondary/satellite instance |
 | **[Home Server](./home-server)** | Varies | 4-32 GB | Unlimited | Yes | No (local SQLite) | Full control, all add-ons |
 | **[Desktop Install](./desktop-install)** | Your PC | Your PC | Your PC | While running | No (local SQLite) | Quick start, single machine |
-| **[Managed Hosting](./managed-hosting)** | Shared | Shared | Included | Yes | No | Zero maintenance ($15/mo) |
 | **Render** *(legacy)* | Shared | 512 MB | Ephemeral | No (sleeps) | N/A | Not recommended |
 
 ## Oracle Cloud Free Tier (Recommended)
@@ -33,18 +32,11 @@ Run everything locally on your personal computer. Connects directly to Claude De
 
 > [Desktop Install Guide →](./desktop-install)
 
-## Managed Hosting
-
-Skip all infrastructure. $15/mo or $120/yr gets you a pre-configured Crow instance with automatic updates, daily backups, and SSL — no setup required.
-
-> [Managed Hosting Guide →](./managed-hosting)
-
 ## Which Should I Choose?
 
 - **Want a permanent free server?** → [Oracle Cloud](./oracle-cloud). Never sleeps, local SQLite, 47 GB disk.
 - **Have a Raspberry Pi or old laptop?** → [Home Server](./home-server). Full control, all add-ons supported.
 - **Just want to try Crow?** → [Desktop Install](./desktop-install). Clone, setup, connect — done in 5 minutes.
-- **Don't want to manage anything?** → [Managed Hosting](./managed-hosting). Zero maintenance, live in minutes.
 
 **Our recommendation:** Start with [Oracle Cloud](./oracle-cloud) as your primary instance — it has more RAM and is reliably available. Then add [Google Cloud](./google-cloud) as a satellite and [chain them together](./multi-device) for redundancy and federation. Two always-free clouds, synced automatically.
 

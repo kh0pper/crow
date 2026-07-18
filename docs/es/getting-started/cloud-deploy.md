@@ -3,7 +3,7 @@
 ::: danger Archivado — Ruta de Despliegue Heredada
 Esta página documenta el método de despliegue con Render + Turso, que **ya no tiene soporte** y se conserva solo como referencia. El soporte para la base de datos en la nube de Turso fue eliminado de Crow. La sincronización multi-dispositivo ahora se maneja con replicación P2P de Hypercore con SQLite local. Esta guía ya no se mantiene.
 
-Para un servidor gratuito permanente, usa la [guía de Oracle Cloud Free Tier](./oracle-cloud). Para una opción administrada, consulta el [hosting administrado](https://maestro.press/hosting/).
+Para un servidor gratuito permanente, usa la [guía de Oracle Cloud Free Tier](./oracle-cloud).
 :::
 
 ---

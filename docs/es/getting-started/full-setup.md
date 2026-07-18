@@ -4,10 +4,6 @@ title: Instalación Completa
 
 # Instalación Completa
 
-::: tip ¿No quieres gestionar infraestructura?
-Prueba el [hosting administrado](./managed-hosting) — $15/mes, sin configuración requerida.
-:::
-
 Ejecuta la plataforma Crow completa — gateway, almacenamiento MinIO, blog y Crow's Nest — con un solo comando de Docker Compose.
 
 ## ¿Qué es esto?

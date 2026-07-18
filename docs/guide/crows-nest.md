@@ -25,7 +25,6 @@ The Crow's Nest requires the gateway to be running. Depending on how you install
 - **Crow OS (Raspberry Pi)** — The installer creates a `crow-gateway` systemd service that starts automatically
 - **Cloud (Render)** — The gateway runs as the main process
 - **Docker** — `docker compose` runs the gateway container
-- **Managed Hosting** — Pre-configured, always running
 - **Desktop (stdio)** — No gateway by default — you need to start it manually if you want the Crow's Nest or blog
 
 ### Manual Start (Development / Desktop)

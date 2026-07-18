@@ -1,9 +1,5 @@
 # Docker Setup
 
-::: tip Don't want to manage infrastructure?
-Try [managed hosting](./managed-hosting) — $15/mo, no setup required.
-:::
-
 Run the Crow gateway in Docker for self-hosted deployments.
 
 ## Prerequisites
