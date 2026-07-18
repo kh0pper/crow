@@ -38,7 +38,9 @@ import { getPeerOverview } from "./overview-cache.js";
 
 function isLocalCompanionRunning() {
   try {
-    const installedPath = resolve(homedir(), ".crow", "installed.json");
+    // Resolved via CROW_HOME — a co-hosted instance must not report the
+    // PRIMARY instance's companion as its own local companion.
+    const installedPath = resolve(process.env.CROW_HOME || resolve(homedir(), ".crow"), "installed.json");
     if (!existsSync(installedPath)) return false;
     const installed = JSON.parse(readFileSync(installedPath, "utf-8"));
     const list = Array.isArray(installed) ? installed : Object.values(installed);
