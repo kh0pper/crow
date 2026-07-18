@@ -4,18 +4,22 @@ Crow uses the open [Model Context Protocol (MCP)](https://modelcontextprotocol.i
 
 ## Compatibility Matrix
 
-| Platform | Transport | Auth | Setup Difficulty | Status |
+::: warning Local clients work today; cloud web clients cannot reach a private Crow
+Clients that run **on your own machine** (desktop apps, CLIs, IDEs) reach your self-hosted Crow directly over LAN/tailnet — they work out of the box. Clients that run **in a vendor's cloud** (claude.ai web/mobile, ChatGPT, Grok on the web) must reach your Crow from the public internet, and a self-hosted Crow is deliberately not exposed there. Cloud web-client access is **planned as a follow-on** after v1, behind a dedicated security review.
+:::
+
+| Platform | Runs | Transport | Auth | Status for a private Crow |
 |---|---|---|---|---|
-| [Claude Web & Mobile](./claude) | Streamable HTTP | OAuth 2.1 | Easy | Fully tested |
-| [Claude Desktop](./claude-desktop) | stdio | N/A (local) | Easy | Fully tested |
-| [Claude Code (CLI)](./claude-code) | stdio / HTTP | OAuth 2.1 | Easy | Fully tested |
-| [ChatGPT](./chatgpt) | SSE | OAuth 2.1 | Easy | Compatible |
-| [Gemini](./gemini) | stdio / HTTP | OAuth 2.1 | Easy | Compatible |
-| [Grok (xAI)](./grok) | Streamable HTTP | Bearer token | Medium | Compatible |
-| [Cursor](./cursor) | stdio / HTTP | Varies | Easy | Compatible |
-| [Windsurf](./windsurf) | stdio / HTTP | Varies | Easy | Compatible |
-| [Cline](./cline) | stdio / HTTP | Varies | Easy | Compatible |
-| [Qwen Code](./qwen-coder) | stdio / HTTP | OAuth 2.1 | Easy | Compatible |
+| [Claude Web & Mobile](./claude) | Vendor cloud | Streamable HTTP | OAuth 2.1 | **Not reachable — planned follow-on** |
+| [Claude Desktop](./claude-desktop) | Your machine | stdio | N/A (local) | Fully tested |
+| [Claude Code (CLI)](./claude-code) | Your machine | stdio / HTTP | OAuth 2.1 | Fully tested |
+| [ChatGPT](./chatgpt) | Vendor cloud | SSE / HTTP | OAuth 2.1 | **Not reachable — planned follow-on** |
+| [Gemini](./gemini) | Your machine (CLI) | stdio / HTTP | OAuth 2.1 | Compatible |
+| [Grok (xAI)](./grok) | Vendor cloud | Streamable HTTP | Bearer token | **Not reachable — planned follow-on** |
+| [Cursor](./cursor) | Your machine | stdio / HTTP | Varies | Compatible |
+| [Windsurf](./windsurf) | Your machine | stdio / HTTP | Varies | Compatible |
+| [Cline](./cline) | Your machine | stdio / HTTP | Varies | Compatible |
+| [Qwen Code](./qwen-coder) | Your machine | stdio / HTTP | OAuth 2.1 | Compatible |
 
 ## Mobile Apps
 

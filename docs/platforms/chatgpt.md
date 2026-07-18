@@ -1,11 +1,17 @@
 # ChatGPT
 
-Connect Crow to ChatGPT using the SSE transport. ChatGPT supports MCP through its Apps/Connectors feature.
+::: danger Not available for self-hosted Crow (planned as a follow-on)
+ChatGPT connects to MCP servers **from OpenAI's cloud**, so it can only reach a server that is publicly accessible on the internet. A self-hosted Crow is deliberately **not** reachable from the internet — that privacy posture is the product's core promise, not a missing feature. There is currently **no supported way** to connect ChatGPT to a private Crow. Public cloud-client access is **planned as a follow-on** after v1, behind a dedicated security review.
+
+**Use instead:** any of the local MCP clients on the [platforms index](./index) — they run on your machine and reach your private Crow directly.
+:::
+
+The instructions below apply **only** to the unsupported, advanced case where you have made your gateway publicly reachable yourself (your own domain and reverse proxy — read [SECURITY.md](https://github.com/kh0pper/crow/blob/main/SECURITY.md) first). Tailscale Funnel is **not** such a path: Crow's gateway rejects funneled requests to MCP and OAuth routes by design.
 
 ## Prerequisites
 
-- Crow gateway deployed and healthy ([Getting Started guide](../getting-started/))
-- A ChatGPT Plus or Team plan
+- Crow gateway deployed, healthy, **and publicly reachable** (unsupported — see above)
+- A ChatGPT plan with custom MCP access (behind **Developer Mode**; plan/region availability varies)
 
 ## Setup Steps
 
@@ -32,21 +38,13 @@ Repeat for additional servers:
 - **Protocol**: `2024-11-05`
 - **Auth**: OAuth 2.1 (automatic discovery)
 
-::: tip Important
-ChatGPT uses the **SSE** transport, not Streamable HTTP. Use the `/sse` endpoints, not the `/mcp` endpoints.
+::: tip Transport note
+ChatGPT historically required the **SSE** transport; newer ChatGPT releases also accept Streamable HTTP. If a `/sse` endpoint fails to connect, try the matching `/mcp` endpoint.
 :::
 
-## Self-Hosted / Local Setup
+## Self-Hosted Crow
 
-If you're running the Crow gateway on your own machine, you can expose it to ChatGPT using [Tailscale Funnel](../getting-started/tailscale-setup#option-a-tailscale-funnel-personal-hobby-use). Once Funnel is enabled on the machine running the gateway, your SSE endpoint URL will be:
-
-```
-https://<hostname>.<tailnet>.ts.net/memory/sse
-```
-
-Replace `<hostname>` and `<tailnet>` with your Tailscale machine name and tailnet domain. Use the same URL pattern for other servers (`/projects/sse`, `/router/sse`, etc.). The OAuth flow and setup steps are identical to the cloud instructions above — just substitute your Funnel URL for `your-crow-server`.
-
-See the [Tailscale Setup guide](../getting-started/tailscale-setup) for full configuration details.
+A standard self-hosted Crow **cannot** be connected to ChatGPT — see the notice at the top of this page. In particular, **Tailscale Funnel does not work for this**: the gateway rejects funneled requests to every MCP and OAuth route (only the blog and a few public files are Funnel-safe). Earlier versions of this page documented a Funnel-based setup; that flow has never worked on current Crow and the instructions were removed.
 
 ## Verification
 
@@ -64,9 +62,9 @@ If the connector fails to connect or tools don't appear:
 
 - **Leave OAuth fields blank if prompted.** Crow uses Dynamic Client Registration — ChatGPT discovers OAuth endpoints automatically from the `.well-known` metadata.
 - **Verify your gateway's OAuth metadata is reachable.** Visit `https://your-crow-server/.well-known/oauth-authorization-server` in your browser — you should see a JSON response with `authorization_endpoint`, `token_endpoint`, and `registration_endpoint`.
-- **Check `CROW_GATEWAY_URL` in your `.env` file.** This must match your actual public URL exactly (including `https://`). If you're using Tailscale Funnel, it should be `https://<hostname>.<tailnet>.ts.net`.
+- **Check `CROW_GATEWAY_URL` in your `.env` file.** This must match your actual public URL exactly (including `https://`).
 - **Start a new conversation after gateway restarts.** OAuth sessions are tied to the gateway process. When the gateway restarts, existing sessions become invalid.
-- **Use the `/sse` endpoints, not `/mcp`.** ChatGPT uses the SSE transport, not Streamable HTTP.
+- **Try the other transport.** Older ChatGPT builds require `/sse`; newer ones accept `/mcp`. If one fails, try the other.
 
 ## Cross-Platform Context
 
