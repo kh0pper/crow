@@ -1,12 +1,26 @@
 // Integration tests for scripts/ops/kill-orphan-gateways.sh
 //
 // Strategy: build a FAKE process tree under a mkdtemp dir T —
-//   T/servers/gateway/index.js  (fake "gateway": spawns a bundle child, then sleeps)
+//   T/servers/gateway/fixture-index.js  (fake "gateway": spawns a bundle child, then sleeps)
 //   T/bundles/fake/server/index.js  (fake "bundle child": sleeps; cwd contains /bundles/)
 // — orphan it to ppid==1 (spawn via an intermediate `node -e` parent that
 // spawns detached+unref and exits immediately), then run the real script with
 // ORPHAN_MATCH_PATTERN / ORPHAN_BUNDLE_PATTERN regex-scoped to paths under T
 // so it can NEVER match the real gateways on this production host.
+//
+// ⚠ The gateway fixture's FILENAME is load-bearing: on a host running the real
+// crow-orphan-sweep.timer (1-min cadence), the script's DEFAULT pattern
+// (node.*servers/gateway/index\.js — unanchored) would match a fixture named
+// index.js anywhere on disk, and the prod sweeper would reap the fixture out
+// from under the test mid-run (observed live 2026-07-18: ~3s window / 60s
+// period ≈ 1-in-20 flake). "fixture-index.js" escapes the default pattern; a
+// regression test below pins that property.
+//
+// Host-capability skips: some tests need the REAL prod gateway units to exist
+// (MainPID assertions), and the fixture-reaping tests need this process to be
+// OUTSIDE any *.service cgroup — fixtures inherit our cgroup, and the script's
+// systemd-ownership guard would (correctly) protect them from reaping (this is
+// why they failed on GitHub runners, whose jobs run inside a service cgroup).
 //
 // Every test also asserts the REAL prod gateway MainPIDs
 // (crow-gateway / crow-mpa-gateway) are still alive after the script ran.
@@ -61,15 +75,32 @@ async function waitFor(cond, timeoutMs, what) {
   throw new Error(`timed out after ${timeoutMs}ms waiting for: ${what}`);
 }
 
-/** MainPIDs of the real prod gateways, resolved once. */
+/** MainPIDs of the real prod gateways, resolved once. [] where systemctl is
+ * absent (macOS/containers) or no crow units exist — callers capability-skip. */
 async function prodMainPids() {
-  const { stdout } = await pExecFile("systemctl", [
-    "show", "-p", "MainPID", "--value", "crow-gateway", "crow-mpa-gateway",
-  ]);
-  return stdout
-    .split("\n")
-    .map((s) => parseInt(s.trim(), 10))
-    .filter((n) => Number.isFinite(n) && n > 1);
+  try {
+    const { stdout } = await pExecFile("systemctl", [
+      "show", "-p", "MainPID", "--value", "crow-gateway", "crow-mpa-gateway",
+    ]);
+    return stdout
+      .split("\n")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isFinite(n) && n > 1);
+  } catch {
+    return [];
+  }
+}
+
+/** true when THIS process lives inside a *.service cgroup (CI runners,
+ * systemd-run, VS Code remote server): spawned fixtures inherit the cgroup and
+ * the script's systemd-ownership guard protects them from reaping, so
+ * fixture-reap assertions cannot hold there. */
+function inServiceCgroup() {
+  try {
+    return /\.service/.test(readFileSync("/proc/self/cgroup", "utf8"));
+  } catch {
+    return false; // no /proc (macOS): certainly not a systemd service scope
+  }
 }
 
 function assertProdAlive(pids, when) {
@@ -86,7 +117,7 @@ function makeFakeTree() {
   mkdirSync(gwDir, { recursive: true });
   mkdirSync(bundleDir, { recursive: true });
   const bundleScript = join(bundleDir, "index.js");
-  const gwScript = join(gwDir, "index.js");
+  const gwScript = join(gwDir, "fixture-index.js");
   const childPidFile = join(T, "child.pid");
   // Fake bundle child: just sleeps (holds "the lock" conceptually).
   writeFileSync(bundleScript, `setInterval(() => {}, 1000);\n`);
@@ -175,7 +206,8 @@ const pidRe = (pid) => new RegExp(`\\b${pid}\\b`); // anchored: pid 1234 must no
 
 test("reaps an orphaned fake gateway AND its bundle child (subtree reaping)", async (t) => {
   const prod = await prodMainPids();
-  assert.ok(prod.length >= 1, "expected at least one prod gateway MainPID");
+  if (prod.length === 0) return t.skip("no crow gateway units on this host");
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
 
   const { T, gwScript, childPidFile } = makeFakeTree();
   const spawned = [];
@@ -189,7 +221,7 @@ test("reaps an orphaned fake gateway AND its bundle child (subtree reaping)", as
   assert.ok(isAlive(gwPid) && isAlive(childPid), "fake tree must be alive pre-run");
 
   const { stdout } = await runScript({
-    ORPHAN_MATCH_PATTERN: `${escRe(T)}/servers/gateway/index\\.js`,
+    ORPHAN_MATCH_PATTERN: `${escRe(T)}/servers/gateway/fixture-index\\.js`,
     // Deliberately matches NOTHING: the bundle child must die via sweep 1's
     // SUBTREE reaping, not get mopped up later by sweep 2 — otherwise the
     // critical child-also-dies assertion couldn't detect a missing subtree
@@ -210,6 +242,7 @@ test("reaps an orphaned fake gateway AND its bundle child (subtree reaping)", as
 });
 
 test("second sweep reaps an ALREADY-orphaned bundle child (ppid==1, cwd under /bundles/)", async (t) => {
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
   const prod = await prodMainPids();
   const { T, bundleScript, bundleDir } = makeFakeTree();
   const spawned = [];
@@ -236,6 +269,7 @@ test("second sweep reaps an ALREADY-orphaned bundle child (ppid==1, cwd under /b
 });
 
 test("ORPHAN_DRY_RUN=1 reports victims but kills nothing", async (t) => {
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected (never named as victims)");
   const prod = await prodMainPids();
   const { T, gwScript, childPidFile } = makeFakeTree();
   const spawned = [];
@@ -249,7 +283,7 @@ test("ORPHAN_DRY_RUN=1 reports victims but kills nothing", async (t) => {
   spawned.push(childPid);
 
   const { stdout } = await runScript({
-    ORPHAN_MATCH_PATTERN: `${escRe(T)}/servers/gateway/index\\.js`,
+    ORPHAN_MATCH_PATTERN: `${escRe(T)}/servers/gateway/fixture-index\\.js`,
     ORPHAN_BUNDLE_PATTERN: `${escRe(T)}/bundles/fake/server/index\\.js`,
     ORPHAN_DRY_RUN: "1",
   });
@@ -272,9 +306,9 @@ test("script exits 0 even when nothing matches", async (t) => {
   assertProdAlive(prod, "after the no-match run");
 });
 
-test("--owned-check: classifies real systemd unit pids as owned, session pids as not", async () => {
+test("--owned-check: classifies real systemd unit pids as owned, session pids as not", async (t) => {
   const prod = await prodMainPids();
-  assert.ok(prod.length >= 1, "need a prod MainPID to classify");
+  if (prod.length === 0) return t.skip("no crow gateway units on this host");
   // A real service MainPID is systemd-owned → exit 0.
   await pExecFile("bash", [SCRIPT, "--owned-check", String(prod[0])]);
   // This test process runs in a session scope (not a *.service cgroup) → exit 1.
@@ -288,13 +322,14 @@ test("--owned-check: classifies real systemd unit pids as owned, session pids as
   );
 });
 
-test("systemd-owned prod gateways are protected even when the pattern matches them (dry run)", async () => {
+test("systemd-owned prod gateways are protected even when the pattern matches them (dry run)", async (t) => {
   // The REAL default pattern matches the prod gateways, and every systemd
   // MainPID has ppid==1 (systemd IS pid 1) — so this exercises the candidate
   // protection stack (cgroup ownership + whitelist) against the live units.
   // DRY_RUN prints victims without signalling, so this is safe even if the
   // protections were broken; the assertion is on the victim list.
   const prod = await prodMainPids();
+  if (prod.length === 0) return t.skip("no crow gateway units on this host — nothing to prove protection against");
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: "node.*servers/gateway/index\\.js",
     ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
@@ -310,6 +345,9 @@ test("CROW_ALLOW_ORPHAN=1 orphan survives a REAL (non-dry) sweep", async (t) => 
   // The operator opt-out must be honored by the sweeper, not only by
   // parent-watch — a deliberately detached gateway would otherwise die
   // within a minute of the timer.
+  // Inside a *.service cgroup the fixture would survive via systemd-ownership
+  // protection instead of the opt-out — a vacuous pass; skip honestly.
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — survival would not prove the opt-out");
   const prod = await prodMainPids();
   const { T, gwScript, childPidFile } = makeFakeTree();
   const spawned = [];
@@ -321,7 +359,7 @@ test("CROW_ALLOW_ORPHAN=1 orphan survives a REAL (non-dry) sweep", async (t) => 
   spawned.push(parseInt(readFileSync(childPidFile, "utf8"), 10));
 
   const { stdout } = await runScript({
-    ORPHAN_MATCH_PATTERN: `${escRe(T)}/servers/gateway/index\\.js`,
+    ORPHAN_MATCH_PATTERN: `${escRe(T)}/servers/gateway/fixture-index\\.js`,
     ORPHAN_BUNDLE_PATTERN: `${escRe(T)}/bundles/does-not-match\\.js`,
   });
 
@@ -329,4 +367,30 @@ test("CROW_ALLOW_ORPHAN=1 orphan survives a REAL (non-dry) sweep", async (t) => 
   assert.ok(isAlive(gwPid), "CROW_ALLOW_ORPHAN=1 orphan must NOT be killed");
   assert.doesNotMatch(stdout, pidRe(gwPid), "opted-out orphan must not be named a victim");
   assertProdAlive(prod, "after the opt-out run");
+});
+
+test("fixture filename is invisible to the script's DEFAULT gateway pattern (prod-sweeper de-collision)", () => {
+  // On hosts running crow-orphan-sweep.timer, the script's DEFAULT pattern
+  // sweeps every minute with pgrep -f. If a fixture's cmdline matched it, the
+  // PROD sweeper would reap test fixtures mid-run (observed live 2026-07-18 —
+  // a ~1-in-20 suite flake). This pins the de-collision property against the
+  // default as actually written in the script, so pattern drift reopens the
+  // hazard loudly instead of silently.
+  const src = readFileSync(SCRIPT, "utf8");
+  const m = src.match(/MATCH_PATTERN="\$\{ORPHAN_MATCH_PATTERN:-(.+?)\}"/);
+  assert.ok(m, "could not find the MATCH_PATTERN default in the script");
+  const defaultRe = new RegExp(m[1].replace(/\\\\/g, "\\"));
+  const { T, gwScript } = makeFakeTree();
+  try {
+    const fixtureCmdline = `${process.execPath} ${gwScript}`;
+    assert.doesNotMatch(fixtureCmdline, defaultRe,
+      "fixture cmdline must NOT match the script's default gateway pattern");
+    // The old fixture name (servers/gateway/index.js) DID match — the rename
+    // is load-bearing, not cosmetic.
+    const oldCmdline = `${process.execPath} ${join(T, "servers", "gateway", "index.js")}`;
+    assert.match(oldCmdline, defaultRe,
+      "sanity: the pre-rename fixture name matched the default pattern (that was the flake)");
+  } finally {
+    rmSync(T, { recursive: true, force: true });
+  }
 });
