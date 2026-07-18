@@ -1,5 +1,9 @@
 # Managed Hosting
 
+::: warning Not currently offered
+Managed hosting is not an active offering right now. This page is kept for reference; for a working install today, see the [getting-started paths](./index.md).
+:::
+
 Skip the setup entirely. Get a fully configured Crow instance hosted by [Maestro Press](https://maestro.press) — $15/mo or $120/yr.
 
 ## What's Included
