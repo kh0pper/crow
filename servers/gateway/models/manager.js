@@ -1,14 +1,15 @@
 /**
- * GGUF model download pipeline (Item G, native model runtime, Task 6).
+ * GGUF model download + registration pipeline (Item G, native model
+ * runtime, Tasks 6-7).
  *
- * This is the first half of the "manager" module — downloads only. Task 7
- * extends this same file with provider registration (turning a downloaded
- * blob into a running llama.cpp provider row); the seam is deliberately
- * kept clean: everything above `// --- provider registration (Task 7) ---`
- * (not present yet) only ever touches the filesystem + `state.js`'s
- * `journal` map, never the DB.
+ * Everything above `// --- provider registration (Task 7) ---` is the
+ * download engine (Task 6) — it only ever touches the filesystem +
+ * `state.js`'s `journal` map, never the DB. Below that marker, Task 7 turns
+ * a downloaded blob into a running llama.cpp provider row (`registerModel`),
+ * tears one down (`unregisterModel`), and answers "what points at this
+ * provider" for the delete-confirmation dialog (`providerBindings`).
  *
- * Two layers:
+ * Two layers (Task 6, downloads):
  *
  *   - `fetchModelBlob()` — the raw download engine. Given a ready URL and a
  *     destination path, it streams the response straight to disk (NEVER
@@ -61,7 +62,9 @@ import http from "node:http";
 import https from "node:https";
 import { basename, join } from "node:path";
 
-import { loadState, saveState } from "./state.js";
+import { allocatePort, loadState, releasePort, saveState } from "./state.js";
+import { disableProvider, listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
+import { invalidateProvidersCache } from "../../shared/providers.js";
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -629,4 +632,289 @@ export function enqueueDownload(params) {
     return tracked;
   }
   return promise;
+}
+
+// ---------------------------------------------------------------------------
+// --- provider registration (Task 7) ---
+// ---------------------------------------------------------------------------
+//
+// This section turns a downloaded GGUF into a running provider row and
+// tears it back down. Real-schema facts this code was written against
+// (`scripts/init-db.js`, `servers/shared/providers-db.js` — read those
+// files before changing any of this):
+//
+//   - `providers` has NO hard-delete helper — only `disableProvider(db, id)`
+//     (soft-delete: `disabled = 1`, preserves history for instance-sync).
+//     `unregisterModel`'s "delete provider row" step is therefore a soft
+//     delete, matching every other provider-removal path in this codebase
+//     (`unregisterProvidersByBundle`) rather than inventing a hard DELETE.
+//   - `providers.gpu_policy` is a TEXT column added by a later migration
+//     (`addColumnIfMissing`, not the original CREATE TABLE) holding a JSON
+//     blob — there is no dedicated "runtime" or "mutex_group" column, so
+//     "native" marking and the mutex group both ride inside that JSON, per
+//     the task spec's "no schema changes" constraint.
+//   - There is no `ai_profiles` or `bots` TABLE. AI chat profiles are a
+//     JSON array stored at `dashboard_settings.value` under
+//     `key = 'ai_profiles'` (see `servers/gateway/dashboard/settings/
+//     sections/llm/ai-profiles.js`); a pointer-mode profile carries
+//     `provider_id` (+ `model_id`) directly. Bots are rows in
+//     `pi_bot_defs(bot_id, display_name, definition, ...)` where
+//     `definition` is a JSON blob whose `models.default` / `models.escalation`
+//     / `fast_voice_model` fields hold `"<providerId>/<modelId>"` strings
+//     (see `servers/gateway/dashboard/panels/bot-builder/data-queries.js`
+//     `loadModelOptions` — it builds exactly that key shape). `providerBindings`
+//     below reads both real locations directly; there was no queryable
+//     `provider_id` column to join against for bots.
+//
+// A registered model's provider `id` is the catalog `modelId` itself (e.g.
+// "qwen3-4b") — stable, already namespaced by the curated catalog, and the
+// natural key `state.js`'s `registry` map and `reconcileOnBoot`'s
+// `listProviderRows().modelId` shaping both key off of.
+
+/** Runtime marker + provider id → catalog model id, unused elsewhere. */
+const NATIVE_RUNTIME = "native";
+
+/** Default mutex group for a chat-class native model when no existing
+ * enabled provider row (native or otherwise) already claims a chat-class
+ * mutex group to join. */
+const DEFAULT_CHAT_MUTEX_GROUP = "local-llm";
+
+/**
+ * A provider row (as returned by `listProvidersAll`) counts as a
+ * "chat-class member" of its mutex group when at least one of its `models[]`
+ * entries carries `task === "chat"`. Rows without a mutex group, disabled
+ * rows, and rows with no chat-tagged model entries are not counted.
+ */
+function isChatClassRow(row) {
+  return Array.isArray(row.models) && row.models.some((m) => m && m.task === "chat");
+}
+
+/**
+ * mutexGroup rule for a newly-registering chat-class model (spec verbatim):
+ * join the existing group with the most chat-class members; if no enabled
+ * provider row has any chat-class member in a group, fall back to
+ * `DEFAULT_CHAT_MUTEX_GROUP`. Ties keep the first group encountered in
+ * `existingRows` order (stable — `listProvidersAll` orders by
+ * `disabled ASC, id`, so ties resolve alphabetically by provider id).
+ * Pure function of the rows already in the registry — the row being
+ * registered is never included (call this BEFORE inserting it).
+ */
+export function pickChatMutexGroup(existingRows) {
+  const counts = new Map();
+  for (const row of existingRows) {
+    if (row.disabled) continue;
+    const group = row.gpuPolicy?.mutexGroup;
+    if (!group) continue;
+    if (!isChatClassRow(row)) continue;
+    counts.set(group, (counts.get(group) || 0) + 1);
+  }
+  let best = null;
+  let bestCount = 0;
+  for (const [group, count] of counts) {
+    if (count > bestCount) {
+      best = group;
+      bestCount = count;
+    }
+  }
+  return best || DEFAULT_CHAT_MUTEX_GROUP;
+}
+
+/**
+ * Register a downloaded model as a native-runtime provider row.
+ *
+ * Order (binding — later tasks' process supervisor depends on this exact
+ * sequence): allocate + bind-test the port → persist the reservation +
+ * registry entry to state.json → insert the provider row with its FINAL
+ * `base_url` (the port never changes after this point — no placeholder,
+ * no later "update base_url once the process is up") → invalidate the
+ * providers cache LAST, so no reader can observe a cache miss that
+ * refetches a still-mid-write row.
+ *
+ * The `dir`-scoped `state.registry[modelId]` entry this writes (`file`,
+ * `quant`, `catalogId`, `registeredAt`) is what lets `unregisterModel` find
+ * the on-disk blob to delete without needing a `catalog` argument of its
+ * own — the registry entry IS the durable record of which file this
+ * modelId's row corresponds to.
+ *
+ * Injectable seams (`allocatePortFn`/`listProvidersAllFn`/`upsertProviderFn`/
+ * `invalidateCacheFn`) default to the real implementations; tests use them
+ * to observe call order without needing to intercept module internals.
+ *
+ * @returns {Promise<object>} the registered provider row shape:
+ *   `{ id, baseUrl, port, apiKey, host, bundleId, description, models,
+ *      gpuPolicy, disabled, lamport_ts }`
+ */
+export async function registerModel({
+  modelId,
+  quant,
+  catalog,
+  db,
+  dir,
+  allocatePortFn = allocatePort,
+  listProvidersAllFn = listProvidersAll,
+  upsertProviderFn = upsertProvider,
+  invalidateCacheFn = invalidateProvidersCache,
+}) {
+  const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
+
+  const state = loadState(dir);
+  const port = await allocatePortFn(state, modelId, { crowHome: dir, pid: process.pid });
+  state.registry[modelId] = {
+    file: sanitizeFilename(quantEntry.file),
+    quant: quantEntry.quant,
+    catalogId: model.id,
+    registeredAt: new Date().toISOString(),
+  };
+  saveState(dir, state);
+
+  const gpuPolicy = { runtime: NATIVE_RUNTIME };
+  if (model.task === "chat") {
+    const existingRows = await listProvidersAllFn(db);
+    gpuPolicy.mutexGroup = pickChatMutexGroup(existingRows);
+  }
+  // embed-class (and any other non-chat task): no mutexGroup key at all —
+  // embedding servers don't contend for the chat mutex group.
+
+  const baseUrl = `http://127.0.0.1:${port}/v1`;
+  const models = [{ id: model.id, task: model.task, contextLen: model.context_len }];
+  const description = `${model.family} ${quantEntry.quant} (native)`;
+
+  const upserted = await upsertProviderFn(db, {
+    id: modelId,
+    baseUrl,
+    apiKey: null,
+    host: "local",
+    bundleId: null,
+    description,
+    models,
+    disabled: false,
+    providerType: "openai-compat",
+    gpuPolicy,
+  });
+
+  await invalidateCacheFn();
+
+  return {
+    id: modelId,
+    baseUrl,
+    port,
+    apiKey: null,
+    host: "local",
+    bundleId: null,
+    description,
+    models,
+    gpuPolicy,
+    disabled: false,
+    lamport_ts: upserted.lamport_ts,
+  };
+}
+
+/**
+ * Tear down a registered native model: stop its process (if a live runtime
+ * handle is given — no process supervisor exists yet as of Task 7, this is
+ * a forward-looking seam for the task that adds one), free its port
+ * reservation, delete its blob, soft-delete its provider row, and
+ * invalidate the providers cache. Order is binding (asserted via injected
+ * spies in tests) — each step only starts once the previous one has
+ * settled.
+ *
+ * `runtimeHandle`, if given, is duck-typed as `{ live: boolean, stop():
+ * Promise<void> }` — `stop()` is only called when `live` is truthy.
+ *
+ * Injectable seams mirror `registerModel`'s pattern.
+ *
+ * @returns {Promise<{ modelId, deleted: boolean, disabled: boolean }>}
+ */
+export async function unregisterModel({
+  modelId,
+  db,
+  dir,
+  runtimeHandle,
+  releasePortFn = releasePort,
+  unlinkFn = unlinkSync,
+  disableProviderFn = disableProvider,
+  invalidateCacheFn = invalidateProvidersCache,
+}) {
+  if (runtimeHandle && runtimeHandle.live) {
+    await runtimeHandle.stop();
+  }
+
+  const state = loadState(dir);
+  releasePortFn(state, modelId);
+  const regEntry = state.registry[modelId];
+  delete state.registry[modelId];
+  saveState(dir, state);
+
+  let deleted = false;
+  if (regEntry?.file) {
+    const dest = join(modelsBlobDir(dir), regEntry.file);
+    try {
+      unlinkFn(dest);
+      deleted = true;
+    } catch (err) {
+      if (err && err.code !== "ENOENT") throw err;
+    }
+  }
+
+  const result = await disableProviderFn(db, modelId);
+  await invalidateCacheFn();
+
+  return { modelId, deleted, disabled: !!result?.ok };
+}
+
+/**
+ * What currently points at provider `providerId`, for the delete
+ * confirmation ("this will break N profiles and M bots") dialog.
+ *
+ * Reads the two REAL locations that reference a provider id (see the
+ * section header comment above for why there is no `provider_id` column to
+ * query directly):
+ *   - `dashboard_settings` row keyed `'ai_profiles'` (JSON array; pointer-mode
+ *     entries carry `provider_id`).
+ *   - `pi_bot_defs.definition` (JSON per row; `models.default`,
+ *     `models.escalation`, `fast_voice_model` carry `"<providerId>/<modelId>"`).
+ *
+ * Missing table/row/malformed JSON in either location resolves to an empty
+ * list for that half rather than throwing — a fresh install with no
+ * `pi_bot_defs` table (MPA-only, per `bot-board/data-queries.js`) must still
+ * answer this query.
+ *
+ * @returns {Promise<{ profiles: Array<object>, bots: Array<{bot_id,display_name}> }>}
+ */
+export async function providerBindings(db, providerId) {
+  const profiles = [];
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'",
+      args: [],
+    });
+    const parsed = JSON.parse(rows[0]?.value || "[]");
+    if (Array.isArray(parsed)) {
+      for (const p of parsed) {
+        if (p && p.provider_id === providerId) profiles.push(p);
+      }
+    }
+  } catch {
+    /* no dashboard_settings row, or corrupt JSON -> no profile bindings found */
+  }
+
+  const bots = [];
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs",
+      args: [],
+    });
+    const prefix = `${providerId}/`;
+    for (const row of rows) {
+      let def;
+      try { def = JSON.parse(row.definition || "{}"); } catch { def = {}; }
+      const keys = [def?.models?.default, def?.models?.escalation, def?.fast_voice_model];
+      const bound = keys.some((k) => typeof k === "string" && k.startsWith(prefix));
+      if (bound) bots.push({ bot_id: row.bot_id, display_name: row.display_name });
+    }
+  } catch {
+    /* pi_bot_defs missing on this instance (primary gateway) -> no bot bindings */
+  }
+
+  return { profiles, bots };
 }
