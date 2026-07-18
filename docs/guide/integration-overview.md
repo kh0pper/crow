@@ -91,7 +91,6 @@ The gateway's `/router/mcp` endpoint consolidates all tools into **10 category t
 | `crow_sharing` | Sharing server | invite, accept, share, inbox, send message, contacts, revoke |
 | `crow_storage` | Storage server | upload, list, get URL, delete, stats |
 | `crow_media` | Media bundle (when installed) | articles, podcasts, playlists |
-| `crow_consulting` | Consulting server | prospect pipeline ops |
 | `crow_tools` | External integrations | GitHub, Brave Search, Slack, and other connected services |
 | `crow_discover` | Schema lookup | Returns full parameter schemas on demand |
 

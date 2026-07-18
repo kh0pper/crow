@@ -30,7 +30,6 @@ const specs = [
   ["sharing", "./servers/sharing/server.js", "createSharingServer"],
   ["blog", "./servers/blog/server.js", "createBlogServer"],
   ["storage", "./servers/storage/server.js", "createStorageServer"],
-  ["consulting", "./servers/consulting/server.js", "createConsultingServer"],
 ];
 const report = {};
 for (const [cat, path, fn] of specs) {

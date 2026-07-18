@@ -15,7 +15,6 @@ import { createMemoryServer } from "../../memory/server.js";
 import { createProjectServer } from "../../research/server.js";
 import { createSharingServer } from "../../sharing/server.js";
 import { createBlogServer } from "../../blog/server.js";
-import { createConsultingServer } from "../../consulting/server.js";
 import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { connectedServers } from "../proxy.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
@@ -46,9 +45,8 @@ function botcronNextRun(cronExpression, fromDate = new Date()) {
 /**
  * Category proxies the chat tool-executor can actually dispatch. Mirrors the
  * regex in executeTool() (`^crow_(memory|projects|blog|sharing|storage|media)$`).
- * `consulting` is advertised in TOOL_MANIFESTS but the executor regex omits it,
- * so its category proxy is NOT executable — a bound bot must not be handed it
- * (Slice B B3 / plan D4). Deep/background work instead rides the explicit
+ * (The old `consulting` category was moved to a private MPA-only bundle,
+ * 2026-07-18.) Deep/background work instead rides the explicit
  * crow_delegate / crow_job_status schemas (the pi-backed replacement for the
  * retired crow_orchestrate).
  */
@@ -149,7 +147,6 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
-  consulting: createConsultingServer,
 };
 
 /**
@@ -669,7 +666,7 @@ function formatResult(mcpResult) {
   return { result: text, isError };
 }
 
-const CATEGORY_PROXY_RE = /^crow_(memory|projects|blog|sharing|storage|media|consulting)$/;
+const CATEGORY_PROXY_RE = /^crow_(memory|projects|blog|sharing|storage|media)$/;
 
 /**
  * Slice B (B3, decision 5): resolve a tool call to the EFFECTIVE tool it will
@@ -725,8 +722,7 @@ export function isExternalSendTool(name) {
  * Bound (opts.botDef set — Slice B B3): SCOPES the advertised set to the bot's
  * selection. Core crow_<category> proxies are included only for EXECUTABLE
  * categories the bot selected under (all-or-nothing, decision 4); addon tools
- * only for the bot's selected tool names; the consulting category proxy is
- * dropped (non-executable); background work rides the explicit crow_delegate /
+ * only for the bot's selected tool names; background work rides the explicit crow_delegate /
  * crow_job_status schemas (D4); device-native tools (capture, discover) are
  * always unioned. Tool
  * selections with no voice equivalent are simply omitted here — B4 surfaces a
