@@ -254,7 +254,7 @@ export function extensionSkills(ext) {
 // A bot's def.tools.crow_mcp selections use CANONICAL pi server names (the keys
 // of ~/.pi/agent/mcp.json). The glasses fast-voice path (Slice B) advertises
 // GATEWAY CATEGORIES (servers/gateway/tool-manifests.js): memory | projects |
-// blog | sharing | storage | media | orchestrator | consulting. This map is
+// blog | sharing | storage | media. This map is
 // the single, explicit bridge between the two vocabularies.
 //
 // Precision (review finding A4): every server a bot can actually SELECT from
@@ -263,7 +263,7 @@ export function extensionSkills(ext) {
 // unavailable by voice rather than silently drop them. (crow-tasks /
 // crow-bots-sql / crow-browser / google-workspace / brave-search / texas-gov-data
 // are pi MCP servers or addons with no voice category.) Voice-only categories
-// that no canonical server maps to (sharing, media, orchestrator, consulting)
+// that no canonical server maps to (sharing, media)
 // are intentionally absent — this map is one-directional: bot selection
 // (canonical) -> voice category. addon ids differ from canonical names
 // (e.g. addon `bots-sql-mcp` vs canonical `crow-bots-sql`); both no-voice

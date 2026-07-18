@@ -29,7 +29,6 @@ Los servidores centrales de Crow exponen más de 110 herramientas en total:
 | Blog | 23 | `crow_create_post`, `crow_publish_post`, `crow_blog_settings` |
 | Compartición | 33 | `crow_generate_invite`, `crow_share`, `crow_inbox` |
 | Almacenamiento | 8 | `crow_upload_file`, `crow_list_files`, `crow_delete_file` |
-| Consultoría | 6 | `crow_consulting_get`, `crow_consulting_stats` |
 | **Total** | **117** | |
 
 Cada integración externa (Obsidian, Home Assistant, Ollama, etc.) agrega 5-20+ herramientas adicionales encima de esto.
@@ -46,7 +45,7 @@ Crow ofrece tres modos de configuración que intercambian eficiencia de contexto
 
 ### Router del gateway
 
-El gateway expone un único endpoint MCP en `/router/mcp` con una **herramienta de categoría por servidor** consolidada — 9 herramientas en una instalación completa: `crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, `crow_consulting`, más `crow_tools` (integraciones externas e instancias remotas) y `crow_discover` (consulta de esquemas). En lugar de cargar 117 definiciones de herramientas por adelantado, la IA llama a una herramienta de categoría con un parámetro `action` — `crow_memory` con `action: "store_memory"`, por ejemplo — y usa `crow_discover` para consultar bajo demanda las acciones disponibles y sus esquemas completos. Las definiciones de herramientas solo entran al contexto cuando realmente se necesitan.
+El gateway expone un único endpoint MCP en `/router/mcp` con una **herramienta de categoría por servidor** consolidada — 8 herramientas en una instalación completa: `crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, más `crow_tools` (integraciones externas e instancias remotas) y `crow_discover` (consulta de esquemas). En lugar de cargar 117 definiciones de herramientas por adelantado, la IA llama a una herramienta de categoría con un parámetro `action` — `crow_memory` con `action: "store_memory"`, por ejemplo — y usa `crow_discover` para consultar bajo demanda las acciones disponibles y sus esquemas completos. Las definiciones de herramientas solo entran al contexto cuando realmente se necesitan.
 
 ### Núcleo combinado
 
