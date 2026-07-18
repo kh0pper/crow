@@ -15,7 +15,10 @@
  *     buffered whole in memory), hashes incrementally with a single
  *     `crypto.createHash("sha256")` fed from the same chunks as they're
  *     written, follows redirects manually (checking the host allowlist on
- *     EVERY hop, not just the first), and re-hashes an on-disk prefix from
+ *     EVERY hop, not just the first, and rejecting any non-https hop outside an
+ *     explicit test-only escape — a bare hostname check alone would still
+ *     let a plain `http:` URL through, or let a redirect silently downgrade
+ *     an https request to http), and re-hashes an on-disk prefix from
  *     scratch when resuming (a streaming hash object has no way to "resume"
  *     — the only way to get a correct final digest after a partial file is
  *     to re-feed the bytes already on disk into a fresh hash before
@@ -34,7 +37,9 @@
  * `CROW_MODEL_DL_CONCURRENCY` — GGUF downloads are multi-gigabyte and this
  * host's disk/network don't benefit from more parallelism than that, and
  * unbounded concurrency would let a chatty panel starve every download of
- * bandwidth at once.
+ * bandwidth at once. It is also idempotent per `modelId`: a second enqueue
+ * for a model already queued/downloading returns the SAME promise rather
+ * than starting a second writer on the same destination file.
  *
  * `dir` is always injected by the caller (same convention as `state.js`:
  * production passes `resolveDataDir()`, tests pass an `fs.mkdtempSync`
@@ -108,6 +113,19 @@ export class UnsafeDestinationError extends Error {
     super(message);
     this.name = "UnsafeDestinationError";
     this.code = "UNSAFE_DESTINATION";
+  }
+}
+
+/** Shared typed error for redirect-handling protocol violations: a
+ * non-https URL at a hop that isn't explicitly test-escaped (see
+ * `insecureHttpHosts`), a redirect response with no Location header, or
+ * exceeding `maxRedirects`. `code` distinguishes the three cases so
+ * callers can tell them apart without string-matching `message`. */
+export class DownloadProtocolError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = "DownloadProtocolError";
+    this.code = code;
   }
 }
 
@@ -210,20 +228,37 @@ function requestOnce(urlStr, { headers, lookup }) {
   });
 }
 
-/** Follow redirects manually, re-checking the host allowlist on every hop
- * (including the first) before connecting. Returns the final 200/206
- * response. `maxRedirects` bounds the number of redirect hops (not
- * counting the initial request). */
-async function openStream({ url, headers, lookup, maxRedirects }) {
+/** Follow redirects manually, re-checking the host allowlist AND the
+ * https-only protocol requirement on every hop (including the first)
+ * before connecting. Returns the final 200/206 response. `maxRedirects`
+ * bounds the number of redirect hops (not counting the initial request).
+ *
+ * `insecureHttpHosts` is a test-only escape (default `[]`, i.e. https is
+ * required everywhere in production): a hop whose URL is `http:` is only
+ * allowed through when its hostname is literally in this list. Without
+ * this, a plain `http:` URL to an allowlisted host would download fine,
+ * and — worse — a redirect could silently downgrade an https request to
+ * http on any later hop; checking protocol independently on every hop
+ * (not just validating the initial URL) closes both holes. */
+async function openStream({ url, headers, lookup, maxRedirects, insecureHttpHosts = [] }) {
   let currentUrl = url;
   // eslint-disable-next-line no-await-in-loop -- redirect hops are
   // inherently sequential: each hop's Location header depends on the
-  // previous response, and each hop must be allowlist-checked before the
-  // NEXT connection is made — parallelizing would defeat the check.
+  // previous response, and each hop must be allowlist/protocol-checked
+  // before the NEXT connection is made — parallelizing would defeat that.
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const urlObj = new URL(currentUrl);
     if (!isAllowedHost(urlObj.hostname)) {
       throw new HostNotAllowedError(urlObj.hostname);
+    }
+    if (urlObj.protocol !== "https:") {
+      const escaped = urlObj.protocol === "http:" && insecureHttpHosts.includes(urlObj.hostname);
+      if (!escaped) {
+        throw new DownloadProtocolError(
+          `Refusing non-https URL (${urlObj.protocol}) for host ${urlObj.hostname} — pass insecureHttpHosts to explicitly allow this host (tests only; never set in production)`,
+          "INSECURE_PROTOCOL",
+        );
+      }
     }
     // eslint-disable-next-line no-await-in-loop
     const { res } = await requestOnce(currentUrl, { headers, lookup });
@@ -231,7 +266,10 @@ async function openStream({ url, headers, lookup, maxRedirects }) {
       res.resume(); // discard redirect body
       const location = res.headers.location;
       if (!location) {
-        throw new Error(`Redirect response (${res.statusCode}) with no Location header from ${currentUrl}`);
+        throw new DownloadProtocolError(
+          `Redirect response (${res.statusCode}) with no Location header from ${currentUrl}`,
+          "REDIRECT_NO_LOCATION",
+        );
       }
       currentUrl = new URL(location, currentUrl).toString();
       continue;
@@ -242,7 +280,7 @@ async function openStream({ url, headers, lookup, maxRedirects }) {
     }
     return { res, finalUrl: currentUrl };
   }
-  throw new Error(`Too many redirects (> ${maxRedirects}) downloading ${url}`);
+  throw new DownloadProtocolError(`Too many redirects (> ${maxRedirects}) downloading ${url}`, "TOO_MANY_REDIRECTS");
 }
 
 /** Re-hash the on-disk prefix `[0, resumeFrom)` of `dest` into `hash`
@@ -325,12 +363,17 @@ function streamToFile({ res, dest, resumeFrom, hash, onBytes, createWriteStream 
  *   - `createWriteStream`: injected write-stream factory, defaults to
  *     `fs.createWriteStream` — tests override it to force an ENOSPC error
  *     deterministically instead of actually filling the disk.
+ *   - `insecureHttpHosts`: test-only escape from the https-only
+ *     requirement (default `[]` — https is mandatory everywhere in
+ *     production). See `openStream` doc for why every hop is checked
+ *     independently.
  *
  * Returns `{ path, sha256, bytesDone }`. Throws `HostNotAllowedError`,
- * `ChecksumError` (dest already deleted), or `DiskFullError` (dest KEPT
- * for resume) as documented above; any other stream error is rethrown
- * as-is with a `.bytesDone` property attached so callers can journal
- * progress before propagating.
+ * `DownloadProtocolError` (insecure protocol / bad redirect), `ChecksumError`
+ * (dest already deleted), or `DiskFullError` (dest KEPT for resume) as
+ * documented above; any other stream error is rethrown as-is with a
+ * `.bytesDone` property attached so callers can journal progress before
+ * propagating.
  */
 export async function fetchModelBlob({
   url,
@@ -341,6 +384,7 @@ export async function fetchModelBlob({
   lookup,
   maxRedirects = 5,
   createWriteStream = fsCreateWriteStream,
+  insecureHttpHosts = [],
 }) {
   assertNotSymlink(dest);
 
@@ -355,7 +399,7 @@ export async function fetchModelBlob({
   const headers = {};
   if (effectiveResumeFrom > 0) headers.Range = `bytes=${effectiveResumeFrom}-`;
 
-  const { res } = await openStream({ url, headers, lookup, maxRedirects });
+  const { res } = await openStream({ url, headers, lookup, maxRedirects, insecureHttpHosts });
   const totalBytes = parseTotalBytes(res.headers, effectiveResumeFrom);
 
   let bytesDone;
@@ -397,8 +441,9 @@ function modelsBlobDir(dir) {
  * killed/restarted process can resume. See module doc for the full
  * contract; `dir` is the injected CROW_HOME/data dir (never guessed).
  *
- * `baseUrl` and `lookup` exist purely for tests — production never sets
- * them (real huggingface.co, real DNS).
+ * `baseUrl`, `lookup`, and `insecureHttpHosts` exist purely for tests —
+ * production never sets them (real huggingface.co, real DNS, https
+ * required everywhere).
  */
 export async function downloadModel({
   modelId,
@@ -411,6 +456,7 @@ export async function downloadModel({
   maxRedirects = 5,
   createWriteStream,
   journalIntervalMs = 1000,
+  insecureHttpHosts,
 }) {
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
   const blobDir = modelsBlobDir(dir);
@@ -462,6 +508,7 @@ export async function downloadModel({
       lookup,
       maxRedirects,
       createWriteStream,
+      insecureHttpHosts,
       onProgress: wrappedOnProgress,
     });
     const s = loadState(dir);
@@ -521,6 +568,7 @@ export function deleteModel({ modelId, quant, dir, catalog }) {
 
 const downloadQueue = [];
 let activeDownloads = 0;
+const inFlightByModelId = new Map();
 
 /** Concurrency for `enqueueDownload`: `CROW_MODEL_DL_CONCURRENCY`, clamped
  * to [1, 2]. Non-numeric/missing/less-than-1 falls back to 1. */
@@ -554,10 +602,31 @@ function pumpDownloadQueue() {
  * With the default concurrency of 1, two enqueued downloads never overlap
  * — the second's HTTP request is not opened until the first has fully
  * settled (resolved or rejected).
+ *
+ * Idempotent per `modelId`: calling this again for a `modelId` that
+ * already has a job queued or running returns the SAME promise instead of
+ * enqueueing a second job. Without this, `CROW_MODEL_DL_CONCURRENCY=2`
+ * (or even concurrency 1 with two rapid calls before the first is
+ * dequeued) could run two downloads for the same model concurrently —
+ * two writers racing on the same `dest` file. The dedup entry is cleared
+ * once the job settles, so a later call (after completion) starts a
+ * genuinely fresh job.
  */
 export function enqueueDownload(params) {
-  return new Promise((resolvePromise, reject) => {
+  const key = params && params.modelId;
+  if (key && inFlightByModelId.has(key)) {
+    return inFlightByModelId.get(key);
+  }
+  const promise = new Promise((resolvePromise, reject) => {
     downloadQueue.push({ params, resolve: resolvePromise, reject });
     pumpDownloadQueue();
   });
+  if (key) {
+    const tracked = promise.finally(() => {
+      if (inFlightByModelId.get(key) === tracked) inFlightByModelId.delete(key);
+    });
+    inFlightByModelId.set(key, tracked);
+    return tracked;
+  }
+  return promise;
 }

@@ -10,6 +10,14 @@
  * forces DNS resolution straight to 127.0.0.1, so the allowlist check runs
  * against the actual literal hostnames named in the spec while every
  * socket still talks to the local fixture server.
+ *
+ * The manager also requires https on every hop by default (see
+ * `DownloadProtocolError`, code INSECURE_PROTOCOL). Since every fixture
+ * server here is plain http, tests pass the test-only `insecureHttpHosts`
+ * escape (`INSECURE_HF` / `INSECURE_HF_AND_CDN` below) naming exactly the
+ * hostnames they dial — production never sets this option. Two dedicated
+ * tests ("plain http ... is rejected" and "an https-to-http downgrade
+ * redirect is rejected") prove what happens WITHOUT the escape.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -24,6 +32,9 @@ import {
   writeFileSync,
   mkdirSync,
   symlinkSync,
+  openSync,
+  writeSync,
+  closeSync,
   createWriteStream as fsCreateWriteStream,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,8 +53,17 @@ import {
   ChecksumError,
   DiskFullError,
   UnsafeDestinationError,
+  DownloadProtocolError,
 } from "../servers/gateway/models/manager.js";
 import { loadState } from "../servers/gateway/models/state.js";
+
+// Every fixture server in this file is plain http (no TLS) — this is the
+// explicit test-only escape from the manager's https-only enforcement.
+// Production NEVER sets insecureHttpHosts; see the two dedicated tests
+// below ("http to an allowlisted host is rejected" and "downgrade redirect
+// is rejected") for what happens WITHOUT it.
+const INSECURE_HF = ["huggingface.co"];
+const INSECURE_HF_AND_CDN = ["huggingface.co", "cdn-lfs.huggingface.co"];
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -248,6 +268,7 @@ test("downloadModel streams the full blob to disk and verifies sha256 incrementa
         catalog,
         lookup: lookupToLocalhost,
         baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF,
         onProgress: (p) => progressCalls.push(p),
       });
       assert.equal(result.sha256, BLOB_SHA256);
@@ -283,6 +304,7 @@ test("wrong sha256 deletes the file and throws a typed ChecksumError", async () 
             catalog,
             lookup: lookupToLocalhost,
             baseUrl: `http://huggingface.co:${port}`,
+            insecureHttpHosts: INSECURE_HF,
           }),
         (err) => {
           assert.ok(err instanceof ChecksumError, `expected ChecksumError, got ${err}`);
@@ -320,6 +342,7 @@ test("interrupted download (socket killed mid-stream) journals bytesDone", async
           catalog,
           lookup: lookupToLocalhost,
           baseUrl: `http://huggingface.co:${port}`,
+          insecureHttpHosts: INSECURE_HF,
         }),
       );
       const state = loadState(dir);
@@ -356,6 +379,7 @@ test("resume issues Range from journal bytesDone, re-hashes the prefix, and comp
         catalog,
         lookup: lookupToLocalhost,
         baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF,
       }),
     );
     await stopServer(phase1.srv);
@@ -379,6 +403,7 @@ test("resume issues Range from journal bytesDone, re-hashes the prefix, and comp
         catalog,
         lookup: lookupToLocalhost,
         baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF,
       });
       assert.equal(seenRange, `bytes=${bytesAfterInterrupt}-`);
       assert.equal(result.sha256, BLOB_SHA256);
@@ -386,6 +411,71 @@ test("resume issues Range from journal bytesDone, re-hashes the prefix, and comp
 
       const state = loadState(dir);
       assert.equal(state.journal["test-model"], undefined);
+    } finally {
+      await stopServer(phase2.srv);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resuming over a corrupted on-disk prefix produces a ChecksumError", async () => {
+  const port = await getFreePort();
+  const dir = scratchDir("corrupt-resume");
+  try {
+    const catalog = makeCatalog();
+
+    // Phase 1: interrupted partway through, same as the resume test above.
+    const phase1 = await startServerOnPort(port, killAtHalfHandler(BLOB));
+    await assert.rejects(() =>
+      downloadModel({
+        modelId: "test-model",
+        dir,
+        catalog,
+        lookup: lookupToLocalhost,
+        baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF,
+      }),
+    );
+    await stopServer(phase1.srv);
+
+    const journaled = loadState(dir).journal["test-model"];
+    assert.ok(journaled, "expected a journal entry after phase 1");
+    assert.ok(journaled.bytesDone > 0 && journaled.bytesDone < BLOB.length);
+
+    // Corrupt a byte inside the already-written prefix, BEFORE resuming —
+    // the resume path re-hashes exactly this on-disk range from scratch, so
+    // a flipped byte here must surface as a final checksum mismatch even
+    // though the rest of the download completes normally.
+    const dest = join(dir, "models", "blobs", "blob.gguf");
+    const flipOffset = Math.floor(journaled.bytesDone / 2);
+    const fd = openSync(dest, "r+");
+    try {
+      writeSync(fd, Buffer.from([BLOB[flipOffset] ^ 0xff]), 0, 1, flipOffset);
+    } finally {
+      closeSync(fd);
+    }
+
+    const phase2 = await startServerOnPort(port, rangeAwareHandler(BLOB));
+    try {
+      await assert.rejects(
+        () =>
+          downloadModel({
+            modelId: "test-model",
+            dir,
+            catalog,
+            lookup: lookupToLocalhost,
+            baseUrl: `http://huggingface.co:${port}`,
+            insecureHttpHosts: INSECURE_HF,
+          }),
+        (err) => {
+          assert.ok(err instanceof ChecksumError, `expected ChecksumError, got ${err}`);
+          return true;
+        },
+      );
+      // The corrupted (now known-bad) blob must be deleted, same as any
+      // other checksum mismatch.
+      assert.equal(existsSync(dest), false);
     } finally {
       await stopServer(phase2.srv);
     }
@@ -412,6 +502,7 @@ test("write-stream ENOSPC error becomes a typed DiskFullError and keeps the part
             catalog,
             lookup: lookupToLocalhost,
             baseUrl: `http://huggingface.co:${port}`,
+            insecureHttpHosts: INSECURE_HF,
             createWriteStream: makeEnospcWriteStream(50_000),
           }),
         (err) => {
@@ -457,6 +548,7 @@ test("redirect to a disallowed host is refused with a typed HostNotAllowedError"
             catalog,
             lookup: lookupToLocalhost,
             baseUrl: `http://huggingface.co:${port}`,
+            insecureHttpHosts: INSECURE_HF,
           }),
         (err) => {
           assert.ok(err instanceof HostNotAllowedError, `expected HostNotAllowedError, got ${err}`);
@@ -493,9 +585,94 @@ test("redirect to an allowed hf.co-family host is followed to a successful compl
         catalog,
         lookup: lookupToLocalhost,
         baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF_AND_CDN,
       });
       assert.equal(result.sha256, BLOB_SHA256);
       assert.deepEqual(readFileSync(result.path), BLOB);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await stopServer(srv);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HTTPS enforcement
+// ---------------------------------------------------------------------------
+
+test("plain http to an allowlisted host is rejected without the insecureHttpHosts escape", async () => {
+  const { srv, port } = await startServer(rangeAwareHandler(BLOB));
+  try {
+    const dir = scratchDir("http-rejected");
+    try {
+      const catalog = makeCatalog();
+      let requestsReceived = 0;
+      srv.on("request", () => { requestsReceived++; });
+      await assert.rejects(
+        () =>
+          downloadModel({
+            modelId: "test-model",
+            dir,
+            catalog,
+            lookup: lookupToLocalhost,
+            baseUrl: `http://huggingface.co:${port}`,
+            // no insecureHttpHosts — https is required by default
+          }),
+        (err) => {
+          assert.ok(err instanceof DownloadProtocolError, `expected DownloadProtocolError, got ${err}`);
+          assert.equal(err.code, "INSECURE_PROTOCOL");
+          return true;
+        },
+      );
+      assert.equal(requestsReceived, 0, "must be refused before ever connecting");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await stopServer(srv);
+  }
+});
+
+test("an https-to-http downgrade redirect is rejected even to an otherwise-allowed host", async () => {
+  // Models the real hazard: buildDownloadUrl's production output is always
+  // https, but a compromised/misconfigured redirect could point somewhere
+  // that downgrades to http. The initial hop is explicitly escaped
+  // (INSECURE_HF, standing in for "we already validated this connection");
+  // the redirect target is a DIFFERENT allowed-by-hostname host that is
+  // deliberately NOT in the escape list, proving each hop's protocol is
+  // checked independently rather than only the first URL.
+  const port = await getFreePort();
+  const downgradeLocation = `http://cdn-lfs.huggingface.co:${port}/downgraded/blob.gguf`;
+  const { srv } = await startServerOnPort(port, (req, res) => {
+    if (req.url.includes("/resolve/main/")) {
+      res.writeHead(302, { Location: downgradeLocation });
+      res.end();
+      return;
+    }
+    // Should never be reached — the downgrade must be refused before this.
+    rangeAwareHandler(BLOB)(req, res);
+  });
+  try {
+    const dir = scratchDir("downgrade");
+    try {
+      const catalog = makeCatalog();
+      await assert.rejects(
+        () =>
+          downloadModel({
+            modelId: "test-model",
+            dir,
+            catalog,
+            lookup: lookupToLocalhost,
+            baseUrl: `http://huggingface.co:${port}`,
+            insecureHttpHosts: INSECURE_HF, // cdn-lfs.huggingface.co is deliberately NOT escaped
+          }),
+        (err) => {
+          assert.ok(err instanceof DownloadProtocolError, `expected DownloadProtocolError, got ${err}`);
+          assert.equal(err.code, "INSECURE_PROTOCOL");
+          return true;
+        },
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -549,6 +726,7 @@ test("deleteModel removes the downloaded blob and any journal entry", async () =
         catalog,
         lookup: lookupToLocalhost,
         baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF,
       });
       assert.ok(existsSync(result.path));
 
@@ -612,7 +790,13 @@ test("enqueueDownload runs two downloads serially under the default concurrency 
           },
         ],
       };
-      const common = { dir, catalog, lookup: lookupToLocalhost, baseUrl: `http://huggingface.co:${port}` };
+      const common = {
+        dir,
+        catalog,
+        lookup: lookupToLocalhost,
+        baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF,
+      };
 
       const [ra, rb] = await Promise.all([
         enqueueDownload({ modelId: "model-a", ...common }),
@@ -635,5 +819,50 @@ test("enqueueDownload runs two downloads serially under the default concurrency 
     await stopServer(srv);
     if (prevConcurrency === undefined) delete process.env.CROW_MODEL_DL_CONCURRENCY;
     else process.env.CROW_MODEL_DL_CONCURRENCY = prevConcurrency;
+  }
+});
+
+test("enqueueDownload is idempotent per modelId: a second enqueue while one is in flight returns the same job", async () => {
+  let requestCount = 0;
+  const { srv, port } = await startServer((req, res) => {
+    requestCount++;
+    // Small delay so both enqueue calls land while the first request is
+    // still in flight, giving the dedup a real window to matter.
+    setTimeout(() => rangeAwareHandler(BLOB)(req, res), 30);
+  });
+  try {
+    const dir = scratchDir("dedup");
+    try {
+      const catalog = makeCatalog();
+      const opts = {
+        modelId: "test-model",
+        dir,
+        catalog,
+        lookup: lookupToLocalhost,
+        baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF,
+      };
+
+      const p1 = enqueueDownload(opts);
+      const p2 = enqueueDownload(opts);
+      assert.equal(p1, p2, "a second enqueue while the first is in flight must return the SAME promise");
+
+      const [r1, r2] = await Promise.all([p1, p2]);
+      assert.equal(r1.sha256, BLOB_SHA256);
+      assert.equal(r2.sha256, BLOB_SHA256);
+      assert.equal(requestCount, 1, "the underlying download must only run once — no second writer on the same dest");
+
+      // Once settled, the dedup entry is cleared: a later enqueue for the
+      // same modelId is a genuinely fresh job, not the stale cached one.
+      const p3 = enqueueDownload(opts);
+      assert.notEqual(p3, p1);
+      const r3 = await p3;
+      assert.equal(r3.sha256, BLOB_SHA256);
+      assert.equal(requestCount, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await stopServer(srv);
   }
 });
