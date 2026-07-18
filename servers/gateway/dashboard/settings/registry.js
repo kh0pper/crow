@@ -86,7 +86,9 @@ export async function dispatchAction(sectionsList, { req, res, db, action }) {
  * Load add-on settings sections from ~/.crow/bundles/<id>/settings-section.js
  */
 export async function loadAddonSettings() {
-  const crowDir = join(homedir(), ".crow");
+  // Resolved via CROW_HOME so co-hosted instances load their OWN add-on
+  // settings sections, not the primary instance's.
+  const crowDir = process.env.CROW_HOME || join(homedir(), ".crow");
   const installedPath = join(crowDir, "installed.json");
 
   if (!existsSync(installedPath)) return;

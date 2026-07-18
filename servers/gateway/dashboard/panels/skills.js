@@ -18,7 +18,9 @@ import { getInstanceSyncManager } from "../../../sharing/server.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_SKILLS_DIR = join(__dirname, "../../../../skills");
-const USER_SKILLS_DIR = join(homedir(), ".crow", "skills");
+// Resolved via CROW_HOME so co-hosted instances (MPA, alternate workspaces)
+// read and write their OWN user skills, not the primary instance's.
+const USER_SKILLS_DIR = join(process.env.CROW_HOME || join(homedir(), ".crow"), "skills");
 
 function listSkillFiles(dir) {
   try {

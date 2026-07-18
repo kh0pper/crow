@@ -4796,7 +4796,10 @@
           "NTFY_URL",
           "GOOGLE_TOKEN_FILE",
           "CROW_GATEWAY_URL",
-          "CROW_TASKS_DB_PATH"
+          "CROW_TASKS_DB_PATH",
+          "PLANNER_DRIVE_FOLDER_ID",
+          "PLANNER_CATEGORY",
+          "PLANNER_CRON"
         ]
       },
       "panel": "panel/pm-workspace.js",
@@ -4915,6 +4918,21 @@
         {
           "name": "CROW_TASKS_DB_PATH",
           "description": "Path to the kanban tasks DB (default $CROW_DATA_DIR/tasks.db)",
+          "required": false
+        },
+        {
+          "name": "PLANNER_DRIVE_FOLDER_ID",
+          "description": "Drive folder where approved planned-events feed files are written for an external agent (e.g. Power Automate) to create real calendar events",
+          "required": false
+        },
+        {
+          "name": "PLANNER_CATEGORY",
+          "description": "Marker category stamped on planner-created calendar events; the reconcile loop-guard matches on it (default: Crow Plan)",
+          "required": false
+        },
+        {
+          "name": "PLANNER_CRON",
+          "description": "Cron expression for planner export/reconcile runs (default: */15 * * * *)",
           "required": false
         }
       ],
