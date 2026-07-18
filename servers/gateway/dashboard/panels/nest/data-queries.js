@@ -54,9 +54,11 @@ export async function getNestData(db, lang, opts = {}) {
     pinnedItems = rows[0]?.value ? JSON.parse(rows[0].value) : [];
   } catch {}
 
-  // Installed bundles
+  // Installed bundles — resolved via CROW_HOME so co-hosted instances (MPA,
+  // alternate workspaces) render their OWN installed.json, not the primary's.
   let bundles = [];
-  const installedPath = join(homedir(), ".crow", "installed.json");
+  const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+  const installedPath = join(crowHome, "installed.json");
   if (existsSync(installedPath)) {
     try {
       let installed = JSON.parse(readFileSync(installedPath, "utf-8"));
@@ -73,9 +75,9 @@ export async function getNestData(db, lang, opts = {}) {
         let icon = null;
         let category = null;
         const installedAt = meta.installedAt || null;
-        // Try to load manifest from ~/.crow/bundles/ or repo bundles/
+        // Try to load manifest from <CROW_HOME>/bundles/ or repo bundles/
         const manifestPaths = [
-          join(homedir(), ".crow", "bundles", id, "manifest.json"),
+          join(crowHome, "bundles", id, "manifest.json"),
           join(import.meta.dirname, "../../../../../bundles", id, "manifest.json"),
         ];
         for (const mp of manifestPaths) {
