@@ -1,0 +1,4 @@
+{
+  "comment": "Tests excluded on CI runners ONLY (applied under GITHUB_ACTIONS or npm test -- --ci; local npm test always runs everything). Each entry: file (relative to tests/), class (docker|network|multi-instance|timing|host-systemd), reason (one specific line). Keep this list at zero except for same-day flake quarantine — prefer in-file capability skips (see kill-orphan-gateways.test.js) so the tests still run where their host facilities exist.",
+  "excluded": []
+}
