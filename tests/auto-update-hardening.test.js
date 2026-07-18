@@ -13,6 +13,7 @@
 import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
+  mkdirSync,
   rmSync,
   writeFileSync,
   readFileSync,
@@ -59,7 +60,11 @@ function fixture() {
   g(work, "config", "user.email", "t@t");
   g(work, "config", "user.name", "t");
   writeFileSync(join(work, "a.txt"), "one\n");
-  g(work, "add", "a.txt");
+  // A runnable no-op init-db: since A3 the updater CHECKS its exit code
+  // (a failure now withholds the restart), so fixture updates need one.
+  mkdirSync(join(work, "scripts"), { recursive: true });
+  writeFileSync(join(work, "scripts", "init-db.js"), "process.exit(0);\n");
+  g(work, "add", "a.txt", "scripts/init-db.js");
   g(work, "commit", "-m", "c1");
   g(work, "push", "origin", "main");
   return { root, origin, work, cleanup: () => rmSync(root, { recursive: true, force: true }) };

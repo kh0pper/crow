@@ -230,6 +230,10 @@ export async function checkForUpdates() {
   }
 }
 
+// Migration-quarantine re-alert cooldown (mirrors the audit-breaker pattern).
+const QUARANTINE_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+let _quarantineAlertAt = 0;
+
 /** The mutating sequence; exported ONLY as the test seam for the under-lock
  *  branch re-check (spec D3b — the outer guard would abort a branch fixture
  *  before the lock). */
@@ -247,6 +251,40 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     await saveSetting("auto_update_last_check", new Date().toISOString());
     await saveSetting("auto_update_last_result", msg);
     return { updated: false, error: msg };
+  }
+
+  // A3 migration quarantine — evaluated UNDER the lock, after the fetch, so
+  // both the 6h tick and the manual "Check now" button (which also lands here)
+  // consult it with origin/main's fresh head sha, and co-hosted gateways
+  // can't race the marker. A quarantined sha is never re-pulled; the marker
+  // auto-clears when main moves (attempts-capped).
+  try {
+    const originHead = await run("git", ["rev-parse", "origin/main"]);
+    const { evaluateQuarantine, resolveGuardDbPath } = await import("../shared/migration-guard.js");
+    const { resolveDataDir } = await import("../db.js");
+    const q = evaluateQuarantine({
+      appRoot: APP_ROOT,
+      dbPath: resolveGuardDbPath(resolveDataDir),
+      originHeadSha: originHead.stdout,
+    });
+    if (q.blocked) {
+      const msg = `Skipped: migration quarantined (gen ${q.marker.fromGeneration}->${q.marker.toGeneration}, attempt ${q.marker.attempts}) — delete the quarantine marker files to override`;
+      log(msg);
+      if (Date.now() - _quarantineAlertAt > QUARANTINE_ALERT_COOLDOWN_MS) {
+        _quarantineAlertAt = Date.now();
+        const { fireMigrationAlert } = await import("../shared/migration-guard.js");
+        await fireMigrationAlert({
+          title: "Crow updates paused: migration quarantined",
+          body: `Auto-update is paused because a migration (schema gen ${q.marker.fromGeneration}->${q.marker.toGeneration}) damaged data and was rolled back. Updates resume automatically when a fix lands on main (attempt ${q.marker.attempts}/3).`,
+        });
+      }
+      await saveSetting("auto_update_last_check", new Date().toISOString());
+      await saveSetting("auto_update_last_result", msg);
+      return { updated: false, skipped: "quarantined", message: msg };
+    }
+    if (q.cleared) log(`Quarantine cleared — main moved past ${q.marker.sha.slice(0, 9)}; retrying the migration under guard`);
+  } catch (err) {
+    log(`quarantine check error (proceeding): ${err?.message}`);
   }
 
   // Check if there are new commits
@@ -300,9 +338,74 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
     }
   }
 
-  // Run init-db for any schema changes
+  // Run init-db for any schema changes — guarded (A3) when the run carries
+  // migration risk: the pulled range crosses a schema generation OR touches
+  // scripts/init-db.js (state-conditional rebuilds fire on DB shape, not
+  // generation). Non-crossing, init-db-unchanged runs keep the bare call.
   log("Running database migrations...");
-  await run("node", ["scripts/init-db.js"]);
+  const guard = await import("../shared/migration-guard.js");
+  const { resolveDataDir: _rdd } = await import("../db.js");
+  const dbPath = guard.resolveGuardDbPath(_rdd);
+  const newGeneration = guard.readTreeGeneration(APP_ROOT);
+  const preState = guard.readSchemaState(dbPath);
+  const armed =
+    (newGeneration != null && preState.readable && preState.userVersion < newGeneration) ||
+    changedFiles.stdout.split("\n").includes("scripts/init-db.js");
+  if (armed) {
+    const headSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+    const res = await guard.runGuardedInitDb({
+      dbPath, appRoot: APP_ROOT, sha: headSha, newGeneration,
+      log: (m) => log(`[migration-guard] ${m}`),
+    });
+    if (res.verdict === "loss") {
+      // Fail closed: the guard restored the backup and quarantined the sha.
+      // Roll the code back to match the restored schema — but never destroy
+      // local WIP on a possibly-false verdict (quarantined boot handles the
+      // code-newer-than-schema case).
+      const porcelain = await run("git", ["status", "--porcelain"]);
+      const trackedWip = porcelain.stdout.split("\n").filter((l) => l && !l.startsWith("??"));
+      if (trackedWip.length === 0) {
+        await run("git", ["reset", "--hard", currentVersion]);
+        if (changedFiles.stdout.includes("package-lock.json") || changedFiles.stdout.includes("package.json")) {
+          await run("npm", ["install", "--omit=dev"], { timeout: 300000 });
+        }
+        log(`Rolled code back to ${currentVersion} to match the restored database.`);
+      } else {
+        log("Local WIP present — code left at the new sha; next boot is quarantined (old schema, data intact).");
+      }
+      const msg = `Migration quarantined: data loss detected and rolled back (${(res.report?.losses || []).join("; ")})`;
+      await saveSetting("auto_update_last_check", new Date().toISOString());
+      await saveSetting("auto_update_last_result", msg);
+      // The live process's DB handles still pin the pre-restore inode —
+      // restart IMMEDIATELY so the process reopens the restored file.
+      scheduleSupervisedRestart(log, "Restarting to reopen the restored database...");
+      return { updated: false, error: msg, quarantined: true };
+    }
+    if (res.initDbExit !== 0) {
+      const msg = `Migration failed (init-db exit ${res.initDbExit}) — restart withheld, running code unchanged`;
+      log(msg);
+      await guard.fireMigrationAlert({
+        title: "Crow migration failed during auto-update",
+        body: `init-db exited ${res.initDbExit} after pulling an update. The gateway keeps running the previous code; the next restart will retry via the boot gate. Check logs, then run \`node scripts/guarded-init-db.mjs\`.`,
+      });
+      await saveSetting("auto_update_last_check", new Date().toISOString());
+      await saveSetting("auto_update_last_result", msg);
+      return { updated: false, error: msg };
+    }
+  } else {
+    const initRes = await run("node", ["scripts/init-db.js"]);
+    if (initRes.code !== 0) {
+      const msg = `init-db failed (exit ${initRes.code}) — restart withheld, running code unchanged`;
+      log(msg);
+      await guard.fireMigrationAlert({
+        title: "Crow init-db failed during auto-update",
+        body: `init-db exited ${initRes.code} after pulling an update (no migration expected). The gateway keeps running the previous code. Check logs, then run \`node scripts/guarded-init-db.mjs\`.`,
+      });
+      await saveSetting("auto_update_last_check", new Date().toISOString());
+      await saveSetting("auto_update_last_result", msg);
+      return { updated: false, error: msg };
+    }
+  }
 
   const newRef = await run("git", ["rev-parse", "--short", "HEAD"]);
   const newVersion = newRef.stdout;
@@ -317,24 +420,30 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   // Restart to load the new code when supervised (systemd, launchd
   // KeepAlive, Docker, etc.). Without a supervisor the pulled code only
   // takes effect on the next manual restart.
-  if (isSupervised()) {
-    log("Restarting gateway to apply update...");
-    // Close the HTTP server first to release the port, then exit
-    // so the supervisor's restart doesn't hit EADDRINUSE.
-    // exitCode is preset so that if the loop drains before the inner timer
-    // fires (manual check-now path: crow:shutdown closes the only ref'd
-    // handle), node still exits nonzero — Restart=on-failure needs it.
-    // Both timers are unref'd so a pending restart chain can never hold open
-    // or kill a process whose loop otherwise finished (test runners).
-    process.exitCode = 1;
-    const outer = setTimeout(() => {
-      process.emit("crow:shutdown");
-      setTimeout(() => process.exit(1), 1000).unref();
-    }, 1500);
-    outer.unref();
-  }
+  scheduleSupervisedRestart(log, "Restarting gateway to apply update...");
 
   return { updated: true, from: currentVersion, to: newVersion };
+}
+
+/** Supervised-restart machinery, shared by the normal update path and the
+ *  migration-guard loss path (which must reopen the restored DB file).
+ *  No-op without a supervisor. */
+function scheduleSupervisedRestart(log, message) {
+  if (!isSupervised()) return;
+  log(message);
+  // Close the HTTP server first to release the port, then exit
+  // so the supervisor's restart doesn't hit EADDRINUSE.
+  // exitCode is preset so that if the loop drains before the inner timer
+  // fires (manual check-now path: crow:shutdown closes the only ref'd
+  // handle), node still exits nonzero — Restart=on-failure needs it.
+  // Both timers are unref'd so a pending restart chain can never hold open
+  // or kill a process whose loop otherwise finished (test runners).
+  process.exitCode = 1;
+  const outer = setTimeout(() => {
+    process.emit("crow:shutdown");
+    setTimeout(() => process.exit(1), 1000).unref();
+  }, 1500);
+  outer.unref();
 }
 
 /**
