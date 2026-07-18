@@ -29,6 +29,9 @@ import {
   writeFileSync,
   mkdirSync,
   readFileSync,
+  renameSync,
+  unlinkSync,
+  createWriteStream as fsWriteStream,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +43,7 @@ import {
   isAllowedRuntimeHost,
   buildRuntimeDownloadUrl,
   ensureRuntime,
+  downloadRuntimeAsset,
   buildLlamaServerArgs,
   startModel,
   stopModel,
@@ -48,7 +52,7 @@ import {
   __resetSetprivProbeCacheForTest,
   getStatusSnapshot,
 } from "../servers/gateway/models/runtime.js";
-import { acquireHostLock, lockPathFor } from "../servers/gateway/models/native-lock.js";
+import { acquireHostLock, lockPathFor, stealStaleLock } from "../servers/gateway/models/native-lock.js";
 import { startStubLlamaServer } from "./fixtures/stub-llama-server.mjs";
 
 function scratchDir(tag) {
@@ -494,6 +498,81 @@ test("acquireHostLock: corrupt lock content is treated as stale and stolen", asy
   });
 });
 
+test("native-lock: rename-atomic steal never clobbers a winner's fresh lock (dual-steal TOCTOU regression)", async () => {
+  // Reproduces the exact race a reviewer caught against an earlier
+  // (unlink-based) version of stealStaleLock: two racers, A and B, both
+  // read the SAME stale lock. A completes its whole steal-and-create
+  // cycle first. B — simulated here at the moment it decided to steal,
+  // holding the pid it read BEFORE A acted — only gets around to its own
+  // steal attempt afterward, when the file at lockPath is no longer the
+  // original stale one but A's brand-new live lock. B must detect that
+  // mismatch and back off rather than destroy A's lock.
+  await withScratch("lock-toctou", async (dir) => {
+    const lockPath = lockPathFor("local-llm", { runtimeDir: dir });
+    const deadPid = 888888;
+    const winnerPid = 777777;
+
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(lockPath, String(deadPid), "utf8"); // the original stale lock both racers see
+
+    // Racer A ("the winner") runs a complete acquire through the public
+    // API — read stale pid -> rename-steal -> discard -> fresh create.
+    const releaseWinner = acquireHostLock("local-llm", {
+      runtimeDir: dir,
+      pid: winnerPid,
+      isProcessAlive: (p) => p !== deadPid,
+    });
+    assert.ok(typeof releaseWinner === "function");
+    assert.equal(readFileSync(lockPath, "utf8"), String(winnerPid));
+
+    // Racer B ("the loser") is simulated at the exact point it decided to
+    // steal: it captured `existingPid: deadPid` before A did anything,
+    // and is only now attempting the rename. This specific interleaving
+    // can't be forced through the public `acquireHostLock` entry point
+    // alone (a real re-read there always reflects current disk state),
+    // so this calls the exported primitive directly with the STALE belief
+    // B actually held at decision time.
+    stealStaleLock({
+      fs: { renameSync, readFileSync, unlinkSync },
+      lockPath,
+      existingPid: deadPid,
+    });
+
+    // A's fresh, live lock must be completely intact — the mismatch
+    // (staged content is winnerPid, not the deadPid B was expecting) must
+    // have been detected and the file put back, never discarded.
+    assert.equal(readFileSync(lockPath, "utf8"), String(winnerPid));
+
+    // And B, now going through the normal acquireHostLock path, correctly
+    // sees the winner's lock as live and gets null back — it does NOT
+    // end up holding a lock while the winner's lock is present.
+    const releaseLoser = acquireHostLock("local-llm", {
+      runtimeDir: dir,
+      pid: 555555,
+      isProcessAlive: (p) => p === winnerPid,
+    });
+    assert.equal(releaseLoser, null);
+
+    releaseWinner();
+  });
+});
+
+test("stealStaleLock: a rename that finds nothing at lockPath (already claimed) is a silent no-op", async () => {
+  await withScratch("lock-steal-noop", async (dir) => {
+    const lockPath = lockPathFor("local-llm", { runtimeDir: dir });
+    // Nothing exists at lockPath at all — represents the case where a
+    // different racer's rename already won AND that racer had also
+    // already finished discarding (or the lock was legitimately released
+    // in between). Must not throw, must not create anything.
+    assert.doesNotThrow(() => stealStaleLock({
+      fs: { renameSync, readFileSync, unlinkSync },
+      lockPath,
+      existingPid: 123,
+    }));
+    assert.equal(existsSync(lockPath), false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // resolveAsset
 // ---------------------------------------------------------------------------
@@ -617,7 +696,7 @@ test("buildRuntimeDownloadUrl builds a releases/download URL", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ensureRuntime — real tar extraction, checksum-before-chmod ordering
+// Shared fixtures for downloadRuntimeAsset / ensureRuntime tests below
 // ---------------------------------------------------------------------------
 
 function startFixtureServer(handler) {
@@ -658,6 +737,68 @@ function makeRealTarball(dir) {
   return { bytes, sha256 };
 }
 
+// ---------------------------------------------------------------------------
+// downloadRuntimeAsset — partial-file cleanup on a mid-stream error
+// ---------------------------------------------------------------------------
+
+/** A `createWriteStream` that writes a few real bytes to disk and then
+ * asynchronously emits an "error" — simulates a network drop / ENOSPC
+ * partway through a download against a REAL partial file on disk, so the
+ * cleanup assertion is checking a genuine leftover, not a hypothetical
+ * one. */
+function createFlakyWriteStream(dest) {
+  const real = fsWriteStream(dest);
+  let bytesSeen = 0;
+  const originalWrite = real.write.bind(real);
+  real.write = (chunk, ...rest) => {
+    bytesSeen += chunk.length;
+    const ok = originalWrite(chunk, ...rest);
+    if (bytesSeen > 200 && !real.__failed) {
+      real.__failed = true;
+      setImmediate(() => real.emit("error", Object.assign(new Error("simulated mid-stream failure"), { code: "EIO" })));
+    }
+    return ok;
+  };
+  return real;
+}
+
+test("downloadRuntimeAsset deletes the partial file on a mid-stream error", async () => {
+  await withScratch("dl-stream-error", async (dir) => {
+    const { srv, port } = await startFixtureServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/gzip" });
+      res.write(Buffer.alloc(2000, 7));
+      // Give the flaky write-stream time to raise its injected error
+      // before the response ends, so the failure path (not a clean
+      // finish) is what actually resolves the download promise.
+      setTimeout(() => res.end(), 100);
+    });
+    const dest = join(dir, "partial-runtime.tar.gz");
+    try {
+      await assert.rejects(
+        () => downloadRuntimeAsset({
+          url: `http://github.com:${port}/releases/download/x/y.tar.gz`,
+          dest,
+          expectedSha: null,
+          lookup: forceGithubLookup(),
+          insecureHttpHosts: ["github.com"],
+          createWriteStream: createFlakyWriteStream,
+        }),
+        (err) => {
+          assert.equal(err.code, "EIO");
+          return true;
+        },
+      );
+      assert.equal(existsSync(dest), false); // partial file cleaned up, not left behind
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureRuntime — real tar extraction, checksum-before-chmod ordering
+// ---------------------------------------------------------------------------
+
 test("ensureRuntime downloads, verifies, extracts (real tar), and chmods only after verification", async () => {
   await withScratch("ensure-happy", async (dir) => {
     const buildDir = join(dir, "build");
@@ -686,10 +827,22 @@ test("ensureRuntime downloads, verifies, extracts (real tar), and chmods only af
       });
 
       assert.ok(existsSync(binPath));
+      // binPath is under the FINAL releaseDir; chmod ran on the file while
+      // it was still in the staging extract dir (before the finalize
+      // rename), so the two paths differ by design — assert on shape
+      // (same basename, correct mode) rather than string equality.
       assert.equal(chmodCalls.length, 1);
-      assert.equal(chmodCalls[0].p, binPath);
+      assert.ok(chmodCalls[0].p.endsWith("llama-server"));
+      assert.ok(chmodCalls[0].p.includes(".extract-linux-x64-cpu-test-rel.tmp"));
       assert.equal(chmodCalls[0].mode, 0o755);
       assert.equal(readFileSync(binPath, "utf8").includes("fake-llama-server"), true);
+
+      // Finalization is a real rename: no leftover staging dir, no
+      // leftover download tmp file, next to the now-populated releaseDir.
+      const runtimesDir = join(dir, "crow-home", "runtimes", "llamacpp");
+      assert.equal(existsSync(join(runtimesDir, ".extract-linux-x64-cpu-test-rel.tmp")), false);
+      assert.equal(existsSync(join(runtimesDir, ".download-linux-x64-cpu-test-rel.tmp")), false);
+      assert.equal(existsSync(join(runtimesDir, "test-rel", ".crow-runtime-installed.json")), true);
 
       // Idempotent: a second call reuses the manifest, no re-download
       // (fixture server would 200 again anyway, but chmod must NOT be
@@ -742,10 +895,13 @@ test("ensureRuntime never chmods when the downloaded archive fails checksum veri
         },
       );
       assert.equal(chmodCalls.length, 0); // unverified binary never made executable
-      // The staging archive must not survive a checksum failure either.
-      const releaseDir = join(dir, "crow-home", "runtimes", "llamacpp", "test-rel-bad");
-      const staged = existsSync(join(releaseDir, ".download-linux-x64-cpu.tmp"));
-      assert.equal(staged, false);
+      // A checksum failure happens entirely inside downloadRuntimeAsset,
+      // before ensureRuntime ever touches the staging extract dir or
+      // releaseDir — none of the three should exist.
+      const runtimesDir = join(dir, "crow-home", "runtimes", "llamacpp");
+      assert.equal(existsSync(join(runtimesDir, ".download-linux-x64-cpu-test-rel-bad.tmp")), false);
+      assert.equal(existsSync(join(runtimesDir, ".extract-linux-x64-cpu-test-rel-bad.tmp")), false);
+      assert.equal(existsSync(join(runtimesDir, "test-rel-bad")), false);
     } finally {
       await new Promise((r) => srv.close(r));
     }

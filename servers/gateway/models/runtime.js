@@ -38,12 +38,14 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -328,10 +330,14 @@ async function openRuntimeStream({ url, lookup, maxRedirects, insecureHttpHosts 
 /**
  * Download a runtime asset archive to `dest`, hashing incrementally
  * (never buffered whole in memory) and verifying against `expectedSha`
- * BEFORE returning. On mismatch, the partial/completed file is deleted
- * and `RuntimeChecksumError` is thrown — never left on disk to be
- * mistaken for a good one, and never reaches `ensureRuntime`'s
- * extract/chmod steps. No resume support (see module doc for why).
+ * BEFORE returning. On checksum mismatch, or on any stream/network error
+ * mid-download (connection drop, ENOSPC, ...), the partial file is
+ * deleted before the error propagates — never left on disk to be
+ * mistaken for a good (or resumable) one. Unlike `manager.js`'s GGUF
+ * downloads, there is no journal here to resume against: runtime
+ * archives are tens of MB, so a caller that wants to retry just calls
+ * this again from scratch (see module doc for why resume isn't worth
+ * the complexity here).
  */
 export async function downloadRuntimeAsset({
   url,
@@ -344,24 +350,48 @@ export async function downloadRuntimeAsset({
 }) {
   const res = await openRuntimeStream({ url, lookup, maxRedirects, insecureHttpHosts });
   const hash = createHash("sha256");
-  await new Promise((resolvePromise, reject) => {
-    const ws = createWriteStream(dest);
-    let settled = false;
-    const fail = (err) => {
-      if (settled) return;
-      settled = true;
-      reject(err);
-    };
-    res.on("data", (chunk) => hash.update(chunk));
-    res.on("error", fail);
-    ws.on("error", fail);
-    res.pipe(ws);
-    ws.on("finish", () => {
-      if (settled) return;
-      settled = true;
-      resolvePromise();
+  try {
+    await new Promise((resolvePromise, reject) => {
+      const ws = createWriteStream(dest);
+      let settled = false;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        try {
+          res.destroy();
+        } catch {
+          /* already gone */
+        }
+        try {
+          ws.destroy();
+        } catch {
+          /* already gone */
+        }
+        reject(err);
+      };
+      res.on("data", (chunk) => hash.update(chunk));
+      res.on("error", fail);
+      res.on("aborted", () => fail(new Error("Download aborted by remote server")));
+      ws.on("error", fail);
+      res.pipe(ws);
+      ws.on("finish", () => {
+        if (settled) return;
+        settled = true;
+        resolvePromise();
+      });
     });
-  });
+  } catch (err) {
+    // Stream/network failure mid-download (not a checksum mismatch — that
+    // case is handled below, after a successful stream completion). The
+    // partial file is never left behind for a later caller to mistake
+    // for a complete or resumable download.
+    try {
+      unlinkSync(dest);
+    } catch {
+      /* already gone, or never created */
+    }
+    throw err;
+  }
 
   const sha256 = hash.digest("hex");
   if (expectedSha && sha256.toLowerCase() !== String(expectedSha).toLowerCase()) {
@@ -419,17 +449,32 @@ function findBinaryRecursive(fsMod, dir, name) {
  * file and reused without re-downloading.
  *
  * Binding order — an unverified binary is NEVER made executable, let
- * alone spawned:
+ * alone spawned, AND the final `releaseDir` never observably contains a
+ * partial install:
  *   1. `resolveAsset` (throws its wrapped error on failure — see below).
- *   2. Download the archive; `downloadRuntimeAsset` verifies its sha256
- *      BEFORE this function proceeds (a mismatch throws
- *      `RuntimeChecksumError` and the bad file is already gone).
- *   3. Extract (`tar`).
+ *   2. Download the archive to a scratch file next to (not inside)
+ *      `releaseDir`; `downloadRuntimeAsset` verifies its sha256 AND
+ *      cleans up after itself on any failure (mismatch or mid-stream
+ *      error) before this function proceeds.
+ *   3. Extract (`tar`) into a STAGING directory
+ *      (`<parent>/.extract-<key>-<release>.tmp`), never directly into
+ *      `releaseDir`. A disk-full or killed process mid-tar leaves only a
+ *      stray staging directory next to `releaseDir` — `releaseDir`
+ *      itself is untouched, so a later run can never mistake a
+ *      half-extracted archive for a complete install.
  *   4. Locate the `binaryName` file (default `"llama-server"`) anywhere
- *      under the release directory.
- *   5. `chmodFn(binPath, 0o755)` — the ONLY point in this function that
- *      makes anything executable, and it only runs after steps 2-4 have
- *      all succeeded.
+ *      under the staging directory.
+ *   5. `chmodFn(stagedBinPath, 0o755)` — the ONLY point in this function
+ *      that makes anything executable, and it only runs after steps
+ *      2-4 have all succeeded. The manifest is ALSO written into the
+ *      staging directory at this point (not into `releaseDir` yet) so it
+ *      finalizes together with the binary in the next step — a reader
+ *      can never observe a `releaseDir` with a binary but no manifest,
+ *      or a manifest with no binary.
+ *   6. Finalize with a single `renameSync(stagingDir, releaseDir)` — an
+ *      atomic swap on the same filesystem. Any stale `releaseDir` left
+ *      by an old/corrupt manifest is cleared first (POSIX `rename` onto
+ *      a non-empty directory fails with `ENOTEMPTY`).
  *
  * `resolveAsset` itself returns `{ error }` rather than throwing (see its
  * doc); this function is the one that turns that into an actual throw,
@@ -452,37 +497,42 @@ export async function ensureRuntime(dir, runtimeBlock, probe, opts = {}) {
     extract = defaultExtractTarGz,
     binaryName = "llama-server",
     chmodFn = chmodSync,
-    fs = { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync },
+    fs = { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, rmSync, renameSync },
   } = opts;
 
   const resolved = resolveAsset(probe, runtimeBlock, { lddOutput, arch, baseUrl });
   if (resolved.error) throw resolved.error;
 
-  const releaseDir = join(dir, "runtimes", "llamacpp", runtimeBlock.release);
+  const runtimesDir = join(dir, "runtimes", "llamacpp");
+  const releaseDir = join(runtimesDir, runtimeBlock.release);
   const manifestPath = join(releaseDir, ".crow-runtime-installed.json");
 
   if (fs.existsSync(manifestPath)) {
     try {
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      const candidateBinPath = manifest && manifest.relBinPath ? join(releaseDir, manifest.relBinPath) : null;
       if (
         manifest
         && manifest.key === resolved.key
         && manifest.sha256 === resolved.sha256
-        && manifest.binPath
-        && fs.existsSync(manifest.binPath)
+        && candidateBinPath
+        && fs.existsSync(candidateBinPath)
       ) {
-        return manifest.binPath; // already installed for this exact asset
+        return candidateBinPath; // already installed for this exact asset
       }
     } catch {
       /* corrupt manifest — fall through and reinstall */
     }
   }
 
-  fs.mkdirSync(releaseDir, { recursive: true });
-  const archivePath = join(releaseDir, `.download-${resolved.key}.tmp`);
+  fs.mkdirSync(runtimesDir, { recursive: true });
+  const archivePath = join(runtimesDir, `.download-${resolved.key}-${runtimeBlock.release}.tmp`);
+  const stagingDir = join(runtimesDir, `.extract-${resolved.key}-${runtimeBlock.release}.tmp`);
 
   // Step 2: download + verify. Throws before anything below runs on a
-  // checksum mismatch, host-not-allowed, or protocol violation.
+  // checksum mismatch, host-not-allowed, protocol violation, or
+  // mid-stream failure (and never leaves the partial archive behind
+  // either — see `downloadRuntimeAsset`).
   await download({
     url: resolved.url,
     dest: archivePath,
@@ -493,29 +543,55 @@ export async function ensureRuntime(dir, runtimeBlock, probe, opts = {}) {
     insecureHttpHosts,
   });
 
-  // Step 3: extract.
-  extract({ archivePath, destDir: releaseDir });
+  // Only now (download verified) do we touch the staging extract dir —
+  // clear any leftover from a previous crashed/killed attempt first.
+  try {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+  } catch {
+    /* best effort */
+  }
+  fs.mkdirSync(stagingDir, { recursive: true });
+
+  // Step 3: extract into staging, never into releaseDir.
+  extract({ archivePath, destDir: stagingDir });
   try {
     fs.unlinkSync(archivePath);
   } catch {
     /* best-effort cleanup of the staging archive */
   }
 
-  // Step 4: locate.
-  const binPath = findBinaryRecursive(fs, releaseDir, binaryName);
-  if (!binPath) {
-    throw new RuntimeExtractionError(`Extracted ${resolved.key} but found no "${binaryName}" binary under ${releaseDir}`);
+  // Step 4: locate, within staging.
+  const stagedBinPath = findBinaryRecursive(fs, stagingDir, binaryName);
+  if (!stagedBinPath) {
+    try {
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+    throw new RuntimeExtractionError(`Extracted ${resolved.key} but found no "${binaryName}" binary under ${stagingDir}`);
   }
 
   // Step 5: the ONLY chmod+x in this function, only after 2-4 succeeded.
-  chmodFn(binPath, 0o755);
+  chmodFn(stagedBinPath, 0o755);
 
+  const relBinPath = relative(stagingDir, stagedBinPath);
   fs.writeFileSync(
-    manifestPath,
-    JSON.stringify({ key: resolved.key, sha256: resolved.sha256, binPath, installedAt: new Date().toISOString() }, null, 2),
+    join(stagingDir, ".crow-runtime-installed.json"),
+    JSON.stringify({ key: resolved.key, sha256: resolved.sha256, relBinPath, installedAt: new Date().toISOString() }, null, 2),
   );
 
-  return binPath;
+  // Step 6: atomic(-ish) finalize — a single rename swaps the
+  // fully-populated staging dir into place. Clear any stale releaseDir
+  // first (POSIX rename onto an existing non-empty directory fails with
+  // ENOTEMPTY).
+  try {
+    fs.rmSync(releaseDir, { recursive: true, force: true });
+  } catch {
+    /* best effort */
+  }
+  fs.renameSync(stagingDir, releaseDir);
+
+  return join(releaseDir, relBinPath);
 }
 
 // ---------------------------------------------------------------------------
