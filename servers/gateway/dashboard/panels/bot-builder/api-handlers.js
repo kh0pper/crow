@@ -16,7 +16,7 @@ import { handleDeleteConfirm } from "./delete-bot.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
 import { regenerateBotMcp } from "../bot-mcp-regen.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
-import { t, SUPPORTED_LANGS } from "../../shared/i18n.js";
+import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 
 // Same crow_lang-cookie resolution the dashboard router uses (index.js);
@@ -64,7 +64,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
       const existing = (await db.execute({ sql: "SELECT 1 FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
       if (existing) {
         return res.redirectAfterPost(
-          "/dashboard/bot-builder?error=" + encodeURIComponent(t("botbuilder.createExists", reqLang(req)).replace("{id}", botId))
+          "/dashboard/bot-builder?error=" + encodeURIComponent(fill(t("botbuilder.createExists", reqLang(req)), { id: botId }))
         );
       }
       await db.execute({

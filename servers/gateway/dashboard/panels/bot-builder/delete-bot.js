@@ -32,7 +32,7 @@
 
 import { escapeHtml, section, callout } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
-import { t } from "../../shared/i18n.js";
+import { t, fill } from "../../shared/i18n.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
 
 async function count(db, sql, args) {
@@ -89,28 +89,27 @@ export async function renderDeleteConfirm(req, res, { db, layout, lang, PAGE_CSS
 
   const li = (txt) => `<li>${txt}</li>`;
   const items = [
-    li(t("botbuilder.delRadiusSessions", lang).replace("{n}", String(br.sessions))),
-    gwType ? li(t("botbuilder.delRadiusGateway", lang).replace("{type}", escapeHtml(gwType))) : "",
+    li(fill(t("botbuilder.delRadiusSessions", lang), { n: br.sessions })),
+    gwType ? li(fill(t("botbuilder.delRadiusGateway", lang), { type: escapeHtml(gwType) })) : "",
     (br.acl || br.invites)
-      ? li(t("botbuilder.delRadiusMessaging", lang).replace("{acl}", String(br.acl)).replace("{inv}", String(br.invites)))
+      ? li(fill(t("botbuilder.delRadiusMessaging", lang), { acl: br.acl, inv: br.invites }))
       : "",
     br.boundDevices.length
-      ? li(t("botbuilder.delRadiusDevices", lang).replace("{names}",
-          escapeHtml(br.boundDevices.map((d) => d.name || d.id).join(", "))))
+      ? li(fill(t("botbuilder.delRadiusDevices", lang), {
+          names: escapeHtml(br.boundDevices.map((d) => d.name || d.id).join(", ")) }))
       : "",
     (br.messages || br.groupMemberships)
-      ? li(t("botbuilder.delRadiusConversation", lang)
-          .replace("{n}", String(br.messages)).replace("{g}", String(br.groupMemberships)))
+      ? li(fill(t("botbuilder.delRadiusConversation", lang), { n: br.messages, g: br.groupMemberships }))
       : "",
     li(t("botbuilder.delRadiusWorkspaceKept", lang)),
   ].filter(Boolean).join("");
 
   const liveWarn = br.liveSessions
-    ? callout(escapeHtml(t("botbuilder.delLiveSessionsWarn", lang).replace("{n}", String(br.liveSessions))), "warning")
+    ? callout(escapeHtml(fill(t("botbuilder.delLiveSessionsWarn", lang), { n: br.liveSessions })), "warning")
     : "";
 
   const body =
-    `<p>${t("botbuilder.delIntro", lang).replace("{name}", `<b>${escapeHtml(bot.display_name || botId)}</b>`)}</p>` +
+    `<p>${fill(t("botbuilder.delIntro", lang), { name: `<b>${escapeHtml(bot.display_name || botId)}</b>` })}</p>` +
     `<ul class="btb-del-radius">${items}</ul>` +
     liveWarn +
     callout(escapeHtml(t("botbuilder.delPermanent", lang)), "error") +

@@ -7,7 +7,7 @@
  */
 import { escapeHtml, section, badge, formField, actionBar } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
-import { t, tJs } from "../../shared/i18n.js";
+import { t, tJs, fill } from "../../shared/i18n.js";
 import { createDbClient } from "../../../../db.js";
 import { serversForBot } from "../../../../../scripts/pi-bots/mcp_writer.mjs";
 import {
@@ -188,7 +188,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     // bot's resolved model is MULTI_AGENT_CAPABLE AND Permissions →
     // Multi-agent is on.
     const subWarn = PI_EXT_ALLOWLIST.includes("subagent")
-      ? `<p class="btb-warn">&#9888; ${t("botbuilder.warnSubagent", lang).replace("{models}", `<code>${escapeHtml(MULTI_AGENT_CAPABLE.join(", "))}</code>`)}</p>`
+      ? `<p class="btb-warn">&#9888; ${fill(t("botbuilder.warnSubagent", lang), { models: `<code>${escapeHtml(MULTI_AGENT_CAPABLE.join(", "))}</code>` })}</p>`
       : "";
     const peerTools = await gatherPeerTools(db);
     const remoteOn = await remoteInvocationOn(db);
@@ -308,7 +308,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         const unavailable = voiceUnavailableSelections(def);
         if (unavailable.length) {
           noVoiceWarn =
-            `<p class="btb-notice-warn">${t("botbuilder.warnNoVoiceTools", lang).replace("{tools}", `<code>${unavailable.map(escapeHtml).join("</code>, <code>")}</code>`)}</p>`;
+            `<p class="btb-notice-warn">${fill(t("botbuilder.warnNoVoiceTools", lang), { tools: `<code>${unavailable.map(escapeHtml).join("</code>, <code>")}</code>` })}</p>`;
         }
       } catch { /* tool-executor unavailable: skip the warning */ }
 
@@ -460,7 +460,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         (botCrowId ? `<p class="btb-hint">${escapeHtml(t("botbuilder.cmRawAddress", lang))}: <code>${escapeHtml(botCrowId)}</code></p>` : "") +
         `<form method="POST">${actInputs("gw_advanced_add")}` +
         `<div class="btb-group"><label>${escapeHtml(t("botbuilder.cmManualPubkey", lang))}</label>` +
-        `<input type="text" name="sender_pubkey" class="btb-input" placeholder="secp256k1 hex (64 or 66)"></div>` +
+        `<input type="text" name="sender_pubkey" class="btb-input" placeholder="${escapeHtml(t("botbuilder.cmPubkeyPlaceholder", lang))}"></div>` +
         `<div class="btb-group"><label>${escapeHtml(t("botbuilder.cmManualName", lang))}</label>` +
         `<input type="text" name="display_name" class="btb-input"></div>` +
         `<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.cmManualAdd", lang))}</button></form>` +

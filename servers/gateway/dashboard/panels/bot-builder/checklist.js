@@ -16,7 +16,7 @@
  */
 
 import { escapeHtml } from "../../shared/components.js";
-import { t } from "../../shared/i18n.js";
+import { t, fill } from "../../shared/i18n.js";
 import { loadModelOptions } from "./data-queries.js";
 import { missingGatewayFields } from "./gateway-fields.js";
 
@@ -56,7 +56,7 @@ export async function renderReadiness(db, bot, def, lang) {
     modelReady
       ? `<code>${escapeHtml(configured)}</code>`
       : (configured
-          ? t("botbuilder.checkModelUnavailable", lang).replace("{key}", escapeHtml(configured))
+          ? fill(t("botbuilder.checkModelUnavailable", lang), { key: escapeHtml(configured) })
           : t("botbuilder.checkModelNone", lang)),
     tabHref("ai"), fixLabel));
 
@@ -70,15 +70,15 @@ export async function renderReadiness(db, bot, def, lang) {
     if (missing.length) {
       rows.push(row(WARN, t("botbuilder.checkChannel", lang),
         `${escapeHtml(gw.type)} — ` +
-        t("botbuilder.checkChannelIncomplete", lang).replace("{fields}", escapeHtml(missing.join(", "))),
+        fill(t("botbuilder.checkChannelIncomplete", lang), { fields: escapeHtml(missing.join(", ")) }),
         tabHref("gateways"), fixLabel));
     } else {
       let detail = escapeHtml(gw.type);
       if (gw.type === "gmail") {
         detail += ` — ${escapeHtml(gw.address || "")}, ` +
-          t("botbuilder.checkChannelAllowed", lang).replace("{n}", String((gw.allowlist || []).length));
+          fill(t("botbuilder.checkChannelAllowed", lang), { n: (gw.allowlist || []).length });
       } else if (gw.device_id) {
-        detail += ` — ${t("botbuilder.checkChannelDevice", lang).replace("{id}", escapeHtml(String(gw.device_id)))}`;
+        detail += ` — ${fill(t("botbuilder.checkChannelDevice", lang), { id: escapeHtml(String(gw.device_id)) })}`;
       }
       rows.push(row(OK, t("botbuilder.checkChannel", lang), detail, tabHref("gateways"), fixLabel));
     }
@@ -89,14 +89,14 @@ export async function renderReadiness(db, bot, def, lang) {
   const nMcp = (tools.crow_mcp || []).length;
   const nBuiltin = (tools.pi_builtin || []).length;
   rows.push(row(OK, t("botbuilder.checkTools", lang),
-    t("botbuilder.checkToolsDetail", lang).replace("{mcp}", String(nMcp)).replace("{builtin}", String(nBuiltin)),
+    fill(t("botbuilder.checkToolsDetail", lang), { mcp: nMcp, builtin: nBuiltin }),
     tabHref("tools"), fixLabel));
 
   // ---- Skills & prompt ----
   const nSkills = (def.skills || []).length;
   const hasPrompt = !!(def.system_prompt || "").trim();
   rows.push(row(hasPrompt ? OK : WARN, t("botbuilder.checkSkills", lang),
-    t("botbuilder.checkSkillsDetail", lang).replace("{n}", String(nSkills)) +
+    fill(t("botbuilder.checkSkillsDetail", lang), { n: nSkills }) +
     (hasPrompt ? ` · ${t("botbuilder.checkPromptSet", lang)}` : ` · ${t("botbuilder.checkPromptMissing", lang)}`),
     tabHref("skills"), fixLabel));
 
