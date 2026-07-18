@@ -67,7 +67,7 @@ npm run init-db
 - **Zod schemas** — All MCP tool parameters use Zod with `.max()` constraints
 - **FTS safety** — Use `sanitizeFtsQuery()` from `servers/db.js` for FTS5 MATCH queries
 - **LIKE safety** — Use `escapeLikePattern()` from `servers/db.js` for LIKE queries
-- **No test framework** — Verify servers start without errors: `node servers/<name>/index.js`
+- **Tests: Node's built-in test runner** (no third-party framework) — `npm test` runs the full suite (~300 files) in an isolated scratch environment; it never touches your real `~/.crow`. Single file: `npm test -- tests/<file>.test.js`. Tests that need host facilities (docker daemon, crow systemd units) self-skip where those are absent. Also verify affected servers start without errors: `node servers/<name>/index.js`
 - **Server factory pattern** — Tool logic in `server.js`, transport wiring in `index.js`
 
 ## Pull Request Process
@@ -75,8 +75,8 @@ npm run init-db
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/your-feature`
 3. Make your changes following the conventions above
-4. Test: verify affected servers start without errors
-5. Submit a PR using the pull request template
+4. Test: run `npm test` (the full suite must pass) and verify affected servers start without errors
+5. Submit a PR using the pull request template. CI (the `Tests` workflow) runs the suite, port-allocation and registry checks, and a dependency audit on every PR — a red check blocks merge. If `npm audit` flags a critical advisory in production dependencies, fix it in the same PR (upgrade or `overrides`) or link a tracking issue.
 
 ## Submitting Ideas
 
