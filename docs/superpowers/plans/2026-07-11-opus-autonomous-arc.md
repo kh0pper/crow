@@ -1217,7 +1217,9 @@ fixed in this doc:
   done-step `renderActionCards` only, with `deepLink` explicitly out of bounds.
 - **C3 — the suite gate ran 261 test files against PRODUCTION state.** `CROW_HOME`
   defaults to the real `~/.crow` (homedir-derived — a throwaway clone does not help),
-  there is no CI test workflow, and `node --test` runs files in parallel. This is the
+  there is no CI test workflow *(superseded 2026-07-18 by arc item A1: `npm test` +
+  the `Tests` workflow now exist — see the §2 superseded block)*, and `node --test`
+  runs files in parallel. This is the
   exact mechanism behind both contamination incidents §3 already records. §2 now
   mandates the scratch-env invocation.
 - **C4 — merging IS deploying, and the migration rail was unenforceable.** Auto-update

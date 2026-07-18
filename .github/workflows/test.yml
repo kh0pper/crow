@@ -45,13 +45,16 @@ jobs:
 
   static-checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      # Both scripts are dependency-free (node builtins only) — no npm ci.
+          cache: npm
+      # build-registry imports ajv (a devDependency) via lib/bundle-contract —
+      # a full npm ci is required (check-port-allocation alone is dep-free).
+      - run: npm ci
       - name: Port allocation check
         run: node scripts/check-port-allocation.js
       - name: Registry build check
