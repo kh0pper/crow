@@ -1,6 +1,6 @@
 export default {
   id: "rookery",
-  name: "Rookery Reviewer",
+  name: "Open Science Reviewer",
   icon: "search",
   route: "/dashboard/rookery",
   navOrder: 62,
@@ -8,7 +8,7 @@ export default {
   async handler(req, res, { layout }) {
     const content = `
 <div class="panel-page">
-  <h2>Rookery Reviewer</h2>
+  <h2>Open Science Reviewer</h2>
   <p>Assemble an experiment report + its evidence into an audit workspace, then
      open the blind reviewer on it.
      <a id="rk-reviewer-link" href="http://127.0.0.1:3061/" target="_blank" rel="noopener">Open reviewer ↗</a>
@@ -62,6 +62,6 @@ export default {
   refresh();
 })();
 </script>`;
-    res.send(layout({ title: "Rookery Reviewer", content }));
+    res.send(layout({ title: "Open Science Reviewer", content }));
   },
 };

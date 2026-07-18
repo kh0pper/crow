@@ -1,4 +1,4 @@
-# Rookery Reviewer
+# Open Science Reviewer (Rookery)
 
 A self-hosted, one-click extension that turns a Crow deployment into an
 experiment-audit workbench: a Dockerized [OpenScience](https://github.com/synsci/openscience)
