@@ -22,7 +22,7 @@ import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { validateExtensions, isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
@@ -30,6 +30,7 @@ import { resolveModel, escalateRequested, stripEscalateToken } from "./model_res
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType } from "./tracker.mjs";
 import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
+import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { runSkillReview } from "./skill_review.mjs";
@@ -43,10 +44,11 @@ import { parsePlanRef, containedRealPath } from "../../servers/gateway/routes/pl
 import { extractPlanFileLine, buildPlanPrompt } from "./plan_dispatch.mjs";
 
 const HOME = process.env.HOME || homedir();
-const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
 // Package was renamed from @mariozechner/pi-coding-agent to
 // @earendil-works/pi-coding-agent (still 'pi' binary; v0.74.2 verified).
-const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
+// node = the process running the bridge; pi cli via the pi_resolver ladder
+// (PIBOT_PI_CLI env → bot-engine bundle → repo dep → running node's global
+// root) — never a hardcoded host layout.
 const CROW_DB = botsDbPath();
 // Skill-file roots are resolved per-instance by skill_resolver (A3):
 // <crowHome>/skills, then ~/.crow/skills, then the repo ~/crow/skills.
@@ -108,8 +110,10 @@ export class PiRpc {
     this.resolved = resolved;
     // Test seam: nodeBin/cliPath let tests drive the exit-surface path with a
     // stub child instead of a real pi (which would wire live MCP servers).
-    const nodeBin = opts.nodeBin || NODE;
-    const cliPath = opts.cliPath || PI_CLI;
+    // Without the seam, requirePiCli throws the honest "bot engine (pi) is
+    // not installed" error instead of spawning a phantom path.
+    const nodeBin = opts.nodeBin || resolveNodeBin();
+    const cliPath = opts.cliPath || requirePiCli().cliPath;
     const args = [cliPath, "--mode", "rpc", "--provider", resolved.provider, "--model", resolved.model,
       "--session-dir", sessionDir + "/sessions"];
     // Phase 3.1 (R9/R11): multi-agent is allowed iff the operator opted in
@@ -150,7 +154,7 @@ export class PiRpc {
         .concat(opts.selfAuthoringDir);
     }
     const env = Object.assign({}, process.env,
-      { PATH: HOME + "/.nvm/versions/node/v20.20.2/bin:" + (process.env.PATH || ""),
+      { PATH: dirname(nodeBin) + ":" + (process.env.PATH || ""),
         PI_PROVIDER: resolved.provider,
         PIBOT_SUBAGENT_DEPTH: "0",
         PI_BOT_PERMISSION_POLICY: JSON.stringify(piPolicy) },
