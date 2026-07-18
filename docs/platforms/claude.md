@@ -1,11 +1,17 @@
 # Claude Web & Mobile
 
-Connect Crow to Claude on the web (claude.ai) or the Claude mobile app using Custom Integrations.
+::: danger Not available for self-hosted Crow (planned as a follow-on)
+claude.ai and the Claude mobile app connect to MCP servers **from Anthropic's cloud**, so they can only reach a server that is publicly accessible on the internet. A self-hosted Crow is deliberately **not** reachable from the internet — that privacy posture is the product's core promise, not a missing feature. There is currently **no supported way** to connect claude.ai or the Claude mobile app to a private Crow. Public cloud-client access is **planned as a follow-on** after v1, behind a dedicated security review.
+
+**Use instead:** [Claude Desktop](./claude-desktop) or [Claude Code](./claude-code) — both run on your own machine, reach your private Crow directly, and share the same memories.
+:::
+
+The instructions below apply **only** to the unsupported, advanced case where you have made your gateway publicly reachable yourself (your own domain and reverse proxy — read [SECURITY.md](https://github.com/kh0pper/crow/blob/main/SECURITY.md) first). Tailscale Funnel is **not** such a path: Crow's gateway rejects funneled requests to MCP and OAuth routes by design.
 
 ## Prerequisites
 
-- Crow gateway deployed and healthy ([Getting Started guide](../getting-started/))
-- A Claude Pro, Team, or Enterprise plan (Custom Integrations require a paid plan)
+- Crow gateway deployed, healthy, **and publicly reachable** (unsupported — see above)
+- A Claude plan that supports custom connectors (Free currently includes one connector; paid plans allow more)
 
 ## Setup Steps
 
@@ -38,17 +44,11 @@ Repeat for each server you want to connect:
 - **Protocol**: `2025-03-26`
 - **Auth**: OAuth 2.1 (automatic)
 
-## Self-Hosted / Local Setup
+## Self-Hosted Crow
 
-If you're running the Crow gateway on your own machine (e.g., a Raspberry Pi or home server), you can expose it to Claude using [Tailscale Funnel](../getting-started/tailscale-setup#option-a-tailscale-funnel-personal-hobby-use). Once Funnel is enabled on the machine running the gateway, your MCP endpoint URL will be:
+A standard self-hosted Crow **cannot** be connected to claude.ai — see the notice at the top of this page. In particular, **Tailscale Funnel does not work for this**: the gateway rejects funneled requests to every MCP and OAuth route (only the blog and a few public files are Funnel-safe). Earlier versions of this page documented a Funnel-based setup; that flow has never worked on current Crow and the instructions were removed.
 
-```
-https://<hostname>.<tailnet>.ts.net/memory/mcp
-```
-
-Replace `<hostname>` and `<tailnet>` with your Tailscale machine name and tailnet domain. Use the same URL pattern for other servers (`/projects/mcp`, `/router/mcp`, etc.). The OAuth flow and setup steps are identical to the cloud instructions above — just substitute your Funnel URL for `your-crow-server`.
-
-See the [Tailscale Setup guide](../getting-started/tailscale-setup) for full configuration details.
+Your self-hosted Crow works today with the local clients on the [platforms index](./index) — Claude Desktop and Claude Code give you the same Claude models with full access to your private Crow.
 
 ## Verification
 
@@ -66,7 +66,7 @@ If the connector fails to connect or tools don't appear:
 
 - **Leave OAuth Client ID and Client Secret blank.** Crow uses Dynamic Client Registration (RFC 7591) — Claude discovers the OAuth endpoints automatically from the `.well-known` metadata. No pre-configured credentials needed.
 - **Verify your gateway's OAuth metadata is reachable.** Visit `https://your-crow-server/.well-known/oauth-authorization-server` in your browser — you should see a JSON response with `authorization_endpoint`, `token_endpoint`, and `registration_endpoint`.
-- **Check `CROW_GATEWAY_URL` in your `.env` file.** This must match your actual public URL exactly (including `https://`). If you're using Tailscale Funnel, it should be `https://<hostname>.<tailnet>.ts.net`.
+- **Check `CROW_GATEWAY_URL` in your `.env` file.** This must match your actual public URL exactly (including `https://`).
 - **Start a new conversation after gateway restarts.** OAuth sessions are tied to the gateway process. When the gateway restarts, existing Claude.ai sessions become invalid — start a fresh conversation to re-authenticate.
 - **Check gateway logs for OAuth errors.** If running via systemd: `journalctl -u crow-gateway -f`. Look for errors in the `/register`, `/authorize`, or `/token` endpoints.
 
