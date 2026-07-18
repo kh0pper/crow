@@ -16,9 +16,10 @@
 # envelope to .env. Without S3 + aggressive pruning, a single active
 # channel can fill a 500 GB disk within months.
 #
-# Image: chocobozzz/peertube:v8.1.5-bookworm (stable line; pin tag to
-# a specific release for production — we use the floating tag for the
-# roll-out, will pin before merge).
+# Image: chocobozzz/peertube:v8.1.5 (pinned release). Debian-suffixed
+# variants (-bookworm) ended at v7.x — v8+ ships plain vN.N.N and
+# vN.N.N-trixie tags only, and upstream retains old version tags, so a
+# plain version pin is durable.
 
 networks:
   crow-federation:
@@ -64,7 +65,7 @@ services:
       retries: 10
 
   peertube:
-    image: chocobozzz/peertube:v8.1.5-bookworm
+    image: chocobozzz/peertube:v8.1.5
     container_name: crow-peertube
     networks:
       - default

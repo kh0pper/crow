@@ -1,6 +1,6 @@
 services:
   vllm-rocm-qwen35-27b:
-    image: ${VLLM_ROCM_IMAGE}
+    image: ${VLLM_ROCM_IMAGE:-rocm/vllm-dev:nightly_main_20260413}
     container_name: vllm-rocm-qwen35-27b
     devices:
       - /dev/kfd

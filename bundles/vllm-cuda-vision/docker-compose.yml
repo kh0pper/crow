@@ -1,6 +1,6 @@
 services:
   vllm-cuda-vision:
-    image: ${VLLM_CUDA_IMAGE}
+    image: ${VLLM_CUDA_IMAGE:-vllm/vllm-openai:v0.11.0}
     container_name: vllm-cuda-vision
     runtime: nvidia
     env_file:

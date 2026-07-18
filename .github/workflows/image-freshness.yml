@@ -2,6 +2,10 @@ name: Bundle Image Freshness Check
 
 # Nightly check that every bundle's docker image still pulls.
 # Catches upstream image deletions, repo renames, and tag deprecations.
+#
+# Reporting contract: scheduled failures update ONE pinned issue (found by the
+# bundle-image-stale label) instead of filing a new issue per night; a passing
+# scheduled run closes it. workflow_dispatch runs never touch issues.
 
 on:
   schedule:
@@ -19,17 +23,20 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Extract bundle images
+        # The script resolves ${VAR:-default} interpolation in image references
+        # and skips locally-built (build:) services — a raw grep here reported
+        # literal `${VLLM_ROCM_IMAGE}` and local build tags as missing images
+        # for months. See the script header for why `docker compose config` is
+        # not used (bundles with required install-time env fail it).
         run: |
           set -e
-          : > /tmp/images.txt
-          for compose in bundles/*/docker-compose.yml; do
-            [ -f "$compose" ] || continue
-            grep -E '^\s*image:\s+' "$compose" | grep -v '^\s*#' | \
-              sed -E 's/^\s*image:\s*//' | tr -d '"' | tr -d "'" >> /tmp/images.txt || true
-          done
-          sort -u /tmp/images.txt -o /tmp/images.txt
-          echo "Found $(wc -l < /tmp/images.txt) unique images:"
+          python3 scripts/extract-bundle-images.py /tmp/images.txt /tmp/parse-failures.txt
+          echo "Images to check:"
           cat /tmp/images.txt
+          if [ -s /tmp/parse-failures.txt ]; then
+            echo "Compose files that failed to parse (their images were NOT checked):"
+            cat /tmp/parse-failures.txt
+          fi
 
       - name: Pull each image
         id: pull
@@ -37,11 +44,21 @@ jobs:
           set +e
           fail=0
           : > /tmp/missing.txt
+          # A compose file that doesn't parse (or an image reference that can't
+          # be resolved) means images silently escaped the check — treat that
+          # as a failure, not a skip. The lines are already self-describing.
+          if [ -s /tmp/parse-failures.txt ]; then
+            cat /tmp/parse-failures.txt >> /tmp/missing.txt
+            fail=1
+          fi
           while IFS= read -r img; do
             [ -z "$img" ] && continue
             echo "::group::Pulling $img"
             if docker pull "$img" >/dev/null 2>&1; then
               echo "OK"
+              # Free the layers immediately — the full set (incl. multi-GB
+              # vLLM/ROCm images) would exhaust runner disk if accumulated.
+              docker rmi "$img" >/dev/null 2>&1 || true
             else
               echo "FAIL"
               echo "$img" >> /tmp/missing.txt
@@ -51,25 +68,84 @@ jobs:
           done < /tmp/images.txt
           exit $fail
 
-      - name: File issue on failure
+      - name: Update the pinned issue on failure
         if: failure() && github.event_name == 'schedule'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            let body = "Nightly image-freshness check failed.\n\n";
+            const LABEL = 'bundle-image-stale';
+            const TITLE = 'Bundle image-freshness check failed';
+            let list;
             try {
               const missing = fs.readFileSync('/tmp/missing.txt', 'utf8').trim().split('\n').filter(Boolean);
-              body += "Images that failed to pull:\n";
-              for (const img of missing) body += "- `" + img + "`\n";
+              list = missing.map(m => '- `' + m + '`').join('\n');
             } catch (e) {
-              body += "Could not read missing list — see workflow logs.";
+              list = '_Could not read the missing list — see workflow logs._';
             }
-            body += "\n\nWorkflow run: " + context.serverUrl + "/" + context.repo.owner + "/" + context.repo.repo + "/actions/runs/" + context.runId;
-            await github.rest.issues.create({
+            const runUrl = context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId;
+            const body = [
+              'Nightly image-freshness check failed.',
+              '',
+              'Images that failed to pull:',
+              list,
+              '',
+              'Last failing run: ' + runUrl,
+              'Last checked: ' + new Date().toISOString(),
+              '',
+              '_This issue is updated in place by every scheduled failure and auto-closes when the check passes again._',
+            ].join('\n');
+            const open = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: "Bundle image-freshness check failed",
-              body,
-              labels: ["bundle-image-stale", "automated"],
+              labels: LABEL,
+              state: 'open',
+              per_page: 100,
             });
+            if (open.data.length > 0) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open.data[0].number,
+                title: TITLE,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: TITLE,
+                body,
+                labels: [LABEL, 'automated'],
+              });
+            }
+
+      - name: Close the pinned issue on success
+        if: success() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = 'bundle-image-stale';
+            const runUrl = context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId;
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: LABEL,
+              state: 'open',
+              per_page: 100,
+            });
+            for (const issue of open.data) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: 'Image-freshness check passed again: ' + runUrl + ' — closing.',
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+            }

@@ -4523,7 +4523,7 @@
       ],
       "ports": [],
       "webUI": null,
-      "notes": "Three containers (peertube + postgres + redis). chocobozzz/peertube:production-bookworm image. Expose via caddy_add_federation_site { domain: PEERTUBE_WEBSERVER_HOSTNAME, upstream: 'peertube:9000', profile: 'activitypub-peertube' } — the peertube profile also wires WebSocket upgrade on /socket.io and large request-body limits for video upload chunking. Admin credentials: first-boot logs print a randomly-generated admin password (search `docker logs crow-peertube | grep -A1 \"Username\"`); rotate via `docker exec -it crow-peertube npm run reset-password -- -u root` immediately.",
+      "notes": "Three containers (peertube + postgres + redis). chocobozzz/peertube:v8.1.5 image (pinned release; v8+ has no -bookworm variant). Expose via caddy_add_federation_site { domain: PEERTUBE_WEBSERVER_HOSTNAME, upstream: 'peertube:9000', profile: 'activitypub-peertube' } — the peertube profile also wires WebSocket upgrade on /socket.io and large request-body limits for video upload chunking. Admin credentials: first-boot logs print a randomly-generated admin password (search `docker logs crow-peertube | grep -A1 \"Username\"`); rotate via `docker exec -it crow-peertube npm run reset-password -- -u root` immediately.",
       "official": true
     },
     {
