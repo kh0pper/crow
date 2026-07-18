@@ -43,7 +43,7 @@ npm install 2>&1 | tail -3 | tee -a "$LOG_FILE"
 
 # Run database migrations
 log "Running database migrations..."
-npm run init-db 2>&1 | tee -a "$LOG_FILE"
+node scripts/guarded-init-db.mjs 2>&1 | tee -a "$LOG_FILE"
 
 # Restart gateway if running as systemd service
 if systemctl is-active --quiet crow-gateway 2>/dev/null; then

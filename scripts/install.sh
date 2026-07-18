@@ -65,7 +65,7 @@ npm install --silent
 
 # Step 4: Initialize database
 echo "  Initializing database..."
-node scripts/init-db.js
+node scripts/guarded-init-db.mjs
 
 # Step 5: Launch the setup wizard
 echo ""
