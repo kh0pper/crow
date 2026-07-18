@@ -53,8 +53,15 @@ if (res.report && (res.report.losses.length || res.report.suspects.length)) {
   for (const s of res.report.suspects) console.warn(`  suspect: ${s}`);
 }
 if (res.verdict === "loss") {
-  console.error(`Database restored from backup; migration quarantined. Evidence: ${res.evidence || "n/a"}`);
-  console.error("Restart any Crow-connected processes (gateway, MCP servers, bots) now.");
+  if (res.restored) {
+    console.error(`Database restored from backup; migration quarantined. Evidence: ${res.evidence}`);
+    console.error("Restart any Crow-connected processes (gateway, MCP servers, bots) now.");
+  } else {
+    console.error("Migration quarantined but automatic restore was NOT possible.");
+    console.error(res.backupPath
+      ? `Restore manually: stop the gateway, then copy ${res.backupPath} over the database.`
+      : "No backup was available — check disk space and docs/developers/db-recovery.md.");
+  }
   process.exit(2);
 }
 if (res.initDbExit !== 0) {

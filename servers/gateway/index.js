@@ -126,7 +126,7 @@ try {
   const { SCHEMA_GENERATION, needsSchemaInit } = await import("../shared/schema-version.js");
   const {
     readSchemaState, runGuardedInitDb, resolveGuardDbPath,
-    activeMarker, dataMarkerPath, repoMarkerPath,
+    activeMarker, dataMarkerPath, repoMarkerPath, backupDir,
   } = await import("../shared/migration-guard.js");
   const { resolveDataDir } = await import("../db.js");
   const { dirname } = await import("node:path");
@@ -160,9 +160,21 @@ try {
       } catch {}
       const res = await runGuardedInitDb({ dbPath, appRoot, sha, newGeneration: SCHEMA_GENERATION });
       if (res.verdict === "loss") {
-        // Fail closed happened inside the guard (restore + quarantine + alert).
-        // Boot continues on the restored, pre-migration DB — data intact.
-        console.warn("[migration-guard] Data loss detected and rolled back — booting on the restored pre-migration database.");
+        if (res.restored) {
+          // Fail closed happened inside the guard (restore + quarantine + alert).
+          // Boot continues on the restored, pre-migration DB — data intact.
+          console.warn("[migration-guard] Data loss detected and rolled back — booting on the restored pre-migration database.");
+        } else if (!res.dbPresent) {
+          // No DB file at all — booting would silently create an empty one.
+          console.error("[migration-guard] FATAL: data loss detected and the database file is missing after a failed restore.");
+          console.error(`  Restore manually from ${res.backupPath || backupDir(dbPath)} before starting the gateway.`);
+          process.exit(1);
+        } else {
+          // Restore unavailable/failed but the (damaged) DB is present: booting
+          // keeps the instance observable; the alert instructs a manual restore
+          // (stop the gateway first). Quarantine prevents repeat damage.
+          console.warn("[migration-guard] Data loss detected and restore was NOT possible — booting on the DAMAGED database. See the alert for manual recovery steps.");
+        }
       } else if (res.initDbExit !== 0) {
         const after = readSchemaState(dbPath);
         if (needsSchemaInit({ coreTableCount: after.coreTableCount, userVersion: after.userVersion, schemaGeneration: SCHEMA_GENERATION })) {

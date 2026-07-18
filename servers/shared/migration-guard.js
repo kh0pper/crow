@@ -235,7 +235,14 @@ export function backupDir(dbPath) {
 
 async function takeBackup(dbPath, fromGen, toGen, performBackupFn) {
   const dir = backupDir(dbPath);
-  mkdirSync(dir, { recursive: true });
+  // A backup-infrastructure failure (unwritable data dir, ENOSPC — the most
+  // likely trigger for a BACKUP feature) must degrade to the fail-open
+  // "no safety backup" path, never throw out of the never-throws guard.
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    return { ok: false, reason: `cannot create backup dir: ${err?.message}` };
+  }
   // Free-space precheck: ≥1.2× DB size on the anchor filesystem.
   try {
     const { statfsSync } = await import("node:fs");
@@ -300,15 +307,31 @@ export function pinBackup(path) {
 /* ----------------------------------------------------------------- restore */
 
 /** Move damaged db (+wal/+shm) aside as evidence, copy the backup in. The
- *  caller guarantees this process holds no handles on dbPath. */
+ *  caller guarantees this process holds no handles on dbPath.
+ *
+ *  Self-healing on partial failure: if the copy-in fails after the rename,
+ *  the damaged file (and its WAL siblings) are renamed BACK so dbPath is
+ *  never left missing — a missing DB file would be silently re-created empty
+ *  by the next better-sqlite3 open, which is worse than the damaged state. */
 export function restoreBackup(dbPath, backupPath) {
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const evidence = `${dbPath}.damaged-${ts}`;
   renameSync(dbPath, evidence);
+  const movedSuffixes = [];
   for (const suffix of ["-wal", "-shm"]) {
-    try { renameSync(dbPath + suffix, evidence + suffix); } catch {}
+    try { renameSync(dbPath + suffix, evidence + suffix); movedSuffixes.push(suffix); } catch {}
   }
-  copyFileSync(backupPath, dbPath);
+  try {
+    copyFileSync(backupPath, dbPath);
+  } catch (err) {
+    try {
+      renameSync(evidence, dbPath);
+      for (const suffix of movedSuffixes) {
+        try { renameSync(evidence + suffix, dbPath + suffix); } catch {}
+      }
+    } catch {}
+    throw new Error(`restore copy failed (damaged file moved back): ${err?.message}`);
+  }
   return { evidence };
 }
 
@@ -518,11 +541,20 @@ export async function runGuardedInitDb({
         (evidence
           ? `The database was RESTORED from the pre-migration backup; the damaged file is kept at ${evidence}. Restart any Crow-connected processes (MCP servers, bots) now.`
           : backup.ok
-            ? `Automatic restore failed — restore manually from ${backup.path}.`
+            ? `Automatic restore FAILED — stop the gateway and restore manually from ${backup.path}.`
             : `No backup was available (disk) — the loss is NOT recoverable from the guard; check ${backupDir(dbPath)}.`) +
         ` This migration is quarantined (attempt ${marker.attempts}/${QUARANTINE_MAX_ATTEMPTS}); delete ${dataMarkerPath(dbPath)} and ${repoMarkerPath(appRoot)} to override.`,
     });
-    return { verdict: "loss", backupPath: backup.path, evidence, report: result.report, initDbExit: r.code, marker };
+    return {
+      verdict: "loss",
+      backupPath: backup.path,
+      evidence,
+      restored: !!evidence,
+      dbPresent: existsSync(dbPath),
+      report: result.report,
+      initDbExit: r.code,
+      marker,
+    };
   }
 
   if (result.verdict === "suspect") {

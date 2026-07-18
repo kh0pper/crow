@@ -358,6 +358,17 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       log: (m) => log(`[migration-guard] ${m}`),
     });
     if (res.verdict === "loss") {
+      if (!res.restored) {
+        // Restore failed or no backup existed: the (damaged) migrated DB is
+        // what's on disk and the running code matches it. Do NOT roll code
+        // back or restart into a state the alert just told the operator to
+        // repair by hand — keep running, quarantined, loudly.
+        const msg = `Migration quarantined: data loss detected, automatic restore NOT possible — manual recovery required (${(res.report?.losses || []).join("; ")})`;
+        log(msg);
+        await saveSetting("auto_update_last_check", new Date().toISOString());
+        await saveSetting("auto_update_last_result", msg);
+        return { updated: false, error: msg, quarantined: true };
+      }
       // Fail closed: the guard restored the backup and quarantined the sha.
       // Roll the code back to match the restored schema — but never destroy
       // local WIP on a possibly-false verdict (quarantined boot handles the

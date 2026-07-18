@@ -384,3 +384,54 @@ test("retention: keeps last 3, pinned exempt, damaged capped at 2", (t) => {
   const damagedLeft = readdirSync(dir).filter((f) => f.includes(".damaged-"));
   assert.equal(damagedLeft.length, 2);
 });
+
+/* ------------------------------------------- final-review regression fixes */
+
+test("takeBackup: unwritable backup dir fails OPEN (no throw, no-backup alert), never crashes the guard", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "mg-nobk-"));
+  t.after(() => { _setAlertChannelsForTest(null); rmSync(dir, { recursive: true, force: true }); });
+  const dbPath = join(dir, "data", "crow.db");
+  makeFixtureDb(dbPath);
+  // A regular FILE where the backups dir must go → mkdirSync throws ENOTDIR.
+  writeFileSync(join(dir, "data", "backups"), "not a directory");
+  const alerts = stubAlerts();
+  const res = await runGuardedInitDb({
+    dbPath, appRoot: dir, newGeneration: 9, log: () => {},
+    runInitDb: async () => ({ code: 0 }), performBackupFn: copyBackup,
+  });
+  assert.equal(res.verdict, "pass");
+  assert.ok(alerts.some(([, p]) => /without a safety backup/.test(p.title)), "no-backup alert fired");
+});
+
+test("restoreBackup: failed copy self-heals — damaged file renamed back, dbPath never missing", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "mg-heal-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "crow.db");
+  writeFileSync(dbPath, "damaged-content");
+  assert.throws(() => restoreBackup(dbPath, join(dir, "no-such-backup.db")), /restore copy failed/);
+  assert.ok(existsSync(dbPath), "dbPath must not be left missing");
+  assert.equal(readFileSync(dbPath, "utf8"), "damaged-content");
+});
+
+test("loss without a usable backup reports restored:false and dbPresent:true", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "mg-lossnb-"));
+  t.after(() => { _setAlertChannelsForTest(null); rmSync(dir, { recursive: true, force: true }); });
+  const dbPath = join(dir, "data", "crow.db");
+  makeFixtureDb(dbPath);
+  writeFileSync(join(dir, "data", "backups"), "not a directory"); // backup impossible
+  stubAlerts();
+  const res = await runGuardedInitDb({
+    dbPath, appRoot: dir, sha: "bad", newGeneration: 9, log: () => {},
+    runInitDb: async () => {
+      const db = new Database(dbPath);
+      db.exec("DROP TABLE test_data");
+      db.close();
+      return { code: 0 };
+    },
+    performBackupFn: copyBackup,
+  });
+  assert.equal(res.verdict, "loss");
+  assert.equal(res.restored, false);
+  assert.equal(res.dbPresent, true);
+  assert.ok(activeMarker(dataMarkerPath(dbPath)), "still quarantined");
+});
