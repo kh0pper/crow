@@ -1,0 +1,85 @@
+name: Tests
+
+# The CI floor (arc item A1, 2026-07-18): full suite + repo gates + audit on
+# every PR and every push to main — deliberately NO path filters, so a check
+# context always exists (path-filtered workflows were why "no check runs" used
+# to read as normal here).
+#
+# ⚠ Job KEYS (suite / static-checks / audit) are load-bearing: branch
+# protection requires them as status-check contexts, and GitHub uses the job
+# key as the context because these jobs must NOT set a `name:` property.
+# Renaming a key requires updating branch protection in the same PR.
+#
+# CI green does NOT cover schema migrations — SCHEMA_GENERATION bumps still
+# require the manual migration rail (scripts/schema-migration-dryrun.sh) on
+# live-shaped data before merge.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Never cancel a main verification run (two quick merges must both get
+# verified); superseded PR pushes are safe to cancel.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # GITHUB_ACTIONS=true applies tests/ci-exclusions.json (empty today);
+      # host-bound tests self-skip via in-file capability guards instead.
+      - run: npm test
+
+  static-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Both scripts are dependency-free (node builtins only) — no npm ci.
+      - name: Port allocation check
+        run: node scripts/check-port-allocation.js
+      - name: Registry build check
+        run: node scripts/build-registry.mjs --check
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Blocking tier: CRITICAL advisories in production deps stop merges.
+      # Advisory-red playbook: fix same-day via upgrade or package.json
+      # "overrides"; if genuinely unfixable same-day, raise the level in a PR
+      # that links a tracking issue. Registry flakes are retried; note npm ci
+      # in the suite job shares the same registry dependency anyway.
+      - name: npm audit (blocking, critical, production deps)
+        # npm exits 1 for vulns AND for many infra errors, so retry every
+        # failure: a genuine critical just burns ~60s of retries before the
+        # job goes red; a registry blip gets three chances.
+        run: |
+          for i in 1 2 3; do
+            npm audit --omit=dev --audit-level=critical && exit 0
+            echo "npm audit failed, retry $i/3"; sleep $((i*10))
+          done
+          exit 1
+      - name: npm audit (informational, full)
+        continue-on-error: true
+        run: npm audit || true
