@@ -139,6 +139,12 @@ test("install-set: sequential, continue-on-error, exactly one deferred restart, 
     _getInstallSetBarrierForTest,
   } = await import("../servers/gateway/routes/bundles.js");
   const { loadCollections } = await import("../servers/gateway/dashboard/panels/extensions/collections.js");
+  // fx-broken (type bundle + compose) traverses validateInstall's docker gate;
+  // pin the probe so the mount-guard this test exists to prove is what's
+  // actually exercised on docker-less/loaded hosts (and skip a real 3s
+  // `docker info` spawn per run).
+  const { _setDockerProbeForTest } = await import("../servers/gateway/dashboard/panels/extensions/data-queries.js");
+  _setDockerProbeForTest(true);
 
   // Production no-op, proven by mechanism (not by a comment): on a fresh import,
   // before anything installs a barrier, the module-private barrier is null. The

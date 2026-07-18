@@ -5,6 +5,14 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { validateInstall } from "../servers/gateway/routes/bundles.js";
 import { createDbClient } from "../servers/db.js";
+import { _setDockerProbeForTest } from "../servers/gateway/dashboard/panels/extensions/data-queries.js";
+
+// Four tests below traverse validateInstall's docker gate (caddy consent ×2,
+// plex hosted, uptime-kuma pass) but none of them is ABOUT docker. The live
+// probe (`docker info`, 3s timeout, cached 60s) times out under parallel-suite
+// load and turns them into 412 docker_unavailable for the wrong reason — pin
+// it for the whole file. (routes/bundles.js consults this same ESM instance.)
+_setDockerProbeForTest(true);
 
 // Honor CROW_HOME like the code under test does (routes/bundles.js resolves its
 // paths from it) — under the scratch suite env this points at the throwaway dir,

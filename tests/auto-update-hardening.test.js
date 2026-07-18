@@ -34,6 +34,16 @@ import {
   _lockPrimitivesForTest,
 } from "../servers/gateway/auto-update.js";
 
+// This file drives real updates through runUpdate's restart branch. Under a
+// systemd-launched context (CI runners, systemd-run, VS Code remote) the
+// inherited INVOCATION_ID makes isSupervised() true and the successful-update
+// tests would arm the gateway's restart chain inside THIS process. The suite
+// must never believe it is supervised — scrub before any test runs (the
+// supervisor.test.js / parent-watch.test.js files that test supervision set
+// these vars explicitly themselves).
+delete process.env.INVOCATION_ID;
+delete process.env.CROW_SUPERVISED;
+
 const REAL_APP_ROOT = join(import.meta.dirname, "..");
 const restoreRoot = () => _setAppRootForTest(REAL_APP_ROOT);
 const LOCK_STALE_MS = 30 * 60 * 1000;

@@ -49,6 +49,18 @@ let _dockerProbeInflight = null;
 export function _resetDockerProbeForTest() {
   _dockerProbe = { ok: null, at: 0 };
   _dockerProbeInflight = null;
+  _dockerProbePin = null;
+}
+
+// Test-only pin, consulted before the cache AND the TTL — a pinned value can
+// never expire mid-test-file the way a cached probe result can (the 60s TTL
+// re-probes, and on a loaded host the 3s `docker info` times out → tests that
+// aren't about docker fail on the docker gate).
+let _dockerProbePin = null;
+
+/** Test-only: pin dockerAvailable() to a fixed value (null un-pins). */
+export function _setDockerProbeForTest(ok) {
+  _dockerProbePin = typeof ok === "boolean" ? ok : null;
 }
 
 /**
@@ -58,6 +70,7 @@ export function _resetDockerProbeForTest() {
  * @returns {Promise<boolean>}
  */
 export function dockerAvailable() {
+  if (_dockerProbePin !== null) return Promise.resolve(_dockerProbePin);
   const now = Date.now();
   if (_dockerProbe.ok !== null && now - _dockerProbe.at < DOCKER_PROBE_TTL_MS) {
     return Promise.resolve(_dockerProbe.ok);

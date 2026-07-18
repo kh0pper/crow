@@ -320,11 +320,18 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
   if (isSupervised()) {
     log("Restarting gateway to apply update...");
     // Close the HTTP server first to release the port, then exit
-    // so the supervisor's restart doesn't hit EADDRINUSE
-    setTimeout(() => {
+    // so the supervisor's restart doesn't hit EADDRINUSE.
+    // exitCode is preset so that if the loop drains before the inner timer
+    // fires (manual check-now path: crow:shutdown closes the only ref'd
+    // handle), node still exits nonzero — Restart=on-failure needs it.
+    // Both timers are unref'd so a pending restart chain can never hold open
+    // or kill a process whose loop otherwise finished (test runners).
+    process.exitCode = 1;
+    const outer = setTimeout(() => {
       process.emit("crow:shutdown");
-      setTimeout(() => process.exit(1), 1000);
+      setTimeout(() => process.exit(1), 1000).unref();
     }, 1500);
+    outer.unref();
   }
 
   return { updated: true, from: currentVersion, to: newVersion };
