@@ -14,6 +14,51 @@
  */
 
 import { t } from "../shared/i18n.js";
+import { existsSync, readFileSync } from "fs";
+import { join, dirname } from "path";
+import { homedir } from "os";
+import { fileURLToPath } from "url";
+
+// ─── Visibility gate (B5, 2026-07-18) ───
+//
+// Fediverse features are blind to core: this panel only appears once at least
+// one federated bundle is installed. "Federated" is derived from the in-repo
+// registry (tags include "fediverse"), so new federated bundles gate correctly
+// without touching this file; community-store installs are covered by the
+// installed entry's own tags. The installed.json read happens per nav render
+// (call-time CROW_HOME, matches extensions/data-queries.js) so the panel
+// appears right after an install with no gateway restart.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REGISTRY_PATH = join(__dirname, "../../../../registry/add-ons.json");
+
+let _federatedIds = null;
+function federatedIds() {
+  if (_federatedIds) return _federatedIds;
+  const ids = new Set();
+  try {
+    const reg = JSON.parse(readFileSync(REGISTRY_PATH, "utf8"));
+    for (const a of reg["add-ons"] || []) {
+      if ((a.tags || []).includes("fediverse")) ids.add(a.id);
+    }
+  } catch {}
+  _federatedIds = ids;
+  return ids;
+}
+
+export function hasFederatedBundleInstalled() {
+  const crowDir = process.env.CROW_HOME || join(homedir(), ".crow");
+  const installedPath = join(crowDir, "installed.json");
+  try {
+    if (!existsSync(installedPath)) return false;
+    const installed = JSON.parse(readFileSync(installedPath, "utf8"));
+    const known = federatedIds();
+    return Object.values(installed).some(
+      (e) => e && (known.has(e.id) || (e.tags || []).includes("fediverse")),
+    );
+  } catch {
+    return false;
+  }
+}
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -281,6 +326,10 @@ export default {
   route: "/dashboard/fediverse",
   navOrder: 80,
   category: "connections",
+  // Hidden until a federated bundle is installed (see gate above). The route
+  // itself stays mounted — direct navigation on an instance with no federated
+  // bundles just shows empty queues behind auth, which is harmless.
+  hidden: () => !hasFederatedBundleInstalled(),
 
   async handler(req, res, { db, lang, layout }) {
     const tab = (req.query.tab === "crosspost") ? "crosspost" : "moderation";

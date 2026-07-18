@@ -101,10 +101,22 @@ export function getAllPanels() {
 /**
  * Get visible panels (excludes hidden panels) sorted by navOrder.
  * Used for sidebar nav and dashboard home redirect.
+ * `hidden` may be a boolean or a predicate; a predicate is re-evaluated on
+ * every call so visibility can track runtime state (e.g. the Fediverse Admin
+ * panel appears only once a federated bundle is installed — no restart
+ * needed). Predicates must be synchronous and cheap; a thrown predicate
+ * counts as visible (fail-open: never hide a working panel on a probe bug).
  */
 export function getVisiblePanels() {
   return [...panels.values()]
-    .filter((p) => !p.hidden)
+    .filter((p) => {
+      if (typeof p.hidden !== "function") return !p.hidden;
+      try {
+        return !p.hidden();
+      } catch {
+        return true;
+      }
+    })
     .sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
 }
 
