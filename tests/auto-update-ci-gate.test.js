@@ -61,7 +61,7 @@ test("classifyCheckRuns: no named runs (fork without our CI) is unknown", () => 
 
 const g = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
 
-function fixture() {
+function fixture({ behind = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), "au-cigate-"));
   const origin = join(root, "origin.git");
   const work = join(root, "work");
@@ -75,6 +75,7 @@ function fixture() {
   g(work, "add", "a.txt", "scripts/init-db.js");
   g(work, "commit", "-m", "c1");
   g(work, "push", "origin", "main");
+  if (!behind) return { root, work, cleanup: () => rmSync(root, { recursive: true, force: true }) };
   // A new commit on origin (via a second clone) so the update has work to do.
   const pusher = mkdtempSync(join(root, "pusher-"));
   execFileSync("git", ["clone", origin, pusher], { stdio: "pipe" });
@@ -145,6 +146,23 @@ test("local (non-GitHub) remotes fail open without the test hook", async () => {
     const res = await runLockedUpdate(() => {});
     assert.equal(res.updated, true, "unknown verdict (local remote) proceeds");
   } finally {
+    _setDbForTest(null);
+    _setAppRootForTest(join(import.meta.dirname, ".."));
+    fx.cleanup();
+  }
+});
+
+test("placement: an up-to-date repo short-circuits BEFORE the CI gate (red verdict never consulted)", async () => {
+  const fx = fixture({ behind: false });
+  try {
+    _setAppRootForTest(fx.work);
+    _setDbForTest(stubDb());
+    _setCiVerdictForTest("red");
+    const res = await runLockedUpdate(() => {});
+    assert.equal(res.updated, false);
+    assert.equal(res.skipped, undefined, "behind=0 must return plain up-to-date, not a CI skip");
+  } finally {
+    _setCiVerdictForTest(null);
     _setDbForTest(null);
     _setAppRootForTest(join(import.meta.dirname, ".."));
     fx.cleanup();
