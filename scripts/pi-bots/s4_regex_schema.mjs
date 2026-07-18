@@ -16,11 +16,13 @@
  * <function= in assistant text, upstream 500 / "Failed to parse input", an
  * extension_error, or agent_end with NO successful s4 tool_execution_end.
  */
+import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
+import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 
 const HOME = "/home/kh0pp";
-const NODE = `${HOME}/.nvm/versions/node/v20.20.2/bin/node`;
-const PI_CLI = `${HOME}/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js`;
+const NODE = resolveNodeBin();
+const PI_CLI = requirePiCli().cliPath;
 const SPK = `${HOME}/.pi-spike`;
 const CWD_S4 = `${SPK}/cwd-s4`;
 const SDIR = `${SPK}/sessions-s4`;
@@ -34,7 +36,7 @@ class PiRpc {
       "--session-dir", SDIR, "--no-session", "--tools", tools];
     this.proc = spawn(NODE, args, {
       cwd: CWD_S4,
-      env: { ...process.env, PATH: `${HOME}/.nvm/versions/node/v20.20.2/bin:${process.env.PATH || ""}`,
+      env: { ...process.env, PATH: `${dirname(resolveNodeBin())}:${process.env.PATH || ""}`,
         PI_CODING_AGENT_DIR: `${SPK}/agent-real`, PI_PROVIDER: provider },
       stdio: ["pipe", "pipe", "pipe"],
     });
