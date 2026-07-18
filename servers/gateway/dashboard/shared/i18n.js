@@ -827,6 +827,7 @@ export const translations = {
   "botbuilder.cmAdvanced": { en: "Advanced", es: "Avanzado" },
   "botbuilder.cmRawAddress": { en: "Bot address", es: "Dirección del bot" },
   "botbuilder.cmManualPubkey": { en: "Add by public key", es: "Añadir por clave pública" },
+  "botbuilder.cmPubkeyPlaceholder": { en: "Public key (64 or 66 hex characters)", es: "Clave pública (64 o 66 caracteres hexadecimales)" },
   "botbuilder.cmManualName": { en: "Name (optional)", es: "Nombre (opcional)" },
   "botbuilder.cmManualAdd": { en: "Add", es: "Añadir" },
   "botbuilder.cmTaglineLabel": { en: "Directory tagline (optional)", es: "Lema del directorio (opcional)" },
@@ -1695,4 +1696,27 @@ export function tJs(key, lang = "en") {
     .replace(/'/g, "\\'")
     .replace(/`/g, "\\`")
     .replace(/\$\{/g, "\\${");
+}
+
+/**
+ * Interpolate {name} placeholders with literal values.
+ *
+ * Use this instead of chained String.replace("{x}", value) whenever a value
+ * can carry user-controlled text: a replacement STRING treats $&, $', $`,
+ * $$ and $<n> specially, so a bot id or device name containing "$&" would
+ * render mangled. split/join inserts the value verbatim.
+ *
+ * Values are NOT HTML-escaped here — callers escape per context (some sites
+ * deliberately interpolate pre-built HTML such as <code> lists).
+ *
+ * @param {string} str - template containing {name} placeholders
+ * @param {Record<string, string|number>} params - placeholder → literal value
+ * @returns {string}
+ */
+export function fill(str, params) {
+  let out = String(str);
+  for (const [k, v] of Object.entries(params || {})) {
+    out = out.split(`{${k}}`).join(String(v));
+  }
+  return out;
 }
