@@ -59,6 +59,7 @@ jobs:
         run: node scripts/check-port-allocation.js
       - name: Registry build check
         run: node scripts/build-registry.mjs --check
+      - run: npm run validate-model-catalog
 
   audit:
     runs-on: ubuntu-latest
