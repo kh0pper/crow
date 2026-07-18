@@ -248,10 +248,6 @@ export function buildExtensionsHTML({
       <input class="ext-search__input" type="text" placeholder="${t("extensions.searchPlaceholder", lang)}" id="ext-search" autocomplete="off">
     </div>`;
 
-  const sourceNote = registrySource === "local"
-    ? `<div class="ext-sourcenote">${t("extensions.localRegistry", lang)}</div>`
-    : "";
-
   // ─── Starter collections ───
   const collectionCard = (c) => `<button type="button" class="ext-collection-card" data-collection-id="${escapeHtml(c.id)}">
         <span class="ext-collection-card__icon">${collectionIcon(c.icon)}</span>
@@ -408,7 +404,6 @@ export function buildExtensionsHTML({
   const viewsHtml = `${dockerBannerHtml}${viewTabsHtml}
     <div class="ext-view" id="ext-view-browse" role="tabpanel">
       ${searchHtml}
-      ${sourceNote}
       ${collectionsHtml}
       ${featuredHtml}
       ${chipsHtml}
