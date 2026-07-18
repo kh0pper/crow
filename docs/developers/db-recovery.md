@@ -91,3 +91,40 @@ addressed upstream:
   through `createNotification`, which would try to write the corrupt DB first).
   Surfaced in the nest as the `federation-audit` health signal. See
   `servers/shared/cross-host-auth.js`.
+
+## The migration guard (A3)
+
+Every production `init-db` run — auto-update after a pull, the gateway boot
+gate, `scripts/install.sh` upgrades, and `scripts/crow-update.sh` — goes
+through `servers/shared/migration-guard.js` when the run carries migration
+risk (a schema-generation crossing, or a pulled change to
+`scripts/init-db.js`). The guard:
+
+1. Takes a **pre-migration backup** (incremental SQLite backup, safe on a live
+   WAL database) into `<data-dir>/backups/migrations/` (keeps the last 3, plus
+   any pinned by a finding for 30 days).
+2. Runs init-db, then compares per-table row counts, columns, and schema
+   objects against `servers/shared/migration-expectations.js` (the manifest of
+   *expected* drops/prunes/moves/rebuilds — kept honest by a static rot-guard
+   test).
+3. On **high-confidence loss** (an undeclared table vanished, a rebuild lost
+   rows/columns, a large unexplained loss): **restores the backup**, keeps the
+   damaged file as `crow.db.damaged-<ts>` evidence, writes quarantine markers,
+   fires a DB-free ntfy + email alert, and (on the auto-update path) rolls the
+   code back and restarts. Anything less certain **fails open**: the migration
+   stands, and the same loud alert channel explains what looked suspicious.
+
+**Quarantine:** two marker files with one meaning — this migration damaged
+data here, don't re-run it:
+
+- `<repo>/.crow-migration-quarantine.json` (stops every updater sharing the
+  checkout, including the manual "Check for updates now" button)
+- `<data-dir>/migration-quarantine.json` (makes the boot gate skip init-db —
+  the gateway boots on the intact old-schema data; features needing the new
+  schema may error until the fix lands)
+
+The quarantine clears itself when a new commit lands on `main` (up to 3
+automatic retries per generation crossing). To override manually — after
+verifying the verdict was wrong or recovering by hand — delete both marker
+files. `node scripts/guarded-init-db.mjs` is the guarded manual entry point;
+`npm run init-db` remains the bare, unguarded seam for scratch/dev databases.

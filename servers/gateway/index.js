@@ -109,49 +109,83 @@ if (process.env.CROW_DASHBOARD_PUBLIC === "true") {
   console.warn("   Ensure you have a strong admin password and 2FA enabled. Prefer `tailscale serve` for private remote access.");
 }
 
-// Initialize OAuth tables
-await initOAuthTables();
-
 // Verify core schema exists / is current — auto-initialize if missing (Docker
 // first run) OR if the persisted schema generation is behind the code (an
 // out-of-band `git pull`/rollback/merge-then-restart that added migrations but
 // never re-ran init-db; the 6h auto-updater runs init-db post-pull, this covers
 // the manual path). See servers/shared/schema-version.js.
+//
+// ORDER INVARIANT (A3 / R2-2): this block runs BEFORE the first createDbClient
+// in the process (initOAuthTables below) and its detection read is a raw
+// short-lived better-sqlite3 handle. createDbClient registers a never-closed
+// per-path WAL keeper; if it ran first, a migration-guard restore would swap
+// the DB file under a pinned inode (split-brain). Do not reorder, and do not
+// add DB access above this block. tests/migration-guard.test.js asserts the
+// source ordering.
 try {
   const { SCHEMA_GENERATION, needsSchemaInit } = await import("../shared/schema-version.js");
-  const _schemaDb = createDbClient();
-  const { rows } = await _schemaDb.execute(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('memories', 'dashboard_settings', 'crow_context')"
-  );
-  let userVersion = 0;
-  try {
-    const uvRes = await _schemaDb.execute("PRAGMA user_version");
-    userVersion = Number(uvRes.rows?.[0]?.user_version ?? 0);
-  } catch {
-    userVersion = 0;
-  }
-  _schemaDb.close();
-  const driftOnly = rows.length >= 3 && userVersion < SCHEMA_GENERATION;
-  if (needsSchemaInit({ coreTableCount: rows.length, userVersion, schemaGeneration: SCHEMA_GENERATION })) {
-    if (driftOnly) {
-      console.log(
-        `Schema version drift (db user_version=${userVersion} < code SCHEMA_GENERATION=${SCHEMA_GENERATION}) — running init-db to apply pending migrations...`
+  const {
+    readSchemaState, runGuardedInitDb, resolveGuardDbPath,
+    activeMarker, dataMarkerPath, repoMarkerPath, backupDir,
+  } = await import("../shared/migration-guard.js");
+  const { resolveDataDir } = await import("../db.js");
+  const { dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const gatewayDir = dirname(fileURLToPath(import.meta.url));
+  const appRoot = dirname(dirname(gatewayDir));
+  const dbPath = resolveGuardDbPath(resolveDataDir);
+  const state = readSchemaState(dbPath);
+  if (needsSchemaInit({ coreTableCount: state.coreTableCount, userVersion: state.userVersion, schemaGeneration: SCHEMA_GENERATION })) {
+    // Quarantine markers (data-dir AND repo level — co-hosted gateways share
+    // one checkout): a known-damaging migration is never knowingly re-run.
+    const marker = activeMarker(dataMarkerPath(dbPath)) || activeMarker(repoMarkerPath(appRoot));
+    if (marker) {
+      console.warn(
+        `[migration-guard] Migration gen ${marker.fromGeneration}->${marker.toGeneration} (sha ${marker.sha}) is QUARANTINED — ` +
+        `booting WITHOUT running init-db. Data is intact; features needing the new schema may error. ` +
+        `Delete ${dataMarkerPath(dbPath)} and ${repoMarkerPath(appRoot)} to override.`
       );
     } else {
-      console.log("Database schema incomplete — running init-db...");
-    }
-    const { execFileSync } = await import("node:child_process");
-    const { dirname } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
-    const gatewayDir = dirname(fileURLToPath(import.meta.url));
-    const appRoot = dirname(dirname(gatewayDir));
-    try {
-      execFileSync("node", ["scripts/init-db.js"], { cwd: appRoot, stdio: "inherit" });
-      console.log("Database schema initialized successfully.");
-    } catch (initErr) {
-      console.error("ERROR: Failed to auto-initialize database schema:", initErr.message);
-      console.error("  Run 'npm run init-db' manually.");
-      process.exit(1);
+      if (state.coreTableCount >= 3 && state.userVersion < SCHEMA_GENERATION) {
+        console.log(
+          `Schema version drift (db user_version=${state.userVersion} < code SCHEMA_GENERATION=${SCHEMA_GENERATION}) — running guarded init-db...`
+        );
+      } else {
+        console.log("Database schema incomplete — running init-db...");
+      }
+      let sha = null;
+      try {
+        const { execFileSync } = await import("node:child_process");
+        sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: appRoot, timeout: 10000 }).toString().trim();
+      } catch {}
+      const res = await runGuardedInitDb({ dbPath, appRoot, sha, newGeneration: SCHEMA_GENERATION });
+      if (res.verdict === "loss") {
+        if (res.restored) {
+          // Fail closed happened inside the guard (restore + quarantine + alert).
+          // Boot continues on the restored, pre-migration DB — data intact.
+          console.warn("[migration-guard] Data loss detected and rolled back — booting on the restored pre-migration database.");
+        } else if (!res.dbPresent) {
+          // No DB file at all — booting would silently create an empty one.
+          console.error("[migration-guard] FATAL: data loss detected and the database file is missing after a failed restore.");
+          console.error(`  Restore manually from ${res.backupPath || backupDir(dbPath)} before starting the gateway.`);
+          process.exit(1);
+        } else {
+          // Restore unavailable/failed but the (damaged) DB is present: booting
+          // keeps the instance observable; the alert instructs a manual restore
+          // (stop the gateway first). Quarantine prevents repeat damage.
+          console.warn("[migration-guard] Data loss detected and restore was NOT possible — booting on the DAMAGED database. See the alert for manual recovery steps.");
+        }
+      } else if (res.initDbExit !== 0) {
+        const after = readSchemaState(dbPath);
+        if (needsSchemaInit({ coreTableCount: after.coreTableCount, userVersion: after.userVersion, schemaGeneration: SCHEMA_GENERATION })) {
+          console.error(`ERROR: Failed to auto-initialize database schema (init-db exit ${res.initDbExit}).`);
+          console.error("  Run 'npm run init-db' manually.");
+          process.exit(1);
+        }
+        console.warn(`[migration-guard] init-db exited ${res.initDbExit} but the schema is current — continuing.`);
+      } else {
+        console.log("Database schema initialized successfully.");
+      }
     }
   }
 } catch (e) {
@@ -159,6 +193,9 @@ try {
   console.error("  Run 'npm run init-db' first.");
   process.exit(1);
 }
+
+// Initialize OAuth tables
+await initOAuthTables();
 
 // Clean up old audit log entries (90-day retention)
 try {
