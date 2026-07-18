@@ -1,5 +1,7 @@
 # Crow
 
+[![Tests](https://github.com/kh0pper/crow/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/kh0pper/crow/actions/workflows/test.yml)
+
 Crow is a modular, agentic framework and MCP platform that integrates with the services and AI tools you already use — run on hardware you own, with local or cloud models. It brings persistent memory, research, agents, P2P sharing, and a full self-hosted app ecosystem into one private interface that your AI clients can reach natively.
 
 Built on the open [Model Context Protocol](https://modelcontextprotocol.io) standard. Published by [Maestro Press](https://maestro.press) | [Product Page](https://maestro.press/software/crow-overview/) | [Docs](https://maestro.press/software/crow/)

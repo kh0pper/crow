@@ -110,5 +110,5 @@ These bundles use `network_mode: host`. They consume whatever ports their upstre
 
 1. Pick an unallocated port in a sensible range (admin UIs in 3000-3099, backend APIs in 8000-8099, metrics in 19000-19999).
 2. Add a row to the table with bundle name and PR/status.
-3. CI port-collision check (`.github/workflows/port-allocation.yml`) verifies your new port doesn't clash.
+3. CI port-collision check (the `static-checks` job in `.github/workflows/test.yml`) verifies your new port doesn't clash.
 4. Reference this file in your bundle's PR description.

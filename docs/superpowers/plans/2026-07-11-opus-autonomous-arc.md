@@ -87,33 +87,32 @@ session at the front.
    verdict must be READY TO MERGE (fix and re-review otherwise).
 5. **PR → merge** — `gh` is ABSENT on crow; use the GitHub MCP tools
    (`mcp__github__create_pull_request`, `mcp__github__merge_pull_request`; repo
-   `kh0pper/crow`). Check-runs via
+   `kh0pper/crow`).
+
+   **⚠ SUPERSEDED 2026-07-18 by arc item A1 (the CI floor):** this section
+   previously taught that check-runs `total_count: 0` was NORMAL (workflows
+   were path-filtered) and that the REAL gates were local-only. **That is no
+   longer true.** The `Tests` workflow (`.github/workflows/test.yml`) runs the
+   full suite + check-ports + build-registry + npm audit on EVERY PR and push
+   to main with no path filters: every current sha gets check-runs, an empty
+   check-runs result means something is broken, and **CI red blocks ALL merges
+   including the operator's (decision Q6)**. Verify via
    `curl https://api.github.com/repos/kh0pper/crow/commits/<sha>/check-runs` —
-   `total_count: 0` is NORMAL (workflows are path-filtered); the REAL gates are local
-   and you must run all three:
-   - full suite: `node --test tests/*.test.js` (there is NO `npm test` script; the
-     per-file `test:*` scripts in package.json are shortcuts, not the suite),
+   every run `completed`/`success` before merging.
+
+   The local gates remain good practice before pushing (fast feedback), now as:
+   - full suite: **`npm test`** (scratch-env isolation is built into
+     `scripts/run-suite.mjs` — it can never touch the real `~/.crow`; the old
+     hand-rolled `T=$(mktemp -d); CROW_HOME=$T … node --test tests/*.test.js`
+     incantation is retired),
    - `node scripts/check-port-allocation.js` (any new bundle host port must be added
      to `docs/developers/port-allocation.md` or this fails),
    - `node scripts/build-registry.mjs --check`.
 
-   **⚠️ The suite runs against PROD unless you isolate it.** There is NO CI test
-   workflow (`.github/workflows/` has only deploy-docs, image-freshness,
-   pet-mode-appimage, port-allocation) — this local run, on the prod box, is the only
-   execution the code ever gets. And `CROW_HOME` / `CROW_DATA_DIR` default to the real
-   `~/.crow` (`routes/bundles.js:118`, `panels/extensions/data-queries.js:19`,
-   `panel-registry.js:40`, `servers/db.js:72` — all `process.env.CROW_HOME ||
-   join(homedir(), ".crow")`), 261 test files run in PARALLEL, and a throwaway clone
-   does NOT help because the path is homedir-derived, not repo-derived. This is the
-   exact mechanism behind both incidents in §3 (a suite run refreshed prod maker-lab;
-   an install test installed a real container on prod). **Run the suite with scratch
-   env:**
-   ```
-   T=$(mktemp -d); CROW_HOME=$T CROW_DATA_DIR=$T/data CROW_DISABLE_NOSTR=1 \
-     CROW_DISABLE_INSTANCE_SYNC=1 node --test tests/*.test.js
-   ```
-   and `fuser ~/.crow/data/crow.db` first to confirm no stale writer. Individual tests
-   that need prod-shaped state must set it up in the scratch dir themselves.
+   `fuser ~/.crow/data/crow.db` before any LIVE-messaging E2E still applies
+   (stale-writer check), and **CI green does NOT cover schema migrations** —
+   `SCHEMA_GENERATION` bumps still require the §3 migration rail
+   (`scripts/schema-migration-dryrun.sh`) before merge.
 
    **Check-ports is FULLY green as of 2026-07-16** (PR #203 committed capstone-tracker
    and documented port 8090) — the old "exactly one known error line: Port 8090
@@ -122,8 +121,7 @@ session at the front.
    **Post-merge, watch the docs deploy.** `.github/workflows/deploy-docs.yml` fires on
    any push to main touching `docs/**` → rebuilds the **public** VitePress site on
    GitHub Pages. §5 asks you to update THIS plan doc (which lives under `docs/`) as part
-   of each item, so **every item ships a public docs rebuild.** The `total_count: 0`
-   check-runs result on the PR sha does NOT cover it — after merging, poll the
+   of each item, so **every item ships a public docs rebuild** — after merging, poll the
    `deploy-docs` run on main and confirm it succeeded. (A known-flaky Pages-publish step
    has failed cosmetically before with the build green; distinguish the two.)
 
@@ -1219,7 +1217,9 @@ fixed in this doc:
   done-step `renderActionCards` only, with `deepLink` explicitly out of bounds.
 - **C3 — the suite gate ran 261 test files against PRODUCTION state.** `CROW_HOME`
   defaults to the real `~/.crow` (homedir-derived — a throwaway clone does not help),
-  there is no CI test workflow, and `node --test` runs files in parallel. This is the
+  there is no CI test workflow *(superseded 2026-07-18 by arc item A1: `npm test` +
+  the `Tests` workflow now exist — see the §2 superseded block)*, and `node --test`
+  runs files in parallel. This is the
   exact mechanism behind both contamination incidents §3 already records. §2 now
   mandates the scratch-env invocation.
 - **C4 — merging IS deploying, and the migration rail was unenforceable.** Auto-update

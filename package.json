@@ -4,6 +4,7 @@
   "description": "Self-hosted AI platform with persistent memory, encrypted P2P sharing, and 20+ integrations — works with Claude, ChatGPT, Gemini, and any MCP client",
   "type": "module",
   "scripts": {
+    "test": "node scripts/run-suite.mjs",
     "setup": "node scripts/setup.js",
     "memory-server": "node servers/memory/index.js",
     "research-server": "node servers/research/index.js",
@@ -83,7 +84,7 @@
     "zod": "^3.24.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "devDependencies": {
     "acorn": "^8.16.0",
