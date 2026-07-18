@@ -168,19 +168,6 @@ export const TOOL_MANIFESTS = {
     },
   },
 
-  consulting: {
-    displayName: "Consulting Pipeline",
-    description: "Maestro Press consulting prospect tracker: promote/advance orgs through pipeline stages, list pending prospects, write rendered prospectuses to the MPA inbox (systemd path watcher renders to PDF)",
-    tools: {
-      crow_consulting_promote: { params: "tea_id, stage?, notes?, name?, org_type?, esc_region?, county?", desc: "Promote an org to a pipeline stage (upserts when tea_id not present)" },
-      crow_consulting_list_pending: { params: "limit?", desc: "List orgs at stage='prospect' with no pipeline action yet" },
-      crow_consulting_write_prospectus: { params: "tea_id, markdown", desc: "Write finished prospectus markdown to the MPA inbox and mark the row generated" },
-      crow_consulting_list_by_stage: { params: "stage, limit?", desc: "List consulting rows at a given stage" },
-      crow_consulting_get: { params: "tea_id", desc: "Get a single consulting row by tea_id" },
-      crow_consulting_stats: { params: "", desc: "Counts per stage + pending-generation count" },
-    },
-  },
-
   storage: {
     displayName: "Storage",
     description: "S3-compatible file storage: upload (base64 or presigned URL), list, download URLs, delete, quota management. SDXL background generation for companion avatar.",
