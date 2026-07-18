@@ -86,7 +86,7 @@ Local apps, CLIs, and IDEs connect directly to your instance. These work on a st
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | CLI | Desktop app | IDE | IDE | VS Code | CLI | CLI | CLI |
 
-**Cloud web clients** (claude.ai on web/mobile, ChatGPT, Grok, Gemini on the web) are different: their servers have to reach your Crow from the public internet, and a self-hosted Crow deliberately does not expose its MCP endpoints publicly — your instance stays private on your LAN or tailnet. That is a security posture, not a missing feature. If you choose to operate a publicly reachable gateway, the [platform guides](https://maestro.press/software/crow/platforms/) cover the OAuth-based setup each cloud client uses — read [SECURITY.md](SECURITY.md#whats-public-by-default) first.
+**Cloud web clients** (claude.ai on web/mobile, ChatGPT, Grok, Gemini on the web) are different: their servers have to reach your Crow from the public internet, and a self-hosted Crow deliberately does not expose its MCP endpoints publicly — your instance stays private on your LAN or tailnet. That is a security posture, not a missing feature. **Cloud web-client access is planned as a follow-on** after v1, behind a dedicated security review. The [platform guides](https://maestro.press/software/crow/platforms/) explain the current situation per client; if you operate a publicly reachable gateway yourself (unsupported), read [SECURITY.md](SECURITY.md#whats-public-by-default) first.
 
 ## Crow's Nest
 
