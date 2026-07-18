@@ -216,9 +216,13 @@ async function main() {
   const argv = process.argv.slice(2);
   const { values, positionals } = parseCliArgs(argv);
 
-  if (values.help || argv.length === 0) {
+  if (values.help) {
     process.stdout.write(HELP);
     process.exit(0);
+  }
+
+  if (argv.length === 0) {
+    fail("usage: <hf_repo> <filename> [options] (--help for details)", 1);
   }
 
   const [repo, filename] = positionals;
