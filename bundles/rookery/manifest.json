@@ -1,6 +1,7 @@
 {
   "id": "rookery",
-  "name": "Rookery Reviewer",
+  "name": "Open Science Reviewer",
+  "origin": "community",
   "version": "0.1.0",
   "description": "Self-hosted OpenScience reviewer + experiment-audit workspace assembler — audit a report's numeric claims against its registered evidence, on your own local model",
   "type": "bundle",
@@ -31,6 +32,5 @@
     { "name": "ROOKERY_MCP_CROW_TOKEN", "description": "Crow local MCP token for the router endpoint (dashboard → Connect panel → local MCP token; shown once at generation). Required when ROOKERY_MCP_CROW_URL is set; rides the generated config's headers, never a child process env", "required": false, "secret": true }
   ],
   "ports": [3061],
-  "notes": "Self-hosted only — never configure the vendor's Atlas/cloud layer. The reviewer runs entirely on the endpoint you provide. Assembled workspaces contain COPIES of your report + evidence; originals are never modified. NO webUI block on purpose: the app cannot live behind the gateway's /proxy/<id>/ subpath (root-absolute asset paths baked in its binary) — serve 127.0.0.1:3061 at a root origin and set ROOKERY_REVIEWER_URL (see README).",
-  "official": false
+  "notes": "Self-hosted only — never configure the vendor's Atlas/cloud layer. The reviewer runs entirely on the endpoint you provide. Assembled workspaces contain COPIES of your report + evidence; originals are never modified. NO webUI block on purpose: the app cannot live behind the gateway's /proxy/<id>/ subpath (root-absolute asset paths baked in its binary) — serve 127.0.0.1:3061 at a root origin and set ROOKERY_REVIEWER_URL (see README)."
 }
