@@ -132,6 +132,21 @@ export class DownloadProtocolError extends Error {
   }
 }
 
+/** Thrown by `registerModel` when a provider row already exists at the
+ * target id and was NOT registered by this native runtime for this catalog
+ * model — e.g. a user's cloud/bundle provider that happens to share the
+ * catalog's model id. Registration refuses to overwrite it: no upsert is
+ * attempted and no port reservation is left behind (the port is allocated
+ * AFTER this check passes, never before). */
+export class ProviderIdConflictError extends Error {
+  constructor(modelId) {
+    super(`A provider with id "${modelId}" already exists and was not registered by this native runtime for this model — refusing to overwrite it.`);
+    this.name = "ProviderIdConflictError";
+    this.code = "PROVIDER_ID_CONFLICT";
+    this.modelId = modelId;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Host allowlist
 // ---------------------------------------------------------------------------
@@ -740,6 +755,24 @@ export function pickChatMutexGroup(existingRows) {
  * `invalidateCacheFn`) default to the real implementations; tests use them
  * to observe call order without needing to intercept module internals.
  *
+ * Provider-id collision guard: `modelId` doubles as the provider row's `id`
+ * (see the section header comment), which means a user's own cloud/bundle
+ * provider could already occupy that id by coincidence — an unrelated row
+ * that this call must never clobber. BEFORE anything else (before even
+ * allocating a port, so a rejected call never leaks a reservation), any
+ * existing row at this id is checked for ownership: it's "ours" only if its
+ * `gpu_policy.runtime === "native"` AND its own `models[]` array already
+ * carries an entry for this catalog model's id (i.e. it's a row THIS
+ * registration path wrote, for THIS model — the row itself is the durable
+ * record, deliberately NOT the local, ephemeral `state.registry` map,
+ * which `unregisterModel` clears on every teardown; ownership must survive
+ * a register→unregister→re-register cycle on the same instance). Anything
+ * else (a foreign provider, or a native-tagged row for a different model)
+ * throws `ProviderIdConflictError` with the existing row completely
+ * untouched.
+ *
+ * @throws {ProviderIdConflictError} if a provider already exists at this id
+ *   and isn't a prior registration of this same model by this runtime.
  * @returns {Promise<object>} the registered provider row shape:
  *   `{ id, baseUrl, port, apiKey, host, bundleId, description, models,
  *      gpuPolicy, disabled, lamport_ts }`
@@ -758,6 +791,21 @@ export async function registerModel({
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
 
   const state = loadState(dir);
+
+  // Collision guard — read-only, runs BEFORE any state/DB mutation (in
+  // particular before allocatePortFn, so a rejected call leaves no
+  // reservation behind to clean up).
+  const existingRows = await listProvidersAllFn(db);
+  const existingRow = existingRows.find((r) => r.id === modelId);
+  if (existingRow) {
+    const isOurs = existingRow.gpuPolicy?.runtime === NATIVE_RUNTIME
+      && Array.isArray(existingRow.models)
+      && existingRow.models.some((m) => m && m.id === model.id);
+    if (!isOurs) {
+      throw new ProviderIdConflictError(modelId);
+    }
+  }
+
   const port = await allocatePortFn(state, modelId, { crowHome: dir, pid: process.pid });
   state.registry[modelId] = {
     file: sanitizeFilename(quantEntry.file),
@@ -769,8 +817,10 @@ export async function registerModel({
 
   const gpuPolicy = { runtime: NATIVE_RUNTIME };
   if (model.task === "chat") {
-    const existingRows = await listProvidersAllFn(db);
-    gpuPolicy.mutexGroup = pickChatMutexGroup(existingRows);
+    // Exclude this model's own (pre-existing, legitimate-re-register) row
+    // from the mutex-group count — it must never vote for its own group.
+    const otherRows = existingRows.filter((r) => r.id !== modelId);
+    gpuPolicy.mutexGroup = pickChatMutexGroup(otherRows);
   }
   // embed-class (and any other non-chat task): no mutexGroup key at all —
   // embedding servers don't contend for the chat mutex group.

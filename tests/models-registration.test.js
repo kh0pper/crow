@@ -27,6 +27,7 @@ import {
   providerBindings,
   pickChatMutexGroup,
   sanitizeFilename,
+  ProviderIdConflictError,
 } from "../servers/gateway/models/manager.js";
 import { loadState, saveState } from "../servers/gateway/models/state.js";
 import { upsertProvider, setProviderSyncManager } from "../servers/shared/providers-db.js";
@@ -299,6 +300,83 @@ test("pickChatMutexGroup: pure function, exhaustive over the rule (unit-level, n
 });
 
 // ---------------------------------------------------------------------------
+// registerModel — provider-id collision guard (fix round 1)
+// ---------------------------------------------------------------------------
+
+test("registerModel: refuses to clobber a foreign existing provider row at the same id", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    // A user's own unrelated cloud provider happens to share the catalog's
+    // model id (coincidence, e.g. hand-configured before the catalog
+    // existed). NOT native-tagged, NOT ours.
+    const foreign = {
+      id: "chat-test-model",
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "sk-real-secret-do-not-touch",
+      host: "cloud",
+      bundleId: null,
+      description: "my own cloud provider",
+      models: [{ id: "gpt-lookalike", name: "Some Cloud Model" }],
+      disabled: false,
+      providerType: "openai-compat",
+      gpuPolicy: null,
+    };
+    await upsertProvider(db, foreign);
+    const before = await dbRow(db, "chat-test-model");
+
+    await assert.rejects(
+      () => registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir }),
+      (err) => {
+        assert.ok(err instanceof ProviderIdConflictError);
+        assert.equal(err.code, "PROVIDER_ID_CONFLICT");
+        assert.equal(err.modelId, "chat-test-model");
+        return true;
+      },
+    );
+
+    const after = await dbRow(db, "chat-test-model");
+    assert.equal(after.base_url, before.base_url);
+    assert.equal(after.api_key, before.api_key);
+    assert.equal(after.host, before.host);
+    assert.equal(after.models, before.models);
+    assert.equal(after.gpu_policy, before.gpu_policy);
+    assert.equal(after.lamport_ts, before.lamport_ts, "no write at all happened -- not even a no-op upsert bump");
+
+    const state = loadState(dir);
+    assert.equal(state.reservations["chat-test-model"], undefined, "no port reservation leaked by the rejected call");
+    assert.equal(state.registry["chat-test-model"], undefined, "no registry entry leaked by the rejected call");
+  } finally { cleanup(); }
+});
+
+test("registerModel: a native row for a DIFFERENT catalog model at a colliding id is also refused", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    // Native-tagged, but for a different model's id -- still not "ours" for
+    // THIS registration.
+    await upsertProvider(db, {
+      id: "chat-test-model",
+      baseUrl: "http://127.0.0.1:18150/v1",
+      apiKey: null,
+      host: "local",
+      bundleId: null,
+      description: "native, but a different model",
+      models: [{ id: "some-other-catalog-id", task: "chat", contextLen: 4096 }],
+      disabled: false,
+      providerType: "openai-compat",
+      gpuPolicy: { runtime: "native" },
+    });
+
+    await assert.rejects(
+      () => registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir }),
+      ProviderIdConflictError,
+    );
+
+    const state = loadState(dir);
+    assert.equal(state.reservations["chat-test-model"], undefined);
+  } finally { cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
 // unregisterModel — order + effects
 // ---------------------------------------------------------------------------
 
@@ -398,6 +476,40 @@ test("unregisterModel: missing blob (already deleted) is not an error", async ()
     const outcome = await unregisterModel({ modelId: "chat-test-model", db, dir });
     assert.equal(outcome.deleted, false);
     assert.equal(outcome.disabled, true);
+  } finally { cleanup(); }
+});
+
+test("register -> unregister -> re-register cycle: port freed and re-used, disabled flips back to 0, no stale base_url", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    const first = await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
+    const firstPort = first.port;
+
+    const rowAfterFirst = await dbRow(db, "chat-test-model");
+    assert.equal(Number(rowAfterFirst.disabled), 0);
+
+    await unregisterModel({ modelId: "chat-test-model", db, dir });
+    const rowAfterUnregister = await dbRow(db, "chat-test-model");
+    assert.equal(Number(rowAfterUnregister.disabled), 1, "soft-deleted, not hard-deleted");
+    const stateAfterUnregister = loadState(dir);
+    assert.equal(stateAfterUnregister.reservations["chat-test-model"], undefined, "port freed");
+
+    // Re-register must NOT be treated as a foreign-id collision: the
+    // surviving (disabled) row is still native-tagged for this exact
+    // catalog model, so ownership holds even though state.registry was
+    // cleared by unregister.
+    const second = await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
+
+    assert.equal(second.port, firstPort, "the freed port is the lowest free port again, so it's re-used");
+    assert.equal(second.baseUrl, `http://127.0.0.1:${firstPort}/v1`, "no stale base_url from the torn-down registration");
+
+    const rowAfterSecond = await dbRow(db, "chat-test-model");
+    assert.equal(Number(rowAfterSecond.disabled), 0, "disabled flips back to 0");
+    assert.equal(rowAfterSecond.base_url, second.baseUrl);
+
+    const stateAfterSecond = loadState(dir);
+    assert.equal(stateAfterSecond.reservations["chat-test-model"].port, firstPort);
+    assert.ok(stateAfterSecond.registry["chat-test-model"], "registry entry rewritten on re-register");
   } finally { cleanup(); }
 });
 
