@@ -18,6 +18,7 @@
  * Exit 0 + "S0-PROBE OK" on success; non-zero + diagnostic on failure.
  */
 
+import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 
@@ -50,7 +51,7 @@ if (!t) {
   process.exit(2);
 }
 
-const NODE = `${HOME}/.nvm/versions/node/v20.20.2/bin/node`;
+const NODE = resolveNodeBin();
 
 const child = spawn(NODE, t.args, {
   cwd: t.cwd,

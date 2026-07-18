@@ -28,6 +28,8 @@
  * No Gmail; namespaced p31-e2e-* artifacts torn down; production untouched;
  * crow.db busy_timeout-only.
  */
+import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
+import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -35,8 +37,8 @@ import { handleInbound } from "./bridge.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 
 const HOME = "/home/kh0pp";
-const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
-const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
+const NODE = resolveNodeBin();
+const PI_CLI = requirePiCli().cliPath;
 const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
 const CAPABLE = "alibaba-coding/qwen3.6-plus"; // on MULTI_AGENT_CAPABLE
@@ -115,7 +117,7 @@ const run = async () => {
   console.log("\n=== R10: child-shaped pi inherits per-bot policy + depth (env propagation) ===");
   const childPolicy = JSON.stringify({ bash: "deny", write_paths: [maSdir], multi_agent: true, model_capable: true });
   const childEnv = Object.assign({}, process.env, {
-    PATH: HOME + "/.nvm/versions/node/v20.20.2/bin:" + (process.env.PATH || ""),
+    PATH: dirname(resolveNodeBin()) + ":" + (process.env.PATH || ""),
     PI_PROVIDER: "alibaba-coding",
     PIBOT_SUBAGENT_DEPTH: "1", // subagent/index.ts sets this on every child it spawns
     PI_BOT_PERMISSION_POLICY: childPolicy,

@@ -11,11 +11,12 @@
  *
  * Run on crow. Pre-seeded thread id passed as argv[2].
  */
+import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { handleInbound, stopSession } from "./bridge.mjs";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 
-const NODE = "/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node";
+const NODE = resolveNodeBin();
 const GIO = "/home/kh0pp/.s0-spike/gmail_io.mjs";
 const BOT = "research-scout";
 const THREAD = process.argv[2];

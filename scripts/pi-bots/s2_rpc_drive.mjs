@@ -22,11 +22,13 @@
  * Exit 0 iff all PASS.
  */
 
+import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
+import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 
 const HOME = "/home/kh0pp";
-const NODE = `${HOME}/.nvm/versions/node/v20.20.2/bin/node`;
-const PI_CLI = `${HOME}/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js`;
+const NODE = resolveNodeBin();
+const PI_CLI = requirePiCli().cliPath;
 const SPK = `${HOME}/.pi-spike`;
 const PINNED_CWD = `${SPK}/cwd`;
 const SESSION_DIR = `${SPK}/sessions-s2`;
@@ -51,7 +53,7 @@ class PiRpc {
       cwd: cwd || PINNED_CWD,
       env: {
         ...process.env,
-        PATH: `${HOME}/.nvm/versions/node/v20.20.2/bin:${process.env.PATH || ""}`,
+        PATH: `${dirname(resolveNodeBin())}:${process.env.PATH || ""}`,
         PI_CODING_AGENT_DIR: configDir,
         PI_PROVIDER: PROVIDER,
       },
