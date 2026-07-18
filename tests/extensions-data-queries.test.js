@@ -67,7 +67,8 @@ test("fetchRegistryData serves the in-repo registry as the sole registry source 
     assert.equal(registrySource, "local");
     assert.ok(available.length > 50, "local registry entries should have loaded");
     for (const a of available) {
-      assert.equal(a._community, false, `local first-party entry '${a.id}' must not be _community`);
+      assert.equal(a._community, a.official === false,
+        `entry '${a.id}': _community must mirror official===false (badge exactly the declared community entries)`);
     }
   } finally {
     globalThis.fetch = realFetch;
