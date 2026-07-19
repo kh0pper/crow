@@ -168,15 +168,10 @@ test("acquire native: identity conflict on the fast path throws before taking th
   let caught = null;
   try {
     await acquireProvider("native-target", {
-      cfg,
-      identityProbeFn: async () => "conflict",
+      ...startCapableOpts({ cfg, identityProbeFn: async () => "conflict", startCalls }),
       acquireHostLockFn: () => {
         lockCalls += 1;
         return () => {};
-      },
-      startModelFn: (p) => {
-        startCalls.push(p);
-        return fakeHandle();
       },
     });
   } catch (err) {
@@ -195,13 +190,8 @@ test("acquire native: host lock held elsewhere surfaces an honest error, no star
   let caught = null;
   try {
     await acquireProvider("native-target", {
-      cfg,
-      identityProbeFn: async () => "down",
+      ...startCapableOpts({ cfg, identityProbeFn: async () => "down", startCalls }),
       acquireHostLockFn: () => null, // held elsewhere
-      startModelFn: (p) => {
-        startCalls.push(p);
-        return fakeHandle();
-      },
     });
   } catch (err) {
     caught = err;
@@ -271,14 +261,84 @@ test("acquire native: a native sibling in the same mutexGroup is stopped via its
   assert.equal(sibHandle.live, false);
 });
 
+// --- fix round 1, finding 1: lock held for the LIFE of residency ----------
+
+test("acquire native: the host lock is held for the life of residency — release fires only on the handle's terminal transition, never right after a successful start", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18112, "qwen3-4b") } };
+  let releaseCalls = 0;
+  const release = () => {
+    releaseCalls += 1;
+  };
+  let capturedOnTerminal = null;
+  const startModelFn = (params) => {
+    capturedOnTerminal = params.onTerminal;
+    assert.equal(typeof capturedOnTerminal, "function", "startModel is given an onTerminal callback to wire up");
+    return fakeHandle();
+  };
+
+  let probeCalls = 0;
+  const identityProbeFn = async () => {
+    probeCalls += 1;
+    return probeCalls === 1 ? "down" : "resident"; // fast-path down, then resident once "started"
+  };
+
+  const result = await acquireProvider("native-target", {
+    ...startCapableOpts({ cfg, identityProbeFn, startModelFn }),
+    acquireHostLockFn: () => release,
+  });
+
+  assert.equal(result, true);
+  assert.equal(releaseCalls, 0, "the lock must NOT be released immediately after a successful start");
+
+  // Simulate the process later reaching a terminal state (runtime.js's
+  // own onTerminal-firing correctness — idle-stop, restarts-exhausted,
+  // explicit stop — is covered separately in tests/models-runtime.test.js;
+  // this test only proves gpu-orchestrator wires release() to fire when
+  // that callback IS invoked, and not before).
+  capturedOnTerminal("stopped");
+  assert.equal(releaseCalls, 1, "release fires when the handle reaches a terminal state");
+});
+
+// --- fix round 1, finding 3: Docker acquire evicts a native sibling -------
+
+test("Docker acquire evicts a resident native sibling in the same mutexGroup (handle.stop spy)", async () => {
+  const cfg = {
+    providers: {
+      "docker-target": dockerProv("http://127.0.0.1:8003/v1", "vllm-rocm-qwen35-4b", { gpuPolicy: { mutexGroup: "local-llm" } }),
+      "native-sib": nativeProv(18120, "qwen3-4b", { gpuPolicy: { runtime: "native", mutexGroup: "local-llm" } }),
+    },
+  };
+  const sibHandle = fakeHandle();
+  _setNativeHandleForTest("native-sib", sibHandle);
+
+  const bundleUpCalls = [];
+  const result = await acquireProvider("docker-target", {
+    cfg,
+    probeReadyFn: async () => false, // never "already resident" via the fast path — force the full swap+start
+    bundleUpFn: async (bundleId) => {
+      bundleUpCalls.push(bundleId);
+    },
+    waitForReadyFn: async () => true, // stub past the real polling loop
+  });
+
+  assert.equal(result, true);
+  assert.deepEqual(bundleUpCalls, ["vllm-rocm-qwen35-4b"]);
+  assert.equal(sibHandle.stopCalls, 1, "the native sibling's handle.stop() was called to admit the Docker target");
+  assert.equal(sibHandle.live, false);
+});
+
 // --- touch point 2: maybeAcquireLocalProvider ------------------------------
 
 test("maybeAcquireLocalProvider does not early-out on a native provider's null bundleId", async () => {
   const cfg = { providers: { "native-target": nativeProv(18108, "qwen3-4b") } };
-  const result = await maybeAcquireLocalProvider("native-target", {
-    cfg,
-    identityProbeFn: async () => "resident", // fast path — already warm
-  });
+  // Fast path (already resident) — resolveNativeBinPath still runs before
+  // the single-flight per the acquireProvider contract, so the full
+  // start-capable opts bag is supplied even though nothing will actually
+  // start.
+  const result = await maybeAcquireLocalProvider(
+    "native-target",
+    startCapableOpts({ cfg, identityProbeFn: async () => "resident" }),
+  );
   assert.equal(result, true, "must not return null just because the native provider has no bundleId");
 });
 
@@ -318,7 +378,10 @@ test("ensureResident native: no live handle -> starts it and reports embed capab
   let probeCalls = 0;
   const identityProbeFn = async () => {
     probeCalls += 1;
-    return "resident"; // once started, immediately reports resident
+    // First call is the fast-path check (nothing running yet -> "down");
+    // subsequent calls are the post-start readiness wait, which reports
+    // resident immediately once the (stubbed) process is "up".
+    return probeCalls === 1 ? "down" : "resident";
   };
 
   const result = await ensureResident("native-target", cfg, {

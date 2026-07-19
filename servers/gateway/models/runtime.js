@@ -112,6 +112,23 @@ export class RuntimeExtractionError extends Error {
   }
 }
 
+/** Thrown when a runtime-asset download's underlying socket sits idle
+ * (no bytes sent or received — connect-hang, stalled headers, OR a
+ * stalled body mid-stream, since the timeout is a single socket-idle
+ * timer that resets on any I/O and is never cleared for the socket's
+ * lifetime) for longer than `timeoutMs`. Without this, a dropped/black-
+ * holed TCP connection left `requestOnce`'s promise (and everything
+ * awaiting it) unsettled forever — see Task 9 review round 1. */
+export class RuntimeDownloadTimeoutError extends Error {
+  constructor(url, timeoutMs) {
+    super(`Runtime asset download stalled (no socket activity for ${timeoutMs}ms): ${url}`);
+    this.name = "RuntimeDownloadTimeoutError";
+    this.code = "DOWNLOAD_TIMEOUT";
+    this.url = url;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // glibc parsing (pure — mirrors probe.js's exported-pure-parser convention)
 // ---------------------------------------------------------------------------
@@ -267,6 +284,12 @@ export function resolveAsset(probe, runtimeBlock, opts = {}) {
 
 const RUNTIME_ALLOWED_HOSTS = new Set(["github.com", "objects.githubusercontent.com"]);
 
+/** Default socket-idle timeout for a runtime-asset download hop
+ * (~120s, per Task 9 review round 1: "no promise may hang forever on a
+ * stalled TCP connection"). Injectable end to end via
+ * `downloadRuntimeAsset({ timeoutMs })` / `ensureRuntime(..., { timeoutMs })`. */
+export const DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS = 120_000;
+
 /** True iff `hostname` is exactly "github.com" or "objects.githubusercontent.com"
  * (GitHub's release-asset redirect target). No subdomain wildcarding —
  * these are the two literal hosts a llama.cpp release download hits. */
@@ -275,11 +298,19 @@ export function isAllowedRuntimeHost(hostname) {
   return RUNTIME_ALLOWED_HOSTS.has(hostname.toLowerCase());
 }
 
-function requestOnce(urlStr, { lookup }) {
+function requestOnce(urlStr, { lookup, timeoutMs = DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS }) {
   return new Promise((resolvePromise, reject) => {
     const urlObj = new URL(urlStr);
     const transport = urlObj.protocol === "https:" ? https : http;
-    const req = transport.request(urlObj, { method: "GET", lookup }, (res) => resolvePromise({ res }));
+    // `timeout` sets a single idle timer on the underlying socket that
+    // resets on ANY I/O and is never cleared for the socket's lifetime —
+    // it therefore covers both a connect/header-wait hang AND a stalled
+    // body mid-download (the socket `res` streams from is the same one
+    // `req` is bound to), not just the initial connect.
+    const req = transport.request(urlObj, { method: "GET", lookup, timeout: timeoutMs }, (res) => resolvePromise({ res }));
+    req.on("timeout", () => {
+      req.destroy(new RuntimeDownloadTimeoutError(urlStr, timeoutMs));
+    });
     req.on("error", reject);
     req.end();
   });
@@ -290,7 +321,7 @@ function requestOnce(urlStr, { lookup }) {
  * for why every hop, not just the first). `insecureHttpHosts` is the
  * same test-only escape as `manager.js` (default `[]` — https required
  * everywhere in production). */
-async function openRuntimeStream({ url, lookup, maxRedirects, insecureHttpHosts = [] }) {
+async function openRuntimeStream({ url, lookup, maxRedirects, insecureHttpHosts = [], timeoutMs }) {
   let currentUrl = url;
   // eslint-disable-next-line no-await-in-loop -- sequential by nature, see manager.js's identical loop.
   for (let hop = 0; hop <= maxRedirects; hop++) {
@@ -308,7 +339,7 @@ async function openRuntimeStream({ url, lookup, maxRedirects, insecureHttpHosts 
       }
     }
     // eslint-disable-next-line no-await-in-loop
-    const { res } = await requestOnce(currentUrl, { lookup });
+    const { res } = await requestOnce(currentUrl, { lookup, timeoutMs });
     if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
       res.resume();
       const location = res.headers.location;
@@ -347,8 +378,9 @@ export async function downloadRuntimeAsset({
   maxRedirects = 5,
   createWriteStream = fsCreateWriteStream,
   insecureHttpHosts = [],
+  timeoutMs = DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS,
 }) {
-  const res = await openRuntimeStream({ url, lookup, maxRedirects, insecureHttpHosts });
+  const res = await openRuntimeStream({ url, lookup, maxRedirects, insecureHttpHosts, timeoutMs });
   const hash = createHash("sha256");
   try {
     await new Promise((resolvePromise, reject) => {
@@ -498,6 +530,7 @@ export async function ensureRuntime(dir, runtimeBlock, probe, opts = {}) {
     binaryName = "llama-server",
     chmodFn = chmodSync,
     fs = { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, rmSync, renameSync },
+    timeoutMs = DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS,
   } = opts;
 
   const resolved = resolveAsset(probe, runtimeBlock, { lddOutput, arch, baseUrl });
@@ -541,6 +574,7 @@ export async function ensureRuntime(dir, runtimeBlock, probe, opts = {}) {
     maxRedirects,
     createWriteStream,
     insecureHttpHosts,
+    timeoutMs,
   });
 
   // Only now (download verified) do we touch the staging extract dir —
@@ -684,9 +718,20 @@ export function getStatusSnapshot() {
  *     `defaultIdleMinutes()`) of no `touch()` calls, UNLESS `keepWarm` or
  *     `alwaysResident` is set (idle timer never scheduled at all in that
  *     case) or `idleMinutes <= 0`.
+ *   - `onTerminal(reason)` (Task 9 review round 1): fires EXACTLY ONCE,
+ *     the first time this handle reaches a state it will never leave —
+ *     `"stopped"` (via `stop()`, called explicitly, from a sibling
+ *     swap-out, or by the idle timer above) or `"unhealthy"` (the
+ *     `maxRestarts`-th unexpected exit). A restart that still has budget
+ *     left is NOT terminal — `onTerminal` does not fire for it. Exists so
+ *     a caller that hands out a host-wide resource tied to this process's
+ *     lifetime (gpu-orchestrator's native mutex-group lock) can release it
+ *     exactly when the process can no longer be considered to hold that
+ *     resource, without polling `status()`. Never throws into the
+ *     supervisor even if the callback itself throws.
  *
- * `spawn`/`setTimeoutFn`/`clearTimeoutFn`/`setprivAvailable` are all
- * injectable so tests never touch a real process or a real clock.
+ * `spawn`/`setTimeoutFn`/`clearTimeoutFn`/`setprivAvailable`/`onTerminal`
+ * are all injectable so tests never touch a real process or a real clock.
  */
 export function startModel({
   binPath,
@@ -704,6 +749,7 @@ export function startModel({
   backoffMs = (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
+  onTerminal = () => {},
 }) {
   const idleDisabled = !!keepWarm || !!alwaysResident || !(idleMinutes > 0);
 
@@ -720,6 +766,17 @@ export function startModel({
     _restartTimer: null,
     _stopped: false,
   };
+
+  let terminalFired = false;
+  function fireTerminal(reason) {
+    if (terminalFired) return;
+    terminalFired = true;
+    try {
+      onTerminal(reason);
+    } catch {
+      /* a caller's terminal hook must never break process supervision */
+    }
+  }
 
   function resetIdleTimer() {
     if (idleDisabled) return;
@@ -747,11 +804,13 @@ export function startModel({
       if (handle._stopped) {
         handle.state = "stopped";
         activeHandles.delete(alias);
+        fireTerminal("stopped");
         return;
       }
       handle.lastError = `exited (code=${code}, signal=${signal})`;
       if (handle.restartCount >= maxRestarts) {
         handle.state = "unhealthy";
+        fireTerminal("unhealthy");
         return;
       }
       handle.restartCount += 1;
@@ -790,6 +849,7 @@ export function startModel({
     if (!handle.child) {
       handle.state = "stopped";
       handle.live = false;
+      fireTerminal("stopped");
       return Promise.resolve();
     }
     const child = handle.child;
@@ -807,6 +867,10 @@ export function startModel({
     return exited.then(() => {
       handle.state = "stopped";
       handle.live = false;
+      // fireTerminal("stopped") already ran inside spawnChild's own "exit"
+      // listener above (registered before this once()-listener, so it
+      // always runs first) — idempotent via terminalFired, not repeated
+      // here.
     });
   };
 
