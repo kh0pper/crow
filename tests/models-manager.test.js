@@ -54,6 +54,8 @@ import {
   DiskFullError,
   UnsafeDestinationError,
   DownloadProtocolError,
+  DownloadTimeoutError,
+  fetchModelBlob,
 } from "../servers/gateway/models/manager.js";
 import { loadState } from "../servers/gateway/models/state.js";
 
@@ -150,6 +152,19 @@ function killAtHalfHandler(blob) {
     const half = Math.floor(blob.length / 2);
     res.write(blob.subarray(0, half));
     setTimeout(() => res.destroy(), 15);
+  };
+}
+
+/** Headers + a partial body, then genuine silence — never destroys the
+ * connection, never ends the response. Distinct from `killAtHalfHandler`
+ * (which actively severs the connection): this simulates a black-holed/
+ * hung peer, exactly what Fix 4's socket-idle timeout exists to detect. */
+function stallAfterHalfHandler(blob) {
+  return (req, res) => {
+    res.writeHead(200, { "Content-Length": String(blob.length) });
+    const half = Math.floor(blob.length / 2);
+    res.write(blob.subarray(0, half));
+    // deliberately never res.end() / res.destroy() — a real stall
   };
 }
 
@@ -356,6 +371,129 @@ test("interrupted download (socket killed mid-stream) journals bytesDone", async
       rmSync(dir, { recursive: true, force: true });
     }
   } finally {
+    await stopServer(srv);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Final-review fix wave — Fix 4: GGUF downloads had no socket timeout
+// ---------------------------------------------------------------------------
+
+test("Fix 4: a connection that never sends headers rejects with a typed DownloadTimeoutError instead of hanging forever", async () => {
+  // Accepts the connection but never writes a byte and never ends the
+  // response — the connect/header-wait phase, handled by requestOnce's own
+  // Node socket-timeout option (mirrors runtime.js's identical test for
+  // downloadRuntimeAsset).
+  const { srv, port } = await startServer(() => {});
+  const dir = scratchDir("dl-connect-stall");
+  try {
+    const dest = join(dir, "connect-stall.gguf");
+    await assert.rejects(
+      () => fetchModelBlob({
+        url: `http://huggingface.co:${port}/x/resolve/main/y.gguf`,
+        dest,
+        lookup: lookupToLocalhost,
+        insecureHttpHosts: INSECURE_HF,
+        timeoutMs: 50, // tiny for a fast test — production default is 120s
+      }),
+      (err) => {
+        assert.ok(err instanceof DownloadTimeoutError, `expected DownloadTimeoutError, got ${err}`);
+        assert.equal(err.code, "DOWNLOAD_TIMEOUT");
+        assert.equal(err.timeoutMs, 50);
+        return true;
+      },
+    );
+    assert.equal(existsSync(dest), false, "no partial file — the stall was never past the connect/header phase");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stopServer(srv);
+  }
+});
+
+test("Fix 4: a connection that sends headers + partial body then stalls rejects with a typed DownloadTimeoutError within the injected timeout; partial file is kept, not deleted", async () => {
+  const { srv, port } = await startServer(stallAfterHalfHandler(BLOB));
+  try {
+    const dir = scratchDir("dl-body-stall");
+    try {
+      const dest = join(dir, "body-stall.gguf");
+      await assert.rejects(
+        () => fetchModelBlob({
+          url: `http://huggingface.co:${port}/x/resolve/main/y.gguf`,
+          dest,
+          lookup: lookupToLocalhost,
+          insecureHttpHosts: INSECURE_HF,
+          timeoutMs: 50,
+        }),
+        (err) => {
+          assert.ok(err instanceof DownloadTimeoutError, `expected DownloadTimeoutError, got ${err}`);
+          assert.equal(err.code, "DOWNLOAD_TIMEOUT");
+          assert.ok(err.bytesDone > 0 && err.bytesDone < BLOB.length, `expected partial bytesDone on the error, got ${err.bytesDone}`);
+          return true;
+        },
+      );
+      assert.equal(existsSync(dest), true, "the partial file is KEPT on disk (like DiskFullError), not deleted (unlike ChecksumError)");
+      const onDisk = readFileSync(dest);
+      assert.ok(onDisk.length > 0 && onDisk.length < BLOB.length);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await stopServer(srv);
+  }
+});
+
+test("Fix 4: downloadModel journals bytesDone on a body stall, so a subsequent call resumes rather than restarting", async () => {
+  const { srv, port } = await startServer(stallAfterHalfHandler(BLOB));
+  try {
+    const dir = scratchDir("dl-model-stall");
+    try {
+      const catalog = makeCatalog();
+      await assert.rejects(
+        () => downloadModel({
+          modelId: "test-model",
+          dir,
+          catalog,
+          lookup: lookupToLocalhost,
+          baseUrl: `http://huggingface.co:${port}`,
+          insecureHttpHosts: INSECURE_HF,
+          timeoutMs: 50,
+        }),
+        (err) => {
+          assert.ok(err instanceof DownloadTimeoutError, `expected DownloadTimeoutError, got ${err}`);
+          return true;
+        },
+      );
+      const state = loadState(dir);
+      const entry = state.journal["test-model"];
+      assert.ok(entry, "expected a journal entry after the stall");
+      assert.ok(entry.bytesDone > 0 && entry.bytesDone < BLOB.length, `expected partial bytesDone, got ${entry.bytesDone}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await stopServer(srv);
+  }
+});
+
+test("Fix 4: fetchModelBlob without an explicit timeoutMs defaults to DEFAULT_DOWNLOAD_TIMEOUT_MS and does not spuriously time out a normal fast download", async () => {
+  const { srv, port } = await startServer((req, res) => {
+    res.writeHead(200, { "Content-Length": String(BLOB.length) });
+    res.end(BLOB);
+  });
+  const dir = scratchDir("dl-default-timeout");
+  try {
+    const dest = join(dir, "fast.gguf");
+    const result = await fetchModelBlob({
+      url: `http://huggingface.co:${port}/x/resolve/main/y.gguf`,
+      dest,
+      lookup: lookupToLocalhost,
+      insecureHttpHosts: INSECURE_HF,
+      // timeoutMs omitted — the default (120s) must not fire for a fast,
+      // successful download.
+    });
+    assert.equal(result.sha256, BLOB_SHA256);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
     await stopServer(srv);
   }
 });
