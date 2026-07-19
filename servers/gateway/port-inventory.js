@@ -10,10 +10,21 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+import { resolveDataDir } from "../db.js";
+import { loadState, PORT_RANGE_START as NATIVE_MODEL_PORT_START, PORT_RANGE_END as NATIVE_MODEL_PORT_END } from "./models/state.js";
+
 const execFileP = promisify(execFile);
 const CROW_HOME = process.env.CROW_HOME || join(homedir(), ".crow");
 const BUNDLES_DIR = join(CROW_HOME, "bundles");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
+
+/** Generic label for a live 18100-18199 listener whose port has no matching
+ * entry in this instance's models/state.json reservations (e.g. a stale/
+ * external process on the port, or a reservation written by a DIFFERENT
+ * CROW_HOME on a shared host — reservations are per-instance, see
+ * models/state.js). Never a guess at a model id when one isn't provably
+ * known. */
+export const GENERIC_LOCAL_MODEL_LABEL = "local model server (native runtime)";
 
 /** Core Crow services: shown, never bundle-attributed. */
 export function coreServices() {
@@ -123,11 +134,22 @@ function addrId(a) {
  * Foreign listeners -> informational. The displayed bound address is the actual
  * ss address when listening, else the declared bind.
  *
+ * `nativeModelPorts` attributes the gateway-internal native-model-runtime
+ * range (18100-18199, see `models/state.js`'s `PORT_RANGE_START/END`) as a
+ * local model server instead of falling into the generic `"foreign"`
+ * bucket the Ports settings section hides behind a collapsed "Other host
+ * listeners" details element (Item G, Task 14) — these are Crow's OWN
+ * spawned llama-server processes, just not bundle/compose-declared ones.
+ * A port in range gets the reserving model's id as `bundleName` when this
+ * instance's state file has a live reservation for it, else the generic
+ * {@link GENERIC_LOCAL_MODEL_LABEL} — never a guessed model id.
+ *
  * @param {Array<{bundleId,bundleName,port:number,bind:string,bindKind:string,proto:string,source:string,portEnvVar?:string}>} endpoints
  * @param {Array<{port:number,boundAddr:string}>} listeners
  * @param {Map<number,string>} coreSet
+ * @param {Map<number,string>} [nativeModelPorts] - port -> modelId, from this instance's models/state.json reservations
  */
-export function attributeAndDetect(endpoints, listeners, coreSet) {
+export function attributeAndDetect(endpoints, listeners, coreSet, nativeModelPorts = new Map()) {
   const ports = new Set([
     ...endpoints.map((e) => e.port).filter((p) => p != null),
     ...listeners.map((l) => l.port),
@@ -168,6 +190,13 @@ export function attributeAndDetect(endpoints, listeners, coreSet) {
       rows.push({
         port, bundleId: null, bundleName: coreSet.get(port), declaredBind: null,
         boundAddr: liveAddr, kind: "core", listening, status: listening ? "up" : "down",
+        shared: false, conflict, conflictReason: conflict ? `Port ${port} has multiple overlapping listeners` : null,
+      });
+    } else if (port >= NATIVE_MODEL_PORT_START && port <= NATIVE_MODEL_PORT_END) {
+      const modelId = nativeModelPorts.get(port) || null;
+      rows.push({
+        port, bundleId: modelId, bundleName: modelId || GENERIC_LOCAL_MODEL_LABEL, declaredBind: null,
+        boundAddr: liveAddr, kind: "local-model", listening: true, status: "up",
         shared: false, conflict, conflictReason: conflict ? `Port ${port} has multiple overlapping listeners` : null,
       });
     } else {
@@ -242,11 +271,33 @@ export async function readListeners() {
   } catch { return []; }
 }
 
+/**
+ * Read this instance's native-model port reservations from
+ * `<resolveDataDir()>/models/state.json` (the same file `models/state.js`'s
+ * `allocatePort`/`releasePort` maintain) as a `Map<port, modelId>`. Missing
+ * or unparseable state resolves to an empty map — `loadState` itself never
+ * throws (see its doc), so a fresh/corrupt state file just yields no
+ * attributions rather than breaking inventory building.
+ */
+export function loadNativeModelPortMap() {
+  const state = loadState(resolveDataDir());
+  const map = new Map();
+  // allocatePort never double-assigns a port across two reservations, so a
+  // collision here would only ever indicate a corrupt/hand-edited state
+  // file — last-write-wins is a defensive fallback, not a real ambiguity.
+  for (const [modelId, reservation] of Object.entries(state.reservations || {})) {
+    if (reservation && Number.isInteger(reservation.port)) {
+      map.set(reservation.port, modelId);
+    }
+  }
+  return map;
+}
+
 let _cache = null; // { at:number, rows }
 /** Build the inventory; `ttlMs`>0 returns a recent cached result (for getPreview). */
 export async function buildPortInventory({ ttlMs = 0, now = 0 } = {}) {
   if (ttlMs > 0 && _cache && now - _cache.at < ttlMs) return _cache.rows;
-  const rows = attributeAndDetect(listInstalledBundles(), await readListeners(), coreServices());
+  const rows = attributeAndDetect(listInstalledBundles(), await readListeners(), coreServices(), loadNativeModelPortMap());
   if (ttlMs > 0) _cache = { at: now, rows };
   return rows;
 }
