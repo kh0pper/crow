@@ -36,10 +36,35 @@
  *
  * Keep `defaultMember: true` on exactly one provider per group if you
  * want idle auto-revert to restore it after a specialist times out.
+ *
+ * --- Native runtime providers (Item G, Task 9) ---
+ *
+ * A provider is native iff `gpuPolicy.runtime === "native"` (only
+ * `manager.js`'s `registerModel` writes this). Control plane: spawn/kill a
+ * local `llama-server` process via `models/runtime.js`'s `startModel`/
+ * `stopModel`, not docker compose. Cross-GATEWAY-PROCESS contention for a
+ * native model's mutexGroup is arbitrated by an advisory host-wide lock
+ * (`models/native-lock.js`'s `acquireHostLock`) that is held for the LIFE
+ * of the model's residency — acquired right before a successful start,
+ * released exactly once when that process reaches a terminal state
+ * (explicit stop, idle-timeout self-stop, or restarts-exhausted), via
+ * `startModel`'s `onTerminal` callback. See `acquireOrStartNative`'s doc
+ * for the full ordering.
+ *
+ * KNOWN v1 LIMITATION: this lock arbitrates native-vs-native ONLY. Nothing
+ * in the Docker control plane reads it, so a Docker bundle acquired on one
+ * gateway process and a native model acquired on ANOTHER gateway process,
+ * contending for the same physical GPU/RAM but declared in different
+ * mutexGroups, are NOT mutually excluded by anything in this file.
+ * Same-PROCESS eviction between the two control planes IS covered in both
+ * directions (a native acquire stops a Docker sibling via `bundleStop`; a
+ * Docker acquire stops a native sibling via its handle's `stop()`) — only
+ * the cross-process case is an open gap, left for a future revision if
+ * multi-gateway hosts ever need a unified VRAM ledger.
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname, resolve } from "node:path";
 import { loadProviders as loadCachedProviders } from "../shared/providers.js";
@@ -58,12 +83,34 @@ const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
 const MODEL_CATALOG_PATH = resolve(dirname(__filename), "..", "..", "registry", "model-catalog.json");
 
+// mtime-checked cache — `defaultLoadCatalog` runs on every native acquire
+// (potentially every chat turn once a native model is warm), so a bare
+// readFileSync+JSON.parse per call is wasted work for a file that changes
+// only on deploy. Re-reads only when the file's mtime actually moves (an
+// `npm run deploy`/git-pull picking up a catalog update), never silently
+// staying stale across a long-running gateway process.
+let _catalogCache = null;
+let _catalogCacheMtimeMs = null;
+
 /** Default `loadCatalogFn` for the native start path — reads the curated
  * catalog's `runtime` block (llama.cpp version pin + per-platform assets)
  * that `ensureRuntime` needs. Injectable so tests never touch the real
- * repo-tracked catalog file. */
+ * repo-tracked catalog file (and never see cross-test cache pollution —
+ * each test supplies its own `loadCatalogFn`, bypassing this cache
+ * entirely). */
 function defaultLoadCatalog() {
-  return JSON.parse(readFileSync(MODEL_CATALOG_PATH, "utf8"));
+  let mtimeMs;
+  try {
+    mtimeMs = statSync(MODEL_CATALOG_PATH).mtimeMs;
+  } catch {
+    mtimeMs = null;
+  }
+  if (_catalogCache && mtimeMs !== null && mtimeMs === _catalogCacheMtimeMs) {
+    return _catalogCache;
+  }
+  _catalogCache = JSON.parse(readFileSync(MODEL_CATALOG_PATH, "utf8"));
+  _catalogCacheMtimeMs = mtimeMs;
+  return _catalogCache;
 }
 
 function loadProviders() {
@@ -406,8 +453,53 @@ export async function warmProviderByName(name) {
 export const _internals = { getProvider, getMutexSiblings, getMutexGroups, mutexGroupOf };
 
 // -----------------------------------------------------------------------
-// Native runtime — acquire path (Item G, Task 9)
+// Native runtime — acquire path (Item G, Task 9; lock-lifetime + download-
+// isolation fixed in review round 1)
 // -----------------------------------------------------------------------
+
+// `ensureRuntime` in-flight dedupe, keyed by catalog release — a first
+// install's download can take a while; if two callers ask for the same
+// release concurrently (e.g. two providers on the same llama.cpp pin,
+// acquired at the same moment by two chat turns), the second must await
+// the first's already-running install rather than starting a redundant
+// second download. `ensureRuntime` is itself idempotent (its manifest
+// check + atomic staging-dir rename), so this is a performance/network
+// courtesy, not a correctness requirement — but it's cheap to provide.
+const _runtimeEnsureInFlight = new Map(); // release key -> Promise<binPath>
+
+/**
+ * Resolve the llama-server `binPath` for a native provider. Deliberately
+ * called from `acquireProvider`'s native branch BEFORE the `_swapInFlight`
+ * chain is ever touched (Task 9 review round 1, finding 2): a first-install
+ * download can take minutes, and it must never occupy the single-flight
+ * queue that unrelated Docker/native swaps for OTHER providers are waiting
+ * behind — only the actual spawn+sibling-swap belongs in that critical
+ * section. `ensureRuntime`'s own manifest check makes a repeat call for an
+ * already-installed release cheap (no network I/O), so resolving it
+ * unconditionally on every acquire — even one that turns out to hit the
+ * `identityProbe` fast path and never needs to start anything — is an
+ * acceptable, small, constant cost.
+ */
+async function resolveNativeBinPath(p, opts = {}) {
+  const {
+    ensureRuntimeFn = ensureRuntime,
+    resolveDataDirFn = resolveDataDir,
+    loadCatalogFn = defaultLoadCatalog,
+    getCachedProbeFn = getCachedProbe,
+  } = opts;
+  const dir = resolveDataDirFn();
+  const catalog = loadCatalogFn();
+  const probe = getCachedProbeFn();
+  const key = (catalog && catalog.runtime && catalog.runtime.release) || "default";
+  if (_runtimeEnsureInFlight.has(key)) return _runtimeEnsureInFlight.get(key);
+  const inFlight = Promise.resolve()
+    .then(() => ensureRuntimeFn(dir, catalog.runtime, probe))
+    .finally(() => {
+      if (_runtimeEnsureInFlight.get(key) === inFlight) _runtimeEnsureInFlight.delete(key);
+    });
+  _runtimeEnsureInFlight.set(key, inFlight);
+  return inFlight;
+}
 
 /** Poll `identityProbe` until it reports "resident" or "conflict", or the
  * timeout elapses (-> "down"). Mirrors `waitForReady`'s shape for the
@@ -428,27 +520,28 @@ async function waitForNativeReady(baseUrl, alias, {
 
 /**
  * Start a native provider's llama-server process and wait for it to report
- * itself resident. No locking, no sibling swap — those are the acquire
- * path's job (`acquireNativeSwap`) and `ensureResident`'s native branch
- * deliberately skips them too, mirroring the Docker `ensureResident`'s
- * parity (alwaysResident providers don't swap siblings at boot).
+ * itself resident. Binds the EXACT port already encoded in `p.baseUrl` —
+ * NEVER re-allocates a fresh one from the port pool. A bind failure (the
+ * process never reports resident within the timeout) is an honest thrown
+ * error, never a silent fallback to a different port.
  *
- * Binds the EXACT port already encoded in `p.baseUrl` — NEVER re-allocates
- * a fresh one from the port pool. A bind failure (the process never
- * reports resident within the timeout) is an honest thrown error, never a
- * silent fallback to a different port.
+ * `opts.binPath`, if given, is used as-is (the caller already resolved it
+ * via `resolveNativeBinPath` outside the single-flight); otherwise it's
+ * resolved inline here (the `ensureResident` boot path calls this directly
+ * and isn't queued behind `_swapInFlight`, so there's nothing to protect
+ * it from). `opts.onTerminal`, if given, is forwarded verbatim to
+ * `startModelFn` — see `runtime.js`'s `startModel` doc.
  */
 async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   const {
     identityProbeFn = identityProbe,
     startModelFn = startModel,
-    ensureRuntimeFn = ensureRuntime,
     loadStateFn = loadState,
     resolveDataDirFn = resolveDataDir,
-    loadCatalogFn = defaultLoadCatalog,
-    getCachedProbeFn = getCachedProbe,
     fetchImpl,
     spawnFn,
+    onTerminal,
+    binPath: preResolvedBinPath,
     readinessTimeoutMs = READINESS_TIMEOUT_MS,
     readinessPollMs = READINESS_POLL_MS,
     readinessInitialDelayMs = READINESS_INITIAL_DELAY_MS,
@@ -467,12 +560,10 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   }
   const ggufPath = join(dir, "models", "blobs", regEntry.file);
 
-  const catalog = loadCatalogFn();
-  const probe = getCachedProbeFn();
-  const binPath = await ensureRuntimeFn(dir, catalog.runtime, probe);
+  const binPath = preResolvedBinPath || await resolveNativeBinPath(p, opts);
 
   console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port})`);
-  const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn });
+  const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn, onTerminal });
   _nativeHandles.set(providerName, handle);
 
   const result = await waitForNativeReady(p.baseUrl, alias, {
@@ -497,22 +588,52 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
 }
 
 /**
- * Native branch of `acquireProvider`'s swap transaction (runs inside the
- * same `_swapInFlight` single-flight as the Docker branch). Order:
- *   1. `identityProbe` fast path — resident -> done; conflict -> typed
- *      error, no lock ever taken, no traffic routed.
- *   2. `acquireHostLock(mutexGroup)` — null -> typed "another Crow
+ * Core native acquire, shared by `acquireProvider`'s native branch AND
+ * `ensureResident`'s native branch (Task 9 review round 1: both paths can
+ * start a process and therefore both need identical lock discipline).
+ * Order (binding — see finding 1 of the review):
+ *   1. `identityProbe` fast path — resident -> done, lock never touched
+ *      (an already-resident model's lock is already held from ITS start,
+ *      by definition below — re-touching it here would open a window
+ *      where the lock is briefly free while the model is still up);
+ *      conflict -> typed error, no lock ever taken, no traffic routed.
+ *   2. Sibling swap — BEFORE taking the lock. A same-mutexGroup sibling
+ *      may currently be the one holding this group's lock (locks now
+ *      live for the life of a resident native model, not just its
+ *      startup); stopping it releases that lock as a side effect of its
+ *      own `onTerminal`, so the lock is free for us by the time step 3
+ *      asks for it — UNLESS something outside this group's own siblings
+ *      holds it, which is a genuine conflict, correctly surfaced by step 3.
+ *   3. `acquireHostLock(mutexGroup)` — null -> typed "another Crow
  *      instance..." error.
- *   3. Sibling swap: Docker sibling via `bundleStop`, native sibling via
- *      its handle's `stop()` — mirrors the Docker branch's sibling loop.
- *   4. `startNativeAndAwaitReady`.
- * The lock is released in `finally` once this swap transaction settles —
- * it protects the START critical section against a second gateway process
- * on this host racing to start a sibling; ongoing residency truth is
- * `identityProbe`/the OS-level bind test, not this lock (see
- * `native-lock.js`'s module doc).
+ *   4. `startNativeAndAwaitReady`, with an `onTerminal` callback wired to
+ *      release the lock taken in step 3. On a FAILED start (never became
+ *      resident, or a post-start identity conflict), `finally` releases
+ *      the lock immediately — ownership was never successfully handed
+ *      off. On a SUCCESSFUL start, `finally` does NOT release it: the
+ *      lock is now owned by the running process and is released exactly
+ *      once, whenever it reaches a terminal state (explicit stop —
+ *      including a future sibling swap-out or unregister — idle-timeout
+ *      self-stop, or maxRestarts-exhausted unhealthy give-up), per
+ *      `runtime.js`'s `startModel` `onTerminal` contract. A gateway
+ *      crash mid-residency is covered separately, by `native-lock.js`'s
+ *      stale-pid steal on the NEXT acquire.
+ *
+ * Cross-process Docker-vs-native is a known v1 gap: this lock arbitrates
+ * native-vs-native only. A Docker bundle on another gateway process has no
+ * way to observe or wait on this lock (nothing in the Docker control plane
+ * reads it), so a Docker acquire on one gateway and a native acquire on
+ * another, racing for the same physical GPU/RAM but in DIFFERENT
+ * mutexGroups, are not mutually excluded by anything in this file. Only
+ * same-PROCESS eviction (below, and its Docker-branch mirror in
+ * `acquireProvider`) is guaranteed today.
+ *
+ * @returns {Promise<{freshStart: boolean}>} `freshStart` is `false` when
+ *   the fast path found it already resident (nothing new happened —
+ *   `ensureResident` uses this to decide whether to report embed
+ *   recovery), `true` when this call actually started it.
  */
-async function acquireNativeSwap(providerName, p, cfg, opts = {}) {
+async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
   const {
     acquireHostLockFn = acquireHostLock,
     identityProbeFn = identityProbe,
@@ -527,12 +648,37 @@ async function acquireNativeSwap(providerName, p, cfg, opts = {}) {
     const fastStatus = await identityProbeFn(p.baseUrl, alias, fetchImpl);
     if (fastStatus === "resident") {
       _lastUsedAt.set(providerName, Date.now());
-      return true;
+      return { freshStart: false };
     }
     if (fastStatus === "conflict") {
       throw new NativePortConflictError(providerName, p.baseUrl);
     }
-    // "down" — fall through to lock + start.
+    // "down" — fall through to sibling swap + lock + start.
+  }
+
+  const siblings = getMutexSiblings(providerName, cfg);
+  for (const sibName of siblings) {
+    const sib = getProvider(sibName, cfg);
+    if (!sib || !isLocallyOrchestratable(sib)) continue;
+    if (isNativeRuntime(sib)) {
+      const sibHandle = _nativeHandles.get(sibName);
+      if (sibHandle && sibHandle.live) {
+        console.log(`[gpu-orchestrator] swapping out native ${sibName} for ${providerName}`);
+        await stopModelFn(sibHandle).catch((err) =>
+          console.warn(`[gpu-orchestrator] stop native ${sibName} failed: ${err.message}`)
+        );
+        _nativeHandles.delete(sibName);
+      }
+      _lastUsedAt.delete(sibName);
+    } else if (sib.bundleId) {
+      if (await probeReadyFn(sib.baseUrl)) {
+        console.log(`[gpu-orchestrator] swapping out ${sibName} (bundleId=${sib.bundleId}) for ${providerName}`);
+        await bundleStopFn(sib.bundleId).catch((err) =>
+          console.warn(`[gpu-orchestrator] stop ${sib.bundleId} failed: ${err.message}`)
+        );
+        _lastUsedAt.delete(sibName);
+      }
+    }
   }
 
   const mutexGroup = mutexGroupOf(p) || providerName;
@@ -541,36 +687,31 @@ async function acquireNativeSwap(providerName, p, cfg, opts = {}) {
     throw new NativeHostLockHeldError(mutexGroup);
   }
 
+  let success = false;
   try {
-    const siblings = getMutexSiblings(providerName, cfg);
-    for (const sibName of siblings) {
-      const sib = getProvider(sibName, cfg);
-      if (!sib || !isLocallyOrchestratable(sib)) continue;
-      if (isNativeRuntime(sib)) {
-        const sibHandle = _nativeHandles.get(sibName);
-        if (sibHandle && sibHandle.live) {
-          console.log(`[gpu-orchestrator] swapping out native ${sibName} for ${providerName}`);
-          await stopModelFn(sibHandle).catch((err) =>
-            console.warn(`[gpu-orchestrator] stop native ${sibName} failed: ${err.message}`)
-          );
-          _nativeHandles.delete(sibName);
-        }
-        _lastUsedAt.delete(sibName);
-      } else if (sib.bundleId) {
-        if (await probeReadyFn(sib.baseUrl)) {
-          console.log(`[gpu-orchestrator] swapping out ${sibName} (bundleId=${sib.bundleId}) for ${providerName}`);
-          await bundleStopFn(sib.bundleId).catch((err) =>
-            console.warn(`[gpu-orchestrator] stop ${sib.bundleId} failed: ${err.message}`)
-          );
-          _lastUsedAt.delete(sibName);
-        }
-      }
-    }
-
-    return await startNativeAndAwaitReady(providerName, p, opts);
+    const onTerminal = (reason) => {
+      console.log(`[gpu-orchestrator] native ${providerName} lock released (terminal: ${reason})`);
+      release();
+    };
+    await startNativeAndAwaitReady(providerName, p, { ...opts, onTerminal });
+    success = true;
+    return { freshStart: true };
   } finally {
-    release();
+    // A successful start hands lock ownership off to `onTerminal` above —
+    // releasing here too would free it while the model is still resident
+    // (finding 1). Only a FAILED start (never reached `success = true`)
+    // releases here.
+    if (!success) release();
   }
+}
+
+/** Thin `acquireProvider`-shaped wrapper — see `acquireOrStartNative`'s
+ * doc for the actual logic. `acquireProvider`'s contract is "true on
+ * success, throw on failure", so `freshStart` is not surfaced here (only
+ * `ensureResident`'s native branch cares about that distinction). */
+async function acquireNativeSwap(providerName, p, cfg, opts = {}) {
+  await acquireOrStartNative(providerName, p, cfg, opts);
+  return true;
 }
 
 /**
@@ -599,7 +740,15 @@ export async function acquireProvider(providerName, opts = {}) {
       console.warn(`[gpu-orchestrator] refusing to orchestrate ${providerName} — its baseUrl is not on this machine`);
       return null;
     }
-    const nativeSwap = _swapInFlight.then(() => acquireNativeSwap(providerName, p, cfg, opts));
+    // Resolve the runtime binary BEFORE touching _swapInFlight (Task 9
+    // review round 1, finding 2): a first-install download can take
+    // minutes and must never occupy the single-flight queue that an
+    // unrelated provider's swap is waiting behind. Only the actual
+    // spawn+sibling-swap (acquireNativeSwap, via startNativeAndAwaitReady)
+    // runs inside the single-flight below.
+    const binPath = await resolveNativeBinPath(p, opts);
+    const nativeOpts = { ...opts, binPath };
+    const nativeSwap = _swapInFlight.then(() => acquireNativeSwap(providerName, p, cfg, nativeOpts));
     _swapInFlight = nativeSwap.catch(() => {});
     return nativeSwap;
   }
@@ -611,20 +760,55 @@ export async function acquireProvider(providerName, opts = {}) {
   }
 
   const swap = _swapInFlight.then(async () => {
+    // Injectable purely so `acquireProvider ... a Docker provider evicts a
+    // resident native sibling` is unit-testable without a real `docker`
+    // binary (Task 9 review round 1, finding 3) — every default is the
+    // exact real function, so no existing caller's behavior changes.
+    const {
+      probeReadyFn = probeReady,
+      bundleUpFn = bundleUp,
+      bundleStopFn = bundleStop,
+      stopModelFn = stopModel,
+      waitForReadyFn = waitForReady,
+    } = opts;
+
     // Fast path: already resident.
-    if (await probeReady(p.baseUrl)) {
+    if (await probeReadyFn(p.baseUrl)) {
       _lastUsedAt.set(providerName, Date.now());
       return true;
     }
 
-    // Stop mutex siblings first.
-    const siblings = getMutexSiblings(providerName);
+    // Stop mutex siblings first. A sibling can be native (Task 9 review
+    // round 1, finding 3: same-PROCESS symmetric eviction — a native
+    // sibling with a live handle in _nativeHandles is stopped via that
+    // handle, same as the native branch's own sibling loop; its
+    // `onTerminal` releases the native host lock as a side effect, same as
+    // there). Cross-PROCESS Docker-vs-native is NOT covered — see the
+    // module doc and `acquireOrStartNative`'s doc for why: the native
+    // host lock has no Docker-side reader, so a Docker acquire on one
+    // gateway and a native acquire on ANOTHER, contending for the same
+    // physical GPU/RAM in different mutexGroups, are not mutually
+    // excluded by anything in this file. Only this same-process case is.
+    const siblings = getMutexSiblings(providerName, cfg);
     for (const sibName of siblings) {
-      const sib = getProvider(sibName);
-      if (!sib?.bundleId || !isLocallyOrchestratable(sib)) continue;
-      if (await probeReady(sib.baseUrl)) {
+      const sib = getProvider(sibName, cfg);
+      if (!sib || !isLocallyOrchestratable(sib)) continue;
+      if (isNativeRuntime(sib)) {
+        const sibHandle = _nativeHandles.get(sibName);
+        if (sibHandle && sibHandle.live) {
+          console.log(`[gpu-orchestrator] swapping out native ${sibName} for ${providerName}`);
+          await stopModelFn(sibHandle).catch((err) =>
+            console.warn(`[gpu-orchestrator] stop native ${sibName} failed: ${err.message}`)
+          );
+          _nativeHandles.delete(sibName);
+        }
+        _lastUsedAt.delete(sibName);
+        continue;
+      }
+      if (!sib.bundleId) continue;
+      if (await probeReadyFn(sib.baseUrl)) {
         console.log(`[gpu-orchestrator] swapping out ${sibName} (bundleId=${sib.bundleId}) for ${providerName}`);
-        await bundleStop(sib.bundleId).catch((err) =>
+        await bundleStopFn(sib.bundleId).catch((err) =>
           console.warn(`[gpu-orchestrator] stop ${sib.bundleId} failed: ${err.message}`)
         );
         _lastUsedAt.delete(sibName);
@@ -633,8 +817,8 @@ export async function acquireProvider(providerName, opts = {}) {
 
     // Start target.
     console.log(`[gpu-orchestrator] starting ${providerName} (bundleId=${p.bundleId})`);
-    await bundleUp(p.bundleId);
-    const ready = await waitForReady(p.baseUrl);
+    await bundleUpFn(p.bundleId);
+    const ready = await waitForReadyFn(p.baseUrl);
     if (ready) {
       console.log(`[gpu-orchestrator] ${providerName} ready`);
       _lastUsedAt.set(providerName, Date.now());
@@ -736,18 +920,18 @@ export function _setDeferredResidentsForTest(names) {
  * isn't enough, matching `identityProbe`'s "never trust a port without
  * confirming what it's serving" stance. Not resident -> start it (no
  * lock/sibling-swap, mirroring the Docker branch's boot-time parity). */
-async function ensureNativeResident(name, p, opts = {}) {
-  const { identityProbeFn = identityProbe, fetchImpl } = opts;
-  const handle = _nativeHandles.get(name);
-  const alias = nativeAlias(p);
-  if (handle && handle.live && alias) {
-    const status = await identityProbeFn(p.baseUrl, alias, fetchImpl);
-    if (status === "resident") {
-      console.log(`[gpu-orchestrator] ${name} already resident`);
-      return false;
-    }
+async function ensureNativeResident(name, p, cfg, opts = {}) {
+  // Delegates to the SAME core acquireProvider's native branch uses (Task
+  // 9 review round 1, finding 1): both paths can start a process and
+  // therefore both need identical lock discipline — a boot-time ensure
+  // that started a model without taking/holding its mutexGroup's host
+  // lock would leave that lock free for a DIFFERENT gateway process to
+  // walk right past while this model is genuinely resident.
+  const result = await acquireOrStartNative(name, p, cfg, opts);
+  if (!result.freshStart) {
+    console.log(`[gpu-orchestrator] ${name} already resident`);
+    return false;
   }
-  await startNativeAndAwaitReady(name, p, opts);
   return providerHasEmbedModel(p);
 }
 
@@ -761,7 +945,7 @@ export async function ensureResident(name, cfg = loadProviders(), opts = {}) {
   try {
     const p = (cfg.providers || {})[name];
     if (p && isNativeRuntime(p)) {
-      return await ensureNativeResident(name, p, opts);
+      return await ensureNativeResident(name, p, cfg, opts);
     }
     if (!p?.bundleId) {
       console.warn(`[gpu-orchestrator] ${name} has no bundleId — skipping`);

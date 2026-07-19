@@ -39,6 +39,7 @@ import { join } from "node:path";
 import {
   RuntimeAssetError,
   RuntimeChecksumError,
+  RuntimeDownloadTimeoutError,
   resolveAsset,
   isAllowedRuntimeHost,
   buildRuntimeDownloadUrl,
@@ -344,6 +345,137 @@ test("alwaysResident also disables the idle timer", async () => {
 
   assert.equal(timerCalls.length, 0);
   await handle.stop();
+});
+
+// ---------------------------------------------------------------------------
+// startModel — onTerminal (Task 9 review round 1: gpu-orchestrator's native
+// host lock is released exactly when this fires, so it must fire exactly
+// once per terminal transition and NEVER for a restart that still has
+// budget left)
+// ---------------------------------------------------------------------------
+
+test("onTerminal fires exactly once when the idle timer stops the process", async () => {
+  const timerCalls = [];
+  const setTimeoutFn = (fn, ms) => {
+    timerCalls.push({ fn, ms });
+    return timerCalls.length;
+  };
+  const clearTimeoutFn = () => {};
+  const spawn = () => fakeChild(9210);
+  const terminalCalls = [];
+
+  const handle = startModel({
+    binPath: "/opt/llamacpp/llama-server",
+    ggufPath: "/models/x.gguf",
+    alias: "onterminal-idle-model",
+    port: 18113,
+    spawn,
+    setprivAvailable: false,
+    idleMinutes: 30,
+    setTimeoutFn,
+    clearTimeoutFn,
+    onTerminal: (reason) => terminalCalls.push(reason),
+  });
+
+  assert.deepEqual(terminalCalls, [], "not terminal while running");
+  await timerCalls[0].fn(); // simulate the idle period elapsing -> handle.stop()
+  assert.deepEqual(terminalCalls, ["stopped"]);
+  assert.equal(handle.state, "stopped");
+});
+
+test("onTerminal fires exactly once when restarts are exhausted (unhealthy), never for a restart still under budget", async () => {
+  const children = [];
+  const spawn = () => {
+    const child = fakeChild(9220 + children.length);
+    children.push(child);
+    return child;
+  };
+  const setTimeoutFn = (fn) => {
+    fn(); // synchronous restart chain, mirrors the existing backoff test
+    return children.length;
+  };
+  const clearTimeoutFn = () => {};
+  const terminalCalls = [];
+
+  const handle = startModel({
+    binPath: "/opt/llamacpp/llama-server",
+    ggufPath: "/models/x.gguf",
+    alias: "onterminal-restart-model",
+    port: 18114,
+    spawn,
+    setprivAvailable: false,
+    keepWarm: true,
+    maxRestarts: 2,
+    setTimeoutFn,
+    clearTimeoutFn,
+    onTerminal: (reason) => terminalCalls.push(reason),
+  });
+
+  children[0].emit("exit", 1, null); // restart 1 of 2 -- NOT terminal
+  assert.deepEqual(terminalCalls, [], "a restart still under budget is not a terminal transition");
+  children[1].emit("exit", 1, null); // restart 2 of 2 -- NOT terminal
+  assert.deepEqual(terminalCalls, []);
+  children[2].emit("exit", 1, "SIGSEGV"); // restartCount(2) >= maxRestarts(2) -> unhealthy, terminal
+  assert.deepEqual(terminalCalls, ["unhealthy"]);
+  assert.equal(handle.state, "unhealthy");
+
+  // A caller (like gpu-orchestrator's release()) that got the single
+  // onTerminal call must never see a second one even if something later
+  // also calls stop() on an already-unhealthy handle.
+  await handle.stop();
+  assert.deepEqual(terminalCalls, ["unhealthy"], "onTerminal is idempotent — fires at most once per handle");
+});
+
+test("onTerminal fires exactly once on an explicit stop() and is idempotent across a double stop()", async () => {
+  const spawn = () => fakeChild(9230);
+  const terminalCalls = [];
+  const handle = startModel({
+    binPath: "/opt/llamacpp/llama-server",
+    ggufPath: "/models/x.gguf",
+    alias: "onterminal-stop-model",
+    port: 18115,
+    spawn,
+    setprivAvailable: false,
+    keepWarm: true,
+    onTerminal: (reason) => terminalCalls.push(reason),
+  });
+
+  await handle.stop();
+  assert.deepEqual(terminalCalls, ["stopped"]);
+  await handle.stop(); // double-stop — must not double-fire
+  assert.deepEqual(terminalCalls, ["stopped"]);
+});
+
+test("onTerminal defaults to a no-op and never breaks supervision when it throws", async () => {
+  const spawn = () => fakeChild(9240);
+  // No onTerminal passed at all — default must be a safe no-op.
+  const handle = startModel({
+    binPath: "/opt/llamacpp/llama-server",
+    ggufPath: "/models/x.gguf",
+    alias: "onterminal-default-model",
+    port: 18116,
+    spawn,
+    setprivAvailable: false,
+    keepWarm: true,
+  });
+  await handle.stop(); // must not throw
+  assert.equal(handle.state, "stopped");
+
+  const spawn2 = () => fakeChild(9241);
+  const handle2 = startModel({
+    binPath: "/opt/llamacpp/llama-server",
+    ggufPath: "/models/x.gguf",
+    alias: "onterminal-throwing-model",
+    port: 18117,
+    spawn: spawn2,
+    setprivAvailable: false,
+    keepWarm: true,
+    onTerminal: () => {
+      throw new Error("a caller's terminal hook must never break supervision");
+    },
+  });
+  await handle2.stop(); // must not throw/propagate the callback's error
+  assert.equal(handle2.state, "stopped");
 });
 
 test("getStatusSnapshot reports every tracked model and drops it once stopped", async () => {
@@ -789,6 +921,38 @@ test("downloadRuntimeAsset deletes the partial file on a mid-stream error", asyn
         },
       );
       assert.equal(existsSync(dest), false); // partial file cleaned up, not left behind
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+test("downloadRuntimeAsset rejects a stalled connection with RuntimeDownloadTimeoutError instead of hanging forever", async () => {
+  await withScratch("dl-stall-timeout", async (dir) => {
+    // Accepts the connection but never writes a byte and never ends the
+    // response — a genuine stalled-socket simulation (Task 9 review round
+    // 1, finding 2b: "no promise may hang forever on a stalled TCP
+    // connection").
+    const { srv, port } = await startFixtureServer(() => {});
+    const dest = join(dir, "stalled-runtime.tar.gz");
+    try {
+      await assert.rejects(
+        () => downloadRuntimeAsset({
+          url: `http://github.com:${port}/releases/download/x/y.tar.gz`,
+          dest,
+          expectedSha: null,
+          lookup: forceGithubLookup(),
+          insecureHttpHosts: ["github.com"],
+          timeoutMs: 50, // tiny for a fast test — production default is 120s
+        }),
+        (err) => {
+          assert.ok(err instanceof RuntimeDownloadTimeoutError, `expected RuntimeDownloadTimeoutError, got ${err}`);
+          assert.equal(err.code, "DOWNLOAD_TIMEOUT");
+          assert.equal(err.timeoutMs, 50);
+          return true;
+        },
+      );
+      assert.equal(existsSync(dest), false, "no partial file — the stall was never past the connect/header phase");
     } finally {
       await new Promise((r) => srv.close(r));
     }
