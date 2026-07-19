@@ -67,6 +67,7 @@ import filesPanel from "./panels/files.js";
 import healthPanel from "./panels/health.js";
 import memoryPanel from "./panels/memory.js";
 import extensionsPanel from "./panels/extensions.js";
+import modelCatalogPanel from "./panels/model-catalog.js";
 import skillsPanel from "./panels/skills.js";
 import projectsPanel from "./panels/projects.js";
 import settingsPanel from "./panels/settings.js";
@@ -99,6 +100,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(blogPanel);
   registerPanel(filesPanel);
   registerPanel(extensionsPanel);
+  registerPanel(modelCatalogPanel);
   registerPanel(skillsPanel);
   registerPanel(settingsPanel);
   registerPanel(contactsPanel);

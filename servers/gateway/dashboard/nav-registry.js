@@ -51,6 +51,7 @@ const DEFAULT_NAV_PANEL_ASSIGNMENTS = {
   "bot-builder": "agents",
   "bot-board": "agents",
   skills: "agents",
+  "model-catalog": "agents",
   connect: "connections",
   contacts: "connections",
   messages: "connections",
