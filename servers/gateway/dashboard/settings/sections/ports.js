@@ -13,6 +13,7 @@ const KIND_LABEL = {
   hardcoded: "bundle",
   managed: "model service",
   core: "core service",
+  "local-model": "local model",
   foreign: "other listener",
 };
 
