@@ -414,6 +414,19 @@ export async function isProviderReady(providerName) {
  *
  * `opts.cfg` overrides the provider config this resolves `providerName`
  * from (tests only; forwarded to `acquireProvider` too — see its doc).
+ *
+ * `opts.onError`, if given, is invoked with the underlying thrown error
+ * whenever this function is about to collapse it into a plain `false`
+ * (Item G, PR G-F, defect 4). The tri-state return contract (`null` /
+ * `true` / `false`) is relied on verbatim by several other callers
+ * (`chat.js`, `llm-router.js`) that never pass `onError` and are
+ * completely unaffected — this is an additive, opt-in seam, not a
+ * change to what gets returned. `routes/models.js`'s start route is the
+ * one caller that passes it, so it can thread the real reason (e.g.
+ * `GLIBC_TOO_OLD`) into its 502 response instead of the generic
+ * "failed to become ready" message that used to be the only thing a
+ * caller ever saw — the actual cause previously reached nothing but
+ * this function's own `console.warn` below.
  */
 export async function maybeAcquireLocalProvider(providerName, opts = {}) {
   if (!providerName) return null;
@@ -427,6 +440,9 @@ export async function maybeAcquireLocalProvider(providerName, opts = {}) {
     return await acquireProvider(providerName, opts);
   } catch (err) {
     console.warn(`[gpu-orchestrator] maybeAcquireLocalProvider(${providerName}) failed: ${err.message}`);
+    if (typeof opts.onError === "function") {
+      try { opts.onError(err); } catch { /* caller's observer must never break this function */ }
+    }
     return false;
   }
 }

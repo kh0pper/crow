@@ -167,6 +167,37 @@ test("registerModel: allocates a port already recorded in state.json reservation
   } finally { cleanup(); }
 });
 
+// ---------------------------------------------------------------------------
+// registerModel + loadProviders() — no invisible-registration window
+// (Item G, PR G-F, defect 2: the DEFAULT invalidateCacheFn used to be the
+// plain sync invalidateProvidersCache(), which only clears the cache — the
+// very next loadProviders() call fires an un-awaited background DB refresh
+// and returns the stale/models.json-fallback snapshot in the meantime.
+// A start-route lookup immediately after a fresh native registration saw
+// the models.json fallback, found no such provider, and 409'd NOT_NATIVE
+// for a model that was already durably registered.)
+// ---------------------------------------------------------------------------
+
+test("registerModel: the registered provider is visible to the very next loadProviders() call — no stale-cache window, no sleep/poll", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    const { loadProviders, invalidateProvidersCache } = await import("../servers/shared/providers.js");
+    // Start from a deterministic cold cache regardless of what earlier
+    // tests in this process left behind.
+    invalidateProvidersCache();
+
+    await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
+
+    // Deliberately NO await/sleep/poll here — the very next synchronous
+    // loadProviders() call (the same one the start route's
+    // maybeAcquireLocalProvider makes) must already see the fresh row.
+    const cfg = loadProviders();
+    const p = cfg.providers["chat-test-model"];
+    assert.ok(p, "the just-registered provider is visible on the very next loadProviders() call");
+    assert.equal(p.gpuPolicy?.runtime, "native");
+  } finally { cleanup(); }
+});
+
 test("registerModel: invalidates the providers cache exactly once, AFTER the row is durably written", async () => {
   const { db, dir, cleanup } = freshLibsql();
   try {
