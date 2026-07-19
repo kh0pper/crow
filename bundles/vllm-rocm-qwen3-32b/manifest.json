@@ -11,5 +11,21 @@
     "gpu_arch": ["gfx1151"]
   },
   "env_vars": [],
-  "port": 8002
+  "port": 8002,
+  "providers": [
+    {
+      "id": "crow-mode-a-32b",
+      "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+      "apiKey": "none",
+      "description": "Mid-tier reasoning/synthesis endpoint (Qwen3-32B dense BF16)",
+      "models": [
+        {
+          "id": "qwen3-32b",
+          "contextLen": 32768,
+          "warm": true,
+          "priority": "interactive"
+        }
+      ]
+    }
+  ]
 }
