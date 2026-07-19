@@ -333,3 +333,71 @@ test("createStarterArtifacts: idempotency survives via dashboard_settings even i
     cleanup();
   }
 });
+
+test("resolveStarterProvider falls through when the first_run_default row is disabled", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    // Disabled first-run default provider — should be skipped.
+    await insertProvider(sdb, { id: FIRST_RUN_DEFAULT_ID, models: [{ id: FIRST_RUN_DEFAULT_ID }], disabled: 1 });
+    // Enabled fallback provider.
+    await insertProvider(sdb, { id: "cloud-x", models: [{ id: "gpt-x" }] });
+
+    const result = await resolveStarterProvider(sdb);
+    // Must pick the enabled provider, not the disabled first-run default.
+    assert.deepEqual(result, { providerId: "cloud-x", modelId: "gpt-x" });
+  } finally {
+    cleanup();
+  }
+});
+
+test("createStarterArtifacts recreates the conversation when starter_conversation_id points at a deleted row", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    await insertProvider(sdb, { id: FIRST_RUN_DEFAULT_ID, models: [{ id: FIRST_RUN_DEFAULT_ID }] });
+
+    // First run: creates bot + conversation.
+    const first = await createStarterArtifacts(sdb, { lang: "en" });
+    const firstConvId = first.conversationId;
+    assert.ok(Number.isInteger(firstConvId));
+
+    // Verify initial state: 1 bot, 1 conversation.
+    const botsAfterFirst = await sdb.execute({ sql: "SELECT COUNT(*) n FROM pi_bot_defs", args: [] });
+    assert.equal(Number(botsAfterFirst.rows[0].n), 1);
+    const convsAfterDelete = await sdb.execute({ sql: "SELECT COUNT(*) n FROM chat_conversations", args: [] });
+    assert.equal(Number(convsAfterDelete.rows[0].n), 1);
+
+    // Delete the conversation row (simulating operator cleanup or DB inconsistency).
+    await sdb.execute({
+      sql: "DELETE FROM chat_conversations WHERE id = ?",
+      args: [firstConvId],
+    });
+
+    // Verify the row is gone.
+    const convsAfterDeleteVerify = await sdb.execute({
+      sql: "SELECT COUNT(*) n FROM chat_conversations",
+      args: [],
+    });
+    assert.equal(Number(convsAfterDeleteVerify.rows[0].n), 0);
+
+    // Second run: should recreate conversation with a NEW id (not re-use the deleted id).
+    const second = await createStarterArtifacts(sdb, { lang: "en" });
+    const secondConvId = second.conversationId;
+
+    // Must have created a new conversation (different id).
+    assert.notEqual(secondConvId, firstConvId);
+    assert.ok(Number.isInteger(secondConvId));
+
+    // Verify new conversation row exists.
+    const convsAfterSecond = await sdb.execute({
+      sql: "SELECT COUNT(*) n FROM chat_conversations WHERE id = ?",
+      args: [secondConvId],
+    });
+    assert.equal(Number(convsAfterSecond.rows[0].n), 1);
+
+    // Verify no duplicate bot was created (still 1 bot row).
+    const botsAfterSecond = await sdb.execute({ sql: "SELECT COUNT(*) n FROM pi_bot_defs", args: [] });
+    assert.equal(Number(botsAfterSecond.rows[0].n), 1);
+  } finally {
+    cleanup();
+  }
+});

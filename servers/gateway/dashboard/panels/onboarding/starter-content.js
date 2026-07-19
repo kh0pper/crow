@@ -260,10 +260,10 @@ export async function resolveStarterProvider(db) {
  */
 function buildStarterPersona(tpl) {
   return (
-    `${tpl.system_prompt} When the user asks what you remember or asks you ` +
-    `to remember something, you MUST call the crow_memory tool — never ` +
-    `describe the call, make it. Starter memories about Crow exist; recall ` +
-    `answers from them.`
+    `${tpl.system_prompt} When the user asks what you remember, or asks you ` +
+    `to remember something, you MUST use your memory tools and actually make ` +
+    `the tool call — never describe or narrate it instead. Starter memories ` +
+    `about Crow exist; recall answers from them.`
   );
 }
 
