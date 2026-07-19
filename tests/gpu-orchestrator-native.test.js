@@ -22,6 +22,9 @@
 
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   pollResidency,
   acquireProvider,
@@ -36,6 +39,7 @@ import {
 } from "../servers/gateway/gpu-orchestrator.js";
 import { _resetProviderHealth, getProviderHealth } from "../servers/gateway/provider-health.js";
 import { nativeReadinessTimeoutMs } from "../servers/gateway/models/runtime.js";
+import { loadState, saveState } from "../servers/gateway/models/state.js";
 
 // --- fixtures ------------------------------------------------------------
 
@@ -106,6 +110,36 @@ beforeEach(() => {
   _resetProviderHealth();
   _setNativeHandleForTest("native-target", null);
   _setNativeHandleForTest("native-sib", null);
+});
+
+// --- getNativeHandle (Item G, Task 12 follow-up: read-only accessor for the
+// panel's stop/delete routes — see gpu-orchestrator.js's doc on it) --------
+
+test("getNativeHandle: null when no handle was ever seeded for this provider name", async () => {
+  const { getNativeHandle } = await import("../servers/gateway/gpu-orchestrator.js");
+  assert.equal(getNativeHandle("native-target"), null);
+  assert.equal(getNativeHandle("some-unknown-provider"), null);
+});
+
+test("getNativeHandle: returns the exact handle object seeded via the test seam, live reflects in place", async () => {
+  const { getNativeHandle } = await import("../servers/gateway/gpu-orchestrator.js");
+  const handle = fakeHandle({ live: true });
+  _setNativeHandleForTest("native-target", handle);
+  assert.equal(getNativeHandle("native-target"), handle);
+
+  // Mutating the handle's own `live` flag (as `runtime.js`'s real
+  // startModel/stop() do in place) is visible through the accessor without
+  // re-seeding — it's a live reference into the module's map, not a copy.
+  handle.live = false;
+  assert.equal(getNativeHandle("native-target").live, false);
+});
+
+test("getNativeHandle: clearing via the test seam (null) makes it null again — the accessor has no separate mutation surface", async () => {
+  const { getNativeHandle } = await import("../servers/gateway/gpu-orchestrator.js");
+  _setNativeHandleForTest("native-target", fakeHandle({ live: true }));
+  assert.notEqual(getNativeHandle("native-target"), null);
+  _setNativeHandleForTest("native-target", null);
+  assert.equal(getNativeHandle("native-target"), null);
 });
 
 // --- touch point 5: pollResidency compose-file gate (named blocker) -----
@@ -794,4 +828,119 @@ test("Fix 3: freed reservations are persisted via saveStateFn", async () => {
     }),
   });
   assert.equal(saveCalls, 1, "saveState was called because a reservation was freed");
+});
+
+// --- Task 13 fix round 1, finding c: the wasLive marker ("reloading after
+// update") ---------------------------------------------------------------
+//
+// Uses a REAL scratch dir (not the `startCapableOpts` fixture's fake
+// "/fake/crow-home") so persistence genuinely happens against the real
+// state.js module and is verifiable via loadState() — a stronger proof
+// than injecting a fake loadStateFn/saveStateFn pair, and the exact
+// end-to-end path production runs.
+
+function scratchStateDir() {
+  return mkdtempSync(join(tmpdir(), "gpu-orch-waslive-"));
+}
+
+test("Finding c: a successful native start persists wasLive:true on the registry entry", async () => {
+  const dir = scratchStateDir();
+  try {
+    saveState(dir, { reservations: {}, journal: {}, registry: { "native-target": { file: "model.gguf" } } });
+    const cfg = { providers: { "native-target": nativeProv(18150, "qwen3-4b") } };
+    let probeCalls = 0;
+    const identityProbeFn = async () => {
+      probeCalls += 1;
+      return probeCalls === 1 ? "down" : "resident"; // fast-path miss, then resident once "started"
+    };
+
+    const result = await acquireProvider("native-target", {
+      ...startCapableOpts({ cfg, identityProbeFn }),
+      resolveDataDirFn: () => dir,
+    });
+
+    assert.equal(result, true);
+    const entry = loadState(dir).registry["native-target"];
+    assert.equal(entry.wasLive, true);
+    assert.equal(entry.lastStoppedAt, null);
+    // pre-existing fields survive the merge untouched
+    assert.equal(entry.file, "model.gguf");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Finding c: the handle reaching a terminal state (stop/crash) clears wasLive and stamps lastStoppedAt — BEFORE any restart could see it", async () => {
+  const dir = scratchStateDir();
+  try {
+    saveState(dir, { reservations: {}, journal: {}, registry: { "native-target": { file: "model.gguf" } } });
+    const cfg = { providers: { "native-target": nativeProv(18151, "qwen3-4b") } };
+    let probeCalls = 0;
+    const identityProbeFn = async () => {
+      probeCalls += 1;
+      return probeCalls === 1 ? "down" : "resident"; // fast-path miss, then resident once "started"
+    };
+    let capturedOnTerminal = null;
+    const startModelFn = (params) => {
+      capturedOnTerminal = params.onTerminal;
+      return fakeHandle();
+    };
+
+    const result = await acquireProvider("native-target", {
+      ...startCapableOpts({ cfg, identityProbeFn, startModelFn }),
+      resolveDataDirFn: () => dir,
+    });
+    assert.equal(result, true);
+    assert.equal(loadState(dir).registry["native-target"].wasLive, true, "sanity: it became live first");
+
+    // Simulate the real runtime.js handle later reaching a terminal state
+    // (idle-unload, crash-exhausted, explicit stop) — same simulation
+    // pattern the pre-existing "host lock is held for the life of
+    // residency" test above uses.
+    capturedOnTerminal("stopped");
+
+    const after = loadState(dir).registry["native-target"];
+    assert.equal(after.wasLive, false);
+    assert.ok(typeof after.lastStoppedAt === "string" && after.lastStoppedAt.length > 0, "lastStoppedAt is stamped");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Finding c: a boot-fresh gateway process (no in-memory handle) sees a previously-live, still-marked registry entry — this is the 'reloading after update' signal GET /runtime reads", async () => {
+  const dir = scratchStateDir();
+  try {
+    // Simulates state left behind by a PRIOR process that died/restarted
+    // while this model was resident: wasLive:true, no corresponding
+    // in-memory handle in THIS (fresh) process — this test doesn't touch
+    // acquireProvider at all, it just proves the persisted marker survives
+    // as plain JSON and reads back exactly as written, independent of the
+    // orchestrator's in-memory state.
+    saveState(dir, {
+      reservations: {},
+      journal: {},
+      registry: { "native-target": { file: "model.gguf", wasLive: true, lastStoppedAt: null } },
+    });
+    const entry = loadState(dir).registry["native-target"];
+    assert.equal(entry.wasLive, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Finding c: persisting the marker against an unwritable dir never throws and never blocks a successful acquire (safety net)", async () => {
+  // "/fake/crow-home" (startCapableOpts' own default resolveDataDirFn
+  // stand-in) is deliberately never created on disk — loadState() against
+  // it degrades to an empty registry, so persistLivenessMarker's
+  // no-matching-entry early return is what actually keeps this safe (see
+  // its doc) — this test pins that the acquire itself still succeeds
+  // regardless.
+  const cfg = { providers: { "native-target": nativeProv(18152, "qwen3-4b") } };
+  let probeCalls = 0;
+  const identityProbeFn = async () => {
+    probeCalls += 1;
+    return probeCalls === 1 ? "down" : "resident";
+  };
+  const result = await acquireProvider("native-target", startCapableOpts({ cfg, identityProbeFn }));
+  assert.equal(result, true, "an unwritable/fake persistence dir never blocks a successful start");
 });

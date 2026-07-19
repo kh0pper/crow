@@ -233,6 +233,33 @@ function shouldSyncRow(table, row) {
     return Boolean(row.group_uid);
   }
   if (table === "providers") {
+    if (!row) return false;
+    // Local-only marker (Item G, Task 12 fix round 1): a providers row
+    // whose gpu_policy JSON carries `local_only: true` is riding the
+    // providers table's storage mechanics for something that is NOT a real
+    // LLM/embedding endpoint — e.g. the model catalog's stashed Hugging
+    // Face API token (servers/gateway/routes/models.js's
+    // HF_TOKEN_PROVIDER_ID row: base_url "https://huggingface.co",
+    // disabled, models: [] — a real, non-loopback host, so it would
+    // otherwise pass the loopback carve-out below and sync in plaintext to
+    // every paired instance). This is deliberately a general convention —
+    // ANY future providers row that needs to opt out of fleet sync sets
+    // this same marker — not a hardcoded check against one reserved id.
+    // Checked BEFORE the base_url/loopback logic (a local-only row may have
+    // a perfectly real, non-loopback base_url) and gates BOTH emit
+    // (emitChange) and apply (_applyEntry) — this function is their single
+    // shared choke point, same as the loopback carve-out below.
+    // Malformed gpu_policy JSON is not treated as local_only (fails open
+    // to the existing loopback/host checks, not silently dropped).
+    if (row.gpu_policy) {
+      let policy = null;
+      try {
+        policy = typeof row.gpu_policy === "string" ? JSON.parse(row.gpu_policy) : row.gpu_policy;
+      } catch {
+        policy = null; // malformed JSON -> fall through, not local_only
+      }
+      if (policy && policy.local_only === true) return false;
+    }
     // Loopback endpoints are per-instance by construction: a peer dialing
     // 127.0.0.1 reaches ITSELF, never the origin's service. They're also
     // co-owned by every instance's locality predicate (loopback matches
@@ -241,7 +268,7 @@ function shouldSyncRow(table, row) {
     // apply) is the only clean single-writer story. Missing/malformed
     // base_url → defensive false: a providers row without a parseable
     // endpoint shouldn't sync either.
-    if (!row || !row.base_url) return false;
+    if (!row.base_url) return false;
     let hostname;
     try {
       hostname = new URL(row.base_url).hostname;
