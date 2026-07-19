@@ -11,7 +11,43 @@
  * is kept as a thin backwards-compat wrapper during the phased rollout.
  */
 
+import { readFileSync, statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadProviders as loadCachedProviders } from "../../shared/providers.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const MODEL_CATALOG_PATH = resolve(dirname(__filename), "..", "..", "..", "registry", "model-catalog.json");
+
+// mtime-checked cache — mirrors gpu-orchestrator.js's `defaultLoadCatalog`
+// (same rationale: this can run on every chat turn once a native model's
+// provider row predates chat_template_kwargs, so a bare readFileSync +
+// JSON.parse per call is wasted work for a file that only changes on
+// deploy).
+let _catalogCache = null;
+let _catalogCacheMtimeMs = null;
+
+/** Healing fallback (C1 Task 1): look up a model's catalog entry by id, for
+ * provider rows registered before this change carried `chatTemplateKwargs`
+ * in their `models[]` JSON. Never throws — an unreadable/missing catalog
+ * degrades to `null`, same as "no fallback available". */
+function catalogModelEntry(id) {
+  let mtimeMs;
+  try {
+    mtimeMs = statSync(MODEL_CATALOG_PATH).mtimeMs;
+  } catch {
+    return null;
+  }
+  try {
+    if (!_catalogCache || mtimeMs !== _catalogCacheMtimeMs) {
+      _catalogCache = JSON.parse(readFileSync(MODEL_CATALOG_PATH, "utf8"));
+      _catalogCacheMtimeMs = mtimeMs;
+    }
+  } catch {
+    return null;
+  }
+  return (_catalogCache?.models || []).find((m) => m.id === id) || null;
+}
 
 function firstModelId(models) {
   if (!Array.isArray(models)) return null;
@@ -42,6 +78,25 @@ async function resolveFromDb(db, providerId, modelId) {
     pickedModel = modelId;
   }
 
+  const pickedEntry = models.find((m) => typeof m === "object" && m.id === pickedModel);
+  let chatTemplateKwargs =
+    pickedEntry && pickedEntry.chatTemplateKwargs && typeof pickedEntry.chatTemplateKwargs === "object"
+      ? pickedEntry.chatTemplateKwargs
+      : undefined;
+  if (!chatTemplateKwargs) {
+    // Healing fallback: rows registered before the catalog carried the
+    // field. Only for native-runtime rows (provider id IS the catalog
+    // model id) — see catalogModelEntry's doc.
+    let policy = null;
+    try { policy = typeof r.gpu_policy === "string" ? JSON.parse(r.gpu_policy) : r.gpu_policy; } catch {}
+    if (policy && policy.runtime === "native") {
+      const cat = catalogModelEntry(providerId);
+      if (cat && cat.chat_template_kwargs && typeof cat.chat_template_kwargs === "object") {
+        chatTemplateKwargs = cat.chat_template_kwargs;
+      }
+    }
+  }
+
   return {
     baseUrl: r.base_url,
     apiKey: r.api_key || "none",
@@ -49,6 +104,7 @@ async function resolveFromDb(db, providerId, modelId) {
     provider_id: providerId,
     provider_type: r.provider_type || null,
     host: r.host || "local",
+    chatTemplateKwargs,
   };
 }
 

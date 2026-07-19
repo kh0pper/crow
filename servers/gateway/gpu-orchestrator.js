@@ -657,6 +657,7 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
     readinessInitialDelayMs = READINESS_INITIAL_DELAY_MS,
     storageClass = "ssd",
     nativeReadinessTimeoutMsFn = nativeReadinessTimeoutMs,
+    loadCatalogFn = defaultLoadCatalog,
   } = opts;
 
   const alias = nativeAlias(p);
@@ -688,8 +689,19 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
     if (typeof onTerminal === "function") onTerminal(reason);
   };
 
+  // Scoped --jinja (C1 Task 1): chat_template_kwargs in request bodies is
+  // only honored under llama-server's jinja engine; scoped per-model — the
+  // other catalog models are not template-verified under --jinja.
+  let extraArgs = [];
+  try {
+    const entry = (loadCatalogFn()?.models || []).find((m) => m.id === providerName);
+    if (entry && entry.chat_template_kwargs && typeof entry.chat_template_kwargs === "object") {
+      extraArgs = ["--jinja"];
+    }
+  } catch { /* catalog unreadable → no extra args, model starts as before */ }
+
   console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port}, readinessTimeoutMs=${readinessTimeoutMs})`);
-  const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn, onTerminal: wrappedOnTerminal });
+  const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn, onTerminal: wrappedOnTerminal, extraArgs });
   _nativeHandles.set(providerName, handle);
 
   const result = await waitForNativeReady(p.baseUrl, alias, {

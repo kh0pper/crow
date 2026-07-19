@@ -279,6 +279,12 @@ function shouldSyncRow(table, row) {
     if (host === "localhost" || host === "::1" || /^127\./.test(host)) return false;
     return true;
   }
+  if (table === "memories") {
+    // Starter/demo content seeded by onboarding (C1) is per-install: it must
+    // never ride to paired instances (same convention as providers
+    // gpu_policy.local_only above — one gate covers emit AND apply).
+    if (row && row.source === "starter") return false;
+  }
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
   // dashboard_settings holds only the global scope; per-instance overrides live

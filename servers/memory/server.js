@@ -597,7 +597,7 @@ export function createMemoryServer(dbPath, options = {}) {
 
       // Emit sync entry
       if (syncManager) {
-        const updated = { id, content, category, tags, importance, context };
+        const updated = { id, content, category, tags, importance, context, source: rows[0].source ?? null };
         // Remove undefined fields
         for (const k of Object.keys(updated)) { if (updated[k] === undefined) delete updated[k]; }
         syncManager.emitChange("memories", "update", updated).catch(() => {});
@@ -687,7 +687,7 @@ export function createMemoryServer(dbPath, options = {}) {
 
       // Emit sync entry
       if (syncManager) {
-        syncManager.emitChange("memories", "delete", { id }).catch(() => {});
+        syncManager.emitChange("memories", "delete", { id, source: memory.source ?? null }).catch(() => {});
       }
 
       return { content: [{ type: "text", text: `Memory #${id} deleted.` }] };
