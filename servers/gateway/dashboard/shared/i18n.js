@@ -1848,6 +1848,22 @@ export const translations = {
   // ─── Starter agent + conversation (C1/C3 Task 3) ───
   "starter.botName": { en: "My Crow", es: "Mi Crow" },
   "starter.convTitle": { en: "Chat with your Crow", es: "Chatea con tu Crow" },
+  // ─── Help & Setup: clear starter content (C1/C3 Task 4) ───
+  "helpSetup.starterTitle": { en: "Starter content", es: "Contenido inicial" },
+  "helpSetup.starterCount": {
+    en: "{n} starter memories from first-run setup. This only removes memories — the starter bot and its conversation are managed separately in Bot Builder and Messages.",
+    es: "{n} memorias iniciales de la configuración de primer uso. Esto solo elimina memorias: el bot inicial y su conversación se gestionan por separado en Bot Builder y Mensajes.",
+  },
+  "helpSetup.starterClear": { en: "Clear starter memories", es: "Borrar memorias iniciales" },
+  "helpSetup.starterClearConfirm": {
+    en: "Delete all starter memories? This only affects memories — the starter bot and its conversation stay put. This can't be undone.",
+    es: "¿Eliminar todas las memorias iniciales? Esto solo afecta a las memorias: el bot inicial y su conversación no se tocan. Esto no se puede deshacer.",
+  },
+  "helpSetup.starterCleared": { en: "Starter memories cleared.", es: "Memorias iniciales eliminadas." },
+  "helpSetup.starterNone": {
+    en: "No starter memories left to clear.",
+    es: "No quedan memorias iniciales por borrar.",
+  },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
