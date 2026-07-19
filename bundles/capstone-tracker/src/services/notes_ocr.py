@@ -27,6 +27,7 @@ def _load_trocr():
         return _trocr_processor, _trocr_model
     try:
         from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+
         logger.info("Loading TrOCR model (this may take a moment)...")
         _trocr_processor = TrOCRProcessor.from_pretrained(
             "microsoft/trocr-base-handwritten"
@@ -123,7 +124,7 @@ def ocr_with_vision(image: Image.Image) -> str:
     """Use OpenAI-compatible vision endpoint (local Qwen by default) to transcribe handwriting.
 
     Endpoint + model + key come from env (see plan § 4.0.5):
-        OCR_VISION_URL    e.g. http://100.118.41.122:8003/v1
+        OCR_VISION_URL    e.g. http://<your-llm-host>:<port>/v1
         OCR_VISION_MODEL  e.g. qwen3.6-35b-a3b
         OCR_VISION_API_KEY e.g. "none" (llama-server accepts any value)
     """
@@ -150,8 +151,8 @@ def ocr_with_vision(image: Image.Image) -> str:
                         {
                             "type": "text",
                             "text": "Transcribe the handwriting in this image accurately. "
-                                    "Return only the transcribed text, nothing else. "
-                                    "If the image is blank or contains no text, return an empty string.",
+                            "Return only the transcribed text, nothing else. "
+                            "If the image is blank or contains no text, return an empty string.",
                         },
                     ],
                 }
