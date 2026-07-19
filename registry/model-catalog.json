@@ -37,8 +37,9 @@
       "min_runtime_version": "b10068",
       "default_quant": "Q4_K_M",
       "first_run_default": true,
+      "chat_template_kwargs": { "enable_thinking": false },
       "tags": ["chat", "small", "cpu-capable"],
-      "notes": "Small class default. Runs on CPU alone (min_vram_mb: 0) on an 8 GB RAM machine; this is the first model Crow offers on a fresh install.",
+      "notes": "Small class default. Runs on CPU alone (min_vram_mb: 0) on an 8 GB RAM machine; this is the first model Crow offers on a fresh install. chat_template_kwargs suppresses Qwen3's <think> reasoning block: on a small model the thinking preamble is noisy filler that ruins the first-chat experience, and the llm-router's fast voice route already defaults to the same enable_thinking:false.",
       "quants": [
         {
           "file": "Qwen3-4B-Q4_K_M.gguf",

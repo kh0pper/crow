@@ -81,6 +81,23 @@ export function providerNotReadyError(providerName, isNative, lang) {
   };
 }
 
+/**
+ * Build `adapter.chatStream()`'s per-call options (C1 Task 1). Pure —
+ * regression seam for the thinking-suppression chain. `cfg` is a
+ * `resolveProviderConfig()` result (or null); its optional
+ * `chatTemplateKwargs` is threaded through ONLY when present, so cloud
+ * adapters and adapters ignorant of the option see no new field. (The
+ * openai adapter reads `options.chatTemplateKwargs` per call — verified
+ * ai/adapters/openai.js:142-148; other adapters ignore unknown options.)
+ */
+export function chatStreamOptionsFor(cfg, signal) {
+  const opts = { signal };
+  if (cfg && cfg.chatTemplateKwargs && typeof cfg.chatTemplateKwargs === "object") {
+    opts.chatTemplateKwargs = cfg.chatTemplateKwargs;
+  }
+  return opts;
+}
+
 export default function chatRouter(dashboardAuth) {
   const router = Router();
 
@@ -572,7 +589,13 @@ export default function chatRouter(dashboardAuth) {
       }
 
       // Get provider adapter (profile-aware; per-message overrides honored)
+      // `resolvedProviderCfg` (C1 Task 1) carries the resolveProviderConfig
+      // result purely so its optional `chatTemplateKwargs` can reach the
+      // chatStream call below — hoisted above the branches because the
+      // `cfg` locals inside them are branch-scoped `const`s, out of scope
+      // at the call site.
       let adapter;
+      let resolvedProviderCfg = null;
       try {
         const providerDiffers = effectiveProvider && effectiveProvider !== conversation.provider;
         if (providerDiffers) {
@@ -581,6 +604,7 @@ export default function chatRouter(dashboardAuth) {
           // (accepts provider_id or provider_type), fall back to
           // models.json if no DB row matches.
           const cfg = await resolveProviderConfig(db, effectiveProvider, effectiveModel).catch(() => null);
+          resolvedProviderCfg = cfg;
           if (cfg) {
             const { createAdapterFromProfile: fromProfile } = await import("../ai/provider.js");
             // DB rows for bundle-registered local providers (crow-swap-*,
@@ -613,11 +637,19 @@ export default function chatRouter(dashboardAuth) {
             // mode profiles ignore the db arg and use embedded fields.
             const result = await createAdapterFromProfile(profile, effectiveModel, db);
             adapter = result.adapter;
+            // createAdapterFromProfile never calls resolveProviderConfig
+            // itself — fetch it separately, purely to obtain
+            // chatTemplateKwargs (C1 Task 1, deviation 6: inline-config
+            // profiles with no provider_id stay unsuppressed).
+            if (profile.provider_id) {
+              resolvedProviderCfg = await resolveProviderConfig(db, profile.provider_id, profile.model_id).catch(() => null);
+            }
           }
         } else {
           // No profile: try DB-first resolver on the conversation's
           // provider/model (Quick Chat). Fall back to env on miss.
           const cfg = await resolveProviderConfig(db, effectiveProvider, effectiveModel).catch(() => null);
+          resolvedProviderCfg = cfg;
           if (cfg) {
             const { createAdapterFromProfile: fromProfile } = await import("../ai/provider.js");
             // DB rows for bundle-registered local providers (crow-swap-*,
@@ -747,9 +779,7 @@ export default function chatRouter(dashboardAuth) {
         let roundOutputTokens = 0;
 
         try {
-          for await (const event of adapter.chatStream(aiMessages, tools, {
-            signal: abortController.signal,
-          })) {
+          for await (const event of adapter.chatStream(aiMessages, tools, chatStreamOptionsFor(resolvedProviderCfg, abortController.signal))) {
             if (abortController.signal.aborted) break;
 
             switch (event.type) {
