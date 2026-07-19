@@ -63,6 +63,34 @@ async function refreshCache() {
   _cacheLoadedAt = Date.now();
 }
 
+/**
+ * Invalidate the cache AND await a real refresh before returning (Item G,
+ * PR G-F, defect 2). `invalidateProvidersCache()` above only clears the
+ * cache and leaves the next `loadProviders()` call to fire an un-awaited
+ * background `refreshCache()` — fine for the common "somebody else will
+ * call `loadProviders()` again eventually and see the update" case, but
+ * wrong for a caller that's about to hand the row it just wrote to
+ * something that needs to see it RIGHT NOW: a fresh native-model
+ * registration followed immediately by the start route's
+ * `maybeAcquireLocalProvider` -> `loadProviders()` lookup was invisible
+ * for up to one DB round-trip, which `loadProviders()`'s synchronous
+ * contract can never await — the lookup fell through to the stale/
+ * models.json-fallback cache and 409'd `NOT_NATIVE` for a model that was
+ * already durably registered.
+ *
+ * `loadProviders()` itself stays synchronous on purpose (see its doc —
+ * many hot-path callers, e.g. the orchestrator, can't be made async), so
+ * this is a separate, deliberately async sibling for the handful of
+ * callers (today: `manager.js`'s `registerModel`) that CAN await —
+ * they pass this as their `invalidateCacheFn` instead of the plain sync
+ * `invalidateProvidersCache`.
+ */
+export async function invalidateAndRefreshProvidersCache() {
+  invalidateProvidersCache();
+  await refreshCache();
+  return _cache;
+}
+
 function loadFromModelsJson() {
   for (const p of repoModelsJsonSearchPaths()) {
     try {

@@ -271,6 +271,65 @@ test("GET /api/models/catalog: reflects registered/running state from state.json
 });
 
 // ---------------------------------------------------------------------------
+// Catalog — cold-cache reprobe (Item G, PR G-F, defect 3: the route used to
+// read getCachedProbeFn() raw, so a client that never opened the full panel
+// (which fires its own reprobe-on-open effect) or hit POST /reprobe itself
+// saw a permanent fitBadge:"unknown" for every quant.)
+// ---------------------------------------------------------------------------
+
+test("GET /api/models/catalog: a cold probe cache is warmed via a one-shot reprobe — real badges, not permanent 'unknown'", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    let reprobeCalls = 0;
+    let cached = null; // simulates probe.js's own module-level cache: null until reprobeFn "runs"
+    await withServer({
+      dir: h.dir,
+      loadCatalogFn: makeCatalog,
+      getCachedProbeFn: () => cached,
+      reprobeFn: async () => {
+        reprobeCalls++;
+        cached = FIXED_PROBE;
+        return FIXED_PROBE;
+      },
+    }, async (base) => {
+      const r = await fetch(base + "/api/models/catalog", { headers: authHeaders(token) });
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.deepEqual(body.probe, FIXED_PROBE, "the response carries the freshly-reprobed hardware, not null");
+      const quants = Object.fromEntries(body.models[0].quants.map((q) => [q.quant, q.fitBadge]));
+      assert.equal(quants["Q4_K_M"], "fits", "a cold-cache request still gets a real fit badge, not 'unknown'");
+      assert.equal(reprobeCalls, 1, "reprobe fired exactly once for the cold-cache request");
+
+      // A SECOND request in the same process must reuse the now-warm
+      // cache (mirroring probe.js's real getCachedProbe()/reprobe()
+      // module-cache contract) — reprobe must not fire again.
+      const r2 = await fetch(base + "/api/models/catalog", { headers: authHeaders(token) });
+      assert.equal(r2.status, 200);
+      assert.equal(reprobeCalls, 1, "reprobe called exactly once across two requests — the second reused the warm cache");
+    });
+  } finally { await h.cleanup(); }
+});
+
+test("GET /api/models/catalog: a warm probe cache never triggers a reprobe", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    let reprobeCalls = 0;
+    await withServer({
+      dir: h.dir,
+      loadCatalogFn: makeCatalog,
+      getCachedProbeFn: () => FIXED_PROBE,
+      reprobeFn: async () => { reprobeCalls++; return FIXED_PROBE; },
+    }, async (base) => {
+      const r = await fetch(base + "/api/models/catalog", { headers: authHeaders(token) });
+      assert.equal(r.status, 200);
+      assert.equal(reprobeCalls, 0, "an already-warm cache is used as-is — no reprobe call at all");
+    });
+  } finally { await h.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
 // Download gate
 // ---------------------------------------------------------------------------
 
@@ -878,6 +937,62 @@ test("POST /api/models/:id/start: reaches maybeAcquireLocalProvider and maps tru
       const notNative = await fetch(base + "/api/models/panel-test-model/start", { method: "POST", headers: authHeaders(token) });
       assert.equal(notNative.status, 409);
       assert.equal((await notNative.json()).code, "NOT_NATIVE");
+    });
+  } finally { await h.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// Start route — surfaces the real failure reason (Item G, PR G-F, defect 4:
+// the 502 used to swallow the underlying typed error — e.g. GLIBC_TOO_OLD —
+// entirely; it reached only the gateway's own console.warn, never the
+// caller/panel.)
+// ---------------------------------------------------------------------------
+
+test("POST /api/models/:id/start: a start failure threads the underlying error's code+message into the 502 body as `cause`", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { registerModel } = await import("../servers/gateway/models/manager.js");
+    await registerModel({ modelId: "panel-test-model", quant: "Q4_K_M", catalog: makeCatalog(), db: h.db, dir: h.dir });
+
+    let sawOnErrorOpts = false;
+    await withServer({
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      maybeAcquireLocalProviderFn: async (id, opts) => {
+        sawOnErrorOpts = typeof opts?.onError === "function";
+        opts.onError(Object.assign(new Error("glibc too old for any linux runtime asset (need >= 2.34)"), { code: "GLIBC_TOO_OLD" }));
+        return false;
+      },
+    }, async (base) => {
+      const failed = await fetch(base + "/api/models/panel-test-model/start", { method: "POST", headers: authHeaders(token) });
+      assert.equal(failed.status, 502);
+      const body = await failed.json();
+      assert.equal(body.code, "START_FAILED");
+      assert.ok(sawOnErrorOpts, "the route passed an onError observer to maybeAcquireLocalProviderFn");
+      assert.equal(body.cause?.code, "GLIBC_TOO_OLD", "the underlying typed error's code reached the response body");
+      assert.match(body.cause?.message, /glibc too old/i);
+    });
+  } finally { await h.cleanup(); }
+});
+
+test("POST /api/models/:id/start: a start failure with no captured error still returns a well-formed 502 with cause:null", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { registerModel } = await import("../servers/gateway/models/manager.js");
+    await registerModel({ modelId: "panel-test-model", quant: "Q4_K_M", catalog: makeCatalog(), db: h.db, dir: h.dir });
+
+    await withServer({
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      // Stub never calls onError — mirrors a plain readiness-timeout
+      // (no underlying thrown error at all, just `false`).
+      maybeAcquireLocalProviderFn: async () => false,
+    }, async (base) => {
+      const failed = await fetch(base + "/api/models/panel-test-model/start", { method: "POST", headers: authHeaders(token) });
+      assert.equal(failed.status, 502);
+      const body = await failed.json();
+      assert.equal(body.code, "START_FAILED");
+      assert.equal(body.cause, null);
     });
   } finally { await h.cleanup(); }
 });
