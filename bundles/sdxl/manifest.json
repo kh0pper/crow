@@ -21,6 +21,7 @@
     3005
   ],
   "webUI": null,
+  "no_auto_provider": "Not an LLM chat endpoint -- image generation is wired via the SDXL_SERVICE_URL env var (default http://127.0.0.1:3005), consumed directly by the crow_generate_background MCP tool in servers/storage/server.js (custom /health + /generate JSON API, not OpenAI-compatible /v1/images/generations). No LLM providers[] entry applies.",
   "requires": {
     "min_ram_mb": 4096,
     "min_disk_mb": 25000,
