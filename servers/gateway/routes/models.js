@@ -42,12 +42,12 @@
  * `models: []` array, so it is never a candidate for chat routing, mutex
  * arbitration, or the Providers-tab's enabled-row rendering paths (all of
  * which either skip disabled rows or key off `models[].task === "chat"`).
- * This intentionally means the token rides this instance's existing
- * provider fleet-sync (`servers/sharing/instance-sync.js`'s `SYNCED_TABLES`
- * includes `"providers"`, and `api_key` is not in that table's
- * `EXCLUDED_COLUMNS`) — the same already-accepted trade-off Settings ->
- * Providers keys make today (see `providers-db.js`'s module doc), not a
- * new one introduced here.
+ * UNLIKE a real cloud-provider key, this row is never broadcast to paired
+ * instances: it carries `gpu_policy: { local_only: true }`, a marker
+ * `shouldSyncRow`'s providers branch (`servers/sharing/instance-sync.js`)
+ * checks and excludes on BOTH emit and apply — see that function's doc for
+ * why this is a general convention (any providers row can opt out this
+ * way), not a hardcoded check against this one reserved id.
  */
 
 import { Router } from "express";
@@ -543,7 +543,15 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
         models: [],
         disabled: true,
         providerType: null,
-        gpuPolicy: null,
+        // local_only: true is the general convention `shouldSyncRow`'s
+        // providers branch (servers/sharing/instance-sync.js) checks to
+        // exclude a row from fleet instance-sync entirely — this row's
+        // base_url is a real (non-loopback) host, so without this marker
+        // it would otherwise sync in plaintext to every paired instance.
+        // Deliberately non-null (not `null`) even on a re-POST: upsertProvider's
+        // SQL COALESCEs a null gpu_policy into "keep existing" on UPDATE, so a
+        // null write here would silently fail to (re-)establish the marker.
+        gpuPolicy: { local_only: true },
       });
       await invalidateCacheFn();
       res.json({ configured: !!cleaned });

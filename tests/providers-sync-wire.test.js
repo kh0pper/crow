@@ -12,6 +12,12 @@
  *   D9: shouldSyncRow('providers') rejects loopback base_urls in both
  *       directions (emit and apply).
  *
+ * Item G Task 12 fix round 1: shouldSyncRow('providers') also rejects any
+ * row whose gpu_policy carries `local_only: true`, independent of
+ * base_url — the general convention that keeps the model-catalog panel's
+ * Hugging Face token (a real, non-loopback "provider" row) off the fleet
+ * sync wire.
+ *
  * Harness follows tests/instance-sync.test.js: real init-db.js schema in a
  * tmp dir, fixed ed25519 identity, stub outbound feeds (no Hypercore).
  */
@@ -106,6 +112,92 @@ test("D9: loopback base_urls never sync; tailnet/LAN/cloud do; malformed/missing
   assert.equal(shouldSyncRowForTest("providers", noUrl), false, "missing base_url");
   assert.equal(shouldSyncRowForTest("providers", providerRow({ base_url: "not a url" })), false, "malformed base_url");
   assert.equal(shouldSyncRowForTest("providers", null), false, "null row");
+});
+
+// ── local_only marker (Item G Task 12 fix round 1) ──────────────────────────
+//
+// A providers row can opt out of fleet sync entirely by setting
+// `gpu_policy.local_only = true`, independent of its base_url (unlike the
+// loopback carve-out, which only ever catches 127.0.0.1/localhost/::1
+// hosts). The models-catalog panel's Hugging Face token row is the first
+// user of this: its base_url is a real, non-loopback host
+// (https://huggingface.co), so WITHOUT the marker it would sail straight
+// past the loopback check above and sync in plaintext to every paired
+// instance. `shouldSyncRowForTest` is the exact function called at BOTH
+// `emitChange` (outbound) and `_applyEntry` (inbound) — see D9's comment
+// above for why one function call proves both directions; the assertions
+// below do the same for this marker.
+
+test("local_only marker: a providers row with gpu_policy.local_only=true never syncs, even with a real non-loopback base_url", () => {
+  const hfTokenRow = providerRow({
+    id: "crow-hf-token",
+    base_url: "https://huggingface.co",
+    disabled: 1,
+    models: "[]",
+    gpu_policy: JSON.stringify({ local_only: true }),
+  });
+  // (a) the exact shape POST /api/models/hf-token writes never syncs —
+  // proven via the SAME gate emitChange/​_applyEntry both call, so this
+  // single assertion covers outbound AND inbound symmetrically.
+  assert.equal(
+    shouldSyncRowForTest("providers", hfTokenRow),
+    false,
+    "a local_only=true row must never sync, regardless of base_url",
+  );
+});
+
+test("local_only marker: a normal external provider row (no marker) still syncs — no over-exclusion", () => {
+  // (b) a real cloud/tailnet provider row, gpu_policy present but WITHOUT
+  // the marker, must be unaffected by this change.
+  const withUnrelatedPolicy = providerRow({ gpu_policy: JSON.stringify({ mutexGroup: "local-llm" }) });
+  assert.equal(shouldSyncRowForTest("providers", withUnrelatedPolicy), true);
+
+  // No gpu_policy at all (the common case for most cloud providers).
+  const noPolicy = providerRow();
+  assert.equal(shouldSyncRowForTest("providers", noPolicy), true);
+
+  // gpu_policy.local_only present but falsy/absent must NOT be treated as
+  // an exclusion — only a literal `=== true` opts a row out.
+  assert.equal(
+    shouldSyncRowForTest("providers", providerRow({ gpu_policy: JSON.stringify({ local_only: false }) })),
+    true,
+    "local_only: false must still sync",
+  );
+  assert.equal(
+    shouldSyncRowForTest("providers", providerRow({ gpu_policy: JSON.stringify({ mutexGroup: "x" }) })),
+    true,
+    "gpu_policy present without a local_only key must still sync",
+  );
+});
+
+test("local_only marker: malformed gpu_policy JSON fails OPEN to the existing loopback/host checks, not silently dropped", () => {
+  // A non-loopback row with garbage gpu_policy must still sync (the
+  // malformed-JSON catch falls through, it does not itself return false).
+  assert.equal(
+    shouldSyncRowForTest("providers", providerRow({ gpu_policy: "{not valid json" })),
+    true,
+  );
+  // A LOOPBACK row with garbage gpu_policy is still correctly rejected —
+  // by the pre-existing loopback check, not the local_only branch.
+  assert.equal(
+    shouldSyncRowForTest("providers", providerRow({ base_url: "http://127.0.0.1:8011/v1", gpu_policy: "{not valid json" })),
+    false,
+  );
+});
+
+test("local_only marker: also gates a LOOPBACK-shaped row (belt and braces, not just the non-loopback HF-token case)", () => {
+  // (c) apply-side symmetry: _applyEntry calls this exact function on the
+  // inbound wire row before ever touching the DB — there is no second,
+  // apply-specific gate to separately mirror (same structure D9 already
+  // relies on above for the loopback carve-out). A local_only row with a
+  // loopback base_url is rejected by EITHER check independently.
+  assert.equal(
+    shouldSyncRowForTest("providers", providerRow({
+      base_url: "http://127.0.0.1:18100/v1",
+      gpu_policy: JSON.stringify({ local_only: true }),
+    })),
+    false,
+  );
 });
 
 // ── D3: excluded bookkeeping columns ─────────────────────────────────────────
