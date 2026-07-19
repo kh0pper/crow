@@ -1845,6 +1845,9 @@ export const translations = {
     en: "Something went wrong with that action. Refresh the page and try again.",
     es: "Algo salió mal con esa acción. Actualiza la página e inténtalo de nuevo.",
   },
+  // ─── Starter agent + conversation (C1/C3 Task 3) ───
+  "starter.botName": { en: "My Crow", es: "Mi Crow" },
+  "starter.convTitle": { en: "Chat with your Crow", es: "Chatea con tu Crow" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
