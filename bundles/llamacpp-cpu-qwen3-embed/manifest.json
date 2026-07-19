@@ -20,6 +20,7 @@
   "docker": {
     "composefile": "docker-compose.yml"
   },
+  "inference": true,
   "providers": [
     {
       "id": "llamacpp-cpu-embed",

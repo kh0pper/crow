@@ -13,6 +13,7 @@
   },
   "env_vars": [],
   "port": 8012,
+  "inference": true,
   "providers": [
     {
       "id": "crow-chat",

@@ -13,6 +13,7 @@
   },
   "env_vars": [],
   "port": 8004,
+  "inference": true,
   "providers": [
     {
       "id": "crow-embed",
