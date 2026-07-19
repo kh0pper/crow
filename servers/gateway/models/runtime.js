@@ -661,6 +661,43 @@ export function __resetSetprivProbeCacheForTest() {
 // Process supervision
 // ---------------------------------------------------------------------------
 
+/** Base readiness-timeout floor (ms) `nativeReadinessTimeoutMs` scales up
+ * from. Matches the flat default a bare llama-server process cold-start
+ * (weights already on disk, just mmap + warm-up) needs on modest hardware. */
+export const NATIVE_READINESS_BASE_MS = 120_000;
+
+/** Per-megabyte readiness allowance (ms), by storage class the model's
+ * GGUF blob is read from — an HDD's sequential read is roughly 5x slower
+ * than an SSD's for the mmap-driven load llama-server does on start, so a
+ * multi-GB model takes proportionally longer to become ready. */
+const NATIVE_READINESS_MS_PER_MB = { ssd: 8, hdd: 40 };
+
+/**
+ * How long to wait for a native (llama.cpp) model to report itself
+ * resident, scaled by how much has to be read off disk: `120_000 +
+ * quantSizeMb * (storageClass === "hdd" ? 40 : 8)`. A 2.5 GB quant on SSD
+ * gets ~140s; the same quant on HDD gets ~220s; a 17 GB quant on HDD gets
+ * ~800s.
+ *
+ * `storageClass` is NOT auto-detected — `models/probe.js`'s `diskFreeMb`
+ * only reports free space, not the underlying device's rotational-vs-flash
+ * class, and building that detection is out of scope here. v1 honestly
+ * assumes `"ssd"` (the common case for the fast NVMe/SSD boxes this native
+ * runtime targets) unless a caller passes an explicit override — see
+ * `gpu-orchestrator.js`'s `startNativeAndAwaitReady`, which forwards
+ * `opts.storageClass` through for exactly that purpose.
+ *
+ * A non-finite/zero/negative `quantSizeMb` (e.g. an older registry entry
+ * written before this field existed) degrades to the bare `120_000` floor
+ * rather than throwing — an honest "we don't know the size" default, not a
+ * crash.
+ */
+export function nativeReadinessTimeoutMs(quantSizeMb, storageClass = "ssd") {
+  const sizeMb = Number.isFinite(quantSizeMb) && quantSizeMb > 0 ? quantSizeMb : 0;
+  const msPerMb = NATIVE_READINESS_MS_PER_MB[storageClass] ?? NATIVE_READINESS_MS_PER_MB.ssd;
+  return NATIVE_READINESS_BASE_MS + sizeMb * msPerMb;
+}
+
 /** Default per-model idle timeout, minutes: `CROW_MODEL_IDLE_MIN` env var
  * (positive integer), else 30. */
 export function defaultIdleMinutes() {

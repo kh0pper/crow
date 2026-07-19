@@ -746,10 +746,14 @@ export function pickChatMutexGroup(existingRows) {
  * refetches a still-mid-write row.
  *
  * The `dir`-scoped `state.registry[modelId]` entry this writes (`file`,
- * `quant`, `catalogId`, `registeredAt`) is what lets `unregisterModel` find
- * the on-disk blob to delete without needing a `catalog` argument of its
- * own — the registry entry IS the durable record of which file this
- * modelId's row corresponds to.
+ * `quant`, `catalogId`, `registeredAt`, `sizeMb`) is what lets
+ * `unregisterModel` find the on-disk blob to delete without needing a
+ * `catalog` argument of its own — the registry entry IS the durable record
+ * of which file this modelId's row corresponds to. `sizeMb` (the quant's
+ * catalog `size_mb`, MB, may be a float) is read back by
+ * `gpu-orchestrator.js`'s native acquire path to scale the readiness
+ * timeout to the model's actual size (Item G, Task 10) — it is NOT used by
+ * `unregisterModel` or anything else in this file.
  *
  * Injectable seams (`allocatePortFn`/`listProvidersAllFn`/`upsertProviderFn`/
  * `invalidateCacheFn`) default to the real implementations; tests use them
@@ -812,6 +816,7 @@ export async function registerModel({
     quant: quantEntry.quant,
     catalogId: model.id,
     registeredAt: new Date().toISOString(),
+    sizeMb: Number.isFinite(quantEntry.size_mb) ? quantEntry.size_mb : null,
   };
   saveState(dir, state);
 
