@@ -4,7 +4,7 @@
   "name": "vLLM Vision — Qwen3-VL-8B-Instruct-FP8",
   "category": "ai",
   "description": "Vision-language model for image understanding, OCR, structured output. Qwen3-VL-8B in FP8 (Blackwell). On-demand via the GPU orchestrator; mutex with grackle-embed/rerank during burst.",
-  "host": "49cf71ca878643ba7717f344329266fd",
+  "host": "local",
   "requires": {
     "gpu": true,
     "min_vram_gb": 8,
