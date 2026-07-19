@@ -22,11 +22,15 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { validateManifest } from "../scripts/lib/bundle-contract.mjs";
 import { buildRegistry } from "../scripts/build-registry.mjs";
+
+const APP_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const BUNDLES_ROOT = join(APP_ROOT, "bundles");
 
 /** Make a throwaway bundle dir <root>/<id> with optional files {relpath: content}. */
 function tmpBundle(id, files = {}) {
@@ -172,6 +176,44 @@ test("no WARN for a compose with an inference marker but no exposed port", () =>
   assert.deepEqual(r.warnings, []);
 });
 
+// --- 3b. image-name marker (no command override): the LocalAI shape ---
+
+const LOCALAI_SHAPED_COMPOSE = `services:
+  demo:
+    image: localai/localai:latest-cpu
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - demo-models:/build/models
+    environment:
+      - THREADS=4
+    restart: unless-stopped
+`;
+
+test("WARN: localai-shaped image (no command override) + exposed port, manifest declares neither flag", () => {
+  const dir = tmpBundle("demo", { "docker-compose.yml": LOCALAI_SHAPED_COMPOSE });
+  const r = validateManifest({ ...BASE, docker: { composefile: "docker-compose.yml" } }, dir);
+  assert.equal(r.ok, true, "heuristic must warn, not fail: " + r.errors.join("; "));
+  assert.equal(r.errors.length, 0);
+  assert.ok(r.warnings.length >= 1, "expected a WARN for the localai-shaped compose");
+});
+
+test("no WARN for a random non-inference image with a port and no command override", () => {
+  const random = `services:\n  demo:\n    image: nginx:latest\n    ports:\n      - "8080:80"\n    restart: unless-stopped\n`;
+  const dir = tmpBundle("demo", { "docker-compose.yml": random });
+  const r = validateManifest({ ...BASE, docker: { composefile: "docker-compose.yml" } }, dir);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.warnings, []);
+});
+
+test("no WARN for a localai-shaped image WITH a command override (image name alone is not enough once command is judged)", () => {
+  const withCommand = `services:\n  demo:\n    image: localai/localai:latest-cpu\n    ports:\n      - "127.0.0.1:8080:8080"\n    command: ["--debug"]\n`;
+  const dir = tmpBundle("demo", { "docker-compose.yml": withCommand });
+  const r = validateManifest({ ...BASE, docker: { composefile: "docker-compose.yml" } }, dir);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.warnings, []);
+});
+
 // --- 4. generalized instance-identity leak scan ---
 
 test("leak: tailnet IP nested inside an env_vars default fails", () => {
@@ -278,4 +320,26 @@ test("every real inference bundle (providers[] present) is stamped inference: tr
       assert.equal(entry.inference, true, `${entry.id} has providers[] but is not stamped inference: true`);
     }
   }
+});
+
+test("localai carries an honest no_auto_provider reason (post-install model catalog, same shape as ollama)", () => {
+  const { registry } = buildRegistry();
+  const localai = registry["add-ons"].find((e) => e.id === "localai");
+  assert.ok(localai, "localai must still be a bundle in the tree");
+  assert.equal(localai.providers, undefined, "localai must not ship an LLM providers[] block");
+  assert.equal(typeof localai.no_auto_provider, "string");
+  assert.ok(localai.no_auto_provider.length > 20, "localai no_auto_provider reason must be a real explanation, not a stub");
+});
+
+test("the real tree produces zero heuristic WARNs (localai's no_auto_provider suppresses its own image-marker match)", () => {
+  const dirs = readdirSync(BUNDLES_ROOT, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  const allWarnings = [];
+  for (const id of dirs) {
+    const manifestPath = join(BUNDLES_ROOT, id, "manifest.json");
+    if (!existsSync(manifestPath)) continue;
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const { warnings } = validateManifest(manifest, join(BUNDLES_ROOT, id), { bundleExists: () => true });
+    for (const w of warnings) allWarnings.push(`${id}: ${w}`);
+  }
+  assert.deepEqual(allWarnings, [], "unexpected heuristic WARN(s) on the real bundles/ tree");
 });
