@@ -73,11 +73,23 @@
 #     than guessed — a wrongly-killed live model cannot be undone, while a
 #     genuinely orphaned process just gets caught on the next sweep. A
 #     reservation-less llama-server on a random port remains reapable (truly
-#     abandoned — its reservation was deleted or never existed). Residual
-#     case, stated honestly: if a reservation IS present but the model is
-#     actually dead (crashed without ever calling releasePort), the process
-#     has already exited on its own — there is nothing left for this sweep
-#     to kill either way, so skipping it here costs nothing.
+#     abandoned — its reservation was deleted or never existed, i.e. the
+#     state file is missing entirely OR it parsed cleanly with no match for
+#     this port). Residual case, stated honestly: if a reservation IS
+#     present but the model is actually dead (crashed without ever calling
+#     releasePort), the process has already exited on its own — there is
+#     nothing left for this sweep to kill either way, so skipping it here
+#     costs nothing.
+#
+#     Fix round 2: a state file that EXISTS but fails to parse (corrupt
+#     JSON, permission error, unexpected shape) is a DIFFERENT case from
+#     "confirmed no reservation" and must never be silently treated as one —
+#     `port_reserved_model`'s node helper returns a distinct exit code for
+#     it (2, vs. 1 for a confirmed clean miss) specifically so this can't
+#     degrade into "couldn't read it, so assume unreserved, so kill it,"
+#     which would defeat the whole point of this cross-check. That case
+#     fails CLOSED too (skipped, logged) — the same fail-closed principle as
+#     an undeterminable CROW_HOME/port above.
 #
 # PROTECTION (checked at candidate selection AND before every signal):
 #   1. systemd-owned: any process whose /proc/<pid>/cgroup places it inside a
@@ -233,13 +245,24 @@ native_port_of() {
 
 # Adoption cross-check (fix round 1, Critical finding — see the Sweep 3
 # header comment for the full scenario): does `statePath`'s models/
-# state.json hold ANY reservation for `port`? Prints the reserving modelId
-# and returns 0 if so; prints nothing and returns 1 otherwise (missing/
-# corrupt state file, or no matching reservation — both mean "not
-# protected by this check", not "protected"). Parsed with `node` rather
-# than `jq`: every Crow host already requires node to run the gateway
-# itself, so this adds no new host dependency (jq is NOT a guaranteed
-# install-time dependency — confirmed absent from scripts/crow-install.sh).
+# state.json hold ANY reservation for `port`? Exit code is a real 3-way
+# result (fix round 2 — a corrupt state file must NOT silently degrade to
+# "not reserved", or a state file corrupted at the wrong moment could get a
+# legitimately-adopted model killed, defeating the whole point of this
+# check):
+#   0 = reserved — reserving modelId printed on stdout.
+#   1 = CONFIRMED not reserved — the file is missing entirely (never had,
+#       or had and lost, a reservation — explicitly fine to treat as
+#       reapable, see the Sweep-3 header's "residual case" note) OR it
+#       parsed cleanly with no matching port.
+#   2 = UNKNOWN — the file exists but could not be read/parsed (corrupt
+#       JSON, permission error, unexpected shape). Callers MUST treat this
+#       as fail-closed (skip), never as "not reserved" — see the header
+#       comment's fail-closed principle.
+# Parsed with `node` rather than `jq`: every Crow host already requires
+# node to run the gateway itself, so this adds no new host dependency (jq
+# is NOT a guaranteed install-time dependency — confirmed absent from
+# scripts/crow-install.sh).
 port_reserved_model() {
   local state_path="$1" port="$2"
   [ -f "$state_path" ] || return 1
@@ -257,7 +280,7 @@ try {
   }
   process.exit(1);
 } catch {
-  process.exit(1);
+  process.exit(2);
 }
 EOF
 }
@@ -413,8 +436,18 @@ for pid in $(pgrep -f "$NATIVE_PATTERN" 2>/dev/null); do
     continue
   fi
   reserved_model=$(port_reserved_model "${native_home}/models/state.json" "$native_port")
-  if [ -n "$reserved_model" ]; then
+  reserved_rc=$?
+  if [ "$reserved_rc" = "0" ]; then
     log "skipping adopted native model on port $native_port (reserved for '$reserved_model' in ${native_home}/models/state.json) — pid $pid"
+    continue
+  elif [ "$reserved_rc" != "1" ]; then
+    # Fix round 2: exit 2 (state file exists but unreadable/corrupt) or any
+    # other unexpected code must NEVER be treated as "confirmed not
+    # reserved" — only a real exit 1 (missing file, or a clean parse with no
+    # match) means that. Fail CLOSED, same principle as the CROW_HOME/port
+    # check above: a state file corrupted at the wrong moment must not cost
+    # a live, adopted model its life.
+    log "skipping native model runtime pid $pid — ${native_home}/models/state.json unreadable, refusing to guess"
     continue
   fi
 

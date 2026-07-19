@@ -717,6 +717,55 @@ test("sweep 3 fails CLOSED when a candidate's own port can't be determined (no -
   assertProdAlive(prod, "after the fail-closed run");
 });
 
+test("sweep 3 fails CLOSED when its own CROW_HOME's state.json exists but is corrupt (fix round 2)", async (t) => {
+  // The gap this closes: port_reserved_model's node helper used to exit 1
+  // for BOTH "parsed cleanly, no match" AND "couldn't parse it at all" —
+  // the bash wrapper had no way to tell an honest miss apart from an
+  // unreadable file, so a state file corrupted at exactly the wrong moment
+  // would silently read as "not reserved" and get a legitimately-adopted
+  // model killed. A corrupt (but PRESENT) state.json must never be treated
+  // the same as a confirmed clean miss.
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
+  const prod = await prodMainPids();
+  const fixture = makeFakeNativeRuntime();
+  if (!fixture) return t.skip("python3 not available to build a realistic native-runtime fixture binary");
+  const { T, binPath } = fixture;
+
+  const spawned = [];
+  t.after(() => {
+    trackedKill(spawned);
+    rmSync(T, { recursive: true, force: true });
+  });
+
+  const PORT = 18145;
+  const stateDir = join(T, "models");
+  mkdirSync(stateDir, { recursive: true });
+  // Deliberately NOT valid JSON — simulates a state file corrupted mid-write
+  // (or by disk corruption, or hand-editing) rather than the clean "no
+  // matching reservation" case another test already covers.
+  writeFileSync(join(stateDir, "state.json"), "{ this is not valid json ][");
+
+  const pid = await spawnFakeNativeModel(binPath, { port: PORT, alias: "maybe-adopted-model" });
+  spawned.push(pid);
+  assert.ok(isAlive(pid), "fixture must be alive pre-run");
+
+  // DRY_RUN so the skip decision is provable via stdout, matching the
+  // reserved-port test's technique.
+  const { stdout } = await runScript({
+    ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
+    ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+    ORPHAN_DRY_RUN: "1",
+  });
+
+  await sleep(2500);
+  assert.ok(isAlive(pid), "a candidate whose state.json is corrupt must survive (fail closed, not assumed unreserved)");
+  assert.match(stdout, /state\.json unreadable, refusing to guess/i, "script must log the corrupt-state-file skip");
+  assert.doesNotMatch(stdout, /would kill pid \d+.*orphaned native model runtime/i,
+    "must never be framed as a DRY-RUN reap victim");
+  assertProdAlive(prod, "after the corrupt-state-file run");
+});
+
 test("sweep 3 requires the exe/cwd identity proof — a cmdline-only decoy (no matching exe/cwd) survives", async (t) => {
   // The whole point of checking exe/cwd instead of trusting ORPHAN_NATIVE_PATTERN
   // alone: a process whose cmdline merely MENTIONS the "runtimes/llamacpp"
