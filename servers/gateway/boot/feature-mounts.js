@@ -238,6 +238,19 @@ export async function mountFeatureRoutes(app, deps) {
     console.warn("[notifications] Failed to mount:", err.message);
   }
 
+  // --- Mount Model Catalog Panel API (Item G, Task 12) ---
+  // Own JSON-answering session gate (routes/models.js's
+  // requireDashboardSessionJson) rather than the redirect-based
+  // dashboardAuth every other router here takes — see that file's module
+  // doc. dashboardAuth is still passed for call-site parity; unused.
+  try {
+    const { default: modelsRouter } = await import("../routes/models.js");
+    app.use(modelsRouter(dashboardAuth));
+    console.log("Model Catalog API mounted at /api/models");
+  } catch (err) {
+    console.warn("[models] Failed to mount:", err.message);
+  }
+
   // --- Mount Turbo Streams (server-pushed HTML fragments) ---
   // Private routes under /dashboard/streams/*; the Funnel-reject
   // middleware above blocks public access. See routes/streams.js for the
