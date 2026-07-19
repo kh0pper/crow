@@ -426,6 +426,87 @@ test("POST /api/models/download -> GET /api/models/downloads: job transitions do
 });
 
 // ---------------------------------------------------------------------------
+// Task 13 fix round 2 (Important, confirmed Concern-1 from round 1):
+// curated downloads must forward the stored HF token too — state 3 of the
+// gated three-state flow ("token configured but license not yet accepted")
+// was unreachable for a real gated:true catalog entry (e.g. the seed
+// catalog's gemma-3-27b-it) because nothing ever attached the token to the
+// actual download request.
+// ---------------------------------------------------------------------------
+
+function makeGatedCatalog() {
+  return {
+    version: 1,
+    runtime: { name: "llama.cpp", release: "b10068", assets: {} },
+    models: [{
+      id: "panel-gated-model",
+      family: "GatedFamily",
+      lab: "TestLab",
+      hf_repo: "test/panel-gated-model-GGUF",
+      license: "gemma",
+      gated: true,
+      task: "chat",
+      context_len: 8192,
+      default_quant: "Q4_K_M",
+      tags: ["chat", "gated"],
+      quants: [{ file: "panel-gated-model-Q4_K_M.gguf", quant: "Q4_K_M", size_mb: 500, min_ram_mb: 1000, min_vram_mb: 0, sha256: "abc" }],
+    }],
+  };
+}
+
+test("POST /api/models/download: forwards the stored HF token as an Authorization header when configured (gated:true entry)", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    let capturedExtraHeaders = "UNSET";
+    const opts = {
+      dir: h.dir, loadCatalogFn: makeGatedCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      enqueueDownloadFn: async ({ extraHeaders, onProgress }) => {
+        capturedExtraHeaders = extraHeaders;
+        onProgress({ bytesDone: 500, totalBytes: 500 });
+      },
+    };
+    await withServer(opts, async (base) => {
+      const set = await fetch(base + "/api/models/hf-token", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ token: "hf_gatedtoken789" }),
+      });
+      assert.equal(set.status, 200);
+
+      const post = await fetch(base + "/api/models/download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ modelId: "panel-gated-model", quant: "Q4_K_M" }),
+      });
+      assert.equal(post.status, 202);
+    });
+    assert.deepEqual(capturedExtraHeaders, { Authorization: "Bearer hf_gatedtoken789" });
+  } finally { await h.cleanup(); }
+});
+
+test("POST /api/models/download: sends no Authorization header when no HF token is configured", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    let capturedExtraHeaders = "UNSET";
+    const opts = {
+      dir: h.dir, loadCatalogFn: makeGatedCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      enqueueDownloadFn: async ({ extraHeaders, onProgress }) => {
+        capturedExtraHeaders = extraHeaders;
+        onProgress({ bytesDone: 500, totalBytes: 500 });
+      },
+    };
+    await withServer(opts, async (base) => {
+      const post = await fetch(base + "/api/models/download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ modelId: "panel-gated-model", quant: "Q4_K_M" }),
+      });
+      assert.equal(post.status, 202);
+    });
+    assert.equal(capturedExtraHeaders, undefined, "no token configured -> extraHeaders is undefined, not a header with an empty/null value");
+  } finally { await h.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
 // Browse Hugging Face download (Task 13 fix round 1, finding 1)
 // ---------------------------------------------------------------------------
 //
@@ -694,6 +775,76 @@ test("POST /api/models/:id/stop: calls handle.stop() when live, no-ops when alre
 
       const r3 = await fetch(base + "/api/models/does-not-exist/stop", { method: "POST", headers: authHeaders(token) });
       assert.equal(r3.status, 400);
+    });
+  } finally { await h.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// Task 13 fix round 2 (Critical regression): existence is state.registry
+// presence, NOT catalog membership — start/stop/DELETE must all work for a
+// model registered via Browse-HF, whose derived id is (by construction)
+// never in the curated catalog `loadCatalogFn` returns.
+// ---------------------------------------------------------------------------
+
+test("start / stop / DELETE all work for an hf-browser-registered model (not in the catalog at all); a truly unknown id still 400s", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { registerModel } = await import("../servers/gateway/models/manager.js");
+    // Simulates exactly what POST /hf-download's async block does: register
+    // a model whose id is NOT present in the curated catalog `makeCatalog()`
+    // returns (this route's loadCatalogFn) — the whole point of Browse-HF.
+    const hfCatalog = {
+      models: [{
+        id: "some-repo-cool-model-q4", family: "cool-model", hf_repo: "org/some-repo",
+        task: "chat", context_len: null, default_quant: "hf",
+        quants: [{ file: "cool-model-Q4.gguf", quant: "hf", sha256: "d".repeat(64), size_mb: 5, min_ram_mb: 5, min_vram_mb: 0 }],
+      }],
+    };
+    await registerModel({
+      modelId: "some-repo-cool-model-q4", quant: "hf", catalog: hfCatalog, db: h.db, dir: h.dir,
+      registryExtra: { source: "hf-browser" },
+    });
+    // Sanity: this id is genuinely absent from the route's own catalog view.
+    assert.equal(makeCatalog().models.some((m) => m.id === "some-repo-cool-model-q4"), false);
+
+    let stopCalls = 0;
+    const handle = { live: true, stop: async () => { stopCalls++; handle.live = false; } };
+    await withServer({
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      getNativeHandleFn: (id) => (id === "some-repo-cool-model-q4" ? handle : null),
+      maybeAcquireLocalProviderFn: async () => true,
+    }, async (base) => {
+      const start = await fetch(base + "/api/models/some-repo-cool-model-q4/start", { method: "POST", headers: authHeaders(token) });
+      assert.equal(start.status, 200, "start must not 400 UNKNOWN_MODEL for a registered hf-browser model");
+      assert.equal((await start.json()).running, true);
+
+      const stop = await fetch(base + "/api/models/some-repo-cool-model-q4/stop", { method: "POST", headers: authHeaders(token) });
+      assert.equal(stop.status, 200, "stop must not 400 UNKNOWN_MODEL for a registered hf-browser model");
+      assert.equal(stopCalls, 1);
+
+      const preview = await fetch(base + "/api/models/some-repo-cool-model-q4", { method: "DELETE", headers: authHeaders(token) });
+      assert.equal(preview.status, 200, "DELETE preview must not 400 UNKNOWN_MODEL for a registered hf-browser model");
+      assert.equal((await preview.json()).requiresConfirm, true);
+
+      const confirmed = await fetch(base + "/api/models/some-repo-cool-model-q4?confirm=true", { method: "DELETE", headers: authHeaders(token) });
+      assert.equal(confirmed.status, 200);
+      assert.equal((await confirmed.json()).deleted, true);
+
+      // A genuinely unknown id (neither catalog nor registry) still 400s
+      // on all three routes — the fix narrows the existence check, it
+      // doesn't remove it.
+      const badStart = await fetch(base + "/api/models/totally-bogus-id/start", { method: "POST", headers: authHeaders(token) });
+      assert.equal(badStart.status, 400);
+      assert.equal((await badStart.json()).code, "UNKNOWN_MODEL");
+
+      const badStop = await fetch(base + "/api/models/totally-bogus-id/stop", { method: "POST", headers: authHeaders(token) });
+      assert.equal(badStop.status, 400);
+      assert.equal((await badStop.json()).code, "UNKNOWN_MODEL");
+
+      const badDelete = await fetch(base + "/api/models/totally-bogus-id", { method: "DELETE", headers: authHeaders(token) });
+      assert.equal(badDelete.status, 400);
+      assert.equal((await badDelete.json()).code, "UNKNOWN_MODEL");
     });
   } finally { await h.cleanup(); }
 });

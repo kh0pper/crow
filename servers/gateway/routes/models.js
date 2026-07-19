@@ -301,6 +301,19 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
         return res.status(202).json({ jobId, status: existing.status });
       }
 
+      // Task 13 fix round 2 (Important, confirmed Concern-1 from round 1):
+      // a gated curated entry (e.g. gemma-3-27b-it) could never actually
+      // authenticate its download even with a token configured — nothing
+      // forwarded it. Same lookup /hf-download already does, threaded the
+      // same way (extraHeaders -> downloadModel -> fetchModelBlob).
+      let hfToken = null;
+      const tokenDb = dbFactory();
+      try {
+        hfToken = await getHfToken(tokenDb);
+      } catch { /* best effort — an un-gated model still downloads fine unauthenticated */ }
+      finally { try { tokenDb.close(); } catch { /* best effort */ } }
+      const extraHeaders = hfToken ? { Authorization: `Bearer ${hfToken}` } : undefined;
+
       const dir = resolveDir();
       const job = {
         id: jobId,
@@ -325,6 +338,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
             quant: resolved.quantId,
             dir,
             catalog,
+            extraHeaders,
             onProgress: ({ bytesDone, totalBytes }) => {
               job.bytesDone = bytesDone;
               if (totalBytes != null) job.totalBytes = totalBytes;
@@ -491,14 +505,23 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
 
   router.delete("/api/models/:id", async (req, res) => {
     const modelId = req.params.id;
+    // Existence check is state.registry presence, NOT catalog membership
+    // (Task 13 fix round 2, critical regression fix) — an hf-browser
+    // model's derived id is never in the curated catalog, so gating on
+    // findModel() alone made every hf-browser download an unstoppable,
+    // undeletable zombie. findModel() is kept ONLY to distinguish "a real
+    // curated id that just hasn't been downloaded yet" (404 NOT_INSTALLED,
+    // existing behavior, still tested) from "never heard of this id at
+    // all" (400 UNKNOWN_MODEL) — it is never read again below this gate.
     const catalog = loadCatalogFn();
     const model = findModel(catalog, modelId);
-    if (!model) {
-      return res.status(400).json({ error: `Unknown model id: ${modelId}`, code: "UNKNOWN_MODEL" });
-    }
     const dir = resolveDir();
     const state = loadStateFn(dir);
-    if (!state.registry[modelId]) {
+    const regEntry = state.registry[modelId];
+    if (!model && !regEntry) {
+      return res.status(400).json({ error: `Unknown model id: ${modelId}`, code: "UNKNOWN_MODEL" });
+    }
+    if (!regEntry) {
       return res.status(404).json({ error: `${modelId} is not installed`, code: "NOT_INSTALLED" });
     }
 
@@ -531,13 +554,16 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
 
   router.post("/api/models/:id/start", async (req, res) => {
     const modelId = req.params.id;
+    // See DELETE's comment above (Task 13 fix round 2): existence is
+    // state.registry presence, not catalog membership.
     const catalog = loadCatalogFn();
     const model = findModel(catalog, modelId);
-    if (!model) {
+    const state = loadStateFn(resolveDir());
+    const regEntry = state.registry[modelId];
+    if (!model && !regEntry) {
       return res.status(400).json({ error: `Unknown model id: ${modelId}`, code: "UNKNOWN_MODEL" });
     }
-    const state = loadStateFn(resolveDir());
-    if (!state.registry[modelId]) {
+    if (!regEntry) {
       return res.status(404).json({ error: `${modelId} is not installed`, code: "NOT_INSTALLED" });
     }
     try {
@@ -557,13 +583,16 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
 
   router.post("/api/models/:id/stop", async (req, res) => {
     const modelId = req.params.id;
+    // See DELETE's comment above (Task 13 fix round 2): existence is
+    // state.registry presence, not catalog membership.
     const catalog = loadCatalogFn();
     const model = findModel(catalog, modelId);
-    if (!model) {
+    const state = loadStateFn(resolveDir());
+    const regEntry = state.registry[modelId];
+    if (!model && !regEntry) {
       return res.status(400).json({ error: `Unknown model id: ${modelId}`, code: "UNKNOWN_MODEL" });
     }
-    const state = loadStateFn(resolveDir());
-    if (!state.registry[modelId]) {
+    if (!regEntry) {
       return res.status(404).json({ error: `${modelId} is not installed`, code: "NOT_INSTALLED" });
     }
     try {
