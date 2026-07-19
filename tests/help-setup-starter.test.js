@@ -44,8 +44,8 @@ async function seedStarterRow(db, content) {
   });
 }
 
-function fakeReq(body = {}) {
-  return { csrfToken: "test-csrf", query: {}, body, headers: {} };
+function fakeReq(body = {}, query = {}) {
+  return { csrfToken: "test-csrf", query, body, headers: {} };
 }
 
 const CLEAR_ACTION = 'value="help_setup_clear_starter"';
@@ -140,6 +140,11 @@ test("render: after clearing, the section shows the 'cleared' flash and 'none' c
     action: "help_setup_clear_starter",
   });
 
-  const html = await section.render({ req: fakeReq(), db, lang: "en" });
+  const html = await section.render({
+    req: fakeReq({}, { helpSetupMsg: "cleared" }),
+    db,
+    lang: "en",
+  });
+  assert.ok(html.includes("Starter memories cleared"), "flash text present");
   assert.ok(!html.includes(CLEAR_ACTION), "no clear form once starter memories are gone");
 });
