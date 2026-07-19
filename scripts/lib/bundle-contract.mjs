@@ -22,13 +22,28 @@ const validateShape = ajv.compile(schema);
 const PORT_MAPPING_RE = /\bports:\s*(\n[ \t]*-[ \t]*\S.*|[ \t]*\[[^\]]*\])/;
 /** Command/entrypoint markers that smell like an OpenAI-compat inference server. */
 const INFERENCE_CMD_RE = /--served-model-name|llama-server|vllm|ollama/i;
+/** A compose `command:` key present at all (list or inline form) — i.e. an image-default entrypoint is NOT being used as-is. */
+const COMMAND_OVERRIDE_RE = /\bcommand:\s*(\n[ \t]*-[ \t]*\S|\[[^\]]*\]|\S)/;
+/**
+ * Image names that ship a self-contained OpenAI-compat server with no compose
+ * command override at all (models arrive post-install via the image's own
+ * CLI/API, e.g. LocalAI's `local-ai models install <name>` / first-use
+ * download — the same "unknowable at manifest-write time" shape as ollama).
+ * Only consulted when there is NO command override (see below) — a bundle
+ * that overrides the command is judged on that command, not its image name.
+ */
+const INFERENCE_IMAGE_RE = /\bimage:\s*.*\blocal-?ai\b/i;
 
 /**
  * Heuristic-only (WARN, never fails the build): does this bundle's compose file
  * expose a host port AND run something that looks like an OpenAI-compat
- * inference server, per the marker list above? Matched against the raw file
- * text (not a real YAML parse — no yaml dependency in this repo, and a text
- * heuristic is all a WARN needs).
+ * inference server? Matched against the raw file text (not a real YAML parse
+ * — no yaml dependency in this repo, and a text heuristic is all a WARN
+ * needs). Two ways to trip it:
+ *   1. a command/entrypoint marker (--served-model-name/llama-server/vllm/ollama)
+ *      anywhere in the file, or
+ *   2. no `command:` override at all, and the image name matches a known
+ *      self-contained-server pattern (currently just localai/local-ai).
  */
 function composeLooksLikeInferenceEndpoint(bundleDir, composefileRel) {
   if (typeof composefileRel !== "string" || !composefileRel) return false;
@@ -40,7 +55,10 @@ function composeLooksLikeInferenceEndpoint(bundleDir, composefileRel) {
   } catch {
     return false;
   }
-  return PORT_MAPPING_RE.test(text) && INFERENCE_CMD_RE.test(text);
+  if (!PORT_MAPPING_RE.test(text)) return false;
+  if (INFERENCE_CMD_RE.test(text)) return true;
+  if (!COMMAND_OVERRIDE_RE.test(text) && INFERENCE_IMAGE_RE.test(text)) return true;
+  return false;
 }
 
 /** Tailscale CGNAT range: 100.64.0.0/10 (100.64.x.x - 100.127.x.x). */
