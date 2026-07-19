@@ -2769,6 +2769,7 @@
         "port": 8080,
         "path": "/"
       },
+      "no_auto_provider": "LocalAI's OpenAI-compatible endpoint (http://{host}:8080/v1) is live once the container starts, but -- same shape as ollama -- its model catalog is populated post-install: either on first API request (auto-download) or via `docker compose exec localai local-ai models install <name>`, not at install-time, so there is no served model id to write into a static providers[] entry. After a model is installed, add the provider manually via Settings -> LLM -> Providers, base URL http://<host>:8080/v1, with the model id you installed/downloaded (see `local-ai models list` inside the container, or the model gallery name used for the first-use download).",
       "notes": "LocalAI is OpenAI-compatible. Configure AI_PROVIDER=openai and AI_BASE_URL=http://localhost:8080/v1 in .env to use with Crow's AI Chat.",
       "official": true
     },
