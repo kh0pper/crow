@@ -24,6 +24,10 @@
  *     ungated with at least one quant carrying min_vram_mb:0 (CPU-capable) —
  *     first_run_default is the model Crow offers as the default first
  *     install on a machine with no GPU.
+ *   - chat_template_kwargs, when present, must be a plain object (arrays,
+ *     strings, and null are rejected) — it is threaded verbatim into
+ *     llama-server's --jinja request body and into the openai adapter's
+ *     chat_template_kwargs pass-through (C1 Task 1).
  */
 
 import { readFileSync } from "node:fs";
@@ -114,6 +118,15 @@ export function validateCatalog(catalog) {
 
     if (model.first_run_default === true) {
       firstRunDefaults.push(model);
+    }
+
+    if (model.chat_template_kwargs !== undefined) {
+      const isPlainObject = model.chat_template_kwargs !== null
+        && typeof model.chat_template_kwargs === "object"
+        && !Array.isArray(model.chat_template_kwargs);
+      if (!isPlainObject) {
+        errors.push(`${label}: chat_template_kwargs must be a plain object when present, got ${JSON.stringify(model.chat_template_kwargs)}`);
+      }
     }
 
     if (!Number.isNaN(releaseBuild) && model.min_runtime_version != null) {

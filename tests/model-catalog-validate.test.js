@@ -141,3 +141,48 @@ test("null quant sha256 is rejected when the model entry is gated:false", () => 
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((e) => /sha256/i.test(e)));
 });
+
+// --- chat_template_kwargs (C1 Task 1) ---
+
+test("seed qwen3-4b (first_run_default) carries chat_template_kwargs enable_thinking:false", () => {
+  const catalog = loadSeed();
+  const model = firstModel(catalog, "qwen3-4b");
+  assert.equal(model.first_run_default, true);
+  assert.deepEqual(model.chat_template_kwargs, { enable_thinking: false });
+  const result = validateCatalog(catalog);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.ok, true);
+});
+
+test("a model with no chat_template_kwargs still validates cleanly", () => {
+  const catalog = loadSeed();
+  const model = firstModel(catalog, "phi-4-mini-instruct");
+  assert.equal(model.chat_template_kwargs, undefined);
+  const result = validateCatalog(catalog);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.ok, true);
+});
+
+test("chat_template_kwargs as an array fails", () => {
+  const catalog = loadSeed();
+  firstModel(catalog, "qwen3-4b").chat_template_kwargs = ["enable_thinking"];
+  const result = validateCatalog(catalog);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => /chat_template_kwargs/i.test(e)));
+});
+
+test("chat_template_kwargs as a string fails", () => {
+  const catalog = loadSeed();
+  firstModel(catalog, "qwen3-4b").chat_template_kwargs = "enable_thinking:false";
+  const result = validateCatalog(catalog);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => /chat_template_kwargs/i.test(e)));
+});
+
+test("chat_template_kwargs as null fails", () => {
+  const catalog = loadSeed();
+  firstModel(catalog, "qwen3-4b").chat_template_kwargs = null;
+  const result = validateCatalog(catalog);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => /chat_template_kwargs/i.test(e)));
+});
