@@ -1,5 +1,6 @@
 /**
- * starter-content.js — onboarding starter memories (C1/C3 Task 2).
+ * starter-content.js — onboarding starter memories + starter agent/conversation
+ * (C1/C3 Tasks 2-3).
  *
  *   seedStarterMemories(db, lang) inserts a handful of `source='starter'`
  *   rows into `memories` (idempotent — no-ops if any starter row exists).
@@ -8,6 +9,10 @@
  *   shouldSyncRow('memories', row) excludes source='starter' rows from
  *   instance-sync (starter/demo content is per-install, same convention as
  *   providers' gpu_policy.local_only).
+ *   resolveStarterProvider(db) picks the provider/model pair the starter
+ *   agent + conversation should use (Task 3).
+ *   createStarterArtifacts(db, {lang}) creates the `crow-starter` pi_bot_defs
+ *   row and its matching chat_conversations row, idempotently (Task 3).
  *
  * Harness follows tests/instance-sync.test.js: real init-db.js schema in a
  * tmp dir so the memories_fts triggers exist (FTS works with zero embedding
@@ -17,16 +22,21 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { shouldSyncRowForTest } from "../servers/sharing/instance-sync.js";
 import {
   STARTER_SOURCE,
+  STARTER_BOT_ID,
   seedStarterMemories,
   clearStarterMemories,
+  resolveStarterProvider,
+  createStarterArtifacts,
 } from "../servers/gateway/dashboard/panels/onboarding/starter-content.js";
+
+const REPO_ROOT = join(import.meta.dirname, "..");
 
 // ── Shared setup ─────────────────────────────────────────────────────────────
 
@@ -35,7 +45,7 @@ const tmpDir = mkdtempSync(join(tmpdir(), "crow-startercontent-test-"));
 execFileSync(process.execPath, ["scripts/init-db.js"], {
   env: { ...process.env, CROW_DATA_DIR: tmpDir },
   stdio: "pipe",
-  cwd: join(import.meta.dirname, ".."),
+  cwd: REPO_ROOT,
 });
 
 const DB_PATH = join(tmpDir, "crow.db");
@@ -44,6 +54,35 @@ const db = createDbClient(DB_PATH);
 after(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
+
+// ── Task 3 shared helpers ───────────────────────────────────────────────────
+
+/** The real catalog's first_run_default model id (currently "qwen3-4b"). */
+const CATALOG = JSON.parse(readFileSync(join(REPO_ROOT, "registry", "model-catalog.json"), "utf8"));
+const FIRST_RUN_DEFAULT_ID = CATALOG.models.find((m) => m.first_run_default === true).id;
+
+/** Fresh scratch DB per test — provider/bot/conversation state must not leak
+ * across resolveStarterProvider/createStarterArtifacts scenarios. */
+function makeScratchDb() {
+  const dir = mkdtempSync(join(tmpdir(), "crow-starterartifacts-test-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: dir },
+    stdio: "pipe",
+    cwd: REPO_ROOT,
+  });
+  const scratchDb = createDbClient(join(dir, "crow.db"));
+  return {
+    db: scratchDb,
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+async function insertProvider(scratchDb, { id, models, disabled = 0 }) {
+  await scratchDb.execute({
+    sql: "INSERT INTO providers (id, base_url, models, disabled) VALUES (?,?,?,?)",
+    args: [id, "http://127.0.0.1:9/v1", JSON.stringify(models), disabled],
+  });
+}
 
 // ── STARTER_SOURCE ────────────────────────────────────────────────────────────
 
@@ -145,4 +184,152 @@ test("shouldSyncRow excludes memories rows with source='starter' (both direction
     shouldSyncRowForTest("memories", { id: 3, content: "z", source: null }),
     true
   );
+});
+
+// ── STARTER_BOT_ID ───────────────────────────────────────────────────────────
+
+test("STARTER_BOT_ID is the 'crow-starter' marker", () => {
+  assert.equal(STARTER_BOT_ID, "crow-starter");
+});
+
+// ── resolveStarterProvider ───────────────────────────────────────────────────
+
+test("resolveStarterProvider: picks the native first_run_default provider row when present", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    await insertProvider(sdb, { id: FIRST_RUN_DEFAULT_ID, models: [{ id: FIRST_RUN_DEFAULT_ID }] });
+    const result = await resolveStarterProvider(sdb);
+    assert.deepEqual(result, { providerId: FIRST_RUN_DEFAULT_ID, modelId: FIRST_RUN_DEFAULT_ID });
+  } finally {
+    cleanup();
+  }
+});
+
+test("resolveStarterProvider: falls back to the newest enabled provider with a model when no native default row exists", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    await insertProvider(sdb, { id: "cloud-x", models: [{ id: "gpt-x" }] });
+    const result = await resolveStarterProvider(sdb);
+    assert.deepEqual(result, { providerId: "cloud-x", modelId: "gpt-x" });
+  } finally {
+    cleanup();
+  }
+});
+
+test("resolveStarterProvider: a provider with empty models[] is unusable -> null", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    await insertProvider(sdb, { id: "no-auto-provider", models: [] });
+    const result = await resolveStarterProvider(sdb);
+    assert.equal(result, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("resolveStarterProvider: no provider rows -> null", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    const result = await resolveStarterProvider(sdb);
+    assert.equal(result, null);
+  } finally {
+    cleanup();
+  }
+});
+
+// ── createStarterArtifacts ───────────────────────────────────────────────────
+
+test("createStarterArtifacts: no provider -> {error:'no_provider'} and creates nothing", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    const result = await createStarterArtifacts(sdb, { lang: "en" });
+    assert.deepEqual(result, { error: "no_provider" });
+    const bots = await sdb.execute({ sql: "SELECT COUNT(*) n FROM pi_bot_defs", args: [] });
+    assert.equal(Number(bots.rows[0].n), 0);
+    const convs = await sdb.execute({ sql: "SELECT COUNT(*) n FROM chat_conversations", args: [] });
+    assert.equal(Number(convs.rows[0].n), 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("createStarterArtifacts: creates a bot def + conversation, and is idempotent on a second call", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    await insertProvider(sdb, { id: FIRST_RUN_DEFAULT_ID, models: [{ id: FIRST_RUN_DEFAULT_ID }] });
+
+    const first = await createStarterArtifacts(sdb, { lang: "en" });
+    assert.equal(first.botId, STARTER_BOT_ID);
+    assert.equal(first.providerId, FIRST_RUN_DEFAULT_ID);
+    assert.equal(first.modelId, FIRST_RUN_DEFAULT_ID);
+    assert.ok(Number.isInteger(first.conversationId));
+
+    const botsAfterFirst = await sdb.execute({ sql: "SELECT COUNT(*) n FROM pi_bot_defs", args: [] });
+    assert.equal(Number(botsAfterFirst.rows[0].n), 1);
+    const convsAfterFirst = await sdb.execute({ sql: "SELECT COUNT(*) n FROM chat_conversations", args: [] });
+    assert.equal(Number(convsAfterFirst.rows[0].n), 1);
+
+    const second = await createStarterArtifacts(sdb, { lang: "en" });
+    assert.deepEqual(second, first);
+
+    const botsAfterSecond = await sdb.execute({ sql: "SELECT COUNT(*) n FROM pi_bot_defs", args: [] });
+    assert.equal(Number(botsAfterSecond.rows[0].n), 1);
+    const convsAfterSecond = await sdb.execute({ sql: "SELECT COUNT(*) n FROM chat_conversations", args: [] });
+    assert.equal(Number(convsAfterSecond.rows[0].n), 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("createStarterArtifacts: bot definition is a well-formed pi memory-tooled def; conversation shares its system_prompt", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    await insertProvider(sdb, { id: FIRST_RUN_DEFAULT_ID, models: [{ id: FIRST_RUN_DEFAULT_ID }] });
+    const result = await createStarterArtifacts(sdb, { lang: "en" });
+
+    const botRow = await sdb.execute({
+      sql: "SELECT definition, display_name FROM pi_bot_defs WHERE bot_id = ?",
+      args: [STARTER_BOT_ID],
+    });
+    assert.equal(botRow.rows.length, 1);
+    const def = JSON.parse(botRow.rows[0].definition);
+    assert.equal(def.engine, "pi");
+    assert.ok(def.tools.crow_mcp.includes("crow-memory/crow_recall_by_context"));
+    assert.equal(def.models.default, `${FIRST_RUN_DEFAULT_ID}/${FIRST_RUN_DEFAULT_ID}`);
+    assert.equal(botRow.rows[0].display_name, "My Crow");
+    assert.ok(def.system_prompt && def.system_prompt.length > 0);
+
+    const convRow = await sdb.execute({
+      sql: "SELECT title, provider, model, system_prompt FROM chat_conversations WHERE id = ?",
+      args: [result.conversationId],
+    });
+    assert.equal(convRow.rows.length, 1);
+    assert.equal(convRow.rows[0].title, "Chat with your Crow");
+    assert.equal(convRow.rows[0].provider, FIRST_RUN_DEFAULT_ID);
+    assert.equal(convRow.rows[0].model, FIRST_RUN_DEFAULT_ID);
+    assert.ok(convRow.rows[0].system_prompt && convRow.rows[0].system_prompt.length > 0);
+    assert.equal(convRow.rows[0].system_prompt, def.system_prompt);
+  } finally {
+    cleanup();
+  }
+});
+
+test("createStarterArtifacts: idempotency survives via dashboard_settings even if resolveStarterProvider's inputs later change", async () => {
+  const { db: sdb, cleanup } = makeScratchDb();
+  try {
+    await insertProvider(sdb, { id: "cloud-x", models: [{ id: "gpt-x" }] });
+    const first = await createStarterArtifacts(sdb, { lang: "en" });
+    assert.equal(first.providerId, "cloud-x");
+
+    // A newer provider row now exists; without the dashboard_settings gate
+    // this would resolve to a different provider on a naive re-run.
+    await insertProvider(sdb, { id: FIRST_RUN_DEFAULT_ID, models: [{ id: FIRST_RUN_DEFAULT_ID }] });
+    const second = await createStarterArtifacts(sdb, { lang: "en" });
+    assert.deepEqual(second, first);
+
+    const convs = await sdb.execute({ sql: "SELECT COUNT(*) n FROM chat_conversations", args: [] });
+    assert.equal(Number(convs.rows[0].n), 1);
+  } finally {
+    cleanup();
+  }
 });
