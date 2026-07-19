@@ -40,6 +40,7 @@ import {
   rmSync,
   copyFileSync,
   chmodSync,
+  realpathSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -206,20 +207,80 @@ process.stdout.write(String(c.pid));
   return pid;
 }
 
+/** Resolve a real, standalone-executable copy source for the native-runtime
+ * fixture binary — must be a real ELF (so a direct copy + direct exec makes
+ * /proc/<pid>/exe genuinely resolve under the fixture's own path, not a
+ * simulation) that TOLERATES ARBITRARY TRAILING ARGV (unlike `/bin/sleep`,
+ * which validates every argument as its own option/duration and exits
+ * immediately on an unrecognized one — verified live: `sleep 600 --port
+ * 18140` exits nonzero before ever sleeping). `python3 -c '<script>' <args>`
+ * hands everything after the script straight to `sys.argv` without
+ * validating it, so a realistic llama-server-shaped cmdline (--model
+ * --alias --port --host) can ride along. Cached after first resolution;
+ * `null` if python3 isn't on this host (tests that need it skip honestly —
+ * python3 is NOT a Crow install-time dependency, only a test-fixture
+ * convenience). */
+let _python3BinCache;
+function resolvePython3Binary() {
+  if (_python3BinCache !== undefined) return _python3BinCache;
+  const which = spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf-8" });
+  if (which.status !== 0 || !which.stdout.trim()) {
+    _python3BinCache = null;
+    return _python3BinCache;
+  }
+  try {
+    _python3BinCache = realpathSync(which.stdout.trim());
+  } catch {
+    _python3BinCache = null;
+  }
+  return _python3BinCache;
+}
+
 /** Build a fake native-runtime release layout under a fresh mkdtemp dir:
  * T/runtimes/llamacpp/vTest/llama-server-fixture — a COPY of the real
- * `/bin/sleep` binary (a small real ELF executable), so spawning it directly
- * gives a process whose /proc/<pid>/exe genuinely resolves under
+ * python3 binary (see {@link resolvePython3Binary}), so spawning it
+ * directly gives a process whose /proc/<pid>/exe genuinely resolves under
  * ".../runtimes/llamacpp/..." — the exact identity signal sweep 3 checks,
- * not a simulation of it. Returns { T, binPath }. */
+ * not a simulation of it. Returns { T, binPath } or `null` if python3 isn't
+ * available. */
 function makeFakeNativeRuntime() {
+  const py = resolvePython3Binary();
+  if (!py) return null;
   const T = mkdtempSync(join(tmpdir(), "orphan-native-test-"));
   const releaseDir = join(T, "runtimes", "llamacpp", "vTest");
   mkdirSync(releaseDir, { recursive: true });
   const binPath = join(releaseDir, "llama-server-fixture");
-  copyFileSync("/bin/sleep", binPath);
+  copyFileSync(py, binPath);
   chmodSync(binPath, 0o755);
   return { T, binPath };
+}
+
+/** Spawn `binPath` (from {@link makeFakeNativeRuntime}) orphaned to ppid==1
+ * with a REALISTIC llama-server-shaped cmdline — `--model <gguf> --alias
+ * <alias> --port <port> --host 127.0.0.1`, matching
+ * `runtime.js`'s `buildLlamaServerArgs` shape exactly (the flags Sweep 3's
+ * `native_port_of` actually parses). `port` omitted entirely tests the
+ * fail-closed "couldn't determine a port" path. */
+function spawnFakeNativeModel(binPath, { port, alias = "test-model" } = {}) {
+  const args = ["-c", "import time; time.sleep(600)", "--model", "/fake/model.gguf", "--alias", alias];
+  if (port != null) args.push("--port", String(port), "--host", "127.0.0.1");
+  return spawnOrphanedBinary(binPath, args);
+}
+
+/** Write `T/models/state.json` with a single reservation — the same shape
+ * `models/state.js`'s `saveState`/`allocatePort` produce — so the sweep's
+ * `port_reserved_model` helper (which reads this exact file) sees it. */
+function writeStateReservation(T, modelId, port) {
+  const stateDir = join(T, "models");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "state.json"),
+    JSON.stringify({
+      reservations: { [modelId]: { port, owner: { crowHome: T, pid: 999999 }, createdAt: new Date().toISOString() } },
+      journal: {},
+      registry: {},
+    }, null, 2),
+  );
 }
 
 async function runScript(env) {
@@ -479,19 +540,23 @@ test("fixture filename is invisible to the script's DEFAULT gateway pattern (pro
 // Sweep 3: orphaned native model runtime processes (Item G, Task 14)
 // ---------------------------------------------------------------------------
 
-test("sweep 3 reaps an orphaned native model runtime process (ppid==1, exe under runtimes/llamacpp/)", async (t) => {
+test("sweep 3 reaps an orphaned native model runtime process (ppid==1, exe under runtimes/llamacpp/, no reservation for its port)", async (t) => {
   const prod = await prodMainPids();
   if (prod.length === 0) return t.skip("no crow gateway units on this host");
   if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
+  const fixture = makeFakeNativeRuntime();
+  if (!fixture) return t.skip("python3 not available to build a realistic native-runtime fixture binary");
+  const { T, binPath } = fixture;
 
-  const { T, binPath } = makeFakeNativeRuntime();
   const spawned = [];
   t.after(() => {
     trackedKill(spawned);
     rmSync(T, { recursive: true, force: true });
   });
 
-  const pid = await spawnOrphanedBinary(binPath, ["600"]);
+  // No T/models/state.json at all — port_reserved_model must treat a
+  // missing state file as "not reserved", not "protected".
+  const pid = await spawnFakeNativeModel(binPath, { port: 18140 });
   spawned.push(pid);
   assert.ok(isAlive(pid), "native runtime fixture must be alive pre-run");
 
@@ -510,14 +575,17 @@ test("sweep 3 reaps an orphaned native model runtime process (ppid==1, exe under
 test("sweep 3 ORPHAN_DRY_RUN=1 names the native runtime victim but kills nothing", async (t) => {
   if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected (never named as victims)");
   const prod = await prodMainPids();
-  const { T, binPath } = makeFakeNativeRuntime();
+  const fixture = makeFakeNativeRuntime();
+  if (!fixture) return t.skip("python3 not available to build a realistic native-runtime fixture binary");
+  const { T, binPath } = fixture;
+
   const spawned = [];
   t.after(() => {
     trackedKill(spawned);
     rmSync(T, { recursive: true, force: true });
   });
 
-  const pid = await spawnOrphanedBinary(binPath, ["600"]);
+  const pid = await spawnFakeNativeModel(binPath, { port: 18141 });
   spawned.push(pid);
 
   const { stdout } = await runScript({
@@ -531,6 +599,122 @@ test("sweep 3 ORPHAN_DRY_RUN=1 names the native runtime victim but kills nothing
   assert.ok(isAlive(pid), "dry run must NOT kill the native runtime fixture");
   assert.match(stdout, pidRe(pid), "dry run must name the native runtime victim");
   assertProdAlive(prod, "after the native-runtime dry run");
+});
+
+// ---------------------------------------------------------------------------
+// Sweep 3 adoption cross-check (fix round 1, Critical finding)
+// ---------------------------------------------------------------------------
+
+test("sweep 3 SKIPS a candidate whose port is reserved in its own CROW_HOME's state.json (adopted model, not reaped)", async (t) => {
+  // The scenario: a crashed gateway's llama-server survived (setpriv absent
+  // or lost the pdeathsig race), got reparented to init (ppid==1), and was
+  // then ADOPTED by the restarted gateway (identityProbe found it already
+  // resident -> freshStart:false, no respawn) — so it's STILL serving live
+  // traffic despite looking exactly like an orphan. reconcileOnBoot leaves
+  // its reservation in state.json for precisely this reason; Sweep 3 must
+  // see that and refuse to kill it.
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
+  const prod = await prodMainPids();
+  const fixture = makeFakeNativeRuntime();
+  if (!fixture) return t.skip("python3 not available to build a realistic native-runtime fixture binary");
+  const { T, binPath } = fixture;
+
+  const spawned = [];
+  t.after(() => {
+    trackedKill(spawned);
+    rmSync(T, { recursive: true, force: true });
+  });
+
+  const PORT = 18142;
+  writeStateReservation(T, "adopted-model", PORT);
+  const pid = await spawnFakeNativeModel(binPath, { port: PORT, alias: "adopted-model" });
+  spawned.push(pid);
+  assert.ok(isAlive(pid), "adopted-model fixture must be alive pre-run");
+
+  // DRY_RUN so the skip decision is provable via stdout without racing the
+  // TERM→KILL grace window (also proves the "would have matched but was
+  // protected" path independently of any real signal being sent).
+  const { stdout } = await runScript({
+    ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
+    ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+    ORPHAN_DRY_RUN: "1",
+  });
+
+  await sleep(2500);
+  assert.ok(isAlive(pid), "adopted-model fixture must survive — it's reserved, not abandoned");
+  assert.match(stdout, /skipping adopted native model on port 18142/i, "script must log the adoption skip");
+  assert.match(stdout, /adopted-model/, "skip log must name the reserving model id");
+  // The pid legitimately appears IN the skip log line itself — what must
+  // never appear is reap_tree's own "would kill"/"SIGTERM" victim framing.
+  assert.doesNotMatch(stdout, /would kill pid \d+.*orphaned native model runtime/i,
+    "an adopted model must never be named a DRY-RUN reap victim");
+  assertProdAlive(prod, "after the adoption-skip dry run");
+});
+
+test("sweep 3 still reaps a candidate whose port has NO reservation at all (truly abandoned, not adopted)", async (t) => {
+  const prod = await prodMainPids();
+  if (prod.length === 0) return t.skip("no crow gateway units on this host");
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
+  const fixture = makeFakeNativeRuntime();
+  if (!fixture) return t.skip("python3 not available to build a realistic native-runtime fixture binary");
+  const { T, binPath } = fixture;
+
+  const spawned = [];
+  t.after(() => {
+    trackedKill(spawned);
+    rmSync(T, { recursive: true, force: true });
+  });
+
+  const PORT = 18143;
+  // A state.json EXISTS (unlike the plain reap test above) but reserves a
+  // DIFFERENT port for a different model — proves the cross-check is a
+  // per-port lookup, not "any state file present -> protected".
+  writeStateReservation(T, "some-other-model", PORT + 1000);
+  const pid = await spawnFakeNativeModel(binPath, { port: PORT, alias: "abandoned-model" });
+  spawned.push(pid);
+
+  const { stdout } = await runScript({
+    ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
+    ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+  });
+
+  await waitFor(() => !isAlive(pid), 5000, "unreserved native runtime fixture to die");
+  assert.ok(!isAlive(pid), `unreserved native runtime fixture ${pid} must be gone`);
+  assert.doesNotMatch(stdout, /skipping adopted native model/i, "must not be logged as an adoption skip");
+  assertProdAlive(prod, "after the truly-abandoned reap run");
+});
+
+test("sweep 3 fails CLOSED when a candidate's own port can't be determined (no --port in its cmdline)", async (t) => {
+  // Never guess: a candidate matching the exe/cwd identity proof but with
+  // no parseable --port must be skipped, not reaped — the whole point of
+  // the adoption cross-check is refusing to kill on incomplete evidence.
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
+  const prod = await prodMainPids();
+  const fixture = makeFakeNativeRuntime();
+  if (!fixture) return t.skip("python3 not available to build a realistic native-runtime fixture binary");
+  const { T, binPath } = fixture;
+
+  const spawned = [];
+  t.after(() => {
+    trackedKill(spawned);
+    rmSync(T, { recursive: true, force: true });
+  });
+
+  const pid = await spawnFakeNativeModel(binPath, {}); // no `port` -> no --port flag at all
+  spawned.push(pid);
+
+  const { stdout } = await runScript({
+    ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
+    ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+  });
+
+  await sleep(2500);
+  assert.ok(isAlive(pid), "a candidate with no determinable port must survive (fail closed)");
+  assert.match(stdout, /could not determine its own CROW_HOME\/port/i, "script must log the fail-closed skip");
+  assertProdAlive(prod, "after the fail-closed run");
 });
 
 test("sweep 3 requires the exe/cwd identity proof — a cmdline-only decoy (no matching exe/cwd) survives", async (t) => {
@@ -587,7 +771,13 @@ test("sweep 3 candidate identity check matches on cwd too, not only exe", async 
     rmSync(T, { recursive: true, force: true });
   });
 
-  const pid = await spawnOrphaned(script, { cwd: releaseDir });
+  // A realistic --port flag so the adoption cross-check (fix round 1) can
+  // determine the candidate's port and proceed past its fail-closed guard;
+  // no T/models/state.json exists at all, so it's correctly unreserved.
+  const pid = await spawnOrphaned(script, {
+    cwd: releaseDir,
+    extraArgs: ["--model", "/fake/model.gguf", "--alias", "cwd-test-model", "--port", "18144", "--host", "127.0.0.1"],
+  });
   spawned.push(pid);
   assert.ok(isAlive(pid), "cwd-fixture must be alive pre-run");
 
