@@ -15,6 +15,7 @@ import {
   allocatePort,
   releasePort,
   reconcileOnBoot,
+  registryEntryRuntimeState,
 } from "../servers/gateway/models/state.js";
 
 function scratchDir(tag) {
@@ -287,4 +288,32 @@ test("reconcileOnBoot does not mutate state.journal or state.registry", () => {
   const before = JSON.stringify(state);
   reconcileOnBoot({ state, listProviderRows: () => [], isProcessAlive: () => true });
   assert.equal(JSON.stringify(state), before);
+});
+
+// ---------------------------------------------------------------------------
+// registryEntryRuntimeState (Task 13 fix round 1, finding c — "reloading
+// after update")
+// ---------------------------------------------------------------------------
+
+test("registryEntryRuntimeState: live always wins, regardless of the marker", () => {
+  assert.equal(registryEntryRuntimeState({ wasLive: true }, true), "running");
+  assert.equal(registryEntryRuntimeState({ wasLive: false }, true), "running");
+  assert.equal(registryEntryRuntimeState(null, true), "running");
+});
+
+test("registryEntryRuntimeState: not live + wasLive:true -> stopped_after_restart (the gateway restarted out from under it)", () => {
+  assert.equal(registryEntryRuntimeState({ wasLive: true }, false), "stopped_after_restart");
+  assert.equal(registryEntryRuntimeState({ wasLive: true, lastStoppedAt: null }, false), "stopped_after_restart");
+});
+
+test("registryEntryRuntimeState: not live + wasLive:false/absent -> plain stopped (never started, or deliberately stopped)", () => {
+  assert.equal(registryEntryRuntimeState({ wasLive: false }, false), "stopped");
+  assert.equal(registryEntryRuntimeState({}, false), "stopped");
+  assert.equal(registryEntryRuntimeState(null, false), "stopped");
+  assert.equal(registryEntryRuntimeState(undefined, false), "stopped");
+});
+
+test("registryEntryRuntimeState: a truthy-but-not-strictly-true wasLive (e.g. a stray string) does not accidentally match", () => {
+  assert.equal(registryEntryRuntimeState({ wasLive: "true" }, false), "stopped");
+  assert.equal(registryEntryRuntimeState({ wasLive: 1 }, false), "stopped");
 });

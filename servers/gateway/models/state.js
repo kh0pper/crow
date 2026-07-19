@@ -10,8 +10,14 @@
  *   - journal: in-progress model downloads (url/dest/bytesDone/expectedSha/
  *     startedAt) so a killed download can resume instead of restarting.
  *   - registry: models this CROW_HOME has actually installed (file/quant/
- *     catalogId/registeredAt), independent of whether a runtime is
- *     currently running for them.
+ *     catalogId/registeredAt/sizeMb), independent of whether a runtime is
+ *     currently running for them. Two optional fields ride the same entry:
+ *     `wasLive`/`lastStoppedAt` (Task 13 fix round 1, finding c — see
+ *     `registryEntryRuntimeState` below, written by `gpu-orchestrator.js`)
+ *     and `source` (e.g. `"hf-browser"` — Task 13 fix round 1, finding 1,
+ *     written by `manager.js`'s `registerModel` via its `registryExtra`
+ *     param) distinguishing an un-vetted Browse-Hugging-Face registration
+ *     from a curated one.
  *
  * `dir` is always injected by the caller — this module never guesses a
  * path itself. Production callers pass `resolveDataDir()` (the same
@@ -141,6 +147,38 @@ export async function allocatePort(state, modelId, { crowHome = resolveDataDir()
 /** Free modelId's port reservation, if any. No-op if it has none. */
 export function releasePort(state, modelId) {
   delete state.reservations[modelId];
+}
+
+/**
+ * Classify a registry entry's runtime state for the panel (Task 13 fix
+ * round 1, finding c — the "reloading after update" state).
+ *
+ * `live` is whatever `GET /api/models/runtime` (or the panel's SSR
+ * equivalent) already determined from the in-process handle snapshot for
+ * this process lifetime — this function never touches that itself, it only
+ * decides what to say when `live` is false.
+ *
+ * `entry.wasLive` is set by `gpu-orchestrator.js` the moment a native model
+ * actually becomes resident, and cleared back to `false` (with
+ * `lastStoppedAt` stamped) the moment it reaches ANY terminal state
+ * (explicit stop, sibling swap-out, idle-unload, crash-exhausted) WHILE
+ * that same gateway process is still running. That ordering is exactly
+ * what makes `wasLive === true` combined with `live === false` mean "this
+ * process never got the chance to see it stop" — i.e. the gateway itself
+ * restarted out from under a resident model — rather than "the user (or
+ * the system) deliberately stopped it," which always clears the marker
+ * before any restart could intervene. A model that was never started at
+ * all (or was cleanly stopped before the restart) has `wasLive` `false`/
+ * absent and correctly reads as plain `"stopped"`.
+ *
+ * @param {{wasLive?: boolean}|null|undefined} entry - a `state.registry[modelId]` entry
+ * @param {boolean} live - true iff this process currently has a live handle for it
+ * @returns {"running"|"stopped_after_restart"|"stopped"}
+ */
+export function registryEntryRuntimeState(entry, live) {
+  if (live) return "running";
+  if (entry && entry.wasLive === true) return "stopped_after_restart";
+  return "stopped";
 }
 
 /**

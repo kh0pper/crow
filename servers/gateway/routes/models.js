@@ -60,8 +60,11 @@ import { isAllowedNetwork, verifySession, parseCookies } from "../dashboard/auth
 import { listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { getCachedProbe, reprobe, fitBadge } from "../models/probe.js";
-import { loadState } from "../models/state.js";
-import { enqueueDownload, registerModel, unregisterModel, providerBindings } from "../models/manager.js";
+import { loadState, registryEntryRuntimeState } from "../models/state.js";
+import {
+  enqueueDownload, registerModel, unregisterModel, providerBindings,
+  downloadHfFile, fetchHfPathInfo, isValidHfRepoId, isValidHfFilename, deriveModelIdFromFilename,
+} from "../models/manager.js";
 import { getStatusSnapshot } from "../models/runtime.js";
 import { getNativeHandle, maybeAcquireLocalProvider } from "../gpu-orchestrator.js";
 
@@ -132,6 +135,11 @@ function publicJob(job) {
     error: job.error,
     errorCode: job.errorCode,
     providerId: job.providerId,
+    // "curated" (default, omitted historically — every existing job before
+    // this field existed is implicitly curated) | "hf-browser" (Task 13 fix
+    // round 1, finding 1) — lets the panel tell which progress UI a given
+    // job belongs to without re-deriving it from the id shape.
+    source: job.source || "curated",
   };
 }
 
@@ -167,6 +175,9 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     hfApiBase = "https://huggingface.co",
     fetchImplFn = fetch,
     hfSearchTimeoutMs = HF_SEARCH_TIMEOUT_MS,
+    registryEntryRuntimeStateFn = registryEntryRuntimeState,
+    downloadHfFileFn = downloadHfFile,
+    fetchHfPathInfoFn = fetchHfPathInfo,
   } = opts;
 
   const router = Router();
@@ -351,6 +362,131 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     res.json({ downloads: Array.from(downloadJobs.values()).map(publicJob) });
   });
 
+  // --- Browse Hugging Face download (Task 13 fix round 1, finding 1 —
+  // Kevin decided to build this in this PR rather than leave the tab
+  // search-only) ---------------------------------------------------------
+  //
+  // Shares the download-job map + GET /downloads polling surface with the
+  // curated /download route above (jobs carry `source: "hf-browser"` —
+  // see publicJob) but is otherwise a SEPARATE pipeline: no catalog entry
+  // exists for an arbitrary Hugging Face file, so the fit gate's size and
+  // the download's sha256 are both fetched live from Hugging Face's
+  // paths-info API (`manager.js`'s `fetchHfPathInfo`) BEFORE any download
+  // traffic — see that function's doc for why a nonexistent path and a
+  // non-LFS (unverifiable) file are each their own typed, honest failure,
+  // never conflated with a generic upstream error.
+  router.post("/api/models/hf-download", async (req, res) => {
+    try {
+      const { hfRepo, file, force } = req.body || {};
+      if (!isValidHfRepoId(hfRepo)) {
+        return res.status(400).json({ error: `Invalid Hugging Face repo id: ${JSON.stringify(hfRepo)}`, code: "INVALID_HF_REPO" });
+      }
+      if (!isValidHfFilename(file)) {
+        return res.status(400).json({ error: `Invalid file name: ${JSON.stringify(file)}`, code: "INVALID_HF_FILE" });
+      }
+
+      let token = null;
+      const tokenDb = dbFactory();
+      try {
+        token = await getHfToken(tokenDb);
+      } catch { /* best effort — an un-gated file still downloads fine unauthenticated */ }
+      finally { try { tokenDb.close(); } catch { /* best effort */ } }
+
+      let pathInfo;
+      try {
+        pathInfo = await fetchHfPathInfoFn({ hfRepo, file, hfApiBase, hfToken: token });
+      } catch (err) {
+        const code = err.code === "HF_FILE_NOT_FOUND" ? "HF_FILE_NOT_FOUND" : "HF_UPSTREAM_ERROR";
+        const status = err.code === "HF_FILE_NOT_FOUND" ? 404 : 502;
+        return res.status(status).json({ error: err.message, code });
+      }
+      if (!pathInfo.sha256) {
+        return res.status(422).json({
+          error: "This file has no verifiable checksum (it isn't LFS-tracked) — refusing to download an unverifiable file.",
+          code: "NO_VERIFIABLE_CHECKSUM",
+        });
+      }
+
+      const sizeMb = typeof pathInfo.sizeBytes === "number" ? pathInfo.sizeBytes / 1_000_000 : null;
+      const probe = getCachedProbeFn();
+      const badge = fitBadgeFn(probe, { min_ram_mb: sizeMb, min_vram_mb: 0 });
+      if (badge === "wont_fit" && force !== true) {
+        return res.status(409).json({
+          error: `This file is unlikely to fit on this hardware (fitBadge: ${badge}). Pass force:true to download anyway.`,
+          code: "WONT_FIT",
+          fitBadge: badge,
+        });
+      }
+
+      const modelId = deriveModelIdFromFilename(file);
+      const jobId = jobIdFor(modelId, "hf");
+      const existing = downloadJobs.get(jobId);
+      if (existing && (existing.status === "downloading" || existing.status === "registering")) {
+        return res.status(202).json({ jobId, status: existing.status });
+      }
+
+      const dir = resolveDir();
+      const job = {
+        id: jobId,
+        modelId,
+        quant: "hf",
+        status: "downloading",
+        bytesDone: 0,
+        totalBytes: sizeMb != null ? Math.round(sizeMb * 1_000_000) : null,
+        startedAt: new Date().toISOString(),
+        error: null,
+        errorCode: null,
+        providerId: null,
+        source: "hf-browser",
+      };
+      downloadJobs.set(jobId, job);
+
+      // Fire-and-forget — identical shape to the curated /download handler.
+      (async () => {
+        let catalog;
+        try {
+          const result = await downloadHfFileFn({
+            hfRepo,
+            file,
+            dir,
+            hfToken: token,
+            onProgress: ({ bytesDone, totalBytes }) => {
+              job.bytesDone = bytesDone;
+              if (totalBytes != null) job.totalBytes = totalBytes;
+            },
+          });
+          catalog = result.catalog;
+        } catch (err) {
+          job.status = "error";
+          job.error = err.message;
+          job.errorCode = err.code || "DOWNLOAD_FAILED";
+          return;
+        }
+
+        const db = dbFactory();
+        try {
+          job.status = "registering";
+          const provider = await registerModelFn({
+            modelId, quant: "hf", catalog, db, dir,
+            registryExtra: { source: "hf-browser" },
+          });
+          job.status = "done";
+          job.providerId = provider.id;
+        } catch (err) {
+          job.status = "error";
+          job.error = err.message;
+          job.errorCode = err.code || "REGISTER_FAILED";
+        } finally {
+          try { db.close(); } catch { /* best effort */ }
+        }
+      })();
+
+      res.status(202).json({ jobId, status: job.status });
+    } catch (err) {
+      res.status(500).json({ error: err.message, code: "INTERNAL" });
+    }
+  });
+
   // --- Install / uninstall -----------------------------------------------
 
   router.delete("/api/models/:id", async (req, res) => {
@@ -448,9 +584,17 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       const byAlias = new Map(snapshot.map((s) => [s.alias, s]));
       const models = Object.keys(state.registry).map((modelId) => {
         const status = byAlias.get(modelId);
-        return status
-          ? { modelId, ...status }
-          : { modelId, state: "stopped", live: false, port: null, restartCount: 0, lastError: null, startedAt: null, pid: null };
+        if (status) return { modelId, ...status };
+        // Task 13 fix round 1, finding c: distinguish "never started" from
+        // "was resident when the gateway went down and hasn't re-warmed
+        // yet" via the persisted wasLive marker (state.registry[modelId])
+        // — see registryEntryRuntimeState's doc for the exact contract.
+        const entry = state.registry[modelId];
+        return {
+          modelId,
+          state: registryEntryRuntimeStateFn(entry, false),
+          live: false, port: null, restartCount: 0, lastError: null, startedAt: null, pid: null,
+        };
       });
       const activeDownloads = Array.from(downloadJobs.values())
         .filter((j) => j.status === "downloading" || j.status === "registering").length;

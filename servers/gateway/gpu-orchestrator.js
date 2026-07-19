@@ -75,6 +75,10 @@ import {
 } from "./provider-health.js";
 import { resolveDataDir, createDbClient } from "../db.js";
 import { loadState, saveState, reconcileOnBoot } from "./models/state.js";
+// wasLive-marker plumbing lives in this file (not state.js) so it can reuse
+// `startNativeAndAwaitReady`'s ALREADY-resolved `dir` — see
+// `persistLivenessMarker`'s doc below for why this deliberately never
+// calls the bare `resolveDataDir()` on its own.
 import { acquireHostLock } from "./models/native-lock.js";
 import { identityProbe, startModel, stopModel, ensureRuntime, nativeReadinessTimeoutMs } from "./models/runtime.js";
 import { getCachedProbe, reprobe } from "./models/probe.js";
@@ -560,6 +564,42 @@ async function waitForNativeReady(baseUrl, alias, {
 }
 
 /**
+ * Persist the "was this model live" marker `state.js`'s
+ * `registryEntryRuntimeState` reads to distinguish a deliberately-stopped
+ * model from one that's mid-restart-recovery (Task 13 fix round 1, finding
+ * c — the panel's "reloading after update" state).
+ *
+ * Deliberately uses the REAL `loadState`/`saveState` against the EXACT
+ * `dir` its caller already resolved (via the injectable `resolveDataDirFn`
+ * every existing test in this file stubs to something like
+ * `"/fake/crow-home"`) rather than re-resolving `resolveDataDir()` itself —
+ * a bare, unmocked `resolveDataDir()` call falls back to the REAL
+ * `~/.crow/data` when `CROW_DATA_DIR` isn't set in the calling process,
+ * which every test in this file that exercises the native-start path is
+ * exactly that case (`node --test <this file>` alone, outside `npm test`'s
+ * scratch-CROW_HOME wrapper). Wrapped in try/catch and never throws: this
+ * is a UI-only marker, and a fixture/test `dir` that was never meant to be
+ * written to must degrade to a harmless no-op (an EACCES/ENOENT at a path
+ * like `/fake/crow-home`), never break process supervision or the caller's
+ * return value.
+ */
+function persistLivenessMarker(dir, modelId, { wasLive }) {
+  try {
+    const state = loadState(dir);
+    const entry = state.registry?.[modelId];
+    if (!entry) return; // nothing registered under this id — nothing to mark
+    state.registry[modelId] = {
+      ...entry,
+      wasLive,
+      lastStoppedAt: wasLive ? null : new Date().toISOString(),
+    };
+    saveState(dir, state);
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] failed to persist liveness marker for ${modelId}: ${err.message}`);
+  }
+}
+
+/**
  * Start a native provider's llama-server process and wait for it to report
  * itself resident. Binds the EXACT port already encoded in `p.baseUrl` —
  * NEVER re-allocates a fresh one from the port pool. A bind failure (the
@@ -622,8 +662,18 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
 
   const binPath = preResolvedBinPath || await resolveNativeBinPath(p, opts);
 
+  // Wrap the caller's onTerminal (if any — `acquireOrStartNative` passes
+  // its lock-release closure here) so the SAME single, exactly-once
+  // terminal transition also clears the wasLive marker BEFORE the lock
+  // frees and BEFORE any restart could happen — finding c above. Reuses
+  // this function's own already-resolved `dir`, never re-resolves it.
+  const wrappedOnTerminal = (reason) => {
+    persistLivenessMarker(dir, providerName, { wasLive: false });
+    if (typeof onTerminal === "function") onTerminal(reason);
+  };
+
   console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port}, readinessTimeoutMs=${readinessTimeoutMs})`);
-  const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn, onTerminal });
+  const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn, onTerminal: wrappedOnTerminal });
   _nativeHandles.set(providerName, handle);
 
   const result = await waitForNativeReady(p.baseUrl, alias, {
@@ -637,6 +687,7 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   if (result === "resident") {
     console.log(`[gpu-orchestrator] ${providerName} ready`);
     _lastUsedAt.set(providerName, Date.now());
+    persistLivenessMarker(dir, providerName, { wasLive: true });
     return true;
   }
 

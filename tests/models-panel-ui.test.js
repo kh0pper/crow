@@ -44,6 +44,7 @@ import modelCatalogPanel, {
 } from "../servers/gateway/dashboard/panels/model-catalog.js";
 import { dashboardAuth } from "../servers/gateway/dashboard/auth.js";
 import { translations } from "../servers/gateway/dashboard/shared/i18n.js";
+import { saveState } from "../servers/gateway/models/state.js";
 
 const repoRoot = join(import.meta.dirname, "..");
 
@@ -411,4 +412,54 @@ test("panel manifest: registered id/route/icon shape matches the panel-registry 
   assert.equal(modelCatalogPanel.route, "/dashboard/model-catalog");
   assert.equal(typeof modelCatalogPanel.handler, "function");
   assert.equal(typeof modelCatalogPanel.navOrder, "number");
+});
+
+// ---------------------------------------------------------------------------
+// Task 13 fix round 1
+// ---------------------------------------------------------------------------
+
+test("client script ships the Browse-HF download wiring: the /hf-download endpoint, the confirm dialog, and the per-file row builder", () => {
+  const src = readFileSync(join(repoRoot, "servers/gateway/dashboard/panels/model-catalog.js"), "utf8");
+  const scriptStart = src.indexOf("<script>", src.indexOf("function modelCatalogClientJS"));
+  const scriptEnd = src.indexOf("</script>", scriptStart);
+  const body = src.slice(scriptStart, scriptEnd);
+  assert.match(body, /"\/hf-download"/, "POST /hf-download is called somewhere in the client script");
+  assert.match(body, /function showHfDownloadConfirm/);
+  assert.match(body, /function buildHfFileRow/);
+  assert.match(body, /function pollHfDownload/);
+  // Finding d: the gated-retry detection must key off the typed code, never
+  // the old raw.indexOf("403") string heuristic (both the curated AND the
+  // Browse-HF paths).
+  assert.doesNotMatch(body, /indexOf\("403"\)/);
+  assert.match(body, /errorCode === "HTTP_403"/g);
+});
+
+test("GET /api/models/runtime-equivalent SSR: a registry entry with wasLive:true and no live handle renders the 'reloading after update' state, distinct from plain 'not running'", async () => {
+  const h = freshLibsql();
+  try {
+    // qwen3-4b is a real registry.json/curated catalog id (registry/model-catalog.json)
+    saveState(h.dir, {
+      reservations: {},
+      journal: {},
+      registry: { "qwen3-4b": { file: "qwen3-4b.gguf", quant: "Q4_K_M", wasLive: true, lastStoppedAt: null } },
+    });
+    const layout = ({ content }) => content;
+    const html = await modelCatalogPanel.handler({}, {}, { db: h.db, layout, lang: "en" });
+    assert.match(html, /Reloading after update/);
+    assert.match(html, /running before the gateway restarted/);
+  } finally { await h.cleanup(); }
+});
+
+test("GET /api/models/runtime-equivalent SSR: a registry entry with NO wasLive marker renders plain 'Not running', never 'reloading'", async () => {
+  const h = freshLibsql();
+  try {
+    saveState(h.dir, {
+      reservations: {},
+      journal: {},
+      registry: { "qwen3-4b": { file: "qwen3-4b.gguf", quant: "Q4_K_M" } },
+    });
+    const layout = ({ content }) => content;
+    const html = await modelCatalogPanel.handler({}, {}, { db: h.db, layout, lang: "en" });
+    assert.doesNotMatch(html, /Reloading after update/);
+  } finally { await h.cleanup(); }
 });
