@@ -42,6 +42,7 @@ import {
   RuntimeAssetError,
   RuntimeChecksumError,
   RuntimeDownloadTimeoutError,
+  RuntimeHostNotAllowedError,
   resolveAsset,
   isAllowedRuntimeHost,
   buildRuntimeDownloadUrl,
@@ -818,9 +819,14 @@ test("resolveAsset: vulkan accel with sufficient glibc picks the vulkan asset", 
 // isAllowedRuntimeHost / buildRuntimeDownloadUrl
 // ---------------------------------------------------------------------------
 
-test("isAllowedRuntimeHost allows exactly github.com and objects.githubusercontent.com", () => {
+test("isAllowedRuntimeHost allows exactly github.com, objects.githubusercontent.com, and release-assets.githubusercontent.com", () => {
   assert.equal(isAllowedRuntimeHost("github.com"), true);
   assert.equal(isAllowedRuntimeHost("objects.githubusercontent.com"), true);
+  // Item G, PR G-F follow-up: GitHub's release-asset redirect target
+  // observed live as of 2026-07-19 (confirmed via `curl -sIL` against a
+  // real release URL) — objects.githubusercontent.com is kept alongside
+  // it since there's no signal it's fully retired.
+  assert.equal(isAllowedRuntimeHost("release-assets.githubusercontent.com"), true);
   assert.equal(isAllowedRuntimeHost("evilgithub.com"), false);
   assert.equal(isAllowedRuntimeHost("huggingface.co"), false);
   assert.equal(isAllowedRuntimeHost(""), false);
@@ -958,6 +964,81 @@ test("downloadRuntimeAsset rejects a stalled connection with RuntimeDownloadTime
         },
       );
       assert.equal(existsSync(dest), false, "no partial file — the stall was never past the connect/header phase");
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// downloadRuntimeAsset — redirect-host allowlist (Item G, PR G-F follow-up:
+// GitHub's release-asset redirect target observed live as of 2026-07-19 is
+// release-assets.githubusercontent.com, not the previously-hardcoded
+// objects.githubusercontent.com — confirmed via `curl -sIL` against a real
+// release URL. Both hosts are now allowed; every hop is still re-checked
+// against the allowlist, so an attacker-controlled redirect to anything
+// else is still refused.)
+// ---------------------------------------------------------------------------
+
+test("downloadRuntimeAsset follows a real github.com -> release-assets.githubusercontent.com redirect chain", async () => {
+  await withScratch("dl-redirect-release-assets", async (dir) => {
+    const buildDir = join(dir, "build");
+    mkdirSync(buildDir, { recursive: true });
+    const { bytes, sha256 } = makeRealTarball(buildDir);
+
+    const { srv, port } = await startFixtureServer((req, res) => {
+      if (req.url.startsWith("/releases/download/")) {
+        // The first hop, as if it came from github.com — redirects to the
+        // OTHER allowed host. forceGithubLookup() resolves every hostname
+        // to 127.0.0.1, so this single fixture server plays both hops.
+        res.writeHead(302, { location: `http://release-assets.githubusercontent.com:${port}/blob/x?sig=abc` });
+        res.end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/gzip" });
+      res.end(bytes);
+    });
+
+    const dest = join(dir, "redirected-runtime.tar.gz");
+    try {
+      await downloadRuntimeAsset({
+        url: `http://github.com:${port}/releases/download/x/y.tar.gz`,
+        dest,
+        expectedSha: sha256,
+        lookup: forceGithubLookup(),
+        insecureHttpHosts: ["github.com", "release-assets.githubusercontent.com"],
+      });
+      assert.ok(readFileSync(dest).equals(bytes), "the redirected download landed the real payload, checksum-verified");
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+test("downloadRuntimeAsset still refuses a redirect to a host outside the runtime allowlist", async () => {
+  await withScratch("dl-redirect-refused", async (dir) => {
+    const { srv, port } = await startFixtureServer((req, res) => {
+      res.writeHead(302, { location: `http://evil-cdn.example.com:${port}/payload` });
+      res.end();
+    });
+
+    const dest = join(dir, "refused-runtime.tar.gz");
+    try {
+      await assert.rejects(
+        () => downloadRuntimeAsset({
+          url: `http://github.com:${port}/releases/download/x/y.tar.gz`,
+          dest,
+          expectedSha: null,
+          lookup: forceGithubLookup(),
+          insecureHttpHosts: ["github.com", "evil-cdn.example.com"],
+        }),
+        (err) => {
+          assert.ok(err instanceof RuntimeHostNotAllowedError);
+          assert.equal(err.hostname, "evil-cdn.example.com");
+          return true;
+        },
+      );
+      assert.equal(existsSync(dest), false, "an unallowed redirect target never gets a partial file written");
     } finally {
       await new Promise((r) => srv.close(r));
     }

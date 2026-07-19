@@ -303,7 +303,17 @@ export function resolveAsset(probe, runtimeBlock, opts = {}) {
 // Runtime asset download (own allowlist — see module doc)
 // ---------------------------------------------------------------------------
 
-const RUNTIME_ALLOWED_HOSTS = new Set(["github.com", "objects.githubusercontent.com"]);
+// "objects.githubusercontent.com" was GitHub's release-asset redirect
+// target historically and "release-assets.githubusercontent.com" is the
+// target observed live as of Item G, PR G-F (confirmed via `curl -sIL`
+// against a real release URL, 2026-07-19) — both are kept since GitHub
+// may serve either depending on the release/rollout, and there's no
+// signal here that the old host is fully retired.
+const RUNTIME_ALLOWED_HOSTS = new Set([
+  "github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+]);
 
 /** Default socket-idle timeout for a runtime-asset download hop
  * (~120s, per Task 9 review round 1: "no promise may hang forever on a
@@ -311,9 +321,11 @@ const RUNTIME_ALLOWED_HOSTS = new Set(["github.com", "objects.githubusercontent.
  * `downloadRuntimeAsset({ timeoutMs })` / `ensureRuntime(..., { timeoutMs })`. */
 export const DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS = 120_000;
 
-/** True iff `hostname` is exactly "github.com" or "objects.githubusercontent.com"
- * (GitHub's release-asset redirect target). No subdomain wildcarding —
- * these are the two literal hosts a llama.cpp release download hits. */
+/** True iff `hostname` is exactly "github.com", "objects.githubusercontent.com",
+ * or "release-assets.githubusercontent.com" (GitHub's release-asset
+ * redirect targets — see RUNTIME_ALLOWED_HOSTS's comment for why both
+ * githubusercontent hosts are kept). No subdomain wildcarding — these
+ * are the literal hosts a llama.cpp release download hits. */
 export function isAllowedRuntimeHost(hostname) {
   if (typeof hostname !== "string" || hostname.length === 0) return false;
   return RUNTIME_ALLOWED_HOSTS.has(hostname.toLowerCase());
