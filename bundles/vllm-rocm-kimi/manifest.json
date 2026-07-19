@@ -11,5 +11,24 @@
     "gpu_arch": ["gfx1151"]
   },
   "env_vars": [],
-  "port": 8003
+  "port": 8003,
+  "providers": [
+    {
+      "id": "crow-swap-kimi",
+      "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+      "apiKey": "none",
+      "description": "Long-context planner specialist (Kimi-Linear-48B-A3B-Instruct BF16, on-demand; conflicts with crow-chat)",
+      "models": [
+        {
+          "id": "kimi-linear-48b",
+          "contextLen": 32768,
+          "warm": false,
+          "onDemand": true,
+          "mutexGroup": "8003-swap",
+          "conflictsWith": ["crow-chat"],
+          "priority": "batch"
+        }
+      ]
+    }
+  ]
 }
