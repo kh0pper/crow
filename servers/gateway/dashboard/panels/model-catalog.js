@@ -179,8 +179,13 @@ export async function loadPanelData({
   const snapshot = getStatusSnapshotFn();
   const byAlias = new Map(snapshot.map((s) => [s.alias, s]));
   const runtimeModels = Object.keys(state.registry).map((modelId) => {
+    // Task 13 fix round 3: hf-browser-registered models have no curated
+    // card (they're not in the catalog at all), so the runtime strip is
+    // their ONLY surface — it needs to know their source to offer a
+    // Remove affordance there instead.
+    const source = state.registry[modelId]?.source || "curated";
     const status = byAlias.get(modelId);
-    if (status) return { modelId, ...status };
+    if (status) return { modelId, source, ...status };
     // Task 13 fix round 1, finding c: distinguish "never started" from
     // "was resident when the gateway restarted, hasn't re-warmed yet" via
     // the persisted wasLive marker — same classification GET /api/models/
@@ -189,6 +194,7 @@ export async function loadPanelData({
     const entry = state.registry[modelId];
     return {
       modelId,
+      source,
       state: registryEntryRuntimeStateFn(entry, false),
       live: false, port: null, restartCount: 0, lastError: null, startedAt: null, pid: null,
     };
@@ -411,7 +417,7 @@ function renderFitPill(badgeName, lang) {
   return `<span class="mcat-fit-pill mcat-fit-pill--${cls}">${escapeHtml(t(fitLabelKey(badgeName), lang))}</span>`;
 }
 
-function renderRuntimeStrip(data, lang) {
+export function renderRuntimeStrip(data, lang) {
   const { runtime, probe, runtimeModels, estimatedRamMb, estimatedVramMb } = data;
 
   const binaryLine = runtime.name
@@ -459,6 +465,16 @@ function renderRuntimeStrip(data, lang) {
     const actionBtn = m.live
       ? button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" data-model-id="${escapeHtml(m.modelId)}"` })
       : button(t("models.actionStart", lang), { variant: "secondary", size: "sm", attrs: `data-action="start" data-model-id="${escapeHtml(m.modelId)}"` });
+    // Task 13 fix round 3: an hf-browser-registered model has NO curated
+    // card (its id is never in the catalog), so the runtime strip is the
+    // only place it can ever be removed from — give it a Remove button
+    // here, reusing the exact same delegated data-action="remove" ->
+    // requestDelete -> confirm-modal -> DELETE?confirm=true flow the
+    // curated cards already use. Curated rows keep relying on their own
+    // card's Remove button, unchanged.
+    const removeBtn = m.source === "hf-browser"
+      ? button(t("models.actionRemove", lang), { variant: "danger", size: "sm", attrs: `data-action="remove" data-model-id="${escapeHtml(m.modelId)}"` })
+      : "";
     return `<tr>
       <td class="mono">${escapeHtml(m.modelId)}</td>
       <td>${stateCell}</td>
@@ -466,7 +482,7 @@ function renderRuntimeStrip(data, lang) {
       <td class="mono">${m.pid != null ? escapeHtml(String(m.pid)) : "—"}</td>
       <td class="mono">${escapeHtml(String(m.restartCount || 0))}</td>
       <td>${m.lastError ? escapeHtml(String(m.lastError)) : "—"}</td>
-      <td>${actionBtn}</td>
+      <td>${actionBtn}${removeBtn}</td>
     </tr>`;
   }).join("");
 
@@ -569,7 +585,7 @@ function renderModelCard(model, lang, hfTokenConfigured) {
   </div>`;
 }
 
-function renderCuratedTab(data, lang) {
+export function renderCuratedTab(data, lang) {
   const groups = groupBySizeClass(data.models);
   const order = [
     ["small", "models.groupSmall"],
@@ -625,7 +641,7 @@ function renderHfTab(data, lang) {
 // template literal's <script> content. Every browser-side string is single
 // or double quoted; concatenation only.
 
-function modelCatalogClientJS(lang) {
+export function modelCatalogClientJS(lang) {
   return `
     <div id="mcat-modal-overlay">
       <div id="mcat-modal-content"></div>
@@ -675,7 +691,13 @@ function modelCatalogClientJS(lang) {
           INVALID_HF_REPO: '${tJs("models.errInvalidHf", lang)}',
           INVALID_HF_FILE: '${tJs("models.errInvalidHf", lang)}',
           NO_VERIFIABLE_CHECKSUM: '${tJs("models.errNoVerifiableChecksum", lang)}',
-          HF_FILE_NOT_FOUND: '${tJs("models.errHfUpstream", lang)}'
+          HF_FILE_NOT_FOUND: '${tJs("models.errHfUpstream", lang)}',
+          // Task 13 fix round 3: Hugging Face answers an unauthenticated
+          // gated download 401 (no/invalid token), distinct from 403
+          // (authenticated but the license hasn't been accepted yet) —
+          // maps to the same "requires a Hugging Face login" copy the
+          // pre-download three-state notice already uses.
+          HTTP_401: '${tJs("models.gatedNoToken", lang)}'
         };
 
         function messageFor(code, fallback) {
@@ -697,7 +719,45 @@ function modelCatalogClientJS(lang) {
           if (bar) bar.style.width = (pct || 0) + "%";
         }
 
-        // --- Quant select -> fit pill/hint live update ---
+        // --- Quant select -> fit pill/hint/action-area live update ---
+        //
+        // Task 13 fix round 3 (GATING): the action area MUST also
+        // re-render on quant change — a default-wont_fit entry with a
+        // fitting alternate quant was otherwise never downloadable (the
+        // disabled notice from the server-render never went away), and
+        // conversely a default-fits entry switched to a wont_fit quant
+        // left the enabled Download button showing for a quant the
+        // server will refuse. See refreshCardActions below.
+        function refreshCardActions(modelId, fit) {
+          var card = document.querySelector('.mcat-card[data-model-id="' + modelId + '"]');
+          if (!card) return;
+          var actions = card.querySelector(".mcat-card__actions");
+          if (!actions) return;
+          // Registered/running cards show Start/Stop + Remove regardless
+          // of quant selection — the quant selector only matters for a
+          // not-yet-installed model (same branch structure the
+          // server-render's renderModelCard uses). A "remove" button is
+          // present in BOTH the running and registered-not-running
+          // branches, absent in the not-installed ones, so its presence
+          // is a reliable signal to leave the actions area alone here.
+          if (actions.querySelector('[data-action="remove"]')) return;
+          actions.replaceChildren();
+          if (fit === "wont_fit") {
+            var notice = document.createElement("div");
+            notice.className = "mcat-card__notice";
+            notice.textContent = FIT_HINTS.wont_fit;
+            actions.appendChild(notice);
+          } else {
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "btn btn-primary btn-sm";
+            btn.setAttribute("data-action", "download");
+            btn.setAttribute("data-model-id", modelId);
+            btn.textContent = '${tJs("models.actionDownload", lang)}';
+            actions.appendChild(btn);
+          }
+        }
+
         document.querySelectorAll(".mcat-quant-select").forEach(function (sel) {
           sel.addEventListener("change", function () {
             var modelId = sel.dataset.modelId;
@@ -713,6 +773,7 @@ function modelCatalogClientJS(lang) {
             }
             var hint = document.querySelector('.mcat-card__fit-hint[data-model-id="' + modelId + '"]');
             if (hint) hint.textContent = FIT_HINTS[fit] || FIT_HINTS.unknown;
+            refreshCardActions(modelId, fit);
           });
         });
 
@@ -793,30 +854,47 @@ function modelCatalogClientJS(lang) {
           return !!(card && card.querySelector(".mcat-card__badge--gated"));
         }
 
-        function startDownload(modelId) {
+        // Task 13 fix round 3 (GATING): NEVER auto-force from the selected
+        // quant's fit badge — that silently bypassed the server's 409
+        // WONT_FIT gate the moment the button next to a wont_fit-selected
+        // quant was clicked (contradicting the spec's "won't fit =
+        // disabled"). The initial call is always force:false; only an
+        // explicit second click on the "Download anyway" button the 409
+        // branch below renders (mirrors startHfDownload's WONT_FIT
+        // handling) retries with force:true. tight/unknown quants need no
+        // special handling here — the server already accepts them without
+        // force (force is inert for those two), so they succeed on the
+        // very first, unforced call.
+        function startDownload(modelId, force) {
           var sel = document.querySelector('.mcat-quant-select[data-model-id="' + modelId + '"]');
           var quant = sel ? sel.value : null;
-          var fit = "fits";
-          if (sel) {
-            var opt = sel.options[sel.selectedIndex];
-            fit = opt.getAttribute("data-fit") || "fits";
-          } else {
-            var pill = document.querySelector('.mcat-fit-hint[data-model-id="' + modelId + '"] .mcat-fit-pill');
-            if (pill) {
-              var m = pill.className.match(/mcat-fit-pill--(\\S+)/);
-              if (m) fit = m[1];
-            }
-          }
           setStatus(modelId, '${tJs("models.actionDownloading", lang)}');
           apiFetch("/download", {
             method: "POST",
-            body: JSON.stringify({ modelId: modelId, quant: quant, force: fit !== "fits" })
+            body: JSON.stringify({ modelId: modelId, quant: quant, force: !!force })
           }).then(function (res) {
             if (res.ok || res.status === 202) {
               pollDownload(res.data.jobId, modelId);
-            } else {
-              setStatus(modelId, messageFor(res.data.code, res.data.error));
+              return;
             }
+            if (res.status === 409 && res.data && res.data.code === "WONT_FIT") {
+              setStatus(modelId, messageFor("WONT_FIT", res.data.error));
+              var card = document.querySelector('.mcat-card[data-model-id="' + modelId + '"]');
+              var actions = card ? card.querySelector(".mcat-card__actions") : null;
+              if (actions) {
+                actions.replaceChildren();
+                var forceBtn = document.createElement("button");
+                forceBtn.type = "button";
+                forceBtn.className = "btn btn-danger btn-sm";
+                forceBtn.textContent = '${tJs("models.actionForceDownload", lang)}';
+                forceBtn.addEventListener("click", function () {
+                  startDownload(modelId, true);
+                });
+                actions.appendChild(forceBtn);
+              }
+              return;
+            }
+            setStatus(modelId, messageFor(res.data && res.data.code, res.data && res.data.error));
           }).catch(function () {
             setStatus(modelId, messageFor("INTERNAL"));
           });
