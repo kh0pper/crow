@@ -132,6 +132,39 @@ export class DownloadProtocolError extends Error {
   }
 }
 
+/** Thrown when a GGUF download's underlying socket sits idle (no bytes
+ * sent or received) for longer than `timeoutMs` — final-review fix wave,
+ * Fix 4 (IMPORTANT). Mirrors `runtime.js`'s `RuntimeDownloadTimeoutError`
+ * as its own distinct type (not a `DownloadProtocolError` — a stalled
+ * connection is not a protocol violation, it's a liveness failure) so
+ * callers can tell the two apart without string-matching `message`. Two
+ * phases are covered independently: a connect/header-wait stall (before
+ * any response arrives — Node's own per-request socket `timeout` option,
+ * `requestOnce`'s `req.on("timeout", ...)`) and a stalled body mid-stream
+ * (after headers, `streamToFile`'s own JS-level idle timer, reset on every
+ * `res` `"data"` event — deliberately NOT reusing Node's socket-timeout
+ * event for this phase, since that event stays armed for the socket's
+ * whole lifetime and racing it against a second, independent watchdog
+ * would make which typed error wins nondeterministic; see `requestOnce`'s
+ * `req.setTimeout(0)` call once headers arrive). Like `DiskFullError` (and
+ * unlike `ChecksumError`), the partial file is deliberately KEPT on disk —
+ * `downloadModel`'s journal already makes a timeout resumable, exactly
+ * like any other mid-download failure. */
+export class DownloadTimeoutError extends Error {
+  constructor(url, timeoutMs) {
+    super(`Download stalled (no socket activity for ${timeoutMs}ms): ${url}`);
+    this.name = "DownloadTimeoutError";
+    this.code = "DOWNLOAD_TIMEOUT";
+    this.url = url;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** Default socket-idle timeout for a GGUF download hop (~120s, matching
+ * `runtime.js`'s `DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS`). Injectable end to
+ * end via `fetchModelBlob({ timeoutMs })` / `downloadModel({ timeoutMs })`. */
+export const DEFAULT_DOWNLOAD_TIMEOUT_MS = 120_000;
+
 /** Thrown by `registerModel` when a provider row already exists at the
  * target id and was NOT registered by this native runtime for this catalog
  * model — e.g. a user's cloud/bundle provider that happens to share the
@@ -234,13 +267,27 @@ function parseTotalBytes(headers, resumeFrom) {
 // Layer 1: raw download engine
 // ---------------------------------------------------------------------------
 
-function requestOnce(urlStr, { headers, lookup }) {
+/**
+ * `timeoutMs`, if given, arms Node's per-request socket-idle timer for the
+ * connect/header-wait phase ONLY: once headers arrive (the response
+ * callback fires), `req.setTimeout(0)` disarms it immediately — body-phase
+ * stalls are watched independently by `streamToFile`'s own JS-level idle
+ * timer (see `DownloadTimeoutError`'s doc for why two independent
+ * mechanisms, not one shared across both phases).
+ */
+function requestOnce(urlStr, { headers, lookup, timeoutMs }) {
   return new Promise((resolvePromise, reject) => {
     const urlObj = new URL(urlStr);
     const transport = urlObj.protocol === "https:" ? https : http;
-    const req = transport.request(urlObj, { method: "GET", headers, lookup }, (res) => {
+    const req = transport.request(urlObj, { method: "GET", headers, lookup, timeout: timeoutMs }, (res) => {
+      req.setTimeout(0);
       resolvePromise({ req, res });
     });
+    if (timeoutMs) {
+      req.once("timeout", () => {
+        req.destroy(new DownloadTimeoutError(urlStr, timeoutMs));
+      });
+    }
     req.on("error", reject);
     req.end();
   });
@@ -258,7 +305,7 @@ function requestOnce(urlStr, { headers, lookup }) {
  * and — worse — a redirect could silently downgrade an https request to
  * http on any later hop; checking protocol independently on every hop
  * (not just validating the initial URL) closes both holes. */
-async function openStream({ url, headers, lookup, maxRedirects, insecureHttpHosts = [] }) {
+async function openStream({ url, headers, lookup, maxRedirects, insecureHttpHosts = [], timeoutMs }) {
   let currentUrl = url;
   // eslint-disable-next-line no-await-in-loop -- redirect hops are
   // inherently sequential: each hop's Location header depends on the
@@ -279,7 +326,7 @@ async function openStream({ url, headers, lookup, maxRedirects, insecureHttpHost
       }
     }
     // eslint-disable-next-line no-await-in-loop
-    const { res } = await requestOnce(currentUrl, { headers, lookup });
+    const { res } = await requestOnce(currentUrl, { headers, lookup, timeoutMs });
     if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
       res.resume(); // discard redirect body
       const location = res.headers.location;
@@ -316,7 +363,16 @@ function rehashPrefix(dest, resumeFrom, hash) {
   });
 }
 
-function streamToFile({ res, dest, resumeFrom, hash, onBytes, createWriteStream }) {
+/**
+ * `timeoutMs`, if given, arms an idle watchdog (Fix 4, final-review fix
+ * wave) that resets on every `res` `"data"` event: if `timeoutMs` elapses
+ * with no bytes received, `fail()`s with a `DownloadTimeoutError` — the
+ * body-phase half of the two-phase mechanism `requestOnce`'s doc describes
+ * (this half is a plain JS timer, deliberately independent of Node's own
+ * socket-timeout event, which `requestOnce` disarms once headers arrive).
+ * `url` is passed through only for the error message.
+ */
+function streamToFile({ res, dest, resumeFrom, hash, onBytes, createWriteStream, timeoutMs, url }) {
   return new Promise((resolvePromise, reject) => {
     const writeStream = createWriteStream(dest, {
       flags: resumeFrom > 0 ? "r+" : "w",
@@ -324,18 +380,35 @@ function streamToFile({ res, dest, resumeFrom, hash, onBytes, createWriteStream 
     });
     let bytesDone = resumeFrom;
     let settled = false;
+    let idleTimer = null;
+
+    const clearIdleTimer = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+    };
 
     const fail = (err) => {
       if (settled) return;
       settled = true;
+      clearIdleTimer();
       err.bytesDone = bytesDone;
       try { res.destroy(); } catch { /* already gone */ }
       try { writeStream.destroy(); } catch { /* already gone */ }
       reject(err);
     };
 
+    const resetIdleTimer = () => {
+      if (!timeoutMs) return;
+      clearIdleTimer();
+      idleTimer = setTimeout(() => fail(new DownloadTimeoutError(url, timeoutMs)), timeoutMs);
+    };
+    resetIdleTimer(); // start the clock immediately — a body that never sends a first byte is also a stall
+
     res.on("data", (chunk) => {
       if (settled) return;
+      resetIdleTimer();
       hash.update(chunk);
       bytesDone += chunk.length;
       const ok = writeStream.write(chunk);
@@ -361,6 +434,7 @@ function streamToFile({ res, dest, resumeFrom, hash, onBytes, createWriteStream 
     res.on("end", () => {
       if (settled) return;
       settled = true;
+      clearIdleTimer();
       writeStream.end(() => resolvePromise({ bytesDone }));
     });
   });
@@ -385,13 +459,20 @@ function streamToFile({ res, dest, resumeFrom, hash, onBytes, createWriteStream 
  *     requirement (default `[]` — https is mandatory everywhere in
  *     production). See `openStream` doc for why every hop is checked
  *     independently.
+ *   - `timeoutMs`: socket-idle timeout (final-review fix wave, Fix 4),
+ *     default `DEFAULT_DOWNLOAD_TIMEOUT_MS` (120s) — covers both a
+ *     connect/header-wait stall and a stalled body mid-stream (see
+ *     `DownloadTimeoutError`'s doc for the two-phase mechanism). Without
+ *     this, a dropped/black-holed TCP connection left the download's
+ *     promise (and everything awaiting it, including `enqueueDownload`'s
+ *     serial queue) unsettled forever.
  *
  * Returns `{ path, sha256, bytesDone }`. Throws `HostNotAllowedError`,
  * `DownloadProtocolError` (insecure protocol / bad redirect), `ChecksumError`
- * (dest already deleted), or `DiskFullError` (dest KEPT for resume) as
- * documented above; any other stream error is rethrown as-is with a
- * `.bytesDone` property attached so callers can journal progress before
- * propagating.
+ * (dest already deleted), `DiskFullError`, or `DownloadTimeoutError` (both
+ * dest KEPT for resume) as documented above; any other stream error is
+ * rethrown as-is with a `.bytesDone` property attached so callers can
+ * journal progress before propagating.
  */
 export async function fetchModelBlob({
   url,
@@ -403,6 +484,7 @@ export async function fetchModelBlob({
   maxRedirects = 5,
   createWriteStream = fsCreateWriteStream,
   insecureHttpHosts = [],
+  timeoutMs = DEFAULT_DOWNLOAD_TIMEOUT_MS,
 }) {
   assertNotSymlink(dest);
 
@@ -417,7 +499,7 @@ export async function fetchModelBlob({
   const headers = {};
   if (effectiveResumeFrom > 0) headers.Range = `bytes=${effectiveResumeFrom}-`;
 
-  const { res } = await openStream({ url, headers, lookup, maxRedirects, insecureHttpHosts });
+  const { res } = await openStream({ url, headers, lookup, maxRedirects, insecureHttpHosts, timeoutMs });
   const totalBytes = parseTotalBytes(res.headers, effectiveResumeFrom);
 
   let bytesDone;
@@ -428,6 +510,8 @@ export async function fetchModelBlob({
       resumeFrom: effectiveResumeFrom,
       hash,
       createWriteStream,
+      timeoutMs,
+      url,
       onBytes: (n) => {
         bytesDone = n;
         if (typeof onProgress === "function") onProgress({ bytesDone: n, totalBytes });
@@ -461,7 +545,9 @@ function modelsBlobDir(dir) {
  *
  * `baseUrl`, `lookup`, and `insecureHttpHosts` exist purely for tests —
  * production never sets them (real huggingface.co, real DNS, https
- * required everywhere).
+ * required everywhere). `timeoutMs` (Fix 4) passes through to
+ * `fetchModelBlob`'s socket-idle timeout — default `DEFAULT_DOWNLOAD_TIMEOUT_MS`
+ * unless overridden.
  */
 export async function downloadModel({
   modelId,
@@ -475,6 +561,7 @@ export async function downloadModel({
   createWriteStream,
   journalIntervalMs = 1000,
   insecureHttpHosts,
+  timeoutMs,
 }) {
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
   const blobDir = modelsBlobDir(dir);
@@ -527,6 +614,7 @@ export async function downloadModel({
       maxRedirects,
       createWriteStream,
       insecureHttpHosts,
+      timeoutMs,
       onProgress: wrappedOnProgress,
     });
     const s = loadState(dir);

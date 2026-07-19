@@ -29,6 +29,7 @@ import {
   resolveWarmableProviderName,
   ensureResident,
   isNativeRuntimeProvider,
+  initNativeModels,
   NativePortConflictError,
   NativeHostLockHeldError,
   _setNativeHandleForTest,
@@ -491,4 +492,306 @@ test("isNativeRuntimeProvider: true for a native provider, false for a Docker pr
   assert.equal(isNativeRuntimeProvider("native-target", cfg), true);
   assert.equal(isNativeRuntimeProvider("docker-target", cfg), false);
   assert.equal(isNativeRuntimeProvider("does-not-exist", cfg), false);
+});
+
+// ---------------------------------------------------------------------------
+// Final-review fix wave — Fix 1: probe cache never populated in production
+// ---------------------------------------------------------------------------
+
+test("Fix 1: acquire native with a null initial probe cache awaits reprobeFn exactly once; a second acquire makes zero additional calls", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18116, "qwen3-4b") } };
+  const fakeProbe = { platform: "linux", accel: "cpu" };
+  let cachedProbe = null; // mirrors probe.js's real cache: null until reprobe() warms it
+  let reprobeCalls = 0;
+  const getCachedProbeFn = () => cachedProbe;
+  const reprobeFn = async () => {
+    reprobeCalls += 1;
+    cachedProbe = fakeProbe; // reprobe() also populates the cache it's read from — same as production
+    return fakeProbe;
+  };
+
+  const ensureRuntimeCalls = [];
+  let probeCalls = 0;
+  const identityProbeFn = async () => {
+    probeCalls += 1;
+    // Per acquire: 1st call is the fast-path check (nothing running yet ->
+    // "down"), 2nd+ is the post-start readiness wait -> "resident". `probeCalls`
+    // is reset to 0 before the second acquire below so this pattern repeats.
+    return probeCalls === 1 ? "down" : "resident";
+  };
+
+  const opts = {
+    cfg,
+    identityProbeFn,
+    acquireHostLockFn: () => () => {},
+    startModelFn: () => fakeHandle(),
+    ensureRuntimeFn: async (dir, runtimeBlock, probe) => {
+      ensureRuntimeCalls.push(probe);
+      return "/fake/runtimes/llamacpp/b1/llama-server";
+    },
+    loadStateFn: () => ({ registry: { "native-target": { file: "model.gguf" } } }),
+    resolveDataDirFn: () => "/fake/crow-home",
+    loadCatalogFn: () => ({ runtime: { release: "b1", assets: {} } }),
+    getCachedProbeFn,
+    reprobeFn,
+    readinessTimeoutMs: 200,
+    readinessPollMs: 5,
+    readinessInitialDelayMs: 0,
+  };
+
+  const first = await acquireProvider("native-target", opts);
+  assert.equal(first, true);
+  assert.equal(reprobeCalls, 1, "reprobeFn was awaited exactly once on the null-cache miss");
+  assert.deepEqual(ensureRuntimeCalls[0], fakeProbe, "the reprobe()'d probe (not null) was threaded into ensureRuntimeFn");
+
+  // Second acquire: a fresh down->resident cycle (same shape as the first —
+  // resolveNativeBinPath runs unconditionally on every acquireProvider call,
+  // per its own doc, regardless of which path the swap itself takes).
+  probeCalls = 0;
+  await acquireProvider("native-target", opts);
+  assert.equal(reprobeCalls, 1, "second acquire: zero additional reprobeFn calls — the cache is warm");
+});
+
+// ---------------------------------------------------------------------------
+// Final-review fix wave — Fix 2: handle.touch() had zero callers
+// ---------------------------------------------------------------------------
+
+test("Fix 2: the resident fast path touches the live native handle, resetting its idle timer", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18117, "qwen3-4b") } };
+  let touchCalls = 0;
+  const handle = fakeHandle({ touch: () => { touchCalls += 1; } });
+  _setNativeHandleForTest("native-target", handle);
+
+  // resolveNativeBinPath runs unconditionally on every acquireProvider call
+  // (before the fast path is even checked — see its own doc), so this test
+  // needs the full stub bag even though it never reaches a real start.
+  const result = await acquireProvider(
+    "native-target",
+    startCapableOpts({ cfg, identityProbeFn: async () => "resident" }), // fast path — already resident
+  );
+
+  assert.equal(result, true);
+  assert.equal(touchCalls, 1, "handle.touch() was called on the resident fast path");
+});
+
+test("Fix 2: the resident fast path does not call touch() when there is no live handle in-memory (simulated-restart re-warm case)", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18118, "qwen3-4b") } };
+  // No _setNativeHandleForTest call — beforeEach already cleared it. This
+  // is the "simulated restart" shape: identityProbe reports resident (the
+  // real OS-level port is up) but this process holds no in-memory handle.
+  const result = await acquireProvider(
+    "native-target",
+    startCapableOpts({ cfg, identityProbeFn: async () => "resident" }),
+  );
+  assert.equal(result, true, "still reports resident even with no live handle to touch — touch() is best-effort, not required for correctness");
+});
+
+test("Fix 2: touch() is not called on a dead (non-live) cached handle", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18119, "qwen3-4b") } };
+  let touchCalls = 0;
+  const handle = fakeHandle({ live: false, touch: () => { touchCalls += 1; } });
+  _setNativeHandleForTest("native-target", handle);
+
+  await acquireProvider("native-target", startCapableOpts({ cfg, identityProbeFn: async () => "resident" }));
+
+  assert.equal(touchCalls, 0, "a non-live handle is never touched — matches the sibling-eviction gate's live check elsewhere in this file");
+});
+
+// ---------------------------------------------------------------------------
+// Final-review fix wave — Fix 5: readiness-timeout orphans a loading process
+// ---------------------------------------------------------------------------
+
+test("Fix 5: a readiness timeout (\"down\") stops the orphaned handle and clears it from _nativeHandles before throwing; both release paths fire safely", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18121, "qwen3-4b") } };
+
+  // A handle that mirrors runtime.js's real behavior more faithfully than
+  // the bare `fakeHandle()` helper: its stop() actually fires the captured
+  // onTerminal callback (exactly once), same as the real startModel's
+  // handle does — needed so this test can observe BOTH release paths Fix
+  // 5's doc describes (onTerminal's, and acquireOrStartNative's own
+  // finally block) actually firing, not just one of them.
+  let live = true;
+  let stopCalls = 0;
+  let capturedOnTerminal = null;
+  const handle = {
+    get live() { return live; },
+    async stop() {
+      stopCalls += 1;
+      live = false;
+      if (capturedOnTerminal) capturedOnTerminal("stopped");
+    },
+    status() { return { live }; },
+  };
+  const startModelFn = (params) => {
+    capturedOnTerminal = params.onTerminal;
+    return handle;
+  };
+  const identityProbeFn = async () => "down"; // never becomes resident — the timeout path
+
+  // Idempotent, like native-lock.js's real release() closure (guarded by a
+  // `released` flag) — a raw (non-guarded) counter alongside it proves BOTH
+  // call sites actually invoke it, while the guarded flag proves that,
+  // exactly as Fix 5's doc claims, this is safe: no crash, no double-free.
+  let rawReleaseCalls = 0;
+  let released = false;
+  const release = () => {
+    rawReleaseCalls += 1;
+    if (released) return;
+    released = true;
+  };
+
+  await assert.rejects(
+    () => acquireProvider("native-target", {
+      ...startCapableOpts({ cfg, identityProbeFn, startModelFn }),
+      acquireHostLockFn: () => release,
+    }),
+    /failed to bind port 18121|refusing to rebind/,
+  );
+
+  assert.equal(stopCalls, 1, "the orphaned handle was stopped before the readiness-timeout error was thrown");
+  assert.equal(live, false);
+  assert.equal(rawReleaseCalls, 2, "release() was invoked from BOTH call sites — onTerminal (via handle.stop()) and acquireOrStartNative's finally block");
+  assert.equal(released, true, "and it settled safely — no throw from the second (idempotent-no-op) call");
+});
+
+test("Fix 5: a post-start identity conflict also stops the orphaned handle and clears it from _nativeHandles before throwing", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18122, "qwen3-4b") } };
+  const handle = fakeHandle();
+  const startModelFn = () => handle;
+  let probeCalls = 0;
+  const identityProbeFn = async () => {
+    probeCalls += 1;
+    // 1st call: fast-path check (nothing running yet -> "down"). 2nd+:
+    // post-start readiness wait — the process bound the port but is
+    // serving something else.
+    return probeCalls === 1 ? "down" : "conflict";
+  };
+
+  let caught = null;
+  try {
+    await acquireProvider("native-target", startCapableOpts({ cfg, identityProbeFn, startModelFn }));
+  } catch (err) {
+    caught = err;
+  }
+
+  assert.ok(caught instanceof NativePortConflictError, `expected NativePortConflictError, got ${caught}`);
+  assert.equal(handle.stopCalls, 1, "the orphaned (conflicting) handle was stopped before the conflict error was thrown");
+  assert.equal(handle.live, false);
+});
+
+// ---------------------------------------------------------------------------
+// Final-review fix wave — Fix 3: reconcileOnBoot never invoked
+// ---------------------------------------------------------------------------
+
+test("Fix 3: initNativeModels invokes reconcileOnBootFn exactly once, shaping native provider rows to {modelId}", async () => {
+  const state = { reservations: {}, journal: {}, registry: {} };
+  let reconcileCalls = 0;
+  let capturedListProviderRows = null;
+  const reconcileOnBootFn = (args) => {
+    reconcileCalls += 1;
+    capturedListProviderRows = args.listProviderRows;
+    assert.equal(args.state, state);
+    assert.equal(typeof args.isProcessAlive, "function");
+    return { freedReservations: [], orphanRows: [], resumableDownloads: [] };
+  };
+
+  const rows = [
+    { id: "native-a", disabled: false, gpuPolicy: { runtime: "native" } },
+    { id: "docker-b", disabled: false, gpuPolicy: null }, // not native — must be excluded
+    { id: "native-disabled", disabled: true, gpuPolicy: { runtime: "native" } }, // disabled — excluded
+  ];
+
+  const plan = await initNativeModels({
+    dir: "/fake/crow-home",
+    db: {}, // truthy — enables the provider-row read branch
+    loadStateFn: () => state,
+    saveStateFn: () => {},
+    listProvidersAllFn: async () => rows,
+    reconcileOnBootFn,
+  });
+
+  assert.equal(reconcileCalls, 1, "reconcileOnBoot was invoked exactly once");
+  assert.deepEqual(capturedListProviderRows(), [{ modelId: "native-a" }], "only the enabled native row was shaped in — Docker and disabled rows excluded");
+  assert.deepEqual(plan, { freedReservations: [], orphanRows: [], resumableDownloads: [] });
+});
+
+test("Fix 3: a journaled (interrupted) download is re-enqueued via enqueueDownloadFn", async () => {
+  const state = {
+    reservations: {},
+    journal: {
+      "native-partial": { url: "https://huggingface.co/x/resolve/main/y.gguf", dest: "/fake/blobs/y.gguf", bytesDone: 1024, expectedSha: "deadbeef", startedAt: "2026-07-18T00:00:00.000Z" },
+    },
+    registry: {},
+  };
+  const enqueueCalls = [];
+  const catalog = { models: [] };
+
+  await initNativeModels({
+    dir: "/fake/crow-home",
+    db: null, // no DB — reservations/journal reconciliation still runs
+    loadStateFn: () => state,
+    saveStateFn: () => {},
+    loadCatalogFn: () => catalog,
+    enqueueDownloadFn: (params) => {
+      enqueueCalls.push(params);
+      return Promise.resolve({ path: "/fake/blobs/y.gguf", sha256: "deadbeef" });
+    },
+  });
+
+  assert.equal(enqueueCalls.length, 1, "the one journaled download was re-enqueued");
+  assert.equal(enqueueCalls[0].modelId, "native-partial");
+  assert.equal(enqueueCalls[0].dir, "/fake/crow-home");
+  assert.equal(enqueueCalls[0].catalog, catalog);
+});
+
+test("Fix 3: a reconcileOnBootFn throw does not propagate out of initNativeModels", async () => {
+  await assert.doesNotReject(() => initNativeModels({
+    dir: "/fake/crow-home",
+    db: null,
+    loadStateFn: () => ({ reservations: {}, journal: {}, registry: {} }),
+    reconcileOnBootFn: () => {
+      throw new Error("boom");
+    },
+  }));
+});
+
+test("Fix 3: a provider-row read failure (bad db) does not propagate — reconciliation degrades to reservations-only", async () => {
+  const state = { reservations: {}, journal: {}, registry: {} };
+  let reconcileCalls = 0;
+  const plan = await initNativeModels({
+    dir: "/fake/crow-home",
+    db: {},
+    loadStateFn: () => state,
+    listProvidersAllFn: async () => {
+      throw new Error("db read failed");
+    },
+    reconcileOnBootFn: (args) => {
+      reconcileCalls += 1;
+      assert.deepEqual(args.listProviderRows(), [], "provider rows degrade to empty on a read failure, never throw");
+      return { freedReservations: [], orphanRows: [], resumableDownloads: [] };
+    },
+  });
+  assert.equal(reconcileCalls, 1);
+  assert.deepEqual(plan, { freedReservations: [], orphanRows: [], resumableDownloads: [] });
+});
+
+test("Fix 3: freed reservations are persisted via saveStateFn", async () => {
+  const state = { reservations: { "model-dead": { port: 18100 } }, journal: {}, registry: {} };
+  let saveCalls = 0;
+  await initNativeModels({
+    dir: "/fake/crow-home",
+    db: null,
+    loadStateFn: () => state,
+    saveStateFn: (dir, s) => {
+      saveCalls += 1;
+      assert.equal(dir, "/fake/crow-home");
+      assert.equal(s, state);
+    },
+    reconcileOnBootFn: () => ({
+      freedReservations: [{ modelId: "model-dead", port: 18100 }],
+      orphanRows: [],
+      resumableDownloads: [],
+    }),
+  });
+  assert.equal(saveCalls, 1, "saveState was called because a reservation was freed");
 });

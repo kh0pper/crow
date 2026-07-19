@@ -73,11 +73,13 @@ import {
   setResidencyInitialized, recordResidency, releaseResidency,
   pruneResidency, getProviderHealth,
 } from "./provider-health.js";
-import { resolveDataDir } from "../db.js";
-import { loadState } from "./models/state.js";
+import { resolveDataDir, createDbClient } from "../db.js";
+import { loadState, saveState, reconcileOnBoot } from "./models/state.js";
 import { acquireHostLock } from "./models/native-lock.js";
 import { identityProbe, startModel, stopModel, ensureRuntime, nativeReadinessTimeoutMs } from "./models/runtime.js";
-import { getCachedProbe } from "./models/probe.js";
+import { getCachedProbe, reprobe } from "./models/probe.js";
+import { enqueueDownload } from "./models/manager.js";
+import { listProvidersAll } from "../shared/providers-db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
@@ -498,10 +500,20 @@ async function resolveNativeBinPath(p, opts = {}) {
     resolveDataDirFn = resolveDataDir,
     loadCatalogFn = defaultLoadCatalog,
     getCachedProbeFn = getCachedProbe,
+    reprobeFn = reprobe,
   } = opts;
   const dir = resolveDataDirFn();
   const catalog = loadCatalogFn();
-  const probe = getCachedProbeFn();
+  // Fix 1 (final-review fix wave, CRITICAL): the cache is null until
+  // reprobe() runs, and nothing on the production boot path ever calls it
+  // — every native acquire threw UNSUPPORTED_PLATFORM(null) forever. Warm
+  // it here, once, on a cache miss; reprobe() also populates probe.js's own
+  // module cache, so subsequent calls' getCachedProbeFn() sees it warm and
+  // never re-probes.
+  let probe = getCachedProbeFn();
+  if (!probe) {
+    probe = await reprobeFn();
+  }
   const key = (catalog && catalog.runtime && catalog.runtime.release) || "default";
   if (_runtimeEnsureInFlight.has(key)) return _runtimeEnsureInFlight.get(key);
   const inFlight = Promise.resolve()
@@ -610,6 +622,26 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
     _lastUsedAt.set(providerName, Date.now());
     return true;
   }
+
+  // Fix 5 (final-review fix wave, IMPORTANT): a FRESH start that ends in
+  // "down" (readiness timeout) or "conflict" (bound the port but isn't
+  // serving OUR alias) must not leave the process it just spawned running,
+  // untracked, behind an about-to-be-released lock. Without this,
+  // `acquireOrStartNative`'s `finally` still releases the mutex-group lock
+  // (this throw means `success` never became `true`), while the loading/
+  // misbehaving process kept running with its `_nativeHandles` entry still
+  // intact — free lock, live orphan process, exactly the hazard this fix
+  // closes. `handle.stop()` fires the handle's own `onTerminal("stopped")`,
+  // which (per `acquireOrStartNative`) is ALSO wired to release this same
+  // lock — but `release()` is idempotent (see `native-lock.js`), so that
+  // and the `finally`'s own release below never double-free anything.
+  try {
+    await handle.stop();
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] stop native ${providerName} after readiness failure failed: ${err.message}`);
+  }
+  if (_nativeHandles.get(providerName) === handle) _nativeHandles.delete(providerName);
+
   if (result === "conflict") {
     throw new NativePortConflictError(providerName, p.baseUrl);
   }
@@ -679,6 +711,14 @@ async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
     const fastStatus = await identityProbeFn(p.baseUrl, alias, fetchImpl);
     if (fastStatus === "resident") {
       _lastUsedAt.set(providerName, Date.now());
+      // Fix 2 (final-review fix wave, CRITICAL): handle.touch() resets
+      // runtime.js's idle-stop timer — until this call it had ZERO
+      // callers, so a resident native model under continuous active load
+      // still got killed by its own idle timer (default 30 min) the
+      // instant that timer's initial window elapsed, since nothing ever
+      // reset it. This IS the traffic signal that should keep it warm.
+      const liveHandle = _nativeHandles.get(providerName);
+      if (liveHandle?.live) liveHandle.touch();
       return { freshStart: false };
     }
     if (fastStatus === "conflict") {
@@ -1152,6 +1192,126 @@ export function _stopResidencyMonitor() {
   _residencyPollFailing = false;
 }
 
+/** True if a process with this pid appears to be alive on this host — same
+ * rule as `native-lock.js`'s (unexported) `defaultIsProcessAlive`: a
+ * `kill(pid, 0)` that succeeds, or fails EPERM (exists, owned by someone
+ * else), both count as "alive"; only ESRCH means it's genuinely gone.
+ * Duplicated locally (4 lines) rather than importing a private helper from
+ * `native-lock.js` — this module's only real coupling to that file stays
+ * the one function (`acquireHostLock`) the acquire path already needs. */
+function defaultIsProcessAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err && err.code === "EPERM";
+  }
+}
+
+/**
+ * Boot-time native-model reconciliation (final-review fix wave, Fix 3 —
+ * IMPORTANT). `state.js`'s `reconcileOnBoot` is a pure function that was
+ * never actually invoked from any production boot path — a killed gateway
+ * left stale port reservations, unexplained provider-row orphans, and
+ * abandoned in-progress GGUF downloads forever. This function is the
+ * missing caller: loadState -> reconcileOnBoot (against the live
+ * `providers` table, shaped to `{modelId}` for native rows, and a real
+ * pid-liveness check) -> saveState (persists freed reservations) -> log
+ * `orphanRows` honestly -> re-enqueue every still-journaled download via
+ * `manager.js`'s `enqueueDownload`.
+ *
+ * Re-enqueue caveat (honest limitation, not silently papered over):
+ * `state.journal` entries (see `state.js`'s doc) do not record which QUANT
+ * a download was for — only `url`/`dest`/`bytesDone`/`expectedSha`.
+ * `enqueueDownload` -> `downloadModel` re-derives `url`/`dest` from
+ * `resolveEntry(catalog, modelId, quant)`, defaulting `quant` to the
+ * model's `default_quant` when omitted (as it is here). A download that
+ * was for the default quant (the common case) resumes correctly — its
+ * freshly re-derived `url`/`dest` match the journaled ones, so
+ * `downloadModel`'s own resume-match check picks up `bytesDone` where it
+ * left off. A download for a NON-default quant re-derives a DIFFERENT
+ * `url`/`dest`, fails that match, and restarts from scratch instead of
+ * truly resuming — a safe degrade (no corruption, no crash), just not a
+ * true resume; fixing it would require the journal to record `quant` too,
+ * out of scope for this fix.
+ *
+ * Never throws — every failure mode (provider-row read, the reconcile call
+ * itself, an individual re-enqueue) is independently caught and warned, so
+ * a broken model-runtime state on one instance can never block gateway
+ * boot for anyone. `db`, if omitted, degrades to "no provider rows" (still
+ * frees reservations by liveness alone) — needed for callers/tests that
+ * don't have a DB handle yet.
+ *
+ * @returns {Promise<{freedReservations:Array, orphanRows:Array, resumableDownloads:Array}>}
+ */
+const EMPTY_RECONCILE_PLAN = Object.freeze({ freedReservations: [], orphanRows: [], resumableDownloads: [] });
+
+export async function initNativeModels({
+  dir = resolveDataDir(),
+  db,
+  loadStateFn = loadState,
+  saveStateFn = saveState,
+  listProvidersAllFn = listProvidersAll,
+  isProcessAliveFn = defaultIsProcessAlive,
+  reconcileOnBootFn = reconcileOnBoot,
+  enqueueDownloadFn = enqueueDownload,
+  loadCatalogFn = defaultLoadCatalog,
+} = {}) {
+  // Whole body wrapped: `reconcileOnBootFn` is an injected seam (a caller's
+  // stub, or a future state.js change) just as capable of throwing as the
+  // I/O around it — every step here is "convenience/cleanup", never
+  // boot-critical, so ANY failure degrades to the empty plan rather than
+  // propagating (this function's own promise must never reject).
+  try {
+    const state = loadStateFn(dir);
+
+    let nativeRows = [];
+    if (db) {
+      try {
+        const rows = await listProvidersAllFn(db);
+        nativeRows = rows
+          .filter((r) => !r.disabled && r.gpuPolicy?.runtime === "native")
+          .map((r) => ({ modelId: r.id }));
+      } catch (err) {
+        console.warn(`[gpu-orchestrator] native model reconcile: failed to read provider rows: ${err.message}`);
+      }
+    }
+
+    const plan = reconcileOnBootFn({
+      state,
+      listProviderRows: () => nativeRows,
+      isProcessAlive: isProcessAliveFn,
+    });
+
+    if (plan.freedReservations.length) {
+      console.log(`[gpu-orchestrator] native model reconcile: freed ${plan.freedReservations.length} stale port reservation(s): ${plan.freedReservations.map((r) => r.modelId).join(", ")}`);
+      saveStateFn(dir, state);
+    }
+
+    if (plan.orphanRows.length) {
+      console.warn(`[gpu-orchestrator] native model reconcile: ${plan.orphanRows.length} provider row(s) with no matching port reservation: ${plan.orphanRows.map((r) => r.modelId).join(", ")}`);
+    }
+
+    for (const dl of plan.resumableDownloads) {
+      try {
+        const catalog = loadCatalogFn();
+        console.log(`[gpu-orchestrator] native model reconcile: resuming interrupted download for ${dl.modelId} (${dl.bytesDone || 0} bytes so far)`);
+        Promise.resolve(enqueueDownloadFn({ modelId: dl.modelId, dir, catalog })).catch((err) => {
+          console.warn(`[gpu-orchestrator] native model reconcile: resume of ${dl.modelId} failed: ${err.message}`);
+        });
+      } catch (err) {
+        console.warn(`[gpu-orchestrator] native model reconcile: could not re-enqueue ${dl.modelId}: ${err.message}`);
+      }
+    }
+
+    return plan;
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] native model reconcile failed: ${err.message}`);
+    return EMPTY_RECONCILE_PLAN;
+  }
+}
+
 /**
  * Startup — ensure all alwaysResident providers are up.
  * Non-fatal: logs and continues on error. Call from gateway init.
@@ -1169,6 +1329,22 @@ export async function initOrchestrator() {
   // failure class this feature exists to eliminate).
   setResidencyInitialized();
   startResidencyMonitor();
+
+  // Native-model boot reconciliation (final-review fix wave, Fix 3) — its
+  // own dedicated try/catch, deliberately separate from the alwaysResident
+  // loop below, so a reconcile failure can never prevent alwaysResident
+  // bundles from coming up (and vice versa).
+  try {
+    const db = createDbClient();
+    try {
+      await initNativeModels({ db });
+    } finally {
+      try { db.close(); } catch { /* best effort */ }
+    }
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] native model reconcile failed: ${err.message}`);
+  }
+
   try {
     const cfg = loadProviders();
     const ownAddrs = getOwnAddresses();
