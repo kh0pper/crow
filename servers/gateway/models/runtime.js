@@ -56,7 +56,13 @@ import { join, relative } from "node:path";
  * thrown directly by that function — see its doc) for every "can't
  * honestly pick an asset" case: unsupported platform/arch, no catalog
  * entry for the resolved key, or glibc too old for every candidate.
- * `code` is one of UNSUPPORTED_PLATFORM | NO_ASSET | GLIBC_TOO_OLD. */
+ * `code` is one of UNSUPPORTED_PLATFORM | NO_ASSET | GLIBC_TOO_OLD |
+ * GLIBC_UNKNOWN. `GLIBC_UNKNOWN` is thrown by `ensureRuntime` itself
+ * (not `resolveAsset`, which never probes the host — see its doc) when
+ * it tried to collect `ldd --version` and the collection itself failed
+ * (missing binary, non-zero exit, ...) — a DISTINCT, honest code from
+ * `GLIBC_TOO_OLD`, which means "asked, and it's too old". Conflating the
+ * two would silently mislabel "couldn't ask" as "asked and failed". */
 export class RuntimeAssetError extends Error {
   constructor(message, code, details = {}) {
     super(message);
@@ -149,6 +155,20 @@ export function parseGlibcVersion(lddOutput) {
   const m = /(\d+)\.(\d+)\s*$/.exec(firstLine.trim());
   if (!m) return null;
   return { major: Number.parseInt(m[1], 10), minor: Number.parseInt(m[2], 10) };
+}
+
+/**
+ * Run `ldd --version` and return its raw stdout. Honestly THROWS on
+ * failure (missing `ldd`, non-zero exit, ...) rather than swallowing it
+ * into an empty/undefined result — `ensureRuntime` (the only caller)
+ * turns a throw here into a distinct `GLIBC_UNKNOWN`-coded
+ * `RuntimeAssetError`, never the `GLIBC_TOO_OLD` lie (see that class's
+ * doc). `execFileSyncImpl` is injectable so tests never shell out to a
+ * real `ldd` — same DI pattern as `chmodFn`/`extract` in `ensureRuntime`
+ * and `execFileSyncImpl` in `defaultExtractTarGz` below.
+ */
+export function collectLddOutput(execFileSyncImpl = execFileSyncNode) {
+  return execFileSyncImpl("ldd", ["--version"], { encoding: "utf8" });
 }
 
 /** True iff `actual` ({major,minor}, possibly null) satisfies `required`
@@ -283,7 +303,17 @@ export function resolveAsset(probe, runtimeBlock, opts = {}) {
 // Runtime asset download (own allowlist — see module doc)
 // ---------------------------------------------------------------------------
 
-const RUNTIME_ALLOWED_HOSTS = new Set(["github.com", "objects.githubusercontent.com"]);
+// "objects.githubusercontent.com" was GitHub's release-asset redirect
+// target historically and "release-assets.githubusercontent.com" is the
+// target observed live as of Item G, PR G-F (confirmed via `curl -sIL`
+// against a real release URL, 2026-07-19) — both are kept since GitHub
+// may serve either depending on the release/rollout, and there's no
+// signal here that the old host is fully retired.
+const RUNTIME_ALLOWED_HOSTS = new Set([
+  "github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+]);
 
 /** Default socket-idle timeout for a runtime-asset download hop
  * (~120s, per Task 9 review round 1: "no promise may hang forever on a
@@ -291,9 +321,11 @@ const RUNTIME_ALLOWED_HOSTS = new Set(["github.com", "objects.githubusercontent.
  * `downloadRuntimeAsset({ timeoutMs })` / `ensureRuntime(..., { timeoutMs })`. */
 export const DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS = 120_000;
 
-/** True iff `hostname` is exactly "github.com" or "objects.githubusercontent.com"
- * (GitHub's release-asset redirect target). No subdomain wildcarding —
- * these are the two literal hosts a llama.cpp release download hits. */
+/** True iff `hostname` is exactly "github.com", "objects.githubusercontent.com",
+ * or "release-assets.githubusercontent.com" (GitHub's release-asset
+ * redirect targets — see RUNTIME_ALLOWED_HOSTS's comment for why both
+ * githubusercontent hosts are kept). No subdomain wildcarding — these
+ * are the literal hosts a llama.cpp release download hits. */
 export function isAllowedRuntimeHost(hostname) {
   if (typeof hostname !== "string" || hostname.length === 0) return false;
   return RUNTIME_ALLOWED_HOSTS.has(hostname.toLowerCase());
@@ -605,6 +637,25 @@ export function sweepStaleRuntimeTmp(dir, opts = {}) {
  * clean that instance's stale `.extract-*.tmp`/`.download-*.tmp` leftovers
  * without any new host-wide directory-enumeration logic (Task 14, PR G-D).
  *
+ * glibc detection (Item G, PR G-F, blocker fix): `resolveAsset` is
+ * deliberately pure and never probes the host itself (see its doc), but
+ * its ONLY production caller — `gpu-orchestrator.js`'s
+ * `resolveNativeBinPath` — never passed `opts.lddOutput` through to
+ * `ensureRuntime`. That left `resolveAsset` treating every linux host's
+ * glibc as "undetectable" (its documented fail-closed stance), which
+ * means `GLIBC_TOO_OLD` fired UNCONDITIONALLY on every linux host,
+ * including ones with a perfectly modern glibc. `ensureRuntime` — unlike
+ * `resolveAsset` — is already an async, host-touching function (it
+ * downloads and extracts real files), so it's the right seam to actually
+ * collect `ldd --version` when the caller left `opts.lddOutput`
+ * undefined AND `probe.platform === "linux"`. An explicitly injected
+ * `opts.lddOutput` (including `null`) still wins outright — collection
+ * only fires on `undefined`, so no double-collection and tests stay
+ * hermetic. If collection itself fails (`ldd` missing, non-zero exit,
+ * ...), that's an honest `GLIBC_UNKNOWN` `RuntimeAssetError` — NEVER
+ * silently treated as `GLIBC_TOO_OLD` (asked-and-failed is not the same
+ * claim as couldn't-ask).
+ *
  * @returns {Promise<string>} the executable binary's path.
  */
 export async function ensureRuntime(dir, runtimeBlock, probe, opts = {}) {
@@ -623,6 +674,8 @@ export async function ensureRuntime(dir, runtimeBlock, probe, opts = {}) {
     fs = { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, rmSync, renameSync },
     timeoutMs = DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS,
     sweepStaleTmp = sweepStaleRuntimeTmp,
+    execFileSyncImpl = execFileSyncNode,
+    collectLddOutputFn = collectLddOutput,
   } = opts;
 
   try {
@@ -631,7 +684,20 @@ export async function ensureRuntime(dir, runtimeBlock, probe, opts = {}) {
     /* best effort — a sweep failure must never block a real install */
   }
 
-  const resolved = resolveAsset(probe, runtimeBlock, { lddOutput, arch, baseUrl });
+  let effectiveLddOutput = lddOutput;
+  if (effectiveLddOutput === undefined && probe && probe.platform === "linux") {
+    try {
+      effectiveLddOutput = collectLddOutputFn(execFileSyncImpl);
+    } catch (err) {
+      throw new RuntimeAssetError(
+        `Could not determine host glibc version (\`ldd --version\` failed: ${err.message}) — refusing to guess a runtime asset`,
+        "GLIBC_UNKNOWN",
+        { cause: err.message },
+      );
+    }
+  }
+
+  const resolved = resolveAsset(probe, runtimeBlock, { lddOutput: effectiveLddOutput, arch, baseUrl });
   if (resolved.error) throw resolved.error;
 
   const runtimesDir = join(dir, "runtimes", "llamacpp");
