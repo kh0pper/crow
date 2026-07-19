@@ -13,6 +13,7 @@
   },
   "env_vars": [],
   "port": 8011,
+  "inference": true,
   "providers": [
     {
       "id": "crow-voice",

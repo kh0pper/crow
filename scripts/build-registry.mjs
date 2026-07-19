@@ -60,18 +60,18 @@ export function buildRegistry(opts = {}) {
     try {
       manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
     } catch (e) {
-      audit.push({ id, type: "?", surfaces: [], ok: false, errors: [`manifest.json parse error: ${e.message}`], status: "invalid" });
+      audit.push({ id, type: "?", surfaces: [], ok: false, errors: [`manifest.json parse error: ${e.message}`], warnings: [], status: "invalid" });
       continue;
     }
     const bundleDir = join(bundlesRoot, id);
-    const { ok, errors } = validateManifest(manifest, bundleDir, { bundleExists });
+    const { ok, errors, warnings } = validateManifest(manifest, bundleDir, { bundleExists });
     const isTracked = trackedSet === null ? true : trackedSet.has(id);
     const isDraft = manifest.draft === true;
     let status = "published";
     if (!ok) status = "invalid";
     else if (isDraft) status = "draft";
     else if (!isTracked) status = "untracked";
-    audit.push({ id, type: manifest.type, surfaces: detectSurfaces(manifest), ok, errors, status });
+    audit.push({ id, type: manifest.type, surfaces: detectSurfaces(manifest), ok, errors, warnings: warnings || [], status });
     if (ok && !isDraft && isTracked) {
       // `official` is DERIVED, never trusted from the manifest: first-party
       // (no `origin`, or `origin: "official"`) stamps true; a third-party
@@ -100,6 +100,7 @@ function main() {
     const surf = (a.surfaces || []).join("+") || "-";
     const errs = a.errors && a.errors.length ? "  :: " + a.errors.join("; ") : "";
     console.log(`${tag} ${a.id.padEnd(28)} ${(a.type || "?").padEnd(10)} ${surf}${errs}`);
+    for (const w of a.warnings || []) console.log(`  WARN      ${a.id.padEnd(28)} :: ${w}`);
   }
   const n = (s) => audit.filter((a) => a.status === s).length;
   console.log(`\n${audit.length} bundles | ${registry["add-ons"].length} published | ${n("invalid")} invalid | ${n("draft")} draft | ${n("untracked")} untracked`);

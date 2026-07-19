@@ -25,7 +25,7 @@
     {"name": "EMAIL_TO",                       "description": "Destination for audit digests + alerts",           "required": true},
     {"name": "IMAP_HOST",                      "description": "IMAP hostname for email monitor",                  "default": "imap.gmail.com", "required": true},
     {"name": "IMAP_PORT",                      "description": "IMAP port",                                        "default": "993",       "required": true},
-    {"name": "OCR_VISION_URL",                 "description": "OpenAI-compatible vision endpoint (local Qwen)",   "default": "http://100.118.41.122:8003/v1", "required": true},
+    {"name": "OCR_VISION_URL",                 "description": "OpenAI-compatible vision endpoint base URL (e.g. http://<your-llm-host>:<port>/v1) -- point this at your own local vision-capable inference endpoint (llama.cpp/vLLM/Ollama). No default is shipped; every installer's LLM host differs.", "required": true},
     {"name": "OCR_VISION_MODEL",               "description": "Vision model alias",                               "default": "qwen3.6-35b-a3b", "required": true},
     {"name": "OCR_VISION_API_KEY",             "description": "API key for vision endpoint (llama-server: 'none')","default": "none",     "required": false},
     {"name": "CAPSTONE_TRACKER_INTERNAL_URL",  "description": "Self URL for in-container HTTP callbacks",         "default": "http://127.0.0.1:8000", "required": true}

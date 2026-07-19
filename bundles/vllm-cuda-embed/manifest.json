@@ -4,7 +4,7 @@
   "name": "vLLM Embeddings — Qwen3-Embedding-0.6B",
   "category": "ai",
   "description": "Multilingual text embeddings (Qwen3-Embedding-0.6B, 1024-dim Matryoshka). Powers semantic search across memory/research/blog. Runs on grackle's RTX 5060 Ti via vLLM-CUDA.",
-  "host": "49cf71ca878643ba7717f344329266fd",
+  "host": "local",
   "requires": {
     "gpu": true,
     "min_vram_gb": 2,
@@ -13,6 +13,7 @@
   },
   "env_vars": [],
   "port": 9100,
+  "inference": true,
   "providers": [
     {
       "id": "grackle-embed",
