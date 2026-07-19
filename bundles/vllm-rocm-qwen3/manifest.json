@@ -12,6 +12,7 @@
   },
   "env_vars": [],
   "port": 8001,
+  "inference": true,
   "providers": [
     {
       "id": "crow-dispatch",

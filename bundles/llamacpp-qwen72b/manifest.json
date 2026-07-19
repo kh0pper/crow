@@ -7,6 +7,7 @@
   "requires": { "gpu": true, "min_vram_gb": 60, "platform": "linux-x86_64", "gpu_arch": ["gfx1151"] },
   "env_vars": [],
   "port": 8003,
+  "inference": true,
   "providers": [
     {
       "id": "crow-swap-qwen72b",

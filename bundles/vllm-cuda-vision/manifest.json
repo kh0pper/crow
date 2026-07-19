@@ -13,6 +13,7 @@
   },
   "env_vars": [],
   "port": 9102,
+  "inference": true,
   "providers": [
     {
       "id": "grackle-vision",
