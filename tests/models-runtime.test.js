@@ -32,6 +32,8 @@ import {
   renameSync,
   unlinkSync,
   createWriteStream as fsWriteStream,
+  utimesSync,
+  statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +54,8 @@ import {
   probeSetprivAvailable,
   __resetSetprivProbeCacheForTest,
   getStatusSnapshot,
+  sweepStaleRuntimeTmp,
+  STALE_RUNTIME_TMP_MAX_AGE_MS,
 } from "../servers/gateway/models/runtime.js";
 import { acquireHostLock, lockPathFor, stealStaleLock } from "../servers/gateway/models/native-lock.js";
 import { startStubLlamaServer } from "./fixtures/stub-llama-server.mjs";
@@ -1079,6 +1083,146 @@ test("ensureRuntime rejects a resolveAsset failure before attempting any downloa
     await assert.rejects(
       () => ensureRuntime(dir, runtimeBlock, probe, {}),
       (err) => {
+        assert.ok(err instanceof RuntimeAssetError);
+        assert.equal(err.code, "UNSUPPORTED_PLATFORM");
+        return true;
+      },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sweepStaleRuntimeTmp (Task 14, PR G-D — stale tmp sweep)
+// ---------------------------------------------------------------------------
+
+/** Backdate a path's mtime by `ageMs` from `now` (real fs call — these
+ * tests exercise sweepStaleRuntimeTmp's default real-fs binding directly,
+ * since it has no test-visible network/process side effects to fake). */
+function backdate(path, ageMs, now = Date.now()) {
+  const t = (now - ageMs) / 1000;
+  utimesSync(path, t, t);
+}
+
+test("sweepStaleRuntimeTmp removes an old .extract-*.tmp directory and .download-*.tmp file, leaves fresh ones and non-tmp paths alone", async () => {
+  await withScratch("sweep-basic", async (dir) => {
+    const runtimesDir = join(dir, "runtimes", "llamacpp");
+    mkdirSync(runtimesDir, { recursive: true });
+
+    const now = Date.now();
+    const eightDaysMs = 8 * 24 * 60 * 60 * 1000;
+    const oneDayMs = 24 * 60 * 60 * 1000;
+
+    // Old staging dir (from a killed extract) — must be removed.
+    const oldExtractDir = join(runtimesDir, ".extract-linux-x64-cpu-old-release.tmp");
+    mkdirSync(oldExtractDir, { recursive: true });
+    writeFileSync(join(oldExtractDir, "partial-file"), "junk");
+    backdate(oldExtractDir, eightDaysMs, now);
+
+    // Old download tmp file (from a killed download) — must be removed.
+    const oldDownloadFile = join(runtimesDir, ".download-linux-x64-cpu-old-release.tmp");
+    writeFileSync(oldDownloadFile, "partial bytes");
+    backdate(oldDownloadFile, eightDaysMs, now);
+
+    // Fresh (recent) staging dir — must survive (an install could be
+    // mid-flight from a concurrent ensureRuntime call).
+    const freshExtractDir = join(runtimesDir, ".extract-linux-x64-cpu-new-release.tmp");
+    mkdirSync(freshExtractDir, { recursive: true });
+    backdate(freshExtractDir, oneDayMs, now);
+
+    // A completed release dir with a similar-looking but non-matching name
+    // must never be touched, regardless of age.
+    const releaseDir = join(runtimesDir, "some-release");
+    mkdirSync(releaseDir, { recursive: true });
+    writeFileSync(join(releaseDir, "llama-server"), "binary");
+    backdate(releaseDir, eightDaysMs, now);
+
+    const removed = sweepStaleRuntimeTmp(dir, { now });
+
+    assert.deepEqual(new Set(removed), new Set([oldExtractDir, oldDownloadFile]));
+    assert.equal(existsSync(oldExtractDir), false, "old staging dir must be gone");
+    assert.equal(existsSync(oldDownloadFile), false, "old download tmp file must be gone");
+    assert.equal(existsSync(freshExtractDir), true, "fresh staging dir must survive");
+    assert.equal(existsSync(releaseDir), true, "a completed release dir must never be touched");
+    assert.equal(existsSync(join(releaseDir, "llama-server")), true);
+  });
+});
+
+test("sweepStaleRuntimeTmp respects the maxAgeMs boundary (default 7 days)", async () => {
+  await withScratch("sweep-boundary", async (dir) => {
+    const runtimesDir = join(dir, "runtimes", "llamacpp");
+    mkdirSync(runtimesDir, { recursive: true });
+    const now = Date.now();
+
+    const justUnder = join(runtimesDir, ".download-x-just-under.tmp");
+    writeFileSync(justUnder, "x");
+    backdate(justUnder, STALE_RUNTIME_TMP_MAX_AGE_MS - 60_000, now);
+
+    const justOver = join(runtimesDir, ".download-x-just-over.tmp");
+    writeFileSync(justOver, "x");
+    backdate(justOver, STALE_RUNTIME_TMP_MAX_AGE_MS + 60_000, now);
+
+    const removed = sweepStaleRuntimeTmp(dir, { now });
+    assert.deepEqual(removed, [justOver]);
+    assert.equal(existsSync(justUnder), true);
+    assert.equal(existsSync(justOver), false);
+  });
+});
+
+test("sweepStaleRuntimeTmp is a no-op when runtimes/llamacpp doesn't exist yet", async () => {
+  await withScratch("sweep-missing-dir", async (dir) => {
+    assert.equal(existsSync(join(dir, "runtimes")), false);
+    const removed = sweepStaleRuntimeTmp(dir);
+    assert.deepEqual(removed, []);
+  });
+});
+
+test("sweepStaleRuntimeTmp never throws on a readdir/stat error (best-effort)", () => {
+  const brokenFs = {
+    existsSync: () => true,
+    readdirSync: () => {
+      throw new Error("boom");
+    },
+    statSync,
+    rmSync: () => {},
+  };
+  assert.doesNotThrow(() => {
+    const removed = sweepStaleRuntimeTmp("/nonexistent-for-this-test", { fs: brokenFs });
+    assert.deepEqual(removed, []);
+  });
+});
+
+test("ensureRuntime sweeps stale tmp leftovers on its startup path before doing anything else", async () => {
+  await withScratch("ensure-sweeps-stale-tmp", async (dir) => {
+    const crowHome = join(dir, "crow-home");
+    const runtimesDir = join(crowHome, "runtimes", "llamacpp");
+    mkdirSync(runtimesDir, { recursive: true });
+    const staleFile = join(runtimesDir, ".download-linux-x64-cpu-ancient-release.tmp");
+    writeFileSync(staleFile, "leftover");
+    backdate(staleFile, STALE_RUNTIME_TMP_MAX_AGE_MS + 60_000);
+
+    // A bad-platform probe makes ensureRuntime reject immediately after the
+    // sweep runs — proves the sweep executes even when the rest of the
+    // function never gets past resolveAsset.
+    const runtimeBlock = makeRuntimeBlock();
+    const probe = { platform: "windows" };
+    await assert.rejects(() => ensureRuntime(crowHome, runtimeBlock, probe, {}));
+
+    assert.equal(existsSync(staleFile), false, "stale tmp leftover must be swept even on an immediate-reject path");
+  });
+});
+
+test("ensureRuntime's stale-tmp sweep failure never blocks the real install", async () => {
+  await withScratch("ensure-sweep-failure-tolerant", async (dir) => {
+    const runtimeBlock = makeRuntimeBlock();
+    const probe = { platform: "windows" };
+    const throwingSweep = () => {
+      throw new Error("sweep exploded");
+    };
+    await assert.rejects(
+      () => ensureRuntime(dir, runtimeBlock, probe, { sweepStaleTmp: throwingSweep }),
+      (err) => {
+        // Still the REAL error from resolveAsset, not the sweep's throw —
+        // proves the try/catch around the sweep call swallows it.
         assert.ok(err instanceof RuntimeAssetError);
         assert.equal(err.code, "UNSUPPORTED_PLATFORM");
         return true;

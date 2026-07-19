@@ -40,6 +40,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -470,6 +471,90 @@ function findBinaryRecursive(fsMod, dir, name) {
 }
 
 // ---------------------------------------------------------------------------
+// Stale tmp sweep (Task 14, PR G-D — follow-up from PR G-B's final review)
+// ---------------------------------------------------------------------------
+
+/** Default max age (ms, 7 days) a `.extract-*.tmp` / `.download-*.tmp`
+ * entry under `<dir>/runtimes/llamacpp/` may sit before {@link
+ * sweepStaleRuntimeTmp} removes it. */
+export const STALE_RUNTIME_TMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Matches ONLY the two tmp-naming conventions `ensureRuntime` itself
+ * writes (`.download-<key>-<release>.tmp` files, `.extract-<key>-<release>.tmp`
+ * staging directories) — never a completed `releaseDir` or its manifest,
+ * regardless of key/release content, since both real segments can contain
+ * arbitrary catalog-controlled text. */
+const STALE_TMP_NAME_RE = /^\.(extract|download)-.*\.tmp$/;
+
+/**
+ * Remove stale `.extract-*.tmp` / `.download-*.tmp` entries (files or
+ * directories) under `<dir>/runtimes/llamacpp/` whose mtime is older than
+ * `maxAgeMs` (default {@link STALE_RUNTIME_TMP_MAX_AGE_MS}) — regardless of
+ * whether their key/release matches the catalog's CURRENT `runtime` block.
+ * A catalog release-pin bump, or a process killed mid-download/mid-extract
+ * for a release the catalog no longer points at, would otherwise leave an
+ * orphaned staging entry on disk forever (nothing in `ensureRuntime`'s own
+ * idempotent-manifest path ever revisits a release it isn't currently
+ * asked to install).
+ *
+ * Safety: the removal candidate list comes from `readdirSync` entries
+ * matched against {@link STALE_TMP_NAME_RE} — a real regex test against an
+ * enumerated basename, not a shell glob — so there is no path-expansion
+ * surface, and a `releaseDir` (which never starts with `.extract-` or
+ * `.download-`) is structurally excluded regardless of its own contents.
+ *
+ * Best-effort by design (matches this module's overall stance that a
+ * cleanup pass must never block the actual install/serve path it runs
+ * alongside): a missing `runtimesDir`, a permission error, or an entry that
+ * vanishes between `readdirSync` and `statSync` (raced by a concurrent
+ * `ensureRuntime` finishing its own install) all resolve to "skip that
+ * entry" rather than throwing.
+ *
+ * `now`/`fs` are injectable for deterministic testing; production always
+ * uses the real clock and real fs calls (this function has its own default
+ * fs binding, independent of `ensureRuntime`'s caller-injectable `fs`
+ * option, since a caller mocking `ensureRuntime`'s core install-flow fs
+ * calls for a determinism test has no reason to also intercept this
+ * unrelated best-effort sweep).
+ *
+ * @returns {string[]} absolute paths actually removed (for logging/tests).
+ */
+export function sweepStaleRuntimeTmp(dir, opts = {}) {
+  const {
+    maxAgeMs = STALE_RUNTIME_TMP_MAX_AGE_MS,
+    now = Date.now(),
+    fs = { existsSync, readdirSync, statSync, rmSync },
+  } = opts;
+  const runtimesDir = join(dir, "runtimes", "llamacpp");
+  const removed = [];
+  if (!fs.existsSync(runtimesDir)) return removed;
+  let entries;
+  try {
+    entries = fs.readdirSync(runtimesDir);
+  } catch {
+    return removed;
+  }
+  for (const name of entries) {
+    if (!STALE_TMP_NAME_RE.test(name)) continue;
+    const full = join(runtimesDir, name);
+    let st;
+    try {
+      st = fs.statSync(full);
+    } catch {
+      continue; // vanished between readdir and stat
+    }
+    if (now - st.mtimeMs < maxAgeMs) continue;
+    try {
+      fs.rmSync(full, { recursive: true, force: true });
+      removed.push(full);
+    } catch {
+      /* best effort — a single stubborn entry must not block the rest */
+    }
+  }
+  return removed;
+}
+
+// ---------------------------------------------------------------------------
 // ensureRuntime
 // ---------------------------------------------------------------------------
 
@@ -514,6 +599,12 @@ function findBinaryRecursive(fsMod, dir, name) {
  * attempted, matching this codebase's convention of throwing typed
  * errors at the point of a real mutation (see `manager.js`).
  *
+ * Startup path also runs {@link sweepStaleRuntimeTmp} (best-effort, never
+ * throws into this function) before anything else below — every call site
+ * already knows its own `dir` (CROW_HOME), so this is the natural place to
+ * clean that instance's stale `.extract-*.tmp`/`.download-*.tmp` leftovers
+ * without any new host-wide directory-enumeration logic (Task 14, PR G-D).
+ *
  * @returns {Promise<string>} the executable binary's path.
  */
 export async function ensureRuntime(dir, runtimeBlock, probe, opts = {}) {
@@ -531,7 +622,14 @@ export async function ensureRuntime(dir, runtimeBlock, probe, opts = {}) {
     chmodFn = chmodSync,
     fs = { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, rmSync, renameSync },
     timeoutMs = DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS,
+    sweepStaleTmp = sweepStaleRuntimeTmp,
   } = opts;
+
+  try {
+    sweepStaleTmp(dir);
+  } catch {
+    /* best effort — a sweep failure must never block a real install */
+  }
 
   const resolved = resolveAsset(probe, runtimeBlock, { lddOutput, arch, baseUrl });
   if (resolved.error) throw resolved.error;

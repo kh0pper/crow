@@ -19,6 +19,27 @@
 #     cmdline matches ORPHAN_BUNDLE_PATTERN, whose /proc/<pid>/cwd contains
 #     "/bundles/", and which is not protected → same TERM→wait→KILL
 #     (subtree included).
+#   Sweep 3 (orphaned native model runtime processes — Item G, Task 14):
+#     every ppid==1 process whose cmdline matches ORPHAN_NATIVE_PATTERN AND
+#     whose /proc/<pid>/exe OR /proc/<pid>/cwd contains the path fragment
+#     "/runtimes/llamacpp/" (under ANY CROW_HOME — no literal ~/.crow
+#     anywhere in this check), and which is not protected → same
+#     TERM→wait→KILL. This is a llama-server process (Item G's native model
+#     runtime, servers/gateway/models/runtime.js's startModel) that outlived
+#     its gateway: it runs detached in its own process group precisely so a
+#     gateway restart/swap doesn't kill an in-flight generation, but that
+#     also means a gateway that died WITHOUT a clean stop() leaves it
+#     running forever, holding a GPU/RAM allocation and a port reservation
+#     no live process still owns. The cmdline match is a cheap first filter
+#     (a llama-server invocation's argv always includes its own binPath,
+#     which lives under <CROW_HOME>/runtimes/llamacpp/<release>/, whether or
+#     not it's wrapped in `setpriv --pdeathsig=SIGTERM ...`); the exe/cwd
+#     check is the actual identity proof — `setpriv` execve's the target
+#     program, so /proc/<pid>/exe of the RUNNING process (setpriv-wrapped or
+#     not) always resolves to the real llama-server binary path, never to
+#     setpriv's own path. Requiring that check (not just the cmdline regex)
+#     means a process that merely happens to mention that path in an
+#     unrelated argument can never be swept.
 #
 # PROTECTION (checked at candidate selection AND before every signal):
 #   1. systemd-owned: any process whose /proc/<pid>/cgroup places it inside a
@@ -53,6 +74,10 @@
 #                          Default: node.*servers/gateway/index\.js
 #   ORPHAN_BUNDLE_PATTERN  regex (pgrep -f) selecting bundle-child processes
 #                          for sweep 2. Default: node server/index\.js
+#   ORPHAN_NATIVE_PATTERN  regex (pgrep -f) selecting candidate native model
+#                          runtime processes for sweep 3 (see above — cmdline
+#                          match is only the first filter, exe/cwd is the
+#                          real identity check). Default: runtimes/llamacpp
 #   ORPHAN_DRY_RUN         set to 1 to only PRINT the victims (pid + cmdline);
 #                          nothing is signalled. Default: 0
 #
@@ -66,6 +91,7 @@ set -u
 
 MATCH_PATTERN="${ORPHAN_MATCH_PATTERN:-node.*servers/gateway/index\.js}"
 BUNDLE_PATTERN="${ORPHAN_BUNDLE_PATTERN:-node server/index\.js}"
+NATIVE_PATTERN="${ORPHAN_NATIVE_PATTERN:-runtimes/llamacpp}"
 DRY_RUN="${ORPHAN_DRY_RUN:-0}"
 
 log() {
@@ -79,7 +105,9 @@ ppid_of() {
   local stat rest
   stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
-  # rest = "<state> <ppid> ..."
+  # rest = "<state> <ppid> ..." — deliberately unquoted: this splits rest
+  # into positional fields on whitespace, which is the whole point here.
+  # shellcheck disable=SC2086
   set -- $rest
   echo "$2"
 }
@@ -90,6 +118,7 @@ starttime_of() {
   local stat rest
   stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
+  # shellcheck disable=SC2086  # deliberate field-split, see ppid_of above
   set -- $rest
   echo "${20}"
 }
@@ -99,6 +128,23 @@ cmdline_of() {
 }
 
 alive() { [ -d "/proc/$1" ]; }
+
+# True iff pid's exe symlink OR cwd symlink contains "/runtimes/llamacpp/"
+# — the actual identity proof for sweep 3 (see the header comment on why
+# this, not just the cmdline pattern, is what makes a candidate real).
+# Any CROW_HOME: this is a substring test, never anchored to ~/.crow.
+exe_or_cwd_under_native_runtimes() {
+  local target
+  target=$(readlink "/proc/$1/exe" 2>/dev/null) || target=""
+  case "$target" in
+    */runtimes/llamacpp/*) return 0 ;;
+  esac
+  target=$(readlink "/proc/$1/cwd" 2>/dev/null) || target=""
+  case "$target" in
+    */runtimes/llamacpp/*) return 0 ;;
+  esac
+  return 1
+}
 
 # systemd-owned: the pid's cgroup path contains a *.service component.
 systemd_owned() {
@@ -212,7 +258,7 @@ for pid in $(pgrep -f "$MATCH_PATTERN" 2>/dev/null); do
   # Children first, gateway itself last — killing the gateway first would
   # re-parent its bundle children to init and their DB locks would survive.
   tree="$(stamp_pids "$(descendants_of "$pid") $pid")"
-  log "orphan gateway pid $pid (ppid=1) — reaping subtree: $(echo $tree | tr '\n' ' ')"
+  log "orphan gateway pid $pid (ppid=1) — reaping subtree: $(echo "$tree" | tr '\n' ' ')"
   reap_tree "$tree" "orphan gateway subtree"
 done
 
@@ -230,6 +276,24 @@ for pid in $(pgrep -f "$BUNDLE_PATTERN" 2>/dev/null); do
   tree="$(stamp_pids "$(descendants_of "$pid") $pid")"
   log "orphaned bundle child pid $pid (ppid=1, cwd=$cwd) — reaping"
   reap_tree "$tree" "orphaned bundle child"
+done
+
+# --- Sweep 3: orphaned native model runtime processes (ppid==1, exe/cwd
+# under ANY CROW_HOME's runtimes/llamacpp/) — Item G, Task 14 ----------------
+for pid in $(pgrep -f "$NATIVE_PATTERN" 2>/dev/null); do
+  [ "$pid" = "$$" ] && continue
+  protected "$pid" && continue
+  ppid=$(ppid_of "$pid") || continue
+  [ "$ppid" = "1" ] || continue
+  exe_or_cwd_under_native_runtimes "$pid" || continue
+  # A native runtime process has no children of its own to worry about
+  # (unlike the gateway/bundle sweeps, there is no downstream lock-holder
+  # depending on it), but stamp+reap through the same single-pid "tree" for
+  # a uniform, already-hardened code path (protection + starttime
+  # re-verification on every signal).
+  tree="$(stamp_pids "$pid")"
+  log "orphaned native model runtime pid $pid (ppid=1) — reaping: $(cmdline_of "$pid")"
+  reap_tree "$tree" "orphaned native model runtime"
 done
 
 exit 0
