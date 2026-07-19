@@ -44,5 +44,6 @@
     11434
   ],
   "webUI": null,
+  "no_auto_provider": "Ollama's OpenAI-compatible endpoint (http://{host}:11434/v1) is live once the container starts, but its model catalog is populated at pull-time (`docker compose exec ollama ollama pull <model>`), not at install-time -- there is no served model id to write into a static providers[] entry. Registering a provider row with an empty models[] list breaks default profile resolution (resolveProviderConfig() in servers/gateway/ai/resolve-profile.js falls back to model:null when no model_id is stored and models[] is empty). After pulling a model, add the provider manually via Settings -> LLM -> Providers, pointing baseUrl at http://<host>:11434/v1 with the pulled model's name.",
   "notes": "RAM and disk depend on model size. Small models (tinyllama) need ~2GB RAM. Large models (llama3) need 8GB+. Each model uses 2-50GB disk."
 }
