@@ -29,7 +29,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import {
   mkdtempSync,
@@ -38,6 +38,8 @@ import {
   readFileSync,
   existsSync,
   rmSync,
+  copyFileSync,
+  chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -141,12 +143,15 @@ setInterval(() => {}, 1000);
 /**
  * Spawn `script` orphaned to ppid==1: an intermediate `node -e` parent spawns
  * it detached+unref, prints the pid, and exits immediately (its child is then
- * adopted by init). Returns the pid once /proc shows ppid==1.
+ * adopted by init). Returns the pid once /proc shows ppid==1. `opts.extraArgs`
+ * (default []) are appended to argv after `script` — used by the sweep-3
+ * decoy test to put an arbitrary substring in the process's cmdline without
+ * it being anywhere near the process's actual exe/cwd.
  */
 async function spawnOrphaned(script, opts = {}) {
   const bootstrap = `
 const { spawn } = require("node:child_process");
-const c = spawn(process.execPath, [${JSON.stringify(script)}], {
+const c = spawn(process.execPath, [${JSON.stringify(script)}, ...${JSON.stringify(opts.extraArgs || [])}], {
   detached: true,
   stdio: "ignore",
   cwd: ${JSON.stringify(opts.cwd || tmpdir())},
@@ -169,16 +174,73 @@ process.stdout.write(String(c.pid));
   return pid;
 }
 
+/**
+ * Spawn a real ELF binary at `binPath` (directly exec'd — no interpreter, so
+ * `/proc/<pid>/exe` resolves to `binPath` itself, matching how a real
+ * llama-server process — or its setpriv-wrapped form, which execve's the
+ * target and inherits its /proc/<pid>/exe — actually looks on this host),
+ * orphaned to ppid==1 via the same intermediate-bootstrap technique as
+ * {@link spawnOrphaned}.
+ */
+async function spawnOrphanedBinary(binPath, args = [], opts = {}) {
+  const bootstrap = `
+const { spawn } = require("node:child_process");
+const c = spawn(${JSON.stringify(binPath)}, ${JSON.stringify(args)}, {
+  detached: true,
+  stdio: "ignore",
+  cwd: ${JSON.stringify(opts.cwd || tmpdir())},
+});
+c.unref();
+process.stdout.write(String(c.pid));
+`;
+  const { stdout } = await pExecFile(process.execPath, ["-e", bootstrap]);
+  const pid = parseInt((stdout.match(/\d+/) || [])[0], 10);
+  assert.ok(pid > 1, "bootstrap must print the orphan pid");
+  await waitFor(() => {
+    try {
+      return ppidOf(pid) === 1;
+    } catch {
+      return false;
+    }
+  }, 5000, `pid ${pid} to be re-parented to init (ppid==1)`);
+  return pid;
+}
+
+/** Build a fake native-runtime release layout under a fresh mkdtemp dir:
+ * T/runtimes/llamacpp/vTest/llama-server-fixture — a COPY of the real
+ * `/bin/sleep` binary (a small real ELF executable), so spawning it directly
+ * gives a process whose /proc/<pid>/exe genuinely resolves under
+ * ".../runtimes/llamacpp/..." — the exact identity signal sweep 3 checks,
+ * not a simulation of it. Returns { T, binPath }. */
+function makeFakeNativeRuntime() {
+  const T = mkdtempSync(join(tmpdir(), "orphan-native-test-"));
+  const releaseDir = join(T, "runtimes", "llamacpp", "vTest");
+  mkdirSync(releaseDir, { recursive: true });
+  const binPath = join(releaseDir, "llama-server-fixture");
+  copyFileSync("/bin/sleep", binPath);
+  chmodSync(binPath, 0o755);
+  return { T, binPath };
+}
+
 async function runScript(env) {
-  // Never inherit unscoped defaults in tests: both patterns are ALWAYS set.
+  // Never inherit unscoped defaults in tests: all three patterns are ALWAYS
+  // set (sweep 3's ORPHAN_NATIVE_PATTERN added Task 14 — same rationale as
+  // the other two: an unscoped default could sweep this real host's own
+  // gateway/bundle/native-runtime processes mid-suite-run).
   assert.ok(env.ORPHAN_MATCH_PATTERN, "test must scope ORPHAN_MATCH_PATTERN");
   assert.ok(env.ORPHAN_BUNDLE_PATTERN, "test must scope ORPHAN_BUNDLE_PATTERN");
+  assert.ok(env.ORPHAN_NATIVE_PATTERN, "test must scope ORPHAN_NATIVE_PATTERN");
   const { stdout, stderr } = await pExecFile("bash", [SCRIPT], {
     env: { ...process.env, ...env },
     timeout: 30000,
   });
   return { stdout, stderr };
 }
+
+/** Path to a candidate never present on a real host — the "match nothing"
+ * scope every test that isn't exercising sweep 3 itself uses for
+ * ORPHAN_NATIVE_PATTERN. */
+const NATIVE_PATTERN_NOMATCH = "/nonexistent-orphan-test-path/runtimes/llamacpp/does-not-exist";
 
 function trackedKill(pids) {
   for (const pid of pids) {
@@ -204,6 +266,18 @@ function cleanupTree(spawned, T, childPidFile) {
 
 const pidRe = (pid) => new RegExp(`\\b${pid}\\b`); // anchored: pid 1234 must not match 51234
 
+test("bash -n: script parses", () => {
+  const r = spawnSync("bash", ["-n", SCRIPT]);
+  assert.equal(r.status, 0, r.stderr && r.stderr.toString());
+});
+
+test("shellcheck passes when available (skips otherwise)", (t) => {
+  const which = spawnSync("shellcheck", ["--version"], { stdio: "ignore" });
+  if (which.error) return t.skip("shellcheck not installed");
+  const r = spawnSync("shellcheck", [SCRIPT], { encoding: "utf-8" });
+  assert.equal(r.status, 0, r.stdout);
+});
+
 test("reaps an orphaned fake gateway AND its bundle child (subtree reaping)", async (t) => {
   const prod = await prodMainPids();
   if (prod.length === 0) return t.skip("no crow gateway units on this host");
@@ -227,6 +301,7 @@ test("reaps an orphaned fake gateway AND its bundle child (subtree reaping)", as
     // critical child-also-dies assertion couldn't detect a missing subtree
     // reap (sweep 2 would mask it).
     ORPHAN_BUNDLE_PATTERN: `${escRe(T)}/bundles/does-not-match\\.js`,
+    ORPHAN_NATIVE_PATTERN: NATIVE_PATTERN_NOMATCH,
   });
 
   await waitFor(() => !isAlive(gwPid), 5000, "fake gateway to die");
@@ -261,6 +336,7 @@ test("second sweep reaps an ALREADY-orphaned bundle child (ppid==1, cwd under /b
     // Gateway pattern scoped to a path that matches NOTHING:
     ORPHAN_MATCH_PATTERN: `${escRe(T)}/servers/gateway/does-not-exist\\.js`,
     ORPHAN_BUNDLE_PATTERN: `${escRe(T)}/bundles/fake/server/index\\.js`,
+    ORPHAN_NATIVE_PATTERN: NATIVE_PATTERN_NOMATCH,
   });
 
   await waitFor(() => !isAlive(childPid), 5000, "orphaned bundle child to die");
@@ -285,6 +361,7 @@ test("ORPHAN_DRY_RUN=1 reports victims but kills nothing", async (t) => {
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: `${escRe(T)}/servers/gateway/fixture-index\\.js`,
     ORPHAN_BUNDLE_PATTERN: `${escRe(T)}/bundles/fake/server/index\\.js`,
+    ORPHAN_NATIVE_PATTERN: NATIVE_PATTERN_NOMATCH,
     ORPHAN_DRY_RUN: "1",
   });
 
@@ -302,6 +379,7 @@ test("script exits 0 even when nothing matches", async (t) => {
   await runScript({
     ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
     ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: NATIVE_PATTERN_NOMATCH,
   });
   assertProdAlive(prod, "after the no-match run");
 });
@@ -333,6 +411,7 @@ test("systemd-owned prod gateways are protected even when the pattern matches th
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: "node.*servers/gateway/index\\.js",
     ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: NATIVE_PATTERN_NOMATCH,
     ORPHAN_DRY_RUN: "1",
   });
   for (const pid of prod) {
@@ -361,6 +440,7 @@ test("CROW_ALLOW_ORPHAN=1 orphan survives a REAL (non-dry) sweep", async (t) => 
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: `${escRe(T)}/servers/gateway/fixture-index\\.js`,
     ORPHAN_BUNDLE_PATTERN: `${escRe(T)}/bundles/does-not-match\\.js`,
+    ORPHAN_NATIVE_PATTERN: NATIVE_PATTERN_NOMATCH,
   });
 
   await sleep(2500); // longer than the TERM→KILL grace
@@ -393,4 +473,131 @@ test("fixture filename is invisible to the script's DEFAULT gateway pattern (pro
   } finally {
     rmSync(T, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Sweep 3: orphaned native model runtime processes (Item G, Task 14)
+// ---------------------------------------------------------------------------
+
+test("sweep 3 reaps an orphaned native model runtime process (ppid==1, exe under runtimes/llamacpp/)", async (t) => {
+  const prod = await prodMainPids();
+  if (prod.length === 0) return t.skip("no crow gateway units on this host");
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
+
+  const { T, binPath } = makeFakeNativeRuntime();
+  const spawned = [];
+  t.after(() => {
+    trackedKill(spawned);
+    rmSync(T, { recursive: true, force: true });
+  });
+
+  const pid = await spawnOrphanedBinary(binPath, ["600"]);
+  spawned.push(pid);
+  assert.ok(isAlive(pid), "native runtime fixture must be alive pre-run");
+
+  const { stdout } = await runScript({
+    ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
+    ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+  });
+
+  await waitFor(() => !isAlive(pid), 5000, "orphaned native runtime fixture to die");
+  assert.ok(!isAlive(pid), `orphaned native runtime fixture ${pid} must be gone`);
+  assert.match(stdout, /native model runtime/i, "script should log what it did");
+  assertProdAlive(prod, "after the native-runtime reap run");
+});
+
+test("sweep 3 ORPHAN_DRY_RUN=1 names the native runtime victim but kills nothing", async (t) => {
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected (never named as victims)");
+  const prod = await prodMainPids();
+  const { T, binPath } = makeFakeNativeRuntime();
+  const spawned = [];
+  t.after(() => {
+    trackedKill(spawned);
+    rmSync(T, { recursive: true, force: true });
+  });
+
+  const pid = await spawnOrphanedBinary(binPath, ["600"]);
+  spawned.push(pid);
+
+  const { stdout } = await runScript({
+    ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
+    ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: escRe(binPath),
+    ORPHAN_DRY_RUN: "1",
+  });
+
+  await sleep(2500); // longer than the script's TERM→KILL grace window
+  assert.ok(isAlive(pid), "dry run must NOT kill the native runtime fixture");
+  assert.match(stdout, pidRe(pid), "dry run must name the native runtime victim");
+  assertProdAlive(prod, "after the native-runtime dry run");
+});
+
+test("sweep 3 requires the exe/cwd identity proof — a cmdline-only decoy (no matching exe/cwd) survives", async (t) => {
+  // The whole point of checking exe/cwd instead of trusting ORPHAN_NATIVE_PATTERN
+  // alone: a process whose cmdline merely MENTIONS the "runtimes/llamacpp"
+  // path fragment (e.g. as an unrelated argument) but isn't actually running
+  // FROM that location must never be treated as a native-runtime candidate.
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
+  const prod = await prodMainPids();
+  const T = mkdtempSync(join(tmpdir(), "orphan-native-decoy-"));
+  const decoyScript = join(T, "decoy.js");
+  writeFileSync(decoyScript, `setInterval(() => {}, 1000);\n`);
+  const spawned = [];
+  t.after(() => {
+    trackedKill(spawned);
+    rmSync(T, { recursive: true, force: true });
+  });
+
+  // decoyArg never exists on disk — it's just an argv token containing the
+  // substring. Neither the decoy's exe (node's own binary) nor its cwd
+  // (tmpdir(), passed as opts.cwd default) is anywhere under it.
+  const decoyArg = join(T, "runtimes", "llamacpp", "not-actually-the-binary");
+  const pid = await spawnOrphaned(decoyScript, { extraArgs: [decoyArg] });
+  spawned.push(pid);
+  assert.ok(isAlive(pid), "decoy must be alive pre-run");
+
+  const { stdout } = await runScript({
+    ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
+    ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: escRe(decoyArg),
+  });
+
+  await sleep(2500);
+  assert.ok(isAlive(pid), "cmdline-only decoy (no matching exe/cwd) must survive sweep 3");
+  assert.doesNotMatch(stdout, pidRe(pid), "decoy must never be named a native-runtime victim");
+  assertProdAlive(prod, "after the decoy run");
+});
+
+test("sweep 3 candidate identity check matches on cwd too, not only exe", async (t) => {
+  // The brief specifies "exe/cwd" — prove the cwd branch independently of
+  // the exe branch: a plain node script (exe = node's own binary, never
+  // under runtimes/llamacpp) whose CWD is set to a fake release dir must
+  // still be reaped.
+  if (inServiceCgroup()) return t.skip("suite runs inside a *.service cgroup — fixtures would be systemd-protected");
+  const prod = await prodMainPids();
+  const T = mkdtempSync(join(tmpdir(), "orphan-native-cwd-"));
+  const releaseDir = join(T, "runtimes", "llamacpp", "vTest");
+  mkdirSync(releaseDir, { recursive: true });
+  const script = join(releaseDir, "fake-native-child.js");
+  writeFileSync(script, `setInterval(() => {}, 1000);\n`);
+  const spawned = [];
+  t.after(() => {
+    trackedKill(spawned);
+    rmSync(T, { recursive: true, force: true });
+  });
+
+  const pid = await spawnOrphaned(script, { cwd: releaseDir });
+  spawned.push(pid);
+  assert.ok(isAlive(pid), "cwd-fixture must be alive pre-run");
+
+  await runScript({
+    ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
+    ORPHAN_BUNDLE_PATTERN: "/nonexistent-orphan-test-path/server/index\\.js",
+    ORPHAN_NATIVE_PATTERN: escRe(script),
+  });
+
+  await waitFor(() => !isAlive(pid), 5000, "cwd-matched native runtime fixture to die");
+  assert.ok(!isAlive(pid), `cwd-matched native runtime fixture ${pid} must be gone`);
+  assertProdAlive(prod, "after the cwd-match reap run");
 });

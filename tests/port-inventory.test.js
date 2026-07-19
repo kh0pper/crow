@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseComposeHostPorts, parseSsListeners } from "../servers/gateway/port-inventory.js";
+import { PORT_RANGE_START, PORT_RANGE_END, saveState, loadState } from "../servers/gateway/models/state.js";
 
 const one = (yml) => { const r = parseComposeHostPorts(yml); return r.length === 1 ? r[0] : r; };
 
@@ -141,4 +145,114 @@ test("dual-stack wildcard (0.0.0.0 + [::]) on same port -> NOT a conflict", () =
   const rows = attributeAndDetect([], [{ port: 22, boundAddr: "0.0.0.0" }, { port: 22, boundAddr: "[::]" }], core);
   const r = rows.find(x => x.port === 22);
   assert.equal(r.conflict, false);
+});
+
+// ---------------------------------------------------------------------------
+// Native model port attribution (18100-18199) — Item G, Task 14
+// ---------------------------------------------------------------------------
+
+import { loadNativeModelPortMap, GENERIC_LOCAL_MODEL_LABEL } from "../servers/gateway/port-inventory.js";
+
+test("a listening port in the native-model range with a matching reservation attributes to that model id, not foreign", () => {
+  const rows = attributeAndDetect(
+    [], [{ port: 18100, boundAddr: "127.0.0.1" }], core,
+    new Map([[18100, "qwen3-4b-instruct"]]),
+  );
+  const r = rows.find((x) => x.port === 18100);
+  assert.equal(r.kind, "local-model");
+  assert.equal(r.bundleName, "qwen3-4b-instruct");
+  assert.equal(r.bundleId, "qwen3-4b-instruct");
+  assert.equal(r.status, "up");
+  assert.equal(r.listening, true);
+});
+
+test("a listening port in the native-model range with NO matching reservation falls back to the generic label, not foreign", () => {
+  const rows = attributeAndDetect([], [{ port: 18150, boundAddr: "127.0.0.1" }], core, new Map());
+  const r = rows.find((x) => x.port === 18150);
+  assert.equal(r.kind, "local-model");
+  assert.equal(r.bundleName, GENERIC_LOCAL_MODEL_LABEL);
+  assert.equal(r.bundleId, null);
+});
+
+test("nativeModelPorts defaults to an empty map when the 4th arg is omitted (backward compatible call sites)", () => {
+  const rows = attributeAndDetect([], [{ port: 18100, boundAddr: "127.0.0.1" }], core);
+  const r = rows.find((x) => x.port === 18100);
+  assert.equal(r.kind, "local-model");
+  assert.equal(r.bundleName, GENERIC_LOCAL_MODEL_LABEL);
+});
+
+test(`a listening port just outside the range (${PORT_RANGE_START - 1} / ${PORT_RANGE_END + 1}) stays foreign`, () => {
+  const rows = attributeAndDetect(
+    [],
+    [{ port: PORT_RANGE_START - 1, boundAddr: "0.0.0.0" }, { port: PORT_RANGE_END + 1, boundAddr: "0.0.0.0" }],
+    core,
+    new Map([[PORT_RANGE_START - 1, "should-not-attribute"], [PORT_RANGE_END + 1, "should-not-attribute"]]),
+  );
+  assert.equal(rows.find((x) => x.port === PORT_RANGE_START - 1).kind, "foreign");
+  assert.equal(rows.find((x) => x.port === PORT_RANGE_END + 1).kind, "foreign");
+});
+
+test("the range boundaries themselves (PORT_RANGE_START, PORT_RANGE_END) attribute as local-model", () => {
+  const rows = attributeAndDetect(
+    [], [{ port: PORT_RANGE_START, boundAddr: "127.0.0.1" }, { port: PORT_RANGE_END, boundAddr: "127.0.0.1" }], core,
+  );
+  assert.equal(rows.find((x) => x.port === PORT_RANGE_START).kind, "local-model");
+  assert.equal(rows.find((x) => x.port === PORT_RANGE_END).kind, "local-model");
+});
+
+test("a bundle-declared endpoint on a port inside the native range still wins (compose attribution takes priority)", () => {
+  // Extremely unlikely in practice (the range is gateway-internal), but the
+  // endpoint branch is checked first in attributeAndDetect regardless — this
+  // pins that ordering so a future change can't silently invert it.
+  const rows = attributeAndDetect(
+    [ep("some-bundle", 18100, "loopback")],
+    [{ port: 18100, boundAddr: "127.0.0.1" }],
+    core,
+    new Map([[18100, "some-model"]]),
+  );
+  const r = rows.find((x) => x.port === 18100);
+  assert.equal(r.kind, "hardcoded"); // ep() fixtures use source:"compose" with no portEnvVar
+  assert.equal(r.bundleId, "some-bundle");
+});
+
+function withCrowDataDir(dir, fn) {
+  const prev = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = dir;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.CROW_DATA_DIR;
+    else process.env.CROW_DATA_DIR = prev;
+  }
+}
+
+test("loadNativeModelPortMap reads reservations from this instance's models/state.json, keyed by port", () => {
+  const dir = mkdtempSync(join(tmpdir(), "port-inventory-state-"));
+  try {
+    withCrowDataDir(dir, () => {
+      const state = loadState(dir);
+      state.reservations["qwen3-4b-instruct"] = { port: 18100, owner: { crowHome: dir, pid: 12345 }, createdAt: new Date().toISOString() };
+      state.reservations["llama-3-8b"] = { port: 18101, owner: { crowHome: dir, pid: 12346 }, createdAt: new Date().toISOString() };
+      saveState(dir, state);
+
+      const map = loadNativeModelPortMap();
+      assert.equal(map.get(18100), "qwen3-4b-instruct");
+      assert.equal(map.get(18101), "llama-3-8b");
+      assert.equal(map.size, 2);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadNativeModelPortMap returns an empty map when no state file exists yet", () => {
+  const dir = mkdtempSync(join(tmpdir(), "port-inventory-state-missing-"));
+  try {
+    withCrowDataDir(dir, () => {
+      const map = loadNativeModelPortMap();
+      assert.equal(map.size, 0);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
