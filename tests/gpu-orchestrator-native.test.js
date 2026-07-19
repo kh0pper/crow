@@ -1,0 +1,340 @@
+/**
+ * gpu-orchestrator native-runtime branch (Item G, Task 9).
+ *
+ * A provider is native iff `provider.gpuPolicy?.runtime === "native"`
+ * (the ONLY writer of that field is `manager.js`'s `registerModel` — see
+ * its doc for the exact row shape this file's fixtures mirror: `bundleId:
+ * null`, `host: "local"`, `baseUrl: "http://127.0.0.1:<port>/v1"`,
+ * `models: [{ id: <alias>, task, contextLen }]`).
+ *
+ * Every native-path test stubs `spawn`/`fetch`-adjacent seams
+ * (`identityProbeFn`, `startModelFn`, `stopModelFn`, `acquireHostLockFn`,
+ * `bundleStopFn`, `probeReadyFn`, `ensureRuntimeFn`, `loadStateFn`,
+ * `resolveDataDirFn`, `loadCatalogFn`, `getCachedProbeFn`) via the
+ * `opts` bag `acquireProvider`/`maybeAcquireLocalProvider`/`ensureResident`
+ * now accept — no real llama-server, no real filesystem/network touched.
+ * `opts.cfg` overrides the provider config the native branch resolves
+ * targets/siblings from, following the same "cfg passed explicitly"
+ * pattern `tests/gpu-orchestrator-host-gate.test.js` and
+ * `tests/gpu-orchestrator-residency-poll.test.js` already use for the
+ * PURE helpers in this module.
+ */
+
+import { test, beforeEach } from "node:test";
+import assert from "node:assert/strict";
+import {
+  pollResidency,
+  acquireProvider,
+  maybeAcquireLocalProvider,
+  resolveWarmableProviderName,
+  ensureResident,
+  NativePortConflictError,
+  NativeHostLockHeldError,
+  _setNativeHandleForTest,
+} from "../servers/gateway/gpu-orchestrator.js";
+import { _resetProviderHealth, getProviderHealth } from "../servers/gateway/provider-health.js";
+
+// --- fixtures ------------------------------------------------------------
+
+const OWN = new Set(["localhost", "127.0.0.1", "::1"]);
+
+/** A native provider row shaped exactly like `manager.js`'s `registerModel`
+ * output: `bundleId: null`, `host: "local"`, loopback baseUrl,
+ * `models[0].id` doubling as the llama-server `--alias`. */
+function nativeProv(port, alias, extra = {}) {
+  const { gpuPolicy, ...rest } = extra;
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    host: "local",
+    bundleId: null,
+    models: [{ id: alias, task: "chat" }],
+    gpuPolicy: { runtime: "native", ...gpuPolicy },
+    ...rest,
+  };
+}
+
+/** A Docker-backed provider row (the pre-existing, unmodified control
+ * plane) — used to prove the native branch doesn't weaken the Docker
+ * gates it sits beside. */
+function dockerProv(baseUrl, bundleId, extra = {}) {
+  return { baseUrl, bundleId, host: "local", models: [{ id: "docker-model", task: "chat" }], ...extra };
+}
+
+/** A stub `startModel()` handle — `{ live, stop(), status() }`. */
+function fakeHandle(overrides = {}) {
+  const h = {
+    live: true,
+    stopCalls: 0,
+    async stop() {
+      h.stopCalls += 1;
+      h.live = false;
+    },
+    status() {
+      return { live: h.live };
+    },
+    ...overrides,
+  };
+  return h;
+}
+
+/** Injectable seams that get a fresh native provider all the way to
+ * "started and ready" without touching a real binary/download/process. */
+function startCapableOpts({ cfg, identityProbeFn, startCalls = [], startModelFn }) {
+  return {
+    cfg,
+    identityProbeFn,
+    acquireHostLockFn: () => () => {},
+    startModelFn: startModelFn || ((params) => {
+      startCalls.push(params);
+      return fakeHandle();
+    }),
+    ensureRuntimeFn: async () => "/fake/runtimes/llamacpp/b1/llama-server",
+    loadStateFn: () => ({ registry: { "native-target": { file: "model.gguf" } } }),
+    resolveDataDirFn: () => "/fake/crow-home",
+    loadCatalogFn: () => ({ runtime: { release: "b1", assets: {} } }),
+    getCachedProbeFn: () => ({ platform: "linux", accel: "cpu" }),
+    readinessTimeoutMs: 200,
+    readinessPollMs: 5,
+    readinessInitialDelayMs: 0,
+  };
+}
+
+beforeEach(() => {
+  _resetProviderHealth();
+  _setNativeHandleForTest("native-target", null);
+  _setNativeHandleForTest("native-sib", null);
+});
+
+// --- touch point 5: pollResidency compose-file gate (named blocker) -----
+
+test("pollResidency never releases a native provider's residency for lacking a compose file", async () => {
+  const cfg = {
+    providers: {
+      "native-embed": nativeProv(18107, "qwen3-embed", { gpuPolicy: { alwaysResident: true, runtime: "native" } }),
+      "docker-embed": dockerProv("http://127.0.0.1:9100/v1", "safe-bundle", { gpuPolicy: { alwaysResident: true } }),
+    },
+  };
+  const probe = async () => true;
+  const composeExistsCalls = [];
+  // ALWAYS false — this is exactly the condition that used to trip the
+  // gate for anything with a bundleId. A native provider must never even
+  // ask composeExists in the first place.
+  const composeExists = (id) => {
+    composeExistsCalls.push(id);
+    return false;
+  };
+
+  const probed = await pollResidency({ cfg, ownAddrs: OWN, probe, now: () => 1000, composeExists });
+
+  assert.deepEqual(probed.sort(), ["native-embed"], "only the native provider was probed this tick");
+  assert.deepEqual(composeExistsCalls, ["safe-bundle"], "composeExists is never called for a native provider");
+  const health = getProviderHealth().providers;
+  assert.ok(health["native-embed"], "native provider's residency entry was NOT released for lacking a compose file");
+  assert.equal(health["docker-embed"], undefined, "Docker provider still correctly released — the per-runtime gate didn't weaken the Docker path");
+});
+
+// --- touch point 1: acquireProvider re-warm / bind-failure (named blocker) --
+
+test("after simulated restart, re-warm binds the exact port from base_url; bind failure surfaces an error, never a silent rebind", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18106, "qwen3-4b") } };
+  // Simulated restart: _nativeHandles has NOTHING for "native-target" (the
+  // in-memory map reset with the gateway process) — beforeEach already
+  // ensures this. The real llama-server process either died or never came
+  // back; identityProbe never reports "resident" for the whole window,
+  // simulating a bind failure (e.g. EADDRINUSE causing an immediate exit).
+  const startCalls = [];
+  const startModelFn = (params) => {
+    startCalls.push(params);
+    return fakeHandle();
+  };
+  const identityProbeFn = async () => "down";
+
+  await assert.rejects(
+    () => acquireProvider("native-target", startCapableOpts({ cfg, identityProbeFn, startCalls, startModelFn })),
+    /failed to bind port 18106|refusing to rebind/,
+  );
+
+  assert.equal(startCalls.length, 1, "started exactly once — no retry attempt on a different port");
+  assert.equal(startCalls[0].port, 18106, "bound the EXACT port encoded in base_url, never re-allocated");
+});
+
+// --- touch point 1: identity-conflict / lock-held --------------------------
+
+test("acquire native: identity conflict on the fast path throws before taking the lock or starting anything", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18105, "qwen3-4b") } };
+  let lockCalls = 0;
+  const startCalls = [];
+
+  let caught = null;
+  try {
+    await acquireProvider("native-target", {
+      cfg,
+      identityProbeFn: async () => "conflict",
+      acquireHostLockFn: () => {
+        lockCalls += 1;
+        return () => {};
+      },
+      startModelFn: (p) => {
+        startCalls.push(p);
+        return fakeHandle();
+      },
+    });
+  } catch (err) {
+    caught = err;
+  }
+
+  assert.ok(caught instanceof NativePortConflictError, `expected NativePortConflictError, got ${caught}`);
+  assert.equal(lockCalls, 0, "the host lock is never taken on a conflict");
+  assert.equal(startCalls.length, 0, "never started — no traffic routed to a conflicting port");
+});
+
+test("acquire native: host lock held elsewhere surfaces an honest error, no start attempted", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18104, "qwen3-4b") } };
+  const startCalls = [];
+
+  let caught = null;
+  try {
+    await acquireProvider("native-target", {
+      cfg,
+      identityProbeFn: async () => "down",
+      acquireHostLockFn: () => null, // held elsewhere
+      startModelFn: (p) => {
+        startCalls.push(p);
+        return fakeHandle();
+      },
+    });
+  } catch (err) {
+    caught = err;
+  }
+
+  assert.ok(caught instanceof NativeHostLockHeldError, `expected NativeHostLockHeldError, got ${caught}`);
+  assert.match(caught.message, /another Crow instance on this host is using the GPU\/RAM/);
+  assert.equal(startCalls.length, 0, "never started while the lock is held elsewhere");
+});
+
+// --- touch point 1: sibling swap inside the single-flight -----------------
+
+test("acquire native: a Docker sibling in the same mutexGroup is stopped via bundleStop to admit it", async () => {
+  const cfg = {
+    providers: {
+      "native-target": nativeProv(18101, "qwen3-4b", { gpuPolicy: { runtime: "native", mutexGroup: "local-llm" } }),
+      "docker-sib": dockerProv("http://127.0.0.1:8003/v1", "vllm-rocm-qwen35-4b", { gpuPolicy: { mutexGroup: "local-llm" } }),
+    },
+  };
+
+  let targetProbeCalls = 0;
+  const identityProbeFn = async (baseUrl) => {
+    if (baseUrl.includes(":18101")) {
+      targetProbeCalls += 1;
+      return targetProbeCalls === 1 ? "down" : "resident";
+    }
+    return "down";
+  };
+  const bundleStopCalls = [];
+  const bundleStopFn = async (bundleId) => {
+    bundleStopCalls.push(bundleId);
+  };
+  const probeReadyFn = async (baseUrl) => baseUrl.includes(":8003"); // Docker sibling is currently up
+
+  const result = await acquireProvider(
+    "native-target",
+    { ...startCapableOpts({ cfg, identityProbeFn }), bundleStopFn, probeReadyFn },
+  );
+
+  assert.equal(result, true);
+  assert.deepEqual(bundleStopCalls, ["vllm-rocm-qwen35-4b"], "the Docker sibling was stopped via bundleStop");
+});
+
+test("acquire native: a native sibling in the same mutexGroup is stopped via its handle's stop()", async () => {
+  const cfg = {
+    providers: {
+      "native-target": nativeProv(18102, "qwen3-8b", { gpuPolicy: { runtime: "native", mutexGroup: "local-llm" } }),
+      "native-sib": nativeProv(18103, "qwen3-4b", { gpuPolicy: { runtime: "native", mutexGroup: "local-llm" } }),
+    },
+  };
+  const sibHandle = fakeHandle();
+  _setNativeHandleForTest("native-sib", sibHandle);
+
+  let targetProbeCalls = 0;
+  const identityProbeFn = async (baseUrl) => {
+    if (baseUrl.includes(":18102")) {
+      targetProbeCalls += 1;
+      return targetProbeCalls === 1 ? "down" : "resident";
+    }
+    return "down";
+  };
+
+  const result = await acquireProvider("native-target", startCapableOpts({ cfg, identityProbeFn }));
+
+  assert.equal(result, true);
+  assert.equal(sibHandle.stopCalls, 1, "the native sibling's handle.stop() was called exactly once");
+  assert.equal(sibHandle.live, false);
+});
+
+// --- touch point 2: maybeAcquireLocalProvider ------------------------------
+
+test("maybeAcquireLocalProvider does not early-out on a native provider's null bundleId", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18108, "qwen3-4b") } };
+  const result = await maybeAcquireLocalProvider("native-target", {
+    cfg,
+    identityProbeFn: async () => "resident", // fast path — already warm
+  });
+  assert.equal(result, true, "must not return null just because the native provider has no bundleId");
+});
+
+// --- touch point 3: resolveWarmableProviderName ----------------------------
+
+test("resolveWarmableProviderName treats a native provider (bundleId null, runtime native) as warmable", () => {
+  const cfg = { providers: { "native-target": nativeProv(18109, "qwen3-4b") } };
+  assert.equal(resolveWarmableProviderName(cfg, "native-target", OWN), "native-target");
+});
+
+// --- touch point 4: ensureResident -----------------------------------------
+
+test("ensureResident native: process alive + identityProbe resident -> already resident, never restarts", async () => {
+  const p = nativeProv(18110, "qwen3-embed", { gpuPolicy: { alwaysResident: true, runtime: "native" } });
+  const cfg = { providers: { "native-target": p } };
+  _setNativeHandleForTest("native-target", fakeHandle({ live: true }));
+
+  const startCalls = [];
+  const result = await ensureResident("native-target", cfg, {
+    identityProbeFn: async () => "resident",
+    startModelFn: (params) => {
+      startCalls.push(params);
+      return fakeHandle();
+    },
+  });
+
+  assert.equal(result, false, "already resident -> no NEW embed warmup to report");
+  assert.equal(startCalls.length, 0, "never restarted an already-resident process");
+});
+
+test("ensureResident native: no live handle -> starts it and reports embed capability", async () => {
+  const p = nativeProv(18111, "qwen3-embed", { gpuPolicy: { alwaysResident: true, runtime: "native" } });
+  p.models = [{ id: "qwen3-embed", task: "embed" }];
+  const cfg = { providers: { "native-target": p } };
+  // beforeEach already cleared any handle for "native-target".
+
+  let probeCalls = 0;
+  const identityProbeFn = async () => {
+    probeCalls += 1;
+    return "resident"; // once started, immediately reports resident
+  };
+
+  const result = await ensureResident("native-target", cfg, {
+    identityProbeFn,
+    acquireHostLockFn: () => () => {},
+    startModelFn: () => fakeHandle(),
+    ensureRuntimeFn: async () => "/fake/runtimes/llamacpp/b1/llama-server",
+    loadStateFn: () => ({ registry: { "native-target": { file: "model.gguf" } } }),
+    resolveDataDirFn: () => "/fake/crow-home",
+    loadCatalogFn: () => ({ runtime: { release: "b1", assets: {} } }),
+    getCachedProbeFn: () => ({ platform: "linux", accel: "cpu" }),
+    readinessTimeoutMs: 200,
+    readinessPollMs: 5,
+    readinessInitialDelayMs: 0,
+  });
+
+  assert.equal(result, true, "started fresh AND is embed-capable -> caller should trigger backfill");
+  assert.ok(probeCalls >= 1);
+});

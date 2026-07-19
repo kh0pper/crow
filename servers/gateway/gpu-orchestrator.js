@@ -39,7 +39,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname, resolve } from "node:path";
 import { loadProviders as loadCachedProviders } from "../shared/providers.js";
@@ -48,9 +48,23 @@ import {
   setResidencyInitialized, recordResidency, releaseResidency,
   pruneResidency, getProviderHealth,
 } from "./provider-health.js";
+import { resolveDataDir } from "../db.js";
+import { loadState } from "./models/state.js";
+import { acquireHostLock } from "./models/native-lock.js";
+import { identityProbe, startModel, stopModel, ensureRuntime } from "./models/runtime.js";
+import { getCachedProbe } from "./models/probe.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
+const MODEL_CATALOG_PATH = resolve(dirname(__filename), "..", "..", "registry", "model-catalog.json");
+
+/** Default `loadCatalogFn` for the native start path — reads the curated
+ * catalog's `runtime` block (llama.cpp version pin + per-platform assets)
+ * that `ensureRuntime` needs. Injectable so tests never touch the real
+ * repo-tracked catalog file. */
+function defaultLoadCatalog() {
+  return JSON.parse(readFileSync(MODEL_CATALOG_PATH, "utf8"));
+}
 
 function loadProviders() {
   return loadCachedProviders();
@@ -66,6 +80,38 @@ const READINESS_POLL_MS = 2_000;
 const READINESS_INITIAL_DELAY_MS = 1_000;
 const PROBE_TIMEOUT_MS = 2_000;
 
+// -----------------------------------------------------------------------
+// Native runtime — typed errors (Item G, Task 9)
+// -----------------------------------------------------------------------
+
+/** Thrown when a native provider's port is answering, but NOT as the model
+ * we expect (`identityProbe` returned "conflict") — either on the fast
+ * path (already-something-else resident) or after a fresh start that bound
+ * a port already claimed by an unrelated process. NEVER treated as
+ * resident, NEVER routed traffic — see `identityProbe`'s doc for why. */
+export class NativePortConflictError extends Error {
+  constructor(providerName, baseUrl) {
+    super(`native provider "${providerName}" (${baseUrl}) is serving a different model than expected — refusing to route traffic`);
+    this.name = "NativePortConflictError";
+    this.code = "NATIVE_PORT_CONFLICT";
+    this.providerName = providerName;
+    this.baseUrl = baseUrl;
+  }
+}
+
+/** Thrown when `acquireHostLock` returns null for a native provider's mutex
+ * group — some other Crow instance (a different gateway process on this
+ * same host) currently holds the GPU/RAM for that group. Honest, typed —
+ * never silently swallowed into a generic false/null. */
+export class NativeHostLockHeldError extends Error {
+  constructor(mutexGroup) {
+    super(`another Crow instance on this host is using the GPU/RAM (native runtime lock held for "${mutexGroup}")`);
+    this.name = "NativeHostLockHeldError";
+    this.code = "NATIVE_HOST_LOCK_HELD";
+    this.mutexGroup = mutexGroup;
+  }
+}
+
 const IDLE_REVERT_MS = Number(process.env.GPU_IDLE_REVERT_MS ?? 20 * 60 * 1000);
 const IDLE_CHECK_INTERVAL_MS = Number(process.env.GPU_IDLE_CHECK_INTERVAL_MS ?? 2 * 60 * 1000);
 const RESIDENCY_POLL_MS = Number(process.env.CROW_PROVIDER_RESIDENCY_POLL_MS ?? 120_000);
@@ -77,6 +123,21 @@ let _residencyTimer = null;
 let _residencyInFlight = false;
 let _residencyPollFailing = false; // edge-trigger for the poll's failure warn
 const _lastUsedAt = new Map(); // providerName -> epoch ms of last acquireProvider success
+
+// Live `startModel()` handles for native-runtime providers this process has
+// started, keyed by provider name. Purely in-memory — reset on gateway
+// restart, which is exactly the "simulated restart" case the re-warm path
+// (identityProbe against the OS-level port, not this map) must still handle
+// correctly: a missing entry here means "we don't have a handle", NOT
+// "nothing is listening on that port".
+const _nativeHandles = new Map();
+
+/** Test seam — seed/clear a fake native handle without going through a real
+ * `startModel()` spawn. Mirrors `_setDeferredResidentsForTest`. */
+export function _setNativeHandleForTest(name, handle) {
+  if (handle === null || handle === undefined) _nativeHandles.delete(name);
+  else _nativeHandles.set(name, handle);
+}
 
 // -----------------------------------------------------------------------
 // Bundle control
@@ -169,8 +230,7 @@ async function waitForReady(baseUrl, { totalTimeoutMs = READINESS_TIMEOUT_MS } =
 // Provider/mutex resolution
 // -----------------------------------------------------------------------
 
-function getProvider(name) {
-  const cfg = loadProviders();
+function getProvider(name, cfg = loadProviders()) {
   return cfg.providers?.[name] || null;
 }
 
@@ -179,11 +239,35 @@ function mutexGroupOf(provider) {
   return provider.gpuPolicy?.mutexGroup ?? provider.mutexGroup ?? provider.models?.[0]?.mutexGroup ?? null;
 }
 
-function getMutexSiblings(name) {
-  const p = getProvider(name);
+/** A provider is native iff its gpu_policy JSON declares `runtime: "native"`
+ * (see `manager.js`'s `registerModel` — the ONLY writer of this field). */
+function isNativeRuntime(provider) {
+  return provider?.gpuPolicy?.runtime === "native";
+}
+
+/** The llama-server `--alias` this provider serves — its own `models[0].id`,
+ * per `registerModel`'s row shape (verbatim from the task brief). */
+function nativeAlias(provider) {
+  return provider?.models?.[0]?.id ?? null;
+}
+
+/** Parse the port out of a native provider's `baseUrl`
+ * (`http://127.0.0.1:<port>/v1`). Never re-derived/re-allocated elsewhere —
+ * a re-warm after restart MUST bind the exact port the DB row already
+ * advertises, not a fresh one from the port pool. */
+function portFromBaseUrl(baseUrl) {
+  try {
+    const port = Number(new URL(baseUrl).port);
+    return Number.isFinite(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+function getMutexSiblings(name, cfg = loadProviders()) {
+  const p = getProvider(name, cfg);
   const group = mutexGroupOf(p);
   if (!group) return [];
-  const cfg = loadProviders();
   return Object.entries(cfg.providers || {})
     .filter(([n, v]) => n !== name && mutexGroupOf(v) === group)
     .map(([n]) => n);
@@ -257,16 +341,20 @@ export async function isProviderReady(providerName) {
  *   - `false`  if readiness timed out.
  *
  * Never throws — caller should fall through to the adapter on error.
+ *
+ * `opts.cfg` overrides the provider config this resolves `providerName`
+ * from (tests only; forwarded to `acquireProvider` too — see its doc).
  */
-export async function maybeAcquireLocalProvider(providerName) {
+export async function maybeAcquireLocalProvider(providerName, opts = {}) {
   if (!providerName) return null;
-  const p = getProvider(providerName);
-  if (!p?.bundleId) return null;
+  const cfg = opts.cfg || loadProviders();
+  const p = getProvider(providerName, cfg);
+  if (!p?.bundleId && !isNativeRuntime(p)) return null;
   // host unset defaults to local (matches resolveFromModelsJson).
   if (p.host && p.host !== "local") return null;
   if (!isLocallyOrchestratable(p)) return null; // F-INSTALL-10: not this machine's bundle
   try {
-    return await acquireProvider(providerName);
+    return await acquireProvider(providerName, opts);
   } catch (err) {
     console.warn(`[gpu-orchestrator] maybeAcquireLocalProvider(${providerName}) failed: ${err.message}`);
     return false;
@@ -286,7 +374,7 @@ export function resolveWarmableProviderName(cfg, name, ownAddrs = getOwnAddresse
   const provs = (cfg && cfg.providers) || {};
   const direct = provs[name];
   if (!direct) return null;
-  if (direct.bundleId) {
+  if (direct.bundleId || isNativeRuntime(direct)) {
     if (!isLocallyOrchestratable(direct, ownAddrs)) return null; // F-INSTALL-10
     return name;
   }
@@ -317,6 +405,174 @@ export async function warmProviderByName(name) {
 // Test/introspection helpers — exported for smoke scripts.
 export const _internals = { getProvider, getMutexSiblings, getMutexGroups, mutexGroupOf };
 
+// -----------------------------------------------------------------------
+// Native runtime — acquire path (Item G, Task 9)
+// -----------------------------------------------------------------------
+
+/** Poll `identityProbe` until it reports "resident" or "conflict", or the
+ * timeout elapses (-> "down"). Mirrors `waitForReady`'s shape for the
+ * Docker path, but native readiness is identity-based (is THIS the model
+ * we asked for), not just a bare 200. */
+async function waitForNativeReady(baseUrl, alias, {
+  totalTimeoutMs, pollMs, initialDelayMs, identityProbeFn, fetchImpl,
+}) {
+  await new Promise((r) => setTimeout(r, initialDelayMs));
+  const deadline = Date.now() + totalTimeoutMs;
+  while (Date.now() < deadline) {
+    const status = await identityProbeFn(baseUrl, alias, fetchImpl);
+    if (status === "resident" || status === "conflict") return status;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return "down";
+}
+
+/**
+ * Start a native provider's llama-server process and wait for it to report
+ * itself resident. No locking, no sibling swap — those are the acquire
+ * path's job (`acquireNativeSwap`) and `ensureResident`'s native branch
+ * deliberately skips them too, mirroring the Docker `ensureResident`'s
+ * parity (alwaysResident providers don't swap siblings at boot).
+ *
+ * Binds the EXACT port already encoded in `p.baseUrl` — NEVER re-allocates
+ * a fresh one from the port pool. A bind failure (the process never
+ * reports resident within the timeout) is an honest thrown error, never a
+ * silent fallback to a different port.
+ */
+async function startNativeAndAwaitReady(providerName, p, opts = {}) {
+  const {
+    identityProbeFn = identityProbe,
+    startModelFn = startModel,
+    ensureRuntimeFn = ensureRuntime,
+    loadStateFn = loadState,
+    resolveDataDirFn = resolveDataDir,
+    loadCatalogFn = defaultLoadCatalog,
+    getCachedProbeFn = getCachedProbe,
+    fetchImpl,
+    spawnFn,
+    readinessTimeoutMs = READINESS_TIMEOUT_MS,
+    readinessPollMs = READINESS_POLL_MS,
+    readinessInitialDelayMs = READINESS_INITIAL_DELAY_MS,
+  } = opts;
+
+  const alias = nativeAlias(p);
+  if (!alias) throw new Error(`orchestrator: native provider "${providerName}" has no model alias (models[0].id)`);
+  const port = portFromBaseUrl(p.baseUrl);
+  if (!port) throw new Error(`orchestrator: native provider "${providerName}" has an unparseable baseUrl port (${p.baseUrl})`);
+
+  const dir = resolveDataDirFn();
+  const state = loadStateFn(dir);
+  const regEntry = state.registry?.[providerName];
+  if (!regEntry?.file) {
+    throw new Error(`orchestrator: no model registry entry for native provider "${providerName}" — was it registered?`);
+  }
+  const ggufPath = join(dir, "models", "blobs", regEntry.file);
+
+  const catalog = loadCatalogFn();
+  const probe = getCachedProbeFn();
+  const binPath = await ensureRuntimeFn(dir, catalog.runtime, probe);
+
+  console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port})`);
+  const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn });
+  _nativeHandles.set(providerName, handle);
+
+  const result = await waitForNativeReady(p.baseUrl, alias, {
+    totalTimeoutMs: readinessTimeoutMs,
+    pollMs: readinessPollMs,
+    initialDelayMs: readinessInitialDelayMs,
+    identityProbeFn,
+    fetchImpl,
+  });
+
+  if (result === "resident") {
+    console.log(`[gpu-orchestrator] ${providerName} ready`);
+    _lastUsedAt.set(providerName, Date.now());
+    return true;
+  }
+  if (result === "conflict") {
+    throw new NativePortConflictError(providerName, p.baseUrl);
+  }
+  // "down" — the process never reported itself resident within the
+  // timeout. Never silently rebind on a different port; surface it.
+  throw new Error(`orchestrator: native provider "${providerName}" failed to bind port ${port} within ${readinessTimeoutMs}ms — refusing to rebind on a different port`);
+}
+
+/**
+ * Native branch of `acquireProvider`'s swap transaction (runs inside the
+ * same `_swapInFlight` single-flight as the Docker branch). Order:
+ *   1. `identityProbe` fast path — resident -> done; conflict -> typed
+ *      error, no lock ever taken, no traffic routed.
+ *   2. `acquireHostLock(mutexGroup)` — null -> typed "another Crow
+ *      instance..." error.
+ *   3. Sibling swap: Docker sibling via `bundleStop`, native sibling via
+ *      its handle's `stop()` — mirrors the Docker branch's sibling loop.
+ *   4. `startNativeAndAwaitReady`.
+ * The lock is released in `finally` once this swap transaction settles —
+ * it protects the START critical section against a second gateway process
+ * on this host racing to start a sibling; ongoing residency truth is
+ * `identityProbe`/the OS-level bind test, not this lock (see
+ * `native-lock.js`'s module doc).
+ */
+async function acquireNativeSwap(providerName, p, cfg, opts = {}) {
+  const {
+    acquireHostLockFn = acquireHostLock,
+    identityProbeFn = identityProbe,
+    stopModelFn = stopModel,
+    bundleStopFn = bundleStop,
+    probeReadyFn = probeReady,
+    fetchImpl,
+  } = opts;
+
+  const alias = nativeAlias(p);
+  if (alias) {
+    const fastStatus = await identityProbeFn(p.baseUrl, alias, fetchImpl);
+    if (fastStatus === "resident") {
+      _lastUsedAt.set(providerName, Date.now());
+      return true;
+    }
+    if (fastStatus === "conflict") {
+      throw new NativePortConflictError(providerName, p.baseUrl);
+    }
+    // "down" — fall through to lock + start.
+  }
+
+  const mutexGroup = mutexGroupOf(p) || providerName;
+  const release = acquireHostLockFn(mutexGroup);
+  if (!release) {
+    throw new NativeHostLockHeldError(mutexGroup);
+  }
+
+  try {
+    const siblings = getMutexSiblings(providerName, cfg);
+    for (const sibName of siblings) {
+      const sib = getProvider(sibName, cfg);
+      if (!sib || !isLocallyOrchestratable(sib)) continue;
+      if (isNativeRuntime(sib)) {
+        const sibHandle = _nativeHandles.get(sibName);
+        if (sibHandle && sibHandle.live) {
+          console.log(`[gpu-orchestrator] swapping out native ${sibName} for ${providerName}`);
+          await stopModelFn(sibHandle).catch((err) =>
+            console.warn(`[gpu-orchestrator] stop native ${sibName} failed: ${err.message}`)
+          );
+          _nativeHandles.delete(sibName);
+        }
+        _lastUsedAt.delete(sibName);
+      } else if (sib.bundleId) {
+        if (await probeReadyFn(sib.baseUrl)) {
+          console.log(`[gpu-orchestrator] swapping out ${sibName} (bundleId=${sib.bundleId}) for ${providerName}`);
+          await bundleStopFn(sib.bundleId).catch((err) =>
+            console.warn(`[gpu-orchestrator] stop ${sib.bundleId} failed: ${err.message}`)
+          );
+          _lastUsedAt.delete(sibName);
+        }
+      }
+    }
+
+    return await startNativeAndAwaitReady(providerName, p, opts);
+  } finally {
+    release();
+  }
+}
+
 /**
  * Ensure `providerName` is resident and responsive. Stops mutex siblings
  * first (if any). Waits up to READINESS_TIMEOUT_MS for warmup.
@@ -325,10 +581,29 @@ export const _internals = { getProvider, getMutexSiblings, getMutexGroups, mutex
  * for the same or different providers queue cleanly.
  *
  * Returns true on success, false on timeout. Throws on docker errors.
+ *
+ * `opts` (native-only; ignored by the Docker branch) forwards injectable
+ * seams to the native start path — see `startNativeAndAwaitReady`'s doc.
+ * `opts.cfg` overrides the provider config the native branch resolves the
+ * target/siblings from (tests only — production always omits it, so
+ * `getProvider`/`getMutexSiblings` fall back to the real `loadProviders()`).
+ * No existing caller passes `opts`, so Docker-path behavior is unaffected.
  */
-export async function acquireProvider(providerName) {
-  const p = getProvider(providerName);
+export async function acquireProvider(providerName, opts = {}) {
+  const cfg = opts.cfg || loadProviders();
+  const p = getProvider(providerName, cfg);
   if (!p) throw new Error(`orchestrator: unknown provider "${providerName}"`);
+
+  if (isNativeRuntime(p)) {
+    if (!isLocallyOrchestratable(p)) {
+      console.warn(`[gpu-orchestrator] refusing to orchestrate ${providerName} — its baseUrl is not on this machine`);
+      return null;
+    }
+    const nativeSwap = _swapInFlight.then(() => acquireNativeSwap(providerName, p, cfg, opts));
+    _swapInFlight = nativeSwap.catch(() => {});
+    return nativeSwap;
+  }
+
   if (!p.bundleId) throw new Error(`orchestrator: provider "${providerName}" has no bundleId`);
   if (!isLocallyOrchestratable(p)) {
     console.warn(`[gpu-orchestrator] refusing to orchestrate ${providerName} — its baseUrl is not on this machine`);
@@ -455,12 +730,39 @@ export function _setDeferredResidentsForTest(names) {
   _deferredResidents = new Set(names);
 }
 
+/** Native branch of `ensureResident`: "resident" = process alive (we hold a
+ * live handle) AND `identityProbe` confirms it's actually serving our
+ * alias (per the task brief's exact definition) — a live process alone
+ * isn't enough, matching `identityProbe`'s "never trust a port without
+ * confirming what it's serving" stance. Not resident -> start it (no
+ * lock/sibling-swap, mirroring the Docker branch's boot-time parity). */
+async function ensureNativeResident(name, p, opts = {}) {
+  const { identityProbeFn = identityProbe, fetchImpl } = opts;
+  const handle = _nativeHandles.get(name);
+  const alias = nativeAlias(p);
+  if (handle && handle.live && alias) {
+    const status = await identityProbeFn(p.baseUrl, alias, fetchImpl);
+    if (status === "resident") {
+      console.log(`[gpu-orchestrator] ${name} already resident`);
+      return false;
+    }
+  }
+  await startNativeAndAwaitReady(name, p, opts);
+  return providerHasEmbedModel(p);
+}
+
 /** Ensure ONE alwaysResident provider: probe → bundleUp → waitForReady.
  *  Returns true iff it warmed an embed-capable provider (caller may
- *  trigger the embedding backfill). Never throws. */
-async function ensureResident(name, cfg = loadProviders()) {
+ *  trigger the embedding backfill). Never throws.
+ *
+ *  `opts` (native-only) forwards injectable seams to
+ *  `ensureNativeResident` — see its doc; ignored by the Docker branch. */
+export async function ensureResident(name, cfg = loadProviders(), opts = {}) {
   try {
     const p = (cfg.providers || {})[name];
+    if (p && isNativeRuntime(p)) {
+      return await ensureNativeResident(name, p, opts);
+    }
     if (!p?.bundleId) {
       console.warn(`[gpu-orchestrator] ${name} has no bundleId — skipping`);
       return false;
@@ -544,10 +846,15 @@ export async function pollResidency(opts = {}) {
 
       // SSRF / path-traversal gate: only providers this machine can actually
       // orchestrate (a safe bundleId whose compose file exists) are probed.
-      if (!p.bundleId || !isSafeBundleId(p.bundleId)) { releaseResidency(name); continue; }
-      let exists = false;
-      try { exists = composeExists(p.bundleId); } catch { exists = false; }
-      if (!exists) { releaseResidency(name); continue; }
+      // Per-runtime: native providers have no bundleId/compose file at all
+      // (their control plane is startModel/stopModel, not docker compose)
+      // and must NEVER be releaseResidency()'d for lacking one.
+      if (!isNativeRuntime(p)) {
+        if (!p.bundleId || !isSafeBundleId(p.bundleId)) { releaseResidency(name); continue; }
+        let exists = false;
+        try { exists = composeExists(p.bundleId); } catch { exists = false; }
+        if (!exists) { releaseResidency(name); continue; }
+      }
 
       let prev = health.providers[name];
       // Operator repointed the provider — release and re-evaluate ownership
