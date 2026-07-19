@@ -6,5 +6,25 @@
   "description": "Top-tier reasoning (Qwen2.5-72B-Instruct Q4_K_M via llama.cpp-ROCm). Replaces vLLM Kimi slot (custom attention segfaults on gfx1151). 64K context, -fa 1 + --no-mmap per kyuz0/amd-strix-halo-toolboxes.",
   "requires": { "gpu": true, "min_vram_gb": 60, "platform": "linux-x86_64", "gpu_arch": ["gfx1151"] },
   "env_vars": [],
-  "port": 8003
+  "port": 8003,
+  "inference": true,
+  "providers": [
+    {
+      "id": "crow-swap-qwen72b",
+      "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+      "apiKey": "none",
+      "description": "Top-tier reasoning specialist (Qwen2.5-72B-Instruct Q4_K_M, on-demand; conflicts with crow-chat)",
+      "models": [
+        {
+          "id": "qwen2.5-72b",
+          "contextLen": 65536,
+          "warm": false,
+          "onDemand": true,
+          "mutexGroup": "8003-swap",
+          "conflictsWith": ["crow-chat"],
+          "priority": "batch"
+        }
+      ]
+    }
+  ]
 }

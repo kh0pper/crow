@@ -10,6 +10,7 @@
   },
   "env_vars": [],
   "port": 8880,
+  "no_auto_provider": "Not an LLM chat endpoint -- text-to-speech is wired via ttsProfileSeed below, which seeds a dedicated TTS profile (provider: kokoro) pointing at this container's OpenAI-compatible /v1/audio/speech endpoint on install (see servers/gateway/routes/bundles.js seedProfile()). No LLM providers[] entry applies.",
   "ttsProfileSeed": {
     "name": "Kokoro (local)",
     "provider": "kokoro",

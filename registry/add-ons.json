@@ -1074,6 +1074,7 @@
       },
       "env_vars": [],
       "port": 8004,
+      "no_auto_provider": "Not an LLM chat endpoint -- speech-to-text is wired via sttProfileSeed below, which seeds a dedicated STT profile (provider: fasterwhisper) pointing at this container's OpenAI-compatible /v1/audio/transcriptions endpoint on install (see servers/gateway/routes/bundles.js seedProfile()). No LLM providers[] entry applies.",
       "sttProfileSeed": {
         "name": "Faster-Whisper (local)",
         "provider": "fasterwhisper",
@@ -2179,6 +2180,7 @@
       },
       "env_vars": [],
       "port": 8880,
+      "no_auto_provider": "Not an LLM chat endpoint -- text-to-speech is wired via ttsProfileSeed below, which seeds a dedicated TTS profile (provider: kokoro) pointing at this container's OpenAI-compatible /v1/audio/speech endpoint on install (see servers/gateway/routes/bundles.js seedProfile()). No LLM providers[] entry applies.",
       "ttsProfileSeed": {
         "name": "Kokoro (local)",
         "provider": "kokoro",
@@ -2458,6 +2460,7 @@
       "docker": {
         "composefile": "docker-compose.yml"
       },
+      "inference": true,
       "providers": [
         {
           "id": "llamacpp-cpu-embed",
@@ -2496,6 +2499,28 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
+      "providers": [
+        {
+          "id": "crow-swap-qwen72b",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "description": "Top-tier reasoning specialist (Qwen2.5-72B-Instruct Q4_K_M, on-demand; conflicts with crow-chat)",
+          "models": [
+            {
+              "id": "qwen2.5-72b",
+              "contextLen": 65536,
+              "warm": false,
+              "onDemand": true,
+              "mutexGroup": "8003-swap",
+              "conflictsWith": [
+                "crow-chat"
+              ],
+              "priority": "batch"
+            }
+          ]
+        }
+      ],
       "official": true
     },
     {
@@ -2515,6 +2540,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-swap-highend",
@@ -2555,6 +2581,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-swap-deep",
@@ -2595,6 +2622,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-swap-coder",
@@ -2635,6 +2663,7 @@
       },
       "env_vars": [],
       "port": 8004,
+      "inference": true,
       "providers": [
         {
           "id": "crow-embed",
@@ -2671,6 +2700,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-chat",
@@ -2739,6 +2769,7 @@
         "port": 8080,
         "path": "/"
       },
+      "no_auto_provider": "LocalAI's OpenAI-compatible endpoint (http://{host}:8080/v1) is live once the container starts, but -- same shape as ollama -- its model catalog is populated post-install: either on first API request (auto-download) or via `docker compose exec localai local-ai models install <name>`, not at install-time, so there is no served model id to write into a static providers[] entry. After a model is installed, add the provider manually via Settings -> LLM -> Providers, base URL http://<host>:8080/v1, with the model id you installed/downloaded (see `local-ai models list` inside the container, or the model gallery name used for the first-use download).",
       "notes": "LocalAI is OpenAI-compatible. Configure AI_PROVIDER=openai and AI_BASE_URL=http://localhost:8080/v1 in .env to use with Crow's AI Chat.",
       "official": true
     },
@@ -4258,6 +4289,7 @@
         11434
       ],
       "webUI": null,
+      "no_auto_provider": "Ollama's OpenAI-compatible endpoint (http://{host}:11434/v1) is live once the container starts, but its model catalog is populated at pull-time (`docker compose exec ollama ollama pull <model>`), not at install-time -- there is no served model id to write into a static providers[] entry. Registering a provider row with an empty models[] list breaks default profile resolution (resolveProviderConfig() in servers/gateway/ai/resolve-profile.js falls back to model:null when no model_id is stored and models[] is empty). After pulling a model, add the provider manually via Settings -> LLM -> Providers, pointing baseUrl at http://<host>:11434/v1 with the pulled model's name.",
       "notes": "RAM and disk depend on model size. Small models (tinyllama) need ~2GB RAM. Large models (llama3) need 8GB+. Each model uses 2-50GB disk.",
       "official": true
     },
@@ -5239,6 +5271,7 @@
         3005
       ],
       "webUI": null,
+      "no_auto_provider": "Not an LLM chat endpoint -- image generation is wired via the SDXL_SERVICE_URL env var (default http://127.0.0.1:3005), consumed directly by the crow_generate_background MCP tool in servers/storage/server.js (custom /health + /generate JSON API, not OpenAI-compatible /v1/images/generations). No LLM providers[] entry applies.",
       "requires": {
         "min_ram_mb": 4096,
         "min_disk_mb": 25000,
@@ -5969,6 +6002,7 @@
         "path": "/docs",
         "label": "vLLM API docs"
       },
+      "no_auto_provider": "VLLM_MODEL is a required install-time env var with no default (docker-compose.yml: `--model=${VLLM_MODEL:?Set VLLM_MODEL}`) -- the served model is whatever HuggingFace id the installer types in, so there is no fixed model id this manifest can register at build time. Manifest providers[] has no mechanism to read a resolved env var into a model id (registerProviderFromManifest only substitutes {host_ip}/{port}). After install, add the provider manually via Settings -> LLM -> Providers, pointing baseUrl at http://<host>:${VLLM_HTTP_PORT:-8089}/v1 with the same value used for VLLM_MODEL as the model id (vLLM serves it under --served-model-name=${VLLM_MODEL}).",
       "notes": "Linux x86_64 + NVIDIA GPU required. Recommended classroom shape: Qwen2.5-3B-Instruct at VLLM_MAX_NUM_SEQS=16 on a 16 GB consumer GPU (tested in the Maker Lab Phase 0 benchmark, see bundles/maker-lab/PHASE-0-REPORT.md Spike 5). vLLM's OpenAI-compatible endpoint drops into Maker Lab's MAKER_LAB_LLM_ENDPOINT as-is.",
       "official": true
     },
@@ -5978,7 +6012,7 @@
       "name": "vLLM Embeddings — Qwen3-Embedding-0.6B",
       "category": "ai",
       "description": "Multilingual text embeddings (Qwen3-Embedding-0.6B, 1024-dim Matryoshka). Powers semantic search across memory/research/blog. Runs on grackle's RTX 5060 Ti via vLLM-CUDA.",
-      "host": "49cf71ca878643ba7717f344329266fd",
+      "host": "local",
       "requires": {
         "gpu": true,
         "min_vram_gb": 2,
@@ -5989,6 +6023,7 @@
       },
       "env_vars": [],
       "port": 9100,
+      "inference": true,
       "providers": [
         {
           "id": "grackle-embed",
@@ -6020,7 +6055,7 @@
       "name": "vLLM Reranker — Qwen3-Reranker-0.6B",
       "category": "ai",
       "description": "Cross-encoder reranker for hybrid FTS+vector retrieval top-K reordering. Multilingual, instruction-aware. Runs on grackle's RTX 5060 Ti via vLLM-CUDA.",
-      "host": "49cf71ca878643ba7717f344329266fd",
+      "host": "local",
       "requires": {
         "gpu": true,
         "min_vram_gb": 2,
@@ -6031,6 +6066,7 @@
       },
       "env_vars": [],
       "port": 9101,
+      "inference": true,
       "providers": [
         {
           "id": "grackle-rerank",
@@ -6055,7 +6091,7 @@
       "name": "vLLM Vision — Qwen3-VL-8B-Instruct-FP8",
       "category": "ai",
       "description": "Vision-language model for image understanding, OCR, structured output. Qwen3-VL-8B in FP8 (Blackwell). On-demand via the GPU orchestrator; mutex with grackle-embed/rerank during burst.",
-      "host": "49cf71ca878643ba7717f344329266fd",
+      "host": "local",
       "requires": {
         "gpu": true,
         "min_vram_gb": 8,
@@ -6066,6 +6102,7 @@
       },
       "env_vars": [],
       "port": 9102,
+      "inference": true,
       "providers": [
         {
           "id": "grackle-vision",
@@ -6101,6 +6138,28 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
+      "providers": [
+        {
+          "id": "crow-swap-kimi",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "description": "Long-context planner specialist (Kimi-Linear-48B-A3B-Instruct BF16, on-demand; conflicts with crow-chat)",
+          "models": [
+            {
+              "id": "kimi-linear-48b",
+              "contextLen": 32768,
+              "warm": false,
+              "onDemand": true,
+              "mutexGroup": "8003-swap",
+              "conflictsWith": [
+                "crow-chat"
+              ],
+              "priority": "batch"
+            }
+          ]
+        }
+      ],
       "official": true
     },
     {
@@ -6119,6 +6178,23 @@
       },
       "env_vars": [],
       "port": 8001,
+      "inference": true,
+      "providers": [
+        {
+          "id": "crow-dispatch",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "description": "Fast tool-dispatch endpoint (Qwen3-4B BF16)",
+          "models": [
+            {
+              "id": "qwen3-4b",
+              "contextLen": 32768,
+              "warm": true,
+              "priority": "maker_lab"
+            }
+          ]
+        }
+      ],
       "official": true
     },
     {
@@ -6137,6 +6213,23 @@
       },
       "env_vars": [],
       "port": 8002,
+      "inference": true,
+      "providers": [
+        {
+          "id": "crow-mode-a-32b",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "description": "Mid-tier reasoning/synthesis endpoint (Qwen3-32B dense BF16)",
+          "models": [
+            {
+              "id": "qwen3-32b",
+              "contextLen": 32768,
+              "warm": true,
+              "priority": "interactive"
+            }
+          ]
+        }
+      ],
       "official": true
     },
     {
@@ -6156,6 +6249,7 @@
       },
       "env_vars": [],
       "port": 8012,
+      "inference": true,
       "providers": [
         {
           "id": "crow-chat",
@@ -6191,6 +6285,7 @@
       },
       "env_vars": [],
       "port": 8011,
+      "inference": true,
       "providers": [
         {
           "id": "crow-voice",

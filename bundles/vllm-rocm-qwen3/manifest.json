@@ -11,5 +11,22 @@
     "gpu_arch": ["gfx1151"]
   },
   "env_vars": [],
-  "port": 8001
+  "port": 8001,
+  "inference": true,
+  "providers": [
+    {
+      "id": "crow-dispatch",
+      "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+      "apiKey": "none",
+      "description": "Fast tool-dispatch endpoint (Qwen3-4B BF16)",
+      "models": [
+        {
+          "id": "qwen3-4b",
+          "contextLen": 32768,
+          "warm": true,
+          "priority": "maker_lab"
+        }
+      ]
+    }
+  ]
 }

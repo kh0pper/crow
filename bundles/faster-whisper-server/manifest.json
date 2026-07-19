@@ -10,6 +10,7 @@
   },
   "env_vars": [],
   "port": 8004,
+  "no_auto_provider": "Not an LLM chat endpoint -- speech-to-text is wired via sttProfileSeed below, which seeds a dedicated STT profile (provider: fasterwhisper) pointing at this container's OpenAI-compatible /v1/audio/transcriptions endpoint on install (see servers/gateway/routes/bundles.js seedProfile()). No LLM providers[] entry applies.",
   "sttProfileSeed": {
     "name": "Faster-Whisper (local)",
     "provider": "fasterwhisper",
