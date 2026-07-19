@@ -41,6 +41,44 @@
 #     means a process that merely happens to mention that path in an
 #     unrelated argument can never be swept.
 #
+#     ADOPTION CROSS-CHECK (fix round 1, Critical finding): `setpriv
+#     --pdeathsig=SIGTERM` and startModel's own SIGTERM-the-group `stop()`
+#     path mean a llama-server almost always dies WITH its gateway — but
+#     that's a mitigation, not a guarantee (setpriv can be absent on the
+#     host, or lose the pdeathsig race on a hard crash), and when it
+#     survives, the RESTARTED gateway can legitimately ADOPT it instead of
+#     respawning: gpu-orchestrator.js's acquireOrStartNative calls
+#     identityProbe first, and a "resident" result (the surviving process is
+#     still correctly answering as the right alias) returns
+#     `{freshStart:false}` WITHOUT ever touching `_nativeHandles` or calling
+#     `startModel` again — traffic gets routed to it, but this pid's ppid
+#     stays 1 forever and it is never back under any gateway's supervision.
+#     `models/state.js`'s `reconcileOnBoot` already encodes the correct rule
+#     for this exact situation ("a live provider row means the runtime is
+#     still legitimately using that port even though the reserving pid is
+#     gone" — see its doc) and deliberately does NOT free that reservation.
+#     Sweep 3 mirrors that rule before ever signaling a candidate: derive
+#     the candidate's own CROW_HOME from the SAME exe/cwd match above (the
+#     path fragment before "/runtimes/llamacpp/" is exactly the `dir`
+#     `state.js`'s `statePath(dir)` expects), parse the candidate's OWN
+#     bound port from its OWN cmdline's "--port" flag (buildLlamaServerArgs
+#     in runtime.js always includes it, setpriv-wrapped or not — chosen over
+#     ss/lsof so this needs no extra host tool and reflects exactly what the
+#     process was launched with, matching state.json's own semantics), and
+#     if THAT CROW_HOME's models/state.json holds ANY reservation for that
+#     port, the candidate is skipped (logged) as an adopted native model,
+#     never signaled. Fails CLOSED on ambiguity: if the candidate's own
+#     CROW_HOME or port can't be determined at all (a raced/vanished
+#     process, an unexpected invocation shape), it is also skipped rather
+#     than guessed — a wrongly-killed live model cannot be undone, while a
+#     genuinely orphaned process just gets caught on the next sweep. A
+#     reservation-less llama-server on a random port remains reapable (truly
+#     abandoned — its reservation was deleted or never existed). Residual
+#     case, stated honestly: if a reservation IS present but the model is
+#     actually dead (crashed without ever calling releasePort), the process
+#     has already exited on its own — there is nothing left for this sweep
+#     to kill either way, so skipping it here costs nothing.
+#
 # PROTECTION (checked at candidate selection AND before every signal):
 #   1. systemd-owned: any process whose /proc/<pid>/cgroup places it inside a
 #      *.service cgroup belongs to systemd — in EVERY unit state. This is the
@@ -144,6 +182,84 @@ exe_or_cwd_under_native_runtimes() {
     */runtimes/llamacpp/*) return 0 ;;
   esac
   return 1
+}
+
+# The CROW_HOME implied by a native-runtime candidate's exe/cwd — the path
+# fragment BEFORE "/runtimes/llamacpp/" (same exe-then-cwd precedence as
+# exe_or_cwd_under_native_runtimes). This is exactly the `dir` argument
+# `models/state.js`'s `statePath(dir)` expects (`<dir>/models/state.json`),
+# since `ensureRuntime` in runtime.js builds the binary path as
+# `<dir>/runtimes/llamacpp/<release>/...` from that very same `dir`. Prints
+# nothing and returns 1 if neither exe nor cwd matches (fail closed — see
+# the adoption cross-check in the header comment).
+native_crow_home_of() {
+  local target
+  target=$(readlink "/proc/$1/exe" 2>/dev/null) || target=""
+  case "$target" in
+    */runtimes/llamacpp/*) echo "${target%%/runtimes/llamacpp/*}"; return 0 ;;
+  esac
+  target=$(readlink "/proc/$1/cwd" 2>/dev/null) || target=""
+  case "$target" in
+    */runtimes/llamacpp/*) echo "${target%%/runtimes/llamacpp/*}"; return 0 ;;
+  esac
+  return 1
+}
+
+# The port a native-runtime candidate was told to bind, parsed from its OWN
+# cmdline's "--port" flag (buildLlamaServerArgs in runtime.js always
+# includes literal "--port <port>", whether or not setpriv wraps the
+# invocation). Chosen over ss/lsof: no extra host tool required, and this
+# reflects exactly what the process was launched with — the same thing
+# state.json's reservation records, not a live socket scrape that could in
+# principle diverge (a process bound to a DIFFERENT port than it was told
+# to would fail identityProbe's caller anyway). Prints nothing and returns
+# 1 if "--port" isn't found (a raced/vanished process, or an unexpected
+# invocation shape) — fail closed, never guess.
+native_port_of() {
+  local cmdline prev=""
+  cmdline=$(cmdline_of "$1")
+  # shellcheck disable=SC2086  # deliberate field-split to walk argv tokens
+  set -- $cmdline
+  while [ "$#" -gt 0 ]; do
+    if [ "$prev" = "--port" ]; then
+      echo "$1"
+      return 0
+    fi
+    prev="$1"
+    shift
+  done
+  return 1
+}
+
+# Adoption cross-check (fix round 1, Critical finding — see the Sweep 3
+# header comment for the full scenario): does `statePath`'s models/
+# state.json hold ANY reservation for `port`? Prints the reserving modelId
+# and returns 0 if so; prints nothing and returns 1 otherwise (missing/
+# corrupt state file, or no matching reservation — both mean "not
+# protected by this check", not "protected"). Parsed with `node` rather
+# than `jq`: every Crow host already requires node to run the gateway
+# itself, so this adds no new host dependency (jq is NOT a guaranteed
+# install-time dependency — confirmed absent from scripts/crow-install.sh).
+port_reserved_model() {
+  local state_path="$1" port="$2"
+  [ -f "$state_path" ] || return 1
+  node - "$state_path" "$port" <<'EOF' 2>/dev/null
+const fs = require("node:fs");
+try {
+  const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+  const port = parseInt(process.argv[3], 10);
+  const reservations = (state && typeof state.reservations === "object" && state.reservations) || {};
+  for (const [modelId, r] of Object.entries(reservations)) {
+    if (r && r.port === port) {
+      process.stdout.write(modelId);
+      process.exit(0);
+    }
+  }
+  process.exit(1);
+} catch {
+  process.exit(1);
+}
+EOF
 }
 
 # systemd-owned: the pid's cgroup path contains a *.service component.
@@ -286,6 +402,22 @@ for pid in $(pgrep -f "$NATIVE_PATTERN" 2>/dev/null); do
   ppid=$(ppid_of "$pid") || continue
   [ "$ppid" = "1" ] || continue
   exe_or_cwd_under_native_runtimes "$pid" || continue
+
+  # Adoption cross-check (fix round 1) — see the Sweep 3 header comment.
+  # Fail CLOSED: if this candidate's own CROW_HOME or bound port can't be
+  # determined, skip rather than guess.
+  native_home=$(native_crow_home_of "$pid")
+  native_port=$(native_port_of "$pid")
+  if [ -z "$native_home" ] || [ -z "$native_port" ]; then
+    log "skipping native model runtime pid $pid — could not determine its own CROW_HOME/port, refusing to guess"
+    continue
+  fi
+  reserved_model=$(port_reserved_model "${native_home}/models/state.json" "$native_port")
+  if [ -n "$reserved_model" ]; then
+    log "skipping adopted native model on port $native_port (reserved for '$reserved_model' in ${native_home}/models/state.json) — pid $pid"
+    continue
+  fi
+
   # A native runtime process has no children of its own to worry about
   # (unlike the gateway/bundle sweeps, there is no downstream lock-holder
   # depending on it), but stamp+reap through the same single-pid "tree" for
