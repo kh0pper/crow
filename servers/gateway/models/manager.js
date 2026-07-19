@@ -1,6 +1,7 @@
 /**
  * GGUF model download + registration pipeline (Item G, native model
- * runtime, Tasks 6-7).
+ * runtime, Tasks 6-7; Task 13 fix round 1 added Browse-Hugging-Face
+ * downloads and a typed HTTP-status error).
  *
  * Everything above `// --- provider registration (Task 7) ---` is the
  * download engine (Task 6) — it only ever touches the filesystem +
@@ -8,6 +9,14 @@
  * a downloaded blob into a running llama.cpp provider row (`registerModel`),
  * tears one down (`unregisterModel`), and answers "what points at this
  * provider" for the delete-confirmation dialog (`providerBindings`).
+ *
+ * The "Browse Hugging Face — un-vetted-repo downloads" section (search for
+ * that heading below, just above `deleteModel`) is Task 13 fix round 1:
+ * `downloadHfFile`/`fetchHfPathInfo` let the panel's advanced search tab
+ * download an arbitrary GGUF file the operator picked, verified against a
+ * sha256 fetched live from Hugging Face — reusing this same download
+ * engine (`downloadModel`) via a synthetic one-model catalog, not a
+ * parallel implementation.
  *
  * Two layers (Task 6, downloads):
  *
@@ -164,6 +173,61 @@ export class DownloadTimeoutError extends Error {
  * `runtime.js`'s `DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_MS`). Injectable end to
  * end via `fetchModelBlob({ timeoutMs })` / `downloadModel({ timeoutMs })`. */
 export const DEFAULT_DOWNLOAD_TIMEOUT_MS = 120_000;
+
+/** Thrown when a download hop returns a non-redirect, non-200/206 HTTP
+ * status (Task 13 fix round 1, finding d). Replaces a bare `Error` so
+ * callers can branch on `.statusCode`/`.code` (`"HTTP_403"`, `"HTTP_404"`,
+ * ...) instead of string-matching the message — the panel's gated-model
+ * retry copy in particular needs to detect "this was specifically a 403"
+ * without parsing free text that could drift. */
+export class HttpStatusError extends Error {
+  constructor(statusCode, url) {
+    super(`Unexpected HTTP status ${statusCode} downloading ${url}`);
+    this.name = "HttpStatusError";
+    this.code = `HTTP_${statusCode}`;
+    this.statusCode = statusCode;
+  }
+}
+
+/** Thrown by `fetchHfPathInfo` on a non-2xx response from Hugging Face's
+ * paths-info API (network error, or the API itself refusing/erroring —
+ * confirmed live: a repo Hugging Face won't resolve returns 401, not 404,
+ * so this is intentionally NOT statusCode-specific). */
+export class HfMetadataError extends Error {
+  constructor(message, statusCode) {
+    super(message);
+    this.name = "HfMetadataError";
+    this.code = "HF_METADATA_ERROR";
+    this.statusCode = statusCode ?? null;
+  }
+}
+
+/** Thrown when the requested file does not appear in the repo at all —
+ * confirmed live: Hugging Face's paths-info API answers a nonexistent path
+ * inside a real repo with `200 []`, not a 404, so this must be detected by
+ * an empty/missing result, not inferred from the HTTP status. */
+export class HfFileNotFoundError extends Error {
+  constructor(hfRepo, file) {
+    super(`File not found in Hugging Face repo ${hfRepo}: ${file}`);
+    this.name = "HfFileNotFoundError";
+    this.code = "HF_FILE_NOT_FOUND";
+  }
+}
+
+/** Thrown when Hugging Face reports the requested file with no LFS `oid` —
+ * i.e. it isn't an LFS-tracked object, so there is no content-hash we can
+ * verify a download against (a non-LFS `oid` is a git blob SHA-1 over a
+ * git-wrapped object, not a bare-content sha256 — it would never match
+ * `fetchModelBlob`'s streamed sha256 of the raw bytes, so trusting it would
+ * be actively misleading, not just weaker). The un-vetted/advanced-tab
+ * download path never downloads a file it cannot verify. */
+export class NoVerifiableChecksumError extends Error {
+  constructor(file) {
+    super(`This file has no verifiable checksum (not LFS-tracked): ${file}`);
+    this.name = "NoVerifiableChecksumError";
+    this.code = "NO_VERIFIABLE_CHECKSUM";
+  }
+}
 
 /** Thrown by `registerModel` when a provider row already exists at the
  * target id and was NOT registered by this native runtime for this catalog
@@ -341,7 +405,7 @@ async function openStream({ url, headers, lookup, maxRedirects, insecureHttpHost
     }
     if (res.statusCode !== 200 && res.statusCode !== 206) {
       res.resume();
-      throw new Error(`Unexpected HTTP status ${res.statusCode} downloading ${currentUrl}`);
+      throw new HttpStatusError(res.statusCode, currentUrl);
     }
     return { res, finalUrl: currentUrl };
   }
@@ -485,6 +549,7 @@ export async function fetchModelBlob({
   createWriteStream = fsCreateWriteStream,
   insecureHttpHosts = [],
   timeoutMs = DEFAULT_DOWNLOAD_TIMEOUT_MS,
+  extraHeaders,
 }) {
   assertNotSymlink(dest);
 
@@ -496,7 +561,11 @@ export async function fetchModelBlob({
     await rehashPrefix(dest, effectiveResumeFrom, hash);
   }
 
-  const headers = {};
+  // `extraHeaders` (e.g. an HF `Authorization: Bearer <token>` for a gated
+  // repo — Task 13 fix round 1) is caller-supplied and merged first, so the
+  // Range header this function computes for a resume can never be
+  // shadowed by it.
+  const headers = { ...(extraHeaders || {}) };
   if (effectiveResumeFrom > 0) headers.Range = `bytes=${effectiveResumeFrom}-`;
 
   const { res } = await openStream({ url, headers, lookup, maxRedirects, insecureHttpHosts, timeoutMs });
@@ -562,6 +631,7 @@ export async function downloadModel({
   journalIntervalMs = 1000,
   insecureHttpHosts,
   timeoutMs,
+  extraHeaders,
 }) {
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
   const blobDir = modelsBlobDir(dir);
@@ -615,6 +685,7 @@ export async function downloadModel({
       createWriteStream,
       insecureHttpHosts,
       timeoutMs,
+      extraHeaders,
       onProgress: wrappedOnProgress,
     });
     const s = loadState(dir);
@@ -639,6 +710,219 @@ export async function downloadModel({
     persistJournal(bytesDone);
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Browse Hugging Face — un-vetted-repo downloads (Task 13 fix round 1,
+// finding 1: Kevin decided to build this in-PR).
+//
+// The curated path above trusts a PR-reviewed, sha256-pinned catalog entry.
+// This path has no such review — the operator is choosing an arbitrary
+// GGUF file out of Hugging Face's public search. The ONE non-negotiable
+// safety property this section exists to guarantee: a file is NEVER
+// downloaded (or, having been downloaded, never registered as a runnable
+// provider) without an independently-fetched, verified sha256 to check it
+// against. Hugging Face's `paths-info` API is queried BEFORE any byte of
+// the file itself is requested; if it reports no LFS `oid` for the path
+// (i.e. the file isn't LFS-tracked — a git-blob `oid` is a SHA-1 over a
+// git-wrapped object, not a content sha256, and would never match anyway),
+// this refuses outright rather than downloading something it cannot verify.
+// ---------------------------------------------------------------------------
+
+/** Strict shape check for a Hugging Face repo id: exactly `owner/name`, two
+ * path segments, conservative charset (letters/digits/`_`/`.`/`-`) — no
+ * traversal, no query strings, no extra segments. Reused by
+ * `routes/models.js`'s `POST /hf-download` 400 gate so the shape rule lives
+ * in exactly one place. */
+const HF_REPO_SHAPE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,96}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,96}$/;
+export function isValidHfRepoId(hfRepo) {
+  return typeof hfRepo === "string" && HF_REPO_SHAPE_RE.test(hfRepo);
+}
+
+/** Strict shape check for a single filename requested from a Hugging Face
+ * repo: no path separators (so it can never escape the repo root or the
+ * on-disk blobs dir once handed to `sanitizeFilename`), not `.`/`..`,
+ * conservative charset. */
+const HF_FILE_SHAPE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$/;
+export function isValidHfFilename(file) {
+  if (typeof file !== "string" || !file) return false;
+  if (file.includes("/") || file.includes("\\")) return false;
+  if (file === "." || file === "..") return false;
+  return HF_FILE_SHAPE_RE.test(file);
+}
+
+/** Reduce a Hugging Face filename to a safe, DB-friendly provider/model id:
+ * strip the `.gguf` extension, lowercase, collapse any run of characters
+ * outside `[a-z0-9._-]` into a single `-`, trim leading/trailing `-`.
+ * `registerModel`'s provider-id collision guard applies to whatever this
+ * returns exactly as it does for a curated catalog id — no special-casing
+ * needed there (Task 13 fix round 1, finding 1). */
+export function deriveModelIdFromFilename(file) {
+  const base = String(file ?? "").replace(/\.gguf$/i, "");
+  const slug = base
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  if (!slug) {
+    throw new UnsafeDestinationError(`Could not derive a model id from filename: ${JSON.stringify(file)}`);
+  }
+  return slug;
+}
+
+/**
+ * Query Hugging Face's `paths-info` API for one file's LFS sha256 + size,
+ * BEFORE downloading anything. Confirmed against the real API (2026-07-19):
+ * `POST {hfApiBase}/api/models/{hfRepo}/paths-info/main` with
+ * `{paths:[file], expand:true}` returns `[{path, size, oid, lfs:{oid,
+ * size}}]` for a file that exists — `lfs.oid` IS the content sha256 for an
+ * LFS-tracked object (independently verified: matches the catalog's own
+ * pinned sha256 for `qwen3-4b`'s Q4_K_M file byte-for-byte). A path that
+ * doesn't exist in an otherwise-valid repo answers `200 []`, not a 404 —
+ * `HfFileNotFoundError` covers that case explicitly rather than trusting
+ * the HTTP status. A non-LFS file has no `lfs` key at all — `sha256` comes
+ * back `null` and the caller (`downloadHfFile`) refuses to proceed.
+ *
+ * @returns {Promise<{sha256: string|null, sizeBytes: number|null}>}
+ */
+export async function fetchHfPathInfo({
+  hfRepo,
+  file,
+  hfApiBase = "https://huggingface.co",
+  hfToken,
+  fetchImpl = fetch,
+  timeoutMs = 8000,
+}) {
+  const url = `${hfApiBase}/api/models/${hfRepo}/paths-info/main`;
+  let res;
+  try {
+    res = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(hfToken ? { Authorization: `Bearer ${hfToken}` } : {}),
+      },
+      body: JSON.stringify({ paths: [file], expand: true }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    // Covers network errors AND AbortSignal.timeout() firing — matches
+    // routes/models.js's existing /hf-search collapse-to-one-code pattern.
+    throw new HfMetadataError(`Hugging Face metadata request failed: ${err.message || err}`);
+  }
+  if (!res.ok) {
+    throw new HfMetadataError(`Hugging Face metadata request failed (${res.status})`, res.status);
+  }
+  let body;
+  try {
+    body = await res.json();
+  } catch (err) {
+    throw new HfMetadataError(`Hugging Face metadata response was not valid JSON: ${err.message}`);
+  }
+  const entry = Array.isArray(body) ? body.find((e) => e && e.path === file) : null;
+  if (!entry) {
+    throw new HfFileNotFoundError(hfRepo, file);
+  }
+  const sha256 = entry.lfs && typeof entry.lfs.oid === "string" ? entry.lfs.oid : null;
+  const sizeBytes = typeof entry.size === "number"
+    ? entry.size
+    : (entry.lfs && typeof entry.lfs.size === "number" ? entry.lfs.size : null);
+  return { sha256, sizeBytes };
+}
+
+/**
+ * Download one arbitrary GGUF file out of a Hugging Face repo the operator
+ * picked from the Browse-Hugging-Face search tab — not a curated catalog
+ * entry. Verifies the file's sha256 (fetched via `fetchHfPathInfo`, BEFORE
+ * any download traffic) and refuses outright if Hugging Face reports none
+ * (`NoVerifiableChecksumError` — see module doc above). Reuses the exact
+ * same journaled, resumable, incrementally-hashed engine curated downloads
+ * use (`downloadModel`) by building a one-model, one-quant SYNTHETIC
+ * catalog around the verified file — every safety property `downloadModel`/
+ * `fetchModelBlob` already have (host allowlist, https-only, symlink
+ * refusal, incremental sha256, resumable journal, disk-full/timeout
+ * handling) applies unchanged; nothing here re-implements any of it.
+ *
+ * `hfToken`, if given, is forwarded as `Authorization: Bearer <token>` to
+ * BOTH the metadata call and the actual file download (`extraHeaders`,
+ * threaded through `downloadModel`/`fetchModelBlob` — Task 13 fix round 1)
+ * — required for a gated repo's file to download at all.
+ *
+ * @returns {Promise<{path: string, sha256: string, modelId: string,
+ *   sizeMb: number|null, catalog: object}>} `catalog` is the synthetic
+ *   catalog this call built — the caller (routes/models.js) passes it
+ *   straight through to `registerModel`, which needs a catalog to resolve
+ *   the same entry back out of.
+ */
+export async function downloadHfFile({
+  hfRepo,
+  file,
+  dir,
+  onProgress,
+  hfToken,
+  hfApiBase,
+  fetchHfPathInfoFn = fetchHfPathInfo,
+  downloadModelFn = downloadModel,
+  lookup,
+  baseUrl,
+  maxRedirects,
+  createWriteStream,
+  journalIntervalMs,
+  insecureHttpHosts,
+  timeoutMs,
+}) {
+  if (!isValidHfRepoId(hfRepo)) {
+    throw new UnsafeDestinationError(`Invalid Hugging Face repo id: ${JSON.stringify(hfRepo)}`);
+  }
+  if (!isValidHfFilename(file)) {
+    throw new UnsafeDestinationError(`Invalid Hugging Face file name: ${JSON.stringify(file)}`);
+  }
+
+  const { sha256, sizeBytes } = await fetchHfPathInfoFn({ hfRepo, file, hfApiBase, hfToken });
+  if (!sha256) {
+    throw new NoVerifiableChecksumError(file);
+  }
+
+  const modelId = deriveModelIdFromFilename(file);
+  // Decimal MB (bytes / 1e6), matching the curated catalog's own size_mb
+  // convention — independently confirmed live against qwen3-4b's pinned
+  // catalog entry (2497280256 bytes -> 2497.28, exactly the catalog's
+  // size_mb). Used both as this synthetic quant's `size_mb` (fed into
+  // `fitBadge` by the route) and, via `registerModel`, as the registry
+  // entry's `sizeMb` that scales the native readiness timeout.
+  const sizeMb = typeof sizeBytes === "number" ? sizeBytes / 1_000_000 : null;
+
+  const catalog = {
+    models: [{
+      id: modelId,
+      family: hfRepo.split("/")[1] || hfRepo,
+      hf_repo: hfRepo,
+      task: "chat",
+      context_len: null,
+      default_quant: "hf",
+      quants: [{ file, quant: "hf", sha256, size_mb: sizeMb, min_ram_mb: sizeMb, min_vram_mb: 0 }],
+    }],
+  };
+
+  const extraHeaders = hfToken ? { Authorization: `Bearer ${hfToken}` } : undefined;
+
+  const result = await downloadModelFn({
+    modelId,
+    quant: "hf",
+    dir,
+    catalog,
+    onProgress,
+    lookup,
+    baseUrl,
+    maxRedirects,
+    createWriteStream,
+    journalIntervalMs,
+    insecureHttpHosts,
+    timeoutMs,
+    extraHeaders,
+  });
+
+  return { ...result, modelId, sizeMb, catalog };
 }
 
 /**
@@ -841,7 +1125,18 @@ export function pickChatMutexGroup(existingRows) {
  * catalog `size_mb`, MB, may be a float) is read back by
  * `gpu-orchestrator.js`'s native acquire path to scale the readiness
  * timeout to the model's actual size (Item G, Task 10) — it is NOT used by
- * `unregisterModel` or anything else in this file.
+ * `unregisterModel` or anything else in this file. Two more fields ride the
+ * same object but are NOT written here: `wasLive`/`lastStoppedAt`
+ * (Task 13 fix round 1, finding c) are set by `gpu-orchestrator.js` the
+ * first time the model actually becomes resident, not at registration time
+ * — a freshly-registered, never-started model correctly has neither.
+ *
+ * `registryExtra` (Task 13 fix round 1, finding 1), if given, is
+ * shallow-merged into the registry entry AFTER the fields above — the only
+ * caller today is `routes/models.js`'s `POST /hf-download` handler, which
+ * passes `{ source: "hf-browser" }` so the panel/registry can tell a
+ * Browse-Hugging-Face registration apart from a curated one. Defaults to
+ * `{}` (no-op) so every existing call site is unaffected.
  *
  * Injectable seams (`allocatePortFn`/`listProvidersAllFn`/`upsertProviderFn`/
  * `invalidateCacheFn`) default to the real implementations; tests use them
@@ -879,6 +1174,7 @@ export async function registerModel({
   listProvidersAllFn = listProvidersAll,
   upsertProviderFn = upsertProvider,
   invalidateCacheFn = invalidateProvidersCache,
+  registryExtra = {},
 }) {
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
 
@@ -905,6 +1201,7 @@ export async function registerModel({
     catalogId: model.id,
     registeredAt: new Date().toISOString(),
     sizeMb: Number.isFinite(quantEntry.size_mb) ? quantEntry.size_mb : null,
+    ...registryExtra,
   };
   saveState(dir, state);
 

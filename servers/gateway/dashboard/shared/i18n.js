@@ -23,6 +23,7 @@ export const translations = {
   "nav.blog": { en: "Blog", es: "Blog" },
   "nav.files": { en: "Files", es: "Archivos" },
   "nav.extensions": { en: "Extensions", es: "Extensiones" },
+  "nav.model-catalog": { en: "Model Catalog", es: "Catálogo de modelos" },
   "nav.skills": { en: "Skills", es: "Habilidades" },
   "nav.settings": { en: "Settings", es: "Ajustes" },
   "nav.contacts": { en: "Contacts", es: "Contactos" },
@@ -654,6 +655,182 @@ export const translations = {
   "extensions.configureFailed": { en: "Save failed", es: "Error al guardar" },
   "extensions.collectionBusy": { en: "Another install is already running — wait for it to finish.", es: "Ya hay otra instalación en curso — espera a que termine." },
   "extensions.noResults": { en: "No add-ons match your search.", es: "Ningún complemento coincide con tu búsqueda." },
+
+  // ─── Model Catalog Panel (Item G) ───
+  "models.pageTitle": { en: "Model Catalog", es: "Catálogo de modelos" },
+  "models.pageIntro": {
+    en: "Browse a curated catalog of local models, or search Hugging Face directly for advanced options. Downloaded models register automatically and are ready to use in chat.",
+    es: "Explora un catálogo seleccionado de modelos locales, o busca directamente en Hugging Face para opciones avanzadas. Los modelos descargados se registran automáticamente y quedan listos para usar en el chat.",
+  },
+  "models.tabCurated": { en: "Curated", es: "Seleccionados" },
+  "models.tabBrowseHf": { en: "Browse Hugging Face", es: "Explorar Hugging Face" },
+  "models.emptyCatalog": { en: "The model catalog could not be loaded.", es: "No se pudo cargar el catálogo de modelos." },
+
+  // Runtime status strip
+  "models.runtimeHeading": { en: "Runtime status", es: "Estado del runtime" },
+  "models.runtimeBinary": { en: "Runtime: {name} {release}", es: "Runtime: {name} {release}" },
+  "models.runtimeNoBinary": { en: "No runtime detected yet.", es: "Aún no se ha detectado el runtime." },
+  "models.runtimeHardware": { en: "Detected: {accel} · RAM available: {ram} · Disk free: {disk}", es: "Detectado: {accel} · RAM disponible: {ram} · Disco libre: {disk}" },
+  "models.runtimeGpu": { en: "GPU: {gpu} ({vram})", es: "GPU: {gpu} ({vram})" },
+  "models.runtimeNoGpu": { en: "No GPU detected — running on CPU only.", es: "No se detectó GPU — se ejecuta solo en CPU." },
+  "models.runtimeWsl2": {
+    en: "Running under WSL2 — CPU only in this version; GPU acceleration is not yet available inside WSL2.",
+    es: "Ejecutándose en WSL2 — solo CPU en esta versión; la aceleración por GPU aún no está disponible dentro de WSL2.",
+  },
+  "models.runtimeUnknownFields": { en: "Couldn't detect: {fields}", es: "No se pudo detectar: {fields}" },
+  "models.runtimeReprobe": { en: "Re-detect hardware", es: "Volver a detectar hardware" },
+  "models.runtimeReprobing": { en: "Detecting...", es: "Detectando..." },
+  "models.runtimeActiveDownloads": { en: "{n} download(s) in progress", es: "{n} descarga(s) en curso" },
+  "models.runtimeEstimatedRam": { en: "Estimated resources in use by running models: {ram}", es: "Recursos estimados en uso por los modelos en ejecución: {ram}" },
+  "models.runtimeNoModelsRunning": { en: "No models currently running.", es: "No hay modelos en ejecución actualmente." },
+  "models.runtimeStateRunning": { en: "Running", es: "En ejecución" },
+  "models.runtimeStateStopped": { en: "Not running", es: "No se está ejecutando" },
+  "models.runtimeStateUnhealthy": { en: "Crashed", es: "Fallido" },
+  "models.runtimeStateReloading": { en: "Reloading after update", es: "Recargando tras la actualización" },
+  "models.runtimeStateReloadingHint": {
+    en: "This model was running before the gateway restarted — click Start to bring it back.",
+    es: "Este modelo estaba en ejecución antes de que se reiniciara la puerta de enlace — haz clic en Iniciar para volver a activarlo.",
+  },
+  "models.runtimeColModel": { en: "Model", es: "Modelo" },
+  "models.runtimeColState": { en: "State", es: "Estado" },
+  "models.runtimeColPort": { en: "Port", es: "Puerto" },
+  "models.runtimeColPid": { en: "PID", es: "PID" },
+  "models.runtimeColRestarts": { en: "Restarts", es: "Reinicios" },
+  "models.runtimeColLastError": { en: "Last error", es: "Último error" },
+  "models.runtimeColActions": { en: "Actions", es: "Acciones" },
+
+  // Curated tab
+  "models.groupSmall": { en: "Small (CPU-capable)", es: "Pequeños (compatibles con CPU)" },
+  "models.groupMid": { en: "Mid-size", es: "Tamaño medio" },
+  "models.groupLarge": { en: "Large", es: "Grandes" },
+  "models.groupOther": { en: "Other", es: "Otros" },
+  "models.recommendedBadge": { en: "Recommended first model", es: "Modelo recomendado para empezar" },
+  "models.gatedBadge": { en: "Gated", es: "Acceso restringido" },
+  "models.statusRunning": { en: "Running", es: "En ejecución" },
+  "models.cardLab": { en: "Lab: {lab}", es: "Laboratorio: {lab}" },
+  "models.cardLicense": { en: "License: {license}", es: "Licencia: {license}" },
+  "models.cardContext": { en: "{n} token context", es: "Contexto de {n} tokens" },
+  "models.quantLabel": { en: "Variant", es: "Variante" },
+
+  // Fit badges
+  "models.fitFits": { en: "Fits", es: "Cabe" },
+  "models.fitTight": { en: "Tight", es: "Ajustado" },
+  "models.fitWontFit": { en: "Won't fit", es: "No cabe" },
+  "models.fitUnknown": { en: "Unknown", es: "Desconocido" },
+  "models.fitFitsHint": { en: "Comfortably fits your detected hardware.", es: "Se ajusta cómodamente a tu hardware detectado." },
+  "models.fitTightHint": { en: "Close to your limits — may run slowly or use swap.", es: "Cerca de tus límites — puede ejecutarse lento o usar memoria de intercambio." },
+  "models.fitWontFitHint": { en: "Needs more RAM/VRAM than this machine has available.", es: "Necesita más RAM/VRAM de la que esta máquina tiene disponible." },
+  "models.fitUnknownHint": { en: "Couldn't verify fit — this may not run.", es: "No se pudo verificar si es compatible — puede que no funcione." },
+
+  // Actions
+  "models.actionDownload": { en: "Download", es: "Descargar" },
+  "models.actionDownloading": { en: "Downloading...", es: "Descargando..." },
+  "models.actionRegistering": { en: "Registering...", es: "Registrando..." },
+  "models.actionStart": { en: "Start", es: "Iniciar" },
+  "models.actionStarting": { en: "Starting...", es: "Iniciando..." },
+  "models.actionStop": { en: "Stop", es: "Detener" },
+  "models.actionStopping": { en: "Stopping...", es: "Deteniendo..." },
+  "models.actionRemove": { en: "Remove", es: "Eliminar" },
+  "models.actionRetry": { en: "Retry", es: "Reintentar" },
+  "models.actionTryInChat": { en: "Try it in chat", es: "Probarlo en el chat" },
+  "models.downloadSuccess": { en: "Registered — try it in chat.", es: "Registrado — pruébalo en el chat." },
+  "models.downloadErrorGated": {
+    en: "Download failed. This model is gated — accept the license on huggingface.co, then retry.",
+    es: "Error al descargar. Este modelo tiene acceso restringido — acepta la licencia en huggingface.co y vuelve a intentarlo.",
+  },
+
+  // Gated three-state copy
+  "models.gatedNoToken": {
+    en: "This model requires a Hugging Face login. Add a token in the Browse Hugging Face tab below, then retry.",
+    es: "Este modelo requiere iniciar sesión en Hugging Face. Agrega un token en la pestaña Explorar Hugging Face y vuelve a intentarlo.",
+  },
+  "models.gatedTokenConfigured": {
+    en: "A Hugging Face token is configured. If the download fails, accept this model's license on huggingface.co, then retry.",
+    es: "Hay un token de Hugging Face configurado. Si la descarga falla, acepta la licencia de este modelo en huggingface.co y vuelve a intentarlo.",
+  },
+
+  // Delete confirmation
+  "models.deleteConfirmTitle": { en: "Remove {model}?", es: "¿Eliminar {model}?" },
+  "models.deleteConfirmIntro": {
+    en: "This will stop the model, delete the downloaded file, and remove it as a provider.",
+    es: "Esto detendrá el modelo, eliminará el archivo descargado y lo quitará como proveedor.",
+  },
+  "models.deleteBindingsIntro": { en: "The following will be affected:", es: "Lo siguiente se verá afectado:" },
+  "models.deleteNoBindings": { en: "Nothing else references this model.", es: "Nada más hace referencia a este modelo." },
+  "models.deleteConfirmButton": { en: "Remove anyway", es: "Eliminar de todos modos" },
+  "models.deleteCancelButton": { en: "Cancel", es: "Cancelar" },
+  "models.deleteSuccess": { en: "Removed.", es: "Eliminado." },
+
+  // Browse Hugging Face tab
+  "models.hfIntro": {
+    en: "Search Hugging Face directly for GGUF models. These are not curated by Crow — you are trusting the uploader's file; model files are parsed by the local runtime, and a malicious file targets exactly that parser.",
+    es: "Busca directamente en Hugging Face modelos GGUF. Crow no selecciona estos modelos — confías en el archivo de quien lo subió; los archivos de modelo son analizados por el runtime local, y un archivo malicioso apunta exactamente a ese analizador.",
+  },
+  "models.hfSearchLabel": { en: "Search Hugging Face", es: "Buscar en Hugging Face" },
+  "models.hfSearchPlaceholder": { en: "e.g. mistral, llama, gguf...", es: "por ejemplo: mistral, llama, gguf..." },
+  "models.hfSearchButton": { en: "Search", es: "Buscar" },
+  "models.hfSearching": { en: "Searching...", es: "Buscando..." },
+  "models.hfSearchEmpty": { en: "No GGUF repositories matched your search.", es: "Ningún repositorio GGUF coincide con tu búsqueda." },
+  "models.hfResultDownloads": { en: "{n} downloads", es: "{n} descargas" },
+  "models.hfResultLikes": { en: "{n} likes", es: "{n} me gusta" },
+  "models.hfResultLicenseUnknown": { en: "License unknown", es: "Licencia desconocida" },
+  "models.hfResultFiles": { en: "{n} GGUF file(s)", es: "{n} archivo(s) GGUF" },
+  "models.hfViewOnHf": { en: "View on Hugging Face", es: "Ver en Hugging Face" },
+
+  // Browse Hugging Face downloads (Task 13 fix round 1, finding 1)
+  "models.hfDownloadConfirmTitle": { en: "Download {file}?", es: "¿Descargar {file}?" },
+  "models.hfDownloadConfirmWarning": {
+    en: "This file is not curated by Crow. You are trusting the uploader's file — model files are parsed by the local runtime, and a malicious file targets exactly that parser.",
+    es: "Este archivo no está seleccionado por Crow. Confías en el archivo de quien lo subió — los archivos de modelo son analizados por el runtime local, y un archivo malicioso apunta exactamente a ese analizador.",
+  },
+  "models.hfDownloadConfirmButton": { en: "Download anyway", es: "Descargar de todos modos" },
+  "models.actionForceDownload": { en: "Download anyway (may not fit)", es: "Descargar de todos modos (puede no caber)" },
+  "models.errWontFit": { en: "This file is unlikely to fit on this hardware.", es: "Es poco probable que este archivo quepa en este hardware." },
+  "models.errInvalidHf": { en: "That doesn't look like a valid Hugging Face repo or file.", es: "Eso no parece ser un repositorio o archivo válido de Hugging Face." },
+  "models.errNoVerifiableChecksum": {
+    en: "This file has no verifiable checksum — refusing to download an unverifiable file.",
+    es: "Este archivo no tiene una suma de verificación comprobable — nos negamos a descargar un archivo no verificable.",
+  },
+  "models.hfFitUnknownHint": {
+    en: "File size isn't available from search results — check the file size on Hugging Face before downloading.",
+    es: "El tamaño del archivo no está disponible en los resultados de búsqueda — verifica el tamaño en Hugging Face antes de descargar.",
+  },
+  "models.hfGatedNoToken": { en: "Gated — requires a Hugging Face login.", es: "Acceso restringido — requiere iniciar sesión en Hugging Face." },
+  "models.hfGatedWithToken": {
+    en: "Gated — your token may still need the license accepted on huggingface.co.",
+    es: "Acceso restringido — es posible que tu token aún necesite que se acepte la licencia en huggingface.co.",
+  },
+
+  // Hugging Face token
+  "models.hfTokenLabel": { en: "Hugging Face token (optional)", es: "Token de Hugging Face (opcional)" },
+  "models.hfTokenPlaceholder": { en: "hf_...", es: "hf_..." },
+  "models.hfTokenSave": { en: "Save token", es: "Guardar token" },
+  "models.hfTokenClear": { en: "Clear token", es: "Borrar token" },
+  "models.hfTokenConfigured": { en: "A token is configured.", es: "Hay un token configurado." },
+  "models.hfTokenNotConfigured": {
+    en: "No token configured — gated models will say so before you download.",
+    es: "No hay un token configurado — los modelos con acceso restringido lo indicarán antes de descargar.",
+  },
+  "models.hfTokenSaved": { en: "Token saved.", es: "Token guardado." },
+  "models.hfTokenCleared": { en: "Token cleared.", es: "Token borrado." },
+  "models.hfTokenSaveFailed": { en: "Could not save token: {error}", es: "No se pudo guardar el token: {error}" },
+  "models.hfTokenHint": {
+    en: "Stored the same way cloud provider API keys are — never displayed again after saving.",
+    es: "Se guarda de la misma forma que las claves API de los proveedores en la nube — nunca se vuelve a mostrar después de guardarlo.",
+  },
+
+  // Error-code mapping (Task 12 route error codes -> user-facing copy)
+  "models.errNetworkDenied": { en: "Not reachable from this network.", es: "No es accesible desde esta red." },
+  "models.errUnauthenticated": { en: "Your session expired — reload the page and log in again.", es: "Tu sesión expiró — recarga la página e inicia sesión de nuevo." },
+  "models.errUnknownModel": { en: "Unknown model.", es: "Modelo desconocido." },
+  "models.errUnknownQuant": { en: "Unknown variant for this model.", es: "Variante desconocida para este modelo." },
+  "models.errNotInstalled": { en: "This model isn't installed.", es: "Este modelo no está instalado." },
+  "models.errStartFailed": { en: "The model failed to start in time.", es: "El modelo no pudo iniciarse a tiempo." },
+  "models.errNotNative": { en: "This model can't be started this way.", es: "Este modelo no se puede iniciar de esta forma." },
+  "models.errMissingQuery": { en: "Enter a search term.", es: "Ingresa un término de búsqueda." },
+  "models.errHfUpstream": { en: "Hugging Face is unreachable right now.", es: "Hugging Face no está disponible en este momento." },
+  "models.errBadToken": { en: "That token doesn't look valid.", es: "Ese token no parece válido." },
+  "models.errInternal": { en: "Something went wrong.", es: "Algo salió mal." },
 
   // ─── Skills Panel ───
   "skills.pageTitle": { en: "Skills", es: "Habilidades" },

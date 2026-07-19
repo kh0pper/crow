@@ -55,6 +55,15 @@ import {
   UnsafeDestinationError,
   DownloadProtocolError,
   DownloadTimeoutError,
+  HttpStatusError,
+  HfMetadataError,
+  HfFileNotFoundError,
+  NoVerifiableChecksumError,
+  isValidHfRepoId,
+  isValidHfFilename,
+  deriveModelIdFromFilename,
+  fetchHfPathInfo,
+  downloadHfFile,
   fetchModelBlob,
 } from "../servers/gateway/models/manager.js";
 import { loadState } from "../servers/gateway/models/state.js";
@@ -1003,4 +1012,356 @@ test("enqueueDownload is idempotent per modelId: a second enqueue while one is i
   } finally {
     await stopServer(srv);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Task 13 fix round 1, finding d: typed HTTP status error
+// ---------------------------------------------------------------------------
+
+test("a non-redirect, non-200/206 HTTP status throws a typed HttpStatusError with statusCode + code", async () => {
+  const { srv, port } = await startServer((req, res) => {
+    res.writeHead(403, { "content-type": "text/plain" });
+    res.end("Forbidden");
+  });
+  try {
+    const dir = scratchDir("http-status");
+    try {
+      await assert.rejects(
+        () => downloadModel({
+          modelId: "test-model", dir, catalog: makeCatalog(),
+          lookup: lookupToLocalhost, baseUrl: `http://huggingface.co:${port}`, insecureHttpHosts: INSECURE_HF,
+        }),
+        (err) => {
+          assert.ok(err instanceof HttpStatusError, `expected HttpStatusError, got ${err.constructor.name}`);
+          assert.equal(err.statusCode, 403);
+          assert.equal(err.code, "HTTP_403");
+          return true;
+        },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await stopServer(srv);
+  }
+});
+
+test("HttpStatusError.code varies with the actual status (404 -> HTTP_404)", async () => {
+  const { srv, port } = await startServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  });
+  try {
+    await assert.rejects(
+      () => fetchModelBlob({
+        url: `http://huggingface.co:${port}/repo/resolve/main/f.gguf`,
+        dest: join(scratchDir("http-404"), "f.gguf"),
+        lookup: lookupToLocalhost,
+        insecureHttpHosts: INSECURE_HF,
+      }),
+      (err) => {
+        assert.equal(err.code, "HTTP_404");
+        assert.equal(err.statusCode, 404);
+        return true;
+      },
+    );
+  } finally {
+    await stopServer(srv);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task 13 fix round 1, finding 1: Browse Hugging Face downloads
+// ---------------------------------------------------------------------------
+
+/** Shape validators — pure, no I/O. */
+test("isValidHfRepoId: exactly owner/name, conservative charset, no traversal", () => {
+  assert.equal(isValidHfRepoId("Qwen/Qwen3-4B-GGUF"), true);
+  assert.equal(isValidHfRepoId("org-name/repo.name_2"), true);
+  assert.equal(isValidHfRepoId("noSlash"), false);
+  assert.equal(isValidHfRepoId("a/b/c"), false, "extra path segment rejected");
+  assert.equal(isValidHfRepoId("../etc/passwd"), false);
+  assert.equal(isValidHfRepoId("/leading-slash"), false);
+  assert.equal(isValidHfRepoId("trailing-slash/"), false);
+  assert.equal(isValidHfRepoId(""), false);
+  assert.equal(isValidHfRepoId(null), false);
+  assert.equal(isValidHfRepoId(123), false);
+});
+
+test("isValidHfFilename: single sanitized filename, no separators, no traversal", () => {
+  assert.equal(isValidHfFilename("model-Q4_K_M.gguf"), true);
+  assert.equal(isValidHfFilename("a.b_c-9.gguf"), true);
+  assert.equal(isValidHfFilename("dir/model.gguf"), false);
+  assert.equal(isValidHfFilename("..\\model.gguf"), false);
+  assert.equal(isValidHfFilename(".."), false);
+  assert.equal(isValidHfFilename("."), false);
+  assert.equal(isValidHfFilename(""), false);
+  assert.equal(isValidHfFilename(null), false);
+});
+
+test("deriveModelIdFromFilename: strips .gguf, lowercases, collapses unsafe chars, trims", () => {
+  assert.equal(deriveModelIdFromFilename("Foo-Bar_Q4_K_M.gguf"), "foo-bar_q4_k_m");
+  assert.equal(deriveModelIdFromFilename("Weird!!Name??.GGUF"), "weird-name");
+  assert.throws(() => deriveModelIdFromFilename("....gguf"), UnsafeDestinationError);
+  assert.throws(() => deriveModelIdFromFilename(""), UnsafeDestinationError);
+});
+
+/** Local stand-in for Hugging Face's `paths-info` API — routes on method +
+ * URL, independent per-call configurable via `mode`. `fetchHfPathInfo` uses
+ * plain `fetch()` (no DNS-override tricks needed), so this fixture is
+ * addressed directly as `hfApiBase` at its real 127.0.0.1 port. */
+function startHfMetaFixture(sha256, size) {
+  let mode = "ok"; // ok | no-lfs | not-found | error-500
+  let lastHeaders = null;
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      lastHeaders = req.headers;
+      if (mode === "error-500") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "internal" }));
+        return;
+      }
+      let body = {};
+      try { body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); } catch { /* ignore */ }
+      const paths = Array.isArray(body.paths) ? body.paths : [];
+      if (mode === "not-found") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("[]"); // confirmed live behavior: HF answers 200 [] for a path that doesn't exist
+        return;
+      }
+      const results = paths.map((p) => {
+        const entry = { path: p, size, oid: "deadbeef0000gitblobsha1notasha256", type: "file" };
+        if (mode !== "no-lfs") entry.lfs = { oid: sha256, size };
+        return entry;
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(results));
+    });
+  });
+  return new Promise((resolvePromise, reject) => {
+    server.listen(0, "127.0.0.1", () => resolvePromise({
+      base: `http://127.0.0.1:${server.address().port}`,
+      setMode: (m) => { mode = m; },
+      lastHeaders: () => lastHeaders,
+      close: () => new Promise((r) => server.close(r)),
+    }));
+    server.on("error", reject);
+  });
+}
+
+test("fetchHfPathInfo: LFS file -> real sha256 + size", async () => {
+  const fx = await startHfMetaFixture(BLOB_SHA256, BLOB.length);
+  try {
+    const info = await fetchHfPathInfo({ hfRepo: "org/repo", file: "model.gguf", hfApiBase: fx.base });
+    assert.equal(info.sha256, BLOB_SHA256);
+    assert.equal(info.sizeBytes, BLOB.length);
+  } finally {
+    await fx.close();
+  }
+});
+
+test("fetchHfPathInfo: non-LFS file -> sha256 null (never a git blob hash mistaken for content sha256)", async () => {
+  const fx = await startHfMetaFixture(BLOB_SHA256, BLOB.length);
+  fx.setMode("no-lfs");
+  try {
+    const info = await fetchHfPathInfo({ hfRepo: "org/repo", file: "README.md", hfApiBase: fx.base });
+    assert.equal(info.sha256, null);
+  } finally {
+    await fx.close();
+  }
+});
+
+test("fetchHfPathInfo: nonexistent path in a valid repo (200 []) throws HfFileNotFoundError, not a silent empty result", async () => {
+  const fx = await startHfMetaFixture(BLOB_SHA256, BLOB.length);
+  fx.setMode("not-found");
+  try {
+    await assert.rejects(
+      () => fetchHfPathInfo({ hfRepo: "org/repo", file: "nope.gguf", hfApiBase: fx.base }),
+      HfFileNotFoundError,
+    );
+  } finally {
+    await fx.close();
+  }
+});
+
+test("fetchHfPathInfo: upstream 500 throws HfMetadataError with statusCode", async () => {
+  const fx = await startHfMetaFixture(BLOB_SHA256, BLOB.length);
+  fx.setMode("error-500");
+  try {
+    await assert.rejects(
+      () => fetchHfPathInfo({ hfRepo: "org/repo", file: "model.gguf", hfApiBase: fx.base }),
+      (err) => {
+        assert.ok(err instanceof HfMetadataError);
+        assert.equal(err.statusCode, 500);
+        return true;
+      },
+    );
+  } finally {
+    await fx.close();
+  }
+});
+
+test("fetchHfPathInfo: forwards the hfToken as a Bearer Authorization header", async () => {
+  const fx = await startHfMetaFixture(BLOB_SHA256, BLOB.length);
+  try {
+    await fetchHfPathInfo({ hfRepo: "org/repo", file: "model.gguf", hfApiBase: fx.base, hfToken: "hf_secrettoken123" });
+    assert.equal(fx.lastHeaders().authorization, "Bearer hf_secrettoken123");
+  } finally {
+    await fx.close();
+  }
+});
+
+/** Combined fixture serving BOTH the paths-info API (POST, addressed via
+ * plain 127.0.0.1 as `hfApiBase`) AND the actual resolve/download endpoint
+ * (GET, addressed via the real "huggingface.co" hostname + `lookup`
+ * override + `insecureHttpHosts`, exactly like every other download-engine
+ * test in this file) — `downloadHfFile` talks to both. */
+function startHfCombinedFixture(blob, sha256) {
+  let downloadHeaders = null;
+  let servedBlob = blob;
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      if (req.method === "POST" && /\/paths-info\//.test(req.url)) {
+        let body = {};
+        try { body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); } catch { /* ignore */ }
+        const paths = Array.isArray(body.paths) ? body.paths : [];
+        const results = paths.map((p) => ({ path: p, size: blob.length, oid: "gitblobsha1", lfs: { oid: sha256, size: blob.length } }));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(results));
+        return;
+      }
+      // GET /{repo}/resolve/main/{file}
+      downloadHeaders = req.headers;
+      res.writeHead(200, { "Content-Length": String(servedBlob.length) });
+      res.end(servedBlob);
+    });
+  });
+  return new Promise((resolvePromise, reject) => {
+    server.listen(0, "127.0.0.1", () => resolvePromise({
+      port: server.address().port,
+      setServedBlob: (b) => { servedBlob = b; },
+      downloadHeaders: () => downloadHeaders,
+      close: () => new Promise((r) => server.close(r)),
+    }));
+    server.on("error", reject);
+  });
+}
+
+test("downloadHfFile: verifies the fetched sha256, streams to disk, registers via the SAME synthetic catalog it returns", async () => {
+  const fx = await startHfCombinedFixture(BLOB, BLOB_SHA256);
+  try {
+    const dir = scratchDir("hf-download-ok");
+    try {
+      const result = await downloadHfFile({
+        hfRepo: "org/repo",
+        file: "org-model-Q4_K_M.gguf",
+        dir,
+        hfApiBase: `http://127.0.0.1:${fx.port}`,
+        lookup: lookupToLocalhost,
+        baseUrl: `http://huggingface.co:${fx.port}`,
+        insecureHttpHosts: INSECURE_HF,
+      });
+      assert.equal(result.sha256, BLOB_SHA256);
+      assert.equal(result.modelId, "org-model-q4_k_m");
+      assert.ok(result.sizeMb > 0);
+      assert.equal(result.catalog.models[0].id, "org-model-q4_k_m");
+      assert.equal(result.catalog.models[0].quants[0].sha256, BLOB_SHA256);
+      assert.ok(existsSync(result.path));
+      assert.equal(readFileSync(result.path).length, BLOB.length);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await fx.close();
+  }
+});
+
+test("downloadHfFile: a file with no LFS oid is refused BEFORE any download traffic (NoVerifiableChecksumError)", async () => {
+  const fx = await startHfMetaFixture(BLOB_SHA256, BLOB.length);
+  fx.setMode("no-lfs");
+  try {
+    const dir = scratchDir("hf-download-nolfs");
+    try {
+      await assert.rejects(
+        () => downloadHfFile({
+          hfRepo: "org/repo", file: "README.md", dir,
+          hfApiBase: fx.base,
+        }),
+        NoVerifiableChecksumError,
+      );
+      // Never touched the blobs dir at all — refused before any download attempt.
+      assert.equal(existsSync(join(dir, "models", "blobs")), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await fx.close();
+  }
+});
+
+test("downloadHfFile: a mismatched sha256 (blob doesn't match what paths-info reported) throws ChecksumError and deletes the bad file", async () => {
+  const wrongBlob = makeBlob(400_000); // different content -> different real sha256 than BLOB_SHA256
+  const fx = await startHfCombinedFixture(wrongBlob, BLOB_SHA256); // paths-info LIES: claims BLOB_SHA256 but serves wrongBlob
+  try {
+    const dir = scratchDir("hf-download-mismatch");
+    try {
+      await assert.rejects(
+        () => downloadHfFile({
+          hfRepo: "org/repo",
+          file: "org-model-Q4_K_M.gguf",
+          dir,
+          hfApiBase: `http://127.0.0.1:${fx.port}`,
+          lookup: lookupToLocalhost,
+          baseUrl: `http://huggingface.co:${fx.port}`,
+          insecureHttpHosts: INSECURE_HF,
+        }),
+        ChecksumError,
+      );
+      const dest = join(dir, "models", "blobs", "org-model-Q4_K_M.gguf");
+      assert.equal(existsSync(dest), false, "the mismatched file is deleted, never left on disk to be mistaken for good");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await fx.close();
+  }
+});
+
+test("downloadHfFile: forwards hfToken as a Bearer Authorization header to the ACTUAL download request too (needed for gated repos)", async () => {
+  const fx = await startHfCombinedFixture(BLOB, BLOB_SHA256);
+  try {
+    const dir = scratchDir("hf-download-token");
+    try {
+      await downloadHfFile({
+        hfRepo: "org/repo",
+        file: "org-model-Q4_K_M.gguf",
+        dir,
+        hfToken: "hf_secrettoken456",
+        hfApiBase: `http://127.0.0.1:${fx.port}`,
+        lookup: lookupToLocalhost,
+        baseUrl: `http://huggingface.co:${fx.port}`,
+        insecureHttpHosts: INSECURE_HF,
+      });
+      assert.equal(fx.downloadHeaders().authorization, "Bearer hf_secrettoken456");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await fx.close();
+  }
+});
+
+test("downloadHfFile: rejects an invalid repo id / filename shape before any network call", async () => {
+  await assert.rejects(
+    () => downloadHfFile({ hfRepo: "../etc/passwd", file: "x.gguf", dir: scratchDir("hf-bad-repo") }),
+    UnsafeDestinationError,
+  );
+  await assert.rejects(
+    () => downloadHfFile({ hfRepo: "org/repo", file: "../../x.gguf", dir: scratchDir("hf-bad-file") }),
+    UnsafeDestinationError,
+  );
 });

@@ -76,6 +76,11 @@ const IDENTICAL_OK = new Set([
   "contacts.manual",
   "contacts.groupColor", // "Color" is Spanish too
   "connect.localStdioHeading", // "Local (stdio)"
+  // Model Catalog panel (Item G Task 13, reviewed 2026-07-18)
+  "models.runtimeBinary", // "Runtime: {name} {release}" — "runtime" is used untranslated in Spanish tech contexts
+  "models.runtimeGpu", // "GPU: {gpu} ({vram})" — GPU is an acronym, unchanged in Spanish
+  "models.runtimeColPid", // "PID" — abbreviation, unchanged in Spanish
+  "models.hfTokenPlaceholder", // "hf_..." — literal input placeholder prefix, language-neutral
 ]);
 
 const keys = Object.keys(translations);
