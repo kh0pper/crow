@@ -27,6 +27,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { shouldSyncRowForTest } from "../servers/sharing/instance-sync.js";
+import { createMemoryServer } from "../servers/memory/server.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   STARTER_SOURCE,
   STARTER_BOT_ID,
@@ -184,6 +187,87 @@ test("shouldSyncRow excludes memories rows with source='starter' (both direction
     shouldSyncRowForTest("memories", { id: 3, content: "z", source: null }),
     true
   );
+});
+
+test("crow_update_memory and crow_delete_memory emit payloads carrying source='starter' for a starter row (C-A final review fix)", async () => {
+  // Regression for the finding: the INSERT emit always carried `source`, but
+  // the UPDATE emit built { id, content, category, tags, importance, context }
+  // (no source) and the DELETE emit sent { id } only. shouldSyncRow('memories', row)
+  // gates on row.source === 'starter' — a payload missing that field can't be
+  // excluded, so editing/deleting a starter row would have broadcast a bare-id
+  // mutation that could clobber/delete an unrelated row at the same id on a
+  // paired peer. Drive the REAL MCP tool handlers (not a hand-built payload) so
+  // this fails if the fix ever regresses.
+  const testDir = mkdtempSync(join(tmpdir(), "crow-startersync-test-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: testDir },
+    stdio: "pipe",
+    cwd: REPO_ROOT,
+  });
+  const dbPath = join(testDir, "crow.db");
+
+  const emitted = [];
+  const spySync = {
+    emitChange: async (table, op, row) => { emitted.push({ table, op, row }); return 1; },
+  };
+
+  const memServer = createMemoryServer(dbPath, { syncManager: spySync });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await memServer.connect(serverTransport);
+  const client = new Client({ name: "test-starter-sync", version: "0" });
+  await client.connect(clientTransport);
+
+  try {
+    // Seed a starter-sourced memory directly (mirrors seedStarterMemories'
+    // shape) so we control its id.
+    const seedDb = createDbClient(dbPath);
+    const insertResult = await seedDb.execute({
+      sql: "INSERT INTO memories (content, category, source, importance) VALUES (?,?,?,?)",
+      args: ["A starter fact about Crow.", "general", STARTER_SOURCE, 5],
+    });
+    const starterId = Number(insertResult.lastInsertRowid);
+    seedDb.close();
+
+    // --- UPDATE ---
+    await client.callTool({
+      name: "crow_update_memory",
+      arguments: { id: starterId, content: "An edited starter fact." },
+    });
+
+    const updateEmit = emitted.find((e) => e.table === "memories" && e.op === "update");
+    assert.ok(updateEmit, "crow_update_memory fired an emitChange('memories','update',...)");
+    assert.equal(updateEmit.row.source, STARTER_SOURCE, "update payload carries source='starter'");
+    assert.equal(
+      shouldSyncRowForTest("memories", updateEmit.row),
+      false,
+      "the actual update wire payload is excluded by shouldSyncRow"
+    );
+
+    // --- DELETE (preview then confirm, per crow_delete_memory's token flow) ---
+    const preview = await client.callTool({
+      name: "crow_delete_memory",
+      arguments: { id: starterId, confirm_token: "" },
+    });
+    const tokenMatch = /confirm_token:\s*"([^"]+)"/.exec(preview.content[0].text);
+    assert.ok(tokenMatch, "preview call returned a confirm_token");
+
+    await client.callTool({
+      name: "crow_delete_memory",
+      arguments: { id: starterId, confirm_token: tokenMatch[1] },
+    });
+
+    const deleteEmit = emitted.find((e) => e.table === "memories" && e.op === "delete");
+    assert.ok(deleteEmit, "crow_delete_memory fired an emitChange('memories','delete',...)");
+    assert.equal(deleteEmit.row.source, STARTER_SOURCE, "delete payload carries source='starter'");
+    assert.equal(
+      shouldSyncRowForTest("memories", deleteEmit.row),
+      false,
+      "the actual delete wire payload is excluded by shouldSyncRow"
+    );
+  } finally {
+    await client.close();
+    rmSync(testDir, { recursive: true, force: true });
+  }
 });
 
 // ── STARTER_BOT_ID ───────────────────────────────────────────────────────────
