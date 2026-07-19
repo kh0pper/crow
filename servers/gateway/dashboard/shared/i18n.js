@@ -686,6 +686,11 @@ export const translations = {
   "models.runtimeStateRunning": { en: "Running", es: "En ejecución" },
   "models.runtimeStateStopped": { en: "Not running", es: "No se está ejecutando" },
   "models.runtimeStateUnhealthy": { en: "Crashed", es: "Fallido" },
+  "models.runtimeStateReloading": { en: "Reloading after update", es: "Recargando tras la actualización" },
+  "models.runtimeStateReloadingHint": {
+    en: "This model was running before the gateway restarted — click Start to bring it back.",
+    es: "Este modelo estaba en ejecución antes de que se reiniciara la puerta de enlace — haz clic en Iniciar para volver a activarlo.",
+  },
   "models.runtimeColModel": { en: "Model", es: "Modelo" },
   "models.runtimeColState": { en: "State", es: "Estado" },
   "models.runtimeColPort": { en: "Port", es: "Puerto" },
@@ -771,6 +776,21 @@ export const translations = {
   "models.hfResultLicenseUnknown": { en: "License unknown", es: "Licencia desconocida" },
   "models.hfResultFiles": { en: "{n} GGUF file(s)", es: "{n} archivo(s) GGUF" },
   "models.hfViewOnHf": { en: "View on Hugging Face", es: "Ver en Hugging Face" },
+
+  // Browse Hugging Face downloads (Task 13 fix round 1, finding 1)
+  "models.hfDownloadConfirmTitle": { en: "Download {file}?", es: "¿Descargar {file}?" },
+  "models.hfDownloadConfirmWarning": {
+    en: "This file is not curated by Crow. You are trusting the uploader's file — model files are parsed by the local runtime, and a malicious file targets exactly that parser.",
+    es: "Este archivo no está seleccionado por Crow. Confías en el archivo de quien lo subió — los archivos de modelo son analizados por el runtime local, y un archivo malicioso apunta exactamente a ese analizador.",
+  },
+  "models.hfDownloadConfirmButton": { en: "Download anyway", es: "Descargar de todos modos" },
+  "models.actionForceDownload": { en: "Download anyway (may not fit)", es: "Descargar de todos modos (puede no caber)" },
+  "models.errWontFit": { en: "This file is unlikely to fit on this hardware.", es: "Es poco probable que este archivo quepa en este hardware." },
+  "models.errInvalidHf": { en: "That doesn't look like a valid Hugging Face repo or file.", es: "Eso no parece ser un repositorio o archivo válido de Hugging Face." },
+  "models.errNoVerifiableChecksum": {
+    en: "This file has no verifiable checksum — refusing to download an unverifiable file.",
+    es: "Este archivo no tiene una suma de verificación comprobable — nos negamos a descargar un archivo no verificable.",
+  },
   "models.hfFitUnknownHint": {
     en: "File size isn't available from search results — check the file size on Hugging Face before downloading.",
     es: "El tamaño del archivo no está disponible en los resultados de búsqueda — verifica el tamaño en Hugging Face antes de descargar.",

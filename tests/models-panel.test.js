@@ -36,6 +36,7 @@ import { createClient } from "@libsql/client";
 
 import modelsRouter, { requireDashboardSessionJson, HF_TOKEN_PROVIDER_ID } from "../servers/gateway/routes/models.js";
 import { setProviderSyncManager } from "../servers/shared/providers-db.js";
+import { loadState } from "../servers/gateway/models/state.js";
 
 const repoRoot = join(import.meta.dirname, "..");
 
@@ -201,6 +202,7 @@ const ALL_ROUTES = [
   ["POST", "/api/models/reprobe"],
   ["POST", "/api/models/download"],
   ["GET", "/api/models/downloads"],
+  ["POST", "/api/models/hf-download"],
   ["DELETE", "/api/models/any-model-id"],
   ["POST", "/api/models/any-model-id/start"],
   ["POST", "/api/models/any-model-id/stop"],
@@ -210,8 +212,8 @@ const ALL_ROUTES = [
   ["POST", "/api/models/hf-token"],
 ];
 
-test("EVERY /api/models/* route (all 12) is gated: 403 NETWORK_DENIED with no headers, 401 UNAUTHENTICATED with an allowed network but no/bad session", async () => {
-  assert.equal(ALL_ROUTES.length, 12, "route count drifted — update this list (and the coverage it's meant to guarantee) alongside the router");
+test("EVERY /api/models/* route (all 13) is gated: 403 NETWORK_DENIED with no headers, 401 UNAUTHENTICATED with an allowed network but no/bad session", async () => {
+  assert.equal(ALL_ROUTES.length, 13, "route count drifted — update this list (and the coverage it's meant to guarantee) alongside the router");
   const h = freshLibsql();
   try {
     await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE }, async (base) => {
@@ -418,7 +420,191 @@ test("POST /api/models/download -> GET /api/models/downloads: job transitions do
       assert.equal(job.status, "done");
       assert.equal(job.providerId, "panel-test-model");
       assert.equal(job.bytesDone, 500);
+      assert.equal(job.source, "curated", "a curated job (no source override) reports the default \"curated\", not undefined");
     });
+  } finally { await h.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// Browse Hugging Face download (Task 13 fix round 1, finding 1)
+// ---------------------------------------------------------------------------
+//
+// The download ENGINE (fetchHfPathInfo/downloadHfFile — real network,
+// real checksum verification) is covered end-to-end in
+// tests/models-manager.test.js. These route-level tests stub both via
+// opts (same pattern the curated /download tests above use for
+// enqueueDownloadFn) and focus on the ROUTE's own logic: shape validation,
+// the no-verifiable-checksum refusal, fit-gating from the fetched size,
+// and — running the REAL registerModelFn against the real scratch DB,
+// exactly like the curated download-to-done test above — that the
+// resulting registry entry actually carries `source: "hf-browser"`.
+
+test("POST /api/models/hf-download: 400 INVALID_HF_REPO / INVALID_HF_FILE for malformed shapes, before any network call", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    let pathInfoCalls = 0;
+    const opts = {
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      fetchHfPathInfoFn: async () => { pathInfoCalls += 1; return { sha256: "x", sizeBytes: 1 }; },
+    };
+    await withServer(opts, async (base) => {
+      const badRepo = await fetch(base + "/api/models/hf-download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ hfRepo: "../etc/passwd", file: "x.gguf" }),
+      });
+      assert.equal(badRepo.status, 400);
+      assert.equal((await badRepo.json()).code, "INVALID_HF_REPO");
+
+      const badFile = await fetch(base + "/api/models/hf-download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ hfRepo: "org/repo", file: "../../x.gguf" }),
+      });
+      assert.equal(badFile.status, 400);
+      assert.equal((await badFile.json()).code, "INVALID_HF_FILE");
+    });
+    assert.equal(pathInfoCalls, 0, "an invalid shape is rejected before ever calling out to Hugging Face");
+  } finally { await h.cleanup(); }
+});
+
+test("POST /api/models/hf-download: 422 NO_VERIFIABLE_CHECKSUM when Hugging Face reports no LFS sha for the file", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const opts = {
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      fetchHfPathInfoFn: async () => ({ sha256: null, sizeBytes: 1234 }),
+    };
+    await withServer(opts, async (base) => {
+      const r = await fetch(base + "/api/models/hf-download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ hfRepo: "org/repo", file: "README.md" }),
+      });
+      assert.equal(r.status, 422);
+      const body = await r.json();
+      assert.equal(body.code, "NO_VERIFIABLE_CHECKSUM");
+      assert.match(body.error, /no verifiable checksum/i);
+    });
+  } finally { await h.cleanup(); }
+});
+
+test("POST /api/models/hf-download: wont_fit (huge fetched size) refused with 409 unless force:true", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const opts = {
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      // FIXED_PROBE has ramAvailableMb: 4000 — 900 GB is unfittable by any measure.
+      fetchHfPathInfoFn: async () => ({ sha256: "a".repeat(64), sizeBytes: 900_000_000_000 }),
+      downloadHfFileFn: async () => { throw new Error("must not be called — the fit gate should have refused first"); },
+    };
+    await withServer(opts, async (base) => {
+      const refused = await fetch(base + "/api/models/hf-download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ hfRepo: "org/repo", file: "huge-model.gguf" }),
+      });
+      assert.equal(refused.status, 409);
+      const body = await refused.json();
+      assert.equal(body.code, "WONT_FIT");
+      assert.equal(body.fitBadge, "wont_fit");
+    });
+  } finally { await h.cleanup(); }
+});
+
+test("POST /api/models/hf-download -> GET /api/models/downloads: job carries source:\"hf-browser\"; on success, the registry entry ALSO carries source:\"hf-browser\" via a REAL registerModel call", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const fakeSha = "b".repeat(64);
+    // Matches exactly what deriveModelIdFromFilename("cool-model-Q4.gguf")
+    // produces — the route derives modelId itself (via the same pure
+    // function the real downloadHfFile uses internally) and passes it to
+    // registerModelFn independent of whatever a stub's returned catalog
+    // claims, so a test fixture whose ids don't agree with that derivation
+    // is internally inconsistent, not a bug in the route.
+    const derivedId = "cool-model-q4";
+    const fakeCatalog = {
+      models: [{
+        id: derivedId,
+        family: "repo",
+        hf_repo: "org/repo",
+        task: "chat",
+        context_len: null,
+        default_quant: "hf",
+        quants: [{ file: "cool-model-Q4.gguf", quant: "hf", sha256: fakeSha, size_mb: 5, min_ram_mb: 5, min_vram_mb: 0 }],
+      }],
+    };
+    const opts = {
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      fetchHfPathInfoFn: async () => ({ sha256: fakeSha, sizeBytes: 5_000_000 }),
+      downloadHfFileFn: async ({ onProgress }) => {
+        onProgress({ bytesDone: 5_000_000, totalBytes: 5_000_000 });
+        return { path: "/fake/path", sha256: fakeSha, modelId: derivedId, sizeMb: 5, catalog: fakeCatalog };
+      },
+    };
+    await withServer(opts, async (base) => {
+      const post = await fetch(base + "/api/models/hf-download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ hfRepo: "org/repo", file: "cool-model-Q4.gguf" }),
+      });
+      assert.equal(post.status, 202);
+      const { jobId } = await post.json();
+
+      let job = null;
+      for (let i = 0; i < 50; i++) {
+        const r = await fetch(base + "/api/models/downloads", { headers: authHeaders(token) });
+        const body = await r.json();
+        job = body.downloads.find((j) => j.id === jobId);
+        if (job && job.status === "done") break;
+        await new Promise((res) => setTimeout(res, 20));
+      }
+      assert.ok(job, "job present in GET /api/models/downloads");
+      assert.equal(job.source, "hf-browser");
+      assert.equal(job.status, "done");
+      assert.equal(job.providerId, derivedId);
+    });
+
+    const state = loadState(h.dir);
+    assert.equal(state.registry[derivedId].source, "hf-browser");
+    assert.equal(state.registry[derivedId].catalogId, derivedId);
+  } finally { await h.cleanup(); }
+});
+
+test("POST /api/models/hf-download: an engine failure (e.g. checksum mismatch) surfaces its typed errorCode on the job, never registers a provider", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const opts = {
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      fetchHfPathInfoFn: async () => ({ sha256: "c".repeat(64), sizeBytes: 100 }),
+      downloadHfFileFn: async () => {
+        const err = new Error("Checksum mismatch: expected c..., got d...");
+        err.code = "CHECKSUM_MISMATCH";
+        throw err;
+      },
+    };
+    await withServer(opts, async (base) => {
+      const post = await fetch(base + "/api/models/hf-download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ hfRepo: "org/repo", file: "bad-model.gguf" }),
+      });
+      const { jobId } = await post.json();
+
+      let job = null;
+      for (let i = 0; i < 50; i++) {
+        const r = await fetch(base + "/api/models/downloads", { headers: authHeaders(token) });
+        const body = await r.json();
+        job = body.downloads.find((j) => j.id === jobId);
+        if (job && job.status === "error") break;
+        await new Promise((res) => setTimeout(res, 20));
+      }
+      assert.ok(job);
+      assert.equal(job.status, "error");
+      assert.equal(job.errorCode, "CHECKSUM_MISMATCH");
+      assert.equal(job.providerId, null);
+    });
+    const state = loadState(h.dir);
+    assert.equal(state.registry["bad-model"], undefined, "never registered");
   } finally { await h.cleanup(); }
 });
 

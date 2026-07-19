@@ -1,18 +1,23 @@
 /**
- * Model Catalog Panel — Item G Task 13
+ * Model Catalog Panel — Item G Task 13 (+ fix round 1: Browse-HF downloads,
+ * the "reloading after update" runtime state, typed gated-retry detection)
  *
  * Browse the curated catalog (registry/model-catalog.json), download +
  * register GGUF models as local providers, start/stop/remove them, and
- * (advanced) search Hugging Face directly for GGUF repos.
+ * search Hugging Face directly for GGUF repos — including downloading an
+ * arbitrary (un-vetted, HF-sha-verified) file straight from a search result
+ * via `POST /api/models/hf-download` (fix round 1, finding 1).
  *
  * Architecture: server-side render (SSR) for the initial page — this panel
  * imports the SAME read-only model-management functions Task 12's
  * `routes/models.js` uses (`probe.js`, `state.js`, `runtime.js`,
  * `gpu-orchestrator.js`'s `getNativeHandle`) directly, rather than doing a
  * self-referential HTTP fetch of its own API on first paint. All later
- * interaction (download, start/stop, delete, HF search, HF token) is driven
- * client-side against the real `/api/models/*` routes from Task 12,
- * consumed verbatim (this file never modifies `routes/models.js`).
+ * interaction (download, start/stop, delete, HF search, HF token,
+ * Browse-HF download) is driven client-side against the real
+ * `/api/models/*` routes, consumed verbatim — this file never modifies
+ * `routes/models.js` (that file's own fix-round-1 changes, incl.
+ * `POST /hf-download`, were made directly, not through this panel).
  *
  * Security note: all server-rendered dynamic content is escaped via
  * escapeHtml(). Client-side DOM built from API responses (HF search results,
@@ -35,7 +40,7 @@ import { t, tJs, fill } from "../shared/i18n.js";
 import { escapeHtml, button, callout, tabs } from "../shared/components.js";
 import { resolveDataDir } from "../../../db.js";
 import { getCachedProbe, reprobe, fitBadge } from "../../models/probe.js";
-import { loadState } from "../../models/state.js";
+import { loadState, registryEntryRuntimeState } from "../../models/state.js";
 import { getStatusSnapshot } from "../../models/runtime.js";
 import { getNativeHandle } from "../../gpu-orchestrator.js";
 import { listProvidersAll } from "../../../shared/providers-db.js";
@@ -120,6 +125,7 @@ export async function loadPanelData({
   getStatusSnapshotFn = getStatusSnapshot,
   getNativeHandleFn = getNativeHandle,
   listProvidersAllFn = listProvidersAll,
+  registryEntryRuntimeStateFn = registryEntryRuntimeState,
 } = {}) {
   const resolvedDir = dir || resolveDataDir();
   const catalog = loadCatalogFn();
@@ -174,9 +180,18 @@ export async function loadPanelData({
   const byAlias = new Map(snapshot.map((s) => [s.alias, s]));
   const runtimeModels = Object.keys(state.registry).map((modelId) => {
     const status = byAlias.get(modelId);
-    return status
-      ? { modelId, ...status }
-      : { modelId, state: "stopped", live: false, port: null, restartCount: 0, lastError: null, startedAt: null, pid: null };
+    if (status) return { modelId, ...status };
+    // Task 13 fix round 1, finding c: distinguish "never started" from
+    // "was resident when the gateway restarted, hasn't re-warmed yet" via
+    // the persisted wasLive marker — same classification GET /api/models/
+    // runtime uses, mirrored here for SSR (see state.js's
+    // registryEntryRuntimeState doc for the exact contract).
+    const entry = state.registry[modelId];
+    return {
+      modelId,
+      state: registryEntryRuntimeStateFn(entry, false),
+      live: false, port: null, restartCount: 0, lastError: null, startedAt: null, pid: null,
+    };
   });
 
   // Estimated RAM/VRAM in use — derived from catalog quant costs for models
@@ -341,6 +356,15 @@ function panelStyles() {
 .mcat-hf-result__meta { font-size:0.75rem; color:var(--crow-text-muted); margin-top:0.2rem; }
 .mcat-hf-result__notice { font-size:0.75rem; color:var(--crow-text-muted); margin-top:0.35rem; }
 
+/* Per-file download rows (Task 13 fix round 1, finding 1) */
+.mcat-hf-result__files-list {
+  margin-top:0.6rem; padding-top:0.5rem; border-top:1px solid var(--crow-border);
+  display:flex; flex-direction:column; gap:0.4rem;
+}
+.mcat-hf-result__file-row { display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; }
+.mcat-hf-result__file-name { font-size:0.78rem; color:var(--crow-text-secondary); flex:1 1 auto; min-width:0; word-break:break-all; }
+.mcat-hf-result__file-actions { flex-shrink:0; }
+
 .mcat-hf-token { margin-top:1.5rem; padding-top:1.25rem; border-top:1px solid var(--crow-border); }
 .mcat-hf-token__heading { font-family:'Fraunces',serif; font-weight:600; font-size:0.95rem; margin-bottom:0.4rem; }
 .mcat-hf-token__row { display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center; margin:0.5rem 0; }
@@ -420,13 +444,24 @@ function renderRuntimeStrip(data, lang) {
     : escapeHtml(t("models.runtimeNoModelsRunning", lang));
 
   const rowsHtml = runtimeModels.map((m) => {
-    const stateKey = m.live ? "models.runtimeStateRunning" : m.state === "unhealthy" ? "models.runtimeStateUnhealthy" : "models.runtimeStateStopped";
+    // Task 13 fix round 1, finding c: "stopped_after_restart" is its own
+    // distinct, honest state — a model that was resident when the gateway
+    // last went down, not yet re-warmed — never conflated with a plain
+    // never-started "Not running".
+    const stateKey = m.live
+      ? "models.runtimeStateRunning"
+      : m.state === "unhealthy" ? "models.runtimeStateUnhealthy"
+      : m.state === "stopped_after_restart" ? "models.runtimeStateReloading"
+      : "models.runtimeStateStopped";
+    const stateCell = m.state === "stopped_after_restart"
+      ? escapeHtml(t(stateKey, lang)) + `<div class="mcat-strip__status">${escapeHtml(t("models.runtimeStateReloadingHint", lang))}</div>`
+      : escapeHtml(t(stateKey, lang));
     const actionBtn = m.live
       ? button(t("models.actionStop", lang), { variant: "secondary", size: "sm", attrs: `data-action="stop" data-model-id="${escapeHtml(m.modelId)}"` })
       : button(t("models.actionStart", lang), { variant: "secondary", size: "sm", attrs: `data-action="start" data-model-id="${escapeHtml(m.modelId)}"` });
     return `<tr>
       <td class="mono">${escapeHtml(m.modelId)}</td>
-      <td>${escapeHtml(t(stateKey, lang))}</td>
+      <td>${stateCell}</td>
       <td class="mono">${m.port != null ? escapeHtml(String(m.port)) : "—"}</td>
       <td class="mono">${m.pid != null ? escapeHtml(String(m.pid)) : "—"}</td>
       <td class="mono">${escapeHtml(String(m.restartCount || 0))}</td>
@@ -635,7 +670,12 @@ function modelCatalogClientJS(lang) {
           MISSING_QUERY: '${tJs("models.errMissingQuery", lang)}',
           HF_UPSTREAM_ERROR: '${tJs("models.errHfUpstream", lang)}',
           BAD_TOKEN: '${tJs("models.errBadToken", lang)}',
-          INTERNAL: '${tJs("models.errInternal", lang)}'
+          INTERNAL: '${tJs("models.errInternal", lang)}',
+          WONT_FIT: '${tJs("models.errWontFit", lang)}',
+          INVALID_HF_REPO: '${tJs("models.errInvalidHf", lang)}',
+          INVALID_HF_FILE: '${tJs("models.errInvalidHf", lang)}',
+          NO_VERIFIABLE_CHECKSUM: '${tJs("models.errNoVerifiableChecksum", lang)}',
+          HF_FILE_NOT_FOUND: '${tJs("models.errHfUpstream", lang)}'
         };
 
         function messageFor(code, fallback) {
@@ -719,8 +759,13 @@ function modelCatalogClientJS(lang) {
             } else if (job.status === "error") {
               setProgress(modelId, 0, false);
               var raw = job.error || "";
+              // Task 13 fix round 1, finding d: keys off the TYPED error
+              // code manager.js's HttpStatusError now attaches to the job
+              // (errorCode === "HTTP_403"), never string-matching the raw
+              // message — a message-format change can no longer silently
+              // break this detection.
               var gated = card_isGated(modelId);
-              var looksLicense = gated && raw.indexOf("403") !== -1;
+              var looksLicense = gated && job.errorCode === "HTTP_403";
               var msg = looksLicense
                 ? '${tJs("models.downloadErrorGated", lang)}'
                 : messageFor(job.errorCode, raw);
@@ -924,6 +969,183 @@ function modelCatalogClientJS(lang) {
         refreshActiveDownloads();
         setInterval(refreshActiveDownloads, 5000);
 
+        // --- Browse Hugging Face downloads (Task 13 fix round 1, finding 1) ---
+        //
+        // Each search result can list several GGUF files; a download
+        // targets ONE specific (repo, file) pair, so each file gets its
+        // own row with its own status/progress/actions — captured via
+        // closures (not the delegated data-action pattern the curated
+        // cards use), since a repo/file string can contain characters that
+        // are awkward to round-trip through a CSS attribute selector.
+
+        function pollHfDownload(jobId, statusSpan, progressTrack, actions, repoId, file) {
+          apiFetch("/downloads").then(function (res) {
+            if (!res.ok) { statusSpan.textContent = messageFor("INTERNAL"); return; }
+            var job = (res.data.downloads || []).filter(function (j) { return j.id === jobId; })[0];
+            if (!job) {
+              setTimeout(function () { pollHfDownload(jobId, statusSpan, progressTrack, actions, repoId, file); }, 1500);
+              return;
+            }
+            if (job.status === "downloading" || job.status === "registering") {
+              var pct = job.totalBytes ? Math.round((job.bytesDone / job.totalBytes) * 100) : 0;
+              progressTrack.hidden = false;
+              var bar = progressTrack.querySelector(".mcat-card__progress-bar");
+              if (bar) bar.style.width = pct + "%";
+              statusSpan.textContent = job.status === "registering"
+                ? '${tJs("models.actionRegistering", lang)}'
+                : '${tJs("models.actionDownloading", lang)}' + " " + fmtBytes(job.bytesDone) + (job.totalBytes ? " / " + fmtBytes(job.totalBytes) : "");
+              setTimeout(function () { pollHfDownload(jobId, statusSpan, progressTrack, actions, repoId, file); }, 1500);
+            } else if (job.status === "done") {
+              progressTrack.hidden = true;
+              statusSpan.textContent = '${tJs("models.downloadSuccess", lang)}';
+              actions.replaceChildren();
+              var link = document.createElement("a");
+              link.className = "btn btn-primary btn-sm";
+              link.href = "/dashboard/messages";
+              link.textContent = '${tJs("models.actionTryInChat", lang)}';
+              actions.appendChild(link);
+            } else if (job.status === "error") {
+              progressTrack.hidden = true;
+              // Finding d: keys off the typed HTTP_403 code, not string-matching.
+              var looksLicense = job.errorCode === "HTTP_403";
+              statusSpan.textContent = looksLicense
+                ? '${tJs("models.downloadErrorGated", lang)}'
+                : messageFor(job.errorCode, job.error);
+              actions.replaceChildren();
+              var retryBtn = document.createElement("button");
+              retryBtn.type = "button";
+              retryBtn.className = "btn btn-primary btn-sm";
+              retryBtn.textContent = '${tJs("models.actionRetry", lang)}';
+              retryBtn.addEventListener("click", function () {
+                showHfDownloadConfirm(repoId, file, false, statusSpan, progressTrack, actions);
+              });
+              actions.appendChild(retryBtn);
+            }
+          }).catch(function () {
+            setTimeout(function () { pollHfDownload(jobId, statusSpan, progressTrack, actions, repoId, file); }, 3000);
+          });
+        }
+
+        function startHfDownload(repoId, file, statusSpan, progressTrack, actions, force) {
+          actions.replaceChildren();
+          statusSpan.textContent = '${tJs("models.actionDownloading", lang)}';
+          apiFetch("/hf-download", {
+            method: "POST",
+            body: JSON.stringify({ hfRepo: repoId, file: file, force: !!force })
+          }).then(function (res) {
+            if (res.ok || res.status === 202) {
+              pollHfDownload(res.data.jobId, statusSpan, progressTrack, actions, repoId, file);
+              return;
+            }
+            if (res.data && res.data.code === "WONT_FIT") {
+              statusSpan.textContent = messageFor("WONT_FIT", res.data.error);
+              var forceBtn = document.createElement("button");
+              forceBtn.type = "button";
+              forceBtn.className = "btn btn-danger btn-sm";
+              forceBtn.textContent = '${tJs("models.actionForceDownload", lang)}';
+              forceBtn.addEventListener("click", function () {
+                startHfDownload(repoId, file, statusSpan, progressTrack, actions, true);
+              });
+              actions.appendChild(forceBtn);
+              return;
+            }
+            statusSpan.textContent = messageFor(res.data && res.data.code, res.data && res.data.error);
+            var retryBtn = document.createElement("button");
+            retryBtn.type = "button";
+            retryBtn.className = "btn btn-primary btn-sm";
+            retryBtn.textContent = '${tJs("models.actionRetry", lang)}';
+            retryBtn.addEventListener("click", function () {
+              showHfDownloadConfirm(repoId, file, false, statusSpan, progressTrack, actions);
+            });
+            actions.appendChild(retryBtn);
+          }).catch(function () {
+            statusSpan.textContent = messageFor("INTERNAL");
+          });
+        }
+
+        function showHfDownloadConfirm(repoId, file, gated, statusSpan, progressTrack, actions) {
+          var frag = document.createElement("div");
+
+          var title = document.createElement("div");
+          title.className = "mcat-modal__title";
+          title.textContent = '${tJs("models.hfDownloadConfirmTitle", lang)}'.replace("{file}", file);
+          frag.appendChild(title);
+
+          var warn = document.createElement("p");
+          warn.textContent = '${tJs("models.hfDownloadConfirmWarning", lang)}';
+          frag.appendChild(warn);
+
+          if (gated) {
+            var gatedP = document.createElement("p");
+            gatedP.textContent = mcat_hfTokenConfigured
+              ? '${tJs("models.hfGatedWithToken", lang)}'
+              : '${tJs("models.hfGatedNoToken", lang)}';
+            frag.appendChild(gatedP);
+          }
+
+          var modalActions = document.createElement("div");
+          modalActions.className = "mcat-modal__actions";
+
+          var cancelBtn = document.createElement("button");
+          cancelBtn.type = "button";
+          cancelBtn.className = "btn btn-secondary btn-sm";
+          cancelBtn.textContent = '${tJs("models.deleteCancelButton", lang)}';
+          cancelBtn.addEventListener("click", hideModal);
+          modalActions.appendChild(cancelBtn);
+
+          var confirmBtn = document.createElement("button");
+          confirmBtn.type = "button";
+          confirmBtn.className = "btn btn-primary btn-sm";
+          confirmBtn.textContent = '${tJs("models.hfDownloadConfirmButton", lang)}';
+          confirmBtn.addEventListener("click", function () {
+            hideModal();
+            startHfDownload(repoId, file, statusSpan, progressTrack, actions, false);
+          });
+          modalActions.appendChild(confirmBtn);
+          frag.appendChild(modalActions);
+
+          var mc = document.getElementById("mcat-modal-content");
+          mc.replaceChildren();
+          mc.appendChild(frag);
+          showModal();
+        }
+
+        function buildHfFileRow(repoId, file, gated) {
+          var row = document.createElement("div");
+          row.className = "mcat-hf-result__file-row";
+
+          var nameSpan = document.createElement("span");
+          nameSpan.className = "mcat-hf-result__file-name mono";
+          nameSpan.textContent = file;
+          row.appendChild(nameSpan);
+
+          var statusSpan = document.createElement("span");
+          statusSpan.className = "mcat-card__status-text";
+          row.appendChild(statusSpan);
+
+          var actions = document.createElement("span");
+          actions.className = "mcat-hf-result__file-actions";
+          var downloadBtn = document.createElement("button");
+          downloadBtn.type = "button";
+          downloadBtn.className = "btn btn-primary btn-sm";
+          downloadBtn.textContent = '${tJs("models.actionDownload", lang)}';
+          downloadBtn.addEventListener("click", function () {
+            showHfDownloadConfirm(repoId, file, gated, statusSpan, progressTrack, actions);
+          });
+          actions.appendChild(downloadBtn);
+          row.appendChild(actions);
+
+          var progressTrack = document.createElement("div");
+          progressTrack.className = "mcat-card__progress-track";
+          progressTrack.hidden = true;
+          var progressBar = document.createElement("div");
+          progressBar.className = "mcat-card__progress-bar";
+          progressTrack.appendChild(progressBar);
+          row.appendChild(progressTrack);
+
+          return row;
+        }
+
         // --- Browse Hugging Face search ---
         function renderHfResults(results) {
           var wrap = document.getElementById("mcat-hf-results");
@@ -985,6 +1207,16 @@ function modelCatalogClientJS(lang) {
             link.style.marginTop = "0.35rem";
             link.textContent = '${tJs("models.hfViewOnHf", lang)}';
             card.appendChild(link);
+
+            var files = r.ggufFiles || [];
+            if (files.length > 0) {
+              var filesWrap = document.createElement("div");
+              filesWrap.className = "mcat-hf-result__files-list";
+              files.forEach(function (f) {
+                filesWrap.appendChild(buildHfFileRow(r.id, f, !!r.gated));
+              });
+              card.appendChild(filesWrap);
+            }
 
             wrap.appendChild(card);
           });
