@@ -3,9 +3,10 @@
  */
 
 import { escapeHtml } from "../../shared/components.js";
-import { t } from "../../shared/i18n.js";
+import { t, fill } from "../../shared/i18n.js";
 import { getProxyStatus } from "../../../proxy.js";
 import { STEP_KEYS } from "../../panels/onboarding.js";
+import { STARTER_SOURCE, clearStarterMemories } from "../../panels/onboarding/starter-content.js";
 
 export default {
   id: "help-setup",
@@ -52,6 +53,32 @@ export default {
     };
     const ht = helpT[currentLang] || helpT.en;
 
+    const csrfToken = req?.csrfToken || "";
+    const { rows: starterCountRows } = await db.execute({
+      sql: "SELECT COUNT(*) n FROM memories WHERE source = ?",
+      args: [STARTER_SOURCE],
+    });
+    const starterCount = Number(starterCountRows[0]?.n || 0);
+    // Flash is a fixed status enum mapped to i18n — never free text from the
+    // URL (mirrors sync-conflicts.js's flash pattern).
+    const starterFlash = req?.query?.helpSetupMsg === "cleared"
+      ? `<div style="margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:var(--crow-bg-deep);border-left:3px solid var(--crow-accent);border-radius:4px;font-size:0.85rem">
+           ${escapeHtml(t("helpSetup.starterCleared", currentLang))}
+         </div>`
+      : "";
+    const starterBody = starterCount > 0
+      ? `<p style="font-size:0.85rem;line-height:1.6;margin-bottom:0.75rem">${escapeHtml(fill(t("helpSetup.starterCount", currentLang), { n: starterCount }))}</p>
+         <form method="POST" action="/dashboard/settings" onsubmit="return confirm(${escapeHtml(JSON.stringify(t("helpSetup.starterClearConfirm", currentLang)))})">
+           <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}" />
+           <input type="hidden" name="action" value="help_setup_clear_starter" />
+           <button type="submit" class="btn btn-secondary" style="font-size:0.85rem">${escapeHtml(t("helpSetup.starterClear", currentLang))}</button>
+         </form>`
+      : `<p style="font-size:0.85rem;color:var(--crow-text-muted)">${escapeHtml(t("helpSetup.starterNone", currentLang))}</p>`;
+    const starterHtml = `
+      <h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin:1.25rem 0 0.5rem">${escapeHtml(t("helpSetup.starterTitle", currentLang))}</h4>
+      ${starterFlash}
+      ${starterBody}`;
+
     const proxyStatus = getProxyStatus();
     const coreTools = 49;
     let externalToolCount = 0;
@@ -78,10 +105,19 @@ export default {
         <span style="font-size:0.8rem;color:var(--crow-text-muted)">${coreTools} ${ht.core} + ${externalToolCount} ${ht.external} &mdash; ~${(estimatedTokens / 1000).toFixed(1)}K ${ht.tokensOfContext}</span>
         ${!routerDisabled ? `<span style="font-size:0.75rem;background:color-mix(in srgb, var(--crow-success) 15%, transparent);color:var(--crow-success);padding:2px 8px;border-radius:4px">${ht.routerAvailable}</span>` : ""}
       </div>
-      <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">${ht.contextDoc}</p>`;
+      <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">${ht.contextDoc}</p>
+      ${starterHtml}`;
   },
 
-  async handleAction() {
+  async handleAction({ req, res, db, action }) {
+    if (!action || !action.startsWith("help_setup_")) return false;
+
+    if (action === "help_setup_clear_starter") {
+      await clearStarterMemories(db);
+      res.redirectAfterPost("/dashboard/settings?section=help-setup&helpSetupMsg=cleared");
+      return true;
+    }
+
     return false;
   },
 };
