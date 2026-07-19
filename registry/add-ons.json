@@ -2460,6 +2460,7 @@
       "docker": {
         "composefile": "docker-compose.yml"
       },
+      "inference": true,
       "providers": [
         {
           "id": "llamacpp-cpu-embed",
@@ -2498,6 +2499,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-swap-qwen72b",
@@ -2538,6 +2540,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-swap-highend",
@@ -2578,6 +2581,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-swap-deep",
@@ -2618,6 +2622,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-swap-coder",
@@ -2658,6 +2663,7 @@
       },
       "env_vars": [],
       "port": 8004,
+      "inference": true,
       "providers": [
         {
           "id": "crow-embed",
@@ -2694,6 +2700,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-chat",
@@ -6015,6 +6022,7 @@
       },
       "env_vars": [],
       "port": 9100,
+      "inference": true,
       "providers": [
         {
           "id": "grackle-embed",
@@ -6057,6 +6065,7 @@
       },
       "env_vars": [],
       "port": 9101,
+      "inference": true,
       "providers": [
         {
           "id": "grackle-rerank",
@@ -6092,6 +6101,7 @@
       },
       "env_vars": [],
       "port": 9102,
+      "inference": true,
       "providers": [
         {
           "id": "grackle-vision",
@@ -6127,6 +6137,7 @@
       },
       "env_vars": [],
       "port": 8003,
+      "inference": true,
       "providers": [
         {
           "id": "crow-swap-kimi",
@@ -6166,6 +6177,7 @@
       },
       "env_vars": [],
       "port": 8001,
+      "inference": true,
       "providers": [
         {
           "id": "crow-dispatch",
@@ -6200,6 +6212,7 @@
       },
       "env_vars": [],
       "port": 8002,
+      "inference": true,
       "providers": [
         {
           "id": "crow-mode-a-32b",
@@ -6235,6 +6248,7 @@
       },
       "env_vars": [],
       "port": 8012,
+      "inference": true,
       "providers": [
         {
           "id": "crow-chat",
@@ -6270,6 +6284,7 @@
       },
       "env_vars": [],
       "port": 8011,
+      "inference": true,
       "providers": [
         {
           "id": "crow-voice",
