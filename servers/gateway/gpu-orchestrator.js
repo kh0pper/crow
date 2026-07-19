@@ -188,6 +188,23 @@ export function _setNativeHandleForTest(name, handle) {
   else _nativeHandles.set(name, handle);
 }
 
+/**
+ * Read-only accessor for this process's live `startModel()` handle for a
+ * native-runtime provider (Item G, Task 12 follow-up from PR G-B's final
+ * review: the models panel's stop/delete routes need to reach a live
+ * process handle to hand into `manager.js`'s `unregisterModel({
+ * runtimeHandle })` / to call `.stop()` directly, and `_nativeHandles` had
+ * no public accessor — only the test-only seed/clear setter above).
+ * Returns the handle (`{ live, stop(), status(), touch() }`, see
+ * `runtime.js`'s `startModel` doc) or `null` if this process has no live
+ * handle for `providerName` (nothing started here since boot, or it was
+ * already stopped). Deliberately just a getter — no new mutation surface;
+ * callers that need to stop it call `.stop()` on the returned handle
+ * themselves (mirroring the sibling-eviction code in this same file). */
+export function getNativeHandle(providerName) {
+  return _nativeHandles.get(providerName) || null;
+}
+
 // -----------------------------------------------------------------------
 // Bundle control
 // -----------------------------------------------------------------------

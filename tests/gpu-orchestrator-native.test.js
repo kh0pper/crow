@@ -108,6 +108,36 @@ beforeEach(() => {
   _setNativeHandleForTest("native-sib", null);
 });
 
+// --- getNativeHandle (Item G, Task 12 follow-up: read-only accessor for the
+// panel's stop/delete routes — see gpu-orchestrator.js's doc on it) --------
+
+test("getNativeHandle: null when no handle was ever seeded for this provider name", async () => {
+  const { getNativeHandle } = await import("../servers/gateway/gpu-orchestrator.js");
+  assert.equal(getNativeHandle("native-target"), null);
+  assert.equal(getNativeHandle("some-unknown-provider"), null);
+});
+
+test("getNativeHandle: returns the exact handle object seeded via the test seam, live reflects in place", async () => {
+  const { getNativeHandle } = await import("../servers/gateway/gpu-orchestrator.js");
+  const handle = fakeHandle({ live: true });
+  _setNativeHandleForTest("native-target", handle);
+  assert.equal(getNativeHandle("native-target"), handle);
+
+  // Mutating the handle's own `live` flag (as `runtime.js`'s real
+  // startModel/stop() do in place) is visible through the accessor without
+  // re-seeding — it's a live reference into the module's map, not a copy.
+  handle.live = false;
+  assert.equal(getNativeHandle("native-target").live, false);
+});
+
+test("getNativeHandle: clearing via the test seam (null) makes it null again — the accessor has no separate mutation surface", async () => {
+  const { getNativeHandle } = await import("../servers/gateway/gpu-orchestrator.js");
+  _setNativeHandleForTest("native-target", fakeHandle({ live: true }));
+  assert.notEqual(getNativeHandle("native-target"), null);
+  _setNativeHandleForTest("native-target", null);
+  assert.equal(getNativeHandle("native-target"), null);
+});
+
 // --- touch point 5: pollResidency compose-file gate (named blocker) -----
 
 test("pollResidency never releases a native provider's residency for lacking a compose file", async () => {
