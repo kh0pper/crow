@@ -192,6 +192,42 @@ test("GET /api/models/catalog: 200 with a valid session", async () => {
   } finally { await h.cleanup(); }
 });
 
+/** Every route this router mounts, as [method, path]. Kept as one literal
+ * list so the parametrized auth test below and its own length assertion
+ * catch a route silently added without auth coverage. */
+const ALL_ROUTES = [
+  ["GET", "/api/models/catalog"],
+  ["GET", "/api/models/probe"],
+  ["POST", "/api/models/reprobe"],
+  ["POST", "/api/models/download"],
+  ["GET", "/api/models/downloads"],
+  ["DELETE", "/api/models/any-model-id"],
+  ["POST", "/api/models/any-model-id/start"],
+  ["POST", "/api/models/any-model-id/stop"],
+  ["GET", "/api/models/runtime"],
+  ["GET", "/api/models/hf-search?q=x"],
+  ["GET", "/api/models/hf-token"],
+  ["POST", "/api/models/hf-token"],
+];
+
+test("EVERY /api/models/* route (all 12) is gated: 403 NETWORK_DENIED with no headers, 401 UNAUTHENTICATED with an allowed network but no/bad session", async () => {
+  assert.equal(ALL_ROUTES.length, 12, "route count drifted — update this list (and the coverage it's meant to guarantee) alongside the router");
+  const h = freshLibsql();
+  try {
+    await withServer({ dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE }, async (base) => {
+      for (const [method, path] of ALL_ROUTES) {
+        const noHeaders = await fetch(base + path, { method });
+        assert.equal(noHeaders.status, 403, `${method} ${path}: expected 403 with no headers, got ${noHeaders.status}`);
+        assert.equal((await noHeaders.json()).code, "NETWORK_DENIED", `${method} ${path}`);
+
+        const noSession = await fetch(base + path, { method, headers: noSessionHeaders() });
+        assert.equal(noSession.status, 401, `${method} ${path}: expected 401 with network-ok/no-session, got ${noSession.status}`);
+        assert.equal((await noSession.json()).code, "UNAUTHENTICATED", `${method} ${path}`);
+      }
+    });
+  } finally { await h.cleanup(); }
+});
+
 // ---------------------------------------------------------------------------
 // Catalog + fit badges
 // ---------------------------------------------------------------------------
@@ -318,6 +354,35 @@ test("POST /api/models/download: tight and unknown quants are allowed WITHOUT fo
       const unknown = await fetch(base + "/api/models/download", {
         method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
         body: JSON.stringify({ modelId: "panel-test-model", quant: "Q4_K_M" }),
+      });
+      assert.equal(unknown.status, 202);
+    });
+    assert.equal(enqueueCalls, 2);
+  } finally { await h.cleanup(); }
+});
+
+test("POST /api/models/download: tight and unknown quants are ALSO allowed WITH force:true (force is inert, not required, for them)", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    let enqueueCalls = 0;
+    const opts = {
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      enqueueDownloadFn: async ({ onProgress }) => { enqueueCalls++; onProgress({ bytesDone: 10, totalBytes: 10 }); },
+    };
+    await withServer(opts, async (base) => {
+      // tight, force:true
+      const tight = await fetch(base + "/api/models/download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ modelId: "panel-test-model", quant: "Q5_K_M", force: true }),
+      });
+      assert.equal(tight.status, 202);
+    });
+    // unknown (no cached probe), force:true
+    await withServer({ ...opts, getCachedProbeFn: () => null }, async (base) => {
+      const unknown = await fetch(base + "/api/models/download", {
+        method: "POST", headers: authHeaders(token, { "content-type": "application/json" }),
+        body: JSON.stringify({ modelId: "panel-test-model", quant: "Q4_K_M", force: true }),
       });
       assert.equal(unknown.status, 202);
     });
@@ -678,10 +743,18 @@ test("hf-token: GET before/after POST reports only { configured }, never the raw
       console.error = originalError;
     }
     // Verify storage path directly: the exact providers.api_key column, under the reserved id.
-    const row = await h.db.execute({ sql: "SELECT api_key, disabled, models FROM providers WHERE id = ?", args: [HF_TOKEN_PROVIDER_ID] });
+    const row = await h.db.execute({ sql: "SELECT api_key, disabled, models, gpu_policy FROM providers WHERE id = ?", args: [HF_TOKEN_PROVIDER_ID] });
     assert.equal(row.rows[0].api_key, "hf_super-secret-value-should-never-leak");
     assert.equal(Number(row.rows[0].disabled), 1, "never an active routing candidate");
     assert.deepEqual(JSON.parse(row.rows[0].models), []);
+    // Fix round 1: local_only marker — never broadcast to paired instances.
+    assert.deepEqual(JSON.parse(row.rows[0].gpu_policy), { local_only: true });
+    const { shouldSyncRowForTest } = await import("../servers/sharing/instance-sync.js");
+    assert.equal(
+      shouldSyncRowForTest("providers", { base_url: "https://huggingface.co", gpu_policy: row.rows[0].gpu_policy }),
+      false,
+      "the hf-token row as actually written must be rejected by the fleet-sync gate",
+    );
   } finally { await h.cleanup(); }
 });
 
