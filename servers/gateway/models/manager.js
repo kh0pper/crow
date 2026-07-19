@@ -73,7 +73,7 @@ import { basename, join } from "node:path";
 
 import { allocatePort, loadState, releasePort, saveState } from "./state.js";
 import { disableProvider, listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
-import { invalidateProvidersCache } from "../../shared/providers.js";
+import { invalidateProvidersCache, invalidateAndRefreshProvidersCache } from "../../shared/providers.js";
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -1141,6 +1141,16 @@ export function pickChatMutexGroup(existingRows) {
  * Injectable seams (`allocatePortFn`/`listProvidersAllFn`/`upsertProviderFn`/
  * `invalidateCacheFn`) default to the real implementations; tests use them
  * to observe call order without needing to intercept module internals.
+ * `invalidateCacheFn` defaults to `invalidateAndRefreshProvidersCache`
+ * (Item G, PR G-F, defect 2), NOT the plain sync `invalidateProvidersCache`
+ * — this function's caller (the download-then-register route, or any
+ * caller that immediately turns around and asks whether the model it just
+ * registered is startable) needs the row to be visible in the very next
+ * `loadProviders()` call, which the plain invalidate can't guarantee (it
+ * only clears the cache; the next `loadProviders()` call fires an
+ * un-awaited background DB refresh and returns the stale/fallback
+ * snapshot in the meantime). Awaiting the real refresh here closes that
+ * window.
  *
  * Provider-id collision guard: `modelId` doubles as the provider row's `id`
  * (see the section header comment), which means a user's own cloud/bundle
@@ -1173,7 +1183,7 @@ export async function registerModel({
   allocatePortFn = allocatePort,
   listProvidersAllFn = listProvidersAll,
   upsertProviderFn = upsertProvider,
-  invalidateCacheFn = invalidateProvidersCache,
+  invalidateCacheFn = invalidateAndRefreshProvidersCache,
   registryExtra = {},
 }) {
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);

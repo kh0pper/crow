@@ -207,10 +207,22 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
 
   // --- Catalog -------------------------------------------------------------
 
-  router.get("/api/models/catalog", (req, res) => {
+  router.get("/api/models/catalog", async (req, res) => {
     try {
       const catalog = loadCatalogFn();
-      const probe = getCachedProbeFn();
+      // Fix (Item G, PR G-F, defect 3): the cache is only warmed by
+      // resolveNativeBinPath's own cold-cache fix (gpu-orchestrator.js) or
+      // an explicit POST /reprobe — neither of which a client that opens
+      // the catalog without ever starting/reprobing a model triggers. That
+      // left every quant's fitBadge permanently "unknown" for such a
+      // client. One-shot, same pattern as resolveNativeBinPath: reprobe
+      // only on a cold cache; reprobe() caches its own result, so every
+      // subsequent request in the process lifetime takes the cheap
+      // getCachedProbeFn() path again.
+      let probe = getCachedProbeFn();
+      if (!probe) {
+        probe = await reprobeFn({ modelsDir: resolveDir() });
+      }
       const state = loadStateFn(resolveDir());
       const models = (catalog.models || []).map((model) => {
         const regEntry = state.registry[model.id] || null;
@@ -567,10 +579,17 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       return res.status(404).json({ error: `${modelId} is not installed`, code: "NOT_INSTALLED" });
     }
     try {
-      const result = await maybeAcquireLocalProviderFn(modelId);
+      // Fix (Item G, PR G-F, defect 4): the 502 below used to swallow the
+      // underlying typed error (e.g. GLIBC_TOO_OLD) entirely — it reached
+      // only the gateway's own console.warn, never the caller. `onError`
+      // captures it (opt-in seam on maybeAcquireLocalProvider, see its
+      // doc) so it can ride along in the response body as `cause`.
+      let startError = null;
+      const result = await maybeAcquireLocalProviderFn(modelId, { onError: (err) => { startError = err; } });
       if (result === true) return res.json({ running: true });
       if (result === false) {
-        return res.status(502).json({ error: "Model failed to become ready in time", code: "START_FAILED" });
+        const cause = startError ? { code: startError.code || "UNKNOWN", message: startError.message } : null;
+        return res.status(502).json({ error: "Model failed to become ready in time", code: "START_FAILED", cause });
       }
       return res.status(409).json({
         error: `${modelId} is not a locally-orchestratable native provider`,

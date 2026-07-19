@@ -56,6 +56,7 @@ import {
   getStatusSnapshot,
   sweepStaleRuntimeTmp,
   STALE_RUNTIME_TMP_MAX_AGE_MS,
+  collectLddOutput,
 } from "../servers/gateway/models/runtime.js";
 import { acquireHostLock, lockPathFor, stealStaleLock } from "../servers/gateway/models/native-lock.js";
 import { startStubLlamaServer } from "./fixtures/stub-llama-server.mjs";
@@ -1088,6 +1089,143 @@ test("ensureRuntime rejects a resolveAsset failure before attempting any downloa
         return true;
       },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureRuntime — self-collected ldd output (Item G, PR G-F, blocker fix:
+// resolveNativeBinPath never passed opts.lddOutput, so every linux host hit
+// resolveAsset's fail-closed "undetectable == too old" branch and got
+// GLIBC_TOO_OLD unconditionally, even on hosts with a perfectly modern
+// glibc — see runtime.js's ensureRuntime doc, "glibc detection" section).
+// ---------------------------------------------------------------------------
+
+test("collectLddOutput: runs the injected execFileSyncImpl as `ldd --version`", () => {
+  let sawArgs = null;
+  const out = collectLddOutput((cmd, args, opts) => {
+    sawArgs = [cmd, args, opts];
+    return "ldd (GNU libc) 2.35\n";
+  });
+  assert.equal(out, "ldd (GNU libc) 2.35\n");
+  assert.equal(sawArgs[0], "ldd");
+  assert.deepEqual(sawArgs[1], ["--version"]);
+});
+
+test("ensureRuntime: undefined opts.lddOutput on a linux probe triggers self-collection, and the collected value picks the right asset", async () => {
+  await withScratch("ensure-ldd-collect", async (dir) => {
+    const buildDir = join(dir, "build");
+    mkdirSync(buildDir, { recursive: true });
+    const { bytes, sha256 } = makeRealTarball(buildDir);
+
+    const { srv, port } = await startFixtureServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/gzip" });
+      res.end(bytes);
+    });
+
+    // Only a cpu asset in this catalog block — accel:"cpu" below means
+    // resolveAsset never even attempts the (absent) vulkan key, so a
+    // successful resolve here proves the collected glibc satisfied the
+    // cpu asset's own min_glibc gate.
+    const runtimeBlock = {
+      release: "test-rel-ldd-collect",
+      assets: { "linux-x64-cpu": { file: "llama-runtime.tar.gz", sha256, min_glibc: "2.17" } },
+    };
+    const probe = { platform: "linux", wsl2: false, accel: "cpu" };
+
+    let execCalls = 0;
+    let sawArgs = null;
+
+    try {
+      const binPath = await ensureRuntime(join(dir, "crow-home"), runtimeBlock, probe, {
+        // lddOutput deliberately OMITTED — must be self-collected.
+        baseUrl: `http://github.com:${port}`,
+        insecureHttpHosts: ["github.com"],
+        lookup: forceGithubLookup(port),
+        chmodFn: () => {},
+        execFileSyncImpl: (cmd, args) => {
+          execCalls++;
+          sawArgs = [cmd, args];
+          return "ldd (GNU libc) 2.35\n";
+        },
+      });
+      assert.ok(existsSync(binPath), "resolved and installed a real asset with no injected lddOutput");
+      assert.equal(execCalls, 1, "the ldd collector ran exactly once");
+      assert.deepEqual(sawArgs, ["ldd", ["--version"]]);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+});
+
+test("ensureRuntime: a failing ldd collection is an honest GLIBC_UNKNOWN error, never the GLIBC_TOO_OLD lie", async () => {
+  await withScratch("ensure-ldd-collect-fail", async (dir) => {
+    const runtimeBlock = makeRuntimeBlock();
+    const probe = { platform: "linux", wsl2: false, accel: "cpu" };
+    await assert.rejects(
+      () => ensureRuntime(dir, runtimeBlock, probe, {
+        execFileSyncImpl: () => {
+          throw new Error("spawnSync ldd ENOENT");
+        },
+      }),
+      (err) => {
+        assert.ok(err instanceof RuntimeAssetError);
+        assert.equal(err.code, "GLIBC_UNKNOWN");
+        assert.notEqual(err.code, "GLIBC_TOO_OLD", "couldn't-ask must never be relabeled as asked-and-too-old");
+        assert.match(err.message, /ENOENT/);
+        return true;
+      },
+    );
+  });
+});
+
+test("ensureRuntime: an explicitly injected opts.lddOutput (even undefined-looking falsy values like null) wins outright — the collector never runs", async () => {
+  await withScratch("ensure-ldd-injected-wins", async (dir) => {
+    const buildDir = join(dir, "build");
+    mkdirSync(buildDir, { recursive: true });
+    const { bytes, sha256 } = makeRealTarball(buildDir);
+    const { srv, port } = await startFixtureServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/gzip" });
+      res.end(bytes);
+    });
+    const runtimeBlock = {
+      release: "test-rel-ldd-injected",
+      assets: { "linux-x64-cpu": { file: "llama-runtime.tar.gz", sha256, min_glibc: "2.17" } },
+    };
+    const probe = { platform: "linux", wsl2: false, accel: "cpu" };
+    let execCalls = 0;
+    try {
+      const binPath = await ensureRuntime(join(dir, "crow-home"), runtimeBlock, probe, {
+        lddOutput: "ldd (GNU libc) 2.35",
+        baseUrl: `http://github.com:${port}`,
+        insecureHttpHosts: ["github.com"],
+        lookup: forceGithubLookup(port),
+        chmodFn: () => {},
+        execFileSyncImpl: () => {
+          execCalls++;
+          return "ldd (GNU libc) 2.35";
+        },
+      });
+      assert.ok(existsSync(binPath));
+      assert.equal(execCalls, 0, "the collector must never run when lddOutput is explicitly injected");
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+
+    // A null lddOutput (resolveAsset's own "explicitly unknown" test case)
+    // is still NOT `undefined` — collection must not fire for it either.
+    let nullExecCalls = 0;
+    await assert.rejects(
+      () => ensureRuntime(dir, runtimeBlock, probe, {
+        lddOutput: null,
+        execFileSyncImpl: () => { nullExecCalls++; return "ldd (GNU libc) 2.35"; },
+      }),
+      (err) => {
+        assert.ok(err instanceof RuntimeAssetError);
+        assert.equal(err.code, "GLIBC_TOO_OLD", "null lddOutput still resolves via resolveAsset's own fail-closed path");
+        return true;
+      },
+    );
+    assert.equal(nullExecCalls, 0, "an explicit null must not trigger collection either");
   });
 });
 
