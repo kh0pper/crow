@@ -593,6 +593,28 @@ export function messagesCSS() {
   }
   .msg-empty p { font-size: 0.85rem; }
 
+  /* === Suggested-prompt chips (empty AI conversation) === */
+  .msg-suggest-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.75rem 0.25rem;
+  }
+  .msg-suggest-chip {
+    font-size: 0.8rem;
+    background: var(--crow-bg-elevated, #2d2d3d);
+    border: 1px solid var(--crow-border);
+    border-radius: var(--crow-radius-pill, 999px);
+    color: var(--crow-text-secondary, var(--crow-text-muted));
+    cursor: pointer;
+    padding: 0.4rem 0.85rem;
+    transition: background 0.15s, color 0.15s;
+  }
+  .msg-suggest-chip:hover {
+    background: var(--crow-accent-muted, #1e293b);
+    color: var(--crow-accent);
+  }
+
   /* === New Contact Popover === */
   .msg-popover {
     display: none;

@@ -186,6 +186,27 @@ export function messagesClientJS(opts) {
         function () { return !!document.getElementById('msg-viewport'); }
       );
     }
+    var aiId = params.get('ai');
+    if (aiId && /^\\d+$/.test(aiId)) {
+      fireOpen(
+        function () {
+          // a wiped render leaves stale _activeItem → reset so the retry re-renders
+          if (_activeItem && !document.getElementById('msg-viewport')) _activeItem = null;
+          msgSelectItem('ai', parseInt(aiId, 10));
+        },
+        function () {
+          // Piggyback the composer focus on the same isDone check that
+          // stops the retry loop — it only fires once, right when the
+          // conversation actually renders.
+          var ready = !!document.getElementById('msg-viewport');
+          if (ready) {
+            var composer = document.getElementById('msg-input');
+            if (composer) composer.focus();
+          }
+          return ready;
+        }
+      );
+    }
     if (params.get('connected') === '1') {
       // COUPLING NOTE (R2-M2): this lives inside the window-level
       // __msgOpenHookBound once-guard, which only re-arms on a full page load.
@@ -511,6 +532,12 @@ export function messagesClientJS(opts) {
     _pendingAttachments = [];
     renderAttachmentPreview();
 
+    // First send on a fresh conversation: drop the suggestion chips — they
+    // only make sense before any message exists, and sendAiMessage never
+    // reloads the conversation from the server, so nothing else clears them.
+    var suggestChips = document.querySelector('.msg-suggest-chips');
+    if (suggestChips) suggestChips.remove();
+
     // Add user message bubble
     appendBubble(viewport, { role: 'user', content: content || '(attachment)', attachments: atts.length > 0 ? atts : null });
     viewport.scrollTop = viewport.scrollHeight;
@@ -589,6 +616,17 @@ export function messagesClientJS(opts) {
               model_id: eventData.model_id || null,
               reason: eventData.reason || null,
             };
+          }
+
+          if (currentEventType === 'provider_warming') {
+            // Server sends a translated message field only for native
+            // providers (a first-time native warm can read a multi-GB GGUF
+            // off disk and take minutes — worth narrating). Docker/cloud
+            // providers send no message; fall back to the generic thinking copy.
+            if (typing.parentNode) {
+              typing.textContent = (eventData.message || '${tJs("messages.thinking", lang)}') + ' ';
+              typing.appendChild(cancelBtn);
+            }
           }
 
           if (currentEventType === 'content') {
@@ -1049,6 +1087,27 @@ export function messagesClientJS(opts) {
     var viewport = el('div', { className: 'msg-chat-viewport', id: 'msg-viewport' });
     for (var i = 0; i < msgs.length; i++) {
       appendBubble(viewport, msgs[i]);
+    }
+    if (headerData.type === 'ai' && msgs.length === 0) {
+      var chipsWrap = el('div', { className: 'msg-suggest-chips' });
+      var chipTexts = [
+        '${tJs("messages.suggest1", lang)}',
+        '${tJs("messages.suggest2", lang)}',
+        '${tJs("messages.suggest3", lang)}',
+      ];
+      chipTexts.forEach(function (chipText) {
+        chipsWrap.appendChild(el('button', {
+          className: 'msg-suggest-chip',
+          type: 'button',
+          text: chipText,
+          onclick: function () {
+            var composer = document.getElementById('msg-input');
+            if (composer) composer.value = chipText;
+            sendCurrentMessage();
+          },
+        }));
+      });
+      viewport.appendChild(chipsWrap);
     }
     container.appendChild(viewport);
 
