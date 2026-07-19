@@ -76,7 +76,7 @@ import {
 import { resolveDataDir } from "../db.js";
 import { loadState } from "./models/state.js";
 import { acquireHostLock } from "./models/native-lock.js";
-import { identityProbe, startModel, stopModel, ensureRuntime } from "./models/runtime.js";
+import { identityProbe, startModel, stopModel, ensureRuntime, nativeReadinessTimeoutMs } from "./models/runtime.js";
 import { getCachedProbe } from "./models/probe.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -409,6 +409,18 @@ export async function maybeAcquireLocalProvider(providerName, opts = {}) {
 }
 
 /**
+ * Is `providerName` a native (llama.cpp/gateway-supervised) runtime — as
+ * opposed to a Docker-bundle provider or a cloud/peer provider? PURE,
+ * no I/O. Callers (chat.js) use this ONLY to pick user-facing copy for a
+ * `maybeAcquireLocalProvider` failure — never to gate whether to acquire at
+ * all (that decision belongs to `acquireProvider`/`maybeAcquireLocalProvider`
+ * themselves). Unknown provider name -> false (never throws).
+ */
+export function isNativeRuntimeProvider(providerName, cfg = loadProviders()) {
+  return isNativeRuntime(getProvider(providerName, cfg));
+}
+
+/**
  * Map a provider NAME to the bundle-backed provider that should be warmed for it.
  * PURE (takes the loaded providers cfg). Some providers are bundle-less raw-endpoint
  * aliases that share a baseUrl with a bundled provider — e.g. pi resolves to
@@ -531,6 +543,19 @@ async function waitForNativeReady(baseUrl, alias, {
  * and isn't queued behind `_swapInFlight`, so there's nothing to protect
  * it from). `opts.onTerminal`, if given, is forwarded verbatim to
  * `startModelFn` — see `runtime.js`'s `startModel` doc.
+ *
+ * Readiness timeout (Item G, Task 10): `opts.readinessTimeoutMs`, if given,
+ * wins outright (tests use this to keep the timeout window short). Absent
+ * that, the timeout is SCALED to the model's actual size via
+ * `runtime.js`'s `nativeReadinessTimeoutMs(regEntry.sizeMb, opts.storageClass)`
+ * — a multi-GB quant honestly gets longer to become ready than the old flat
+ * `READINESS_TIMEOUT_MS` gave every native model regardless of size. An
+ * older registry entry with no recorded `sizeMb` (registered before this
+ * field existed) degrades to that function's `120_000`ms floor, not a
+ * crash. `opts.storageClass` defaults to `"ssd"` — see `runtime.js`'s doc
+ * for why this is an honest injectable override, not real detection.
+ * `opts.nativeReadinessTimeoutMsFn` overrides the formula function itself
+ * (test seam only).
  */
 async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   const {
@@ -542,9 +567,11 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
     spawnFn,
     onTerminal,
     binPath: preResolvedBinPath,
-    readinessTimeoutMs = READINESS_TIMEOUT_MS,
+    readinessTimeoutMs: readinessTimeoutMsOverride,
     readinessPollMs = READINESS_POLL_MS,
     readinessInitialDelayMs = READINESS_INITIAL_DELAY_MS,
+    storageClass = "ssd",
+    nativeReadinessTimeoutMsFn = nativeReadinessTimeoutMs,
   } = opts;
 
   const alias = nativeAlias(p);
@@ -560,9 +587,13 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   }
   const ggufPath = join(dir, "models", "blobs", regEntry.file);
 
+  const readinessTimeoutMs = readinessTimeoutMsOverride != null
+    ? readinessTimeoutMsOverride
+    : nativeReadinessTimeoutMsFn(regEntry.sizeMb, storageClass);
+
   const binPath = preResolvedBinPath || await resolveNativeBinPath(p, opts);
 
-  console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port})`);
+  console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port}, readinessTimeoutMs=${readinessTimeoutMs})`);
   const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn, onTerminal });
   _nativeHandles.set(providerName, handle);
 

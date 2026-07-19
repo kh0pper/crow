@@ -28,11 +28,13 @@ import {
   maybeAcquireLocalProvider,
   resolveWarmableProviderName,
   ensureResident,
+  isNativeRuntimeProvider,
   NativePortConflictError,
   NativeHostLockHeldError,
   _setNativeHandleForTest,
 } from "../servers/gateway/gpu-orchestrator.js";
 import { _resetProviderHealth, getProviderHealth } from "../servers/gateway/provider-health.js";
+import { nativeReadinessTimeoutMs } from "../servers/gateway/models/runtime.js";
 
 // --- fixtures ------------------------------------------------------------
 
@@ -400,4 +402,93 @@ test("ensureResident native: no live handle -> starts it and reports embed capab
 
   assert.equal(result, true, "started fresh AND is embed-capable -> caller should trigger backfill");
   assert.ok(probeCalls >= 1);
+});
+
+// --- Item G, Task 10: size-scaled readiness timeout -------------------------
+
+test("nativeReadinessTimeoutMs: boundaries — 0 MB floors at 120s, 2500 MB SSD is 140s, 17000 MB HDD is 800s", () => {
+  assert.equal(nativeReadinessTimeoutMs(0), 120_000, "0 MB (or unknown size) never goes below the base floor");
+  assert.equal(nativeReadinessTimeoutMs(2500, "ssd"), 140_000, "120_000 + 2500*8 = 140_000");
+  assert.equal(nativeReadinessTimeoutMs(17000, "hdd"), 800_000, "120_000 + 17000*40 = 800_000");
+});
+
+test("nativeReadinessTimeoutMs: defaults to ssd's per-MB rate when storageClass is omitted", () => {
+  assert.equal(nativeReadinessTimeoutMs(2500), nativeReadinessTimeoutMs(2500, "ssd"));
+});
+
+test("nativeReadinessTimeoutMs: a non-finite/negative size degrades to the bare floor, never throws or goes negative", () => {
+  assert.equal(nativeReadinessTimeoutMs(undefined), 120_000);
+  assert.equal(nativeReadinessTimeoutMs(null), 120_000);
+  assert.equal(nativeReadinessTimeoutMs(NaN), 120_000);
+  assert.equal(nativeReadinessTimeoutMs(-500), 120_000);
+});
+
+test("acquire native: with no readinessTimeoutMs override, the timeout is computed from the registry entry's sizeMb via nativeReadinessTimeoutMs — not the old flat default", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18113, "qwen3-4b") } };
+  const calls = [];
+  // Tiny stand-in formula so the test doesn't actually wait real minutes —
+  // proves WHAT gets passed in (sizeMb, storageClass), not the real
+  // production timeout value (that's covered by the boundary tests above).
+  const nativeReadinessTimeoutMsFn = (sizeMb, storageClass) => {
+    calls.push({ sizeMb, storageClass });
+    return 200; // ms — plenty for the stubbed identity-probe below
+  };
+  let probeCalls = 0;
+  const identityProbeFn = async () => {
+    probeCalls += 1;
+    // 1st call: acquireOrStartNative's fast-path check (nothing running
+    // yet). 2nd+: the post-start readiness wait — "resident" immediately.
+    return probeCalls === 1 ? "down" : "resident";
+  };
+
+  const result = await acquireProvider("native-target", {
+    ...startCapableOpts({ cfg, identityProbeFn }),
+    // Override the fixture's flat `readinessTimeoutMs: 200` from
+    // startCapableOpts — this test is specifically about what happens when
+    // NO override is supplied, so the formula path is exercised instead.
+    readinessTimeoutMs: undefined,
+    nativeReadinessTimeoutMsFn,
+    loadStateFn: () => ({ registry: { "native-target": { file: "model.gguf", sizeMb: 4321 } } }),
+  });
+
+  assert.equal(result, true);
+  assert.deepEqual(calls, [{ sizeMb: 4321, storageClass: "ssd" }], "the registry entry's sizeMb and the default ssd storageClass were threaded into the formula");
+});
+
+test("acquire native: an explicit readinessTimeoutMs override still wins outright (existing test fixtures keep working)", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18114, "qwen3-4b") } };
+  let formulaCalls = 0;
+  const nativeReadinessTimeoutMsFn = () => {
+    formulaCalls += 1;
+    return 999_999;
+  };
+  let probeCalls = 0;
+  const identityProbeFn = async () => {
+    probeCalls += 1;
+    return probeCalls === 1 ? "down" : "resident";
+  };
+
+  const result = await acquireProvider("native-target", {
+    ...startCapableOpts({ cfg, identityProbeFn }),
+    nativeReadinessTimeoutMsFn,
+    // startCapableOpts already sets readinessTimeoutMs: 200 — an explicit
+    // override — so the formula must never even be called.
+  });
+
+  assert.equal(result, true);
+  assert.equal(formulaCalls, 0, "an explicit readinessTimeoutMs override bypasses the formula entirely");
+});
+
+// --- Item G, Task 10: isNativeRuntimeProvider (chat.js copy-selection seam) -
+
+test("isNativeRuntimeProvider: true for a native provider, false for a Docker provider, false for an unknown name", () => {
+  const cfg = {
+    providers: {
+      "native-target": nativeProv(18115, "qwen3-4b"),
+      "docker-target": dockerProv("http://127.0.0.1:8003/v1", "vllm-rocm-qwen35-4b"),
+    },
+  };
+  assert.equal(isNativeRuntimeProvider("native-target", cfg), true);
+  assert.equal(isNativeRuntimeProvider("docker-target", cfg), false);
+  assert.equal(isNativeRuntimeProvider("does-not-exist", cfg), false);
 });
