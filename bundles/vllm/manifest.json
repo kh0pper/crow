@@ -83,5 +83,6 @@
     "path": "/docs",
     "label": "vLLM API docs"
   },
+  "no_auto_provider": "VLLM_MODEL is a required install-time env var with no default (docker-compose.yml: `--model=${VLLM_MODEL:?Set VLLM_MODEL}`) -- the served model is whatever HuggingFace id the installer types in, so there is no fixed model id this manifest can register at build time. Manifest providers[] has no mechanism to read a resolved env var into a model id (registerProviderFromManifest only substitutes {host_ip}/{port}). After install, add the provider manually via Settings -> LLM -> Providers, pointing baseUrl at http://<host>:${VLLM_HTTP_PORT:-8089}/v1 with the same value used for VLLM_MODEL as the model id (vLLM serves it under --served-model-name=${VLLM_MODEL}).",
   "notes": "Linux x86_64 + NVIDIA GPU required. Recommended classroom shape: Qwen2.5-3B-Instruct at VLLM_MAX_NUM_SEQS=16 on a 16 GB consumer GPU (tested in the Maker Lab Phase 0 benchmark, see bundles/maker-lab/PHASE-0-REPORT.md Spike 5). vLLM's OpenAI-compatible endpoint drops into Maker Lab's MAKER_LAB_LLM_ENDPOINT as-is."
 }
