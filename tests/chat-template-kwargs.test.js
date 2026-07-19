@@ -193,6 +193,31 @@ test("resolveProviderConfig heals a pre-Task-1 native row (no chatTemplateKwargs
   assert.deepEqual(cfg.chatTemplateKwargs, { enable_thinking: false });
 });
 
+test("healing fallback does NOT apply to non-native gpu_policy rows (docker runtime at a catalog-colliding id)", async () => {
+  // Regression guard: a provider at catalog-colliding id (qwen3-4b) with a
+  // truthy gpuPolicy but non-native runtime (docker) must NOT fall back to
+  // the catalog entry's chat_template_kwargs. The healing fallback is
+  // native-only — docker/cloud runtime providers are admin-managed and should
+  // be treated as "already configured" even if the models[] entry lacks the
+  // field.
+  //
+  // Note: we upsert AFTER the native healing-fallback test, so this replaces
+  // the native provider row at id "qwen3-4b" with a docker one.
+  await upsertProvider(db, {
+    id: "qwen3-4b",
+    baseUrl: "http://127.0.0.1:9413/v1",
+    host: "local",
+    bundleId: null,
+    description: "test",
+    models: [{ id: "qwen3-4b" }],
+    disabled: false,
+    providerType: null,
+    gpuPolicy: { runtime: "docker", imageName: "some-image" },
+  });
+  const cfg = await resolveProviderConfig(db, "qwen3-4b", "qwen3-4b");
+  assert.equal(cfg.chatTemplateKwargs, undefined);
+});
+
 // --- chatStreamOptionsFor: pure helper -------------------------------------
 
 test("chatStreamOptionsFor threads chatTemplateKwargs when present", () => {
