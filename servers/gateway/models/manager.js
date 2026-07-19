@@ -1226,7 +1226,14 @@ export async function registerModel({
   // embedding servers don't contend for the chat mutex group.
 
   const baseUrl = `http://127.0.0.1:${port}/v1`;
-  const models = [{ id: model.id, task: model.task, contextLen: model.context_len }];
+  const models = [{
+    id: model.id,
+    task: model.task,
+    contextLen: model.context_len,
+    ...(model.chat_template_kwargs && typeof model.chat_template_kwargs === "object"
+      ? { chatTemplateKwargs: model.chat_template_kwargs }
+      : {}),
+  }];
   const description = `${model.family} ${quantEntry.quant} (native)`;
 
   const upserted = await upsertProviderFn(db, {
