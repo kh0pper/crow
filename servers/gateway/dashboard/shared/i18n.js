@@ -357,6 +357,10 @@ export const translations = {
   "messages.acceptRequest": { en: "Accept", es: "Aceptar" },
   "messages.declineRequest": { en: "Decline", es: "Rechazar" },
 
+  // ─── Chat — native model runtime (Item G, Task 10) ───
+  "chat.native_model_loading": { en: "Loading local model \"{provider}\" — this can take a few minutes for larger models.", es: "Cargando el modelo local \"{provider}\" — esto puede tardar varios minutos en modelos más grandes." },
+  "chat.native_model_load_failed": { en: "The local model \"{provider}\" didn't load in time. Check the gateway logs for details.", es: "El modelo local \"{provider}\" no cargó a tiempo. Consulta los registros del gateway para más detalles." },
+
   // ─── Peer invite share (Messages Phase 2 PR1) ───
   "invite.shareLabel": { en: "Share this link", es: "Comparte este enlace" },
   "invite.shareHint": {

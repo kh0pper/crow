@@ -203,7 +203,18 @@ async function handleChat(req, res) {
 
   // Warm before forward (N3): bring up a cold / swapped-out local provider (e.g.
   // the on-demand 35B) before forwarding. No-op for non-local / no-bundle
-  // providers; never throws.
+  // providers; never throws. Native (llama.cpp, gateway-supervised) providers
+  // warm through this EXACT SAME call as chat.js's SSE route — Item G, Task 10
+  // needed no change here: `maybeAcquireLocalProvider` already branches into
+  // the native acquire path (proven by
+  // tests/gpu-orchestrator-native.test.js's "maybeAcquireLocalProvider does
+  // not early-out on a native provider's null bundleId"). What this route
+  // does NOT have is chat.js's `provider_warming`/`error` SSE events — this
+  // is a raw OpenAI-compat proxy for the companion/glasses LLM loop, which
+  // forwards the upstream body verbatim and never authors its own SSE
+  // frames, so there is no event channel to put a "warming" notice on. The
+  // companion sees a warm-up simply as this await taking longer, same as
+  // before this task.
   const [providerId] = splitKey(key);
   await maybeAcquireLocalProvider(providerId);
 

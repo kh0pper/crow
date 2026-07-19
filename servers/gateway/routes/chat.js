@@ -29,6 +29,8 @@ import { chooseProvider as smartRoute, stripSlashCommand, SmartChatDisabled } fr
 import { fixedWindowLimit } from "../middleware/rate-limit.js";
 import { recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
+import { parseCookies } from "../dashboard/auth.js";
+import { t, fill, SUPPORTED_LANGS } from "../dashboard/shared/i18n.js";
 
 /** Sliding window: max messages to send to AI */
 const CONTEXT_WINDOW = 20;
@@ -38,6 +40,46 @@ const activeGenerations = new Map();
 
 /** Rate limiter: 10 messages / 60s, keyed by req.ip (legacy key name: sessionToken) */
 const messageRateLimit = fixedWindowLimit({ max: 10, windowMs: 60 * 1000 });
+
+/**
+ * `provider_warming` SSE payload for a warm attempt (Item G, Task 10).
+ * Pure — exported so the native-vs-Docker copy split is unit-testable
+ * without standing up the whole SSE route (DB, adapter resolution, etc.).
+ * Docker/cloud path is UNCHANGED — no `message` field, exactly as before
+ * this task (the Docker warm is normally fast enough that the UI never
+ * needed narration). Native gets a translated `message` because a
+ * first-time native warm reads a multi-GB GGUF off disk and can take
+ * minutes — long enough that a bare "warming" pill with no explanation
+ * reads as a hang.
+ */
+export function nativeWarmingEvent(providerName, isNative, lang) {
+  if (!isNative) return { provider_id: providerName };
+  return {
+    provider_id: providerName,
+    message: fill(t("chat.native_model_loading", lang), { provider: providerName }),
+  };
+}
+
+/**
+ * `error` SSE payload when `maybeAcquireLocalProvider` reports a timeout
+ * (`warmed === false`). Pure — same testability rationale as
+ * `nativeWarmingEvent`. The Docker-bundle hint ("docker compose logs") is
+ * UNCHANGED for non-native providers; a native provider has no compose
+ * file, so it must NEVER see that hint — it gets the new, real-i18n
+ * `chat.native_model_load_failed` copy and a distinct `code` instead.
+ */
+export function providerNotReadyError(providerName, isNative, lang) {
+  if (isNative) {
+    return {
+      message: fill(t("chat.native_model_load_failed", lang), { provider: providerName }),
+      code: "native_provider_not_ready",
+    };
+  }
+  return {
+    message: `Local provider "${providerName}" did not become ready in time. Check "docker compose logs" for its bundle.`,
+    code: "provider_not_ready",
+  };
+}
 
 export default function chatRouter(dashboardAuth) {
   const router = Router();
@@ -408,6 +450,15 @@ export default function chatRouter(dashboardAuth) {
       return res.status(429).json({ error: "Rate limited — max 10 messages per minute" });
     }
 
+    // Dashboard's language cookie — same convention `dashboard/index.js`
+    // uses for every server-rendered/translated string (see its many
+    // `SUPPORTED_LANGS.includes(cookies.crow_lang)` call sites). Used below
+    // ONLY for the native-runtime warming/failure copy (Item G, Task 10) —
+    // every other message on this route predates i18n and stays plain
+    // English, unchanged.
+    const cookies = parseCookies(req);
+    const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
+
     const db = createDbClient();
     const toolExecutor = createToolExecutor();
 
@@ -592,18 +643,17 @@ export default function chatRouter(dashboardAuth) {
         return;
       }
 
-      // Warm up on-demand local bundles (vLLM / llama.cpp swap groups).
-      // Fast path if already resident; returns null for cloud + peer-hosted
-      // providers (no-op). Swap-siblings on the same port are stopped first.
+      // Warm up on-demand local bundles (vLLM / llama.cpp swap groups) OR a
+      // native (llama.cpp, gateway-supervised) model process. Fast path if
+      // already resident; returns null for cloud + peer-hosted providers
+      // (no-op). Swap-siblings on the same port are stopped first.
       try {
-        const { maybeAcquireLocalProvider } = await import("../gpu-orchestrator.js");
-        sendEvent("provider_warming", { provider_id: effectiveProvider });
+        const { maybeAcquireLocalProvider, isNativeRuntimeProvider } = await import("../gpu-orchestrator.js");
+        const isNative = isNativeRuntimeProvider(effectiveProvider);
+        sendEvent("provider_warming", nativeWarmingEvent(effectiveProvider, isNative, lang));
         const warmed = await maybeAcquireLocalProvider(effectiveProvider);
         if (warmed === false) {
-          sendEvent("error", {
-            message: `Local provider "${effectiveProvider}" did not become ready in time. Check "docker compose logs" for its bundle.`,
-            code: "provider_not_ready",
-          });
+          sendEvent("error", providerNotReadyError(effectiveProvider, isNative, lang));
           closeStream();
           return;
         }
