@@ -25,7 +25,7 @@ import { CLOUD_PRESETS } from "./onboarding/cloud-presets.js";
 import { aiStepClientJS } from "./onboarding/ai-step-client.js";
 import { upsertProvider } from "../../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../../shared/providers.js";
-import { seedStarterMemories, createStarterArtifacts } from "./onboarding/starter-content.js";
+import { seedStarterMemories, createStarterArtifacts, resolveStarterProvider } from "./onboarding/starter-content.js";
 
 /** Exported so tests derive step positions (indexOf/length) instead of pinning indices. */
 export const STEP_KEYS = ["welcome", "ai", "integrations", "bot", "starter", "connect", "meet", "done"];
@@ -343,6 +343,20 @@ const CLOUD_ERROR_KEYS = {
   save_failed: "onboarding.ai.cloudErrSaveFailed",
 };
 
+/**
+ * The meet step's `?err=` closed enum (same discipline as CLOUD_ERROR_KEYS
+ * above): `no_provider` is reserved strictly for handleMeetPost's
+ * `{error:"no_provider"}` result (createStarterArtifacts found nothing
+ * usable at POST time); `setup_failed` (review fix round 1, Task 8) is
+ * every OTHER exception the POST handler catches — a distinct, generic,
+ * honest message rather than mislabeling an arbitrary failure as "no
+ * provider available". An unrecognized code renders no callout.
+ */
+const MEET_ERROR_KEYS = {
+  no_provider: "onboarding.meet.err",
+  setup_failed: "onboarding.meet.errGeneric",
+};
+
 function renderAiOptions(lang, ctx = {}) {
   const req = ctx.req || null;
   const cloudOk = !!(req && req.query && req.query.cloud === "ok");
@@ -600,11 +614,15 @@ async function stampOnboardingCompleted(db) {
  *
  * `createStarterArtifactsFn` returning `{error:"no_provider"}` is the one
  * failure mode the spec defines (a race between the GET, which hides the
- * form once the provider count is 0, and the POST — e.g. two open tabs);
- * any other unexpected failure redirects the same way rather than 500ing,
- * mirroring the other two handlers' catch-and-redirect discipline. Never
- * logs anything beyond `err.message` — there is no request-body secret here,
- * but the pattern is kept consistent with identity-backup/cloud-provider.
+ * form once resolveStarterProvider() finds nothing usable, and the POST —
+ * e.g. two open tabs); it is the ONLY path that carries `err=no_provider`.
+ * Review fix round 1 (Task 8): any other unexpected failure — a throw from
+ * either seam, a bad db, anything not explicitly the no_provider result —
+ * redirects with `err=setup_failed` instead, a generic honest message
+ * rather than mislabeling an arbitrary exception as "no AI provider
+ * available" (which may simply be false). Never logs anything beyond
+ * `err.message` — there is no request-body secret here, but the pattern is
+ * kept consistent with identity-backup/cloud-provider.
  */
 export async function handleMeetPost(req, res, opts = {}) {
   const {
@@ -626,7 +644,7 @@ export async function handleMeetPost(req, res, opts = {}) {
     return res.redirectAfterPost(`/dashboard/messages?ai=${result.conversationId}`);
   } catch (err) {
     console.error("[onboarding] meet-your-crow setup failed:", err.message); // message only
-    return back("no_provider");
+    return back("setup_failed");
   }
 }
 
@@ -649,11 +667,35 @@ async function countProviders(db) {
 }
 
 /**
+ * Resolve the starter provider for the meet step's render gate, honestly
+ * folding a throw to null. Review fix round 1 (Task 8): the meet step must
+ * render the SAME empty state (no form, advice-shaped callout) whether
+ * resolveStarterProvider() legitimately found nothing usable or blew up —
+ * neither case may crash the wizard, and the copy shown must not assert a
+ * specific cause that could be false in the throw case.
+ * `resolveFn` is an injectable seam (tests), defaulting to the real
+ * starter-content.js export.
+ * @param {object|null} db
+ * @param {Function} resolveFn
+ * @returns {Promise<{providerId: string, modelId: string}|null>}
+ */
+async function safeResolveStarterProvider(db, resolveFn) {
+  if (!db) return null;
+  try {
+    return await resolveFn(db);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * @param {string} stem - STEP_KEYS entry
  * @param {string} lang
- * @param {{providersCount?: number|null, crowId?: string|null, req?: object}} [ctx]
- *   - server-fetched data the step body needs (ai: providersCount; done:
- *     crowId + req for the backup form); handler-populated so this stays sync.
+ * @param {{providersCount?: number|null, starterProvider?: {providerId: string, modelId: string}|null, crowId?: string|null, req?: object}} [ctx]
+ *   - server-fetched data the step body needs (ai: providersCount; meet:
+ *     starterProvider — resolveStarterProvider()'s result, null when there
+ *     is nothing usable or the resolve threw; done: crowId + req for the
+ *     backup form); handler-populated so this stays sync.
  */
 function renderStepBody(stem, lang, ctx = {}) {
   const body = `<p style="font-size:var(--crow-text-base);line-height:var(--crow-leading-relaxed);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-4)">${t(`onboarding.${stem}.body`, lang)}</p>`;
@@ -685,18 +727,26 @@ function renderStepBody(stem, lang, ctx = {}) {
       return body + callout(t("onboarding.connectNote", lang), "info")
         + linkWrap(deepLink(t("onboarding.openConnections", lang), "/dashboard/connect"));
     case "meet": {
-      // Task 8: seeds the starter agent + example memories, then opens the
-      // first chat. Gated the same way as the ai step's count-dependent
-      // copy (ctx.providersCount, fetched by the handler below) — n === 0
-      // hides the CTA entirely rather than letting a doomed POST 302 back
-      // here; n === null (no db / query failed) renders the form optimistically,
-      // same "no false claims either way" discipline as the ai step.
-      const n = ctx.providersCount;
+      // Review fix round 1 (Task 8): gates on the SAME question the POST
+      // handler actually answers — "is there a usable starter provider?"
+      // (resolveStarterProvider(db), fetched by the handler below into
+      // ctx.starterProvider) — rather than providersCount, which counts any
+      // enabled providers row including empty-models[] placeholders (e.g.
+      // no_auto_provider) that resolveStarterProvider treats as unusable.
+      // Gating on the wrong signal let a doomed POST through: live CTA
+      // renders, POST fires, createStarterArtifacts finds nothing usable,
+      // bounces err=no_provider after a wasted seed write. A falsy
+      // starterProvider (including a resolve() throw, which the handler
+      // below folds to null) hides the CTA and shows the same honest
+      // empty-state callout — see onboarding.meet.noProvider's softened,
+      // advice-shaped copy for why it must not assert a specific cause.
+      const starterProvider = ctx.starterProvider;
       const req = ctx.req || null;
       const errParam = req && req.query ? req.query.err : null;
-      const errorHtml = errParam === "no_provider" ? callout(t("onboarding.meet.err", lang), "error") : "";
+      const errorKey = MEET_ERROR_KEYS[errParam] || null;
+      const errorHtml = errorKey ? callout(t(errorKey, lang), "error") : "";
       const aiIdx = STEP_KEYS.indexOf("ai");
-      if (n === 0) {
+      if (!starterProvider) {
         return body + errorHtml
           + callout(t("onboarding.meet.noProvider", lang), "info")
           + linkWrap(button(t("onboarding.ai.title", lang), { variant: "secondary", href: `/dashboard/onboarding?step=${aiIdx}` }));
@@ -756,7 +806,7 @@ export default {
   category: "tools",
   hidden: true,              // reachable by URL + first-run redirect, not in the sidebar
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, resolveStarterProviderFn = resolveStarterProvider }) {
     // Cookie-first: the dispatcher-provided context lang derives from the DB
     // "language" setting, which defaults to "en" for a brand-new user who has
     // not saved a preference yet. resolveLang() reads the crow_lang cookie set
@@ -773,14 +823,21 @@ export default {
     // W3-3: Reaching the "done" step marks onboarding complete (first time only).
     if (stem === "done") await stampOnboardingCompleted(db);
 
-    // The ai and meet steps' copy is conditional on whether any provider is
-    // configured; fetch the count server-side only when one of those steps
-    // (or "done", for its dormant-features callout) is the one rendering.
-    // The done step also needs the instance crowId (nullable) + req for the
-    // backup form (csrf token, backup_error query); the meet step needs req
-    // for its csrf token + ?err= query.
+    // The ai step's copy and the done step's dormant callout are conditional
+    // on whether ANY provider is configured (providersCount); the meet step
+    // gates on a narrower, different question — is there a provider the
+    // starter agent can actually USE (resolveStarterProvider(db), review fix
+    // round 1 Task 8) — since a provider row can be enabled with an empty
+    // models[] (e.g. a no_auto_provider placeholder) and still count as
+    // "configured". `resolveStarterProviderFn` is an injectable seam
+    // (tests), defaulting to the real starter-content.js export; wrapped in
+    // safeResolveStarterProvider so a throw is folded to null (honest empty
+    // state) instead of crashing the wizard. The done step also needs the
+    // instance crowId (nullable) + req for the backup form (csrf token,
+    // backup_error query); the meet step needs req for its csrf token +
+    // ?err= query.
     const ctx = stem === "ai" ? { providersCount: await countProviders(db), req }
-      : stem === "meet" ? { providersCount: await countProviders(db), req }
+      : stem === "meet" ? { starterProvider: await safeResolveStarterProvider(db, resolveStarterProviderFn), req }
       : stem === "done" ? { crowId: readInstanceCrowId(), req, providersCount: await countProviders(db) }
       : {};
 

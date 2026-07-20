@@ -17,7 +17,7 @@ const ONBOARDING_KEYS = [
   "onboarding.connect.title", "onboarding.connect.body",
   "onboarding.connectNote", "onboarding.openConnections",
   "onboarding.meet.title", "onboarding.meet.body", "onboarding.meet.cta",
-  "onboarding.meet.noProvider", "onboarding.meet.err",
+  "onboarding.meet.noProvider", "onboarding.meet.err", "onboarding.meet.errGeneric",
   "onboarding.done.title", "onboarding.done.body", "onboarding.doneNote", "onboarding.doneDormant",
   "onboarding.btnNext", "onboarding.btnBack", "onboarding.btnSkip",
   "onboarding.btnGoDashboard", "onboarding.replayLink",

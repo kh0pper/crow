@@ -1791,13 +1791,24 @@ export const translations = {
     es: "Esto crea un agente inicial con algunos recuerdos de ejemplo ya cargados y luego abre tu primer chat con él — una forma rápida de ver lo que Crow puede hacer antes de crear el tuyo propio.",
   },
   "onboarding.meet.cta": { en: "Meet your Crow", es: "Conoce a tu Crow" },
+  // Review fix round 1 (Task 8): softened to advice-shaped wording — this
+  // renders both when there is genuinely no usable provider AND when
+  // resolveStarterProvider() threw (unknown state), so it must not assert a
+  // specific cause that could be false in the second case.
   "onboarding.meet.noProvider": {
-    en: "No AI provider is set up yet, so there's no one to chat with. Set one up first, then come back here.",
-    es: "Todavía no hay ningún proveedor de IA configurado, así que no hay con quién chatear. Configura uno primero y luego vuelve aquí.",
+    en: "We couldn't find a usable AI provider yet — set one up in the AI step, then come back.",
+    es: "Todavía no pudimos encontrar un proveedor de IA utilizable — configura uno en el paso de IA y luego vuelve.",
   },
   "onboarding.meet.err": {
     en: "Couldn't set up your starter agent — no AI provider is available right now. Set one up, then try again.",
     es: "No se pudo configurar tu agente inicial: no hay ningún proveedor de IA disponible en este momento. Configura uno y vuelve a intentarlo.",
+  },
+  // Review fix round 1 (Task 8): reserved for any failure OTHER than the
+  // {error:"no_provider"} result — a generic, honest message instead of
+  // mislabeling arbitrary exceptions as "no provider available".
+  "onboarding.meet.errGeneric": {
+    en: "Something went wrong while setting up your starter agent. Try again; if it keeps failing, check the gateway logs.",
+    es: "Ocurrió un error al configurar tu agente inicial. Inténtalo de nuevo; si el problema persiste, revisa los registros del gateway.",
   },
   "onboarding.done.title": { en: "You're all set", es: "Todo listo" },
   "onboarding.done.body": {
