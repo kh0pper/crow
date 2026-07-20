@@ -715,13 +715,20 @@ export function isExternalSendTool(name) {
 
 // Above this, a maxLength/minLength bound is advisory (validation, docs); llama.cpp's
 // native tool-calling compiles every advertised JSON-schema into a GBNF sampling
-// grammar, and a huge bounded-repetition count there is pure poison — it blows up the
+// grammar, and a bounded-repetition count there is pure poison — it blows up the
 // grammar compiler and hard-fails the WHOLE chat request (not just the one tool), e.g.
 // llama-server's "Failed to initialize samplers: failed to parse grammar" 400. Isolated
 // from Funkwhale's fw_upload_track (file_base64.maxLength: 200_000_000) — see C1
-// live-verification evidence. 4096 is generous for any real string bound; nothing sane
-// needs more, and this only strips the field, it never rejects the tool or the request.
-const SCHEMA_BOUND_LIMIT = 4096;
+// live-verification evidence.
+//
+// The limit is empirically calibrated, NOT a round "seems generous" guess: live-tested
+// a single string property's maxLength in isolation against the real deployed
+// llama-server build (b10068) — 1000 and 1800 succeeded, 1990 succeeded, 2000 and 4096
+// both reproduced the exact grammar-parse 400, independent of tool count, required-vs-
+// optional, or any other field on the schema. So a limit anywhere near 4096 does NOT
+// protect the request; 1024 is chosen with real margin under the observed ~1990-2000
+// cliff (and under any stricter ceiling a different llama.cpp build might have).
+const SCHEMA_BOUND_LIMIT = 1024;
 
 /**
  * Recursively walk a JSON-schema-shaped object/array and delete any `maxLength`/
