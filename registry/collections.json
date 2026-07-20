@@ -54,6 +54,13 @@
         { "id": "uptime-kuma", "kind": "deploys" },
         { "id": "data-dashboard", "kind": "builtin" }
       ]
+    },
+    {
+      "id": "agents",
+      "name": "Agents",
+      "description": "Run AI bots on email and chat — the bot engine plus everything Bot Builder needs to put an agent on a channel.",
+      "icon": "🤖",
+      "members": [ { "id": "bot-engine", "kind": "builtin" } ]
     }
   ]
 }
