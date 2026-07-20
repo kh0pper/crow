@@ -36,8 +36,8 @@ function providersDb(n) {
 
 // ── STEP_KEYS shape ──────────────────────────────────────────────────────────
 
-test("STEP_KEYS is exactly welcome,ai,integrations,bot,starter,connect,done in order", () => {
-  assert.deepEqual(STEP_KEYS, ["welcome", "ai", "integrations", "bot", "starter", "connect", "done"]);
+test("STEP_KEYS is exactly welcome,ai,integrations,bot,starter,connect,meet,done in order", () => {
+  assert.deepEqual(STEP_KEYS, ["welcome", "ai", "integrations", "bot", "starter", "connect", "meet", "done"]);
 });
 
 // ── ai step ──────────────────────────────────────────────────────────────────
@@ -114,6 +114,29 @@ test("new ai/starter onboarding keys resolve in en AND es", () => {
     "onboarding.aiEmptyNote", "onboarding.aiConfiguredNote", "onboarding.openProviders",
     "onboarding.starter.title", "onboarding.starter.body",
     "onboarding.starterMemberCount", "onboarding.openCollections",
+  ];
+  for (const k of KEYS) {
+    const entry = i18n.translations[k];
+    assert.ok(entry, `missing translations entry for ${k}`);
+    assert.ok(entry.en && entry.en.trim(), `missing/empty en value for ${k}`);
+    assert.ok(entry.es && entry.es.trim(), `missing/empty es value for ${k}`);
+  }
+});
+
+// Task 7: the AI step's three-choice rework — every new key it references.
+test("new ai-step three-choice onboarding.ai.* keys resolve in en AND es", () => {
+  const KEYS = [
+    "onboarding.ai.optionLocalTitle", "onboarding.ai.optionLocalDesc",
+    "onboarding.ai.optionCloudTitle", "onboarding.ai.optionCloudDesc",
+    "onboarding.ai.optionSkipTitle", "onboarding.ai.optionSkipDesc",
+    "onboarding.ai.localFits", "onboarding.ai.localUnknown", "onboarding.ai.localWontFit",
+    "onboarding.ai.localAlreadyInstalled",
+    "onboarding.ai.downloadStart", "onboarding.ai.downloadRetry", "onboarding.ai.downloadDone",
+    "onboarding.ai.downloadEta", "onboarding.ai.upsell",
+    "onboarding.ai.cloudProviderLabel", "onboarding.ai.cloudKeyLabel", "onboarding.ai.cloudModelLabel",
+    "onboarding.ai.cloudSubmit", "onboarding.ai.cloudAdded", "onboarding.ai.cloudFreeTiersBlurb",
+    "onboarding.ai.cloudDocsLinkLabel", "onboarding.ai.cloudBadPreset", "onboarding.ai.cloudKeyRequired",
+    "onboarding.ai.cloudSaveFailed", "onboarding.ai.sizeGb",
   ];
   for (const k of KEYS) {
     const entry = i18n.translations[k];
