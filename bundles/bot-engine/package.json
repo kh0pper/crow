@@ -1,0 +1,7 @@
+{
+  "name": "crow-bot-engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@earendil-works/pi-coding-agent": "0.74.2" }
+}

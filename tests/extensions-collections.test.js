@@ -14,9 +14,9 @@ const manifestOf = (id) =>
   JSON.parse(readFileSync(join(REPO, "bundles", id, "manifest.json"), "utf8"));
 const hasCompose = (id) => existsSync(join(REPO, "bundles", id, "docker-compose.yml"));
 
-test("loader returns the four collections with well-formed shape", () => {
+test("loader returns the five collections with well-formed shape", () => {
   const cols = loadCollections();
-  assert.deepEqual(cols.map((c) => c.id).sort(), ["development", "education", "home-server", "research"]);
+  assert.deepEqual(cols.map((c) => c.id).sort(), ["agents", "development", "education", "home-server", "research"]);
   for (const c of cols) {
     assert.ok(c.name && c.description && c.icon, `${c.id} missing display fields`);
     assert.ok(Array.isArray(c.members) && c.members.length > 0, `${c.id} has no members`);
