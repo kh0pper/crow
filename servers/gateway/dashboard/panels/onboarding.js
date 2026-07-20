@@ -9,7 +9,7 @@
  *   - Reaching the "done" step sets onboarding_completed_at (first time only)
  *   - Done step shows a subtle CSS-only celebration + "what to try" cards
  */
-import { stepper, section, callout, button, escapeHtml } from "../shared/components.js";
+import { stepper, section, callout, button, escapeHtml, docsUrl } from "../shared/components.js";
 import { t, SUPPORTED_LANGS } from "../shared/i18n.js";
 import { parseCookies } from "../auth.js";
 import { upsertSetting, readSetting } from "../settings/registry.js";
@@ -17,6 +17,10 @@ import { loadCollections } from "./extensions/collections.js";
 import { csrfInput } from "../shared/csrf.js";
 import { buildIdentityBackup, loadInstanceSeed, deriveInstanceIdentity } from "../../../sharing/identity.js";
 import { instanceSeedDir } from "../../../../scripts/pi-bots/instance-paths.mjs";
+import { CLOUD_PRESETS } from "./onboarding/cloud-presets.js";
+import { aiStepClientJS } from "./onboarding/ai-step-client.js";
+import { upsertProvider } from "../../../shared/providers-db.js";
+import { invalidateProvidersCache } from "../../../shared/providers.js";
 
 /** Exported so tests derive step positions (indexOf/length) instead of pinning indices. */
 export const STEP_KEYS = ["welcome", "ai", "integrations", "bot", "starter", "connect", "done"];
@@ -209,6 +213,195 @@ const CARD_CSS = `
 `;
 
 /**
+ * Three-choice AI-step CSS (Task 7): the option cards (radio + title + desc)
+ * and the local card's download/progress area. Scoped classnames, design
+ * tokens only — no fixed colors, matches every other panel's inline
+ * <style> block convention (CELEBRATION_CSS/CARD_CSS above).
+ */
+const AI_OPTIONS_CSS = `
+<style>
+.onb-ai-options {
+  display: grid;
+  gap: var(--crow-space-3);
+  margin-bottom: var(--crow-space-4);
+}
+.onb-ai-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--crow-space-3);
+  padding: var(--crow-space-3) var(--crow-space-4);
+  border: 1px solid var(--crow-border);
+  border-radius: 10px;
+  cursor: pointer;
+  background: var(--crow-bg-surface);
+}
+.onb-ai-option input[type="radio"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.onb-ai-option-title {
+  font-weight: 600;
+  font-size: var(--crow-text-sm);
+  color: var(--crow-text-primary);
+}
+.onb-ai-option-desc {
+  font-size: var(--crow-text-sm);
+  color: var(--crow-text-secondary);
+  margin-top: 2px;
+}
+.onb-ai-panel {
+  border: 1px solid var(--crow-border);
+  border-radius: 10px;
+  padding: var(--crow-space-4);
+  margin-bottom: var(--crow-space-4);
+  background: var(--crow-bg-surface);
+}
+.onb-ai-card > div {
+  margin-bottom: var(--crow-space-2);
+  font-size: var(--crow-text-sm);
+  color: var(--crow-text-secondary);
+}
+.onb-ai-card > div:first-child {
+  font-weight: 600;
+  color: var(--crow-text-primary);
+  font-size: var(--crow-text-base);
+}
+.onb-ai-field {
+  display: block;
+  font-size: var(--crow-text-sm);
+  color: var(--crow-text-secondary);
+  margin-bottom: var(--crow-space-3);
+}
+.onb-ai-field select,
+.onb-ai-field input {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  margin-top: 2px;
+  padding: 0.4rem 0.6rem;
+  background: var(--crow-bg-deep);
+  border: 1px solid var(--crow-border);
+  border-radius: 6px;
+  color: var(--crow-text-primary);
+}
+.onb-ai-free-blurb {
+  font-size: var(--crow-text-sm);
+  color: var(--crow-text-tertiary);
+  margin-bottom: var(--crow-space-3);
+}
+.onb-ai-progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--crow-bg-deep);
+  overflow: hidden;
+  margin-bottom: var(--crow-space-2);
+}
+.onb-ai-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--crow-accent);
+  transition: width 0.3s ease;
+}
+.onb-ai-status {
+  font-size: var(--crow-text-sm);
+  color: var(--crow-text-secondary);
+}
+.onb-ai-status--done {
+  color: var(--crow-success);
+  font-weight: 600;
+}
+</style>
+`;
+
+/**
+ * The onboarding AI step's three-choice layout (Task 7): local (default,
+ * in-wizard download), cloud (paste-a-key form), skip. Server renders
+ * labels + a skeleton local card only — `ai-step-client.js`'s script fills
+ * in every catalog-derived fact from its own client fetch (module doc for
+ * why: exactly one GET /api/models/catalog, no SSR probe duplication).
+ *
+ * `?cloud=ok` (set by handleCloudProviderPost's redirect) both shows the
+ * success callout AND pre-selects/reveals the cloud panel — a user who just
+ * added a provider should land back looking at what they added, not the
+ * local card the wizard defaults to otherwise.
+ * @param {string} lang
+ * @param {{req?: object}} [ctx]
+ */
+function renderAiOptions(lang, ctx = {}) {
+  const req = ctx.req || null;
+  const cloudOk = !!(req && req.query && req.query.cloud === "ok");
+  const localChecked = !cloudOk;
+  const cloudChecked = cloudOk;
+
+  const firstPreset = CLOUD_PRESETS[0] || null;
+  const presetOptions = CLOUD_PRESETS.map((p) =>
+    `<option value="${escapeHtml(p.id)}" data-default-model="${escapeHtml(p.defaultModel)}" data-key-hint="${escapeHtml(p.keyHint)}">${escapeHtml(p.label)}</option>`
+  ).join("");
+
+  const cloudSuccess = cloudOk ? callout(t("onboarding.ai.cloudAdded", lang), "success") : "";
+  const docsHref = docsUrl((lang === "es" ? "es/" : "") + "guide/ai-providers");
+
+  return `${AI_OPTIONS_CSS}
+    <div class="onb-ai-options">
+      <label class="onb-ai-option">
+        <input type="radio" name="onbAiChoice" id="onb-ai-radio-local" value="local"${localChecked ? " checked" : ""}>
+        <span>
+          <span class="onb-ai-option-title">${t("onboarding.ai.optionLocalTitle", lang)}</span><br>
+          <span class="onb-ai-option-desc">${t("onboarding.ai.optionLocalDesc", lang)}</span>
+        </span>
+      </label>
+      <label class="onb-ai-option">
+        <input type="radio" name="onbAiChoice" id="onb-ai-radio-cloud" value="cloud"${cloudChecked ? " checked" : ""}>
+        <span>
+          <span class="onb-ai-option-title">${t("onboarding.ai.optionCloudTitle", lang)}</span><br>
+          <span class="onb-ai-option-desc">${t("onboarding.ai.optionCloudDesc", lang)}</span>
+        </span>
+      </label>
+      <label class="onb-ai-option">
+        <input type="radio" name="onbAiChoice" id="onb-ai-radio-skip" value="skip">
+        <span>
+          <span class="onb-ai-option-title">${t("onboarding.ai.optionSkipTitle", lang)}</span><br>
+          <span class="onb-ai-option-desc">${t("onboarding.ai.optionSkipDesc", lang)}</span>
+        </span>
+      </label>
+    </div>
+
+    <div id="onb-ai-panel-local" class="onb-ai-panel"${localChecked ? "" : " hidden"}>
+      <div class="onb-ai-card">
+        <div id="onb-ai-local-name">${t("common.loading", lang)}</div>
+        <div id="onb-ai-local-size"></div>
+        <div id="onb-ai-local-fit"></div>
+        <div id="onb-ai-local-upsell" hidden></div>
+        <div id="onb-ai-local-action"></div>
+      </div>
+    </div>
+
+    <div id="onb-ai-panel-cloud" class="onb-ai-panel"${cloudChecked ? "" : " hidden"}>
+      ${cloudSuccess}
+      <form method="POST" action="/dashboard/onboarding/cloud-provider">
+        ${csrfInput(req)}
+        <label class="onb-ai-field">${t("onboarding.ai.cloudProviderLabel", lang)}
+          <select name="preset" id="onb-ai-cloud-preset">${presetOptions}</select>
+        </label>
+        <label class="onb-ai-field">${t("onboarding.ai.cloudKeyLabel", lang)}
+          <input type="password" name="apiKey" id="onb-ai-cloud-key" autocomplete="off" placeholder="${escapeHtml(firstPreset ? firstPreset.keyHint : "")}">
+        </label>
+        <label class="onb-ai-field">${t("onboarding.ai.cloudModelLabel", lang)}
+          <input type="text" name="model" id="onb-ai-cloud-model" value="${escapeHtml(firstPreset ? firstPreset.defaultModel : "")}">
+        </label>
+        <p class="onb-ai-free-blurb">${t("onboarding.ai.cloudFreeTiersBlurb", lang)} <a href="${docsHref}" target="_blank" rel="noopener">${t("onboarding.ai.cloudDocsLinkLabel", lang)}</a></p>
+        ${button(t("onboarding.ai.cloudSubmit", lang), { variant: "primary", type: "submit" })}
+      </form>
+    </div>
+
+    <div id="onb-ai-panel-skip" class="onb-ai-panel" hidden>
+      <p style="font-size:var(--crow-text-sm);color:var(--crow-text-secondary)">${t("onboarding.ai.optionSkipDesc", lang)}</p>
+    </div>
+
+    ${aiStepClientJS(lang)}`;
+}
+
+/**
  * The instance crowId for the done step's backup section, or null when there
  * is no readable plaintext-seed identity.json (fresh install where the sharing
  * server has not run yet, or an encrypted-at-rest identity). Null → the
@@ -292,6 +485,59 @@ export async function handleIdentityBackupPost(req, res) {
 }
 
 /**
+ * POST /dashboard/onboarding/cloud-provider — hand-registered in
+ * dashboard/index.js the same way as handleIdentityBackupPost, BEHIND
+ * dashboardAuth + csrfMiddleware. The cloud option's paste-a-key form
+ * (`renderAiOptions` above). dashboard/index.js's route wrapper supplies
+ * `{ db }` (mirroring the fix-it action POST's inline db-lifecycle
+ * wrapper); `upsertProviderFn`/`invalidateCacheFn` are injectable seams
+ * for tests, defaulting to the real providers-db.js / providers.js calls.
+ *
+ * Never logs or echoes the API key — mirrors handleIdentityBackupPost's
+ * discipline with the passphrase: only `err.message` reaches console.error.
+ */
+export async function handleCloudProviderPost(req, res, opts = {}) {
+  const {
+    db = null,
+    upsertProviderFn = upsertProvider,
+    invalidateCacheFn = invalidateProvidersCache,
+  } = opts;
+  const lang = resolveLang(req);
+  const aiIdx = STEP_KEYS.indexOf("ai");
+  try {
+    const presetId = typeof req.body?.preset === "string" ? req.body.preset : "";
+    const preset = CLOUD_PRESETS.find((p) => p.id === presetId);
+    if (!preset) {
+      return res.status(400).type("text/plain").send(t("onboarding.ai.cloudBadPreset", lang));
+    }
+    const apiKey = typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
+    if (!apiKey) {
+      return res.status(400).type("text/plain").send(t("onboarding.ai.cloudKeyRequired", lang));
+    }
+    const modelField = typeof req.body?.model === "string" && req.body.model.trim()
+      ? req.body.model.trim()
+      : preset.defaultModel;
+
+    await upsertProviderFn(db, {
+      id: preset.id,
+      baseUrl: preset.baseUrl,
+      apiKey,
+      host: "cloud",
+      bundleId: null,
+      description: preset.label + " (onboarding)",
+      models: [{ id: modelField }],
+      disabled: false,
+      providerType: preset.providerType,
+    });
+    await invalidateCacheFn();
+    return res.redirectAfterPost(`/dashboard/onboarding?step=${aiIdx}&cloud=ok`);
+  } catch (err) {
+    console.error("[onboarding] cloud provider setup failed:", err.message); // message only — never the api key
+    return res.status(500).type("text/plain").send(t("onboarding.ai.cloudSaveFailed", lang));
+  }
+}
+
+/**
  * Count enabled rows in the providers table. Returns null when there is no db
  * or the query fails — the caller renders no count claim at all in that case
  * (asserting "nothing configured yet" on a db error could be a lie, and the
@@ -330,7 +576,8 @@ function renderStepBody(stem, lang, ctx = {}) {
       }
       // n == null (no db / query failed): no count claim either way.
       return body + note
-        + linkWrap(deepLink(t("onboarding.openProviders", lang), "/dashboard/settings?section=llm&tab=providers"));
+        + linkWrap(deepLink(t("onboarding.openProviders", lang), "/dashboard/settings?section=llm&tab=providers"))
+        + renderAiOptions(lang, ctx);
     }
     case "starter":
       return body + renderStarterCards(lang)
@@ -367,7 +614,9 @@ function renderNav(current, lang) {
   }
   if (current < last) {
     parts.push(button(t("onboarding.btnSkip", lang), { variant: "ghost", href: "/dashboard" }));
-    parts.push(button(t("onboarding.btnNext", lang), { variant: "primary", href: `/dashboard/onboarding?step=${current + 1}` }));
+    // id is a hook for ai-step-client.js's highlightNext() — purely additive,
+    // no other step reads it.
+    parts.push(button(t("onboarding.btnNext", lang), { variant: "primary", href: `/dashboard/onboarding?step=${current + 1}`, attrs: 'id="onboarding-next-btn"' }));
   } else {
     parts.push(button(t("onboarding.btnGoDashboard", lang), { variant: "primary", href: "/dashboard" }));
   }
@@ -411,7 +660,7 @@ export default {
     // fetch the count server-side only when that step is the one rendering.
     // The done step needs the instance crowId (nullable) + req for the backup
     // form (csrf token, backup_error query).
-    const ctx = stem === "ai" ? { providersCount: await countProviders(db) }
+    const ctx = stem === "ai" ? { providersCount: await countProviders(db), req }
       : stem === "done" ? { crowId: readInstanceCrowId(), req }
       : {};
 
