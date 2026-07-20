@@ -302,6 +302,25 @@
       "official": true
     },
     {
+      "id": "bot-engine",
+      "name": "Bot Engine (pi)",
+      "description": "The agent engine behind Bot Builder's email and chat channels (Gmail, Discord, Telegram, Slack). Installs the pi coding agent as a per-instance npm payload — no Docker, no open ports, no system services.",
+      "type": "bundle",
+      "category": "ai",
+      "version": "1.0.0",
+      "origin": "official",
+      "npm_required": true,
+      "requires": {
+        "min_ram_mb": 512,
+        "min_disk_mb": 400
+      },
+      "env_vars": [],
+      "verify_paths": [
+        "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+      ],
+      "official": true
+    },
+    {
       "id": "browser",
       "name": "Browser Automation",
       "version": "1.0.0",

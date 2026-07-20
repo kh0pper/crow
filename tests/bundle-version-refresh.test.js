@@ -306,6 +306,109 @@ describe("4b — docker-type restriction + declared-root traversal rejection", (
 });
 
 // ---------------------------------------------------------------------------
+// Test 4c (C4 Task 3): version-drift on an EXACT-pinned dep also fires npm —
+// today only an added dep NAME does. A range-pinned dep stays presence-only
+// (no version comparison at all), exactly as before.
+// ---------------------------------------------------------------------------
+describe("npm trigger — exact-pin version-drift (C4 Task 3)", () => {
+  test("an exact-pinned dep whose installed version differs from the pin fires npm (version-drift, not just added-name)", async () => {
+    const id = "widget-npm-pin-drift";
+    const repoRoot = freshRoot("crowrepo-npmpindrift-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "N", version: "1.0.1", type: "mcp-server", category: "misc", description: "d" }));
+    put(repoRoot, `${id}/package.json`, JSON.stringify({ name: id, dependencies: { "pinned-dep": "2.0.0" } })); // exact semver pin
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    // Installed dep is present by NAME but at the OLD pinned version — the
+    // presence-only check this task replaces would bless this as complete.
+    put(CROW_HOME, `bundles/${id}/node_modules/pinned-dep/package.json`, JSON.stringify({ name: "pinned-dep", version: "1.0.0" }));
+    setInstalled([id]);
+
+    const runner = fakeRunner();
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.equal(runner.calls.length, 1, "npm must fire when an exact-pinned dep's installed version differs from the pin");
+    assert.deepEqual(runner.calls[0].args, ["install", "--omit=dev"]);
+  });
+
+  test("an exact-pinned dep already at the pinned version does NOT fire npm", async () => {
+    const id = "widget-npm-pin-match";
+    const repoRoot = freshRoot("crowrepo-npmpinmatch-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "N", version: "1.0.1", type: "mcp-server", category: "misc", description: "d" }));
+    put(repoRoot, `${id}/package.json`, JSON.stringify({ name: id, dependencies: { "pinned-dep": "2.0.0" } }));
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    put(CROW_HOME, `bundles/${id}/node_modules/pinned-dep/package.json`, JSON.stringify({ name: "pinned-dep", version: "2.0.0" }));
+    setInstalled([id]);
+
+    const runner = fakeRunner();
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.equal(runner.calls.length, 0, "npm must NOT fire when the exact-pinned dep is already at the pinned version");
+  });
+
+  test("range dep unchanged behavior: a range-pinned dep present by name never triggers on version alone", async () => {
+    const id = "widget-npm-range-mismatch";
+    const repoRoot = freshRoot("crowrepo-npmrangemismatch-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "N", version: "1.0.1", type: "mcp-server", category: "misc", description: "d" }));
+    put(repoRoot, `${id}/package.json`, JSON.stringify({ name: id, dependencies: { "ranged-dep": "^3.0.0" } }));
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    // Installed version (1.0.0) doesn't even satisfy ^3.0.0 — range deps stay
+    // presence-only, so this must NOT trigger a refresh.
+    put(CROW_HOME, `bundles/${id}/node_modules/ranged-dep/package.json`, JSON.stringify({ name: "ranged-dep", version: "1.0.0" }));
+    setInstalled([id]);
+
+    const runner = fakeRunner();
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.equal(runner.calls.length, 0, "range-pinned deps must stay presence-only — no version comparison");
+  });
+
+  test("an exact-pinned dep with no readable installed package.json is treated as drifted (fires npm)", async () => {
+    const id = "widget-npm-pin-unreadable";
+    const repoRoot = freshRoot("crowrepo-npmpinunreadable-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({ id, name: "N", version: "1.0.1", type: "mcp-server", category: "misc", description: "d" }));
+    put(repoRoot, `${id}/package.json`, JSON.stringify({ name: id, dependencies: { "pinned-dep": "2.0.0" } }));
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "mcp-server" }));
+    // pinned-dep/ exists (dir present) but has no package.json inside it.
+    mkdirSync(join(CROW_HOME, `bundles/${id}/node_modules/pinned-dep`), { recursive: true });
+    setInstalled([id]);
+
+    const runner = fakeRunner();
+    await repairInstalledBundleAssets({ appBundles: repoRoot, run: runner });
+    assert.equal(runner.calls.length, 1, "an unreadable installed package.json for an exact-pinned dep must be treated as drift, not silently trusted");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 4d (C4 Task 3): the boot-time refresh's npm step stays warn-only even
+// for an npm_required bundle — hard-fail must never leak into gateway boot.
+// The install-time hard-fail path (runInstallJob, tests/bundle-npm-required
+// .test.js) is a completely separate code path from refreshVersionedBundle.
+// ---------------------------------------------------------------------------
+describe("npm_required refresh at boot stays warn-only (hard-fail must never leak into gateway boot)", () => {
+  test("an npm_required bundle whose boot-time refresh npm step throws is still just a warning — no throw, no error reported, destDir survives", async () => {
+    const id = "widget-npm-required-boot";
+    const repoRoot = freshRoot("crowrepo-npmrequiredboot-");
+    put(repoRoot, `${id}/manifest.json`, JSON.stringify({
+      id, name: "N", version: "1.0.1", type: "bundle", category: "ai", description: "d",
+      npm_required: true,
+    }));
+    put(repoRoot, `${id}/package.json`, JSON.stringify({ name: id, dependencies: { "added-dep": "^1.0.0" } }));
+
+    put(CROW_HOME, `bundles/${id}/manifest.json`, JSON.stringify({ id, version: "1.0.0", type: "bundle" }));
+    // node_modules exists but lacks added-dep → the npm trigger fires.
+    put(CROW_HOME, `bundles/${id}/node_modules/.keep`, "");
+    setInstalled([id]);
+
+    const throwingRunner = async () => { throw new Error("simulated npm failure at boot"); };
+    const { errors, repaired } = await repairInstalledBundleAssets({ appBundles: repoRoot, run: throwingRunner });
+
+    assert.deepEqual(errors, [], "a failing npm step at boot must never surface as an error — warn-only even for npm_required");
+    assert.ok(repaired.some((r) => r.includes(id)), "the refresh itself must still be reported as having run");
+    assert.ok(existsSync(destBundleDir(id)), "destDir must NOT be removed — boot-time refresh never hard-fails, unlike the install-time path");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Test 5: unreadable/missing installed manifest → falls back to missing-only
 // repair, no throw.
 // ---------------------------------------------------------------------------
