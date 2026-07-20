@@ -154,9 +154,17 @@ async function saveIntegration(id, btn) {
     msg.className = 'int-status-msg';
     if (data.ok) {
       msg.style.color = 'var(--crow-success)';
-      msg.textContent = data.restarting ? '${tJs("settings.savedRestarting", lang)}' : '${tJs("settings.savedRestartNeeded", lang)}';
       if (data.restarting) {
+        msg.textContent = '${tJs("settings.savedRestarting", lang)}';
         setTimeout(() => { pollHealth(); }, 2000);
+      } else {
+        msg.textContent = '${tJs("settings.savedRestartNeeded", lang)} ';
+        var restartBtn = document.createElement('button');
+        restartBtn.type = 'button';
+        restartBtn.className = 'btn btn-secondary btn-sm';
+        restartBtn.textContent = '${tJs("settings.restartNow", lang)}';
+        restartBtn.onclick = function() { restartCrowNow(restartBtn, msg); };
+        msg.appendChild(restartBtn);
       }
     } else {
       msg.style.color = 'var(--crow-error)';
@@ -200,6 +208,24 @@ async function removeIntegration(id, btn) {
   }
   btn.disabled = false;
   btn.textContent = '${tJs("settings.removeIntegration", lang)}';
+}
+
+function restartCrowNow(btn, msg) {
+  if (!confirm('${tJs("settings.restartConfirm", lang)}')) return;
+  btn.disabled = true;
+  btn.textContent = '${tJs("settings.restartingNow", lang)}';
+  fetch('/bundles/api/restart', { method: 'POST' }).then(function(r) {
+    if (!r.ok) throw new Error('restart request failed');
+    setTimeout(function() { pollHealth(); }, 2000);
+  }).catch(function() {
+    btn.disabled = false;
+    btn.textContent = '${tJs("settings.restartNow", lang)}';
+    var errEl = document.createElement('div');
+    errEl.className = 'int-status-msg';
+    errEl.style.color = 'var(--crow-error)';
+    errEl.textContent = '${tJs("settings.restartFailed", lang)}';
+    msg.after(errEl);
+  });
 }
 
 function pollHealth(attempts) {
