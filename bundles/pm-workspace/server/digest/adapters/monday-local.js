@@ -26,19 +26,25 @@ export async function mondayLocalSection(db) {
       };
     }
 
+    // The sync re-logs unresolved flags every run (e.g. delete_flagged each
+    // 15-min pull), so collapse to one row per distinct problem with a count —
+    // otherwise a single stale flag fills the whole section.
     const problems = await db.execute({
-      sql: `SELECT run_at, action, board_id, item_ref, detail
+      sql: `SELECT MAX(run_at) AS run_at, action, board_id, item_ref,
+                   detail, COUNT(*) AS n
             FROM pm_sync_log
             WHERE (ok = 0 OR action IN ('conflict','delete_flagged'))
               AND run_at >= datetime('now', '-1 day')
+            GROUP BY board_id, action, item_ref
             ORDER BY run_at DESC LIMIT 10`,
       args: [],
     });
     for (const row of problems.rows) {
+      const times = Number(row.n) > 1 ? ` (×${row.n} in 24h)` : "";
       section.items.push({
-        label: `${row.action} — ${row.item_ref || "?"}`,
+        label: `${row.action} — ${row.item_ref || "?"}${times}`,
         detail: row.detail || "",
-        meta: `board ${row.board_id} · ${row.run_at}`,
+        meta: `board ${row.board_id} · last ${row.run_at}`,
         urgent: true,
       });
     }
