@@ -81,6 +81,8 @@ const IDENTICAL_OK = new Set([
   "models.runtimeGpu", // "GPU: {gpu} ({vram})" — GPU is an acronym, unchanged in Spanish
   "models.runtimeColPid", // "PID" — abbreviation, unchanged in Spanish
   "models.hfTokenPlaceholder", // "hf_..." — literal input placeholder prefix, language-neutral
+  // Onboarding AI step three-choice rework (C1/C3 Task 7)
+  "onboarding.ai.sizeGb", // "{gb} GB" — the unit abbreviation is unchanged in Spanish
 ]);
 
 const keys = Object.keys(translations);

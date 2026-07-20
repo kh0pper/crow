@@ -24,7 +24,7 @@ import { getPresignedUrl, isAvailable as isStorageAvailable } from "../../storag
 import { openStream } from "../streams/sse.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { checkVendorSwitch } from "../ai/vendor-guard.js";
-import { listProvidersAll } from "../../shared/providers-db.js";
+import { listProvidersAll, findUsableProviderRow } from "../../shared/providers-db.js";
 import { chooseProvider as smartRoute, stripSlashCommand, SmartChatDisabled } from "../ai/smart-router.js";
 import { fixedWindowLimit } from "../middleware/rate-limit.js";
 import { recordUsageEvent } from "../../shared/metering.js";
@@ -269,13 +269,30 @@ export default function chatRouter(dashboardAuth) {
         provider = bodyProvider;
         convModel = model || "";
       } else {
-        // Env-based fallback (legacy, kept during the dual-ship window)
+        // Path C — env-based fallback (legacy, kept during the dual-ship
+        // window). Amended review (C-B Task 9 finding #1): a
+        // providers-table-only install (the wizard's local-download and
+        // cloud-paste-key branches write ONLY the `providers` DB row, never
+        // AI_PROVIDER/.env or `ai_profiles`) has no env config and no
+        // profiles, so before this fallback existed, "+ New AI chat"
+        // 400ed here silently — client.js's msgNewAiChat sees no data.id
+        // and just returns. Before giving up, consult the providers table
+        // via the same predicate the Messages panel's aiConfigured gate
+        // uses (findUsableProviderRow, shared/providers-db.js) — it
+        // already fails closed to null on any query error, so this can
+        // never turn into a 500.
         const config = getProviderConfig();
-        if (!config) {
-          return res.status(400).json({ error: "No AI provider configured. Add an AI Profile or use Quick Chat." });
+        if (config) {
+          provider = config.provider;
+          convModel = model || config.model || "";
+        } else {
+          const usable = await findUsableProviderRow(db);
+          if (!usable) {
+            return res.status(400).json({ error: "No AI provider configured. Add an AI Profile or use Quick Chat." });
+          }
+          provider = usable.id;
+          convModel = model || usable.modelId;
         }
-        provider = config.provider;
-        convModel = model || config.model || "";
       }
 
       const result = await db.execute({

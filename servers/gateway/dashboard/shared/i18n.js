@@ -299,6 +299,9 @@ export const translations = {
   "messages.deleteConversation": { en: "Delete", es: "Eliminar" },
   "messages.deleteConfirm": { en: "Delete this conversation?", es: "¿Eliminar esta conversación?" },
   "messages.thinking": { en: "Thinking...", es: "Pensando..." },
+  "messages.suggest1": { en: "What can you remember for me?", es: "¿Qué puedes recordar por mí?" },
+  "messages.suggest2": { en: "Remember that my favorite color is blue.", es: "Recuerda que mi color favorito es el azul." },
+  "messages.suggest3": { en: "What can you help me with?", es: "¿En qué puedes ayudarme?" },
   "messages.using": { en: "Using", es: "Usando" },
   "messages.error": { en: "Error:", es: "Error:" },
   "messages.unknown": { en: "Unknown", es: "Desconocido" },
@@ -1685,6 +1688,68 @@ export const translations = {
     es: "{n} proveedor(es) de modelos ya están disponibles en esta instancia.",
   },
   "onboarding.openProviders": { en: "Open Providers", es: "Abrir Proveedores" },
+  // ── AI step, three-choice rework (C1/C3 Task 7) ──
+  "onboarding.ai.optionLocalTitle": { en: "Run locally (recommended)", es: "Ejecutar localmente (recomendado)" },
+  "onboarding.ai.optionLocalDesc": {
+    en: "Download a small model that runs entirely on this machine — private, free, no account needed.",
+    es: "Descarga un modelo pequeño que se ejecuta por completo en esta máquina: privado, gratuito, sin necesidad de cuenta.",
+  },
+  "onboarding.ai.optionCloudTitle": { en: "Use a cloud provider", es: "Usar un proveedor en la nube" },
+  "onboarding.ai.optionCloudDesc": {
+    en: "Paste an API key from OpenAI, Anthropic, Google, Groq, or OpenRouter.",
+    es: "Pega una clave API de OpenAI, Anthropic, Google, Groq u OpenRouter.",
+  },
+  "onboarding.ai.optionSkipTitle": { en: "Skip for now", es: "Omitir por ahora" },
+  "onboarding.ai.optionSkipDesc": {
+    en: "You can set this up anytime from Settings → Providers.",
+    es: "Puedes configurarlo en cualquier momento desde Ajustes → Proveedores.",
+  },
+  "onboarding.ai.localFits": { en: "Runs on your hardware ✓", es: "Se ejecuta en tu hardware ✓" },
+  "onboarding.ai.localUnknown": {
+    en: "Couldn't detect whether this fits your hardware — it may still work.",
+    es: "No se pudo detectar si esto encaja en tu hardware — puede que funcione de todas formas.",
+  },
+  "onboarding.ai.localWontFit": {
+    en: "This needs more RAM/VRAM than this machine has available.",
+    es: "Esto necesita más RAM/VRAM de la que esta máquina tiene disponible.",
+  },
+  "onboarding.ai.localAlreadyInstalled": { en: "Already installed — you're set.", es: "Ya está instalado — todo listo." },
+  "onboarding.ai.downloadStart": { en: "Download and set up", es: "Descargar y configurar" },
+  "onboarding.ai.downloadRetry": { en: "Retry download", es: "Reintentar descarga" },
+  "onboarding.ai.downloadDone": { en: "Downloaded and ready — try it in chat.", es: "Descargado y listo — pruébalo en el chat." },
+  "onboarding.ai.downloadEta": { en: "about {eta} left", es: "quedan aprox. {eta}" },
+  "onboarding.ai.upsell": {
+    en: "Your hardware can run a bigger model — see the Model Catalog after setup.",
+    es: "Tu hardware puede ejecutar un modelo más grande — consulta el Catálogo de modelos después de configurar.",
+  },
+  "onboarding.ai.upsellLink": { en: "Open the Model Catalog", es: "Abrir el Catálogo de modelos" },
+  "onboarding.ai.cloudProviderLabel": { en: "Provider", es: "Proveedor" },
+  "onboarding.ai.cloudKeyLabel": { en: "API key", es: "Clave API" },
+  "onboarding.ai.cloudModelLabel": { en: "Model", es: "Modelo" },
+  "onboarding.ai.cloudSubmit": { en: "Add provider", es: "Agregar proveedor" },
+  "onboarding.ai.cloudAdded": { en: "Provider added — you're all set.", es: "Proveedor agregado — todo listo." },
+  "onboarding.ai.cloudFreeTiersBlurb": {
+    en: "Several of these providers offer a free tier for personal use.",
+    es: "Varios de estos proveedores ofrecen un nivel gratuito para uso personal.",
+  },
+  "onboarding.ai.cloudDocsLinkLabel": { en: "See current free-tier details", es: "Ver detalles actuales del nivel gratuito" },
+  "onboarding.ai.cloudBadPreset": { en: "Unknown provider preset.", es: "Preajuste de proveedor desconocido." },
+  "onboarding.ai.cloudKeyRequired": { en: "An API key is required.", es: "Se requiere una clave API." },
+  "onboarding.ai.cloudSaveFailed": { en: "Could not save this provider — please try again.", es: "No se pudo guardar este proveedor — inténtalo de nuevo." },
+  // ── cloud-form validation errors, redirect-and-render (Task 7 review fix round 1) ──
+  "onboarding.ai.cloudErrBadPreset": {
+    en: "Unknown provider preset — please choose one from the list.",
+    es: "Preajuste de proveedor desconocido — elige uno de la lista.",
+  },
+  "onboarding.ai.cloudErrMissingKey": {
+    en: "An API key is required to add this provider.",
+    es: "Se requiere una clave API para agregar este proveedor.",
+  },
+  "onboarding.ai.cloudErrSaveFailed": {
+    en: "Could not save this provider — please try again.",
+    es: "No se pudo guardar este proveedor — inténtalo de nuevo.",
+  },
+  "onboarding.ai.sizeGb": { en: "{gb} GB", es: "{gb} GB" },
   "onboarding.integrations.title": { en: "Connect your tools", es: "Conecta tus herramientas" },
   "onboarding.integrations.body": {
     en: "Link services like Google, Slack, and GitHub so Crow can act on them for you. You add API keys in Settings, where each integration explains what it needs.",
@@ -1718,6 +1783,33 @@ export const translations = {
     es: "Abre el asistente de conexión guiado para configurar Claude Code, Cursor, Gemini CLI y otros clientes con configuración lista para copiar.",
   },
   "onboarding.openConnections": { en: "Open the connect wizard", es: "Abrir el asistente de conexión" },
+  // Task 8: "Meet your Crow" step (C1/C3 PR C-B) — seeds the starter agent +
+  // example memories and opens the first chat.
+  "onboarding.meet.title": { en: "Meet your Crow", es: "Conoce a tu Crow" },
+  "onboarding.meet.body": {
+    en: "This creates a starter agent with a few example memories already loaded, then opens your first chat with it — a quick way to see what Crow can do before you build your own.",
+    es: "Esto crea un agente inicial con algunos recuerdos de ejemplo ya cargados y luego abre tu primer chat con él — una forma rápida de ver lo que Crow puede hacer antes de crear el tuyo propio.",
+  },
+  "onboarding.meet.cta": { en: "Meet your Crow", es: "Conoce a tu Crow" },
+  // Review fix round 1 (Task 8): softened to advice-shaped wording — this
+  // renders both when there is genuinely no usable provider AND when
+  // resolveStarterProvider() threw (unknown state), so it must not assert a
+  // specific cause that could be false in the second case.
+  "onboarding.meet.noProvider": {
+    en: "We couldn't find a usable AI provider yet — set one up in the AI step, then come back.",
+    es: "Todavía no pudimos encontrar un proveedor de IA utilizable — configura uno en el paso de IA y luego vuelve.",
+  },
+  "onboarding.meet.err": {
+    en: "Couldn't set up your starter agent — no AI provider is available right now. Set one up, then try again.",
+    es: "No se pudo configurar tu agente inicial: no hay ningún proveedor de IA disponible en este momento. Configura uno y vuelve a intentarlo.",
+  },
+  // Review fix round 1 (Task 8): reserved for any failure OTHER than the
+  // {error:"no_provider"} result — a generic, honest message instead of
+  // mislabeling arbitrary exceptions as "no provider available".
+  "onboarding.meet.errGeneric": {
+    en: "Something went wrong while setting up your starter agent. Try again; if it keeps failing, check the gateway logs.",
+    es: "Ocurrió un error al configurar tu agente inicial. Inténtalo de nuevo; si el problema persiste, revisa los registros del gateway.",
+  },
   "onboarding.done.title": { en: "You're all set", es: "Todo listo" },
   "onboarding.done.body": {
     en: "That's the tour. Explore the dashboard at your own pace. Everything here is available from the sidebar.",
@@ -1726,6 +1818,10 @@ export const translations = {
   "onboarding.doneNote": {
     en: "You can replay this guide anytime from Settings, Help and Setup.",
     es: "Puedes repetir esta guía cuando quieras desde Ajustes, Ayuda y configuración.",
+  },
+  "onboarding.doneDormant": {
+    en: "A few features are still off because no AI provider is configured — agents, chat, and voice won't work until you add one.",
+    es: "Algunas funciones siguen desactivadas porque no hay ningún proveedor de IA configurado: los agentes, el chat y la voz no funcionarán hasta que agregues uno.",
   },
   // 4-PR3 identity backup (done step + settings pointer)
   "onboarding.backup.title": { en: "Back up your identity", es: "Respalda tu identidad" },
