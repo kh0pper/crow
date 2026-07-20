@@ -238,3 +238,51 @@ test("F-11: Caddy vhost and final URL follow the ACTUAL hostname (MDNS_HOST)", (
   assert.match(src(), /\$\{MDNS_HOST\} \{/);          // Caddyfile vhost
   assert.match(src(), /https:\/\/\$\{MDNS_HOST\}\/setup/); // final message
 });
+
+// ─── C1/C3 Task 10: closing-output rewrite, Docker-warn move, cloud fallback ───
+
+test("Task 10: closing block no longer contains the old 'What's next' / 'Useful commands' tail", () => {
+  const s = src();
+  assert.doesNotMatch(s, /What's next/);
+  assert.doesNotMatch(s, /Useful commands/);
+  assert.doesNotMatch(s, /npm run local-token/, "the headless local-token step must be gone from the installer tail");
+  assert.doesNotMatch(s, /API keys go in/);
+  assert.doesNotMatch(s, /crow bundle install <x>/);
+  assert.doesNotMatch(s, /Tip: run 'crow status'/);
+});
+
+test("Task 10: closing block is exactly 'Crow is ready!' + dashboard URL + one 'everything else happens there' pointer", () => {
+  const s = src();
+  const closing = s.slice(s.indexOf('header "Installation Complete"'));
+  assert.match(closing, /echo "  Crow is ready!"/);
+  assert.match(closing, /echo "  Everything else happens there — the setup wizard walks you through"/);
+  assert.match(closing, /echo "  passwords, your AI model, and connecting devices\."/);
+});
+
+test("Task 10: cloud fallback prints an SSH tunnel to :3001 instead of the mDNS URL when IS_CLOUD_HOST and no GATEWAY_HTTPS_URL", () => {
+  const s = src();
+  const closing = s.slice(s.indexOf('header "Installation Complete"'));
+  assert.match(closing, /if \[ "\$IS_CLOUD_HOST" = true \] && \[ -z "\$\{GATEWAY_HTTPS_URL:-\}" \]; then/, "must branch on the EXISTING IS_CLOUD_HOST var, no new flag");
+  assert.match(closing, /This is a cloud server: \$\{MDNS_HOST\} is not reachable from your browser\./);
+  assert.match(closing, /ssh -L 3001:localhost:3001 \$\{USER\}@<this-server's-public-IP>/);
+  assert.match(closing, /Or re-run this installer and accept Tailscale Serve for a permanent URL\./);
+  // The mDNS "Open in your browser" line must live in the else branch, not print unconditionally.
+  const ifIdx = closing.indexOf('if [ "$IS_CLOUD_HOST" = true ]');
+  const elseIdx = closing.indexOf("else", ifIdx);
+  const fiIdx = closing.indexOf("fi", elseIdx);
+  assert.ok(ifIdx !== -1 && elseIdx !== -1 && fiIdx !== -1, "if/else/fi must all be present");
+  assert.match(closing.slice(elseIdx, fiIdx), /Open in your browser:/);
+  assert.match(closing.slice(elseIdx, fiIdx), /https:\/\/\$\{MDNS_HOST\}\/setup/);
+});
+
+test("Task 10 MUTATION: only ONE IS_CLOUD_HOST is declared (the metadata-probe one) — the closing block must reuse it, not redeclare", () => {
+  const matches = src().match(/^IS_CLOUD_HOST=/gm) || [];
+  assert.equal(matches.length, 1, "IS_CLOUD_HOST must be set exactly once (at the cloud-metadata check)");
+});
+
+test("Task 10: Docker step no longer warns about re-login — the extensions banner is the point-of-use now", () => {
+  const s = src();
+  const dockerStep = s.slice(s.indexOf('header "Step 3/9: Docker"'), s.indexOf('header "Step 4/9: Caddy"'));
+  assert.doesNotMatch(dockerStep, /log out and back in/i);
+  assert.match(dockerStep, /log "Docker installed"/, "the install-success log line must remain");
+});
