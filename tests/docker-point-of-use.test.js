@@ -194,6 +194,18 @@ test("i18n: docker-unavailable banner/guidance keys exist in EN and ES", () => {
   }
 });
 
+// ─── C1/C3 Task 10: banner names the fresh-install re-login cause ───
+
+test("Task 10: dockerUnavailableDesc names the fresh-install re-login cause (moved from the installer's Step 3 warn), with a real (non-identical) ES translation", () => {
+  const desc = translations["extensions.dockerUnavailableDesc"];
+  assert.match(desc.en, /log out.*back in/i, "en must tell the user to log out/back in for the Docker group to take effect");
+  assert.match(desc.es, /cierra la sesión.*vuelve a iniciarla/i, "es must carry the same re-login guidance");
+  assert.notEqual(desc.en, desc.es, "es must be a real translation, not an EN copy");
+  // The existing re-run-the-installer sentence must still be present and still second.
+  const enSentences = desc.en.split(". ");
+  assert.match(enSentences[1], /re-run the install script/, "re-run-the-installer guidance must stay the second sentence");
+});
+
 // ─── The client error surface (verification pin — B3) ───
 
 test("client install-error surface renders the server's error message (res.data.error), so the 4xx guidance reaches the user", () => {

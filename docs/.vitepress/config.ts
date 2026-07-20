@@ -37,6 +37,7 @@ export default defineConfig({
               { text: 'Servidor en Casa', link: '/es/getting-started/home-server' },
               { text: 'Raspberry Pi (Crow OS)', link: '/es/getting-started/raspberry-pi' },
               { text: 'Instalación de Escritorio', link: '/es/getting-started/desktop-install' },
+              { text: 'Windows (WSL2)', link: '/es/getting-started/windows-wsl2' },
               { text: 'Configuración de Escritorio', link: '/es/getting-started/desktop-setup' },
               { text: 'Docker', link: '/es/getting-started/docker' },
               { text: 'Instalación Completa', link: '/es/getting-started/full-setup' },
@@ -45,6 +46,7 @@ export default defineConfig({
               { text: 'Dominio Personalizado', link: '/es/getting-started/custom-domain' },
               { text: 'Multidispositivo', link: '/es/getting-started/multi-device' },
               { text: 'Despliegue en la Nube (Heredado)', link: '/es/getting-started/cloud-deploy' },
+              { text: 'Opciones de IA Gratuita en la Nube', link: '/es/getting-started/free-cloud-ai' },
             ],
           },
           {
@@ -218,6 +220,7 @@ export default defineConfig({
           { text: 'Google Cloud Free Tier', link: '/getting-started/google-cloud' },
           { text: 'Home Server', link: '/getting-started/home-server' },
           { text: 'Desktop Install', link: '/getting-started/desktop-install' },
+          { text: 'Windows (WSL2)', link: '/getting-started/windows-wsl2' },
           { text: 'Tailscale Remote Access', link: '/getting-started/tailscale-setup' },
           { text: 'Custom Domain', link: '/getting-started/custom-domain' },
           { text: 'Docker', link: '/getting-started/docker' },
@@ -228,6 +231,7 @@ export default defineConfig({
           { text: 'Full Setup (MinIO + Gateway)', link: '/getting-started/full-setup' },
           { text: 'Raspberry Pi (Crow OS)', link: '/getting-started/raspberry-pi' },
           { text: 'Multi-Device Quick Start', link: '/getting-started/multi-device' },
+          { text: 'Free Cloud AI Options', link: '/getting-started/free-cloud-ai' },
         ],
       },
       {
