@@ -125,14 +125,25 @@ function canBind(port) {
  * `owner.crowHome` defaults to `resolveDataDir()` (call-time, not a
  * module-load constant, so it reflects whichever CROW_HOME this process
  * is actually running under) and can be overridden for tests.
+ *
+ * `canBind` (the probe function) defaults to the module's real bind-test
+ * and can be overridden for tests. This matters because `node --test` runs
+ * separate test files as concurrent processes: another file's real
+ * `allocatePort` call can transiently hold 127.0.0.1:<port> in this same
+ * 18100-18199 range at the exact moment this call probes it, so a test
+ * asserting an *exact* returned port must stub this out to be hermetic.
  */
-export async function allocatePort(state, modelId, { crowHome = resolveDataDir(), pid = process.pid } = {}) {
+export async function allocatePort(
+  state,
+  modelId,
+  { crowHome = resolveDataDir(), pid = process.pid, canBind: canBindFn = canBind } = {}
+) {
   const reservedPorts = new Set(Object.values(state.reservations).map((r) => r.port));
   for (let port = PORT_RANGE_START; port <= PORT_RANGE_END; port++) {
     if (reservedPorts.has(port)) continue;
     // eslint-disable-next-line no-await-in-loop -- ports must be probed in
     // ascending order, one at a time; parallelizing would race binds.
-    const free = await canBind(port);
+    const free = await canBindFn(port);
     if (!free) continue;
     state.reservations[modelId] = {
       port,
