@@ -34,6 +34,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * Sanitize user input for use in SQLite FTS5 MATCH queries.
  * Strips FTS5 operators and wraps individual terms in double quotes
  * for safe literal matching. Returns null if no valid terms remain.
+ *
+ * The returned string joins terms with a bare space, which FTS5 parses as
+ * an implicit AND — every term must appear in a row for it to match. That's
+ * the right default for precise recall, but it means an ordinary
+ * multi-word natural-language question (which is mostly function words)
+ * can require all of them verbatim in one row and match nothing. See
+ * `orFromAndFtsQuery` / `ftsMatchWithOrFallback` below for the fallback.
  */
 export function sanitizeFtsQuery(input) {
   if (!input || typeof input !== "string") return null;
@@ -50,6 +57,50 @@ export function sanitizeFtsQuery(input) {
     .map((w) => `"${w}"`)
     .join(" ");
   return terms || null;
+}
+
+/**
+ * Convert an AND-form FTS5 MATCH query (as returned by `sanitizeFtsQuery` —
+ * quoted terms joined by a bare space, i.e. implicit AND) into the same
+ * terms joined with explicit OR. The input is already a sequence of
+ * individually double-quoted terms with no embedded spaces, so splitting
+ * on the single-space separator and rejoining with " OR " is safe and
+ * introduces no new injection surface — every term stays quoted exactly
+ * as sanitizeFtsQuery produced it.
+ *
+ * Returns null for null/empty input. For a single-term query, OR and AND
+ * are identical, so the caller can treat that as "no different fallback".
+ */
+export function orFromAndFtsQuery(safeQuery) {
+  if (!safeQuery) return null;
+  return safeQuery.split(" ").join(" OR ");
+}
+
+/**
+ * Run an FTS5 MATCH query built from `sanitizeFtsQuery` (implicit AND
+ * across terms). If the strict AND query returns zero rows, retry the
+ * identical terms joined with OR before giving up — this is what turns an
+ * honest-but-unhelpful empty result for ordinary multi-word prose ("What
+ * can you remember for me?") into a ranked broader match, while leaving
+ * every precise AND match that already succeeds untouched (the AND query
+ * is always tried first and returned as-is whenever it finds anything).
+ *
+ * Assumes `params[0]` is the FTS MATCH argument produced by
+ * sanitizeFtsQuery, and that `sql` contains `ORDER BY rank` so the OR
+ * fallback still ranks rows matching more terms first.
+ *
+ * @param {{execute: (arg: {sql: string, args: any[]}) => Promise<any>}} db
+ * @param {string} sql
+ * @param {any[]} params
+ * @returns {Promise<any[]>} rows
+ */
+export async function ftsMatchWithOrFallback(db, sql, params) {
+  const result = await db.execute({ sql, args: params });
+  if (result.rows.length > 0) return result.rows;
+  const orQuery = orFromAndFtsQuery(params[0]);
+  if (!orQuery || orQuery === params[0]) return result.rows;
+  const orResult = await db.execute({ sql, args: [orQuery, ...params.slice(1)] });
+  return orResult.rows;
 }
 
 /**

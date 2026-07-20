@@ -7,7 +7,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
+import { createDbClient, sanitizeFtsQuery, escapeLikePattern, ftsMatchWithOrFallback } from "../db.js";
 import { generateCrowContext, PROTECTED_SECTIONS, invalidateContextCache } from "./crow-context.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import { createNotification, cleanupNotifications } from "../shared/notifications.js";
@@ -118,7 +118,7 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_search_memories",
-    "Search persistent memory using full-text search (and semantic search when available). Returns memories ranked by relevance. Use this to recall information from previous sessions.",
+    "Search persistent memory using full-text search (and semantic search when available). Returns memories ranked by relevance; if no memory contains every query word, automatically broadens to memories containing any query word before reporting no results. Use this to recall information from previous sessions.",
     {
       query: z.string().max(500).describe("Search query"),
       category: z.string().max(500).optional().describe("Filter by category"),
@@ -209,8 +209,9 @@ export function createMemoryServer(dbPath, options = {}) {
         sql += " ORDER BY rank LIMIT ?";
         params.push(limit);
 
-        const result = await db.execute({ sql, args: params });
-        rows = result.rows;
+        // Precise AND match first; only if that finds nothing, retry the
+        // same terms OR'd together (rank ordering still applies either way).
+        rows = await ftsMatchWithOrFallback(db, sql, params);
       }
 
       // Merge: semantic results first, then FTS results (deduplicated)
@@ -244,7 +245,7 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_recall_by_context",
-    "Retrieve memories relevant to a given context. Uses full-text search across content, context, and tags. Memories tagged source='maker-lab' are excluded by default to keep kid-session memories out of generic recall; pass include_maker_lab=true to include them (use this when operating within the maker-lab skill).",
+    "Retrieve memories relevant to a given context. Uses full-text search across content, context, and tags, preferring memories that contain every significant word of the context; if none do, automatically broadens to memories containing any of those words before reporting none found. Memories tagged source='maker-lab' are excluded by default to keep kid-session memories out of generic recall; pass include_maker_lab=true to include them (use this when operating within the maker-lab skill).",
     {
       context: z.string().max(2000).describe("Describe the current context or topic to find relevant memories"),
       limit: z.number().max(100).default(5).describe("Maximum results"),
@@ -276,7 +277,9 @@ export function createMemoryServer(dbPath, options = {}) {
       sql += " ORDER BY rank LIMIT ?";
       params.push(limit);
 
-      const { rows } = await db.execute({ sql, args: params });
+      // Precise AND match first; only if that finds nothing, retry the
+      // same terms OR'd together (rank ordering still applies either way).
+      const rows = await ftsMatchWithOrFallback(db, sql, params);
 
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No relevant memories found for this context." }] };
