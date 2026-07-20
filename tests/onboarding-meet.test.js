@@ -74,6 +74,7 @@ test("meet step with a usable starter provider renders the meet form (csrf + cta
   const html = await render({ step: String(MEET_IDX) }, { db: {}, resolveStarterProviderFn: usableProvider });
   assert.ok(html.includes('action="/dashboard/onboarding/meet"'), "posts to the meet endpoint");
   assert.ok(html.includes('method="POST"'), "form is a POST");
+  assert.ok(html.includes('data-turbo="false"'), "meet form opts out of Turbo for full-page reload (R2-M2)");
   assert.ok(html.includes('name="_csrf"'), "csrf input present");
   assert.ok(html.includes(i18n.t("onboarding.meet.cta", "en")), "cta button label rendered");
   assert.ok(!html.includes(i18n.t("onboarding.meet.noProvider", "en")), "no empty-state note when a usable provider exists");

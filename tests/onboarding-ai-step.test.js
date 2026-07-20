@@ -83,6 +83,7 @@ test("ai step cloud form posts to /dashboard/onboarding/cloud-provider with ever
   const html = await render({ step: String(AI_IDX) }, { db: providersDb(0) });
   assert.ok(html.includes('action="/dashboard/onboarding/cloud-provider"'), "form posts to the cloud-provider endpoint");
   assert.ok(html.includes('method="POST"'), "form is a POST");
+  assert.ok(!html.includes('data-turbo="false"'), "cloud form stays Turbo-enabled (redirects to wizard itself)");
   assert.ok(html.includes('name="_csrf"'), "csrf input present");
   for (const preset of CLOUD_PRESETS) {
     assert.ok(html.includes(`value="${preset.id}"`), `preset option value for ${preset.id} rendered`);

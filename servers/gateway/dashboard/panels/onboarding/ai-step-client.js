@@ -12,8 +12,8 @@
  * established pattern for served browser JS in this codebase): the
  * returned <script> string is built inside a template literal and must
  * never contain a literal backtick character - not even inside a comment.
- * Every string inside the browser JS below uses single quotes and "+"
- * concatenation. ES5 style throughout (var, function expressions, no arrow
+ * No literal backticks in the served string (quote style and concatenation
+ * are unconstrained). ES5 style throughout (var, function expressions, no arrow
  * functions, no let/const, no template literals) - this file ships
  * unbundled straight to the browser.
  *
