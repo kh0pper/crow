@@ -101,6 +101,30 @@ test("ai step without ?cloud=ok does not show the success callout", async () => 
   assert.ok(!html.includes(i18n.t("onboarding.ai.cloudAdded", "en")), "no success callout without cloud=ok");
 });
 
+// ── option-card radio width (CDP round finding #2) ──────────────────────────
+//
+// The dashboard's global CSS reset (layout.js:1101, `input, textarea, select
+// { width: 100%; ... }`) is unscoped by `type`, so without a scoped override
+// the radio inputs in .onb-ai-option inflate to the full row width and crush
+// the title+desc column to a ~70-100px sliver (live-measured 1525px on a
+// 1920px viewport in the CDP round). Pin the scoped override that fixes it
+// without touching the global reset (contained blast radius — see the CSS
+// comment in onboarding.js for why the global rule itself is untouched here).
+test("ai step's option-card radios carry a scoped width:auto override (CDP round finding #2)", async () => {
+  const html = await render({ step: String(AI_IDX) }, { db: providersDb(0) });
+  const selectorIdx = html.indexOf('.onb-ai-option input[type="radio"]');
+  assert.ok(selectorIdx > -1, "could not locate the .onb-ai-option input[type=radio] selector in the rendered ai step");
+  // The declaration block includes a source-comment aside that itself quotes
+  // a CSS rule (braces and all), so a naive "up to the first }" match would
+  // truncate inside that comment — anchor on the actual closing brace via
+  // the always-present flex-shrink declaration that ends the real block.
+  const closeIdx = html.indexOf("flex-shrink: 0;", selectorIdx);
+  assert.ok(closeIdx > -1, "could not find the end of the radio declaration block");
+  const ruleBody = html.slice(selectorIdx, closeIdx);
+  assert.match(ruleBody, /width:\s*auto/, "radio width is explicitly reset to auto, overriding the global input{width:100%} reset");
+  assert.match(ruleBody, /flex:\s*0 0 auto/, "radio does not stretch to fill the flex row");
+});
+
 test("ai step keeps the existing providers-count note + deep link (unchanged behavior)", async () => {
   const html = await render({ step: String(AI_IDX) }, { db: providersDb(2) });
   assert.ok(html.includes(i18n.t("onboarding.aiConfiguredNote", "en").replace("{n}", "2")), "configured note still renders");
