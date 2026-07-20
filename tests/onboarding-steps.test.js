@@ -36,8 +36,8 @@ function providersDb(n) {
 
 // ── STEP_KEYS shape ──────────────────────────────────────────────────────────
 
-test("STEP_KEYS is exactly welcome,ai,integrations,bot,starter,connect,done in order", () => {
-  assert.deepEqual(STEP_KEYS, ["welcome", "ai", "integrations", "bot", "starter", "connect", "done"]);
+test("STEP_KEYS is exactly welcome,ai,integrations,bot,starter,connect,meet,done in order", () => {
+  assert.deepEqual(STEP_KEYS, ["welcome", "ai", "integrations", "bot", "starter", "connect", "meet", "done"]);
 });
 
 // ── ai step ──────────────────────────────────────────────────────────────────

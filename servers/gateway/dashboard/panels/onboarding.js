@@ -25,9 +25,10 @@ import { CLOUD_PRESETS } from "./onboarding/cloud-presets.js";
 import { aiStepClientJS } from "./onboarding/ai-step-client.js";
 import { upsertProvider } from "../../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../../shared/providers.js";
+import { seedStarterMemories, createStarterArtifacts } from "./onboarding/starter-content.js";
 
 /** Exported so tests derive step positions (indexOf/length) instead of pinning indices. */
-export const STEP_KEYS = ["welcome", "ai", "integrations", "bot", "starter", "connect", "done"];
+export const STEP_KEYS = ["welcome", "ai", "integrations", "bot", "starter", "connect", "meet", "done"];
 
 /**
  * Resolve language cookie-first. The panel-dispatch lang derives from the DB
@@ -560,6 +561,76 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
 }
 
 /**
+ * Mark onboarding complete (first time only). Shared by the "done" step's
+ * GET render (W3-3) and Task 8's meet-step POST below — reaching either one
+ * means the user finished the tour, and the flag must only ever be written
+ * once (idempotent replay from Settings must not touch it again).
+ * @param {{execute: Function}|null} db
+ * @returns {Promise<void>}
+ */
+async function stampOnboardingCompleted(db) {
+  if (!db) return;
+  try {
+    const existing = await readSetting(db, "onboarding_completed_at");
+    if (!existing) {
+      await upsertSetting(db, "onboarding_completed_at", new Date().toISOString());
+    }
+  } catch {}
+}
+
+/**
+ * POST /dashboard/onboarding/meet — hand-registered in dashboard/index.js the
+ * same way as handleIdentityBackupPost/handleCloudProviderPost, BEHIND
+ * dashboardAuth + csrfMiddleware. The "Meet your Crow" step's CTA
+ * (renderStepBody's "meet" case below): seeds the starter memories (Task 2)
+ * and the starter agent + conversation (Task 3), then hands the user
+ * straight into that conversation via the `?ai=` deep-link (Task 6) instead
+ * of routing back through the "done" step — reaching this endpoint
+ * successfully IS finishing the tour, so it stamps
+ * onboarding_completed_at itself (stampOnboardingCompleted above — same
+ * first-write-only guard the "done" step's GET uses).
+ *
+ * `seedStarterMemoriesFn`/`createStarterArtifactsFn` are injectable seams for
+ * tests (Task 7's `upsertProviderFn`/`invalidateCacheFn` pattern), defaulting
+ * to the real starter-content.js exports. Both calls are individually
+ * idempotent (starter-content.js module doc), so a double-submit or a retry
+ * after a redirect never duplicates the starter memories, bot, or
+ * conversation — the client-side onsubmit guard in the "meet" case below is
+ * belt-and-suspenders, not load-bearing.
+ *
+ * `createStarterArtifactsFn` returning `{error:"no_provider"}` is the one
+ * failure mode the spec defines (a race between the GET, which hides the
+ * form once the provider count is 0, and the POST — e.g. two open tabs);
+ * any other unexpected failure redirects the same way rather than 500ing,
+ * mirroring the other two handlers' catch-and-redirect discipline. Never
+ * logs anything beyond `err.message` — there is no request-body secret here,
+ * but the pattern is kept consistent with identity-backup/cloud-provider.
+ */
+export async function handleMeetPost(req, res, opts = {}) {
+  const {
+    db = null,
+    seedStarterMemoriesFn = seedStarterMemories,
+    createStarterArtifactsFn = createStarterArtifacts,
+  } = opts;
+  const lang = resolveLang(req);
+  const meetIdx = STEP_KEYS.indexOf("meet");
+  const back = (code) =>
+    res.redirectAfterPost(`/dashboard/onboarding?step=${meetIdx}&err=${encodeURIComponent(code)}`);
+  try {
+    await seedStarterMemoriesFn(db, lang);
+    const result = await createStarterArtifactsFn(db, { lang });
+    if (result && result.error === "no_provider") {
+      return back("no_provider");
+    }
+    await stampOnboardingCompleted(db);
+    return res.redirectAfterPost(`/dashboard/messages?ai=${result.conversationId}`);
+  } catch (err) {
+    console.error("[onboarding] meet-your-crow setup failed:", err.message); // message only
+    return back("no_provider");
+  }
+}
+
+/**
  * Count enabled rows in the providers table. Returns null when there is no db
  * or the query fails — the caller renders no count claim at all in that case
  * (asserting "nothing configured yet" on a db error could be a lie, and the
@@ -613,12 +684,43 @@ function renderStepBody(stem, lang, ctx = {}) {
     case "connect":
       return body + callout(t("onboarding.connectNote", lang), "info")
         + linkWrap(deepLink(t("onboarding.openConnections", lang), "/dashboard/connect"));
+    case "meet": {
+      // Task 8: seeds the starter agent + example memories, then opens the
+      // first chat. Gated the same way as the ai step's count-dependent
+      // copy (ctx.providersCount, fetched by the handler below) — n === 0
+      // hides the CTA entirely rather than letting a doomed POST 302 back
+      // here; n === null (no db / query failed) renders the form optimistically,
+      // same "no false claims either way" discipline as the ai step.
+      const n = ctx.providersCount;
+      const req = ctx.req || null;
+      const errParam = req && req.query ? req.query.err : null;
+      const errorHtml = errParam === "no_provider" ? callout(t("onboarding.meet.err", lang), "error") : "";
+      const aiIdx = STEP_KEYS.indexOf("ai");
+      if (n === 0) {
+        return body + errorHtml
+          + callout(t("onboarding.meet.noProvider", lang), "info")
+          + linkWrap(button(t("onboarding.ai.title", lang), { variant: "secondary", href: `/dashboard/onboarding?step=${aiIdx}` }));
+      }
+      return body + errorHtml + `
+        <form method="POST" action="/dashboard/onboarding/meet" onsubmit="this.querySelector('button').disabled=true">
+          ${csrfInput(req)}
+          ${button(t("onboarding.meet.cta", lang), { variant: "primary", type: "submit" })}
+        </form>`;
+    }
     case "done": {
       const celebrateHtml = `${CELEBRATION_CSS}<div class="onboarding-celebrate">
         <div class="onboarding-celebrate-check" aria-hidden="true">&#10003;</div>
         <span class="onboarding-celebrate-label">${t("onboarding.celebration", lang)}</span>
       </div>`;
+      // Spec C1 "skip": when no provider is configured, agents/chat/voice are
+      // dormant — say so plainly and link back to the ai step (same target
+      // the meet step's empty state points at).
+      const dormantHtml = ctx.providersCount === 0
+        ? callout(t("onboarding.doneDormant", lang), "warning")
+          + linkWrap(button(t("onboarding.ai.title", lang), { variant: "secondary", href: `/dashboard/onboarding?step=${STEP_KEYS.indexOf("ai")}` }))
+        : "";
       return celebrateHtml + body + callout(t("onboarding.doneNote", lang), "success")
+        + dormantHtml
         + renderBackupSection(lang, ctx)
         + renderActionCards(lang);
     }
@@ -669,21 +771,17 @@ export default {
     const stem = STEP_KEYS[current];
 
     // W3-3: Reaching the "done" step marks onboarding complete (first time only).
-    if (stem === "done" && db) {
-      try {
-        const existing = await readSetting(db, "onboarding_completed_at");
-        if (!existing) {
-          await upsertSetting(db, "onboarding_completed_at", new Date().toISOString());
-        }
-      } catch {}
-    }
+    if (stem === "done") await stampOnboardingCompleted(db);
 
-    // The ai step's copy is conditional on whether any provider is configured;
-    // fetch the count server-side only when that step is the one rendering.
-    // The done step needs the instance crowId (nullable) + req for the backup
-    // form (csrf token, backup_error query).
+    // The ai and meet steps' copy is conditional on whether any provider is
+    // configured; fetch the count server-side only when one of those steps
+    // (or "done", for its dormant-features callout) is the one rendering.
+    // The done step also needs the instance crowId (nullable) + req for the
+    // backup form (csrf token, backup_error query); the meet step needs req
+    // for its csrf token + ?err= query.
     const ctx = stem === "ai" ? { providersCount: await countProviders(db), req }
-      : stem === "done" ? { crowId: readInstanceCrowId(), req }
+      : stem === "meet" ? { providersCount: await countProviders(db), req }
+      : stem === "done" ? { crowId: readInstanceCrowId(), req, providersCount: await countProviders(db) }
       : {};
 
     const steps = STEP_KEYS.map((k) => ({ label: t(`onboarding.${k}.title`, lang) }));
