@@ -241,6 +241,20 @@ const AI_OPTIONS_CSS = `
   background: var(--crow-bg-surface);
 }
 .onb-ai-option input[type="radio"] {
+  /* Scoped override for the global input reset (layout.js's unscoped
+   * input, textarea, select { width: 100%; ... } rule) — that rule is not
+   * excluded for type=radio/checkbox, so without this the radio inflates
+   * to the full row width and crushes the title+desc column to a sliver
+   * (CDP round finding #2, C1-B Task 9). Fix here, not in the global
+   * reset, to keep this PR's blast radius contained; the global gap is a
+   * separate residual-minors candidate (other radios/checkboxes in the
+   * app may have quietly compensated for it and could regress).
+   */
+  width: auto;
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  padding: 0;
   margin-top: 3px;
   flex-shrink: 0;
 }
