@@ -20,6 +20,7 @@ export const ICON_MAP = {
   cloud: "☁️",
   image: "\u{1F5BC}️",
   book: "\u{1F4D6}",
+  bot: "\u{1F916}",
   home: "\u{1F3E0}",
   archive: "\u{1F4E6}",
   mic: "\u{1F3A4}",

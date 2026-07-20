@@ -48,7 +48,14 @@ function closeServer(server) {
 test("allocatePort returns the lowest free port, starting at 18100", async () => {
   await withScratch("alloc-first", async () => {
     const state = { reservations: {}, journal: {}, registry: {} };
-    const port = await allocatePort(state, "model-a");
+    // Stub the bind probe: node --test runs test FILES concurrently, and
+    // tests/models-registration.test.js exercises the real allocatePort
+    // over this same 18100-18199 range, so a live bind-probe can find
+    // 18100 transiently held by that other process and correctly skip to
+    // 18101 -- a real cross-file TOCTOU, not a product bug. This test
+    // asserts the exact starting port, so it must not depend on host
+    // network state to be hermetic.
+    const port = await allocatePort(state, "model-a", { canBind: async () => true });
     assert.equal(port, PORT_RANGE_START);
     assert.equal(state.reservations["model-a"].port, PORT_RANGE_START);
   });
@@ -56,8 +63,14 @@ test("allocatePort returns the lowest free port, starting at 18100", async () =>
 
 test("allocatePort skips ports already reserved in state", async () => {
   const state = { reservations: {}, journal: {}, registry: {} };
-  const first = await allocatePort(state, "model-a");
-  const second = await allocatePort(state, "model-b");
+  // Same cross-file TOCTOU as above: both assertions below are exact
+  // ports (not a first+1 relative check would still be racy too -- a
+  // probe collision landing between the two calls could make
+  // first=18100, second=18102), so stub the probe to isolate this test
+  // from models-registration.test.js's concurrent real allocatePort calls.
+  const stub = { canBind: async () => true };
+  const first = await allocatePort(state, "model-a", stub);
+  const second = await allocatePort(state, "model-b", stub);
   assert.equal(first, PORT_RANGE_START);
   assert.equal(second, PORT_RANGE_START + 1);
   assert.notEqual(first, second);
@@ -87,11 +100,15 @@ test("allocatePort bind-tests and skips a port actually held on the host", async
 
 test("releasePort frees a reservation so its port can be reallocated", async () => {
   const state = { reservations: {}, journal: {}, registry: {} };
-  const port = await allocatePort(state, "model-a");
+  // Exact-port assertions again (18100 before AND after release) -- same
+  // cross-file TOCTOU with models-registration.test.js's real allocatePort,
+  // so stub the probe here too.
+  const stub = { canBind: async () => true };
+  const port = await allocatePort(state, "model-a", stub);
   assert.equal(port, PORT_RANGE_START);
   releasePort(state, "model-a");
   assert.equal(state.reservations["model-a"], undefined);
-  const reallocated = await allocatePort(state, "model-b");
+  const reallocated = await allocatePort(state, "model-b", stub);
   assert.equal(reallocated, PORT_RANGE_START);
 });
 
