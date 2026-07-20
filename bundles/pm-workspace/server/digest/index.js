@@ -10,6 +10,7 @@
  */
 
 import { boardsSections } from "./adapters/boards.js";
+import { briefingSection } from "./adapters/briefing.js";
 import { googleSections } from "./adapters/google.js";
 import { mondayLocalSection } from "./adapters/monday-local.js";
 import { boxSection } from "./adapters/box.js";
@@ -46,6 +47,8 @@ export async function assembleDigest(db, config) {
     }
   };
 
+  // Briefing leads the digest — distilled follow-ups before raw feeds.
+  push(await guarded(() => briefingSection(config, localDate()), "Briefing"));
   push(await guarded(() => boardsSections(db, config), "Boards"));
   push(await guarded(() => mondayLocalSection(db), "Monday sync"));
   push(await guarded(() => googleSections(config), "Google"));
