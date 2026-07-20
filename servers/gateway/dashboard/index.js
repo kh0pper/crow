@@ -75,7 +75,7 @@ import contactsPanel from "./panels/contacts.js";
 import botBuilderPanel from "./panels/bot-builder.js";
 import botBoardPanel from "./panels/bot-board.js";
 import designSystemPanel from "./panels/design-system.js";
-import onboardingPanel, { handleIdentityBackupPost } from "./panels/onboarding.js";
+import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost } from "./panels/onboarding.js";
 import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
@@ -653,6 +653,20 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // AFTER dashboardAuth + csrfMiddleware above, so it is session-authed and
   // CSRF-protected exactly like the fix-it action POST.
   router.post("/dashboard/onboarding/identity-backup", handleIdentityBackupPost);
+
+  // Task 7: onboarding AI step's cloud-provider paste-a-key form — same
+  // mounting slot as identity-backup above (session-authed + CSRF-protected).
+  // Inline db-lifecycle wrapper mirrors the fix-it action POST: the handler
+  // itself takes an injectable `{ db, upsertProviderFn, invalidateCacheFn }`
+  // for tests, production always supplies a real db here.
+  router.post("/dashboard/onboarding/cloud-provider", async (req, res) => {
+    const db = createDbClient();
+    try {
+      await handleCloudProviderPost(req, res, { db });
+    } finally {
+      try { db.close(); } catch {}
+    }
+  });
 
   // Federation companion router (Phase 3) — session-authed, under dashboard
   // auth. Mounted AFTER dashboardAuth so session cookies are validated.
