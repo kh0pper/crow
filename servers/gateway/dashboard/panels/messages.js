@@ -18,6 +18,7 @@ import { getUnifiedConversationList, getBotDirectory, getMessageRequests } from 
 import { csrfInput } from "../shared/csrf.js";
 import { buildInviteShare, parseShortCodeResult } from "../shared/peer-invite-ui.js";
 import { extractInviteCode } from "../../../sharing/invite-url.js";
+import { findUsableProviderRow } from "../../../shared/providers-db.js";
 
 /**
  * True if the `providers` table — the modern provider registry, same table
@@ -36,32 +37,18 @@ import { extractInviteCode } from "../../../sharing/invite-url.js";
  * starter conversation could never open (client.js stubs loadAiConversation
  * to a no-op when the panel says AI is unconfigured).
  *
- * Any query failure degrades to false — never throws, never crashes the
- * panel render.
+ * Delegates to shared/providers-db.js's `findUsableProviderRow` (Amended
+ * review, C-B Task 9): that same predicate is also needed by chat.js's
+ * conversation-creation env-fallback path, which wants the row's id/model —
+ * not just a boolean — so the scan lives there once and this is a thin
+ * boolean wrapper over it. Any query failure degrades to false — never
+ * throws, never crashes the panel render.
  *
  * @param {{execute: (arg: string|{sql: string, args: any[]}) => Promise<any>}|null} db
  * @returns {Promise<boolean>}
  */
 async function hasUsableProvider(db) {
-  if (!db) return false;
-  try {
-    const { rows } = await db.execute({
-      sql: "SELECT models FROM providers WHERE disabled = 0",
-      args: [],
-    });
-    for (const row of rows || []) {
-      let models;
-      try {
-        models = JSON.parse(row.models || "[]");
-      } catch {
-        models = [];
-      }
-      if (Array.isArray(models) && models.length && models[0] && models[0].id) return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
+  return !!(await findUsableProviderRow(db));
 }
 
 export default {
