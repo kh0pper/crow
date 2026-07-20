@@ -385,7 +385,7 @@ function renderAiOptions(lang, ctx = {}) {
 
   const cloudSuccess = cloudOk ? callout(t("onboarding.ai.cloudAdded", lang), "success") : "";
   const cloudError = cloudErrorKey ? callout(t(cloudErrorKey, lang), "error") : "";
-  const docsHref = docsUrl((lang === "es" ? "es/" : "") + "guide/ai-providers");
+  const docsHref = docsUrl((lang === "es" ? "es/" : "") + "getting-started/free-cloud-ai");
 
   return `${AI_OPTIONS_CSS}
     <div class="onb-ai-options">
