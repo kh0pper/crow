@@ -1722,6 +1722,7 @@ export const translations = {
     en: "Your hardware can run a bigger model — see the Model Catalog after setup.",
     es: "Tu hardware puede ejecutar un modelo más grande — consulta el Catálogo de modelos después de configurar.",
   },
+  "onboarding.ai.upsellLink": { en: "Open the Model Catalog", es: "Abrir el Catálogo de modelos" },
   "onboarding.ai.cloudProviderLabel": { en: "Provider", es: "Proveedor" },
   "onboarding.ai.cloudKeyLabel": { en: "API key", es: "Clave API" },
   "onboarding.ai.cloudModelLabel": { en: "Model", es: "Modelo" },
@@ -1735,6 +1736,19 @@ export const translations = {
   "onboarding.ai.cloudBadPreset": { en: "Unknown provider preset.", es: "Preajuste de proveedor desconocido." },
   "onboarding.ai.cloudKeyRequired": { en: "An API key is required.", es: "Se requiere una clave API." },
   "onboarding.ai.cloudSaveFailed": { en: "Could not save this provider — please try again.", es: "No se pudo guardar este proveedor — inténtalo de nuevo." },
+  // ── cloud-form validation errors, redirect-and-render (Task 7 review fix round 1) ──
+  "onboarding.ai.cloudErrBadPreset": {
+    en: "Unknown provider preset — please choose one from the list.",
+    es: "Preajuste de proveedor desconocido — elige uno de la lista.",
+  },
+  "onboarding.ai.cloudErrMissingKey": {
+    en: "An API key is required to add this provider.",
+    es: "Se requiere una clave API para agregar este proveedor.",
+  },
+  "onboarding.ai.cloudErrSaveFailed": {
+    en: "Could not save this provider — please try again.",
+    es: "No se pudo guardar este proveedor — inténtalo de nuevo.",
+  },
   "onboarding.ai.sizeGb": { en: "{gb} GB", es: "{gb} GB" },
   "onboarding.integrations.title": { en: "Connect your tools", es: "Conecta tus herramientas" },
   "onboarding.integrations.body": {

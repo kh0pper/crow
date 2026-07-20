@@ -107,6 +107,21 @@ test("ai step keeps the existing providers-count note + deep link (unchanged beh
     || html.includes("/dashboard/settings?section=llm&amp;tab=providers"), "advanced providers deep link still renders");
 });
 
+test("Task 7 review fix round 1: new i18n keys resolve in en AND es", () => {
+  const KEYS = [
+    "onboarding.ai.upsellLink",
+    "onboarding.ai.cloudErrBadPreset",
+    "onboarding.ai.cloudErrMissingKey",
+    "onboarding.ai.cloudErrSaveFailed",
+  ];
+  for (const k of KEYS) {
+    const entry = i18n.translations[k];
+    assert.ok(entry, `missing translations entry for ${k}`);
+    assert.ok(entry.en && entry.en.trim(), `missing/empty en value for ${k}`);
+    assert.ok(entry.es && entry.es.trim(), `missing/empty es value for ${k}`);
+  }
+});
+
 // ── POST handler (handleCloudProviderPost) ──────────────────────────────────
 
 test("cloud-provider POST: valid preset+key calls upsertProvider with the preset's baseUrl, redirects with cloud=ok", async () => {
@@ -144,7 +159,7 @@ test("cloud-provider POST: an editable custom model field overrides the preset d
   assert.equal(calls[0].models[0].id, "gpt-4o");
 });
 
-test("cloud-provider POST: unknown preset id → 400, never calls upsertProvider", async () => {
+test("cloud-provider POST: unknown preset id → redirects to the ai step with cloud_error=bad_preset, never calls upsertProvider", async () => {
   let called = false;
   const res = makeRes();
   await handleCloudProviderPost(makePostReq({ preset: "not-a-real-preset", apiKey: "sk-test" }), res, {
@@ -152,12 +167,14 @@ test("cloud-provider POST: unknown preset id → 400, never calls upsertProvider
     upsertProviderFn: async () => { called = true; },
     invalidateCacheFn: async () => {},
   });
-  assert.equal(res.status_, 400);
+  assert.equal(res.status_, null, "no bare status set — a redirect, not a page-replacing error response");
   assert.equal(called, false, "upsertProvider never called for a bad preset");
-  assert.equal(res.redirected, null);
+  assert.ok(res.redirected, "redirects back to the wizard instead of dead-ending");
+  assert.ok(res.redirected.includes(`step=${AI_IDX}`), "redirects to the ai step");
+  assert.ok(res.redirected.includes("cloud_error=bad_preset"), "carries the bad_preset error code");
 });
 
-test("cloud-provider POST: empty API key → 400, never calls upsertProvider", async () => {
+test("cloud-provider POST: empty API key → redirects to the ai step with cloud_error=missing_key, never calls upsertProvider", async () => {
   let called = false;
   const res = makeRes();
   await handleCloudProviderPost(makePostReq({ preset: "openai", apiKey: "   " }), res, {
@@ -165,11 +182,14 @@ test("cloud-provider POST: empty API key → 400, never calls upsertProvider", a
     upsertProviderFn: async () => { called = true; },
     invalidateCacheFn: async () => {},
   });
-  assert.equal(res.status_, 400);
+  assert.equal(res.status_, null, "no bare status set — a redirect, not a page-replacing error response");
   assert.equal(called, false, "upsertProvider never called for an empty key");
+  assert.ok(res.redirected, "redirects back to the wizard instead of dead-ending");
+  assert.ok(res.redirected.includes(`step=${AI_IDX}`), "redirects to the ai step");
+  assert.ok(res.redirected.includes("cloud_error=missing_key"), "carries the missing_key error code");
 });
 
-test("cloud-provider POST: never logs the raw api key, even on a failure path", async () => {
+test("cloud-provider POST: upsertProvider failure → redirects to the ai step with cloud_error=save_failed, never logs the raw api key", async () => {
   const res = makeRes();
   const originalError = console.error;
   const logged = [];
@@ -183,8 +203,39 @@ test("cloud-provider POST: never logs the raw api key, even on a failure path", 
   } finally {
     console.error = originalError;
   }
-  assert.equal(res.status_, 500);
+  assert.equal(res.status_, null, "no bare status set — a redirect, not a page-replacing error response");
+  assert.ok(res.redirected, "redirects back to the wizard instead of dead-ending");
+  assert.ok(res.redirected.includes(`step=${AI_IDX}`), "redirects to the ai step");
+  assert.ok(res.redirected.includes("cloud_error=save_failed"), "carries the save_failed error code");
   assert.ok(!logged.join(" ").includes("sk-super-secret-key"), "api key never logged");
+});
+
+// ── error-callout rendering (SSR, gated by the closed cloud_error enum) ─────
+
+test("ai step with ?cloud_error=bad_preset shows the bad-preset error callout and reveals the cloud panel", async () => {
+  const html = await render({ step: String(AI_IDX), cloud_error: "bad_preset" }, { db: providersDb(0) });
+  assert.ok(html.includes(i18n.t("onboarding.ai.cloudErrBadPreset", "en")), "bad-preset error callout rendered");
+  assert.ok(!html.includes('id="onb-ai-panel-cloud" class="onb-ai-panel" hidden'), "cloud panel is revealed, not hidden");
+});
+
+test("ai step with ?cloud_error=missing_key shows the missing-key error callout", async () => {
+  const html = await render({ step: String(AI_IDX), cloud_error: "missing_key" }, { db: providersDb(0) });
+  assert.ok(html.includes(i18n.t("onboarding.ai.cloudErrMissingKey", "en")), "missing-key error callout rendered");
+});
+
+test("ai step with ?cloud_error=save_failed shows the save-failed error callout", async () => {
+  const html = await render({ step: String(AI_IDX), cloud_error: "save_failed" }, { db: providersDb(0) });
+  assert.ok(html.includes(i18n.t("onboarding.ai.cloudErrSaveFailed", "en")), "save-failed error callout rendered");
+});
+
+test("ai step with an unrecognized ?cloud_error value renders no error callout (closed enum)", async () => {
+  const html = await render({ step: String(AI_IDX), cloud_error: "totally-made-up" }, { db: providersDb(0) });
+  assert.ok(!html.includes("callout-error"), "no error callout for an unrecognized code");
+});
+
+test("ai step cloud form's API key input is required", async () => {
+  const html = await render({ step: String(AI_IDX) }, { db: providersDb(0) });
+  assert.ok(/id="onb-ai-cloud-key"[^>]*\brequired\b/.test(html), "key input carries the required attribute");
 });
 
 // ── client-script contract (source-string assertions) ───────────────────────
@@ -205,7 +256,12 @@ test("ai-step-client.js: zero literal backtick characters inside the <script> bl
 test("ai-step-client.js: drives POST /api/models/download and polls at 1500ms", () => {
   const src = readFileSync(join(repoRoot, "servers/gateway/dashboard/panels/onboarding/ai-step-client.js"), "utf8");
   assert.ok(src.includes("/api/models/download"), "posts to the download endpoint");
-  assert.ok(src.includes("1500"), "polls at the 1500ms interval");
+  // Call-site match, not a bare substring: "1500" alone would also pass for
+  // "15000" (src.includes("1500") is vacuous — src.includes("15000") is also
+  // true). Pin the actual setTimeout(..., 1500) argument position instead.
+  assert.ok(/setTimeout\(function \(\) \{ pollDownload\(jobId\); \}, 1500\);/.test(src),
+    "polls at exactly the 1500ms interval (call-site match)");
+  assert.ok(!/,\s*15000\)/.test(src), "no stray 15-second interval snuck in");
   assert.ok(src.includes("/api/models/downloads"), "reattach-on-return checks the downloads list");
   assert.ok(src.includes("/api/models/catalog"), "populates the card from the catalog endpoint");
 });
@@ -216,4 +272,62 @@ test("ai-step-client.js: never calls POST /api/models/reprobe (catalog self-warm
   const scriptEnd = src.indexOf("</script>", scriptStart);
   const body = src.slice(scriptStart, scriptEnd);
   assert.ok(!body.includes("/reprobe"), "no separate reprobe call — the catalog fetch is the only probe trigger");
+});
+
+// ── reattach-on-return: a distinct, deletion-detectable source contract ─────
+// (Task 7 review finding 4). Plain string/substring checks on "believeActive"
+// or "reattempted" alone would still pass if those identifiers were reused
+// for something unrelated, and a check that only sees "/api/models/downloads"
+// somewhere in the file can't tell reattach-on-init apart from the ordinary
+// downloading/registering poll loop. These assertions were verified against
+// a real deletion: temporarily removing the `if (believeActive &&
+// !reattempted) { ... }` resume-POST block from ai-step-client.js made this
+// test fail (the branchBody match came back without the guard/flip/re-POST
+// lines), and restoring the block made it pass again.
+test("ai-step-client.js: reattach-on-return is a distinct source contract (init fetch + vanished-job resume guard)", () => {
+  const src = readFileSync(join(repoRoot, "servers/gateway/dashboard/panels/onboarding/ai-step-client.js"), "utf8");
+
+  // Module-init Promise.all fetches catalog AND downloads together, feeding
+  // both into renderLocalCard before any download starts or any idle
+  // "Download and set up" button ever renders — this is what lets a step
+  // re-entry pick up an in-flight job instead of restarting it.
+  const initBlock = src.match(
+    /Promise\.all\(\[\s*fetch\("\/api\/models\/catalog"\)[\s\S]{0,150}fetch\("\/api\/models\/downloads"\)[\s\S]{0,300}renderLocalCard\(results\[0\], results\[1\]\)/
+  );
+  assert.ok(initBlock, "module-init Promise.all fetches catalog+downloads together and feeds both into renderLocalCard, before any download starts");
+
+  // The vanished-job resume guard, isolated to the "!job" branch specifically
+  // (distinct from the ordinary downloading/registering poll loop below it).
+  const vanishedJobBranch = src.match(/if \(!job\) \{[\s\S]{0,600}?\n\s*\}\n/);
+  assert.ok(vanishedJobBranch, "could not locate the vanished-job (!job) branch");
+  const branchBody = vanishedJobBranch[0];
+  assert.ok(/believeActive\s*&&\s*!reattempted/.test(branchBody),
+    "vanished-job branch gates the resume POST on believeActive && !reattempted together");
+  assert.ok(/reattempted\s*=\s*true/.test(branchBody),
+    "reattempted flips true before the resume POST fires (never-loop-forever guard)");
+  assert.ok(/fetch\("\/api\/models\/download",/.test(branchBody),
+    "vanished-job branch re-POSTs to the download endpoint to resume from the on-disk journal");
+});
+
+// ── ETA rendering: a minimal deletion-detectable source contract ───────────
+// (review addendum). Verified against a real deletion: temporarily changing
+// `etaText = fmtEta(...)` to `etaText = '--';` made this test fail, restoring
+// it made it pass again.
+test("ai-step-client.js: ETA rendering (fmtEta + rolling average) reaches the DOM at its render site", () => {
+  const src = readFileSync(join(repoRoot, "servers/gateway/dashboard/panels/onboarding/ai-step-client.js"), "utf8");
+  assert.ok(/function fmtEta\(/.test(src), "fmtEta helper defined");
+  assert.ok(/etaText\s*=\s*fmtEta\(/.test(src), "renderProgress's rolling-average path calls fmtEta and assigns etaText");
+  assert.ok(/etaLabel[\s\S]{0,80}join\(etaText\)/.test(src), "the ETA label is built by interpolating etaText into the downloadEta string");
+  assert.ok(/statusEl2\.textContent\s*=[\s\S]{0,200}etaLabel/.test(src), "the render site writes etaLabel into the status text actually shown in the DOM");
+});
+
+// ── upsell deep-link (finding 1) ────────────────────────────────────────────
+test("ai-step-client.js: the upsell card renders a real anchor to /dashboard/model-catalog, not plain text", () => {
+  const src = readFileSync(join(repoRoot, "servers/gateway/dashboard/panels/onboarding/ai-step-client.js"), "utf8");
+  const scriptStart = src.indexOf("<script>", src.indexOf("export function aiStepClientJS"));
+  const scriptEnd = src.indexOf("</script>", scriptStart);
+  const body = src.slice(scriptStart, scriptEnd);
+  assert.ok(/createElement\("a"\)/.test(body), "upsell renders via a real <a> element");
+  assert.ok(/upsellLink\.href\s*=\s*"\/dashboard\/model-catalog"/.test(body), "upsell link points at the real Model Catalog route");
+  assert.ok(!body.includes("innerHTML"), "upsell link is built via DOM methods, never innerHTML (checked inside the served <script> block only)");
 });
