@@ -427,12 +427,37 @@ export async function downloadRuntimeAsset({
         } catch {
           /* already gone */
         }
+        // Wait for `ws`'s own lifecycle (construction -> any queued
+        // write(s) -> destroy/close) to fully settle before rejecting.
+        // `ws`'s underlying fs.open()/write()/close() run on the libuv
+        // threadpool, genuinely asynchronously with respect to this
+        // function's own progress — under real scheduler contention (a
+        // loaded CI runner, many parallel test-file processes) that
+        // background work can still be in flight at the exact instant a
+        // stream/network error fires here. Rejecting immediately (the
+        // previous behavior) let the catch block below's `unlinkSync`
+        // race ahead of it: `unlinkSync` would find nothing yet (silently
+        // swallowing ENOENT), and the still-in-flight open()/write()
+        // would finish moments later, leaving an orphaned partial file
+        // that nothing then cleans up — a real bug (confirmed via a
+        // genuine OS-scheduler-contention repro, not merely a test
+        // artifact): a later caller could mistake that leftover for a
+        // fresh, resumable, or even complete download. Waiting for `ws`'s
+        // "close" event guarantees its on-disk state has stabilized
+        // (whatever was ever going to be written/created has been, and
+        // the fd is closed) before cleanup ever runs.
+        const finish = () => reject(err);
+        if (ws.closed) {
+          finish();
+          return;
+        }
+        ws.once("close", finish);
         try {
           ws.destroy();
         } catch {
-          /* already gone */
+          ws.removeListener("close", finish);
+          finish();
         }
-        reject(err);
       };
       res.on("data", (chunk) => hash.update(chunk));
       res.on("error", fail);
