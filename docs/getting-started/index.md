@@ -5,6 +5,7 @@
 - Free always-on cloud server, okay with a one-time setup → [Oracle Cloud Free Tier](./oracle-cloud)
 - Own hardware (Raspberry Pi, NUC, old laptop) → [Home Server](./home-server)
 - Just my computer, local only, no server → [Desktop Install](./desktop-install)
+- On Windows, want the full server experience (systemd, dashboard, auto-start) → [Windows (WSL2)](./windows-wsl2)
 - Developer, prefer Docker → [Docker](./docker)
 - Already have Crow, adding a second instance → [Google Cloud](./google-cloud) + [multi-device guide](./multi-device)
 - Instance already running, now connecting my AI client → [Platform Guides](../platforms/)

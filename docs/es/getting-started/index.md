@@ -5,6 +5,7 @@
 - Servidor en la nube gratuito y permanente, sin problema con una configuración inicial → [Oracle Cloud Nivel Gratuito](./oracle-cloud)
 - Tengo hardware propio (Raspberry Pi, NUC, laptop vieja) → [Servidor en Casa](./home-server)
 - Solo mi computadora, uso local, sin servidor → [Instalación de Escritorio](./desktop-install)
+- En Windows, quiero la experiencia completa del servidor (systemd, panel, inicio automático) → [Windows (WSL2)](./windows-wsl2)
 - Desarrollador, prefiero Docker → [Docker](/es/getting-started/docker)
 - Ya tengo Crow y quiero agregar una segunda instancia → [Google Cloud](./google-cloud) + [guía multidispositivo](/es/getting-started/multi-device)
 - Mi instancia ya está en marcha y ahora quiero conectar mi cliente de IA → [Guías de Plataformas](/es/platforms/)
