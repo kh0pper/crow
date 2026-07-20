@@ -75,7 +75,7 @@ import contactsPanel from "./panels/contacts.js";
 import botBuilderPanel from "./panels/bot-builder.js";
 import botBoardPanel from "./panels/bot-board.js";
 import designSystemPanel from "./panels/design-system.js";
-import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost } from "./panels/onboarding.js";
+import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost, handleMeetPost } from "./panels/onboarding.js";
 import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
@@ -663,6 +663,19 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     const db = createDbClient();
     try {
       await handleCloudProviderPost(req, res, { db });
+    } finally {
+      try { db.close(); } catch {}
+    }
+  });
+
+  // Task 8: onboarding "Meet your Crow" step — seeds the starter agent +
+  // conversation and hands the user into their first chat. Same mounting
+  // slot as identity-backup/cloud-provider above (session-authed +
+  // CSRF-protected). Inline db-lifecycle wrapper mirrors both siblings.
+  router.post("/dashboard/onboarding/meet", async (req, res) => {
+    const db = createDbClient();
+    try {
+      await handleMeetPost(req, res, { db });
     } finally {
       try { db.close(); } catch {}
     }

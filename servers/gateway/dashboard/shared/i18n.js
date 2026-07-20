@@ -1783,6 +1783,22 @@ export const translations = {
     es: "Abre el asistente de conexión guiado para configurar Claude Code, Cursor, Gemini CLI y otros clientes con configuración lista para copiar.",
   },
   "onboarding.openConnections": { en: "Open the connect wizard", es: "Abrir el asistente de conexión" },
+  // Task 8: "Meet your Crow" step (C1/C3 PR C-B) — seeds the starter agent +
+  // example memories and opens the first chat.
+  "onboarding.meet.title": { en: "Meet your Crow", es: "Conoce a tu Crow" },
+  "onboarding.meet.body": {
+    en: "This creates a starter agent with a few example memories already loaded, then opens your first chat with it — a quick way to see what Crow can do before you build your own.",
+    es: "Esto crea un agente inicial con algunos recuerdos de ejemplo ya cargados y luego abre tu primer chat con él — una forma rápida de ver lo que Crow puede hacer antes de crear el tuyo propio.",
+  },
+  "onboarding.meet.cta": { en: "Meet your Crow", es: "Conoce a tu Crow" },
+  "onboarding.meet.noProvider": {
+    en: "No AI provider is set up yet, so there's no one to chat with. Set one up first, then come back here.",
+    es: "Todavía no hay ningún proveedor de IA configurado, así que no hay con quién chatear. Configura uno primero y luego vuelve aquí.",
+  },
+  "onboarding.meet.err": {
+    en: "Couldn't set up your starter agent — no AI provider is available right now. Set one up, then try again.",
+    es: "No se pudo configurar tu agente inicial: no hay ningún proveedor de IA disponible en este momento. Configura uno y vuelve a intentarlo.",
+  },
   "onboarding.done.title": { en: "You're all set", es: "Todo listo" },
   "onboarding.done.body": {
     en: "That's the tour. Explore the dashboard at your own pace. Everything here is available from the sidebar.",
@@ -1791,6 +1807,10 @@ export const translations = {
   "onboarding.doneNote": {
     en: "You can replay this guide anytime from Settings, Help and Setup.",
     es: "Puedes repetir esta guía cuando quieras desde Ajustes, Ayuda y configuración.",
+  },
+  "onboarding.doneDormant": {
+    en: "A few features are still off because no AI provider is configured — agents, chat, and voice won't work until you add one.",
+    es: "Algunas funciones siguen desactivadas porque no hay ningún proveedor de IA configurado: los agentes, el chat y la voz no funcionarán hasta que agregues uno.",
   },
   // 4-PR3 identity backup (done step + settings pointer)
   "onboarding.backup.title": { en: "Back up your identity", es: "Respalda tu identidad" },

@@ -16,7 +16,9 @@ const ONBOARDING_KEYS = [
   "onboarding.starterMemberCount", "onboarding.openCollections",
   "onboarding.connect.title", "onboarding.connect.body",
   "onboarding.connectNote", "onboarding.openConnections",
-  "onboarding.done.title", "onboarding.done.body", "onboarding.doneNote",
+  "onboarding.meet.title", "onboarding.meet.body", "onboarding.meet.cta",
+  "onboarding.meet.noProvider", "onboarding.meet.err",
+  "onboarding.done.title", "onboarding.done.body", "onboarding.doneNote", "onboarding.doneDormant",
   "onboarding.btnNext", "onboarding.btnBack", "onboarding.btnSkip",
   "onboarding.btnGoDashboard", "onboarding.replayLink",
 ];
@@ -61,10 +63,12 @@ test("renders every step with the stepper and step-specific deep links", async (
     bot: "/dashboard/bot-builder",
     starter: "/dashboard/extensions#collections",
     connect: "/dashboard/connect",
+    meet: null,
     done: null,
   };
   // integrations, connect, done each render a callout unconditionally.
-  // (The ai step's callout is db-dependent; tests/onboarding-steps.test.js covers it.)
+  // (The ai and meet steps' callouts are db-dependent; tests/onboarding-steps.test.js
+  // and tests/onboarding-meet.test.js cover those.)
   const calloutStems = ["integrations", "connect", "done"];
   for (let step = 0; step < STEP_KEYS.length; step++) {
     const stem = STEP_KEYS[step];
