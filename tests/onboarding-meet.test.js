@@ -21,16 +21,22 @@ const MEET_IDX = STEP_KEYS.indexOf("meet");
 const AI_IDX = STEP_KEYS.indexOf("ai");
 
 // Same seam as tests/onboarding-steps.test.js: drive the panel handler with a stub layout.
-async function render(query = {}, { db } = {}) {
+// `resolveStarterProviderFn` mirrors handleMeetPost's seam pattern (Task 8
+// review fix round 1) — the meet step's render gate no longer derives from
+// providersCount, so these render tests inject the resolve seam directly
+// instead of a providers-COUNT db stub.
+async function render(query = {}, { db, resolveStarterProviderFn } = {}) {
   let captured = "";
   const layout = ({ content }) => content;
   const res = { send(h) { captured = h; }, setHeader() {} };
   const req = { method: "GET", query, headers: {} };
-  const out = await onboardingPanel.handler(req, res, { layout, lang: "en", db });
+  const out = await onboardingPanel.handler(req, res, { layout, lang: "en", db, resolveStarterProviderFn });
   return typeof out === "string" ? out : captured;
 }
 
 // Minimal db stub: answers the providers COUNT query with `n`, everything else empty.
+// Still used by the done-step tests (dormant callout still gates on
+// providersCount, unaffected by the meet-step fix).
 function providersDb(n) {
   return {
     async execute(q) {
@@ -42,6 +48,11 @@ function providersDb(n) {
     },
   };
 }
+
+// A usable / unusable starterProvider resolution, for the meet step's render
+// gate.
+const usableProvider = async () => ({ providerId: "p", modelId: "m" });
+const noProvider = async () => null;
 
 function makeRes() {
   return {
@@ -59,35 +70,75 @@ function makePostReq(body) {
 
 // ── SSR: meet step render ───────────────────────────────────────────────────
 
-test("meet step with a provider renders the meet form (csrf + cta), no empty-state callout", async () => {
-  const html = await render({ step: String(MEET_IDX) }, { db: providersDb(2) });
+test("meet step with a usable starter provider renders the meet form (csrf + cta), no empty-state callout", async () => {
+  const html = await render({ step: String(MEET_IDX) }, { db: {}, resolveStarterProviderFn: usableProvider });
   assert.ok(html.includes('action="/dashboard/onboarding/meet"'), "posts to the meet endpoint");
   assert.ok(html.includes('method="POST"'), "form is a POST");
   assert.ok(html.includes('name="_csrf"'), "csrf input present");
   assert.ok(html.includes(i18n.t("onboarding.meet.cta", "en")), "cta button label rendered");
-  assert.ok(!html.includes(i18n.t("onboarding.meet.noProvider", "en")), "no empty-state note when a provider exists");
+  assert.ok(!html.includes(i18n.t("onboarding.meet.noProvider", "en")), "no empty-state note when a usable provider exists");
 });
 
-test("meet step with zero providers shows the honest empty-state callout and hides the form", async () => {
-  const html = await render({ step: String(MEET_IDX) }, { db: providersDb(0) });
+test("meet step with no usable starter provider shows the honest empty-state callout and hides the form", async () => {
+  const html = await render({ step: String(MEET_IDX) }, { db: {}, resolveStarterProviderFn: noProvider });
   assert.ok(html.includes(i18n.t("onboarding.meet.noProvider", "en")), "empty-state note present");
-  assert.ok(!html.includes('action="/dashboard/onboarding/meet"'), "no form posted when there is no provider");
+  assert.ok(!html.includes('action="/dashboard/onboarding/meet"'), "no form posted when there is no usable provider");
   assert.ok(html.includes(`/dashboard/onboarding?step=${AI_IDX}`), "links back to the ai step");
 });
 
+// Review fix round 1 (Task 8): a providers row that is enabled but has an
+// empty models[] (e.g. a no_auto_provider placeholder) used to make
+// providersCount positive and render the live CTA even though
+// resolveStarterProvider() would find nothing usable — the POST would then
+// bounce err=no_provider after a wasted seed write. Gating on
+// ctx.starterProvider instead means this exact shape now renders the empty
+// state, not the form.
+test("meet step with an enabled-but-unusable provider (empty models[]) shows the empty state, not a doomed form", async () => {
+  const html = await render({ step: String(MEET_IDX) }, { db: {}, resolveStarterProviderFn: noProvider });
+  assert.ok(!html.includes('action="/dashboard/onboarding/meet"'), "no form when providers exist but none are usable");
+  assert.ok(html.includes(i18n.t("onboarding.meet.noProvider", "en")), "honest empty-state callout instead");
+});
+
+// Review fix round 1 (Task 8): resolveStarterProvider() throwing must render
+// the SAME honest empty state, not crash the wizard.
+test("meet step renders the empty state (not a crash) when resolveStarterProvider throws", async () => {
+  const html = await render({ step: String(MEET_IDX) }, {
+    db: {},
+    resolveStarterProviderFn: async () => { throw new Error("db exploded"); },
+  });
+  assert.ok(html.includes(i18n.t("onboarding.meet.noProvider", "en")), "empty-state note present on a resolve throw");
+  assert.ok(!html.includes('action="/dashboard/onboarding/meet"'), "no form posted when resolve threw");
+});
+
 test("meet step form disables its submit button on submit (double-submit guard, no separate script)", async () => {
-  const html = await render({ step: String(MEET_IDX) }, { db: providersDb(1) });
+  const html = await render({ step: String(MEET_IDX) }, { db: {}, resolveStarterProviderFn: usableProvider });
   assert.match(html, /<form method="POST" action="\/dashboard\/onboarding\/meet"[^>]*onsubmit="[^"]*disabled[^"]*"/);
 });
 
 test("meet step with ?err=no_provider shows the error callout", async () => {
-  const html = await render({ step: String(MEET_IDX), err: "no_provider" }, { db: providersDb(1) });
+  const html = await render({ step: String(MEET_IDX), err: "no_provider" }, { db: {}, resolveStarterProviderFn: usableProvider });
   assert.ok(html.includes(i18n.t("onboarding.meet.err", "en")), "error callout rendered");
 });
 
+// Review fix round 1 (Task 8): the new setup_failed code (catch-all in
+// handleMeetPost) gets its own generic, honest callout — distinct from the
+// no_provider-specific message.
+test("meet step with ?err=setup_failed shows the generic error callout", async () => {
+  const html = await render({ step: String(MEET_IDX), err: "setup_failed" }, { db: {}, resolveStarterProviderFn: usableProvider });
+  assert.ok(html.includes(i18n.t("onboarding.meet.errGeneric", "en")), "generic error callout rendered");
+  assert.ok(!html.includes(i18n.t("onboarding.meet.err", "en")), "does not render the no_provider-specific message");
+});
+
+test("meet step with an unrecognized ?err code renders no error callout (closed enum)", async () => {
+  const html = await render({ step: String(MEET_IDX), err: "totally-made-up" }, { db: {}, resolveStarterProviderFn: usableProvider });
+  assert.ok(!html.includes(i18n.t("onboarding.meet.err", "en")), "no no_provider callout for an unknown code");
+  assert.ok(!html.includes(i18n.t("onboarding.meet.errGeneric", "en")), "no generic callout for an unknown code");
+});
+
 test("meet step without ?err shows no error callout", async () => {
-  const html = await render({ step: String(MEET_IDX) }, { db: providersDb(1) });
+  const html = await render({ step: String(MEET_IDX) }, { db: {}, resolveStarterProviderFn: usableProvider });
   assert.ok(!html.includes(i18n.t("onboarding.meet.err", "en")), "no error callout by default");
+  assert.ok(!html.includes(i18n.t("onboarding.meet.errGeneric", "en")), "no generic error callout by default");
 });
 
 // ── done step: dormant-features callout ─────────────────────────────────────
@@ -107,7 +158,8 @@ test("done step omits the dormant-features callout when a provider is configured
 test("new onboarding.meet.* + onboarding.doneDormant keys resolve in en AND es", () => {
   const KEYS = [
     "onboarding.meet.title", "onboarding.meet.body", "onboarding.meet.cta",
-    "onboarding.meet.noProvider", "onboarding.meet.err", "onboarding.doneDormant",
+    "onboarding.meet.noProvider", "onboarding.meet.err", "onboarding.meet.errGeneric",
+    "onboarding.doneDormant",
   ];
   for (const k of KEYS) {
     const entry = i18n.translations[k];
@@ -160,7 +212,10 @@ test("meet POST: no_provider result redirects back to the meet step with err=no_
   assert.ok(!dbCalls.some((s) => /INSERT|UPDATE|REPLACE/i.test(s)), "no completion stamp written on failure");
 });
 
-test("meet POST: unexpected exception redirects back to the meet step with an error code, never throws, never logs secrets", async () => {
+// Review fix round 1 (Task 8): a catch-all exception must NOT be labeled
+// no_provider (a specific-but-possibly-false claim) — it gets the distinct
+// setup_failed code instead.
+test("meet POST: unexpected exception (seedStarterMemories throws) redirects with err=setup_failed, never no_provider, never throws, never logs secrets", async () => {
   const res = makeRes();
   const originalError = console.error;
   const logged = [];
@@ -176,6 +231,27 @@ test("meet POST: unexpected exception redirects back to the meet step with an er
   }
   assert.ok(res.redirected, "redirects back to the wizard instead of dead-ending / throwing");
   assert.ok(res.redirected.includes(`step=${MEET_IDX}`), "redirects to the meet step");
+  assert.ok(res.redirected.includes("err=setup_failed"), "carries the generic setup_failed code");
+  assert.ok(!res.redirected.includes("err=no_provider"), "does NOT mislabel an arbitrary exception as no_provider");
+});
+
+test("meet POST: unexpected exception (createStarterArtifacts throws) redirects with err=setup_failed", async () => {
+  const res = makeRes();
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    await handleMeetPost(makePostReq({}), res, {
+      db: {},
+      seedStarterMemoriesFn: async () => ({ inserted: 5, skipped: false }),
+      createStarterArtifactsFn: async () => { throw new Error("something else entirely"); },
+    });
+  } finally {
+    console.error = originalError;
+  }
+  assert.ok(res.redirected, "redirects back to the wizard instead of dead-ending / throwing");
+  assert.ok(res.redirected.includes(`step=${MEET_IDX}`), "redirects to the meet step");
+  assert.ok(res.redirected.includes("err=setup_failed"), "carries the generic setup_failed code");
+  assert.ok(!res.redirected.includes("err=no_provider"), "does NOT mislabel an arbitrary exception as no_provider");
 });
 
 test("meet POST: stamps onboarding_completed_at on success, first-write-only", async () => {
