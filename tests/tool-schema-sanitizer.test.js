@@ -21,7 +21,7 @@ import { connectedServers } from "../servers/gateway/proxy.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
 
-const BOUND = 4096;
+const BOUND = 1024;
 
 // ---------------------------------------------------------------------------
 // Unit tests: sanitizeToolSchema
@@ -73,13 +73,13 @@ test("sanitizeToolSchema deletes oversized bounds inside anyOf/oneOf/allOf", () 
       { type: "string", maxLength: 100 },
     ],
     oneOf: [{ type: "string", minLength: 50_000_000 }],
-    allOf: [{ type: "string", maxLength: 4096 }],
+    allOf: [{ type: "string", maxLength: 1024 }],
   };
   const out = sanitizeToolSchema(schema);
   assert.equal("maxLength" in out.anyOf[0], false);
   assert.equal(out.anyOf[1].maxLength, 100);
   assert.equal("minLength" in out.oneOf[0], false);
-  assert.equal(out.allOf[0].maxLength, 4096); // exactly at the bound: kept
+  assert.equal(out.allOf[0].maxLength, 1024); // exactly at the bound: kept
 });
 
 test("sanitizeToolSchema deletes oversized bounds inside an object-form additionalProperties", () => {
