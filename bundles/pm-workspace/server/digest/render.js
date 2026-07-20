@@ -12,6 +12,7 @@
  *     reason?: string,              // when unavailable
  *     items?: [{ label, detail?, meta?, urgent? }],
  *     table?: { headers: [...], rows: [[...], ...] },
+ *     markdown?: string,            // pre-authored body (briefings) — minimal md subset
  *     note?: string }
  */
 
@@ -32,11 +33,56 @@ const S = {
   urgent: "background:#fee;border-left:4px solid #e74c3c;padding:10px;margin:10px 0;border-radius:4px;",
   meta: "color:#666;font-size:0.85em;",
   unavailable: "color:#999;font-style:italic;font-size:0.9em;",
+  h3: "color:#34495e;margin:14px 0 4px;font-size:1em;",
+  p: "margin:4px 0;",
+  ul: "margin:4px 0;padding-left:22px;",
+  li: "margin:2px 0;",
+  briefing: "background:#f4f9ff;border-left:4px solid #3498db;padding:4px 14px 10px;margin:8px 0;border-radius:4px;",
   table: "width:100%;border-collapse:collapse;margin:8px 0;font-size:0.9em;",
   th: "text-align:left;padding:6px 8px;border-bottom:2px solid #ddd;color:#34495e;",
   td: "padding:6px 8px;border-bottom:1px solid #eee;",
   footer: "margin-top:30px;padding-top:15px;border-top:1px solid #ddd;color:#666;font-size:0.9em;",
 };
+
+/**
+ * Minimal markdown → email HTML for briefing bodies. Supports the subset the
+ * briefing template uses: ## / ### headings, - lists, **bold**, [text](url)
+ * links, and blank-line paragraphs. Everything is escaped first; no raw HTML
+ * passes through.
+ */
+export function mdToHtml(md) {
+  const inline = (s) =>
+    escapeHtml(s)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(
+        /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+        `<a href="$2" style="color:#3498db">$1</a>`
+      );
+
+  const out = [];
+  let list = null;
+  const closeList = () => {
+    if (list) { out.push("</ul>"); list = null; }
+  };
+  for (const raw of String(md || "").split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    const h = line.match(/^(#{2,4})\s+(.*)$/);
+    if (h) {
+      closeList();
+      out.push(`<h3 style="${S.h3}">${inline(h[2])}</h3>`);
+    } else if (/^[-*]\s+/.test(line)) {
+      if (!list) { out.push(`<ul style="${S.ul}">`); list = true; }
+      out.push(`<li style="${S.li}">${inline(line.replace(/^[-*]\s+/, ""))}</li>`);
+    } else if (line.trim() === "") {
+      closeList();
+    } else {
+      closeList();
+      out.push(`<p style="${S.p}">${inline(line)}</p>`);
+    }
+  }
+  closeList();
+  return out.join("\n");
+}
 
 function renderSectionHtml(section) {
   const out = [`<h2 style="${S.h2}">${escapeHtml(section.title)}</h2>`];
@@ -44,6 +90,10 @@ function renderSectionHtml(section) {
   if (!section.available) {
     out.push(`<p style="${S.unavailable}">${escapeHtml(section.reason || "Unavailable")}</p>`);
     return out.join("\n");
+  }
+
+  if (section.markdown) {
+    out.push(`<div style="${S.briefing}">${mdToHtml(section.markdown)}</div>`);
   }
 
   if (section.table && section.table.rows?.length) {
@@ -68,7 +118,7 @@ function renderSectionHtml(section) {
     }
   }
 
-  if (!section.table?.rows?.length && !section.items?.length) {
+  if (!section.table?.rows?.length && !section.items?.length && !section.markdown) {
     out.push(`<p style="${S.meta}">${escapeHtml(section.note || "Nothing to report.")}</p>`);
   } else if (section.note) {
     out.push(`<p style="${S.meta}">${escapeHtml(section.note)}</p>`);
@@ -124,6 +174,9 @@ export function renderDigest(digest, config = {}) {
       text.push(`  (${section.reason || "unavailable"})`);
       continue;
     }
+    if (section.markdown) {
+      for (const line of String(section.markdown).split(/\r?\n/)) text.push("  " + line);
+    }
     if (section.table?.rows?.length) {
       for (const row of section.table.rows) text.push("  " + row.join(" | "));
     }
@@ -133,7 +186,7 @@ export function renderDigest(digest, config = {}) {
         if (item.meta) text.push(`      ${item.meta}`);
       }
     }
-    if (!section.table?.rows?.length && !section.items?.length) {
+    if (!section.table?.rows?.length && !section.items?.length && !section.markdown) {
       text.push(`  ${section.note || "Nothing to report."}`);
     } else if (section.note) {
       text.push(`  ${section.note}`);
@@ -146,7 +199,10 @@ export function renderDigest(digest, config = {}) {
   const parts = [];
   for (const section of digest.sections) {
     if (!section.available) continue;
-    const n = (section.items?.length || 0) + (section.table?.rows?.length || 0);
+    const n =
+      (section.items?.length || 0) +
+      (section.table?.rows?.length || 0) +
+      (section.markdown ? 1 : 0);
     if (n > 0) parts.push(`${section.title}: ${n}`);
   }
   const summary = parts.length ? parts.join(" · ") : "Nothing to report today.";
