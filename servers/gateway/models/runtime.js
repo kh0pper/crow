@@ -48,6 +48,8 @@ import http from "node:http";
 import https from "node:https";
 import { join, relative } from "node:path";
 
+import { superviseProcess } from "../process-supervisor.js";
+
 // ---------------------------------------------------------------------------
 // Typed errors
 // ---------------------------------------------------------------------------
@@ -977,131 +979,48 @@ export function startModel({
   clearTimeoutFn = clearTimeout,
   onTerminal = () => {},
 }) {
-  const idleDisabled = !!keepWarm || !!alwaysResident || !(idleMinutes > 0);
+  const args = buildLlamaServerArgs({ ggufPath, alias, port, host, extraArgs });
 
-  const handle = {
-    alias,
-    port,
-    live: false,
-    state: "starting",
-    restartCount: 0,
-    lastError: null,
-    startedAt: null,
-    child: null,
-    _idleTimer: null,
-    _restartTimer: null,
-    _stopped: false,
-  };
+  // Generic spawn/restart/idle/kill supervision lives in
+  // `process-supervisor.js` (C4 Task 1) — this function only adds the
+  // model-shaped identity (alias/port) on top: `key: alias` doubles as
+  // both the restart-log tag and the `activeHandles` registry key the
+  // panel's `getStatusSnapshot` reads.
+  const handle = superviseProcess({
+    key: alias,
+    command: binPath,
+    args,
+    spawn,
+    setprivAvailable,
+    maxRestarts,
+    backoffMs,
+    idleMinutes,
+    keepWarm,
+    alwaysResident,
+    setTimeoutFn,
+    clearTimeoutFn,
+    onTerminal,
+    registry: activeHandles,
+  });
 
-  let terminalFired = false;
-  function fireTerminal(reason) {
-    if (terminalFired) return;
-    terminalFired = true;
-    try {
-      onTerminal(reason);
-    } catch {
-      /* a caller's terminal hook must never break process supervision */
-    }
-  }
+  handle.alias = alias;
+  handle.port = port;
 
-  function resetIdleTimer() {
-    if (idleDisabled) return;
-    if (handle._idleTimer) clearTimeoutFn(handle._idleTimer);
-    handle._idleTimer = setTimeoutFn(() => handle.stop(), idleMinutes * 60 * 1000);
-  }
-
-  function spawnChild() {
-    const args = buildLlamaServerArgs({ ggufPath, alias, port, host, extraArgs });
-    const [cmd, cmdArgs] = setprivAvailable
-      ? ["setpriv", ["--pdeathsig=SIGTERM", binPath, ...args]]
-      : [binPath, args];
-    const child = spawn(cmd, cmdArgs, { detached: true, stdio: ["ignore", "pipe", "pipe"] });
-    handle.child = child;
-    handle.live = true;
-    handle.state = "running";
-    handle.startedAt = new Date().toISOString();
-
-    child.on("error", (err) => {
-      handle.lastError = err && err.message;
-    });
-    child.on("exit", (code, signal) => {
-      handle.live = false;
-      handle.child = null;
-      if (handle._stopped) {
-        handle.state = "stopped";
-        activeHandles.delete(alias);
-        fireTerminal("stopped");
-        return;
-      }
-      handle.lastError = `exited (code=${code}, signal=${signal})`;
-      if (handle.restartCount >= maxRestarts) {
-        handle.state = "unhealthy";
-        fireTerminal("unhealthy");
-        return;
-      }
-      handle.restartCount += 1;
-      handle.state = "restarting";
-      const delay = backoffMs(handle.restartCount - 1);
-      handle._restartTimer = setTimeoutFn(() => {
-        if (!handle._stopped) spawnChild();
-      }, delay);
-    });
-
-    resetIdleTimer();
-  }
-
+  const genericStatus = handle.status;
   handle.status = function status() {
+    const s = genericStatus();
     return {
       alias,
       port,
-      state: handle.state,
-      live: handle.live,
-      restartCount: handle.restartCount,
-      lastError: handle.lastError,
-      startedAt: handle.startedAt,
-      pid: handle.child ? handle.child.pid : null,
+      state: s.state,
+      live: s.live,
+      restartCount: s.restartCount,
+      lastError: s.lastError,
+      startedAt: s.startedAt,
+      pid: s.pid,
     };
   };
 
-  handle.touch = function touch() {
-    resetIdleTimer();
-  };
-
-  handle.stop = function stop() {
-    handle._stopped = true;
-    if (handle._idleTimer) clearTimeoutFn(handle._idleTimer);
-    if (handle._restartTimer) clearTimeoutFn(handle._restartTimer);
-    activeHandles.delete(alias);
-    if (!handle.child) {
-      handle.state = "stopped";
-      handle.live = false;
-      fireTerminal("stopped");
-      return Promise.resolve();
-    }
-    const child = handle.child;
-    const pid = child.pid;
-    const exited = new Promise((resolvePromise) => child.once("exit", resolvePromise));
-    try {
-      process.kill(-pid, "SIGTERM");
-    } catch {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        /* already gone */
-      }
-    }
-    return exited.then(() => {
-      handle.state = "stopped";
-      handle.live = false;
-      // fireTerminal("stopped") already ran inside spawnChild's own "exit"
-      // listener above (registered before this once()-listener, so it
-      // always runs first) — idempotent via terminalFired, not repeated
-      // here.
-    });
-  };
-
-  activeHandles.set(alias, handle);
-  spawnChild();
   return handle;
 }
 
