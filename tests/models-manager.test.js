@@ -196,12 +196,32 @@ function makeEnospcWriteStream(thresholdBytes) {
     const real = fsCreateWriteStream(dest, opts);
     let written = 0;
     const originalWrite = real.write.bind(real);
+    const emitEnospc = () => {
+      real.emit("error", Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" }));
+    };
     real.write = (chunk, ...rest) => {
       written += chunk.length;
       if (written > thresholdBytes) {
-        setImmediate(() => {
-          real.emit("error", Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" }));
-        });
+        // A real ENOSPC can only ever surface on a write() to an fd that's
+        // already open -- the OS has no way to fail a write before open()
+        // has completed. `real`'s underlying open() is itself async (fs
+        // streams construct via `_construct`, dispatched on a nextTick that
+        // races the `res.on("data", ...)` handler feeding this write()
+        // override), so under scheduler/I-O contention (parallel test
+        // files, a loaded CI runner) the very first write() here can land
+        // before that open() has finished. Emitting the injected error
+        // immediately in that window models a failure the real OS could
+        // never produce, and lets `real.destroy()` (in the product's
+        // `streamToFile` fail() path) tear the stream down before it has
+        // ever created `dest` on disk -- flaking the "partial file kept"
+        // assertion below with no product bug involved. Waiting for the
+        // real `"open"` event first keeps the injected failure physically
+        // honest and removes the race by construction.
+        if (typeof real.fd === "number") {
+          setImmediate(emitEnospc);
+        } else {
+          real.once("open", () => setImmediate(emitEnospc));
+        }
         return false;
       }
       return originalWrite(chunk, ...rest);
