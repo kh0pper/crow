@@ -213,7 +213,6 @@ else
   curl -fsSL https://get.docker.com | sudo sh
   sudo usermod -aG docker "$USER"
   log "Docker installed"
-  warn "You may need to log out and back in for Docker group to take effect"
 fi
 
 # ─── Step 4: Install Caddy ───────────────────────────────
@@ -521,26 +520,21 @@ header "Installation Complete"
 echo ""
 echo "  Crow is ready!"
 echo ""
-echo "  Open in your browser:"
-echo "    https://${MDNS_HOST}/setup"
-if [ -n "${GATEWAY_HTTPS_URL:-}" ]; then
-  echo "    ${GATEWAY_HTTPS_URL}/setup   (any device on your tailnet)"
+if [ "$IS_CLOUD_HOST" = true ] && [ -z "${GATEWAY_HTTPS_URL:-}" ]; then
+  echo "  This is a cloud server: ${MDNS_HOST} is not reachable from your browser."
+  echo "  Open an SSH tunnel from your own computer, then browse to http://localhost:3001/setup :"
+  echo "    ssh -L 3001:localhost:3001 ${USER}@<this-server's-public-IP>"
+  echo "  (Or re-run this installer and accept Tailscale Serve for a permanent URL.)"
+else
+  echo "  Open in your browser:"
+  echo "    https://${MDNS_HOST}/setup"
+  if [ -n "${GATEWAY_HTTPS_URL:-}" ]; then
+    echo "    ${GATEWAY_HTTPS_URL}/setup   (any device on your tailnet)"
+  fi
 fi
 echo ""
-echo "  What's next:"
-echo "    1. Open /setup in your browser — the first-run wizard sets your"
-echo "       password and walks you through AI providers and connecting"
-echo "       your AI client (also later: Settings -> Connections)"
-echo "    2. Prefer the terminal? API keys go in $CROW_HOME/.env, then:"
-echo "       sudo systemctl restart crow-gateway"
-echo "    3. Headless MCP token:  cd $CROW_APP && npm run local-token"
-echo ""
-echo "  Useful commands:"
-echo "    crow status             — Platform status"
-echo "    crow bundle install <x> — Install an add-on"
-echo "    sudo systemctl status crow-gateway — Gateway logs"
-echo ""
-echo "  Tip: run 'crow status' to verify everything is healthy."
+echo "  Everything else happens there — the setup wizard walks you through"
+echo "  passwords, your AI model, and connecting devices."
 echo ""
 
 # Add crow CLI to PATH if not already there
