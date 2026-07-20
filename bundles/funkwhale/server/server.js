@@ -347,7 +347,13 @@ export async function createFunkwhaleServer(options = {}) {
     {
       library_uuid: z.string().uuid(),
       file_path: z.string().max(4096).optional(),
-      file_base64: z.string().max(200_000_000).optional(),
+      // No maxLength here: a 200,000,000-char bound in the advertised schema broke
+      // llama-server's JSON-schema→GBNF tool-calling grammar compiler for every chat
+      // request that included this tool. Real size enforcement belongs in the
+      // handler below (not implemented — currently unbounded, same as before this
+      // change removed the schema-level ceiling) or the upstream Funkwhale API's own
+      // upload limits, not an advisory bound on the advertised MCP schema.
+      file_base64: z.string().optional(),
       filename: z.string().max(500).optional(),
       import_reference: z.string().max(200).optional(),
     },

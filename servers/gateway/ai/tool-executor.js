@@ -713,6 +713,49 @@ export function isExternalSendTool(name) {
   return false;
 }
 
+// Above this, a maxLength/minLength bound is advisory (validation, docs); llama.cpp's
+// native tool-calling compiles every advertised JSON-schema into a GBNF sampling
+// grammar, and a huge bounded-repetition count there is pure poison — it blows up the
+// grammar compiler and hard-fails the WHOLE chat request (not just the one tool), e.g.
+// llama-server's "Failed to initialize samplers: failed to parse grammar" 400. Isolated
+// from Funkwhale's fw_upload_track (file_base64.maxLength: 200_000_000) — see C1
+// live-verification evidence. 4096 is generous for any real string bound; nothing sane
+// needs more, and this only strips the field, it never rejects the tool or the request.
+const SCHEMA_BOUND_LIMIT = 4096;
+
+/**
+ * Recursively walk a JSON-schema-shaped object/array and delete any `maxLength`/
+ * `minLength` numeric bound that exceeds SCHEMA_BOUND_LIMIT. Handles
+ * properties/items/anyOf/oneOf/allOf/additionalProperties-object nesting generically
+ * (it recurses into every object/array value it finds, not just those named keys, so
+ * any future nesting shape is covered for free). Never mutates its input; returns a
+ * new tree. Defensive: any error walking a weird shape (unexpected non-plain-object,
+ * getter that throws, etc.) is swallowed and the ORIGINAL schema is returned
+ * untouched — this must never be the reason a tool fails to advertise.
+ */
+export function sanitizeToolSchema(schema) {
+  try {
+    return walkSchemaNode(schema);
+  } catch {
+    return schema;
+  }
+}
+
+function walkSchemaNode(node) {
+  if (Array.isArray(node)) {
+    return node.map((item) => (item && typeof item === "object" ? walkSchemaNode(item) : item));
+  }
+  if (!node || typeof node !== "object") return node;
+  const out = {};
+  for (const [key, value] of Object.entries(node)) {
+    if ((key === "maxLength" || key === "minLength") && typeof value === "number" && value > SCHEMA_BOUND_LIMIT) {
+      continue; // drop the oversized bound; everything else on this node is kept
+    }
+    out[key] = (value && typeof value === "object") ? walkSchemaNode(value) : value;
+  }
+  return out;
+}
+
 /**
  * Build the MCP tool schemas for the AI provider.
  *
@@ -956,5 +999,13 @@ export function getChatTools(opts = {}) {
     }
   }
 
-  return tools;
+  // Sanitize every advertised schema at this single choke point — core category
+  // tools, addon/promoted tools, and cross-instance remote tools all flow through
+  // here regardless of caller (chat.js, one-shot.js, meta-glasses routes.js via
+  // getChatTools({botDef})). Generic, not funkwhale-specific.
+  // Sanitize every advertised schema at this single choke point — core category
+  // tools, addon/promoted tools, and cross-instance remote tools all flow through
+  // here regardless of caller (chat.js, one-shot.js, meta-glasses routes.js via
+  // getChatTools({botDef})). Generic, not funkwhale-specific.
+  return tools.map((t) => ({ ...t, inputSchema: sanitizeToolSchema(t.inputSchema) }));
 }
