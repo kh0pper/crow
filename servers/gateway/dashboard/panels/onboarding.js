@@ -752,7 +752,8 @@ function renderStepBody(stem, lang, ctx = {}) {
           + linkWrap(button(t("onboarding.ai.title", lang), { variant: "secondary", href: `/dashboard/onboarding?step=${aiIdx}` }));
       }
       return body + errorHtml + `
-        <form method="POST" action="/dashboard/onboarding/meet" onsubmit="this.querySelector('button').disabled=true">
+        <form method="POST" action="/dashboard/onboarding/meet" data-turbo="false" onsubmit="this.querySelector('button').disabled=true">
+          <!-- Full page load required: the messages ?ai= deep-link only arms on real loads (R2-M2) -->
           ${csrfInput(req)}
           ${button(t("onboarding.meet.cta", lang), { variant: "primary", type: "submit" })}
         </form>`;
