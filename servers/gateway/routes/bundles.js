@@ -39,6 +39,7 @@ import { writeSetting } from "../dashboard/settings/registry.js";
 import { getCollection } from "../dashboard/panels/extensions/collections.js";
 import { dockerAvailable } from "../dashboard/panels/extensions/data-queries.js";
 import { beginInstallSet, endInstallSet, isInstallSetRunning } from "../install-lock.js";
+import { setActiveJobSource } from "../bot-engine-status.js";
 import {
   CROW_HOME,
   BUNDLES_DIR,
@@ -1867,6 +1868,11 @@ export function planInstallSet(collection) {
  */
 export default function bundlesRouter() {
   const router = Router();
+
+  // C4 Task 4: register this module's jobs Map as bot-engine-status's active-job
+  // source. Inverted (bundles.js calls INTO bot-engine-status, not the reverse) so
+  // bot-engine-status stays a leaf — it must never import this 2,500-line file.
+  setActiveJobSource(activeJobFor);
 
   // Cross-host verification. dashboard/index.js routes ANY request bearing an
   // x-crow-signature header straight here, BEFORE dashboardAuth and CSRF — so a
