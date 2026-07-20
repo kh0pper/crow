@@ -297,6 +297,35 @@ export function _createJobForTest(bundleId, action) { return createJob(bundleId,
 export function _getJobForTest(id) { return jobs.get(id); }
 export function _finishJobForTest(job, status) { return finishJob(job, status); }
 
+/**
+ * C4 Task 3 (r1 critical #4): the unfinished ("running") install job for
+ * bundleId, if any — either a direct single-bundle install job whose
+ * bundleId matches, OR an in-flight "install-set" job whose collection
+ * contains bundleId as a member (r2: an Agents-collection install must read
+ * as "installing" for every member it's carrying, not just the literal
+ * collection id — this is what lets a later status seam (Task 4) report
+ * a member bundle as installing instead of absent).
+ *
+ * Exported (not wired into a status seam here — that's Task 4's
+ * setActiveJobSource) so POST /bundles/api/install can refuse a second
+ * concurrent install of the SAME bundle right now, and Task 4 can reuse the
+ * exact same lookup for engineStatus.
+ *
+ * @param {string} bundleId
+ * @returns {{id:string}|null}
+ */
+export function activeJobFor(bundleId) {
+  for (const job of jobs.values()) {
+    if (job.status !== "running") continue;
+    if (job.action === "install" && job.bundleId === bundleId) return job;
+    if (job.action === "install-set") {
+      const collection = getCollection(job.bundleId, _collectionsPathOverride || undefined);
+      if (collection?.members?.some((m) => m.id === bundleId)) return job;
+    }
+  }
+  return null;
+}
+
 // Broadcasts the job's new state to any live Turbo Stream subscribers
 // (see /dashboard/streams/jobs in routes/streams.js). All mutations go
 // through appendLog/finishJob so this is the chokepoint. Non-throwing.
@@ -353,16 +382,30 @@ function copyBundleRefreshItem(appSrc, destDir, item) {
 
 /**
  * True iff the repo package.json declares a dependency NAME absent from the
- * installed bundle's node_modules/ — the ONLY npm-install trigger (R1/R2:
- * narrow, added-dep-only; a removed dep or a version-range-only bump must NOT
- * fire a boot-time npm install). existsSync(join(nm, depName)) handles
- * @scope/name naturally.
+ * installed bundle's node_modules/ (R1/R2: narrow, added-dep-only; a removed
+ * dep or a version-range-only bump must NOT fire a boot-time npm install), OR
+ * (C4 Task 3) the dependency IS present but is pinned to an exact semver
+ * (`/^\d+\.\d+\.\d+$/`) in the repo package.json and the installed copy's own
+ * package.json reports a different version — version-drift on an exact pin
+ * must also refresh, since presence-by-name alone would bless a stale
+ * install forever. Range-pinned deps stay presence-only: existence of the
+ * name is the only thing checked, exactly as before.
+ * existsSync(join(nm, depName)) handles @scope/name naturally.
  */
 function bundleNeedsNpmInstall(appSrc, destDir) {
   const pkg = readJsonSafe(join(appSrc, "package.json"), null);
   if (!pkg || !pkg.dependencies || typeof pkg.dependencies !== "object") return false;
   const nodeModules = join(destDir, "node_modules");
-  return Object.keys(pkg.dependencies).some((depName) => !existsSync(join(nodeModules, depName)));
+  return Object.keys(pkg.dependencies).some((depName) => {
+    const depDir = join(nodeModules, depName);
+    if (!existsSync(depDir)) return true;
+    const pin = pkg.dependencies[depName];
+    if (typeof pin === "string" && /^\d+\.\d+\.\d+$/.test(pin)) {
+      const installedPkg = readJsonSafe(join(depDir, "package.json"), null);
+      if (!installedPkg || installedPkg.version !== pin) return true;
+    }
+    return false;
+  });
 }
 
 /**
@@ -1303,14 +1346,53 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // immediately dies with ERR_MODULE_NOT_FOUND for the SDK, which
     // surfaces user-side as "I don't have a music player integration
     // installed" or similar mysteries.
-    if (existsSync(join(destDir, "package.json")) && !existsSync(join(destDir, "node_modules"))) {
+    //
+    // C4 Task 3: manifest.npm_required === true means the bundle is USELESS
+    // without a working install (e.g. bot-engine's pi CLI) — hard-fail on any
+    // npm problem instead of the warn-only behavior every other bundle keeps.
+    // Never skip because node_modules exists: an interrupted prior install can
+    // leave a PARTIAL tree that would pass an absence-only check on retry
+    // (r1 critical #3), so npm_required bundles always rm -rf node_modules
+    // first and reinstall clean.
+    const pkgJsonPath = join(destDir, "package.json");
+    if (manifest?.npm_required === true) {
+      if (!existsSync(pkgJsonPath)) {
+        appendLog(job, "npm install failed: package.json missing from bundle (npm_required)");
+        rmSync(destDir, { recursive: true, force: true });
+        return { ok: false, reason: "npm install failed: package.json missing from bundle" };
+      }
+
+      rmSync(join(destDir, "node_modules"), { recursive: true, force: true });
+      const hasLock = existsSync(join(destDir, "package-lock.json"));
+      const npmArgs = [
+        hasLock ? "ci" : "install",
+        "--omit=optional", "--no-audit", "--no-fund", "--ignore-scripts",
+      ];
+      appendLog(job, `Installing bundle dependencies (npm ${npmArgs[0]}, required)…`);
+      try {
+        // run()'s default execFile timeout is already 300_000 (pi payload can
+        // exceed 120s on slow links) — no override needed here.
+        await run("npm", npmArgs, { cwd: destDir });
+        appendLog(job, "Dependencies installed");
+      } catch (err) {
+        const stderrTail = String(err.stderr || err.message || "").slice(-2000).trim();
+        appendLog(job, `npm install failed: ${stderrTail}`);
+        rmSync(destDir, { recursive: true, force: true });
+        return { ok: false, reason: `npm install failed: ${stderrTail}` };
+      }
+
+      const missing = (manifest.verify_paths || []).filter((p) => !existsSync(join(destDir, p)));
+      if (missing.length > 0) {
+        appendLog(job, `npm install verification failed: missing ${missing.join(", ")}`);
+        rmSync(destDir, { recursive: true, force: true });
+        return { ok: false, reason: `npm install failed: verify_paths missing: ${missing.join(", ")}` };
+      }
+    } else if (existsSync(pkgJsonPath) && !existsSync(join(destDir, "node_modules"))) {
       appendLog(job, "Installing bundle dependencies (npm install)…");
       try {
-        execFileSync("npm", ["install", "--omit=optional", "--no-audit", "--no-fund"], {
+        await run("npm", ["install", "--omit=optional", "--no-audit", "--no-fund"], {
           cwd: destDir,
-          env: process.env,
           timeout: 120_000,
-          stdio: "pipe",
         });
         appendLog(job, "Dependencies installed");
       } catch (err) {
@@ -1907,6 +1989,20 @@ export default function bundlesRouter() {
     // job creation.
     if (isInstallSetRunning()) {
       return res.status(409).json({ error: "A collection install is in progress — wait for it to finish and try again." });
+    }
+
+    // C4 Task 3 (r1 critical #4): refuse a second concurrent install of the
+    // SAME bundle — without this, two rapid clicks (or a client retry racing
+    // its own in-flight request) run runInstallJob twice concurrently against
+    // the same destDir. `error` is required: the shipped extensions client
+    // renders res.data.error verbatim on a non-ok install (client.js:425).
+    const existingJob = activeJobFor(bundle_id);
+    if (existingJob) {
+      return res.status(409).json({
+        code: "already_installing",
+        job_id: existingJob.id,
+        error: `${bundle_id} is already installing (job ${existingJob.id}) — attach to that job instead of starting a new install.`,
+      });
     }
 
     // Create job for async tracking
