@@ -6,6 +6,7 @@ Ejecuta Crow en Windows usando WSL2 (Subsistema de Windows para Linux). Obtienes
 
 - **Windows 11** (Windows 10 build 19041+ también funciona, pero Windows 11 tiene la experiencia WSL2 más fluida)
 - **Virtualización habilitada en tu BIOS/UEFI** — WSL2 ejecuta una VM ligera real, así que la virtualización por hardware (Intel VT-x / AMD-V) debe estar activada. La mayoría de las máquinas la traen activada de fábrica; si `wsl --install` falla con un error de virtualización, revisa la configuración de tu BIOS y actívala.
+- **systemd debe estar habilitado en WSL2** — El instalador de Crow requiere un gestor de servicios systemd funcional. El Ubuntu actual que instala `wsl --install` tiene systemd habilitado por defecto, pero si tienes una instalación WSL2 más antigua o Windows 10, tu distribución puede tener systemd deshabilitado. Lo verificarás después de instalar Ubuntu y lo habilitarás si es necesario (ver la sección **Asegurar que systemd está activo** abajo).
 
 ## Instalar WSL2 + Ubuntu
 
@@ -23,6 +24,41 @@ Después de reiniciar, Ubuntu termina automáticamente su configuración inicial
 Si `wsl --install` reporta que WSL ya está presente, instala Ubuntu específicamente con `wsl --install -d Ubuntu`, y luego ábrelo desde el menú Inicio.
 :::
 
+## Asegurar que systemd está activo
+
+Una vez que Ubuntu esté ejecutándose, verifica que systemd esté funcionando dentro de WSL2:
+
+```bash
+systemctl is-system-running
+```
+
+Deberías ver `running` o `degraded` (degraded solo significa que alguna unidad ajena a Crow no está contenta — revisa `systemctl --failed` si quieres saber cuál). Si obtienes un error diciendo que systemd no se está ejecutando, habilítalo:
+
+```bash
+sudo nano /etc/wsl.conf
+```
+
+Agrega (o edita) esta sección:
+
+```ini
+[boot]
+systemd=true
+```
+
+Guarda y sal, luego reinicia WSL2 desde **PowerShell** (no desde dentro de Ubuntu):
+
+```powershell
+wsl --shutdown
+```
+
+Vuelve a abrir la aplicación Ubuntu y verifica de nuevo:
+
+```bash
+systemctl is-system-running
+```
+
+Una vez que systemd esté confirmado como activo, procede a instalar Crow.
+
 ## Instalar Crow
 
 Abre la aplicación **Ubuntu** desde el menú Inicio (esto te lleva a una terminal Linux real) y ejecuta el mismo comando único usado para instalaciones de [Servidor en Casa](./home-server):
@@ -33,9 +69,9 @@ curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-inst
 
 El instalador detecta Debian/Ubuntu y se ejecuta normalmente — Node.js, la plataforma Crow, un servicio systemd y un certificado HTTPS autofirmado se configuran dentro del entorno Ubuntu de WSL2. Toma de 5 a 10 minutos, igual que una instalación nativa de Linux.
 
-## Las Tres Peculiaridades de WSL2
+## Las Dos Peculiaridades de WSL2
 
-WSL2 se comporta como Linux para casi todo, pero tres cosas funcionan distinto a una máquina Linux nativa. Cada una tiene una solución sencilla.
+WSL2 se comporta como Linux para casi todo, pero dos cosas funcionan distinto a una máquina Linux nativa. Cada una tiene una solución sencilla.
 
 ### 1. Acceso desde el navegador: usa `localhost`, no `.local`
 
@@ -55,44 +91,7 @@ Si además configuraste [Tailscale](./tailscale-setup) dentro del entorno Ubuntu
 El puerto por defecto del gateway es `3001` — confirma contra lo que realmente imprime el instalador al final de la ejecución antes de confiar en esta URL, por si tu instancia está configurada de otra forma.
 :::
 
-### 2. Inicio automático: habilita systemd en WSL2
-
-El instalador configura un servicio systemd `crow-gateway`, pero las distribuciones WSL2 no ejecutan systemd por defecto — sin él, el servicio no sobrevive a un reinicio de WSL2 (y Crow no volverá a levantarse después de cerrar y reabrir la ventana de Ubuntu o reiniciar Windows).
-
-Habilita systemd una sola vez, desde dentro de Ubuntu:
-
-```bash
-sudo nano /etc/wsl.conf
-```
-
-Agrega (o edita) esta sección:
-
-```ini
-[boot]
-systemd=true
-```
-
-Guarda y sal, luego reinicia WSL2 desde **PowerShell** (no desde dentro de Ubuntu):
-
-```powershell
-wsl --shutdown
-```
-
-Vuelve a abrir la aplicación Ubuntu — WSL2 reinicia con systemd activo. Verifica que funcionó:
-
-```bash
-systemctl is-system-running
-```
-
-Deberías ver `running` o `degraded` (degraded solo significa que alguna unidad ajena a Crow no está contenta — revisa `systemctl --failed` si quieres saber cuál) en lugar de un error diciendo que systemd no se está ejecutando. Luego confirma que Crow específicamente arrancó:
-
-```bash
-sudo systemctl status crow-gateway
-```
-
-Si te saltas este paso, Crow igual funciona — solo que tienes que iniciarlo manualmente después de cada reinicio de WSL2 con `sudo systemctl start crow-gateway` (que a su vez solo funciona una vez que systemd está habilitado) o ejecutando `node servers/gateway/index.js` directamente desde el directorio `~/.crow/app`.
-
-### 3. Disco: mantén los datos del lado de Linux, no en `/mnt/c`
+### 2. Disco: mantén los datos del lado de Linux, no en `/mnt/c`
 
 Instala Crow dentro de tu directorio personal de Ubuntu (el `~` por defecto cuando has iniciado sesión en Ubuntu, por ejemplo `/home/<usuario>/.crow`) — no bajo `/mnt/c/...`, aunque esa ruta (tu `C:\` de Windows) sea accesible desde dentro de WSL2.
 
@@ -126,11 +125,12 @@ Debido a que el soporte de WSL2 depende de lanzamientos de Windows/WSL2 que camb
 
 - [ ] `wsl --install` se completa y reinicia sin errores
 - [ ] La configuración inicial de Ubuntu crea un usuario de Linux exitosamente
-- [ ] El comando único `crow-install.sh` completa todos los pasos sin un fallo de detección de Debian/Ubuntu
+- [ ] Dentro de Ubuntu, `systemctl is-system-running` devuelve `running` o `degraded` (si genera un error, habilita systemd vía `/etc/wsl.conf` y `wsl --shutdown` antes de proceder)
+- [ ] El comando único `crow-install.sh` completa todos los pasos sin un fallo de detección de Debian/Ubuntu o errores de systemd
 - [ ] `http://localhost:3001/setup` carga en un navegador de Windows (Edge y Chrome como mínimo) sin configuración adicional
 - [ ] La URL mDNS `.local` que imprime el instalador **no** carga desde Windows (confirma que la guía sigue coincidiendo con la realidad — si esto alguna vez empieza a funcionar, la guía necesita actualizarse)
-- [ ] Antes de habilitar systemd: `crow-gateway` no sobrevive a `wsl --shutdown` + reapertura
-- [ ] Después de agregar `[boot]\nsystemd=true` a `/etc/wsl.conf` y `wsl --shutdown`: `systemctl is-system-running` devuelve `running` o `degraded`, y `crow-gateway` está activo al reabrir Ubuntu sin inicio manual
+- [ ] Después de la instalación, `sudo systemctl status crow-gateway` está activo
+- [ ] Después de `wsl --shutdown` + reapertura, `crow-gateway` sigue activo (sobrevive al reinicio)
 - [ ] El paso de detección de hardware del asistente de configuración reporta aceleración solo-CPU (confirma que esto sigue coincidiendo con la rama WSL2 de `probe.js` — si Crow llega a distribuir un recurso CUDA-en-WSL2 en el futuro, la sección de GPU de esta guía necesita una reescritura, no solo una nota)
 - [ ] `\\wsl$\Ubuntu\home\<usuario>\.crow\` es accesible desde el Explorador de Windows
 - [ ] Registra la versión de Crow, el número de build de Windows, y la versión de WSL (`wsl --version`) probadas, junto con la fecha, al inicio de las notas de prueba
