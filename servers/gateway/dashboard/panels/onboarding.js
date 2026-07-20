@@ -3,7 +3,11 @@
  * a new user sets their dashboard password (and replayable from Settings, Help
  * and Setup). Orient-and-route: each step explains one thing and deep-links to
  * the existing surface that does the work. No inline config, no .env writes.
- * Step navigation is a ?step=N query param (no client JS; refresh/back safe).
+ * Step navigation is a ?step=N query param, so every step but one is
+ * refresh/back-safe with no client JS. The exception is the ai step (Task 7):
+ * it ships a small client script (ai-step-client.js) for the local-download
+ * progress UI and catalog-derived card facts — the rest of the wizard stays
+ * 100% server-rendered.
  *
  * W3-3 additions:
  *   - Reaching the "done" step sets onboarding_completed_at (first time only)
@@ -323,15 +327,27 @@ const AI_OPTIONS_CSS = `
  * `?cloud=ok` (set by handleCloudProviderPost's redirect) both shows the
  * success callout AND pre-selects/reveals the cloud panel — a user who just
  * added a provider should land back looking at what they added, not the
- * local card the wizard defaults to otherwise.
+ * local card the wizard defaults to otherwise. `?cloud_error=<code>` (Task 7
+ * review fix round 1) does the same for a failed submission: reveals the
+ * cloud panel so the user lands back on the form they were filling in,
+ * with an error callout instead of a page-replacing 400/500. `code` is a
+ * closed enum — CLOUD_ERROR_KEYS below is the only place that maps it to an
+ * i18n key, so an unrecognized value (a stale link, a typo) renders nothing.
  * @param {string} lang
  * @param {{req?: object}} [ctx]
  */
+const CLOUD_ERROR_KEYS = {
+  bad_preset: "onboarding.ai.cloudErrBadPreset",
+  missing_key: "onboarding.ai.cloudErrMissingKey",
+  save_failed: "onboarding.ai.cloudErrSaveFailed",
+};
+
 function renderAiOptions(lang, ctx = {}) {
   const req = ctx.req || null;
   const cloudOk = !!(req && req.query && req.query.cloud === "ok");
-  const localChecked = !cloudOk;
-  const cloudChecked = cloudOk;
+  const cloudErrorKey = CLOUD_ERROR_KEYS[req && req.query ? req.query.cloud_error : undefined] || null;
+  const cloudChecked = cloudOk || !!cloudErrorKey;
+  const localChecked = !cloudChecked;
 
   const firstPreset = CLOUD_PRESETS[0] || null;
   const presetOptions = CLOUD_PRESETS.map((p) =>
@@ -339,6 +355,7 @@ function renderAiOptions(lang, ctx = {}) {
   ).join("");
 
   const cloudSuccess = cloudOk ? callout(t("onboarding.ai.cloudAdded", lang), "success") : "";
+  const cloudError = cloudErrorKey ? callout(t(cloudErrorKey, lang), "error") : "";
   const docsHref = docsUrl((lang === "es" ? "es/" : "") + "guide/ai-providers");
 
   return `${AI_OPTIONS_CSS}
@@ -378,13 +395,14 @@ function renderAiOptions(lang, ctx = {}) {
 
     <div id="onb-ai-panel-cloud" class="onb-ai-panel"${cloudChecked ? "" : " hidden"}>
       ${cloudSuccess}
+      ${cloudError}
       <form method="POST" action="/dashboard/onboarding/cloud-provider">
         ${csrfInput(req)}
         <label class="onb-ai-field">${t("onboarding.ai.cloudProviderLabel", lang)}
           <select name="preset" id="onb-ai-cloud-preset">${presetOptions}</select>
         </label>
         <label class="onb-ai-field">${t("onboarding.ai.cloudKeyLabel", lang)}
-          <input type="password" name="apiKey" id="onb-ai-cloud-key" autocomplete="off" placeholder="${escapeHtml(firstPreset ? firstPreset.keyHint : "")}">
+          <input type="password" name="apiKey" id="onb-ai-cloud-key" autocomplete="off" required placeholder="${escapeHtml(firstPreset ? firstPreset.keyHint : "")}">
         </label>
         <label class="onb-ai-field">${t("onboarding.ai.cloudModelLabel", lang)}
           <input type="text" name="model" id="onb-ai-cloud-model" value="${escapeHtml(firstPreset ? firstPreset.defaultModel : "")}">
@@ -493,6 +511,13 @@ export async function handleIdentityBackupPost(req, res) {
  * wrapper); `upsertProviderFn`/`invalidateCacheFn` are injectable seams
  * for tests, defaulting to the real providers-db.js / providers.js calls.
  *
+ * Task 7 review fix round 1: every failure path redirects back to the ai
+ * step instead of replacing the whole page with a bare 400/500 — mirrors
+ * handleIdentityBackupPost's `back()` discipline above. `cloud_error` is a
+ * closed enum (bad_preset | missing_key | save_failed); renderAiOptions
+ * maps it to an i18n key and ignores anything else, so an unexpected query
+ * value renders no callout rather than an arbitrary string.
+ *
  * Never logs or echoes the API key — mirrors handleIdentityBackupPost's
  * discipline with the passphrase: only `err.message` reaches console.error.
  */
@@ -502,18 +527,15 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
     upsertProviderFn = upsertProvider,
     invalidateCacheFn = invalidateProvidersCache,
   } = opts;
-  const lang = resolveLang(req);
   const aiIdx = STEP_KEYS.indexOf("ai");
+  const back = (code) =>
+    res.redirectAfterPost(`/dashboard/onboarding?step=${aiIdx}&cloud_error=${encodeURIComponent(code)}`);
   try {
     const presetId = typeof req.body?.preset === "string" ? req.body.preset : "";
     const preset = CLOUD_PRESETS.find((p) => p.id === presetId);
-    if (!preset) {
-      return res.status(400).type("text/plain").send(t("onboarding.ai.cloudBadPreset", lang));
-    }
+    if (!preset) return back("bad_preset");
     const apiKey = typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
-    if (!apiKey) {
-      return res.status(400).type("text/plain").send(t("onboarding.ai.cloudKeyRequired", lang));
-    }
+    if (!apiKey) return back("missing_key");
     const modelField = typeof req.body?.model === "string" && req.body.model.trim()
       ? req.body.model.trim()
       : preset.defaultModel;
@@ -533,7 +555,7 @@ export async function handleCloudProviderPost(req, res, opts = {}) {
     return res.redirectAfterPost(`/dashboard/onboarding?step=${aiIdx}&cloud=ok`);
   } catch (err) {
     console.error("[onboarding] cloud provider setup failed:", err.message); // message only — never the api key
-    return res.status(500).type("text/plain").send(t("onboarding.ai.cloudSaveFailed", lang));
+    return back("save_failed");
   }
 }
 

@@ -344,7 +344,12 @@ export function aiStepClientJS(lang) {
           if (upsellEl) {
             if (computeUpsell(catalog, model, quantEntry)) {
               upsellEl.hidden = false;
-              upsellEl.textContent = '${tJs("onboarding.ai.upsell", lang)}';
+              upsellEl.replaceChildren();
+              upsellEl.appendChild(document.createTextNode('${tJs("onboarding.ai.upsell", lang)} '));
+              var upsellLink = document.createElement("a");
+              upsellLink.href = "/dashboard/model-catalog";
+              upsellLink.textContent = '${tJs("onboarding.ai.upsellLink", lang)}';
+              upsellEl.appendChild(upsellLink);
             } else {
               upsellEl.hidden = true;
             }
