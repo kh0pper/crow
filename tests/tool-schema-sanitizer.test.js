@@ -171,7 +171,7 @@ function walkForOversizedBounds(node, path, violations) {
   }
 }
 
-test("getChatTools() (unbound) output carries no maxLength/minLength above 4096 anywhere", () => {
+test("getChatTools() (unbound) output carries no maxLength/minLength above 1024 anywhere", () => {
   const tools = getChatTools();
   const violations = [];
   for (const t of tools) {
@@ -180,7 +180,7 @@ test("getChatTools() (unbound) output carries no maxLength/minLength above 4096 
   assert.deepEqual(violations, [], `oversized bounds leaked into advertised tools: ${violations.join(", ")}`);
 });
 
-test("getChatTools() (bound to a bot) output carries no maxLength/minLength above 4096 anywhere", () => {
+test("getChatTools() (bound to a bot) output carries no maxLength/minLength above 1024 anywhere", () => {
   const tools = getChatTools({ botDef: { bot_id: "botA", tools: { crow_mcp: ["memory/crow_store_memory"] } } });
   const violations = [];
   for (const t of tools) {

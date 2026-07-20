@@ -1010,9 +1010,5 @@ export function getChatTools(opts = {}) {
   // tools, addon/promoted tools, and cross-instance remote tools all flow through
   // here regardless of caller (chat.js, one-shot.js, meta-glasses routes.js via
   // getChatTools({botDef})). Generic, not funkwhale-specific.
-  // Sanitize every advertised schema at this single choke point — core category
-  // tools, addon/promoted tools, and cross-instance remote tools all flow through
-  // here regardless of caller (chat.js, one-shot.js, meta-glasses routes.js via
-  // getChatTools({botDef})). Generic, not funkwhale-specific.
   return tools.map((t) => ({ ...t, inputSchema: sanitizeToolSchema(t.inputSchema) }));
 }
