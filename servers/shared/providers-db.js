@@ -395,6 +395,52 @@ export async function unregisterProvidersByBundle(db, bundleId) {
 }
 
 /**
+ * Return the first non-disabled `providers` row that carries at least one
+ * usable model, or null if none exists. "Usable" = the same predicate the
+ * Messages panel's `aiConfigured` gate uses (dashboard/panels/messages.js
+ * `hasUsableProvider`, which now delegates here): Array.isArray(models) &&
+ * models.length && models[0] && models[0].id, with a guarded JSON.parse per
+ * row so one corrupt `models` cell doesn't sink the scan.
+ *
+ * Single source of truth so a providers-table-only install (the onboarding
+ * wizard's local-download and cloud-paste-key branches write ONLY this
+ * table — never `.env` AI_PROVIDER or the `ai_profiles` blob) is recognized
+ * identically everywhere that needs "is there a usable provider row at
+ * all" vs. "which one, and what model" — see chat.js's conversation-creation
+ * env-fallback path (Amended review, C-B Task 9 finding #1: without this,
+ * "+ New AI chat" 400ed silently on that install shape).
+ *
+ * Rows are scanned in `id` order for determinism; any query failure returns
+ * null (fail closed, never throws).
+ *
+ * @param {{execute: (arg: string|{sql: string, args: any[]}) => Promise<any>}|null} db
+ * @returns {Promise<{ id: string, modelId: string } | null>}
+ */
+export async function findUsableProviderRow(db) {
+  if (!db) return null;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT id, models FROM providers WHERE disabled = 0 ORDER BY id",
+      args: [],
+    });
+    for (const row of rows || []) {
+      let models;
+      try {
+        models = JSON.parse(row.models || "[]");
+      } catch {
+        models = [];
+      }
+      if (Array.isArray(models) && models.length && models[0] && models[0].id) {
+        return { id: row.id, modelId: models[0].id };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * D1 decision table for the owner-asserts reconciler. Pure — exported for
  * exhaustive unit-testing of the matrix (tests/providers-reconcile-gate.test.js).
  *
