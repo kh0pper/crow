@@ -40,3 +40,18 @@ export function engineRequiredFor(gw) {
   if (missingGatewayFields(gw).length !== 0) return false;
   return resolveEngineStatus().state === "absent";
 }
+
+/**
+ * True when the shared, pinnable engineStatus() resolves to "absent" —
+ * used by the Gateways-tab RENDER (Task 8) to decide whether to arm the
+ * client-side gate modal for the currently-selected gwType. Deliberately
+ * independent of record completeness: unlike engineRequiredFor() (which
+ * only fires on a saved, complete record), the render-time check must arm
+ * BEFORE the operator has finished typing — completeness is checked
+ * client-side, live, against the DOM form values at submit time (see
+ * engine-gate-client.js). Shares resolveEngineStatus() so the same
+ * _setEngineStatusForTest pin arms both the render gate and the save gate.
+ */
+export function isEngineAbsent() {
+  return resolveEngineStatus().state === "absent";
+}

@@ -32,7 +32,7 @@
 import { test, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -47,6 +47,8 @@ let writeSetting = null;
 let handleWizardCreate = null;
 let renderWizard = null;
 let WIZARD_STEP_KEYS = null;
+let renderBotEditor = null;
+let botBuilderPanel = null;
 
 const origPibotPiCli = process.env.PIBOT_PI_CLI;
 const origCrowHome = process.env.CROW_HOME;
@@ -67,6 +69,8 @@ before(async () => {
   ({ writeSetting } = await import("../servers/gateway/dashboard/settings/registry.js"));
   ({ handleWizardCreate, renderWizard, WIZARD_STEP_KEYS } =
     await import("../servers/gateway/dashboard/panels/bot-builder/wizard.js"));
+  ({ renderBotEditor } = await import("../servers/gateway/dashboard/panels/bot-builder/editor.js"));
+  ({ default: botBuilderPanel } = await import("../servers/gateway/dashboard/panels/bot-builder.js"));
 });
 
 after(async () => {
@@ -380,4 +384,112 @@ test("wizard create: complete discord record + engine ready → inserted as befo
   assert.deepEqual(def.gateways, [{ type: "discord", token: "tok123", allowlist: [], channel_ids: [] }]);
   await clearWizProviders();
   _setEngineStatusForTest(null);
+});
+
+// ---------------------------------------------------------------------------
+// C4 Task 8 — client-side gate modal + one-click install, runtime-enable
+// warn banner (server-rendered contract: data attributes for the client
+// mirror, friendly banners instead of raw error/warn values, the zero-
+// backtick client script invariant).
+// ---------------------------------------------------------------------------
+
+const layout = ({ content }) => content;
+
+function mkGetReq(query) {
+  return { method: "GET", query, body: {}, cookies: {}, headers: {} };
+}
+function mkSendRes() {
+  const res = { html: null, redirected: null };
+  res.send = (s) => { res.html = s; return res; };
+  res.redirectAfterPost = (url) => { res.redirected = url; };
+  return res;
+}
+
+test("gateways tab render: complete gmail record + engine absent → form armed with channels + required-fields data attributes", async () => {
+  _setEngineStatusForTest({ state: "absent" });
+  const res = mkSendRes();
+  const req = mkGetReq({ bot: "gate-bot", tab: "gateways" });
+  await renderBotEditor(req, res, { db, layout, lang: "en", PAGE_CSS: "", botId: "gate-bot", notice: "", q: req.query });
+  assert.match(res.html, /id="btb-gateways-form"[^>]*data-engine-gate="1"/, "form must carry the gate attribute");
+  assert.match(res.html, /data-engine-channels="gmail,discord,telegram,slack"/, "channels list must mirror ENGINE_CHANNELS");
+  assert.match(res.html, /data-engine-required-fields="gw_address,gw_allowlist"/, "required DOM field names for gmail");
+  assert.match(res.html, /window\.__crowEngineGateOpen/, "stable hook for the Task 9 readiness row must be present");
+  assert.match(res.html, /id="engine-gate-modal-overlay"/, "modal overlay markup must ship on the page");
+});
+
+test("gateways tab render: engine ready → NOT armed (no data-engine-gate attribute anywhere)", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
+  const res = mkSendRes();
+  const req = mkGetReq({ bot: "gate-bot", tab: "gateways" });
+  await renderBotEditor(req, res, { db, layout, lang: "en", PAGE_CSS: "", botId: "gate-bot", notice: "", q: req.query });
+  assert.ok(!/data-engine-gate="1"/.test(res.html), "must not arm the client gate while the engine is ready");
+  // The overlay/hook still ship (Task 9's readiness row may still want the
+  // hook even when this particular tab isn't gated) but the script itself
+  // is unconditional — only the FORM's data attribute is state-dependent.
+  assert.match(res.html, /window\.__crowEngineGateOpen/);
+});
+
+test("gateways tab render: engine absent but gwType is crow-messages (not an ENGINE_CHANNELS type) → NOT armed", async () => {
+  await db.execute({
+    sql: "UPDATE pi_bot_defs SET definition=? WHERE bot_id='gate-bot'",
+    args: [JSON.stringify({ gateways: [{ type: "crow-messages", allow_paired_instances: true }], tools: {}, models: {} })],
+  });
+  _setEngineStatusForTest({ state: "absent" });
+  const res = mkSendRes();
+  const req = mkGetReq({ bot: "gate-bot", tab: "gateways" });
+  await renderBotEditor(req, res, { db, layout, lang: "en", PAGE_CSS: "", botId: "gate-bot", notice: "", q: req.query });
+  assert.ok(!/data-engine-gate="1"/.test(res.html), "crow-messages is never a gated channel type");
+});
+
+test("bot-builder panel: error=engine_required renders a friendly banner + Install button, never the raw query value", async () => {
+  _setEngineStatusForTest({ state: "absent" });
+  const res = mkSendRes();
+  const req = mkGetReq({ bot: "gate-bot", tab: "gateways", error: "engine_required" });
+  await botBuilderPanel.handler(req, res, { db, layout, lang: "en" });
+  assert.ok(!res.html.includes(">engine_required<"), "must never leak the raw query value as visible text");
+  assert.match(res.html, /class="btb-notice-err"/, "renders as an error notice");
+  assert.match(res.html, /id="engine-gate-open-btn"/, "renders the Install bot engine button");
+  assert.doesNotMatch(res.html, /needs the bot engine.*undefined/i);
+});
+
+test("bot-builder panel: warn=bot_runtime_off renders a friendly banner + one-click enable button, never the raw query value", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
+  const res = mkSendRes();
+  const req = mkGetReq({ bot: "gate-bot", tab: "gateways", warn: "bot_runtime_off" });
+  await botBuilderPanel.handler(req, res, { db, layout, lang: "en" });
+  assert.ok(!res.html.includes(">bot_runtime_off<"), "must never leak the raw query value as visible text");
+  assert.match(res.html, /class="btb-notice-warn"/, "renders as a warn notice");
+  assert.match(res.html, /id="bot-runtime-enable-btn"/, "renders the one-click enable button");
+  assert.match(res.html, /id="bot-runtime-enable-status"/, "renders a status span for the async enable result");
+});
+
+test("bot-builder panel: an unrelated error value still renders raw (no regression to the generic fallback)", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
+  const res = mkSendRes();
+  const req = mkGetReq({ bot: "gate-bot", tab: "gateways", error: "unknown_bot" });
+  await botBuilderPanel.handler(req, res, { db, layout, lang: "en" });
+  assert.match(res.html, />unknown_bot</, "generic fallback still renders the raw value verbatim");
+  assert.ok(!/id="engine-gate-open-btn"/.test(res.html), "the engine-gate banner (with its button) must not render for an unrelated error");
+});
+
+test("engine-gate-client.js: zero literal backtick characters inside the emitted <script> block", () => {
+  const src = readFileSync(join(new URL("..", import.meta.url).pathname, "servers/gateway/dashboard/panels/bot-builder/engine-gate-client.js"), "utf8");
+  const scriptStart = src.indexOf("<script>", src.indexOf("function engineGateClientJS"));
+  const scriptEnd = src.indexOf("</script>", scriptStart);
+  assert.ok(scriptStart > -1 && scriptEnd > scriptStart, "could not locate the client <script> block");
+  const body = src.slice(scriptStart + "<script>".length, scriptEnd);
+  const backtickCount = (body.match(/`/g) || []).length;
+  assert.equal(backtickCount, 0, "a literal backtick inside the client <script> block would break the whole dashboard");
+});
+
+test("engine-gate-client.js: emitted script is syntactically valid JS and exposes the stable hook", async () => {
+  const { engineGateClientJS } = await import("../servers/gateway/dashboard/panels/bot-builder/engine-gate-client.js");
+  const out = engineGateClientJS("en");
+  const s = out.indexOf("<script>") + "<script>".length;
+  const e = out.indexOf("</script>");
+  const js = out.slice(s, e);
+  assert.doesNotThrow(() => new Function(js), "emitted client JS must parse without a SyntaxError");
+  assert.match(js, /window\.__crowEngineGateOpen\s*=\s*function/, "must define the stable hook Task 9 will call");
+  assert.match(js, /bundle_id:\s*BUNDLE_ID/, "install POST must target bot-engine");
+  assert.match(js, /already_installing/, "must handle the 409 already_installing adopt-job-id path");
 });
