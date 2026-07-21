@@ -581,6 +581,8 @@ export const translations = {
   "extensions.uninstallDockerDesc": { en: "This will stop all containers and remove the add-on. The gateway will restart to apply changes.", es: "Esto detendrá todos los contenedores y eliminará el complemento. La puerta de enlace se reiniciará para aplicar los cambios." },
   "extensions.uninstallDesc": { en: "This will remove the add-on and its configuration.", es: "Esto eliminará el complemento y su configuración." },
   "extensions.dataDeleteHint": { en: "Optionally delete all files stored by this service. Leave unchecked to keep data for a future reinstall.", es: "Opcionalmente elimina todos los archivos almacenados por este servicio. Deja sin marcar para conservar los datos para una futura reinstalación." },
+  "extensions.engineBlastHeading": { en: "Uninstalling the bot engine will stop these bot channels from working:", es: "Desinstalar el motor de bots hará que estos canales de bot dejen de funcionar:" },
+  "extensions.engineBlastItem": { en: "{name} ({types})", es: "{name} ({types})" }, // template shape only, no natural-language words to translate
   "extensions.restartingGatewayChanges": { en: "Restarting gateway...", es: "Reiniciando la puerta de enlace..." },
   "extensions.installedDate": { en: "installed", es: "instalado" },
   "extensions.needsRam": { en: "This add-on needs ~", es: "Este complemento necesita ~" },
