@@ -19,26 +19,27 @@ import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposa
 import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
-import { ENGINE_CHANNELS, engineStatus } from "../../../bot-engine-status.js";
+import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { botRuntimeStatus } from "../../../bot-runtime.js";
+import { botRuntimeActive } from "../bot-runtime-flag.js";
+import { engineRequiredFor, _setEngineStatusForTest } from "./engine-gate.js";
 
 // Task 7 (C4): the gateways-tab save gate needs two host/process-dependent
 // checks — engineStatus() (whose "global" npm rung resolves off the REAL
 // running node, not anything a test controls) and botRuntimeStatus() (a
 // module singleton only populated by a real initBotRuntime() call: timers,
-// a sync sqlite handle, the event bus — too heavy for a route test). Both
-// are pinnable here, following the house convention for exactly this kind
-// of host-state seam (bot-engine-status.js's _setSeamsForTest,
+// a sync sqlite handle, the event bus — too heavy for a route test). The
+// engine-status pin now lives in the shared ./engine-gate.js (the wizard's
+// create path — wizard.js — needs the SAME pinnable predicate, and it can't
+// import a local pin here without a real ESM cycle since this file already
+// imports handleWizardCreate from wizard.js). Re-exported below so existing
+// importers of `_setEngineStatusForTest` from this file are unaffected.
+// botRuntimeStatus stays local-pinnable here, following the house convention
+// for this kind of host-state seam (bot-engine-status.js's _setSeamsForTest,
 // dashboard/panels/extensions/data-queries.js's _setDockerProbeForTest):
 // null (the default) falls through to the real check.
-let _engineStatusPin = null;
+export { _setEngineStatusForTest };
 let _botRuntimeStatusPin = null;
-
-/** Test-only: pin engineStatus()'s result for the gateways-tab attach gate.
- * Pass null to un-pin (falls back to the real engineStatus()). */
-export function _setEngineStatusForTest(status) {
-  _engineStatusPin = status || null;
-}
 
 /** Test-only: pin botRuntimeStatus()'s result for the runtime-disarmed
  * warning. Pass null to un-pin (falls back to the real botRuntimeStatus()). */
@@ -434,8 +435,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
     if (tab === "gateways") {
       const savedGw = (def.gateways || [])[0];
       if (savedGw && ENGINE_CHANNELS.includes(savedGw.type) && missingGatewayFields(savedGw).length === 0) {
-        const engine = _engineStatusPin || engineStatus({ env: process.env });
-        if (engine.state === "absent") {
+        if (engineRequiredFor(savedGw)) {
           // Form state is accepted as lost on this path — the fix is
           // installing the engine, not reposting the same form.
           return res.redirectAfterPost(
@@ -450,11 +450,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
         // (the engine exists); only a disarmed runtime needs a nudge here.
         const runtime = _botRuntimeStatusPin || botRuntimeStatus();
         if (runtime && runtime.mode === "gateway") {
-          let flagOn = false;
-          try {
-            const raw = await readSetting(db, "feature_flags");
-            flagOn = !!(raw && JSON.parse(raw)?.bot_runtime === true);
-          } catch { /* unparsable flags read as off */ }
+          const flagOn = await botRuntimeActive(db);
           if (!flagOn) extraQ += "&warn=bot_runtime_off";
         }
       }

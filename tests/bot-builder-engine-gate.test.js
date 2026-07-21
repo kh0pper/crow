@@ -44,8 +44,12 @@ let handleBotBuilderPost = null;
 let _setEngineStatusForTest = null;
 let _setBotRuntimeStatusForTest = null;
 let writeSetting = null;
+let handleWizardCreate = null;
+let renderWizard = null;
+let WIZARD_STEP_KEYS = null;
 
 const origPibotPiCli = process.env.PIBOT_PI_CLI;
+const origCrowHome = process.env.CROW_HOME;
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], {
@@ -61,6 +65,8 @@ before(async () => {
     _setBotRuntimeStatusForTest,
   } = await import("../servers/gateway/dashboard/panels/bot-builder/api-handlers.js"));
   ({ writeSetting } = await import("../servers/gateway/dashboard/settings/registry.js"));
+  ({ handleWizardCreate, renderWizard, WIZARD_STEP_KEYS } =
+    await import("../servers/gateway/dashboard/panels/bot-builder/wizard.js"));
 });
 
 after(async () => {
@@ -73,6 +79,8 @@ beforeEach(async () => {
   _setBotRuntimeStatusForTest(null);
   if (origPibotPiCli === undefined) delete process.env.PIBOT_PI_CLI;
   else process.env.PIBOT_PI_CLI = origPibotPiCli;
+  if (origCrowHome === undefined) delete process.env.CROW_HOME;
+  else process.env.CROW_HOME = origCrowHome;
   // Reset each bot to a plain gmail gateway before every test so a prior
   // test's saved (or rejected) state can't leak into the next.
   await db.execute({
@@ -86,6 +94,8 @@ beforeEach(async () => {
 afterEach(() => {
   _setEngineStatusForTest(null);
   _setBotRuntimeStatusForTest(null);
+  if (origCrowHome === undefined) delete process.env.CROW_HOME;
+  else process.env.CROW_HOME = origCrowHome;
 });
 
 function mkRes() {
@@ -257,4 +267,117 @@ test("engine ready + runtime mode 'disabled' (suite kill switch) → saved, no w
   );
   assert.match(res.redirected, /saved=1/);
   assert.equal(res.redirected.includes("warn=bot_runtime_off"), false, "mode!=='gateway' must never warn");
+});
+
+// ---------------------------------------------------------------------------
+// Review finding 1: the runtime-disarmed warning must read botRuntimeActive(db)
+// (which falls back to isMpaHost() when the flag is unset), NOT hand-roll
+// "unset === off". On an MPA host with an unset flag, the runtime is armed
+// by default — warning anyway would be a false positive.
+// ---------------------------------------------------------------------------
+
+test("MPA-shaped host + UNSET bot_runtime flag + engine ready → saved, NO warn (isMpaHost fallback arms the runtime)", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
+  _setBotRuntimeStatusForTest({ mode: "gateway" });
+  await writeSetting(db, "feature_flags", JSON.stringify({}), { scope: "local" }); // bot_runtime key absent entirely
+  process.env.CROW_HOME = "/home/x/.crow-mpa"; // isMpaHost() keys off CROW_HOME|CROW_DATA_DIR containing ".crow-mpa"
+  const res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "gate-bot", gw_type: "discord", gw_token: "tok123" } },
+    res, { db }
+  );
+  assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
+  assert.equal(res.redirected.includes("warn=bot_runtime_off"), false,
+    "MPA host + unset flag must resolve bot_runtime=true via botRuntimeActive's isMpaHost() fallback: " + res.redirected);
+});
+
+test("plain (non-MPA) host + UNSET bot_runtime flag + engine ready → saved WITH warn", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
+  _setBotRuntimeStatusForTest({ mode: "gateway" });
+  await writeSetting(db, "feature_flags", JSON.stringify({}), { scope: "local" }); // bot_runtime key absent entirely
+  delete process.env.CROW_HOME; // CROW_DATA_DIR is already a plain tmp dir (no ".crow-mpa")
+  const res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "gate-bot", gw_type: "discord", gw_token: "tok123" } },
+    res, { db }
+  );
+  assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
+  assert.match(res.redirected, /warn=bot_runtime_off/,
+    "plain host + unset flag must default off (isMpaHost() false) and warn: " + res.redirected);
+});
+
+// ---------------------------------------------------------------------------
+// Review finding 2: the wizard's final create must be gated the same way the
+// Gateways-tab save is — a complete engine-channel record built via the same
+// normalizeGatewayFields machinery must not be INSERTed while the engine is
+// absent (nothing would ever poll it, and the operator never sees a warning
+// because the row would look fully onboarded).
+// ---------------------------------------------------------------------------
+
+async function addWizProvider(id, models) {
+  await db.execute({
+    sql: "INSERT INTO providers (id, base_url, models, disabled) VALUES (?,?,?,0)",
+    args: [id, "http://127.0.0.1:9999/v1", JSON.stringify(models)],
+  });
+}
+const clearWizProviders = () => db.execute({ sql: "DELETE FROM providers", args: [] });
+const wizBotRow = async (id) =>
+  (await db.execute({ sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE bot_id=?", args: [id] })).rows[0] || null;
+const wizStepIdx = (k) => WIZARD_STEP_KEYS.indexOf(k);
+
+function mkWizRes() {
+  const res = { redirected: null, html: null };
+  res.redirectAfterPost = (url) => { res.redirected = url; };
+  res.send = (html) => { res.html = html; return res; };
+  return res;
+}
+
+test("wizard create: complete discord record + engine absent → NOT inserted, bounces back to the channel step with the carry intact", async () => {
+  await addWizProvider("wizprov", [{ id: "m1" }]);
+  _setEngineStatusForTest({ state: "absent" });
+  const body = {
+    action: "wizard_create", nav: "create",
+    tpl: "discord-qa", display_name: "Wiz Discord Bot", bot_id: "wiz-discord-bot",
+    model: "wizprov/m1", gw_type: "discord", gw_token: "tok123",
+  };
+  const res = mkWizRes();
+  await handleWizardCreate({ body }, res, { db, lang: "en" });
+  assert.equal(res.redirected, null, "engine-required gate must send nothing (same convention as name/model validation failures)");
+  assert.equal(res.html, null);
+  assert.equal(await wizBotRow("wiz-discord-bot"), null, "no pi_bot_defs row inserted while the engine is absent");
+
+  // panel-handler fall-through: handleWizardCreate sent nothing, so the
+  // caller falls through to renderWizard, which re-derives the failure and
+  // re-renders the CHANNEL step (not review) with the carry intact — the
+  // same PRG-avoidance convention as the existing name/model gate failures.
+  const renderRes = mkWizRes();
+  await renderWizard(
+    { method: "POST", body, query: {}, headers: {} },
+    renderRes,
+    { db, layout: ({ content }) => content, lang: "en", PAGE_CSS: "", notice: "" }
+  );
+  const html = renderRes.html;
+  assert.match(html, new RegExp(`name="step" value="${wizStepIdx("channel")}"`), "re-renders the channel step, not review");
+  assert.match(html, /callout-error/, "shows an error callout");
+  assert.match(html, /<input type="hidden" name="display_name" value="Wiz Discord Bot">/, "entered state preserved");
+  await clearWizProviders();
+  _setEngineStatusForTest(null);
+});
+
+test("wizard create: complete discord record + engine ready → inserted as before", async () => {
+  await addWizProvider("wizprov", [{ id: "m1" }]);
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
+  const res = mkWizRes();
+  await handleWizardCreate({ body: {
+    action: "wizard_create", nav: "create",
+    tpl: "discord-qa", display_name: "Wiz Discord Bot 2", bot_id: "wiz-discord-bot-2",
+    model: "wizprov/m1", gw_type: "discord", gw_token: "tok123",
+  } }, res, { db, lang: "en" });
+  assert.match(res.redirected, /bot=wiz-discord-bot-2&tab=review&created=wiz-discord-bot-2/, "must PRG on success: " + res.redirected);
+  const row = await wizBotRow("wiz-discord-bot-2");
+  assert.ok(row, "row must be inserted when the engine is ready");
+  const def = JSON.parse(row.definition);
+  assert.deepEqual(def.gateways, [{ type: "discord", token: "tok123", allowlist: [], channel_ids: [] }]);
+  await clearWizProviders();
+  _setEngineStatusForTest(null);
 });

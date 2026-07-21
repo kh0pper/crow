@@ -29,6 +29,7 @@ import {
 import { BOT_TEMPLATES, getTemplate, applyTemplate, availableMcpSet } from "./templates.js";
 import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { emitBotDefsChanged } from "./defs-changed.js";
+import { engineRequiredFor } from "./engine-gate.js";
 
 export const WIZARD_STEP_KEYS = ["template", "basics", "model", "channel", "review"];
 
@@ -219,7 +220,20 @@ export async function renderWizard(req, res, { db, layout, lang, PAGE_CSS, notic
       step = WIZARD_STEP_KEYS.indexOf("model");
       error = t("botbuilder.createModelInvalid", lang);
     } else {
-      step = last; // unexpected fall-through: re-render review, state intact
+      // Task 7 follow-up (C4): mirror handleWizardCreate's engine-attach
+      // gate so the re-derivation covers every reason it can decline to
+      // send. A complete engine-channel record (gmail/discord/telegram/
+      // slack) with the bot engine absent bounces back to the channel step,
+      // same carry-preserving convention as the name/model checks above.
+      const gwTpl = getTemplate(state.tpl) || BOT_TEMPLATES[BOT_TEMPLATES.length - 1];
+      const gwType = WIZARD_GW_TYPES.includes(state.gw_type) ? state.gw_type : gwTpl.gwType;
+      const gwCandidate = normalizeGatewayFields(gwType, b);
+      if (gwCandidate && engineRequiredFor(gwCandidate[0])) {
+        step = WIZARD_STEP_KEYS.indexOf("channel");
+        error = t("botbuilder.wizEngineRequired", lang);
+      } else {
+        step = last; // unexpected fall-through: re-render review, state intact
+      }
     }
   } else if (req.method === "POST") {
     const posted = Math.min(Math.max(parseInt(b.step, 10) || 0, 0), last);
@@ -357,6 +371,27 @@ export async function handleWizardCreate(req, res, { db, lang }) {
   const def = defaultDefinition(botId, null, state.model);
   const tpl = getTemplate(state.tpl) || BOT_TEMPLATES[BOT_TEMPLATES.length - 1];
 
+  // Channel: simple types normalize through the shared module; crow-messages
+  // gets its minimal host-managed record; device-bound types persist a
+  // type-only draft (same W1-4 draft semantics as the Gateways tab — every
+  // consumer keys on required fields / device binding, never bare type).
+  const gwType = WIZARD_GW_TYPES.includes(state.gw_type) ? state.gw_type : tpl.gwType;
+  const simpleGateways = normalizeGatewayFields(gwType, b);
+
+  // Task 7 follow-up (C4): the same server-side attach gate api-handlers.js
+  // enforces on the Gateways-tab save must also cover wizard create — the
+  // wizard builds a complete engine-channel record through the identical
+  // normalizeGatewayFields machinery, so a bot with a working discord/gmail/
+  // telegram/slack channel could otherwise get INSERTed while the engine is
+  // absent (nothing would ever poll it). Checked before the template
+  // overlay/MCP probe below (which can spawn every MCP server) so a reject
+  // doesn't pay for work whose result is thrown away. Returns WITHOUT
+  // sending, same convention as every other validation failure above
+  // (display_name, model) — the panel handler falls through to renderWizard,
+  // which re-derives this exact failure and re-renders the channel step with
+  // the carry intact.
+  if (simpleGateways && engineRequiredFor(simpleGateways[0])) return;
+
   // Template overlay, filtered against the live probe + skills on THIS
   // install (spec §D2). probeAll() may return {_error} on a fresh install
   // with no canonical mcp.json — availableMcpSet then yields the empty set
@@ -373,12 +408,6 @@ export async function handleWizardCreate(req, res, { db, lang }) {
   }
   applyTemplate(def, tpl, { availableMcp, availableSkills });
 
-  // Channel: simple types normalize through the shared module; crow-messages
-  // gets its minimal host-managed record; device-bound types persist a
-  // type-only draft (same W1-4 draft semantics as the Gateways tab — every
-  // consumer keys on required fields / device binding, never bare type).
-  const gwType = WIZARD_GW_TYPES.includes(state.gw_type) ? state.gw_type : tpl.gwType;
-  const simpleGateways = normalizeGatewayFields(gwType, b);
   if (simpleGateways) {
     def.gateways = simpleGateways;
   } else if (gwType === "crow-messages") {

@@ -1070,6 +1070,7 @@ export const translations = {
   "botbuilder.wizGwFinishLaterNote": { en: "Voice channels need a paired device. Your bot will be created with this channel selected; finish the device setup on its Gateways tab.", es: "Los canales de voz necesitan un dispositivo emparejado. Tu bot se creará con este canal seleccionado; termina la configuración del dispositivo en su pestaña Gateways." },
   "botbuilder.wizGwFinishLaterShort": { en: "finish setup on the Gateways tab", es: "termina la configuración en la pestaña Gateways" },
   "botbuilder.wizGwNoneNote": { en: "You can add a channel any time on the bot's Gateways tab. Until then, you can still talk to it from its Sessions tab.", es: "Puedes añadir un canal en cualquier momento en la pestaña Gateways del bot. Hasta entonces, puedes hablar con él desde su pestaña Sesiones." },
+  "botbuilder.wizEngineRequired": { en: "This channel needs the bot engine installed first — install it, then finish this step.", es: "Este canal necesita primero el motor de bots instalado: instálalo y luego termina este paso." },
   "botbuilder.wizReviewTemplate": { en: "Starting point", es: "Punto de partida" },
   "botbuilder.wizReviewName": { en: "Name", es: "Nombre" },
   "botbuilder.wizReviewBotId": { en: "Internal id", es: "Id interno" },
