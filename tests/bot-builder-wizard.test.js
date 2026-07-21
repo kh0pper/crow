@@ -5,7 +5,7 @@
  * of Turbo Drive (data-turbo="false" — render-on-POST is incompatible with
  * Turbo's must-redirect rule, spec round-2 CRITICAL-A) and carry CSRF.
  */
-import { test, before, after } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -18,6 +18,7 @@ process.env.CROW_DATA_DIR = dir;
 let db = null;
 let renderWizard, handleWizardCreate, WIZARD_STEP_KEYS, uniqueBotId, slugifyBotId;
 let translations = null;
+let _setEngineStatusForTest = null;
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], {
@@ -30,11 +31,27 @@ before(async () => {
   ({ renderWizard, handleWizardCreate, WIZARD_STEP_KEYS, uniqueBotId, slugifyBotId } =
     await import("../servers/gateway/dashboard/panels/bot-builder/wizard.js"));
   ({ translations } = await import("../servers/gateway/dashboard/shared/i18n.js"));
+  // wizard.js doesn't re-export the test-only pin (only api-handlers.js
+  // does, for its own consumers) — import the shared leaf module directly,
+  // same seam bot-builder-engine-gate.test.js uses.
+  ({ _setEngineStatusForTest } =
+    await import("../servers/gateway/dashboard/panels/bot-builder/engine-gate.js"));
 });
 
 after(async () => {
   try { db && db.close && db.close(); } catch {}
   rmSync(dir, { recursive: true, force: true });
+});
+
+// Hermeticity: this file isn't testing the engine-attach gate itself (that's
+// bot-builder-engine-gate.test.js) — the two tests below that create a
+// COMPLETE gmail record must pin engineStatus() "ready" so they don't
+// depend on whatever the host running the suite happens to have installed
+// (a dev box with a global pi install resolves "ready" via rung 4; a clean
+// CI runner resolves "absent" and the real gate would reject the create).
+// Reset after every test regardless of which one pinned it.
+afterEach(() => {
+  _setEngineStatusForTest(null);
 });
 
 function mkRes() {
@@ -214,6 +231,7 @@ test("wizard_create (blank/none): inserts row, safe defaults, PRG to review with
 });
 
 test("wizard_create (gmail): channel record parity via the shared normalizer", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
   await addProvider("prov", [{ id: "m1" }]);
   const res = mkRes();
   await handleWizardCreate({ body: {
@@ -228,6 +246,10 @@ test("wizard_create (gmail): channel record parity via the shared normalizer", a
 });
 
 test("wizard_create conflict: duplicate submit redirects to the existing bot, never clobbers", async () => {
+  // Not itself a gate test (gw_type "none" here never reaches
+  // engineRequiredFor) but pinned anyway for hermeticity/robustness against
+  // the conflict-tolerance short-circuit's ordering relative to the gate.
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
   await addProvider("prov", [{ id: "m1" }]);
   const res = mkRes();
   await handleWizardCreate({ body: {
