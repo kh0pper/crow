@@ -90,6 +90,12 @@ env.CROW_DATA_DIR = join(scratch, "data");
 // or instance-sync traffic.
 env.CROW_DISABLE_NOSTR = "1";
 env.CROW_DISABLE_INSTANCE_SYNC = "1";
+// C4 Task 6: the gateway-supervised bot runtime arms a 60s bridge-tick
+// interval and a discord child on any host where bot_runtime resolves true
+// (including the isMpaHost fallback) — a scratch suite gateway must never
+// double-poll pi_bot_defs alongside a real host's own bot-runtime/systemd
+// units, so it's forced off suite-wide exactly like Nostr/instance-sync above.
+env.CROW_DISABLE_BOT_RUNTIME = "1";
 // The suite must never believe it is supervised: a systemd-launched context
 // (CI runner, systemd-run, VS Code remote) leaks INVOCATION_ID, and code
 // under test would arm real restart/exit paths inside test processes.

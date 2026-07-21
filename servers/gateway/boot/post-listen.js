@@ -196,6 +196,17 @@ export async function runPostListenSetup(server, app, deps) {
     });
   });
 
+  // C4 Task 6: gateway-supervised bot runtime (bridge tick interval + Discord
+  // child, both gated on the bot_runtime feature flag via runtimeGate — see
+  // bot-runtime.js). Kill switch: CROW_DISABLE_BOT_RUNTIME=1 (forced by
+  // run-suite.mjs for every scratch suite gateway). Non-fatal — a failure
+  // here must not take down the gateway.
+  import("../bot-runtime.js").then(({ initBotRuntime }) => {
+    initBotRuntime().catch((err) => {
+      console.warn(`[bot-runtime] init failed: ${err.message}`);
+    });
+  });
+
   // Start schedule executor
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);
