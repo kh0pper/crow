@@ -10,7 +10,7 @@ import {
   PI_BUILTIN, PI_EXT_ALLOWLIST,
   loadModelOptions, remoteInvocationOn, defaultDefinition, lines,
 } from "./data-queries.js";
-import { normalizeGatewayFields } from "./gateway-fields.js";
+import { normalizeGatewayFields, missingGatewayFields } from "./gateway-fields.js";
 import { handleWizardCreate } from "./wizard.js";
 import { handleDeleteConfirm } from "./delete-bot.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
@@ -19,6 +19,32 @@ import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposa
 import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
+import { ENGINE_CHANNELS, engineStatus } from "../../../bot-engine-status.js";
+import { botRuntimeStatus } from "../../../bot-runtime.js";
+
+// Task 7 (C4): the gateways-tab save gate needs two host/process-dependent
+// checks — engineStatus() (whose "global" npm rung resolves off the REAL
+// running node, not anything a test controls) and botRuntimeStatus() (a
+// module singleton only populated by a real initBotRuntime() call: timers,
+// a sync sqlite handle, the event bus — too heavy for a route test). Both
+// are pinnable here, following the house convention for exactly this kind
+// of host-state seam (bot-engine-status.js's _setSeamsForTest,
+// dashboard/panels/extensions/data-queries.js's _setDockerProbeForTest):
+// null (the default) falls through to the real check.
+let _engineStatusPin = null;
+let _botRuntimeStatusPin = null;
+
+/** Test-only: pin engineStatus()'s result for the gateways-tab attach gate.
+ * Pass null to un-pin (falls back to the real engineStatus()). */
+export function _setEngineStatusForTest(status) {
+  _engineStatusPin = status || null;
+}
+
+/** Test-only: pin botRuntimeStatus()'s result for the runtime-disarmed
+ * warning. Pass null to un-pin (falls back to the real botRuntimeStatus()). */
+export function _setBotRuntimeStatusForTest(status) {
+  _botRuntimeStatusPin = status || null;
+}
 
 // Same crow_lang-cookie resolution the dashboard router uses (index.js);
 // defensive because POST handlers can be exercised with header-less reqs.
@@ -394,6 +420,44 @@ export async function handleBotBuilderPost(req, res, { db }) {
     } else if (tab === "triggers") {
       def.triggers.gateway = !!b.tr_gateway;
       def.triggers.cron = (b.tr_cron || "").trim();
+    }
+
+    // Task 7 (C4): server-side attach gate — the primary UX is a client-side
+    // intercept (Task 8, engine absence is known at render); this is only a
+    // backstop for a client bypassing JS. Fires ONLY on a COMPLETE
+    // engine-channel record (type ∈ ENGINE_CHANNELS AND no missing required
+    // fields) — a type-only draft from the dropdown's auto-submit-on-type-
+    // change (W1-4 snap-back doctrine) is inert (no consumer acts on it
+    // until it's complete) and must keep saving exactly as before this gate
+    // existed. Voice/device gateways (glasses/companion) and crow-messages
+    // are never in ENGINE_CHANNELS, so they're never gated here (C4-3).
+    if (tab === "gateways") {
+      const savedGw = (def.gateways || [])[0];
+      if (savedGw && ENGINE_CHANNELS.includes(savedGw.type) && missingGatewayFields(savedGw).length === 0) {
+        const engine = _engineStatusPin || engineStatus({ env: process.env });
+        if (engine.state === "absent") {
+          // Form state is accepted as lost on this path — the fix is
+          // installing the engine, not reposting the same form.
+          return res.redirectAfterPost(
+            `/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=gateways&error=engine_required`
+          );
+        }
+        // Runtime-disarmed surfacing (r1 critical #2): the engine exists,
+        // but nothing will actually poll this gateway until the bot_runtime
+        // flag is on (it defaults off on every non-MPA host) — without this
+        // warning a stranger completes onboarding green and the bot stays
+        // silently deaf. installing/unhealthy/ready all pass the gate above
+        // (the engine exists); only a disarmed runtime needs a nudge here.
+        const runtime = _botRuntimeStatusPin || botRuntimeStatus();
+        if (runtime && runtime.mode === "gateway") {
+          let flagOn = false;
+          try {
+            const raw = await readSetting(db, "feature_flags");
+            flagOn = !!(raw && JSON.parse(raw)?.bot_runtime === true);
+          } catch { /* unparsable flags read as off */ }
+          if (!flagOn) extraQ += "&warn=bot_runtime_off";
+        }
+      }
     }
 
     try {
