@@ -486,9 +486,18 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     // as a data attribute so the client mirrors Task 7's completeness
     // predicate against the live form without duplicating field-name
     // knowledge (gateway-fields.js's engineGateRequiredDomFields()).
+    // data-engine-fields-type pins which gwType that required-fields list
+    // was computed for: the type <select>'s onchange re-submits the form
+    // to re-render fields for whatever type the operator just picked, but
+    // the DOM (and this required-fields list) still reflect the OLD type
+    // until that re-render lands — the client bails out of the gate when
+    // the live select value no longer matches this attribute (bug fix,
+    // C4 Task 8 follow-up: a stale-complete old-type record was hijacking
+    // a harmless type switch and popping the install modal instead of
+    // letting the re-render through).
     const engineGateArmed = ENGINE_CHANNELS.includes(gwType) && isEngineAbsent();
     const engineGateAttrs = engineGateArmed
-      ? ` data-engine-gate="1" data-engine-channels="${escapeHtml(ENGINE_CHANNELS.join(","))}" data-engine-required-fields="${escapeHtml(engineGateRequiredDomFields(gwType).join(","))}"`
+      ? ` data-engine-gate="1" data-engine-channels="${escapeHtml(ENGINE_CHANNELS.join(","))}" data-engine-required-fields="${escapeHtml(engineGateRequiredDomFields(gwType).join(","))}" data-engine-fields-type="${escapeHtml(gwType)}"`
       : "";
     body =
       `<form method="POST" class="btb-form" id="btb-gateways-form"${engineGateAttrs}>${hidden("gateways")}` +
