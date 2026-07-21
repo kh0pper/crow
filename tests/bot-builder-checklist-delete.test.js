@@ -19,6 +19,9 @@ process.env.CROW_DATA_DIR = dir;
 let db = null;
 let renderReadiness, deleteBlastRadius, handleDeleteConfirm, renderDeleteConfirm;
 let translations = null;
+let _setEngineStatusForTest, _setBotRuntimeStatusForTest, writeSetting;
+
+const origCrowHomeForEngineTests = process.env.CROW_HOME;
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], {
@@ -36,12 +39,22 @@ before(async () => {
   ({ deleteBlastRadius, handleDeleteConfirm, renderDeleteConfirm } =
     await import("../servers/gateway/dashboard/panels/bot-builder/delete-bot.js"));
   ({ translations } = await import("../servers/gateway/dashboard/shared/i18n.js"));
+  ({ _setEngineStatusForTest, _setBotRuntimeStatusForTest } =
+    await import("../servers/gateway/dashboard/panels/bot-builder/engine-gate.js"));
+  ({ writeSetting } = await import("../servers/gateway/dashboard/settings/registry.js"));
 });
 
 after(async () => {
   try { db && db.close && db.close(); } catch {}
   rmSync(dir, { recursive: true, force: true });
 });
+
+function resetEnginePins() {
+  _setEngineStatusForTest(null);
+  _setBotRuntimeStatusForTest(null);
+  if (origCrowHomeForEngineTests === undefined) delete process.env.CROW_HOME;
+  else process.env.CROW_HOME = origCrowHomeForEngineTests;
+}
 
 const addProvider = (id, models) => db.execute({
   sql: "INSERT INTO providers (id, base_url, models, disabled) VALUES (?,?,?,0)",
@@ -122,6 +135,108 @@ test("disabled bot: Status row warns; missing prompt warns; es renders without b
   const es = await renderReadiness(db, bot, defOf(bot), "es");
   assert.ok(!/botbuilder\.[a-zA-Z_]/.test(es), "no bare i18n keys in es");
   assert.match(es, /desactivado/);
+});
+
+// ---- "Bot engine" row (C4 Task 9) ----
+//
+// Reuses the SAME pins the Gateways-tab save gate (Task 7/8) uses
+// (engine-gate.js's _setEngineStatusForTest/_setBotRuntimeStatusForTest) so
+// these tests are deterministic regardless of what's actually installed on
+// the host running the suite (see bot-builder-engine-gate.test.js's header
+// comment for why the real engineStatus()'s "global" rung can't be relied
+// on here). botRuntimeActive(db) resolution isn't pinned — it reads the
+// real feature_flags setting + isMpaHost(), exactly like the save-gate
+// tests do, since CROW_DATA_DIR here is a plain scratch dir (isMpaHost()
+// false) unless a test explicitly points CROW_HOME at a ".crow-mpa" path.
+
+test("no engine-channel gateway (crow-messages only): 'Bot engine' row absent", async () => {
+  const bot = mkBot({ gateways: [{ type: "crow-messages", allow_paired_instances: true }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.ok(!html.includes("Bot engine"), "row must not render when no gateway needs the engine");
+});
+
+test("no gateways at all: 'Bot engine' row absent", async () => {
+  const bot = mkBot({ gateways: [] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.ok(!html.includes("Bot engine"));
+});
+
+test("engine installing: 'Bot engine' row WARNs with 'installing…'", async () => {
+  _setEngineStatusForTest({ state: "installing" });
+  const bot = mkBot({ gateways: [{ type: "discord", token: "t", allowlist: [], channel_ids: [] }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.match(html, /Bot engine/);
+  assert.match(html, /installing…/);
+  resetEnginePins();
+});
+
+test("engine absent: 'Bot engine' row ERRs with a fix action that opens the Task-8 modal", async () => {
+  _setEngineStatusForTest({ state: "absent" });
+  const bot = mkBot({ gateways: [{ type: "gmail", address: "a@b.c", allowlist: ["a@b.c"] }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.match(html, /Bot engine/);
+  assert.match(html, /not installed on this instance yet/);
+  assert.match(html, /onclick="window\.__crowEngineGateOpen\(\)"/, "fix action opens the Task-8 modal hook");
+  assert.match(html, />Install bot engine</);
+  resetEnginePins();
+});
+
+test("engine unhealthy: 'Bot engine' row ERRs with the last error + retry time", async () => {
+  _setEngineStatusForTest({ state: "unhealthy", error: "spawn ENOENT", retryAt: "2026-07-21T00:00:00.000Z" });
+  const bot = mkBot({ gateways: [{ type: "telegram", token: "t" }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.match(html, /Bot engine/);
+  assert.match(html, /spawn ENOENT/);
+  assert.match(html, /2026-07-21T00:00:00\.000Z/);
+  resetEnginePins();
+});
+
+test("engine ready + gateway-mode runtime flag OFF: 'Bot engine' row is DISARMED (WARN) with the Task-7 one-click enable", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "bundle", cliPath: "/fake/cli.js" });
+  _setBotRuntimeStatusForTest({ mode: "gateway" });
+  await writeSetting(db, "feature_flags", JSON.stringify({ bot_runtime: false }), { scope: "local" });
+  const bot = mkBot({ gateways: [{ type: "slack", token: "t" }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.match(html, /Bot engine/);
+  assert.match(html, /bot runtime is off on this instance/);
+  assert.match(html, /id="bot-runtime-enable-btn"/, "same one-click enable mechanism as Task 8's warn banner");
+  assert.match(html, /id="bot-runtime-enable-status"/);
+  resetEnginePins();
+});
+
+test("engine ready + gateway-mode runtime flag ON: 'Bot engine' row is READY (OK) showing the resolution source", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "bundle", cliPath: "/fake/cli.js" });
+  _setBotRuntimeStatusForTest({ mode: "gateway" });
+  await writeSetting(db, "feature_flags", JSON.stringify({ bot_runtime: true }), { scope: "local" });
+  const bot = mkBot({ gateways: [{ type: "discord", token: "t", allowlist: [], channel_ids: [] }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.match(html, /Bot engine/);
+  assert.match(html, /installed \(source: bundle\)/);
+  assert.ok(!html.includes("bot-runtime-enable-btn"), "no disarmed fix action when the runtime is armed");
+  assert.ok(!html.includes("managed by system services"), "no external-mode note in gateway mode");
+  resetEnginePins();
+});
+
+test("engine ready + runtime mode 'external': 'Bot engine' row is READY (OK) with the external-mode note, never disarmed", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
+  _setBotRuntimeStatusForTest({ mode: "external" });
+  await writeSetting(db, "feature_flags", JSON.stringify({ bot_runtime: false }), { scope: "local" });
+  const bot = mkBot({ gateways: [{ type: "gmail", address: "a@b.c", allowlist: ["a@b.c"] }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.match(html, /Bot engine/);
+  assert.match(html, /installed \(source: env\)/);
+  assert.match(html, /managed by system services/, "external note appended for mode==='external'");
+  assert.ok(!html.includes("bot-runtime-enable-btn"), "external mode is never disarmed regardless of the flag");
+  resetEnginePins();
+});
+
+test("es rendering of the engine row has no bare i18n keys", async () => {
+  _setEngineStatusForTest({ state: "absent" });
+  const bot = mkBot({ gateways: [{ type: "gmail", address: "a@b.c", allowlist: ["a@b.c"] }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "es");
+  assert.ok(!/botbuilder\.[a-zA-Z_]/.test(html), "no bare i18n keys in es");
+  assert.match(html, /Motor de bots/);
+  resetEnginePins();
 });
 
 // ---- delete ----
