@@ -1167,6 +1167,37 @@ export const translations = {
   "botbuilder.delConfirmBtn": { en: "Delete permanently", es: "Eliminar permanentemente" },
   "botbuilder.delCancelBtn": { en: "Cancel", es: "Cancelar" },
 
+  // ─── Engine-attach gate (C4 Task 8: modal + banners) ───
+  "botbuilder.engineGateBannerErrorBody": {
+    en: "This channel needs the bot engine, which isn't installed on this instance yet — the save was not applied.",
+    es: "Este canal necesita el motor de bots, que aún no está instalado en esta instancia — el guardado no se aplicó.",
+  },
+  "botbuilder.engineGateInstallBtn": { en: "Install bot engine", es: "Instalar motor de bots" },
+  "botbuilder.runtimeOffBannerBody": {
+    en: "Saved. The bot engine is installed, but the bot runtime is off on this instance — bots won't poll Gmail/Discord/Telegram/Slack until it's on.",
+    es: "Guardado. El motor de bots está instalado, pero el runtime de bots está apagado en esta instancia — los bots no sondearán Gmail/Discord/Telegram/Slack hasta que se active.",
+  },
+  "botbuilder.runtimeOffEnableBtn": { en: "Turn on bot runtime", es: "Activar runtime de bots" },
+  "botbuilder.runtimeOffEnabling": { en: "Enabling...", es: "Activando..." },
+  "botbuilder.runtimeOffEnabled": { en: "Enabled — bots start polling within about a minute.", es: "Activado — los bots empezarán a sondear en aproximadamente un minuto." },
+  "botbuilder.runtimeOffEnableFailed": { en: "Could not enable. Try again from Settings → Bot Runtime.", es: "No se pudo activar. Intenta de nuevo desde Ajustes → Runtime de bots." },
+  "botbuilder.engineGateModalTitle": { en: "Install the bot engine", es: "Instalar el motor de bots" },
+  "botbuilder.engineGateModalBody": {
+    en: "Gmail, Discord, Telegram, and Slack channels are driven by pi, the same coding-agent engine Bot Builder uses to run every bot's turns. It isn't installed on this instance yet.",
+    es: "Los canales de Gmail, Discord, Telegram y Slack funcionan mediante pi, el mismo motor de agente de codificación que Bot Builder usa para ejecutar los turnos de cada bot. Aún no está instalado en esta instancia.",
+  },
+  "botbuilder.engineGateModalDiskNote": {
+    en: "Installs the npm package @earendil-works/pi-coding-agent 0.74.2 (~400 MB disk). No Docker, no sudo, no open ports.",
+    es: "Instala el paquete npm @earendil-works/pi-coding-agent 0.74.2 (~400 MB de disco). Sin Docker, sin sudo, sin puertos abiertos.",
+  },
+  "botbuilder.engineGateInstallingBtn": { en: "Installing...", es: "Instalando..." },
+  "botbuilder.engineGateRetryBtn": { en: "Retry", es: "Reintentar" },
+  "botbuilder.engineGateInstallFailedPrefix": { en: "Install failed:", es: "La instalación falló:" },
+  "botbuilder.engineGateUnknownError": { en: "unknown error", es: "error desconocido" },
+  "botbuilder.engineGateNetworkError": { en: "Network error. Check the connection and retry.", es: "Error de red. Verifica la conexión e intenta de nuevo." },
+  "botbuilder.engineGateWorking": { en: "Working...", es: "Trabajando..." },
+  "botbuilder.engineGateDone": { en: "Installed. Continuing your save...", es: "Instalado. Continuando tu guardado..." },
+
   // ─── Bot Board Panel (W3-4 + W4-3 i18n sweep) ───
   // Status label keys — display counterparts to the frozen CARD_STATUSES data values
   "botboard.statusPending": { en: "Pending", es: "Pendiente" },

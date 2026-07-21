@@ -141,5 +141,26 @@ export function botBuilderStyles() {
   .btb-btn-danger{background:var(--crow-error);color:#fff}
   .btb-del-radius{margin:.5rem 0 .75rem;padding-left:1.2rem;font-size:.9rem}
   .btb-del-radius li{margin:.2rem 0}
+
+  /* Engine-attach gate modal (C4 Task 8) */
+  #engine-gate-modal-overlay{
+    display:none; position:fixed;
+    top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.6);
+    z-index:1000;
+    align-items:center; justify-content:center;
+    backdrop-filter:blur(4px);
+    -webkit-backdrop-filter:blur(4px);
+  }
+  #engine-gate-modal-content{
+    background:var(--crow-bg-surface);
+    border:1px solid var(--crow-border);
+    border-radius:var(--crow-radius-card,12px);
+    padding:1.5rem;
+    max-width:480px; width:90%;
+    max-height:80vh; overflow-y:auto; overflow-x:hidden;
+    box-sizing:border-box; word-wrap:break-word;
+    box-shadow:0 20px 60px rgba(0,0,0,0.5);
+  }
 </style>`;
 }

@@ -31,8 +31,11 @@ import {
   probeAll, probeExtensions, loadVisionProfiles, gatherPeerTools, remoteInvocationOn,
   loadModelOptions, loadSkills,
 } from "./data-queries.js";
-import { renderGatewayFields } from "./gateway-fields.js";
+import { renderGatewayFields, engineGateRequiredDomFields } from "./gateway-fields.js";
 import { renderReadiness } from "./checklist.js";
+import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
+import { isEngineAbsent } from "./engine-gate.js";
+import { engineGateClientJS } from "./engine-gate-client.js";
 
 // Tab id → i18n key map
 const TAB_KEYS = {
@@ -474,8 +477,21 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       gwFields = fb.fields;
       gwHint = fb.hint;
     }
+    // C4 Task 8: arm the client-side engine-gate ONLY for the currently
+    // rendered gwType (a type-only draft that isn't an ENGINE_CHANNELS type
+    // never needs the modal), and only while the engine is actually absent
+    // right now — reusing the SAME pinnable engineStatus() resolution as
+    // Task 7's save-time gate (engine-gate.js's isEngineAbsent()) so tests
+    // can arm both with one call. The required-field DOM names ride along
+    // as a data attribute so the client mirrors Task 7's completeness
+    // predicate against the live form without duplicating field-name
+    // knowledge (gateway-fields.js's engineGateRequiredDomFields()).
+    const engineGateArmed = ENGINE_CHANNELS.includes(gwType) && isEngineAbsent();
+    const engineGateAttrs = engineGateArmed
+      ? ` data-engine-gate="1" data-engine-channels="${escapeHtml(ENGINE_CHANNELS.join(","))}" data-engine-required-fields="${escapeHtml(engineGateRequiredDomFields(gwType).join(","))}"`
+      : "";
     body =
-      `<form method="POST" class="btb-form">${hidden("gateways")}` +
+      `<form method="POST" class="btb-form" id="btb-gateways-form"${engineGateAttrs}>${hidden("gateways")}` +
       `<div class="btb-group"><label>${t("botbuilder.labelGatewayType", lang)}</label>` +
       `<select name="gw_type" class="btb-select" onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()">${typeOpts}</select></div>` +
       gwFields + gwHint +
@@ -973,10 +989,13 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
 
   return res.send(layout({
     title: "Bot Builder — " + botId, // renderLayout escapes the title itself
+    // The engine-gate modal + its overlay markup ship on every tab (not just
+    // gateways) — the readiness checklist on the review tab (Task 9) opens
+    // the identical modal via the stable window.__crowEngineGateOpen hook.
     content: PAGE_CSS + section(
       "",
       `<p><a href="/dashboard/bot-builder">&larr; ${t("botbuilder.noticeAllBots", lang)}</a></p>` + notice +
-      nav + body,
+      nav + body + engineGateClientJS(lang),
       {
         // The heading carries a live status badge — raw HTML by design.
         // Everything user-controlled inside it is escaped here.
