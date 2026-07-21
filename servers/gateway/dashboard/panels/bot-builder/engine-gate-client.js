@@ -49,6 +49,15 @@ export function engineGateClientJS(lang) {
         var API = "/dashboard/bundles/api";
         var BUNDLE_ID = "bot-engine";
 
+        // Set true by the cancel button and the overlay's click-outside
+        // dismiss - checked before onDone/onInstalled side effects so a
+        // cancelled dialog can't fire an unrequested resubmit once a job
+        // that's still running in the background happens to finish (the
+        // job itself is left running; only this client's callback chain
+        // needs to go inert). Reset at the top of every fresh
+        // openEngineGateModal() call.
+        var engineGateCancelled = false;
+
         function overlayEl() { return document.getElementById("engine-gate-modal-overlay"); }
         function contentEl() { return document.getElementById("engine-gate-modal-content"); }
         function showEngineModal() { var o = overlayEl(); if (o) o.style.display = "flex"; }
@@ -56,7 +65,9 @@ export function engineGateClientJS(lang) {
 
         var overlay = overlayEl();
         if (overlay) {
-          overlay.addEventListener("click", function (e) { if (e.target === overlay) hideEngineModal(); });
+          overlay.addEventListener("click", function (e) {
+            if (e.target === overlay) { engineGateCancelled = true; hideEngineModal(); }
+          });
         }
 
         function setEngineModalContent(el) {
@@ -127,6 +138,7 @@ export function engineGateClientJS(lang) {
         // enough for the "Installed..." status line to be readable before
         // the modal closes out from under it).
         function openEngineGateModal(onInstalled) {
+          engineGateCancelled = false;
           var frag = document.createElement("div");
 
           var h3 = document.createElement("h3");
@@ -155,7 +167,7 @@ export function engineGateClientJS(lang) {
           cancelBtn.type = "button";
           cancelBtn.className = "btn btn-secondary";
           cancelBtn.textContent = '${tJs("common.cancel", lang)}';
-          cancelBtn.addEventListener("click", hideEngineModal);
+          cancelBtn.addEventListener("click", function () { engineGateCancelled = true; hideEngineModal(); });
           btnRow.appendChild(cancelBtn);
 
           var installBtn = document.createElement("button");
@@ -164,8 +176,10 @@ export function engineGateClientJS(lang) {
           installBtn.textContent = '${tJs("botbuilder.engineGateInstallBtn", lang)}';
           installBtn.addEventListener("click", function () {
             startEngineInstall(statusDiv, installBtn, function (success) {
+              if (engineGateCancelled) return;
               if (!success) return;
               setTimeout(function () {
+                if (engineGateCancelled) return;
                 hideEngineModal();
                 if (typeof onInstalled === "function") onInstalled();
               }, 900);
@@ -193,6 +207,7 @@ export function engineGateClientJS(lang) {
         if (gwForm && gwForm.getAttribute("data-engine-gate") === "1") {
           var channels = (gwForm.getAttribute("data-engine-channels") || "").split(",").filter(function (s) { return s; });
           var requiredFields = (gwForm.getAttribute("data-engine-required-fields") || "").split(",").filter(function (s) { return s; });
+          var fieldsType = gwForm.getAttribute("data-engine-fields-type") || "";
           var bypassGate = false;
 
           var fieldNonEmpty = function (name) {
@@ -205,6 +220,18 @@ export function engineGateClientJS(lang) {
           var recordIsComplete = function () {
             var typeEl = gwForm.querySelector("[name='gw_type']");
             var curType = typeEl ? typeEl.value : "";
+            // requiredFields/channels were computed server-side for
+            // fieldsType, not necessarily the LIVE select value: the type
+            // <select>'s onchange re-submits the form to re-render fields
+            // for whichever type the operator just picked, and that
+            // re-submit passes through this SAME listener before the
+            // re-render lands. If the live value has already moved on
+            // from fieldsType, this stale list can't say anything
+            // meaningful about the new type's completeness - bail so the
+            // re-render always gets through, instead of the old type's
+            // now-irrelevant leftover fields hijacking a harmless type
+            // switch into opening the install modal.
+            if (curType !== fieldsType) return false;
             if (channels.indexOf(curType) === -1) return false;
             for (var i = 0; i < requiredFields.length; i++) {
               if (!fieldNonEmpty(requiredFields[i])) return false;
