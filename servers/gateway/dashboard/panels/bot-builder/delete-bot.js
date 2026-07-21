@@ -34,6 +34,7 @@ import { escapeHtml, section, callout } from "../../shared/components.js";
 import { csrfInput } from "../../shared/csrf.js";
 import { t, fill } from "../../shared/i18n.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
+import { emitBotDefsChanged } from "./defs-changed.js";
 
 async function count(db, sql, args) {
   try {
@@ -190,5 +191,6 @@ export async function handleDeleteConfirm(req, res, { db }) {
     return res.redirectAfterPost(
       `/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&error=` + encodeURIComponent(String(e.message || e)));
   }
+  emitBotDefsChanged(botId);
   return res.redirectAfterPost(`/dashboard/bot-builder?deleted=${encodeURIComponent(botId)}`);
 }
