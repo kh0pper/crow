@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 
 const MODULES = [
-  "bridge.mjs", "bridge_tick.mjs", "tracker.mjs", "skill_promote.mjs",
+  "bridge.mjs", "bridge_tick_lib.mjs", "tracker.mjs", "skill_promote.mjs",
   "skill_provenance.mjs", "model_resolver.mjs", "mcp_writer.mjs",
   "discord_gateway.mjs", "gateways/gateway_runner.mjs",
 ];

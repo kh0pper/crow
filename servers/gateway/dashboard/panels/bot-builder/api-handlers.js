@@ -18,6 +18,7 @@ import { regenerateBotMcp } from "../bot-mcp-regen.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
 import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
+import { emitBotDefsChanged } from "./defs-changed.js";
 
 // Same crow_lang-cookie resolution the dashboard router uses (index.js);
 // defensive because POST handlers can be exercised with header-less reqs.
@@ -74,6 +75,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
     } catch (e) {
       return res.redirectAfterPost("/dashboard/bot-builder?error=" + encodeURIComponent(String(e.message || e)));
     }
+    emitBotDefsChanged(botId);
     // Item 5 PR2 (spec §D4): land on the readiness checklist, not the raw AI tab.
     return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&created=${encodeURIComponent(botId)}`);
   }
@@ -91,9 +93,11 @@ export async function handleBotBuilderPost(req, res, { db }) {
   }
 
   if (action === "toggle") {
+    let toggled = true;
     try {
       await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 1 - enabled, updated_at=datetime('now') WHERE bot_id=?", args: [b.bot_id] });
-    } catch { /* ignore */ }
+    } catch { toggled = false; /* ignore */ }
+    if (toggled) emitBotDefsChanged(b.bot_id);
     // Back to the review tab (the toggle lives under the Status checklist
     // row there) so the user sees the updated row — PR #191 review m3.
     return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(b.bot_id || "")}&tab=review`);
@@ -410,6 +414,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
     } catch (e) {
       return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${tab}&error=` + encodeURIComponent(String(e.message || e)));
     }
+    emitBotDefsChanged(botId);
     return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${tab}&saved=1${extraQ}`);
   }
 

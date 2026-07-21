@@ -28,6 +28,7 @@ import {
 } from "./gateway-fields.js";
 import { BOT_TEMPLATES, getTemplate, applyTemplate, availableMcpSet } from "./templates.js";
 import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
+import { emitBotDefsChanged } from "./defs-changed.js";
 
 export const WIZARD_STEP_KEYS = ["template", "basics", "model", "channel", "review"];
 
@@ -394,5 +395,6 @@ export async function handleWizardCreate(req, res, { db, lang }) {
   } catch (e) {
     return res.redirectAfterPost("/dashboard/bot-builder?new=1&error=" + encodeURIComponent(String(e.message || e)));
   }
+  emitBotDefsChanged(botId);
   return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&created=${encodeURIComponent(botId)}`);
 }
