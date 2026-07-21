@@ -1094,6 +1094,28 @@ export const translations = {
   "botbuilder.checkChannelIncomplete": { en: "setup incomplete ({fields}) — this bot can't receive messages yet", es: "configuración incompleta ({fields}): este bot aún no puede recibir mensajes" },
   "botbuilder.checkChannelAllowed": { en: "{n} allowed sender(s)", es: "{n} remitente(s) permitido(s)" },
   "botbuilder.checkChannelDevice": { en: "device {id}", es: "dispositivo {id}" },
+
+  // ─── Bot Builder — readiness checklist "Bot engine" row (C4 Task 9) ───
+  "botbuilder.checkEngine": { en: "Bot engine", es: "Motor de bots" },
+  "botbuilder.checkEngineAbsent": {
+    en: "not installed on this instance yet — this channel can't run until it's installed",
+    es: "aún no está instalado en esta instancia: este canal no puede funcionar hasta instalarlo",
+  },
+  "botbuilder.checkEngineInstalling": { en: "installing…", es: "instalando…" },
+  "botbuilder.checkEngineDisarmed": {
+    en: "engine installed, but the bot runtime is off on this instance — bots won't poll",
+    es: "el motor está instalado, pero el runtime de bots está apagado en esta instancia: los bots no sondearán",
+  },
+  "botbuilder.checkEngineReady": { en: "installed (source: {source})", es: "instalado (origen: {source})" },
+  "botbuilder.checkEngineExternalNote": {
+    en: "managed by system services on this host, not the gateway",
+    es: "gestionado por servicios del sistema en este host, no por el gateway",
+  },
+  "botbuilder.checkEngineUnhealthy": {
+    en: "not responding — {error} (retrying at {retryAt})",
+    es: "no responde — {error} (reintentando a las {retryAt})",
+  },
+
   "botbuilder.checkTools": { en: "Tools", es: "Herramientas" },
   "botbuilder.checkToolsDetail": { en: "{mcp} Crow tools · {builtin} built-in", es: "{mcp} herramientas de Crow · {builtin} integradas" },
   "botbuilder.checkSkills": { en: "Skills & instructions", es: "Habilidades e instrucciones" },
@@ -1521,6 +1543,19 @@ export const translations = {
   "settings.section.remoteInvocation": { en: "Remote Tool Invocation", es: "Invocación de herramientas remotas" },
   "settings.section.remoteBotManagement": { en: "Remote Bot Management", es: "Gestión remota de bots" },
   "settings.section.botRuntime": { en: "Bot Runtime", es: "Ejecución de bots" },
+  "settings.botRuntimeBody": {
+    en: "When enabled, this instance <strong>runs</strong> the bots defined here — polling Gmail and " +
+      "answering Telegram / Slack / Discord. The gateway supervises this itself by default: there is no " +
+      "install step, and this toggle starts or stops it with no restart. Standalone systemd units " +
+      "(<code>scripts/pi-bots/install-runtime.sh</code>) are only used on hosts explicitly configured with " +
+      "<code>PIBOT_SUPERVISOR=external</code>. Off by default. <strong>Local to this instance, never synced.</strong>",
+    es: "Cuando está activado, esta instancia <strong>ejecuta</strong> los bots definidos aquí — sondeando Gmail y " +
+      "respondiendo Telegram / Slack / Discord. El gateway supervisa esto por sí mismo de forma predeterminada: no " +
+      "hay paso de instalación, y este interruptor lo inicia o detiene sin reiniciar. Las unidades systemd " +
+      "independientes (<code>scripts/pi-bots/install-runtime.sh</code>) solo se usan en hosts configurados " +
+      "explícitamente con <code>PIBOT_SUPERVISOR=external</code>. Desactivado de forma predeterminada. " +
+      "<strong>Local a esta instancia, nunca sincronizado.</strong>",
+  },
   "settings.ports.description": { en: "Host ports used by installed bundles and core services, with live status. Read-only.", es: "Puertos del host usados por los paquetes instalados y los servicios principales, con estado en vivo. Solo lectura." },
   "settings.section.llm": { en: "LLM Orchestrator", es: "Orquestador LLM" },
   "settings.section.connections": { en: "Connection URLs", es: "URLs de conexión" },

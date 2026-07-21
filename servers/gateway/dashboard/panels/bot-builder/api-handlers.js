@@ -20,32 +20,25 @@ import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
-import { botRuntimeStatus } from "../../../bot-runtime.js";
 import { botRuntimeActive } from "../bot-runtime-flag.js";
-import { engineRequiredFor, _setEngineStatusForTest } from "./engine-gate.js";
+import {
+  engineRequiredFor, _setEngineStatusForTest,
+  _setBotRuntimeStatusForTest, resolveBotRuntimeStatus,
+} from "./engine-gate.js";
 
 // Task 7 (C4): the gateways-tab save gate needs two host/process-dependent
 // checks — engineStatus() (whose "global" npm rung resolves off the REAL
 // running node, not anything a test controls) and botRuntimeStatus() (a
 // module singleton only populated by a real initBotRuntime() call: timers,
-// a sync sqlite handle, the event bus — too heavy for a route test). The
-// engine-status pin now lives in the shared ./engine-gate.js (the wizard's
-// create path — wizard.js — needs the SAME pinnable predicate, and it can't
-// import a local pin here without a real ESM cycle since this file already
-// imports handleWizardCreate from wizard.js). Re-exported below so existing
-// importers of `_setEngineStatusForTest` from this file are unaffected.
-// botRuntimeStatus stays local-pinnable here, following the house convention
-// for this kind of host-state seam (bot-engine-status.js's _setSeamsForTest,
-// dashboard/panels/extensions/data-queries.js's _setDockerProbeForTest):
-// null (the default) falls through to the real check.
-export { _setEngineStatusForTest };
-let _botRuntimeStatusPin = null;
-
-/** Test-only: pin botRuntimeStatus()'s result for the runtime-disarmed
- * warning. Pass null to un-pin (falls back to the real botRuntimeStatus()). */
-export function _setBotRuntimeStatusForTest(status) {
-  _botRuntimeStatusPin = status || null;
-}
+// a sync sqlite handle, the event bus — too heavy for a route test). Both
+// pins now live in the shared ./engine-gate.js (the wizard's create path —
+// wizard.js — needs the SAME pinnable engineStatus, and the readiness
+// checklist row — checklist.js, Task 9 — needs BOTH pins; neither can import
+// a local pin here without a real ESM cycle since this file already imports
+// handleWizardCreate from wizard.js). Re-exported below so existing
+// importers of `_setEngineStatusForTest`/`_setBotRuntimeStatusForTest` from
+// this file are unaffected.
+export { _setEngineStatusForTest, _setBotRuntimeStatusForTest };
 
 // Same crow_lang-cookie resolution the dashboard router uses (index.js);
 // defensive because POST handlers can be exercised with header-less reqs.
@@ -448,7 +441,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
         // warning a stranger completes onboarding green and the bot stays
         // silently deaf. installing/unhealthy/ready all pass the gate above
         // (the engine exists); only a disarmed runtime needs a nudge here.
-        const runtime = _botRuntimeStatusPin || botRuntimeStatus();
+        const runtime = resolveBotRuntimeStatus();
         if (runtime && runtime.mode === "gateway") {
           const flagOn = await botRuntimeActive(db);
           if (!flagOn) extraQ += "&warn=bot_runtime_off";

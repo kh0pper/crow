@@ -12,6 +12,7 @@
  * ESM cycle. A shared leaf both sides import avoids that entirely.
  */
 import { ENGINE_CHANNELS, engineStatus } from "../../../bot-engine-status.js";
+import { botRuntimeStatus } from "../../../bot-runtime.js";
 import { missingGatewayFields } from "./gateway-fields.js";
 
 let _engineStatusPin = null;
@@ -23,8 +24,36 @@ export function _setEngineStatusForTest(status) {
   _engineStatusPin = status || null;
 }
 
-function resolveEngineStatus() {
+/**
+ * Full engineStatus() resolution (pinned or real) — exported so any
+ * consumer needing the whole {state, source, cliPath, error, retryAt} shape
+ * (not just the absent/not-absent boolean isEngineAbsent() below) can share
+ * the SAME pin as the attach gate with one _setEngineStatusForTest call.
+ * The readiness checklist row (Task 9, checklist.js) is the first such
+ * consumer — it needs "installing"/"unhealthy"/"ready" detail, not just
+ * absent-or-not.
+ */
+export function resolveEngineStatus() {
   return _engineStatusPin || engineStatus({ env: process.env });
+}
+
+let _botRuntimeStatusPin = null;
+
+/** Test-only: pin botRuntimeStatus()'s result. Moved here from api-handlers.js
+ * (which re-exports this for backward compatibility) so the readiness
+ * checklist row (Task 9) can share the SAME pin as the Gateways-tab save
+ * gate's runtime-disarmed warning — the exact reason engineStatus's pin
+ * already lives in this shared leaf module rather than locally in
+ * api-handlers.js. Pass null to un-pin (falls back to the real
+ * botRuntimeStatus()). */
+export function _setBotRuntimeStatusForTest(status) {
+  _botRuntimeStatusPin = status || null;
+}
+
+/** Full botRuntimeStatus() resolution (pinned or real) — see
+ * _setBotRuntimeStatusForTest above. */
+export function resolveBotRuntimeStatus() {
+  return _botRuntimeStatusPin || botRuntimeStatus();
 }
 
 /**
