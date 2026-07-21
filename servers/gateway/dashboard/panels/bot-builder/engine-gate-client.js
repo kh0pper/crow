@@ -10,8 +10,8 @@
  *      fields) and, on a complete record, preventDefault() the submit and
  *      open the install modal BEFORE the POST — so the operator's typed
  *      credentials never leave the DOM. On a successful install, the SAME
- *      still-populated form is resubmitted via requestSubmit() (never
- *      form.submit() — that would skip the fetch-wrapper's CSRF header
+ *      still-populated form is resubmitted via requestSubmit() (never the
+ *      bare native submit — that would skip the fetch-wrapper's CSRF header
  *      attach path documented in shared/layout.js).
  *   2. Backstop banners: `error=engine_required` (a client that bypassed
  *      the intercept — JS disabled, or a race) renders a friendly banner
@@ -245,8 +245,7 @@ export function engineGateClientJS(lang) {
             e.preventDefault();
             openEngineGateModal(function () {
               bypassGate = true;
-              if (gwForm.requestSubmit) gwForm.requestSubmit();
-              else gwForm.submit();
+              gwForm.requestSubmit();
             });
           });
         }
