@@ -379,6 +379,7 @@ export default defineConfig({
           { text: 'Writing Skills', link: '/developers/skills' },
           { text: 'Core Tools', link: '/developers/core-tools' },
           { text: 'Self-Hosted Bundles', link: '/developers/bundles' },
+          { text: 'Bot Engine (pi)', link: '/developers/bot-engine' },
           { text: 'Community Directory', link: '/developers/directory' },
           { text: 'Data Dashboard Dev', link: '/developers/data-dashboard' },
           { text: 'Nominatim GIS Dev', link: '/developers/nominatim' },

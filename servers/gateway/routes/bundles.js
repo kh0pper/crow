@@ -39,7 +39,7 @@ import { writeSetting } from "../dashboard/settings/registry.js";
 import { getCollection } from "../dashboard/panels/extensions/collections.js";
 import { dockerAvailable } from "../dashboard/panels/extensions/data-queries.js";
 import { beginInstallSet, endInstallSet, isInstallSetRunning } from "../install-lock.js";
-import { setActiveJobSource } from "../bot-engine-status.js";
+import { setActiveJobSource, ENGINE_CHANNELS } from "../bot-engine-status.js";
 import {
   CROW_HOME,
   BUNDLES_DIR,
@@ -1927,6 +1927,40 @@ export default function bundlesRouter() {
     }
 
     res.json({ bundles: results });
+  });
+
+  // GET /bundles/api/engine-blast — Uninstall blast-radius for the bot engine
+  // (C4 Task 10): which enabled bot channels would stop working if bot-engine
+  // is uninstalled. Reads pi_bot_defs directly (same async createDbClient()
+  // client bot-builder's api-handlers.js already uses for this table — see
+  // its save_gateways handler) rather than pulling in any bot-builder module,
+  // so this route carries no dependency on the bot-builder panel.
+  router.get("/bundles/api/engine-blast", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE enabled = 1",
+        args: [],
+      });
+      const engineChannelSet = new Set(ENGINE_CHANNELS);
+      const channels = [];
+      for (const row of rows) {
+        let def;
+        try { def = JSON.parse(row.definition || "{}"); } catch { def = {}; }
+        const gateways = Array.isArray(def?.gateways) ? def.gateways : [];
+        const types = [...new Set(
+          gateways.map((gw) => gw && gw.type).filter((type) => engineChannelSet.has(type)),
+        )];
+        if (types.length > 0) {
+          channels.push({ bot_id: row.bot_id, display_name: row.display_name, types });
+        }
+      }
+      res.json({ channels });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      try { db.close(); } catch {}
+    }
   });
 
   // GET /bundles/api/consent-challenge/:id — Mint a consent token for a privileged or consent_required bundle.

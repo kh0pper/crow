@@ -2,12 +2,17 @@
  * Settings Section: Bot Runtime (Multi-Instance group) — F3b.
  *
  * Toggles feature_flags.bot_runtime (local-only; absent from sync-allowlist).
- * When ON, this instance's installed bot-runtime units (pibot-*@<instance>)
- * actually run bots (poll Gmail / answer Telegram/Slack/Discord); the runners
- * self-gate on this flag with no restart. OFF = installed-but-idle. Requires
- * the units to be installed first (scripts/pi-bots/install-runtime.sh).
+ * When ON, the gateway process itself runs bots (poll Gmail / answer
+ * Telegram/Slack/Discord) via bot-runtime.js's in-process bridge tick +
+ * supervised Discord child (C4 Task 6) — no separate install step, no
+ * restart to flip. The old copy here claimed the runtime units had to be
+ * installed first (scripts/pi-bots/install-runtime.sh) — that predates
+ * gateway supervision and is false on every default host now; standalone
+ * systemd units are only relevant on a host explicitly configured with
+ * PIBOT_SUPERVISOR=external (C4 Task 9 reword).
  */
 import { readSetting, writeSetting } from "../registry.js";
+import { t } from "../../shared/i18n.js";
 
 async function readFlags(db) {
   const raw = await readSetting(db, "feature_flags");
@@ -28,16 +33,13 @@ export default {
     return on ? "enabled" : "disabled";
   },
 
-  async render({ db }) {
+  async render({ db, lang }) {
     const flags = await readFlags(db);
     const on = flags.bot_runtime === true;
     return `<form method="POST">
       <input type="hidden" name="action" value="set_bot_runtime">
       <div style="margin-bottom:1rem;color:var(--crow-text-secondary);font-size:0.9rem;line-height:1.5">
-        When enabled, this instance <strong>runs</strong> the bots defined here — polling Gmail and
-        answering Telegram / Slack / Discord. The runtime units must be installed first
-        (<code>scripts/pi-bots/install-runtime.sh</code>); this toggle then starts/stops them with no restart.
-        Off by default. <strong>Local to this instance, never synced.</strong>
+        ${t("settings.botRuntimeBody", lang)}
       </div>
       <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer">
         <input type="checkbox" name="enabled" ${on ? "checked" : ""}>

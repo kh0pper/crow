@@ -183,6 +183,30 @@ export function buildCrowMessagesGatewayConfig(b) {
   return gw;
 }
 
+// DOM `name` attribute each abstract GATEWAY_REQUIRED_FIELDS entry renders
+// as, for the simple gateway types that are also ENGINE_CHANNELS (gmail/
+// discord/telegram/slack). Lets the C4 Task 8 client-side engine-gate mirror
+// (engine-gate-client.js) check "is this record complete?" against the live
+// form DOM without duplicating field-name knowledge server- and client-side.
+const ENGINE_GATE_DOM_FIELD = {
+  gmail: { address: "gw_address", allowlist: "gw_allowlist" },
+  discord: { token: "gw_token" },
+  telegram: { token: "gw_token" },
+  slack: { bot_token: "gw_bot_token", app_token: "gw_app_token" },
+};
+
+/**
+ * The DOM input `name`s the client must check are non-empty for `gwType` to
+ * count as a complete engine-channel record (Gateways-tab render only —
+ * `gwType` not in ENGINE_GATE_DOM_FIELD returns []).
+ * @param {string} gwType
+ * @returns {string[]}
+ */
+export function engineGateRequiredDomFields(gwType) {
+  const domMap = ENGINE_GATE_DOM_FIELD[gwType];
+  return domMap ? Object.values(domMap) : [];
+}
+
 /**
  * Which required fields (per GATEWAY_REQUIRED_FIELDS) are missing/empty on a
  * gateway record. Array fields count as present only when non-empty.

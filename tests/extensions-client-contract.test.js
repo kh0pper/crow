@@ -685,6 +685,93 @@ test("BEHAVIOR: an unknown category falls back to its slug rather than mislabell
   assert.equal(document.querySelector("#modal-content .ext-card__badge").textContent, "quantum-farming");
 });
 
+// ─── 8. Bot-engine uninstall blast-radius (C4 Task 10) ───
+
+/** engine-blast fetchImpl helper — mirrors installSetFetch()/envFetch() above. */
+function engineBlastFetch(channels) {
+  return (url) => {
+    if (url.includes("/engine-blast")) {
+      return { ok: true, status: 200, json: () => Promise.resolve({ channels }) };
+    }
+    return { ok: true, status: 200, json: () => Promise.resolve({}) };
+  };
+}
+
+const BOT_ENGINE_BOOT = { installed: { "bot-engine": { version: "1.0.0" } }, collections: [] };
+
+test("BEHAVIOR: uninstalling bot-engine fetches the blast list and shows affected bot channels in the confirm modal", async () => {
+  const { $, click, settle, document, calls } = boot({
+    ...BOT_ENGINE_BOOT,
+    fetchImpl: engineBlastFetch([
+      { bot_id: "mail-bot", display_name: "Mail Bot", types: ["gmail", "discord"] },
+    ]),
+  });
+
+  click($('.bundle-uninstall[data-id="bot-engine"]'));
+  await settle();
+
+  assert.ok(calls.some((c) => c.url.includes("/engine-blast")), "the client fetched the blast-radius endpoint");
+  const content = document.getElementById("modal-content");
+  assert.match(content.textContent, /stop these bot channels from working/i);
+  assert.match(content.textContent, /Mail Bot/);
+  assert.match(content.textContent, /gmail, discord/);
+});
+
+test("BEHAVIOR: uninstalling bot-engine with no affected channels shows no blast warning", async () => {
+  const { $, click, settle, document } = boot({
+    ...BOT_ENGINE_BOOT,
+    fetchImpl: engineBlastFetch([]),
+  });
+
+  click($('.bundle-uninstall[data-id="bot-engine"]'));
+  await settle();
+
+  const content = document.getElementById("modal-content");
+  assert.ok(!/stop these bot channels from working/i.test(content.textContent), "no blast warning when nothing is affected");
+});
+
+test("BEHAVIOR: uninstalling a non-engine bundle never calls the blast-radius endpoint", async () => {
+  const { $, click, settle, calls } = boot({
+    installed: { jellyfin: { version: "1.0.0" } },
+    fetchImpl: engineBlastFetch([{ bot_id: "x", display_name: "X", types: ["gmail"] }]),
+  });
+
+  click($('.bundle-uninstall[data-id="jellyfin"]'));
+  await settle();
+
+  assert.ok(!calls.some((c) => c.url.includes("/engine-blast")), "engine-blast is only fetched for the bot-engine bundle");
+});
+
+test("BEHAVIOR: a bot display_name with HTML-looking content renders as literal text, never as markup", async () => {
+  const { $, click, settle, document } = boot({
+    ...BOT_ENGINE_BOOT,
+    fetchImpl: engineBlastFetch([
+      { bot_id: "evil-bot", display_name: "<b>Evil</b> Bot", types: ["discord"] },
+    ]),
+  });
+
+  click($('.bundle-uninstall[data-id="bot-engine"]'));
+  await settle();
+
+  const content = document.getElementById("modal-content");
+  assert.equal(content.querySelector("b"), null, "the display_name must never be parsed as HTML");
+  assert.match(content.textContent, /<b>Evil<\/b> Bot/, "it renders as literal text via textContent");
+});
+
+test("BEHAVIOR: a failed engine-blast fetch still opens the confirm modal (fails safe, empty list)", async () => {
+  const { $, click, settle, document } = boot({
+    ...BOT_ENGINE_BOOT,
+    fetchImpl: () => Promise.reject(new Error("network down")),
+  });
+
+  click($('.bundle-uninstall[data-id="bot-engine"]'));
+  await settle();
+
+  assert.equal(document.getElementById("modal-overlay").style.display, "flex", "the confirm modal still opens");
+  const content = document.getElementById("modal-content");
+  assert.ok(!/stop these bot channels from working/i.test(content.textContent));
+});
+
 // ─── Cheap smoke checks on the emitted source (NOT the guard — the DOM tests above are) ───
 
 test("SMOKE: the emitted client keeps the one-time Escape listener guard (Turbo must not stack listeners)", () => {

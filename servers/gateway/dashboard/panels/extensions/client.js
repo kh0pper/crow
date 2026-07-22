@@ -520,103 +520,153 @@ export function extensionsClientJS(lang) {
         });
 
         // --- Uninstall modal ---
+        // "bot-engine" gets an extra pre-fetch (Task 10): the blast-radius
+        // endpoint lists which enabled bot channels would stop working, so
+        // the confirm dialog can warn about them BEFORE the operator commits.
+        // The fetch runs first and the modal is built once it settles (or on
+        // any failure, with an empty list — never blocking the uninstall
+        // flow on this being reachable).
+        var ENGINE_BUNDLE_ID = "bot-engine";
+
+        function buildUninstallModal(id, name, isDocker, blastChannels) {
+          var frag = document.createElement("div");
+
+          var h3 = document.createElement("h3");
+          h3.style.cssText = "font-family:Fraunces,serif;margin-bottom:0.75rem";
+          h3.textContent = '${tJs("extensions.remove", lang)}' + " " + name + "?";
+          frag.appendChild(h3);
+
+          var warnBox = document.createElement("div");
+          warnBox.style.cssText = "background:rgba(231,76,60,0.08);border:1px solid rgba(231,76,60,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem;box-sizing:border-box";
+
+          var warnTitle = document.createElement("div");
+          warnTitle.style.cssText = "font-weight:600;color:var(--crow-error, #e74c3c);margin-bottom:0.35rem;font-size:0.9rem";
+          warnTitle.textContent = '${tJs("extensions.cannotBeUndone", lang)}';
+          warnBox.appendChild(warnTitle);
+
+          var warnText = document.createElement("div");
+          warnText.style.cssText = "color:var(--crow-text-secondary);font-size:0.85rem;line-height:1.5";
+          warnText.textContent = isDocker
+            ? '${tJs("extensions.uninstallDockerDesc", lang)}'
+            : '${tJs("extensions.uninstallDesc", lang)}';
+          warnBox.appendChild(warnText);
+          frag.appendChild(warnBox);
+
+          if (blastChannels && blastChannels.length > 0) {
+            var blastBox = document.createElement("div");
+            blastBox.style.cssText = "background:rgba(231,76,60,0.08);border:1px solid rgba(231,76,60,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem;box-sizing:border-box";
+
+            var blastTitle = document.createElement("div");
+            blastTitle.style.cssText = "font-weight:600;color:var(--crow-error, #e74c3c);margin-bottom:0.35rem;font-size:0.9rem";
+            blastTitle.textContent = '${tJs("extensions.engineBlastHeading", lang)}';
+            blastBox.appendChild(blastTitle);
+
+            var blastList = document.createElement("ul");
+            blastList.style.cssText = "margin:0;padding-left:1.2rem;color:var(--crow-text-secondary);font-size:0.85rem;line-height:1.5";
+            blastChannels.forEach(function(ch) {
+              var chName = (ch && ch.display_name) || "";
+              var chTypes = (ch && ch.types) || [];
+              var li = document.createElement("li");
+              // display_name is user-controlled data — textContent only, never innerHTML.
+              li.textContent = '${tJs("extensions.engineBlastItem", lang)}'
+                .split("{name}").join(chName)
+                .split("{types}").join(chTypes.join(", "));
+              blastList.appendChild(li);
+            });
+            blastBox.appendChild(blastList);
+            frag.appendChild(blastBox);
+          }
+
+          var checkId = null;
+          if (isDocker) {
+            var dataBox = document.createElement("div");
+            dataBox.style.cssText = "background:rgba(240,173,78,0.08);border:1px solid rgba(240,173,78,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem;box-sizing:border-box";
+
+            var hint = document.createElement("div");
+            hint.style.cssText = "font-size:0.8rem;color:var(--crow-text-secondary);margin-bottom:0.5rem";
+            hint.textContent = '${tJs("extensions.dataDeleteHint", lang)}';
+            dataBox.appendChild(hint);
+
+            var label = document.createElement("label");
+            label.style.cssText = "display:inline-flex;align-items:center;gap:0.4rem;font-size:0.85rem;color:var(--crow-text-secondary);cursor:pointer;margin:0";
+            var check = document.createElement("input");
+            check.type = "checkbox";
+            check.id = "delete-data-check";
+            checkId = check.id;
+            label.appendChild(check);
+            label.appendChild(document.createTextNode('${tJs("extensions.deleteStoredData", lang)}'));
+            dataBox.appendChild(label);
+
+            frag.appendChild(dataBox);
+          }
+
+          var statusDiv = document.createElement("div");
+          statusDiv.style.cssText = "font-size:0.85rem;margin:0.75rem 0;display:none";
+          frag.appendChild(statusDiv);
+
+          var btnRow = document.createElement("div");
+          btnRow.style.cssText = "display:flex;gap:0.5rem;justify-content:flex-end;margin-top:1rem";
+
+          var cancelBtn = document.createElement("button");
+          cancelBtn.className = "btn btn-secondary";
+          cancelBtn.textContent = '${tJs("common.cancel", lang)}';
+          cancelBtn.addEventListener("click", hideModal);
+          btnRow.appendChild(cancelBtn);
+
+          var removeBtn = document.createElement("button");
+          removeBtn.style.cssText = "background:var(--crow-error, #e74c3c);color:white;border:none";
+          removeBtn.className = "btn";
+          removeBtn.textContent = '${tJs("extensions.remove", lang)}';
+          removeBtn.addEventListener("click", function() {
+            var deleteData = checkId ? document.getElementById(checkId).checked : false;
+            removeBtn.disabled = true;
+            removeBtn.textContent = '${tJs("extensions.removing", lang)}';
+            statusDiv.style.display = "block";
+            statusDiv.style.color = "var(--crow-accent)";
+            statusDiv.textContent = '${tJs("extensions.stoppingAndRemoving", lang)}';
+
+            apiCall("uninstall", { bundle_id: id, delete_data: deleteData }).then(function(res) {
+              if (res.ok && res.data.job_id) {
+                pollJob(res.data.job_id, statusDiv, removeBtn);
+              } else {
+                statusDiv.style.color = "var(--crow-error, #e74c3c)";
+                statusDiv.textContent = res.data.error || '${tJs("extensions.removalFailed", lang)}';
+                removeBtn.disabled = false;
+                removeBtn.textContent = '${tJs("extensions.retry", lang)}';
+              }
+            }).catch(function() {
+              statusDiv.style.color = "var(--crow-error, #e74c3c)";
+              statusDiv.textContent = '${tJs("extensions.networkError", lang)}';
+              removeBtn.disabled = false;
+              removeBtn.textContent = '${tJs("extensions.retry", lang)}';
+            });
+          });
+          btnRow.appendChild(removeBtn);
+          frag.appendChild(btnRow);
+
+          return frag;
+        }
+
         document.querySelectorAll(".bundle-uninstall").forEach(function(btn) {
           btn.addEventListener("click", function() {
             var id = this.dataset.id;
             var name = this.dataset.name;
             var isDocker = this.dataset.docker === "true";
 
-            var frag = document.createElement("div");
-
-            var h3 = document.createElement("h3");
-            h3.style.cssText = "font-family:Fraunces,serif;margin-bottom:0.75rem";
-            h3.textContent = '${tJs("extensions.remove", lang)}' + " " + name + "?";
-            frag.appendChild(h3);
-
-            var warnBox = document.createElement("div");
-            warnBox.style.cssText = "background:rgba(231,76,60,0.08);border:1px solid rgba(231,76,60,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem;box-sizing:border-box";
-
-            var warnTitle = document.createElement("div");
-            warnTitle.style.cssText = "font-weight:600;color:var(--crow-error, #e74c3c);margin-bottom:0.35rem;font-size:0.9rem";
-            warnTitle.textContent = '${tJs("extensions.cannotBeUndone", lang)}';
-            warnBox.appendChild(warnTitle);
-
-            var warnText = document.createElement("div");
-            warnText.style.cssText = "color:var(--crow-text-secondary);font-size:0.85rem;line-height:1.5";
-            warnText.textContent = isDocker
-              ? '${tJs("extensions.uninstallDockerDesc", lang)}'
-              : '${tJs("extensions.uninstallDesc", lang)}';
-            warnBox.appendChild(warnText);
-            frag.appendChild(warnBox);
-
-            var checkId = null;
-            if (isDocker) {
-              var dataBox = document.createElement("div");
-              dataBox.style.cssText = "background:rgba(240,173,78,0.08);border:1px solid rgba(240,173,78,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem;box-sizing:border-box";
-
-              var hint = document.createElement("div");
-              hint.style.cssText = "font-size:0.8rem;color:var(--crow-text-secondary);margin-bottom:0.5rem";
-              hint.textContent = '${tJs("extensions.dataDeleteHint", lang)}';
-              dataBox.appendChild(hint);
-
-              var label = document.createElement("label");
-              label.style.cssText = "display:inline-flex;align-items:center;gap:0.4rem;font-size:0.85rem;color:var(--crow-text-secondary);cursor:pointer;margin:0";
-              var check = document.createElement("input");
-              check.type = "checkbox";
-              check.id = "delete-data-check";
-              checkId = check.id;
-              label.appendChild(check);
-              label.appendChild(document.createTextNode('${tJs("extensions.deleteStoredData", lang)}'));
-              dataBox.appendChild(label);
-
-              frag.appendChild(dataBox);
+            if (id === ENGINE_BUNDLE_ID) {
+              fetch(API + "/engine-blast").then(function(r) {
+                return r.ok ? r.json() : { channels: [] };
+              }).then(function(data) {
+                setModalContent(buildUninstallModal(id, name, isDocker, (data && data.channels) || []));
+                showModal();
+              }).catch(function() {
+                setModalContent(buildUninstallModal(id, name, isDocker, []));
+                showModal();
+              });
+              return;
             }
 
-            var statusDiv = document.createElement("div");
-            statusDiv.style.cssText = "font-size:0.85rem;margin:0.75rem 0;display:none";
-            frag.appendChild(statusDiv);
-
-            var btnRow = document.createElement("div");
-            btnRow.style.cssText = "display:flex;gap:0.5rem;justify-content:flex-end;margin-top:1rem";
-
-            var cancelBtn = document.createElement("button");
-            cancelBtn.className = "btn btn-secondary";
-            cancelBtn.textContent = '${tJs("common.cancel", lang)}';
-            cancelBtn.addEventListener("click", hideModal);
-            btnRow.appendChild(cancelBtn);
-
-            var removeBtn = document.createElement("button");
-            removeBtn.style.cssText = "background:var(--crow-error, #e74c3c);color:white;border:none";
-            removeBtn.className = "btn";
-            removeBtn.textContent = '${tJs("extensions.remove", lang)}';
-            removeBtn.addEventListener("click", function() {
-              var deleteData = checkId ? document.getElementById(checkId).checked : false;
-              removeBtn.disabled = true;
-              removeBtn.textContent = '${tJs("extensions.removing", lang)}';
-              statusDiv.style.display = "block";
-              statusDiv.style.color = "var(--crow-accent)";
-              statusDiv.textContent = '${tJs("extensions.stoppingAndRemoving", lang)}';
-
-              apiCall("uninstall", { bundle_id: id, delete_data: deleteData }).then(function(res) {
-                if (res.ok && res.data.job_id) {
-                  pollJob(res.data.job_id, statusDiv, removeBtn);
-                } else {
-                  statusDiv.style.color = "var(--crow-error, #e74c3c)";
-                  statusDiv.textContent = res.data.error || '${tJs("extensions.removalFailed", lang)}';
-                  removeBtn.disabled = false;
-                  removeBtn.textContent = '${tJs("extensions.retry", lang)}';
-                }
-              }).catch(function() {
-                statusDiv.style.color = "var(--crow-error, #e74c3c)";
-                statusDiv.textContent = '${tJs("extensions.networkError", lang)}';
-                removeBtn.disabled = false;
-                removeBtn.textContent = '${tJs("extensions.retry", lang)}';
-              });
-            });
-            btnRow.appendChild(removeBtn);
-            frag.appendChild(btnRow);
-
-            setModalContent(frag);
+            setModalContent(buildUninstallModal(id, name, isDocker, []));
             showModal();
           });
         });

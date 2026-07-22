@@ -581,6 +581,8 @@ export const translations = {
   "extensions.uninstallDockerDesc": { en: "This will stop all containers and remove the add-on. The gateway will restart to apply changes.", es: "Esto detendrá todos los contenedores y eliminará el complemento. La puerta de enlace se reiniciará para aplicar los cambios." },
   "extensions.uninstallDesc": { en: "This will remove the add-on and its configuration.", es: "Esto eliminará el complemento y su configuración." },
   "extensions.dataDeleteHint": { en: "Optionally delete all files stored by this service. Leave unchecked to keep data for a future reinstall.", es: "Opcionalmente elimina todos los archivos almacenados por este servicio. Deja sin marcar para conservar los datos para una futura reinstalación." },
+  "extensions.engineBlastHeading": { en: "Uninstalling the bot engine will stop these bot channels from working:", es: "Desinstalar el motor de bots hará que estos canales de bot dejen de funcionar:" },
+  "extensions.engineBlastItem": { en: "{name} ({types})", es: "{name} ({types})" }, // template shape only, no natural-language words to translate
   "extensions.restartingGatewayChanges": { en: "Restarting gateway...", es: "Reiniciando la puerta de enlace..." },
   "extensions.installedDate": { en: "installed", es: "instalado" },
   "extensions.needsRam": { en: "This add-on needs ~", es: "Este complemento necesita ~" },
@@ -1070,6 +1072,7 @@ export const translations = {
   "botbuilder.wizGwFinishLaterNote": { en: "Voice channels need a paired device. Your bot will be created with this channel selected; finish the device setup on its Gateways tab.", es: "Los canales de voz necesitan un dispositivo emparejado. Tu bot se creará con este canal seleccionado; termina la configuración del dispositivo en su pestaña Gateways." },
   "botbuilder.wizGwFinishLaterShort": { en: "finish setup on the Gateways tab", es: "termina la configuración en la pestaña Gateways" },
   "botbuilder.wizGwNoneNote": { en: "You can add a channel any time on the bot's Gateways tab. Until then, you can still talk to it from its Sessions tab.", es: "Puedes añadir un canal en cualquier momento en la pestaña Gateways del bot. Hasta entonces, puedes hablar con él desde su pestaña Sesiones." },
+  "botbuilder.wizEngineRequired": { en: "This channel needs the bot engine installed first — install it, then finish this step.", es: "Este canal necesita primero el motor de bots instalado: instálalo y luego termina este paso." },
   "botbuilder.wizReviewTemplate": { en: "Starting point", es: "Punto de partida" },
   "botbuilder.wizReviewName": { en: "Name", es: "Nombre" },
   "botbuilder.wizReviewBotId": { en: "Internal id", es: "Id interno" },
@@ -1093,6 +1096,28 @@ export const translations = {
   "botbuilder.checkChannelIncomplete": { en: "setup incomplete ({fields}) — this bot can't receive messages yet", es: "configuración incompleta ({fields}): este bot aún no puede recibir mensajes" },
   "botbuilder.checkChannelAllowed": { en: "{n} allowed sender(s)", es: "{n} remitente(s) permitido(s)" },
   "botbuilder.checkChannelDevice": { en: "device {id}", es: "dispositivo {id}" },
+
+  // ─── Bot Builder — readiness checklist "Bot engine" row (C4 Task 9) ───
+  "botbuilder.checkEngine": { en: "Bot engine", es: "Motor de bots" },
+  "botbuilder.checkEngineAbsent": {
+    en: "not installed on this instance yet — this channel can't run until it's installed",
+    es: "aún no está instalado en esta instancia: este canal no puede funcionar hasta instalarlo",
+  },
+  "botbuilder.checkEngineInstalling": { en: "installing…", es: "instalando…" },
+  "botbuilder.checkEngineDisarmed": {
+    en: "engine installed, but the bot runtime is off on this instance — bots won't poll",
+    es: "el motor está instalado, pero el runtime de bots está apagado en esta instancia: los bots no sondearán",
+  },
+  "botbuilder.checkEngineReady": { en: "installed (source: {source})", es: "instalado (origen: {source})" },
+  "botbuilder.checkEngineExternalNote": {
+    en: "managed by system services on this host, not the gateway",
+    es: "gestionado por servicios del sistema en este host, no por el gateway",
+  },
+  "botbuilder.checkEngineUnhealthy": {
+    en: "not responding — {error} (retrying at {retryAt})",
+    es: "no responde — {error} (reintentando a las {retryAt})",
+  },
+
   "botbuilder.checkTools": { en: "Tools", es: "Herramientas" },
   "botbuilder.checkToolsDetail": { en: "{mcp} Crow tools · {builtin} built-in", es: "{mcp} herramientas de Crow · {builtin} integradas" },
   "botbuilder.checkSkills": { en: "Skills & instructions", es: "Habilidades e instrucciones" },
@@ -1165,6 +1190,37 @@ export const translations = {
   "botbuilder.delPermanent": { en: "This permanently deletes the bot and its history.", es: "Esto elimina permanentemente el bot y su historial." },
   "botbuilder.delConfirmBtn": { en: "Delete permanently", es: "Eliminar permanentemente" },
   "botbuilder.delCancelBtn": { en: "Cancel", es: "Cancelar" },
+
+  // ─── Engine-attach gate (C4 Task 8: modal + banners) ───
+  "botbuilder.engineGateBannerErrorBody": {
+    en: "This channel needs the bot engine, which isn't installed on this instance yet — the save was not applied.",
+    es: "Este canal necesita el motor de bots, que aún no está instalado en esta instancia — el guardado no se aplicó.",
+  },
+  "botbuilder.engineGateInstallBtn": { en: "Install bot engine", es: "Instalar motor de bots" },
+  "botbuilder.runtimeOffBannerBody": {
+    en: "Saved. The bot engine is installed, but the bot runtime is off on this instance — bots won't poll Gmail/Discord/Telegram/Slack until it's on.",
+    es: "Guardado. El motor de bots está instalado, pero el runtime de bots está apagado en esta instancia — los bots no sondearán Gmail/Discord/Telegram/Slack hasta que se active.",
+  },
+  "botbuilder.runtimeOffEnableBtn": { en: "Turn on bot runtime", es: "Activar runtime de bots" },
+  "botbuilder.runtimeOffEnabling": { en: "Enabling...", es: "Activando..." },
+  "botbuilder.runtimeOffEnabled": { en: "Enabled — bots start polling within about a minute.", es: "Activado — los bots empezarán a sondear en aproximadamente un minuto." },
+  "botbuilder.runtimeOffEnableFailed": { en: "Could not enable. Try again from Settings → Bot Runtime.", es: "No se pudo activar. Intenta de nuevo desde Ajustes → Runtime de bots." },
+  "botbuilder.engineGateModalTitle": { en: "Install the bot engine", es: "Instalar el motor de bots" },
+  "botbuilder.engineGateModalBody": {
+    en: "Gmail, Discord, Telegram, and Slack channels are driven by pi, the same coding-agent engine Bot Builder uses to run every bot's turns. It isn't installed on this instance yet.",
+    es: "Los canales de Gmail, Discord, Telegram y Slack funcionan mediante pi, el mismo motor de agente de codificación que Bot Builder usa para ejecutar los turnos de cada bot. Aún no está instalado en esta instancia.",
+  },
+  "botbuilder.engineGateModalDiskNote": {
+    en: "Installs the npm package @earendil-works/pi-coding-agent 0.74.2 (~400 MB disk). No Docker, no sudo, no open ports.",
+    es: "Instala el paquete npm @earendil-works/pi-coding-agent 0.74.2 (~400 MB de disco). Sin Docker, sin sudo, sin puertos abiertos.",
+  },
+  "botbuilder.engineGateInstallingBtn": { en: "Installing...", es: "Instalando..." },
+  "botbuilder.engineGateRetryBtn": { en: "Retry", es: "Reintentar" },
+  "botbuilder.engineGateInstallFailedPrefix": { en: "Install failed:", es: "La instalación falló:" },
+  "botbuilder.engineGateUnknownError": { en: "unknown error", es: "error desconocido" },
+  "botbuilder.engineGateNetworkError": { en: "Network error. Check the connection and retry.", es: "Error de red. Verifica la conexión e intenta de nuevo." },
+  "botbuilder.engineGateWorking": { en: "Working...", es: "Trabajando..." },
+  "botbuilder.engineGateDone": { en: "Installed. Continuing your save...", es: "Instalado. Continuando tu guardado..." },
 
   // ─── Bot Board Panel (W3-4 + W4-3 i18n sweep) ───
   // Status label keys — display counterparts to the frozen CARD_STATUSES data values
@@ -1489,6 +1545,19 @@ export const translations = {
   "settings.section.remoteInvocation": { en: "Remote Tool Invocation", es: "Invocación de herramientas remotas" },
   "settings.section.remoteBotManagement": { en: "Remote Bot Management", es: "Gestión remota de bots" },
   "settings.section.botRuntime": { en: "Bot Runtime", es: "Ejecución de bots" },
+  "settings.botRuntimeBody": {
+    en: "When enabled, this instance <strong>runs</strong> the bots defined here — polling Gmail and " +
+      "answering Telegram / Slack / Discord. The gateway supervises this itself by default: there is no " +
+      "install step, and this toggle starts or stops it with no restart. Standalone systemd units " +
+      "(<code>scripts/pi-bots/install-runtime.sh</code>) are only used on hosts explicitly configured with " +
+      "<code>PIBOT_SUPERVISOR=external</code>. Off by default. <strong>Local to this instance, never synced.</strong>",
+    es: "Cuando está activado, esta instancia <strong>ejecuta</strong> los bots definidos aquí — sondeando Gmail y " +
+      "respondiendo Telegram / Slack / Discord. El gateway supervisa esto por sí mismo de forma predeterminada: no " +
+      "hay paso de instalación, y este interruptor lo inicia o detiene sin reiniciar. Las unidades systemd " +
+      "independientes (<code>scripts/pi-bots/install-runtime.sh</code>) solo se usan en hosts configurados " +
+      "explícitamente con <code>PIBOT_SUPERVISOR=external</code>. Desactivado de forma predeterminada. " +
+      "<strong>Local a esta instancia, nunca sincronizado.</strong>",
+  },
   "settings.ports.description": { en: "Host ports used by installed bundles and core services, with live status. Read-only.", es: "Puertos del host usados por los paquetes instalados y los servicios principales, con estado en vivo. Solo lectura." },
   "settings.section.llm": { en: "LLM Orchestrator", es: "Orquestador LLM" },
   "settings.section.connections": { en: "Connection URLs", es: "URLs de conexión" },

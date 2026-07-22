@@ -1,0 +1,86 @@
+/**
+ * Shared engine-attach-gate predicate (Task 7, C4).
+ *
+ * Two save paths need the identical "refuse to attach an engine-channel
+ * gateway while the bot engine is absent" check: the Gateways-tab save in
+ * api-handlers.js, and the wizard's final create in wizard.js. Both need the
+ * SAME pinnable engineStatus() result so a single test call arms both gates.
+ *
+ * This lives in its own leaf module rather than as a local in api-handlers.js
+ * because api-handlers.js already imports handleWizardCreate from wizard.js
+ * — wizard.js importing api-handlers.js's local pin back would be a real
+ * ESM cycle. A shared leaf both sides import avoids that entirely.
+ */
+import { ENGINE_CHANNELS, engineStatus } from "../../../bot-engine-status.js";
+import { botRuntimeStatus } from "../../../bot-runtime.js";
+import { missingGatewayFields } from "./gateway-fields.js";
+
+let _engineStatusPin = null;
+
+/** Test-only: pin engineStatus()'s result for the attach gate (both the
+ * Gateways-tab save gate in api-handlers.js and the wizard create gate in
+ * wizard.js). Pass null to un-pin (falls back to the real engineStatus()). */
+export function _setEngineStatusForTest(status) {
+  _engineStatusPin = status || null;
+}
+
+/**
+ * Full engineStatus() resolution (pinned or real) — exported so any
+ * consumer needing the whole {state, source, cliPath, error, retryAt} shape
+ * (not just the absent/not-absent boolean isEngineAbsent() below) can share
+ * the SAME pin as the attach gate with one _setEngineStatusForTest call.
+ * The readiness checklist row (Task 9, checklist.js) is the first such
+ * consumer — it needs "installing"/"unhealthy"/"ready" detail, not just
+ * absent-or-not.
+ */
+export function resolveEngineStatus() {
+  return _engineStatusPin || engineStatus({ env: process.env });
+}
+
+let _botRuntimeStatusPin = null;
+
+/** Test-only: pin botRuntimeStatus()'s result. Moved here from api-handlers.js
+ * (which re-exports this for backward compatibility) so the readiness
+ * checklist row (Task 9) can share the SAME pin as the Gateways-tab save
+ * gate's runtime-disarmed warning — the exact reason engineStatus's pin
+ * already lives in this shared leaf module rather than locally in
+ * api-handlers.js. Pass null to un-pin (falls back to the real
+ * botRuntimeStatus()). */
+export function _setBotRuntimeStatusForTest(status) {
+  _botRuntimeStatusPin = status || null;
+}
+
+/** Full botRuntimeStatus() resolution (pinned or real) — see
+ * _setBotRuntimeStatusForTest above. */
+export function resolveBotRuntimeStatus() {
+  return _botRuntimeStatusPin || botRuntimeStatus();
+}
+
+/**
+ * True when `gw` (a single normalized gateway record, e.g. `def.gateways[0]`)
+ * is a COMPLETE engine-channel record (type ∈ ENGINE_CHANNELS AND no missing
+ * required fields) with the bot engine absent — the shared predicate for
+ * "refuse to attach/insert this gateway; the fix is installing the engine,
+ * not reposting the same form." A type-only draft (incomplete fields) is
+ * never gated — no consumer acts on it until it's complete.
+ */
+export function engineRequiredFor(gw) {
+  if (!gw || !ENGINE_CHANNELS.includes(gw.type)) return false;
+  if (missingGatewayFields(gw).length !== 0) return false;
+  return resolveEngineStatus().state === "absent";
+}
+
+/**
+ * True when the shared, pinnable engineStatus() resolves to "absent" —
+ * used by the Gateways-tab RENDER (Task 8) to decide whether to arm the
+ * client-side gate modal for the currently-selected gwType. Deliberately
+ * independent of record completeness: unlike engineRequiredFor() (which
+ * only fires on a saved, complete record), the render-time check must arm
+ * BEFORE the operator has finished typing — completeness is checked
+ * client-side, live, against the DOM form values at submit time (see
+ * engine-gate-client.js). Shares resolveEngineStatus() so the same
+ * _setEngineStatusForTest pin arms both the render gate and the save gate.
+ */
+export function isEngineAbsent() {
+  return resolveEngineStatus().state === "absent";
+}
