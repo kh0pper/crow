@@ -2530,10 +2530,19 @@ await initTable("job_search_sites table", `
 `);
 
 // --- Bot Builder tables (F3: moved from scripts/init-pi-bots.mjs) ---
-// Full current shape: pi_bot_defs.project_id and bot_sessions.model/escalated
-// are in the CREATE body here (init-pi-bots.mjs adds them via guarded ALTER on
-// pre-F3 DBs). CREATE ... IF NOT EXISTS — a no-op on the live MPA crow.db.
-// init-pi-bots.mjs remains the MPA-only JSON->column project_id backfill + guard.
+// Full current shape: pi_bot_defs.project_id and bot_sessions.model/escalated/
+// kind are in the CREATE body here (init-pi-bots.mjs adds model/escalated via
+// guarded ALTER on pre-F3 DBs). CREATE ... IF NOT EXISTS — a no-op on the live
+// MPA crow.db. init-pi-bots.mjs remains the MPA-only JSON->column project_id
+// backfill + guard.
+// bot_sessions.kind (C4 acceptance fix, 2026-07-22): bridge.mjs upsertSession()
+// writes/reads this on every bot turn (default "chat"; also "planning" for the
+// plan-authoring session — see pi-bots/bridge.mjs ~:807). It was writing to a
+// column that only existed on prod via an uncaptured manual ALTER TABLE — a
+// truly fresh install crashed on its first bot turn ("no column named kind").
+// Added to the CREATE body (fresh installs) AND via addColumnIfMissing right
+// after this initTable call (pre-existing installs, same idiom as every other
+// post-hoc column in this file) — additive-only, no SCHEMA_GENERATION bump.
 await initTable("pi_bot_defs table", `
   CREATE TABLE IF NOT EXISTS pi_bot_defs (
     bot_id        TEXT PRIMARY KEY,
@@ -2566,6 +2575,7 @@ await initTable("bot_sessions table", `
                         CHECK (control IN ('run','stop')),
     model             TEXT,
     escalated         INTEGER DEFAULT 0,
+    kind              TEXT NOT NULL DEFAULT 'chat',
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -2575,6 +2585,11 @@ await initTable("bot_sessions table", `
   CREATE INDEX IF NOT EXISTS idx_bot_sessions_status
     ON bot_sessions (status);
 `);
+
+// Pre-existing installs (table already present without `kind`, e.g. any host
+// that ran init-db.js between F3 and this fix): idempotent guarded ALTER,
+// matching prod's manual column def (TEXT NOT NULL DEFAULT 'chat').
+await addColumnIfMissing("bot_sessions", "kind", "TEXT NOT NULL DEFAULT 'chat'");
 
 await initTable("bot_skill_events table", `
   CREATE TABLE IF NOT EXISTS bot_skill_events (
