@@ -7,7 +7,7 @@
  * gmail and the companion fields were unreachable. The type must persist as
  * a device-less draft record.
  */
-import { test, before, after } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -19,6 +19,7 @@ process.env.CROW_DATA_DIR = dir;
 
 let db = null;
 let handleBotBuilderPost = null;
+let _setEngineStatusForTest = null;
 
 before(async () => {
   execFileSync(process.execPath, ["scripts/init-db.js"], {
@@ -28,7 +29,8 @@ before(async () => {
   });
   const { createDbClient } = await import("../servers/db.js");
   db = createDbClient();
-  ({ handleBotBuilderPost } = await import("../servers/gateway/dashboard/panels/bot-builder/api-handlers.js"));
+  ({ handleBotBuilderPost, _setEngineStatusForTest } =
+    await import("../servers/gateway/dashboard/panels/bot-builder/api-handlers.js"));
   await db.execute({
     sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,1)",
     args: ["draft-bot", "Draft Bot", JSON.stringify({ gateways: [{ type: "gmail", address: "x@y.z", allowlist: [] }], tools: {}, models: {} })],
@@ -38,6 +40,18 @@ before(async () => {
 after(async () => {
   try { db && db.close && db.close(); } catch {}
   rmSync(dir, { recursive: true, force: true });
+});
+
+// Hermeticity: this file isn't testing the engine-attach gate (that's
+// bot-builder-engine-gate.test.js) — it's testing gateway-field
+// persistence. The one test below that saves a COMPLETE gmail record must
+// pin engineStatus() "ready" so it doesn't depend on whatever the host
+// running the suite happens to have installed (a dev box with a global pi
+// install resolves "ready" via rung 4; a clean CI runner resolves
+// "absent" and the real gate would reject the save). Reset after every
+// test regardless of which one pinned it.
+afterEach(() => {
+  _setEngineStatusForTest(null);
 });
 
 function mkRes() {
@@ -143,6 +157,10 @@ test("selected device wins over a typed name", async () => {
 });
 
 test("switching back to gmail still works after a draft", async () => {
+  // Complete gmail record → the engine-attach gate (Task 7) would fire if
+  // the engine resolved "absent"; pin "ready" so this test is hermetic on
+  // any host, not just one with a global pi install.
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
   const res = mkRes();
   await handleBotBuilderPost(
     { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "gmail", gw_address: "a@b.c", gw_allowlist: "a@b.c" } },

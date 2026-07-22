@@ -10,7 +10,7 @@ import {
   PI_BUILTIN, PI_EXT_ALLOWLIST,
   loadModelOptions, remoteInvocationOn, defaultDefinition, lines,
 } from "./data-queries.js";
-import { normalizeGatewayFields } from "./gateway-fields.js";
+import { normalizeGatewayFields, missingGatewayFields } from "./gateway-fields.js";
 import { handleWizardCreate } from "./wizard.js";
 import { handleDeleteConfirm } from "./delete-bot.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
@@ -19,6 +19,26 @@ import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposa
 import { t, fill, SUPPORTED_LANGS } from "../../shared/i18n.js";
 import { parseCookies } from "../../auth.js";
 import { emitBotDefsChanged } from "./defs-changed.js";
+import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
+import { botRuntimeActive } from "../bot-runtime-flag.js";
+import {
+  engineRequiredFor, _setEngineStatusForTest,
+  _setBotRuntimeStatusForTest, resolveBotRuntimeStatus,
+} from "./engine-gate.js";
+
+// Task 7 (C4): the gateways-tab save gate needs two host/process-dependent
+// checks — engineStatus() (whose "global" npm rung resolves off the REAL
+// running node, not anything a test controls) and botRuntimeStatus() (a
+// module singleton only populated by a real initBotRuntime() call: timers,
+// a sync sqlite handle, the event bus — too heavy for a route test). Both
+// pins now live in the shared ./engine-gate.js (the wizard's create path —
+// wizard.js — needs the SAME pinnable engineStatus, and the readiness
+// checklist row — checklist.js, Task 9 — needs BOTH pins; neither can import
+// a local pin here without a real ESM cycle since this file already imports
+// handleWizardCreate from wizard.js). Re-exported below so existing
+// importers of `_setEngineStatusForTest`/`_setBotRuntimeStatusForTest` from
+// this file are unaffected.
+export { _setEngineStatusForTest, _setBotRuntimeStatusForTest };
 
 // Same crow_lang-cookie resolution the dashboard router uses (index.js);
 // defensive because POST handlers can be exercised with header-less reqs.
@@ -394,6 +414,39 @@ export async function handleBotBuilderPost(req, res, { db }) {
     } else if (tab === "triggers") {
       def.triggers.gateway = !!b.tr_gateway;
       def.triggers.cron = (b.tr_cron || "").trim();
+    }
+
+    // Task 7 (C4): server-side attach gate — the primary UX is a client-side
+    // intercept (Task 8, engine absence is known at render); this is only a
+    // backstop for a client bypassing JS. Fires ONLY on a COMPLETE
+    // engine-channel record (type ∈ ENGINE_CHANNELS AND no missing required
+    // fields) — a type-only draft from the dropdown's auto-submit-on-type-
+    // change (W1-4 snap-back doctrine) is inert (no consumer acts on it
+    // until it's complete) and must keep saving exactly as before this gate
+    // existed. Voice/device gateways (glasses/companion) and crow-messages
+    // are never in ENGINE_CHANNELS, so they're never gated here (C4-3).
+    if (tab === "gateways") {
+      const savedGw = (def.gateways || [])[0];
+      if (savedGw && ENGINE_CHANNELS.includes(savedGw.type) && missingGatewayFields(savedGw).length === 0) {
+        if (engineRequiredFor(savedGw)) {
+          // Form state is accepted as lost on this path — the fix is
+          // installing the engine, not reposting the same form.
+          return res.redirectAfterPost(
+            `/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=gateways&error=engine_required`
+          );
+        }
+        // Runtime-disarmed surfacing (r1 critical #2): the engine exists,
+        // but nothing will actually poll this gateway until the bot_runtime
+        // flag is on (it defaults off on every non-MPA host) — without this
+        // warning a stranger completes onboarding green and the bot stays
+        // silently deaf. installing/unhealthy/ready all pass the gate above
+        // (the engine exists); only a disarmed runtime needs a nudge here.
+        const runtime = resolveBotRuntimeStatus();
+        if (runtime && runtime.mode === "gateway") {
+          const flagOn = await botRuntimeActive(db);
+          if (!flagOn) extraQ += "&warn=bot_runtime_off";
+        }
+      }
     }
 
     try {

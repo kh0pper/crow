@@ -7,6 +7,7 @@
 import { botBuilderStyles } from "./bot-builder/css.js";
 import { tableMissing } from "./bot-builder/data-queries.js";
 import { escapeHtml, section } from "../shared/components.js";
+import { t } from "../shared/i18n.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
 import { handlePeerEdit } from "./bot-builder/peer-edit.js";
 import { handleBotBuilderPost } from "./bot-builder/api-handlers.js";
@@ -16,6 +17,24 @@ import { renderWizard } from "./bot-builder/wizard.js";
 import { renderDeleteConfirm } from "./bot-builder/delete-bot.js";
 
 const PAGE_CSS = botBuilderStyles();
+
+// C4 Task 8: q.error="engine_required" / q.warn="bot_runtime_off" are the
+// ONLY two values these params ever carry from api-handlers.js's Task 7
+// gate (the gateways-tab save redirect) — every other error/warn value
+// keeps rendering raw (baseNotice/warnNotice below), unchanged from before
+// this task. Both banners carry a button engine-gate-client.js wires up
+// (the script ships on every editor tab; see editor.js).
+function engineRequiredBanner(lang) {
+  return `<p class="btb-notice-err">${escapeHtml(t("botbuilder.engineGateBannerErrorBody", lang))} ` +
+    `<button type="button" id="engine-gate-open-btn" class="btb-btn btb-btn-sm btb-btn-inline">` +
+    `${escapeHtml(t("botbuilder.engineGateInstallBtn", lang))}</button></p>`;
+}
+function botRuntimeOffBanner(lang) {
+  return `<p class="btb-notice-warn">${escapeHtml(t("botbuilder.runtimeOffBannerBody", lang))} ` +
+    `<button type="button" id="bot-runtime-enable-btn" class="btb-btn btb-btn-sm btb-btn-inline">` +
+    `${escapeHtml(t("botbuilder.runtimeOffEnableBtn", lang))}</button> ` +
+    `<span id="bot-runtime-enable-status" class="btb-hint"></span></p>`;
+}
 
 export default {
   id: "bot-builder",
@@ -57,10 +76,12 @@ export default {
     // both messages stacked read as a double banner (PR #191 review m2).
     const baseNotice = q.saved ? `<p class="btb-notice-ok">Saved.</p>`
       : q.deleted ? `<p class="btb-notice-ok">Deleted <code>${escapeHtml(String(q.deleted))}</code>.</p>`
+      : q.error === "engine_required" ? engineRequiredBanner(lang)
       : q.error ? `<p class="btb-notice-err">${escapeHtml(String(q.error))}</p>` : "";
     // Soft, non-blocking warning (e.g. AI-tab model pair not in models.json).
     // Independent of the base notice so it can ride alongside a Saved.
-    const warnNotice = q.warn ? `<p class="btb-notice-warn">${escapeHtml(String(q.warn))}</p>` : "";
+    const warnNotice = q.warn === "bot_runtime_off" ? botRuntimeOffBanner(lang)
+      : q.warn ? `<p class="btb-notice-warn">${escapeHtml(String(q.warn))}</p>` : "";
     const notice = runtimeBanner + baseNotice + warnNotice;
 
     // ---- guided-creation wizard (Item 5 PR1, spec §D1) ----

@@ -83,6 +83,8 @@ const IDENTICAL_OK = new Set([
   "models.hfTokenPlaceholder", // "hf_..." — literal input placeholder prefix, language-neutral
   // Onboarding AI step three-choice rework (C1/C3 Task 7)
   "onboarding.ai.sizeGb", // "{gb} GB" — the unit abbreviation is unchanged in Spanish
+  // Bot-engine uninstall blast-radius (C4 Task 10)
+  "extensions.engineBlastItem", // "{name} ({types})" — pure template shape, no words to translate
 ]);
 
 const keys = Object.keys(translations);
