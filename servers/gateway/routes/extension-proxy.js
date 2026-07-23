@@ -21,7 +21,10 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { isAllowedNetwork, parseCookies, verifySession } from "../dashboard/auth.js";
 
-const CROW_HOME = join(homedir(), ".crow");
+// Respect CROW_HOME so a secondary instance (systemd unit with its own
+// CROW_HOME) proxies ITS extensions — not the primary's. Hardcoding ~/.crow
+// here made every co-hosted instance serve the primary's web UIs.
+const CROW_HOME = process.env.CROW_HOME || join(homedir(), ".crow");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
 const BUNDLES_DIR = join(CROW_HOME, "bundles");
 
@@ -43,10 +46,16 @@ function getProxiedExtensions() {
     for (const entry of installed) {
       const manifest = getManifest(entry.id);
       if (manifest?.webUI?.port) {
+        // webUI.portEnv names an env var that overrides the manifest port —
+        // lets a per-instance unit remap the backend (e.g. a second browser
+        // container on 6081) without editing the shared manifest.
+        const envPort = manifest.webUI.portEnv
+          ? Number(process.env[manifest.webUI.portEnv]) || null
+          : null;
         proxied.push({
           id: entry.id,
           name: manifest.name || entry.id,
-          port: manifest.webUI.port,
+          port: envPort || manifest.webUI.port,
           path: manifest.webUI.path || "/",
           label: manifest.webUI.label || manifest.name || entry.id,
           proxyMode: manifest.webUI.proxyMode || "subpath",
