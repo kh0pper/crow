@@ -3,12 +3,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: crow-browser
+    # Overridable so a second Crow instance on the same host (distinct
+    # CROW_HOME) can run its own browser container side-by-side. With
+    # network_mode: host the ports must be overridden too — set
+    # CROW_BROWSER_{VNC,RFB,CDP}_PORT in this bundle's .env alongside the name.
+    container_name: ${CROW_BROWSER_CONTAINER_NAME:-crow-browser}
     network_mode: host
     environment:
       - DISPLAY=:99
       - VNC_PASSWORD=${CROW_BROWSER_VNC_PASSWORD:?VNC password is required}
-      - CDP_PORT=9222
+      - CDP_PORT=${CROW_BROWSER_CDP_PORT:-9222}
+      - NOVNC_PORT=${CROW_BROWSER_VNC_PORT:-6080}
+      - RFB_PORT=${CROW_BROWSER_RFB_PORT:-5900}
       - CHROME_PROXY=${CROW_BROWSER_PROXY:-}
     volumes:
       - ${CROW_HOME:-${HOME}/.crow}/browser-downloads:/downloads

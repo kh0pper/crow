@@ -29,8 +29,10 @@ import { execFileSync } from "node:child_process";
  * @returns {McpServer}
  */
 export function createBrowserServer(options = {}) {
-  const cdpUrl = options.cdpUrl || process.env.CROW_BROWSER_CDP_URL || "http://127.0.0.1:9222";
-  const sessionDir = options.sessionDir || join(homedir(), ".crow", "browser-sessions");
+  const cdpUrl = options.cdpUrl || process.env.CROW_BROWSER_CDP_URL ||
+    `http://127.0.0.1:${process.env.CROW_BROWSER_CDP_PORT || "9222"}`;
+  const sessionDir = options.sessionDir ||
+    join(process.env.CROW_HOME || join(homedir(), ".crow"), "browser-sessions");
   const vncPort = process.env.CROW_BROWSER_VNC_PORT || "6080";
 
   const server = new McpServer(
