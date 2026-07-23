@@ -46,6 +46,7 @@ Unlike hosted, auto-authoring bot platforms, Crow keeps the engine on your hardw
 | **Blog & publishing** | Markdown blog with RSS/Atom feeds, themes, and public URLs. Publish by telling your AI. |
 | **File storage** | S3-compatible storage with quotas and presigned URLs. |
 | **20+ integrations** | GitHub, Slack, Notion, Gmail, Trello, Discord, Google Workspace, and more, proxied through one authenticated gateway. |
+| **Local AI (Model Catalog)** | A curated model catalog with Hugging Face downloads, hardware-fit filtering, and a managed llama.cpp runtime — run your own AI locally with no cloud key. |
 | **Self-hosting add-ons** | Ollama, Nextcloud, Immich, Home Assistant, Jellyfin, and more, installable by asking your AI. |
 | **Multi-instance** | Run Crow on several devices and sync the pieces that should travel with you. |
 

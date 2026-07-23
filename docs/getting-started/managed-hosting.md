@@ -4,99 +4,17 @@
 Managed hosting is not an active offering right now. This page is kept for reference; for a working install today, see the [getting-started paths](./index.md).
 :::
 
-Skip the setup entirely. Get a fully configured Crow instance hosted by [Maestro Press](https://maestro.press) — $15/mo or $120/yr.
+Managed hosting is the planned zero-ops way to run Crow: a fully configured instance operated by [Maestro Press](https://maestro.press) on your own subdomain, with automatic updates, daily backups, HTTPS, mandatory two-factor authentication, and email-based password recovery — the same Crow features as self-hosting, without the server work.
 
-## What's Included
+There is no signup or checkout while the offering is inactive, and no pricing is published here until it is real.
 
-- **Your own subdomain** — `username.crow.maestro.press`
-- **Crow's Nest & blog** — Visual control panel and publishing platform, ready to go
-- **All AI integrations** — Connect Claude, ChatGPT, Gemini, Grok, Cursor, and more
-- **Public blog & podcast** — Your blog and podcast RSS feeds are publicly accessible with HTTPS — ready for monetization, podcast directories (Apple Podcasts, Spotify), and subscribers
-- **Daily backups** — Automatic daily backups of your data
-- **SSL included** — HTTPS enabled by default
-- **Automatic updates** — Always running the latest version of Crow
-- **No bandwidth limits** — No throttling or fair-use caps on your public content
+## In the meantime
 
-## How It Works
+Self-hosting is free and gives you full control — your data stays on infrastructure you choose:
 
-1. **Pick a username** — Choose your subdomain (e.g., `alice.crow.maestro.press`)
-2. **Check out** — $15/mo or $120/yr (4 months free with annual)
-3. **Visit your instance** — Your Crow's Nest is live immediately
-4. **Connect your AI** — Use the `/setup` page to connect Claude, ChatGPT, or any supported platform
+- [Oracle Cloud Free Tier](./oracle-cloud) — a permanent free server that never sleeps
+- [Raspberry Pi / Crow OS](./full-setup) — one-line installer on a Pi or any Debian/Ubuntu machine
+- [Desktop setup](./desktop-setup) — run Crow beside Claude Desktop on your own computer
+- [All getting-started paths](./index.md)
 
-> **[Get started at maestro.press/hosting →](https://maestro.press/hosting/)**
-
-## What Can I Do With It?
-
-Everything a self-hosted Crow instance can do:
-
-- **Persistent memory** — Your AI remembers across conversations and platforms
-- **Project management** — Organize projects, manage sources, generate APA citations, connect data backends
-- **Blog** — Publish posts with Markdown, RSS feeds, and custom themes
-- **File storage** — Upload and manage files with presigned URLs
-- **20+ integrations** — Gmail, GitHub, Slack, Notion, and more
-- **Encrypted P2P sharing** — Share memories and research with other Crow users
-- **Crow's Nest** — Visual control panel for messages, blog, files, and settings
-
-## Managed vs. Self-Hosted
-
-| | Managed Hosting | Self-Hosted (Free) |
-|---|---|---|
-| **Setup** | None — live in minutes | You deploy and configure |
-| **Maintenance** | Automatic updates and backups | You manage updates |
-| **Cost** | $15/mo or $120/yr | Free (Render, Oracle Cloud, Pi) |
-| **Control** | Hosted by Maestro Press | Full control over your server |
-| **Data** | Stored on Maestro Press infrastructure | Stored wherever you choose |
-| **Public blog/podcast** | Ready to go, no extra setup | Requires reverse proxy + domain |
-| **2FA** | Mandatory (TOTP) | Optional |
-| **Password reset** | Email-based | CLI (`npm run reset-password`) |
-| **Best for** | Users who want Crow without the ops work | Developers and tinkerers |
-
-Both options give you the same Crow features. Self-hosting is free and gives you full control. Managed hosting trades a small monthly cost for zero maintenance.
-
-::: tip Hybrid setup
-Managed hosting can be chained with a self-hosted instance for the best of both worlds — always-on cloud access plus a home server for heavy processing and data storage. See [Multi-Device Quick Start](./multi-device) to set it up.
-:::
-
-## Security
-
-Managed hosting includes additional security features that are automatically enabled:
-
-### Two-Factor Authentication (Required)
-
-On your first login, you'll be asked to set up two-factor authentication (2FA) using an authenticator app like Google Authenticator or Authy.
-
-1. Scan the QR code with your authenticator app
-2. Enter the 6-digit code to verify
-3. Save your 8 recovery codes in a safe place — they won't be shown again
-
-2FA is **mandatory** for managed hosting and cannot be disabled. You can optionally trust a device for 30 days to skip the code on future logins. Manage your 2FA settings (regenerate codes, revoke trusted devices) in **Settings → Two-Factor Auth**.
-
-### Password Reset
-
-If you forget your password, click **"Forgot password?"** on the login page. A reset link will be sent to the email address on your account (the one used during signup). The link expires after 1 hour.
-
-### Account Lockout
-
-After 5 failed login attempts, your account is locked for 15 minutes. When this happens:
-- You'll receive an email alert with the source IP address
-- The lockout screen shows a link to reset your password and contact support at **support@maestro.press**
-
-For the full security model, see the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md).
-
-## FAQ
-
-**Can I migrate to self-hosting later?**
-Yes. Your data can be exported and moved to a self-hosted instance at any time.
-
-**Can I use my own domain?**
-Custom domains are on the roadmap. For now, you get `username.crow.maestro.press`.
-
-**Is my data private?**
-Yes. Each managed instance has its own isolated database. Maestro Press does not access your data. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md) for details.
-
-**Can I monetize my blog or podcast?**
-Yes. Managed hosting includes public HTTPS URLs for your blog and podcast feeds — suitable for ad-supported content, paid subscriptions, and podcast directory submission. Self-hosted users can do this too, but need to set up a reverse proxy and custom domain (Tailscale Funnel is for personal/hobby use only).
-
-**What are the terms of service?**
-See the [Managed Hosting Terms of Service](/legal/managed-hosting-terms).
+A future managed instance will chain with a self-hosted one (always-on cloud access plus a home server for heavy processing) via [Multi-Device](./multi-device) — that mechanism works between any two instances today.

@@ -1,6 +1,6 @@
 {
   "name": "crow-platform",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Self-hosted AI platform with persistent memory, encrypted P2P sharing, and 20+ integrations — works with Claude, ChatGPT, Gemini, and any MCP client",
   "type": "module",
   "scripts": {

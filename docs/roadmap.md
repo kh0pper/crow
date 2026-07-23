@@ -4,14 +4,14 @@
 
 ## What v1 means
 
-Crow's version number stays at 0.x until all of the following are true:
+Crow was tagged **1.0.0 in July 2026**, when all of the following became true — each proven on a wiped scratch install, not asserted:
 
-- A newcomer on supported hardware reaches first value — a connected AI client using Crow's memory, or a working agent — within 30 minutes of starting the installer, without help from the maintainer.
-- CI defines what is mergeable: the full test suite runs on every pull request and every push to `main`, and a red run blocks merge for everyone.
+- A newcomer on supported hardware reaches first value — a connected AI client using Crow's memory, or a working agent — within 30 minutes of starting the installer, without help from the maintainer. (The timed walkthrough: under 2 minutes of interaction after the installer, zero terminal steps.)
+- CI defines what is mergeable: the full test suite runs on every pull request and every push to `main`, and a red run blocks merge for everyone, the maintainer included.
 - Every capability claim in the README and docs is demonstrably true on a fresh install, or explicitly labeled as planned.
 - The release is tagged 1.0.0.
 
-Everything aspirational — FERPA-specific tooling, education verticals, cloud web clients reaching self-hosted instances — is explicitly post-v1 or explicitly parked (see below).
+Everything aspirational — FERPA-specific tooling, education verticals — remains explicitly post-v1 or parked (see below).
 
 ## Shipped in 2026
 
@@ -24,13 +24,13 @@ The original 2026 roadmap on this page listed four education-focused milestones.
 - **Project spaces** — the shareable project redesign: membership, roles, per-member capability overrides, and an audit log.
 - **Engineering floor (July 2026)** — CI on every PR and push with branch protection that binds the maintainer too, a runtime database-migration guard with automatic backup and quarantine, and fleet auto-update that refuses to pull a red or unverified `main`.
 
-## Current focus: proving v1
+- **First value (July 2026)** — the setup wizard now carries a fresh install to a working AI: a curated **Model Catalog** with Hugging Face downloads (llama.cpp runtime, hardware-fit filtering — local-first, no cloud key required), starter memories that make the first conversation demonstrate recall, and the CLI post-install steps folded into the dashboard.
+- **Bot engine as an extension (July 2026)** — agent channels (Gmail, Discord) install their engine as a one-click bundle at the point of use instead of assuming a pre-provisioned machine; honest readiness states throughout.
 
-The active arc converts "works on the maintainer's fleet" into "works for a stranger":
+## Current focus: after v1
 
-- **Truth & identity** — reconcile every README/docs claim with reality (this page's rewrite is part of that work).
-- **First 30 minutes** — design work on reaching first value inside the setup wizard: a free-path AI provider quickstart, a guided first agent, and folding the remaining CLI post-install steps into the dashboard.
-- **Model catalog** — a curated local-model catalog with Hugging Face downloads (llama.cpp-first) instead of hardcoded model lists.
+- **Cloud web-client access** — claude.ai on the web, ChatGPT, and similar clients need a publicly reachable endpoint, which a private Crow deliberately does not expose today. A hardened opt-in path is the committed next arc, gated behind a dedicated security review (consent gate first). Until it ships, cloud web clients remain unsupported on self-hosted instances.
+- **Platform breadth** — the Windows path runs via WSL2 (documented; GPU currently falls back to CPU there — CUDA-in-WSL2 enablement is filed), and the macOS path predates the current wizard. Hardening both with real-hardware proof is next.
 
 ## Deliberately parked
 
@@ -38,7 +38,6 @@ These are conscious decisions, not TODOs:
 
 - **Education verticals (old Milestones 2–4)** — LMS course projects, Canvas backends, curriculum and institutional tooling. Parked until validated education users exist. The data-backend registry that would power them remains in place.
 - **FERPA enforcement** — Self-hosted Crow keeps data on infrastructure you control, which suits FERPA-sensitive contexts; Crow does not itself implement FERPA controls, and none are currently planned.
-- **Cloud web clients on self-hosted instances** — claude.ai on the web, ChatGPT, and similar clients require a publicly reachable endpoint, which a private Crow deliberately does not expose. Whether to offer a hardened public path is an open strategy decision, not a scheduled feature.
 - **Managed hosting** — not an active offering.
 - **crowdsec-firewall-bouncer bundle** — the one bundle from the 2026-04 MVP expansion that never shipped (upstream publishes no Docker image; a safe install needs the privileged-install consent gate plus a tested unwind path). Parked until that machinery has been exercised.
 
