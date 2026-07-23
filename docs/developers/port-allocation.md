@@ -59,7 +59,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 5335 | 127.0.0.1 | adguard-home (DNS, TCP+UDP) | MVP PR 3 |
 | 5336 | — | pi-hole (DNS) | reserved (Phase 2 DNS) |
 | 5337 | — | technitium (DNS) | reserved (Phase 2 DNS) |
-| 6080 | 127.0.0.1 | browser (noVNC, existing) | existing |
+| 6080 | 127.0.0.1 | browser (noVNC, existing) — overridable via `CROW_BROWSER_VNC_PORT`; RFB 5900 via `CROW_BROWSER_RFB_PORT`, CDP 9222 via `CROW_BROWSER_CDP_PORT`. Secondary instances on one host pick +1 offsets (6081/5901/9223) | existing |
 | 6875 | 127.0.0.1 | bookstack (existing) | existing |
 | 8000 | 127.0.0.1 | paperless (existing) | existing |
 | 8004 | 127.0.0.1 | faster-whisper-server (local STT) | existing |
