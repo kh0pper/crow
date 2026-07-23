@@ -10,6 +10,8 @@ DISP_NUM=99
 DISPLAY=":${DISP_NUM}"
 export DISPLAY
 CDP_PORT="${CDP_PORT:-9222}"
+NOVNC_PORT="${NOVNC_PORT:-6080}"
+RFB_PORT="${RFB_PORT:-5900}"
 SCREEN="1920x1080x24"
 
 log() { echo "[crow-browser] $*"; }
@@ -50,15 +52,15 @@ log "Xvfb ready (pid ${XVFB_PID})."
 # --- x11vnc ---
 log "Starting x11vnc..."
 x11vnc -display ":${DISP_NUM}" -auth "$XAUTHORITY" -forever -shared \
-  -passwd "$VNC_PASSWORD" -rfbport 5900 -noxdamage -quiet &
+  -passwd "$VNC_PASSWORD" -rfbport "${RFB_PORT}" -noxdamage -quiet &
 X11VNC_PID=$!
 sleep 1
 kill -0 "$X11VNC_PID" 2>/dev/null || die "x11vnc failed to start"
 log "x11vnc up (pid ${X11VNC_PID})."
 
 # --- noVNC / websockify ---
-log "Starting noVNC on :6080..."
-websockify --web /usr/share/novnc 6080 localhost:5900 &
+log "Starting noVNC on :${NOVNC_PORT}..."
+websockify --web /usr/share/novnc "${NOVNC_PORT}" "localhost:${RFB_PORT}" &
 WEBSOCKIFY_PID=$!
 sleep 1
 kill -0 "$WEBSOCKIFY_PID" 2>/dev/null || die "websockify failed to start"
@@ -105,7 +107,7 @@ done
 echo ""
 echo "============================================="
 echo "  Crow Browser — Ready (verified)"
-echo "  noVNC:     http://localhost:6080/vnc.html"
+echo "  noVNC:     http://localhost:${NOVNC_PORT}/vnc.html"
 echo "  CDP:       http://127.0.0.1:${CDP_PORT}/json/version"
 echo "============================================="
 echo ""
