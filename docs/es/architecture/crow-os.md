@@ -82,7 +82,7 @@ Todos los datos de Crow viven en `~/.crow/`, lo que hace que la instalación com
 `scripts/crow-install.sh` realiza estos pasos:
 
 1. **Actualizaciones del sistema** — `apt update && apt upgrade`
-2. **Node.js 20** — vía el repositorio de NodeSource
+2. **Node.js 22** — vía el repositorio de NodeSource
 3. **Docker + Docker Compose** — script de instalación oficial
 4. **Caddy** — reverse proxy con TLS automático
 5. **Avahi** — mDNS para el hostname `crow.local`
