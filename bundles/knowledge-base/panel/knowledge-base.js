@@ -65,19 +65,19 @@ export default {
 
     // ─── ARTICLES TAB ───
     if (tab === "articles") {
-      let articles = [];
-      if (activeCollectionId) {
-        const result = await db.execute({
-          sql: `SELECT a.id, a.title, a.slug, a.language, a.status, a.pair_id, a.tags,
-                a.updated_at, a.published_at, a.last_verified_at,
-                c.name AS collection_name
-                FROM kb_articles a JOIN kb_collections c ON a.collection_id = c.id
-                WHERE a.collection_id = ?
-                ORDER BY a.pair_id, a.language`,
-          args: [Number(activeCollectionId)],
-        });
-        articles = result.rows;
-      }
+      // No collection filter = all collections ("All" must never show an empty lie)
+      const filterSql = activeCollectionId ? "WHERE a.collection_id = ?" : "";
+      const filterArgs = activeCollectionId ? [Number(activeCollectionId)] : [];
+      const result = await db.execute({
+        sql: `SELECT a.id, a.title, a.slug, a.language, a.status, a.pair_id, a.tags,
+              a.updated_at, a.published_at, a.last_verified_at,
+              c.name AS collection_name
+              FROM kb_articles a JOIN kb_collections c ON a.collection_id = c.id
+              ${filterSql}
+              ORDER BY c.name, a.pair_id, a.language`,
+        args: filterArgs,
+      });
+      const articles = result.rows;
 
       // Group by pair_id for display
       const pairs = new Map();
@@ -97,7 +97,7 @@ export default {
           : '<span style="color:var(--crow-text-muted);font-size:0.8rem">Draft</span>';
         return `
           <tr>
-            <td><a href="/dashboard/knowledge-base?tab=edit&id=${primary.id}" style="color:var(--crow-text-primary)">${escapeHtml(primary.title)}</a></td>
+            <td><a href="/dashboard/knowledge-base?tab=edit&id=${primary.id}" style="color:var(--crow-text-primary)">${escapeHtml(primary.title)}</a>${!activeCollectionId ? `<div style="font-size:0.75rem;color:var(--crow-text-muted)">${escapeHtml(primary.collection_name || "")}</div>` : ""}</td>
             <td>${langBadges}</td>
             <td>${statusPill}</td>
             <td style="font-size:0.8rem;color:var(--crow-text-muted)">${primary.updated_at ? primary.updated_at.slice(0, 10) : ""}</td>

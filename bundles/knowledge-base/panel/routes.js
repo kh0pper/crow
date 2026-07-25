@@ -6,18 +6,42 @@
  */
 
 import { Router } from "express";
-import { resolve, dirname } from "path";
+import { join, resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { pathToFileURL } from "url";
+import { homedir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-let createDbClient;
-try {
-  const dbMod = await import(pathToFileURL(resolve(__dirname, "../server/db.js")).href);
-  createDbClient = dbMod.createDbClient;
-} catch {
-  createDbClient = null;
+// The panel registry installs this file to <crow-home>/panels/, which breaks
+// bundle-relative imports. Resolve db.js from the installed bundle first, then
+// the dev layout, then fall back to a direct libsql client from env.
+async function loadCreateDbClient() {
+  const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+  const candidates = [
+    join(crowHome, "bundles", "knowledge-base", "server", "db.js"),
+    resolve(__dirname, "../server/db.js"),
+  ];
+  for (const path of candidates) {
+    try {
+      const mod = await import(pathToFileURL(path).href);
+      if (mod.createDbClient) return mod.createDbClient;
+    } catch {
+      // try next candidate
+    }
+  }
+  try {
+    const { createClient } = await import("@libsql/client");
+    return (dbPath) => {
+      const filePath = dbPath || process.env.CROW_DB_PATH
+        || join(process.env.CROW_DATA_DIR || join(crowHome, "data"), "crow.db");
+      const client = createClient({ url: `file:${filePath}` });
+      client.execute("PRAGMA busy_timeout = 5000").catch(() => {});
+      return client;
+    };
+  } catch {
+    return null;
+  }
 }
 
 export default function kbDashboardRouter() {
@@ -25,7 +49,10 @@ export default function kbDashboardRouter() {
   let db;
 
   router.use(async (req, res, next) => {
-    if (!db && createDbClient) db = createDbClient();
+    if (!db) {
+      const createDbClient = await loadCreateDbClient();
+      if (createDbClient) db = createDbClient();
+    }
     if (!db) return res.status(500).json({ error: "Database not available" });
     next();
   });
