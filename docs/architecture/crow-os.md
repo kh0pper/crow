@@ -81,7 +81,7 @@ All Crow data lives in `~/.crow/`, making the entire installation portable:
 `scripts/crow-install.sh` performs these steps:
 
 1. **System updates** — `apt update && apt upgrade`
-2. **Node.js 20** — via NodeSource repository
+2. **Node.js 22** — via NodeSource repository
 3. **Docker + Docker Compose** — official install script
 4. **Caddy** — reverse proxy with automatic TLS
 5. **Avahi** — mDNS for `crow.local` hostname

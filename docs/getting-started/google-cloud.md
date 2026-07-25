@@ -55,8 +55,8 @@ ssh your-username@<EXTERNAL_IP>
 ## Step 4: Install Crow
 
 ```bash
-# Install Node.js 20
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+# Install Node.js 22
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs git
 
 # Clone and set up Crow

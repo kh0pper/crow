@@ -56,7 +56,7 @@ bash crow-install.sh   # Ejecutarlo
 :::
 
 El instalador tarda 5-10 minutos y configura:
-- Node.js 20, Docker, Caddy, Avahi (mDNS)
+- Node.js 22, Docker, Caddy, Avahi (mDNS)
 - Plataforma Crow con base de datos SQLite
 - Identidad criptográfica (Crow ID)
 - Servicio systemd para inicio automático
