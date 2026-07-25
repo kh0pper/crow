@@ -310,6 +310,7 @@
       "version": "1.0.0",
       "origin": "official",
       "npm_required": true,
+      "min_node": "22.19.0",
       "requires": {
         "min_ram_mb": 512,
         "min_disk_mb": 400
