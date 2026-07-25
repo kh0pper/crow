@@ -4,7 +4,7 @@ title: Bot Engine (pi)
 
 # Bot Engine (pi)
 
-The **bot engine** is the agent runtime behind Bot Builder's message-based channels — Gmail, Discord, Telegram, and Slack. It is [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent), pinned to `0.74.2`. Crow's pi-bots bridge (`scripts/pi-bots/`) spawns it per-turn in RPC mode (`--mode rpc`), feeds it the inbound message plus the bot's definition (model, tools, skills, permission policy), and relays its reply back out the channel it arrived on.
+The **bot engine** is the agent runtime behind Bot Builder's message-based channels — Gmail, Discord, Telegram, and Slack. It is [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent), pinned to `0.82.0` (requires Node.js >= 22.19). Crow's pi-bots bridge (`scripts/pi-bots/`) spawns it per-turn in RPC mode (`--mode rpc`), feeds it the inbound message plus the bot's definition (model, tools, skills, permission policy), and relays its reply back out the channel it arrived on.
 
 Bots on **Crow Messages** or a **voice/device** channel never need the engine — those run their own loop directly against the gateway's model router, not pi. The engine only matters once a bot has an engine-channel gateway attached.
 

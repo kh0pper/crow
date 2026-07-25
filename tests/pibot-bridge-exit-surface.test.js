@@ -82,3 +82,25 @@ test("waiters pending at exit time are rejected by the exit handler", async () =
   );
   await pi.close();
 });
+
+test("PiRpc spawns pi with --no-approve (project-trust pinned to deny for bot spawns)", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "crow-pirpc-"));
+  mkdirSync(join(scratch, "sessions"), { recursive: true });
+  const stub = makeStub(scratch, "setTimeout(() => {}, 5000);\n");
+  const pi = new PiRpc({
+    def: {},
+    sessionDir: scratch,
+    resolved: { provider: "p", model: "m", key: "p/m" },
+    nodeBin: process.execPath,
+    cliPath: stub,
+  });
+  try {
+    const args = pi.proc.spawnargs;
+    const i = args.indexOf("--no-approve");
+    assert.ok(i > 0, "--no-approve must be among the spawn args");
+    assert.ok(i > args.indexOf("rpc"), "flag rides the rpc-mode arg list");
+    assert.ok(args.indexOf("--provider") > i, "flag sits before provider selection (stable position)");
+  } finally {
+    await pi.close();
+  }
+});
