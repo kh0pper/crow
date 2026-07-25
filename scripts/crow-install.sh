@@ -21,7 +21,7 @@ set -euo pipefail
 CROW_HOME="$HOME/.crow"
 CROW_APP="$CROW_HOME/app"
 CROW_DATA="$CROW_HOME/data"
-NODE_MAJOR=20
+NODE_MAJOR=22
 
 # Colors
 RED='\033[0;31m'

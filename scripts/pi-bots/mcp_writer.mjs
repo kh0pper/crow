@@ -78,7 +78,7 @@ function touchesCrowDb(block) {
 // A bot may select an MCP server that lives in <crowHome>/mcp-addons.json but
 // is ABSENT from the canonical ~/.pi/agent/mcp.json (e.g. texas-gov-data,
 // bots-sql-mcp, tasks on MPA). pi-lab's additive merge (CONFIRMED against the
-// installed v0.74.2: extensions/mcp-client.ts reverses the path list so homedir
+// installed v0.74.2 and re-verified on v0.82.0 (2026-07-25 probe run): extensions/mcp-client.ts reverses the path list so homedir
 // is Object.assign'd LAST and wins on key collision; the per-bot sessionDir
 // /.mcp.json is a cwd-self entry and is the SOLE source for absent-from-homedir
 // servers) means we can safely ADD such servers in the per-bot file — never

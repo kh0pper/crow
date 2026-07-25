@@ -61,7 +61,7 @@ function freshRoot(prefix) {
 }
 
 /** Build a fresh fixture bundle source tree: npm_required + verify_paths, mirroring bot-engine's manifest shape (never depends on the real pi package). */
-function buildFixture(id, { withLock = true } = {}) {
+function buildFixture(id, { withLock = true, minNode } = {}) {
   const root = freshRoot("crow-fixture-npmreq-");
   const dir = join(root, id);
   mkdirSync(dir, { recursive: true });
@@ -73,6 +73,7 @@ function buildFixture(id, { withLock = true } = {}) {
     version: "1.0.0",
     description: "d",
     npm_required: true,
+    ...(minNode !== undefined ? { min_node: minNode } : {}),
     requires: { min_ram_mb: 1, min_disk_mb: 1 },
     env_vars: [],
     verify_paths: [VERIFY_REL],
@@ -390,5 +391,76 @@ test("concurrent-install guard: once the first job finishes, a new install of th
   } finally {
     server.close();
     rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+// ─── min_node engine floor (Node-22 rail, 2026-07) ───
+
+test("npm_required + min_node above current Node → refused before npm runs, destDir removed, honest reason", async () => {
+  const id = "fx-npmreq-minnode-hi";
+  const fixtureRoot = buildFixture(id, { minNode: "999.0.0" });
+  _setAppBundlesForTest(fixtureRoot);
+  const job = _createJobForTest(id, "install");
+  try {
+    stubNpm();
+    const log = join(freshRoot("crow-npmlog-"), "args.log");
+    process.env.NPM_STUB_LOG = log;
+
+    const out = await runInstallJob(id, {}, {
+      job, installedSnapshot: [], consentVerified: false,
+      manifest: readManifest(fixtureRoot, id),
+    });
+
+    assert.equal(out.ok, false, "min_node above current Node must refuse the install");
+    assert.match(out.reason, /requires Node\.js >= 999\.0\.0/);
+    assert.match(out.reason, new RegExp(process.versions.node.replace(/\./g, "\\.")),
+      "reason must name the Node this Crow actually runs");
+    assert.equal(existsSync(log), false, "npm must never have been invoked");
+    assert.equal(existsSync(destDirFor(id)), false, "destDir removed on refusal");
+  } finally {
+    _finishJobForTest(job, "failed");
+    restorePath();
+  }
+});
+
+test("npm_required + satisfied min_node → install proceeds through npm as normal", async () => {
+  const id = "fx-npmreq-minnode-ok";
+  const fixtureRoot = buildFixture(id, { minNode: "1.0.0" });
+  _setAppBundlesForTest(fixtureRoot);
+  const job = _createJobForTest(id, "install");
+  try {
+    stubNpm();
+    process.env.NPM_STUB_MATERIALIZE = "1";
+
+    const out = await runInstallJob(id, {}, {
+      job, installedSnapshot: [], consentVerified: false,
+      manifest: readManifest(fixtureRoot, id),
+    });
+
+    assert.equal(out.ok, true, "a satisfied min_node must not block the install");
+  } finally {
+    _finishJobForTest(job, "done");
+    restorePath();
+  }
+});
+
+test("npm_required + malformed min_node → fails open (install proceeds), never bricks on a manifest typo", async () => {
+  const id = "fx-npmreq-minnode-junk";
+  const fixtureRoot = buildFixture(id, { minNode: "not-a-version" });
+  _setAppBundlesForTest(fixtureRoot);
+  const job = _createJobForTest(id, "install");
+  try {
+    stubNpm();
+    process.env.NPM_STUB_MATERIALIZE = "1";
+
+    const out = await runInstallJob(id, {}, {
+      job, installedSnapshot: [], consentVerified: false,
+      manifest: readManifest(fixtureRoot, id),
+    });
+
+    assert.equal(out.ok, true, "malformed min_node must fail open");
+  } finally {
+    _finishJobForTest(job, "done");
+    restorePath();
   }
 });

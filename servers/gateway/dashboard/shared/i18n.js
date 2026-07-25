@@ -1211,8 +1211,8 @@ export const translations = {
     es: "Los canales de Gmail, Discord, Telegram y Slack funcionan mediante pi, el mismo motor de agente de codificación que Bot Builder usa para ejecutar los turnos de cada bot. Aún no está instalado en esta instancia.",
   },
   "botbuilder.engineGateModalDiskNote": {
-    en: "Installs the npm package @earendil-works/pi-coding-agent 0.74.2 (~400 MB disk). No Docker, no sudo, no open ports.",
-    es: "Instala el paquete npm @earendil-works/pi-coding-agent 0.74.2 (~400 MB de disco). Sin Docker, sin sudo, sin puertos abiertos.",
+    en: "Installs the npm package @earendil-works/pi-coding-agent 0.82.0 (~200 MB disk). Requires Node.js 22+. No Docker, no sudo, no open ports.",
+    es: "Instala el paquete npm @earendil-works/pi-coding-agent 0.82.0 (~200 MB de disco). Requiere Node.js 22+. Sin Docker, sin sudo, sin puertos abiertos.",
   },
   "botbuilder.engineGateInstallingBtn": { en: "Installing...", es: "Instalando..." },
   "botbuilder.engineGateRetryBtn": { en: "Retry", es: "Reintentar" },
