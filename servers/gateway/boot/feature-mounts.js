@@ -127,7 +127,9 @@ export async function mountFeatureRoutes(app, deps) {
     const { join } = await import("node:path");
     const { pathToFileURL } = await import("node:url");
     const { homedir } = await import("node:os");
-    const installed = join(homedir(), ".crow", "bundles", "knowledge-base", "routes", "kb-public.js");
+    // Honor CROW_HOME so alternate instances mount their own installed copy
+    const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+    const installed = join(crowHome, "bundles", "knowledge-base", "routes", "kb-public.js");
     // C3: re-anchored — boot/ is one level deeper, need ../../bundles
     const repo = join(__featureGatewayDir, "../../bundles/knowledge-base/routes/kb-public.js");
     const routesPath = existsSync(installed) ? installed : repo;
