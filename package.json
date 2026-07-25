@@ -85,7 +85,7 @@
     "zod": "^3.24.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.19.0"
   },
   "devDependencies": {
     "acorn": "^8.16.0",

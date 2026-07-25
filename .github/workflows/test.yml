@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       # GITHUB_ACTIONS=true applies tests/ci-exclusions.json (empty today);
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       # build-registry imports ajv (a devDependency) via lib/bundle-contract —
       # a full npm ci is required (check-port-allocation alone is dep-free).
@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       # Blocking tier: CRITICAL advisories in production deps stop merges.
       # Advisory-red playbook: fix same-day via upgrade or package.json
       # "overrides"; if genuinely unfixable same-day, raise the level in a PR

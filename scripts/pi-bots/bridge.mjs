@@ -45,7 +45,7 @@ import { extractPlanFileLine, buildPlanPrompt } from "./plan_dispatch.mjs";
 
 const HOME = process.env.HOME || homedir();
 // Package was renamed from @mariozechner/pi-coding-agent to
-// @earendil-works/pi-coding-agent (still 'pi' binary; v0.74.2 verified).
+// @earendil-works/pi-coding-agent (still 'pi' binary; v0.82.0 verified).
 // node = the process running the bridge; pi cli via the pi_resolver ladder
 // (PIBOT_PI_CLI env → bot-engine bundle → repo dep → running node's global
 // root) — never a hardcoded host layout.
@@ -114,7 +114,16 @@ export class PiRpc {
     // not installed" error instead of spawning a phantom path.
     const nodeBin = opts.nodeBin || resolveNodeBin();
     const cliPath = opts.cliPath || requirePiCli().cliPath;
-    const args = [cliPath, "--mode", "rpc", "--provider", resolved.provider, "--model", resolved.model,
+    // --no-approve pins pi >=0.79's project-trust gating to DENY for bot
+    // spawns: pi must never load project-local .pi/ settings, packages, or
+    // instructions from the bot's cwd. Bots can hold write_paths into their
+    // own sessionDir/workspace, so auto-trusting cwd files would let a bot
+    // write .pi/ config and load an extension around the permission gate
+    // (the GHSA-mqxh-6gq7-558m vector). Per-bot MCP is unaffected: pi-lab's
+    // mcp-client reads cwd/.mcp.json itself (verified live on 0.82.0
+    // 2026-07-25: probe server loaded + tool called with this flag set).
+    // Older pi (0.74.2) accepts the flag too, so no version gating.
+    const args = [cliPath, "--mode", "rpc", "--no-approve", "--provider", resolved.provider, "--model", resolved.model,
       "--session-dir", sessionDir + "/sessions"];
     // Phase 3.1 (R9/R11): multi-agent is allowed iff the operator opted in
     // (def.permission_policy.multi_agent) AND the POST-resolution model is

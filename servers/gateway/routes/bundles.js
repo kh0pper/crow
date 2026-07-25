@@ -393,6 +393,24 @@ function copyBundleRefreshItem(appSrc, destDir, item) {
  * name is the only thing checked, exactly as before.
  * existsSync(join(nm, depName)) handles @scope/name naturally.
  */
+/**
+ * Numeric x.y.z comparison for manifest.min_node (the npm_required engine
+ * floor — bot-engine 0.82.0 hard-requires Node >= 22.19). True when
+ * `current` satisfies `min`. Malformed input fails OPEN (true): a manifest
+ * typo must not brick installs; a payload that truly needs the floor still
+ * fails honestly at npm/spawn time.
+ */
+function nodeSatisfiesMin(current, min) {
+  const parse = (v) => {
+    const m = /^v?(\d+)\.(\d+)(?:\.(\d+))?/.exec(String(v).trim());
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3] || 0)] : null;
+  };
+  const c = parse(current), n = parse(min);
+  if (!c || !n) return true;
+  for (let i = 0; i < 3; i++) { if (c[i] !== n[i]) return c[i] > n[i]; }
+  return true;
+}
+
 function bundleNeedsNpmInstall(appSrc, destDir) {
   const pkg = readJsonSafe(join(appSrc, "package.json"), null);
   if (!pkg || !pkg.dependencies || typeof pkg.dependencies !== "object") return false;
@@ -1357,6 +1375,16 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
     // first and reinstall clean.
     const pkgJsonPath = join(destDir, "package.json");
     if (manifest?.npm_required === true) {
+      // Engine floor: refuse honestly instead of installing a payload that
+      // will crash at first spawn on an older Node (bot-engine 0.82.0 on
+      // Node 20 dies with an opaque undici stack).
+      if (typeof manifest.min_node === "string" && manifest.min_node.trim()
+          && !nodeSatisfiesMin(process.versions.node, manifest.min_node)) {
+        const reason = `requires Node.js >= ${manifest.min_node.trim()} — this Crow runs Node ${process.versions.node}; upgrade Node.js, restart Crow, and retry`;
+        appendLog(job, "npm install refused: " + reason);
+        rmSync(destDir, { recursive: true, force: true });
+        return { ok: false, reason };
+      }
       if (!existsSync(pkgJsonPath)) {
         appendLog(job, "npm install failed: package.json missing from bundle (npm_required)");
         rmSync(destDir, { recursive: true, force: true });
