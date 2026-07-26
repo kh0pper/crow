@@ -286,11 +286,24 @@ function main() {
     }
   });
 
-  const child = spawn(
-    "docker",
-    ["exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB, "-q", "-c", PG_COPY],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
+  // The edjobs stack moved to grackle (2026-07-26): reach its postgres via
+  // ssh docker-exec. Set EDJOBS_PG_SSH_HOST="" to restore the local-container
+  // path (e.g. if the stack ever moves back).
+  const PG_SSH_HOST = process.env.EDJOBS_PG_SSH_HOST ?? "kh0pp@100.121.254.89";
+  const pgArgs = ["exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB, "-q", "-c"];
+  const shellQuote = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const child = PG_SSH_HOST
+    ? spawn(
+        "ssh",
+        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", PG_SSH_HOST,
+         ["docker", ...pgArgs].join(" ") + " " + shellQuote(PG_COPY)],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      )
+    : spawn(
+        "docker",
+        [...pgArgs, PG_COPY],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
 
   let stderr = "";
   child.stdout.setEncoding("utf8");
@@ -301,7 +314,7 @@ function main() {
   });
 
   child.on("error", (err) => {
-    console.error(`[sync-edjobs] failed to spawn docker: ${err.message}`);
+    console.error(`[sync-edjobs] failed to spawn docker/ssh: ${err.message}`);
     db.close();
     process.exit(1);
   });
