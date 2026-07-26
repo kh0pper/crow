@@ -62,6 +62,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 6080 | 127.0.0.1 | browser (noVNC, existing) — overridable via `CROW_BROWSER_VNC_PORT`; RFB 5900 via `CROW_BROWSER_RFB_PORT`, CDP 9222 via `CROW_BROWSER_CDP_PORT`. Secondary instances on one host pick +1 offsets (6081/5901/9223) | existing |
 | 6875 | 127.0.0.1 | bookstack (existing) | existing |
 | 8000 | 127.0.0.1 | paperless (existing) | existing |
+| 8002 | tailscale IP | ~~ed-jobs-scraper backend~~ — freed 2026-07-26 (stack migrated to grackle :8002) | external, freed |
 | 8004 | 127.0.0.1 | faster-whisper-server (local STT) | existing |
 | 8007 | 127.0.0.1 | llamacpp-cpu-qwen3-embed (CPU embeddings) | PR #111 |
 | 8080 | 127.0.0.1 | localai (existing) — **also nextcloud, conflict** | existing |
@@ -71,6 +72,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8085 | 127.0.0.1 | miniflux (existing) | existing |
 | 8086 | 127.0.0.1 | shiori (existing) | existing |
 | 8088 | 127.0.0.1 | trilium (existing) | existing |
+| 8089 | 127.0.0.1 + tailscale IP | edjobs nominatim (external, ~/ed-jobs-scraper) — R4 GIS tools + grackle scraper stack (ufw-scoped) | external |
 | 8090 | 127.0.0.1 | capstone-tracker | shipped |
 | 8091 | 127.0.0.1 | crowdsec (LAPI) | MVP PR 4 |
 | 8092 | 127.0.0.1 | stirling-pdf | MVP PR 1 |
