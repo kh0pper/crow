@@ -325,7 +325,13 @@ app.use(cors({
   credentials: true,
 }));
 
-// Rate limiting — general (skip for --no-auth since it's a local-only bridge)
+// Rate limiting — general (skip for --no-auth since it's a local-only bridge).
+// GATEWAY_RATE_LIMIT_SKIP_PREFIXES: comma-separated extra path prefixes exempted
+// from the general limiter, for deployments where many clients share one NAT IP
+// behind an already-allowlisted reverse proxy (per-IP buckets collapse to a
+// single shared bucket there).
+const rateLimitSkipPrefixes = (process.env.GATEWAY_RATE_LIMIT_SKIP_PREFIXES || "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
 if (!noAuth) {
   app.use(rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -333,7 +339,8 @@ if (!noAuth) {
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many requests, please try again later" },
-    skip: (req) => req.path.startsWith("/dashboard") || req.path.startsWith("/api/meta-glasses/") || req.path.startsWith("/llm"),
+    skip: (req) => req.path.startsWith("/dashboard") || req.path.startsWith("/api/meta-glasses/") || req.path.startsWith("/llm")
+      || rateLimitSkipPrefixes.some((p) => req.path.startsWith(p)),
   }));
 }
 
