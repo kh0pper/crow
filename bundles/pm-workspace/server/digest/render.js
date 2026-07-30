@@ -25,7 +25,7 @@ export function escapeHtml(s) {
 }
 
 const S = {
-  body: "font-family:-apple-system,'Segoe UI',sans-serif;line-height:1.6;max-width:640px;margin:0 auto;padding:20px;color:#2c3e50;",
+  body: "font-family:-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.65;max-width:640px;margin:0 auto;padding:20px;color:#2c3e50;",
   h1: "color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px;margin:0 0 6px;font-size:1.5em;",
   date: "color:#666;font-style:italic;margin:0 0 18px;",
   h2: "color:#34495e;margin:25px 0 8px;font-size:1.15em;",
@@ -34,9 +34,12 @@ const S = {
   meta: "color:#666;font-size:0.85em;",
   unavailable: "color:#999;font-style:italic;font-size:0.9em;",
   h3: "color:#34495e;margin:14px 0 4px;font-size:1em;",
-  p: "margin:4px 0;",
-  ul: "margin:4px 0;padding-left:22px;",
-  li: "margin:2px 0;",
+  mdH2: "color:#2c3e50;margin:20px 0 8px;font-size:1.08em;padding-bottom:5px;border-bottom:1px solid #d6e4f0;",
+  mdH3: "color:#5a6b7b;margin:16px 0 5px;font-size:0.92em;letter-spacing:0.04em;text-transform:uppercase;",
+  p: "margin:6px 0;",
+  ul: "margin:6px 0 10px;padding-left:20px;",
+  li: "margin:5px 0;",
+  callout: "background:#fff5f5;border-left:4px solid #e74c3c;padding:10px 14px;margin:12px 0;border-radius:4px;",
   briefing: "background:#f4f9ff;border-left:4px solid #3498db;padding:4px 14px 10px;margin:8px 0;border-radius:4px;",
   table: "width:100%;border-collapse:collapse;margin:8px 0;font-size:0.9em;",
   th: "text-align:left;padding:6px 8px;border-bottom:2px solid #ddd;color:#34495e;",
@@ -46,9 +49,11 @@ const S = {
 
 /**
  * Minimal markdown → email HTML for briefing bodies. Supports the subset the
- * briefing template uses: ## / ### headings, - lists, **bold**, [text](url)
- * links, and blank-line paragraphs. Everything is escaped first; no raw HTML
- * passes through.
+ * briefing template uses: ## / ### headings (rendered as two distinct visual
+ * levels so long briefings keep a scannable hierarchy), - lists, **bold**,
+ * [text](url) links, > blockquote callouts (rendered as a highlighted card,
+ * for deadline/urgent blocks), and blank-line paragraphs. Everything is
+ * escaped first; no raw HTML passes through.
  */
 export function mdToHtml(md) {
   const inline = (s) =>
@@ -61,26 +66,41 @@ export function mdToHtml(md) {
 
   const out = [];
   let list = null;
+  let quote = null;
   const closeList = () => {
     if (list) { out.push("</ul>"); list = null; }
   };
+  const closeQuote = () => {
+    if (quote) { closeList(); out.push("</div>"); quote = null; }
+  };
   for (const raw of String(md || "").split(/\r?\n/)) {
-    const line = raw.trimEnd();
+    let line = raw.trimEnd();
+    const isQuote = /^>\s?/.test(line);
+    if (isQuote) {
+      if (!quote) { closeList(); out.push(`<div style="${S.callout}">`); quote = true; }
+      line = line.replace(/^>\s?/, "");
+    } else if (quote && line.trim() !== "") {
+      closeQuote();
+    }
     const h = line.match(/^(#{2,4})\s+(.*)$/);
     if (h) {
       closeList();
-      out.push(`<h3 style="${S.h3}">${inline(h[2])}</h3>`);
+      if (!quote) closeQuote();
+      const style = h[1].length === 2 ? S.mdH2 : S.mdH3;
+      out.push(`<h3 style="${style}">${inline(h[2])}</h3>`);
     } else if (/^[-*]\s+/.test(line)) {
       if (!list) { out.push(`<ul style="${S.ul}">`); list = true; }
       out.push(`<li style="${S.li}">${inline(line.replace(/^[-*]\s+/, ""))}</li>`);
     } else if (line.trim() === "") {
       closeList();
+      closeQuote();
     } else {
       closeList();
       out.push(`<p style="${S.p}">${inline(line)}</p>`);
     }
   }
   closeList();
+  closeQuote();
   return out.join("\n");
 }
 
