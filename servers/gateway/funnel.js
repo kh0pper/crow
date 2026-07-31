@@ -30,6 +30,19 @@ export const PUBLIC_FUNNEL_PREFIXES = [
 ];
 
 /**
+ * GATEWAY_FUNNEL_PUBLIC_PREFIXES: comma-separated extra entries appended to
+ * PUBLIC_FUNNEL_PREFIXES, for deployments that funnel additional public
+ * surfaces (e.g. share surfaces under /s). Same semantics as the static list:
+ * trailing "/" = subtree prefix, no trailing slash = exact match. The same
+ * three conditions at the top of this file apply to every entry added here.
+ * Read at middleware creation, not per request.
+ */
+function envFunnelPrefixes() {
+  return (process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES || "")
+    .split(",").map((s) => s.trim()).filter((s) => s.startsWith("/"));
+}
+
+/**
  * Express middleware: reject funneled requests to any non-public path.
  *
  * Entries ending with "/" are tree prefixes (subtree match only — path must
@@ -42,11 +55,12 @@ export const PUBLIC_FUNNEL_PREFIXES = [
  * @returns {(req, res, next) => void}
  */
 export function rejectFunneledMiddleware() {
+  const allowed = [...PUBLIC_FUNNEL_PREFIXES, ...envFunnelPrefixes()];
   return (req, res, next) => {
     if (!req.headers["tailscale-funnel-request"]) return next();
     if (process.env.CROW_DASHBOARD_PUBLIC === "true") return next();
     if (
-      PUBLIC_FUNNEL_PREFIXES.some((p) => {
+      allowed.some((p) => {
         if (p.endsWith("/")) return req.path.startsWith(p);
         return req.path === p;
       })
