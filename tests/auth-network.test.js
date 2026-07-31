@@ -206,3 +206,30 @@ test("funnel: public prefixes pass, lookalike paths are rejected", () => {
   // non-funnel requests always pass this middleware
   assert.equal(runFunnelMw("/dashboard", { funnel: false }).nexted, true);
 });
+
+test("funnel: GATEWAY_FUNNEL_PUBLIC_PREFIXES extends the allowlist with the same semantics", () => {
+  process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES = "/s/,/s, /s-assets/ ,not-a-path";
+  try {
+    // subtree entry "/s/" and exact entry "/s"
+    assert.equal(runFunnelMw("/s").nexted, true);
+    assert.equal(runFunnelMw("/s/family").nexted, true);
+    assert.equal(runFunnelMw("/s-assets/icons/icon-192.png").nexted, true);
+    // lookalikes and bare-subtree misses still rejected
+    assert.equal(runFunnelMw("/sX").statusCode, 403);
+    assert.equal(runFunnelMw("/s-assets").statusCode, 403);
+    // entries not starting with "/" are dropped, never matched
+    assert.equal(runFunnelMw("/not-a-path").statusCode, 403);
+    // dashboard stays private regardless of env
+    assert.equal(runFunnelMw("/dashboard").statusCode, 403);
+    // env is read at middleware creation: static list unaffected
+    assert.equal(runFunnelMw("/blog").nexted, true);
+  } finally {
+    delete process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES;
+  }
+});
+
+test("funnel: env unset leaves the static allowlist behavior unchanged", () => {
+  delete process.env.GATEWAY_FUNNEL_PUBLIC_PREFIXES;
+  assert.equal(runFunnelMw("/s/family").statusCode, 403);
+  assert.equal(runFunnelMw("/blog").nexted, true);
+});
