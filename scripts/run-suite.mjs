@@ -96,6 +96,12 @@ env.CROW_DISABLE_INSTANCE_SYNC = "1";
 // double-poll pi_bot_defs alongside a real host's own bot-runtime/systemd
 // units, so it's forced off suite-wide exactly like Nostr/instance-sync above.
 env.CROW_DISABLE_BOT_RUNTIME = "1";
+// Perch Hub C-2: same reasoning for the gateway-supervised Perch hub — a
+// scratch suite gateway must never spawn a real hub child or bind the
+// loopback perch ports (4210/4211 + the 4141-4179 session pool) alongside a
+// real host's own supervised copy. Tests that exercise the runtime inject
+// their own env object through initPerchRuntime's seam.
+env.CROW_DISABLE_PERCH = "1";
 // The suite must never believe it is supervised: a systemd-launched context
 // (CI runner, systemd-run, VS Code remote) leaks INVOCATION_ID, and code
 // under test would arm real restart/exit paths inside test processes.
