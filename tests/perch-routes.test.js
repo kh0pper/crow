@@ -503,6 +503,49 @@ test("POST /narrow accepts a subset of the envelope and stores it on the session
   assert.notEqual(rows[0].status, "active", "an upserted narrowing row must not read as a turn in progress");
 });
 
+// --- F2: narrowing is a PERCH-session concept in P1 --------------------------
+//
+// The narrow route is keyed by gateway_thread_id, which the caller supplies, so
+// without a channel check an operator could permanently strip `bash` from a
+// production gmail thread from inside Perch — and Bot Builder, the declared
+// single writer of the envelope, would show nothing. Cross-channel narrowing is
+// a Phase-2 question; it needs Bot Builder visibility first.
+
+test("POST /narrow refuses a gmail session row and leaves its capabilities alone", async () => {
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,narrowed_tools) " +
+    "VALUES ('chatty','gmail','narrow-gmail','chat','waiting-user',NULL)"
+  ).run();
+  c.close();
+
+  const r = await postJson("/bots/chatty/sessions/narrow-gmail/narrow", { disabled_tools: ["bash"] });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "not_a_perch_session");
+  assert.equal(r.body.gateway_type, "gmail");
+
+  const after = raw();
+  const row = after.prepare(
+    "SELECT narrowed_tools, gateway_type FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id='narrow-gmail'"
+  ).get();
+  after.close();
+  assert.equal(row.narrowed_tools, null, "a gmail thread's envelope is Bot Builder's alone");
+  assert.equal(row.gateway_type, "gmail");
+});
+
+test("POST /narrow still accepts a perch row and a thread that does not exist yet", async () => {
+  // The refusal must be a channel check, not a ban on narrowing: the two
+  // legitimate cases are the whole feature.
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status) " +
+    "VALUES ('chatty','perch','narrow-existing-perch','perch','waiting-user')"
+  ).run();
+  c.close();
+  assert.equal((await postJson("/bots/chatty/sessions/narrow-existing-perch/narrow", { disabled_tools: ["bash"] })).status, 200);
+  assert.equal((await postJson("/bots/chatty/sessions/narrow-brand-new/narrow", { disabled_tools: ["bash"] })).status, 200);
+});
+
 test("POST /narrow rejects widening — unknown ids and def-denied ids alike", async () => {
   const unknown = await postJson("/bots/chatty/sessions/narrow-b/narrow", { disabled_tools: ["read", "teleport"] });
   assert.equal(unknown.status, 400);
