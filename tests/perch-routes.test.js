@@ -15,7 +15,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
@@ -209,6 +209,39 @@ test("GET /bots/:id/sessions marks a fresh active row live, a stale one not", as
   const byThread = Object.fromEntries(body.sessions.map((s) => [s.gateway_thread_id, s]));
   assert.equal(byThread.fresh.live, true);
   assert.equal(byThread.stale.live, false, "an aged-out claim must be reclaimable, not eternally 'live'");
+});
+
+test("GET /bots/:id/sessions is capped, and says so rather than dumping every row", async () => {
+  // A long-lived gmail bot gets one row per THREAD, and duplicate rows per
+  // (bot, thread) are tolerated by design (getSession takes the newest), so
+  // this table only ever grows. An uncapped ORDER BY id DESC hands the lens
+  // the entire history in one JSON body.
+  const c = raw();
+  const ins = c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,status) VALUES ('crowded','gmail',?,'waiting-user')"
+  );
+  for (let i = 0; i < 60; i++) ins.run("t" + String(i).padStart(3, "0"));
+  c.close();
+
+  const { body } = await getJson("/bots/crowded/sessions");
+  assert.equal(body.sessions.length, 50);
+  assert.equal(body.limit, 50);
+  assert.equal(body.truncated, true, "the lens cannot be honest about a cap it is not told about");
+  // Newest first — a cap that kept the OLDEST rows would hide today's work.
+  assert.equal(body.sessions[0].gateway_thread_id, "t059");
+  assert.equal(body.sessions[49].gateway_thread_id, "t010");
+});
+
+test("a bot under the cap is not reported as truncated", async () => {
+  const c = raw();
+  const ins = c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,status) VALUES ('sparse','perch',?,'waiting-user')"
+  );
+  for (let i = 0; i < 3; i++) ins.run("s" + i);
+  c.close();
+  const { body } = await getJson("/bots/sparse/sessions");
+  assert.equal(body.sessions.length, 3);
+  assert.equal(body.truncated, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -745,6 +778,51 @@ test("GET transcript TAIL-truncates: the newest turns survive, the oldest are co
   assert.equal(body.omitted, 500);
   assert.equal(body.events[0].id, "m500", "head-truncation would hide today's turns");
   assert.equal(body.events[1999].id, "m2499");
+});
+
+test("GET transcript reads only the tail BYTES — a fat file is never slurped whole", async () => {
+  // The line cap alone does not bound memory: 100 lines of 50 KB is a 5 MB
+  // file that passes `all.length > 2000` untouched, and readFileSync + split
+  // holds it twice. Real pi session files are large (one on this box already
+  // exceeds 2 MB) and a single line can be enormous.
+  const sessions = join(dir, "sessions-fat");
+  mkdirSync(sessions, { recursive: true });
+  const uuid = "019eeb17-0000-7000-8000-dddddddddddd";
+  const lines = [];
+  for (let i = 0; i < 100; i++) {
+    lines.push(JSON.stringify({
+      type: "message", id: "m" + i,
+      message: { role: "user", content: "x".repeat(50 * 1024) },
+    }));
+  }
+  const file = join(sessions, "2026-06-21T16-50-50-013Z_" + uuid + ".jsonl");
+  writeFileSync(file, lines.join("\n") + "\n");
+  // Comfortably past the 2 MB byte cap, while staying well under the 2000-line
+  // cap (100 lines) — so only the BYTE bound can be what truncates this.
+  const fixtureSize = statSync(file).size;
+  assert.ok(fixtureSize > 4 * 1024 * 1024, "precondition: fixture must dwarf the byte cap, got " + fixtureSize);
+
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-fat',?,?,'waiting-user')"
+  ).run(sessions, uuid);
+  c.close();
+
+  const { status, body } = await getJson("/bots/chatty/sessions/t-fat/transcript");
+  assert.equal(status, 200);
+  assert.ok(body.events.length > 0, "the newest turns must still render");
+  assert.ok(body.events.length < 100, "the whole file must not come back: got " + body.events.length + " of 100");
+  assert.equal(body.events[body.events.length - 1].id, "m99", "the tail is what survives");
+  assert.equal(body.events.some((e) => e.id === "m0"), false, "the head must have been left on disk");
+  assert.equal(body.truncated, true);
+  // The exact count of dropped entries is unknowable once the head is never
+  // read — saying 0 would be a lie, so the field is null and the lens words it
+  // without a number.
+  assert.equal(body.omitted, null);
+  // Every event that DID come back is a complete, parsed object: the partial
+  // first line at the byte boundary is dropped, not half-parsed.
+  assert.ok(body.events.every((e) => e && e.type === "message" && e.message && e.message.role === "user"));
 });
 
 test("GET transcript 404s when there is no row, no dir, or no matching file", async () => {
