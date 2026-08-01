@@ -187,6 +187,11 @@ test("GET /bots/:id/sessions surfaces channel, board and narrowing columns", asy
   // can only learn a SESSION's narrowing from this row.
   assert.equal(byThread["thread-perch"].narrowed_tools, '["bash"]');
   assert.equal(byThread["thread-gmail"].narrowed_tools, null);
+  // C-6 made `kind` real on bridge-created rows too, so the payload carries it
+  // as a first-class field (before C-6 the lens had to key badges off
+  // gateway_type alone).
+  assert.equal(byThread["thread-gmail"].kind, "chat");
+  assert.equal(byThread["thread-perch"].kind, "perch");
 });
 
 test("GET /bots/:id/sessions marks a fresh active row live, a stale one not", async () => {
@@ -252,7 +257,7 @@ test("POST /turn 202s, passes the perch channel through, and streams the reply",
   assert.equal(inboundCalls[0].gateway_type, "perch");
   assert.equal(inboundCalls[0].bot_id, "chatty");
   assert.equal(inboundCalls[0].user_message, "hi");
-  assert.equal(inboundCalls[0].kind, "perch"); // ignored today; C-6 plumbs it
+  assert.equal(inboundCalls[0].kind, "perch"); // C-6 plumbs this through to the row
 
   const { text } = await readSse("/turns/" + body.turnId + "/events");
   assert.deepEqual(sseEvents(text), ["log", "reply"]);
@@ -264,9 +269,13 @@ test("POST /turn 202s, passes the perch channel through, and streams the reply",
 
   // The session row the turn claimed is a real perch row.
   const c = raw();
-  const row = c.prepare("SELECT gateway_type, status FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id=?").get(body.sessionId);
+  const row = c.prepare("SELECT gateway_type, kind, status FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id=?").get(body.sessionId);
   c.close();
   assert.equal(row.gateway_type, "perch");
+  // `kind` comes from claimTurn's INSERT here (handleInbound is injected in this
+  // file, so the bridge's own upsert never runs). The C-6 plumb that makes the
+  // BRIDGE-created INSERT carry it is proven end-to-end in perch-narrowing.test.js.
+  assert.equal(row.kind, "perch");
   assert.equal(row.status, "waiting-user", "a finished turn must not leave a live claim behind");
 });
 

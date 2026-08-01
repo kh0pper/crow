@@ -73,6 +73,32 @@ export function toolAllowlist(def, { remoteEnabled = false } = {}) {
   return out.join(",");
 }
 
+/**
+ * Per-session tool narrowing (Perch Hub P1, C-6). The envelope model: Bot
+ * Builder is the single WRITER of what a bot may do; a session may only ever
+ * ask for LESS. This is an intersection, never a union — a name that is not in
+ * `allowlistCsv` cannot be introduced by narrowing, and every failure mode
+ * falls back to the unmodified def envelope (fail-open to the DEF, never wider).
+ *
+ * @param {string} allowlistCsv  the FINAL csv PiRpc is about to spawn with —
+ *   toolAllowlist(def) plus the `subagent` append, so a session can narrow
+ *   `subagent` away too.
+ * @param {string|null} narrowedJson  bot_sessions.narrowed_tools — a JSON array
+ *   of tool ids to disable. Absent / malformed / non-array / empty => no-op.
+ * @returns {string} the csv to spawn with. `""` is a real, deliberate answer:
+ *   a fully narrowed session gets NO tools (PiRpc pins `--tools ""` for it —
+ *   omitting the flag would hand pi its full default surface, i.e. narrowing
+ *   would WIDEN).
+ */
+export function applySessionNarrowing(allowlistCsv, narrowedJson) {
+  if (!narrowedJson) return allowlistCsv;
+  let disabled;
+  try { disabled = JSON.parse(narrowedJson); } catch { return allowlistCsv; }
+  if (!Array.isArray(disabled) || !disabled.length) return allowlistCsv;
+  const keep = String(allowlistCsv || "").split(",").filter((t) => t && !disabled.includes(t));
+  return keep.join(",");
+}
+
 // F4a L2b: read feature_flags.remote_invocation with the same scope resolution
 // as readSetting (this-instance override first, then global), synchronously
 // over better-sqlite3. Local-only flag; default off. Never throws.
@@ -139,7 +165,21 @@ export class PiRpc {
     // hand DB-edit bypasses this.
     let tools = toolAllowlist(def, { remoteEnabled: opts.remoteEnabled });
     if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
-    if (tools) args.push("--tools", tools);
+    // C-6: per-session narrowing is applied to the FINAL csv — AFTER the
+    // subagent append — so a session can narrow `subagent` away too. Narrowing
+    // only ever removes (applySessionNarrowing); opts.narrowedTools absent (every
+    // non-perch caller) leaves `tools` untouched and the branch below identical
+    // to what shipped before.
+    const narrowedTools = applySessionNarrowing(tools, opts.narrowedTools);
+    if (narrowedTools !== tools) {
+      // A narrowing that removes EVERY tool must STILL pin `--tools ""`: pi
+      // parses that to an empty allowlist (dist/cli/args.js:85-89 →
+      // core/sdk.js:133-136, verified on 0.82.0), whereas omitting the flag
+      // hands pi its full default surface — narrowing would widen.
+      args.push("--tools", narrowedTools);
+    } else if (tools) {
+      args.push("--tools", tools);
+    }
     if (opts.appendSystemPromptFile) args.push("--append-system-prompt", opts.appendSystemPromptFile);
     if (opts.piSessionId) args.push("--session", opts.piSessionId);
     // PI_BOT_PERMISSION_POLICY drives the per-bot gate in pi-lab's
@@ -476,6 +516,11 @@ export async function handleInbound(opts) {
   }
 
   let session = getSession(bot_id, gateway_thread_id);
+  // C-6: the same SELECT * that resolves pi_session_id also carries this
+  // session's saved narrowing (Perch writes it; Bot Builder still owns the
+  // envelope). NULL on every non-perch row => PiRpc sees undefined => the
+  // spawn args are byte-identical to what shipped before.
+  const narrowedTools = session && session.narrowed_tools != null ? session.narrowed_tools : null;
   if (session && session.control === "stop") {
     session.status = "stopped"; upsertSession(session);
     await sendReply("Session is stopped. Reply 'resume' to continue.");
@@ -621,12 +666,17 @@ export async function handleInbound(opts) {
     " escalated=" + resolved.escalated + " source=" + resolved.source +
     " session=" + (effectiveResume ? "resume" : "new") + (forceNew ? " (forced-new: model changed)" : ""));
 
+  // C-6 `kind` plumb: an adapter that declares one (perch does) tags the row;
+  // one that does not is left EXACTLY as before — the INSERT path defaults
+  // 'chat' and the UPDATE path copies the existing row's kind forward. Writing
+  // a default here instead would silently rewrite an existing row's kind on
+  // every turn from a caller that never asked for one.
   session = upsertSession(Object.assign({}, session || {}, {
     bot_id, gateway_thread_id, gateway_type, project_id: projectId,
     card_id: cardId == null ? null : cardId, plan_path: plan.path,
     pi_session_dir: sessionDir + "/sessions", status: "active", control: "run",
     model: resolved.key, escalated: resolved.escalated ? 1 : 0,
-  }));
+  }, opts.kind ? { kind: String(opts.kind) } : {}));
 
   // Warm the resolved model bundle before spawning pi (same as runJob). The
   // bridge is a separate process from the gateway, so it warms over HTTP via
@@ -634,7 +684,7 @@ export async function handleInbound(opts) {
   // return "Connection error" → "(no reply)" on Discord/Gmail. Non-fatal.
   await warmModel(resolved.provider, log);
 
-  const pi = new PiRpc({ def, sessionDir, resolved, selfAuthoringDir, remoteEnabled,
+  const pi = new PiRpc({ def, sessionDir, resolved, selfAuthoringDir, remoteEnabled, narrowedTools,
     piSessionId: effectiveResume ? session.pi_session_id : null, appendSystemPromptFile: sysFile });
   let result;
   // B1: captured on a successful turn so the post-turn skill review (fired AFTER
