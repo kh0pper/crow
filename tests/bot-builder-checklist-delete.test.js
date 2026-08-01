@@ -230,6 +230,31 @@ test("engine ready + runtime mode 'external': 'Bot engine' row is READY (OK) wit
   resetEnginePins();
 });
 
+test("perch gateway: counted as an engine channel — 'Bot engine' row renders, and the Channel row is ready with no missing fields", async () => {
+  // Perch Hub P1 C-4: hasEngineChannel() is `gateways.some(g => ENGINE_CHANNELS.includes(g.type))`,
+  // so a bare {type:"perch"} record must pull the engine row in. It must ALSO
+  // read complete on the Channel row (GATEWAY_REQUIRED_FIELDS.perch === []) —
+  // a perch bot with nothing else to fill in is genuinely ready.
+  _setEngineStatusForTest({ state: "absent" });
+  const bot = mkBot({ gateways: [{ type: "perch" }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.match(html, /Bot engine/, "perch must pull in the engine row");
+  assert.match(html, /not installed on this instance yet/);
+  assert.ok(!/setup incomplete/.test(html), "perch has no required fields — the Channel row must not claim it's incomplete");
+  resetEnginePins();
+});
+
+test("perch gateway + engine ready + runtime armed: 'Bot engine' row is READY (OK)", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "bundle", cliPath: "/fake/cli.js" });
+  _setBotRuntimeStatusForTest({ mode: "gateway" });
+  await writeSetting(db, "feature_flags", JSON.stringify({ bot_runtime: true }), { scope: "local" });
+  const bot = mkBot({ gateways: [{ type: "perch" }] });
+  const html = await renderReadiness(db, bot, defOf(bot), "en");
+  assert.match(html, /Bot engine/);
+  assert.match(html, /installed \(source: bundle\)/);
+  resetEnginePins();
+});
+
 test("es rendering of the engine row has no bare i18n keys", async () => {
   _setEngineStatusForTest({ state: "absent" });
   const bot = mkBot({ gateways: [{ type: "gmail", address: "a@b.c", allowlist: ["a@b.c"] }] });

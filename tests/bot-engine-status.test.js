@@ -65,7 +65,10 @@ beforeEach(() => {
 });
 
 test("ENGINE_CHANNELS lists the supported bot channels", () => {
-  assert.deepEqual(ENGINE_CHANNELS, ["gmail", "discord", "telegram", "slack"]);
+  // "perch" (Perch Hub P1, C-4) is a first-class engine channel: a perch
+  // turn spawns pi in-process through handleInbound exactly like gmail's
+  // tick does, so a perch attach needs the engine present just the same.
+  assert.deepEqual(ENGINE_CHANNELS, ["gmail", "discord", "telegram", "slack", "perch"]);
 });
 
 test("absent: resolvePiCli misses on every rung (env/bundle/repo/global)", () => {

@@ -37,7 +37,7 @@ export const WIZARD_STEP_KEYS = ["template", "basics", "model", "channel", "revi
 // the shared gateway-fields module; device-bound types persist a type-only
 // draft record and finish on the Gateways tab (spec §D3). "none" is the
 // always-present "skip for now" (spec §D1 step 3).
-const WIZARD_GW_TYPES = ["none", "crow-messages", "gmail", "discord", "telegram", "slack", "glasses", "companion"];
+const WIZARD_GW_TYPES = ["none", "crow-messages", "perch", "gmail", "discord", "telegram", "slack", "glasses", "companion"];
 
 // Every field the wizard collects; the carry re-emits these as hidden inputs
 // on steps that don't edit them (spec §D1: state lives in the POST body).
