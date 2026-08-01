@@ -52,7 +52,7 @@ A **channel** is where people talk to your bot. The template picks a sensible on
 - **Gmail / Discord / Telegram / Slack** need credentials from those services — see the [channel guides](#channel-guides) below. You can also pick the channel now, skip the credentials, and finish later.
 - **No channel yet** is always an option. The bot still works — you can talk to it from its Sessions tab — and you can add a channel any time.
 
-The first time you attach a Gmail, Discord, Telegram, or Slack channel, Crow may prompt you to install the **bot engine** — a small one-time download that powers those channels. It's a normal add-on install (no restart needed), and it only happens once per Crow instance. See the [Bot Engine reference](/developers/bot-engine) if you want the details.
+The first time you attach a Gmail, Discord, Telegram, Slack, or Perch channel, Crow may prompt you to install the **bot engine** — a small one-time download that powers those channels. It's a normal add-on install (no restart needed), and it only happens once per Crow instance. See the [Bot Engine reference](/developers/bot-engine) if you want the details.
 
 ## Step 6 — Review and create
 
