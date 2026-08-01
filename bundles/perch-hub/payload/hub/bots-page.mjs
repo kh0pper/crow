@@ -264,6 +264,14 @@ export function botsClient(esc) {
 				if (s.live) badges.push('<span class="badge live">live</span>');
 				const when = [s.status || "", s.updated_at || "", thread ? thread.slice(0, 24) : "no thread id"].filter(Boolean).join(" · ");
 				const paneKey = esc(botId) + "-" + esc(String(s.id));
+				// Transcript is a READ — observation is free on every channel.
+				// Controls WRITE the session's tool envelope, and narrowing is a
+				// perch-session concept in P1: the gateway refuses a narrow on a
+				// non-perch row (400 not_a_perch_session), and offering the
+				// affordance anyway would invite an operator to strip a tool from
+				// a production gmail thread from a surface Bot Builder — the
+				// single writer of the envelope — cannot see.
+				const canNarrow = String(s.gateway_type || "") === "perch";
 				const acts = thread
 					? '<button class="quiet" data-act="transcript" data-bot="' +
 						esc(botId) +
@@ -272,13 +280,15 @@ export function botsClient(esc) {
 						'" data-pane="t-' +
 						paneKey +
 						'">Transcript</button>' +
-						'<button class="quiet" data-act="controls" data-bot="' +
-						esc(botId) +
-						'" data-thread="' +
-						esc(thread) +
-						'" data-pane="c-' +
-						paneKey +
-						'">Controls</button>'
+						(canNarrow
+							? '<button class="quiet" data-act="controls" data-bot="' +
+								esc(botId) +
+								'" data-thread="' +
+								esc(thread) +
+								'" data-pane="c-' +
+								paneKey +
+								'">Controls</button>'
+							: "")
 					: '<span class="badge">no thread id</span>';
 				return (
 					'<div class="srow"><span class="roost-dot"></span>' +

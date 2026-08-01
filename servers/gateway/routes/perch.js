@@ -608,6 +608,15 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
       if (!Array.isArray(list) || list.some((t) => typeof t !== "string")) {
         return jsonError(res, 400, "bad_request");
       }
+      // P1 scopes narrowing to PERCH sessions. The thread id is caller-supplied
+      // (foreignChannel()), the lens draws a session row for every channel, and
+      // the bridge reads narrowed_tools on all of them — so without this an
+      // operator could permanently strip a tool from a production gmail thread
+      // from inside Perch, invisibly to Bot Builder, which is the single writer
+      // of the envelope. Cross-channel narrowing is a Phase-2 question: it
+      // needs a Bot Builder surface that shows the narrowing first.
+      const foreign = foreignChannel(await latestSession(db, botId, threadId));
+      if (foreign) return jsonError(res, 400, "not_a_perch_session", { gateway_type: foreign });
       const envelope = await buildEnvelope(db, parseDef(row));
       const allowed = new Set(envelope.tools.map((t) => t.id));
       // Perch narrows; Bot Builder widens. Anything outside the def's own grant
