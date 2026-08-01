@@ -373,8 +373,14 @@ function readTranscript(file) {
  * @param {object} [seams]
  * @param {Function} [seams.handleInboundImpl] test seam — replaces the lazy
  *   bridge import so a turn can be driven without spawning pi.
+ * @param {Function} [seams.loadBridgeImpl] test seam — replaces the lazy import
+ *   ITSELF, keeping its timing. `handleInboundImpl` short-circuits before the
+ *   import and so resolves in a microtask, which can never interleave with
+ *   another request; the real first turn of a gateway's life awaits a genuine
+ *   module load. Only this seam reproduces that yield, which is the one window
+ *   in which the in-flight guard is racy.
  */
-export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null } = {}) {
+export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null, loadBridgeImpl = loadBridge } = {}) {
   const router = Router();
 
   // FIRST statement: auth-gate the whole prefix (bot-board-api.js idiom).
@@ -382,7 +388,7 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
 
   async function resolveHandleInbound() {
     if (handleInboundImpl) return handleInboundImpl;
-    return (await loadBridge()).handleInbound;
+    return (await loadBridgeImpl()).handleInbound;
   }
 
   // ---- GET /bots — every bot on the instance, plus attach + engine state ----
@@ -494,7 +500,11 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
     const botId = String(req.params.id);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const db = createDbClient();
+    // Two separate undo obligations, both held only until the turn is LAUNCHED,
+    // after which its own .finally() owns them: `held` is the in-flight memory
+    // guard (taken before any await, see below), `claimed` is the DB row claim.
     let claimed = null;
+    let held = null;
     try {
       const row = await loadBotRow(db, botId);
       if (!row) return jsonError(res, 404, "unknown_bot");
@@ -513,18 +523,32 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
       // no tick, so it enforces its own — two pi processes resuming ONE session
       // file corrupts the transcript. Memory guard for this process, DB claim
       // for the case where a restart landed mid-turn.
+      //
+      // The memory guard is checked and TAKEN in the same synchronous run, with
+      // no await between: every await below (the session read, the lazy bridge
+      // import, the DB claim) is a yield point at which a second request for
+      // this thread would otherwise walk straight through a check that has
+      // already passed. The bridge import is a real module load on a gateway's
+      // first turn, so that window is not hypothetical.
+      if (inFlight.has(flightKey)) return jsonError(res, 409, "turn_in_progress");
+      inFlight.add(flightKey);
+      held = flightKey;
+
       const existing = await latestSession(db, botId, threadId);
       // Perch turns run on perch threads and on brand-new ones. Never on
       // another channel's — see foreignChannel().
       const foreign = foreignChannel(existing);
-      if (foreign) return jsonError(res, 400, "not_a_perch_session", { gateway_type: foreign });
-      if (inFlight.has(flightKey) || claimIsFresh(existing)) {
+      if (foreign) {
+        inFlight.delete(held); held = null;
+        return jsonError(res, 400, "not_a_perch_session", { gateway_type: foreign });
+      }
+      if (claimIsFresh(existing)) {
+        inFlight.delete(held); held = null;
         return jsonError(res, 409, "turn_in_progress");
       }
 
       const handleInbound = await resolveHandleInbound();
       await claimTurn(db, botId, threadId);
-      inFlight.add(flightKey);
       claimed = { flightKey, threadId };
 
       sweepTurns();
@@ -566,13 +590,15 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
         inFlight.delete(flightKey);
         releaseClaim(botId, threadId);
       });
+      // The turn is running: it owns both undo obligations now, and the catch
+      // below must not release what a live turn is still holding.
+      held = null;
+      claimed = null;
 
       res.status(202).json({ turnId, sessionId: threadId });
     } catch (err) {
-      if (claimed) {
-        inFlight.delete(claimed.flightKey);
-        releaseClaim(botId, claimed.threadId);
-      }
+      if (claimed) releaseClaim(botId, claimed.threadId);
+      if (held) inFlight.delete(held);
       jsonError(res, 500, String((err && err.message) || err));
     } finally {
       try { db.close(); } catch { /* already closed */ }
