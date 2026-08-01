@@ -3,12 +3,21 @@
 // randomBytes, the raw spawn under the log-drain wrapper, the logger) is
 // injected, so nothing here spawns a real process, mints a token into the
 // real ~/.crow, or writes to the real gateway log.
+//
+// The LAST test in this file is deliberately different — Task C-8's end-to-end
+// install: the REAL vendored payload, the REAL superviseProcess, a real hub
+// process answering a real HTTP request. See its header block.
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, statSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createServer } from "node:net";
+import {
+  mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, statSync, readFileSync, cpSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   initPerchRuntime,
@@ -16,8 +25,12 @@ import {
   stopPerchRuntime,
   stopPerchRuntimeBounded,
   PERCH_STOP_TIMEOUT_MS,
+  PERCH_BUNDLE_ID,
   _resetPerchRuntimeForTest,
 } from "../servers/gateway/perch-runtime.js";
+import { computePayloadDigest } from "../scripts/check-vendored-payloads.mjs";
+
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -345,4 +358,170 @@ test("stopPerchRuntimeBounded swallows a throwing stop rather than failing its c
 
 test("the default bound is 5s and is exported so both callers share one number", () => {
   assert.equal(PERCH_STOP_TIMEOUT_MS, 5000);
+});
+
+// ---------------------------------------------------------------------------
+// C-8 — END TO END: real vendored payload, real supervisor, real HTTP
+// ---------------------------------------------------------------------------
+//
+// Everything above this line runs against fakes. This one does not: it copies
+// `bundles/perch-hub/payload/` — the actual bytes `scripts/vendor-perch.mjs`
+// pulled out of pi-lab at the commit recorded in payload/UPSTREAM — into a
+// scratch CROW_HOME laid out the way a real install lays it out, then boots it
+// through the REAL `superviseProcess` and proves the hub answers
+// `GET /bots` with the bearer the runtime minted.
+//
+// Why the fixture writes BOTH the payload tree AND `installed.json`:
+// "installed" has two different readers in this product and they read two
+// different things. `perch-runtime.js` and the Perch panel key off the payload
+// directory on disk; the extension PROXY's route table
+// (`extension-proxy.js` getProxiedExtensions) is built from
+// `CROW_HOME/installed.json` joined against `CROW_HOME/bundles/<id>/manifest.json`.
+// A fixture with only the payload boots a healthy hub behind a proxy route that
+// 404s — everything looks fine and nothing works. Real install writes all
+// three (payload, manifest copy, installed.json entry), so this does too.
+//
+// Ports are allocated from the ephemeral range at run time, never the 4210/4211
+// defaults and never the lab's live pi-hub on 4200/4201.
+
+/** Bind :0 on loopback, note the port the kernel handed out, release it. */
+function freeLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Lay out a scratch CROW_HOME exactly as a real bundle install would. */
+function installRealPayload(home) {
+  const srcBundle = join(REPO_ROOT, "bundles", PERCH_BUNDLE_ID);
+  assert.ok(
+    existsSync(join(srcBundle, "payload", "hub", "server.mjs")),
+    "bundles/perch-hub/payload is missing — run `node scripts/vendor-perch.mjs --ref crow-mode`",
+  );
+  const destBundle = join(home, "bundles", PERCH_BUNDLE_ID);
+  mkdirSync(destBundle, { recursive: true });
+  cpSync(join(srcBundle, "payload"), join(destBundle, "payload"), { recursive: true });
+  cpSync(join(srcBundle, "manifest.json"), join(destBundle, "manifest.json"));
+
+  const manifest = JSON.parse(readFileSync(join(destBundle, "manifest.json"), "utf8"));
+  writeFileSync(
+    join(home, "installed.json"),
+    JSON.stringify(
+      [{ id: PERCH_BUNDLE_ID, type: "bundle", version: manifest.version, installedAt: new Date().toISOString() }],
+      null,
+      2,
+    ),
+  );
+  return { destBundle, manifest };
+}
+
+/** Poll until the hub answers, or give up with the child's own log lines. */
+async function fetchWhenUp(url, init, { timeoutMs = 20000, logs = [] } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr = null;
+  while (Date.now() < deadline) {
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      lastErr = err;
+      await sleep(150);
+    }
+  }
+  throw new Error(
+    `hub never answered ${url} within ${timeoutMs}ms (last: ${lastErr && lastErr.message})\n` +
+      `child output:\n${logs.join("\n") || "  (none)"}`,
+  );
+}
+
+/** Any live process whose argv mentions this scratch payload dir. */
+function processesUnder(payloadDir) {
+  const ps = execFileSync("ps", ["-eo", "pid=,args="], { encoding: "utf8" });
+  return ps.split("\n").filter((line) => line.includes(payloadDir));
+}
+
+test("E2E: the vendored payload installs, boots under the real supervisor, and serves /bots", async () => {
+  const home = mkdtempSync(join(scratch, "crowhome-e2e-"));
+  const { destBundle, manifest } = installRealPayload(home);
+  const payloadDir = join(destBundle, "payload");
+
+  // The fixture must be the REAL vendored bytes, not a stub like the fakes
+  // above use — otherwise a green run below would prove nothing about what
+  // ships. This is the same digest CI recomputes.
+  assert.equal(
+    computePayloadDigest(payloadDir),
+    manifest.payload_sha256,
+    "scratch payload does not match the manifest's stamped digest",
+  );
+  assert.equal(manifest.draft, false, "the bundle must be published for anyone to install it");
+
+  const port = await freeLoopbackPort();
+  const registryPort = await freeLoopbackPort();
+  for (const p of [port, registryPort]) {
+    assert.ok(p > 10000, `refusing to bind low port ${p}`);
+    assert.ok(![4200, 4201, 4210, 4211].includes(p), `port ${p} is reserved`);
+  }
+  assert.notEqual(port, registryPort);
+
+  const logs = [];
+  let started = null;
+  try {
+    // No `superviseProcess` seam and no `_spawn` seam: this is the real
+    // supervisor spawning a real node process. Only the logger is captured.
+    started = await initPerchRuntime({
+      crowHome: home,
+      env: {
+        PATH: process.env.PATH,
+        // Scratch HOME so the hub's settings.json / session lookups can never
+        // reach the operator's real ~/.pi.
+        HOME: home,
+        CROW_PERCH_PORT: String(port),
+        CROW_PERCH_REGISTRY_PORT: String(registryPort),
+      },
+      _log: (line) => logs.push(line),
+    });
+    assert.equal(started.started, true);
+    assert.ok(started.handle, "real superviseProcess must hand back a handle");
+
+    const token = readFileSync(join(home, "perch-token"), "utf8").trim();
+    assert.match(token, /^[0-9a-f]{64}$/);
+
+    const res = await fetchWhenUp(
+      `http://127.0.0.1:${port}/bots`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      { logs },
+    );
+    assert.equal(res.status, 200, `GET /bots with the minted bearer must be 200\nchild output:\n${logs.join("\n")}`);
+    const body = await res.text();
+    // The bots lens exists only under PERCH_CROW_MODE=1 — the runtime's env
+    // block is what turns it on, so this marker proves the crow-mode wiring
+    // end to end, not just "some server answered".
+    assert.ok(body.includes('id="perch-bots-root"'), "response is not the crow-mode bots lens");
+
+    // The bearer is load-bearing, not decorative.
+    const unauth = await fetch(`http://127.0.0.1:${port}/bots`, { redirect: "manual" });
+    assert.notEqual(unauth.status, 200, "the hub must not serve /bots without the bearer");
+
+    assert.equal(perchRuntimeStatus().running, true);
+    assert.equal(perchRuntimeStatus().port, port);
+  } finally {
+    // Real teardown path — the same one gateway shutdown and uninstall use.
+    const stopped = await stopPerchRuntime();
+    if (started && started.started) assert.equal(stopped, true);
+  }
+
+  // The supervisor kills the whole process GROUP; if that ever regresses the
+  // hub outlives the gateway and keeps the port. `handle.stop()` resolves on
+  // the child's exit event, so by here it is already gone.
+  assert.deepEqual(processesUnder(payloadDir), [], "a hub process survived the stop path");
+  await assert.rejects(
+    fetch(`http://127.0.0.1:${port}/bots`),
+    "the hub port must be closed after teardown",
+  );
 });
