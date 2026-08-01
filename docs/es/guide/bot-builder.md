@@ -46,8 +46,59 @@ Un gateway conecta un agente con un lugar donde la gente habla con él. La misma
 - **Discord**: El agente se une a un servidor de Discord como bot y responde en canales y mensajes directos, con una lista de usuarios permitidos por agente.
 - **Lentes Meta**: Un par de lentes Ray-Ban Meta (Gen 2) emparejados se vincula a un agente. Ese agente entonces dirige el turno de voz rápido: su persona, sus skills, sus herramientas delimitadas y sus permisos, hablados a través de los perfiles de habla y voz que elegiste. Consulta la [guía de Lentes Meta](/es/guide/meta-glasses).
 - **Crow Messages**: El agente se vuelve accesible como un contacto. Las personas que invites pueden enviarle mensajes, puedes explorar y agregar los bots que corren en tus Crows, y puedes reunir a personas y bots en una sala grupal. Consulta la [guía de Crow Messages](/es/guide/crow-messages).
+- **Perch**: El agente se vuelve conversable desde la página Perch de tu propio panel. No hay nada que configurar: elegir el canal es toda la configuración. Perch necesita la extensión Perch Hub instalada. Consulta [Perch](#perch-habla-con-un-agente-desde-tu-propio-panel) más abajo.
 
 Vincular los lentes a un agente es uno a uno: un dispositivo dirige un agente a la vez, y elegir un nuevo agente para un dispositivo libera el vínculo anterior.
+
+## Perch: habla con un agente desde tu propio panel
+
+Perch es una extensión que agrega una página **Perch** al Crow's Nest. Muestra todos los agentes de tu Crow, todas las conversaciones que cada uno ha tenido en cualquier canal, y la transcripción de cada una. Para los agentes a los que les adjuntes el canal Perch, además te da una caja de mensajes.
+
+Nada de Perch queda expuesto a internet. Corre en tu máquina, escucha solo ahí, y solo es accesible a través del inicio de sesión de tu panel.
+
+### 1. Instala Perch
+
+Instala **Perch Hub** desde la página de Extensiones, o abre **Perch** en la navegación y usa el botón **Instalar Perch** de la tarjeta que aparece. Perch registra un pequeño servicio local, así que Crow se reinicia para poder enrutarlo; la página se recarga sola cuando la puerta de enlace vuelve, y aparece una entrada **Perch** en la navegación.
+
+Si Perch dice que está desconectado justo después de instalarlo, normalmente es el reinicio que aún está pendiente: la tarjeta te dice en cuál de los dos casos estás, y lo dice con claridad cuando el supervisor sí registró un error real.
+
+### 2. Adjunta el canal Perch a un agente
+
+Abre el agente en el Bot Builder, ve a la pestaña **Gateways**, elige **Perch (chat del panel)** y guarda. No hay campos que llenar. También puedes elegir Perch como canal mientras creas un agente en el asistente.
+
+Los turnos de Perch corren sobre el mismo motor de bots que usan Gmail y Discord, así que si el motor todavía no está instalado, Crow te ofrecerá instalarlo antes de dejarte guardar.
+
+Los agentes sin el canal adjunto igual aparecen en Perch. Puedes leer sus sesiones y transcripciones; simplemente no puedes escribirles. Observar es gratis, hablar es la parte que eliges activar.
+
+### 3. Escríbele al agente
+
+Abre **Perch**. Cada agente es una tarjeta. Los agentes con el canal adjunto tienen una caja de mensajes al pie de la suya: escribe, envía, y la respuesta llega en vivo a medida que el agente la produce. Si algo sale mal — el motor no está listo, el agente ya está ocupado con otro mensaje de la misma conversación — la tarjeta lo dice en lugar de la respuesta, en vez de quedarse girando.
+
+Cada conversación es una sesión. Aparece en la lista de sesiones del agente con una **transcripción** que puedes abrir, y el agente retoma el hilo donde lo dejaste.
+
+### 4. Acota las herramientas de un agente para una sola conversación
+
+Abre **Controls** en cualquier fila de sesión. Verás el envelope completo del agente: todas las herramientas que tiene permitidas, cada una con una casilla, además de su modelo y sus skills.
+
+Desmarca una herramienta y queda apagada **solo para esa conversación**, a partir del siguiente mensaje. La definición del agente no se toca, y todas las demás conversaciones conservan el conjunto completo. Esto es para el momento en que quieres que un agente responda una pregunta sin tocar tus archivos, sin editar nada, sin salir a la red: en este hilo, ahora mismo.
+
+Las herramientas que aparecen con un candado son las que el agente no tiene permitidas en absoluto. Ahí no se pueden activar; enlazan al Bot Builder, que es el único lugar que otorga una herramienta. Perch solo puede quitar, nunca dar.
+
+### 5. Cómo leer las insignias
+
+Cada fila de sesión lleva insignias:
+
+- el **canal** por el que llegó: `perch`, `gmail`, `discord`, etc.;
+- una insignia de **tarjeta** cuando la sesión fue iniciada por un despacho del bot-board, que enlaza de vuelta a la tarjeta en el tablero;
+- una insignia **live** mientras un turno está corriendo de verdad.
+
+### Antes de instalarlo
+
+Vale la pena saber dos cosas, porque Perch no las esconde.
+
+Cualquiera que pueda entrar a tu panel puede leer las transcripciones de **todos** los agentes en Perch. No hay control de acceso por agente.
+
+Perch además trae su gestor de sesiones original completo, que puede iniciar programas en la máquina donde corre. Eso es deliberado: es una herramienta de operador autoalojada, y está detrás del inicio de sesión de tu panel y de nada más. Instálalo en un Crow cuyo inicio de sesión trates con la misma seriedad que el acceso por shell a esa máquina, y no en uno donde ese inicio de sesión esté compartido más ampliamente.
 
 ## Permisos y seguridad
 
