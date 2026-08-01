@@ -68,6 +68,8 @@ Abre el agente en el Bot Builder, ve a la pestaña **Gateways**, elige **Perch (
 
 Los turnos de Perch corren sobre el mismo motor de bots que usan Gmail y Discord, así que si el motor todavía no está instalado, Crow te ofrecerá instalarlo antes de dejarte guardar.
 
+Puedes adjuntar el canal antes de instalar Perch, y el guardado sí se completa — pero Crow te avisa, porque la página que mostraría las respuestas del agente es justamente la extensión Perch. El aviso trae al lado un botón **Instalar Perch**, y cuando la instalación y el reinicio terminan vuelves al mismo agente ya sin el aviso.
+
 Los agentes sin el canal adjunto igual aparecen en Perch. Puedes leer sus sesiones y transcripciones; simplemente no puedes escribirles. Observar es gratis, hablar es la parte que eliges activar.
 
 ### 3. Escríbele al agente

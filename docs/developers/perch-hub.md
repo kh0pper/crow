@@ -58,6 +58,17 @@ What it does not need is credentials. `GATEWAY_REQUIRED_FIELDS.perch` is `[]` �
 
 The type is offered in both places a channel can be chosen: the Gateways tab dropdown and the create wizard's channel step (`WIZARD_GW_TYPES` is a separate list from `SIMPLE_GATEWAY_TYPES`; a type missing from it silently falls back to the template's channel).
 
+### Attaching `perch` without the bundle warns
+
+`perch` is the one channel whose surface is a *bundle* rather than a remote service, so an attach can be complete, saved, and gated correctly and still have nowhere to put a reply: the lens **is** `perch-hub`. Without the bundle, a turn still 202s and still spawns pi; the answer simply goes nowhere the operator can see.
+
+Both save surfaces therefore raise `&warn=perch_not_installed` — the Gateways-tab save (`bot-builder/api-handlers.js`) and `handleWizardCreate` (`bot-builder/wizard.js`). It is a **warning, never a block**, on the same pattern as C4's `warn=bot_runtime_off`: the record saves, the turn API is untouched, and `GATEWAY_REQUIRED_FIELDS.perch` stays `[]` (a required field there would change what the C4 engine gate treats as a complete attach). The banner carries a one-click install driven by the Perch panel's own job client — `perchGateClientJS()` is exported and used from both places rather than copied.
+
+Two details worth keeping if this code is touched:
+
+- The signal is `perchInstalled()` from `panels/perch.js` — **disk truth at call time**, not `perchRuntimeStatus().running`. Every `webUI` bundle install ends in a gateway restart, so "installed but not running" is a normal window and must not warn.
+- One save can raise two warnings at once (a disarmed bot runtime *and* a missing Perch), which reaches the panel as an array. `bot-builder.js` reads `?warn=` as a list and renders one banner per value; free-form warn strings are never split, since several of them contain commas.
+
 A perch turn is one `handleInbound()` call, like a Gmail turn — but it is the **first in-process** one in the gateway. Every other dispatch spawns a detached child; perch runs the bridge in-process because only that gives a streaming `sendReply` to push down SSE. The bridge is imported lazily so gateway boot stays light.
 
 Because there is no polling tick to serialize turns the way Gmail's does, the turn route enforces one turn per thread itself: a memory guard for this process, plus a DB claim (`status='active'` with a fresh `updated_at`) so a gateway that restarted mid-turn still refuses a second turn. Claims older than one turn budget are reclaimable, so a crashed turn can never wedge a thread permanently. Two pi processes resuming one session file corrupts the transcript, which is what all of that is protecting.
@@ -177,7 +188,7 @@ Mounted at `/dashboard/perch-api`, inside the dashboard router, after `dashboard
 | `GET /turns/:turnId/events` | SSE. Events are `log` (progress) and the terminal `reply` or `error`. `404 unknown_turn`. |
 | `POST /bots/:id/sessions/:threadId/narrow` | `{ok:true}` or `400 {error:"widening_rejected",offending}` |
 
-`narrowed_tools` on the sessions row is not optional: the envelope endpoint is per-bot, so that row is the only place the Controls pane can learn a *session's* saved narrowing. Without it the pane renders an honest "this Crow build does not report the saved narrowing" instead of the truth.
+`narrowed_tools` on the sessions row is not optional: the envelope endpoint is per-bot, so that row is the only place the Controls pane can learn a *session's* saved narrowing. The lens reads it as a tri-state and says a different thing for each — a value means a real narrowing, an explicit `null` means "nothing narrowed in this session yet" (the ordinary state of a fresh session), and an absent field means "this Crow build did not report it". Emit the field even when it is null; omitting it makes every fresh session look like a broken build.
 
 `log` events are plain strings, not JSON — the lens writes them straight into the pending line and JSON-parses only the terminal events. Newlines are collapsed, because a bare newline inside an SSE `data:` payload splits the frame.
 
@@ -246,7 +257,12 @@ Per-session narrowing needs one new column, `bot_sessions.narrowed_tools TEXT`. 
 
 > On a host already at the current schema generation, `needsSchemaInit` is false, so the gateway never re-runs `init-db` at boot. The column arrives through the update script's `guarded-init-db` pass, not through a gateway restart.
 
-Every host's deploy must include an update run (or a direct `guarded-init-db` pass). Skip it and `GET /dashboard/perch-api/bots/:id/sessions` fails with "no such column" on that host, while everything else looks healthy. This is the same route the `kind` column took to the fleet.
+Every host's deploy must include an update run (or a direct `guarded-init-db` pass). **Skip it and the Perch channel is entirely non-functional on that host — not degraded, not partially working.** Measured in the Phase 1 acceptance round, not inferred:
+
+- `GET /dashboard/perch-api/bots/:id/sessions` → `500 {"error":"no such column: narrowed_tools"}`. No session list, and therefore no transcripts, no badges, and no Controls pane.
+- `POST /dashboard/perch-api/bots/:id/turn` → `500 {"error":"no such column: narrowed_tools"}` as well. The turn reads the newest session row for its in-flight guard *before* it claims anything or imports the bridge, so every message fails there — nothing is spawned, nothing is answered.
+
+What survives is `GET /bots` and the panel chrome around it, which is exactly what makes this bad: the nav entry is there, the hub is up, the bot list renders, and every single thing an operator then tries returns a 500. It reads as "Perch is broken", and the fix is a one-line migration nobody thinks to look for. Run the migration as part of the deploy, not after the first report. This is the same route the `kind` column took to the fleet.
 
 ## See also
 
