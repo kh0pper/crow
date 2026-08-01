@@ -28,6 +28,7 @@ export const translations = {
   "nav.settings": { en: "Settings", es: "Ajustes" },
   "nav.contacts": { en: "Contacts", es: "Contactos" },
   "nav.projects": { en: "Projects", es: "Proyectos" },
+  "nav.perch": { en: "Perch", es: "Perch" },
   // Nav group headers — spine-aligned (W3-6)
   "nav.group.home": { en: "Home", es: "Inicio" },
   "nav.group.agents": { en: "Agents", es: "Agentes" },
@@ -2036,6 +2037,56 @@ export const translations = {
     en: "No starter memories left to clear.",
     es: "No quedan memorias iniciales por borrar.",
   },
+
+  // ─── Perch panel (Perch Hub Phase 1, Task C-7) ───
+  // Three honest states: running (framed lens), installed-but-down, and
+  // not-installed (gate card + one-click install).
+  "perch.runningTitle": { en: "Perch — sessions", es: "Perch — sesiones" },
+  "perch.runningSubtitle": {
+    en: "Every session your bots are running, their channels, transcripts, and a place to message them directly.",
+    es: "Todas las sesiones que ejecutan tus bots, sus canales, transcripciones y un lugar para escribirles directamente.",
+  },
+  "perch.frameLabel": { en: "Perch bots lens", es: "Vista de bots de Perch" },
+  "perch.openInTab": { en: "Open in a new tab", es: "Abrir en una pestaña nueva" },
+  "perch.offlineTitle": { en: "Perch is offline", es: "Perch está desconectado" },
+  "perch.offlineBody": {
+    en: "The Perch hub is installed, but the gateway is not currently running it — so there are no sessions to show.",
+    es: "El hub de Perch está instalado, pero la puerta de enlace no lo está ejecutando ahora mismo, así que no hay sesiones que mostrar.",
+  },
+  "perch.offlineErrorLabel": { en: "Last error", es: "Último error" },
+  "perch.offlineNoError": {
+    en: "The supervisor recorded no error. Perch was most likely installed after this gateway started, and has not been supervised yet.",
+    es: "El supervisor no registró ningún error. Lo más probable es que Perch se instalara después de iniciar esta puerta de enlace y aún no esté supervisado.",
+  },
+  "perch.offlineHint": {
+    en: "Restart the gateway, then reload this page. If Perch stays offline, look for [perch-hub] lines in the gateway log.",
+    es: "Reinicia la puerta de enlace y vuelve a cargar esta página. Si Perch sigue desconectado, busca líneas [perch-hub] en el registro de la puerta de enlace.",
+  },
+  "perch.offlineRetryBtn": { en: "Check again", es: "Comprobar de nuevo" },
+  "perch.gateTitle": { en: "Perch is not installed", es: "Perch no está instalado" },
+  "perch.gateBody": {
+    en: "Perch is the session observatory for your bots: every session with its channel and transcript, plus a chat card for messaging a bot directly.",
+    es: "Perch es el observatorio de sesiones de tus bots: cada sesión con su canal y su transcripción, además de una tarjeta de chat para escribir a un bot directamente.",
+  },
+  "perch.gateDiskNote": {
+    en: "Installs a small local service that listens only on this machine, behind your dashboard login. About 20 MB of disk.",
+    es: "Instala un pequeño servicio local que solo escucha en esta máquina, detrás del inicio de sesión de tu panel. Unos 20 MB de disco.",
+  },
+  "perch.gateInstallBtn": { en: "Install Perch", es: "Instalar Perch" },
+  "perch.gateInstallingBtn": { en: "Installing…", es: "Instalando…" },
+  "perch.gateWorking": { en: "Working…", es: "Trabajando…" },
+  "perch.gateDone": { en: "Installed. Restarting the gateway…", es: "Instalado. Reiniciando la puerta de enlace…" },
+  "perch.gateRestarting": {
+    en: "The gateway is restarting — this page will reload on its own.",
+    es: "La puerta de enlace se está reiniciando; esta página se recargará sola.",
+  },
+  "perch.gateFailedPrefix": { en: "Install failed:", es: "La instalación falló:" },
+  "perch.gateUnknownError": { en: "unknown error", es: "error desconocido" },
+  "perch.gateNetworkError": {
+    en: "Could not reach the gateway. Check the connection and try again.",
+    es: "No se pudo contactar con la puerta de enlace. Revisa la conexión e inténtalo de nuevo.",
+  },
+  "perch.gateRetryBtn": { en: "Retry", es: "Reintentar" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
