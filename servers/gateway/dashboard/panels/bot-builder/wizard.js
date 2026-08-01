@@ -24,8 +24,9 @@ import { t } from "../../shared/i18n.js";
 import { loadModelOptions, defaultDefinition, probeAll, loadSkills } from "./data-queries.js";
 import {
   renderGatewayFields, normalizeGatewayFields, SIMPLE_GATEWAY_TYPES,
-  buildCrowMessagesGatewayConfig,
+  buildCrowMessagesGatewayConfig, PERCH_GATEWAY_TYPE,
 } from "./gateway-fields.js";
+import { perchInstalled } from "../perch.js";
 import { BOT_TEMPLATES, getTemplate, applyTemplate, availableMcpSet } from "./templates.js";
 import { resolveCrowHome } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { emitBotDefsChanged } from "./defs-changed.js";
@@ -425,5 +426,12 @@ export async function handleWizardCreate(req, res, { db, lang }) {
     return res.redirectAfterPost("/dashboard/bot-builder?new=1&error=" + encodeURIComponent(String(e.message || e)));
   }
   emitBotDefsChanged(botId);
-  return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&created=${encodeURIComponent(botId)}`);
+  // Perch Hub P1, acceptance finding D2: the wizard is the OTHER save
+  // surface, and the C-4 lesson this arc keeps re-learning is that covering
+  // one leaves a hole. Same warn as the Gateways tab: the bot is created
+  // either way, but a Perch channel on an instance with no perch-hub bundle
+  // has nowhere to show a reply, so say so with the install button attached.
+  const perchWarn = gwType === PERCH_GATEWAY_TYPE && !perchInstalled()
+    ? "&warn=perch_not_installed" : "";
+  return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=review&created=${encodeURIComponent(botId)}${perchWarn}`);
 }

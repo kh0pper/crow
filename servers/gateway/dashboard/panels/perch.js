@@ -199,13 +199,28 @@ export function perchGateClientJS(lang) {
           btn.textContent = '${tJs("perch.gateRetryBtn", lang)}';
         }
 
+        // Reload, minus any warn/error the CURRENT url is carrying. On the
+        // panel's own gate card there is nothing to strip and this is a plain
+        // reload; on the Bot Builder banner (finding D2) it is what stops the
+        // page coming back onto a warning about a bundle that is now
+        // installed. Same query-stripping idiom as the runtime-off banner in
+        // bot-builder/engine-gate-client.js.
+        function reloadClean() {
+          var url = new URL(location.href);
+          var before = url.toString();
+          url.searchParams.delete("warn");
+          url.searchParams.delete("error");
+          if (url.toString() === before) location.reload();
+          else location.href = url.toString();
+        }
+
         // The gateway is going down and coming back; poll /health until it
         // answers, then reload so the nav picks up the new panel.
         function waitForRestart() {
           say('${tJs("perch.gateRestarting", lang)}', false);
           setTimeout(function poll() {
             fetch("/health").then(function (r) {
-              if (r.ok) location.reload();
+              if (r.ok) reloadClean();
               else setTimeout(poll, 2000);
             }).catch(function () { setTimeout(poll, 2000); });
           }, 3000);
@@ -216,7 +231,7 @@ export function perchGateClientJS(lang) {
             var log = (job && job.log) || [];
             if (job.status === "complete") {
               say('${tJs("perch.gateDone", lang)}', false);
-              setTimeout(function () { location.reload(); }, 1200);
+              setTimeout(function () { reloadClean(); }, 1200);
             } else if (job.status === "complete_restart") {
               say('${tJs("perch.gateDone", lang)}', false);
               fetch(API + "/restart", { method: "POST", headers: { "Content-Type": "application/json" } })

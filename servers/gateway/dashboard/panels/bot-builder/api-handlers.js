@@ -10,7 +10,8 @@ import {
   PI_BUILTIN, PI_EXT_ALLOWLIST,
   loadModelOptions, remoteInvocationOn, defaultDefinition, lines,
 } from "./data-queries.js";
-import { normalizeGatewayFields, missingGatewayFields } from "./gateway-fields.js";
+import { normalizeGatewayFields, missingGatewayFields, PERCH_GATEWAY_TYPE } from "./gateway-fields.js";
+import { perchInstalled } from "../perch.js";
 import { handleWizardCreate } from "./wizard.js";
 import { handleDeleteConfirm } from "./delete-bot.js";
 import { readSetting, writeSetting } from "../../settings/registry.js";
@@ -446,6 +447,18 @@ export async function handleBotBuilderPost(req, res, { db }) {
           const flagOn = await botRuntimeActive(db);
           if (!flagOn) extraQ += "&warn=bot_runtime_off";
         }
+      }
+      // Perch Hub P1, acceptance finding D2: a perch attach without the
+      // perch-hub bundle saves fine and turns even run — but the lens IS the
+      // bundle, so the reply has nowhere to land. WARN (the plan's word),
+      // never block: GATEWAY_REQUIRED_FIELDS.perch stays [] so the C-4 engine
+      // gate keeps its semantics, and the turn API is untouched. The signal is
+      // perchInstalled()'s disk truth at call time, NOT the supervisor's
+      // running state — a webUI install always ends in a restart, and nagging
+      // through that window would be noise. Two warns can fire on one save;
+      // the panel reads ?warn= as a list (bot-builder.js).
+      if (savedGw && savedGw.type === PERCH_GATEWAY_TYPE && !perchInstalled()) {
+        extraQ += "&warn=perch_not_installed";
       }
     }
 
