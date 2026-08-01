@@ -390,9 +390,18 @@ export function botsClient(esc) {
 			esc(envelope.model || "unset") +
 			((envelope.skills || []).length ? " · skills " + esc((envelope.skills || []).join(", ")) : "") +
 			"</div>";
-		const note = saved
-			? '<div class="note">Unchecking narrows this session only, from the next turn on.</div>'
-			: '<div class="note">Unchecking narrows this session only, from the next turn on. This Crow build does not report the saved narrowing, so the boxes start from the bot\'s full envelope.</div>';
+		// Three states, not two. "No narrowing saved yet" is the ORDINARY case
+		// for a fresh session and must not be reported as a missing feature —
+		// telling an operator their Crow cannot report something it reported
+		// correctly (as null) sends them hunting for a bug that isn't there.
+		// savedNarrowing() distinguishes them: a Set is a real narrowing, null
+		// is "reported, nothing narrowed", undefined is "not reported at all".
+		const note =
+			saved instanceof Set
+				? '<div class="note">Unchecking narrows this session only, from the next turn on.</div>'
+				: saved === null
+					? '<div class="note">Unchecking narrows this session only, from the next turn on. Nothing is narrowed in this session yet, so the boxes start from the bot\'s full envelope.</div>'
+					: '<div class="note">Unchecking narrows this session only, from the next turn on. This Crow build did not report a saved narrowing for this session, so the boxes start from the bot\'s full envelope.</div>';
 		return (
 			head +
 			'<div class="tools">' +
@@ -404,18 +413,30 @@ export function botsClient(esc) {
 		);
 	}
 
-	/** Saved narrowing, IF this Crow reports it on the session row (forward-compatible). */
+	/**
+	 * Saved narrowing for a session row, as a TRI-state (forward-compatible):
+	 *
+	 *   Set       — this Crow reported a narrowing and it parsed
+	 *   null      — reported, but nothing is narrowed in this session yet
+	 *               (a fresh session: the field is present and SQL NULL)
+	 *   undefined — not reported at all: the row is unknown here, or the
+	 *               build predates the field, or what it sent was unusable
+	 *
+	 * Collapsing the middle case into "not reported" is what made the pane
+	 * blame the Crow build for an empty session (acceptance finding D4).
+	 */
 	function savedNarrowing(row) {
-		if (!row || row.narrowed_tools == null) return null;
+		if (!row || !Object.prototype.hasOwnProperty.call(row, "narrowed_tools")) return undefined;
 		let list = row.narrowed_tools;
+		if (list == null) return null;
 		if (typeof list === "string") {
 			try {
 				list = JSON.parse(list);
 			} catch (_) {
-				return null;
+				return undefined;
 			}
 		}
-		return Array.isArray(list) ? new Set(list.map(String)) : null;
+		return Array.isArray(list) ? new Set(list.map(String)) : undefined;
 	}
 
 	function sessionRow(botId, threadId) {
