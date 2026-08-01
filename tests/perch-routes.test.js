@@ -399,6 +399,64 @@ test("a fresh DB claim blocks a turn even with an empty in-memory map (restart m
   assert.equal(r.body.error, "turn_in_progress");
 });
 
+// --- F1: sessionId is caller-supplied, so it can name ANOTHER channel's thread -
+//
+// Traced failure this pins shut: pass a live gmail thread id and claimTurn()
+// flips that row to active → the bridge's getSession() RESUMES it → the perch
+// message lands in the gmail conversation's pi session file → upsertSession()
+// relabels the row `perch` permanently, and the lens badges off gateway_type so
+// nothing ever shows it happened.
+
+test("POST /turn refuses to hijack a gmail thread, and leaves its row untouched", async () => {
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,pi_session_id,pi_session_dir,updated_at) " +
+    "VALUES ('chatty','gmail','198f0c2a11bd7e4c','chat','waiting-user','gmail-uuid','/tmp/gmail-sessions',datetime('now','-2 days'))"
+  ).run();
+  c.close();
+
+  const r = await postJson("/bots/chatty/turn", { message: "hijack", sessionId: "198f0c2a11bd7e4c" });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "not_a_perch_session");
+  assert.equal(r.body.gateway_type, "gmail", "the refusal names the channel that actually owns the thread");
+  assert.equal(inboundCalls.length, 0, "the bridge must never be handed a turn aimed at another channel");
+
+  const after = raw();
+  const row = after.prepare(
+    "SELECT gateway_type, kind, status, pi_session_id FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id='198f0c2a11bd7e4c'"
+  ).get();
+  after.close();
+  assert.equal(row.gateway_type, "gmail", "the row must not be relabelled");
+  assert.equal(row.kind, "chat");
+  assert.equal(row.pi_session_id, "gmail-uuid", "…and its pi session must stay attached to gmail");
+  assert.equal(row.status, "waiting-user", "…and it must not be left claimed 'active'");
+});
+
+test("POST /turn still resumes a perch thread, and still opens a brand-new one", async () => {
+  // The guard is a channel check, not a blanket ban on `sessionId`: the two
+  // legitimate cases must keep working or the chat card can never hold a
+  // conversation. (Without this pair the F1 fix could be a wholesale refusal.)
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,updated_at) " +
+    "VALUES ('chatty','perch','mine-to-resume','perch','waiting-user',datetime('now','-1 hour'))"
+  ).run();
+  // A pre-channel legacy row (gateway_type NULL) is not evidence of another
+  // channel, so it stays usable rather than becoming permanently unreachable.
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_thread_id,status,updated_at) " +
+    "VALUES ('chatty','legacy-null-channel','waiting-user',datetime('now','-1 hour'))"
+  ).run();
+  c.close();
+
+  inboundHook = async (opts) => { await opts.sendReply("resumed"); return { action: "asked" }; };
+  assert.equal((await postJson("/bots/chatty/turn", { message: "again", sessionId: "mine-to-resume" })).status, 202);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await postJson("/bots/chatty/turn", { message: "again", sessionId: "legacy-null-channel" })).status, 202);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await postJson("/bots/chatty/turn", { message: "fresh" })).status, 202);
+});
+
 test("turn guards: engine absent 409s, an unattached bot 403s, an empty message 400s", async () => {
   _setEngineStatusForTest({ state: "absent" });
   const noEngine = await postJson("/bots/chatty/turn", { message: "hi" });

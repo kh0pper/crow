@@ -219,12 +219,33 @@ async function buildEnvelope(db, def) {
 async function latestSession(db, botId, threadId) {
   const { rows } = await db.execute({
     sql:
-      "SELECT id, status, narrowed_tools, pi_session_dir, pi_session_id, " +
+      "SELECT id, status, gateway_type, narrowed_tools, pi_session_dir, pi_session_id, " +
       "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
       "FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1",
     args: [botId, threadId],
   });
   return rows[0] || null;
+}
+
+/**
+ * Is this existing row a thread perch is allowed to act on?
+ *
+ * Thread ids arrive from the CALLER (`body.sessionId`, and the `:threadId`
+ * path segment), so they can name ANY of the bot's threads — including a live
+ * gmail or discord one. Acting on one of those is not a privilege escalation
+ * (every caller here is already dashboard-authed) but it is a silent
+ * data-integrity failure: a turn would claim that row, the bridge's own
+ * getSession() would RESUME it, the perch message would be appended to that
+ * conversation's pi session file, and upsertSession() would relabel the row
+ * `perch` for good — while the lens badges off gateway_type, so nothing would
+ * ever show it.
+ *
+ * A NULL/empty `gateway_type` is a pre-channel legacy row, not evidence of
+ * another channel: those stay usable rather than becoming unreachable. A row
+ * that does not exist at all is the ordinary first-turn case.
+ */
+function foreignChannel(row) {
+  return row && row.gateway_type && row.gateway_type !== "perch" ? String(row.gateway_type) : null;
 }
 
 /** A row is a live claim while it is `active` AND younger than one turn budget.
@@ -492,7 +513,12 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
       // no tick, so it enforces its own — two pi processes resuming ONE session
       // file corrupts the transcript. Memory guard for this process, DB claim
       // for the case where a restart landed mid-turn.
-      if (inFlight.has(flightKey) || claimIsFresh(await latestSession(db, botId, threadId))) {
+      const existing = await latestSession(db, botId, threadId);
+      // Perch turns run on perch threads and on brand-new ones. Never on
+      // another channel's — see foreignChannel().
+      const foreign = foreignChannel(existing);
+      if (foreign) return jsonError(res, 400, "not_a_perch_session", { gateway_type: foreign });
+      if (inFlight.has(flightKey) || claimIsFresh(existing)) {
         return jsonError(res, 409, "turn_in_progress");
       }
 
