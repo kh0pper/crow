@@ -375,6 +375,52 @@ test("one turn per thread: a second POST is refused while the first is in flight
   assert.equal(third.status, 202);
 });
 
+test("the in-flight guard is taken BEFORE the first await, so two concurrent turns cannot both start", async () => {
+  // The guard is only meaningful if nothing can yield between the check and
+  // the claim. The one real yield on that path is the lazy bridge import on a
+  // gateway's first turn — a genuine module load, not a microtask — so this
+  // drives a router through `loadBridgeImpl` to reproduce exactly that window.
+  // Injecting `handleInboundImpl` instead would short-circuit before the
+  // import and prove nothing: microtask-only awaits can never interleave with
+  // another request, which is why the defect is invisible to the other tests.
+  const { default: perchApiRouter } = await import("../servers/gateway/routes/perch.js");
+  const { default: express } = await import("express");
+
+  const started = [];
+  const app = express();
+  app.use(express.json());
+  app.use(perchApiRouter((req, res, next) => next(), {
+    loadBridgeImpl: async () => {
+      await new Promise((r) => setTimeout(r, 40)); // the real import's cost
+      return {
+        handleInbound: (opts) => {
+          started.push(opts);
+          return new Promise(() => {}); // a turn that is still running
+        },
+      };
+    },
+  }));
+  const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  const b = "http://127.0.0.1:" + srv.address().port + "/dashboard/perch-api";
+  const post = () => fetch(b + "/bots/chatty/turn", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "race", sessionId: "toctou-thread" }),
+  }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+
+  try {
+    const [one, two] = await Promise.all([post(), post()]);
+    assert.deepEqual([one.status, two.status].sort(), [202, 409],
+      "exactly one of two simultaneous turns may be admitted");
+    assert.equal((one.status === 409 ? one : two).body.error, "turn_in_progress");
+    assert.equal(started.length, 1,
+      "two pi processes resuming ONE session file corrupts the transcript — that is what the guard is for");
+  } finally {
+    srv.close();
+    _resetPerchTurnsForTest(); // the admitted turn never resolves
+  }
+});
+
 test("a stale DB claim from a gateway that died mid-turn does not wedge the thread", async () => {
   const c = raw();
   c.prepare(
@@ -430,6 +476,48 @@ test("POST /turn refuses to hijack a gmail thread, and leaves its row untouched"
   assert.equal(row.kind, "chat");
   assert.equal(row.pi_session_id, "gmail-uuid", "…and its pi session must stay attached to gmail");
   assert.equal(row.status, "waiting-user", "…and it must not be left claimed 'active'");
+});
+
+test("a refused hijack does not leave the thread wedged or reported live", async () => {
+  // The in-flight guard is taken before the channel check (it has to be — see
+  // the TOCTOU test), so every refusal AFTER it must hand the guard back.
+  // A leak here would be silent and permanent: the thread would answer 409
+  // turn_in_progress forever, and GET /sessions would badge it `live`.
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,updated_at) " +
+    "VALUES ('chatty','discord','wedge-check','chat','waiting-user',datetime('now','-1 day'))"
+  ).run();
+  c.close();
+
+  const first = await postJson("/bots/chatty/turn", { message: "one", sessionId: "wedge-check" });
+  assert.equal(first.status, 400);
+  const second = await postJson("/bots/chatty/turn", { message: "two", sessionId: "wedge-check" });
+  assert.equal(second.status, 400, "a second attempt must still get the HONEST refusal, not 409");
+  assert.equal(second.body.error, "not_a_perch_session");
+
+  const { body } = await getJson("/bots/chatty/sessions");
+  const row = body.sessions.find((s) => s.gateway_thread_id === "wedge-check");
+  assert.equal(row.live, false, "a refused turn must never leave a thread badged live");
+});
+
+test("a thread refused for a fresh DB claim becomes usable again once the claim ages out", async () => {
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,status,updated_at) " +
+    "VALUES ('chatty','perch','ages-out','active',datetime('now'))"
+  ).run();
+  c.close();
+  assert.equal((await postJson("/bots/chatty/turn", { message: "hi", sessionId: "ages-out" })).status, 409);
+
+  // The gateway that owned that claim is gone; the row ages past one turn
+  // budget. Nothing in THIS process may still be holding the thread.
+  const c2 = raw();
+  c2.prepare("UPDATE bot_sessions SET updated_at=datetime('now','-3 hours') WHERE gateway_thread_id='ages-out'").run();
+  c2.close();
+  inboundHook = async (opts) => { await opts.sendReply("back"); return { action: "asked" }; };
+  assert.equal((await postJson("/bots/chatty/turn", { message: "hi again", sessionId: "ages-out" })).status, 202);
+  await new Promise((r) => setTimeout(r, 50));
 });
 
 test("POST /turn still resumes a perch thread, and still opens a brand-new one", async () => {
