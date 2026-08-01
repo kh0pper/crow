@@ -1,0 +1,596 @@
+/**
+ * Perch Hub — the gateway-side API the bots lens calls (Perch Hub P1, C-5).
+ *
+ * The lens itself is a page served BY THE VENDORED HUB, reached only through
+ * the session-gated extension proxy at `<gateway>/proxy/perch-hub/bots`. The
+ * DATA it renders is Crow's, not Perch's, so every fetch it makes is a
+ * root-absolute `/dashboard/perch-api/…` URL that lands here, one level above
+ * the proxy prefix. This file is the whole of that contract.
+ *
+ * MOUNT — deliberately `/dashboard/perch-api`, NOT a root `/api/perch`:
+ *   (a) the general rate limiter (index.js ~:335) SKIPS `/dashboard`; a root
+ *       mount would 429 the lens after a few minutes of ordinary use (200
+ *       req / 15 min, and one lens load is already 1 + N fetches);
+ *   (b) `/dashboard` carries the repo's real CSRF rail (dashboard/index.js →
+ *       shared/csrf.js: cookie `crow_csrf`, header `X-Crow-Csrf`,
+ *       constant-time compare). The lens echoes that cookie on every mutating
+ *       fetch. There is NO second, bespoke guard here — one rail, or the two
+ *       drift;
+ *   (c) `/dashboard/*` is funnel-private (PUBLIC_FUNNEL_PREFIXES omits it), so
+ *       the network-exposure invariant covers this surface for free —
+ *       tests/auth-network.test.js pins the perch paths explicitly.
+ * Body parsing is likewise already done: index.js installs a GLOBAL
+ * `express.json({limit:"1mb"})`. No per-route parser. The only input cap that
+ * matters is the in-route `.slice(0, MESSAGE_CAP)` on the turn message.
+ *
+ * The factory's FIRST statement is `router.use(P, dashboardAuth)` — the
+ * bot-board-api.js idiom. It is not redundant with the dashboard router's own
+ * gate: it keeps this router self-sufficient wherever it is mounted, and the
+ * unauthenticated case is asserted against a REAL route in
+ * tests/perch-routes.test.js (proving the middleware in isolation, as C-3
+ * does, would NOT prove this surface is closed).
+ *
+ * Turn model: perch is a per-turn channel like gmail, so a turn is one
+ * `handleInbound()` call — but this is the FIRST in-process one in the
+ * gateway (every other dispatch spawns a detached child), because only an
+ * in-process call gives us a streaming `sendReply` to push down SSE. The
+ * bridge is imported LAZILY so gateway boot stays light.
+ */
+import { Router } from "express";
+import { randomUUID } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { createDbClient } from "../../db.js";
+import { jsonError } from "./_error.js";
+import { openStream } from "../streams/sse.js";
+import { resolveEngineStatus, resolveBotRuntimeStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
+import { missingGatewayFields } from "../dashboard/panels/bot-builder/gateway-fields.js";
+import { PI_BUILTIN, remoteInvocationOn } from "../dashboard/panels/bot-builder/data-queries.js";
+
+/** Mount prefix. Every route below is registered under it, after the auth gate. */
+const P = "/dashboard/perch-api";
+
+/** Inbound message cap. The global body parser allows 1mb; a turn prompt does not. */
+const MESSAGE_CAP = 32_000;
+
+/** How long a finished/abandoned turn stays replayable before GC. Matches the
+ * lens's own client-side watchdog (bots-page.mjs streamTurn). */
+const TURN_TTL_MS = 15 * 60 * 1000;
+
+/** Transcript tail. A live pi session file on this box already exceeds 2 MB,
+ * so the cap TAIL-truncates: head-truncation would render the oldest turns and
+ * hide today's, which is the opposite of what an observatory is for. */
+const TRANSCRIPT_TAIL_LINES = 2000;
+
+/** Read at call time, never at import time (#217 class): the bridge's own turn
+ * budget is what makes a stale `status='active'` row reclaimable. */
+function turnTimeoutMs() {
+  return Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
+}
+
+// ---------------------------------------------------------------------------
+// in-flight turns (process-local) + their event buffers
+// ---------------------------------------------------------------------------
+
+/** `${botId} ${threadId}` for every turn this process is running right now. */
+const inFlight = new Set();
+/** turnId → {events, done, createdAt, listeners} */
+const turns = new Map();
+
+const flightKeyFor = (botId, threadId) => botId + " " + threadId;
+
+/** Test-only: drop every buffered turn and in-flight claim. */
+export function _resetPerchTurnsForTest() {
+  for (const turn of turns.values()) {
+    for (const stream of turn.listeners) { try { stream.close(); } catch { /* already gone */ } }
+  }
+  turns.clear();
+  inFlight.clear();
+}
+
+/** Lazy GC — no timers. A gateway with no perch traffic must not hold one. */
+function sweepTurns(now = Date.now()) {
+  for (const [id, turn] of turns) {
+    if (now - turn.createdAt > TURN_TTL_MS) {
+      for (const stream of turn.listeners) { try { stream.close(); } catch { /* already gone */ } }
+      turns.delete(id);
+    }
+  }
+}
+
+function markTurnDone(turnId) {
+  const turn = turns.get(turnId);
+  if (!turn || turn.done) return;
+  turn.done = true;
+  for (const stream of turn.listeners) { try { stream.close(); } catch { /* already gone */ } }
+  turn.listeners.clear();
+}
+
+/**
+ * Append an event and fan it out to every attached stream. `reply` and `error`
+ * are TERMINAL: the first one closes the turn, so a late second one (the
+ * bridge already delivered its failure through sendReply, then resolved
+ * `{action:"error"}`) can never double-report.
+ */
+function pushTurnEvent(turnId, event, data) {
+  const turn = turns.get(turnId);
+  if (!turn || turn.done) return;
+  turn.events.push({ event, data });
+  for (const stream of turn.listeners) { try { stream.send(event, data); } catch { /* dropped client */ } }
+  if (event === "reply" || event === "error") markTurnDone(turnId);
+}
+
+// ---------------------------------------------------------------------------
+// bots / defs
+// ---------------------------------------------------------------------------
+
+function parseDef(row) {
+  try {
+    const def = JSON.parse(row.definition || "{}");
+    return def && typeof def === "object" ? def : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Attach semantics (spec §4): observation is free for every bot; conversation
+ * requires a COMPLETE perch gateway record. `GATEWAY_REQUIRED_FIELDS.perch` is
+ * `[]`, so a bare `{type:"perch"}` is complete by construction — but the check
+ * goes through missingGatewayFields() so it stays true to Bot Builder's own
+ * notion of completeness rather than re-deciding it here.
+ */
+function perchAttached(def) {
+  return ((def && def.gateways) || []).some(
+    (gw) => gw && gw.type === "perch" && missingGatewayFields(gw).length === 0
+  );
+}
+
+async function loadBotRow(db, botId) {
+  const { rows } = await db.execute({
+    sql: "SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs WHERE bot_id=?",
+    args: [botId],
+  });
+  return rows[0] || null;
+}
+
+// ---------------------------------------------------------------------------
+// the tool envelope
+// ---------------------------------------------------------------------------
+
+/** Lazy bridge import — shared by the envelope (toolAllowlist) and the turn
+ * (handleInbound). Cached by the ESM loader after the first call. */
+function loadBridge() {
+  return import("../../../scripts/pi-bots/bridge.mjs");
+}
+
+/** Bot Builder's vocabulary for a tool id: builtins are bare names, MCP ids
+ * are `mcp__<server>__<tool>` rendered back as the `server/tool` the Tools tab
+ * shows, remote servers as their capability. */
+function labelFor(id) {
+  if (id.startsWith("mcp__crow-remote-")) return "remote · " + id.slice("mcp__crow-remote-".length);
+  if (id.startsWith("mcp__")) return id.slice("mcp__".length).replace(/__/g, "/");
+  return id;
+}
+
+/**
+ * The bot's envelope: what Bot Builder (the single writer) grants, split into
+ * what is on and what is knowably off.
+ *
+ * The tool universe has exactly two real sources — there is no catalog listing
+ * function to reuse:
+ *   1. builtins: PI_BUILTIN (data-queries.js) — a fixed 7, so a builtin the def
+ *      does NOT grant is a KNOWN denial and renders locked;
+ *   2. mcp + remote ids: derived by toolAllowlist() itself (bridge.mjs) from
+ *      the def's own selections, so every one of them is by definition allowed.
+ * `subagent` is appended by PiRpc AFTER the allowlist (bridge.mjs ~:141) when
+ * the def opts into multi_agent, so it is listed here as narrowable on the same
+ * condition — narrowing means "less than the def grants", subagent included.
+ * (The bridge additionally requires a capability-listed model at spawn; the
+ * envelope reports the def's grant, not the per-turn resolution.)
+ */
+async function buildEnvelope(db, def) {
+  const { toolAllowlist } = await loadBridge();
+  const remoteEnabled = await remoteInvocationOn(db);
+  const csv = toolAllowlist(def, { remoteEnabled });
+  const allowed = csv ? csv.split(",").filter(Boolean) : [];
+  if (def.permission_policy && def.permission_policy.multi_agent === true) allowed.push("subagent");
+  const allowedSet = new Set(allowed);
+  return {
+    tools: allowed.map((id) => ({ id, label: labelFor(id), allowed: true })),
+    denied: PI_BUILTIN.filter((id) => !allowedSet.has(id)).map((id) => ({ id, label: labelFor(id) })),
+    skills: ((def && def.skills) || []).map(String),
+    model: (def && def.models && def.models.default) || null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// session rows: claim / release / narrow
+// ---------------------------------------------------------------------------
+
+/**
+ * The newest bot_sessions row for a thread, with its age in seconds.
+ *
+ * ORDER BY id DESC LIMIT 1 mirrors the bridge's getSession() exactly:
+ * duplicate rows per (bot, thread) are tolerated BY DESIGN there, which is
+ * also why `idx_bot_sessions_bot_thread` is not UNIQUE and why nothing here
+ * may use ON CONFLICT (it would throw at prepare() and 500 every request).
+ */
+async function latestSession(db, botId, threadId) {
+  const { rows } = await db.execute({
+    sql:
+      "SELECT id, status, narrowed_tools, pi_session_dir, pi_session_id, " +
+      "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
+      "FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1",
+    args: [botId, threadId],
+  });
+  return rows[0] || null;
+}
+
+/** A row is a live claim while it is `active` AND younger than one turn budget.
+ * Older claims are reclaimable, so a gateway that died mid-turn cannot wedge a
+ * thread forever. */
+function claimIsFresh(row) {
+  if (!row || row.status !== "active") return false;
+  const age = Number(row.age_s);
+  return Number.isFinite(age) && age * 1000 < turnTimeoutMs();
+}
+
+/**
+ * Take the turn claim. One transaction, SELECT-then-UPDATE-or-INSERT expressed
+ * as UPDATE-latest + INSERT-if-none (db.batch() wraps both in a single
+ * better-sqlite3 transaction), mirroring upsertSession() without ON CONFLICT.
+ * The INSERT is what makes a first-ever perch turn possible; the UPDATE is what
+ * makes the bridge's own getSession() find and REUSE this row a moment later.
+ */
+async function claimTurn(db, botId, threadId) {
+  await db.batch([
+    {
+      sql:
+        "UPDATE bot_sessions SET status='active', updated_at=datetime('now') " +
+        "WHERE id=(SELECT id FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1)",
+      args: [botId, threadId],
+    },
+    {
+      sql:
+        "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control) " +
+        "SELECT ?,'perch',?,'perch','active','run' " +
+        "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
+      args: [botId, threadId, botId, threadId],
+    },
+  ]);
+}
+
+/**
+ * Release the claim — but ONLY if the row is still `active`. Every terminal
+ * bridge path already writes its own status (waiting-user / done / error) and
+ * must not be overwritten; the paths that DON'T (pi-capacity `deferred`, a
+ * pre-flight throw) are exactly the ones that would otherwise leave a fresh
+ * `active` row blocking the next message for a full turn budget.
+ */
+async function releaseClaim(botId, threadId) {
+  const db = createDbClient();
+  try {
+    await db.execute({
+      sql:
+        "UPDATE bot_sessions SET status='waiting-user', updated_at=datetime('now') " +
+        "WHERE status='active' AND id=(SELECT id FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1)",
+      args: [botId, threadId],
+    });
+  } catch { /* best effort: the claim ages out on its own */ } finally {
+    try { db.close(); } catch { /* already closed */ }
+  }
+}
+
+/** Persist a session's narrowing. Same one-transaction shape as claimTurn();
+ * the created row is `waiting-user`, never `active` — narrowing a thread that
+ * has never run must not read as a turn in progress. */
+async function saveNarrowing(db, botId, threadId, json) {
+  await db.batch([
+    {
+      sql:
+        "UPDATE bot_sessions SET narrowed_tools=?, updated_at=datetime('now') " +
+        "WHERE id=(SELECT id FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1)",
+      args: [json, botId, threadId],
+    },
+    {
+      sql:
+        "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,narrowed_tools) " +
+        "SELECT ?,'perch',?,'perch','waiting-user','run',? " +
+        "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
+      args: [botId, threadId, json, botId, threadId],
+    },
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// transcripts
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the pi session file for a row.
+ *
+ * On disk the files are `<ISO-timestamp>_<uuid>.jsonl` inside
+ * `bot_sessions.pi_session_dir`, while `pi_session_id` is the BARE uuid — so
+ * this is a glob on the suffix, never `join(dir, id + ".jsonl")` (that always
+ * 404s). The browser never supplies a path: both halves come from the row.
+ */
+function resolveTranscriptFile(dir, sessionId) {
+  if (!dir || !sessionId) return null;
+  let names;
+  try { names = readdirSync(dir); } catch { return null; }
+  const suffix = "_" + sessionId + ".jsonl";
+  const hits = names.filter((n) => n.endsWith(suffix)).sort();
+  return hits.length ? join(dir, hits[hits.length - 1]) : null;
+}
+
+/**
+ * Parse the tail of a pi session file. Lines are a `type`-discriminated JSON
+ * union (session | model_change | thinking_level_change | message | …);
+ * they are returned AS-IS so the lens stays forward-compatible, and
+ * unparseable lines are skipped silently (a half-written last line is normal
+ * while a turn is running).
+ */
+function readTranscript(file) {
+  const raw = readFileSync(file, "utf8");
+  const all = raw.split("\n").filter((l) => l.trim());
+  const kept = all.length > TRANSCRIPT_TAIL_LINES ? all.slice(-TRANSCRIPT_TAIL_LINES) : all;
+  const events = [];
+  for (const line of kept) {
+    try { events.push(JSON.parse(line)); } catch { /* skip: not our business to guess */ }
+  }
+  return { events, truncated: kept.length < all.length, omitted: all.length - kept.length };
+}
+
+// ---------------------------------------------------------------------------
+// router
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {Function} dashboardAuth session gate (the SAME middleware the rest of
+ *   /dashboard uses)
+ * @param {object} [seams]
+ * @param {Function} [seams.handleInboundImpl] test seam — replaces the lazy
+ *   bridge import so a turn can be driven without spawning pi.
+ */
+export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null } = {}) {
+  const router = Router();
+
+  // FIRST statement: auth-gate the whole prefix (bot-board-api.js idiom).
+  router.use(P, dashboardAuth);
+
+  async function resolveHandleInbound() {
+    if (handleInboundImpl) return handleInboundImpl;
+    return (await loadBridge()).handleInbound;
+  }
+
+  // ---- GET /bots — every bot on the instance, plus attach + engine state ----
+  router.get(P + "/bots", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs ORDER BY bot_id",
+        args: [],
+      });
+      const engine = resolveEngineStatus();
+      // Instance-wide truth, reported per card: whether the bot runtime is
+      // armed to service this bot's OTHER channels. A perch turn never needs
+      // it (it runs in-process here), which is exactly why the lens shows it.
+      let armed = false;
+      try { armed = !!resolveBotRuntimeStatus().bridge.armed; } catch { armed = false; }
+      const bots = rows.map((row) => {
+        const def = parseDef(row);
+        return {
+          id: row.bot_id,
+          name: row.display_name || row.bot_id,
+          perch_attached: perchAttached(def),
+          engine: { state: engine.state },
+          runtime_on: armed && Number(row.enabled) === 1,
+        };
+      });
+      res.json({ bots });
+    } catch (err) {
+      jsonError(res, 500, String((err && err.message) || err));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // ---- GET /bots/:id/sessions — every session, every channel ----
+  router.get(P + "/bots/:id/sessions", async (req, res) => {
+    const botId = String(req.params.id);
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql:
+          "SELECT id, kind, gateway_type, gateway_thread_id, status, card_id, plan_path, " +
+          "narrowed_tools, datetime(updated_at) AS updated_at, " +
+          "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
+          "FROM bot_sessions WHERE bot_id=? ORDER BY id DESC",
+        args: [botId],
+      });
+      const sessions = rows.map((row) => ({
+        id: row.id,
+        kind: row.kind,
+        gateway_type: row.gateway_type,
+        gateway_thread_id: row.gateway_thread_id,
+        status: row.status,
+        card_id: row.card_id,
+        plan_path: row.plan_path,
+        updated_at: row.updated_at,
+        // Live = a turn this process is running right now, OR any channel's
+        // fresh `active` claim (a gmail turn runs in the bridge process and is
+        // invisible to the in-flight set — reporting only ours would lie).
+        live: inFlight.has(flightKeyFor(botId, String(row.gateway_thread_id))) || claimIsFresh(row),
+        // REQUIRED by the lens: the envelope endpoint is per-BOT, so this row
+        // is the only place the controls pane can learn a SESSION's saved
+        // narrowing. Emitted as the stored JSON text; the client accepts an
+        // array or a JSON string.
+        narrowed_tools: row.narrowed_tools == null ? null : row.narrowed_tools,
+      }));
+      res.json({ sessions });
+    } catch (err) {
+      jsonError(res, 500, String((err && err.message) || err));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // ---- GET /bots/:id/envelope — what Bot Builder grants ----
+  router.get(P + "/bots/:id/envelope", async (req, res) => {
+    const botId = String(req.params.id);
+    const db = createDbClient();
+    try {
+      const row = await loadBotRow(db, botId);
+      if (!row) return jsonError(res, 404, "unknown_bot");
+      res.json(await buildEnvelope(db, parseDef(row)));
+    } catch (err) {
+      jsonError(res, 500, String((err && err.message) || err));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // ---- GET /bots/:id/sessions/:threadId/transcript ----
+  router.get(P + "/bots/:id/sessions/:threadId/transcript", async (req, res) => {
+    const botId = String(req.params.id);
+    const threadId = String(req.params.threadId);
+    const db = createDbClient();
+    try {
+      const row = await latestSession(db, botId, threadId);
+      const file = row ? resolveTranscriptFile(row.pi_session_dir, row.pi_session_id) : null;
+      if (!file) return jsonError(res, 404, "no_transcript");
+      res.json(readTranscript(file));
+    } catch (err) {
+      jsonError(res, 500, String((err && err.message) || err));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // ---- POST /bots/:id/turn — the conversation channel ----
+  router.post(P + "/bots/:id/turn", async (req, res) => {
+    const botId = String(req.params.id);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const db = createDbClient();
+    let claimed = null;
+    try {
+      const row = await loadBotRow(db, botId);
+      if (!row) return jsonError(res, 404, "unknown_bot");
+      // Engine first: it is the instance-wide condition, and the lens has a
+      // distinct honest sentence for it.
+      if (resolveEngineStatus().state !== "ready") return jsonError(res, 409, "engine_required");
+      const def = parseDef(row);
+      if (!perchAttached(def)) return jsonError(res, 403, "perch_not_attached");
+
+      const message = String(body.message == null ? "" : body.message).slice(0, MESSAGE_CAP);
+      if (!message.trim()) return jsonError(res, 400, "empty_message");
+
+      const threadId = body.sessionId ? String(body.sessionId) : "perch-" + randomUUID().slice(0, 8);
+      const flightKey = flightKeyFor(botId, threadId);
+      // Gmail gets one-turn-per-thread serialization from its tick; perch has
+      // no tick, so it enforces its own — two pi processes resuming ONE session
+      // file corrupts the transcript. Memory guard for this process, DB claim
+      // for the case where a restart landed mid-turn.
+      if (inFlight.has(flightKey) || claimIsFresh(await latestSession(db, botId, threadId))) {
+        return jsonError(res, 409, "turn_in_progress");
+      }
+
+      const handleInbound = await resolveHandleInbound();
+      await claimTurn(db, botId, threadId);
+      inFlight.add(flightKey);
+      claimed = { flightKey, threadId };
+
+      sweepTurns();
+      const turnId = randomUUID();
+      turns.set(turnId, { events: [], done: false, createdAt: Date.now(), listeners: new Set() });
+
+      handleInbound({
+        bot_id: botId,
+        gateway_type: "perch",
+        gateway_thread_id: threadId,
+        // Ignored by today's bridge (opts are read by named field); C-6 plumbs
+        // it through to the session row. Passing it now means C-6 is a bridge
+        // change only.
+        kind: "perch",
+        user_message: message,
+        sendReply: async (text) => pushTurnEvent(turnId, "reply", { text: String(text == null ? "" : text) }),
+        log: (m) => pushTurnEvent(turnId, "log", { text: String(m == null ? "" : m) }),
+      }).then((result) => {
+        // handleInbound's RESOLVED value is the contract, not the rejection:
+        //  • {action:"deferred"} — pi was at capacity, sendReply was NEVER
+        //    called and the gmail tick would retry. Perch has no tick, so the
+        //    turn ends here and must say so.
+        //  • {action:"error"} — the failure was already delivered through
+        //    sendReply, so the terminal event exists; only mark it done.
+        if (result && result.action === "deferred") {
+          pushTurnEvent(turnId, "error", { text: "the bot engine is busy — try again in a moment" });
+        }
+        markTurnDone(turnId);
+      }).catch((err) => {
+        // Pre-flight throws only (unknown bot, unreadable def, …).
+        pushTurnEvent(turnId, "error", { text: String((err && err.message) || err) });
+        markTurnDone(turnId);
+      }).finally(() => {
+        inFlight.delete(flightKey);
+        releaseClaim(botId, threadId);
+      });
+
+      res.status(202).json({ turnId, sessionId: threadId });
+    } catch (err) {
+      if (claimed) {
+        inFlight.delete(claimed.flightKey);
+        releaseClaim(botId, claimed.threadId);
+      }
+      jsonError(res, 500, String((err && err.message) || err));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // ---- GET /turns/:turnId/events — SSE; terminal event is reply or error ----
+  router.get(P + "/turns/:turnId/events", (req, res) => {
+    sweepTurns();
+    const turn = turns.get(String(req.params.turnId));
+    if (!turn) return jsonError(res, 404, "unknown_turn");
+    const stream = openStream(res);
+    if (!stream) return; // SSE cap reached — openStream already sent 503
+    for (const e of turn.events) stream.send(e.event, e.data);
+    if (turn.done) return stream.close();
+    turn.listeners.add(stream);
+    res.on("close", () => turn.listeners.delete(stream));
+  });
+
+  // ---- POST /bots/:id/sessions/:threadId/narrow — narrow only, never widen ----
+  router.post(P + "/bots/:id/sessions/:threadId/narrow", async (req, res) => {
+    const botId = String(req.params.id);
+    // Keyed by gateway_thread_id, NOT the numeric row id: the turn flow only
+    // ever knows thread ids, and a narrowing has to apply to the row the NEXT
+    // turn will resume.
+    const threadId = String(req.params.threadId);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const db = createDbClient();
+    try {
+      const row = await loadBotRow(db, botId);
+      if (!row) return jsonError(res, 404, "unknown_bot");
+      const list = body.disabled_tools;
+      if (!Array.isArray(list) || list.some((t) => typeof t !== "string")) {
+        return jsonError(res, 400, "bad_request");
+      }
+      const envelope = await buildEnvelope(db, parseDef(row));
+      const allowed = new Set(envelope.tools.map((t) => t.id));
+      // Perch narrows; Bot Builder widens. Anything outside the def's own grant
+      // — unknown id, or one the def denies — is a widening attempt.
+      const offending = [...new Set(list.filter((id) => !allowed.has(id)))];
+      if (offending.length) return jsonError(res, 400, "widening_rejected", { offending });
+      await saveNarrowing(db, botId, threadId, JSON.stringify([...new Set(list)]));
+      res.json({ ok: true });
+    } catch (err) {
+      jsonError(res, 500, String((err && err.message) || err));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  return router;
+}

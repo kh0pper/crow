@@ -2576,6 +2576,7 @@ await initTable("bot_sessions table", `
     model             TEXT,
     escalated         INTEGER DEFAULT 0,
     kind              TEXT NOT NULL DEFAULT 'chat',
+    narrowed_tools    TEXT,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -2590,6 +2591,16 @@ await initTable("bot_sessions table", `
 // that ran init-db.js between F3 and this fix): idempotent guarded ALTER,
 // matching prod's manual column def (TEXT NOT NULL DEFAULT 'chat').
 await addColumnIfMissing("bot_sessions", "kind", "TEXT NOT NULL DEFAULT 'chat'");
+
+// bot_sessions.narrowed_tools (Perch Hub P1, C-5): per-session tool narrowing,
+// a JSON array of tool ids the session has switched OFF. Written by
+// routes/perch.js (Perch narrows; Bot Builder remains the single writer of the
+// envelope itself) and read by the bridge at spawn as an intersection with the
+// def's allowlist — NULL/absent means "the def's full envelope", so every
+// existing row and every non-perch channel is unaffected. Same both-places
+// idiom as `kind` above: CREATE body for fresh installs, guarded ALTER for
+// pre-existing ones. Additive-only — no SCHEMA_GENERATION bump.
+await addColumnIfMissing("bot_sessions", "narrowed_tools", "TEXT");
 
 await initTable("bot_skill_events table", `
   CREATE TABLE IF NOT EXISTS bot_skill_events (

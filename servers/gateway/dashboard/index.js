@@ -81,6 +81,7 @@ import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
+import perchApiRouter from "../routes/perch.js";
 
 /**
  * @param {Function|null} mcpAuthMiddleware - OAuth auth middleware (for unified auth)
@@ -615,6 +616,16 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Skips: GET/HEAD/OPTIONS, HMAC-signed peer calls (handled above),
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
+
+  // Perch Hub P1 (C-5): the gateway API the proxied bots lens calls.
+  // Mounted HERE — inside the dashboard router, after dashboardAuth AND after
+  // csrfMiddleware — rather than at app root beside bot-board-api, because
+  // that ordering is what gives it the real CSRF rail: routers mounted at app
+  // root in boot/feature-mounts.js run BEFORE this file's middleware and would
+  // silently skip it. The rate-limit skip for /dashboard applies either way.
+  // The router still installs dashboardAuth on its own prefix (bot-board-api
+  // idiom) so it is closed wherever it is mounted.
+  router.use(perchApiRouter(dashboardAuth));
 
   // W3-3: "Run backup now" action — dashboard-authed, CSRF-protected
   router.post("/dashboard/nest/backup", async (req, res) => {
