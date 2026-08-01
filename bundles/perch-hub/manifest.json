@@ -4,7 +4,7 @@
   "description": "Session observatory and chat surface for your Crow bots, plus the full Perch pi session manager. Runs loopback-only behind your dashboard login.",
   "type": "bundle",
   "category": "ai",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "origin": "official",
   "npm_required": false,
   "min_node": "22.19.0",
@@ -25,5 +25,5 @@
     "label": "Perch",
     "authTokenFile": "perch-token"
   },
-  "payload_sha256": "7ff5b3fb1d9340565b9931fac8843f654aaaa6013757f3b9fd229769e7242995"
+  "payload_sha256": "e4c7ac434e62cc9a52559d44c122b02e2ef89600f743c86a3bbb43c9b0a540c0"
 }
