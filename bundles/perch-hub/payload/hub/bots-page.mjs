@@ -339,7 +339,16 @@ export function botsClient(esc) {
 			return e && e.type === "message";
 		});
 		if (!entries.length) return '<div class="empty">Nothing rendered yet — this session has no messages on disk.</div>';
-		const head = payload.truncated ? '<div class="note">Showing the latest turns · ' + esc(payload.omitted || 0) + " earlier entries omitted.</div>" : "";
+		// `omitted` is a number only when Crow read the whole file. Once the byte
+		// cap bites, the head is never read and the count is genuinely unknown —
+		// so the notice drops the number rather than inventing "0 omitted".
+		const head = payload.truncated
+			? '<div class="note">Showing the latest turns · ' +
+				(typeof payload.omitted === "number" && payload.omitted > 0
+					? esc(payload.omitted) + " earlier entries omitted."
+					: "earlier entries omitted.") +
+				"</div>"
+			: "";
 		return (
 			head +
 			'<div class="transcript">' +
@@ -466,7 +475,14 @@ export function botsClient(esc) {
 			sessions.set(String(botId), rows);
 			host.innerHTML = sessionRowsHtml(botId, rows);
 			const count = root.querySelector('[data-count="' + CSS.escape(botId) + '"]');
-			if (count) count.textContent = rows.length + (rows.length === 1 ? " session" : " sessions");
+			// Crow caps this list (bot_sessions only grows — one row per thread,
+			// duplicates tolerated by design). Presenting a capped page as the
+			// complete history would quietly hide older threads.
+			if (count) {
+				count.textContent = data.truncated
+					? "showing the " + rows.length + " most recent sessions"
+					: rows.length + (rows.length === 1 ? " session" : " sessions");
+			}
 		} catch (err) {
 			host.innerHTML = '<div class="empty err">Sessions unavailable — ' + esc(reason(err)) + "</div>";
 		}

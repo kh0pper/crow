@@ -51,7 +51,7 @@
  */
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createDbClient } from "../../db.js";
 import { jsonError } from "./_error.js";
@@ -70,10 +70,28 @@ const MESSAGE_CAP = 32_000;
  * lens's own client-side watchdog (bots-page.mjs streamTurn). */
 const TURN_TTL_MS = 15 * 60 * 1000;
 
+/**
+ * Most sessions the lens is handed for one bot.
+ *
+ * bot_sessions only grows: a long-lived gmail bot gets a row per THREAD, and
+ * duplicate rows per (bot, thread) are tolerated by design — getSession() takes
+ * the newest, which is also why `idx_bot_sessions_bot_thread` is not unique. An
+ * uncapped ORDER BY id DESC therefore hands the browser the bot's entire
+ * history in a single JSON body. Perch's own on-disk lister caps its home page
+ * at 25 (hub/server.mjs) and defaults to 50 (lib/sessions.mjs); this matches
+ * that, and the response says when it bit so the lens can be honest.
+ */
+const SESSIONS_LIMIT = 50;
+
 /** Transcript tail. A live pi session file on this box already exceeds 2 MB,
  * so the cap TAIL-truncates: head-truncation would render the oldest turns and
  * hide today's, which is the opposite of what an observatory is for. */
 const TRANSCRIPT_TAIL_LINES = 2000;
+
+/** Hard ceiling on how much of a transcript is ever read into memory. Applied
+ * at the READ, so a file of a hundred enormous lines cannot slip past the line
+ * cap above. */
+const TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
 
 /** Read at call time, never at import time (#217 class): the bridge's own turn
  * budget is what makes a stale `status='active'` row reclaimable. */
@@ -359,21 +377,65 @@ function resolveTranscriptFile(dir, sessionId) {
 }
 
 /**
+ * Read at most the trailing TRANSCRIPT_TAIL_BYTES of a file.
+ *
+ * The line cap alone does NOT bound memory: 100 lines of 50 KB sail past
+ * `length > TRANSCRIPT_TAIL_LINES` as a 5 MB slurp, held twice over by
+ * readFileSync + split. pi session files are large by nature (one on this box
+ * already exceeds 2 MB) and a single entry can be enormous, so the bound has
+ * to be applied at the read, not after it.
+ *
+ * Returns the decoded tail and whether the head was left on disk. When it was,
+ * the first line in the window is almost certainly a fragment — of a line and
+ * possibly of a UTF-8 sequence — so it is dropped rather than half-parsed.
+ */
+function readTailBytes(file, maxBytes) {
+  const size = statSync(file).size;
+  const start = size > maxBytes ? size - maxBytes : 0;
+  const fd = openSync(file, "r");
+  let text;
+  try {
+    const buf = Buffer.allocUnsafe(size - start);
+    let off = 0;
+    while (off < buf.length) {
+      const n = readSync(fd, buf, off, buf.length - off, start + off);
+      if (n <= 0) break; // truncated under us mid-read; take what we got
+      off += n;
+    }
+    text = buf.toString("utf8", 0, off);
+  } finally {
+    try { closeSync(fd); } catch { /* already gone */ }
+  }
+  if (start === 0) return { text, headDropped: false };
+  const nl = text.indexOf("\n");
+  return { text: nl === -1 ? "" : text.slice(nl + 1), headDropped: true };
+}
+
+/**
  * Parse the tail of a pi session file. Lines are a `type`-discriminated JSON
  * union (session | model_change | thinking_level_change | message | …);
  * they are returned AS-IS so the lens stays forward-compatible, and
  * unparseable lines are skipped silently (a half-written last line is normal
  * while a turn is running).
+ *
+ * `omitted` is an exact count of dropped entries when the whole file was read,
+ * and `null` when the byte cap bit — the head is never read, so the number is
+ * genuinely unknown and reporting 0 would be a lie. The lens words the notice
+ * without a count in that case.
  */
 function readTranscript(file) {
-  const raw = readFileSync(file, "utf8");
-  const all = raw.split("\n").filter((l) => l.trim());
+  const { text, headDropped } = readTailBytes(file, TRANSCRIPT_TAIL_BYTES);
+  const all = text.split("\n").filter((l) => l.trim());
   const kept = all.length > TRANSCRIPT_TAIL_LINES ? all.slice(-TRANSCRIPT_TAIL_LINES) : all;
   const events = [];
   for (const line of kept) {
     try { events.push(JSON.parse(line)); } catch { /* skip: not our business to guess */ }
   }
-  return { events, truncated: kept.length < all.length, omitted: all.length - kept.length };
+  return {
+    events,
+    truncated: headDropped || kept.length < all.length,
+    omitted: headDropped ? null : all.length - kept.length,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -446,10 +508,13 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
           "SELECT id, kind, gateway_type, gateway_thread_id, status, card_id, plan_path, " +
           "narrowed_tools, datetime(updated_at) AS updated_at, " +
           "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
-          "FROM bot_sessions WHERE bot_id=? ORDER BY id DESC",
-        args: [botId],
+          // One past the cap: the extra row is how we know there IS more,
+          // without a second COUNT(*) over the same growing table.
+          "FROM bot_sessions WHERE bot_id=? ORDER BY id DESC LIMIT ?",
+        args: [botId, SESSIONS_LIMIT + 1],
       });
-      const sessions = rows.map((row) => ({
+      const truncated = rows.length > SESSIONS_LIMIT;
+      const sessions = (truncated ? rows.slice(0, SESSIONS_LIMIT) : rows).map((row) => ({
         id: row.id,
         kind: row.kind,
         gateway_type: row.gateway_type,
@@ -468,7 +533,7 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
         // array or a JSON string.
         narrowed_tools: row.narrowed_tools == null ? null : row.narrowed_tools,
       }));
-      res.json({ sessions });
+      res.json({ sessions, truncated, limit: SESSIONS_LIMIT });
     } catch (err) {
       jsonError(res, 500, String((err && err.message) || err));
     } finally {
