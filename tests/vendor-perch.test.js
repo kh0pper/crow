@@ -234,11 +234,16 @@ test("vendor script replaces the payload wholesale (no stale files linger inside
   assert.equal(existsSync(join(bundleDir, "payload", "hub", "stowaway.mjs")), false);
 });
 
-test("perch-hub manifest is a draft with the pinned webUI contract and no digest yet", () => {
-  const m = JSON.parse(readFileSync(join(REPO_ROOT, "bundles", "perch-hub", "manifest.json"), "utf8"));
+// C-1 wrote this test to pin the PRE-vendor state (draft, no digest) so the
+// C-1→C-8 window could not silently publish a payload-less bundle. C-8 vendored
+// the payload and flipped the draft, so it now pins the POST-vendor state — the
+// same guard pointed at the shipping shape.
+test("perch-hub manifest is published, digest-stamped, and keeps the pinned webUI contract", () => {
+  const bundleDir = join(REPO_ROOT, "bundles", "perch-hub");
+  const m = JSON.parse(readFileSync(join(bundleDir, "manifest.json"), "utf8"));
   assert.equal(m.id, "perch-hub", "id must equal the dirname — bundle-contract enforces it");
-  assert.equal(m.draft, true, "stays a draft until the payload is vendored (C-8)");
-  assert.equal("payload_sha256" in m, false, "no digest until vendoring stamps it");
+  assert.equal(m.draft, false, "vendored (C-8) — a draft bundle is not installable");
+  assert.match(m.payload_sha256 || "", /^[0-9a-f]{64}$/, "vendoring must stamp the payload digest");
   assert.equal(m.npm_required, false);
   assert.equal(m.min_node, "22.19.0");
   assert.deepEqual(m.webUI, {
@@ -248,4 +253,24 @@ test("perch-hub manifest is a draft with the pinned webUI contract and no digest
     label: "Perch",
     authTokenFile: "perch-token",
   });
+});
+
+test("the shipped perch-hub payload matches its stamped digest and records a real upstream commit", () => {
+  const bundleDir = join(REPO_ROOT, "bundles", "perch-hub");
+  const payloadDir = join(bundleDir, "payload");
+  const m = JSON.parse(readFileSync(join(bundleDir, "manifest.json"), "utf8"));
+
+  // Same check CI runs (`scripts/check-vendored-payloads.mjs`), asserted here so
+  // a hand edit to the vendored bytes fails the suite too, not only static-checks.
+  assert.equal(computePayloadDigest(payloadDir), m.payload_sha256);
+
+  // The hub imports `../lib/sessions.mjs`, so the hub/ + lib/ SIBLING layout is
+  // load-bearing — a flattened payload would only fail at runtime.
+  for (const rel of ["hub/server.mjs", "hub/auth-source.mjs", "hub/bots-page.mjs", "lib/sessions.mjs"]) {
+    assert.ok(existsSync(join(payloadDir, rel)), `payload/${rel} missing`);
+  }
+
+  const [sha, iso] = readFileSync(join(payloadDir, "UPSTREAM"), "utf8").trim().split("\n");
+  assert.match(sha, /^[0-9a-f]{40}$/, "UPSTREAM must record a full pi-lab commit sha");
+  assert.ok(!Number.isNaN(Date.parse(iso)), "UPSTREAM must record an ISO vendoring date");
 });
