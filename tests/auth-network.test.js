@@ -149,6 +149,63 @@ test("rejectFunneled middleware: bot-federation endpoints are never funnel-expos
   }
 });
 
+// Perch Hub C-3. Two new surfaces, both of which must stay off the public
+// internet: the proxied hub itself (whose backend receives an auto-injected
+// bearer, so a funnel-reachable /proxy/perch-hub/ would be an unauthenticated
+// remote path to `POST /api/hub/spawn` — documented upstream as arbitrary code
+// execution), and the gateway-side perch API the bots lens calls.
+test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", async () => {
+  const server = await startTestApp();
+  try {
+    const port = server.address().port;
+    for (const path of [
+      "/proxy/perch-hub/",
+      "/proxy/perch-hub/bots",
+      "/proxy/perch-hub/api/hub/spawn",
+      "/proxy/browser/vnc.html",
+      "/dashboard/perch-api/bots",
+      "/dashboard/perch-api/bots/1/turn",
+      "/dashboard/perch-api/turns/abc/events",
+    ]) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test("dashboardAuth refuses an unauthenticated /dashboard/perch-api request instead of calling next()", async () => {
+  // The perch API mounts behind dashboardAuth (bot-board-api idiom). Proven
+  // here at the middleware, since a session-less caller must never reach a
+  // route that can drive a bot or read a transcript.
+  const { dashboardAuth } = await import("../servers/gateway/dashboard/auth.js");
+
+  const run = (req) => new Promise((resolve) => {
+    let nexted = false;
+    const out = { status: null, redirected: null };
+    const res = {
+      status(c) { out.status = c; return this; },
+      type() { return this; },
+      send() { resolve({ nexted, ...out }); return this; },
+      json() { resolve({ nexted, ...out }); return this; },
+      redirect(url) { out.redirected = url; resolve({ nexted, ...out }); },
+      redirectAfterPost(url) { out.redirected = url; resolve({ nexted, ...out }); },
+    };
+    dashboardAuth(req, res, () => { nexted = true; resolve({ nexted, ...out }); });
+  });
+
+  // Off-network (bare loopback, no Tailscale headers) → hard refusal.
+  const offNet = await run(mkReq({ ip: "127.0.0.1", headers: { host: "x" } }));
+  assert.equal(offNet.nexted, false);
+  assert.equal(offNet.status, 403);
+
+  // On-network but session-less → bounced to the login page, never through.
+  const noSession = await run(mkReq({ ip: "10.0.0.5", headers: { host: "x" } }));
+  assert.equal(noSession.nexted, false, "a request with no crow_session cookie must never reach the perch API");
+  assert.equal(noSession.redirected, "/dashboard/login");
+});
+
 test("rejectFunneled middleware: public paths pass with Funnel header", async () => {
   const server = await startTestApp();
   try {
