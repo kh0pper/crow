@@ -31,10 +31,23 @@
  * does, would NOT prove this surface is closed).
  *
  * Turn model: perch is a per-turn channel like gmail, so a turn is one
- * `handleInbound()` call — but this is the FIRST in-process one in the
- * gateway (every other dispatch spawns a detached child), because only an
- * in-process call gives us a streaming `sendReply` to push down SSE. The
- * bridge is imported LAZILY so gateway boot stays light.
+ * `handleInbound()` call, made IN-PROCESS because only that gives us a
+ * streaming `sendReply` to push down SSE. (Board dispatch, by contrast, spawns
+ * a detached `--inject` child — routes/bot-board-api.js.)
+ *
+ * This is NOT the gateway's first in-process handleInbound: the gmail tick has
+ * run one since C4 — bot-runtime.js imports `runBridgeTick` from
+ * bridge_tick_lib.mjs, which imports `handleInbound` from the bridge directly.
+ * What matters is the consequence. Perch turns and gmail tick turns now run in
+ * ONE process on ONE event loop; both draw on the same host-wide pi capacity
+ * budget (`countLivePi()` vs `LIFECYCLE_DEFAULTS.maxPi`, which is why a perch
+ * turn can come back `{action:"deferred"}` because a gmail turn is occupying a
+ * slot); and a perch turn therefore inherits exactly the `PIBOT_*` timeout and
+ * env tuning a gmail turn gets on this host — including the local-model
+ * systemd drop-ins, which is why turnTimeoutMs() reads PIBOT_TURN_TIMEOUT_MS
+ * rather than hard-coding the bridge's default.
+ *
+ * The bridge is imported LAZILY so gateway boot stays light.
  */
 import { Router } from "express";
 import { randomUUID } from "node:crypto";

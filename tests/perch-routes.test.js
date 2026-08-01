@@ -804,6 +804,32 @@ test("an unauthenticated request to a REAL perch route never reaches the handler
   }
 });
 
+test("nothing claims perch owns the first in-process handleInbound — the gmail tick got there first", () => {
+  // Three places asserted perch was the FIRST in-process handleInbound in the
+  // gateway. It is not: the gmail tick has run one in-process since C4, and a
+  // reader who believes the claim will draw the wrong conclusion about which
+  // process budgets and which timeouts a perch turn is subject to.
+  const tickLib = readFileSync(join(REPO, "scripts/pi-bots/bridge_tick_lib.mjs"), "utf8");
+  assert.match(tickLib, /import \{ handleInbound \} from "\.\/bridge\.mjs"/,
+    "the gmail tick imports the bridge directly…");
+  const runtime = readFileSync(join(REPO, "servers/gateway/bot-runtime.js"), "utf8");
+  assert.match(runtime, /import \{ runBridgeTick as defaultRunBridgeTick \} from "\.\.\/\.\.\/scripts\/pi-bots\/bridge_tick_lib\.mjs"/,
+    "…and the gateway runs that tick in-process, which is what makes the 'first' claim false");
+
+  // Matches the ASSERTION ("this is the FIRST in-process…", "it is the
+  // **first in-process** one") and not its denial ("is NOT the … first
+  // in-process one"), which both files now carry deliberately.
+  const CLAIMS_FIRST = /\bis the (\*\*)?first in-process\b/i;
+  for (const rel of ["servers/gateway/routes/perch.js", "docs/developers/perch-hub.md"]) {
+    const src = readFileSync(join(REPO, rel), "utf8");
+    assert.equal(CLAIMS_FIRST.test(src), false, rel + " still repeats the false 'first in-process' claim");
+    // The fact worth stating instead: they share a process, and therefore the
+    // host-wide pi budget and the PIBOT_* tuning.
+    assert.match(src, /countLivePi/, rel + " should say what sharing a process actually costs");
+    assert.match(src, /PIBOT_/, rel + " should say that perch inherits gmail's PIBOT_* tuning");
+  }
+});
+
 test("the perch API is mounted AFTER the dashboard CSRF rail, not at app root", () => {
   // Mounting it beside bot-board-api in boot/feature-mounts.js would run it
   // BEFORE dashboard/index.js's csrfMiddleware — the router would answer and
