@@ -40,6 +40,7 @@ import { getCollection } from "../dashboard/panels/extensions/collections.js";
 import { dockerAvailable } from "../dashboard/panels/extensions/data-queries.js";
 import { beginInstallSet, endInstallSet, isInstallSetRunning } from "../install-lock.js";
 import { setActiveJobSource, ENGINE_CHANNELS } from "../bot-engine-status.js";
+import { PERCH_BUNDLE_ID, stopPerchRuntimeBounded } from "../perch-runtime.js";
 import {
   CROW_HOME,
   BUNDLES_DIR,
@@ -168,6 +169,41 @@ export function _setRestartHookForTest(fn) { _restartHookForTest = fn; }
 let _installSetBarrier = null;
 export function _setInstallSetBarrierForTest(promiseOrNull) { _installSetBarrier = promiseOrNull || null; }
 export function _getInstallSetBarrierForTest() { return _installSetBarrier; }
+
+// Test-only: stand in for perch-runtime's stopPerchRuntime (the UNBOUNDED
+// stop) and shorten the bound, so a test can prove both that uninstall stops
+// the supervised child before deleting its payload AND that a wedged child
+// cannot hang the uninstall job. Production passes neither — the real
+// stopPerchRuntimeBounded default applies. Pass null to restore.
+// Shape: { stop: () => Promise<boolean>, timeoutMs?: number }
+let _webUiStopHookForTest = null;
+export function _setWebUiStopHookForTest(hook) { _webUiStopHookForTest = hook || null; }
+
+/**
+ * Stop a gateway-supervised web UI child before its payload is removed.
+ *
+ * `rmSync(bundleDir)` in the uninstall path would otherwise delete the payload
+ * out from under a live child whose cwd is inside it. `stopPerchRuntime`
+ * resolves only when the child has actually exited, so this is awaited — but
+ * bounded, because a wedged child must not hang the uninstall job forever.
+ *
+ * perch-hub is the only bundle with a gateway-supervised web UI today, and the
+ * id check is load-bearing rather than cosmetic: calling stopPerchRuntime while
+ * uninstalling some OTHER webUI bundle (browser, minio, …) would kill a
+ * perfectly healthy Perch hub.
+ */
+async function stopSupervisedWebUi(bundleId, manifest, job) {
+  if (!manifest?.webUI || bundleId !== PERCH_BUNDLE_ID) return;
+  const res = await stopPerchRuntimeBounded({
+    ...(_webUiStopHookForTest?.stop ? { stopImpl: _webUiStopHookForTest.stop } : {}),
+    ...(_webUiStopHookForTest?.timeoutMs ? { timeoutMs: _webUiStopHookForTest.timeoutMs } : {}),
+  });
+  if (res.timedOut) {
+    appendLog(job, "Warning: supervised web UI did not exit in time — removing files anyway");
+  } else if (res.stopped) {
+    appendLog(job, "Stopped supervised web UI process");
+  }
+}
 
 // -----------------------------------------------------------------------
 // Cross-host manifest support (Phase 5-MVP)
@@ -1711,6 +1747,19 @@ export async function runInstallJob(bundleId, envVars, { job, installedSnapshot,
       }
     }
 
+    // 3c. A `webUI` block needs a gateway restart before it does anything.
+    // extension-proxy builds its whole route table ONCE, from
+    // getProxiedExtensions(), at factory-construction time
+    // (boot/late-mounts.js) — and perch-runtime's supervisor starts in the
+    // post-listen step. Both ran long before this install, so a bundle
+    // installed into a running gateway has neither a /proxy/<id> route nor a
+    // supervised child until the process comes back. Any add-on type, not just
+    // "bundle": the proxy reads webUI off the manifest regardless of type.
+    if (manifest?.webUI) {
+      needsRestart = true;
+      appendLog(job, "Web UI registered — gateway restart required to route it");
+    }
+
     // 4. Copy any associated skills (bundles and mcp-servers can have skills too)
     if (addonType !== "skill" && manifest?.skills) {
       mkdirSync(SKILLS_DIR, { recursive: true });
@@ -2337,6 +2386,16 @@ export default function bundlesRouter() {
           }
         }
 
+        // 4b. Tear down a proxied web UI. The gateway keeps its /proxy/<id>
+        // route (and, for perch-hub, a supervised child) until it restarts, so
+        // this flips needsRestart the same way a removed panel does; and the
+        // supervised child is stopped BEFORE the rmSync below, since its cwd
+        // is inside the dir about to be deleted.
+        if (manifest?.webUI) {
+          await stopSupervisedWebUi(bundle_id, manifest, job);
+          needsRestart = true;
+        }
+
         // 5. Remove bundle files
         rmSync(bundleDir, { recursive: true, force: true });
         appendLog(job, "Bundle files removed");
@@ -2384,7 +2443,7 @@ export default function bundlesRouter() {
 
         finishJob(job, needsRestart ? "complete_restart" : "complete");
 
-        // Auto-restart gateway after uninstall if panels/servers were removed
+        // Auto-restart gateway after uninstall if panels/servers/web UIs were removed
         if (needsRestart) {
           scheduleGatewayRestart(3000);
         }

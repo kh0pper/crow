@@ -207,6 +207,18 @@ export async function runPostListenSetup(server, app, deps) {
     });
   });
 
+  // Perch Hub C-2: supervise the vendored Perch hub payload, but ONLY when
+  // the perch-hub bundle is actually installed under CROW_HOME (otherwise a
+  // silent no-op). Kill switch: CROW_DISABLE_PERCH=1 (forced by
+  // run-suite.mjs for every scratch suite gateway). Non-fatal, same as the
+  // bot runtime above — a hub that won't start must never take the gateway
+  // down with it.
+  import("../perch-runtime.js").then(({ initPerchRuntime }) => {
+    initPerchRuntime().catch((err) => {
+      console.warn(`[perch-hub] init failed: ${err.message}`);
+    });
+  });
+
   // Start schedule executor
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);

@@ -48,6 +48,14 @@ export function gatewayHint(type, threadId) {
     return "\nGATEWAY THREAD: gmail thread_id=" + threadId
       + " — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.";
   }
+  if (type === "perch") {
+    // Perch Hub P1 (C-4): a live chat surface, not a mail thread — the
+    // operator is watching the reply stream in the dashboard right now.
+    // New type, so nothing existing shifts in the cached prompt prefix.
+    return "\nGATEWAY: perch — you are in a live chat with the operator in the Crow dashboard; "
+      + "your reply text is streamed straight back to them. Do NOT use gmail tools. "
+      + "(session ref: " + threadId + ")";
+  }
   if (type === "board") {
     return "\nGATEWAY: board (card ref: " + threadId + ") — this run was dispatched from the "
       + "kanban board. Do NOT use gmail/discord tools to reply; write your durable result under "

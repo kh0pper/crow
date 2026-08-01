@@ -79,8 +79,10 @@ import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost, han
 import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
+import perchPanel from "./panels/perch.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
+import perchApiRouter from "../routes/perch.js";
 
 /**
  * @param {Function|null} mcpAuthMiddleware - OAuth auth middleware (for unified auth)
@@ -111,6 +113,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(connectPanel);
   registerPanel(fediversePanel);
   registerPanel(meteringPanel);
+  // Carries a `hidden` PREDICATE (fediverse idiom): the nav entry appears
+  // only once the perch-hub bundle is installed. The route stays mounted
+  // regardless — that is what makes the gate card's one-click install
+  // reachable on an instance that does not have Perch yet.
+  registerPanel(perchPanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -615,6 +622,16 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Skips: GET/HEAD/OPTIONS, HMAC-signed peer calls (handled above),
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
+
+  // Perch Hub P1 (C-5): the gateway API the proxied bots lens calls.
+  // Mounted HERE — inside the dashboard router, after dashboardAuth AND after
+  // csrfMiddleware — rather than at app root beside bot-board-api, because
+  // that ordering is what gives it the real CSRF rail: routers mounted at app
+  // root in boot/feature-mounts.js run BEFORE this file's middleware and would
+  // silently skip it. The rate-limit skip for /dashboard applies either way.
+  // The router still installs dashboardAuth on its own prefix (bot-board-api
+  // idiom) so it is closed wherever it is mounted.
+  router.use(perchApiRouter(dashboardAuth));
 
   // W3-3: "Run backup now" action — dashboard-authed, CSRF-protected
   router.post("/dashboard/nest/backup", async (req, res) => {
