@@ -908,6 +908,30 @@ test("nothing claims perch owns the first in-process handleInbound — the gmail
   }
 });
 
+test("the proxy's bearer injection depends on SameSite=Lax, and says so where it injects", async () => {
+  // POST /api/hub/spawn on the vendored hub is arbitrary code execution (the
+  // hub's own header says so), and extension-proxy.js injects the hub's bearer
+  // on EVERY proxied request — so the backend's own auth is satisfied for
+  // anyone who reaches the proxy. The proxy router is mounted at APP ROOT
+  // (boot/late-mounts.js `app.use(router)`), i.e. outside the /dashboard CSRF
+  // rail. What stops a cross-site POST from riding an operator's logged-in
+  // session into that endpoint is one thing only: SameSite=Lax on crow_session.
+  const { setSessionCookie } = await import("../servers/gateway/dashboard/auth.js");
+  const headers = {};
+  setSessionCookie({ setHeader: (k, v) => { headers[k] = v; } }, "tok");
+  const session = headers["Set-Cookie"].find((c) => c.startsWith("crow_session="));
+  assert.match(session, /SameSite=Lax/,
+    "SameSite=None here would make /proxy/perch-hub/api/hub/spawn cross-site reachable — that is RCE, not a cookie tweak");
+  assert.match(session, /HttpOnly/);
+
+  // Pinning the cookie is not enough: the dependency has to be legible at the
+  // injection site, or a future "relax the cookie so the dashboard can be
+  // embedded" change has nothing to warn it.
+  const proxy = readFileSync(join(REPO, "servers/gateway/routes/extension-proxy.js"), "utf8");
+  assert.match(proxy, /SameSite=Lax/, "the injection hook must name the cookie property it leans on");
+  assert.match(proxy, /spawn/, "…and what is on the other side of it");
+});
+
 test("the perch API is mounted AFTER the dashboard CSRF rail, not at app root", () => {
   // Mounting it beside bot-board-api in boot/feature-mounts.js would run it
   // BEFORE dashboard/index.js's csrfMiddleware — the router would answer and

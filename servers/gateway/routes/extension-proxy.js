@@ -164,6 +164,29 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
       on: {
         // Inject the backend's bearer, read fresh on every request (see
         // readAuthToken). No token file → no header, and the backend 401s.
+        //
+        // ⚠ LOAD-BEARING CSRF DEPENDENCY — READ BEFORE CHANGING COOKIE POLICY.
+        // Injecting the bearer means the BACKEND's own auth is already
+        // satisfied for anything that reaches this middleware, so the only
+        // gate left is Crow's session. This router is mounted at APP ROOT
+        // (boot/late-mounts.js `app.use(router)`) — deliberately OUTSIDE the
+        // /dashboard CSRF rail (dashboard/index.js `router.use("/dashboard",
+        // csrfMiddleware)`), because proxied backends serve their own forms
+        // and cannot echo Crow's `X-Crow-Csrf`.
+        //
+        // For perch-hub that backend exposes `POST /api/hub/spawn`, which its
+        // own header documents as arbitrary code execution. The ONLY thing
+        // preventing a cross-site POST from riding a logged-in operator's
+        // session into it is `SameSite=Lax` on `crow_session`
+        // (dashboard/auth.js setSessionCookie) — Lax withholds the cookie from
+        // cross-site POSTs, so the request arrives session-less and
+        // authMiddleware rejects it before we ever inject a bearer.
+        //
+        // Therefore: relaxing that cookie to `SameSite=None` (e.g. "so the
+        // dashboard can be embedded in an iframe") converts this hook into
+        // remote code execution reachable from any page the operator visits.
+        // If embedding is ever needed, this router needs its own CSRF or
+        // origin check FIRST. tests/perch-routes.test.js pins both halves.
         proxyReq: (proxyReq) => {
           const token = readAuthToken(ext.authTokenFile);
           if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
