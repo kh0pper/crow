@@ -145,6 +145,50 @@ test("complete gmail record + engine absent → error=engine_required, def uncha
 });
 
 // ---------------------------------------------------------------------------
+// perch (Perch Hub P1, C-4) — an engine channel with NO required fields, so a
+// bare {type:"perch"} record is COMPLETE by construction and the gate fires on
+// engine state alone. That is the design, not an oversight: there is nothing
+// per-bot to configure (the chat surface is the supervised hub bundle), so
+// there is no "incomplete draft" stage for this type to sit in.
+// ---------------------------------------------------------------------------
+
+test("perch record + engine absent → error=engine_required, def unchanged (no required fields ⇒ gate fires on engine state alone)", async () => {
+  // Start from NO gateway, not beforeEach's complete gmail record: otherwise
+  // the gmail record alone would trip the gate and this test would pass even
+  // with perch entirely unwired (the save falls through to the "unsupported
+  // type" branch, leaving gmail in place). The rejection must be caused by
+  // the perch record this POST builds — nothing else.
+  await db.execute({
+    sql: "UPDATE pi_bot_defs SET definition=? WHERE bot_id='gate-bot'",
+    args: [JSON.stringify({ gateways: [], tools: {}, models: {} })],
+  });
+  _setEngineStatusForTest({ state: "absent" });
+  const before = await readDef();
+  assert.deepEqual(before.gateways, [], "precondition: nothing gateable is on the bot yet");
+  const res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "gate-bot", gw_type: "perch" } },
+    res, { db }
+  );
+  assert.match(res.redirected, /error=engine_required/, "must redirect with error=engine_required: " + res.redirected);
+  assert.equal(res.redirected.includes("saved=1"), false);
+  const after = await readDef();
+  assert.deepEqual(after, before, "definition must be unchanged when the gate rejects the save");
+});
+
+test("perch record + engine ready → saved as a bare type-only record", async () => {
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
+  const res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "gate-bot", gw_type: "perch" } },
+    res, { db }
+  );
+  assert.match(res.redirected, /saved=1/, "engine ready must let the perch attach through: " + res.redirected);
+  const def = await readDef();
+  assert.deepEqual(def.gateways, [{ type: "perch" }], "perch persists as a bare record — nothing to configure");
+});
+
+// ---------------------------------------------------------------------------
 // incomplete draft, engine absent → saves exactly as today (draft doctrine)
 // ---------------------------------------------------------------------------
 
@@ -386,6 +430,57 @@ test("wizard create: complete discord record + engine ready → inserted as befo
   _setEngineStatusForTest(null);
 });
 
+// The C4 lesson this arc keeps re-learning: gating ONE save surface leaves a
+// hole. perch must be refused on the wizard-create path too — the wizard
+// builds its channel record through the same normalizeGatewayFields machinery
+// and INSERTs directly, so an ungated wizard would happily create a fully
+// "onboarded"-looking bot whose perch turns can never run.
+
+test("wizard create: perch channel + engine absent → NOT inserted, bounces back to the channel step with the carry intact", async () => {
+  await addWizProvider("wizprov", [{ id: "m1" }]);
+  _setEngineStatusForTest({ state: "absent" });
+  const body = {
+    action: "wizard_create", nav: "create",
+    tpl: "discord-qa", display_name: "Wiz Perch Bot", bot_id: "wiz-perch-bot",
+    model: "wizprov/m1", gw_type: "perch",
+  };
+  const res = mkWizRes();
+  await handleWizardCreate({ body }, res, { db, lang: "en" });
+  assert.equal(res.redirected, null, "the perch attach must be declined without sending");
+  assert.equal(res.html, null);
+  assert.equal(await wizBotRow("wiz-perch-bot"), null, "no pi_bot_defs row inserted while the engine is absent");
+
+  const renderRes = mkWizRes();
+  await renderWizard(
+    { method: "POST", body, query: {}, headers: {} },
+    renderRes,
+    { db, layout: ({ content }) => content, lang: "en", PAGE_CSS: "", notice: "" }
+  );
+  const html = renderRes.html;
+  assert.match(html, new RegExp(`name="step" value="${wizStepIdx("channel")}"`), "re-renders the channel step, not review");
+  assert.match(html, /callout-error/, "shows an error callout");
+  assert.match(html, /<input type="hidden" name="display_name" value="Wiz Perch Bot">/, "entered state preserved");
+  await clearWizProviders();
+  _setEngineStatusForTest(null);
+});
+
+test("wizard create: perch channel + engine ready → inserted with a bare perch gateway record", async () => {
+  await addWizProvider("wizprov", [{ id: "m1" }]);
+  _setEngineStatusForTest({ state: "ready", source: "env", cliPath: "/fake/cli.js" });
+  const res = mkWizRes();
+  await handleWizardCreate({ body: {
+    action: "wizard_create", nav: "create",
+    tpl: "discord-qa", display_name: "Wiz Perch Bot 2", bot_id: "wiz-perch-bot-2",
+    model: "wizprov/m1", gw_type: "perch",
+  } }, res, { db, lang: "en" });
+  assert.match(res.redirected, /bot=wiz-perch-bot-2&tab=review&created=wiz-perch-bot-2/, "must PRG on success: " + res.redirected);
+  const row = await wizBotRow("wiz-perch-bot-2");
+  assert.ok(row, "row must be inserted when the engine is ready");
+  assert.deepEqual(JSON.parse(row.definition).gateways, [{ type: "perch" }]);
+  await clearWizProviders();
+  _setEngineStatusForTest(null);
+});
+
 // ---------------------------------------------------------------------------
 // C4 Task 8 — client-side gate modal + one-click install, runtime-enable
 // warn banner (server-rendered contract: data attributes for the client
@@ -411,7 +506,7 @@ test("gateways tab render: complete gmail record + engine absent → form armed 
   const req = mkGetReq({ bot: "gate-bot", tab: "gateways" });
   await renderBotEditor(req, res, { db, layout, lang: "en", PAGE_CSS: "", botId: "gate-bot", notice: "", q: req.query });
   assert.match(res.html, /id="btb-gateways-form"[^>]*data-engine-gate="1"/, "form must carry the gate attribute");
-  assert.match(res.html, /data-engine-channels="gmail,discord,telegram,slack"/, "channels list must mirror ENGINE_CHANNELS");
+  assert.match(res.html, /data-engine-channels="gmail,discord,telegram,slack,perch"/, "channels list must mirror ENGINE_CHANNELS");
   assert.match(res.html, /data-engine-required-fields="gw_address,gw_allowlist"/, "required DOM field names for gmail");
   assert.match(res.html, /window\.__crowEngineGateOpen/, "stable hook for the Task 9 readiness row must be present");
   assert.match(res.html, /id="engine-gate-modal-overlay"/, "modal overlay markup must ship on the page");
@@ -439,6 +534,21 @@ test("gateways tab render: engine absent but gwType is crow-messages (not an ENG
   const req = mkGetReq({ bot: "gate-bot", tab: "gateways" });
   await renderBotEditor(req, res, { db, layout, lang: "en", PAGE_CSS: "", botId: "gate-bot", notice: "", q: req.query });
   assert.ok(!/data-engine-gate="1"/.test(res.html), "crow-messages is never a gated channel type");
+});
+
+test("gateways tab render: perch selected + engine absent → armed with an EMPTY required-fields list", async () => {
+  await db.execute({
+    sql: "UPDATE pi_bot_defs SET definition=? WHERE bot_id='gate-bot'",
+    args: [JSON.stringify({ gateways: [{ type: "perch" }], tools: {}, models: {} })],
+  });
+  _setEngineStatusForTest({ state: "absent" });
+  const res = mkSendRes();
+  const req = mkGetReq({ bot: "gate-bot", tab: "gateways" });
+  await renderBotEditor(req, res, { db, layout, lang: "en", PAGE_CSS: "", botId: "gate-bot", notice: "", q: req.query });
+  assert.match(res.html, /id="btb-gateways-form"[^>]*data-engine-gate="1"/, "perch must arm the client gate");
+  assert.match(res.html, /data-engine-fields-type="perch"/);
+  assert.match(res.html, /data-engine-required-fields=""/,
+    "no required fields ⇒ the client-side completeness mirror (engine-gate-client.js recordIsComplete) passes on type alone");
 });
 
 test("bot-builder panel: error=engine_required renders a friendly banner + Install button, never the raw query value", async () => {

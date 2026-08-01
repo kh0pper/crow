@@ -14,7 +14,7 @@ import { escapeHtml, formField } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { lines } from "./data-queries.js";
 
-export const SIMPLE_GATEWAY_TYPES = ["gmail", "discord", "telegram", "slack", "none"];
+export const SIMPLE_GATEWAY_TYPES = ["gmail", "discord", "telegram", "slack", "perch", "none"];
 
 /**
  * Per-type required fields for readiness (spec §D4). gmail requires a
@@ -34,6 +34,13 @@ export const GATEWAY_REQUIRED_FIELDS = {
   // device.bound_bot_id; a type-only record is a UI draft, W1-4).
   glasses: ["device_id"],
   companion: ["device_id"],
+  // Perch (Perch Hub P1, C-4): the chat surface is the supervised perch-hub
+  // bundle, addressed by bot id — there is nothing per-bot to collect, so the
+  // record is complete the moment the type is chosen. Modelled explicitly as
+  // [] rather than left out: an ABSENT entry means "unknown type, make no
+  // claims" (missingGatewayFields bails), which would stop the C4 attach gate
+  // from ever seeing a perch record as a real attach.
+  perch: [],
   none: [],
 };
 
@@ -89,6 +96,11 @@ export function renderGatewayFields(gwType, gw, lang) {
       hint: `<p class="btb-hint">${t("botbuilder.gwHintSlack", lang)}</p>`,
     };
   }
+  if (gwType === "perch") {
+    // No inputs — the Perch chat surface is the perch-hub bundle's own page,
+    // which addresses the bot by id. Hint only.
+    return { fields: "", hint: `<p class="btb-hint">${t("botbuilder.gwHintPerch", lang)}</p>` };
+  }
   if (gwType === "none") {
     return { fields: "", hint: `<p class="btb-hint">${t("botbuilder.gwHintNone", lang)}</p>` };
   }
@@ -117,6 +129,11 @@ export function renderGatewayFields(gwType, gw, lang) {
 export function normalizeGatewayFields(gwType, body) {
   const b = body || {};
   if (gwType === "none") return [];
+  // Perch: a bare type-only record IS the whole config. Built without reading
+  // `b` at all, so leftover gw_* values from a previously-selected type (the
+  // Gateways tab re-submits the whole form on a type change) can never bleed
+  // into it.
+  if (gwType === "perch") return [{ type: "perch" }];
   if (gwType === "discord") {
     return [
       {

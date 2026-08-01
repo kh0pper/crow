@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { handleCrowMessageEvent } from "../scripts/pi-bots/gateways/crow-messages.mjs";
 import * as cmStore from "../scripts/pi-bots/gateways/crow-messages-store.mjs";
-import { isHostManaged, getAdapter } from "../scripts/pi-bots/gateways/index.mjs";
+import { isHostManaged, getAdapter, gatewayHint } from "../scripts/pi-bots/gateways/index.mjs";
 
 function freshDb() {
   const d = mkdtempSync(join(tmpdir(), "crowmsg-adapter-"));
@@ -102,6 +102,27 @@ test("crow-messages is registered as a host-managed adapter", () => {
   assert.equal(isHostManaged("crow-messages"), true);
   const a = getAdapter("crow-messages");
   assert.ok(a && a.type === "crow-messages" && typeof a.start === "function");
+});
+
+// Registry hint coverage lives here because this file already owns
+// gateways/index.mjs (isHostManaged/getAdapter above) — the registry has no
+// test file of its own.
+test("gatewayHint: perch gets a live-chat hint; gmail/discord stay byte-identical (KV-cache prefix)", () => {
+  const perch = gatewayHint("perch", "perch-ab12cd34");
+  assert.match(perch, /^\nGATEWAY: perch/, "perch must have its own branch, not the generic fallback");
+  assert.ok(perch.includes("perch-ab12cd34"), "thread ref carried through");
+  assert.ok(/gmail/i.test(perch), "must tell the bot not to reach for gmail tools in a live chat");
+  assert.notEqual(perch, gatewayHint("signal", "perch-ab12cd34").replace("signal", "perch"),
+    "perch must not just be the generic fallback with the type substituted");
+
+  // The registry's whole reason for existing: these two strings are part of
+  // the system-prompt prefix the KV cache depends on. Pinned verbatim.
+  assert.equal(gatewayHint("discord", "T1"),
+    "\nGATEWAY: discord — your reply text is sent to the Discord channel automatically. "
+    + "Do NOT use gmail tools. (thread ref: T1)");
+  assert.equal(gatewayHint("gmail", "T1"),
+    "\nGATEWAY THREAD: gmail thread_id=T1"
+    + " — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.");
 });
 
 // subscribe() throws synchronously when down — a test-only model (real

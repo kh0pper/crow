@@ -969,6 +969,7 @@ export const translations = {
   "botbuilder.gwHintHousehold": { en: "Household profiles (multiple named users, each with their own avatar & voice) are configured in Settings → Companion → Household — they apply to the whole companion, not per bot.", es: "Los perfiles del hogar (varios usuarios con su propio avatar y voz) se configuran en Ajustes → Companion → Hogar; aplican a todo el companion, no por bot." },
   "botbuilder.gwHintNone": { en: "No gateway — this bot is driven only by direct injection / cards, not inbound messages.", es: "Sin gateway — este bot solo es impulsado por inyección directa / tarjetas, no por mensajes entrantes." },
   "botbuilder.gwHintGmail": { en: "The Gmail gateway polls the address configured on the Gateways tab via bridge_tick.mjs (pibot-bridge.timer, ~1 min).", es: "La puerta de enlace de Gmail sondea la dirección configurada en la pestaña Puertas de enlace a través de bridge_tick.mjs (pibot-bridge.timer, ~1 min)." },
+  "botbuilder.gwHintPerch": { en: "Nothing to configure — you chat with this bot from the Perch page in your dashboard, and replies stream back live. Perch needs the Perch Hub extension installed; each conversation there becomes a session you can inspect and narrow.", es: "Nada que configurar: hablas con este bot desde la página Perch de tu panel y las respuestas llegan en vivo. Perch necesita la extensión Perch Hub instalada; cada conversación se convierte en una sesión que puedes inspeccionar y acotar." },
   // Create-form honesty (Item 4 PR1, §2.1)
   "botbuilder.createProvidersLink": { en: "Configure a model provider", es: "Configura un proveedor de modelos" },
   "botbuilder.createModelInvalid": { en: "Model is required and must be one of this instance's available models — the bot was not created.", es: "El modelo es obligatorio y debe ser uno de los modelos disponibles en esta instancia — el bot no fue creado." },
@@ -1062,6 +1063,7 @@ export const translations = {
   "botbuilder.wizChannelLabel": { en: "Where should people talk to this bot?", es: "¿Dónde debería la gente hablar con este bot?" },
   "botbuilder.wizGw_none": { en: "No channel yet (add one later)", es: "Sin canal por ahora (añade uno después)" },
   "botbuilder.wizGw_crow_messages": { en: "Crow Messages (built in — no setup)", es: "Crow Messages (integrado, sin configuración)" },
+  "botbuilder.wizGw_perch": { en: "Perch (chat from your dashboard — no setup)", es: "Perch (chat desde tu panel, sin configuración)" },
   "botbuilder.wizGw_gmail": { en: "Gmail", es: "Gmail" },
   "botbuilder.wizGw_discord": { en: "Discord", es: "Discord" },
   "botbuilder.wizGw_telegram": { en: "Telegram", es: "Telegram" },
@@ -1171,6 +1173,7 @@ export const translations = {
   "botbuilder.trackerOptTaskList": { en: "Task list (flat checklist)", es: "Lista de tareas (lista simple)" },
   "botbuilder.trackerOptCustom": { en: "Custom tracker", es: "Tablero personalizado" },
   "botbuilder.trackerOptNone": { en: "None (no tracker)", es: "Ninguno (sin tablero)" },
+  "botbuilder.gwOptPerch": { en: "Perch (dashboard chat)", es: "Perch (chat del panel)" },
   "botbuilder.gwOptNone": { en: "None (no channel)", es: "Ninguno (sin canal)" },
   "botbuilder.gwOptComingSoon": { en: "coming soon", es: "próximamente" },
   "botbuilder.sessBtnSend": { en: "Send", es: "Enviar" },

@@ -67,6 +67,19 @@ test("normalize: slack record parity", () => {
   }]);
 });
 
+test("normalize: perch → a bare type-only record (no credentials to collect)", () => {
+  // Perch Hub P1 C-4: the perch channel is a live chat surface served by the
+  // supervised hub bundle; there is nothing per-bot to configure, so the
+  // record is exactly {type:"perch"} — and, with GATEWAY_REQUIRED_FIELDS.perch
+  // === [], it is COMPLETE by construction. That is what makes the C4 attach
+  // gate fire on engine state alone for this type (spec: no required fields).
+  assert.deepEqual(normalizeGatewayFields("perch", {}), [{ type: "perch" }]);
+  // Stray gw_* values from a previously-selected type must not bleed in.
+  assert.deepEqual(
+    normalizeGatewayFields("perch", { gw_token: "leftover", gw_address: "a@b.c", gw_allowlist: "x" }),
+    [{ type: "perch" }]);
+});
+
 test("normalize: none → empty gateways; non-simple types → null", () => {
   assert.deepEqual(normalizeGatewayFields("none", {}), []);
   for (const tpe of ["glasses", "companion", "crow-messages", "signal", "unknown"]) {
@@ -82,7 +95,19 @@ const FIELD_NAMES = {
   telegram: ["gw_token", "gw_allowlist", "gw_chat_ids"],
   slack: ["gw_bot_token", "gw_app_token", "gw_allowlist", "gw_channel_ids"],
   none: [],
+  // Perch (C-4): the chat surface is the Perch Hub bundle's own UI, so the
+  // gateway record carries nothing to configure — hint only, zero inputs.
+  perch: [],
 };
+
+test("SIMPLE_GATEWAY_TYPES is exactly the set this module renders and normalizes", () => {
+  // Pins membership in BOTH directions. The loop below only walks
+  // SIMPLE_GATEWAY_TYPES, so dropping a type from the list would silently
+  // stop testing it — and dropping "perch" would also send the wizard's
+  // channel step (wizard.js: SIMPLE_GATEWAY_TYPES.includes(gwType)) down the
+  // "no channel" branch instead of rendering the perch hint.
+  assert.deepEqual([...SIMPLE_GATEWAY_TYPES].sort(), Object.keys(FIELD_NAMES).sort());
+});
 
 test("render: every simple type renders exactly its field names, en and es", () => {
   for (const tpe of SIMPLE_GATEWAY_TYPES) {
@@ -123,6 +148,13 @@ test("required fields: gmail fail-closed needs address+allowlist; others token-o
   assert.deepEqual(GATEWAY_REQUIRED_FIELDS.slack, ["bot_token", "app_token"]);
   assert.deepEqual(GATEWAY_REQUIRED_FIELDS["crow-messages"], []);
   assert.deepEqual(GATEWAY_REQUIRED_FIELDS.none, []);
+  // perch is MODELLED with an empty list, not merely absent from the table:
+  // absence means "unknown type, make no claims" (missingGatewayFields
+  // returns [] for those too), while an explicit [] means "complete by
+  // construction". Only the explicit entry lets the C4 attach gate treat a
+  // bare {type:"perch"} record as a real attach. Asserting the VALUE (not
+  // just the emptiness of missingGatewayFields) is what distinguishes them.
+  assert.deepEqual(GATEWAY_REQUIRED_FIELDS.perch, []);
 });
 
 test("missingGatewayFields: gmail with empty allowlist is incomplete (deaf-bot guard)", () => {
@@ -138,6 +170,8 @@ test("missingGatewayFields: gmail with empty allowlist is incomplete (deaf-bot g
   // discord's allowlist fails OPEN — token alone is complete.
   assert.deepEqual(missingGatewayFields({ type: "discord", token: "t", allowlist: [] }), []);
   assert.deepEqual(missingGatewayFields({ type: "discord", token: "" }), ["token"]);
+  // perch: nothing to fill in, so a bare type-only record is complete.
+  assert.deepEqual(missingGatewayFields({ type: "perch" }), []);
   // unknown types: no claims.
   assert.deepEqual(missingGatewayFields({ type: "signal" }), []);
   assert.deepEqual(missingGatewayFields(null), []);
