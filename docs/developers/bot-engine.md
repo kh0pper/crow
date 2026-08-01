@@ -4,13 +4,13 @@ title: Bot Engine (pi)
 
 # Bot Engine (pi)
 
-The **bot engine** is the agent runtime behind Bot Builder's message-based channels — Gmail, Discord, Telegram, and Slack. It is [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent), pinned to `0.82.0` (requires Node.js >= 22.19). Crow's pi-bots bridge (`scripts/pi-bots/`) spawns it per-turn in RPC mode (`--mode rpc`), feeds it the inbound message plus the bot's definition (model, tools, skills, permission policy), and relays its reply back out the channel it arrived on.
+The **bot engine** is the agent runtime behind Bot Builder's message-based channels — Gmail, Discord, Telegram, Slack, and [Perch](./perch-hub). It is [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent), pinned to `0.82.0` (requires Node.js >= 22.19). Crow's pi-bots bridge (`scripts/pi-bots/`) spawns it per-turn in RPC mode (`--mode rpc`), feeds it the inbound message plus the bot's definition (model, tools, skills, permission policy), and relays its reply back out the channel it arrived on.
 
 Bots on **Crow Messages** or a **voice/device** channel never need the engine — those run their own loop directly against the gateway's model router, not pi. The engine only matters once a bot has an engine-channel gateway attached.
 
 ## The bundle
 
-The engine ships as a bundle, `bundles/bot-engine/`, so it installs the same way any other add-on does — from the Extensions page, or automatically the first time a bot's Gateways tab tries to save a gmail/discord/telegram/slack channel while the engine is absent (see [Per-channel gating](#per-channel-gating) below).
+The engine ships as a bundle, `bundles/bot-engine/`, so it installs the same way any other add-on does — from the Extensions page, or automatically the first time a bot's Gateways tab tries to save a gmail/discord/telegram/slack/perch channel while the engine is absent (see [Per-channel gating](#per-channel-gating) below).
 
 ```json
 {
@@ -29,7 +29,7 @@ The engine ships as a bundle, `bundles/bot-engine/`, so it installs the same way
 
 A bundle with `npm_required: true` is one the platform considers useless without a working install — there is no silent "installed, but the tool won't actually work" state for the bot engine the way there can be for an optional-dependency bundle.
 
-**Uninstall blast radius.** Because uninstalling the engine stops every gmail/discord/telegram/slack bot dead, the Extensions page's uninstall confirmation for `bot-engine` fetches `GET /bundles/api/engine-blast` first and lists every *enabled* bot that has an engine-channel gateway (bot name + channel types) in the confirmation dialog before letting the uninstall proceed. A disabled bot, or a bot whose only gateway is Crow Messages/voice, is not listed — it isn't affected.
+**Uninstall blast radius.** Because uninstalling the engine stops every gmail/discord/telegram/slack/perch bot dead, the Extensions page's uninstall confirmation for `bot-engine` fetches `GET /bundles/api/engine-blast` first and lists every *enabled* bot that has an engine-channel gateway (bot name + channel types) in the confirmation dialog before letting the uninstall proceed. A disabled bot, or a bot whose only gateway is Crow Messages/voice, is not listed — it isn't affected.
 
 ## The resolver ladder
 
@@ -99,7 +99,7 @@ The Bot Builder readiness checklist splits `ready` one step further into what th
 
 ## Per-channel gating
 
-Only four gateway types need the engine — `gmail`, `discord`, `telegram`, `slack` (`ENGINE_CHANNELS`). Attaching one of these to a bot while the engine state is `absent` is refused at save time (both the Gateways-tab save and the wizard's final create share the same gate), with a modal offering to install the bundle in place. **Crow Messages** and **voice/device** gateways are never gated — they don't touch pi at all.
+Five gateway types need the engine — `gmail`, `discord`, `telegram`, `slack`, `perch` (`ENGINE_CHANNELS`). Attaching one of these to a bot while the engine state is `absent` is refused at save time (both the Gateways-tab save and the wizard's final create share the same gate), with a modal offering to install the bundle in place. **Crow Messages** and **voice/device** gateways are never gated — they don't touch pi at all.
 
 ## See also
 

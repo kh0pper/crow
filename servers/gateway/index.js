@@ -687,6 +687,26 @@ async function gracefulShutdown() {
     new Promise((resolve) => setTimeout(resolve, 10_000)),
   ]);
 
+  // Step 5b — stop the gateway-supervised Perch hub.
+  //
+  // shutdownAll() above only reaps proxy.js's MCP bundle children; it knows
+  // nothing about process-supervisor handles, and those children are spawned
+  // `detached: true` (own process group, so a terminal SIGINT never reaches
+  // them) with pdeathsig only when setpriv exists. Without this the hub
+  // SURVIVES gateway shutdown — proven live during Perch Hub C-2, where the
+  // stub hub was still in `ps` after the gateway exited, holding its port
+  // against the restarted gateway's own child.
+  //
+  // Bounded: a child ignoring SIGTERM must not hold the shutdown open.
+  // (Follow-up, deliberately NOT fixed here: bot-runtime.js's Discord child
+  // has the identical gap and needs its own change + test.)
+  try {
+    const { stopPerchRuntimeBounded } = await import("./perch-runtime.js");
+    await stopPerchRuntimeBounded();
+  } catch {
+    // Module missing or stop threw — never block the exit on it.
+  }
+
   // Step 6 — best-effort WAL checkpoint
   try {
     const _walDb = createDbClient();

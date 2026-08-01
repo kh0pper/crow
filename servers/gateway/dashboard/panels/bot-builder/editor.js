@@ -244,6 +244,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       { value: "glasses", label: "Meta Glasses", available: true },
       { value: "companion", label: "AI Companion (kiosk)", available: true },
       { value: "crow-messages", label: "Crow Messages", available: true },
+      { value: "perch", label: t("botbuilder.gwOptPerch", lang), available: true },
       { value: "signal", label: "Signal", available: false },
       { value: "none", label: t("botbuilder.gwOptNone", lang), available: true },
     ];

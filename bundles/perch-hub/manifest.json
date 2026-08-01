@@ -1,0 +1,29 @@
+{
+  "id": "perch-hub",
+  "name": "Perch Hub",
+  "description": "Session observatory and chat surface for your Crow bots, plus the full Perch pi session manager. Runs loopback-only behind your dashboard login.",
+  "type": "bundle",
+  "category": "ai",
+  "version": "0.1.4",
+  "origin": "official",
+  "npm_required": false,
+  "min_node": "22.19.0",
+  "requires": {
+    "min_ram_mb": 128,
+    "min_disk_mb": 20
+  },
+  "env_vars": [],
+  "draft": false,
+  "verify_paths": [
+    "payload/hub/server.mjs",
+    "payload/UPSTREAM"
+  ],
+  "webUI": {
+    "port": 4210,
+    "portEnv": "CROW_PERCH_PORT",
+    "path": "/",
+    "label": "Perch",
+    "authTokenFile": "perch-token"
+  },
+  "payload_sha256": "0da7e59ff8a37563520b284e60e52cc843296c635d98b10f86e6bbda226e68ef"
+}

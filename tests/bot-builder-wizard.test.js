@@ -210,6 +210,21 @@ test("channel reload (update-fields button) re-renders the same step with the ne
   assert.ok(html.includes('name="gw_bot_token"'), "slack fields rendered after type change");
 });
 
+test("channel step offers perch and renders its hint (no inputs) — Perch Hub P1 C-4", async () => {
+  const html = await renderPost({
+    action: "wizard_step", step: "3", nav: "reload",
+    tpl: "blank", display_name: "X", bot_id: "x", model: "prov/m1", gw_type: "perch",
+  });
+  assert.match(html, /name="step" value="3"/, "reload stays on channel");
+  assert.match(html, /<option value="perch" selected>/, "perch must be an offered channel and stay selected");
+  assert.match(html, /Perch Hub extension installed/,
+    "the perch hint must render — the wizard reaches it via SIMPLE_GATEWAY_TYPES, so a missing " +
+    "entry there silently falls through to the generic no-channel note");
+  assert.ok(!/name="gw_token"|name="gw_address"|name="gw_bot_token"/.test(html),
+    "perch collects nothing — no credential inputs may render");
+  assert.ok(!/botbuilder\.[a-zA-Z_]/.test(html), "no bare i18n keys");
+});
+
 // ---- final create ----
 
 test("wizard_create (blank/none): inserts row, safe defaults, PRG to review with created notice", async () => {

@@ -28,6 +28,7 @@ export const translations = {
   "nav.settings": { en: "Settings", es: "Ajustes" },
   "nav.contacts": { en: "Contacts", es: "Contactos" },
   "nav.projects": { en: "Projects", es: "Proyectos" },
+  "nav.perch": { en: "Perch", es: "Perch" },
   // Nav group headers — spine-aligned (W3-6)
   "nav.group.home": { en: "Home", es: "Inicio" },
   "nav.group.agents": { en: "Agents", es: "Agentes" },
@@ -969,6 +970,7 @@ export const translations = {
   "botbuilder.gwHintHousehold": { en: "Household profiles (multiple named users, each with their own avatar & voice) are configured in Settings → Companion → Household — they apply to the whole companion, not per bot.", es: "Los perfiles del hogar (varios usuarios con su propio avatar y voz) se configuran en Ajustes → Companion → Hogar; aplican a todo el companion, no por bot." },
   "botbuilder.gwHintNone": { en: "No gateway — this bot is driven only by direct injection / cards, not inbound messages.", es: "Sin gateway — este bot solo es impulsado por inyección directa / tarjetas, no por mensajes entrantes." },
   "botbuilder.gwHintGmail": { en: "The Gmail gateway polls the address configured on the Gateways tab via bridge_tick.mjs (pibot-bridge.timer, ~1 min).", es: "La puerta de enlace de Gmail sondea la dirección configurada en la pestaña Puertas de enlace a través de bridge_tick.mjs (pibot-bridge.timer, ~1 min)." },
+  "botbuilder.gwHintPerch": { en: "Nothing to configure — you chat with this bot from the Perch page in your dashboard, and replies stream back live. Perch needs the Perch Hub extension installed; each conversation there becomes a session you can inspect and narrow.", es: "Nada que configurar: hablas con este bot desde la página Perch de tu panel y las respuestas llegan en vivo. Perch necesita la extensión Perch Hub instalada; cada conversación se convierte en una sesión que puedes inspeccionar y acotar." },
   // Create-form honesty (Item 4 PR1, §2.1)
   "botbuilder.createProvidersLink": { en: "Configure a model provider", es: "Configura un proveedor de modelos" },
   "botbuilder.createModelInvalid": { en: "Model is required and must be one of this instance's available models — the bot was not created.", es: "El modelo es obligatorio y debe ser uno de los modelos disponibles en esta instancia — el bot no fue creado." },
@@ -1062,6 +1064,7 @@ export const translations = {
   "botbuilder.wizChannelLabel": { en: "Where should people talk to this bot?", es: "¿Dónde debería la gente hablar con este bot?" },
   "botbuilder.wizGw_none": { en: "No channel yet (add one later)", es: "Sin canal por ahora (añade uno después)" },
   "botbuilder.wizGw_crow_messages": { en: "Crow Messages (built in — no setup)", es: "Crow Messages (integrado, sin configuración)" },
+  "botbuilder.wizGw_perch": { en: "Perch (chat from your dashboard — no setup)", es: "Perch (chat desde tu panel, sin configuración)" },
   "botbuilder.wizGw_gmail": { en: "Gmail", es: "Gmail" },
   "botbuilder.wizGw_discord": { en: "Discord", es: "Discord" },
   "botbuilder.wizGw_telegram": { en: "Telegram", es: "Telegram" },
@@ -1171,6 +1174,7 @@ export const translations = {
   "botbuilder.trackerOptTaskList": { en: "Task list (flat checklist)", es: "Lista de tareas (lista simple)" },
   "botbuilder.trackerOptCustom": { en: "Custom tracker", es: "Tablero personalizado" },
   "botbuilder.trackerOptNone": { en: "None (no tracker)", es: "Ninguno (sin tablero)" },
+  "botbuilder.gwOptPerch": { en: "Perch (dashboard chat)", es: "Perch (chat del panel)" },
   "botbuilder.gwOptNone": { en: "None (no channel)", es: "Ninguno (sin canal)" },
   "botbuilder.gwOptComingSoon": { en: "coming soon", es: "próximamente" },
   "botbuilder.sessBtnSend": { en: "Send", es: "Enviar" },
@@ -1205,6 +1209,14 @@ export const translations = {
   "botbuilder.runtimeOffEnabling": { en: "Enabling...", es: "Activando..." },
   "botbuilder.runtimeOffEnabled": { en: "Enabled — bots start polling within about a minute.", es: "Activado — los bots empezarán a sondear en aproximadamente un minuto." },
   "botbuilder.runtimeOffEnableFailed": { en: "Could not enable. Try again from Settings → Bot Runtime.", es: "No se pudo activar. Intenta de nuevo desde Ajustes → Runtime de bots." },
+  // Perch Hub P1, acceptance finding D2: the Perch channel is saved, but the
+  // surface that would show the bot's replies IS the perch-hub bundle, and it
+  // isn't installed here. A warning, never a block — same shape as the
+  // runtime-off banner above, with a one-click install beside it.
+  "botbuilder.perchMissingBody": {
+    en: "Saved. The Perch channel is attached, but the Perch Hub extension isn't installed on this instance — there is nowhere to read this bot's replies until it is.",
+    es: "Guardado. El canal Perch está conectado, pero la extensión Perch Hub no está instalada en esta instancia — no hay dónde leer las respuestas de este bot hasta que lo esté.",
+  },
   "botbuilder.engineGateModalTitle": { en: "Install the bot engine", es: "Instalar el motor de bots" },
   "botbuilder.engineGateModalBody": {
     en: "Gmail, Discord, Telegram, and Slack channels are driven by pi, the same coding-agent engine Bot Builder uses to run every bot's turns. It isn't installed on this instance yet.",
@@ -2033,6 +2045,56 @@ export const translations = {
     en: "No starter memories left to clear.",
     es: "No quedan memorias iniciales por borrar.",
   },
+
+  // ─── Perch panel (Perch Hub Phase 1, Task C-7) ───
+  // Three honest states: running (framed lens), installed-but-down, and
+  // not-installed (gate card + one-click install).
+  "perch.runningTitle": { en: "Perch — sessions", es: "Perch — sesiones" },
+  "perch.runningSubtitle": {
+    en: "Every session your bots are running, their channels, transcripts, and a place to message them directly.",
+    es: "Todas las sesiones que ejecutan tus bots, sus canales, transcripciones y un lugar para escribirles directamente.",
+  },
+  "perch.frameLabel": { en: "Perch bots lens", es: "Vista de bots de Perch" },
+  "perch.openInTab": { en: "Open in a new tab", es: "Abrir en una pestaña nueva" },
+  "perch.offlineTitle": { en: "Perch is offline", es: "Perch está desconectado" },
+  "perch.offlineBody": {
+    en: "The Perch hub is installed, but the gateway is not currently running it — so there are no sessions to show.",
+    es: "El hub de Perch está instalado, pero la puerta de enlace no lo está ejecutando ahora mismo, así que no hay sesiones que mostrar.",
+  },
+  "perch.offlineErrorLabel": { en: "Last error", es: "Último error" },
+  "perch.offlineNoError": {
+    en: "The supervisor recorded no error. Perch was most likely installed after this gateway started, and has not been supervised yet.",
+    es: "El supervisor no registró ningún error. Lo más probable es que Perch se instalara después de iniciar esta puerta de enlace y aún no esté supervisado.",
+  },
+  "perch.offlineHint": {
+    en: "Restart the gateway, then reload this page. If Perch stays offline, look for [perch-hub] lines in the gateway log.",
+    es: "Reinicia la puerta de enlace y vuelve a cargar esta página. Si Perch sigue desconectado, busca líneas [perch-hub] en el registro de la puerta de enlace.",
+  },
+  "perch.offlineRetryBtn": { en: "Check again", es: "Comprobar de nuevo" },
+  "perch.gateTitle": { en: "Perch is not installed", es: "Perch no está instalado" },
+  "perch.gateBody": {
+    en: "Perch is the session observatory for your bots: every session with its channel and transcript, plus a chat card for messaging a bot directly.",
+    es: "Perch es el observatorio de sesiones de tus bots: cada sesión con su canal y su transcripción, además de una tarjeta de chat para escribir a un bot directamente.",
+  },
+  "perch.gateDiskNote": {
+    en: "Installs a small local service that listens only on this machine, behind your dashboard login. About 20 MB of disk.",
+    es: "Instala un pequeño servicio local que solo escucha en esta máquina, detrás del inicio de sesión de tu panel. Unos 20 MB de disco.",
+  },
+  "perch.gateInstallBtn": { en: "Install Perch", es: "Instalar Perch" },
+  "perch.gateInstallingBtn": { en: "Installing…", es: "Instalando…" },
+  "perch.gateWorking": { en: "Working…", es: "Trabajando…" },
+  "perch.gateDone": { en: "Installed. Restarting the gateway…", es: "Instalado. Reiniciando la puerta de enlace…" },
+  "perch.gateRestarting": {
+    en: "The gateway is restarting — this page will reload on its own.",
+    es: "La puerta de enlace se está reiniciando; esta página se recargará sola.",
+  },
+  "perch.gateFailedPrefix": { en: "Install failed:", es: "La instalación falló:" },
+  "perch.gateUnknownError": { en: "unknown error", es: "error desconocido" },
+  "perch.gateNetworkError": {
+    en: "Could not reach the gateway. Check the connection and try again.",
+    es: "No se pudo contactar con la puerta de enlace. Revisa la conexión e inténtalo de nuevo.",
+  },
+  "perch.gateRetryBtn": { en: "Retry", es: "Reintentar" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

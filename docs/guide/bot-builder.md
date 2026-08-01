@@ -46,8 +46,61 @@ A gateway connects an agent to a place where people talk to it. The same agent d
 - **Discord**: The agent joins a Discord server as a bot and answers in channels and DMs, with a per-agent user allowlist.
 - **Meta Glasses**: A paired pair of Ray-Ban Meta (Gen 2) glasses binds to one agent. That agent then drives the fast voice turn: its persona, its skills, its scoped tools, and its permissions, spoken through the speech and voice profiles you picked. See the [Meta Glasses guide](/guide/meta-glasses).
 - **Crow Messages**: The agent becomes reachable as a contact. People you invite can message it, you can browse and add the bots running across your Crows, and you can put people and bots together in a group room. See the [Crow Messages guide](/guide/crow-messages).
+- **Perch**: The agent becomes chattable from the Perch page in your own dashboard. There is nothing to configure — choosing the channel is the whole setup. Perch needs the Perch Hub extension installed. See [Perch](#perch-talk-to-an-agent-from-your-own-dashboard) below.
 
 Binding glasses to an agent is one-to-one: a device drives one agent at a time, and choosing a new agent for a device releases the old binding.
+
+## Perch: talk to an agent from your own dashboard
+
+Perch is an extension that adds a **Perch** page to the Crow's Nest. It shows every agent on your Crow, every conversation each one has had on any channel, and the transcript of each. For agents you attach the Perch channel to, it also gives you a message box.
+
+Nothing about Perch is exposed to the internet. It runs on your machine, listens only there, and is reachable only through your dashboard login.
+
+### 1. Install Perch
+
+Install **Perch Hub** from the Extensions page, or open **Perch** in the nav and use the **Install Perch** button on the card you land on. Perch registers a small local service, so Crow restarts itself to route it; the page reloads on its own when the gateway is back, and a **Perch** entry appears in the nav.
+
+If Perch says it is offline right after installing, that is usually the restart still pending — the card tells you which case you are in, and says so plainly when the supervisor has recorded a real error instead.
+
+### 2. Attach the Perch channel to an agent
+
+Open the agent in Bot Builder, go to the **Gateways** tab, choose **Perch (dashboard chat)**, and save. There are no fields to fill in. You can also pick Perch as the channel while creating an agent in the wizard.
+
+Perch turns run on the same bot engine that Gmail and Discord use, so if the engine is not installed yet Crow will offer to install it before letting you save.
+
+You can attach the channel before installing Perch itself, and the save goes through — but Crow warns you, because the page that would show the agent's replies is the Perch extension. The warning comes with an **Install Perch** button beside it, and once the install and restart finish you land back on the same agent without the warning.
+
+Agents without the channel attached still appear in Perch. You can read their sessions and transcripts; you just cannot message them. Watching is free, talking is the part you opt into.
+
+### 3. Message the agent
+
+Open **Perch**. Each agent is a card. Attached agents have a message box at the bottom of theirs: type, send, and the reply streams back as the agent produces it. If something goes wrong — the engine is not ready, the agent is already busy with another message in the same conversation — the card says so in place of the reply, rather than spinning.
+
+Each conversation is a session. It shows up in the session list under the agent with a **transcript** you can open, and the agent picks the thread back up where you left it.
+
+### 4. Narrow an agent's tools for one conversation
+
+Open **Controls** on any session row. You see the agent's full envelope: every tool it is allowed to use, each with a checkbox, plus its model and skills.
+
+Uncheck a tool and it is switched off **for that conversation only**, from the next message onward. The agent's definition is untouched, and every other conversation keeps the full set. This is for the moment when you want an agent to answer a question without touching your files, without editing anything, without reaching out over the network — for this one thread, right now.
+
+Tools shown with a padlock are ones the agent is not allowed at all. They are not togglable here; they link to Bot Builder, which is the only place that grants a tool. Perch can only ever take away.
+
+### 5. Reading the badges
+
+Every session row carries badges:
+
+- the **channel** it came in on — `perch`, `gmail`, `discord`, and so on;
+- a **card** badge when the session was started by a bot-board dispatch, linking straight back to the card on the board;
+- a **live** badge while a turn is actually running.
+
+### Before you install it
+
+Two things are worth knowing, because Perch does not hide them.
+
+Everyone who can sign in to your dashboard can read **every** agent's transcripts in Perch. There is no per-agent access control.
+
+Perch also carries its full original session manager, which can start programs on the machine it runs on. That is deliberate — it is a self-hosted operator tool, and it is behind your dashboard login and nothing else. Install it on a Crow whose dashboard login you treat as seriously as shell access on that machine, and not on one where the login is shared more widely than that.
 
 ## Permissions and safety
 
@@ -86,6 +139,7 @@ The Review / Deploy tab summarizes the agent before you commit it. Once deployed
 - [Meta Glasses](/guide/meta-glasses): Run an agent hands-free on Ray-Ban Meta glasses
 - [Crow Messages](/guide/crow-messages): Share a bot, browse bots across your Crows, and build group rooms
 - [Bot Builder Architecture](/architecture/bot-builder): The engine, data model, and voice dispatch internals
+- [Perch Hub](/developers/perch-hub): How the Perch extension is supervised, proxied, and updated
 - [Extensions](/guide/extensions): Install extensions that contribute tools and skills
 - [Writing Skills](/developers/skills): Author the behavioral prompts agents use
 - [AI Providers (BYOAI)](/guide/ai-providers): Configure the models agents run on
