@@ -16,6 +16,11 @@ import { lines } from "./data-queries.js";
 
 export const SIMPLE_GATEWAY_TYPES = ["gmail", "discord", "telegram", "slack", "perch", "none"];
 
+/** The one gateway type whose surface is a BUNDLE rather than a remote
+ * service, so a save can be complete and still have nowhere to show a reply
+ * (acceptance finding D2 — both save surfaces warn on it). */
+export const PERCH_GATEWAY_TYPE = "perch";
+
 /**
  * Per-type required fields for readiness (spec §D4). gmail requires a
  * non-empty allowlist because its sender wall fails CLOSED

@@ -1209,6 +1209,14 @@ export const translations = {
   "botbuilder.runtimeOffEnabling": { en: "Enabling...", es: "Activando..." },
   "botbuilder.runtimeOffEnabled": { en: "Enabled — bots start polling within about a minute.", es: "Activado — los bots empezarán a sondear en aproximadamente un minuto." },
   "botbuilder.runtimeOffEnableFailed": { en: "Could not enable. Try again from Settings → Bot Runtime.", es: "No se pudo activar. Intenta de nuevo desde Ajustes → Runtime de bots." },
+  // Perch Hub P1, acceptance finding D2: the Perch channel is saved, but the
+  // surface that would show the bot's replies IS the perch-hub bundle, and it
+  // isn't installed here. A warning, never a block — same shape as the
+  // runtime-off banner above, with a one-click install beside it.
+  "botbuilder.perchMissingBody": {
+    en: "Saved. The Perch channel is attached, but the Perch Hub extension isn't installed on this instance — there is nowhere to read this bot's replies until it is.",
+    es: "Guardado. El canal Perch está conectado, pero la extensión Perch Hub no está instalada en esta instancia — no hay dónde leer las respuestas de este bot hasta que lo esté.",
+  },
   "botbuilder.engineGateModalTitle": { en: "Install the bot engine", es: "Instalar el motor de bots" },
   "botbuilder.engineGateModalBody": {
     en: "Gmail, Discord, Telegram, and Slack channels are driven by pi, the same coding-agent engine Bot Builder uses to run every bot's turns. It isn't installed on this instance yet.",
