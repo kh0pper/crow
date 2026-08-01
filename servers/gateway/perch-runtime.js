@@ -218,6 +218,42 @@ export async function stopPerchRuntime() {
   return true;
 }
 
+/**
+ * How long either caller of the bounded stop waits for the child to exit
+ * before giving up and carrying on. Both the uninstall path (bundles.js) and
+ * gateway shutdown (index.js) use it, deliberately: a hub wedged in an
+ * uninterruptible state must never hang an uninstall job forever, nor hold the
+ * gateway open past its shutdown budget.
+ */
+export const PERCH_STOP_TIMEOUT_MS = 5000;
+
+/**
+ * `stopPerchRuntime()` with a hard wall-clock cap.
+ *
+ * `handle.stop()` resolves on the child's `exit` event
+ * (`process-supervisor.js`), so a child that ignores SIGTERM never resolves
+ * it. The caller is told which happened rather than being left to guess.
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs] cap, defaults to PERCH_STOP_TIMEOUT_MS
+ * @param {Function} [opts.stopImpl] seam, defaults to stopPerchRuntime
+ * @returns {Promise<{stopped:boolean, timedOut:boolean}>}
+ */
+export async function stopPerchRuntimeBounded({
+  timeoutMs = PERCH_STOP_TIMEOUT_MS,
+  stopImpl = stopPerchRuntime,
+} = {}) {
+  let timer = null;
+  const TIMED_OUT = Symbol("timed-out");
+  const outcome = await Promise.race([
+    Promise.resolve().then(stopImpl).catch(() => false),
+    new Promise((r) => { timer = setTimeout(() => r(TIMED_OUT), timeoutMs); }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (outcome === TIMED_OUT) return { stopped: false, timedOut: true };
+  return { stopped: outcome === true, timedOut: false };
+}
+
 /** Test-only: drop the supervised handle and all module-level state so one
  * test can never leak a running child or a stale lastError into the next. */
 export function _resetPerchRuntimeForTest() {

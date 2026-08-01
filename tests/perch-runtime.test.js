@@ -14,6 +14,8 @@ import {
   initPerchRuntime,
   perchRuntimeStatus,
   stopPerchRuntime,
+  stopPerchRuntimeBounded,
+  PERCH_STOP_TIMEOUT_MS,
   _resetPerchRuntimeForTest,
 } from "../servers/gateway/perch-runtime.js";
 
@@ -299,4 +301,48 @@ test("stopPerchRuntime is awaitable, stops the handle, and is idempotent", async
   // resolve rather than throw or re-kill.
   assert.equal(await stopPerchRuntime(), false);
   assert.equal(supervise.handles[0].stopCount, 1);
+});
+
+// ---------------------------------------------------------------------------
+// bounded stop (C-3) — shared by the uninstall path and gateway shutdown
+// ---------------------------------------------------------------------------
+
+test("stopPerchRuntimeBounded stops a live handle and reports stopped:true", async () => {
+  const home = makeCrowHome();
+  const supervise = fakeSupervisor();
+  await initPerchRuntime({ crowHome: home, env: {}, superviseProcess: supervise });
+
+  assert.deepEqual(await stopPerchRuntimeBounded(), { stopped: true, timedOut: false });
+  assert.equal(supervise.handles[0].stopCount, 1);
+  assert.equal(perchRuntimeStatus().running, false);
+
+  // Nothing left to stop — still resolves, never throws (shutdown runs it
+  // unconditionally, including on hosts that never installed perch-hub).
+  assert.deepEqual(await stopPerchRuntimeBounded(), { stopped: false, timedOut: false });
+});
+
+test("stopPerchRuntimeBounded gives up at the bound when the child never exits", async () => {
+  // handle.stop() resolves on the child's "exit" event, so a process that
+  // ignores SIGTERM leaves it pending forever. Neither an uninstall job nor
+  // gateway shutdown may wait on that.
+  const started = Date.now();
+  const res = await stopPerchRuntimeBounded({
+    timeoutMs: 100,
+    stopImpl: () => new Promise(() => {}),
+  });
+  const elapsed = Date.now() - started;
+  assert.deepEqual(res, { stopped: false, timedOut: true });
+  assert.ok(elapsed < 2000, `bounded stop took ${elapsed}ms — it is not actually bounded`);
+});
+
+test("stopPerchRuntimeBounded swallows a throwing stop rather than failing its caller", async () => {
+  const res = await stopPerchRuntimeBounded({
+    timeoutMs: 100,
+    stopImpl: () => { throw new Error("kill failed: EPERM"); },
+  });
+  assert.deepEqual(res, { stopped: false, timedOut: false });
+});
+
+test("the default bound is 5s and is exported so both callers share one number", () => {
+  assert.equal(PERCH_STOP_TIMEOUT_MS, 5000);
 });

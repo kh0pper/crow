@@ -17,7 +17,7 @@
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { Router } from "express";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { isAllowedNetwork, parseCookies, verifySession } from "../dashboard/auth.js";
 
@@ -59,12 +59,45 @@ function getProxiedExtensions() {
           path: manifest.webUI.path || "/",
           label: manifest.webUI.label || manifest.name || entry.id,
           proxyMode: manifest.webUI.proxyMode || "subpath",
+          // Name of a file under CROW_HOME holding a bearer token for the
+          // backend (perch-hub's `perch-token`). Never a path the manifest
+          // can point outside CROW_HOME — see readAuthToken().
+          authTokenFile: manifest.webUI.authTokenFile || null,
         });
       }
     }
     return proxied;
   } catch {
     return [];
+  }
+}
+
+/**
+ * Read the bearer token an extension's manifest named in
+ * `webUI.authTokenFile`, or null when there is none / it is not there yet.
+ *
+ * LAZY BY CONTRACT. The perch-hub token is minted by `perch-runtime.js` from
+ * the post-listen boot step, while this proxy's route table is built earlier
+ * (boot/late-mounts.js) — a read at factory-construction time gets nothing on
+ * the very first boot after install, and would then serve an empty header for
+ * the whole process lifetime. So this runs per request instead.
+ *
+ * `authTokenFile` is manifest-supplied, so it is resolved against CROW_HOME
+ * and rejected unless it stays inside it (no `../../.ssh/id_ed25519`).
+ *
+ * @param {string|null} authTokenFile relative filename from the manifest
+ * @param {string} [crowHome] test seam; defaults to the module's CROW_HOME
+ * @returns {string|null} trimmed token, or null (header is then omitted and
+ *   the backend answers 401 — an honest failure, not a forged one)
+ */
+export function readAuthToken(authTokenFile, crowHome = CROW_HOME) {
+  if (!authTokenFile) return null;
+  const tokenPath = resolve(crowHome, authTokenFile);
+  if (tokenPath !== resolve(crowHome) && !tokenPath.startsWith(resolve(crowHome) + sep)) return null;
+  try {
+    return readFileSync(tokenPath, "utf8").trim() || null;
+  } catch {
+    return null;
   }
 }
 
@@ -102,9 +135,14 @@ export async function authorizeExtensionUpgrade(req) {
  * Create the extension proxy router and WebSocket setup function.
  *
  * @param {Function} authMiddleware - Dashboard auth middleware
+ * @param {object} [opts]
+ * @param {Function} [opts.createProxy] seam over createProxyMiddleware, so a
+ *   test can read back the options this file hands to http-proxy-middleware —
+ *   the websocket hook has no other observable surface short of a full
+ *   session-authed upgrade.
  * @returns {{ router: Router, setupWebSocket: (server: import('http').Server) => void }}
  */
-export default function extensionProxyFactory(authMiddleware) {
+export default function extensionProxyFactory(authMiddleware, { createProxy = createProxyMiddleware } = {}) {
   const router = Router();
   const extensions = getProxiedExtensions();
   const proxyInstances = [];
@@ -116,7 +154,7 @@ export default function extensionProxyFactory(authMiddleware) {
     const target = `http://127.0.0.1:${ext.port}`;
     const proxyPath = `/proxy/${ext.id}`;
 
-    const proxyMiddleware = createProxyMiddleware({
+    const proxyMiddleware = createProxy({
       target,
       changeOrigin: true,
       ws: true,
@@ -124,6 +162,18 @@ export default function extensionProxyFactory(authMiddleware) {
       logLevel: "warn",
       // Strip headers that block iframe embedding and fix cookies
       on: {
+        // Inject the backend's bearer, read fresh on every request (see
+        // readAuthToken). No token file → no header, and the backend 401s.
+        proxyReq: (proxyReq) => {
+          const token = readAuthToken(ext.authTokenFile);
+          if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
+        },
+        // Same injection for the websocket upgrade, which never passes
+        // through the `proxyReq` hook — http-proxy emits `proxyReqWs` for it.
+        proxyReqWs: (proxyReq) => {
+          const token = readAuthToken(ext.authTokenFile);
+          if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
+        },
         proxyRes: (proxyRes) => {
           // Allow embedding in iframes (needed for VNC, MinIO console)
           delete proxyRes.headers["x-frame-options"];
@@ -136,6 +186,10 @@ export default function extensionProxyFactory(authMiddleware) {
           }
         },
       },
+      // NOTE: dead since the http-proxy-middleware v2→v3 bump — v3 reads error
+      // handlers from `on.error`, and silently ignores this top-level
+      // `onError`. Left as-is on purpose: adopting it changes live 502 copy,
+      // which is its own change with its own test. (Perch Hub C-3.)
       onError: (err, req, res) => {
         if (!res || res.headersSent) return;
         res.status(502).json({
