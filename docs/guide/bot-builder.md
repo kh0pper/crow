@@ -68,6 +68,8 @@ Open the agent in Bot Builder, go to the **Gateways** tab, choose **Perch (dashb
 
 Perch turns run on the same bot engine that Gmail and Discord use, so if the engine is not installed yet Crow will offer to install it before letting you save.
 
+You can attach the channel before installing Perch itself, and the save goes through — but Crow warns you, because the page that would show the agent's replies is the Perch extension. The warning comes with an **Install Perch** button beside it, and once the install and restart finish you land back on the same agent without the warning.
+
 Agents without the channel attached still appear in Perch. You can read their sessions and transcripts; you just cannot message them. Watching is free, talking is the part you opt into.
 
 ### 3. Message the agent
