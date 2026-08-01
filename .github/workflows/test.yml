@@ -59,6 +59,11 @@ jobs:
         run: node scripts/check-port-allocation.js
       - name: Registry build check
         run: node scripts/build-registry.mjs --check
+      # Vendored upstream payloads (bundles/<id>/payload/) must match the
+      # payload_sha256 their vendor script stamped. Manifests without that
+      # field are skipped by design — that is the pre-vendor draft state.
+      - name: Vendored payload digest check
+        run: node scripts/check-vendored-payloads.mjs
       - run: npm run validate-model-catalog
 
   audit:
