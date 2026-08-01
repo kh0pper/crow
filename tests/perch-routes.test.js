@@ -239,7 +239,7 @@ test("GET /bots/:id/envelope 404s an unknown bot", async () => {
 
 test("POST /turn 202s, passes the perch channel through, and streams the reply", async () => {
   inboundHook = async (opts) => {
-    await opts.log("thinking");
+    await opts.log("thinking\nhard");
     await opts.sendReply("hello from the bot");
     return { action: "asked" };
   };
@@ -257,6 +257,10 @@ test("POST /turn 202s, passes the perch channel through, and streams the reply",
   const { text } = await readSse("/turns/" + body.turnId + "/events");
   assert.deepEqual(sseEvents(text), ["log", "reply"]);
   assert.equal(sseData(text, "reply").text, "hello from the bot");
+  // The lens writes `log` straight into the pending line as raw e.data (it
+  // JSON-parses only the terminal events), and a raw newline would split the
+  // SSE frame — so a log arrives as one plain, single-line string.
+  assert.match(text, /^data: thinking hard$/m);
 
   // The session row the turn claimed is a real perch row.
   const c = raw();

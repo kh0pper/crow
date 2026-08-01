@@ -515,7 +515,12 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
         kind: "perch",
         user_message: message,
         sendReply: async (text) => pushTurnEvent(turnId, "reply", { text: String(text == null ? "" : text) }),
-        log: (m) => pushTurnEvent(turnId, "log", { text: String(m == null ? "" : m) }),
+        // `log` is a PLAIN string, unlike reply/error: the lens writes it
+        // straight into the pending line as raw `e.data` (it JSON-parses only
+        // the terminal events), so a {text:…} wrapper would render as a JSON
+        // blob. Newlines are collapsed because a bare "\n" inside an SSE data
+        // payload would split the frame.
+        log: (m) => pushTurnEvent(turnId, "log", String(m == null ? "" : m).replace(/[\r\n]+/g, " ").slice(0, 300)),
       }).then((result) => {
         // handleInbound's RESOLVED value is the contract, not the rejection:
         //  • {action:"deferred"} — pi was at capacity, sendReply was NEVER
