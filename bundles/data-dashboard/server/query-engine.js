@@ -6,7 +6,7 @@
  * Write queries go through a separate path with explicit safety checks.
  */
 
-import { createClient } from "@libsql/client";
+import { appImport } from "./app-root.js";
 import { existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -30,8 +30,45 @@ export function getProjectDbDir(projectId) {
  * @param {string} dbPath - Absolute path to the .db file
  * @returns {import("@libsql/client").Client}
  */
+let _coreCreateDbClient = null;
+try {
+  ({ createDbClient: _coreCreateDbClient } = await appImport("servers/db.js"));
+} catch (err) {
+  console.warn(
+    `[data-dashboard db] core db client unavailable (${err.message}) -- ` +
+    "will fall back to @libsql/client (safe cross-process only)"
+  );
+}
+
+let _coreBroken = false;
+/** Core factory with call-time fallback: better-sqlite3 binds its native
+ *  module lazily at construction, so an ABI mismatch throws HERE, not at
+ *  import. A second SQLite build (@libsql) must NEVER load in-process next
+ *  to better-sqlite3 (see app-root.js header -- 2026-08-04 corruption root
+ *  cause), so @libsql is only a lazy fallback for standalone contexts. */
+function tryCoreClient(filePath) {
+  if (_coreBroken || !_coreCreateDbClient) return null;
+  try { return _coreCreateDbClient(filePath); }
+  catch (err) {
+    _coreBroken = true;
+    console.warn(`[data-dashboard db] core db client failed (${err.message.split("\n")[0]}) -- ` +
+      "falling back to @libsql/client (safe cross-process only)");
+    return null;
+  }
+}
+
 export function openUserDb(dbPath) {
-  return createClient({ url: `file:${dbPath}` });
+  const core = tryCoreClient(dbPath);
+  if (core) return core;
+  const clientPromise = import("@libsql/client").then(({ createClient }) =>
+    createClient({ url: `file:${dbPath}` })
+  );
+  return {
+    async execute(arg) { return (await clientPromise).execute(arg); },
+    async batch(stmts) { return (await clientPromise).batch(stmts); },
+    async executeMultiple(sql) { return (await clientPromise).executeMultiple(sql); },
+    close() { clientPromise.then((c) => c.close()).catch(() => {}); },
+  };
 }
 
 /**

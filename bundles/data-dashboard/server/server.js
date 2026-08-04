@@ -201,7 +201,7 @@ export async function createDataDashboardServer(dbPath, options = {}) {
       }
 
       // Create empty database (libsql creates on first connect)
-      const userDb = (await import("@libsql/client")).createClient({ url: `file:${dbPath}` });
+      const userDb = (await import("./query-engine.js")).openUserDb(dbPath);
       await userDb.execute("SELECT 1"); // Force creation
       userDb.close();
 
