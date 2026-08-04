@@ -24,7 +24,7 @@
 
 import Database from "better-sqlite3";
 import os from "node:os";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -299,6 +299,66 @@ export function resolveJournalMode() {
 
 export const _dbKeepers = new Map();
 
+/* ------------------------------------------------------- WAL tripwire */
+
+/**
+ * WAL-generation tripwire. While this process holds live connections, the
+ * -wal file's inode must NEVER change: SQLite only replaces it via
+ * unlink+recreate, which orphans every already-attached connection (they
+ * keep writing through the old, deleted generation — no mutual exclusion
+ * with the new one → torn multi-page commits → "database disk image is
+ * malformed"). That is exactly the 2026-08-04 corruption mechanism (a
+ * second in-process SQLite build, @libsql via panel routes, unlinked the
+ * live WAL: POSIX locks never conflict within one PID, so its last-closer
+ * check "won" against our own connections).
+ *
+ * The tripwire stats the -wal path on an interval and screams into the
+ * journal on an inode change, turning the next silent generation split
+ * into a diagnosable event within seconds instead of a corrupt DB an hour
+ * later. Detection only — no automatic restart.
+ *
+ * CROW_WAL_TRIPWIRE_MS overrides the interval (default 30000; 0 disables).
+ */
+export const _walTripwires = new Map(); // filePath → {baselineIno, trips, timer}
+
+export function checkWalCoherence(filePath) {
+  const tw = _walTripwires.get(filePath);
+  if (!tw) return { armed: false };
+  let currentIno = null;
+  try { currentIno = statSync(filePath + "-wal").ino; } catch { /* missing */ }
+  if (tw.baselineIno === null && currentIno !== null) {
+    // WAL appeared after arming (first real write) — adopt it as baseline.
+    tw.baselineIno = currentIno;
+  }
+  const ok = tw.baselineIno === null || currentIno === tw.baselineIno;
+  return { armed: true, ok, baselineIno: tw.baselineIno, currentIno };
+}
+
+function armWalTripwire(filePath) {
+  if (_walTripwires.has(filePath)) return;
+  const intervalMs = Number(process.env.CROW_WAL_TRIPWIRE_MS ?? 30000);
+  if (!intervalMs) return;
+  let baselineIno = null;
+  try { baselineIno = statSync(filePath + "-wal").ino; } catch { /* not yet */ }
+  const tw = { baselineIno, trips: 0, timer: null };
+  _walTripwires.set(filePath, tw);
+  tw.timer = setInterval(() => {
+    const res = checkWalCoherence(filePath);
+    if (res.armed && !res.ok) {
+      tw.trips += 1;
+      console.error(
+        `[db] WAL GENERATION SPLIT DETECTED for ${filePath}: -wal inode changed ` +
+        `${res.baselineIno} -> ${res.currentIno ?? "(missing)"} while this process holds ` +
+        `connections. Connections in this process may now write through a dead WAL and ` +
+        `CORRUPT the database. Restart this service and find the unlinker ` +
+        `(strace -f -e unlink,unlinkat). See servers/db.js WAL tripwire notes.`
+      );
+      tw.baselineIno = res.currentIno; // re-baseline so a further split logs again
+    }
+  }, intervalMs);
+  tw.timer.unref?.();
+}
+
 /**
  * Ensure a WAL-mode keeper handle exists for filePath.
  *
@@ -321,6 +381,7 @@ function ensureKeeper(filePath, requestedMode) {
   if (typeof actualMode === "string" && actualMode.toLowerCase() === "wal") {
     try { keeper.pragma("busy_timeout = 30000"); } catch {}
     _dbKeepers.set(filePath, keeper);
+    armWalTripwire(filePath);
   } else {
     // Non-WAL or unreadable — close without registering.
     try { keeper.close(); } catch {}
