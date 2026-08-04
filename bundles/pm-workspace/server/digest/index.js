@@ -103,6 +103,17 @@ export async function runDigest(db, config, { force = false } = {}) {
     digest.sections.map((s) => ({ title: s.title, available: s.available, reason: s.reason || null }))
   );
 
+  // Reserve today's row BEFORE sending: the cron's only resend gate is this row's
+  // existence, so a post-send write failure would mean a resend on every tick.
+  // If the reservation can't be written, skip sending entirely.
+  if (existing.rows.length === 0) {
+    await db.execute({
+      sql: `INSERT INTO pm_digests (digest_date, html, summary, sources_json, sent_at, sent_via)
+            VALUES (?, ?, ?, ?, NULL, NULL)`,
+      args: [date, rendered.html, rendered.summary, sourcesJson],
+    });
+  }
+
   let sentAt = null;
   let sentVia = null;
   let sendError = null;
@@ -124,18 +135,10 @@ export async function runDigest(db, config, { force = false } = {}) {
   const ntfy = await notifyNtfy(config, rendered.summary, date);
   if (ntfy.sent) sentVia = sentVia ? `${sentVia}+ntfy` : "ntfy";
 
-  if (existing.rows.length > 0) {
-    await db.execute({
-      sql: `UPDATE pm_digests SET html = ?, summary = ?, sources_json = ?, sent_at = ?, sent_via = ? WHERE digest_date = ?`,
-      args: [rendered.html, rendered.summary, sourcesJson, sentAt, sentVia, date],
-    });
-  } else {
-    await db.execute({
-      sql: `INSERT INTO pm_digests (digest_date, html, summary, sources_json, sent_at, sent_via)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [date, rendered.html, rendered.summary, sourcesJson, sentAt, sentVia],
-    });
-  }
+  await db.execute({
+    sql: `UPDATE pm_digests SET html = ?, summary = ?, sources_json = ?, sent_at = ?, sent_via = ? WHERE digest_date = ?`,
+    args: [rendered.html, rendered.summary, sourcesJson, sentAt, sentVia, date],
+  });
 
   return {
     ok: true,
