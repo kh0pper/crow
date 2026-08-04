@@ -15,13 +15,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // The panel registry installs this file to <crow-home>/panels/, which breaks
 // bundle-relative imports. Resolve db.js from the installed bundle first, then
-// the dev layout, then fall back to a direct libsql client from env.
+// the dev layout, then the core repo's shared client directly.
+//
+// NEVER fall back to a raw @libsql/client here: this file runs INSIDE the
+// gateway process, which already holds better-sqlite3 connections. A second
+// SQLite implementation in the same PID defeats last-closer detection (POSIX
+// locks never conflict within one process) and unlinks the live WAL —
+// the 2026-08-04 crow.db corruption root cause. Failing to find a safe
+// client must fail the panel, not corrupt the database.
 async function loadCreateDbClient() {
   const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
   const candidates = [
     join(crowHome, "bundles", "knowledge-base", "server", "db.js"),
     resolve(__dirname, "../server/db.js"),
-  ];
+    process.env.CROW_APP_ROOT && join(process.env.CROW_APP_ROOT, "servers", "db.js"),
+    join(homedir(), "crow", "servers", "db.js"),
+  ].filter(Boolean);
   for (const path of candidates) {
     try {
       const mod = await import(pathToFileURL(path).href);
@@ -30,18 +39,8 @@ async function loadCreateDbClient() {
       // try next candidate
     }
   }
-  try {
-    const { createClient } = await import("@libsql/client");
-    return (dbPath) => {
-      const filePath = dbPath || process.env.CROW_DB_PATH
-        || join(process.env.CROW_DATA_DIR || join(crowHome, "data"), "crow.db");
-      const client = createClient({ url: `file:${filePath}` });
-      client.execute("PRAGMA busy_timeout = 5000").catch(() => {});
-      return client;
-    };
-  } catch {
-    return null;
-  }
+  console.error("[knowledge-base panel] no safe DB client available (core db.js unresolvable) — panel DB routes disabled");
+  return null;
 }
 
 export default function kbDashboardRouter() {

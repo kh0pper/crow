@@ -11,7 +11,7 @@
  * are always literal-term safe.
  */
 
-import { createClient } from "@libsql/client";
+import { appImport } from "./app-root.js";
 import { existsSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -68,14 +68,77 @@ export function resolveDbPath(dbPath) {
   return dbPath || process.env.CROW_DB_PATH || join(resolveDataDir(), "crow.db");
 }
 
-/** Create a libsql client for the main crow DB. */
-export function createDbClient(dbPath) {
-  const filePath = resolveDbPath(dbPath);
+/**
+ * Shared better-sqlite3 client factory from the core repo (libsql-shaped
+ * surface: execute/batch/executeMultiple/close). Loaded once at module init.
+ *
+ * A single SQLite implementation per process is a CORRECTNESS requirement,
+ * not a preference: this module is imported into the gateway process by the
+ * panel routes, and a second SQLite build (@libsql) opening crow.db there
+ * defeats last-closer detection and unlinks the live WAL (see app-root.js
+ * header — 2026-08-04 corruption root cause).
+ *
+ * Fallback: only when the core client cannot load (standalone install with
+ * no repo checkout, or a node whose ABI can't load the repo's
+ * better-sqlite3 — e.g. an externally spawned stdio MCP copy on an older
+ * node). @libsql is imported LAZILY there so gateway-hosted code never even
+ * maps the second SQLite library. Cross-process libsql is lock-safe; only
+ * in-process mixing is not, and in-process always resolves the core client.
+ */
+let _coreCreateDbClient = null;
+try {
+  ({ createDbClient: _coreCreateDbClient } = await appImport("servers/db.js"));
+} catch (err) {
+  console.warn(
+    `[pm-workspace db] core db client unavailable (${err.message}) — ` +
+    "will fall back to @libsql/client (safe cross-process only)"
+  );
+}
+
+let _coreBroken = false;
+/** Core factory with call-time fallback: better-sqlite3 binds its native
+ *  module lazily at construction, so an ABI mismatch (e.g. a node 20
+ *  process importing a node 22 build) throws HERE, not at import. */
+function tryCoreClient(filePath) {
+  if (_coreBroken || !_coreCreateDbClient) return null;
+  try { return _coreCreateDbClient(filePath); }
+  catch (err) {
+    _coreBroken = true;
+    console.warn(`[pm-workspace db] core db client failed (${err.message.split("\n")[0]}) -- ` +
+      "falling back to @libsql/client (safe cross-process only)");
+    return null;
+  }
+}
+
+
+async function libsqlClient(filePath, label) {
+  const { createClient } = await import("@libsql/client");
   const client = createClient({ url: `file:${filePath}` });
   client.execute("PRAGMA busy_timeout = 10000").catch((err) =>
-    console.warn("[pm-workspace db] Failed to set busy_timeout:", err.message)
+    console.warn(`[pm-workspace db] ${label} busy_timeout:`, err.message)
   );
   return client;
+}
+
+/** Create a client for the main crow DB (core better-sqlite3 wrapper). */
+export function createDbClient(dbPath) {
+  const filePath = resolveDbPath(dbPath);
+  return tryCoreClient(filePath) || libsqlProxy(filePath, "crow.db");
+}
+
+/**
+ * Wrap the async libsql fallback in a lazily-resolving proxy so the factory
+ * keeps its synchronous signature. Every method awaits the underlying
+ * client's creation first.
+ */
+function libsqlProxy(filePath, label) {
+  const clientPromise = libsqlClient(filePath, label);
+  return {
+    async execute(arg) { return (await clientPromise).execute(arg); },
+    async batch(stmts) { return (await clientPromise).batch(stmts); },
+    async executeMultiple(sql) { return (await clientPromise).executeMultiple(sql); },
+    close() { clientPromise.then((c) => c.close()).catch(() => {}); },
+  };
 }
 
 /** Resolve the kanban tasks DB path (tasks bundle). */
@@ -87,13 +150,9 @@ export function resolveTasksDbPath(config = {}) {
   );
 }
 
-/** Create a libsql client for the tasks DB. Returns null if the file is absent. */
+/** Create a client for the tasks DB. Returns null if the file is absent. */
 export function createTasksDbClient(config = {}) {
   const filePath = resolveTasksDbPath(config);
   if (!existsSync(filePath)) return null;
-  const client = createClient({ url: `file:${filePath}` });
-  client.execute("PRAGMA busy_timeout = 10000").catch((err) =>
-    console.warn("[pm-workspace db] tasks.db busy_timeout:", err.message)
-  );
-  return client;
+  return tryCoreClient(filePath) || libsqlProxy(filePath, "tasks.db");
 }

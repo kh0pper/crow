@@ -251,13 +251,27 @@ export async function attemptLogin(password, ip) {
           }
         }
       }
-      await setLockout(db, ip, a);
+      // Best-effort: lockout bookkeeping must never take the gateway down.
+      // A DB-layer error here (2026-08-03: SQLITE_IOERR_SHORT_READ from a
+      // stale in-process WAL index) previously escaped as an unhandled
+      // rejection, crashed the gateway on every login POST, and the
+      // resulting crash-restart churn corrupted crow.db.
+      try {
+        await setLockout(db, ip, a);
+      } catch (err) {
+        console.error("[auth] setLockout failed (continuing):", err.message);
+      }
       await auditLog(db, 'auth_login_failure', { ip });
       return { error: "Invalid password." };
     }
 
-    // Reset attempts on success + clean expired lockouts
-    await clearLockout(db, ip);
+    // Reset attempts on success + clean expired lockouts (best-effort, same
+    // never-crash rule as setLockout above).
+    try {
+      await clearLockout(db, ip);
+    } catch (err) {
+      console.error("[auth] clearLockout failed (continuing):", err.message);
+    }
 
     // Check if 2FA is enabled
     const twoFaEnabled = await is2faEnabled();
@@ -286,6 +300,12 @@ export async function attemptLogin(password, ip) {
     });
 
     return { token };
+  } catch (err) {
+    // Never let a DB-layer failure escape as an unhandled rejection — the
+    // 2026-08-03 incident showed that crashing here puts systemd into a
+    // crash-restart loop whose overlapping boots corrupt crow.db.
+    console.error("[auth] attemptLogin database failure (returning soft error):", err.message);
+    return { error: "Login temporarily unavailable (server database error). Check gateway logs." };
   } finally {
     db.close();
   }
