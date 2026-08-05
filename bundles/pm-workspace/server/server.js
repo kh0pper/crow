@@ -4,7 +4,10 @@
  * Factory: createPmWorkspaceServer(db, options?)
  * Tools: crow_pm_note_create, crow_pm_note_get, crow_pm_note_list,
  *        crow_pm_search, crow_pm_digest_preview, crow_pm_digest_send,
- *        crow_pm_sync_run, crow_pm_sync_status, crow_pm_status
+ *        crow_pm_sync_run, crow_pm_sync_status, crow_pm_plan_propose,
+ *        crow_pm_plan_list, crow_pm_plan_decide, crow_pm_plan_export,
+ *        crow_pm_plan_reconcile, crow_pm_bot_dispatch, crow_pm_bot_result,
+ *        crow_pm_bot_disposition, crow_pm_bot_telemetry, crow_pm_status
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -20,6 +23,7 @@ import { preview, runDigest } from "./digest/index.js";
 import { runSync } from "./sync/monday.js";
 import { loadSyncConfig } from "./sync/mapping.js";
 import * as planner from "./planner.js";
+import * as dispatchRail from "./dispatch.js";
 
 function text(t) {
   return { content: [{ type: "text", text: t }] };
@@ -282,6 +286,75 @@ export function createPmWorkspaceServer(db, options = {}) {
       } catch (err) {
         return errorText(err.message);
       }
+    }
+  );
+
+  // ── Bot dispatch rail (day-track delegation to the pi-bots runtime) ──
+
+  server.tool(
+    "crow_pm_bot_dispatch",
+    "Dispatch a duty to an enabled pi-bot: enqueues a bot_jobs row (source 'chat', deliver_to defaults to poll-only) and a pm_bot_dispatches telemetry row at dispatch time. This tool does NOT create kanban cards — call tasks_create first and pass its id as card_id so the dispatch is linked to a card. Pick up the outcome later with crow_pm_bot_result, which is scan-gated (see that tool's description).",
+    {
+      bot_id: z.string().min(1).max(200).describe("Enabled pi-bot id (pi_bot_defs.bot_id)"),
+      duty: z.string().min(1).max(200).describe("Short duty label, e.g. 'doc-revision'"),
+      goal: z.string().min(1).max(20_000).describe("The task goal text; wrapped in the dispatch/deliverable-contract template"),
+      card_id: z.number().int().positive().optional().describe("Kanban card id from tasks_create, if this dispatch is tracking a card"),
+      deliver: z.union([z.string(), z.record(z.any())]).optional().describe("Delivery target for the bot_jobs row; defaults to {kind:'poll'}"),
+    },
+    async ({ bot_id, duty, goal, card_id, deliver }) => {
+      try {
+        const row = await dispatchRail.dispatch(db, { bot_id, duty, goal, card_id, deliver });
+        return text(JSON.stringify(row, null, 2));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    }
+  );
+
+  server.tool(
+    "crow_pm_bot_result",
+    "Pick up a dispatched job's outcome. While queued/running, returns status only. On failed, the error text is scanned like any other bot output (Safety measure 8 covers every channel). On completed, the result text plus any workspace files changed since the job started are scanned with the output-scan rules from PM_SCAN_RULES_FILE: findings return REDACTED text plus the findings list and set scan_status='findings' (raw content never crosses this tool boundary); clean sets scan_status='pass'. If PM_SCAN_RULES_FILE is unset, scan_status='skipped'; if it's set but the rules file can't be loaded, this call errors (fail closed) rather than returning unscanned content.",
+    {
+      job_id: z.string().min(1).max(200).describe("bot_jobs.job_id returned by crow_pm_bot_dispatch"),
+    },
+    async ({ job_id }) => {
+      try {
+        const row = await dispatchRail.result(db, { job_id });
+        return text(JSON.stringify(row, null, 2));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    }
+  );
+
+  server.tool(
+    "crow_pm_bot_disposition",
+    "Record the human decision on a dispatched job's output: accepted | edited | rejected. Stamps disposition_at. 'edited' counts against the bot's accept rate the same as 'rejected' does — crow_pm_bot_telemetry's accept_rate is accepted / decided, so anything short of taking the draft as-is is a miss.",
+    {
+      job_id: z.string().min(1).max(200).describe("bot_jobs.job_id"),
+      disposition: z.enum(["accepted", "edited", "rejected"]),
+      boundary_violation: z.boolean().default(false).describe("Flag if the bot's output crossed a boundary it shouldn't have (e.g. edited a shared file instead of writing a new one)"),
+      notes: z.string().max(5000).optional().describe("Optional free-text notes on the decision"),
+    },
+    async ({ job_id, disposition: d, boundary_violation, notes }) => {
+      try {
+        const row = await dispatchRail.disposition(db, { job_id, disposition: d, boundary_violation, notes });
+        return text(JSON.stringify(row, null, 2));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    }
+  );
+
+  server.tool(
+    "crow_pm_bot_telemetry",
+    "Dispatch-rail telemetry: totals by disposition, accept rate (accepted / decided — edits and rejections both count against it), boundary violation count, and a per-bot breakdown of the same numbers.",
+    {
+      since: z.string().max(50).optional().describe("ISO datetime; only count dispatches at or after this time"),
+    },
+    async ({ since }) => {
+      const row = await dispatchRail.telemetry(db, { since });
+      return text(JSON.stringify(row, null, 2));
     }
   );
 
