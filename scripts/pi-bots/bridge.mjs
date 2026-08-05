@@ -206,12 +206,27 @@ export class PiRpc {
       piPolicy.write_paths = (Array.isArray(piPolicy.write_paths) ? piPolicy.write_paths.slice() : [])
         .concat(opts.selfAuthoringDir);
     }
+    // C-12 spawn_env hygiene (r1 S3 — security): a bot def could otherwise set
+    // PI_BOT_INTERACTIVE (flipping a channel turn's ask_user into an
+    // unanswerable "ui" hang) or clobber PI_BOT_PERMISSION_POLICY (a
+    // pre-existing hole — def.spawn_env used to merge in AFTER the computed
+    // policy above). Strip anything that looks like an engine-reserved key
+    // before merging; every other spawn_env key still passes through
+    // unchanged.
+    const spawnEnv = {};
+    for (const k of Object.keys(def.spawn_env || {})) {
+      if (!/^PI_BOT_|^PIBOT_/.test(k)) spawnEnv[k] = def.spawn_env[k];
+    }
     const env = Object.assign({}, process.env,
       { PATH: dirname(nodeBin) + ":" + (process.env.PATH || ""),
         PI_PROVIDER: resolved.provider,
         PIBOT_SUBAGENT_DEPTH: "0",
         PI_BOT_PERMISSION_POLICY: JSON.stringify(piPolicy) },
-      def.spawn_env || {});
+      spawnEnv,
+      // C-12: the interactive engine's per-session overrides (e.g.
+      // PI_BOT_INTERACTIVE:"1") — merged LAST so they win over both the
+      // computed defaults above and the (already-stripped) def.spawn_env.
+      opts.extraEnv || {});
     // detached:true puts pi in its own process group so close() can SIGTERM
     // the whole tree (pi + its MCP children). Without this, killing pi leaves
     // its MCP server children (brave-search, google-workspace, github, etc.)
@@ -219,6 +234,16 @@ export class PiRpc {
     this.proc = spawn(nodeBin, args, { cwd: sessionDir, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     this.events = []; this.responses = []; this.stderr = ""; this._b = ""; this._w = []; this.badStdout = 0;
     this._exitCode = null;
+    // C-12: monotonic per-message sequence number, stamped on every parsed
+    // stdout object. Powers waitForSince's `since` correlation for long-lived
+    // (multi-turn) children — never reset (trimLog does NOT touch this; see
+    // trimLog below).
+    this._seq = 0;
+    // C-12: optional per-message forwarding hook for the interactive engine
+    // (UI streaming, extension_ui_request relay). Called synchronously for
+    // EVERY parsed message, before waiter dispatch, so an ask-user card can be
+    // forwarded before/alongside the same message satisfying a waiter.
+    this.onEvent = opts.onEvent || null;
     // A write after pi died early (e.g. unknown provider on a fresh install)
     // raises EPIPE on stdin asynchronously — without a listener that is an
     // uncaught exception that kills the whole bridge. Swallow it; the exit
@@ -232,7 +257,11 @@ export class PiRpc {
         if (ln.endsWith("\r")) ln = ln.slice(0, -1);
         if (!ln) continue;
         let m; try { m = JSON.parse(ln); } catch { this.badStdout++; continue; }
+        m._seq = ++this._seq;
         (m.type === "response" ? this.responses : this.events).push(m);
+        // A UI-forwarding bug must never kill a turn: exceptions from onEvent
+        // are swallowed, not left to escape into this stdout 'data' handler.
+        if (this.onEvent) { try { this.onEvent(m); } catch {} }
         for (const w of this._w.slice()) if (w.p(m)) { this._w.splice(this._w.indexOf(w), 1); w.r(m); }
       }
     });
@@ -263,6 +292,13 @@ export class PiRpc {
       if (hit) return resolve(hit);
       if (this._exitCode != null) return reject(this._exitError(label));
       const w = { p, r: resolve, j: reject, label }; this._w.push(w);
+      // C-12: ms === 0 means "no timeout" — the interactive engine's own
+      // agent_end wait, which relies on ITS OWN stall watchdog instead. The
+      // exit handler above still rejects this waiter if the child dies, so it
+      // cannot leak past the child's lifetime. (Existing defect, not touched
+      // here: on the ms>0 path this setTimeout is never cleared on success —
+      // ledgered separately.)
+      if (ms === 0) return;
       setTimeout(() => { const i = this._w.indexOf(w); if (i >= 0) { this._w.splice(i, 1); reject(new Error("timeout:" + label + " (stderr " + this.stderr.slice(-200) + ")")); } }, ms);
     });
   }
@@ -270,6 +306,54 @@ export class PiRpc {
     this.send(Object.assign({ type: "prompt", message }, (images && images.length) ? { images } : {}));
     await this.waitFor((m) => m.type === "response" && m.command === "prompt", PROMPT_ACK_TIMEOUT_MS, "prompt-ack");
     return this.waitFor((m) => m.type === "agent_end", ms, "agent_end");
+  }
+  // C-12 (r1 C1, THE critical seam): prompt()/waitFor scan ACCUMULATING
+  // events/responses arrays, so on turn 2+ of a long-lived (interactive)
+  // child both the ack-wait and the agent_end-wait can instantly match turn
+  // 1's stale entries — the same stale-match bug getSessionStats() documents
+  // above, but for the far hotter prompt/agent_end path. promptTurn()
+  // correlates the ack by a fresh id AND scopes both waits to messages parsed
+  // after this call started (`_seq`, stamped in the stdout parse loop).
+  // prompt()/getState() are UNTOUCHED — every existing caller is
+  // spawn-per-turn, so the bug never manifested for them.
+  async promptTurn(message, ms, images) {
+    const id = "prompt_" + (this._promptSeq = (this._promptSeq || 0) + 1);
+    const since = this._seq || 0;            // parse loop stamps m._seq = ++this._seq
+    this.send(Object.assign({ type: "prompt", id, message },
+      (images && images.length) ? { images } : {}));
+    const ack = await this.waitForSince(since,
+      (m) => m.type === "response" && m.command === "prompt" && m.id === id,
+      PROMPT_ACK_TIMEOUT_MS, "prompt-ack");
+    // r2 CR1: a preflight failure acks {success:false, error} and the CHILD KEEPS
+    // RUNNING with no agent loop — waiting for agent_end with ms=0 would wedge the
+    // session forever (watchdog-abort included: abort() with no active run emits
+    // NOTHING, agent.js:200-201). Throw the real error instead.
+    if (ack && ack.success === false) {
+      throw new Error("prompt refused: " + (ack.error || "unknown"));
+    }
+    return this.waitForSince(since, (m) => m.type === "agent_end", ms, "agent_end");
+  }
+  waitForSince(since, p, ms, label) {        // ms === 0 ⇒ NO timeout (engine runs its
+    return this.waitFor((m) => m._seq > since && p(m), ms, label);   // own stall watchdog)
+  }
+  // C-12 (r2 S7): engine-only memory bound for long awake windows. Clears the
+  // accumulated logs but NEVER resets _seq/_promptSeq — `since` monotonicity
+  // must span trims, or a trim between two promptTurn calls would let a
+  // late-arriving stale message from before the trim satisfy the NEXT turn's
+  // `since` filter. Caller guarantees no waiters are pending when it trims
+  // (the engine calls this after fully extracting the reply from the
+  // agent_end promptTurn already returned).
+  trimLog() { this.events = []; this.responses = []; }
+  // C-12 (r2 S8): the per-turn abort() below is uncorrelated (matches ANY
+  // command:"abort" response in the accumulating array) — fine for
+  // spawn-per-turn callers, but a second abort in one long-lived awake window
+  // would match the first's stale response. The interactive engine uses this
+  // waitForSince-scoped variant instead; abort() stays untouched for
+  // per-turn callers.
+  async abortSince(ms = 15000) {
+    const since = this._seq || 0;
+    this.send({ type: "abort" });
+    return this.waitForSince(since, (m) => m.type === "response" && m.command === "abort", ms, "abort").catch(() => null);
   }
   async getState() { this.send({ type: "get_state" }); return this.waitFor((m) => m.type === "response" && m.command === "get_state", 15000, "get_state"); }
   // Correlate by a unique per-call id: waitFor scans an ACCUMULATING responses
