@@ -724,7 +724,19 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
           var newLocked=!!(d.locks&&d.locks[c.id]);
           if(!el || curStatus!==c.status || curLocked!==newLocked){ if(c.id!==busyId) changed=true; }
         });
-        if(changed && !document.hidden) reload();
+        // Reload-storm guard: if the rendered board can never converge with
+        // the stream snapshot (a render/stream query mismatch), an
+        // unconditional reload loops forever — each fresh page re-detects
+        // the same diff. One reload per 10s window; persisted across the
+        // reload it triggers.
+        if(changed && !document.hidden){
+          var now=Date.now(), lastReload=0;
+          try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
+          if(now-lastReload>10000){
+            try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
+            reload();
+          }
+        }
       };
       es.onerror=function(){ /* EventSource auto-reconnects; server resends a full snapshot */ };
     }

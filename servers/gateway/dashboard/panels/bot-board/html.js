@@ -363,7 +363,12 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
     try { contextFields = JSON.parse(trackerDef.columns_json || "[]"); } catch { contextFields = []; }
   }
 
-  // Query tracker_items for this bot
+  // Query tracker_items for this tracker. The tracker is the unit of
+  // display: items written by external feeds (e.g. a mirror sync) carry
+  // bot_id NULL, and the live stream + bot-board-api already query by
+  // tracker alone — filtering by bot here rendered those boards empty
+  // while the stream kept reporting rows, which the client read as a
+  // permanent diff (reload loop).
   let items = [];
   try {
     items = (await db.execute({
@@ -371,8 +376,8 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
         "SELECT id, tracker_id, bot_id, status, priority, label, data_json, action_needed, " +
         "next_followup_date, processing_lease, processing_lease_status, " +
         "datetime(created_at) AS created_at, datetime(updated_at) AS updated_at " +
-        "FROM tracker_items WHERE bot_id=? AND tracker_id=? ORDER BY priority ASC, id ASC",
-      args: [selBot.botId, trackerDef.id],
+        "FROM tracker_items WHERE tracker_id=? ORDER BY priority ASC, id ASC",
+      args: [trackerDef.id],
     })).rows || [];
   } catch { items = []; }
 
