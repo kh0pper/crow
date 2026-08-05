@@ -118,6 +118,25 @@ export async function initPmTables(db) {
     CREATE INDEX IF NOT EXISTS idx_pm_planned_events_status ON pm_planned_events(status, start_utc);
   `);
 
+  // Keep in sync with the identical DDL string in dispatch.js (DISPATCH_DDL).
+  await initTable(db, "pm_bot_dispatches", `
+    CREATE TABLE IF NOT EXISTS pm_bot_dispatches (
+      dispatch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id TEXT NOT NULL UNIQUE,
+      bot_id TEXT NOT NULL,
+      duty TEXT NOT NULL,
+      card_id INTEGER,
+      model TEXT,
+      verdict TEXT,
+      scan_status TEXT,
+      disposition TEXT,
+      boundary_violation INTEGER NOT NULL DEFAULT 0,
+      disposition_notes TEXT,
+      dispatched_at TEXT NOT NULL DEFAULT (datetime('now')),
+      disposition_at TEXT
+    );
+  `);
+
   await initTable(db, "pm_sync_log", `
     CREATE TABLE IF NOT EXISTS pm_sync_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
