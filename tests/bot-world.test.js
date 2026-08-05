@@ -187,7 +187,13 @@ const BOT_DEF = {
   // reordering of those appends changes the recorded sha256.
   permission_policy: { bash: "deny", write_paths: [], multi_agent: false, self_authoring: true },
   gateways: [{ type: "gmail" }, { type: "discord" }],
-  spawn_env: { PIBOT_GOLDEN_MARKER: "1" },
+  // C-12 named this key: PIBOT_*/PI_BOT_* spawn_env keys are now stripped
+  // before the child env is assembled (spawn_env hygiene, r1 S3), so a
+  // PIBOT_-prefixed marker here would silently vanish. PI_GOLDEN_MARKER
+  // keeps the "does an arbitrary spawn_env value reach the child" coverage
+  // this fixture exists for while staying outside the stripped prefixes
+  // (only PI_BOT_*/PIBOT_* are stripped, not PI_* generally).
+  spawn_env: { PI_GOLDEN_MARKER: "1" },
 };
 
 before(() => {
@@ -247,7 +253,6 @@ const GOLDENS = {
       "__OSTMP__/pibot-XXXXXX/sys.md"
     ],
     "env": {
-      "PIBOT_GOLDEN_MARKER": "1",
       "PIBOT_JOB_TIMEOUT_MS": "5000",
       "PIBOT_MAX_PI": "99",
       "PIBOT_PI_CLI": "__TMP__/stub-pi.mjs",
@@ -258,6 +263,7 @@ const GOLDENS = {
       "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
       "PIBOT_WARM_TIMEOUT_MS": "1500",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[\"__TMP__/bots/goldenbot/proposed-skills\"],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
+      "PI_GOLDEN_MARKER": "1",
       "PI_MODELS_JSON": "__TMP__/models.json",
       "PI_PROVIDER": "stub"
     },
@@ -283,7 +289,6 @@ const GOLDENS = {
       "golden-uuid"
     ],
     "env": {
-      "PIBOT_GOLDEN_MARKER": "1",
       "PIBOT_JOB_TIMEOUT_MS": "5000",
       "PIBOT_MAX_PI": "99",
       "PIBOT_PI_CLI": "__TMP__/stub-pi.mjs",
@@ -294,6 +299,7 @@ const GOLDENS = {
       "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
       "PIBOT_WARM_TIMEOUT_MS": "1500",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[\"__TMP__/bots/goldenbot/proposed-skills\"],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
+      "PI_GOLDEN_MARKER": "1",
       "PI_MODELS_JSON": "__TMP__/models.json",
       "PI_PROVIDER": "stub"
     },
@@ -317,7 +323,6 @@ const GOLDENS = {
       "__OSTMP__/pibot-XXXXXX/sys.md"
     ],
     "env": {
-      "PIBOT_GOLDEN_MARKER": "1",
       "PIBOT_JOB_TIMEOUT_MS": "5000",
       "PIBOT_MAX_PI": "99",
       "PIBOT_PI_CLI": "__TMP__/stub-pi.mjs",
@@ -328,6 +333,7 @@ const GOLDENS = {
       "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
       "PIBOT_WARM_TIMEOUT_MS": "1500",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[\"__TMP__/bots/goldenbot/proposed-skills\"],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
+      "PI_GOLDEN_MARKER": "1",
       "PI_MODELS_JSON": "__TMP__/models.json",
       "PI_PROVIDER": "stub"
     },
@@ -351,7 +357,6 @@ const GOLDENS = {
       "__OSTMP__/pibot-job-XXXXXX/job-sys.md"
     ],
     "env": {
-      "PIBOT_GOLDEN_MARKER": "1",
       "PIBOT_JOB_TIMEOUT_MS": "5000",
       "PIBOT_MAX_PI": "99",
       "PIBOT_PI_CLI": "__TMP__/stub-pi.mjs",
@@ -362,6 +367,7 @@ const GOLDENS = {
       "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
       "PIBOT_WARM_TIMEOUT_MS": "1500",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
+      "PI_GOLDEN_MARKER": "1",
       "PI_MODELS_JSON": "__TMP__/models.json",
       "PI_PROVIDER": "stub"
     },
