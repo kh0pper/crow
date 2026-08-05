@@ -80,6 +80,7 @@ const KEYS = [
   "CROW_TASKS_DB_PATH",
   "CROW_DATA_DIR",
   "CROW_DB_PATH",
+  "PM_SCAN_RULES_FILE",
 ];
 
 /**
