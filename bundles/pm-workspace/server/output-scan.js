@@ -45,11 +45,36 @@ export function scanFiles(paths, rules) {
 }
 
 export function redact(text, findings) {
-  let s = String(text || "");
-  // Replace from the end so earlier indexes stay valid.
-  for (const f of [...findings].sort((a, b) => b.index - a.index)) {
-    if (typeof f.index !== "number") continue;
-    s = s.slice(0, f.index) + `[REDACTED:${f.name}]` + s.slice(f.index + f.length);
+  const s = String(text || "");
+  const numeric = findings.filter((f) => typeof f.index === "number" && typeof f.length === "number");
+  if (numeric.length === 0) return s;
+
+  // Coalesce overlapping/adjacent spans BEFORE replacing (review round 1,
+  // CRITICAL 1). Two findings can legitimately overlap — e.g. an SSN-shaped
+  // rule matching a substring inside a longer slack-token match — and
+  // replacing them independently corrupts offsets: the inner replacement
+  // shifts the string, so the outer span's stale end index slices the wrong
+  // place and raw secret bytes survive in the "redacted" output. Merging
+  // first means every replacement below operates on a set of disjoint spans,
+  // so replacing from the end (descending start) never invalidates an
+  // index computed for a span still to be processed.
+  const sorted = [...numeric].sort((a, b) => a.index - b.index);
+  const merged = [];
+  for (const f of sorted) {
+    const start = f.index;
+    const end = f.index + f.length;
+    const last = merged[merged.length - 1];
+    if (last && start <= last.end) {
+      if (end > last.end) last.end = end;
+      if (!last.names.includes(f.name)) last.names.push(f.name);
+    } else {
+      merged.push({ start, end, names: [f.name] });
+    }
   }
-  return s;
+
+  let out = s;
+  for (const span of [...merged].sort((a, b) => b.start - a.start)) {
+    out = out.slice(0, span.start) + `[REDACTED:${span.names.join("+")}]` + out.slice(span.end);
+  }
+  return out;
 }
