@@ -54,7 +54,11 @@ function loadGatewayJobs() {
   for (const row of rows) {
     let def;
     try { def = JSON.parse(row.definition || "{}"); } catch { continue; }
-    for (const gw of def.gateways || []) {
+    // Legacy defs carry `gateways: {}` (an empty object, not an array); `for...of`
+    // on a non-array throws. One malformed def must never abort runtime arming
+    // for the whole instance, so a non-array value is tolerated as "no gateways".
+    const gws = Array.isArray(def.gateways) ? def.gateways : [];
+    for (const gw of gws) {
       if (gw && isHostManaged(gw.type)) jobs.push({ bot_id: row.bot_id, gw });
     }
   }
