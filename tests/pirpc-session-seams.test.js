@@ -83,24 +83,43 @@ function mkPi(scratch, cliPath, extra) {
 
 test("(a) onEvent fires for every parsed stdout message, in order, before waiter dispatch", async () => {
   const scratch = scratchDir();
+  // Emission is send-triggered (not a preamble) so the test can register its
+  // waiter FIRST, deterministically — which is what makes the before-waiter-
+  // dispatch assertion below meaningful rather than racy.
   const stub = protocolStub(scratch, {
-    preamble: [
-      'out({ type: "event", n: 1 });',
-      'out({ type: "event", n: 2 });',
-      'out({ type: "response", command: "marker", n: 3 });',
+    onMessageBody: [
+      '    if (m.type === "go") {',
+      '      out({ type: "event", n: 1 });',
+      '      out({ type: "event", n: 2 });',
+      '      out({ type: "response", command: "marker", n: 3 });',
+      '    }',
     ].join("\n"),
   });
   const seen = [];
-  const pi = mkPi(scratch, stub, { onEvent: (m) => seen.push(m) });
+  let markerWaiterStillRegistered = null;
+  const pi = mkPi(scratch, stub, {
+    onEvent: (m) => {
+      seen.push(m);
+      // Fix round 1 (MINOR 3): prove the "before waiter dispatch" half of the
+      // title. When onEvent runs for the marker message, the marker waiter
+      // must STILL be registered in _w — dispatch (splice + resolve) happens
+      // after onEvent in the parse loop. Deterministic because the waiter is
+      // registered before the stub is told to emit anything.
+      if (m.command === "marker") {
+        markerWaiterStillRegistered = pi._w.some((w) => w.label === "marker");
+      }
+    },
+  });
   try {
-    // Gate on the 3rd (response) message via waitFor — since stdout lines are
-    // drained from the buffer in arrival order within the same handler, by
-    // the time this resolves the two earlier onEvent calls have already run.
-    await pi.waitFor((m) => m.type === "response" && m.command === "marker", 5000, "marker");
+    const wait = pi.waitFor((m) => m.type === "response" && m.command === "marker", 5000, "marker");
+    pi.send({ type: "go" });
+    await wait;
     assert.deepEqual(seen.map((m) => m.n), [1, 2, 3], "onEvent must see all three, in order");
     assert.equal(seen[0].type, "event");
     assert.equal(seen[2].type, "response");
     assert.equal(seen[2].command, "marker", "onEvent sees responses too, not just events");
+    assert.equal(markerWaiterStillRegistered, true,
+      "onEvent must run BEFORE waiter dispatch — the marker waiter was still registered when onEvent saw the marker");
   } finally {
     await pi.close();
   }
@@ -229,6 +248,43 @@ test("(d) promptTurn() on a long-lived child: each turn gets its OWN reply, neve
 });
 
 // ---------------------------------------------------------------------------
+// (d2, fix round 1 IMPORTANT) auto-retry: pi emits agent_end {willRetry:true}
+// BEFORE an auto-retry (dist/core/agent-session.js; auto-retry defaults ON,
+// maxRetries 3) and a second, final agent_end when the retry completes.
+// promptTurn must skip the pre-retry one and return the real one — otherwise
+// it returns the error turn while the child keeps working, and the retry's
+// real agent_end (higher _seq) satisfies the NEXT turn's wait: the exact
+// stale-match class this task exists to close.
+// ---------------------------------------------------------------------------
+
+test("(d2) promptTurn() skips agent_end {willRetry:true} and returns the post-retry final agent_end", async () => {
+  const scratch = scratchDir();
+  const stub = protocolStub(scratch, {
+    onMessageBody: [
+      '    if (m.type === "prompt") {',
+      '      const ack = { type: "response", command: "prompt", success: true };',
+      '      if (m.id) ack.id = m.id;',
+      '      out(ack);',
+      // The pre-retry error turn: agent_end with willRetry:true, then the
+      // retry finishes with a final agent_end (no willRetry).
+      '      out({ type: "agent_end", willRetry: true, marker: "pre-retry",',
+      '        messages: [{ role: "assistant", content: [{ type: "text", text: "transient error" }] }] });',
+      '      out({ type: "agent_end", marker: "final",',
+      '        messages: [{ role: "assistant", content: [{ type: "text", text: "real reply" }] }] });',
+      '    }',
+    ].join("\n"),
+  });
+  const pi = mkPi(scratch, stub);
+  try {
+    const end = await pi.promptTurn("hi", 5000);
+    assert.notEqual(end.willRetry, true, "must never return the pre-retry agent_end");
+    assert.equal(end.marker, "final", "promptTurn must return the post-retry final agent_end, not the willRetry:true one");
+  } finally {
+    await pi.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // (e) ms=0 never times out (fake long gap) AND rejects on child exit (no
 // waiter leak)
 // ---------------------------------------------------------------------------
@@ -338,6 +394,42 @@ test("(h) a preflight-refused ack rejects promptTurn immediately — it never wa
       /prompt refused: boom/
     );
     assert.ok(Date.now() - t0 < 3000, "must reject immediately off the ack, not wait on agent_end");
+  } finally {
+    await pi.close();
+  }
+});
+
+test("(h2) an ack MISSING the success field rejects promptTurn — fail-closed, never proceeds to the agent_end wait", async () => {
+  // Fix round 1 (MINOR 1): pi 0.82.0 always sets `success` on prompt acks, so
+  // a success-less ack is older/malformed protocol. The check must be
+  // `success !== true` (fail-closed), not `success === false` (fail-open) —
+  // with ms=0 there is no timeout backstop, so proceeding would wedge forever.
+  const scratch = scratchDir();
+  const stub = protocolStub(scratch, {
+    onMessageBody: [
+      '    if (m.type === "prompt") {',
+      '      const ack = { type: "response", command: "prompt" };', // no success field at all
+      '      if (m.id) ack.id = m.id;',
+      '      out(ack);',
+      // Deliberately never send agent_end — a session with ms=0 must not wedge.
+      '    }',
+    ].join("\n"),
+  });
+  const pi = mkPi(scratch, stub);
+  try {
+    // Hang-proof by construction: under the fail-open mutation
+    // (`success === false`) promptTurn would proceed to an ms=0 agent_end
+    // wait and pend FOREVER (no timeout backstop, child stays alive) — so
+    // race it against a short timer instead of awaiting it bare, and fail
+    // loudly on "still-pending" rather than wedging the whole test file.
+    const p = pi.promptTurn("hi", 0); // ms=0: the ack check is the only defense
+    const outcome = await Promise.race([
+      p.then(() => "resolved", (e) => e),
+      new Promise((r) => setTimeout(r, 1500, "still-pending")),
+    ]);
+    assert.ok(outcome instanceof Error,
+      "promptTurn must reject a success-less ack immediately, not proceed to the agent_end wait (got: " + String(outcome) + ")");
+    assert.match(outcome.message, /prompt refused: unknown/);
   } finally {
     await pi.close();
   }

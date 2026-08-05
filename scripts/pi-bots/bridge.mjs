@@ -214,8 +214,13 @@ export class PiRpc {
     // before merging; every other spawn_env key still passes through
     // unchanged.
     const spawnEnv = {};
+    const strippedSpawnEnv = [];
     for (const k of Object.keys(def.spawn_env || {})) {
-      if (!/^PI_BOT_|^PIBOT_/.test(k)) spawnEnv[k] = def.spawn_env[k];
+      if (/^PI_BOT_|^PIBOT_/.test(k)) { strippedSpawnEnv.push(k); continue; }
+      spawnEnv[k] = def.spawn_env[k];
+    }
+    if (strippedSpawnEnv.length) {
+      console.error("[pi-bots] stripped engine-reserved spawn_env keys from bot def: " + strippedSpawnEnv.join(", "));
     }
     const env = Object.assign({}, process.env,
       { PATH: dirname(nodeBin) + ":" + (process.env.PATH || ""),
@@ -327,11 +332,22 @@ export class PiRpc {
     // r2 CR1: a preflight failure acks {success:false, error} and the CHILD KEEPS
     // RUNNING with no agent loop — waiting for agent_end with ms=0 would wedge the
     // session forever (watchdog-abort included: abort() with no active run emits
-    // NOTHING, agent.js:200-201). Throw the real error instead.
-    if (ack && ack.success === false) {
+    // NOTHING, agent.js:200-201). Throw the real error instead. Fail-closed on
+    // the field (fix round 1, MINOR 1): pi 0.82.0 always sets `success`, so an
+    // ack MISSING it is older/malformed protocol — with ms=0 there is no
+    // timeout backstop, so anything but an explicit success:true must refuse,
+    // never proceed to an agent_end wait that may never come.
+    if (ack.success !== true) {
       throw new Error("prompt refused: " + (ack.error || "unknown"));
     }
-    return this.waitForSince(since, (m) => m.type === "agent_end", ms, "agent_end");
+    // Fix round 1 (review IMPORTANT): pi emits agent_end {willRetry:true}
+    // BEFORE an auto-retry (dist/core/agent-session.js — auto-retry defaults
+    // ON, maxRetries 3) and a SECOND agent_end when the retry finishes.
+    // Accepting any agent_end would return the pre-retry error turn while the
+    // child keeps working, and the retry's real agent_end (higher _seq) would
+    // then satisfy the NEXT turn's wait — the exact stale-match class this
+    // seam exists to close. Only a final (non-retrying) agent_end ends a turn.
+    return this.waitForSince(since, (m) => m.type === "agent_end" && m.willRetry !== true, ms, "agent_end");
   }
   waitForSince(since, p, ms, label) {        // ms === 0 ⇒ NO timeout (engine runs its
     return this.waitFor((m) => m._seq > since && p(m), ms, label);   // own stall watchdog)
