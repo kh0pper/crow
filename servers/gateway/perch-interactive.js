@@ -167,6 +167,8 @@ export function createInteractiveEngine({
 } = {}) {
   /** sessionId (= gateway_thread_id) → session record. */
   const sessions = new Map();
+  /** sessionId → in-flight adoption promise (fix round 2: single-flight). */
+  const adopting = new Map();
   let seams = null;
   let leaseTimer = null;
 
@@ -470,8 +472,24 @@ export function createInteractiveEngine({
   }
 
   /** Adopt a hibernating perch-live row this process does not hold in memory
-   * (gateway restart, or a session spawned before the last deploy). */
-  async function adopt(sessionId) {
+   * (gateway restart, or a session spawned before the last deploy).
+   *
+   * Fix round 2: adoption is SINGLE-FLIGHT per sessionId. The row read awaits,
+   * and round 1 fanned adoption out to all six public methods — so two
+   * concurrent first-touches at the same not-yet-resident id would each build
+   * their OWN session object and the second `sessions.set` would orphan the
+   * first (two children through the one-in-flight guard; a subscriber attached
+   * to a dead object). Concurrent callers await the SAME adoption promise —
+   * one session object, and one DB read instead of N. */
+  function adopt(sessionId) {
+    let p = adopting.get(sessionId);
+    if (p) return p;
+    p = adoptRow(sessionId).finally(() => { adopting.delete(sessionId); });
+    adopting.set(sessionId, p);
+    return p;
+  }
+
+  async function adoptRow(sessionId) {
     const db = createDbClient();
     try {
       const { rows } = await db.execute({
@@ -799,6 +817,13 @@ export function createInteractiveEngine({
       const pi = s.pi;
       s.pi = null;
       if (pi) pi.close().catch(() => { /* already dead */ });
+      // Fix round 2 rode-along: if startChild already stamped the row `active`
+      // (s.rowId is set ONLY by that write), park it — otherwise the failed
+      // spawn leaves a phantom `active` ghost that list() reports as
+      // hibernating forever and whose fresh claim 409s any wake. Gated on
+      // rowId, not on `pi`: writeRow's insert branch would otherwise MINT a
+      // row for a spawn that never got far enough to have one.
+      if (s.rowId != null) writeRow(s, { status: "waiting-user" }).catch(() => {});
       writeLeases();
       throw e;
     }
