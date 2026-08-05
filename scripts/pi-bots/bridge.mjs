@@ -20,19 +20,20 @@
  */
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, mkdtempSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
-import { writeBotMcp } from "./mcp_writer.mjs";
-import { validateExtensions, isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
+import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType } from "./tracker.mjs";
-import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
-import { resolveCrowHome } from "./ext_registry.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
-import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
+// C-11: the per-turn world assembly (identity + spawn readiness) lives in
+// bot-world.mjs so P2's interactive engine can build the SAME world without
+// this module's per-turn channel semantics. bot-world imports back LAZILY —
+// see its CYCLE NOTE.
+import { buildBotWorld, prepareSpawn } from "./bot-world.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath } from "./instance-paths.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.mjs";
@@ -49,14 +50,17 @@ const HOME = process.env.HOME || homedir();
 // node = the process running the bridge; pi cli via the pi_resolver ladder
 // (PIBOT_PI_CLI env → bot-engine bundle → repo dep → running node's global
 // root) — never a hardcoded host layout.
-const CROW_DB = botsDbPath();
+// C-11: CROW_DB/TASKS_DB/db() are EXPORTED (additive — no rename) so
+// bot-world.mjs resolves against the exact same module-load-time values this
+// module does, rather than recomputing them at call time.
+export const CROW_DB = botsDbPath();
 // Skill-file roots are resolved per-instance by skill_resolver (A3):
 // <crowHome>/skills, then ~/.crow/skills, then the repo ~/crow/skills.
-const TASKS_DB = resolveTasksDbPath();
+export const TASKS_DB = resolveTasksDbPath();
 const TURN_TIMEOUT_MS = Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
 const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 60000);
 
-function db(p) { const d = new Database(p); d.pragma("busy_timeout = 10000"); return d; }
+export function db(p) { const d = new Database(p); d.pragma("busy_timeout = 10000"); return d; }
 
 export function toolAllowlist(def, { remoteEnabled = false } = {}) {
   const builtin = (def.tools && def.tools.pi_builtin) || [];
@@ -312,7 +316,7 @@ export function loadBot(botId) {
 // workspace_dir, tasks_db_uri, slug, and name to inject into the per-turn
 // prompt. Returns null when projectId is unset or the project is missing /
 // archived (in either case the bot falls back to legacy session_dir + env).
-function loadProjectSpace(projectId) {
+export function loadProjectSpace(projectId) {
   if (projectId == null) return null;
   const c = db(CROW_DB);
   const r = c.prepare(
@@ -324,7 +328,7 @@ function loadProjectSpace(projectId) {
 }
 // M3b: list active members with invoke_bot. Used both for the structured
 // prompt context (the bot knows who can talk to it) and for audit attribution.
-function loadProjectMembers(projectId) {
+export function loadProjectMembers(projectId) {
   if (projectId == null) return [];
   const c = db(CROW_DB);
   const rows = c.prepare(`
@@ -422,12 +426,14 @@ function planForCard(def, cardId, tasksDbPathArg) {
   } catch { /* fall through to legacy */ }
   return planFor(def, cardId);
 }
-function getSession(botId, threadId) {
+// C-11: getSession/upsertSession are EXPORTED (additive — no rename) for
+// bot-world.mjs and P2's interactive engine.
+export function getSession(botId, threadId) {
   const c = db(CROW_DB);
   const r = c.prepare("SELECT * FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1").get(botId, threadId);
   c.close(); return r || null;
 }
-function upsertSession(s) {
+export function upsertSession(s) {
   const c = db(CROW_DB);
   if (s.id) {
     c.prepare("UPDATE bot_sessions SET pi_session_id=?, pi_session_dir=?, project_id=?, card_id=?, plan_path=?, status=?, control=?, model=?, escalated=?, kind=?, updated_at=datetime('now') WHERE id=?")
@@ -455,72 +461,25 @@ export async function handleInbound(opts) {
   // reaches the model prompt or persists in the pi session transcript.
   const escalate = escalateRequested(user_message);
   const cleanMsg = stripEscalateToken(user_message);
-  const bot = loadBot(bot_id);
-  const def = bot.def;
-  // Active Crow instance home (CROW_HOME env -> ~/.crow-mpa on MPA, else
-  // ~/.crow). Governs per-instance skills + mcp-addons resolution; the DB
-  // still routes on CROW_DB_PATH (above), independent of this.
-  const crowHome = resolveCrowHome();
-  // M3b atomic cutover: column is authoritative. JSON copy is ignored even
-  // if present (legacy fixtures may still carry it; new bots don't write it).
-  const projectId = bot.project_id == null ? null : Number(bot.project_id);
-  const projectSpace = loadProjectSpace(projectId);
-  const projectMembers = loadProjectMembers(projectId);
-  // session_dir resolution: prefer the project workspace when available
-  // (new project-native bots). Legacy bots without a project_space row, or
-  // whose row has no workspace_dir, fall back to def.session_dir (the
-  // pre-M3 ~/.crow-mpa/pi-bots/<bot_id>/ path).
-  const sessionDir = (projectSpace && projectSpace.workspace_dir)
-    ? (projectSpace.workspace_dir + "/bots/" + bot_id)
-    : def.session_dir;
-  const tasksDbPath = (projectSpace && projectSpace.tasks_db_uri) || TASKS_DB;
-  mkdirSync(sessionDir + "/sessions", { recursive: true });
-
-  // Keep the per-bot <sessionDir>/.mcp.json in sync with the def on every
-  // turn (best-effort; additive merge — homedir ~/.pi/agent/mcp.json still
-  // wins on collision, so a writer hiccup can never break a turn). Primary
-  // writer is the GUI save handler; this is the defensive backstop.
-  // M3b: pass the resolved sessionDir (which may differ from def.session_dir
-  // when the bot has a project_space workspace) so the .mcp.json lives next
-  // to where pi actually runs.
-  // F4a L2b: read the remote_invocation flag + trusted peer gateway URLs once
-  // (local-only, default off). With the flag off, remoteEnabled=false ⇒
-  // writeBotMcp mints no remote blocks and toolAllowlist adds no remote entries
-  // ⇒ live bots are byte-identical to today. Reads never throw.
-  const _conn = db(CROW_DB);
-  let remoteEnabled = false, peerGatewayUrls = {};
-  try {
-    remoteEnabled = readRemoteInvocationEnabled(_conn);
-    if (remoteEnabled) peerGatewayUrls = readPeerGatewayUrls(_conn);
-  } finally { _conn.close(); }
-  try {
-    const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled, peerGatewayUrls });
-    if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
-    if (w.remoteWarnings && w.remoteWarnings.length) {
-      for (const warn of w.remoteWarnings) log("remote-tool: " + warn);
-    }
-    if (w.journalGuarded.length) log("mcp.json journal-guarded: " + w.journalGuarded.join(","));
-    if (w.minted && w.minted.length) log("mcp.json minted from extensions: " + w.minted.join(","));
-  } catch (e) {
-    log("per-bot mcp.json write skipped (non-fatal): " + (e && e.message || e));
-  }
-
-  // Install-approval gate (Phase 2.4): refuse non-allowlisted pi_extensions
-  // that reached pi_bot_defs via an out-of-band DB edit (the GUI only offers
-  // allowlisted ones). The bridge NEVER runs `pi install`; pi-lab is the
-  // fixed package set. This is an audit/refusal surface, not a turn-killer.
-  const extCheck = validateExtensions((def.tools && def.tools.pi_extensions) || []);
-  if (extCheck.rejected.length) {
-    log("REFUSED non-allowlisted pi_extensions: " + extCheck.rejected.join(", ") +
-      " — Bot Builder never runs `pi install`; add via the pi-lab repo + scripts/pi-bots/pi_extensions_allowlist.mjs");
-  }
-
-  let session = getSession(bot_id, gateway_thread_id);
-  // C-6: the same SELECT * that resolves pi_session_id also carries this
-  // session's saved narrowing (Perch writes it; Bot Builder still owns the
-  // envelope). NULL on every non-perch row => PiRpc sees undefined => the
-  // spawn args are byte-identical to what shipped before.
-  const narrowedTools = session && session.narrowed_tools != null ? session.narrowed_tools : null;
+  // C-11 Phase A — identity. This is the code that used to be inline here,
+  // moved verbatim into bot-world.mjs: loadBot → crowHome → project space +
+  // members → sessionDir/tasksDbPath → mkdir sessions → remote flags →
+  // writeBotMcp → validateExtensions → getSession + narrowed_tools.
+  // ORDERING (named): buildBotWorld writes .mcp.json BEFORE the stop / card /
+  // capacity gates below — exactly as before, where the write (old :497)
+  // already preceded the capacity gate (old :547). A capacity-deferred turn
+  // has therefore always left a refreshed .mcp.json behind; unchanged.
+  const world = await buildBotWorld({
+    botId: bot_id, threadId: gateway_thread_id, gatewayType: gateway_type, log,
+  });
+  const def = world.def;
+  const crowHome = world.crowHome;
+  const projectId = world.projectId;
+  const projectSpace = world.projectSpace;
+  const projectMembers = world.projectMembers;
+  const sessionDir = world.sessionDir;
+  const tasksDbPath = world.tasksDbPath;
+  let session = world.session;
   if (session && session.control === "stop") {
     session.status = "stopped"; upsertSession(session);
     await sendReply("Session is stopped. Reply 'resume' to continue.");
@@ -550,53 +509,16 @@ export async function handleInbound(opts) {
     return { action: "deferred", reason: "pi-capacity", livePi };
   }
 
-  const sysFile = join(mkdtempSync(join(tmpdir(), "pibot-")), "sys.md");
-  writeFileSync(sysFile, def.system_prompt || "You are a Crow bot.", { mode: 0o600 });
-
-  // Append the content of each configured skill file to the system prompt.
-  // def.skills[] is saved by the Bot Builder but was never consumed here —
-  // bots with skills (e.g. pir-portal-runner: govqa-portal, oag-portal) ran
-  // without them. A3: resolved per-instance via skill_resolver — first match
-  // across <crowHome>/skills, ~/.crow/skills, ~/crow/skills wins.
-  const { sections: skillSections, missing: missingSkills } =
-    resolveSkills(def.skills || [], { crowHome });
-  for (const s of skillSections) appendFileSync(sysFile, "\n\n" + s.text);
-  for (const name of missingSkills) {
-    log("skill file not found for '" + name + "' in " + skillDirs(crowHome).join(", "));
-  }
-
-  // Slice C — opt-in self-authoring. When permission_policy.self_authoring is
-  // true, the bot MAY draft a new skill into a CONFINED staging dir. The dir is
-  // keyed on def.session_dir (NOT the resolved sessionDir, which for a
-  // project-native bot is <workspace>/bots/<id>) so it is the exact location the
-  // Bot Builder review UI scans — no write-here/scan-there split. We mkdir it,
-  // make it writable for the write tool (PiRpc augments write_paths below), and
-  // inject the directive + full skill-writing guidance into the system prompt.
-  // A staged file stays INERT (skill_resolver loads only by name from the skill
-  // dirs, never from the staging dir; not in def.skills) until an operator
-  // approves it. OFF => none of this happens; the bot is neither told nor tooled
-  // to propose.
-  let selfAuthoringDir = null;
-  if (def.permission_policy && def.permission_policy.self_authoring === true && def.session_dir) {
-    const stagingDir = proposalsDir(def.session_dir);
-    // Safety: a staging dir that coincided with a real skill dir would make a
-    // raw proposal loadable. Under defaults they never collide; refuse if they would.
-    const dirs = skillDirs(crowHome);
-    const collides = dirs.some((d) => stagingDir === d || stagingDir.startsWith(d + "/") || d.startsWith(stagingDir + "/"));
-    if (collides) {
-      log("self_authoring: refusing — staging dir " + stagingDir + " collides with a skill dir; skipped");
-    } else {
-      mkdirSync(stagingDir, { recursive: true });
-      selfAuthoringDir = stagingDir;
-      // Full skill-writing guidance once (dedupe if the operator also attached it).
-      if (!(def.skills || []).includes("skill-writing")) {
-        const sw = resolveSkill("skill-writing", { crowHome });
-        if (sw) appendFileSync(sysFile, "\n\n" + sw.text);
-        else log("self_authoring: skill-writing.md not found in " + dirs.join(", "));
-      }
-      appendFileSync(sysFile, "\n\n" + selfAuthoringPromptBlock(stagingDir));
-    }
-  }
+  // C-11 Phase B — spawn readiness. The sysFile (system_prompt + skills +
+  // the opt-in self-authoring block) and this turn's model resolution, moved
+  // verbatim into bot-world.mjs. It stays HERE, at the point the sysFile was
+  // always written: after the capacity gate, before the prompt is composed.
+  // The only sequence change is that resolveModel() now runs alongside the
+  // sysFile instead of after the prompt templates — neither reads the other's
+  // state, and the model-resolve log line below is still emitted in the same
+  // relative order.
+  const spawnPrep = await prepareSpawn(world, { escalate, log });
+  const resolved = spawnPrep.resolved;
 
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);
   // planFor still pulls from def.session_dir for legacy compatibility (where
@@ -652,12 +574,11 @@ export async function handleInbound(opts) {
       "unless their message is genuinely ambiguous.";
   }
 
-  // Phase 3.0 (R3/R4/R5): resolve provider/model for THIS turn. R4: if an
-  // escalation flips the model vs the session's recorded one, force a FRESH
-  // pi session — resuming a session created under a different provider/model
-  // is an unproven pi path. `resume` still shapes the prompt (conversation
-  // continuity); `effectiveResume` alone decides pi's `--session`.
-  const resolved = await resolveModel(def, { escalate });
+  // Phase 3.0 (R4): if an escalation flips the model vs the session's recorded
+  // one, force a FRESH pi session — resuming a session created under a
+  // different provider/model is an unproven pi path. `resume` still shapes the
+  // prompt (conversation continuity); `effectiveResume` alone decides pi's
+  // `--session`. (R3/R5 resolution itself happens in prepareSpawn above.)
   const forceNew = escalate && resume && ((session && session.model) || null) !== resolved.key;
   const effectiveResume = resume && !forceNew;
   // R5: the ONE deterministic escalation-proof observable (get_state does NOT
@@ -684,8 +605,11 @@ export async function handleInbound(opts) {
   // return "Connection error" → "(no reply)" on Discord/Gmail. Non-fatal.
   await warmModel(resolved.provider, log);
 
-  const pi = new PiRpc({ def, sessionDir, resolved, selfAuthoringDir, remoteEnabled, narrowedTools,
-    piSessionId: effectiveResume ? session.pi_session_id : null, appendSystemPromptFile: sysFile });
+  // piRpcOpts carries {def, sessionDir, resolved, selfAuthoringDir,
+  // remoteEnabled, narrowedTools, appendSystemPromptFile}; the resume decision
+  // is channel policy, so the caller adds piSessionId.
+  const pi = new PiRpc(Object.assign({}, spawnPrep.piRpcOpts, {
+    piSessionId: effectiveResume ? session.pi_session_id : null }));
   let result;
   // B1: captured on a successful turn so the post-turn skill review (fired AFTER
   // pi.close(), so the idle-only gate sees a clean slate) has the transcript.
