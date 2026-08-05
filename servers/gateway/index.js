@@ -709,6 +709,22 @@ async function gracefulShutdown() {
     // Module missing or stop threw — never block the exit on it.
   }
 
+  // Step 5c — kill any long-lived interactive bot children (Perch Hub P2).
+  //
+  // Same gap as the hub above, one level worse: an interactive `pi --mode rpc`
+  // child is spawned `detached: true` (its own process group, so it survives a
+  // terminal SIGINT) AND holds a model plus a fistful of MCP children. Bounded
+  // for the same reason; `createIfMissing:false` so a gateway that never ran an
+  // interactive session does not mint an engine (and a lease file) on its way
+  // out. Rows persist — the sessions hibernate, they are not destroyed.
+  try {
+    const { getInteractiveEngine } = await import("./perch-interactive.js");
+    const engine = getInteractiveEngine({ createIfMissing: false });
+    if (engine) await engine.stopAll({ timeoutMs: 5000 });
+  } catch {
+    // Module missing or stop threw — never block the exit on it.
+  }
+
   // Step 6 — best-effort WAL checkpoint
   try {
     const _walDb = createDbClient();

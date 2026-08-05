@@ -444,7 +444,10 @@ export function loadProjectMembers(projectId) {
 // M3b: appendAudit (mirror of the libsql helper in servers/shared/project-acl.js,
 // but using the better-sqlite3 client the bridge already opens). Best-effort —
 // failures must never break the primary action (the bot turn).
-function appendAuditBridge(projectId, opts) {
+// C-13: EXPORTED (additive — no rename, same as C-11 did for getSession) so the
+// interactive engine audits its turns through the identical shape a channel
+// turn uses, rather than growing a second `bot.invoke` writer that drifts.
+export function appendAuditBridge(projectId, opts) {
   if (projectId == null) return;
   try {
     const c = db(CROW_DB);
