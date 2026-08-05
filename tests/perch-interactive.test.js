@@ -1219,3 +1219,93 @@ test("M-4: the turn stays claimed until reply + trimLog — a fast second messag
   assert.ok(r2.turnId, "…and the second message succeeds once turn 1 is fully done");
   assert.equal(pi.turns.length, 2);
 });
+
+// ---------------------------------------------------------------------------
+// 12. fix round 2 — adoption is single-flight (concurrent first-touch)
+// ---------------------------------------------------------------------------
+
+test("R2: two concurrent message() at one not-yet-resident row share ONE adoption — one child, one turn_in_progress", async () => {
+  const A = makeEngine();
+  const s = await spawned(A.engine, "racey");
+  await A.engine.stopAll({ timeoutMs: 500 });
+
+  // The restart: fresh engine, empty sessions map, same DB. BOTH messages land
+  // before either adoption completes — round 1's adopt() did an async row read
+  // then an unconditional sessions.set, so each call built its own session
+  // object and BOTH spawned children (the one-in-flight guard never saw the
+  // other's turn).
+  const B = makeEngine();
+  const results = await Promise.allSettled([
+    B.engine.message(s.sessionId, "one"),
+    B.engine.message(s.sessionId, "two"),
+  ]);
+  await tick();
+
+  assert.equal(B.state.instances.length, 1,
+    "exactly ONE child — concurrent first-touches must resolve the SAME session object");
+  const fulfilled = results.filter((r) => r.status === "fulfilled");
+  const rejected = results.filter((r) => r.status === "rejected");
+  assert.equal(fulfilled.length, 1, "one caller wins the turn");
+  assert.ok(fulfilled[0].value.turnId);
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].reason.code, "turn_in_progress",
+    "the loser is refused by the one-in-flight guard, not given a second child");
+  assert.equal(B.state.worlds.length, 1, "one adoption, one wake, one world build");
+});
+
+test("R2: two concurrent subscribe() at one not-yet-resident row attach to the SAME session — neither is orphaned", async () => {
+  const A = makeEngine();
+  const s = await spawned(A.engine, "subracey");
+  await A.engine.stopAll({ timeoutMs: 500 });
+
+  const B = makeEngine();
+  const eventsA = [];
+  const eventsB = [];
+  await Promise.all([
+    B.engine.subscribe(s.sessionId, (e) => eventsA.push(e)),
+    B.engine.subscribe(s.sessionId, (e) => eventsB.push(e)),
+  ]);
+  assert.equal(eventsA[0].state, "hibernating");
+  assert.equal(eventsB[0].state, "hibernating");
+
+  // A subsequent state change must reach BOTH. Under round 1's racy adopt the
+  // second sessions.set orphaned the first subscriber's session object: it got
+  // its attach replay and then silence, forever.
+  await B.engine.stop(s.sessionId);
+  await tick();
+  assert.ok(eventsA.some((e) => e.type === "state" && e.state === "stopped"),
+    "subscriber A observes the stop");
+  assert.ok(eventsB.some((e) => e.type === "state" && e.state === "stopped"),
+    "subscriber B observes the stop — no split-brain session objects");
+});
+
+test("R2 rode-along: a spawn failure AFTER the row was stamped parks it; a failure BEFORE writes nothing", async () => {
+  const { engine, state } = makeEngine();
+  // Fail after startChild's writeRow(active): a synchronous getState throw
+  // dodges the `.catch(() => null)` (never attached), same class as I-3.
+  state.piScript = (pi) => { pi.getState = () => { throw new Error("get_state boom"); }; };
+  await assert.rejects(() => engine.spawn({ botId: "ghosty" }), /get_state boom/);
+  state.piScript = null;
+  await tick();
+  const c = raw();
+  const row = c.prepare("SELECT status FROM bot_sessions WHERE bot_id='ghosty' ORDER BY id DESC LIMIT 1").get();
+  const ghost2 = c.prepare("SELECT COUNT(*) AS n FROM bot_sessions WHERE bot_id='ghosty2'").get();
+  c.close();
+  assert.ok(row, "precondition: startChild stamped the row before the failure");
+  assert.equal(row.status, "waiting-user",
+    "the catch parks the stamped row — an orphaned 'active' would read as hibernating forever in list() and 409 wakes");
+
+  // Fail BEFORE the row stamp: the park must not MINT a row (writeRow's insert
+  // branch would) — gated on s.rowId, which only the stamp sets.
+  const boom = Promise.reject(new Error("world boom"));
+  boom.catch(() => { /* pre-handled; buildBotWorld's await still throws */ });
+  state.worldGate = boom;
+  await assert.rejects(() => engine.spawn({ botId: "ghosty2" }), /world boom/);
+  state.worldGate = null;
+  await tick();
+  assert.equal(ghost2.n, 0, "sanity of the probe itself");
+  const c2 = raw();
+  const n = c2.prepare("SELECT COUNT(*) AS n FROM bot_sessions WHERE bot_id='ghosty2'").get().n;
+  c2.close();
+  assert.equal(n, 0, "a pre-stamp failure writes NO row — no minted ghost");
+});
