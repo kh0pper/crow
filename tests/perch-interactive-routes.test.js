@@ -258,6 +258,17 @@ test("POST /bots/:id/interactive maps an unrecognized engine throw to a plain 50
   assert.equal(body.error, "disk full");
 });
 
+test("an err.code that collides with Object.prototype ('constructor') still maps to a clean 500 (fix-round F2)", async () => {
+  // Pre-fix, `ERROR_MAP[err.code]` walked the prototype chain: code
+  // "constructor" yielded Object's constructor function (truthy, not an
+  // array), so mapped[0] was undefined and res.status(undefined) threw inside
+  // an async catch — an unhandled rejection instead of a response.
+  engineImpl.spawn = async () => { throw engineErr("constructor"); };
+  const { status, body } = await postJson("/bots/chatty/interactive", {});
+  assert.equal(status, 500);
+  assert.equal(body.error, "constructor");
+});
+
 // ---------------------------------------------------------------------------
 // POST /interactive/:sid/message
 // ---------------------------------------------------------------------------
@@ -454,6 +465,81 @@ test("GET /interactive/:sid/events unsubscribes when the client disconnects — 
   assert.ok(drained, "unsubscribe must run once res 'close' fires — a lingering subscriber is a leaked callback per connection");
 });
 
+test("a client abort DURING the subscribe await still unsubscribes — close is bound BEFORE subscribe (fix-round F1)", async () => {
+  // The real engine.subscribe() can await a DB read (resolveSession→adoptRow)
+  // before it registers the subscriber. A client that aborts inside that
+  // window fires res 'close' while the route is still awaiting — if the close
+  // handler were registered after the await (the pre-fix ordering), it would
+  // never be added and the subscriber would leak for the process lifetime.
+  // The fake below awaits a REAL timer: a microtask-resolving fake resolves
+  // before the abort can land and can never hit the window.
+  //
+  // Leak detection is CUMULATIVE (added/removed counters), never a snapshot of
+  // a Set's size: the subscriber is only added when the 80ms timer fires, so a
+  // size===0 poll started at abort time reads true vacuously before the leak
+  // even materializes (exactly how this test's first draft passed against the
+  // subscribe-then-bind mutant).
+  let added = 0;
+  let removed = 0;
+  let inWindow;
+  const windowOpen = new Promise((r) => { inWindow = r; });
+  engineImpl.subscribe = async (sid, fn) => {
+    inWindow(); // the route is now awaiting us — the abort window is open
+    await new Promise((r) => setTimeout(r, 80)); // REAL timer, not a microtask
+    added++;
+    fn({ type: "state", sessionId: sid, state: "awake", lastError: null, pendingUi: null });
+    return () => { removed++; };
+  };
+
+  const ac = new AbortController();
+  const fetched = fetch(base + "/interactive/sess-1/events", { signal: ac.signal })
+    .catch(() => { /* aborted — expected */ });
+  await windowOpen;
+  ac.abort(); // client gone while subscribe is still in flight
+  await fetched;
+
+  const landed = await waitUntil(() => added === 1, { attempts: 60, everyMs: 10 });
+  assert.ok(landed, "harness: the fake subscribe must eventually resolve and register its subscriber");
+  const drained = await waitUntil(() => removed === 1, { attempts: 60, everyMs: 10 });
+  assert.ok(drained, "an abort mid-subscribe must still unsubscribe — a subscriber that outlives its connection is a per-abort leak");
+});
+
+test("SSE cap reached → 503 with Retry-After, and the engine is never subscribed (fix-round F4)", async () => {
+  const { openStream, _resetStreamCount, _getStreamCount } =
+    await import("../servers/gateway/streams/sse.js");
+  // Earlier SSE tests cancel their readers asynchronously — wait for every
+  // straggler close to drain the counter, or the fill below could land one
+  // short of the cap and flake.
+  await waitUntil(() => _getStreamCount() === 0);
+  _resetStreamCount();
+
+  // sse-cap.test.js idiom: CROW_SSE_MAX is read at module load, so fill the
+  // shared counter to the cap with stub streams rather than re-tuning the env.
+  const stubRes = () => ({
+    writableEnded: false, headersSent: false,
+    writeHead() {}, flushHeaders() {}, write() {}, end() {}, on() {},
+  });
+  const MAX = parseInt(process.env.CROW_SSE_MAX || "200", 10);
+  const filled = [];
+  try {
+    for (let i = 0; i < MAX; i++) {
+      const s = openStream(stubRes(), { heartbeatMs: 1e9 });
+      assert.ok(s, `filler stream ${i + 1} must open under cap`);
+      filled.push(s);
+    }
+
+    const res = await fetch(base + "/interactive/sess-1/events");
+    assert.equal(res.status, 503, "over-cap SSE connect must 503");
+    assert.equal(res.headers.get("retry-after"), "5");
+    await res.text(); // drain
+    assert.equal(engineCalls.subscribe.length, 0,
+      "openAuthedStream returned null — the route must bail before ever subscribing to the engine");
+  } finally {
+    for (const s of filled) s.close();
+    _resetStreamCount();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // unauthenticated / source-order (C-3 discipline, proven on THIS router)
 // ---------------------------------------------------------------------------
@@ -617,6 +703,18 @@ test("POST /bots/:id/turn refuses a kind='perch-live' thread — the interactive
   assert.equal(body.error, "not_a_perch_session");
   assert.equal(body.kind, "perch-live");
   assert.equal(inboundCalls.length, 0, "a per-turn POST must never spawn a second pi against the interactive engine's own session file");
+
+  // Fix-round F5: the refusal must fire BEFORE claimTurn ever touches the row
+  // — a claim written and then refused would still yank status='active' out
+  // from under the interactive engine. Re-read the row: status untouched, and
+  // no second row inserted (claimTurn's INSERT branch never ran either).
+  const check = raw();
+  const rows = check.prepare(
+    "SELECT status FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id='live-thread'"
+  ).all();
+  check.close();
+  assert.equal(rows.length, 1, "the refusal must not have inserted a second row for the thread");
+  assert.equal(rows[0].status, "waiting-user", "the perch-live row's claim must be untouched — never flipped to 'active' by a refused per-turn POST");
 });
 
 test("GET /bots/:id/sessions surfaces engine state for kind='perch-live' rows, and derives a fallback when the engine has no snapshot", async () => {
