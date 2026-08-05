@@ -12,7 +12,7 @@
 // is ever actually delivered.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -205,6 +205,130 @@ test("cross-instance: a lease in a second lease file protects its pid", () => {
     log: () => {},
   });
   assert.equal(r.reaped.length, 0, "pid leased in the second file must be exempt");
+});
+
+// ---------------------------------------------------------------------------
+// defaultLeaseFiles() — the ONLY path the two real production callers
+// exercise (bridge_tick_lib.mjs sweep and the module's own CLI `reap`, both
+// of which pass NO leaseFiles override). Exercised FOR REAL below: no
+// leaseFiles injection; homedir/env come in through the `_homedir`/`_env`
+// seams (same opts idiom as `_procs`/`_kill`).
+// ---------------------------------------------------------------------------
+
+// (g) HOME nonexistent (readdir throws — the scratch-harness shape) + a
+//     valid CROW_HOME lease: the CROW_HOME source must survive the readdir
+//     failure independently, so the leased pid is exempt.
+//     Mutation check: re-merging the two try/catches into one makes the
+//     readdir throw drop the CROW_HOME file too -> pid reaped -> this fails.
+test("defaultLeaseFiles: nonexistent HOME still honors a valid CROW_HOME lease", () => {
+  const dir = scratchDir("g");
+  const crowHome = join(dir, "crow-home");
+  mkdirSync(crowHome);
+  writeFileSync(
+    join(crowHome, "perch-interactive-leases.json"),
+    JSON.stringify({
+      version: 1,
+      leases: { [String(PID_LEASED)]: { sessionId: "s1", expiresAt: NOW + 60_000 } },
+    })
+  );
+  const procs = [proc(PID_LEASED, { etimes: 3000 })];
+  const r = reapStalePi({
+    _procs: procs,
+    // NO leaseFiles override — defaultLeaseFiles() is the code under test.
+    _homedir: () => join(dir, "no-such-home"),
+    _env: { CROW_HOME: crowHome },
+    now: NOW,
+    _kill: fakeKill(),
+    log: () => {},
+  });
+  assert.equal(
+    r.reaped.length,
+    0,
+    "CROW_HOME lease must exempt the pid even when HOME does not exist"
+  );
+});
+
+// (h) CROW_HOME at a SIBLING path of home (`<x>/home2/.crow` next to
+//     `<x>/home`): a bare string-prefix check would treat it as "under
+//     home" and silently drop its lease file. The boundary-safe check must
+//     read it.
+//     Mutation check: reverting to bare `crowHome.startsWith(home)` drops
+//     the file -> pid reaped -> this fails.
+test("defaultLeaseFiles: sibling-prefix CROW_HOME lease file IS read", () => {
+  const dir = scratchDir("h");
+  const home = join(dir, "home");
+  mkdirSync(home);
+  const crowHome = join(dir, "home2", ".crow"); // sibling: startsWith(home) is true
+  mkdirSync(crowHome, { recursive: true });
+  assert.ok(crowHome.startsWith(home), "fixture must be a bare-prefix sibling");
+  writeFileSync(
+    join(crowHome, "perch-interactive-leases.json"),
+    JSON.stringify({
+      version: 1,
+      leases: { [String(PID_LEASED)]: { sessionId: "s1", expiresAt: NOW + 60_000 } },
+    })
+  );
+  const procs = [proc(PID_LEASED, { etimes: 3000 })];
+  const r = reapStalePi({
+    _procs: procs,
+    // NO leaseFiles override — defaultLeaseFiles() is the code under test.
+    _homedir: () => home,
+    _env: { CROW_HOME: crowHome },
+    now: NOW,
+    _kill: fakeKill(),
+    log: () => {},
+  });
+  assert.equal(
+    r.reaped.length,
+    0,
+    "a sibling-path CROW_HOME lease must exempt the pid"
+  );
+});
+
+// (i) sanity on the same default path: CROW_HOME genuinely under home is
+//     NOT double-added (the readdir source already covers `~/.crow*`), and
+//     a `.crow*` dir found by the readdir loop still protects its pid.
+test("defaultLeaseFiles: readdir source still finds ~/.crow* leases", () => {
+  const dir = scratchDir("i");
+  const home = join(dir, "home");
+  const crowDir = join(home, ".crow-test");
+  mkdirSync(crowDir, { recursive: true });
+  writeFileSync(
+    join(crowDir, "perch-interactive-leases.json"),
+    JSON.stringify({
+      version: 1,
+      leases: { [String(PID_LEASED)]: { sessionId: "s1", expiresAt: NOW + 60_000 } },
+    })
+  );
+  const procs = [proc(PID_LEASED, { etimes: 3000 })];
+  const r = reapStalePi({
+    _procs: procs,
+    _homedir: () => home,
+    _env: { CROW_HOME: crowDir }, // under home -> covered by readdir source
+    now: NOW,
+    _kill: fakeKill(),
+    log: () => {},
+  });
+  assert.equal(r.reaped.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// readFreshLeases version gate: absent version tolerated (covered by the
+// tests above implicitly using version:1); a DIFFERENT declared version is
+// skipped rather than half-parsed.
+// ---------------------------------------------------------------------------
+test("readFreshLeases skips files declaring a version other than 1", () => {
+  const dir = scratchDir("version");
+  const v2 = leaseFile(dir, "v2.json", {
+    version: 2,
+    leases: { [String(PID_LEASED)]: { sessionId: "s1", expiresAt: NOW + 60_000 } },
+  });
+  const noVersion = leaseFile(dir, "no-version.json", {
+    leases: { [String(PID_OTHER)]: { sessionId: "s2", expiresAt: NOW + 60_000 } },
+  });
+  const fresh = readFreshLeases([v2, noVersion], NOW);
+  assert.ok(!fresh.has(PID_LEASED), "version:2 file must be skipped");
+  assert.ok(fresh.has(PID_OTHER), "absent version must be tolerated");
 });
 
 // ---------------------------------------------------------------------------
