@@ -293,17 +293,16 @@ export function createPmWorkspaceServer(db, options = {}) {
 
   server.tool(
     "crow_pm_bot_dispatch",
-    "Dispatch a duty to an enabled pi-bot: enqueues a bot_jobs row (source 'chat', deliver_to defaults to poll-only) and a pm_bot_dispatches telemetry row at dispatch time. This tool does NOT create kanban cards — call tasks_create first and pass its id as card_id so the dispatch is linked to a card. Pick up the outcome later with crow_pm_bot_result, which is scan-gated (see that tool's description).",
+    "Dispatch a duty to an enabled pi-bot: enqueues a bot_jobs row (source 'chat', deliver_to always {kind:'poll'} — there is no way to route delivery around the scan gate) and a pm_bot_dispatches telemetry row at dispatch time. This tool does NOT create kanban cards — call tasks_create first and pass its id as card_id so the dispatch is linked to a card. Pick up the outcome later with crow_pm_bot_result, which is scan-gated (see that tool's description).",
     {
       bot_id: z.string().min(1).max(200).describe("Enabled pi-bot id (pi_bot_defs.bot_id)"),
       duty: z.string().min(1).max(200).describe("Short duty label, e.g. 'doc-revision'"),
       goal: z.string().min(1).max(20_000).describe("The task goal text; wrapped in the dispatch/deliverable-contract template"),
       card_id: z.number().int().positive().optional().describe("Kanban card id from tasks_create, if this dispatch is tracking a card"),
-      deliver: z.union([z.string(), z.record(z.any())]).optional().describe("Delivery target for the bot_jobs row; defaults to {kind:'poll'}"),
     },
-    async ({ bot_id, duty, goal, card_id, deliver }) => {
+    async ({ bot_id, duty, goal, card_id }) => {
       try {
-        const row = await dispatchRail.dispatch(db, { bot_id, duty, goal, card_id, deliver });
+        const row = await dispatchRail.dispatch(db, { bot_id, duty, goal, card_id });
         return text(JSON.stringify(row, null, 2));
       } catch (err) {
         return errorText(err.message);
@@ -313,7 +312,7 @@ export function createPmWorkspaceServer(db, options = {}) {
 
   server.tool(
     "crow_pm_bot_result",
-    "Pick up a dispatched job's outcome. While queued/running, returns status only. On failed, the error text is scanned like any other bot output (Safety measure 8 covers every channel). On completed, the result text plus any workspace files changed since the job started are scanned with the output-scan rules from PM_SCAN_RULES_FILE: findings return REDACTED text plus the findings list and set scan_status='findings' (raw content never crosses this tool boundary); clean sets scan_status='pass'. If PM_SCAN_RULES_FILE is unset, scan_status='skipped'; if it's set but the rules file can't be loaded, this call errors (fail closed) rather than returning unscanned content.",
+    "Pick up a dispatched job's outcome. While queued/running, returns status only. On failed, the error text is scanned like any other bot output (Safety measure 8 covers every channel). On completed, the result text plus any workspace files changed since the job started (or, if not yet marked started, since it was created) are scanned with the output-scan rules from PM_SCAN_RULES_FILE: findings return REDACTED text plus the findings list and set scan_status='findings' (raw content never crosses this tool boundary); clean sets scan_status='pass'. Any workspace file WITH findings is listed under `quarantined` (names only, from findings.files) — never under `files` and never returned as an openable path; only files that scanned clean appear in `files`. If PM_SCAN_RULES_FILE is unset, scan_status='skipped'; if it's set but the rules file can't be loaded, this call errors (fail closed) rather than returning unscanned content.",
     {
       job_id: z.string().min(1).max(200).describe("bot_jobs.job_id returned by crow_pm_bot_dispatch"),
     },
@@ -353,8 +352,12 @@ export function createPmWorkspaceServer(db, options = {}) {
       since: z.string().max(50).optional().describe("ISO datetime; only count dispatches at or after this time"),
     },
     async ({ since }) => {
-      const row = await dispatchRail.telemetry(db, { since });
-      return text(JSON.stringify(row, null, 2));
+      try {
+        const row = await dispatchRail.telemetry(db, { since });
+        return text(JSON.stringify(row, null, 2));
+      } catch (err) {
+        return errorText(err.message);
+      }
     }
   );
 

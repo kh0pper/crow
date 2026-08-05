@@ -30,6 +30,24 @@ test("seeded token is caught and redacted", () => {
   assert.ok(red.includes("[REDACTED:github-token]"));
 });
 
+test("redact coalesces overlapping spans (review round 1, CRITICAL 1)", () => {
+  // The ssn-shaped rule matches a substring INSIDE the slack-token match —
+  // a naive per-finding replace-from-the-end corrupts the outer span's
+  // stale offset once the inner one has already shifted the string, and
+  // raw tail bytes of the token survive. This must not happen.
+  const text = "note xoxb-1234567890-345-67-8901-SECRETTAILXYZ end";
+  const rules = [
+    { name: "slack-token", pattern: /xoxb-1234567890-345-67-8901-SECRETTAILXYZ/g, severity: "secret" },
+    { name: "ssn", pattern: /345-67-8901/g, severity: "secret" },
+  ];
+  const findings = scanText(text, rules);
+  assert.equal(findings.length, 2);
+  const out = redact(text, findings);
+  assert.ok(!/xoxb|345-67-8901|SECRETTAIL/.test(out), `raw token bytes leaked: ${out}`);
+  const markers = out.match(/\[REDACTED:[^\]]*\]/g) || [];
+  assert.equal(markers.length, 1, `expected exactly one merged marker, got: ${out}`);
+});
+
 test("loadRules compiles patterns from a JSON file", () => {
   const dir = mkdtempSync(join(tmpdir(), "scan-"));
   const p = join(dir, "rules.json");
