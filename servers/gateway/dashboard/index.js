@@ -83,6 +83,7 @@ import perchPanel from "./panels/perch.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 import perchApiRouter from "../routes/perch.js";
+import perchInteractiveApiRouter from "../routes/perch-interactive-api.js";
 
 /**
  * @param {Function|null} mcpAuthMiddleware - OAuth auth middleware (for unified auth)
@@ -632,6 +633,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // The router still installs dashboardAuth on its own prefix (bot-board-api
   // idiom) so it is closed wherever it is mounted.
   router.use(perchApiRouter(dashboardAuth));
+
+  // Perch Hub P2 (C-15): the interactive ("spawn as bot") API. Same mount
+  // slot, same reasons — see perch.js's header above and this file's own
+  // comment on the P1 mount.
+  router.use(perchInteractiveApiRouter(dashboardAuth));
 
   // W3-3: "Run backup now" action — dashboard-authed, CSRF-protected
   router.post("/dashboard/nest/backup", async (req, res) => {
