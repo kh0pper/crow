@@ -44,7 +44,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 // Must match LEASE_FILENAME in servers/gateway/perch-interactive.js.
 const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -107,34 +107,61 @@ export function countLivePi() {
  * directory (covers the `~/.crow`, `~/.crow-mpa`, `~/.crow-r4` instances
  * that share this host)
  * plus `<CROW_HOME>/perch-interactive-leases.json` when CROW_HOME points
- * somewhere outside homedir() entirely (scratch/test homes). Wrapped whole
- * in try/catch -> [] — reapStalePi runs inside the bridge tick and
- * gateway_runner intervals, where a readdir throw must not skip the sweep.
+ * somewhere outside homedir() entirely (scratch/test homes). The two
+ * sources fail INDEPENDENTLY (each in its own try/catch): a readdir throw
+ * on a missing/unset HOME — exactly the scratch-harness shape the
+ * CROW_HOME branch exists for — must not drop a valid CROW_HOME lease
+ * file, and nothing here may ever throw into the bridge tick /
+ * gateway_runner sweep. The "under homedir" test is boundary-safe
+ * (`=== home || startsWith(home + sep)`) so a sibling path like
+ * `/home/kh0pp2/.crow` next to `/home/kh0pp` is NOT mistaken for a
+ * subpath of home.
+ *
+ * Seams (test-only, following the reapStalePi opts idiom): `_homedir`
+ * (function replacing os.homedir) and `_env` (object replacing
+ * process.env).
  */
-function defaultLeaseFiles() {
+function defaultLeaseFiles(opts = {}) {
+  const files = [];
+  let home = null;
   try {
-    const home = homedir();
-    const files = [];
-    for (const entry of readdirSync(home)) {
-      if (entry.startsWith(".crow")) {
-        files.push(join(home, entry, LEASE_FILENAME));
+    home = opts._homedir ? opts._homedir() : homedir();
+  } catch {
+    /* no resolvable home — CROW_HOME source below still applies */
+  }
+  if (home) {
+    try {
+      for (const entry of readdirSync(home)) {
+        if (entry.startsWith(".crow")) {
+          files.push(join(home, entry, LEASE_FILENAME));
+        }
       }
+    } catch {
+      /* HOME unset/nonexistent — fall through to the CROW_HOME source */
     }
-    const crowHome = process.env.CROW_HOME;
-    if (crowHome && !crowHome.startsWith(home)) {
+  }
+  try {
+    const env = opts._env || process.env;
+    const crowHome = env.CROW_HOME;
+    const underHome =
+      home != null &&
+      typeof crowHome === "string" &&
+      (crowHome === home || crowHome.startsWith(home + sep));
+    if (crowHome && !underHome) {
       files.push(join(crowHome, LEASE_FILENAME));
     }
-    return files;
   } catch {
-    return [];
+    /* never throw into the sweep */
   }
+  return files;
 }
 
 /**
  * Union the still-fresh (unexpired) leases across every given lease file
  * into a Set<pid>. Missing files, unreadable files, and malformed JSON are
  * all silently excluded — never throws, mirrors "no lease" == today's
- * behavior. Shape consumed: `{version:1, leases:{"<pid>":{sessionId,
+ * behavior. A file that declares a version other than 1 is skipped
+ * (absent version is tolerated). Shape consumed: `{version:1, leases:{"<pid>":{sessionId,
  * expiresAt}}}` (see writeLeases() in servers/gateway/perch-interactive.js).
  */
 export function readFreshLeases(leaseFiles, now) {
@@ -147,6 +174,7 @@ export function readFreshLeases(leaseFiles, now) {
     } catch {
       continue;
     }
+    if (data && data.version !== undefined && data.version !== 1) continue; // unknown future shape — skip, don't guess
     const leases = (data && data.leases) || {};
     for (const [pidStr, lease] of Object.entries(leases)) {
       if (!lease || typeof lease.expiresAt !== "number") continue;
@@ -176,7 +204,7 @@ export function reapStalePi(opts = {}) {
   const log = opts.log || function () {};
   const procs = opts._procs || listBridgePi();
   const now = typeof opts.now === "number" ? opts.now : Date.now();
-  const leaseFiles = opts.leaseFiles || defaultLeaseFiles();
+  const leaseFiles = opts.leaseFiles || defaultLeaseFiles(opts);
   const freshLeases = readFreshLeases(leaseFiles, now);
   const kill = opts._kill || ((pid, signal) => process.kill(pid, signal));
   const victims = [];
