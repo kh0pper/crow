@@ -338,7 +338,12 @@ export class PiRpc {
     // timeout backstop, so anything but an explicit success:true must refuse,
     // never proceed to an agent_end wait that may never come.
     if (ack.success !== true) {
-      throw new Error("prompt refused: " + (ack.error || "unknown"));
+      // C-13 fix round 1 (M-3): typed code — the interactive engine's
+      // abandonment discriminator keys on `err.code`, never on this string.
+      // The message text is load-bearing for existing tests; keep it verbatim.
+      const err = new Error("prompt refused: " + (ack.error || "unknown"));
+      err.code = "prompt_refused";
+      throw err;
     }
     // Fix round 1 (review IMPORTANT): pi emits agent_end {willRetry:true}
     // BEFORE an auto-retry (dist/core/agent-session.js — auto-retry defaults

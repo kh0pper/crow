@@ -53,7 +53,11 @@
  * ── Lifetime ────────────────────────────────────────────────────────────────
  * Idle → hibernate: the child is closed, the `bot_sessions` row and the pi
  * session file survive, and the next message wakes a fresh child with
- * `--session <id>`. Rows are never deleted. While ≥1 child is awake the engine
+ * `--session <id>`. Rows are never deleted. A gateway RESTART is the same
+ * story writ large: stopAll() parks every row `waiting-user` before closing
+ * its child (a row left `active` would read as a live cross-process claim and
+ * 409 the next boot's wake), and EVERY public method adopts a perch-live row
+ * this process has never held — not just message(). While ≥1 child is awake the engine
  * writes `<crowHome>/perch-interactive-leases.json` (atomically, refreshed
  * every 60 s) so the host-global pi reaper (C-14) does not kill a healthy
  * long-lived child for being old.
@@ -654,20 +658,26 @@ export function createInteractiveEngine({
 
   // ---- turn completion -----------------------------------------------------
 
-  function finishTurn(s, turn) {
+  /** Stop the per-turn clocks. Fix round 1 (M-4): this deliberately does NOT
+   * clear `s.turn` — the turn stays claimed until its completion path has
+   * emitted the reply and trimmed the log, so a fast second message gets an
+   * honest `turn_in_progress` instead of interleaving with the tail of turn 1
+   * (trimLog's "no waiters pending" caller guarantee, and reply ordering,
+   * both depend on it). */
+  function stopTurnClocks(s, turn) {
     if (turn.graceTimer != null) { clearTimer(turn.graceTimer); turn.graceTimer = null; }
-    if (s.turn === turn) s.turn = null;
     clearStall(s);
   }
 
   async function onTurnEnd(s, turn, end) {
     if (s.turn !== turn) return;                     // superseded / already abandoned
-    finishTurn(s, turn);
+    stopTurnClocks(s, turn);
 
     if (turn.aborted) {
       // Silent completion: state only. No `reply` event ever follows an abort
       // on the same turn — the mutation-guarded invariant of this engine.
       await writeRow(s, { status: "waiting-user" }).catch(() => {});
+      if (s.turn === turn) s.turn = null;
       emit(s, stateEvent(s));
       armIdle(s);
       return;
@@ -708,18 +718,22 @@ export function createInteractiveEngine({
       log("audit failed (non-fatal): " + ((e && e.message) || e));
     }
 
-    emit(s, { type: "reply", text: replyTextOf(end) });
+    // The invariant is stated over the TURN, not over a pre-await snapshot: an
+    // abort that landed during the metering awaits still silences the reply.
+    if (!turn.aborted) emit(s, { type: "reply", text: replyTextOf(end) });
     // r2 S7: bound the child's accumulating log now that nothing is waiting on
     // it. trimLog preserves _seq, so the next turn's `since` correlation holds.
     try { if (s.pi) s.pi.trimLog(); } catch { /* non-fatal */ }
     await writeRow(s, { status: "waiting-user", model: s.resolved ? s.resolved.key : null }).catch(() => {});
+    // M-4: the turn is released HERE, after reply + trimLog — never at the top.
+    if (s.turn === turn) s.turn = null;
     emit(s, stateEvent(s));
     armIdle(s);
   }
 
   async function onTurnError(s, turn, err) {
     if (s.turn !== turn) return;
-    finishTurn(s, turn);
+    stopTurnClocks(s, turn);
     const message = String((err && err.message) || err);
     s.lastError = message;
     emit(s, { type: "error", text: message });
@@ -729,13 +743,19 @@ export function createInteractiveEngine({
     // healthy and the session degrades to an honest error. Anything else — an
     // ack timeout above all — may have left a live loop whose late, id-less
     // agent_end would end the NEXT turn, so the child is abandoned.
-    if (/^prompt refused:/.test(message)) {
+    // M-3: discriminate on the TYPED code bridge.mjs sets at the throw site,
+    // never on the message string.
+    if (err && err.code === "prompt_refused") {
+      if (s.turn === turn) s.turn = null;            // M-4: released at the end
       emit(s, stateEvent(s));
       armIdle(s);
       return;
     }
-    if (s.pi) await abandonChild(s, message);
-    else emit(s, stateEvent(s));
+    if (s.pi) await abandonChild(s, message);        // clears s.turn itself
+    else {
+      if (s.turn === turn) s.turn = null;
+      emit(s, stateEvent(s));
+    }
   }
 
   /**
@@ -773,7 +793,12 @@ export function createInteractiveEngine({
       await startChild(S, s);
     } catch (e) {
       sessions.delete(s.sessionId);                  // release the reservation
-      if (s.pi) { try { await s.pi.close(); } catch { /* nothing to reap */ } }
+      // I-3 discipline: detach the child BEFORE closing (attachExit's
+      // `s.pi !== pi` guard then swallows the expected exit) and never await
+      // the close — a child that ignores SIGTERM must not hold the caller.
+      const pi = s.pi;
+      s.pi = null;
+      if (pi) pi.close().catch(() => { /* already dead */ });
       writeLeases();
       throw e;
     }
@@ -784,8 +809,7 @@ export function createInteractiveEngine({
 
   async function message(sessionId, text) {
     const S = await loadSeams();
-    let s = sessions.get(String(sessionId));
-    if (!s) s = await adopt(String(sessionId));
+    const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     // ---- one synchronous block: guards + reservation, no await between ----
     if (s.state === "stopped") throw engineError("session_stopped");
@@ -805,9 +829,25 @@ export function createInteractiveEngine({
     } catch (e) {
       s.turn = null;
       if (needsWake) {
-        s.state = s.pi ? "awake" : "hibernating";    // release the reservation
-        if (s.pi) { try { await s.pi.close(); } catch { /* nothing to reap */ } s.pi = null; }
+        // I-3: release the reservation UNCONDITIONALLY and FIRST. The old
+        // `s.pi ? "awake" : "hibernating"` marked a half-started wake as
+        // counted-awake while its child was being torn down — if the close
+        // hung, the slot leaked forever (every later spawn threw
+        // interactive_capacity). Detach before closing so attachExit treats
+        // the exit as expected, and never await the close.
+        const pi = s.pi;
+        s.pi = null;
+        s.state = "hibernating";                     // the reservation is gone NOW
         writeLeases();
+        if (pi) {
+          pi.close().catch(() => { /* already dead */ });
+          // startChild stamped the row 'active' before it failed; park it so
+          // the next wake is not 409'd by our own dead claim. Never on
+          // turn_in_progress — that claim belongs to ANOTHER process.
+          if (!e || e.code !== "turn_in_progress") {
+            writeRow(s, { status: "waiting-user" }).catch(() => {});
+          }
+        }
       }
       throw e;
     }
@@ -827,8 +867,17 @@ export function createInteractiveEngine({
     return { turnId: turn.id };
   }
 
-  function answer(sessionId, requestId, value) {
-    const s = sessions.get(String(sessionId));
+  /** Resolve a session this process holds, or adopt its row (gateway restart).
+   * Fix round 1 (I-2): EVERY public method resolves through here — before,
+   * only message() adopted, so after a restart list() showed sessions that
+   * get/subscribe/stop then refused as no_such_session. */
+  async function resolveSession(sessionId) {
+    const id = String(sessionId);
+    return sessions.get(id) || (await adopt(id));
+  }
+
+  async function answer(sessionId, requestId, value) {
+    const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     const card = s.pendingUi;
     // Liveness BEFORE send (r1 S4): a dead child must yield a 409-shaped
@@ -877,13 +926,17 @@ export function createInteractiveEngine({
   }
 
   async function abort(sessionId) {
-    const s = sessions.get(String(sessionId));
+    const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
+    // I-2: nothing to abort — no in-flight turn and no pending card (the
+    // adopted-after-restart hibernating case above all). An honest no-op
+    // refusal, never a silent ok and never no_such_session.
+    if (!s.turn && !s.pendingUi) throw engineError("no_turn");
     return abortInFlight(s);
   }
 
   async function stop(sessionId) {
-    const s = sessions.get(String(sessionId));
+    const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     const pi = s.pi;
     s.pi = null;
@@ -900,8 +953,8 @@ export function createInteractiveEngine({
     return { ok: true };
   }
 
-  function subscribe(sessionId, fn) {
-    const s = sessions.get(String(sessionId));
+  async function subscribe(sessionId, fn) {
+    const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     s.subscribers.add(fn);
     try {
@@ -914,8 +967,8 @@ export function createInteractiveEngine({
     return () => s.subscribers.delete(fn);
   }
 
-  function get(sessionId) {
-    const s = sessions.get(String(sessionId));
+  async function get(sessionId) {
+    const s = await resolveSession(sessionId);
     return s ? snapshot(s) : null;
   }
 
@@ -991,7 +1044,15 @@ export function createInteractiveEngine({
       if (s.state !== "stopped") s.state = "hibernating";
       let timerHandle = null;
       await Promise.race([
-        Promise.resolve().then(() => pi.close()).catch(() => {}),
+        (async () => {
+          // I-1: PARK the row FIRST, then close. A row left 'active' with a
+          // fresh updated_at reads as a live cross-process claim after a
+          // restart — assertRowClaimable would 409 the next gateway's wake
+          // for a full turn budget. Best-effort, and written before the close
+          // so a child that ignores SIGTERM cannot skip it.
+          try { await writeRow(s, { status: "waiting-user" }); } catch { /* best effort */ }
+          try { await pi.close(); } catch { /* already dead */ }
+        })(),
         new Promise((r) => { timerHandle = setTimeout(r, timeoutMs); }),
       ]);
       if (timerHandle) clearTimeout(timerHandle);

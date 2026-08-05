@@ -120,6 +120,8 @@ function makeBridge(opts = {}) {
     projectId: opts.projectId === undefined ? 7 : opts.projectId,
     worldGate: null,       // set to a promise to hold buildBotWorld mid-flight
     prepGate: null,
+    meterGate: null,       // set to a promise to hold meterTurn mid-flight (M-4)
+    piScript: null,        // (pi, index) => {} — per-instance scripting (I-3)
     modelKey: opts.modelKey || "crow-local/qwen3.6-35b-a3b",
   };
 
@@ -141,6 +143,7 @@ function makeBridge(opts = {}) {
       this.exited = new Promise((r) => { done = r; });
       this._done = done;
       state.instances.push(this);
+      if (state.piScript) state.piScript(this, state.instances.length - 1);
     }
     async getState() {
       return { data: { sessionId: this.piSessionId } };
@@ -228,7 +231,11 @@ function makeBridge(opts = {}) {
       };
     },
     async warmModel(provider) { state.warm.push(provider); },
-    async meterTurn(args) { state.meter.push(args); return { recorded: true }; },
+    async meterTurn(args) {
+      state.meter.push(args);
+      if (state.meterGate) await state.meterGate;
+      return { recorded: true };
+    },
     appendAudit(projectId, o) { state.audit.push({ projectId, ...o }); },
   };
   return seam;
@@ -252,10 +259,11 @@ function makeEngine(o = {}) {
   return { engine, clock, bridge, env, state: bridge._state };
 }
 
-/** Collect every event the engine emits for a session. */
-function collect(engine, sessionId) {
+/** Collect every event the engine emits for a session. Async since fix round 1
+ * (I-2): subscribe adopts unknown rows, so it awaits. */
+async function collect(engine, sessionId) {
   const events = [];
-  const off = engine.subscribe(sessionId, (e) => events.push(e));
+  const off = await engine.subscribe(sessionId, (e) => events.push(e));
   return { events, off, ofType: (t) => events.filter((e) => e.type === t) };
 }
 
@@ -300,9 +308,20 @@ after(() => {
 
 test("spawn: kill switch refuses with perch_disabled and spawns nothing", async () => {
   const { engine, state } = makeEngine({ env: { CROW_DISABLE_PERCH: "1" } });
+  // Minor 5 (d): the old third assertion here was vacuous (list() derives every
+  // non-stopped row as hibernating, so "no awake session" could never fail).
+  // Assert something real instead: the refused spawn left NO session row.
+  const countRows = () => {
+    const c = raw();
+    const n = c.prepare("SELECT COUNT(*) AS n FROM bot_sessions WHERE kind='perch-live'").get().n;
+    c.close();
+    return n;
+  };
+  const rowsBefore = countRows();
   await assert.rejects(() => engine.spawn({ botId: "botty" }), (e) => e.code === "perch_disabled");
   assert.equal(state.instances.length, 0);
-  assert.equal((await engine.list()).filter((s) => s.state !== "hibernating" && s.state !== "stopped").length, 0);
+  assert.equal(state.worlds.length, 0, "the gate fires before any world build");
+  assert.equal(countRows(), rowsBefore, "a refused spawn writes no session row");
 });
 
 test("spawn: builds the world, warms, constructs PiRpc with the FULL piRpcOpts + PI_BOT_INTERACTIVE, and writes the perch-live row", async () => {
@@ -413,7 +432,7 @@ test("message: a second message while a turn is in flight is refused with turn_i
 test("clean completion: meters + audits, emits reply, trims the log, and parks the row", async () => {
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
-  const sink = collect(engine, s.sessionId);
+  const sink = await collect(engine, s.sessionId);
   await engine.message(s.sessionId, "do it");
   const pi = state.instances[0];
   pi.emit({ type: "tool_execution_start", toolName: "bash", toolCallId: "t1" });
@@ -438,17 +457,19 @@ test("clean completion: meters + audits, emits reply, trims the log, and parks t
   assert.equal(state.audit[0].actor_id, "botty");
   assert.deepEqual(state.audit[0].payload.tool_names, ["bash"]);
   assert.equal(state.audit[0].payload.model, "crow-local/qwen3.6-35b-a3b");
+  // Minor 5 (b): the audit row points at the REAL bot_sessions row.
+  assert.equal(state.audit[0].payload.session_id, rowFor(s.threadId).id);
 
   const row = rowFor(s.threadId);
   assert.equal(row.status, "waiting-user");
   assert.equal(row.model, "crow-local/qwen3.6-35b-a3b");
-  assert.equal(engine.get(s.sessionId).state, "awake");
+  assert.equal((await engine.get(s.sessionId)).state, "awake");
 });
 
 test("CR2: an aborted turn's late agent_end produces NO reply and is neither metered nor audited", async () => {
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
-  const sink = collect(engine, s.sessionId);
+  const sink = await collect(engine, s.sessionId);
   await engine.message(s.sessionId, "long one");
   const pi = state.instances[0];
 
@@ -467,23 +488,30 @@ test("CR2: an aborted turn's late agent_end produces NO reply and is neither met
   assert.equal(state.meter.length, 0);
   assert.equal(state.audit.length, 0);
   assert.ok(sink.ofType("state").length >= 1);
-  assert.equal(engine.get(s.sessionId).state, "awake", "the session stays awake after an abort");
+  assert.equal((await engine.get(s.sessionId)).state, "awake", "the session stays awake after an abort");
 });
 
 test("CR1: a refused ack surfaces an SSE error, clears the in-flight turn, arms idle, and does NOT wedge or kill the session", async () => {
   const { engine, clock, state } = makeEngine();
   const s = await spawned(engine);
-  const sink = collect(engine, s.sessionId);
+  const sink = await collect(engine, s.sessionId);
   await engine.message(s.sessionId, "bad model");
   const pi = state.instances[0];
-  pi.lastTurn().reject(new Error("prompt refused: no such provider"));
+  // M-3: the refusal is TYPED at bridge.mjs's throw site — the engine keys on
+  // err.code, so the fake must carry it (the string alone no longer matches).
+  const refusal = new Error("prompt refused: no such provider");
+  refusal.code = "prompt_refused";
+  pi.lastTurn().reject(refusal);
   await tick();
 
   const errs = sink.ofType("error");
   assert.equal(errs.length, 1);
   assert.match(errs[0].text, /prompt refused/);
   assert.equal(pi.closed, 0, "a preflight refusal leaves the child healthy — no agent loop ever started");
-  assert.equal(engine.get(s.sessionId).state, "awake");
+  assert.equal((await engine.get(s.sessionId)).state, "awake");
+  // Minor 5 (a): an errored turn is neither metered nor audited.
+  assert.equal(state.meter.length, 0, "a refused turn is not metered");
+  assert.equal(state.audit.length, 0, "a refused turn is not audited");
 
   // Not wedged: a second message runs normally.
   const again = await engine.message(s.sessionId, "try again");
@@ -496,13 +524,13 @@ test("CR1: a refused ack surfaces an SSE error, clears the in-flight turn, arms 
   await tick();
   clock.advance(600_001);
   await tick();
-  assert.equal(engine.get(s.sessionId).state, "hibernating");
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
 });
 
 test("CARRIED 3: an abandoned turn CLOSES the child — a late agent_end can never satisfy the next turn's wait", async () => {
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
-  const sink = collect(engine, s.sessionId);
+  const sink = await collect(engine, s.sessionId);
   await engine.message(s.sessionId, "hi");
   const pi = state.instances[0];
   // An ack timeout: the prompt may well have been received and the agent loop
@@ -512,8 +540,11 @@ test("CARRIED 3: an abandoned turn CLOSES the child — a late agent_end can nev
   await tick();
 
   assert.equal(pi.closed, 1, "the child is closed, never reused");
-  assert.equal(engine.get(s.sessionId).state, "hibernating");
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
   assert.ok(sink.ofType("error").length >= 1);
+  // Minor 5 (a): an errored turn is neither metered nor audited.
+  assert.equal(state.meter.length, 0, "an abandoned turn is not metered");
+  assert.equal(state.audit.length, 0, "an abandoned turn is not audited");
 });
 
 test("CARRIED 3: an abort that never lands abandons the child after the grace window", async () => {
@@ -526,7 +557,7 @@ test("CARRIED 3: an abort that never lands abandons the child after the grace wi
   clock.advance(30_001);
   await tick();
   assert.equal(pi.closed, 1, "abort with no active run emits nothing — the child must not be reused");
-  assert.equal(engine.get(s.sessionId).state, "hibernating");
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
 });
 
 // ---------------------------------------------------------------------------
@@ -536,7 +567,7 @@ test("CARRIED 3: an abort that never lands abandons the child after the grace wi
 test("onEvent forwarding: tools, assistant text, notify, and the ignored ui methods", async () => {
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
-  const sink = collect(engine, s.sessionId);
+  const sink = await collect(engine, s.sessionId);
   await engine.message(s.sessionId, "go");
   const pi = state.instances[0];
 
@@ -573,13 +604,13 @@ test("onEvent forwarding: every ask_user method carries its OWN fields (r1 S5)",
   for (const [msg, expected] of cases) {
     const { engine, state } = makeEngine();
     const s = await spawned(engine);
-    const sink = collect(engine, s.sessionId);
+    const sink = await collect(engine, s.sessionId);
     await engine.message(s.sessionId, "go");
     state.instances[0].emit(msg);
     const card = sink.ofType("ask_user")[0];
     assert.ok(card, msg.method + " produced a card");
     for (const [k, v] of Object.entries(expected)) assert.deepEqual(card[k], v, msg.method + "." + k);
-    assert.deepEqual(engine.get(s.sessionId).pendingUi, { ...expected });
+    assert.deepEqual((await engine.get(s.sessionId)).pendingUi, { ...expected });
   }
 });
 
@@ -601,9 +632,9 @@ test("answer: value / confirmed / cancelled shapes, and pendingUi clears", async
     await engine.message(s.sessionId, "go");
     const pi = state.instances[0];
     pi.emit({ type: "extension_ui_request", id: "q", method, title: "T", options: ["one"], message: "m" });
-    engine.answer(s.sessionId, "q", answer);
+    await engine.answer(s.sessionId, "q", answer);
     assert.deepEqual(pi.sent[pi.sent.length - 1], expected, method + " " + JSON.stringify(answer));
-    assert.equal(engine.get(s.sessionId).pendingUi, null);
+    assert.equal((await engine.get(s.sessionId)).pendingUi, null);
   }
 });
 
@@ -613,10 +644,10 @@ test("answer: a stale/unknown requestId is refused with no_such_request", async 
   await engine.message(s.sessionId, "go");
   const pi = state.instances[0];
   pi.emit({ type: "extension_ui_request", id: "q", method: "input", title: "T" });
-  assert.throws(() => engine.answer(s.sessionId, "not-q", { value: "x" }), (e) => e.code === "no_such_request");
+  await assert.rejects(() => engine.answer(s.sessionId, "not-q", { value: "x" }), (e) => e.code === "no_such_request");
   assert.equal(pi.sent.length, 0, "nothing is sent to the child on a mismatched id");
   // the real card still stands
-  assert.equal(engine.get(s.sessionId).pendingUi.requestId, "q");
+  assert.equal((await engine.get(s.sessionId)).pendingUi.requestId, "q");
 });
 
 test("answer after the child EXITED is a no_such_request refusal, never a raw throw (r1 S4)", async () => {
@@ -627,7 +658,7 @@ test("answer after the child EXITED is a no_such_request refusal, never a raw th
   pi.emit({ type: "extension_ui_request", id: "q", method: "input", title: "T" });
   pi.exit(1);
   await tick();
-  assert.throws(() => engine.answer(s.sessionId, "q", { value: "x" }), (e) => e.code === "no_such_request");
+  await assert.rejects(() => engine.answer(s.sessionId, "q", { value: "x" }), (e) => e.code === "no_such_request");
 });
 
 // ---------------------------------------------------------------------------
@@ -637,11 +668,11 @@ test("answer after the child EXITED is a no_such_request refusal, never a raw th
 test("hibernate: the idle timer closes the child, parks the row, and flips the state", async () => {
   const { engine, clock, state } = makeEngine();
   const s = await spawned(engine);
-  const sink = collect(engine, s.sessionId);
+  const sink = await collect(engine, s.sessionId);
   clock.advance(600_001);
   await tick();
   assert.equal(state.instances[0].closed, 1);
-  assert.equal(engine.get(s.sessionId).state, "hibernating");
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
   assert.equal(rowFor(s.threadId).status, "waiting-user");
   assert.ok(sink.ofType("state").some((e) => e.state === "hibernating"));
 });
@@ -657,10 +688,10 @@ test("hibernate: an UNANSWERED ask_user card blocks hibernation (mutation (a))",
   clock.advance(600_001);
   await tick();
   assert.equal(pi.closed, 0, "an unanswered card must survive the idle window");
-  assert.equal(engine.get(s.sessionId).state, "awake");
+  assert.equal((await engine.get(s.sessionId)).state, "awake");
 
   // Answering releases it: the idle countdown resumes from the answer.
-  engine.answer(s.sessionId, "q", { confirmed: true });
+  await engine.answer(s.sessionId, "q", { confirmed: true });
   clock.advance(600_001);
   await tick();
   assert.equal(pi.closed, 1);
@@ -673,7 +704,7 @@ test("hibernate: an in-flight turn is not hibernated out from under itself", asy
   clock.advance(600_001);
   await tick();
   assert.equal(state.instances[0].closed, 0);
-  assert.equal(engine.get(s.sessionId).state, "awake");
+  assert.equal((await engine.get(s.sessionId)).state, "awake");
 });
 
 // ---------------------------------------------------------------------------
@@ -686,7 +717,7 @@ test("wake: a message to a hibernating session rebuilds the world FRESH and resu
   const firstPi = state.instances[0];
   clock.advance(600_001);
   await tick();
-  assert.equal(engine.get(s.sessionId).state, "hibernating");
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
 
   // The operator narrowed the session (or edited the envelope) while it slept.
   state.narrowedTools = '["bash","write"]';
@@ -700,7 +731,7 @@ test("wake: a message to a hibernating session rebuilds the world FRESH and resu
   assert.equal(wakeOpts.narrowedTools, '["bash","write"]', "the FRESH narrowing lands in the wake spawn");
   assert.equal(wakeOpts.piSessionId, firstPi.piSessionId, "the pi session is resumed, not restarted");
   assert.deepEqual(wakeOpts.extraEnv, { PI_BOT_INTERACTIVE: "1" });
-  assert.equal(engine.get(s.sessionId).state, "awake");
+  assert.equal((await engine.get(s.sessionId)).state, "awake");
   assert.equal(rowFor(s.threadId).status, "active");
   assert.equal(state.instances[1].turns[0].message, "back again");
 });
@@ -714,8 +745,8 @@ test("C8: a wake past the interactive cap is refused with the exact code and spa
   assert.equal(state.instances.length, 2);
   await assert.rejects(() => engine.message(a.sessionId, "wake me"), (e) => e.code === "interactive_capacity");
   assert.equal(state.instances.length, 2, "no third child");
-  assert.equal(engine.get(a.sessionId).state, "hibernating", "the failed reservation is released");
-  assert.equal(engine.get(b.sessionId).state, "awake");
+  assert.equal((await engine.get(a.sessionId)).state, "hibernating", "the failed reservation is released");
+  assert.equal((await engine.get(b.sessionId)).state, "awake");
 });
 
 test("C8: a wake past the pi cap is refused with pi_capacity and spawns no child", async () => {
@@ -726,7 +757,7 @@ test("C8: a wake past the pi cap is refused with pi_capacity and spawns no child
   state.livePi = 4;                                   // maxPi default in the fake seam is 4
   await assert.rejects(() => engine.message(s.sessionId, "wake me"), (e) => e.code === "pi_capacity");
   assert.equal(state.instances.length, 1);
-  assert.equal(engine.get(s.sessionId).state, "hibernating");
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
 });
 
 test("CR3: two concurrent WAKES at MAX_AWAKE=1 produce exactly one child and one 409", async () => {
@@ -735,8 +766,8 @@ test("CR3: two concurrent WAKES at MAX_AWAKE=1 produce exactly one child and one
   const b = await spawned(engine, "b");
   clock.advance(600_001);
   await tick();                                       // both hibernate
-  assert.equal(engine.get(a.sessionId).state, "hibernating");
-  assert.equal(engine.get(b.sessionId).state, "hibernating");
+  assert.equal((await engine.get(a.sessionId)).state, "hibernating");
+  assert.equal((await engine.get(b.sessionId)).state, "hibernating");
 
   env.PERCH_INTERACTIVE_MAX_AWAKE = "1";              // read at call time
   let release;
@@ -761,7 +792,7 @@ test("CR3: two concurrent WAKES at MAX_AWAKE=1 produce exactly one child and one
 test("C3 watchdog: fires on silence — aborts the turn and reports it", async () => {
   const { engine, clock, state } = makeEngine({ env: { PERCH_TURN_STALL_MS: "60000" } });
   const s = await spawned(engine);
-  const sink = collect(engine, s.sessionId);
+  const sink = await collect(engine, s.sessionId);
   await engine.message(s.sessionId, "silent job");
   const pi = state.instances[0];
   clock.advance(60_001);
@@ -799,7 +830,7 @@ test("C3 watchdog: PAUSED across a long pendingUi wait (mutation (e))", async ()
   clock.advance(600_000);                             // ten stall windows of human thinking time
   await tick();
   assert.equal(pi.aborts, 0, "a session waiting on a human is not stalled");
-  engine.answer(s.sessionId, "q", { value: "a" });
+  await engine.answer(s.sessionId, "q", { value: "a" });
   clock.advance(60_001);
   await tick();
   assert.equal(pi.aborts, 1, "…and the watchdog resumes once the answer is in");
@@ -817,8 +848,8 @@ test("stop: closes the child, marks the row stopped, clears the card, and is not
   pi.emit({ type: "extension_ui_request", id: "q", method: "input", title: "T" });
   await engine.stop(s.sessionId);
   assert.equal(pi.closed, 1);
-  assert.equal(engine.get(s.sessionId).state, "stopped");
-  assert.equal(engine.get(s.sessionId).pendingUi, null);
+  assert.equal((await engine.get(s.sessionId)).state, "stopped");
+  assert.equal((await engine.get(s.sessionId)).pendingUi, null);
   assert.equal(rowFor(s.threadId).status, "stopped");
   await assert.rejects(() => engine.message(s.sessionId, "hi again"), (e) => e.code === "session_stopped");
 });
@@ -833,9 +864,11 @@ test("stopAll: bounded — a child that will not close cannot hold shutdown open
   assert.ok(Date.now() - t0 < 5000, "stopAll returned inside its budget");
   assert.equal(r.stopped, 2, "both children were asked to die");
   assert.equal(state.instances[1].closed, 1);
-  // Rows persist — hibernation semantics, not deletion.
-  assert.ok(rowFor(a.threadId));
-  assert.ok(rowFor(b.threadId));
+  // Rows persist AND are parked (I-1) — hibernation semantics, not deletion,
+  // and never a fresh 'active' claim that would 409 the next boot's wake.
+  // The HUNG child's row is parked too: the write lands before the close.
+  assert.equal(rowFor(a.threadId).status, "waiting-user");
+  assert.equal(rowFor(b.threadId).status, "waiting-user");
 });
 
 // ---------------------------------------------------------------------------
@@ -872,13 +905,13 @@ test("lease file: written on spawn, refreshed every 60 s, emptied on the last cl
 test("crash: an unexpected child exit hibernates the session with lastError, clears the card, and re-wakes on the next message", async () => {
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
-  const sink = collect(engine, s.sessionId);
+  const sink = await collect(engine, s.sessionId);
   const pi = state.instances[0];
   pi.emit({ type: "extension_ui_request", id: "q", method: "input", title: "T" });
   pi.exit(3);
   await tick();
 
-  const snap = engine.get(s.sessionId);
+  const snap = (await engine.get(s.sessionId));
   assert.equal(snap.state, "hibernating");
   assert.match(String(snap.lastError), /exited/);
   assert.equal(snap.pendingUi, null);
@@ -888,7 +921,7 @@ test("crash: an unexpected child exit hibernates the session with lastError, cle
   await engine.message(s.sessionId, "you back?");
   await tick();
   assert.equal(state.instances.length, 2, "a next message attempts a normal wake");
-  assert.equal(engine.get(s.sessionId).state, "awake");
+  assert.equal((await engine.get(s.sessionId)).state, "awake");
 });
 
 // ---------------------------------------------------------------------------
@@ -902,7 +935,7 @@ test("subscribe: a late subscriber is replayed the state AND the pending card; u
   state.instances[0].emit({ type: "extension_ui_request", id: "q", method: "select", title: "Which?", options: ["a"] });
 
   const late = [];
-  const off = engine.subscribe(s.sessionId, (e) => late.push(e));
+  const off = await engine.subscribe(s.sessionId, (e) => late.push(e));
   assert.equal(late[0].type, "state");
   assert.equal(late[0].state, "awake");
   assert.equal(late[1].type, "ask_user");
@@ -920,7 +953,7 @@ test("subscribe: after an abort the replay carries NO card, and after hibernatio
   state.instances[0].emit({ type: "extension_ui_request", id: "q", method: "input", title: "T" });
   await engine.abort(s.sessionId);
   const afterAbort = [];
-  engine.subscribe(s.sessionId, (e) => afterAbort.push(e))();
+  (await engine.subscribe(s.sessionId, (e) => afterAbort.push(e)))();
   assert.deepEqual(afterAbort.map((e) => e.type), ["state"]);
 
   state.instances[0].turns[0].resolve({ type: "agent_end", messages: [] });
@@ -928,7 +961,7 @@ test("subscribe: after an abort the replay carries NO card, and after hibernatio
   clock.advance(600_001);
   await tick();
   const afterHib = [];
-  engine.subscribe(s.sessionId, (e) => afterHib.push(e))();
+  (await engine.subscribe(s.sessionId, (e) => afterHib.push(e)))();
   assert.deepEqual(afterHib.map((e) => e.type), ["state"]);
   assert.equal(afterHib[0].state, "hibernating");
 });
@@ -953,7 +986,7 @@ test("list: live sessions this process holds, plus hibernating perch-live rows i
 
 test("get: unknown session is null, not a throw", async () => {
   const { engine } = makeEngine();
-  assert.equal(engine.get("nope"), null);
+  assert.equal((await engine.get("nope")), null);
   await assert.rejects(() => engine.message("nope", "hi"), (e) => e.code === "no_such_session");
 });
 
@@ -1038,4 +1071,151 @@ test("CARRIED 2: a project-native bot's world roots the session dir in the proje
   assert.equal(world.sessionDir, workspace + "/bots/" + botId, "project workspace wins over def.session_dir");
   assert.ok(existsSync(world.sessionDir + "/sessions"), "the sessions dir is created where pi will actually run");
   assert.equal(world.projectId, Number(info.lastInsertRowid));
+});
+
+// ---------------------------------------------------------------------------
+// 14. fix round 1 — restart survivability, slot-leak, turn-window
+//     (review findings I-1 / I-2 / I-3 / M-4)
+// ---------------------------------------------------------------------------
+
+test("I-1 restart: stopAll parks every row so a NEW process on the same DB can wake the session", async () => {
+  const A = makeEngine();
+  const s = await spawned(A.engine, "restarty");
+  assert.equal(rowFor(s.threadId).status, "active", "precondition: the row is claimed while awake");
+
+  const r = await A.engine.stopAll({ timeoutMs: 500 });
+  assert.equal(r.stopped, 1);
+  assert.equal(rowFor(s.threadId).status, "waiting-user",
+    "stopAll PARKS the row — a fresh 'active' would read as a live claim and 409 the next boot for a full turn budget");
+
+  // The restart: a fresh engine (fresh bridge seam, empty sessions map), same DB.
+  const B = makeEngine();
+  const wake = await B.engine.message(s.sessionId, "hello again");
+  assert.ok(wake.turnId, "the wake succeeds instead of throwing turn_in_progress");
+  await tick();
+  assert.equal(B.state.instances.length, 1);
+  assert.equal(B.state.instances[0].opts.piSessionId, A.state.instances[0].piSessionId,
+    "the adopted row's pi session is resumed, not restarted");
+  assert.equal((await B.engine.get(s.sessionId)).state, "awake");
+});
+
+test("I-2 restart: get / subscribe / stop adopt a row this process never held", async () => {
+  const A = makeEngine();
+  const s = await spawned(A.engine, "adopty");
+  await A.engine.stopAll({ timeoutMs: 500 });
+
+  const B = makeEngine();
+  const snap = await B.engine.get(s.sessionId);
+  assert.ok(snap, "get() adopts instead of returning null");
+  assert.equal(snap.state, "hibernating");
+  assert.equal(snap.botId, "adopty");
+
+  const C = makeEngine();
+  const events = [];
+  const off = await C.engine.subscribe(s.sessionId, (e) => events.push(e));
+  assert.equal(events[0].type, "state");
+  assert.equal(events[0].state, "hibernating", "the replayed state is derived from the adopted row");
+  off();
+
+  const D = makeEngine();
+  await D.engine.stop(s.sessionId);
+  assert.equal(rowFor(s.threadId).status, "stopped", "a ghost session CAN be stopped after a restart");
+  assert.equal((await D.engine.get(s.sessionId)).state, "stopped");
+});
+
+test("I-2 restart: abort/answer on an un-adopted hibernating session return their honest no-op errors", async () => {
+  const A = makeEngine();
+  const s = await spawned(A.engine, "honesty");
+  await A.engine.stopAll({ timeoutMs: 500 });
+
+  const B = makeEngine();
+  await assert.rejects(() => B.engine.abort(s.sessionId), (e) => e.code === "no_turn",
+    "no pending turn — the honest refusal, never no_such_session");
+  const C = makeEngine();
+  await assert.rejects(() => C.engine.answer(s.sessionId, "q1", { value: "x" }), (e) => e.code === "no_such_request",
+    "no pending request — the honest refusal, never no_such_session");
+  // A session that exists NOWHERE (no memory, no row) is still no_such_session.
+  await assert.rejects(() => B.engine.stop("perchlive-nowhere"), (e) => e.code === "no_such_session");
+  await assert.rejects(() => B.engine.subscribe("perchlive-nowhere", () => {}), (e) => e.code === "no_such_session");
+});
+
+test("I-3: a wake failure after the child was constructed releases the slot even when its close HANGS", async () => {
+  const { engine, clock, state } = makeEngine({ env: { PERCH_INTERACTIVE_MAX_AWAKE: "1" } });
+  const s = await spawned(engine, "leaky");
+  clock.advance(600_001);
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+
+  let releaseClose;
+  state.piScript = (pi, idx) => {
+    if (idx === 1) {
+      // Fail AFTER `s.pi` was set: a synchronous getState throw dodges the
+      // engine's `.catch(() => null)` (which never gets attached), exactly the
+      // "wake failure after the child exists" class. The close hangs until the
+      // test releases it.
+      pi.getState = () => { throw new Error("get_state boom"); };
+      pi.closeGate = new Promise((r) => { releaseClose = r; });
+    }
+  };
+  // Hang-proof by construction: under the pre-fix code this await NEVER
+  // settles (the catch awaited the hanging close), so race a real timer and
+  // fail loudly instead of wedging the file.
+  const outcome = await Promise.race([
+    engine.message(s.sessionId, "wake").then(() => "resolved", (e) => e),
+    new Promise((r) => setTimeout(() => r("hung"), 2000)),
+  ]);
+  assert.ok(outcome instanceof Error, "the wake failure must reject promptly (got: " + String(outcome) + ")");
+  assert.match(outcome.message, /get_state boom/);
+  state.piScript = null;
+
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating",
+    "the reservation is released unconditionally — never counted-awake while closing");
+  await tick();
+  assert.equal(rowFor(s.threadId).status, "waiting-user", "our own dead 'active' claim is parked");
+
+  // The slot is free RIGHT NOW — the hung close must not hold it.
+  const other = await spawned(engine, "other");
+  assert.equal((await engine.get(other.sessionId)).state, "awake",
+    "the next spawn succeeds — no permanent interactive_capacity leak");
+
+  // When the hung close finally lands, the teardown is SILENT: the child was
+  // detached before closing, so attachExit treats the exit as expected.
+  const sink = await collect(engine, s.sessionId);
+  releaseClose();
+  await tick();
+  assert.equal(sink.events.filter((e) => e.type === "error" && /exited/.test(String(e.text))).length, 0,
+    "no spurious 'pi exited unexpectedly' on an expected teardown");
+});
+
+test("M-4: the turn stays claimed until reply + trimLog — a fast second message cannot interleave with turn 1's tail", async () => {
+  const { engine, state } = makeEngine();
+  let release;
+  state.meterGate = new Promise((r) => { release = r; });
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "one");
+  const pi = state.instances[0];
+  pi.lastTurn().resolve({
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "first done" }] }],
+  });
+  await tick();                                       // completion is now parked inside meterTurn
+  assert.equal(state.meter.length, 1, "precondition: the completion path reached metering");
+  assert.equal(pi.trimmed, 0, "trimLog has not run — the turn is still finishing");
+
+  // THE window M-4 is about: a second message lands while turn 1's completion
+  // is mid-await. It must be refused, never interleaved (turn 1's reply would
+  // otherwise land after turn 2 started, and trimLog would run mid-turn).
+  await assert.rejects(() => engine.message(s.sessionId, "two"), (e) => e.code === "turn_in_progress");
+  assert.equal(sink.ofType("reply").length, 0, "turn 1's reply has not been emitted yet");
+
+  release();
+  await tick();
+  assert.equal(sink.ofType("reply").length, 1);
+  assert.equal(sink.ofType("reply")[0].text, "first done");
+  assert.equal(pi.trimmed, 1, "trimLog ran with NO other turn in flight (the C-12 caller guarantee)");
+
+  const r2 = await engine.message(s.sessionId, "two");
+  assert.ok(r2.turnId, "…and the second message succeeds once turn 1 is fully done");
+  assert.equal(pi.turns.length, 2);
 });
