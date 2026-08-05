@@ -1,0 +1,41 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadRules, scanText, redact } from "../server/output-scan.js";
+import { writeFileSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+// Compiled rules, the shape loadRules() produces (string patterns are the
+// FILE format only; scanText takes compiled RegExp — review round 1 finding 3).
+const RULES = [
+  { name: "github-token", pattern: /ghp_[A-Za-z0-9]{36}/g, severity: "secret" },
+  { name: "ssh-key-block", pattern: /BEGIN (OPENSSH|RSA) PRIVATE KEY/g, severity: "secret" },
+];
+const FILE_RULES = [
+  { name: "github-token", pattern: "ghp_[A-Za-z0-9]{36}", severity: "secret" },
+  { name: "ssh-key-block", pattern: "BEGIN (OPENSSH|RSA) PRIVATE KEY", severity: "secret" },
+];
+
+test("clean text passes", () => {
+  assert.equal(scanText("A perfectly ordinary draft paragraph.", RULES).length, 0);
+});
+
+test("seeded token is caught and redacted", () => {
+  const text = "leaked: ghp_" + "a".repeat(36) + " end";
+  const findings = scanText(text, RULES);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].name, "github-token");
+  const red = redact(text, findings);
+  assert.ok(!red.includes("ghp_" + "a".repeat(36)));
+  assert.ok(red.includes("[REDACTED:github-token]"));
+});
+
+test("loadRules compiles patterns from a JSON file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "scan-"));
+  const p = join(dir, "rules.json");
+  writeFileSync(p, JSON.stringify({ rules: FILE_RULES }));
+  const rules = loadRules(p);
+  assert.equal(rules.length, 2);
+  assert.ok(rules[0].pattern instanceof RegExp);
+  assert.equal(scanText("token ghp_" + "b".repeat(36), rules).length, 1);
+});

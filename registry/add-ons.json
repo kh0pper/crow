@@ -4896,7 +4896,8 @@
           "CROW_TASKS_DB_PATH",
           "PLANNER_DRIVE_FOLDER_ID",
           "PLANNER_CATEGORY",
-          "PLANNER_CRON"
+          "PLANNER_CRON",
+          "PM_SCAN_RULES_FILE"
         ]
       },
       "panel": "panel/pm-workspace.js",
