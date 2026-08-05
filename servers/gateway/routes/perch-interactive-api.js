@@ -60,7 +60,12 @@ const ERROR_MAP = {
 };
 
 function mapEngineError(res, err) {
-  const mapped = err && err.code && ERROR_MAP[err.code];
+  // Object.hasOwn (fix-round F2): a bare `ERROR_MAP[err.code]` is a
+  // prototype-chain lookup on an object literal — an err.code of
+  // "constructor" would yield a truthy non-array and res.status(undefined)
+  // would throw inside an async catch block.
+  const code = err && err.code;
+  const mapped = code && Object.hasOwn(ERROR_MAP, code) ? ERROR_MAP[code] : null;
   if (mapped) return jsonError(res, mapped[0], mapped[1]);
   return jsonError(res, 500, String((err && err.message) || err));
 }
@@ -182,7 +187,22 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     // every subscriber (this route, and any future one) gets it for free.
     const forward = (event) => stream.send(event.type, event);
 
+    // Register the close handler BEFORE the subscribe await (fix-round F1): a
+    // client abort DURING that await (subscribe→resolveSession→adoptRow does a
+    // real DB read) fires 'close' immediately — if the listener were bound
+    // after, it would never be added and the engine subscriber would leak for
+    // the life of the process. `teardown` is idempotent (unsubscribe is
+    // nulled before it's called), so the late-reconcile below can never
+    // double-unsubscribe with the close handler.
     let unsubscribe = null;
+    let gone = false;
+    const teardown = () => {
+      gone = true;
+      const u = unsubscribe;
+      unsubscribe = null;
+      if (u) { try { u(); } catch { /* already gone */ } }
+    };
+    res.on("close", teardown);
     try {
       unsubscribe = await eng.subscribe(sid, forward);
     } catch {
@@ -192,7 +212,10 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       stream.close();
       return;
     }
-    res.on("close", () => { try { unsubscribe(); } catch { /* already gone */ } });
+    // Late-unsubscribe reconcile: the client vanished while subscribe() was in
+    // flight — 'close' already fired with unsubscribe still null, so run the
+    // teardown again now that we finally hold the real unsubscribe.
+    if (gone) teardown();
   });
 
   // ---- POST /interactive/:sid/answer — resolve a pending ask_user card ----
