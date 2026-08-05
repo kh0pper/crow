@@ -391,7 +391,10 @@ test("(h) a preflight-refused ack rejects promptTurn immediately — it never wa
     const t0 = Date.now();
     await assert.rejects(
       () => pi.promptTurn("hi", 0), // ms=0: if this waited for agent_end it would hang forever
-      /prompt refused: boom/
+      (e) => /prompt refused: boom/.test(e.message)
+        // C-13 fix round 1 (M-3): the refusal is TYPED — the interactive
+        // engine discriminates on err.code, not on the message string.
+        && e.code === "prompt_refused"
     );
     assert.ok(Date.now() - t0 < 3000, "must reject immediately off the ack, not wait on agent_end");
   } finally {
@@ -430,6 +433,7 @@ test("(h2) an ack MISSING the success field rejects promptTurn — fail-closed, 
     assert.ok(outcome instanceof Error,
       "promptTurn must reject a success-less ack immediately, not proceed to the agent_end wait (got: " + String(outcome) + ")");
     assert.match(outcome.message, /prompt refused: unknown/);
+    assert.equal(outcome.code, "prompt_refused", "the fail-closed refusal carries the typed code too (M-3)");
   } finally {
     await pi.close();
   }
