@@ -379,12 +379,14 @@ const dashboardLoginLimiter = rateLimit({
 });
 app.use("/dashboard/login", dashboardLoginLimiter);
 
-// Body parsing with size limit. The /llm LLM-router has its own route-scoped
-// 10mb parser (multi-turn voice transcripts with tool history + image parts
-// exceed 1mb), so skip the global 1mb parser there — otherwise it 413s a large
-// turn before the route is reached.
+// Body parsing with size limit. Routes with their own route-scoped parser must
+// be skipped here — otherwise the global 1mb parser 413s a large body before
+// the route is reached: /llm (10mb parser; multi-turn voice transcripts with
+// tool history + image parts) and /s/:surface/feedback (4mb parser in the
+// knowledge-base bundle; screenshot-attached feedback).
 const _jsonParser = express.json({ limit: "1mb" });
-app.use((req, res, next) => (req.path.startsWith("/llm") ? next() : _jsonParser(req, res, next)));
+const _hasOwnParser = (p) => p.startsWith("/llm") || /^\/s\/[^/]+\/feedback$/.test(p);
+app.use((req, res, next) => (_hasOwnParser(req.path) ? next() : _jsonParser(req, res, next)));
 
 // --- Static files (PWA manifest, service worker, icons) ---
 app.use(express.static(join(__gatewayDir, "public"), {
