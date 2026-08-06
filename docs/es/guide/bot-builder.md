@@ -94,11 +94,31 @@ Cada fila de sesión lleva insignias:
 - una insignia de **tarjeta** cuando la sesión fue iniciada por un despacho del bot-board, que enlaza de vuelta a la tarjeta en el tablero;
 - una insignia **live** mientras un turno está corriendo de verdad.
 
+### 6. Genera un agente en vivo: una sesión en lugar de un turno
+
+Cada tarjeta de agente que tenga el canal Perch adjunto también recibe un botón **Generar como agente**. Un mensaje en la caja del paso 3 es un turno único y autocontenido: lo envías, recibes una respuesta, y termina ahí. Generar es distinto: abre una sesión en vivo, un proceso del agente que se mantiene corriendo a través de varios mensajes, de la misma forma que el agente se comporta cuando trabaja consigo mismo a lo largo de varios pasos de una tarea, en vez de responder una sola pregunta.
+
+La tarjeta de la sesión lleva una insignia de estado: **awake** (despierto) mientras el agente está activo y puede recibir un mensaje ahora mismo, **hibernating** (hibernando) una vez que ha estado inactivo y se apagó solo (no se pierde nada: el siguiente mensaje lo despierta de nuevo a mitad de la conversación), **waking** (despertando) durante el instante en que un mensaje está trayendo de vuelta a una sesión hibernando, **stopped** (detenido) una vez que terminaste la sesión definitivamente, y **error** si lo último que hizo falló. Una sesión detenida no se puede volver a despertar; genera una nueva si quieres seguir hablando con ese agente de esta forma.
+
+Por defecto solo una sesión generada puede estar despierta a la vez, y compite por los mismos cupos de procesamiento que usa cualquier otro turno de agente: respuestas de Gmail, respuestas de Discord, trabajos en segundo plano. Dejar una sesión generada despierta e inactiva por un rato largo puede hacer que esos esperen. Si ya terminaste con una sesión por ahora, deja que hiberne (lo hará sola) o deténla.
+
+Mientras un turno está corriendo, la actividad de las herramientas se transmite a la tarjeta en tiempo real, así que puedes ver qué está haciendo el agente antes de que llegue la respuesta. Aparece un botón **Abortar** durante un turno si quieres interrumpirlo.
+
+### 7. Responder una pregunta que te hace el agente
+
+Algunas skills te preguntan algo a mitad de la tarea en vez de adivinar: elegir de una lista, confirmar antes de hacer algo, escribir texto libre, o editar un bloque de texto. En una sesión generada, eso aparece como una **tarjeta** en lugar de la respuesta: la pregunta, y la forma de responderla. Respóndela y el agente continúa justo donde se quedó. Si una tarjeta sigue esperando tu respuesta cuando sales de la página, ahí sigue cuando vuelves a la sesión.
+
+### 8. Volver más tarde
+
+Recarga la página de Perch y la conversación más reciente de cada agente en cada canal se reabre donde la dejaste: el hilo de la caja de mensajes del paso 3 con su transcripción, y cualquier sesión generada del paso 6 con su estado en vivo y su transcripción, ambos. Nunca tienes que buscar cuál sesión era cuál.
+
 ### Antes de instalarlo
 
-Vale la pena saber dos cosas, porque Perch no las esconde.
+Vale la pena saber varias cosas, porque Perch no las esconde.
 
 Cualquiera que pueda entrar a tu panel puede leer las transcripciones de **todos** los agentes en Perch. No hay control de acceso por agente.
+
+Generar una sesión (paso 6) extiende eso de leer a conducir: cualquiera que pueda iniciar sesión también puede sostener una conversación en vivo como cualquier agente, usando las herramientas y permisos propios de ese agente, no solo observar lo que ya hizo. Es el mismo límite de confianza que el punto anterior sobre transcripciones, no uno nuevo: una sesión del panel ya podía activar a un agente escribiéndole por la caja de chat de Perch, o por el canal real del agente (un correo, un mensaje de Discord). Generar solo elimina el paso de "sale y vuelve por un canal".
 
 Perch además trae su gestor de sesiones original completo, que puede iniciar programas en la máquina donde corre. Eso es deliberado: es una herramienta de operador autoalojada, y está detrás del inicio de sesión de tu panel y de nada más. Instálalo en un Crow cuyo inicio de sesión trates con la misma seriedad que el acceso por shell a esa máquina, y no en uno donde ese inicio de sesión esté compartido más ampliamente.
 

@@ -89,6 +89,25 @@ a.badge.board{text-decoration:none;color:var(--attn);border-color:var(--attn)}
 .chat-send textarea{flex:1}
 .err{color:var(--attn);font-size:13.5px}
 .pending{color:var(--dim)}
+.badge.state-awake{color:var(--alive);border-color:var(--alive)}
+.badge.state-waking{color:var(--teal);border-color:var(--teal)}
+.badge.state-hibernating{color:var(--dim)}
+.badge.state-stopped{color:var(--dim)}
+.badge.state-error{color:var(--attn);border-color:var(--attn)}
+.interactive{margin:0 -16px;border-top:1px solid var(--line);padding:13px 16px;display:grid;gap:10px}
+.interactive:empty{display:none}
+.i-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.i-actions{display:flex;gap:8px}
+.i-transcript{max-height:340px;overflow:auto;display:grid;gap:9px}
+.i-ask{display:grid;gap:8px}
+.i-ask:empty{display:none}
+.i-send{display:flex;gap:8px;align-items:flex-start}
+.i-send textarea{flex:1}
+.ask-card{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:8px;background:var(--sky)}
+.ask-card .title{font-weight:600}
+.ask-card .ask-message{white-space:pre-wrap}
+.ask-opts{display:flex;flex-wrap:wrap;gap:6px}
+.answered{color:var(--dim);font-size:13px}
 `;
 
 /**
@@ -118,6 +137,8 @@ export function botsClient(esc) {
 	const bots = new Map(); // botId → bot record
 	const sessions = new Map(); // botId → session rows
 	const chatThread = new Map(); // botId → perch sessionId the chat card is continuing
+	const interactive = new Map(); // sessionId → { botId, state, turnInFlight, pendingUi } for the interactive card
+	const mountedSid = new Map(); // botId → the sid whose interactive card currently owns the container (fix round 2)
 
 	// ── plumbing ─────────────────────────────────────────────────
 
@@ -209,6 +230,10 @@ export function botsClient(esc) {
 		const cls = !ready ? "attn" : attached ? "" : "idle";
 		const state = attached ? "attached" : "observing";
 		const meta = "engine " + engine + " · runtime " + (bot.runtime_on ? "on" : "off");
+		// "Spawn as bot" needs BOTH flags the chat card implicitly relies on: a
+		// perch gateway attached (or there is nothing to spawn against) and the
+		// engine actually armed (or spawn would just 409 engine_required).
+		const canSpawn = attached && ready;
 		return (
 			'<div class="perch bot" data-bot="' +
 			esc(id) +
@@ -228,6 +253,15 @@ export function botsClient(esc) {
 			esc(id) +
 			'"><div class="empty">Loading sessions…</div></div>' +
 			(attached ? chatHtml(bot) : "") +
+			(canSpawn
+				? '<div class="row-actions"><button class="quiet" data-act="spawn" data-bot="' + esc(id) + '">Spawn as bot</button></div>'
+				: "") +
+			// Container for the interactive session card. Empty (and so hidden by
+			// `.interactive:empty`) until spawnInteractive()/resumeInteractive() fill
+			// it — present whenever the bot is attached, so a resumed perch-live
+			// session has somewhere to land even on a load where the engine happens
+			// to be reported not-ready.
+			(attached ? '<div class="interactive" id="interactive-' + esc(id) + '"></div>' : "") +
 			'<div class="databar"><span>' +
 			(attached ? "message this bot below" : "observing — attach the perch gateway in Bot Builder to talk") +
 			'</span><span class="mono-dim" data-count="' +
@@ -239,10 +273,13 @@ export function botsClient(esc) {
 	}
 
 	function chatHtml(bot) {
+		const id = String(bot.id);
 		return (
 			'<form class="chat" data-act="send" data-bot="' +
-			esc(String(bot.id)) +
-			'"><div class="chat-log"></div>' +
+			esc(id) +
+			'"><div class="chat-log" data-chatlog="' +
+			esc(id) +
+			'"></div>' +
 			'<div class="chat-send"><textarea rows="2" name="message" placeholder="Message ' +
 			esc(bot.name || "this bot") +
 			'"></textarea>' +
@@ -255,13 +292,24 @@ export function botsClient(esc) {
 		return rows
 			.map(function (s) {
 				const thread = s.gateway_thread_id == null ? "" : String(s.gateway_thread_id);
+				const isPerchLive = s.kind === "perch-live";
 				const badges = [];
 				// Channel badge keys off gateway_type — `kind` is only reliable for perch rows.
 				badges.push('<span class="badge chan">' + esc(s.gateway_type || "unknown") + "</span>");
 				if (s.card_id != null) {
 					badges.push('<a class="badge board" href="' + BOARD + "?card=" + q(s.card_id) + '">card ' + esc(s.card_id) + "</a>");
 				}
-				if (s.live) badges.push('<span class="badge live">live</span>');
+				// BADGE CONTRACT (P2 C-15): a kind='perch-live' row carries `state`
+				// (awake|hibernating|stopped) — badge from THAT, and ignore `live`
+				// entirely for these rows (the flag reads false for an awake-idle
+				// interactive session, which would otherwise mislabel it as dead).
+				// Every other kind keeps the P1 `live` badge unchanged.
+				if (isPerchLive) {
+					const liveState = s.state || "hibernating";
+					badges.push('<span class="badge state-' + esc(liveState) + '">' + esc(liveState) + "</span>");
+				} else if (s.live) {
+					badges.push('<span class="badge live">live</span>');
+				}
 				const when = [s.status || "", s.updated_at || "", thread ? thread.slice(0, 24) : "no thread id"].filter(Boolean).join(" · ");
 				const paneKey = esc(botId) + "-" + esc(String(s.id));
 				// Transcript is a READ — observation is free on every channel.
@@ -270,8 +318,11 @@ export function botsClient(esc) {
 				// non-perch row (400 not_a_perch_session), and offering the
 				// affordance anyway would invite an operator to strip a tool from
 				// a production gmail thread from a surface Bot Builder — the
-				// single writer of the envelope — cannot see.
-				const canNarrow = String(s.gateway_type || "") === "perch";
+				// single writer of the envelope — cannot see. A kind='perch-live'
+				// row is ALSO gateway_type='perch' but is the interactive engine's,
+				// not a per-turn session's, and the gateway refuses to narrow it
+				// too (400 not_a_perch_session) — so it is excluded here as well.
+				const canNarrow = String(s.gateway_type || "") === "perch" && !isPerchLive;
 				const acts = thread
 					? '<button class="quiet" data-act="transcript" data-bot="' +
 						esc(botId) +
@@ -322,6 +373,12 @@ export function botsClient(esc) {
 				.map(function (block) {
 					if (!block) return "";
 					if (typeof block.text === "string") return block.text;
+					// A toolCall block (rpc-types' shape: {type:"toolCall", name,
+					// arguments}) carries the tool NAME, not readable text — render
+					// it like the live pane's "tool" SSE event does (by name)
+					// instead of the generic "[toolCall]" type placeholder, which
+					// told the operator nothing about what actually ran.
+					if (block.type === "toolCall") return "[tool: " + (block.name || "?") + "]";
 					return block.type ? "[" + block.type + "]" : "";
 				})
 				.filter(Boolean)
@@ -510,6 +567,77 @@ export function botsClient(esc) {
 			[...bots.values()].map(botCardHtml).join("") +
 			'<div class="row-actions"><button data-act="retry" class="quiet">Refresh</button></div>';
 		await Promise.all([...bots.keys()].map(loadSessions));
+		await Promise.all([...bots.keys()].map(resumeThreads));
+	}
+
+	// ── thread resume ────────────────────────────────────────────
+	// Kills the old "chatThread starts blank, gets filled on first send" idiom:
+	// on every load, each attached bot's chat card resumes the newest per-turn
+	// (kind='perch') thread instead of starting empty, and its newest
+	// kind='perch-live' session (if any) reopens its own card with a live SSE
+	// connection — the counterpart to the per-turn resume, one interactive
+	// session at a time per bot (mirroring "newest thread", not "every thread
+	// this bot ever spawned").
+
+	/** Fill an empty log — but NEVER clobber one that already has content (fix
+	 * I-1). The chat form is live before the resume's transcript fetch resolves,
+	 * so a message sent in that window already put its optimistic entry and its
+	 * pending "…" node in the log — and streamTurn's finish() writes to that
+	 * node BY REFERENCE. Replacing innerHTML would detach it, and the reply
+	 * would vanish silently even though the turn completed server-side. Resumed
+	 * history slots in ABOVE whatever the operator already produced instead. */
+	function prependOrFill(log, html) {
+		if (log.innerHTML) log.insertAdjacentHTML("afterbegin", html);
+		else log.innerHTML = html;
+	}
+
+	/** Prefill the chat card's log from the newest perch-turn thread's transcript. */
+	async function resumeChat(botId, row) {
+		const thread = String(row.gateway_thread_id);
+		chatThread.set(String(botId), thread);
+		const log = root.querySelector('[data-chatlog="' + CSS.escape(botId) + '"]');
+		if (!log) return;
+		try {
+			const payload = await getJson(API + "/bots/" + q(botId) + "/sessions/" + q(thread) + "/transcript");
+			const entries = (payload.events || []).filter(function (e) {
+				return e && e.type === "message";
+			});
+			prependOrFill(
+				log,
+				entries
+					.map(function (e) {
+						const message = e.message || {};
+						const role = String(message.role || "?");
+						return logLine(role === "user" ? "user" : "bot", role, messageText(message));
+					})
+					.join("")
+			);
+		} catch (err) {
+			prependOrFill(log, logLine("bot err", "error", "could not resume the last conversation — " + reason(err)));
+		}
+	}
+
+	/** For one bot: resume its newest perch-turn thread and its newest interactive session, if either exists. */
+	async function resumeThreads(botId) {
+		const bot = bots.get(String(botId));
+		if (!bot || !bot.perch_attached) return;
+		const rows = sessions.get(String(botId)) || [];
+		const chatRow = rows.find(function (s) {
+			return s.kind === "perch" && s.gateway_thread_id != null;
+		});
+		if (chatRow) await resumeChat(botId, chatRow);
+		const liveRow = rows.find(function (s) {
+			return s.kind === "perch-live" && s.gateway_thread_id != null;
+		});
+		// Other half of the double-mount guard (fix I-2): if the operator spawned
+		// an interactive session for this bot while this resume was in flight,
+		// that card and its live EventSource are the newest action — auto-reopening
+		// the older row would stomp them (mountInteractive would close the fresh
+		// stream and display a session the operator did not ask for).
+		const alreadyMounted = [...interactive.values()].some(function (s) {
+			return String(s.botId) === String(botId) && s.es;
+		});
+		if (liveRow && !alreadyMounted) await resumeInteractive(botId, liveRow);
 	}
 
 	// ── turns ────────────────────────────────────────────────────
@@ -594,6 +722,409 @@ export function botsClient(esc) {
 		}
 	}
 
+	// ── interactive sessions (spawn-as-bot) ─────────────────────
+	//
+	// Where the chat card is one `handleInbound()` per message, an interactive
+	// session is a long-lived pi child the interactive engine owns end to end:
+	// spawn once, then stream state/text/tool/log/ask_user/reply/error over one
+	// persistent EventSource for as long as the card is open. `interactive` (see
+	// top of file) is this card's client-side memory — sessionId is the same
+	// string as gateway_thread_id (CARRIED HANDOFF: "one identity"), so every
+	// lookup below is keyed on that one id.
+
+	function stateBadgeHtml(sid, state) {
+		return '<span class="badge state-' + esc(state) + '" data-role="i-state" data-sid="' + esc(sid) + '">' + esc(state) + "</span>";
+	}
+
+	/** The card's static shell: badge, abort/stop, transcript pane, ask-user pane, send form.
+	 * Rendered ONCE per session (mountInteractive) — later updates touch pieces of
+	 * it directly (setInteractiveState, appendInteractiveEntry, renderAskUser)
+	 * rather than re-rendering the whole card, so an in-progress transcript is
+	 * never wiped out from under the operator. */
+	function interactiveShellHtml(botId, sid, state) {
+		return (
+			'<div class="i-head">' +
+			stateBadgeHtml(sid, state) +
+			'<div class="i-actions">' +
+			'<button class="quiet" data-act="i-abort" data-sid="' +
+			esc(sid) +
+			'" hidden>Abort</button>' +
+			'<button class="quiet" data-act="i-stop" data-sid="' +
+			esc(sid) +
+			'">Stop</button></div></div>' +
+			'<div class="i-transcript" id="i-transcript-' +
+			esc(sid) +
+			'"></div>' +
+			'<div class="i-ask" id="i-ask-' +
+			esc(sid) +
+			'"></div>' +
+			'<form class="i-send" data-act="i-send" data-sid="' +
+			esc(sid) +
+			'" data-bot="' +
+			esc(botId) +
+			'"><textarea rows="2" name="message" placeholder="Message this interactive session"></textarea>' +
+			'<button class="primary">Send</button></form>'
+		);
+	}
+
+	/** Fill (or refill) the bot's `#interactive-<botId>` container with a fresh
+	 * card shell for `sid`, and hide the now-redundant "Spawn as bot" button —
+	 * one interactive session shown at a time per bot, matching the one-card
+	 * container the page ships. */
+	function mountInteractive(botId, sid, state) {
+		const host = document.getElementById("interactive-" + botId);
+		if (!host) return null;
+		// One card, one connection (fix I-2): a re-mount (re-spawn, or a spawn
+		// and a resume racing) replaces the card's DOM wholesale, so any
+		// EventSource a previous mount opened would keep streaming into detached
+		// nodes forever. Close it BEFORE the container is overwritten, and drop
+		// superseded sessions from the client-side map so it cannot accumulate.
+		for (const [oldSid, sess] of interactive) {
+			if (String(sess.botId) !== String(botId)) continue;
+			if (sess.es) {
+				sess.es.close();
+				sess.es = null;
+			}
+			if (oldSid !== sid) interactive.delete(oldSid);
+		}
+		mountedSid.set(String(botId), String(sid));
+		host.innerHTML = interactiveShellHtml(botId, sid, state);
+		const spawnBtn = root.querySelector('[data-act="spawn"][data-bot="' + CSS.escape(botId) + '"]');
+		if (spawnBtn) spawnBtn.hidden = true;
+		return host;
+	}
+
+	function setInteractiveState(sid, state) {
+		const sess = interactive.get(sid);
+		if (sess) sess.state = state;
+		const badge = root.querySelector('[data-role="i-state"][data-sid="' + CSS.escape(sid) + '"]');
+		if (badge) {
+			badge.className = "badge state-" + state;
+			badge.textContent = state;
+		}
+	}
+
+	/** Toggle the abort affordance and disable the send box while a turn runs. */
+	function setTurnInFlight(sid, flight) {
+		const sess = interactive.get(sid);
+		if (sess) sess.turnInFlight = flight;
+		const abortBtn = root.querySelector('[data-act="i-abort"][data-sid="' + CSS.escape(sid) + '"]');
+		if (abortBtn) abortBtn.hidden = !flight;
+		const box = root.querySelector('form[data-act="i-send"][data-sid="' + CSS.escape(sid) + '"] textarea');
+		if (box) box.disabled = flight;
+	}
+
+	function appendInteractiveEntry(sid, cls, who, text) {
+		const pane = document.getElementById("i-transcript-" + sid);
+		if (pane) pane.insertAdjacentHTML("beforeend", logLine(cls, who, text));
+	}
+
+	/** Pre-populate the transcript pane from the P1 transcript endpoint — works
+	 * for a kind='perch-live' row exactly like a kind='perch' one (CARRIED
+	 * HANDOFF: sessionId === gateway_thread_id, one identity). */
+	async function loadInteractiveTranscript(botId, sid) {
+		const pane = document.getElementById("i-transcript-" + sid);
+		if (!pane) return;
+		try {
+			const payload = await getJson(API + "/bots/" + q(botId) + "/sessions/" + q(sid) + "/transcript");
+			const entries = (payload.events || []).filter(function (e) {
+				return e && e.type === "message";
+			});
+			// Same I-1 rule as the chat log: a message the operator sent while this
+			// fetch was in flight is already appended here — history goes above it.
+			prependOrFill(
+				pane,
+				entries
+					.map(function (e) {
+						const message = e.message || {};
+						const role = String(message.role || "?");
+						return logLine(role === "user" ? "user" : "bot", role, messageText(message));
+					})
+					.join("")
+			);
+		} catch (err) {
+			prependOrFill(pane, logLine("bot err", "error", "transcript unavailable — " + reason(err)));
+		}
+	}
+
+	/**
+	 * Render (or replace) the pending ask_user card.
+	 *
+	 * CARRIED HANDOFF (binding): `select` options are PRE-RENDERED row strings
+	 * ("[x] …" toggles, "Other…", "── done … ──") matched back by EXACT string —
+	 * every option is rendered VERBATIM as a button and echoed untouched on
+	 * click; never parsed or re-composed. Each pick in a multiSelect triggers a
+	 * fresh ask_user event, so the card naturally re-renders per pick — this
+	 * function needs no multiSelect-specific branch, only a fresh call per event.
+	 * `requestId` is kept in `interactive.get(sid).pendingUi`, never round-tripped
+	 * through a DOM attribute, so it is echoed back exactly as received.
+	 */
+	function renderAskUser(sid, card) {
+		const sess = interactive.get(sid);
+		if (sess) sess.pendingUi = card;
+		const pane = document.getElementById("i-ask-" + sid);
+		if (!pane) return;
+		if (!card) {
+			pane.innerHTML = "";
+			return;
+		}
+		const title = '<div class="title">' + esc(card.title || "") + "</div>";
+		let body = "";
+		if (card.method === "select") {
+			body =
+				'<div class="ask-opts">' +
+				(card.options || [])
+					.map(function (opt, i) {
+						return '<button class="quiet" data-act="i-opt" data-sid="' + esc(sid) + '" data-idx="' + i + '">' + esc(opt) + "</button>";
+					})
+					.join("") +
+				"</div>";
+		} else if (card.method === "input") {
+			body =
+				'<form class="i-answer" data-act="i-answer-input" data-sid="' +
+				esc(sid) +
+				'"><input type="text" name="value" placeholder="' +
+				esc(card.placeholder || "") +
+				'"><button class="primary">Send</button></form>';
+		} else if (card.method === "confirm") {
+			body =
+				'<div class="ask-message">' +
+				esc(card.message || "") +
+				'</div><div class="ask-opts">' +
+				'<button class="primary" data-act="i-confirm" data-sid="' +
+				esc(sid) +
+				'" data-value="1">Confirm</button>' +
+				'<button class="quiet" data-act="i-confirm" data-sid="' +
+				esc(sid) +
+				'" data-value="0">Deny</button></div>';
+		} else if (card.method === "editor") {
+			body =
+				'<form class="i-answer" data-act="i-answer-editor" data-sid="' +
+				esc(sid) +
+				'"><textarea name="value" rows="3">' +
+				esc(card.prefill || "") +
+				'</textarea><button class="primary">Send</button></form>';
+		}
+		const cancel = '<button class="quiet" data-act="i-cancel" data-sid="' + esc(sid) + '">Cancel</button>';
+		pane.innerHTML = '<div class="ask-card">' + title + body + cancel + "</div>";
+	}
+
+	/** The answered card collapses to its chosen value rather than vanishing —
+	 * an operator scrolling back should see what was answered, not a gap. */
+	function collapseAskUser(sid, label) {
+		const pane = document.getElementById("i-ask-" + sid);
+		if (pane) pane.innerHTML = '<div class="answered">Answered: ' + esc(label) + "</div>";
+		const sess = interactive.get(sid);
+		if (sess) sess.pendingUi = null;
+	}
+
+	async function answerAskUser(sid, value, label) {
+		const sess = interactive.get(sid);
+		const card = sess && sess.pendingUi;
+		if (!card) return;
+		try {
+			await postJson(API + "/interactive/" + q(sid) + "/answer", Object.assign({ requestId: card.requestId }, value));
+			collapseAskUser(sid, label);
+		} catch (err) {
+			const pane = document.getElementById("i-ask-" + sid);
+			if (pane) pane.insertAdjacentHTML("beforeend", '<div class="err">' + esc(reason(err)) + "</div>");
+		}
+	}
+
+	/**
+	 * Wire the persistent SSE connection for one session.
+	 *
+	 * P1 discriminator idiom, restated here for the long-lived stream: an
+	 * `error` EVENT with `.data` is a server-sent `event: error` frame (a real
+	 * diagnosis); transport death is signalled ONLY by `readyState === CLOSED`
+	 * with no data. `new EventSource` itself is guarded — this function must
+	 * survive an environment with no EventSource global without taking the rest
+	 * of resumeThreads()/load() down with it.
+	 */
+	function openInteractiveEvents(botId, sid) {
+		// Fix round 2 (residual I-2 leak): this can run long after its own mount
+		// was superseded — resumeInteractive awaits the transcript between mount
+		// and open, and a competing spawn's mount can land inside that window,
+		// overwrite the container, and delete this sid from `interactive`. The
+		// old `interactive.get(sid) || { botId }` fallback would then RESURRECT
+		// the deleted entry with a live EventSource whose card DOM no longer
+		// exists. Only the currently-mounted session for the bot may install
+		// itself; a superseded caller gets nothing opened and nothing mapped.
+		if (mountedSid.get(String(botId)) !== String(sid)) return null;
+		let es;
+		try {
+			es = new EventSource(API + "/interactive/" + q(sid) + "/events");
+		} catch (err) {
+			appendInteractiveEntry(sid, "bot err", "error", "could not open the live connection — " + reason(err));
+			setInteractiveState(sid, "error");
+			return null;
+		}
+		const sess = interactive.get(sid) || { botId: botId, turnHadText: false };
+		sess.es = es;
+		interactive.set(sid, sess);
+
+		function parsed(e) {
+			try {
+				return JSON.parse(e.data);
+			} catch (_) {
+				return {};
+			}
+		}
+		es.addEventListener("state", function (e) {
+			const d = parsed(e);
+			setInteractiveState(sid, d.state || "hibernating");
+			if (d.state === "stopped") setTurnInFlight(sid, false);
+		});
+		es.addEventListener("text", function (e) {
+			// The engine's contract (perch-interactive.js): `text` is the
+			// content stream (one event per assistant message_end) and `reply`
+			// is the turn's terminal marker, carrying the SAME text again for
+			// whichever caller never saw the stream. This lens DOES see the
+			// stream, so it renders from `text` and marks the turn as already
+			// rendered — the `reply` handler below is what used to append the
+			// identical bubble a second time on every single turn (D2).
+			const s = interactive.get(sid);
+			if (s) s.turnHadText = true;
+			appendInteractiveEntry(sid, "bot", "bot", parsed(e).text || "");
+		});
+		es.addEventListener("tool", function (e) {
+			const d = parsed(e);
+			appendInteractiveEntry(sid, "bot tool", "tool", (d.name || "tool") + " " + (d.phase || "") + (d.isError ? " (error)" : ""));
+		});
+		es.addEventListener("log", function (e) {
+			appendInteractiveEntry(sid, "bot log", "log", parsed(e).text || "");
+		});
+		es.addEventListener("reply", function (e) {
+			// Terminal marker for the turn. Render reply.text ONLY when no
+			// `text` event landed first (a defensive fallback for a turn that
+			// produced no streamed text at all, e.g. a tool-only turn) — never
+			// unconditionally, or every ordinary turn double-renders (D2).
+			const s = interactive.get(sid);
+			if (!s || !s.turnHadText) appendInteractiveEntry(sid, "bot", "bot", parsed(e).text || "");
+			if (s) s.turnHadText = false; // reset for the next turn
+			setTurnInFlight(sid, false);
+		});
+		es.addEventListener("ask_user", function (e) {
+			renderAskUser(sid, parsed(e));
+		});
+		es.addEventListener("error", function (e) {
+			if (e && e.data) {
+				appendInteractiveEntry(sid, "bot err", "error", parsed(e).text || "error");
+			} else if (es.readyState === EventSource.CLOSED) {
+				appendInteractiveEntry(sid, "bot err", "error", "the live connection to this session closed");
+				setInteractiveState(sid, "error");
+			}
+		});
+		return es;
+	}
+
+	async function spawnInteractive(botId) {
+		// Double-mount guard (fix I-2): the button is live from first paint —
+		// including the whole resumeThreads() window — and each successful click
+		// spawns a REAL engine session with only one card to show it. Disable on
+		// the way in; the affordance comes back only if the spawn failed (a
+		// successful mount hides the button anyway).
+		const spawnBtn = root.querySelector('[data-act="spawn"][data-bot="' + CSS.escape(botId) + '"]');
+		if (spawnBtn) {
+			if (spawnBtn.disabled) return;
+			spawnBtn.disabled = true;
+		}
+		try {
+			const res = await postJson(API + "/bots/" + q(botId) + "/interactive", {});
+			interactive.set(res.sessionId, { botId: botId, state: res.state || "awake", turnInFlight: false, pendingUi: null, turnHadText: false });
+			mountInteractive(botId, res.sessionId, res.state || "awake");
+			openInteractiveEvents(botId, res.sessionId);
+		} catch (err) {
+			if (spawnBtn) spawnBtn.disabled = false;
+			const host = document.getElementById("interactive-" + botId);
+			if (host) {
+				host.innerHTML =
+					'<div class="err">Could not spawn an interactive session — ' +
+					esc(
+						err.status === 403
+							? "this bot has no perch gateway attached"
+							: err.status === 409 && err.payload && err.payload.error === "engine_required"
+								? "the bot engine is not ready on this instance"
+								: reason(err)
+					) +
+					"</div>";
+			}
+		}
+	}
+
+	/** Reopen an EXISTING kind='perch-live' row's card — no spawn call, just
+	 * transcript + a live SSE connection onto the session the engine already
+	 * knows (or can adopt from its DB row). */
+	async function resumeInteractive(botId, row) {
+		const sid = String(row.gateway_thread_id);
+		interactive.set(sid, { botId: botId, state: row.state || "hibernating", turnInFlight: false, pendingUi: null, turnHadText: false });
+		mountInteractive(botId, sid, row.state || "hibernating");
+		await loadInteractiveTranscript(botId, sid);
+		openInteractiveEvents(botId, sid);
+	}
+
+	async function sendInteractive(form) {
+		const sid = form.dataset.sid;
+		const box = form.querySelector("textarea");
+		const message = String(box.value || "").trim();
+		if (!message) return;
+		const sess = interactive.get(sid);
+		const wasAwake = !!(sess && sess.state === "awake");
+		// Defensive reset for a NEW turn (D2): a prior turn that ended via the
+		// `error` path rather than `reply` (prompt_refused, abandonChild) never
+		// clears turnHadText itself — start this turn from a clean slate so its
+		// own reply is never wrongly suppressed as a duplicate.
+		if (sess) sess.turnHadText = false;
+		appendInteractiveEntry(sid, "user", "you", message);
+		box.value = "";
+		// "waking" is client-local (CARRIED HANDOFF): the engine never broadcasts
+		// its own internal `waking` reservation over SSE, so this optimistic badge
+		// is the only signal an operator gets between "sent" and the real `state`
+		// event a successful wake (or send-to-an-already-awake-session) emits.
+		if (!wasAwake) setInteractiveState(sid, "waking");
+		setTurnInFlight(sid, true);
+		try {
+			await postJson(API + "/interactive/" + q(sid) + "/message", { message: message });
+		} catch (err) {
+			setTurnInFlight(sid, false);
+			setInteractiveState(sid, err.status === 410 ? "stopped" : wasAwake ? "awake" : "hibernating");
+			appendInteractiveEntry(
+				sid,
+				"bot err",
+				"error",
+				err.status === 410 ? "this session is stopped — spawn a new one" : reason(err)
+			);
+		}
+	}
+
+	async function abortInteractive(sid) {
+		try {
+			await postJson(API + "/interactive/" + q(sid) + "/abort", {});
+			setTurnInFlight(sid, false);
+		} catch (err) {
+			appendInteractiveEntry(sid, "bot err", "error", "abort failed — " + reason(err));
+		}
+	}
+
+	async function stopInteractive(sid) {
+		try {
+			await postJson(API + "/interactive/" + q(sid) + "/stop", {});
+			setInteractiveState(sid, "stopped");
+			setTurnInFlight(sid, false);
+			// The stream dies with the session (fix I-2): a stopped card must not
+			// hold its SSE connection open — the browser would reconnect-loop
+			// against a gone session, and the transport-error handler would then
+			// relabel the deliberate stop as an error.
+			const sess = interactive.get(sid);
+			if (sess && sess.es) {
+				sess.es.close();
+				sess.es = null;
+			}
+		} catch (err) {
+			appendInteractiveEntry(sid, "bot err", "error", "stop failed — " + reason(err));
+		}
+	}
+
 	// ── panes + narrowing ────────────────────────────────────────
 
 	async function togglePane(btn, fill) {
@@ -651,6 +1182,28 @@ export function botsClient(esc) {
 				const envelope = await getJson(API + "/bots/" + q(el.dataset.bot) + "/envelope");
 				return controlsHtml(el.dataset.bot, el.dataset.thread, envelope, savedNarrowing(sessionRow(el.dataset.bot, el.dataset.thread)));
 			});
+		} else if (act === "spawn") {
+			event.preventDefault();
+			spawnInteractive(el.dataset.bot);
+		} else if (act === "i-abort") {
+			event.preventDefault();
+			abortInteractive(el.dataset.sid);
+		} else if (act === "i-stop") {
+			event.preventDefault();
+			stopInteractive(el.dataset.sid);
+		} else if (act === "i-opt") {
+			event.preventDefault();
+			const sess = interactive.get(el.dataset.sid);
+			const options = sess && sess.pendingUi && sess.pendingUi.options;
+			const opt = options ? options[Number(el.dataset.idx)] : null;
+			if (opt != null) answerAskUser(el.dataset.sid, { value: opt }, opt);
+		} else if (act === "i-confirm") {
+			event.preventDefault();
+			const confirmed = el.dataset.value === "1";
+			answerAskUser(el.dataset.sid, { confirmed: confirmed }, confirmed ? "Confirmed" : "Denied");
+		} else if (act === "i-cancel") {
+			event.preventDefault();
+			answerAskUser(el.dataset.sid, { cancelled: true }, "Cancelled");
 		}
 	});
 
@@ -660,10 +1213,27 @@ export function botsClient(esc) {
 	});
 
 	root.addEventListener("submit", function (event) {
-		const form = event.target.closest('form[data-act="send"]');
+		const form = event.target.closest("form[data-act]");
 		if (!form) return;
-		event.preventDefault();
-		send(form);
+		const act = form.dataset.act;
+		if (act === "send") {
+			event.preventDefault();
+			send(form);
+		} else if (act === "i-send") {
+			event.preventDefault();
+			sendInteractive(form);
+		} else if (act === "i-answer-input") {
+			event.preventDefault();
+			const input = form.querySelector('input[name="value"]');
+			const value = String((input && input.value) || "");
+			answerAskUser(form.dataset.sid, { value: value }, value);
+			if (input) input.value = "";
+		} else if (act === "i-answer-editor") {
+			event.preventDefault();
+			const ta = form.querySelector('textarea[name="value"]');
+			const value = String((ta && ta.value) || "");
+			answerAskUser(form.dataset.sid, { value: value }, value);
+		}
 	});
 
 	load();

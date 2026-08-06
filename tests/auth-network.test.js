@@ -166,6 +166,15 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
       "/dashboard/perch-api/bots",
       "/dashboard/perch-api/bots/1/turn",
       "/dashboard/perch-api/turns/abc/events",
+      // Perch Hub P2 (C-15): the interactive ("spawn as bot") surfaces —
+      // same private prefix, same reasoning (a long-lived session's SSE
+      // stream and its ask_user answers are exactly as private as a turn).
+      "/dashboard/perch-api/bots/1/interactive",
+      "/dashboard/perch-api/interactive/abc/message",
+      "/dashboard/perch-api/interactive/abc/events",
+      "/dashboard/perch-api/interactive/abc/answer",
+      "/dashboard/perch-api/interactive/abc/abort",
+      "/dashboard/perch-api/interactive/abc/stop",
     ]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
@@ -203,6 +212,35 @@ test("dashboardAuth refuses an unauthenticated /dashboard/perch-api request inst
   // On-network but session-less → bounced to the login page, never through.
   const noSession = await run(mkReq({ ip: "10.0.0.5", headers: { host: "x" } }));
   assert.equal(noSession.nexted, false, "a request with no crow_session cookie must never reach the perch API");
+  assert.equal(noSession.redirected, "/dashboard/login");
+});
+
+test("dashboardAuth refuses an unauthenticated /dashboard/perch-api/interactive request instead of calling next()", async () => {
+  // Perch Hub P2 (C-15): same gate, same prefix — a session-less caller must
+  // never reach a route that can spawn, drive, or observe (via SSE) a
+  // long-lived interactive session.
+  const { dashboardAuth } = await import("../servers/gateway/dashboard/auth.js");
+
+  const run = (req) => new Promise((resolve) => {
+    let nexted = false;
+    const out = { status: null, redirected: null };
+    const res = {
+      status(c) { out.status = c; return this; },
+      type() { return this; },
+      send() { resolve({ nexted, ...out }); return this; },
+      json() { resolve({ nexted, ...out }); return this; },
+      redirect(url) { out.redirected = url; resolve({ nexted, ...out }); },
+      redirectAfterPost(url) { out.redirected = url; resolve({ nexted, ...out }); },
+    };
+    dashboardAuth(req, res, () => { nexted = true; resolve({ nexted, ...out }); });
+  });
+
+  const offNet = await run(mkReq({ ip: "127.0.0.1", headers: { host: "x" } }));
+  assert.equal(offNet.nexted, false);
+  assert.equal(offNet.status, 403);
+
+  const noSession = await run(mkReq({ ip: "10.0.0.5", headers: { host: "x" } }));
+  assert.equal(noSession.nexted, false, "a request with no crow_session cookie must never reach the interactive API");
   assert.equal(noSession.redirected, "/dashboard/login");
 });
 

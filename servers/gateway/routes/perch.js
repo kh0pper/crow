@@ -59,6 +59,7 @@ import { openStream } from "../streams/sse.js";
 import { resolveEngineStatus, resolveBotRuntimeStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
 import { missingGatewayFields } from "../dashboard/panels/bot-builder/gateway-fields.js";
 import { PI_BUILTIN, remoteInvocationOn } from "../dashboard/panels/bot-builder/data-queries.js";
+import { getInteractiveEngine } from "../perch-interactive.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -250,7 +251,7 @@ async function buildEnvelope(db, def) {
 async function latestSession(db, botId, threadId) {
   const { rows } = await db.execute({
     sql:
-      "SELECT id, status, gateway_type, narrowed_tools, pi_session_dir, pi_session_id, " +
+      "SELECT id, kind, status, gateway_type, narrowed_tools, pi_session_dir, pi_session_id, " +
       "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
       "FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1",
     args: [botId, threadId],
@@ -454,12 +455,20 @@ function readTranscript(file) {
  *   another request; the real first turn of a gateway's life awaits a genuine
  *   module load. Only this seam reproduces that yield, which is the one window
  *   in which the in-flight guard is racy.
+ * @param {Function|object} [seams.interactiveEngine] test seam (P2, C-15) — same
+ *   accessor-or-object shape as perch-interactive-api.js's own `engine` seam.
+ *   Used ONLY by GET /bots/:id/sessions to read live `state` for kind='perch-live'
+ *   rows; every P1 test omits it and never touches the interactive engine at all.
  */
-export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null, loadBridgeImpl = loadBridge } = {}) {
+export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null, loadBridgeImpl = loadBridge, interactiveEngine = getInteractiveEngine } = {}) {
   const router = Router();
 
   // FIRST statement: auth-gate the whole prefix (bot-board-api.js idiom).
   router.use(P, dashboardAuth);
+
+  function resolveInteractiveEngine() {
+    return typeof interactiveEngine === "function" ? interactiveEngine() : interactiveEngine;
+  }
 
   async function resolveHandleInbound() {
     if (handleInboundImpl) return handleInboundImpl;
@@ -514,24 +523,48 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
         args: [botId, SESSIONS_LIMIT + 1],
       });
       const truncated = rows.length > SESSIONS_LIMIT;
-      const sessions = (truncated ? rows.slice(0, SESSIONS_LIMIT) : rows).map((row) => ({
-        id: row.id,
-        kind: row.kind,
-        gateway_type: row.gateway_type,
-        gateway_thread_id: row.gateway_thread_id,
-        status: row.status,
-        card_id: row.card_id,
-        plan_path: row.plan_path,
-        updated_at: row.updated_at,
-        // Live = a turn this process is running right now, OR any channel's
-        // fresh `active` claim (a gmail turn runs in the bridge process and is
-        // invisible to the in-flight set — reporting only ours would lie).
-        live: inFlight.has(flightKeyFor(botId, String(row.gateway_thread_id))) || claimIsFresh(row),
-        // REQUIRED by the lens: the envelope endpoint is per-BOT, so this row
-        // is the only place the controls pane can learn a SESSION's saved
-        // narrowing. Emitted as the stored JSON text; the client accepts an
-        // array or a JSON string.
-        narrowed_tools: row.narrowed_tools == null ? null : row.narrowed_tools,
+      const kept = truncated ? rows.slice(0, SESSIONS_LIMIT) : rows;
+      const sessions = await Promise.all(kept.map(async (row) => {
+        const out = {
+          id: row.id,
+          kind: row.kind,
+          gateway_type: row.gateway_type,
+          gateway_thread_id: row.gateway_thread_id,
+          status: row.status,
+          card_id: row.card_id,
+          plan_path: row.plan_path,
+          updated_at: row.updated_at,
+          // Live = a turn this process is running right now, OR any channel's
+          // fresh `active` claim (a gmail turn runs in the bridge process and
+          // is invisible to the in-flight set — reporting only ours would lie).
+          //
+          // BADGE CONTRACT (P2, r2 S10b): this flag reads FALSE for an
+          // awake-idle interactive session (no fresh claim, no in-flight
+          // per-turn guard — the engine holds the child, not a claim row).
+          // For kind='perch-live' rows the lens keys its badge off `state`
+          // below and IGNORES `live` entirely; `live` stays defined here only
+          // because every OTHER kind still depends on it.
+          live: inFlight.has(flightKeyFor(botId, String(row.gateway_thread_id))) || claimIsFresh(row),
+          // REQUIRED by the lens: the envelope endpoint is per-BOT, so this row
+          // is the only place the controls pane can learn a SESSION's saved
+          // narrowing. Emitted as the stored JSON text; the client accepts an
+          // array or a JSON string.
+          narrowed_tools: row.narrowed_tools == null ? null : row.narrowed_tools,
+        };
+        // P2 (C-15): kind='perch-live' rows additionally carry `state` —
+        // "awake"|"hibernating"|"stopped" — the interactive engine's own
+        // truth when this process holds (or can adopt) the session, else
+        // derived from the row's own status. engine.get() is ASYNC (it may
+        // adopt the row from the DB), hence Promise.all over the row map.
+        if (row.kind === "perch-live") {
+          let state = row.status === "stopped" ? "stopped" : "hibernating";
+          try {
+            const snap = await resolveInteractiveEngine().get(String(row.gateway_thread_id));
+            if (snap) state = snap.state;
+          } catch { /* fall back to the row-derived state above */ }
+          out.state = state;
+        }
+        return out;
       }));
       res.json({ sessions, truncated, limit: SESSIONS_LIMIT });
     } catch (err) {
@@ -619,6 +652,15 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
       if (foreign) {
         inFlight.delete(held); held = null;
         return jsonError(res, 400, "not_a_perch_session", { gateway_type: foreign });
+      }
+      // P2 (C-15): a kind='perch-live' row is an interactive session, not a
+      // per-turn chat thread — its gateway_type is 'perch' (not foreign), so
+      // foreignChannel() above does not catch it. Without this refusal a
+      // per-turn POST would claimTurn the row out from under the interactive
+      // engine and spawn a SECOND pi against that same session file.
+      if (existing && existing.kind === "perch-live") {
+        inFlight.delete(held); held = null;
+        return jsonError(res, 400, "not_a_perch_session", { kind: "perch-live" });
       }
       if (claimIsFresh(existing)) {
         inFlight.delete(held); held = null;
