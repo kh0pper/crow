@@ -152,3 +152,142 @@ export function clearConvQuarantine({ appRoot, dataDir }) {
     try { unlinkSync(p); } catch {}
   }
 }
+
+/* --------------------------------------------------------- instance identity */
+
+import { execFile } from "node:child_process";
+
+function git(cwd, args) {
+  return new Promise((resolve) => {
+    execFile("git", args, { cwd, timeout: 120000 }, (err, so, se) =>
+      resolve({ stdout: (so || "").trim(), stderr: (se || "").trim(), code: err ? err.code || 1 : 0 }));
+  });
+}
+
+/** This process's store paths, resolved exactly as the stores themselves are. */
+export async function resolveInstance() {
+  const { resolveDataDir } = await import("../db.js");
+  const { resolveGuardDbPath } = await import("../shared/migration-guard.js");
+  const { tasksDbPath } = await import("../../scripts/pi-bots/instance-paths.mjs");
+  return {
+    dataDir: resolveDataDir(),
+    dbPath: resolveGuardDbPath(resolveDataDir),
+    tasksDbPath: tasksDbPath(),
+  };
+}
+
+/**
+ * The sha this process booted on. Convergence compares against THIS, never
+ * against `pulled`: runLockedUpdate returns updated:false on several branches
+ * AFTER the tree has already moved, so a peer deciding on that flag would sit
+ * on stale code indefinitely just because it did not personally pull.
+ */
+let BOOT_SHA = null;
+export function setBootSha(sha) { BOOT_SHA = sha || null; }
+export function getBootSha() { return BOOT_SHA; }
+
+/* ------------------------------------------------------------------- seams */
+
+let _restartImpl = null;
+/** Test-only: capture restarts instead of arming a real process exit.
+ *  scheduleSupervisedRestart sets process.exitCode = 1 and schedules a real
+ *  process.exit(1), and it is reached through a frozen ESM namespace object so
+ *  it cannot be monkeypatched. run-suite.mjs scrubs INVOCATION_ID/CROW_SUPERVISED
+ *  suite-wide precisely so code under test never arms those paths. */
+export function _setRestartForTest(fn) { _restartImpl = fn; }
+
+let _supervisedImpl = null;
+/** Test-only: the harness deliberately runs unsupervised, but the convergence
+ *  path still has to be exercisable. */
+export function _setSupervisedForTest(fn) { _supervisedImpl = fn; }
+
+async function restart(log, msg) {
+  if (_restartImpl) return _restartImpl(log, msg);
+  const au = await import("./auto-update.js");
+  return au.scheduleSupervisedRestart(log, msg);
+}
+
+async function supervised() {
+  if (_supervisedImpl) return _supervisedImpl();
+  const { isSupervised } = await import("../shared/supervisor.js");
+  return isSupervised();
+}
+
+/* ------------------------------------------------------------- convergence */
+
+/**
+ * Make ONE instance current with the checkout it runs from.
+ *
+ * The pull is a TREE operation and stays behind the checkout-scoped lock in
+ * auto-update.js — exactly one co-hosted gateway performs it. Everything here
+ * is an INSTANCE operation and runs unconditionally, including for the gateway
+ * that lost that lock. Before this split the loser returned early and therefore
+ * never migrated its own stores and never restarted into the new code; with all
+ * gateways restarting together their timers are phase-locked, so the same
+ * instance lost every tick, forever.
+ */
+export async function convergeInstance({ appRoot, instance = null, pulled = false, log = () => {} } = {}) {
+  if (process.env.CROW_DISABLE_CONVERGE === "1" || process.env.CROW_DISABLE_CONVERGE === "true") {
+    log("convergence disabled via CROW_DISABLE_CONVERGE");
+    return { pulled, converged: false, skipped: "disabled", sha: null, applied: [] };
+  }
+
+  const { dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const root = appRoot || dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+  const inst = instance || (await resolveInstance());
+
+  const head = (await git(root, ["rev-parse", "HEAD"])).stdout;
+  const boot = getBootSha();
+
+  // A null sha is a REFUSAL, not a licence. setBootSha is best-effort; treating
+  // null as "not current" would converge and restart on every tick forever, and
+  // the health gate could not stop it (classifyPending with a null bootSha
+  // returns "stale", clearing the cookie without ever verifying).
+  if (!head) return { pulled, converged: false, skipped: "no-head", sha: null, applied: [] };
+  if (!boot) return { pulled, converged: false, skipped: "no-boot-sha", sha: head, applied: [] };
+  if (boot === head) return { pulled, converged: false, skipped: "current", sha: head, applied: [] };
+
+  // Peers honor a quarantine written by whichever instance converged first —
+  // that instance is the canary by construction. This gates the MIGRATE AND
+  // RESTART only; the tree half above has already run, so the checkout can
+  // always move past a bad sha and the marker's expiry can fire.
+  const q = readConvQuarantine({ appRoot: root, dataDir: inst.dataDir });
+  if (q && q.sha === head) {
+    log(`refusing to converge: ${head.slice(0, 9)} is quarantined (${q.why})`);
+    return { pulled, converged: false, skipped: "quarantined", sha: head, applied: [] };
+  }
+
+  const { runMigrations } = await import("../../scripts/migrations/runner.mjs");
+  const { join: joinPath } = await import("node:path");
+  const res = await runMigrations({
+    migrationsDir: joinPath(root, "scripts", "migrations"),
+    dbPath: inst.dbPath,
+    tasksDbPath: inst.tasksDbPath,
+    sha: head,
+    log,
+  });
+
+  // Without a supervisor, the restart is a silent no-op. Writing a
+  // deadline-bearing cookie and then not restarting means the deadline passes
+  // and the next boot — hours later, on code that ran fine the whole time —
+  // classifies it "failed" and quarantines a healthy sha for every instance
+  // sharing this checkout.
+  if (!(await supervised())) {
+    log(`migrations applied for ${head.slice(0, 9)}; no supervisor — restart manually to load the new code`);
+    return { pulled, converged: false, skipped: "unsupervised", sha: head, applied: res.applied };
+  }
+
+  // Baseline BEFORE the restart, from the still-live process, handed across in
+  // the cookie. An empty baseline never regresses — the correct fail-open read.
+  let baseline = {};
+  try {
+    const p = await import("./proxy.js");
+    baseline = p.healthSnapshot();
+  } catch { /* proxy not initialized — fail open */ }
+
+  writePending(inst.dataDir, { sha: head, baseline });
+  await restart(log, `Restarting to run ${head.slice(0, 9)}...`);
+
+  return { pulled, converged: true, sha: head, applied: res.applied };
+}

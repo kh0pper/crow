@@ -11,7 +11,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,6 +20,7 @@ import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/g
 import { _setAlertChannelsForTest } from "../servers/shared/migration-guard.js";
 import {
   setBootSha, _setRestartForTest, _setSupervisedForTest, convergeInstance,
+  readPending,
 } from "../servers/gateway/convergence.js";
 
 // Never let the suite believe it is supervised: a systemd-launched context
@@ -180,4 +181,84 @@ test("BOTH co-hosted instances converge — the lock loser must not starve", asy
   assert.equal(b.pulled, false, "the lock loser must not pull — the tree is shared");
   assert.equal(b.converged, true, "the lock loser must still converge");
   assert.equal(restarts.length, 2, "each converging instance restarts exactly once");
+});
+
+test("convergeInstance writes the cookie with the REAL pre-restart baseline", async () => {
+  const f = twoInstanceFixture();
+  restarts.length = 0;
+  const { connectedServers } = await import("../servers/gateway/proxy.js");
+  connectedServers.clear();
+  connectedServers.set("tasks", { status: "connected", isAddon: true });
+  _setSupervisedForTest(() => true);
+  _setRestartForTest((_log, msg) => { restarts.push(msg); });
+  try {
+    setBootSha(g(f.work, "rev-parse", "HEAD"));
+    f.advanceOrigin("0002-converge-probe.mjs", MIGRATION_BODY);
+    // Fast-forward the shared checkout the way the tree half would.
+    g(f.work, "pull", "--ff-only", "origin", "main");
+
+    await convergeInstance({ appRoot: f.work, instance: f.instances[0] });
+
+    const p = readPending(f.instances[0].dataDir);
+    assert.ok(p, "convergence MUST write the cookie before restarting");
+    assert.equal(p.sha, g(f.work, "rev-parse", "HEAD"));
+    assert.deepEqual(p.baseline, { tasks: "connected" },
+      "the baseline must be the live snapshot, not an empty object");
+    assert.equal(restarts.length, 1, "exactly one restart per convergence");
+  } finally { connectedServers.clear(); }
+});
+
+test("a CURRENT instance does not converge; a null boot sha REFUSES", async () => {
+  const f = twoInstanceFixture();
+  restarts.length = 0;
+  _setSupervisedForTest(() => true);
+  _setRestartForTest((_log, msg) => { restarts.push(msg); });
+  const head = g(f.work, "rev-parse", "HEAD");
+
+  setBootSha(head);
+  const cur = await convergeInstance({ appRoot: f.work, instance: f.instances[0] });
+  assert.equal(cur.skipped, "current",
+    "an up-to-date instance must not migrate and restart on every tick");
+
+  setBootSha(null);
+  const nul = await convergeInstance({ appRoot: f.work, instance: f.instances[0] });
+  assert.equal(nul.skipped, "no-boot-sha",
+    "a null boot sha must REFUSE — treating it as 'not current' converges forever");
+
+  assert.equal(restarts.length, 0, "neither case may restart");
+});
+
+test("an UNSUPERVISED instance migrates but writes NO cookie", async () => {
+  const f = twoInstanceFixture();
+  restarts.length = 0;
+  _setSupervisedForTest(() => false);
+  _setRestartForTest((_log, msg) => { restarts.push(msg); });
+
+  setBootSha(g(f.work, "rev-parse", "HEAD"));
+  f.advanceOrigin("0002-converge-probe.mjs", MIGRATION_BODY);
+  g(f.work, "pull", "--ff-only", "origin", "main");
+
+  const r = await convergeInstance({ appRoot: f.work, instance: f.instances[1] });
+  assert.equal(r.skipped, "unsupervised");
+  assert.equal(readPending(f.instances[1].dataDir), null,
+    "no supervisor means no restart — a cookie here would expire and quarantine a HEALTHY sha");
+  assert.equal(restarts.length, 0);
+  assert.ok(hasProbe(f.instances[1].tasksDbPath), "migrations still ran");
+});
+
+test("the restart is scheduled by convergence ONLY, never by the update's success path", () => {
+  // The success path returning without a restart is not observable from a test
+  // (scheduleSupervisedRestart no-ops unsupervised), so anchor on the source —
+  // the same technique the boot ORDER INVARIANT test uses. A restart there
+  // fires a 1.5s exit timer while convergence is still migrating.
+  const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "auto-update.js"), "utf8");
+  const successReturn = src.indexOf("return { updated: true, from: currentVersion, to: newVersion };");
+  assert.ok(successReturn > 0, "the success return must be present");
+
+  const before = src.slice(0, successReturn);
+  const lastRestart = before.lastIndexOf("scheduleSupervisedRestart(");
+  const lossPath = before.lastIndexOf("Restarting to reopen the restored database");
+  assert.ok(lastRestart < lossPath,
+    "the only scheduleSupervisedRestart before the success return must be the " +
+    "migration-guard LOSS path (which reopens a restored DB file); convergence owns the rest");
 });
