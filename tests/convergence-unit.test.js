@@ -6,6 +6,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { connectedServers, healthSnapshot, addonsSettled, _markAddonsSettled } from "../servers/gateway/proxy.js";
+import { execFileSync } from "node:child_process";
+import { startAutoUpdate, stopAutoUpdate, _setDbForTest, instanceJitterMs } from "../servers/gateway/auto-update.js";
 import { mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -154,4 +156,82 @@ test("convergence quarantine is its OWN namespace and hard-expires", () => {
     clearConvQuarantine({ appRoot: root, dataDir });
     assert.equal(readConvQuarantine({ appRoot: root, dataDir, now: now + 1000 }), null);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("instanceJitterMs is stable per instance and differs between instances", () => {
+  const a = instanceJitterMs("/home/kh0pp/.crow/data");
+  const b = instanceJitterMs("/home/kh0pp/.crow-mpa/data");
+  const c = instanceJitterMs("/home/kh0pp/.crow-r4/data");
+
+  assert.equal(a, instanceJitterMs("/home/kh0pp/.crow/data"), "must be deterministic across calls");
+  assert.notEqual(a, b, "co-hosted instances must not share a phase");
+  assert.notEqual(b, c);
+  assert.notEqual(a, c);
+
+  // Range over many keys, not just the three above — a missing modulo would
+  // pass a three-key check by luck.
+  for (let i = 0; i < 500; i++) {
+    const v = instanceJitterMs(`/tmp/inst-${i}/data`);
+    assert.ok(Number.isInteger(v) && v >= 0 && v < 600000, `jitter ${v} out of range for key ${i}`);
+  }
+});
+
+test("the jitter is actually WIRED IN — the first-check delay differs per instance", async () => {
+  // Without this, instanceJitterMs could be perfect and startAutoUpdate could
+  // still use a fixed delay, leaving the de-phase-locking fix dead.
+  const prevDataDir = process.env.CROW_DATA_DIR;
+  const prevAuto = process.env.CROW_AUTO_UPDATE;
+  delete process.env.CROW_AUTO_UPDATE;
+  const seen = [];
+  const origLog = console.log;
+  console.log = (...a) => seen.push(a.join(" "));
+  try {
+    for (const dir of ["/tmp/jit-a/data", "/tmp/jit-b/data"]) {
+      process.env.CROW_DATA_DIR = dir;
+      await startAutoUpdate({
+        execute: async ({ sql }) =>
+          /^SELECT/i.test(sql) ? { rows: [{ key: "auto_update_enabled", value: "true" }] } : { rows: [] },
+      }, {});
+      stopAutoUpdate();
+    }
+  } finally {
+    console.log = origLog;
+    // RESTORE, never delete: run-suite.mjs sets CROW_DATA_DIR for the whole
+    // process, and deleting it would make every later test resolve to ~/.crow.
+    if (prevDataDir === undefined) delete process.env.CROW_DATA_DIR;
+    else process.env.CROW_DATA_DIR = prevDataDir;
+    if (prevAuto !== undefined) process.env.CROW_AUTO_UPDATE = prevAuto;
+    _setDbForTest(null);
+  }
+
+  const delays = seen.filter((l) => l.includes("first check in")).map((l) => l.match(/in (\d+)s/)?.[1]);
+  assert.equal(delays.length, 2, "both starts must have logged a first-check delay");
+  assert.notEqual(delays[0], delays[1], "two instances must not share a first-check phase");
+});
+
+test("a DISABLED instance still records its ACTUAL running sha", async () => {
+  const prevAuto = process.env.CROW_AUTO_UPDATE;
+  delete process.env.CROW_AUTO_UPDATE; // shouldStartAutoUpdate gates on this
+  const writes = [];
+  const db = {
+    execute: async ({ sql, args }) => {
+      if (/^SELECT/i.test(sql)) return { rows: [{ key: "auto_update_enabled", value: "false" }] };
+      writes.push({ key: args[0], value: args[1] });
+      return { rows: [] };
+    },
+  };
+  try {
+    await startAutoUpdate(db, {});
+    stopAutoUpdate();
+  } finally {
+    if (prevAuto !== undefined) process.env.CROW_AUTO_UPDATE = prevAuto;
+    _setDbForTest(null);
+  }
+
+  const v = writes.find((w) => w.key === "auto_update_current_version");
+  assert.ok(v, "must record even when disabled — the r4 instance reported a version it had not run");
+  const real = execFileSync("git", ["rev-parse", "--short", "HEAD"],
+    { cwd: join(import.meta.dirname, "..") }).toString().trim();
+  assert.equal(v.value, real,
+    "must be THIS checkout's sha, not merely sha-shaped — a stale or origin/main sha would pass a regex");
 });
