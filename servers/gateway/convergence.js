@@ -291,3 +291,72 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
 
   return { pulled, converged: true, sha: head, applied: res.applied };
 }
+
+/* -------------------------------------------------------- boot verification */
+
+/**
+ * Called at boot. Decides what the cookie left behind by the previous
+ * convergence means, and quarantines the sha if that convergence did not prove
+ * itself healthy.
+ *
+ * `snapshot` and `settled` are injected so tests need not wait on the real
+ * addon-connect loop.
+ */
+export async function verifyPendingConvergence({
+  dataDir, appRoot, bootSha, snapshot, settled,
+  now = Date.now(), log = () => {},
+}) {
+  const pending = readPending(dataDir);
+  const verdict = classifyPending(pending, bootSha, now);
+
+  if (verdict === "none") return { verdict: "none" };
+  if (verdict === "stale") { clearPending(dataDir); return { verdict: "stale" }; }
+
+  const quarantine = async (sha, regressions, why) => {
+    writeConvQuarantine({ appRoot, dataDir, sha, regressions, why });
+    clearPending(dataDir);
+    try {
+      const { fireMigrationAlert } = await import("../shared/migration-guard.js");
+      await fireMigrationAlert({
+        title: "Crow update quarantined: convergence failed",
+        body:
+          `This instance converged to ${String(sha).slice(0, 9)} and ${why}. That sha is ` +
+          `quarantined for 24h — no gateway on this host will converge to it, so the first ` +
+          `instance to try is the only one affected. The tree was NOT rolled back: ` +
+          `co-hosted instances may be running it healthily.`,
+      });
+    } catch { /* alerting must never turn a quarantine into a crash */ }
+    log(`convergence to ${String(sha).slice(0, 9)} quarantined — ${why}`);
+    return { verdict: "quarantined", regressions };
+  };
+
+  if (verdict === "failed") {
+    return quarantine(pending.sha, [], "never completed a healthy boot before its deadline");
+  }
+
+  // verdict === "verify". Everything below is wrapped: an unhandled rejection
+  // would take the gateway down on Node 22 and leave the outer promise
+  // unsettled, and the gate must fail OPEN when it cannot determine status —
+  // a false quarantine is worse than no gate at all.
+  try {
+    await settled();
+    const after = snapshot();
+    const cmp = compareHealth(pending.baseline, after);
+    if (cmp.ok) {
+      clearPending(dataDir);
+      // Clear any expired marker we may have left on a previous attempt, so
+      // stale files do not accumulate in a shared checkout.
+      clearConvQuarantine({ appRoot, dataDir });
+      log(`convergence to ${String(pending.sha).slice(0, 9)} verified healthy`);
+      return { verdict: "ok" };
+    }
+    return await quarantine(
+      pending.sha, cmp.regressions,
+      `broke ${cmp.regressions.map((r) => r.id).join(", ")}`,
+    );
+  } catch (err) {
+    clearPending(dataDir);
+    log(`health gate indeterminate (${err.message}) — failing open, not quarantining`);
+    return { verdict: "unknown" };
+  }
+}
