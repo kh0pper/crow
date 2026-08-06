@@ -24,8 +24,30 @@
  * Defaults are deliberately generous: a legitimate card turn is bounded by
  * PIBOT_TURN_TIMEOUT_MS (default 600s) in bridge.mjs, so a 30-min hard age
  * cap and a 90s parentless grace cannot kill a healthy in-progress turn.
+ *
+ * C-14 lease exemption: the reaper is host-global (listBridgePi() scans ALL
+ * matching processes on the host) but `perch-interactive.js` sessions are
+ * per-instance, so instance A's reaper must not kill instance B's leased
+ * long-lived child. While >=1 interactive child is awake, the engine writes
+ * `<crowHome>/perch-interactive-leases.json` (atomic tmp+rename, refreshed
+ * every 60s, `{version:1, leases:{"<pid>":{sessionId, expiresAt}}}` —
+ * see writeLeases() in servers/gateway/perch-interactive.js, the shape is
+ * duplicated here as LEASE_FILENAME rather than imported to keep this
+ * lightweight script free of gateway/db dependencies). A pid in the union
+ * of fresh (unexpired) leases across every lease file is exempt from the
+ * hardAgeSec rule ONLY — orphan and RSS rules still apply unchanged, so a
+ * leased child that's actually wedged or ballooning still gets reaped.
+ * Residual assumption: an instance homed entirely outside `~/.crow*` on a
+ * shared host must set CROW_HOME in the reaper's own env for its lease file
+ * to be found by default (true today for every fleet instance).
  */
 import { execFileSync, spawnSync } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, sep } from "node:path";
+
+// Must match LEASE_FILENAME in servers/gateway/perch-interactive.js.
+const LEASE_FILENAME = "perch-interactive-leases.json";
 
 // Package was renamed from @mariozechner/pi-coding-agent to
 // @earendil-works/pi-coding-agent. countLivePi() greps process command lines
@@ -79,6 +101,91 @@ export function countLivePi() {
   return listBridgePi().length;
 }
 
+/**
+ * Default lease files to consult when the caller doesn't inject its own:
+ * a `perch-interactive-leases.json` under every `<homedir()>/.crow*`
+ * directory (covers the `~/.crow`, `~/.crow-mpa`, `~/.crow-r4` instances
+ * that share this host)
+ * plus `<CROW_HOME>/perch-interactive-leases.json` when CROW_HOME points
+ * somewhere outside homedir() entirely (scratch/test homes). The two
+ * sources fail INDEPENDENTLY (each in its own try/catch): a readdir throw
+ * on a missing/unset HOME — exactly the scratch-harness shape the
+ * CROW_HOME branch exists for — must not drop a valid CROW_HOME lease
+ * file, and nothing here may ever throw into the bridge tick /
+ * gateway_runner sweep. The "under homedir" test is boundary-safe
+ * (`=== home || startsWith(home + sep)`) so a sibling path like
+ * `/home/kh0pp2/.crow` next to `/home/kh0pp` is NOT mistaken for a
+ * subpath of home.
+ *
+ * Seams (test-only, following the reapStalePi opts idiom): `_homedir`
+ * (function replacing os.homedir) and `_env` (object replacing
+ * process.env).
+ */
+function defaultLeaseFiles(opts = {}) {
+  const files = [];
+  let home = null;
+  try {
+    home = opts._homedir ? opts._homedir() : homedir();
+  } catch {
+    /* no resolvable home — CROW_HOME source below still applies */
+  }
+  if (home) {
+    try {
+      for (const entry of readdirSync(home)) {
+        if (entry.startsWith(".crow")) {
+          files.push(join(home, entry, LEASE_FILENAME));
+        }
+      }
+    } catch {
+      /* HOME unset/nonexistent — fall through to the CROW_HOME source */
+    }
+  }
+  try {
+    const env = opts._env || process.env;
+    const crowHome = env.CROW_HOME;
+    const underHome =
+      home != null &&
+      typeof crowHome === "string" &&
+      (crowHome === home || crowHome.startsWith(home + sep));
+    if (crowHome && !underHome) {
+      files.push(join(crowHome, LEASE_FILENAME));
+    }
+  } catch {
+    /* never throw into the sweep */
+  }
+  return files;
+}
+
+/**
+ * Union the still-fresh (unexpired) leases across every given lease file
+ * into a Set<pid>. Missing files, unreadable files, and malformed JSON are
+ * all silently excluded — never throws, mirrors "no lease" == today's
+ * behavior. A file that declares a version other than 1 is skipped
+ * (absent version is tolerated). Shape consumed: `{version:1, leases:{"<pid>":{sessionId,
+ * expiresAt}}}` (see writeLeases() in servers/gateway/perch-interactive.js).
+ */
+export function readFreshLeases(leaseFiles, now) {
+  const t = typeof now === "number" ? now : Date.now();
+  const fresh = new Set();
+  for (const file of leaseFiles || []) {
+    let data;
+    try {
+      data = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      continue;
+    }
+    if (data && data.version !== undefined && data.version !== 1) continue; // unknown future shape — skip, don't guess
+    const leases = (data && data.leases) || {};
+    for (const [pidStr, lease] of Object.entries(leases)) {
+      if (!lease || typeof lease.expiresAt !== "number") continue;
+      if (lease.expiresAt <= t) continue;
+      const pid = Number(pidStr);
+      if (Number.isInteger(pid)) fresh.add(pid);
+    }
+  }
+  return fresh;
+}
+
 function syslog(msg) {
   try {
     spawnSync("logger", ["-t", "pibot-reaper", msg], { timeout: 5000 });
@@ -95,13 +202,17 @@ function syslog(msg) {
 export function reapStalePi(opts = {}) {
   const cfg = Object.assign({}, LIFECYCLE_DEFAULTS, opts);
   const log = opts.log || function () {};
-  const procs = listBridgePi();
+  const procs = opts._procs || listBridgePi();
+  const now = typeof opts.now === "number" ? opts.now : Date.now();
+  const leaseFiles = opts.leaseFiles || defaultLeaseFiles(opts);
+  const freshLeases = readFreshLeases(leaseFiles, now);
+  const kill = opts._kill || ((pid, signal) => process.kill(pid, signal));
   const victims = [];
   for (const p of procs) {
     let reason = null;
     if (p.ppid === 1 && p.etimes > cfg.orphanGraceSec) {
       reason = `orphan ppid=1 etime=${p.etimes}s>${cfg.orphanGraceSec}`;
-    } else if (p.etimes > cfg.hardAgeSec) {
+    } else if (p.etimes > cfg.hardAgeSec && !freshLeases.has(p.pid)) {
       reason = `stuck etime=${p.etimes}s>${cfg.hardAgeSec}`;
     } else if (p.rssKb > cfg.rssCeilingKb) {
       reason = `runaway rss=${Math.round(p.rssKb / 1024)}MB>${Math.round(
@@ -114,7 +225,7 @@ export function reapStalePi(opts = {}) {
     log(m);
     syslog(m);
     try {
-      process.kill(p.pid, "SIGTERM");
+      kill(p.pid, "SIGTERM");
     } catch {
       /* already gone */
     }
@@ -133,7 +244,7 @@ export function reapStalePi(opts = {}) {
     for (const v of victims) {
       if (isAlive(v.pid)) {
         try {
-          process.kill(v.pid, "SIGKILL");
+          kill(v.pid, "SIGKILL");
           const m = `SIGKILL pi pid=${v.pid} (survived SIGTERM)`;
           log(m);
           syslog(m);

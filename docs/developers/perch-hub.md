@@ -176,6 +176,8 @@ Two properties of this design are risks, they were accepted deliberately, and th
 
 **Any dashboard session can read every bot's transcripts.** The bots lens shows all bots on the instance and their session transcripts, with no per-bot access control. That matches Crow's single-operator dashboard model, and it is the same trust boundary as the point above, but it is worth knowing before pointing Perch at an instance whose bots handle other people's mail.
 
+**Phase 2 widens the second point from reading to driving.** [Interactive sessions](#interactive-sessions-spawn-as-a-bot) let any dashboard session spawn a live, long-lived child wearing *any* bot's full identity and tool allowlist, then converse with it turn after turn — not just observe what a bot already did, but act as it, subject only to that bot's own definition. This was accepted as the same trust boundary extended, not a new one: a dashboard session was already able to trigger a bot turn through its real channel (send it a Gmail message, an @-mention on Discord), and Perch's per-turn chat card already let a dashboard session message a bot directly. Spawn-as-bot removes the "goes through the bot's outward-facing channel" step, nothing more.
+
 ## The gateway API
 
 Mounted at `/dashboard/perch-api`, inside the dashboard router, after `dashboardAuth` **and** after the CSRF middleware. The prefix is deliberate: `/dashboard` is skipped by the general rate limiter (a root `/api/perch` mount would 429 the lens after a few minutes of ordinary use, since one lens load is already 1 + N requests), it carries the real CSRF rail, and it is funnel-private. The router also installs `dashboardAuth` on its own prefix as its first statement, so it stays closed wherever it is mounted. Body parsing needs nothing per-route; a global 1 MB JSON parser already runs, and the cap that actually matters is the in-route 32,000-character slice on a turn message.
@@ -205,6 +207,101 @@ The gateway resolves the file; the browser never supplies a path. Both halves co
 Each line is a `type`-discriminated JSON object (`session`, `model_change`, `thinking_level_change`, `message`, and whatever pi adds next). Lines are returned as-is and the lens renders `message` rows and ignores the rest, which keeps it forward-compatible. Unparseable lines are skipped silently — a half-written last line is normal while a turn is running.
 
 Truncation is from the **tail**: the last 2,000 lines, with `{truncated, omitted}` reported. A live session file on a working host already exceeds 2 MB, and head-truncation would render the oldest turns and hide today's, which is the opposite of what an observatory is for.
+
+## Interactive sessions (spawn as a bot)
+
+Phase 1's `perch` channel is per-turn, like Gmail: one `handleInbound()` call, one pi spawn, one reply, child dead. Phase 2 adds the other half — **spawn as bot**: a long-lived `pi --mode rpc` child wearing a bot's full world (its definition, its project space, its `.mcp.json`, its skills, its permission policy, its per-session tool narrowing), driven turn after turn from the bots lens, able to ask the operator a question mid-turn and wait for the answer.
+
+### The engine
+
+`servers/gateway/perch-interactive.js` owns every interactive child. It is a **process singleton** (`getInteractiveEngine()`) — the C-15 routes, `perch.js`'s sessions list, and the gateway's shutdown path all address the same engine, because two engines in one process would each believe they were under the awake cap and would each write the other's pid out of the lease file.
+
+Every spawn and every wake goes through the same `buildBotWorld` + `prepareSpawn` that assembles a Gmail turn's child (see [The envelope model](#the-envelope-model)) — including `PI_BOT_PERMISSION_POLICY`, `--no-approve`, the tool allowlist, and the session's own narrowing. The engine adds exactly one thing on top: `extraEnv: {PI_BOT_INTERACTIVE: "1"}` (see [`PI_BOT_INTERACTIVE`](#pi_bot_interactive-the-single-unlock) below). A **wake rebuilds the world from scratch** rather than replaying a cached one, so an envelope or narrowing edit made while a session was hibernating takes effect on the very next turn, not on the next process restart.
+
+### The state machine
+
+The engine itself tracks four states per session:
+
+| State | Meaning |
+|---|---|
+| `hibernating` | No child. The `bot_sessions` row and the pi session file both survive; the next message wakes a fresh child that resumes the same transcript. Also the state of any perch-live row this gateway process has never held in memory — a previous gateway's session, or one spawned before the last deploy. |
+| `waking` | The counted reservation state. Set by `reserveSlot()` and *only* by it, synchronously, before the first `await` of a spawn or wake — this is what makes the awake-cap check race-free (see [Capacity](#capacity-one-shared-budget) below). |
+| `awake` | A live child, ready for a turn or already mid-turn. |
+| `stopped` | Closed for good by an explicit stop. A stopped session cannot be woken by a message; spawn a new one. |
+
+The bots lens renders a **fifth**, client-only badge, `error`, layered on top of `awake`/`hibernating`/`stopped` whenever the session carries a `lastError` — the engine has no server-side "error" state of its own, because an error is always resolved into one of the four real states (a failed wake lands back in `hibernating` with `lastError` set, for example) rather than being a state in its own right. `waking` itself is also partly a client convenience: the lens shows it the moment a message goes out to a hibernating session, ahead of the `state` event the engine eventually emits.
+
+### Hibernation and wake
+
+A session hibernates when it has been idle for `PERCH_INTERACTIVE_IDLE_MS` with no in-flight turn and no pending `ask_user` card — both conditions are load-bearing. An in-flight turn is covered by the stall watchdog instead (idle and stall are different clocks for different failure modes), and an **unanswered card must never be destroyed by hibernation**: hibernating would close the very child that is waiting on the answer and lose the question along with it. A card can arrive outside of a turn (pi's extension host emits when it likes), so this is not implied by the turn check and is tested separately.
+
+Hibernating closes the pi child (`PiRpc.close()`, the same SIGTERM discipline every bridge spawn uses) and writes the row `status='waiting-user'`. Waking passes `piSessionId` back to `PiRpc`, so pi resumes the same on-disk transcript rather than starting fresh — the bots lens shows one continuous conversation across a hibernate/wake cycle, not two.
+
+A gateway **restart** is the hibernation story writ large: `stopAll()` parks every awake row `waiting-user` *before* closing its child — a row left `active` would read as a live cross-process claim and 409 the very next boot's wake attempt on that thread.
+
+### The lease contract
+
+While at least one child is awake, the engine atomically (tmp-write + rename) writes `<CROW_HOME>/perch-interactive-leases.json` — `{version:1, leases:{"<pid>":{sessionId, expiresAt}}}` — refreshed every 60 seconds. The write happens on every spawn, on every close, and on that 60 second timer; the *last* close writes an **empty** lease set rather than leaving a stale pid behind, since a stale entry would exempt some unrelated future process at that pid from the reaper.
+
+The consumer is the host-global pi reaper (`scripts/pi-bots/pi_lifecycle.mjs`, C-14). That reaper scans **every** matching pi process on the host, not just this instance's — so instance A's reaper must not kill instance B's leased long-lived child. Its `defaultLeaseFiles()` therefore reads the **union** of lease files across every `~/.crow*` directory under `homedir()` (covering `~/.crow`, `~/.crow-mpa`, `~/.crow-r4`, and any other sibling instance on the box) plus `<CROW_HOME>/perch-interactive-leases.json` when `CROW_HOME` points somewhere outside `homedir()` entirely (a scratch or test home). A pid in the union of *fresh* (unexpired) leases is exempt from the reaper's hard-age rule only — the orphan check and the RSS check still apply unchanged, so a leased child that is actually wedged or ballooning still gets reaped. An instance homed entirely outside `~/.crow*` on a shared host must set `CROW_HOME` in the reaper's own environment for its lease file to be found by this default.
+
+### The `ask_user` flow
+
+A skill can ask the operator something mid-turn instead of guessing — pick from a list, confirm before doing something, type free text, or edit a block of text — via pi-lab's `ctx.ui` extension channel (PL-3). The engine recognizes exactly four methods as operator-facing questions: `select`, `input`, `confirm`, `editor`. Everything else the channel carries (`setStatus`, `setWidget`, `setTitle`, `set_editor_text`, and a bare `notify`) is TUI chrome the engine either forwards as a log line (`notify`) or silently ignores.
+
+An `ask_user` request becomes a `pendingUi` card on the session (`{requestId, method, title, options?, placeholder?, message?, prefill?}`) and an `ask_user` SSE event to every subscriber. Two fields are easy to drop and both matter: `confirm` carries a `message` body distinct from its `title`, and `editor` carries a `prefill` — omitting either renders a card that is missing half the question. A pending card **pauses the stall watchdog** (a human thinking is not a stalled agent) and blocks the idle timer from arming, and it is cleared on stop, on abort, on hibernate, and on an unexpected child exit — a late subscriber can therefore never be shown a card no child is still waiting on.
+
+**The verbatim-row echo contract.** pi-lab's `select`/multi-select options arrive as pre-rendered row strings (`"[x] some option"`, `"Other…"`, `"── done, N selected ──"`) and are matched back by *exact string equality* against the original array. The lens renders every option string verbatim as a button and echoes the chosen string back completely untouched — it never parses, re-composes, or normalizes an option string. A multi-select naturally re-renders as a fresh card per pick, since each toggle produces a new `extension_ui_request`, until the "done" row is chosen.
+
+Answering goes through `POST /interactive/:sid/answer` (see [the route table](#the-interactive-api) below), which checks the child is still alive *before* it ever calls `pi.send()` — a dead child yields an honest `409 no_such_request`, never a raw 500. A cancel sends `{cancelled: true}`, which pi-lab resolves as "Question cancelled" rather than hanging the agent loop.
+
+### `PI_BOT_INTERACTIVE`: the single unlock
+
+`PI_BOT_INTERACTIVE=1` is the one environment variable the interactive engine adds on top of an ordinary bot spawn, and it is engine-set only — nothing in a bot's own definition or spawn env can set it (C-12's `spawn_env` hygiene strips any `PIBOT_*`/`PI_BOT_*` marker a definition tries to supply, which closes that surface for every kind of spawn, not only this one). Inside pi-lab it unlocks exactly one thing: the `ctx.ui` ask-user path described above, and nothing else. Every other channel — Gmail, Discord, Telegram, Slack, a per-turn perch reply, a `job_runner` background job — spawns without it, so `ctx.ui` stays unreachable there and pi-lab's behavior is byte-identical to what it was before PL-3 landed.
+
+### Stall, abort, and the stall-abort policy
+
+A turn is one `promptTurn(text, 0)` — no bridge-level turn budget, because a long-lived child's turn is bounded by the engine's own watchdog instead. **The policy: a single tool left silent past `PERCH_TURN_STALL_MS` (default 10 minutes) is treated as stalled and the turn is aborted.** The watchdog resets on every child event (a tool starting, a tool ending, a streamed message chunk) and is paused, not armed, while an `ask_user` card is pending — a human taking their time to answer is not the same failure as an agent that has gone silent.
+
+Aborting a *running* turn is what **produces** its `agent_end` — pi's agent loop, not the engine, decides that — so an abort cannot be modelled as "the turn ends now." The engine sets an `aborted` flag before sending the RPC abort; the `promptTurn` continuation then completes **silently**: no `reply` event ever follows an `abort` on the same turn. Aborting with **no** active run produces nothing at all from pi, and an ack timeout can leave an agent loop live with no way to correlate a late, id-less `agent_end` back to the turn that spawned it — so any turn that ends without a clean `agent_end` within `PERCH_ABORT_GRACE_MS` (default 30 seconds) **closes the child** rather than reuses it. A wake then spawns a fresh child, which resumes the same pi session file, so nothing is lost but the in-memory process. The one exception is a *preflight-refused* prompt (pi never started an agent loop at all): that degrades to an honest SSE error on a still-healthy, still-reusable child.
+
+### Capacity: one shared budget
+
+Awake interactive children are capped at `PERCH_INTERACTIVE_MAX_AWAKE` (default 1) *and* draw on the exact same host-wide pi budget every channel turn draws on (`countLivePi()` against `LIFECYCLE_DEFAULTS.maxPi`, i.e. `PIBOT_MAX_PI`, default `2`). Checking the cap and then spawning is a classic TOCTOU, so the check and the reservation happen in **one synchronous block with no `await` between them** — two concurrent spawn/wake attempts at the cap produce exactly one child and one clean refusal, never two children or a wedge.
+
+`PIBOT_MAX_PI` is genuinely shared, three ways, on one host:
+
+1. **Channel turns** — every in-flight Gmail/Discord/Telegram/Slack/per-turn-perch turn counts against it while its pi child is alive.
+2. **An awake interactive session** — for as long as it stays awake, not just for the duration of a turn. This is the part worth tuning around: a single interactive session left awake on a 2-slot node (the default) can leave only one slot for everything else, and on a 1-effective-slot node (see below) it can leave none.
+3. **`job_runner.mjs`'s reserved-slot gate** — background jobs poll with `reserve = Math.max(1, maxPi - 1)` (`job_runner.mjs`, `tickJobs()`) and skip claiming a new job whenever `countLivePi() >= reserve`, deliberately leaving at least one slot free for an interactive turn. On the default `maxPi=2`, that reserve is 1: **one awake interactive session is enough to stall every background job on that node** until it hibernates or is stopped. A host that runs both spawn-as-bot sessions and background jobs regularly should raise `PIBOT_MAX_PI` rather than assume the reservation buys more headroom than one slot.
+
+### The interactive API
+
+Mounted on the same `/dashboard/perch-api` prefix as the Phase 1 turn API, for the same reasons (rate-limit skip, the real CSRF rail, funnel-private), behind `dashboardAuth` as the router's first statement.
+
+| Route | Returns |
+|---|---|
+| `POST /bots/:id/interactive` | `201 {sessionId, threadId, state:"awake"}`; `409 engine_required`, `403 perch_not_attached`, `409 interactive_capacity`, `409 pi_capacity`, `503 perch_disabled` |
+| `POST /interactive/:sid/message` | `202 {turnId}`; `404 no_such_session`, `410 stopped`, `409 turn_in_progress`, `409 interactive_capacity`, `409 pi_capacity`, `409 pi_gone` |
+| `GET /interactive/:sid/events` | Persistent SSE (`openAuthedStream`, not the P1 per-turn `openStream` — a spawned session outlives one turn, so it needs the periodic session re-check and a keepalive that survives a hibernation-length idle gap). Events: `state\|text\|tool\|ask_user\|log\|reply\|error`, one per `data:` line. On connect, replays the current `state` and any pending `ask_user` card. |
+| `POST /interactive/:sid/answer` | `{ok:true}`; `409 no_such_request` (including a dead child) |
+| `POST /interactive/:sid/abort` | `{ok:true}`; `409 no_turn` |
+| `POST /interactive/:sid/stop` | `{ok:true}` |
+
+A completed, non-aborted turn is metered (`meterBotTurn`, `surface: "bot"`) and audited (`bot.invoke`, `payload.action: "interactive"`) exactly like a channel turn — an interactive turn is a bot turn for billing and audit purposes, even though it never touches a channel-specific `handleInbound()`.
+
+### Deploying the pi-lab side
+
+The ask-user unlock itself lives upstream in `pi-lab`, not in this repository — see [The upstream contract](#the-upstream-contract) below for how Crow-specific behavior generally reaches the vendored payload. But `PI_BOT_INTERACTIVE`'s *consumer*, pi-lab's `ctx.ui` handling (PL-3), is a change to the **pi package itself**, not to the vendored hub payload — and pi loads from `~/.pi/agent/settings.json`'s `packages` list, which points at the live `~/pi-lab` checkout on its **main** branch, not at any bundle. Landing PL-3 on the `crow-mode` branch and vendoring `perch-hub` (this document's own [Vendoring and updates](#vendoring-and-updates) section) is therefore not enough on its own: the ask-user path only reaches a running bot once `crow-mode` is merged or cherry-picked into pi-lab `main`, so the checkout every pi child actually loads carries the change. This is a **named operator gate**, not something a Crow deploy can complete by itself. It is safe to defer: the change is byte-identical to pre-PL-3 pi-lab behavior for every spawn that does not carry `PI_BOT_INTERACTIVE=1`, so a host that has not yet merged `crow-mode` to `main` simply has no `ask_user` capability — interactive sessions still spawn and converse, they just never see a card.
+
+### Known limits
+
+Filed for visibility, not scheduled for a fix in this phase:
+
+- **An awake interactive child starves the post-turn skill review.** `bridge.mjs`'s self-learning review (`runSkillReview`, fired fire-and-forget after a channel turn) self-gates on an *idle-only* check, `countLivePi() === 0` — the same synchronous ps-scan the capacity gate above uses. A single interactive session left awake is enough to make every channel turn's post-turn review skip silently on that node for as long as the session stays awake, exactly the way it would skip during any other busy moment. This is the existing idle-only design working as intended; it simply means "one shared budget" (above) has a second, quieter consequence beyond turn latency.
+- **Interactive sessions have no `!escalate` equivalent.** A channel turn detects a leading `!escalate` token on the raw inbound message and resolves an escalation-tier model for that turn (`escalateRequested()` in `model_resolver.mjs`). An interactive session's spawn and every wake call `prepareSpawn` with `{escalate: false}` unconditionally — there is no per-message escalation path today. Reaching a stronger model for a spawned session currently means creating a bot whose default model is already the one you want.
+- **`countLivePi()` is a synchronous `ps` scan on the gateway's event loop**, run on every capacity check — every spawn, every wake, every `job_runner` tick. It is cheap on a normal host's process count, but it is on the critical path of the reservation's synchronous, no-`await` block by construction (see [Capacity](#capacity-one-shared-budget)), so it is worth knowing about before assuming a capacity check is free.
+- The `spawn_env` policy-clobber hole that C-12 closed for this feature (a bot definition supplying its own `PIBOT_*`/`PI_BOT_*` env and overriding the engine's own) is closed *here*. The broader question of what else a definition-supplied env value can reach inside a spawned child is not fully audited and is a candidate for its own pass someday.
 
 ## The upstream contract
 
