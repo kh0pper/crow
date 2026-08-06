@@ -22,6 +22,28 @@ export function _setAppRootForTest(dir) {
   APP_ROOT = dir;
 }
 
+const JITTER_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * A stable per-instance offset for the first update check.
+ *
+ * Co-hosted gateways restart together, so a fixed 5-minute first check put all
+ * of them on the same millisecond forever: their checks landed 475ms apart and
+ * the same instance lost the lock every single tick. Deriving the offset from
+ * the instance's data dir de-phases them permanently and survives restarts.
+ *
+ * This is robustness, not the fix — the fix is that the lock loser converges
+ * anyway (see convergence.js). Jitter only makes contention rare.
+ */
+export function instanceJitterMs(key) {
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h % JITTER_WINDOW_MS;
+}
+
 const DEFAULT_INTERVAL_HOURS = 6;
 const MIN_INTERVAL_HOURS = 1;
 
@@ -596,28 +618,36 @@ export async function startAutoUpdate(database, { noAuth = false } = {}) {
 
   const settings = await getSettings();
 
+  // Record the sha this process is ACTUALLY running, BEFORE any early return.
+  // This used to sit below the disabled-in-settings return, so a disabled
+  // instance froze its reported version at whatever it was when it was last
+  // enabled — while continuing to run whatever the shared checkout moved to.
+  // The bookkeeping and the running code disagreed and nothing detected it.
+  try {
+    const ref = await run("git", ["rev-parse", "--short", "HEAD"]);
+    if (ref.code === 0 && ref.stdout) await saveSetting("auto_update_current_version", ref.stdout);
+  } catch {}
+
   if (settings.auto_update_enabled !== "true") {
     console.log("[auto-update] Disabled in settings");
     return;
   }
 
-  // Save current version on startup
-  try {
-    const ref = await run("git", ["rev-parse", "--short", "HEAD"]);
-    await saveSetting("auto_update_current_version", ref.stdout);
-  } catch {}
-
   const hours = Math.max(MIN_INTERVAL_HOURS, parseInt(settings.auto_update_interval_hours, 10) || DEFAULT_INTERVAL_HOURS);
   const intervalMs = hours * 60 * 60 * 1000;
 
-  console.log(`[auto-update] Enabled — checking every ${hours}h`);
+  const { resolveDataDir } = await import("../db.js");
+  const firstDelay = 5 * 60 * 1000 + instanceJitterMs(resolveDataDir());
+  console.log(`[auto-update] Enabled — checking every ${hours}h (first check in ${Math.round(firstDelay / 1000)}s)`);
 
-  // First check after 5 minutes (let gateway fully start)
+  // First check after ~5 minutes plus a per-instance offset (let the gateway
+  // fully start, and keep co-hosted instances off the same millisecond).
   updateTimer = setTimeout(async () => {
-    await tickCheck();
-    // Then schedule recurring checks
+    // tickCheck now reaches runMigrations, which CAN reject; an unhandled
+    // rejection in this timer would take the gateway down.
+    await tickCheck().catch((e) => console.error("[auto-update] tick failed:", e.message));
     updateTimer = setInterval(() => { tickCheck().catch(() => {}); }, intervalMs);
-  }, 5 * 60 * 1000);
+  }, firstDelay);
 }
 
 /**
