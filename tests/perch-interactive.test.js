@@ -406,6 +406,43 @@ test("CR3: two concurrent spawns at MAX_AWAKE=1 produce exactly one child and on
   assert.equal(state.instances.length, 1, "exactly one child was constructed");
 });
 
+test("I-1: a child that dies during SPAWN's own trailing awaits never reports 'awake' — session ends hibernating with lastError, and the freed slot lets the next spawn succeed", async () => {
+  const { engine, state } = makeEngine({ env: { PERCH_INTERACTIVE_MAX_AWAKE: "1" } });
+  // The child dies WHILE startChild's own trailing `pi.getState()` call is in
+  // flight — the D1 idiom (line ~432 above), mirrored for the SPAWN path
+  // instead of a re-wake. D1 proves message()'s post-wake `refuseIfPiGone`
+  // guard catches this for a re-wake because it keys off `s.pi`, not
+  // `s.state`; spawn() has no equivalent guard and used to trust startChild's
+  // tail directly. Because getState() resolves (rather than rejects),
+  // startChild ran to completion and reached its own unconditional tail —
+  // `s.state = "awake"; s.lastError = null;` — clobbering attachExit's
+  // already-correct hibernating park into a lie: spawn() returned
+  // {state:"awake"} for a session whose child was already dead, and the
+  // permanently-"awake"-counted slot 409'd every later spawn with
+  // interactive_capacity forever (reserveSlot() counts state==="awake").
+  state.piScript = (pi, idx) => {
+    if (idx !== 0) return;
+    const realGetState = pi.getState.bind(pi);
+    pi.getState = async () => {
+      pi.exit(-1);
+      return realGetState();
+    };
+  };
+  const r = await spawned(engine, "wedgy");
+  state.piScript = null;
+
+  assert.equal(r.state, "hibernating", "spawn must never report awake for a session whose child already died");
+  const snap = await engine.get(r.sessionId);
+  assert.equal(snap.state, "hibernating");
+  assert.ok(snap.lastError, "attachExit's honest error must survive, not be erased by startChild's tail");
+
+  // The slot really is free: a second spawn succeeds immediately at
+  // MAX_AWAKE=1, proving the dead session was never left permanently counted
+  // as awake.
+  const other = await spawned(engine, "other");
+  assert.equal((await engine.get(other.sessionId)).state, "awake");
+});
+
 // ---------------------------------------------------------------------------
 // 2. message / turn model
 // ---------------------------------------------------------------------------

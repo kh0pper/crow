@@ -282,7 +282,7 @@ Mounted on the same `/dashboard/perch-api` prefix as the Phase 1 turn API, for t
 | Route | Returns |
 |---|---|
 | `POST /bots/:id/interactive` | `201 {sessionId, threadId, state:"awake"}`; `409 engine_required`, `403 perch_not_attached`, `409 interactive_capacity`, `409 pi_capacity`, `503 perch_disabled` |
-| `POST /interactive/:sid/message` | `202 {turnId}`; `404 no_such_session`, `410 stopped`, `409 turn_in_progress`, `409 interactive_capacity`, `409 pi_capacity` |
+| `POST /interactive/:sid/message` | `202 {turnId}`; `404 no_such_session`, `410 stopped`, `409 turn_in_progress`, `409 interactive_capacity`, `409 pi_capacity`, `409 pi_gone` |
 | `GET /interactive/:sid/events` | Persistent SSE (`openAuthedStream`, not the P1 per-turn `openStream` — a spawned session outlives one turn, so it needs the periodic session re-check and a keepalive that survives a hibernation-length idle gap). Events: `state\|text\|tool\|ask_user\|log\|reply\|error`, one per `data:` line. On connect, replays the current `state` and any pending `ask_user` card. |
 | `POST /interactive/:sid/answer` | `{ok:true}`; `409 no_such_request` (including a dead child) |
 | `POST /interactive/:sid/abort` | `{ok:true}`; `409 no_turn` |
