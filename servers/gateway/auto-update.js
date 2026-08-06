@@ -193,7 +193,7 @@ export const _lockPrimitivesForTest = { acquireLock, releaseLock, lockIsStale };
  * Check for and apply updates
  * Returns { updated, from, to, error, skipped?, message?, branch? }
  */
-export async function checkForUpdates() {
+export async function checkForUpdates({ instance = null } = {}) {
   const log = (msg) => console.log(`[auto-update] ${msg}`);
   try {
     const branch = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -208,19 +208,47 @@ export async function checkForUpdates() {
     }
     const lock = await lockPath();
     const held = lock ? acquireLock(lock) : null;
+    let treeResult = { updated: false };
+    let pulled = false;
+
     if (lock && !held) {
+      // NOT an error, and NOT a reason to stop. The tree is shared: another
+      // co-hosted gateway is pulling it, which is exactly right. This instance
+      // skips the PULL and still converges itself below. Before this split it
+      // returned here — and since co-hosted gateways restart together, their
+      // timers are phase-locked and the same instance lost every tick forever,
+      // never migrating its own stores and never restarting into the new code.
       const info = readLock(lock);
-      const msg = `Skipped: another updater is running (pid ${info?.pid ?? "unknown"})`;
+      const msg = `Tree pull skipped: another instance holds the checkout lock (pid ${info?.pid ?? "unknown"})`;
       log(msg);
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, skipped: "locked", message: msg };
+      treeResult = { updated: false, skipped: "locked", message: msg };
+    } else {
+      try {
+        treeResult = await runLockedUpdate(log);
+      } finally {
+        if (held) releaseLock(held);
+      }
+      pulled = Boolean(treeResult?.updated);
     }
-    try {
-      return await runLockedUpdate(log);
-    } finally {
-      if (held) releaseLock(held);
+
+    // A process must honor its OWN refusal. runLockedUpdate returns
+    // converge:false on the branches whose whole purpose is to withhold a
+    // restart; a peer may still converge (it refused nothing, and the
+    // quarantine markers guard the genuinely-bad shas), but this process
+    // must not restart into code it just declined.
+    if (treeResult?.converge === false) {
+      log("instance half skipped — this process's own update refused a restart");
+      return { ...treeResult, pulled, converged: false, skipped: "refused" };
     }
+
+    // The INSTANCE half — for every gateway, lock or no lock. APP_ROOT is
+    // passed explicitly: convergence's own fallback resolves from
+    // import.meta.url, which is the real worktree even under a test fixture.
+    const { convergeInstance } = await import("./convergence.js");
+    const conv = await convergeInstance({ appRoot: APP_ROOT, instance, pulled, log });
+    return { ...treeResult, pulled, converged: conv.converged, applied: conv.applied };
   } catch (err) {
     const msg = `Update error: ${err.message}`;
     console.error(`[auto-update] ${msg}`);
@@ -438,7 +466,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
         log(msg);
         await saveSetting("auto_update_last_check", new Date().toISOString());
         await saveSetting("auto_update_last_result", msg);
-        return { updated: false, error: msg, quarantined: true };
+        return { updated: false, error: msg, quarantined: true, converge: false };
       }
       // Fail closed: the guard restored the backup and quarantined the sha.
       // Roll the code back to match the restored schema — but never destroy
@@ -461,7 +489,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       // The live process's DB handles still pin the pre-restore inode —
       // restart IMMEDIATELY so the process reopens the restored file.
       scheduleSupervisedRestart(log, "Restarting to reopen the restored database...");
-      return { updated: false, error: msg, quarantined: true };
+      return { updated: false, error: msg, quarantined: true, converge: false };
     }
     if (res.initDbExit !== 0) {
       const msg = `Migration failed (init-db exit ${res.initDbExit}) — restart withheld, running code unchanged`;
@@ -472,7 +500,11 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       });
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, error: msg };
+      // converge:false — this branch exists to WITHHOLD the restart. Without
+      // the flag, convergence restarts into a sha whose init-db just failed,
+      // the boot guard exits 1, systemd retries, StartLimitBurst is exhausted,
+      // and the unit is dead — on each co-hosted gateway as its tick arrives.
+      return { updated: false, error: msg, converge: false };
     }
   } else {
     const initRes = await run("node", ["scripts/init-db.js"]);
@@ -485,7 +517,11 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       });
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, error: msg };
+      // converge:false — this branch exists to WITHHOLD the restart. Without
+      // the flag, convergence restarts into a sha whose init-db just failed,
+      // the boot guard exits 1, systemd retries, StartLimitBurst is exhausted,
+      // and the unit is dead — on each co-hosted gateway as its tick arrives.
+      return { updated: false, error: msg, converge: false };
     }
   }
 
@@ -499,18 +535,20 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
 
   log(`Updated: ${currentVersion} → ${newVersion}`);
 
-  // Restart to load the new code when supervised (systemd, launchd
-  // KeepAlive, Docker, etc.). Without a supervisor the pulled code only
-  // takes effect on the next manual restart.
-  scheduleSupervisedRestart(log, "Restarting gateway to apply update...");
-
+  // NOTE: the restart is NOT scheduled here. convergeInstance() owns it, and
+  // schedules it only AFTER running this instance's migrations and writing the
+  // boot cookie. Restarting here would fire a 1.5s exit timer while those
+  // migrations are still running — an interrupted ALTER on a live store — and
+  // the cookie, which must exist before the restart, might never be written.
+  // (The restart on the migration-guard LOSS path below stays: it exists to
+  // reopen a restored DB file and is unrelated to convergence.)
   return { updated: true, from: currentVersion, to: newVersion };
 }
 
 /** Supervised-restart machinery, shared by the normal update path and the
  *  migration-guard loss path (which must reopen the restored DB file).
  *  No-op without a supervisor. */
-function scheduleSupervisedRestart(log, message) {
+export function scheduleSupervisedRestart(log, message) {
   if (!isSupervised()) return;
   log(message);
   // Close the HTTP server first to release the port, then exit
