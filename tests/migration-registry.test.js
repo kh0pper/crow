@@ -201,3 +201,23 @@ test("0001-board-stages: adds columns, DEFERS when ANY target table is absent", 
     assert.deepEqual(after, cols, "a re-run must not change the column set");
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
+
+test("ORDER INVARIANT: registry runs after the schema guard, before the first createDbClient", () => {
+  const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "index.js"), "utf8");
+
+  // Anchor on the guard's CALL, not its import: `runGuardedInitDb` first appears
+  // in the dynamic-import destructure, so a plain indexOf would also match a
+  // registry block wrongly placed INSIDE the guard block.
+  const guardCall = src.indexOf("await runGuardedInitDb(");
+  const registry = src.indexOf("runMigrations(");
+  const firstClient = src.indexOf("initOAuthTables()");
+
+  assert.ok(guardCall > 0, "the schema guard call must be present");
+  assert.ok(registry > 0, "the registry call must be present");
+  assert.ok(firstClient > 0, "initOAuthTables must be present");
+  assert.ok(guardCall < registry, "registry must run AFTER the schema guard");
+  assert.ok(registry < firstClient,
+    "registry must run BEFORE the first createDbClient — createDbClient registers a " +
+    "never-closed per-path WAL keeper, and a later migration-guard restore would " +
+    "swap the DB file under a pinned inode (split-brain)");
+});
