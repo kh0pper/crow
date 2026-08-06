@@ -777,6 +777,36 @@ export function createInteractiveEngine({
   }
 
   /**
+   * D1 (C-19 acceptance): the child can die between message()'s reservation
+   * and the moment it actually touches `s.pi` — during the wake's own
+   * trailing awaits inside startChild, during the already-awake
+   * `writeRow(active)`, or during the `getSessionStats()` call right below
+   * this guard's second call site. `attachExit` fires off `pi.exited`
+   * asynchronously and USUALLY lands first (its reaction was queued the
+   * moment the child exited, ahead of whatever message() is still awaiting)
+   * — it already parks the row, flips `hibernating` and emits its own error.
+   * This guard makes that outcome CERTAIN instead of racing it: without it,
+   * `s.pi.getSessionStats()` / `s.pi.promptTurn()` null-deref and the raw
+   * TypeError escapes the route as an untyped 500 (probe-wedge.mjs). Same
+   * discipline as the wake-failure catch in message() below: drop the turn
+   * claim, release the reservation (state → hibernating — the thing
+   * reserveSlot() actually counts), refuse with a typed error. Returns true
+   * (and the caller throws) iff the child is gone.
+   */
+  function refuseIfPiGone(s, turn) {
+    if (s.pi) return false;
+    if (s.turn === turn) s.turn = null;
+    if (s.state !== "stopped") s.state = "hibernating";
+    const message = s.lastError || "pi exited before the turn could start";
+    s.lastError = message;
+    writeLeases();
+    emit(s, { type: "error", text: message });
+    emit(s, stateEvent(s));
+    writeRow(s, { status: "waiting-user" }).catch(() => {});
+    return true;
+  }
+
+  /**
    * Close a child we can no longer trust and park the session (C-12 carried
    * finding 3). The pi session file survives, so the next message wakes a fresh
    * child that resumes the same transcript.
@@ -878,7 +908,12 @@ export function createInteractiveEngine({
     }
 
     clearIdle(s);
+    // D1: the child may already be gone (killed the instant before this call
+    // landed) — refuse honestly rather than null-deref s.pi below.
+    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone");
     turn.statsBefore = await s.pi.getSessionStats().catch(() => null);
+    // D1: …or it died WHILE that stats call was in flight.
+    if (refuseIfPiGone(s, turn)) throw engineError("pi_gone");
     armStall(s);
     emit(s, stateEvent(s));
     // ms=0: no bridge turn budget. The stall watchdog above is this turn's
