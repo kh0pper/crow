@@ -235,3 +235,22 @@ test("a DISABLED instance still records its ACTUAL running sha", async () => {
   assert.equal(v.value, real,
     "must be THIS checkout's sha, not merely sha-shaped — a stale or origin/main sha would pass a regex");
 });
+
+test("CROW_DISABLE_CONVERGE short-circuits convergence entirely", async () => {
+  const { convergeInstance } = await import("../servers/gateway/convergence.js");
+  const prev = process.env.CROW_DISABLE_CONVERGE;
+  process.env.CROW_DISABLE_CONVERGE = "1";
+  try {
+    // Bogus paths are deliberate: if the switch works, nothing touches the
+    // filesystem or git, so they cannot fail.
+    const r = await convergeInstance({
+      appRoot: "/nonexistent",
+      instance: { dataDir: "/nonexistent", dbPath: "/nonexistent/x.db", tasksDbPath: "/nonexistent/t.db" },
+    });
+    assert.equal(r.converged, false);
+    assert.equal(r.skipped, "disabled");
+  } finally {
+    if (prev === undefined) delete process.env.CROW_DISABLE_CONVERGE;
+    else process.env.CROW_DISABLE_CONVERGE = prev;
+  }
+});
