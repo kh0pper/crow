@@ -714,9 +714,15 @@ async function gracefulShutdown() {
   // Same gap as the hub above, one level worse: an interactive `pi --mode rpc`
   // child is spawned `detached: true` (its own process group, so it survives a
   // terminal SIGINT) AND holds a model plus a fistful of MCP children. Bounded
-  // for the same reason; `createIfMissing:false` so a gateway that never ran an
-  // interactive session does not mint an engine (and a lease file) on its way
-  // out. Rows persist — the sessions hibernate, they are not destroyed.
+  // for the same reason; `createIfMissing:false` so THIS shutdown call itself
+  // never mints an engine. It is not a guarantee the process ran no session —
+  // perch.js's `GET /bots/:id/sessions` (the lens's own list refresh) calls
+  // `getInteractiveEngine()` with its default `createIfMissing:true` on any
+  // `kind='perch-live'` row, so the singleton (and its lease file) is commonly
+  // minted well before any spawn. An engine that exists but never woke a child
+  // is `stopAll()`-safe regardless (nothing to kill), and an empty lease file
+  // exempts nobody from the host reaper — only a session actually awake does.
+  // Rows persist — the sessions hibernate, they are not destroyed.
   try {
     const { getInteractiveEngine } = await import("./perch-interactive.js");
     const engine = getInteractiveEngine({ createIfMissing: false });

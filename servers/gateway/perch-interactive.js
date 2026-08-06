@@ -586,6 +586,23 @@ export function createInteractiveEngine({
       s.piSessionId = String(reported);
       await writePiSessionId(s);
     }
+    // I-1: the child can die during THIS function's own trailing awaits (an
+    // unknown provider, a fresh-install misconfig — anywhere from tens to a
+    // few hundred ms). `getState()` above swallows that as a `.catch(() =>
+    // null)`, so it does not throw and startChild runs to this tail — but
+    // `attachExit` has ALREADY fired by then (its reaction was queued the
+    // moment the child exited), parking the session (`s.pi = null`, state →
+    // hibernating, lastError set) and calling `writeRow(waiting-user)`.
+    // Stamping "awake" unconditionally here would clobber that honest park
+    // back to a lie: `message()`'s post-wake `refuseIfPiGone` guard catches
+    // this for the WAKE path because it keys off `s.pi`, not `s.state` — but
+    // `spawn()` has no such guard and returns `s.state` directly to the
+    // caller, so the lie became a real 201 {state:"awake"} with lastError
+    // erased, and the freed-then-relied slot's UNCONDITIONAL "awake" stamp
+    // wedges reserveSlot()'s count forever (interactive_capacity on every
+    // later spawn). Bail before the stamp if this is no longer the current
+    // child — attachExit already told the true story.
+    if (s.pi !== pi) return pi;
     s.state = "awake";
     s.lastError = null;
     writeLeases();
