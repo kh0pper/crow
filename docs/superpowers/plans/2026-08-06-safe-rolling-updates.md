@@ -538,12 +538,18 @@ test("0001-board-stages: adds columns, DEFERS when ANY table is absent, idempote
     c2.close();
   } finally { rmSync(mixed.root, { recursive: true, force: true }); }
 
-  // (b) tasks_items present → applied, columns added, re-runnable.
+  // (b) ALL targets present → applied, columns added, re-runnable.
+  // Both DBs must be seeded: under the `any absent` rule, leaving crow.db bare
+  // would defer and `applied` would not contain the id.
   const f = fixture();
   try {
     const t = new Database(f.tasksDbPath);
     t.prepare("CREATE TABLE tasks_items (id INTEGER PRIMARY KEY, title TEXT)").run();
     t.close();
+    const c = new Database(f.dbPath);
+    c.prepare("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY)").run();
+    c.prepare("CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY)").run();
+    c.close();
     const r = await runMigrations({ migrationsDir: dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath });
     assert.ok(r.applied.includes("0001-board-stages"));
     const t2 = new Database(f.tasksDbPath);
@@ -730,7 +736,7 @@ CROW_HOME=$S CROW_DATA_DIR=$S/data CROW_DB_PATH=$S/data/crow.db \
 CROW_AUTO_UPDATE=0 CROW_ALLOW_ORPHAN=1 PORT=3099 \
 timeout 120 node servers/gateway/index.js --no-auth 2>&1 | tee $S/boot.log | head -60
 ```
-Expected, in this order: `[migrations] deferred (will retry): 0001-board-stages` at boot (a wiped instance has no `tasks_items` yet, so **deferred is correct here, not applied**), the gateway's listen line, and then — only if a `tasks` bundle is installed — `[migrations:post-settle] applied: 0001-board-stages`. With no bundles installed, `[migrations:post-settle] STILL deferred` is the correct outcome. Then confirm `~/.crow/data/crow.db` mtime is unchanged.
+Expected: `[migrations] deferred (will retry): 0001-board-stages` at boot — a wiped instance has no `tasks_items` yet, so **deferred is correct here, not applied** — then the gateway's listen line. No `[migrations:post-settle]` line yet: that second pass is added in Task 10. Then confirm `~/.crow/data/crow.db` mtime is unchanged.
 
 - [ ] **Step 7: Full suite** — `npm test > …/suite-partA.log 2>&1`, then `grep -E "^# (tests|pass|fail|cancelled)"`. Expected `# fail 0`, `# cancelled 0`.
 
@@ -1124,8 +1130,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
+import { readFileSync } from "node:fs";
 import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/gateway/auto-update.js";
 import { _setAlertChannelsForTest } from "../servers/shared/migration-guard.js";
+import {
+  setBootSha, _setRestartForTest, _setSupervisedForTest,
+  convergeInstance, verifyPendingConvergence,
+  writePending, readPending, readConvQuarantine,
+} from "../servers/gateway/convergence.js";
+
+// Captured restarts, asserted per test. Reset in beforeEach-style prologue.
+const restarts = [];
+
+// This file's tree half resolves its guard DB from env. Unpinned, a bare
+// `node --test` run resolves to ~/.crow/data/crow.db and would BACK UP and
+// PRUNE the live primary instance's data dir (migration-guard takeBackup +
+// sweepRetention). Pin scratch paths, and RESTORE rather than delete.
+const _prevEnv = {
+  CROW_HOME: process.env.CROW_HOME,
+  CROW_DATA_DIR: process.env.CROW_DATA_DIR,
+  CROW_DB_PATH: process.env.CROW_DB_PATH,
+};
+const _scratch = mkdtempSync(join(tmpdir(), "conv-env-"));
+mkdirSync(join(_scratch, "data"), { recursive: true });
+process.env.CROW_HOME = _scratch;
+process.env.CROW_DATA_DIR = join(_scratch, "data");
+process.env.CROW_DB_PATH = join(_scratch, "data", "crow.db");
 
 // Never let the suite believe it is supervised — the restart branch would arm
 // this process's exit chain.
@@ -1152,6 +1182,13 @@ const _fixtures = [];
 after(() => {
   _setAppRootForTest(REAL_APP_ROOT);      // MUST restore, even on failure
   _setDbForTest(null);
+  _setRestartForTest(null);
+  _setSupervisedForTest(null);
+  setBootSha(null);                       // module state — do not leak a fixture sha
+  for (const [k, v] of Object.entries(_prevEnv)) {
+    if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+  rmSync(_scratch, { recursive: true, force: true });
   for (const f of _fixtures) f.cleanup();
   _fixtures.length = 0;
 });
@@ -1212,8 +1249,18 @@ export function hasProbe(tasksDbPath) {
 
 test("BOTH co-hosted instances converge — the lock loser must not starve", async () => {
   const f = twoInstanceFixture();
+  // Capture the sha we are "running" BEFORE origin moves. Without this,
+  // getBootSha() is null and convergeInstance refuses with "no-boot-sha" before
+  // it ever reaches runMigrations — the gate would fail for the wrong reason.
+  setBootSha(g(f.work, "rev-parse", "HEAD"));
   f.advanceOrigin("0002-converge-probe.mjs", MIGRATION_BODY);
   _setAppRootForTest(f.work);
+  // The suite runs deliberately unsupervised (run-suite.mjs scrubs the env), so
+  // convergence would otherwise stop at the unsupervised guard. Inject both
+  // seams rather than setting CROW_SUPERVISED, which would arm a real
+  // process.exit(1) inside this runner.
+  _setSupervisedForTest(() => true);
+  _setRestartForTest((_log, msg) => { restarts.push(msg); });
 
   // alpha: no contention, wins the lock, pulls, converges.
   _setDbForTest(stubDb());
@@ -1235,6 +1282,7 @@ test("BOTH co-hosted instances converge — the lock loser must not starve", asy
   assert.equal(a.pulled, true, "the lock winner performs the pull");
   assert.equal(b.pulled, false, "the lock loser must not pull — the tree is shared");
   assert.equal(b.converged, true, "the lock loser must still converge");
+  assert.equal(restarts.length, 2, "each converging instance restarts exactly once");
 });
 ```
 
@@ -1324,14 +1372,42 @@ and change the signature to `export async function checkForUpdates({ instance = 
 
 Passing `APP_ROOT` is **required, not tidiness**: `convergeInstance`'s fallback derives the root from `import.meta.url`, which is the real worktree. Without this, the two-instance gate's tree half operates on the fixture while its instance half operates on `~/crow-wt-rolling` — reading the real `scripts/migrations/`, so the fixture's probe migration is never discovered and the gate can never pass, while `.crow-convergence-quarantine.json` gets written into a checkout three live gateways share.
 
-- [ ] **Step 3b: Mark every refusal branch in `runLockedUpdate`**
+- [ ] **Step 3b: Mark ALL FOUR refusal branches in `runLockedUpdate`**
 
-Add `converge: false` to the three returns that withhold a restart — the `init-db failed (exit N)` return (~line 475), and both migration-guard loss returns (~line 441 and ~line 464). Leave every other return alone: a successful update, an "up to date", a CI-gate skip and a quarantine skip did **not** refuse anything.
+Identify them by **message text**, not line number — there are four, and two share a message shape:
+
+| Message | Context |
+|---|---|
+| `Migration quarantined: data loss detected, automatic restore NOT possible` | loss, restore impossible |
+| `Migration quarantined: data loss detected and rolled back` | loss, rolled back |
+| `Migration failed (init-db exit N) — restart withheld` | **armed** path (generation crossing or `init-db.js` touched) |
+| `init-db failed (exit N) — restart withheld` | **unarmed `else` path** — the MORE COMMON case |
+
+The fourth is the one that is easy to miss: a pull that crosses no schema generation and does not touch `scripts/init-db.js`, where init-db still fails (disk, a locked DB, a bad dependency). It carries identical "restart withheld" semantics. Unmarked, convergence restarts into it and the boot guard exits 1.
 
 ```js
-    return { updated: false, error: msg, converge: false };            // init-db failed
+    return { updated: false, error: msg, converge: false };                     // both init-db paths
     return { updated: false, error: msg, quarantined: true, converge: false };  // both loss paths
 ```
+
+- [ ] **Step 3c: Make the refusal visible to PEERS, not just this process**
+
+`converge: false` is process-local, but the hazard is fleet-wide. Peer P2's next tick finds `behindCount === 0` (P1 already pulled), so `runLockedUpdate` returns the bare `{ updated: false }` at `auto-update.js:354` — no refusal flag — and P2 converges, restarts, and hits `index.js:183` `process.exit(1)`. Marking only the refusing process protects one of three co-hosted gateways.
+
+The loss branches already write a migration-guard quarantine, which peers honor. The **init-db-failure branches write no marker at all**, so they need one. On both, before returning, record the sha as convergence-quarantined:
+
+```js
+      const { writeConvQuarantine } = await import("./convergence.js");
+      const { resolveInstance } = await import("./convergence.js");
+      const inst = await resolveInstance();
+      const badSha = (await run("git", ["rev-parse", "HEAD"])).stdout;
+      writeConvQuarantine({
+        appRoot: APP_ROOT, dataDir: inst.dataDir, sha: badSha,
+        why: `init-db exited ${initRes.code} after pulling this sha`,
+      });
+```
+
+Peers then read that marker in `convergeInstance` and refuse the same sha, and the 24 h expiry plus "clears when the tree moves past it" both still apply.
 
 - [ ] **Step 4: Implement `convergeInstance`**
 
@@ -1415,10 +1491,35 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
   try { const p = await import("./proxy.js"); baseline = p.healthSnapshot(); } catch {}
   writePending(inst.dataDir, { sha: head, baseline });
 
-  const au = await import("./auto-update.js");
-  au.scheduleSupervisedRestart(log, `Restarting to run ${head.slice(0, 9)}...`);
+  await _restart(log, `Restarting to run ${head.slice(0, 9)}...`);
   return { pulled, converged: true, sha: head, applied: res.applied };
 }
+```
+
+Add the restart seam near the top of `convergence.js`. It is **required**, not a convenience: `scheduleSupervisedRestart` sets `process.exitCode = 1` and schedules a real `process.exit(1)` (`auto-update.js:523-528`), and it is reached through a frozen ESM namespace object, so it cannot be monkeypatched. `scripts/run-suite.mjs:105-108` deletes `INVOCATION_ID`/`CROW_SUPERVISED` suite-wide precisely so "code under test would [not] arm real restart/exit paths inside test processes" — a test that sets `CROW_SUPERVISED=1` to exercise this path would break that invariant and fail the whole file regardless of its assertions.
+
+```js
+let _restartImpl = null;
+async function _restart(log, msg) {
+  if (_restartImpl) return _restartImpl(log, msg);
+  const au = await import("./auto-update.js");
+  return au.scheduleSupervisedRestart(log, msg);
+}
+/** Test-only: capture restarts instead of arming a real process exit. */
+export function _setRestartForTest(fn) { _restartImpl = fn; }
+
+let _supervisedImpl = null;
+/** Test-only: the harness deliberately runs unsupervised, but the convergence
+ *  path must still be exercisable. */
+export function _setSupervisedForTest(fn) { _supervisedImpl = fn; }
+```
+
+and use `_supervisedImpl` in place of the direct `isSupervised()` call when it is set:
+
+```js
+  const { isSupervised } = await import("../shared/supervisor.js");
+  const supervised = _supervisedImpl ? _supervisedImpl() : isSupervised();
+  if (!supervised) { /* …unsupervised branch… */ }
 ```
 
 - [ ] **Step 5: Capture the boot sha at gateway start**
@@ -1444,7 +1545,7 @@ try {
 3. Delete `assert.equal(b.skipped, "locked")` mentally and re-run mutation 1 — confirm the *probe-column* assertion also moves, so the gate does not rest on the status string alone.
 4. Remove the `converge: false` guard → the refusal test (Step 7b) must fail.
 5. Delete the `boot === head` short-circuit → the "current instance does not converge" test (Step 7b) must fail. **This is the most dangerous single line in the design** — without it, every tick migrates and restarts, forever.
-6. Leave `scheduleSupervisedRestart` on `runLockedUpdate`'s success path → the "restart is scheduled exactly once" assertion must fail.
+6. Leave `scheduleSupervisedRestart` on `runLockedUpdate`'s success path → the gate's `assert.equal(restarts.length, 2)` must fail (the winner would restart twice).
 
 *(The previous revision claimed "make `convergeInstance` return before `writePending` → Task 10's tests fail". That was a false mutation claim: all three Task 10 tests call `writePending` directly in the test body and inject `snapshot`/`settled`, so none of them ever reaches `convergeInstance`'s write path. Step 7b below closes that gap for real.)*
 
@@ -1515,7 +1616,7 @@ test("a tree half that refused a restart is not overridden by convergence", asyn
 });
 ```
 
-Also add a source-anchor test for the post-listen wiring, mirroring Task 5's — without it, deleting that whole block leaves every test green while the health gate never runs:
+**Defer this next test to Task 10 Step 4b** — it asserts the `post-listen.js` wiring that Task 10 adds, so it would be red at the end of Task 9. Add it in Task 10, right after the wiring lands. Without it, deleting that whole block leaves every test green while the health gate never runs:
 
 ```js
 test("post-listen wires convergence verification after startAutoUpdate", () => {
@@ -1691,7 +1792,7 @@ export async function verifyPendingConvergence({
     // the Bot Board 500 this whole plan exists to fix would survive it. A store's
     // owner having started is the only reliable happens-before for migrating it.
     // Idempotent by construction: applied ids are skipped by record.
-    await addonsSettled();
+    await settledOrTimeout();
     try {
       const { runMigrations } = await import("../../../scripts/migrations/runner.mjs");
       const r2 = await runMigrations({
@@ -1711,14 +1812,28 @@ export async function verifyPendingConvergence({
   }).catch((err) => console.warn("[convergence] verification skipped:", err.message));
 ```
 
-Give `addonsSettled()` a timeout at this call site so a loader that never settles cannot hang the gate forever — resolve after 10 min and proceed, which yields `unknown`/fail-open rather than `failed`:
+Give `addonsSettled()` a timeout at this call site so a loader that never settles cannot hang the gate forever. **A timeout must NOT simply proceed to the snapshot** — every addon that has not yet connected would read as `missing`, i.e. a regression, and quarantine a healthy sha. That is the opposite of the intended fail-open. The race must report WHY it finished, and a timeout forces `unknown`:
 
 ```js
 const settledOrTimeout = () => Promise.race([
-  addonsSettled(),
-  new Promise((r) => setTimeout(r, 10 * 60 * 1000).unref()),
+  addonsSettled().then(() => "settled"),
+  new Promise((r) => setTimeout(() => r("timeout"), 10 * 60 * 1000).unref()),
 ]);
 ```
+
+and pass the outcome through, so `verifyPendingConvergence` skips the comparison entirely on a timeout:
+
+```js
+    const how = await settledOrTimeout();
+    await conv.verifyPendingConvergence({
+      ...,
+      snapshot: how === "timeout" ? () => { throw new Error("addon loading never settled"); }
+                                  : healthSnapshot,
+      settled: async () => {},
+    });
+```
+
+Throwing from `snapshot` routes into the existing fail-open `catch`, which clears the cookie and returns `unknown` without quarantining — exactly the intended behavior, reusing a path that is already tested.
 
 - [ ] **Step 5: Run** — `node --test tests/convergence-two-instance.test.js tests/migration-guard.test.js` → PASS (migration-guard is untouched by this design and must stay green).
 
@@ -1912,7 +2027,7 @@ git diff origin/main..HEAD | grep -iE "DROP TABLE|DELETE FROM" || echo "no new D
 git diff origin/main..HEAD -- servers/shared/schema-version.js | head -1 || true   # must be empty: no gen bump
 git diff origin/main..HEAD | grep -iE "listen\(|PORT" || echo "no new host port — port-allocation.md unaffected"
 ```
-Also confirm `.crow-convergence-quarantine.json` is gitignored — `convergeInstance` writes it into the repo root, which three gateways and the `pibot-gateways@r4` soak share. Add it to `.gitignore` if absent.
+Also confirm `.crow-convergence-quarantine.json*` is gitignored (a trailing wildcard: `writeAtomic` leaves `.tmp.<pid>` files on a crash, which an exact-name rule would miss). Add `.crow-migration-quarantine.json*` too — it is not ignored today either — `convergeInstance` writes it into the repo root, which three gateways and the `pibot-gateways@r4` soak share. Add it to `.gitignore` if absent.
 
 - [ ] **Step 5: Adversarial whole-branch review**
 
