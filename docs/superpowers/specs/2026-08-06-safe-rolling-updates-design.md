@@ -83,6 +83,36 @@ env, then restarts. Trigger: `bootSha !== tree HEAD`.
 The lock loser stops returning early — it skips the pull it does not need and
 proceeds to convergence. This single split closes Gap 1 and Gap 4 together.
 
+**The split is a restructuring of `checkForUpdates()`, not a new entry point beside
+it.** The scheduled tick (`tickCheck → checkForUpdates`) stays the one production
+path; on lock loss it *falls through* to the instance half instead of returning.
+Adding a second entry point that the timer never calls would leave the whole
+mechanism as dead code while every test passed — the tests would be calling a
+function production never runs.
+
+```
+checkForUpdates():
+    branch guard
+    lock ← acquire(checkout lock)
+    if held:  pulled ← runLockedUpdate()      # tree half, one winner
+    else:     pulled ← false                  # normal, not an error
+    release(lock)
+    return convergeInstance()                 # instance half, ALWAYS
+```
+
+**Convergence owns the restart.** `runLockedUpdate()` currently schedules the
+supervised restart itself on the success path; that must move out, or the winner's
+1.5 s exit timer fires while its own migrations are still running — an interrupted
+`ALTER` on a live store — and the boot cookie, which must be written *before* the
+restart, may never be written at all. The restart on the migration-guard **loss**
+path stays where it is: it exists to reopen a restored DB file, which is unrelated.
+
+**The trigger is `bootSha !== HEAD`, never `pulled`.** `runLockedUpdate()` returns
+`updated: false` on several branches *after* the tree has already moved (quarantine
+skip, `init-db failed — restart withheld`, the loss-and-rollback path). Deciding
+convergence on that flag would let peers converge into code the winner had just
+explicitly refused. `pulled` is informational only.
+
 ## Scope decision: which stores
 
 Live core stores per instance are exactly two: `<data-dir>/crow.db` and
@@ -125,8 +155,21 @@ Additions beyond the original brief, each from a trap that has already cost time
   invocation — bare `node` is v20 (ABI 115) and silently mismatches.
 - Explicit r4 env on **every** out-of-gateway spawn.
 - A **both-DB check**: the primary's `~/.crow/data/*` stores must be unchanged
-  after the run. Bulk writes end with a both-DB count check before declaring
-  success.
+  after the run. This is a **row-count** check, not a hash of the `.db` file —
+  these stores are WAL-mode, so writes land in `crow.db-wal` and the main file's
+  checksum does not move. A hash-only guard would print PASS over exactly the
+  env-leak it exists to catch.
+- The bundle sync **explicitly excludes** `server/db.js` and `server/app-root.js`.
+  Omitting `--delete` prevents deletion, not overwrite, and `-c` selects precisely
+  the files that differ — i.e. the deliberately per-instance ones. (They happen to
+  be byte-identical today; that is luck, not a guarantee.) A `diff -r` report at
+  the end, as the brief asked.
+- The health gate is the **same regression check** the gateway uses, not an
+  absolute one. An absolute "every addon connected" gate would have failed every
+  deploy during Aug 3–5 and demanded rollback of a perfectly good tree — the exact
+  reasoning that makes the gateway's gate regression-based applies here unchanged.
+- Wait on addon settling rather than a fixed `sleep`, for the sequential-connect
+  reason above.
 - A timestamped log line whenever the pull touches `scripts/pi-bots/`, so the
   `pibot-gateways@r4` soak (7-day Phase 0, ends ~2026-08-12) has explainable
   heartbeat gaps.
@@ -164,6 +207,16 @@ month. Creating it lazily means no generation bump, no dryrun rail, no DROP risk
 Idempotence is therefore doubly enforced: by recorded id, and by each migration's
 own shape checks. A migration must be safe to run even if its record is missing.
 
+**A migration whose target tables were all absent is DEFERRED, not applied.** Bundle
+stores are created by their bundle, which may start after the gateway boots — and
+`better-sqlite3` creates an empty DB file on open, so "the table is absent" is the
+normal state on a fresh instance, not an error. Recording such a run as applied
+reproduces Gap 1 exactly: the `tasks` addon later creates `tasks_items` **without**
+`stage`/`assigned_bot`/`plan_ref`, and the registry never retries because the id is
+already recorded. So `run()` returns `{ deferred: true }` when every operation
+skipped for an absent table, and the runner does not record it — it retries on the
+next boot. Absent-table tolerance means "do not crash", not "consider it done".
+
 **ORDER INVARIANT:** the registry runs AFTER the schema guard and BEFORE the first
 `createDbClient()` in the process, for the same reason the guard block does —
 `createDbClient` registers a never-closed per-path WAL keeper, and a later restore
@@ -186,10 +239,11 @@ must be covered the same way.
    at the same millisecond, so lock contention becomes rare rather than certain.
    (Jitter is a robustness measure, not the fix — the fix is item 2.)
 5. **Health gate — a REGRESSION check, not an absolute one.** A health snapshot is
-   exported over `proxy.js`'s existing `connectedServers` Map (`proxy.js:170`,
-   which already carries per-addon `status: connected|disconnected|error`). After a
-   convergence restart the new process verifies: HTTP listener bound, DB readable,
-   and **no addon that was `connected` before the convergence is now failing**.
+   taken over `proxy.js`'s existing `connectedServers` Map (`proxy.js:170`, which
+   already carries per-addon `status: connected|disconnected|error`), **filtered to
+   `entry.isAddon`**. After a convergence restart the new process verifies: HTTP
+   listener bound, DB readable, and **no addon that was `connected` before the
+   convergence is now failing**.
 
    Comparing against "all addons green" would quarantine a perfectly good sha on
    any host that already had a broken addon — which is precisely the state crow was
@@ -197,30 +251,60 @@ must be covered the same way.
    reason. The gate must answer "did this update break something?", not "is
    everything perfect?". Fixes Gap 3.
 
-   Grace window for addon connect: **90 s** — `proxy.js`'s own
-   `CONNECT_TIMEOUT_MS` is 60 s, so the window must exceed one full connect attempt
-   or a slow-but-healthy addon reads as a regression.
+   **The `isAddon` filter is load-bearing, not tidiness.** `connectedServers` also
+   holds remote federation peers (`proxy.js:564,582`, statuses include `offline`)
+   and data backends. Without the filter, a peer crow on a different machine
+   rebooting during the window reads as a local regression — a remote host's uptime
+   would quarantine this host's sha.
+
+   **Timing is by completion signal, not by clock.** `initProxyServers` connects
+   addons **sequentially** (`proxy.js:337`, `for (...) { await connectAddonServer }`)
+   with a 60 s `CONNECT_TIMEOUT_MS` each, so the total is unbounded in addon count.
+   Any fixed grace window is wrong: with two addons hung on their full timeout, a
+   third has not yet been *attempted* and is simply absent from the map — which the
+   comparator would read as `missing`, i.e. a regression, on a sha that is fine.
+   The gate therefore waits on an explicit "addon loop finished" signal from
+   `initProxyServers` before snapshotting, with the boot-cookie deadline as the only
+   backstop.
 6. **Boot cookie:** before restarting, convergence writes a `pending-verification`
    record into the instance data dir carrying the target sha, the **pre-convergence
    health snapshot** (the baseline item 5 compares against), and a deadline of
-   **10 min** from the write. The new boot clears it on pass. A boot that finds a
+   **15 min** from the write. The new boot clears it on pass. A boot that finds a
    **past-deadline** pending record proves the previous convergence failed.
 
-   10 min is chosen to exceed the worst realistic boot: a `SCHEMA_GENERATION`
-   migration under the guard, plus the 90 s addon window. Too short quarantines
-   healthy slow boots; too long leaves a crash-looping instance undetected for that
-   window. Both defaults are constants, adjustable without a schema change.
-7. **On failure: quarantine, never rollback.** Write a quarantine marker for that
-   sha (reusing `servers/shared/migration-guard.js`'s existing marker machinery,
-   which already carries auto-clear-when-main-moves and an attempts cap), fire
-   ntfy, keep running degraded and observable. Peers read the marker and never
-   converge to that sha.
+   15 min exceeds the worst realistic boot: a `SCHEMA_GENERATION` migration under
+   the guard, plus a full sequential addon-connect pass where several addons burn
+   their 60 s timeout. Too short quarantines healthy slow boots; too long leaves a
+   crash-looping instance undetected. The write is tmp-then-rename so a crash
+   mid-write cannot leave torn JSON that `readPending` would silently read as
+   "nothing pending".
+7. **On failure: quarantine, never rollback.** Write a convergence-quarantine
+   marker for that sha, fire ntfy, keep running degraded and observable. Peers read
+   the marker and refuse to converge to that sha.
 
    **The tree is never touched.** `git reset --hard` on a shared checkout would
    let one instance's failed health check drag two healthy peers backward on their
    next boot — one instance's failure becoming a fleet-wide regression. Auto-
    rollback is safe for the single-instance install it was imagined for and unsafe
    for exactly the topology being fixed. (Operator decision, 2026-08-06.)
+
+   **Convergence quarantine gets its OWN marker namespace** —
+   `.crow-convergence-quarantine.json`, with its own reader. It does **not** reuse
+   `servers/shared/migration-guard.js`'s markers. Two existing call sites read those
+   markers with no knowledge of why they were written: `index.js:141` would make a
+   gateway boot **skipping `init-db` entirely** — on an empty database, that means
+   serving with no tables — and `auto-update.js:318` would block all updates
+   host-wide while printing `gen undefined->undefined` at the operator. An addon
+   flapping must not be able to disable schema initialization.
+
+   **The quarantine gates the migrate-and-restart, NOT the pull, and it is
+   time-bounded.** A guard placed before the tree update is a fleet deadlock: a
+   blocked peer never fetches, so the checkout never moves past the bad sha, so the
+   "clears when main moves" escape can never fire — all three gateways freeze until
+   an operator deletes files by hand. That is strictly worse than the starvation
+   being fixed. So: the tree half always runs; only convergence is withheld. The
+   marker also carries a hard **24 h expiry** — after that it is ignored regardless,
+   so no failure mode ends in a permanently wedged host.
 8. **Canary by construction:** because peers honor the quarantine marker, the first
    instance to converge absorbs a bad sha alone. This is what the operator already
    does by hand by treating the primary as canary — now it is structural.
@@ -274,8 +358,15 @@ The gate must be **executable** (Item 2a lesson).
   just crow's co-hosted trio. Mitigated by quarantine-not-rollback, canary-by-
   construction, and the kill switch.
 - **A wrong health gate is worse than none** — a false negative quarantines a good
-  sha fleet-wide. Mitigated by fail-open on unknown, and by the marker's existing
-  auto-clear-when-main-moves behavior, which bounds the damage to one sha.
+  sha fleet-wide. Mitigated by fail-open on unknown, the `isAddon` filter, waiting
+  on the addon-settled signal rather than a clock, and the marker's 24 h hard
+  expiry. No quarantine path may end in a state only manual file deletion recovers.
+- **Concurrency:** the instance half now runs unlocked in three processes against
+  one checkout, while a fourth may be mid-`git pull` or mid-`npm install`. Marker
+  and cookie writes are tmp-then-rename. The registry's boot failure is fail-closed
+  (`process.exit(1)`), which under a crash-loop plus systemd's `StartLimitBurst`
+  could hold a gateway down — so registry failures distinguish "transient, retry
+  next boot" (a locked store) from "genuinely broken" rather than exiting on both.
 - **Shared host, live workstreams:** two other sessions restart/deploy the r4
   gateway, and `pibot-gateways@r4` is mid-soak from the working tree. Deploys go in
   tight verified windows; every `scripts/pi-bots/` pull and every soak-unit restart
