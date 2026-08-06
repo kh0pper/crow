@@ -373,6 +373,12 @@ export function botsClient(esc) {
 				.map(function (block) {
 					if (!block) return "";
 					if (typeof block.text === "string") return block.text;
+					// A toolCall block (rpc-types' shape: {type:"toolCall", name,
+					// arguments}) carries the tool NAME, not readable text — render
+					// it like the live pane's "tool" SSE event does (by name)
+					// instead of the generic "[toolCall]" type placeholder, which
+					// told the operator nothing about what actually ran.
+					if (block.type === "toolCall") return "[tool: " + (block.name || "?") + "]";
 					return block.type ? "[" + block.type + "]" : "";
 				})
 				.filter(Boolean)
@@ -953,7 +959,7 @@ export function botsClient(esc) {
 			setInteractiveState(sid, "error");
 			return null;
 		}
-		const sess = interactive.get(sid) || { botId: botId };
+		const sess = interactive.get(sid) || { botId: botId, turnHadText: false };
 		sess.es = es;
 		interactive.set(sid, sess);
 
@@ -970,6 +976,15 @@ export function botsClient(esc) {
 			if (d.state === "stopped") setTurnInFlight(sid, false);
 		});
 		es.addEventListener("text", function (e) {
+			// The engine's contract (perch-interactive.js): `text` is the
+			// content stream (one event per assistant message_end) and `reply`
+			// is the turn's terminal marker, carrying the SAME text again for
+			// whichever caller never saw the stream. This lens DOES see the
+			// stream, so it renders from `text` and marks the turn as already
+			// rendered — the `reply` handler below is what used to append the
+			// identical bubble a second time on every single turn (D2).
+			const s = interactive.get(sid);
+			if (s) s.turnHadText = true;
 			appendInteractiveEntry(sid, "bot", "bot", parsed(e).text || "");
 		});
 		es.addEventListener("tool", function (e) {
@@ -980,7 +995,13 @@ export function botsClient(esc) {
 			appendInteractiveEntry(sid, "bot log", "log", parsed(e).text || "");
 		});
 		es.addEventListener("reply", function (e) {
-			appendInteractiveEntry(sid, "bot", "bot", parsed(e).text || "");
+			// Terminal marker for the turn. Render reply.text ONLY when no
+			// `text` event landed first (a defensive fallback for a turn that
+			// produced no streamed text at all, e.g. a tool-only turn) — never
+			// unconditionally, or every ordinary turn double-renders (D2).
+			const s = interactive.get(sid);
+			if (!s || !s.turnHadText) appendInteractiveEntry(sid, "bot", "bot", parsed(e).text || "");
+			if (s) s.turnHadText = false; // reset for the next turn
 			setTurnInFlight(sid, false);
 		});
 		es.addEventListener("ask_user", function (e) {
@@ -1010,7 +1031,7 @@ export function botsClient(esc) {
 		}
 		try {
 			const res = await postJson(API + "/bots/" + q(botId) + "/interactive", {});
-			interactive.set(res.sessionId, { botId: botId, state: res.state || "awake", turnInFlight: false, pendingUi: null });
+			interactive.set(res.sessionId, { botId: botId, state: res.state || "awake", turnInFlight: false, pendingUi: null, turnHadText: false });
 			mountInteractive(botId, res.sessionId, res.state || "awake");
 			openInteractiveEvents(botId, res.sessionId);
 		} catch (err) {
@@ -1036,7 +1057,7 @@ export function botsClient(esc) {
 	 * knows (or can adopt from its DB row). */
 	async function resumeInteractive(botId, row) {
 		const sid = String(row.gateway_thread_id);
-		interactive.set(sid, { botId: botId, state: row.state || "hibernating", turnInFlight: false, pendingUi: null });
+		interactive.set(sid, { botId: botId, state: row.state || "hibernating", turnInFlight: false, pendingUi: null, turnHadText: false });
 		mountInteractive(botId, sid, row.state || "hibernating");
 		await loadInteractiveTranscript(botId, sid);
 		openInteractiveEvents(botId, sid);
@@ -1049,6 +1070,11 @@ export function botsClient(esc) {
 		if (!message) return;
 		const sess = interactive.get(sid);
 		const wasAwake = !!(sess && sess.state === "awake");
+		// Defensive reset for a NEW turn (D2): a prior turn that ended via the
+		// `error` path rather than `reply` (prompt_refused, abandonChild) never
+		// clears turnHadText itself — start this turn from a clean slate so its
+		// own reply is never wrongly suppressed as a duplicate.
+		if (sess) sess.turnHadText = false;
 		appendInteractiveEntry(sid, "user", "you", message);
 		box.value = "";
 		// "waking" is client-local (CARRIED HANDOFF): the engine never broadcasts
