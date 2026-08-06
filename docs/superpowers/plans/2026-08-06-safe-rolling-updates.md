@@ -20,6 +20,9 @@
 - **Foreground test runs with direct file capture.** Baseline is **2961 pass / 0 fail** on this worktree.
 - **Every test file that can reach `fireMigrationAlert` MUST call `_setAlertChannelsForTest`** with no-op channels, or the suite sends real ntfy pushes and emails.
 - **Every test that can reach `checkForUpdates` MUST call `_setAppRootForTest(<fixture>)` and restore it**, or it runs git against the real worktree.
+- **Every bare `node --test <file>` in this plan MUST be prefixed `CROW_DISABLE_CONVERGE=1`** unless the file pins its own `CROW_DATA_DIR`/`CROW_DB_PATH`. After Task 9, `checkForUpdates()` with no injected instance resolves paths from env — and `npm test` pins a scratch env (`run-suite.mjs`) but a bare run does **not**. `resolveDataDir()` then falls back to `~/.crow/data`, so the existing auto-update tests would `CREATE TABLE`/`ALTER TABLE` the **live primary gateway's** `crow.db` and `tasks.db` and drop a `convergence-pending.json` the live gateway would act on at its next boot. On a host that has lost databases twice this month, this is the single most dangerous line in the plan.
+- **Add `process.env.CROW_DISABLE_CONVERGE = "1"` at the top of `tests/auto-update-hardening.test.js`, `tests/auto-update-ci-gate.test.js`, and `tests/auto-update-tick-gate.test.js`** (beside their existing `delete process.env.INVOCATION_ID` scrub). Those files test the TREE half; the instance half has its own files.
+- **Restore, never delete, environment variables.** `run-suite.mjs` sets `CROW_DATA_DIR` for the whole child process; a test that does `delete process.env.CROW_DATA_DIR` in a `finally` makes every later test in that file resolve to `~/.crow/data`. Capture the previous value and put it back.
 - **Coordination:** `pibot-gateways@r4` is mid-soak from `~/crow` through ~2026-08-12 — log a timestamp for every pull touching `scripts/pi-bots/` and every restart. Don't touch `~/crow-wt-board` or `~/.crow/p4/harness-wt`.
 
 ---
@@ -109,9 +112,22 @@ primary_counts() {
     [ -f "$d" ] || { echo "$d MISSING"; continue; }
     cp "$d" "/tmp/pcheck.db"; [ -f "$d-wal" ] && cp "$d-wal" "/tmp/pcheck.db-wal"
     [ -f "$d-shm" ] && cp "$d-shm" "/tmp/pcheck.db-shm"
+    # Count USER ROWS in every table, not schema objects. Counting sqlite_master
+    # entries would be blind to exactly the leak this guard exists to catch: an
+    # env-leaked migration that INSERTs or DELETEs rows in the primary leaves the
+    # schema untouched and would print PASS.
     echo -n "$d "
-    sqlite3 /tmp/pcheck.db \
-      "SELECT (SELECT count(*) FROM sqlite_master)||':'||(SELECT coalesce(sum(1),0) FROM sqlite_master WHERE type='table');"
+    sqlite3 /tmp/pcheck.db "
+      SELECT group_concat(n, ',') FROM (
+        SELECT name || '=' || (SELECT count(*) FROM pragma_table_info(name)) AS n
+        FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name);" \
+      2>/dev/null
+    # Row counts require dynamic SQL; emit them per table.
+    for t in $(sqlite3 /tmp/pcheck.db \
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"); do
+      echo -n " $t:$(sqlite3 /tmp/pcheck.db "SELECT count(*) FROM \"$t\";" 2>/dev/null)"
+    done
+    echo
     rm -f /tmp/pcheck.db /tmp/pcheck.db-wal /tmp/pcheck.db-shm
   done
 }
@@ -171,14 +187,10 @@ chmod +x /home/kh0pp/r4-tehcy/scripts/r4-deploy.sh && ls -l /home/kh0pp/r4-tehcy
 The gate is a **regression** check, matching the gateway's. An absolute "all connected" gate would have failed every deploy during Aug 3–5, when `tasks` and `bots-sql-mcp` were legitimately down for an unrelated ABI reason, and demanded rollback of a good tree.
 
 ```bash
-addon_states() {  # id=status per line, from the CURRENT journal
-  journalctl -u crow-r4-gateway --since "-24h" --no-pager 2>/dev/null \
-    | grep -oE 'addon [a-z0-9-]+: (connected|disconnected)' \
-    | awk '{print $2$3}' | sed 's/://' | sort -u | awk -F: '{print}' | tail -50
-}
 BASELINE_CONNECTED=$(journalctl -u crow-r4-gateway --since "-24h" --no-pager 2>/dev/null \
   | grep -oE 'addon [a-z0-9-]+: connected' | awk '{print $2}' | tr -d ':' | sort -u)
-log "baseline connected addons: $(echo "$BASELINE_CONNECTED" | tr '\n' ' ')"
+BASELINE_COUNT=$(echo "$BASELINE_CONNECTED" | grep -c . || true)
+log "baseline connected addons ($BASELINE_COUNT): $(echo "$BASELINE_CONNECTED" | tr '\n' ' ')"
 ```
 
 - [ ] **Step 2: Native ABI rebuild, test-loaded**
@@ -203,12 +215,19 @@ done
 RESTART_AT=$(date -Is)
 run sudo systemctl restart crow-r4-gateway || fail "systemctl restart"
 if [ "$DRY_RUN" = 0 ]; then
-  log "waiting for the addon loop to settle (cap 10m)"
+  # Wait until EVERY baseline addon has reported a terminal state — not until the
+  # first one has. Addons connect sequentially at 60s each, so breaking on the
+  # first line exits while later addons have not even been ATTEMPTED; the
+  # regression gate below would then fail a perfectly healthy deploy.
+  log "waiting for all $BASELINE_COUNT baseline addon(s) to reach a terminal state (cap 10m)"
   for i in $(seq 1 120); do
-    journalctl -u crow-r4-gateway --since "$RESTART_AT" --no-pager 2>/dev/null \
-      | grep -q "Loading .* addon server" && \
-    journalctl -u crow-r4-gateway --since "$RESTART_AT" --no-pager 2>/dev/null \
-      | grep -qE "addon .*: (connected|failed to connect)" && sleep 5 && break
+    J=$(journalctl -u crow-r4-gateway --since "$RESTART_AT" --no-pager 2>/dev/null || true)
+    settled=1
+    for a in $BASELINE_CONNECTED; do
+      echo "$J" | grep -qE "addon $a: (connected|failed to connect)" || { settled=0; break; }
+    done
+    [ "$settled" = 1 ] && { log "all baseline addons settled after $((i*5))s"; break; }
+    [ "$i" = 120 ] && log "WARNING: settle timeout — gating on what has reported so far"
     sleep 5
   done
 fi
@@ -487,7 +506,7 @@ git show --stat HEAD
 - [ ] **Step 1: Write the failing test (append)**
 
 ```js
-test("0001-board-stages: adds columns, DEFERS when every table is absent, idempotent", async () => {
+test("0001-board-stages: adds columns, DEFERS when ANY table is absent, idempotent", async () => {
   const dir = join(import.meta.dirname, "..", "scripts", "migrations");
 
   // (a) All targets absent → deferred, NOT recorded.
@@ -498,6 +517,26 @@ test("0001-board-stages: adds columns, DEFERS when every table is absent, idempo
       "a fresh instance has no tasks_items yet — recording this as applied is the original bug");
     assert.ok(!r.applied.includes("0001-board-stages"));
   } finally { rmSync(bare.root, { recursive: true, force: true }); }
+
+  // (a2) THE PRODUCTION SHAPE: crow.db tables present (init-db has run), tasks.db
+  // table absent (the bundle has not started). This is every real instance at boot,
+  // and an `all absent` rule would wrongly mark it applied here.
+  const mixed = fixture();
+  try {
+    const c = new Database(mixed.dbPath);
+    c.prepare("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY)").run();
+    c.prepare("CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY)").run();
+    c.close();
+    const r = await runMigrations({ migrationsDir: dir, dbPath: mixed.dbPath, tasksDbPath: mixed.tasksDbPath });
+    assert.ok(r.deferred.includes("0001-board-stages"),
+      "crow.db tables present + tasks_items absent MUST defer — this is the real-instance shape");
+    assert.ok(!r.applied.includes("0001-board-stages"),
+      "recording it here is exactly the bug: tasks_items gets created later WITHOUT the columns");
+    // The crow.db half still applied its columns — deferral is about the RECORD.
+    const c2 = new Database(mixed.dbPath);
+    assert.ok(c2.prepare("PRAGMA table_info(project_spaces)").all().map((x) => x.name).includes("repo_path"));
+    c2.close();
+  } finally { rmSync(mixed.root, { recursive: true, force: true }); }
 
   // (b) tasks_items present → applied, columns added, re-runnable.
   const f = fixture();
@@ -563,9 +602,16 @@ export function run({ dbPath, tasksDbPath, log = () => {} }) {
     }
   } finally { cdb.close(); }
 
-  // Every target table missing means this instance's stores do not exist YET —
-  // not that the work is done. Defer so the runner retries on the next boot.
-  if (results.every((r) => r === "absent")) return { deferred: true };
+  // ANY absent target means this instance's stores do not all exist YET — not
+  // that the work is done. Defer so the runner retries after the addons settle.
+  //
+  // `any`, NOT `all`. This migration spans two databases: project_spaces lives in
+  // crow.db and is created by init-db.js (so it is ALWAYS present by the time the
+  // boot registry runs), while tasks_items lives in tasks.db and is created by the
+  // tasks BUNDLE, which starts after the gateway boots. An `all` rule would never
+  // fire on a real instance — project_spaces alone would mark the whole migration
+  // applied and the tasks_items columns would never land. That is the original bug.
+  if (results.includes("absent")) return { deferred: true };
 }
 ```
 
@@ -683,7 +729,7 @@ CROW_HOME=$S CROW_DATA_DIR=$S/data CROW_DB_PATH=$S/data/crow.db \
 CROW_AUTO_UPDATE=0 CROW_ALLOW_ORPHAN=1 PORT=3099 \
 timeout 120 node servers/gateway/index.js --no-auth 2>&1 | tee $S/boot.log | head -60
 ```
-Expected: `[migrations] deferred (will retry): 0001-board-stages` — a wiped instance has no `tasks_items` yet, so **deferred is the correct outcome here, not applied**. Gateway reaches its listen line. Then confirm `~/.crow/data/crow.db` mtime is unchanged.
+Expected, in this order: `[migrations] deferred (will retry): 0001-board-stages` at boot (a wiped instance has no `tasks_items` yet, so **deferred is correct here, not applied**), the gateway's listen line, and then — only if a `tasks` bundle is installed — `[migrations:post-settle] applied: 0001-board-stages`. With no bundles installed, `[migrations:post-settle] STILL deferred` is the correct outcome. Then confirm `~/.crow/data/crow.db` mtime is unchanged.
 
 - [ ] **Step 7: Full suite** — `npm test > …/suite-partA.log 2>&1`, then `grep -E "^# (tests|pass|fail|cancelled)"`. Expected `# fail 0`, `# cancelled 0`.
 
@@ -779,14 +825,41 @@ export function healthSnapshot() {
 
 let _settledResolve;
 const _settled = new Promise((r) => { _settledResolve = r; });
-/** Resolves once initProxyServers' addon-connect loop has finished. Addons
- *  connect SEQUENTIALLY at CONNECT_TIMEOUT_MS each, so total time is unbounded
- *  in addon count and no fixed grace window is correct. */
+/** Resolves once addon loading has finished — however it finished. Addons connect
+ *  SEQUENTIALLY at CONNECT_TIMEOUT_MS each, so total time is unbounded in addon
+ *  count and no fixed grace window is correct. */
 export function addonsSettled() { return _settled; }
 export function _markAddonsSettled() { _settledResolve?.(); }
 ```
 
-Then call `_markAddonsSettled()` at the end of the addon `for` loop in `initProxyServers` (after the loop at `proxy.js:337-344`), and also on the `entries.length === 0` early return, so it always resolves.
+**Resolve it in a `finally` wrapping the whole body of `initProxyServers`** — NOT at the end of the addon loop. That loop lives in `loadAddonServers`, which returns early three different ways before ever reaching it (`proxy.js:323` no `mcp-addons.json` — the common case on a fresh instance; the `JSON.parse` catch; `entries.length === 0`), and `initProxyServers` is itself called fire-and-forget with a `.catch` at `post-listen.js:168`. Resolving only at the end of the loop means the signal never fires on any of those paths — the gate then awaits forever, the cookie is never cleared, and the *next* boot reads an expired cookie and quarantines a sha that was healthy all along.
+
+```js
+export async function initProxyServers() {
+  try {
+    // ...existing body unchanged...
+  } finally {
+    _markAddonsSettled();
+  }
+}
+```
+
+- [ ] **Step 3b: Write the test that would have caught this**
+
+```js
+test("addonsSettled resolves even when there is no mcp-addons.json", async () => {
+  const { addonsSettled, _markAddonsSettled } = await import("../servers/gateway/proxy.js");
+  let resolved = false;
+  addonsSettled().then(() => { resolved = true; });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(resolved, false, "must not be resolved before the loader runs");
+  _markAddonsSettled();
+  await addonsSettled();
+  assert.equal(resolved, true);
+});
+```
+
+Then mutate: move `_markAddonsSettled()` from the `finally` to the end of the addon loop and run a gateway with no `mcp-addons.json` — `verifyPendingConvergence` must be seen to hang. That behavioral check is the real proof; the unit test above only pins the primitive.
 
 - [ ] **Step 4: Create convergence.js with the comparator**
 
@@ -932,9 +1005,15 @@ const PENDING_FILE = "convergence-pending.json";
 const QUARANTINE_FILE = ".crow-convergence-quarantine.json";
 
 /** Atomic: a crash mid-write must not leave torn JSON that readPending would
- *  silently swallow as "nothing pending". */
+ *  silently swallow as "nothing pending".
+ *
+ *  The tmp path is PER-PROCESS. The repo-root quarantine marker has three writers
+ *  (one per co-hosted gateway); a shared `${path}.tmp` lets P2's O_TRUNC land in
+ *  the middle of P1's write, and P1 then renames the resulting byte-salad into
+ *  place ATOMICALLY. Every peer's JSON.parse then throws, readConvQuarantine
+ *  returns null, and the canary's failure is silently discarded. */
 function writeAtomic(path, obj) {
-  const tmp = `${path}.tmp`;
+  const tmp = `${path}.tmp.${process.pid}`;
   writeFileSync(tmp, JSON.stringify(obj, null, 2));
   renameSync(tmp, path);
 }
@@ -1219,13 +1298,39 @@ Replace the lock-loss early return (lines 209-223) so it **falls through**:
       pulled = Boolean(treeResult?.updated);
     }
 
-    // The INSTANCE half — always, for every gateway, lock or no lock.
+    // The INSTANCE half — for every gateway, lock or no lock, EXCEPT when this
+    // process's own tree half explicitly refused a restart.
+    //
+    // runLockedUpdate returns updated:false on three branches whose entire purpose
+    // is to withhold the restart: "init-db failed — restart withheld", and both
+    // migration-guard loss paths. The tree has already moved on all three, so
+    // bootSha !== HEAD is true and a naive fall-through restarts anyway — into a
+    // sha whose init-db just failed. The boot guard then hits index.js:183
+    // process.exit(1), systemd restarts, same again, StartLimitBurst is exhausted,
+    // and the UNIT IS DEAD — on each co-hosted gateway as its own tick arrives.
+    // A peer may still converge (it refused nothing, and the quarantine markers
+    // guard the genuinely-bad shas); the process that refused does not.
+    if (treeResult?.converge === false) {
+      log("instance half skipped — this process's own update refused a restart");
+      return { ...treeResult, pulled, converged: false, skipped: "refused" };
+    }
     const { convergeInstance } = await import("./convergence.js");
-    const conv = await convergeInstance({ instance, pulled, log });
+    const conv = await convergeInstance({ appRoot: APP_ROOT, instance, pulled, log });
     return { ...treeResult, pulled, converged: conv.converged, applied: conv.applied };
 ```
 
 and change the signature to `export async function checkForUpdates({ instance = null } = {})`.
+
+Passing `APP_ROOT` is **required, not tidiness**: `convergeInstance`'s fallback derives the root from `import.meta.url`, which is the real worktree. Without this, the two-instance gate's tree half operates on the fixture while its instance half operates on `~/crow-wt-rolling` — reading the real `scripts/migrations/`, so the fixture's probe migration is never discovered and the gate can never pass, while `.crow-convergence-quarantine.json` gets written into a checkout three live gateways share.
+
+- [ ] **Step 3b: Mark every refusal branch in `runLockedUpdate`**
+
+Add `converge: false` to the three returns that withhold a restart — the `init-db failed (exit N)` return (~line 475), and both migration-guard loss returns (~line 441 and ~line 464). Leave every other return alone: a successful update, an "up to date", a CI-gate skip and a quarantine skip did **not** refuse anything.
+
+```js
+    return { updated: false, error: msg, converge: false };            // init-db failed
+    return { updated: false, error: msg, quarantined: true, converge: false };  // both loss paths
+```
 
 - [ ] **Step 4: Implement `convergeInstance`**
 
@@ -1274,8 +1379,15 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
     return { pulled, converged: false, skipped: "quarantined", sha: head, applied: [] };
   }
 
+  // A null boot sha is a REFUSAL, not a licence. setBootSha is best-effort; if
+  // `git rev-parse` failed, treating null as "not current" would converge and
+  // restart on every tick forever, and the health gate could not stop it —
+  // classifyPending with a null bootSha returns "stale", which clears the cookie
+  // without ever verifying. Same for an empty head.
   const boot = getBootSha();
-  if (boot && boot === head) return { pulled, converged: false, skipped: "current", sha: head, applied: [] };
+  if (!head) return { pulled, converged: false, skipped: "no-head", sha: null, applied: [] };
+  if (!boot) return { pulled, converged: false, skipped: "no-boot-sha", sha: head, applied: [] };
+  if (boot === head) return { pulled, converged: false, skipped: "current", sha: head, applied: [] };
 
   const { runMigrations } = await import("../../scripts/migrations/runner.mjs");
   const { join } = await import("node:path");
@@ -1284,10 +1396,22 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
     dbPath: inst.dbPath, tasksDbPath: inst.tasksDbPath, sha: head, log,
   });
 
-  // Baseline BEFORE the restart, from the still-live process, then hand it
-  // across the restart in the cookie.
+  // Without a supervisor, scheduleSupervisedRestart is a SILENT no-op. Writing a
+  // deadline-bearing cookie and then not restarting means the deadline passes and
+  // the next boot — hours later, on code that ran fine the whole time — classifies
+  // it "failed" and quarantines a healthy sha for every instance sharing this
+  // checkout. Migrate, tell the operator, write nothing.
+  const { isSupervised } = await import("../shared/supervisor.js");
+  if (!isSupervised()) {
+    log(`migrations applied for ${head.slice(0, 9)}; no supervisor — restart manually to load the new code`);
+    return { pulled, converged: false, skipped: "unsupervised", sha: head, applied: res.applied };
+  }
+
+  // Baseline BEFORE the restart, from the still-live process, handed across the
+  // restart in the cookie. An empty baseline means "nothing was connected", which
+  // compareHealth treats as never-regresses — the correct fail-open reading.
   let baseline = {};
-  try { ({ healthSnapshot: baseline } = {}); const p = await import("./proxy.js"); baseline = p.healthSnapshot(); } catch {}
+  try { const p = await import("./proxy.js"); baseline = p.healthSnapshot(); } catch {}
   writePending(inst.dataDir, { sha: head, baseline });
 
   const au = await import("./auto-update.js");
@@ -1295,8 +1419,6 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
   return { pulled, converged: true, sha: head, applied: res.applied };
 }
 ```
-
-Clean up the `baseline` line to a plain `try { const p = await import("./proxy.js"); baseline = p.healthSnapshot(); } catch {}` when implementing.
 
 - [ ] **Step 5: Capture the boot sha at gateway start**
 
@@ -1319,7 +1441,89 @@ try {
 1. Restore the early `return` in the lock-loss branch → **beta must fail.** *(Under the previous harness this mutation could not go red, because sequential calls never contended. If it stays green now, the gate is still worthless — stop and fix it.)*
 2. Guard the instance half with `if (pulled) { ... }` → beta must fail.
 3. Delete `assert.equal(b.skipped, "locked")` mentally and re-run mutation 1 — confirm the *probe-column* assertion also moves, so the gate does not rest on the status string alone.
-4. Make `convergeInstance` return before `writePending` → Task 10's verification tests fail.
+4. Remove the `converge: false` guard → the refusal test (Step 7b) must fail.
+5. Delete the `boot === head` short-circuit → the "current instance does not converge" test (Step 7b) must fail. **This is the most dangerous single line in the design** — without it, every tick migrates and restarts, forever.
+6. Leave `scheduleSupervisedRestart` on `runLockedUpdate`'s success path → the "restart is scheduled exactly once" assertion must fail.
+
+*(The previous revision claimed "make `convergeInstance` return before `writePending` → Task 10's tests fail". That was a false mutation claim: all three Task 10 tests call `writePending` directly in the test body and inject `snapshot`/`settled`, so none of them ever reaches `convergeInstance`'s write path. Step 7b below closes that gap for real.)*
+
+- [ ] **Step 7b: Tests for the seams no existing test covers**
+
+Each of these currently survives every mutation in the plan — they are the "silently dead seam" class that `healthSnapshot` was fixed for.
+
+```js
+test("convergeInstance writes the cookie with the REAL pre-restart baseline", async () => {
+  const f = twoInstanceFixture();
+  _setAppRootForTest(f.work);
+  const { convergeInstance, setBootSha, readPending } = await import("../servers/gateway/convergence.js");
+  const { connectedServers } = await import("../servers/gateway/proxy.js");
+  connectedServers.clear();
+  connectedServers.set("tasks", { status: "connected", isAddon: true });
+  process.env.CROW_SUPERVISED = "1";                    // else convergence refuses
+  setBootSha("older-than-head");
+  try {
+    f.advanceOrigin("0002-converge-probe.mjs", MIGRATION_BODY);
+    await convergeInstance({ appRoot: f.work, instance: f.instances[0] });
+    const p = readPending(f.instances[0].dataDir);
+    assert.ok(p, "convergence MUST write the cookie before restarting");
+    assert.equal(p.sha, g(f.work, "rev-parse", "HEAD"));
+    assert.deepEqual(p.baseline, { tasks: "connected" },
+      "the baseline must be the live snapshot, not an empty object");
+  } finally { delete process.env.CROW_SUPERVISED; connectedServers.clear(); }
+});
+
+test("a CURRENT instance does not converge, and an UNSUPERVISED one writes no cookie", async () => {
+  const f = twoInstanceFixture();
+  const { convergeInstance, setBootSha, readPending } = await import("../servers/gateway/convergence.js");
+  const head = g(f.work, "rev-parse", "HEAD");
+
+  setBootSha(head);
+  const cur = await convergeInstance({ appRoot: f.work, instance: f.instances[0] });
+  assert.equal(cur.skipped, "current", "an up-to-date instance must not restart every tick");
+
+  setBootSha(null);
+  const nul = await convergeInstance({ appRoot: f.work, instance: f.instances[0] });
+  assert.equal(nul.skipped, "no-boot-sha", "a null boot sha must REFUSE, not converge forever");
+
+  setBootSha("older");
+  f.advanceOrigin("0003-probe2.mjs", MIGRATION_BODY.replace(/0002-converge-probe/g, "0003-probe2"));
+  delete process.env.INVOCATION_ID; delete process.env.CROW_SUPERVISED;   // unsupervised
+  const uns = await convergeInstance({ appRoot: f.work, instance: f.instances[1] });
+  assert.equal(uns.skipped, "unsupervised");
+  assert.equal(readPending(f.instances[1].dataDir), null,
+    "no supervisor means no restart — a cookie here would expire and quarantine a HEALTHY sha");
+});
+
+test("a tree half that refused a restart is not overridden by convergence", async () => {
+  // The crash-loop case: init-db failed post-pull, restart deliberately withheld.
+  // Convergence must NOT restart into that sha — index.js:183 exits 1, systemd
+  // retries, StartLimitBurst is exhausted, and the unit is dead.
+  const f = twoInstanceFixture();
+  _setAppRootForTest(f.work);
+  _setDbForTest(stubDb());
+  // Land a commit whose init-db.js exits nonzero.
+  writeFileSync(join(f.work, "scripts", "init-db.js"), "process.exit(3);\n");
+  g(f.work, "add", "-A"); g(f.work, "commit", "-m", "bad init-db");
+  g(f.work, "push", "origin", "main"); g(f.work, "reset", "--hard", "HEAD~1");
+  setBootSha(g(f.work, "rev-parse", "HEAD"));
+
+  const r = await checkForUpdates({ instance: f.instances[0] });
+  assert.equal(r.converged, false, "the process that refused must not converge");
+  assert.equal(r.skipped, "refused");
+  assert.equal(hasProbe(f.instances[0].tasksDbPath), false, "no migrations after a refusal");
+});
+```
+
+Also add a source-anchor test for the post-listen wiring, mirroring Task 5's — without it, deleting that whole block leaves every test green while the health gate never runs:
+
+```js
+test("post-listen wires convergence verification after startAutoUpdate", () => {
+  const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "boot", "post-listen.js"), "utf8");
+  const start = src.indexOf("startAutoUpdate(");
+  const verify = src.indexOf("verifyPendingConvergence");
+  assert.ok(start > 0 && verify > start, "verification must be wired, and after auto-update starts");
+});
+```
 
 - [ ] **Step 8: Existing auto-update tests** — `node --test tests/auto-update-hardening.test.js tests/auto-update-ci-gate.test.js tests/auto-update-tick-gate.test.js`. These call `checkForUpdates()` with no argument; the new optional-object signature must keep them passing. The lock-skip message changed — update any assertion to the new text and confirm it still asserts behavior, not just a string.
 
@@ -1477,12 +1681,42 @@ export async function verifyPendingConvergence({
     const { fileURLToPath } = await import("node:url");
     const appRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
     const inst = await conv.resolveInstance();
+
+    // SECOND registry pass, after the addons have settled. The boot pass (Task 5)
+    // runs before serving, when crow.db's tables exist but bundle-owned stores do
+    // NOT — the tasks bundle creates tasks_items only once it starts, which is
+    // after boot. A boot-only registry defers tasks_items and then never retries,
+    // because a current instance short-circuits its ticks on bootSha === HEAD:
+    // the Bot Board 500 this whole plan exists to fix would survive it. A store's
+    // owner having started is the only reliable happens-before for migrating it.
+    // Idempotent by construction: applied ids are skipped by record.
+    await addonsSettled();
+    try {
+      const { runMigrations } = await import("../../../scripts/migrations/runner.mjs");
+      const r2 = await runMigrations({
+        migrationsDir: join(appRoot, "scripts", "migrations"),
+        dbPath: inst.dbPath, tasksDbPath: inst.tasksDbPath,
+        log: (m) => console.log(`[migrations:post-settle] ${m}`),
+      });
+      if (r2.applied.length) console.log(`[migrations:post-settle] applied: ${r2.applied.join(", ")}`);
+      if (r2.deferred.length) console.warn(`[migrations:post-settle] STILL deferred: ${r2.deferred.join(", ")} — the owning bundle may not be installed`);
+    } catch (err) { console.warn("[migrations:post-settle] skipped:", err.message); }
+
     await conv.verifyPendingConvergence({
       dataDir: inst.dataDir, appRoot, bootSha: conv.getBootSha(),
-      snapshot: healthSnapshot, settled: addonsSettled,
+      snapshot: healthSnapshot, settled: async () => {},   // already awaited above
       log: (m) => console.log(`[convergence] ${m}`),
     });
   }).catch((err) => console.warn("[convergence] verification skipped:", err.message));
+```
+
+Give `addonsSettled()` a timeout at this call site so a loader that never settles cannot hang the gate forever — resolve after 10 min and proceed, which yields `unknown`/fail-open rather than `failed`:
+
+```js
+const settledOrTimeout = () => Promise.race([
+  addonsSettled(),
+  new Promise((r) => setTimeout(r, 10 * 60 * 1000).unref()),
+]);
 ```
 
 - [ ] **Step 5: Run** — `node --test tests/convergence-two-instance.test.js tests/migration-guard.test.js` → PASS (migration-guard is untouched by this design and must stay green).

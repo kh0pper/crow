@@ -110,8 +110,34 @@ path stays where it is: it exists to reopen a restored DB file, which is unrelat
 **The trigger is `bootSha !== HEAD`, never `pulled`.** `runLockedUpdate()` returns
 `updated: false` on several branches *after* the tree has already moved (quarantine
 skip, `init-db failed — restart withheld`, the loss-and-rollback path). Deciding
-convergence on that flag would let peers converge into code the winner had just
-explicitly refused. `pulled` is informational only.
+convergence on that flag would let a peer sit on stale code indefinitely just
+because *this* process did not pull. `pulled` is informational only.
+
+**But a process must honor its OWN refusal.** Three of those branches exist
+precisely to withhold a restart: `init-db failed — restart withheld`, and both
+migration-guard loss paths. `bootSha !== HEAD` is true on all of them, so a naive
+fall-through restarts anyway — into a sha whose `init-db` just failed. The boot guard
+then hits `index.js:183` `process.exit(1)`, systemd restarts, the same thing
+happens, `StartLimitBurst` is exhausted, and **the unit is dead** — on each
+co-hosted gateway as its own tick arrives. So `runLockedUpdate` returns an explicit
+`converge: false` on every refusal branch, and `checkForUpdates` skips the instance
+half when its own tree half said so. A *peer* may still converge (it did not refuse
+anything, and the quarantine markers already guard the genuinely-bad cases); the
+process that refused does not.
+
+**Convergence requires a supervisor.** `scheduleSupervisedRestart` is a silent no-op
+when `isSupervised()` is false. Writing a deadline-bearing cookie and then not
+restarting means the deadline passes, and the next boot — hours later, on code that
+ran fine the whole time — classifies it `failed` and quarantines a healthy sha for
+every instance sharing the checkout. So convergence checks `isSupervised()` **before**
+writing the cookie: unsupervised instances run migrations, log that a manual restart
+is needed to load the new code, and write nothing.
+
+**A null boot sha means "do not converge".** `setBootSha` is best-effort; if
+`git rev-parse` fails, `BOOT_SHA` stays null. Treating null as "not current" would
+converge and restart on every tick forever, and the health gate could not stop it
+(`classifyPending` with a null boot sha returns `stale`, which clears the cookie
+without verifying). Null must be a refusal, not a licence.
 
 ## Scope decision: which stores
 
@@ -207,15 +233,29 @@ month. Creating it lazily means no generation bump, no dryrun rail, no DROP risk
 Idempotence is therefore doubly enforced: by recorded id, and by each migration's
 own shape checks. A migration must be safe to run even if its record is missing.
 
-**A migration whose target tables were all absent is DEFERRED, not applied.** Bundle
-stores are created by their bundle, which may start after the gateway boots — and
+**A migration with ANY absent target table is DEFERRED, not applied.** Bundle stores
+are created by their bundle, which starts *after* the gateway boots — and
 `better-sqlite3` creates an empty DB file on open, so "the table is absent" is the
-normal state on a fresh instance, not an error. Recording such a run as applied
-reproduces Gap 1 exactly: the `tasks` addon later creates `tasks_items` **without**
+normal state at boot, not an error. Recording such a run as applied reproduces Gap 1
+exactly: the `tasks` addon later creates `tasks_items` **without**
 `stage`/`assigned_bot`/`plan_ref`, and the registry never retries because the id is
-already recorded. So `run()` returns `{ deferred: true }` when every operation
-skipped for an absent table, and the runner does not record it — it retries on the
-next boot. Absent-table tolerance means "do not crash", not "consider it done".
+already recorded. Absent-table tolerance means "do not crash", not "consider it done".
+
+The rule is **any**, not **all**. `0001-board-stages` spans two databases:
+`project_spaces` in `crow.db` (created by `init-db.js`, so always present after the
+boot guard) and `tasks_items` in `tasks.db` (created by the tasks bundle, so absent
+at boot). An "all absent" rule would never fire on a real instance — one present
+table would mark the whole migration applied and the `tasks_items` columns would
+never land.
+
+**The registry therefore runs TWICE per boot: once before serving, and again after
+the addon-settled signal.** The boot run covers `crow.db`, whose tables exist by
+then. The post-settle run covers bundle-owned stores, which only exist once their
+bundle has started — and a store's owner starting is the only reliable
+happens-before for migrating it. Running only at boot would defer `tasks_items`
+forever on a long-lived gateway, since a current instance short-circuits its ticks.
+The second pass is idempotent by construction: already-applied ids are skipped by
+record, and every body is shape-checked anyway.
 
 **ORDER INVARIANT:** the registry runs AFTER the schema guard and BEFORE the first
 `createDbClient()` in the process, for the same reason the guard block does —
@@ -263,9 +303,18 @@ must be covered the same way.
    Any fixed grace window is wrong: with two addons hung on their full timeout, a
    third has not yet been *attempted* and is simply absent from the map — which the
    comparator would read as `missing`, i.e. a regression, on a sha that is fine.
-   The gate therefore waits on an explicit "addon loop finished" signal from
-   `initProxyServers` before snapshotting, with the boot-cookie deadline as the only
-   backstop.
+   The gate therefore waits on an explicit "addon loop finished" signal before
+   snapshotting.
+
+   **That signal must be unmissable.** `loadAddonServers` returns early three
+   different ways before reaching its loop — no `mcp-addons.json` (the common case
+   on a fresh instance), unparseable JSON, or zero entries — and `initProxyServers`
+   is invoked fire-and-forget with a `.catch`. Resolving the signal only at the end
+   of the loop means it never resolves on those paths, the gate awaits forever, the
+   cookie is never cleared, and the *next* boot reads an expired cookie and
+   quarantines a sha that was healthy all along. So the signal resolves in a
+   `finally` around the whole of `initProxyServers`, and the wait carries its own
+   timeout that resolves to **unknown / fail open** — never to `failed`.
 6. **Boot cookie:** before restarting, convergence writes a `pending-verification`
    record into the instance data dir carrying the target sha, the **pre-convergence
    health snapshot** (the baseline item 5 compares against), and a deadline of
