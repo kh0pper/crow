@@ -52,6 +52,12 @@ const ERROR_MAP = {
   interactive_capacity: [409, "interactive_capacity"],
   pi_capacity: [409, "pi_capacity"],
   turn_in_progress: [409, "turn_in_progress"],
+  // D1 (C-19 acceptance): the child died between the reservation and the
+  // turn actually starting (a wake that raced a kill, or an already-awake
+  // child killed a beat before the message() call reached it). 409, not 500
+  // — the session is honestly gone-and-hibernating, not broken; a retry
+  // wakes a fresh child.
+  pi_gone: [409, "pi_gone"],
   no_such_session: [404, "no_such_session"],
   session_stopped: [410, "stopped"],
   no_such_request: [409, "no_such_request"],

@@ -429,6 +429,70 @@ test("message: a second message while a turn is in flight is refused with turn_i
   assert.equal(state.instances[0].turns.length, 1);
 });
 
+test("D1: a child that dies during the WAKE's own trailing awaits is caught before promptTurn — and never wedges the session at 'awake' with no child (the worse D1 variant)", async () => {
+  const { engine, clock, state } = makeEngine({ env: { PERCH_INTERACTIVE_MAX_AWAKE: "1" } });
+  const s = await spawned(engine, "wedgy");
+  clock.advance(600_001);
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+
+  const sink = await collect(engine, s.sessionId);
+  state.piScript = (pi, idx) => {
+    if (idx !== 1) return;
+    // The child dies WHILE startChild's own trailing `pi.getState()` call is
+    // in flight (I-3's technique, but exiting instead of throwing). Because
+    // that call resolves (rather than rejects), startChild runs to
+    // completion and reaches its OWN unconditional tail — `s.state =
+    // "awake"; writeLeases();` — which clobbers attachExit's already-correct
+    // "hibernating" back to "awake" with s.pi left null. This is the
+    // acceptance report's "worse variant", observed once and not reduced to
+    // a deterministic repro there; here it is deterministic. message()'s own
+    // post-wake guard is the thing that must catch it: it keys off `s.pi`
+    // liveness, not `s.state`, so it corrects the clobbered state instead of
+    // trusting it.
+    const realGetState = pi.getState.bind(pi);
+    pi.getState = async () => {
+      pi.exit(-1);
+      return realGetState();
+    };
+  };
+  await assert.rejects(
+    () => engine.message(s.sessionId, "wake me"),
+    (e) => e.code === "pi_gone",
+    "a typed refusal, never the raw TypeError the null-deref used to leak"
+  );
+  state.piScript = null;
+
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating",
+    "never wedged 'awake' with no child, even though startChild's tail unconditionally sets state=awake");
+  assert.ok(sink.ofType("error").length >= 1, "an honest error event reaches the lens");
+
+  // The awake slot really is free: a brand-new spawn works immediately,
+  // proving PERCH_INTERACTIVE_MAX_AWAKE was never permanently pinned.
+  const other = await spawned(engine, "other");
+  assert.equal((await engine.get(other.sessionId)).state, "awake");
+});
+
+test("D1: a child that dies WHILE the pre-turn stats call is in flight is caught by the second guard, not promptTurn's null-deref", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  const realGetSessionStats = pi.getSessionStats.bind(pi);
+  // The kill lands mid-round-trip: by the time this call's promise settles,
+  // attachExit has already nulled s.pi — exercising the SECOND guard site
+  // (after getSessionStats, before promptTurn), not the first.
+  pi.getSessionStats = async () => {
+    pi.exit(-1);
+    return realGetSessionStats();
+  };
+  await assert.rejects(
+    () => engine.message(s.sessionId, "dies mid-stats"),
+    (e) => e.code === "pi_gone"
+  );
+  assert.equal(pi.turns.length, 0, "promptTurn is never called on the now-dead child");
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+});
+
 test("clean completion: meters + audits, emits reply, trims the log, and parks the row", async () => {
   const { engine, state } = makeEngine();
   const s = await spawned(engine);
