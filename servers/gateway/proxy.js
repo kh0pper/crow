@@ -266,6 +266,15 @@ function cleanupStaleAddonProcesses() {
  * Call this once at gateway startup; it spawns all configured servers.
  */
 export async function initProxyServers() {
+  // The settled signal MUST fire however this function exits — the early
+  // `configured.length === 0` return, a throw from any loader, or the normal
+  // path. initProxyServers is invoked fire-and-forget with a .catch in
+  // boot/post-listen.js, so a signal that only fires at the end of the addon
+  // loop would never resolve on a host with no mcp-addons.json (the common
+  // fresh-install case). The convergence health gate awaits this; an unresolved
+  // promise there means the boot cookie is never cleared and the NEXT boot
+  // quarantines a sha that was healthy all along.
+  try {
   cleanupStaleAddonProcesses();
 
   const configured = INTEGRATIONS.filter((i) => {
@@ -311,6 +320,9 @@ export async function initProxyServers() {
 
   // Load bundle-installed MCP servers from <crow-home>/mcp-addons.json
   await loadAddonServers();
+  } finally {
+    _markAddonsSettled();
+  }
 }
 
 /**
@@ -645,6 +657,40 @@ async function createRemoteInstanceClient(instance) {
   ]);
 
   return client;
+}
+
+/**
+ * Addon id → connection status, for the convergence health gate.
+ *
+ * ADDONS ONLY. connectedServers also holds remote federation peers (whose status
+ * flips to "offline" whenever a crow on another machine reboots) and dynamic
+ * data backends. Including them would let a remote host's uptime quarantine
+ * this host's sha — a regression that has nothing to do with the update.
+ */
+export function healthSnapshot() {
+  const snap = {};
+  for (const [id, entry] of connectedServers) {
+    if (entry.isAddon) snap[id] = entry.status;
+  }
+  return snap;
+}
+
+let _settledResolve = null;
+const _settled = new Promise((r) => { _settledResolve = r; });
+
+/**
+ * Resolves once addon loading has finished — however it finished.
+ *
+ * Addons connect SEQUENTIALLY with a 60s CONNECT_TIMEOUT_MS each, so the total
+ * is unbounded in addon count and no fixed grace window is correct: with two
+ * addons hung on their full timeout, a third has not yet been *attempted* and
+ * would read as "missing", i.e. a false regression, on a perfectly good sha.
+ */
+export function addonsSettled() { return _settled; }
+
+/** Marked from initProxyServers' `finally`. Idempotent. */
+export function _markAddonsSettled() {
+  if (_settledResolve) { _settledResolve(); _settledResolve = null; }
 }
 
 /**
