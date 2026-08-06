@@ -6,7 +6,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { connectedServers, healthSnapshot, addonsSettled, _markAddonsSettled } from "../servers/gateway/proxy.js";
-import { compareHealth } from "../servers/gateway/convergence.js";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  compareHealth,
+  writePending, readPending, clearPending, classifyPending,
+  writeConvQuarantine, readConvQuarantine, clearConvQuarantine,
+  PENDING_TTL_MS, QUARANTINE_TTL_MS,
+} from "../servers/gateway/convergence.js";
 
 // The suite must never believe it is supervised — code under test would arm
 // real restart/exit paths inside this process.
@@ -75,4 +83,75 @@ test("compareHealth flags only REGRESSIONS, never pre-existing breakage", () => 
   assert.equal(compareHealth({}, { anything: "error" }).ok, true,
     "an empty baseline never regresses — the correct fail-open reading");
   assert.equal(compareHealth(null, null).ok, true, "null inputs must not throw");
+});
+
+test("the tuned constants are pinned to their justified values", () => {
+  // Asserting `now + PENDING_TTL_MS` uses the same constant on both sides and
+  // proves nothing. Pin the literals, with the reasoning in the message.
+  assert.equal(PENDING_TTL_MS, 15 * 60 * 1000,
+    "must exceed a guarded SCHEMA_GENERATION migration plus a full SEQUENTIAL addon-connect pass");
+  assert.equal(QUARANTINE_TTL_MS, 24 * 60 * 60 * 1000,
+    "hard expiry so no failure mode ends in a host recoverable only by manual file deletion");
+});
+
+test("boot cookie round-trips atomically and clears", () => {
+  const d = mkdtempSync(join(tmpdir(), "cookie-"));
+  try {
+    const now = Date.parse("2026-08-06T12:00:00Z");
+    writePending(d, { sha: "abc1234", baseline: { tasks: "connected" }, now });
+
+    const p = readPending(d);
+    assert.equal(p.sha, "abc1234");
+    assert.deepEqual(p.baseline, { tasks: "connected" });
+    assert.equal(Date.parse(p.deadline), now + 15 * 60 * 1000); // literal, not the constant
+
+    // The tmp file must be renamed away, never left behind.
+    assert.deepEqual(readdirSync(d), ["convergence-pending.json"]);
+
+    clearPending(d);
+    assert.equal(readPending(d), null);
+    assert.equal(existsSync(join(d, "convergence-pending.json")), false);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("classifyPending covers every boot case including the crash-loop", () => {
+  const now = Date.parse("2026-08-06T12:00:00Z");
+  const fresh   = { sha: "new1234", baseline: {}, deadline: new Date(now + 60_000).toISOString() };
+  const expired = { sha: "new1234", baseline: {}, deadline: new Date(now - 1).toISOString() };
+  const exact   = { sha: "new1234", baseline: {}, deadline: new Date(now).toISOString() };
+
+  assert.equal(classifyPending(null, "new1234", now), "none");
+  assert.equal(classifyPending(fresh, "new1234", now), "verify");
+  assert.equal(classifyPending(expired, "new1234", now), "failed",
+    "crash-loop: booted the target sha but died before verifying");
+  assert.equal(classifyPending(expired, "old9999", now), "failed",
+    "never booted the target sha at all");
+  assert.equal(classifyPending(fresh, "old9999", now), "stale");
+  assert.equal(classifyPending(exact, "new1234", now), "failed", "the deadline boundary is inclusive");
+});
+
+test("convergence quarantine is its OWN namespace and hard-expires", () => {
+  const root = mkdtempSync(join(tmpdir(), "convq-"));
+  const dataDir = join(root, "data");
+  mkdirSync(dataDir);
+  try {
+    const now = Date.parse("2026-08-06T12:00:00Z");
+    writeConvQuarantine({ appRoot: root, dataDir, sha: "bad1234", regressions: [{ id: "x" }], why: "broke x", now });
+
+    // It must NOT land where migration-guard's readers look: index.js reads that
+    // marker and would boot the gateway SKIPPING init-db entirely — on an empty
+    // database, that means serving with no tables at all.
+    assert.equal(existsSync(join(root, ".crow-migration-quarantine.json")), false,
+      "convergence must never write a migration-guard marker");
+    assert.ok(existsSync(join(root, ".crow-convergence-quarantine.json")), "repo-level marker for peers");
+    assert.ok(existsSync(join(dataDir, ".crow-convergence-quarantine.json")), "data-level marker");
+
+    assert.equal(readConvQuarantine({ appRoot: root, dataDir, now: now + 1000 }).sha, "bad1234");
+    assert.equal(readConvQuarantine({ appRoot: root, dataDir, now: now + 23 * 3600_000 }).sha, "bad1234");
+    assert.equal(readConvQuarantine({ appRoot: root, dataDir, now: now + 25 * 3600_000 }), null,
+      "a quarantine older than 24h must be ignored — no permanent wedge");
+
+    clearConvQuarantine({ appRoot: root, dataDir });
+    assert.equal(readConvQuarantine({ appRoot: root, dataDir, now: now + 1000 }), null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
