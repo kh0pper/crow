@@ -392,7 +392,7 @@ test("a throwing migration aborts the rest and records nothing", async () => {
 
 - [ ] **Step 2: Verify it fails**
 
-Run: `export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH && cd /home/kh0pp/crow-wt-rolling && node --test tests/migration-registry.test.js`
+Run: `export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH && cd /home/kh0pp/crow-wt-rolling && CROW_DISABLE_CONVERGE=1 node --test tests/migration-registry.test.js`
 Expected: FAIL — `Cannot find module '../scripts/migrations/runner.mjs'`.
 
 - [ ] **Step 3: Implement**
@@ -470,7 +470,7 @@ export async function runMigrations({ migrationsDir, dbPath, tasksDbPath, sha = 
 }
 ```
 
-- [ ] **Step 4: Run** — `node --test tests/migration-registry.test.js` → PASS, 6 tests.
+- [ ] **Step 4: Run** — `CROW_DISABLE_CONVERGE=1 node --test tests/migration-registry.test.js` → PASS, 6 tests.
 
 - [ ] **Step 5: Mutation-test (assume vacuous until proven otherwise)**
 
@@ -557,7 +557,7 @@ test("0001-board-stages: adds columns, DEFERS when ANY table is absent, idempote
 });
 ```
 
-- [ ] **Step 2: Verify it fails** — `node --test tests/migration-registry.test.js` → FAIL, `0001-board-stages` not in `deferred`.
+- [ ] **Step 2: Verify it fails** — `CROW_DISABLE_CONVERGE=1 node --test tests/migration-registry.test.js` → FAIL, `0001-board-stages` not in `deferred`.
 
 - [ ] **Step 3: Implement**
 
@@ -628,12 +628,13 @@ const out = run({ dbPath: botsDbPath(), tasksDbPath: tasksDbPath(), log: (m) => 
 if (out?.deferred) console.log("  (deferred — target tables absent on this instance)");
 ```
 
-- [ ] **Step 5: Run** — `node --test tests/migration-registry.test.js tests/board-stages-migration.test.js` → PASS. If the pre-existing board-stages test asserts on the old script's internals, adapt it to the wrapper; do not weaken the assertion.
+- [ ] **Step 5: Run** — `CROW_DISABLE_CONVERGE=1 node --test tests/migration-registry.test.js tests/board-stages-migration.test.js` → PASS. If the pre-existing board-stages test asserts on the old script's internals, adapt it to the wrapper; do not weaken the assertion.
 
 - [ ] **Step 6: Mutation-test**
 1. `if (!t) return "absent"` → `throw` → the deferral assertion fails.
 2. Remove the `have.includes(column)` guard → the direct re-run fails with "duplicate column name".
-3. Delete the `results.every(...)` deferral return → test (a) fails.
+3. Delete the `results.includes("absent")` deferral return → tests (a) and (a2) fail.
+4. Change `results.includes("absent")` to `results.every((r) => r === "absent")` → test **(a2)** fails while (a) stays green. This is the exact defect round 2 caught: an `all` rule passes the both-bare fixture and silently fails every real instance.
 
 - [ ] **Step 7: Commit**
 
@@ -712,7 +713,7 @@ try {
 }
 ```
 
-- [ ] **Step 4: Run** — `node --test tests/migration-registry.test.js` → PASS.
+- [ ] **Step 4: Run** — `CROW_DISABLE_CONVERGE=1 node --test tests/migration-registry.test.js` → PASS.
 
 - [ ] **Step 5: Mutation-test the invariant** (the previous plan revision had no mutation here)
 1. Move the registry block *above* the schema-guard block → the `guardCall < registry` assertion must fail.
@@ -1525,7 +1526,7 @@ test("post-listen wires convergence verification after startAutoUpdate", () => {
 });
 ```
 
-- [ ] **Step 8: Existing auto-update tests** — `node --test tests/auto-update-hardening.test.js tests/auto-update-ci-gate.test.js tests/auto-update-tick-gate.test.js`. These call `checkForUpdates()` with no argument; the new optional-object signature must keep them passing. The lock-skip message changed — update any assertion to the new text and confirm it still asserts behavior, not just a string.
+- [ ] **Step 8: Existing auto-update tests** — `CROW_DISABLE_CONVERGE=1 node --test tests/auto-update-hardening.test.js tests/auto-update-ci-gate.test.js tests/auto-update-tick-gate.test.js`. These call `checkForUpdates()` with no argument; the new optional-object signature must keep them passing. The lock-skip message changed — update any assertion to the new text and confirm it still asserts behavior, not just a string.
 
 - [ ] **Step 9: Commit**
 
