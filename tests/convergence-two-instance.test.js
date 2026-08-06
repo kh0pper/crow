@@ -20,7 +20,7 @@ import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/g
 import { _setAlertChannelsForTest } from "../servers/shared/migration-guard.js";
 import {
   setBootSha, _setRestartForTest, _setSupervisedForTest, convergeInstance,
-  readPending,
+  readPending, writePending, verifyPendingConvergence, readConvQuarantine,
 } from "../servers/gateway/convergence.js";
 
 // Never let the suite believe it is supervised: a systemd-launched context
@@ -261,4 +261,120 @@ test("the restart is scheduled by convergence ONLY, never by the update's succes
   assert.ok(lastRestart < lossPath,
     "the only scheduleSupervisedRestart before the success return must be the " +
     "migration-guard LOSS path (which reopens a restored DB file); convergence owns the rest");
+});
+
+test("a health regression quarantines the sha; peers then refuse to converge to it", async () => {
+  const f = twoInstanceFixture();
+  const [alpha, beta] = f.instances;
+  _setSupervisedForTest(() => true);
+  _setRestartForTest(() => {});
+
+  // Quarantine the fixture's ACTUAL head: in production the shared tree STAYS
+  // at the bad sha, which is the case this design has to survive.
+  const badSha = g(f.work, "rev-parse", "HEAD");
+  writePending(alpha.dataDir, { sha: badSha, baseline: { "pm-workspace": "connected" } });
+
+  const out = await verifyPendingConvergence({
+    dataDir: alpha.dataDir, appRoot: f.work, bootSha: badSha,
+    snapshot: () => ({ "pm-workspace": "error" }),
+    settled: async () => {},
+  });
+
+  assert.equal(out.verdict, "quarantined");
+  assert.deepEqual(out.regressions, [{ id: "pm-workspace", was: "connected", now: "error" }]);
+  assert.equal(readPending(alpha.dataDir), null, "the cookie must be cleared either way");
+  assert.equal(readConvQuarantine({ appRoot: f.work, dataDir: alpha.dataDir }).sha, badSha);
+
+  // beta shares the checkout and must now refuse that sha.
+  setBootSha("something-older");
+  const r = await convergeInstance({ appRoot: f.work, instance: beta });
+  assert.equal(r.converged, false, "a peer must not converge to a quarantined sha");
+  assert.equal(r.skipped, "quarantined");
+});
+
+test("a healthy convergence clears the cookie and quarantines nothing", async () => {
+  const f = twoInstanceFixture();
+  const [alpha] = f.instances;
+  const sha = g(f.work, "rev-parse", "HEAD");
+  writePending(alpha.dataDir, { sha, baseline: { tasks: "connected" } });
+
+  const out = await verifyPendingConvergence({
+    dataDir: alpha.dataDir, appRoot: f.work, bootSha: sha,
+    snapshot: () => ({ tasks: "connected" }), settled: async () => {},
+  });
+
+  assert.equal(out.verdict, "ok");
+  assert.equal(readPending(alpha.dataDir), null);
+  assert.equal(readConvQuarantine({ appRoot: f.work, dataDir: alpha.dataDir }), null,
+    "a healthy convergence must not quarantine");
+});
+
+test("an EXPIRED cookie quarantines — the crash-loop case", async () => {
+  const f = twoInstanceFixture();
+  const [alpha] = f.instances;
+  const sha = g(f.work, "rev-parse", "HEAD");
+
+  // Written 20 minutes ago with a 15-minute TTL: the previous convergence
+  // booted the target sha and died before it could verify itself.
+  writePending(alpha.dataDir, { sha, baseline: {}, now: Date.now() - 20 * 60 * 1000 });
+
+  const out = await verifyPendingConvergence({
+    dataDir: alpha.dataDir, appRoot: f.work, bootSha: sha,
+    snapshot: () => ({}), settled: async () => {},
+  });
+
+  assert.equal(out.verdict, "quarantined", "an expired cookie means the convergence failed");
+  assert.equal(readConvQuarantine({ appRoot: f.work, dataDir: alpha.dataDir }).sha, sha);
+  assert.equal(readPending(alpha.dataDir), null);
+});
+
+test("a STALE cookie just clears, and never quarantines", async () => {
+  // A SEPARATE fixture: the quarantine marker is written at the REPO level so
+  // co-hosted peers see it, which means a fixture carrying an earlier
+  // quarantine would leak into this assertion.
+  const f = twoInstanceFixture();
+  const [alpha] = f.instances;
+  const sha = g(f.work, "rev-parse", "HEAD");
+
+  writePending(alpha.dataDir, { sha: "some-other-sha", baseline: {} });
+  const out = await verifyPendingConvergence({
+    dataDir: alpha.dataDir, appRoot: f.work, bootSha: sha,
+    snapshot: () => ({}), settled: async () => {},
+  });
+
+  assert.equal(out.verdict, "stale");
+  assert.equal(readPending(alpha.dataDir), null, "a stale cookie is cleared");
+  assert.equal(readConvQuarantine({ appRoot: f.work, dataDir: alpha.dataDir }), null,
+    "a stale cookie must NOT quarantine");
+});
+
+test("a snapshot that throws FAILS OPEN and always settles", async () => {
+  const f = twoInstanceFixture();
+  const [alpha] = f.instances;
+  const sha = g(f.work, "rev-parse", "HEAD");
+  writePending(alpha.dataDir, { sha, baseline: { tasks: "connected" } });
+
+  const out = await verifyPendingConvergence({
+    dataDir: alpha.dataDir, appRoot: f.work, bootSha: sha,
+    snapshot: () => { throw new Error("proxy not ready"); },
+    settled: async () => {},
+  });
+
+  // An unhandled rejection here would take the gateway down on Node 22, and the
+  // outer promise would never settle. The gate must fail OPEN when it cannot
+  // determine status — a false quarantine is worse than no gate.
+  assert.equal(out.verdict, "unknown");
+  assert.equal(readConvQuarantine({ appRoot: f.work, dataDir: alpha.dataDir }), null,
+    "an indeterminate gate must not quarantine");
+  assert.equal(readPending(alpha.dataDir), null);
+});
+
+test("post-listen wires convergence verification after startAutoUpdate", () => {
+  // Without this anchor, deleting the whole wiring block leaves every other
+  // test green while the health gate never runs in production.
+  const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "boot", "post-listen.js"), "utf8");
+  const start = src.indexOf("startAutoUpdate(");
+  const verify = src.indexOf("verifyPendingConvergence");
+  assert.ok(start > 0, "startAutoUpdate must be present");
+  assert.ok(verify > start, "convergence verification must be wired, and after auto-update starts");
 });
