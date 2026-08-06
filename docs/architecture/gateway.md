@@ -238,3 +238,83 @@ System resource metrics (RAM, disk, CPU) are available at `GET /api/health`, pro
 ## Federation
 
 The gateway can proxy tool calls to remote Crow instances via HTTP. When an instance is registered in the `crow_instances` table with a `gateway_url`, the proxy layer connects using the MCP SDK's `StreamableHTTPClientTransport` and makes remote tools available through the `crow_tools` router action with an `instance_id` parameter. See [Multi-Instance Architecture](./instances) for sync, conflict resolution, and security details.
+
+## Convergence: how a gateway gets current with its checkout
+
+Several gateways can share one `~/crow` checkout while keeping separate data
+dirs (on the dev host: `crow-gateway`, `crow-mpa-gateway`, `crow-r4-gateway`).
+That makes updating two different jobs with different scopes:
+
+| Operation | Scope | Lock | Who runs it |
+|---|---|---|---|
+| pull the tree | the checkout | checkout-scoped, one winner | whichever instance wins |
+| converge the instance | one data dir | none | **every** instance, always |
+
+`checkForUpdates()` does the tree half only if it holds the lock, then **always**
+runs the instance half. **A lock loss is normal, not an error** — another
+co-hosted gateway is pulling the shared tree, which is correct. The loser skips
+the pull it does not need and still migrates its own stores and restarts.
+
+Convergence triggers on `bootSha !== HEAD`, never on whether this process
+pulled: `runLockedUpdate` returns `updated: false` on several branches *after*
+the tree has already moved.
+
+**A process honors its own refusal.** The branches that deliberately withhold a
+restart (init-db failure, both migration-guard loss paths) return
+`converge: false`, and `checkForUpdates` then skips the instance half. Without
+that, convergence would restart into a sha whose `init-db` just failed, the boot
+guard would `process.exit(1)`, and systemd's `StartLimitBurst` would leave the
+unit dead.
+
+Convergence **owns the restart** — scheduled only after migrations run and the
+boot cookie is written. An unsupervised instance migrates, logs that a manual
+restart is needed, and writes no cookie.
+
+### Migration registry
+
+`scripts/migrations/NNNN-slug.mjs`, each exporting `id` and
+`run({ dbPath, tasksDbPath, log })`. Bodies must be idempotent and shape-checked
+(`PRAGMA` presence, additive `ALTER`) — a restored backup can lose the
+bookkeeping row while keeping the change.
+
+Return `{ deferred: true }` when **any** target table is absent. Bundle-owned
+stores are created by their bundle, which starts *after* the gateway boots;
+recording a deferral as applied would let the table be created later without the
+new columns and never retry.
+
+The registry runs **twice per boot**: once before serving (covers `crow.db`) and
+again after the addons settle (covers bundle-owned stores). Bookkeeping lives in
+`schema_migrations`, created lazily by the runner — deliberately **not** in
+`init-db.js`, which would bump `SCHEMA_GENERATION` and re-run its `DROP TABLE`
+statements on every live instance DB.
+
+### Health gate
+
+A **regression** check, not an absolute one: it compares the post-restart addon
+snapshot against the pre-restart baseline carried in the boot cookie. "All addons
+connected" would quarantine a good sha on any host that already had a broken
+addon. Only `entry.isAddon` entries count — `connectedServers` also holds remote
+federation peers, whose status flips to `offline` when a crow on another machine
+reboots.
+
+The gate waits on an addons-settled signal rather than a clock (addons connect
+sequentially, 60 s timeout each) with a 10-minute timeout that yields
+**unknown / fail open**. An indeterminate gate never quarantines.
+
+### Quarantine, not rollback
+
+On regression the sha is written to `.crow-convergence-quarantine.json` at both
+repo and data level, an alert fires, and the instance keeps running degraded.
+Peers read the repo-level marker and refuse that sha, so **the first instance to
+converge is the canary by construction**.
+
+The tree is never rolled back: `git reset --hard` on a shared checkout would drag
+co-hosted peers backward for one instance's failure. Markers hard-expire after
+**24 h**, so no failure mode needs manual file deletion to recover. To clear one
+early, delete both files.
+
+### Kill switch
+
+`CROW_DISABLE_CONVERGE=1` short-circuits the instance half entirely. The tree
+half still runs, so the checkout keeps updating — the instance just stops
+migrating and restarting itself.
