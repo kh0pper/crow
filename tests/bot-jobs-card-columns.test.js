@@ -76,6 +76,16 @@ test("card_id survives a round-trip and defaults to NULL for non-card jobs", () 
   });
 });
 
+test("card_action is added alongside card_id and round-trips", () => {
+  withDb(BOT_JOBS_DDL, (db) => {
+    assert.ok(cols(db).includes("card_action"), "current DDL must create card_action");
+    db.prepare("INSERT INTO bot_jobs (job_id,bot_id,goal,source,card_id,card_action) VALUES (?,?,?,?,?,?)")
+      .run("job-p", "bot-1", "plan card 120", "card", 120, "plan");
+    const r = db.prepare("SELECT card_id, card_action FROM bot_jobs WHERE job_id='job-p'").get();
+    assert.deepEqual([r.card_id, r.card_action], [120, "plan"]);
+  });
+});
+
 test("job_runner self-heals a legacy table on connect", async () => {
   const dir = mkdtempSync(join(tmpdir(), "botjobs-heal-"));
   const dbPath = join(dir, "crow.db");

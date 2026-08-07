@@ -23,6 +23,7 @@ export const BOT_JOBS_DDL = `
     source        TEXT,                            -- voice | chat | schedule | manual
     schedule_id   INTEGER,                         -- set when launched by the bot cron runner
     card_id       INTEGER,                         -- board card this job executes (source='card')
+    card_action   TEXT,                             -- 'execute' | 'plan' (card jobs only)
     escalate      INTEGER NOT NULL DEFAULT 0,
     attempts      INTEGER NOT NULL DEFAULT 0,      -- retry counter (caps re-enqueue of abandoned jobs)
     result        TEXT,
@@ -56,6 +57,7 @@ export const BOT_JOBS_DDL = `
  */
 export const BOT_JOBS_ADDED_COLUMNS = [
   { name: "card_id", ddl: "ALTER TABLE bot_jobs ADD COLUMN card_id INTEGER" },
+  { name: "card_action", ddl: "ALTER TABLE bot_jobs ADD COLUMN card_action TEXT" },
 ];
 
 /**
