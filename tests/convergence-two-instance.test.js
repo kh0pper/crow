@@ -378,3 +378,29 @@ test("post-listen wires convergence verification after startAutoUpdate", () => {
   assert.ok(start > 0, "startAutoUpdate must be present");
   assert.ok(verify > start, "convergence verification must be wired, and after auto-update starts");
 });
+
+test("WIRING: setBootSha is called at gateway boot, before serving", () => {
+  // This is the test whose absence let a fully inert feature ship green. Every
+  // other convergence test supplies the boot sha itself as a seam, so the
+  // production wiring was never exercised: convergeInstance returned
+  // skipped:"no-boot-sha" on every tick, and because the restart had moved out
+  // of runLockedUpdate's success path, the gateways would have stopped applying
+  // updates entirely while reporting success.
+  const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "index.js"), "utf8");
+
+  const setBoot = src.indexOf("setBootSha(");
+  assert.ok(setBoot > 0, "index.js MUST call setBootSha — without it convergence is a no-op fleet-wide");
+
+  // It has to run before the server starts serving, so the very first tick
+  // already has a baseline.
+  const listen = src.indexOf("app.listen(");
+  assert.ok(listen > 0, "app.listen must be present");
+  assert.ok(setBoot < listen, "the boot sha must be recorded before the gateway starts serving");
+
+  // Full sha, not --short: convergeInstance compares against `git rev-parse
+  // HEAD`. A short sha would mismatch on every boot and silently discard the
+  // health-gate cookie as "stale".
+  const call = src.slice(setBoot - 400, setBoot + 200);
+  assert.ok(!/rev-parse["\s,]+.*--short/.test(call),
+    "the boot sha must be the full 40-char form to match convergeInstance's comparison");
+});

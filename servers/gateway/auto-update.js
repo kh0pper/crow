@@ -523,9 +523,11 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
       // converge:false — this branch exists to WITHHOLD the restart. Without
-      // the flag, convergence restarts into a sha whose init-db just failed,
-      // the boot guard exits 1, systemd retries, StartLimitBurst is exhausted,
-      // and the unit is dead — on each co-hosted gateway as its tick arrives.
+      // the flag, convergence restarts into a sha whose init-db just failed and
+      // the boot guard exits 1. Note the units here run RestartSec=5 against a
+      // 10s StartLimitInterval, so StartLimitBurst=5 can never trip: the result
+      // is an UNBOUNDED crash loop, not a stopped unit. Each iteration re-enters
+      // the boot schema guard and re-runs init-db against a live store.
       return { updated: false, error: msg, converge: false };
     }
   } else {
@@ -540,9 +542,11 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
       // converge:false — this branch exists to WITHHOLD the restart. Without
-      // the flag, convergence restarts into a sha whose init-db just failed,
-      // the boot guard exits 1, systemd retries, StartLimitBurst is exhausted,
-      // and the unit is dead — on each co-hosted gateway as its tick arrives.
+      // the flag, convergence restarts into a sha whose init-db just failed and
+      // the boot guard exits 1. Note the units here run RestartSec=5 against a
+      // 10s StartLimitInterval, so StartLimitBurst=5 can never trip: the result
+      // is an UNBOUNDED crash loop, not a stopped unit. Each iteration re-enters
+      // the boot schema guard and re-runs init-db against a live store.
       return { updated: false, error: msg, converge: false };
     }
   }
