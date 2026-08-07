@@ -4,7 +4,7 @@ import { mkdirSync } from "fs";
 import { randomBytes } from "node:crypto";
 import { resolve } from "path";
 import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/slugify.js";
-import { BOT_JOBS_DDL } from "./pi-bots/bot-jobs-schema.mjs";
+import { BOT_JOBS_DDL, missingBotJobsColumns } from "./pi-bots/bot-jobs-schema.mjs";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 
 // Ensure data directory exists
@@ -2462,9 +2462,22 @@ await initTable("bot_runs table", `
 // UPDATE...RETURNING claim is atomic in BOTH modes (writers serialize). Pollers
 // stay coarse (>=60s) to bound lock contention. DDL lives in
 // pi-bots/bot-jobs-schema.mjs (also lazy-ensured by the runner + gateway).
+// bot_jobs columns added after the table shipped. This MUST run before the
+// DDL exec below: BOT_JOBS_DDL's newest index is on card_id, and on a DB
+// that predates that column, creating the index (before the ALTER lands it)
+// throws "no such column: card_id" — which would abort init-db.js entirely,
+// since initTable() below exits the process on any DDL error. A `names`
+// PRAGMA result of length 0 means the table doesn't exist yet (a table
+// always has >=1 column), so a brand-new install skips this and gets
+// card_id straight from the DDL.
+{
+  const info = await db.execute("PRAGMA table_info(bot_jobs)");
+  const names = info.rows.map((r) => r.name);
+  if (names.length) {
+    for (const stmt of missingBotJobsColumns(names)) await db.execute(stmt);
+  }
+}
 await initTable("bot_jobs table", BOT_JOBS_DDL);
-
-
 
 // --- Phase 8 job-search bot tables (2026-05-12) ---
 // job_candidates: dedup'd normalized job postings from all three ingestion

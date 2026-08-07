@@ -75,3 +75,29 @@ test("card_id survives a round-trip and defaults to NULL for non-card jobs", () 
     assert.equal(db.prepare("SELECT card_id FROM bot_jobs WHERE job_id='job-b'").get().card_id, 120);
   });
 });
+
+test("job_runner self-heals a legacy table on connect", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "botjobs-heal-"));
+  const dbPath = join(dir, "crow.db");
+  const seed = new Database(dbPath);
+  seed.exec(LEGACY_DDL);
+  seed.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal) VALUES ('j1','b1','g')").run();
+  seed.close();
+
+  process.env.CROW_DB_PATH = dbPath;
+  const mod = await import("../scripts/pi-bots/job_runner.mjs");
+
+  const c = new Database(dbPath);
+  try {
+    mod.ensureBotJobsSchema(c);
+    const names = c.prepare("PRAGMA table_info(bot_jobs)").all().map((r) => r.name);
+    assert.ok(names.includes("card_id"), "an existing install must gain card_id without init-db");
+
+    // The pre-existing row must survive — ALTER ADD COLUMN, never a rebuild.
+    assert.equal(c.prepare("SELECT COUNT(*) n FROM bot_jobs").get().n, 1);
+
+    mod.ensureBotJobsSchema(c); // second call must not throw "duplicate column"
+  } finally {
+    c.close(); rmSync(dir, { recursive: true, force: true });
+  }
+});

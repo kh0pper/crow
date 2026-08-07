@@ -40,7 +40,7 @@ import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
-import { BOT_JOBS_DDL } from "./bot-jobs-schema.mjs";
+import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 
@@ -55,10 +55,32 @@ const MAX_JOB_ATTEMPTS = Number(process.env.PIBOT_MAX_JOB_ATTEMPTS || 3);  // ca
 // work after a runner restart — mirrors pipeline-runner's ensurePipelineRunsTable.
 // Idempotent (CREATE … IF NOT EXISTS); guarded so it runs at most once per process.
 let _botJobsEnsured = false;
+
+/**
+ * Create the table if absent, then add any columns introduced after it
+ * shipped. Both halves are idempotent, and an existing install has no other
+ * path to a new column (the gateway re-runs init-db only when its 3-table
+ * completeness check fails).
+ * @param {import('better-sqlite3').Database} conn
+ */
+export function ensureBotJobsSchema(conn) {
+  // Missing columns MUST be added before the DDL exec below: BOT_JOBS_DDL's
+  // newest index is on card_id, and creating that index (before the ALTER
+  // adds the column) throws "no such column: card_id" on a legacy table.
+  // names.length === 0 means the table doesn't exist yet (a real table
+  // always has >=1 column), so a fresh install skips straight to the DDL,
+  // which creates it with card_id already present.
+  const names = conn.prepare("PRAGMA table_info(bot_jobs)").all().map((r) => r.name);
+  if (names.length) {
+    for (const stmt of missingBotJobsColumns(names)) conn.exec(stmt);
+  }
+  conn.exec(BOT_JOBS_DDL);
+}
+
 function dbConn() {
   const d = new Database(botsDbPath());
   d.pragma("busy_timeout = 10000");
-  if (!_botJobsEnsured) { try { d.exec(BOT_JOBS_DDL); _botJobsEnsured = true; } catch {} }
+  if (!_botJobsEnsured) { try { ensureBotJobsSchema(d); _botJobsEnsured = true; } catch {} }
   return d;
 }
 
