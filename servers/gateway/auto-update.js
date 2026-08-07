@@ -22,6 +22,28 @@ export function _setAppRootForTest(dir) {
   APP_ROOT = dir;
 }
 
+const JITTER_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * A stable per-instance offset for the first update check.
+ *
+ * Co-hosted gateways restart together, so a fixed 5-minute first check put all
+ * of them on the same millisecond forever: their checks landed 475ms apart and
+ * the same instance lost the lock every single tick. Deriving the offset from
+ * the instance's data dir de-phases them permanently and survives restarts.
+ *
+ * This is robustness, not the fix — the fix is that the lock loser converges
+ * anyway (see convergence.js). Jitter only makes contention rare.
+ */
+export function instanceJitterMs(key) {
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h % JITTER_WINDOW_MS;
+}
+
 const DEFAULT_INTERVAL_HOURS = 6;
 const MIN_INTERVAL_HOURS = 1;
 
@@ -123,8 +145,8 @@ function run(cmd, args, options = {}) {
 
 const LOCK_STALE_MS = 30 * 60 * 1000;
 
-async function lockPath() {
-  const r = await run("git", ["rev-parse", "--absolute-git-dir"]);
+async function lockPath(cwd) {
+  const r = await run("git", ["rev-parse", "--absolute-git-dir"], cwd ? { cwd } : {});
   if (r.code !== 0 || !r.stdout) return null; // not a git checkout → no lock possible
   return join(r.stdout, "crow-auto-update.lock");
 }
@@ -184,6 +206,37 @@ function releaseLock(path) {
   } catch {}
 }
 
+/**
+ * Acquire the checkout lock, waiting for a holder to finish.
+ *
+ * The instance half needs this: the lock-loss path is reached ONLY while
+ * another co-hosted gateway holds the lock, i.e. while it is between `git pull`
+ * and its `npm install --omit=dev` (up to 5 minutes of rewriting the SHARED
+ * node_modules) and its init-db. Converging and restarting into that window
+ * boots a gateway against a half-written dependency tree.
+ *
+ * Returns the lock path on success, or null if it could not be acquired within
+ * `waitMs` — in which case the caller must NOT converge; it retries next tick.
+ */
+export async function acquireCheckoutLock({ appRoot = null, waitMs = 6 * 60 * 1000, pollMs = 2000 } = {}) {
+  // Resolve against the caller's root, not the module's APP_ROOT: convergence
+  // is handed an explicit appRoot, and waiting on a lock for a DIFFERENT tree
+  // would silently defeat the serialization.
+  const lock = await lockPath(appRoot);
+  if (!lock) return null;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const held = acquireLock(lock);
+    if (held) return held;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
+
+export function releaseCheckoutLock(path) {
+  if (path) releaseLock(path);
+}
+
 /** Test-only: the lock primitives, unit-tested directly (they are not
  *  exported for production use — checkForUpdates()/runLockedUpdate() are the
  *  real callers). */
@@ -193,7 +246,7 @@ export const _lockPrimitivesForTest = { acquireLock, releaseLock, lockIsStale };
  * Check for and apply updates
  * Returns { updated, from, to, error, skipped?, message?, branch? }
  */
-export async function checkForUpdates() {
+export async function checkForUpdates({ instance = null } = {}) {
   const log = (msg) => console.log(`[auto-update] ${msg}`);
   try {
     const branch = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -208,19 +261,58 @@ export async function checkForUpdates() {
     }
     const lock = await lockPath();
     const held = lock ? acquireLock(lock) : null;
+    let treeResult = { updated: false };
+    let pulled = false;
+
     if (lock && !held) {
+      // NOT an error, and NOT a reason to stop. The tree is shared: another
+      // co-hosted gateway is pulling it, which is exactly right. This instance
+      // skips the PULL and still converges itself below. Before this split it
+      // returned here — and since co-hosted gateways restart together, their
+      // timers are phase-locked and the same instance lost every tick forever,
+      // never migrating its own stores and never restarting into the new code.
       const info = readLock(lock);
-      const msg = `Skipped: another updater is running (pid ${info?.pid ?? "unknown"})`;
+      const msg = `Tree pull skipped: another instance holds the checkout lock (pid ${info?.pid ?? "unknown"})`;
       log(msg);
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, skipped: "locked", message: msg };
+      treeResult = { updated: false, skipped: "locked", message: msg };
+
+      // Record what the tree is moving to even though we did not pull it.
+      // auto_update_latest_version is otherwise written ONLY inside
+      // runLockedUpdate, which the loser never enters — which is exactly why
+      // the primary's latest_version sat 16 commits BEHIND its own current
+      // while last_result read "another updater is running". The holder has
+      // just fetched, so origin/main is fresh.
+      try {
+        const om = await run("git", ["rev-parse", "--short", "origin/main"]);
+        if (om.code === 0 && om.stdout) await saveSetting("auto_update_latest_version", om.stdout);
+      } catch {}
+    } else {
+      try {
+        treeResult = await runLockedUpdate(log);
+      } finally {
+        if (held) releaseLock(held);
+      }
+      pulled = Boolean(treeResult?.updated);
     }
-    try {
-      return await runLockedUpdate(log);
-    } finally {
-      if (held) releaseLock(held);
+
+    // A process must honor its OWN refusal. runLockedUpdate returns
+    // converge:false on the branches whose whole purpose is to withhold a
+    // restart; a peer may still converge (it refused nothing, and the
+    // quarantine markers guard the genuinely-bad shas), but this process
+    // must not restart into code it just declined.
+    if (treeResult?.converge === false) {
+      log("instance half skipped — this process's own update refused a restart");
+      return { ...treeResult, pulled, converged: false, skipped: "refused" };
     }
+
+    // The INSTANCE half — for every gateway, lock or no lock. APP_ROOT is
+    // passed explicitly: convergence's own fallback resolves from
+    // import.meta.url, which is the real worktree even under a test fixture.
+    const { convergeInstance } = await import("./convergence.js");
+    const conv = await convergeInstance({ appRoot: APP_ROOT, instance, pulled, log });
+    return { ...treeResult, pulled, converged: conv.converged, applied: conv.applied };
   } catch (err) {
     const msg = `Update error: ${err.message}`;
     console.error(`[auto-update] ${msg}`);
@@ -438,7 +530,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
         log(msg);
         await saveSetting("auto_update_last_check", new Date().toISOString());
         await saveSetting("auto_update_last_result", msg);
-        return { updated: false, error: msg, quarantined: true };
+        return { updated: false, error: msg, quarantined: true, converge: false };
       }
       // Fail closed: the guard restored the backup and quarantined the sha.
       // Roll the code back to match the restored schema — but never destroy
@@ -461,7 +553,7 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       // The live process's DB handles still pin the pre-restore inode —
       // restart IMMEDIATELY so the process reopens the restored file.
       scheduleSupervisedRestart(log, "Restarting to reopen the restored database...");
-      return { updated: false, error: msg, quarantined: true };
+      return { updated: false, error: msg, quarantined: true, converge: false };
     }
     if (res.initDbExit !== 0) {
       const msg = `Migration failed (init-db exit ${res.initDbExit}) — restart withheld, running code unchanged`;
@@ -472,7 +564,13 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       });
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, error: msg };
+      // converge:false — this branch exists to WITHHOLD the restart. Without
+      // the flag, convergence restarts into a sha whose init-db just failed and
+      // the boot guard exits 1. Note the units here run RestartSec=5 against a
+      // 10s StartLimitInterval, so StartLimitBurst=5 can never trip: the result
+      // is an UNBOUNDED crash loop, not a stopped unit. Each iteration re-enters
+      // the boot schema guard and re-runs init-db against a live store.
+      return { updated: false, error: msg, converge: false };
     }
   } else {
     const initRes = await run("node", ["scripts/init-db.js"]);
@@ -485,7 +583,13 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
       });
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
-      return { updated: false, error: msg };
+      // converge:false — this branch exists to WITHHOLD the restart. Without
+      // the flag, convergence restarts into a sha whose init-db just failed and
+      // the boot guard exits 1. Note the units here run RestartSec=5 against a
+      // 10s StartLimitInterval, so StartLimitBurst=5 can never trip: the result
+      // is an UNBOUNDED crash loop, not a stopped unit. Each iteration re-enters
+      // the boot schema guard and re-runs init-db against a live store.
+      return { updated: false, error: msg, converge: false };
     }
   }
 
@@ -499,18 +603,20 @@ export async function runLockedUpdate(log = (m) => console.log(`[auto-update] ${
 
   log(`Updated: ${currentVersion} → ${newVersion}`);
 
-  // Restart to load the new code when supervised (systemd, launchd
-  // KeepAlive, Docker, etc.). Without a supervisor the pulled code only
-  // takes effect on the next manual restart.
-  scheduleSupervisedRestart(log, "Restarting gateway to apply update...");
-
+  // NOTE: the restart is NOT scheduled here. convergeInstance() owns it, and
+  // schedules it only AFTER running this instance's migrations and writing the
+  // boot cookie. Restarting here would fire a 1.5s exit timer while those
+  // migrations are still running — an interrupted ALTER on a live store — and
+  // the cookie, which must exist before the restart, might never be written.
+  // (The restart on the migration-guard LOSS path below stays: it exists to
+  // reopen a restored DB file and is unrelated to convergence.)
   return { updated: true, from: currentVersion, to: newVersion };
 }
 
 /** Supervised-restart machinery, shared by the normal update path and the
  *  migration-guard loss path (which must reopen the restored DB file).
  *  No-op without a supervisor. */
-function scheduleSupervisedRestart(log, message) {
+export function scheduleSupervisedRestart(log, message) {
   if (!isSupervised()) return;
   log(message);
   // Close the HTTP server first to release the port, then exit
@@ -558,28 +664,36 @@ export async function startAutoUpdate(database, { noAuth = false } = {}) {
 
   const settings = await getSettings();
 
+  // Record the sha this process is ACTUALLY running, BEFORE any early return.
+  // This used to sit below the disabled-in-settings return, so a disabled
+  // instance froze its reported version at whatever it was when it was last
+  // enabled — while continuing to run whatever the shared checkout moved to.
+  // The bookkeeping and the running code disagreed and nothing detected it.
+  try {
+    const ref = await run("git", ["rev-parse", "--short", "HEAD"]);
+    if (ref.code === 0 && ref.stdout) await saveSetting("auto_update_current_version", ref.stdout);
+  } catch {}
+
   if (settings.auto_update_enabled !== "true") {
     console.log("[auto-update] Disabled in settings");
     return;
   }
 
-  // Save current version on startup
-  try {
-    const ref = await run("git", ["rev-parse", "--short", "HEAD"]);
-    await saveSetting("auto_update_current_version", ref.stdout);
-  } catch {}
-
   const hours = Math.max(MIN_INTERVAL_HOURS, parseInt(settings.auto_update_interval_hours, 10) || DEFAULT_INTERVAL_HOURS);
   const intervalMs = hours * 60 * 60 * 1000;
 
-  console.log(`[auto-update] Enabled — checking every ${hours}h`);
+  const { resolveDataDir } = await import("../db.js");
+  const firstDelay = 5 * 60 * 1000 + instanceJitterMs(resolveDataDir());
+  console.log(`[auto-update] Enabled — checking every ${hours}h (first check in ${Math.round(firstDelay / 1000)}s)`);
 
-  // First check after 5 minutes (let gateway fully start)
+  // First check after ~5 minutes plus a per-instance offset (let the gateway
+  // fully start, and keep co-hosted instances off the same millisecond).
   updateTimer = setTimeout(async () => {
-    await tickCheck();
-    // Then schedule recurring checks
+    // tickCheck now reaches runMigrations, which CAN reject; an unhandled
+    // rejection in this timer would take the gateway down.
+    await tickCheck().catch((e) => console.error("[auto-update] tick failed:", e.message));
     updateTimer = setInterval(() => { tickCheck().catch(() => {}); }, intervalMs);
-  }, 5 * 60 * 1000);
+  }, firstDelay);
 }
 
 /**

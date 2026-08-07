@@ -187,6 +187,62 @@ export async function runPostListenSetup(server, app, deps) {
     console.error("[auto-update] Failed to start:", err.message);
   });
 
+  // Post-settle migration pass + verification of the convergence that caused
+  // this restart, if there was one.
+  import("../convergence.js").then(async (conv) => {
+    const { healthSnapshot, addonsSettled } = await import("../proxy.js");
+    const { dirname, join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const appRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+    const inst = await conv.resolveInstance();
+
+    // Wait for addon loading to finish, but never forever: a loader that hangs
+    // must not strand the cookie, because the NEXT boot would read an expired
+    // cookie and quarantine a sha that was healthy all along. A timeout yields
+    // `unknown` (fail open), never `failed`.
+    const settledOrTimeout = () =>
+      Promise.race([
+        addonsSettled().then(() => "settled"),
+        new Promise((r) => setTimeout(() => r("timeout"), 10 * 60 * 1000).unref()),
+      ]);
+    const how = await settledOrTimeout();
+
+    // SECOND registry pass. The boot pass runs before serving, when crow.db's
+    // tables exist but bundle-owned stores do NOT — the tasks bundle creates
+    // tasks_items only once it starts, which is after boot. A boot-only
+    // registry defers tasks_items and then never retries, because a current
+    // instance short-circuits its ticks on bootSha === HEAD. Idempotent by
+    // construction: applied ids are skipped by record.
+    try {
+      const { runMigrations } = await import("../../../scripts/migrations/runner.mjs");
+      const r2 = await runMigrations({
+        migrationsDir: join(appRoot, "scripts", "migrations"),
+        dbPath: inst.dbPath,
+        tasksDbPath: inst.tasksDbPath,
+        log: (m) => console.log(`[migrations:post-settle] ${m}`),
+      });
+      if (r2.applied.length) console.log(`[migrations:post-settle] applied: ${r2.applied.join(", ")}`);
+      if (r2.deferred.length) {
+        console.warn(`[migrations:post-settle] still deferred: ${r2.deferred.join(", ")} — the owning bundle may not be installed`);
+      }
+    } catch (err) {
+      console.warn("[migrations:post-settle] skipped:", err.message);
+    }
+
+    await conv.verifyPendingConvergence({
+      dataDir: inst.dataDir,
+      appRoot,
+      bootSha: conv.getBootSha(),
+      // On timeout the gate cannot know: throwing routes into the fail-open
+      // catch rather than comparing against addons that were never attempted.
+      snapshot: how === "timeout"
+        ? () => { throw new Error("addon loading never settled"); }
+        : healthSnapshot,
+      settled: async () => {},
+      log: (m) => console.log(`[convergence] ${m}`),
+    });
+  }).catch((err) => console.warn("[convergence] verification skipped:", err.message));
+
   // Bring up alwaysResident vLLM bundles (embed, etc.) via gpu-orchestrator.
   // Non-fatal — if docker isn't available the gateway still runs; bundles
   // just have to be started manually.

@@ -239,6 +239,26 @@ try {
   }
 }
 
+// Record the sha this process booted on, for convergence. Captured once, here,
+// so every later comparison is against the code actually running rather than
+// whatever the shared checkout has since moved to. A null value makes
+// convergeInstance REFUSE (see convergence.js) — deliberately fail-safe, since
+// converging on an unknown baseline would restart on every tick forever.
+//
+// Full 40-char sha: convergeInstance compares against `git rev-parse HEAD`,
+// which is also full-length. A short sha here would make classifyPending see a
+// mismatch on every boot and silently discard the health-gate cookie.
+try {
+  const { execFileSync: _efsBoot } = await import("node:child_process");
+  const { setBootSha } = await import("./convergence.js");
+  const { dirname: _dnBoot } = await import("node:path");
+  const { fileURLToPath: _fupBoot } = await import("node:url");
+  const _rootBoot = _dnBoot(_dnBoot(_dnBoot(_fupBoot(import.meta.url))));
+  setBootSha(_efsBoot("git", ["rev-parse", "HEAD"], { cwd: _rootBoot, timeout: 10000 }).toString().trim());
+} catch (e) {
+  console.warn(`[convergence] could not record the boot sha (${e.message}) — this instance will not self-converge`);
+}
+
 // Initialize OAuth tables
 await initOAuthTables();
 
