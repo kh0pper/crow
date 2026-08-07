@@ -89,6 +89,59 @@ function isAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+/**
+ * Bridge outcomes that finish a card job WITHOUT doing the card's work.
+ *
+ * Both are mapped onto a SUCCESSFUL job result (correctly — neither is a
+ * failure and neither should burn a retry attempt), so none of the failure
+ * paths below ever see them:
+ *   - 'deferred' — handleInbound's pi-capacity gate returned without touching
+ *     the card. Correct for its original callers (a Gmail/Discord tick simply
+ *     reprocesses the same inbound later); a board dispatch has no such tick.
+ *   - 'stopped'  — a session whose control='stop' was honoured before any work.
+ * The board flips the card to stage='executing' BEFORE the job runs, so either
+ * one leaves a completed job and a card stuck in 'executing' forever.
+ *
+ * A SET, deliberately, and not two if-statements: a third such action added to
+ * the bridge must be a one-word change here rather than a silent stranding
+ * bug, and the tests iterate this set so an unwired member fails loudly.
+ */
+export const NO_PROGRESS_ACTIONS = new Set(["deferred", "stopped"]);
+
+/**
+ * Rescue a card whose worker is gone: put it back where an operator (or a
+ * retry) can act on it. THE ONLY dispatcher-side card write in the rail.
+ *
+ * It NEVER sets a card to 'done' — the bot writes its own terminal state
+ * through the tasks_* tools and statusToStage reconciles it. Marking cards done
+ * from a dispatcher-visible exit code inverts card ownership; that was tried
+ * and reverted.
+ *
+ * The write itself is the bridge's `resetStrandedCardBestEffort` against the
+ * bridge's own `cardsDbForBot` resolution (a project's tasks_db_uri wins over
+ * the global tasks.db), so there is exactly one reset implementation and one
+ * database-resolution rule in the product.
+ *
+ * Best-effort: never throws, never fails the job — but ALWAYS logs, success or
+ * failure. A silently swallowed SQLITE_BUSY here is indistinguishable from the
+ * stranding bug this whole rail exists to remove.
+ */
+async function unstrandCard(job, { log = () => {}, bridge = null, reason = "" } = {}) {
+  const cardId = Number(job && job.card_id);
+  if (!Number.isInteger(cardId) || cardId <= 0) return false;
+  const jobId = (job && job.job_id) || "?";
+  try {
+    const b = bridge || await import("./bridge.mjs");
+    const cardsDb = b.cardsDbForBot(job.bot_id);
+    const ok = b.resetStrandedCardBestEffort(cardsDb, cardId, log);
+    log(`job ${jobId}: card ${cardId} ${ok ? "un-stranded → backlog/pending" : "NOT un-stranded (no row updated) — it may be stuck"} (${reason})`);
+    return ok;
+  } catch (e) {
+    log(`job ${jobId}: card ${cardId} un-strand FAILED (${reason}) — card may be stuck: ${(e && e.message) || e}`);
+    return false;
+  }
+}
+
 export function generateJobId() {
   return "job-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
 }
@@ -148,11 +201,22 @@ export function claimNextJob(workerPid = process.pid) {
  * untouched (it's legitimately running). This is what prevents the reaper-kill →
  * re-run infinite loop: a wedged/reaped job's host is usually still alive, so it
  * is NOT re-queued here; only genuinely abandoned jobs are, and only up to the cap.
+ *
+ * A CARD job that reaches the cap is ALSO un-stranded: its worker is provably
+ * dead and it will never be retried, so leaving the card in stage='executing'
+ * strands it forever with nothing running. A job re-queued UNDER the cap is
+ * deliberately left alone — it is about to run again, and its card is
+ * legitimately still 'executing'.
+ *
+ * async only because un-stranding reaches the bridge (lazily imported, exactly
+ * as the pi side already is). Every job-row write still happens synchronously,
+ * before the first await.
  */
-export function recoverStaleClaims(log = () => {}) {
+export async function recoverStaleClaims(log = () => {}, { bridge = null } = {}) {
+  const stranded = [];
   const c = dbConn();
   try {
-    const rows = c.prepare("SELECT job_id, worker_pid, attempts FROM bot_jobs WHERE status='running'").all();
+    const rows = c.prepare("SELECT job_id, bot_id, worker_pid, attempts, card_id, card_action FROM bot_jobs WHERE status='running'").all();
     for (const r of rows) {
       if (isAlive(r.worker_pid)) continue; // host still running it — leave alone
       if (r.attempts < MAX_JOB_ATTEMPTS) {
@@ -162,9 +226,16 @@ export function recoverStaleClaims(log = () => {}) {
         c.prepare("UPDATE bot_jobs SET status='failed', error=?, ended_at=datetime('now') WHERE job_id=?")
           .run("abandoned: worker died, max attempts reached", r.job_id);
         log(`job ${r.job_id} failed — abandoned, ${r.attempts} attempts`);
+        if (r.card_id != null) stranded.push(r);
       }
     }
   } finally { c.close(); }
+  // Un-strand only AFTER the crow.db handle is released: the cards live in a
+  // different database (often a per-project one), and holding one connection
+  // open across a write to another is how the busy-timeout traps start.
+  for (const r of stranded) {
+    await unstrandCard(r, { log, bridge, reason: `abandoned ${r.card_action || "card"} job, ${r.attempts} attempts` });
+  }
 }
 
 export function finalizeJob(job_id, { status, result, error, tool_calls, pi_session_id }) {
@@ -261,6 +332,14 @@ async function runCardExecute(job, { log, bridge }) {
   });
   const action = r && r.action;
   if (action === "error") throw new Error("card execute failed: " + ((r && r.error) || "unknown bridge error"));
+  // COMPLETED WITHOUT PROGRESS. The job is about to finish SUCCESSFULLY (right:
+  // neither outcome is a failure, and throwing would burn a retry attempt), so
+  // none of the failure paths will ever see it — yet the board already flipped
+  // the card to 'executing' and nothing did its work. Un-strand it here or the
+  // card is stuck forever.
+  if (NO_PROGRESS_ACTIONS.has(action)) {
+    await unstrandCard(job, { log, bridge, reason: "execute completed without progress: " + action });
+  }
   if (action === "deferred") {
     return { result: "deferred: " + ((r && r.reason) || "unknown"), toolCalls: 0, sessionId: null };
   }
@@ -404,12 +483,41 @@ export async function deliverResult(job, text, { log = () => {}, deliverChannel 
 }
 
 /**
+ * Run one claimed job to completion and finalize it — the body shared by
+ * tickJobs and the --run-once CLI branch, so the terminal-path handling
+ * (finalize + un-strand on failure) exists exactly once.
+ *
+ * A FAILED card job is un-stranded: its worker died with the card already in
+ * stage='executing' and nothing running. Note this is deliberately NOT
+ * conditioned on card_action — a failed plan job leaves the card stuck in
+ * 'planning' for the same reason.
+ * @returns {Promise<{status:string, result:string|null, error:string|null}>}
+ */
+async function runAndFinalize(job, { log = () => {}, bridge = null } = {}) {
+  let outcome;
+  try {
+    const r = await runJob(job, { log, bridge });
+    outcome = { status: "completed", result: r.result, error: null, tool_calls: r.toolCalls, pi_session_id: r.sessionId };
+  } catch (e) {
+    outcome = { status: "failed", result: null, error: String((e && e.message) || e), tool_calls: null, pi_session_id: null };
+  }
+  finalizeJob(job.job_id, outcome);
+  if (outcome.status === "failed" && job.card_id != null) {
+    await unstrandCard(job, { log, bridge, reason: "job failed: " + outcome.error });
+  }
+  return outcome;
+}
+
+/**
  * One poll tick: recover stale claims, then — only if interactive capacity is
  * spare (reserved-slot gate) — claim and run ONE job to completion, finalize,
  * and deliver. Async; holds no DB connection across the pi run.
+ *
+ * `bridge` is injectable for the same reason runJob's is: the terminal paths
+ * are provable without spawning a real engine.
  */
-export async function tickJobs({ log = () => {}, deliverChannel = null } = {}) {
-  recoverStaleClaims(log);
+export async function tickJobs({ log = () => {}, deliverChannel = null, bridge = null } = {}) {
+  await recoverStaleClaims(log, { bridge });
 
   const maxPi = LIFECYCLE_DEFAULTS.maxPi;
   const reserve = Math.max(1, maxPi - 1); // leave >=1 slot for an interactive turn
@@ -420,19 +528,29 @@ export async function tickJobs({ log = () => {}, deliverChannel = null } = {}) {
   if (!job) return { idle: true };
   log(`claimed job ${job.job_id} (bot=${job.bot_id}, attempt ${job.attempts})`);
 
-  let outcome;
-  try {
-    const r = await runJob(job, { log });
-    outcome = { status: "completed", result: r.result, error: null, tool_calls: r.toolCalls, pi_session_id: r.sessionId };
-  } catch (e) {
-    outcome = { status: "failed", result: null, error: String((e && e.message) || e), tool_calls: null, pi_session_id: null };
-  }
-  finalizeJob(job.job_id, outcome);
+  const outcome = await runAndFinalize(job, { log, bridge });
   log(`job ${job.job_id} → ${outcome.status}${outcome.error ? " (" + outcome.error + ")" : ""}`);
 
   if (outcome.status === "completed") {
     try { await deliverResult(job, outcome.result, { log, deliverChannel }); }
     catch (e) { log(`delivery failed for ${job.job_id}: ${(e && e.message) || e}`); }
+  }
+  return { ran: job.job_id, status: outcome.status };
+}
+
+/**
+ * Claim + run one job IGNORING the reserved-slot gate (manual ops / testing) —
+ * the --run-once CLI branch's body, extracted so its terminal path rides the
+ * SAME finalize-and-un-strand helper as tickJobs and can be tested without
+ * spawning a real engine.
+ */
+export async function runOnce({ log = () => {}, deliverChannel = null, bridge = null } = {}) {
+  await recoverStaleClaims(log, { bridge });
+  const job = claimNextJob();
+  if (!job) return { idle: true };
+  const outcome = await runAndFinalize(job, { log, bridge });
+  if (outcome.status === "completed") {
+    await deliverResult(job, outcome.result, { log, deliverChannel }).catch(() => {});
   }
   return { ran: job.job_id, status: outcome.status };
 }
@@ -461,20 +579,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
       process.exit(0);
     }
     if (a.includes("--run-once")) {
-      // Claim + run one job IGNORING the reserved-slot gate (manual/testing).
-      recoverStaleClaims(log);
-      const job = claimNextJob();
-      if (!job) { console.log(JSON.stringify({ idle: true })); process.exit(0); }
-      let outcome;
-      try {
-        const r = await runJob(job, { log });
-        outcome = { status: "completed", result: r.result, error: null, tool_calls: r.toolCalls, pi_session_id: r.sessionId };
-      } catch (e) {
-        outcome = { status: "failed", result: null, error: String((e && e.message) || e), tool_calls: null, pi_session_id: null };
-      }
-      finalizeJob(job.job_id, outcome);
-      if (outcome.status === "completed") await deliverResult(job, outcome.result, { log, deliverChannel: await mkDeliver() }).catch(() => {});
-      console.log(JSON.stringify({ ran: job.job_id, status: outcome.status }));
+      console.log(JSON.stringify(await runOnce({ log, deliverChannel: await mkDeliver() })));
       process.exit(0);
     }
     console.error("usage: job_runner.mjs --enqueue '<json>' | --status <job_id> | --tick | --run-once");
