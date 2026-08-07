@@ -145,8 +145,8 @@ function run(cmd, args, options = {}) {
 
 const LOCK_STALE_MS = 30 * 60 * 1000;
 
-async function lockPath() {
-  const r = await run("git", ["rev-parse", "--absolute-git-dir"]);
+async function lockPath(cwd) {
+  const r = await run("git", ["rev-parse", "--absolute-git-dir"], cwd ? { cwd } : {});
   if (r.code !== 0 || !r.stdout) return null; // not a git checkout → no lock possible
   return join(r.stdout, "crow-auto-update.lock");
 }
@@ -206,6 +206,37 @@ function releaseLock(path) {
   } catch {}
 }
 
+/**
+ * Acquire the checkout lock, waiting for a holder to finish.
+ *
+ * The instance half needs this: the lock-loss path is reached ONLY while
+ * another co-hosted gateway holds the lock, i.e. while it is between `git pull`
+ * and its `npm install --omit=dev` (up to 5 minutes of rewriting the SHARED
+ * node_modules) and its init-db. Converging and restarting into that window
+ * boots a gateway against a half-written dependency tree.
+ *
+ * Returns the lock path on success, or null if it could not be acquired within
+ * `waitMs` — in which case the caller must NOT converge; it retries next tick.
+ */
+export async function acquireCheckoutLock({ appRoot = null, waitMs = 6 * 60 * 1000, pollMs = 2000 } = {}) {
+  // Resolve against the caller's root, not the module's APP_ROOT: convergence
+  // is handed an explicit appRoot, and waiting on a lock for a DIFFERENT tree
+  // would silently defeat the serialization.
+  const lock = await lockPath(appRoot);
+  if (!lock) return null;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const held = acquireLock(lock);
+    if (held) return held;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
+
+export function releaseCheckoutLock(path) {
+  if (path) releaseLock(path);
+}
+
 /** Test-only: the lock primitives, unit-tested directly (they are not
  *  exported for production use — checkForUpdates()/runLockedUpdate() are the
  *  real callers). */
@@ -246,6 +277,17 @@ export async function checkForUpdates({ instance = null } = {}) {
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
       treeResult = { updated: false, skipped: "locked", message: msg };
+
+      // Record what the tree is moving to even though we did not pull it.
+      // auto_update_latest_version is otherwise written ONLY inside
+      // runLockedUpdate, which the loser never enters — which is exactly why
+      // the primary's latest_version sat 16 commits BEHIND its own current
+      // while last_result read "another updater is running". The holder has
+      // just fetched, so origin/main is fresh.
+      try {
+        const om = await run("git", ["rev-parse", "--short", "origin/main"]);
+        if (om.code === 0 && om.stdout) await saveSetting("auto_update_latest_version", om.stdout);
+      } catch {}
     } else {
       try {
         treeResult = await runLockedUpdate(log);

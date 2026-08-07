@@ -196,6 +196,10 @@ let _restartImpl = null;
  *  suite-wide precisely so code under test never arms those paths. */
 export function _setRestartForTest(fn) { _restartImpl = fn; }
 
+let _lockWaitOpts = null;
+/** Test-only: shorten the wait for the tree to go quiescent. */
+export function _setLockWaitForTest(opts) { _lockWaitOpts = opts; }
+
 let _supervisedImpl = null;
 /** Test-only: the harness deliberately runs unsupervised, but the convergence
  *  path still has to be exercisable. */
@@ -214,6 +218,45 @@ async function supervised() {
 }
 
 /* ------------------------------------------------------------- convergence */
+
+/**
+ * Can this instance safely restart into the code now on disk?
+ *
+ * Returns true when the store needs no schema init, or when a guarded init-db
+ * brings it current. Returns false when the schema is behind and cannot be
+ * migrated — the caller must then keep the live process rather than restart
+ * into a boot guard that will exit(1).
+ */
+async function schemaReadyForRestart({ appRoot, dbPath, log }) {
+  try {
+    const { SCHEMA_GENERATION, needsSchemaInit } = await import("../shared/schema-version.js");
+    const guard = await import("../shared/migration-guard.js");
+    const state = guard.readSchemaState(dbPath);
+    if (!needsSchemaInit({
+      coreTableCount: state.coreTableCount,
+      userVersion: state.userVersion,
+      schemaGeneration: SCHEMA_GENERATION,
+    })) return true;
+
+    log(`schema behind (user_version=${state.userVersion} < ${SCHEMA_GENERATION}) — running guarded init-db before restart`);
+    const res = await guard.runGuardedInitDb({
+      dbPath, appRoot, sha: null, newGeneration: SCHEMA_GENERATION,
+      log: (m) => log(`[migration-guard] ${m}`),
+    });
+    if (res.verdict === "loss" || res.initDbExit !== 0) return false;
+
+    const after = guard.readSchemaState(dbPath);
+    return !needsSchemaInit({
+      coreTableCount: after.coreTableCount,
+      userVersion: after.userVersion,
+      schemaGeneration: SCHEMA_GENERATION,
+    });
+  } catch (err) {
+    // Cannot determine: do not restart on a guess.
+    log(`schema pre-flight error (${err?.message}) — treating as not ready`);
+    return false;
+  }
+}
 
 /**
  * Make ONE instance current with the checkout it runs from.
@@ -258,15 +301,50 @@ export async function convergeInstance({ appRoot, instance = null, pulled = fals
     return { pulled, converged: false, skipped: "quarantined", sha: head, applied: [] };
   }
 
-  const { runMigrations } = await import("../../scripts/migrations/runner.mjs");
-  const { join: joinPath } = await import("node:path");
-  const res = await runMigrations({
-    migrationsDir: joinPath(root, "scripts", "migrations"),
-    dbPath: inst.dbPath,
-    tasksDbPath: inst.tasksDbPath,
-    sha: head,
-    log,
-  });
+  // Serialize the instance half against the TREE half. This path is reached
+  // only while another co-hosted gateway holds the checkout lock — i.e. while
+  // it is between `git pull` and its `npm install --omit=dev` (up to 5 minutes
+  // rewriting the SHARED node_modules) and its init-db. Migrating and
+  // restarting into that window boots a gateway against a half-written
+  // dependency tree, and `Restart=on-failure` with RestartSec=5 against a 10s
+  // StartLimitInterval means the resulting crash loop is UNBOUNDED.
+  //
+  // Failing to acquire is not an error: skip this tick and retry on the next.
+  const au = await import("./auto-update.js");
+  const lock = await au.acquireCheckoutLock({ appRoot: root, ...(_lockWaitOpts || {}) });
+  if (!lock) {
+    log("could not acquire the checkout lock — deferring convergence to the next tick");
+    return { pulled, converged: false, skipped: "tree-busy", sha: head, applied: [] };
+  }
+
+  try {
+    const { runMigrations } = await import("../../scripts/migrations/runner.mjs");
+    const { join: joinPath } = await import("node:path");
+    var res = await runMigrations({
+      migrationsDir: joinPath(root, "scripts", "migrations"),
+      dbPath: inst.dbPath,
+      tasksDbPath: inst.tasksDbPath,
+      sha: head,
+      log,
+    });
+
+    // Schema pre-flight, BEFORE committing to a restart.
+    //
+    // The registry only handles additive changes. A SCHEMA_GENERATION bump is
+    // validated by whichever instance ran init-db — against ITS data. This
+    // instance's store may differ (a backfill or unique index that passed on a
+    // smaller dataset can fail here). Discovering that AFTER restarting means
+    // the boot guard exits 1 on a process we had just killed for no reason.
+    // Check now, and if the schema cannot be brought current, keep serving the
+    // live process instead.
+    const ok = await schemaReadyForRestart({ appRoot: root, dbPath: inst.dbPath, log });
+    if (!ok) {
+      log("schema pre-flight failed — restart withheld, this instance keeps running its current code");
+      return { pulled, converged: false, skipped: "schema-not-ready", sha: head, applied: res.applied };
+    }
+  } finally {
+    au.releaseCheckoutLock(lock);
+  }
 
   // Without a supervisor, the restart is a silent no-op. Writing a
   // deadline-bearing cookie and then not restarting means the deadline passes
