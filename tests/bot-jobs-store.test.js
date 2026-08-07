@@ -82,7 +82,7 @@ test("claim respects FIFO (oldest queued first)", () => {
   assert.equal(mod.claimNextJob().job_id, second);
 });
 
-test("stale recovery: dead worker re-queues under the attempts cap", () => {
+test("stale recovery: dead worker re-queues under the attempts cap", async () => {
   reset();
   const id = mod.enqueueJob({ bot_id: "b1", goal: "abandoned" });
   // Simulate a claim by a now-dead host: running, worker_pid unlikely-to-exist, attempts=1.
@@ -90,26 +90,26 @@ test("stale recovery: dead worker re-queues under the attempts cap", () => {
   c.prepare("UPDATE bot_jobs SET status='running', worker_pid=999999, attempts=1, started_at=datetime('now') WHERE job_id=?").run(id);
   c.close();
 
-  mod.recoverStaleClaims(() => {});
+  await mod.recoverStaleClaims(() => {});
   const s = mod.jobStatus(id);
   assert.equal(s.status, "queued", "abandoned (dead worker) job re-queued");
   assert.equal(s.attempts, 1, "attempts preserved across recovery");
 });
 
-test("stale recovery: fails (no re-queue) once attempts hit the cap", () => {
+test("stale recovery: fails (no re-queue) once attempts hit the cap", async () => {
   reset();
   const id = mod.enqueueJob({ bot_id: "b1", goal: "wedged" });
   const c = new Database(dbPath);
   c.prepare("UPDATE bot_jobs SET status='running', worker_pid=999999, attempts=3, started_at=datetime('now') WHERE job_id=?").run(id);
   c.close();
 
-  mod.recoverStaleClaims(() => {});
+  await mod.recoverStaleClaims(() => {});
   const s = mod.jobStatus(id);
   assert.equal(s.status, "failed", "max-attempts abandoned job is failed, not re-queued");
   assert.match(s.error || "", /abandoned/);
 });
 
-test("stale recovery: a LIVE worker's running job is left untouched", () => {
+test("stale recovery: a LIVE worker's running job is left untouched", async () => {
   reset();
   const id = mod.enqueueJob({ bot_id: "b1", goal: "in-flight" });
   const c = new Database(dbPath);
@@ -117,6 +117,6 @@ test("stale recovery: a LIVE worker's running job is left untouched", () => {
   c.prepare("UPDATE bot_jobs SET status='running', worker_pid=?, attempts=1, started_at=datetime('now') WHERE job_id=?").run(process.pid, id);
   c.close();
 
-  mod.recoverStaleClaims(() => {});
+  await mod.recoverStaleClaims(() => {});
   assert.equal(mod.jobStatus(id).status, "running", "live worker's job stays running");
 });
