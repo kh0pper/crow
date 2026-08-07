@@ -385,18 +385,63 @@ test("the default bound is 5s and is exported so both callers share one number",
 // defaults and never the lab's live pi-hub on 4200/4201.
 
 /** Bind :0 on loopback, note the port the kernel handed out, release it. */
-function freeLoopbackPort() {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
+/**
+ * Reserve `n` DISTINCT free loopback ports.
+ *
+ * Binding port 0, reading the port, closing, and repeating does NOT guarantee
+ * distinct results: once the first socket closes the kernel may hand the same
+ * ephemeral port straight back to the next call. That produced a real
+ * intermittent failure here — two sequential calls both returned 33605 (inside
+ * this host's 32768-60999 ephemeral range) and the `assert.notEqual` guard
+ * below tripped under full-suite load.
+ *
+ * Holding every socket open until all of them are bound makes a collision
+ * structurally impossible rather than merely unlikely, because no port is
+ * released until all have been chosen.
+ */
+function freeLoopbackPorts(n) {
+  const servers = [];
+  const openOne = () =>
+    new Promise((resolve, reject) => {
+      const srv = createServer();
+      srv.once("error", reject);
+      srv.listen(0, "127.0.0.1", () => {
+        servers.push(srv);
+        resolve(srv.address().port);
+      });
     });
-  });
+
+  return (async () => {
+    try {
+      const ports = [];
+      for (let i = 0; i < n; i++) ports.push(await openOne());
+      return ports;
+    } finally {
+      // Release only after every port has been chosen.
+      await Promise.all(servers.map((s) => new Promise((r) => s.close(r))));
+    }
+  })();
+}
+
+async function freeLoopbackPort() {
+  const [p] = await freeLoopbackPorts(1);
+  return p;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test("freeLoopbackPorts hands out distinct ports", async () => {
+  // Regression guard for a rare, load-dependent collision: the previous helper
+  // closed each socket before returning, so the kernel could reuse the port on
+  // the very next call. NOTE the honest limit — this asserts the property, but
+  // cannot deterministically reproduce the old bug (it did not collide in 3600
+  // synthetic pairs). It catches a gross regression; the real protection is
+  // that the new helper cannot collide by construction.
+  const ports = await freeLoopbackPorts(12);
+  assert.equal(ports.length, 12);
+  assert.equal(new Set(ports).size, 12, `ports must be distinct, got ${ports.join(",")}`);
+  for (const p of ports) assert.ok(p > 1024 && p < 65536, `implausible port ${p}`);
+});
 
 /** Lay out a scratch CROW_HOME exactly as a real bundle install would. */
 function installRealPayload(home) {
@@ -461,8 +506,7 @@ test("E2E: the vendored payload installs, boots under the real supervisor, and s
   );
   assert.equal(manifest.draft, false, "the bundle must be published for anyone to install it");
 
-  const port = await freeLoopbackPort();
-  const registryPort = await freeLoopbackPort();
+  const [port, registryPort] = await freeLoopbackPorts(2);
   for (const p of [port, registryPort]) {
     assert.ok(p > 10000, `refusing to bind low port ${p}`);
     assert.ok(![4200, 4201, 4210, 4211].includes(p), `port ${p} is reserved`);
