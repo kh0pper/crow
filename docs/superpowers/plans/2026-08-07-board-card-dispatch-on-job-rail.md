@@ -564,17 +564,41 @@ Import the tasks-db path resolver at the top of the file if it is not already im
 import { tasksDbPath as resolveTasksDbPath } from "./instance-paths.mjs";
 ```
 
-- [ ] **Step 5: Handle the failure path**
+- [ ] **Step 5: Handle the failure path — once, in a shared helper**
 
-`deliverResult` runs only for completed jobs. In the `tickJobs` failure branch — where `outcome.status === "failed"` — add, immediately after `finalizeJob(...)`:
+`deliverResult` runs only for completed jobs, so a *failed* card job would never
+reach the write-back and its card would stay in `executing`. Two call sites need
+this: `tickJobs` and the `--run-once` CLI branch, which has its own copy of the
+finalize logic.
+
+Do **not** paste the same block into both — extract a helper next to
+`applyCardOutcome`:
 
 ```js
-    if (outcome.status === "failed" && job.card_id != null) {
-      applyCardOutcome({ tasksDbPath: resolveTasksDbPath(), cardId: Number(job.card_id), ok: false });
-    }
+/**
+ * Post-finalize hook for a card-sourced job's FAILURE path. Success flows
+ * through deliverResult's kind:"card" branch instead.
+ *
+ * Exists so tickJobs and the --run-once CLI branch share one implementation:
+ * they already keep separate copies of the finalize logic, and a second
+ * divergent copy of the card write-back is how one path silently stops
+ * updating the board.
+ *
+ * @param {{card_id: number|null}} job
+ * @param {{status: string}} outcome
+ */
+export function applyCardFailure(job, outcome) {
+  if (outcome.status !== "failed") return;
+  if (job.card_id == null) return;
+  applyCardOutcome({ tasksDbPath: resolveTasksDbPath(), cardId: Number(job.card_id), ok: false });
+}
 ```
 
-Apply the same block in the `--run-once` CLI branch, which has its own copy of the finalize logic.
+Then call it immediately after `finalizeJob(...)` in **both** places:
+
+```js
+    applyCardFailure(job, outcome);
+```
 
 - [ ] **Step 6: Run the tests**
 
@@ -610,6 +634,7 @@ no-op: delivery runs after the work succeeded and must not crash the worker."
 **Files:**
 - Modify: `servers/gateway/routes/bot-board-api.js` (`lockState` ~line 77, `execute` ~line 546, `plan-dispatch` ~line 602)
 - Create: `tests/board-dispatch-job-rail.test.js`
+- Modify: `tests/board-stage-api.test.js` (this task removes a seam it depends on — see Step 6)
 
 **Interfaces:**
 - Consumes: `card_id` (Task 1), `ensureBotJobsSchema` semantics (Task 2), `deliver_to.kind = "card"` (Task 3).
@@ -645,9 +670,6 @@ const tasksDb = join(dir, "tasks.db");
 
 process.env.CROW_DB_PATH = crowDb;
 process.env.CROW_TASKS_DB_PATH = tasksDb;
-// Belt and braces: if a regression re-introduces the spawn, this makes it inert
-// rather than launching a real pi on the test host.
-process.env.CROW_BOARD_DISPATCH_DRYRUN = "";
 
 function seed() {
   const c = new Database(crowDb);
@@ -821,21 +843,60 @@ Replace its spawn block with an enqueue whose goal names the planning intent. Th
       return res.json({ ok: true, dispatched: bot, jobId });
 ```
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 6: Repair `tests/board-stage-api.test.js` — this task breaks it**
 
-```bash
-node --test tests/board-dispatch-job-rail.test.js
+Two existing tests there use `CROW_BOARD_DISPATCH_DRYRUN = "1"` as a seam to
+skip the real spawn (lines ~178 and ~198). This task deletes that seam, and
+that creates a **real cross-test failure**, not just a dead env var:
+
+- the `execute` test dispatches **card 1** — which now leaves a `queued`
+  `bot_jobs` row for card 1;
+- the `plan-dispatch` test then acts on **card 1** as well — and the new
+  `lockState` correctly sees that queued job and returns **409**, so its
+  `assert.equal(ok.ok, true)` fails.
+
+Fix both, in this order:
+
+1. Delete the four `CROW_BOARD_DISPATCH_DRYRUN` lines (the two assignments and
+   the two `delete` calls). The env var no longer exists in the source.
+2. Clear the job queue between the two tests so the lock cannot leak. Add this
+   immediately before the `plan-dispatch` test's first `fetch`:
+
+```js
+  // execute (above) enqueued a queued job for this same card; lockState now
+  // treats that as a lock, which would 409 this dispatch. Clear it — these two
+  // tests deliberately reuse card 1.
+  const jq = new Database(process.env.CROW_DB_PATH);
+  jq.exec("DELETE FROM bot_jobs");
+  jq.close();
 ```
 
-Expected: PASS, 2 tests.
+3. In the `execute` test, tighten the assertion to prove the new rail is used
+   rather than only that the call returned 200:
 
-- [ ] **Step 7: Mutation-test**
+```js
+  assert.equal(ok.dispatched, "scout");
+  const jdb = new Database(process.env.CROW_DB_PATH);
+  const job = jdb.prepare("SELECT source, card_id, status FROM bot_jobs WHERE card_id=1").get();
+  jdb.close();
+  assert.deepEqual([job.source, job.card_id, job.status], ["card", 1, "queued"]);
+```
+
+- [ ] **Step 7: Run the tests**
+
+```bash
+node --test tests/board-dispatch-job-rail.test.js tests/board-stage-api.test.js tests/board-plan-dispatch.test.js
+```
+
+Expected: PASS — the 2 new tests plus every existing board test.
+
+- [ ] **Step 8: Mutation-test**
 
 Change `lockState`'s job query to `status IN ('running')` only. Re-run.
 
 Expected: the "second execute is refused" test FAILS (a queued job no longer locks). Revert.
 
-- [ ] **Step 8: Run the full suite**
+- [ ] **Step 9: Run the full suite**
 
 ```bash
 npm test > /tmp/suite.log 2>&1; echo "EXIT=$?"
@@ -844,10 +905,10 @@ grep -E '^# (tests|pass|fail)' /tmp/suite.log | tail -3
 
 Expected: 0 fail. Baseline 3004 plus the tests added here.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git commit servers/gateway/routes/bot-board-api.js tests/board-dispatch-job-rail.test.js \
+git commit servers/gateway/routes/bot-board-api.js tests/board-dispatch-job-rail.test.js tests/board-stage-api.test.js \
   -m "feat(board): dispatch cards onto the job rail instead of spawning a bridge
 
 execute and plan-dispatch spawned a detached bridge.mjs --inject into the
