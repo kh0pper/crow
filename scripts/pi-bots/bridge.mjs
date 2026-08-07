@@ -851,12 +851,28 @@ export async function handleInbound(opts) {
 // are unchanged. Callers that CAN report (the job runner) pass one: a
 // silently swallowed SQLITE_BUSY leaves the card stuck with no trace.
 // Returns true only when a card row was actually moved.
+//
+// THE TERMINAL-STATUS GUARD is the mirror of the rule above. handleInbound's
+// error catch is POST-turn: it also wraps the statusToStage reconcile, so a
+// pi.prompt timeout AFTER the bot has already written status='done' through
+// its own tasks_* tools leaves the card at stage='executing', status='done'
+// with the job failed. Resetting that would DISCARD completed work — the
+// dispatcher un-setting 'done' is exactly as wrong as the dispatcher setting
+// it. So a card that has reached a terminal status is never touched; the
+// caller sees changes===0 and logs it, which is the signal an operator wants.
+// 'done'/'cancelled' are the terminal statuses of the stage model
+// (board-stages.js TERMINAL_STAGES + stageToStatus) — they are spelled out
+// rather than derived because a stage whose STAGE_TO_STATUS entry was missing
+// would derive as 'pending' and silently disable un-stranding entirely. A test
+// derives the same list from board-stages and fails if a third one appears.
 export function resetStrandedCardBestEffort(cardsDb, cardId, log = () => {}) {
   try {
     const c = db(cardsDb);
     try {
-      const info = c.prepare("UPDATE tasks_items SET stage='backlog', status='pending', updated_at=datetime('now') WHERE id=?")
-        .run(cardId);
+      const info = c.prepare(
+        "UPDATE tasks_items SET stage='backlog', status='pending', updated_at=datetime('now') " +
+        "WHERE id=? AND status NOT IN ('done','cancelled')"
+      ).run(cardId);
       return info.changes > 0;
     } finally { c.close(); }
   } catch (e) {

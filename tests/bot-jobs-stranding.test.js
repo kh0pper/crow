@@ -266,6 +266,75 @@ for (const [name, drive] of [
   });
 }
 
+// ------------------------------------------- the un-strand must not roll back
+
+/**
+ * The mirror of "the dispatcher never sets done": the dispatcher never UN-sets
+ * it either. handleInbound's error catch is POST-turn and also wraps the
+ * statusToStage reconcile, so a pi.prompt timeout AFTER the bot has already
+ * written status='done' through its own tasks_* tools yields action:'error'
+ * with the card at stage='executing', status='done'. Un-stranding that would
+ * discard finished work.
+ */
+for (const terminal of ["done", "cancelled"]) {
+  test(`a failed card job does NOT roll back a card the bot already left '${terminal}'`, async () => {
+    reset();
+    const t = new Database(PROJECT_TASKS_DB);
+    // stage is still 'executing' precisely because the reconcile never ran.
+    t.prepare("UPDATE tasks_items SET stage='executing', status=? WHERE id=?").run(terminal, CARD_ID);
+    t.close();
+    seedJob({ job_id: "j-terminal-" + terminal, status: "queued" });
+    const lines = [];
+    const bridge = bridgeWith({ handleInbound: async () => ({ action: "error", error: "turn timed out" }) });
+
+    const out = await runner.runOnce({ log: (m) => lines.push(String(m)), bridge });
+
+    assert.equal(out.status, "failed", "the job still fails — only the CARD is left alone");
+    assert.equal(stage().status, terminal,
+      `the bot's '${terminal}' is its own terminal state; the dispatcher must not overwrite it`);
+    assert.notEqual(stage().stage, "backlog", "no rollback of completed work");
+    assert.ok(lines.some((l) => /NOT un-stranded/.test(l) && l.includes(String(CARD_ID))),
+      "a skipped un-strand must be visible, not silent; got: " + JSON.stringify(lines));
+  });
+}
+
+test("the terminal-status guard covers every terminal status the stage model defines", async () => {
+  // The guard is spelled out in SQL (deriving it at runtime would turn a
+  // missing STAGE_TO_STATUS entry into 'pending', which would disable
+  // un-stranding entirely). This test is what keeps the literal honest: add a
+  // third terminal stage to board-stages.js and it fails here, pointing at the
+  // UPDATE that needs it.
+  const { TERMINAL_STAGES, stageToStatus } = await import("../servers/gateway/routes/board-stages.js");
+  const terminalStatuses = [...TERMINAL_STAGES].map(stageToStatus);
+  assert.deepEqual(terminalStatuses.sort(), ["cancelled", "done"],
+    "a new terminal stage must also be added to resetStrandedCardBestEffort's WHERE clause");
+
+  // And prove each one is actually refused by the real reset, not just listed.
+  for (const status of terminalStatuses) {
+    reset();
+    const t = new Database(PROJECT_TASKS_DB);
+    t.prepare("UPDATE tasks_items SET status=? WHERE id=?").run(status, CARD_ID);
+    t.close();
+    assert.equal(realBridge.resetStrandedCardBestEffort(PROJECT_TASKS_DB, CARD_ID, () => {}), false,
+      `the reset must report false (no row moved) for status='${status}'`);
+    assert.equal(stage().status, status);
+  }
+});
+
+test("planCard's pre-session call sites are unaffected by the terminal guard", async () => {
+  // Verified rather than assumed (fix-round-1 requirement). The plan-dispatch
+  // route refuses anything not in Backlog and writes stage='planning',
+  // status='pending' BEFORE spawning, so every card planCard can reset carries
+  // a non-terminal status and the guard never blocks it.
+  reset();
+  const t = new Database(PROJECT_TASKS_DB);
+  t.prepare("UPDATE tasks_items SET stage='planning', status='pending' WHERE id=?").run(CARD_ID);
+  t.close();
+  assert.equal(realBridge.resetStrandedCardBestEffort(PROJECT_TASKS_DB, CARD_ID, () => {}), true,
+    "a planning/pending card must still reset — this is planCard's early-refusal path");
+  assert.deepEqual(stage(), { stage: "backlog", status: "pending" });
+});
+
 test("a failing NON-card job touches no card at all", async () => {
   reset();
   const c = new Database(CROW_DB);
