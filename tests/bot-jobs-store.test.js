@@ -12,6 +12,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { BOT_JOBS_DDL } from "../scripts/pi-bots/bot-jobs-schema.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "botjobs-test-"));
 const dbPath = join(dir, "crow.db");
@@ -19,33 +20,10 @@ process.env.CROW_DB_PATH = dbPath;
 // Keep the runner's reserved-slot math deterministic regardless of host env.
 process.env.PIBOT_MAX_JOB_ATTEMPTS = "3";
 
-// Schema mirror of scripts/init-db.js bot_jobs (kept in sync by intent).
-const SCHEMA = `
-  CREATE TABLE bot_jobs (
-    job_id        TEXT PRIMARY KEY,
-    bot_id        TEXT NOT NULL,
-    goal          TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'queued',
-    deliver_to    TEXT,
-    source        TEXT,
-    schedule_id   INTEGER,
-    escalate      INTEGER NOT NULL DEFAULT 0,
-    attempts      INTEGER NOT NULL DEFAULT 0,
-    result        TEXT,
-    error         TEXT,
-    pi_session_id TEXT,
-    tool_calls    INTEGER,
-    worker_pid    INTEGER,
-    claimed_at    TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    started_at    TEXT,
-    ended_at      TEXT
-  );`;
-
 let mod;
 before(async () => {
   const init = new Database(dbPath);
-  init.exec(SCHEMA);
+  init.exec(BOT_JOBS_DDL);
   init.close();
   mod = await import("../scripts/pi-bots/job_runner.mjs");
 });
