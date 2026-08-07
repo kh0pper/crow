@@ -262,9 +262,11 @@ the tree has already moved.
 **A process honors its own refusal.** The branches that deliberately withhold a
 restart (init-db failure, both migration-guard loss paths) return
 `converge: false`, and `checkForUpdates` then skips the instance half. Without
-that, convergence would restart into a sha whose `init-db` just failed, the boot
-guard would `process.exit(1)`, and systemd's `StartLimitBurst` would leave the
-unit dead.
+that, convergence would restart into a sha whose `init-db` just failed and the
+boot guard would `process.exit(1)`. On units configured `RestartSec=5` against a
+10 s `StartLimitInterval`, `StartLimitBurst` never trips — so the result is an
+**unbounded** crash loop, not a stopped unit, with each iteration re-running
+`init-db` against a live store.
 
 Convergence **owns the restart** — scheduled only after migrations run and the
 boot cookie is written. An unsupervised instance migrates, logs that a manual
