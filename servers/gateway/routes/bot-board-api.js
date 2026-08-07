@@ -15,11 +15,7 @@
  *  - All DB access via the gateway's journal-safe createDbClient() — tasks.db
  *    via createDbClient(TASKS_DB) (DELETE-pinned by CROW_JOURNAL_MODE on this
  *    gateway), crow.db via createDbClient(). No direct better-sqlite3
- *    constructor anywhere in this file. The one executeMultiple/DDL exception
- *    is ensureBotJobsColumns(), the lazy bot_jobs self-heal shared with
- *    tool-executor.js's ensureBotJobs() and job_runner.mjs's
- *    ensureBotJobsSchema() (scripts/pi-bots/bot-jobs-schema.mjs is the single
- *    DDL source for all three).
+ *    constructor anywhere in this file; no executeMultiple/DDL.
  *  - Status literals validated against a hardcoded in-app allowlist BEFORE
  *    any SQL → 400 (the DB CHECK is defense-in-depth, never caught).
  *  - card-create: title must be a non-empty trimmed string → 400 before the
@@ -62,7 +58,6 @@ import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mj
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
 import { parsePlanRef, resolvePlanFile, containedRealPath } from "./plan-ref.js";
 import { isStage, stageToStatus, effectiveStage } from "./board-stages.js";
-import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -80,19 +75,6 @@ const BULK_CAP = 200;
 // D5 single-card lock re-check (the genuinely-single-card site). Returns
 // { locked, row } where row is the MAX(id) bot_sessions row for the card.
 async function lockState(cdb, cardId) {
-  // A card is locked by EITHER rail: a live conversational session (the legacy
-  // bridge path) or an unfinished job (the current dispatch path). Checking
-  // only bot_sessions let a queued job be dispatched a second time.
-  try {
-    const job = (await cdb.execute({
-      sql: "SELECT job_id, status FROM bot_jobs WHERE card_id=? AND status IN ('queued','running') "
-         + "ORDER BY rowid DESC LIMIT 1",
-      args: [cardId],
-    })).rows[0];
-    if (job) return { locked: true, row: job };
-  } catch {
-    // bot_jobs absent on this instance — fall through to the session check.
-  }
   try {
     const r = (await cdb.execute({
       sql:
@@ -109,31 +91,6 @@ async function lockState(cdb, cardId) {
     // for read, conservative for write callers (they 409 only on positive).
     return { locked: false, row: null };
   }
-}
-
-/** Lazy-ensure bot_jobs + its post-ship columns from the gateway side. */
-async function ensureBotJobsColumns(cdb) {
-  // ORDER IS LOAD-BEARING: migrate BEFORE running the DDL.
-  //
-  // BOT_JOBS_DDL ends with a partial index on card_id. Against a legacy table
-  // that lacks the column, executing the DDL throws "no such column: card_id"
-  // — so a DDL-first ordering never reaches the ALTER that would have fixed it,
-  // and on init-db (whose initTable() calls process.exit(1) on DDL failure) it
-  // would crash the whole run on every pre-existing install. Verified against a
-  // real legacy table; Task 2 hit exactly this.
-  //
-  // PRAGMA on a table that does not exist yet returns zero rows, so a brand-new
-  // install simply skips the ALTER loop and gets everything from the DDL.
-  const info = await cdb.execute("PRAGMA table_info(bot_jobs)");
-  const names = info.rows.map((r) => r.name);
-  if (names.length) {
-    for (const stmt of missingBotJobsColumns(names)) await cdb.execute(stmt);
-  }
-  // BOT_JOBS_DDL is several statements in one string — cdb.execute() prepares
-  // a single statement (better-sqlite3 .prepare() throws on more than one),
-  // so it must go through executeMultiple(), same as tool-executor.js's
-  // ensureBotJobs().
-  await cdb.executeMultiple(BOT_JOBS_DDL);
 }
 
 // Resolve the plan-file path for a card exactly as the bridge does
@@ -583,11 +540,9 @@ export default function botBoardApiRouter(dashboardAuth) {
   });
 
   // ---- execute from board (spec: dispatch is explicit; drags never dispatch) ----
-  // Enqueues a bot_jobs row (source='card', card_id, deliver_to.kind='card')
-  // instead of spawning a detached bridge --inject — the job rail gets
-  // scan-gated pickup, retry, stale-claim recovery, and telemetry that the
-  // old conversational-rail spawn never had. job_runner.mjs claims it and
-  // writes the outcome back to the card (done on success, ready on failure).
+  // Reuses the /session/send detached bridge --inject seam. Board turns get
+  // gateway_type "board" + thread "board-card-<id>"; the bot's durable output
+  // is the plan file ## Result + the audit log + the session transcript.
   router.post(P + "/card/:id/execute", async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
@@ -619,17 +574,22 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql: "UPDATE tasks_items SET stage='executing', status='in_progress', updated_at=datetime('now') WHERE id=?",
         args: [id],
       });
-      const jobId = "job-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
-      await ensureBotJobsColumns(cdb);
-      await cdb.execute({
-        sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, card_id) "
-           + "VALUES (?, ?, ?, 'queued', ?, 'card', ?)",
-        args: [
-          jobId, bot, "Execute board card #" + id,
-          JSON.stringify({ kind: "card", card_id: id }), id,
-        ],
-      });
-      return res.json({ ok: true, dispatched: bot, jobId });
+      if (!process.env.CROW_BOARD_DISPATCH_DRYRUN) {
+        const { spawn } = await import("node:child_process");
+        const NODE_BIN = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
+        const BRIDGE = HOME + "/crow/scripts/pi-bots/bridge.mjs";
+        const payload = JSON.stringify({
+          bot_id: bot, gateway_type: "board", gateway_thread_id: "board-card-" + id,
+          user_message: "execute #" + id,
+        });
+        const child = spawn(NODE_BIN, [BRIDGE, "--inject", payload],
+          { cwd: HOME, stdio: ["ignore", "ignore", "ignore"], detached: true });
+        // I3a: a spawn failure (e.g. a stale NODE_BIN path) must not crash the
+        // gateway as an uncaughtException — this dispatch is fire-and-forget.
+        child.on("error", () => {});
+        child.unref();
+      }
+      return res.json({ ok: true, dispatched: bot });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
@@ -667,17 +627,19 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql: "UPDATE tasks_items SET stage='planning', status='pending', updated_at=datetime('now') WHERE id=?",
         args: [id],
       });
-      const jobId = "job-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
-      await ensureBotJobsColumns(cdb);
-      await cdb.execute({
-        sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, card_id) "
-           + "VALUES (?, ?, ?, 'queued', ?, 'card', ?)",
-        args: [
-          jobId, bot, "Write an implementation plan for board card #" + id,
-          JSON.stringify({ kind: "poll" }), id,
-        ],
-      });
-      return res.json({ ok: true, dispatched: bot, jobId });
+      if (!process.env.CROW_BOARD_DISPATCH_DRYRUN) {
+        const { spawn } = await import("node:child_process");
+        const NODE_BIN = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
+        const BRIDGE = HOME + "/crow/scripts/pi-bots/bridge.mjs";
+        const payload = JSON.stringify({ cardId: id, botId: bot });
+        const child = spawn(NODE_BIN, [BRIDGE, "--plan-card", payload],
+          { cwd: HOME, stdio: ["ignore", "ignore", "ignore"], detached: true });
+        // I3a: a spawn failure (e.g. a stale NODE_BIN path) must not crash the
+        // gateway as an uncaughtException — this dispatch is fire-and-forget.
+        child.on("error", () => {});
+        child.unref();
+      }
+      return res.json({ ok: true, dispatched: bot });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
