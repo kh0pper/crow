@@ -20,7 +20,7 @@ import { connectedServers } from "../proxy.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
 import { CronExpressionParser } from "cron-parser";
-import { BOT_JOBS_DDL } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
+import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 
 export { buildRemoteVoiceContext } from "./remote-voice-tools.js";
 
@@ -29,7 +29,20 @@ export { buildRemoteVoiceContext } from "./remote-voice-tools.js";
 let _botJobsEnsured = false;
 async function ensureBotJobs(db) {
   if (_botJobsEnsured) return;
-  try { await db.executeMultiple(BOT_JOBS_DDL); _botJobsEnsured = true; } catch { /* surfaced by the caller's own op */ }
+  try {
+    // Columns added after the table shipped reach existing installs only
+    // here — and MUST land before the DDL exec below: BOT_JOBS_DDL's newest
+    // index is on card_id, and creating that index (before the ALTER adds
+    // the column) throws on a legacy table. names.length === 0 means the
+    // table doesn't exist yet, so a fresh install skips straight to the DDL.
+    const info = await db.execute("PRAGMA table_info(bot_jobs)");
+    const names = info.rows.map((r) => r.name);
+    if (names.length) {
+      for (const stmt of missingBotJobsColumns(names)) await db.execute(stmt);
+    }
+    await db.executeMultiple(BOT_JOBS_DDL);
+    _botJobsEnsured = true;
+  } catch { /* surfaced by the caller's own op */ }
 }
 
 // Bot-cron schedule namespace (Plan B Part 1 Stage 4). MUST stay in sync with
