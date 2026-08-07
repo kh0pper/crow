@@ -182,9 +182,14 @@ test("the websocket upgrade path gets the same bearer, via the v3 `on.proxyReqWs
   assert.equal(typeof options.on.proxyReqWs, "function",
     "server.on('upgrade') never runs the proxyReq hook — without proxyReqWs, websockets reach the hub unauthenticated");
 
+  // http-proxy-middleware v3 calls BOTH hooks as (proxyReq, req, ...) — the
+  // second argument is not optional, and proxyReq now forwards the parsed body
+  // through it (see extension-proxy-json-body.test.js). Calling these with one
+  // argument tests a signature production never uses.
   for (const hook of [options.on.proxyReq, options.on.proxyReqWs]) {
     const headers = {};
-    hook({ setHeader: (k, v) => { headers[k] = v; } });
+    const req = { readableLength: 0, body: undefined, headers: {} };
+    hook({ setHeader: (k, v) => { headers[k] = v; }, getHeader: () => undefined }, req);
     assert.equal(headers["Authorization"], "Bearer ws-token-xyz");
   }
 });
