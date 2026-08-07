@@ -276,6 +276,29 @@ test("recoverStaleClaims un-strands the card when a card job is abandoned for go
 
 Fill in the seeding using the same throwaway-temp-DB idiom as `tests/bot-jobs-store.test.js` (import `BOT_JOBS_DDL`, never a hand-mirrored copy), plus a `tasks_items` table with the columns listed in Task 5's fixture.
 
+- [ ] **Step 2b: Cover the DEFERRED-EXECUTE path — found during Task 3, not in the original brief**
+
+`handleInbound`'s pi-capacity gate returns `deferred` **without mutating the card**, and that is
+correct for its original callers: a Gmail or Discord tick simply reprocesses the same inbound later.
+A board dispatch has no such tick. So a deferred execute finishes as a **completed** job with its
+card stuck in `stage='executing'` forever — the exact bug this feature exists to remove, arriving
+through the one door nobody watched.
+
+This means the un-stranding hook cannot live only on the failure paths. It must also fire when a
+card job COMPLETES with a deferred outcome. Add a test for it:
+
+```js
+test("a deferred execute un-strands its card instead of completing silently", async () => {
+  // Seed a card in stage='executing' and a card job whose bridge call returns
+  // {action:"deferred", reason:"pi-capacity"}.
+  // Expect: the job completes (deferral is not a failure — it must not burn a
+  // retry attempt) AND the card is no longer in 'executing'.
+});
+```
+
+Note `planCard`'s deferred path DOES reset the card (`resetStrandedCardBestEffort`), so only the
+execute path needs this. Do not double-reset a planning deferral.
+
 - [ ] **Step 3: Wire the reset into all three terminal paths**
 
 `recoverStaleClaims` (`job_runner.mjs` ~line 152) currently sets `status='failed'` without selecting `card_id`. Add `card_id`/`card_action` to its SELECT and call the bridge's reset when a card job reaches the attempts cap. Do the same in `tickJobs`'s failure branch and the `--run-once` CLI branch — via **one shared helper**, not three copies.
