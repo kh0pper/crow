@@ -194,6 +194,51 @@ try {
   process.exit(1);
 }
 
+// Per-instance migration registry (scripts/migrations/). Runs for THIS instance
+// with THIS instance's env-resolved paths, so co-hosted gateways sharing one
+// checkout each migrate their own stores. Covers changes that carry no
+// SCHEMA_GENERATION bump — additive columns, and non-crow.db stores like
+// tasks.db — which the guard above deliberately does not.
+//
+// ORDER INVARIANT: after the schema guard, before the first createDbClient
+// (initOAuthTables below), for the same reason the guard block documents —
+// createDbClient registers a never-closed per-path WAL keeper, and a later
+// restore would swap the DB file under a pinned inode.
+// tests/migration-registry.test.js asserts this ordering.
+try {
+  const { runMigrations } = await import("../../scripts/migrations/runner.mjs");
+  const { resolveDataDir: _rddReg } = await import("../db.js");
+  const { resolveGuardDbPath: _rgdpReg } = await import("../shared/migration-guard.js");
+  const { tasksDbPath: _tdpReg } = await import("../../scripts/pi-bots/instance-paths.mjs");
+  const { dirname: _dnReg, join: _joinReg } = await import("node:path");
+  const { fileURLToPath: _fupReg } = await import("node:url");
+
+  const _rootReg = _dnReg(_dnReg(_dnReg(_fupReg(import.meta.url))));
+  const _resReg = await runMigrations({
+    migrationsDir: _joinReg(_rootReg, "scripts", "migrations"),
+    dbPath: _rgdpReg(_rddReg),
+    tasksDbPath: _tdpReg(),
+    log: (m) => console.log(`[migrations] ${m}`),
+  });
+  if (_resReg.applied.length) console.log(`[migrations] applied: ${_resReg.applied.join(", ")}`);
+  if (_resReg.deferred.length) {
+    console.log(`[migrations] deferred (will retry): ${_resReg.deferred.join(", ")}`);
+  }
+} catch (e) {
+  // Fail closed on a genuine failure — serving on a half-migrated store is how
+  // the Bot Board 500'd on every drawer open. But a busy bundle-owned store is
+  // TRANSIENT: the tasks addon child holds tasks.db open, and exiting on that
+  // would make gateway boot depend on a store the gateway does not control,
+  // where a crash-loop plus systemd's StartLimitBurst leaves the unit down.
+  if (/SQLITE_BUSY|database is locked/i.test(e.message || "")) {
+    console.warn(`[migrations] deferred — store busy (${e.message}); retrying next boot`);
+  } else {
+    console.error("ERROR: migration registry failed:", e.message);
+    console.error("  Run it manually with this instance's CROW_DATA_DIR/CROW_DB_PATH before starting.");
+    process.exit(1);
+  }
+}
+
 // Initialize OAuth tables
 await initOAuthTables();
 
