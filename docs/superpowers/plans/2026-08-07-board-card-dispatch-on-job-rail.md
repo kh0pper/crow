@@ -809,11 +809,23 @@ Add the ensure helper near `lockState`:
 ```js
 /** Lazy-ensure bot_jobs + its post-ship columns from the gateway side. */
 async function ensureBotJobsColumns(cdb) {
-  await cdb.execute(BOT_JOBS_DDL);
+  // ORDER IS LOAD-BEARING: migrate BEFORE running the DDL.
+  //
+  // BOT_JOBS_DDL ends with a partial index on card_id. Against a legacy table
+  // that lacks the column, executing the DDL throws "no such column: card_id"
+  // — so a DDL-first ordering never reaches the ALTER that would have fixed it,
+  // and on init-db (whose initTable() calls process.exit(1) on DDL failure) it
+  // would crash the whole run on every pre-existing install. Verified against a
+  // real legacy table; Task 2 hit exactly this.
+  //
+  // PRAGMA on a table that does not exist yet returns zero rows, so a brand-new
+  // install simply skips the ALTER loop and gets everything from the DDL.
   const info = await cdb.execute("PRAGMA table_info(bot_jobs)");
-  for (const stmt of missingBotJobsColumns(info.rows.map((r) => r.name))) {
-    await cdb.execute(stmt);
+  const names = info.rows.map((r) => r.name);
+  if (names.length) {
+    for (const stmt of missingBotJobsColumns(names)) await cdb.execute(stmt);
   }
+  await cdb.execute(BOT_JOBS_DDL);
 }
 ```
 
