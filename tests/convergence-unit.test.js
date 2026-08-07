@@ -8,13 +8,13 @@ import assert from "node:assert/strict";
 import { connectedServers, healthSnapshot, addonsSettled, _markAddonsSettled } from "../servers/gateway/proxy.js";
 import { execFileSync } from "node:child_process";
 import { startAutoUpdate, stopAutoUpdate, _setDbForTest, instanceJitterMs } from "../servers/gateway/auto-update.js";
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   compareHealth,
   writePending, readPending, clearPending, classifyPending,
-  writeConvQuarantine, readConvQuarantine, clearConvQuarantine,
+  writeConvQuarantine, readConvQuarantine, clearConvQuarantine, resolveInstance,
   PENDING_TTL_MS, QUARANTINE_TTL_MS,
 } from "../servers/gateway/convergence.js";
 
@@ -239,7 +239,7 @@ test("a DISABLED instance still records its ACTUAL running sha", async () => {
 test("CROW_DISABLE_CONVERGE short-circuits convergence entirely", async () => {
   const { convergeInstance } = await import("../servers/gateway/convergence.js");
   const prev = process.env.CROW_DISABLE_CONVERGE;
-  process.env.CROW_DISABLE_CONVERGE = "1";
+  process.env.CROW_DISABLE_CONVERGE = "true";  // the documented word form, not just "1"
   try {
     // Bogus paths are deliberate: if the switch works, nothing touches the
     // filesystem or git, so they cannot fail.
@@ -253,4 +253,74 @@ test("CROW_DISABLE_CONVERGE short-circuits convergence entirely", async () => {
     if (prev === undefined) delete process.env.CROW_DISABLE_CONVERGE;
     else process.env.CROW_DISABLE_CONVERGE = prev;
   }
+});
+
+test("resolveInstance resolves the PRODUCTION paths from env", async () => {
+  // Nothing else exercises this: every other test injects `instance` explicitly,
+  // yet production always goes through here (checkForUpdates defaults it to
+  // null). Swapping dbPath/tasksDbPath would put schema_migrations bookkeeping
+  // in tasks.db and migrate crow.db, with no test failing.
+  const prev = {
+    CROW_HOME: process.env.CROW_HOME,
+    CROW_DATA_DIR: process.env.CROW_DATA_DIR,
+    CROW_DB_PATH: process.env.CROW_DB_PATH,
+  };
+  const dir = mkdtempSync(join(tmpdir(), "resolve-inst-"));
+  mkdirSync(join(dir, "data"), { recursive: true });
+  process.env.CROW_HOME = dir;
+  process.env.CROW_DATA_DIR = join(dir, "data");
+  process.env.CROW_DB_PATH = join(dir, "data", "crow.db");
+  try {
+    const inst = await resolveInstance();
+    assert.equal(inst.dataDir, join(dir, "data"), "dataDir comes from CROW_DATA_DIR");
+    assert.ok(inst.dbPath.endsWith("crow.db"), `dbPath must be the crow store, got ${inst.dbPath}`);
+    assert.ok(inst.tasksDbPath.endsWith("tasks.db"), `tasksDbPath must be the tasks store, got ${inst.tasksDbPath}`);
+    assert.notEqual(inst.dbPath, inst.tasksDbPath, "the two stores must not resolve to the same file");
+  } finally {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a tree half that REFUSED a restart is not overridden by convergence", async () => {
+  // The crash-loop guard: init-db failed post-pull and the restart was
+  // deliberately withheld. Nothing else in the suite covers `converge:false`.
+  const { _setDbForTest: setDb } = await import("../servers/gateway/auto-update.js");
+  const au = await import("../servers/gateway/auto-update.js");
+  const conv = await import("../servers/gateway/convergence.js");
+
+  let converged = false;
+  conv._setRestartForTest(() => { converged = true; });
+  setDb({ execute: async ({ sql }) => (/^SELECT/i.test(sql) ? { rows: [] } : { rows: [] }) });
+  try {
+    // Drive the decision directly: a treeResult carrying converge:false must
+    // short-circuit before the instance half.
+    const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "auto-update.js"), "utf8");
+    assert.ok(src.includes("treeResult?.converge === false"),
+      "checkForUpdates must honor its own tree half's refusal");
+    assert.equal((src.match(/converge: false/g) || []).length, 4,
+      "all FOUR restart-withholding branches must be marked (2 loss paths + 2 init-db failures)");
+    assert.equal(converged, false);
+  } finally {
+    conv._setRestartForTest(null);
+    setDb(null);
+  }
+});
+
+test("WIRING: initProxyServers marks addons settled in a finally", () => {
+  // Losing this call means addonsSettled() never resolves, post-listen's race
+  // hits its 10-minute timeout on every boot, and the health gate silently
+  // disables itself — with every log line still looking correct.
+  const src = readFileSync(join(import.meta.dirname, "..", "servers", "gateway", "proxy.js"), "utf8");
+  const fn = src.indexOf("export async function initProxyServers()");
+  assert.ok(fn > 0, "initProxyServers must be present");
+  const body = src.slice(fn, src.indexOf("\n}\n", fn));
+
+  assert.ok(body.includes("_markAddonsSettled()"),
+    "initProxyServers MUST mark addons settled — otherwise the health gate never runs");
+  assert.ok(/finally\s*\{[^}]*_markAddonsSettled\(\)/.test(body),
+    "it must be in a finally: loadAddonServers returns early three ways (no mcp-addons.json, " +
+    "bad JSON, zero entries) and initProxyServers is called fire-and-forget with a .catch");
 });

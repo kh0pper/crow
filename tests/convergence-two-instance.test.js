@@ -16,11 +16,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
+import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 import { checkForUpdates, _setAppRootForTest, _setDbForTest } from "../servers/gateway/auto-update.js";
 import { _setAlertChannelsForTest } from "../servers/shared/migration-guard.js";
 import {
+  _setLockWaitForTest,
   setBootSha, _setRestartForTest, _setSupervisedForTest, convergeInstance,
-  readPending, writePending, verifyPendingConvergence, readConvQuarantine,
+  readPending, writePending, verifyPendingConvergence, readConvQuarantine, writeConvQuarantine,
 } from "../servers/gateway/convergence.js";
 
 // Never let the suite believe it is supervised: a systemd-launched context
@@ -60,12 +62,16 @@ function stubDb(rows = [{ key: "auto_update_enabled", value: "true" }]) {
   };
 }
 
+// Production waits up to 6 minutes for the tree to go quiescent; tests must not.
+_setLockWaitForTest({ waitMs: 5000, pollMs: 50 });
+
 const _fixtures = [];
 after(() => {
   _setAppRootForTest(REAL_APP_ROOT);
   _setDbForTest(null);
   _setRestartForTest(null);
   _setSupervisedForTest(null);
+  _setLockWaitForTest(null);
   setBootSha(null);
   for (const [k, v] of Object.entries(_prevEnv)) {
     if (v === undefined) delete process.env[k];
@@ -101,7 +107,16 @@ export function twoInstanceFixture() {
     const t = new Database(tasksDbPath);
     t.prepare("CREATE TABLE tasks_items (id INTEGER PRIMARY KEY, title TEXT)").run();
     t.close();
-    new Database(dbPath).close();
+    // Model a REAL instance's crow.db: the three tables the boot guard counts
+    // as "core", and a current user_version. A bare empty file would read as
+    // "schema behind", and convergence would correctly refuse to restart into
+    // a boot guard that is about to exit(1) — masking what this gate tests.
+    const c = new Database(dbPath);
+    for (const tbl of ["memories", "dashboard_settings", "crow_context"]) {
+      c.prepare(`CREATE TABLE ${tbl} (id INTEGER PRIMARY KEY)`).run();
+    }
+    c.pragma(`user_version = ${SCHEMA_GENERATION}`);
+    c.close();
     return { name, dataDir, dbPath, tasksDbPath };
   });
 
@@ -167,11 +182,16 @@ test("BOTH co-hosted instances converge — the lock loser must not starve", asy
   // beta: HOLD the lock so beta genuinely LOSES it. Sequential awaited calls do
   // NOT contend — checkForUpdates releases in a finally — so without this beta
   // would simply find "already up to date" and the gate would prove nothing.
+  // Then RELEASE it while beta is mid-flight, modelling the winner finishing
+  // its pull and npm install. Beta must WAIT for the tree to go quiescent and
+  // only then converge — restarting into a half-written node_modules is the
+  // failure this serialization exists to prevent.
   const lockFile = join(f.work, ".git", "crow-auto-update.lock");
   writeFileSync(lockFile, `${process.pid}\n${new Date().toISOString()}\n`);
   _setDbForTest(stubDb());
-  const b = await checkForUpdates({ instance: f.instances[1] });
-  rmSync(lockFile, { force: true });
+  const betaPromise = checkForUpdates({ instance: f.instances[1] });
+  setTimeout(() => rmSync(lockFile, { force: true }), 200);
+  const b = await betaPromise;
 
   assert.equal(b.skipped, "locked", "beta must actually have taken the lock-loss path");
   assert.ok(hasProbe(f.instances[0].tasksDbPath), "alpha (lock winner) must be migrated");
@@ -403,4 +423,114 @@ test("WIRING: setBootSha is called at gateway boot, before serving", () => {
   const call = src.slice(setBoot - 400, setBoot + 200);
   assert.ok(!/rev-parse["\s,]+.*--short/.test(call),
     "the boot sha must be the full 40-char form to match convergeInstance's comparison");
+});
+
+test("the health gate WAITS for addons to settle before snapshotting", async () => {
+  // Without this, `await settled()` is deletable and every test still passes —
+  // yet deleting it snapshots before addons connect, so every addon reads
+  // "missing", compareHealth reports a full-board regression, and a HEALTHY sha
+  // is quarantined for 24h across every co-hosted gateway.
+  const f = twoInstanceFixture();
+  const [alpha] = f.instances;
+  const sha = g(f.work, "rev-parse", "HEAD");
+  writePending(alpha.dataDir, { sha, baseline: { tasks: "connected" } });
+
+  let settledYet = false;
+  const out = await verifyPendingConvergence({
+    dataDir: alpha.dataDir, appRoot: f.work, bootSha: sha,
+    settled: async () => { settledYet = true; },
+    snapshot: () => (settledYet ? { tasks: "connected" } : {}),  // empty until settled
+  });
+
+  assert.equal(out.verdict, "ok",
+    "the snapshot must be taken AFTER settling — otherwise addons read as missing and a good sha is quarantined");
+  assert.equal(readConvQuarantine({ appRoot: f.work, dataDir: alpha.dataDir }), null);
+});
+
+test("a quarantine for a DIFFERENT sha does not block converging to the fix", async () => {
+  // Matching any marker rather than `q.sha === head` would make a bad sha block
+  // its own fix for 24h across every gateway sharing the checkout.
+  const f = twoInstanceFixture();
+  const [alpha] = f.instances;
+  _setSupervisedForTest(() => true);
+  _setRestartForTest(() => {});
+
+  // Quarantine an OLD sha, then move the tree forward to the "fix".
+  writeConvQuarantine({ appRoot: f.work, dataDir: alpha.dataDir, sha: "deadbee", why: "test" });
+  setBootSha(g(f.work, "rev-parse", "HEAD"));
+  f.advanceOrigin("0002-converge-probe.mjs", MIGRATION_BODY);
+  g(f.work, "pull", "--ff-only", "origin", "main");
+
+  const r = await convergeInstance({ appRoot: f.work, instance: alpha });
+  assert.equal(r.converged, true,
+    "a quarantine on a DIFFERENT sha must not block convergence to the fix");
+  assert.ok(hasProbe(alpha.tasksDbPath));
+});
+
+test("quarantine actually ALERTS the operator", async () => {
+  // The alert channels are stubbed suite-wide to avoid real pushes; without
+  // asserting they fire, the whole notification can be deleted and a silent
+  // 24h host-wide quarantine looks identical in the tests.
+  const f = twoInstanceFixture();
+  const [alpha] = f.instances;
+  const sent = [];
+  _setAlertChannelsForTest({
+    sendNtfyNotification: async (t) => { sent.push(["ntfy", t]); },
+    sendEmailNotification: async (t) => { sent.push(["email", t]); },
+  });
+  try {
+    const sha = g(f.work, "rev-parse", "HEAD");
+    writePending(alpha.dataDir, { sha, baseline: { "pm-workspace": "connected" } });
+    const out = await verifyPendingConvergence({
+      dataDir: alpha.dataDir, appRoot: f.work, bootSha: sha,
+      snapshot: () => ({ "pm-workspace": "error" }), settled: async () => {},
+    });
+    assert.equal(out.verdict, "quarantined");
+    assert.ok(sent.length > 0, "a quarantine MUST notify the operator — it is a silent 24h fleet block otherwise");
+  } finally {
+    _setAlertChannelsForTest({ sendNtfyNotification: async () => {}, sendEmailNotification: async () => {} });
+  }
+});
+
+test("convergence DEFERS while the tree is busy", async () => {
+  const f = twoInstanceFixture();
+  const [alpha] = f.instances;
+  const restarted = [];
+  _setSupervisedForTest(() => true);
+  _setRestartForTest((_l, m) => restarted.push(m));
+  setBootSha(g(f.work, "rev-parse", "HEAD"));
+  f.advanceOrigin("0002-converge-probe.mjs", MIGRATION_BODY);
+  g(f.work, "pull", "--ff-only", "origin", "main");
+
+  const lockFile = join(f.work, ".git", "crow-auto-update.lock");
+  writeFileSync(lockFile, `${process.pid}\n${new Date().toISOString()}\n`);
+  const busy = await convergeInstance({ appRoot: f.work, instance: alpha });
+  rmSync(lockFile, { force: true });
+
+  assert.equal(busy.skipped, "tree-busy",
+    "converging while the winner rewrites shared node_modules boots against a torn dependency tree");
+  assert.deepEqual(restarted, [], "a deferred convergence must not restart");
+});
+
+test("convergence WITHHOLDS the restart when this instance's schema is not ready", async () => {
+  const f = twoInstanceFixture();
+  const [alpha] = f.instances;
+  const restarted = [];
+  _setSupervisedForTest(() => true);
+  _setRestartForTest((_l, m) => restarted.push(m));
+  setBootSha(g(f.work, "rev-parse", "HEAD"));
+  f.advanceOrigin("0002-converge-probe.mjs", MIGRATION_BODY);
+  g(f.work, "pull", "--ff-only", "origin", "main");
+
+  // This store is behind, and the fixture's init-db is a no-op, so it cannot be
+  // brought current. The winner validated init-db against ITS data; discovering
+  // the failure AFTER restarting means the boot guard exits 1 on a process we
+  // just killed for no reason.
+  const c = new Database(alpha.dbPath);
+  c.pragma("user_version = 0");
+  c.close();
+
+  const r = await convergeInstance({ appRoot: f.work, instance: alpha });
+  assert.equal(r.skipped, "schema-not-ready");
+  assert.deepEqual(restarted, [], "the live process must keep running instead");
 });
