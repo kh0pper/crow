@@ -425,7 +425,7 @@ connect."
 
 **Interfaces:**
 - Consumes: `card_id` from Task 1.
-- Produces: `deliver_to = {"kind":"card","card_id":<int>}` handled in `deliverResult`. On success the card moves to `stage='done', status='done'`; on failure to `stage='blocked', status='pending'`. Exported helper `applyCardOutcome({ tasksDbPath: string, cardId: number, ok: boolean })` for direct testing.
+- Produces: `deliver_to = {"kind":"card","card_id":<int>}` handled in `deliverResult`. On success the card moves to `stage='done', status='done'`; on failure back to `stage='ready', status='pending'`. Exported helper `applyCardOutcome({ tasksDbPath: string, cardId: number, ok: boolean })` for direct testing.
 
 **Why this task exists:** `deliverResult` today handles `memory`, `poll`, `gmail`, and `gateway`. None of them touch `tasks_items`. Repointing the board without this leaves every dispatched card stuck in `executing` forever.
 
@@ -481,7 +481,7 @@ test("a failed card job blocks the card rather than leaving it executing", async
     const mod = await import("../scripts/pi-bots/job_runner.mjs");
     mod.applyCardOutcome({ tasksDbPath, cardId: 120, ok: false });
     const row = readCard(tasksDbPath);
-    assert.equal(row.stage, "blocked", "a failed job must not leave the card in executing");
+    assert.equal(row.stage, "ready", "a failed job must not leave the card in executing");
     assert.equal(row.status, "pending");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -517,8 +517,13 @@ In `scripts/pi-bots/job_runner.mjs`, add near the other exported store helpers:
  * (the board's cards live there, not in crow.db) with the same better-sqlite3
  * client the rest of this module uses.
  *
- * Failure blocks the card instead of leaving it in 'executing' — a stuck card
- * is invisible, a blocked one is actionable.
+ * On failure the card returns to 'ready' — a valid member of STAGES and the
+ * exact pre-dispatch state, so the card is immediately re-dispatchable. Do NOT
+ * use 'blocked': board-stages.js STAGES is
+ * [backlog, planning, ready, executing, done, cancelled] and an unknown stage
+ * renders wrong and can be silently reconciled away. The failure detail is not
+ * lost — finalizeJob persists error/attempts/timings on the bot_jobs row.
+ * The card carries the state; the job row carries the story.
  *
  * Deliberately does NOT carry the result or error text: finalizeJob already
  * persists both on the bot_jobs row, and tasks_items has no column for them.
@@ -529,7 +534,7 @@ In `scripts/pi-bots/job_runner.mjs`, add near the other exported store helpers:
 export function applyCardOutcome({ tasksDbPath, cardId, ok }) {
   const c = new Database(tasksDbPath);
   try {
-    const stage = ok ? "done" : "blocked";
+    const stage = ok ? "done" : "ready";
     const status = ok ? "done" : "pending";
     c.prepare(
       "UPDATE tasks_items SET stage=?, status=?, updated_at=datetime('now') WHERE id=?"
