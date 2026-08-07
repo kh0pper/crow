@@ -175,11 +175,13 @@ test("execute: refuses without assigned_bot, refuses when not Ready, dispatches 
   const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
   t3.prepare("UPDATE tasks_items SET stage='ready' WHERE id=1").run();
   t3.close();
-  process.env.CROW_BOARD_DISPATCH_DRYRUN = "1"; // test seam: skip the real spawn
   const ok = await (await fetch(base + "/card/1/execute", { method: "POST" })).json();
-  delete process.env.CROW_BOARD_DISPATCH_DRYRUN;
   assert.equal(ok.ok, true);
   assert.equal(ok.dispatched, "scout");
+  const jdb = new Database(process.env.CROW_DB_PATH);
+  const job = jdb.prepare("SELECT source, card_id, status FROM bot_jobs WHERE card_id=1").get();
+  jdb.close();
+  assert.deepEqual([job.source, job.card_id, job.status], ["card", 1, "queued"]);
   const t4 = new Database(process.env.CROW_TASKS_DB_PATH);
   const row = t4.prepare("SELECT stage, status FROM tasks_items WHERE id=1").get();
   t4.close();
@@ -195,9 +197,13 @@ test("plan-dispatch: only legal from backlog/planning; moves stage to planning",
   const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
   t2.prepare("UPDATE tasks_items SET stage='backlog', status='pending' WHERE id=1").run();
   t2.close();
-  process.env.CROW_BOARD_DISPATCH_DRYRUN = "1";
+  // execute (above) enqueued a queued job for this same card; lockState now
+  // treats that as a lock, which would 409 this dispatch. Clear it — these two
+  // tests deliberately reuse card 1.
+  const jq = new Database(process.env.CROW_DB_PATH);
+  jq.exec("DELETE FROM bot_jobs");
+  jq.close();
   const ok = await (await fetch(base + "/card/1/plan-dispatch", { method: "POST" })).json();
-  delete process.env.CROW_BOARD_DISPATCH_DRYRUN;
   assert.equal(ok.ok, true);
   const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
   assert.equal(t3.prepare("SELECT stage FROM tasks_items WHERE id=1").get().stage, "planning");
