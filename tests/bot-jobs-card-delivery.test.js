@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { STAGES } from "../servers/gateway/routes/board-stages.js";
 
 const TASKS_DDL = `
   CREATE TABLE tasks_items (
@@ -38,15 +39,27 @@ test("a completed card job moves the card to done", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("a failed card job blocks the card rather than leaving it executing", async () => {
+test("a failed card job returns the card to ready rather than leaving it executing", async () => {
   const dir = mkdtempSync(join(tmpdir(), "carddeliver-fail-"));
   try {
     const tasksDbPath = seedCard(dir);
     const mod = await import("../scripts/pi-bots/job_runner.mjs");
     mod.applyCardOutcome({ tasksDbPath, cardId: 120, ok: false });
     const row = readCard(tasksDbPath);
-    assert.equal(row.stage, "blocked", "a failed job must not leave the card in executing");
-    assert.equal(row.status, "pending");
+    assert.deepEqual(row, { stage: "ready", status: "pending" },
+      "a failed job must not leave the card in executing — it must land back on a valid, re-dispatchable stage");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the failure stage is a real board stage, not an invented one", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "carddeliver-vocab-"));
+  try {
+    const tasksDbPath = seedCard(dir);
+    const mod = await import("../scripts/pi-bots/job_runner.mjs");
+    mod.applyCardOutcome({ tasksDbPath, cardId: 120, ok: false });
+    const row = readCard(tasksDbPath);
+    assert.ok(STAGES.includes(row.stage),
+      `applyCardOutcome wrote stage=${row.stage}, which is not in board-stages.js STAGES (${STAGES.join(", ")})`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
