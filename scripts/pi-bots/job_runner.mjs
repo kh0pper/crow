@@ -193,15 +193,107 @@ function buildJobPrompt(goal) {
 }
 
 /**
+ * Execute a card job by delegating to the bridge entry point that already owns
+ * the behaviour, and map the bridge's action union onto runJob's
+ * {result, toolCalls, sessionId} contract.
+ *
+ * WHY THIS EXISTS (safety property, not style): the generic runJob body below
+ * spawns the bot under the bot's OWN permission policy, with a bare goal string
+ * and an empty temp session dir. A card job run that way would silently lose
+ *  - planning: planCard's local-model-only refusal ("no config knob reaches a
+ *    paid model") and its stricter-than-the-bot confinement (bash deny,
+ *    write_paths confined to <repo>/.pi/plans + <repo>/docs, multi_agent
+ *    false), plus the plan-file verification, plan_ref/stage='ready' write and
+ *    the audit entry;
+ *  - execution: the card prompt (project context block + card number + current
+ *    board status + the FULL plan-file text), the tasks_* in_progress→done
+ *    instruction, and the statusToStage reconciliation.
+ * Routing here is what keeps those.
+ *
+ * A 'deferred' outcome (pi capacity) is NOT a failure: planCard has already
+ * reset the card, and throwing would burn a retry attempt. Report it as a
+ * result so the job completes and can be re-dispatched.
+ */
+async function runCardJob(job, { log, bridge }) {
+  const cardId = Number(job.card_id);
+  if (!Number.isInteger(cardId) || cardId <= 0) throw new Error("card job has no usable card_id");
+
+  if (job.card_action === "plan") {
+    // OPERATOR RULING 2026-08-07 (binding): escalation NEVER applies to a
+    // planning card job. planCard refuses any non-local provider; job.escalate
+    // exists to reach a bigger (cloud) model. The safety floor wins — and it is
+    // ignored VISIBLY, so an operator who asked for escalation can grep why it
+    // did not happen. job.escalate is deliberately NOT forwarded below.
+    if (job.escalate) {
+      log(`job ${job.job_id}: escalate ignored — plan dispatch is local-model-only (safety floor)`);
+    }
+    const r = await bridge.planCard({ cardId, botId: job.bot_id, log });
+    if (r.action === "error") throw new Error("plan dispatch failed: " + r.error);
+    if (r.action === "deferred") return { result: "deferred: " + r.reason, toolCalls: 0, sessionId: null };
+    return { result: "planned: " + JSON.stringify(r.planRef), toolCalls: 0, sessionId: null };
+  }
+  // 'execute' (the default for a card job)
+  return await runCardExecute(job, { log, bridge });
+}
+
+/**
+ * Card EXECUTION: call handleInbound in-process with the exact payload the
+ * board's detached `bridge.mjs --inject` child has always sent
+ * (servers/gateway/routes/bot-board-api.js POST /card/:id/execute). We do not
+ * compose a prompt here — handleInbound builds it, and a second copy is exactly
+ * how the dispatcher drifts from the bridge.
+ *
+ * Escalation rides the same inbound-only `!escalate` token an operator types:
+ * handleInbound detects it on the RAW message and strips it before the prompt is
+ * built, so the model text is identical either way (model_resolver.ESCALATE_RE /
+ * stripEscalateToken). No second escalation mechanism is introduced.
+ */
+async function runCardExecute(job, { log, bridge }) {
+  const cardId = Number(job.card_id);
+  const replies = [];
+  const r = await bridge.handleInbound({
+    bot_id: job.bot_id,
+    gateway_type: "board",
+    gateway_thread_id: "board-card-" + cardId,
+    user_message: (job.escalate ? "!escalate " : "") + "execute #" + cardId,
+    log,
+    sendReply: async (t) => { replies.push(String(t == null ? "" : t)); },
+  });
+  const action = r && r.action;
+  if (action === "error") throw new Error("card execute failed: " + ((r && r.error) || "unknown bridge error"));
+  if (action === "deferred") {
+    return { result: "deferred: " + ((r && r.reason) || "unknown"), toolCalls: 0, sessionId: null };
+  }
+  // 'executed' | 'asked' | 'noop-done' | 'stopped' — all non-failures. Each one
+  // sends its own text through sendReply, so the captured reply IS the result.
+  return {
+    result: replies.join("\n\n").trim() || (r && r.replyPreview) || "(" + (action || "no action") + ")",
+    toolCalls: Array.isArray(r && r.toolCalls) ? r.toolCalls.length : 0,
+    sessionId: (r && r.piSessionId) || null,
+  };
+}
+
+/**
  * Drive one bot pi turn on the job's goal, detached, and capture the result.
  * Runs the bot with its REAL persona/skills/tools (writeBotMcp + def tools) in a
  * throwaway session dir (clean, isolated — like skill_review). Never holds a DB
  * connection. Returns { result, toolCalls, sessionId, model }.
+ *
+ * A CARD job (source='card') never reaches that generic body — it delegates to
+ * the bridge; see runCardJob. `bridge` is injectable so tests can prove the
+ * routing without spawning a real engine.
  */
-export async function runJob(job, { log = () => {} } = {}) {
+export async function runJob(job, { log = () => {}, bridge: injectedBridge = null } = {}) {
   // loadBot is exported from bridge.mjs (S1). Lazy-import the whole module so we
   // also get PiRpc without a static cycle.
-  const bridge = await import("./bridge.mjs");
+  const bridge = injectedBridge || await import("./bridge.mjs");
+
+  // Card jobs delegate to the bridge, which owns the prompt, the planning
+  // safety floor, stranding recovery and the audit entry. Branch BEFORE any
+  // generic setup — running a card through the body below silently drops all
+  // of it.
+  if (job.source === "card") return await runCardJob(job, { log, bridge });
+
   const bot = bridge.loadBot(job.bot_id); // throws on unknown/disabled
   const def = bot.def;
   const crowHome = resolveCrowHome();
