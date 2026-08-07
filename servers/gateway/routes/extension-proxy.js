@@ -14,7 +14,7 @@
  *   /proxy/minio/              instead of   http://localhost:9001/
  */
 
-import { createProxyMiddleware } from "http-proxy-middleware";
+import { createProxyMiddleware, fixRequestBody } from "http-proxy-middleware";
 import { Router } from "express";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
@@ -187,9 +187,27 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
         // remote code execution reachable from any page the operator visits.
         // If embedding is ever needed, this router needs its own CSRF or
         // origin check FIRST. tests/perch-routes.test.js pins both halves.
-        proxyReq: (proxyReq) => {
+        proxyReq: (proxyReq, req) => {
           const token = readAuthToken(ext.authTokenFile);
           if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
+
+          // Re-send the body the global parser already ate.
+          //
+          // servers/gateway/index.js installs express.json() for every path but
+          // /llm and /s/:surface/feedback, and this router mounts far later
+          // (boot/late-mounts.js). So on a JSON POST the request stream is
+          // ALREADY drained into req.body by the time we get here, and piping
+          // `req` upstream sends the original Content-Length with no bytes
+          // behind it — the backend blocks forever waiting for a body that will
+          // never arrive, and the caller's fetch() never settles. That is the
+          // whole of "press Spawn on Crow and nothing happens".
+          //
+          // ⚠ MUST STAY LAST IN THIS HOOK. fixRequestBody WRITES to proxyReq;
+          // any setHeader after a write throws ERR_HTTP_HEADERS_SENT. It is a
+          // no-op when nothing parsed the body (req.body undefined), which is
+          // why urlencoded form posts — the hub's own login — still stream
+          // through untouched.
+          fixRequestBody(proxyReq, req);
         },
         // Same injection for the websocket upgrade, which never passes
         // through the `proxyReq` hook — http-proxy emits `proxyReqWs` for it.
