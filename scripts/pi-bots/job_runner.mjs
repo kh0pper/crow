@@ -292,7 +292,19 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
   // safety floor, stranding recovery and the audit entry. Branch BEFORE any
   // generic setup — running a card through the body below silently drops all
   // of it.
-  if (job.source === "card") return await runCardJob(job, { log, bridge });
+  //
+  // The gate is DELIBERATELY redundant — declarative (source) OR structural
+  // (card_id). Nothing validates source on the way in: enqueueJob passes
+  // opts.source straight through and the DDL carries no CHECK, so a row with
+  // card_id set but source NULL / 'Card' / 'board' would fall through to the
+  // generic body and run board work under the bot's OWN permission policy with
+  // a bare goal string — exactly the regression this routing exists to
+  // prevent. A safety floor must not rest on one caller typing one string
+  // literal correctly, so belt-and-braces beats minimal here. Widening is safe:
+  // the only other card-aware dispatcher (bundles/pm-workspace/server/dispatch.js)
+  // writes source='chat' and keeps its card id in pm_bot_dispatches, never in
+  // bot_jobs.card_id, so no existing producer is caught by the card_id arm.
+  if (job.source === "card" || job.card_id != null) return await runCardJob(job, { log, bridge });
 
   const bot = bridge.loadBot(job.bot_id); // throws on unknown/disabled
   const def = bot.def;

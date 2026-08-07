@@ -224,6 +224,47 @@ test("a card job defaults to the execute path when card_action is absent", async
   assert.equal(reached, true);
 });
 
+test("a job carrying a card_id routes to the bridge even when source is not 'card'", async () => {
+  // The gate is structural as well as declarative, on purpose. Nothing
+  // validates bot_jobs.source on the way in — enqueueJob passes opts.source
+  // straight through and the DDL has no CHECK — so a row with card_id set but
+  // source NULL / 'Card' / 'board' would otherwise fall through to the generic
+  // body and run board work under the bot's OWN permission policy with a bare
+  // goal string. The floor must not depend on one caller typing one literal.
+  for (const source of [null, undefined, "board", "Card"]) {
+    let reached = false;
+    const fakeBridge = {
+      planCard: async () => { throw new Error("planCard must not be called for an execute job"); },
+      handleInbound: async (o) => { reached = true; await o.sendReply("ok"); return { action: "executed", toolCalls: [] }; },
+      loadBot: GENERIC,
+    };
+    const { runJob } = await loadRunner();
+    const r = await runJob(
+      { job_id: "j11", bot_id: "b1", source, card_id: 77, card_action: "execute" },
+      { log: () => {}, bridge: fakeBridge },
+    );
+    assert.equal(reached, true, "card_id=77 with source=" + JSON.stringify(source) + " must still reach the bridge");
+    assert.equal(r.result, "ok");
+  }
+});
+
+test("a job carrying a card_id and card_action='plan' still hits the planning floor", async () => {
+  // Same widening, plan side: a mislabelled source must not route planning work
+  // through the generic body, which would lose the local-model-only refusal.
+  const seen = [];
+  const fakeBridge = {
+    planCard: async (o) => { seen.push(o.cardId); return { action: "planned", planRef: { kind: "repo", path: "p.md" } }; },
+    handleInbound: async () => { throw new Error("handleInbound must not be called for a plan job"); },
+    loadBot: GENERIC,
+  };
+  const { runJob } = await loadRunner();
+  await runJob(
+    { job_id: "j12", bot_id: "b1", source: null, card_id: 88, card_action: "plan" },
+    { log: () => {}, bridge: fakeBridge },
+  );
+  assert.deepEqual(seen, [88]);
+});
+
 test("a non-card job still takes the generic path", async () => {
   const fakeBridge = {
     planCard: async () => { throw new Error("planCard must not be called for a scheduled job"); },
