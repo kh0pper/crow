@@ -39,7 +39,7 @@ import { resolveModel } from "./model_resolver.mjs";
 import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
-import { botsDbPath } from "./instance-paths.mjs";
+import { botsDbPath, tasksDbPath as resolveTasksDbPath } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL, missingBotJobsColumns } from "./bot-jobs-schema.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
@@ -177,6 +177,54 @@ export function finalizeJob(job_id, { status, result, error, tool_calls, pi_sess
   } finally { c.close(); }
 }
 
+/**
+ * Write a finished job's outcome onto its board card. Opens tasks.db directly
+ * (the board's cards live there, not in crow.db) with the same better-sqlite3
+ * client the rest of this module uses.
+ *
+ * Failure blocks the card instead of leaving it in 'executing' — a stuck card
+ * is invisible, a blocked one is actionable.
+ *
+ * Deliberately does NOT carry the result or error text: finalizeJob already
+ * persists both on the bot_jobs row, and tasks_items has no column for them.
+ * The job row is the record; the card is the state.
+ *
+ * @param {{tasksDbPath: string, cardId: number, ok: boolean}} o
+ */
+export function applyCardOutcome({ tasksDbPath, cardId, ok }) {
+  const c = new Database(tasksDbPath);
+  try {
+    const stage = ok ? "done" : "blocked";
+    const status = ok ? "done" : "pending";
+    c.prepare(
+      "UPDATE tasks_items SET stage=?, status=?, updated_at=datetime('now') WHERE id=?"
+    ).run(stage, status, cardId);
+  } catch {
+    // Delivery runs after the work already succeeded. A tasks.db problem must
+    // not escalate into a failed job or a dead worker.
+  } finally {
+    try { c.close(); } catch {}
+  }
+}
+
+/**
+ * Post-finalize hook for a card-sourced job's FAILURE path. Success flows
+ * through deliverResult's kind:"card" branch instead.
+ *
+ * Exists so tickJobs and the --run-once CLI branch share one implementation:
+ * they already keep separate copies of the finalize logic, and a second
+ * divergent copy of the card write-back is how one path silently stops
+ * updating the board.
+ *
+ * @param {{card_id: number|null}} job
+ * @param {{status: string}} outcome
+ */
+export function applyCardFailure(job, outcome) {
+  if (outcome.status !== "failed") return;
+  if (job.card_id == null) return;
+  applyCardOutcome({ tasksDbPath: resolveTasksDbPath(), cardId: Number(job.card_id), ok: false });
+}
+
 function buildJobPrompt(goal) {
   return [
     "You are running a BACKGROUND job for the user — no one is waiting on this exact",
@@ -289,6 +337,14 @@ export async function deliverResult(job, text, { log = () => {}, deliverChannel 
     } finally { c.close(); }
     return { delivered: "memory" };
   }
+  if (kind === "card") {
+    const cardId = Number(spec.card_id ?? job.card_id);
+    if (Number.isInteger(cardId)) {
+      applyCardOutcome({ tasksDbPath: resolveTasksDbPath(), cardId, ok: true });
+      log(`card ${cardId} marked done by job ${job.job_id}`);
+    }
+    return;
+  }
   if (kind === "gmail" || kind === "gateway") {
     if (!deliverChannel) {
       log(`job ${job.job_id} → ${kind} delivery deferred (no channel deliverer in this process); result kept for poll`);
@@ -324,6 +380,7 @@ export async function tickJobs({ log = () => {}, deliverChannel = null } = {}) {
     outcome = { status: "failed", result: null, error: String((e && e.message) || e), tool_calls: null, pi_session_id: null };
   }
   finalizeJob(job.job_id, outcome);
+  applyCardFailure(job, outcome);
   log(`job ${job.job_id} → ${outcome.status}${outcome.error ? " (" + outcome.error + ")" : ""}`);
 
   if (outcome.status === "completed") {
@@ -369,6 +426,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
         outcome = { status: "failed", result: null, error: String((e && e.message) || e), tool_calls: null, pi_session_id: null };
       }
       finalizeJob(job.job_id, outcome);
+      applyCardFailure(job, outcome);
       if (outcome.status === "completed") await deliverResult(job, outcome.result, { log, deliverChannel: await mkDeliver() }).catch(() => {});
       console.log(JSON.stringify({ ran: job.job_id, status: outcome.status }));
       process.exit(0);
