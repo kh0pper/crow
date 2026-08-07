@@ -284,8 +284,21 @@ A board dispatch has no such tick. So a deferred execute finishes as a **complet
 card stuck in `stage='executing'` forever — the exact bug this feature exists to remove, arriving
 through the one door nobody watched.
 
+**`stopped` is the same failure class** (found in Task 3's review): `runCardExecute` maps
+`action:"stopped"` — a session whose `control='stop'` — onto a successful result with no work done.
+Task 6 flips the card to `executing` before the job runs, so a stopped board session also yields a
+completed job and a permanently stuck card.
+
+So the trigger is **"completed without progress"** — `deferred` OR `stopped` — not `deferred` alone.
+Write it as an explicit set, not two if-statements, so a third such action cannot be forgotten:
+
+```js
+/** Bridge outcomes that finish the job without doing the card's work. */
+const NO_PROGRESS_ACTIONS = new Set(["deferred", "stopped"]);
+```
+
 This means the un-stranding hook cannot live only on the failure paths. It must also fire when a
-card job COMPLETES with a deferred outcome. Add a test for it:
+card job COMPLETES with a no-progress outcome. Add a test for EACH member of that set:
 
 ```js
 test("a deferred execute un-strands its card instead of completing silently", async () => {
