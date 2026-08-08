@@ -95,8 +95,9 @@ export async function probeAll(crowHome = resolveCrowHome()) {
 // since each entry spawns its MCP server.
 let _extCache = null;
 let _extAt = 0;
+let _extHome = null;
 export async function probeExtensions(crowHome) {
-  if (_extCache && Date.now() - _extAt < 300000) return _extCache;
+  if (_extCache && _extHome === crowHome && Date.now() - _extAt < 300000) return _extCache;
   const exts = listInstalledExtensions(crowHome).filter((e) => e.needsMint);
   const out = [];
   for (const ext of exts) {
@@ -104,6 +105,7 @@ export async function probeExtensions(crowHome) {
   }
   _extCache = out;
   _extAt = Date.now();
+  _extHome = crowHome;
   return out;
 }
 
