@@ -24,9 +24,12 @@
  *  - Every UPDATE explicitly sets updated_at=datetime('now'); →done/→cancelled
  *    also sets completed_at=datetime('now'); transition OUT of done/cancelled
  *    sets completed_at=NULL (SQLite DEFAULT is INSERT-only).
- *  - Whole-card single-writer lock (D5): every card write re-checks the
- *    MAX(id) bot_sessions row for that card_id (single-card form); status ∈
- *    {active,waiting-user} ⇒ 409 {reason}.
+ *  - Whole-card single-writer lock (D5): every card write re-checks BOTH rails
+ *    via the shared predicate in ./board-lock.js — an unfinished bot_jobs row
+ *    (queued/running) for that card_id, else the MAX(id) bot_sessions row with
+ *    status ∈ {active,waiting-user} ⇒ 409 {reason}. The SSR board render and
+ *    the no-JS move handler import that SAME module; a local copy here is what
+ *    let the three predicates drift apart once already.
  *  - Plan file = DERIVED <def.session_dir>/plans/<cardId>.md; resolved
  *    realpath asserted under that session_dir (else 400); POST does an
  *    mtime optimistic-concurrency check (409 if changed since the GET).
@@ -35,11 +38,17 @@
  *    db.batch(); applied[] is derived ONLY from the resolved batch result's
  *    per-statement rowsAffected (1 ⇒ applied, 0 ⇒ skipped:"stale"); a
  *    rejected batch ⇒ {error, applied:[]} (all rolled back).
- *  - force-unlock: permitted ONLY when the MAX(id) row is active/waiting-user
- *    AND stale (no updated_at movement ≥ 30 min) AND a POSITIVE "pi is dead"
- *    determination. The liveness check FAILS CLOSED: anything ambiguous /
- *    errored / unverifiable ⇒ refuse (card stays locked; manual SQL remains
- *    the escape hatch). Idempotent SQL guarded by status IN (...).
+ *  - force-unlock, SESSION rail: permitted ONLY when the MAX(id) row is
+ *    active/waiting-user AND stale (no updated_at movement ≥ 30 min) AND a
+ *    POSITIVE "pi is dead" determination. The liveness check FAILS CLOSED:
+ *    anything ambiguous / errored / unverifiable ⇒ refuse (card stays locked;
+ *    manual SQL remains the escape hatch). Idempotent SQL guarded by status IN.
+ *  - force-unlock, JOB rail: terminates the job (status='failed' + an operator
+ *    error string) so it can never be claimed and re-take the card, then
+ *    best-effort un-strands the card via the bridge's own reset. A 'queued' job
+ *    needs no staleness window — nothing has claimed it, so nothing is lost. A
+ *    'running' job takes the same fail-closed gate, against its worker pid.
+ *    One rail per call, deliberately.
  *
  * Zero new npm deps. No bridge/pi edits. Never touches the 3 prod MPA bots.
  */
@@ -58,6 +67,10 @@ import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mj
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
 import { parsePlanRef, resolvePlanFile, containedRealPath } from "./plan-ref.js";
 import { isStage, stageToStatus, effectiveStage } from "./board-stages.js";
+// THE shared dual-rail lock predicate (job rail + session rail). The SSR board
+// render and the no-JS move handler import the same module — see board-lock.js
+// for why a local copy is not allowed to exist here.
+import { lockState, SESSION_LOCK_STATUSES } from "./board-lock.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -67,29 +80,48 @@ const HOME = process.env.HOME || homedir();
 const TASKS_DB = tasksDbPath();
 const CARD_STATUSES = new Set(["pending", "in_progress", "done", "cancelled"]);
 const PROJECT_STATUSES = new Set(["active", "paused", "completed", "archived"]);
-const LOCK_STATUSES = new Set(["active", "waiting-user"]);
 const TERMINAL = new Set(["done", "cancelled"]);
 const STALE_SECONDS = 1800; // 30 min — force-unlock staleness threshold (D5)
 const BULK_CAP = 200;
 
-// D5 single-card lock re-check (the genuinely-single-card site). Returns
-// { locked, row } where row is the MAX(id) bot_sessions row for the card.
-async function lockState(cdb, cardId) {
+/**
+ * Liveness of a bot_jobs worker pid, for the job half of force-unlock. Same
+ * FAIL-CLOSED shape as piLiveness(): only a positive ESRCH counts as dead.
+ * EPERM means the pid exists under another uid — alive. Anything else is
+ * unverifiable, and unverifiable must never unlock.
+ */
+function workerLiveness(pid) {
+  const p = Number(pid);
+  if (!Number.isInteger(p) || p <= 0) return "unknown";
+  try { process.kill(p, 0); return "alive"; } catch (e) {
+    if (e && e.code === "ESRCH") return "dead";
+    if (e && e.code === "EPERM") return "alive";
+    return "unknown";
+  }
+}
+
+/**
+ * Put a card back where an operator can act on it after its job was
+ * force-unlocked. Delegates to the bridge's OWN reset + its OWN cards-database
+ * resolution (a project's tasks_db_uri wins over the instance tasks.db), which
+ * is the same seam job_runner's unstrandCard uses — one reset implementation in
+ * the product, not two. Lazily imported: bridge.mjs is the pi-side module and
+ * the gateway must not pay for it on every boot.
+ *
+ * The reset refuses to touch a card whose status is already done/cancelled,
+ * deliberately — the bot may have finished the work and written its own
+ * terminal state before the job row was cleaned up, and un-setting that would
+ * discard completed work.
+ *
+ * Best-effort: a failure here still leaves the card UNLOCKED (the job row is
+ * already terminal), which is the guarantee force-unlock actually owes.
+ */
+async function unstrandCardBestEffort(botId, cardId) {
   try {
-    const r = (await cdb.execute({
-      sql:
-        "SELECT id, status, pi_session_dir, " +
-        "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
-        "FROM bot_sessions WHERE card_id=? ORDER BY id DESC LIMIT 1",
-      args: [cardId],
-    })).rows[0];
-    if (!r) return { locked: false, row: null };
-    return { locked: LOCK_STATUSES.has(String(r.status)), row: r };
+    const b = await import("../../../scripts/pi-bots/bridge.mjs");
+    return !!b.resetStrandedCardBestEffort(b.cardsDbForBot(String(botId)), Number(cardId));
   } catch {
-    // bot_sessions absent (primary gateway) / transient — not locked here,
-    // but the panel never opens this router there (notAvail). Be permissive
-    // for read, conservative for write callers (they 409 only on positive).
-    return { locked: false, row: null };
+    return false;
   }
 }
 
@@ -507,9 +539,48 @@ export default function botBoardApiRouter(dashboardAuth) {
     let cdb;
     try {
       cdb = createDbClient();
-      const { row } = await lockState(cdb, id);
+      const { rail, row } = await lockState(cdb, id);
       if (!row) return res.status(409).json({ reason: "no bot_sessions row for this card — nothing to unlock" });
-      if (!LOCK_STATUSES.has(String(row.status))) {
+
+      // ---- JOB rail: the lock is an unfinished bot_jobs row, not a session.
+      // Releasing it means TERMINATING the job — a job left 'queued' would be
+      // claimed later and re-take the card. 'failed' is the terminal status
+      // job_runner already understands (claimNextJob only reads 'queued';
+      // recoverStaleClaims only scans 'running'), so a failed row can never be
+      // resurrected. No new status value is invented for this.
+      if (rail === "job") {
+        const jobStatus = String(row.status);
+        // A 'queued' job has provably not been claimed — there is no worker to
+        // outlive and no work to lose, so no staleness window applies. This is
+        // the exact case the operator is stuck in when the pi-bots runtime is
+        // down: the job will never start, and until it is failed the card is
+        // unwritable. A 'running' job goes through the same fail-closed gate a
+        // session does, against the worker pid that claimed it.
+        if (jobStatus === "running") {
+          const live = workerLiveness(row.worker_pid);
+          if (live !== "dead") {
+            return res.status(409).json({
+              reason: live === "alive"
+                ? "refused: the worker process running this job is still alive"
+                : "refused (fail-closed): could not positively confirm the job worker is dead",
+            });
+          }
+        }
+        // Guarded on the status we OBSERVED: if the runner claimed the queued
+        // job between the read and this write, 0 rows change and we report that
+        // rather than failing a job that just started running.
+        const upd = await cdb.execute({
+          sql: "UPDATE bot_jobs SET status='failed', error=?, ended_at=datetime('now') WHERE job_id=? AND status=?",
+          args: ["force-unlocked from the board by an operator (was '" + jobStatus + "')", row.job_id, jobStatus],
+        });
+        const cleared = Number(upd.rowsAffected) || 0;
+        // Only reset the card when we actually terminated the job — otherwise
+        // something else owns it and the card is legitimately still executing.
+        const cardReset = cleared ? await unstrandCardBestEffort(row.bot_id, id) : false;
+        return res.json({ ok: true, cleared, rail: "job", job_id: row.job_id, card_reset: cardReset });
+      }
+
+      if (!SESSION_LOCK_STATUSES.has(String(row.status))) {
         return res.status(409).json({ reason: "card is not locked (latest session is " + String(row.status) + ")" });
       }
       const ageS = Number(row.age_s);
