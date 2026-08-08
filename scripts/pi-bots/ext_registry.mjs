@@ -28,6 +28,7 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { probeServerTools, readCanonicalMcp, CANONICAL_MCP_PATH } from "./mcp_writer.mjs";
+import { crowServerCatalog } from "./crow-server-catalog.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // scripts/pi-bots -> repo root (~/crow) -> bundles
@@ -246,6 +247,23 @@ export function extensionSkills(ext) {
   return ((cap && cap.skills) || []).map((s) =>
     String(s).replace(/.*\//, "").replace(/\.md$/, "")
   );
+}
+
+/**
+ * The set of servers the Tools tab probes: this instance's Crow catalog, plus
+ * the NON-Crow entries from the homedir config. The catalog wins on name, so a
+ * homedir entry pinned to another instance is never probed or offered.
+ *
+ * Once the Crow entries are removed from ~/.pi/agent/mcp.json entirely, this
+ * function is what keeps the picker whole.
+ */
+export function serversForProbe(canonical, crowHome = resolveCrowHome(), opts = {}) {
+  const { servers: catalog } = crowServerCatalog(crowHome, opts);
+  const out = {};
+  for (const [name, block] of Object.entries(canonical.mcpServers || {})) {
+    if (!catalog[name]) out[name] = block;
+  }
+  return Object.assign(out, catalog);
 }
 
 // ---------------------------------------------------------------------------
