@@ -953,7 +953,8 @@ test("probe surface is the catalog plus NON-Crow canonical entries", () => {
   assert.equal(surface["crow-memory"].env.CROW_DB_PATH, join(home, "data", "crow.db"),
     "the catalog wins over the canonical entry");
   assert.equal(surface["brave-search"].env.BRAVE_API_KEY, "k", "non-Crow entries survive");
-  assert.ok(surface.tasks, "this instance's bundles are offered");
+  assert.ok(!surface.tasks,
+    "addons stay OUT — probeExtensions already owns them; folding them in double-lists every addon");
 });
 ```
 
@@ -986,12 +987,18 @@ Add this exported function immediately above `probeAll`:
  * function is what keeps the picker whole.
  */
 export function serversForProbe(canonical, crowHome = resolveCrowHome(), opts = {}) {
-  const { servers: catalog } = crowServerCatalog(crowHome, opts);
+  // CORE servers only. `probeExtensions` already owns the addon surface and is
+  // already instance-correct, so folding the catalog's mcp-addons half in here
+  // would render every installed addon TWICE in the editor's Tools tab and
+  // spawn each one twice per cold render.
+  const { servers: catalog, coreNames } = crowServerCatalog(crowHome, opts);
+  const core = {};
+  for (const name of coreNames) if (catalog[name]) core[name] = catalog[name];
   const out = {};
   for (const [name, block] of Object.entries(canonical.mcpServers || {})) {
-    if (!catalog[name]) out[name] = block;
+    if (!core[name]) out[name] = block;
   }
-  return Object.assign(out, catalog);
+  return Object.assign(out, core);
 }
 ```
 
