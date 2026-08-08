@@ -6,8 +6,9 @@
 // no-JS action=move handler — and they must agree, because a card the API
 // refuses to write must also be drawn locked and must not be movable by hand.
 //
-// Nothing writes bot_jobs.card_id yet (the board's enqueue lands in a later
-// task), so every job row here is seeded directly. No pi engine is spawned.
+// The fixture rows are seeded directly rather than dispatched, so the predicate
+// is tested against states (running, completed, doubly-held) that a fresh
+// enqueue cannot produce. No pi engine is spawned.
 //
 // Harness: scratch tasks.db + crow.db via env, ephemeral express server, plain
 // fetch — the same idiom as tests/board-stage-api.test.js.
@@ -136,10 +137,15 @@ test("force-unlock releases a card held by a queued job, and the card is workabl
   });
   assert.equal(nowOk.status, 200, "the lock must actually be gone");
 
-  process.env.CROW_BOARD_DISPATCH_DRYRUN = "1"; // test seam: no real spawn
+  // Dispatch enqueues a job now — nothing is spawned, so the old
+  // CROW_BOARD_DISPATCH_DRYRUN seam is gone with the spawn it guarded.
   const exec = await fetch(base + "/card/1/execute", { method: "POST" });
-  delete process.env.CROW_BOARD_DISPATCH_DRYRUN;
   assert.equal(exec.status, 200, "execute must be possible again after a force-unlock");
+  // The new job re-locks card 1 — which is the correct end state, and what the
+  // later cross-predicate tests will see.
+  const c2 = crowDb();
+  assert.equal(c2.prepare("SELECT COUNT(*) n FROM bot_jobs WHERE card_id=1 AND status='queued'").get().n, 1);
+  c2.close();
 });
 
 test("force-unlock refuses a running job whose worker is alive (fail-closed)", async () => {

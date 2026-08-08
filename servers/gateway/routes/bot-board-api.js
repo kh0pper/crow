@@ -15,7 +15,11 @@
  *  - All DB access via the gateway's journal-safe createDbClient() — tasks.db
  *    via createDbClient(TASKS_DB) (DELETE-pinned by CROW_JOURNAL_MODE on this
  *    gateway), crow.db via createDbClient(). No direct better-sqlite3
- *    constructor anywhere in this file; no executeMultiple/DDL.
+ *    constructor anywhere in this file. The ONE executeMultiple/DDL exception
+ *    is ensureBotJobs(), the lazy bot_jobs self-heal shared in spirit with
+ *    tool-executor.js's ensureBotJobs() and job_runner.mjs's
+ *    ensureBotJobsSchema() — scripts/pi-bots/bot-jobs-schema.mjs is the single
+ *    DDL source for all three, and it runs at most once per process.
  *  - Status literals validated against a hardcoded in-app allowlist BEFORE
  *    any SQL → 400 (the DB CHECK is defense-in-depth, never caught).
  *  - card-create: title must be a non-empty trimmed string → 400 before the
@@ -71,6 +75,8 @@ import { isStage, stageToStatus, effectiveStage } from "./board-stages.js";
 // render and the no-JS move handler import the same module — see board-lock.js
 // for why a local copy is not allowed to exist here.
 import { lockState, sessionRowFor, SESSION_LOCK_STATUSES } from "./board-lock.js";
+// THE single bot_jobs DDL (shared with init-db, job_runner and tool-executor).
+import { BOT_JOBS_DDL, missingBotJobsColumns } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -83,6 +89,62 @@ const PROJECT_STATUSES = new Set(["active", "paused", "completed", "archived"]);
 const TERMINAL = new Set(["done", "cancelled"]);
 const STALE_SECONDS = 1800; // 30 min — force-unlock staleness threshold (D5)
 const BULK_CAP = 200;
+
+/**
+ * Lazy self-heal of bot_jobs from the gateway side, ONCE per process.
+ *
+ * The latch is not an optimisation: without it the multi-statement DDL below
+ * would be re-executed against crow.db on every single dispatch request. Same
+ * `_botJobsEnsured` idiom as servers/gateway/ai/tool-executor.js.
+ *
+ * ORDER IS LOAD-BEARING — PRAGMA, then ALTER, then DDL:
+ *   BOT_JOBS_DDL ends with a partial index on card_id. Executing it against a
+ *   LEGACY table that predates that column throws "no such column: card_id",
+ *   so a DDL-first ordering never reaches the ALTER that would have fixed it.
+ *   PRAGMA on a table that does not exist yet returns zero rows, so a fresh
+ *   install skips the ALTER loop and gets everything from the DDL.
+ *
+ * Deliberately NOT try/caught: a failed ensure must propagate so the dispatch
+ * handler 500s with the card still untouched. Swallowing it here would let the
+ * INSERT fail afterwards for a second, less legible reason.
+ */
+let _botJobsEnsured = false;
+async function ensureBotJobs(cdb) {
+  if (_botJobsEnsured) return;
+  const info = await cdb.execute("PRAGMA table_info(bot_jobs)");
+  const names = (info.rows || []).map((r) => r.name);
+  if (names.length) {
+    for (const stmt of missingBotJobsColumns(names)) await cdb.execute(stmt);
+  }
+  // BOT_JOBS_DDL is several statements in one string; execute() prepares a
+  // SINGLE statement (better-sqlite3 .prepare() throws on more than one).
+  await cdb.executeMultiple(BOT_JOBS_DDL);
+  _botJobsEnsured = true;
+}
+
+/**
+ * Enqueue ONE board-card job and return its job_id. The board's whole part in a
+ * dispatch is this row: job_runner claims it, routes it on source/card_id to
+ * runCardJob, and the BRIDGE does the work — planCard (local-model-only, with
+ * its confinement policy) or handleInbound. Nothing here composes a prompt or
+ * decides an outcome.
+ *
+ * deliver_to is NULL on purpose. A card job reports through the bot's own
+ * tasks_* writes and the plan file's `## Result` section; the dispatcher owns
+ * no delivery channel and must never write the card's terminal state from a job
+ * outcome. (An earlier attempt set {kind:"card"} here, which inverted exactly
+ * that ownership and was reverted.)
+ */
+async function enqueueCardJob(cdb, { botId, cardId, action, goal }) {
+  await ensureBotJobs(cdb);
+  const jobId = "job-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  await cdb.execute({
+    sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, card_id, card_action) "
+       + "VALUES (?, ?, ?, 'queued', NULL, 'card', ?, ?)",
+    args: [jobId, botId, goal, cardId, action],
+  });
+  return jobId;
+}
 
 /**
  * Liveness of a bot_jobs worker pid, for the job half of force-unlock. Same
@@ -659,9 +721,12 @@ export default function botBoardApiRouter(dashboardAuth) {
   });
 
   // ---- execute from board (spec: dispatch is explicit; drags never dispatch) ----
-  // Reuses the /session/send detached bridge --inject seam. Board turns get
-  // gateway_type "board" + thread "board-card-<id>"; the bot's durable output
-  // is the plan file ## Result + the audit log + the session transcript.
+  // ENQUEUES a bot_jobs row instead of spawning a detached `bridge.mjs --inject`
+  // child. The work is identical — job_runner's runCardExecute calls the same
+  // handleInbound with the same board payload — but on the job rail it gets
+  // scan-gated pickup (the pi capacity reserve), stale-claim recovery, retries,
+  // un-stranding and telemetry that a fire-and-forget spawn never had. The
+  // dispatcher records intent; the bot still owns the card's outcome.
   router.post(P + "/card/:id/execute", async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
@@ -689,26 +754,21 @@ export default function botBoardApiRouter(dashboardAuth) {
       } catch { planExists = false; }
       const eff = effectiveStage(card, planExists);
       if (eff !== "ready") return res.status(409).json({ reason: "card is not Ready (stage: " + eff + ")" });
+      // ENQUEUE FIRST, FLIP THE STAGE SECOND. The reverse order strands the
+      // card: a SQLITE_BUSY (or any ensure/INSERT error) on the enqueue would
+      // return 500 having already written stage='executing' with no job behind
+      // it — and an 'executing' card is neither locked (no job, no session) nor
+      // Ready, so the UI can never re-dispatch it. This way a failed enqueue
+      // leaves the card exactly as the operator left it.
+      const jobId = await enqueueCardJob(cdb, {
+        botId: bot, cardId: id, action: "execute",
+        goal: "Execute board card #" + id,
+      });
       await tdb.execute({
         sql: "UPDATE tasks_items SET stage='executing', status='in_progress', updated_at=datetime('now') WHERE id=?",
         args: [id],
       });
-      if (!process.env.CROW_BOARD_DISPATCH_DRYRUN) {
-        const { spawn } = await import("node:child_process");
-        const NODE_BIN = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
-        const BRIDGE = HOME + "/crow/scripts/pi-bots/bridge.mjs";
-        const payload = JSON.stringify({
-          bot_id: bot, gateway_type: "board", gateway_thread_id: "board-card-" + id,
-          user_message: "execute #" + id,
-        });
-        const child = spawn(NODE_BIN, [BRIDGE, "--inject", payload],
-          { cwd: HOME, stdio: ["ignore", "ignore", "ignore"], detached: true });
-        // I3a: a spawn failure (e.g. a stale NODE_BIN path) must not crash the
-        // gateway as an uncaughtException — this dispatch is fire-and-forget.
-        child.on("error", () => {});
-        child.unref();
-      }
-      return res.json({ ok: true, dispatched: bot });
+      return res.json({ ok: true, dispatched: bot, jobId });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
@@ -718,6 +778,9 @@ export default function botBoardApiRouter(dashboardAuth) {
   });
 
   // ---- plan dispatch: local-model planning run (spec: hybrid dispatch A) ----
+  // Enqueues card_action='plan'; job_runner routes it to bridge.planCard, which
+  // keeps the local-model-only safety floor and the confinement policy. The
+  // dispatcher never reaches a model itself.
   router.post(P + "/card/:id/plan-dispatch", async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
@@ -742,23 +805,17 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (eff !== "backlog" && eff !== "planning") {
         return res.status(409).json({ reason: "plan dispatch is only legal from Backlog (stage: " + eff + ")" });
       }
+      // Same ordering rule as execute: enqueue, THEN flip the stage. A failed
+      // enqueue must not leave the card in 'planning' with nothing planning it.
+      const jobId = await enqueueCardJob(cdb, {
+        botId: bot, cardId: id, action: "plan",
+        goal: "Write an implementation plan for board card #" + id,
+      });
       await tdb.execute({
         sql: "UPDATE tasks_items SET stage='planning', status='pending', updated_at=datetime('now') WHERE id=?",
         args: [id],
       });
-      if (!process.env.CROW_BOARD_DISPATCH_DRYRUN) {
-        const { spawn } = await import("node:child_process");
-        const NODE_BIN = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
-        const BRIDGE = HOME + "/crow/scripts/pi-bots/bridge.mjs";
-        const payload = JSON.stringify({ cardId: id, botId: bot });
-        const child = spawn(NODE_BIN, [BRIDGE, "--plan-card", payload],
-          { cwd: HOME, stdio: ["ignore", "ignore", "ignore"], detached: true });
-        // I3a: a spawn failure (e.g. a stale NODE_BIN path) must not crash the
-        // gateway as an uncaughtException — this dispatch is fire-and-forget.
-        child.on("error", () => {});
-        child.unref();
-      }
-      return res.json({ ok: true, dispatched: bot });
+      return res.json({ ok: true, dispatched: bot, jobId });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
