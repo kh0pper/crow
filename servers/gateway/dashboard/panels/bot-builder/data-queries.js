@@ -20,6 +20,7 @@ import {
   resolveCrowHome,
   listInstalledExtensions,
   extensionTools,
+  serversForProbe,
 } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
 import { tasksDbPath, botsWorkspaceRoot } from "../../../../../scripts/pi-bots/instance-paths.mjs";
@@ -55,7 +56,7 @@ export const TABS = [
 // every MCP server, so we don't redo it on every tools-tab render.
 let _probeCache = null;
 let _probeAt = 0;
-export async function probeAll() {
+export async function probeAll(crowHome = resolveCrowHome()) {
   if (_probeCache && Date.now() - _probeAt < 300000) return _probeCache;
   const out = {};
   let canonical;
@@ -64,11 +65,12 @@ export async function probeAll() {
   } catch (e) {
     return { _error: String(e.message || e) };
   }
-  const names = Object.keys(canonical.mcpServers);
+  const surface = serversForProbe(canonical, crowHome);
+  const names = Object.keys(surface);
   await Promise.all(
     names.map(async (n) => {
       try {
-        out[n] = await probeServerTools(canonical.mcpServers[n], { timeoutMs: 12000 });
+        out[n] = await probeServerTools(surface[n], { timeoutMs: 12000 });
       } catch (e) {
         out[n] = { ok: false, error: String(e.message || e) };
       }

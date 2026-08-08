@@ -10,6 +10,7 @@ import {
   crowServerCatalog,
 } from "../scripts/pi-bots/crow-server-catalog.mjs";
 import { ROOT } from "../scripts/server-registry.js";
+import { serversForProbe } from "../scripts/pi-bots/ext_registry.mjs";
 
 /** An instance home with a tasks bundle dir and an mcp-addons.json. */
 function instanceB() {
@@ -114,4 +115,17 @@ test("crow-storage is catalogued as unconfigured when MinIO env is absent", () =
   const { servers, unconfigured } = crowServerCatalog(home, { binding: BINDING_B(home) });
   assert.ok(!servers["crow-storage"], "not offered as spawnable without MinIO settings");
   assert.match(unconfigured["crow-storage"], /MINIO_ENDPOINT/);
+});
+
+test("probe surface is the catalog plus NON-Crow canonical entries", () => {
+  const { home } = instanceB();
+  const canonical = { mcpServers: {
+    "crow-memory": { command: "n", args: [], env: { CROW_DB_PATH: "/elsewhere/crow.db" } },
+    "brave-search": { command: "npx", args: ["-y", "s"], env: { BRAVE_API_KEY: "k" } },
+  } };
+  const surface = serversForProbe(canonical, home, { binding: BINDING_B(home) });
+  assert.equal(surface["crow-memory"].env.CROW_DB_PATH, join(home, "data", "crow.db"),
+    "the catalog wins over the canonical entry");
+  assert.equal(surface["brave-search"].env.BRAVE_API_KEY, "k", "non-Crow entries survive");
+  assert.ok(surface.tasks, "this instance's bundles are offered");
 });
