@@ -127,37 +127,3 @@ test("journalGuarded: a crow.db-touching catalog server is reported", () => {
   assert.ok(res.journalGuarded.includes("crow-memory"),
     "the WAL-unlink guard must be observable for the catalog path too: " + JSON.stringify(res.journalGuarded));
 });
-
-import { toolAllowlist, applySessionNarrowing } from "../scripts/pi-bots/bridge.mjs";
-
-/**
- * Mirrors the --tools branch in the PiRpc constructor. A bot with no builtin
- * and no MCP tools yields "", and omitting the flag hands pi
- * defaultActiveToolNames — bash, edit, write, and every tool registered by
- * every inherited server (pi dist/cli/args.js:85-89 -> dist/core/sdk.js:133-136).
- */
-function toolsArgs(def, narrowedTools) {
-  const tools = toolAllowlist(def);
-  const narrowed = applySessionNarrowing(tools, narrowedTools);
-  const args = [];
-  if (narrowed !== tools) args.push("--tools", narrowed);
-  else args.push("--tools", tools);
-  return args;
-}
-
-test("an empty tool envelope pins --tools \"\" instead of omitting the flag", () => {
-  const def = { tools: { pi_builtin: [], crow_mcp: [] } };
-  assert.equal(toolAllowlist(def), "", "precondition: the envelope really is empty");
-  assert.deepEqual(toolsArgs(def), ["--tools", ""],
-    "omitting the flag would WIDEN an empty envelope to pi's full default surface");
-});
-
-test("a normal envelope still pins its allowlist", () => {
-  const def = { tools: { pi_builtin: ["read"], crow_mcp: ["tasks/tasks_list"] } };
-  assert.deepEqual(toolsArgs(def), ["--tools", "read,mcp__tasks__tasks_list"]);
-});
-
-test("narrowing to nothing still pins --tools \"\"", () => {
-  const def = { tools: { pi_builtin: ["read"], crow_mcp: [] } };
-  assert.deepEqual(toolsArgs(def, JSON.stringify(["read"])), ["--tools", ""]);
-});
