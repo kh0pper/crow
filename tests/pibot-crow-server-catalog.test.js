@@ -117,7 +117,7 @@ test("crow-storage is catalogued as unconfigured when MinIO env is absent", () =
   assert.match(unconfigured["crow-storage"], /MINIO_ENDPOINT/);
 });
 
-test("probe surface is the catalog plus NON-Crow canonical entries", () => {
+test("probe surface is CORE catalog servers plus NON-Crow canonical entries", () => {
   const { home } = instanceB();
   const canonical = { mcpServers: {
     "crow-memory": { command: "n", args: [], env: { CROW_DB_PATH: "/elsewhere/crow.db" } },
@@ -127,5 +127,16 @@ test("probe surface is the catalog plus NON-Crow canonical entries", () => {
   assert.equal(surface["crow-memory"].env.CROW_DB_PATH, join(home, "data", "crow.db"),
     "the catalog wins over the canonical entry");
   assert.equal(surface["brave-search"].env.BRAVE_API_KEY, "k", "non-Crow entries survive");
-  assert.ok(surface.tasks, "this instance's bundles are offered");
+  assert.ok(!surface.tasks, "addons are NOT folded in — probeExtensions owns them, or tasks would double-list");
+});
+
+test("probe surface rescues a core server absent from canonical entirely", () => {
+  const { home } = instanceB();
+  const canonical = { mcpServers: {
+    "brave-search": { command: "npx", args: ["-y", "s"], env: { BRAVE_API_KEY: "k" } },
+  } };
+  const surface = serversForProbe(canonical, home, { binding: BINDING_B(home) });
+  assert.ok(surface["crow-memory"],
+    "a core server must still reach the picker even when the homedir config never named it");
+  assert.equal(surface["crow-memory"].env.CROW_DB_PATH, join(home, "data", "crow.db"));
 });
