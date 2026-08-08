@@ -13,12 +13,16 @@
  *   "none"      — no tracker context injected
  */
 import Database from "better-sqlite3";
-import { botsDbPath, tasksDbPath } from "./instance-paths.mjs";
+import { botsDbPath, tasksDbPath, resolveSqlitePath } from "./instance-paths.mjs";
 
 const CROW_DB = botsDbPath();
 const TASKS_DB = tasksDbPath();
 
-function db(p) { const d = new Database(p); d.pragma("busy_timeout = 10000"); return d; }
+// Same contract as bridge.mjs's db(): the caller may hand us a project's
+// tasks_db_uri, which production stores as a `file:` URI that better-sqlite3
+// cannot open. Unlike the bridge's un-strand, the readers below do NOT catch,
+// so without this the whole turn dies with SQLITE_CANTOPEN.
+function db(p) { const d = new Database(resolveSqlitePath(p)); d.pragma("busy_timeout = 10000"); return d; }
 
 // ── kanban (existing tasks_items) ──────────────────────────────────
 
