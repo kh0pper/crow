@@ -28,6 +28,7 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { probeServerTools, readCanonicalMcp, CANONICAL_MCP_PATH } from "./mcp_writer.mjs";
+import { crowServerCatalog, instanceBinding, rebindBlock } from "./crow-server-catalog.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // scripts/pi-bots -> repo root (~/crow) -> bundles
@@ -246,6 +247,37 @@ export function extensionSkills(ext) {
   return ((cap && cap.skills) || []).map((s) =>
     String(s).replace(/.*\//, "").replace(/\.md$/, "")
   );
+}
+
+/**
+ * The set of servers the Tools tab probes: this instance's Crow catalog, plus
+ * the NON-Crow entries from the homedir config. The catalog wins on name, so a
+ * homedir entry pinned to another instance is never probed or offered.
+ *
+ * Once the Crow entries are removed from ~/.pi/agent/mcp.json entirely, this
+ * function is what keeps the picker whole.
+ */
+export function serversForProbe(canonical, crowHome = resolveCrowHome(), opts = {}) {
+  // Two jobs. (1) The catalog OWNS every core name — `probeExtensions` owns the
+  // addon surface, so folding addons in here would double-list them.
+  // (2) Everything left in canonical is passed through `rebindBlock`, NOT
+  // verbatim: canonical is pinned to whichever instance authored it, so
+  // `crow-tasks`/`crow-bots-sql`/`crow-storage` would otherwise be probed —
+  // and SPAWNED — against another instance's bundles and databases on every
+  // cold Tools-tab render. A name whose bundle is absent here is dropped.
+  const { servers: catalog, coreNames } = crowServerCatalog(crowHome, opts);
+  const binding = opts.binding || instanceBinding(crowHome, opts);
+  const coreSet = new Set(coreNames);
+  const core = {};
+  for (const name of coreNames) if (catalog[name]) core[name] = catalog[name];
+  const out = {};
+  for (const [name, block] of Object.entries(canonical.mcpServers || {})) {
+    if (coreSet.has(name)) continue; // the catalog owns it (or it is unconfigured here)
+    const r = rebindBlock(name, block, binding, crowHome);
+    if (r.disabled) continue;        // bundle not installed on this instance
+    out[name] = r.block;
+  }
+  return Object.assign(out, core);
 }
 
 // ---------------------------------------------------------------------------

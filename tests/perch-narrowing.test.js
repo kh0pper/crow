@@ -179,9 +179,12 @@ test("malformed narrowing at the spawn keeps the def envelope", async () => {
   assert.equal(toolsFlag(argv), "read,bash");
 });
 
-test("a toolless def with no narrowing still omits --tools (unchanged behavior)", async () => {
+test("a toolless def with no narrowing now pins --tools \"\" instead of omitting the flag", async () => {
+  // `{tools: {}}` is the empty envelope — the exact case Task 3 fixes.
+  // toolAllowlist() returns "" for it, and omitting the flag would hand pi
+  // its full default surface (bash, edit, write, every inherited MCP tool).
   const argv = await spawnArgs({ def: { tools: {} } });
-  assert.equal(toolsFlag(argv), null);
+  assert.equal(toolsFlag(argv), "");
 });
 
 // ---------------------------------------------------------------------------

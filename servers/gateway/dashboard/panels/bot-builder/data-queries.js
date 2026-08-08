@@ -20,6 +20,7 @@ import {
   resolveCrowHome,
   listInstalledExtensions,
   extensionTools,
+  serversForProbe,
 } from "../../../../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../../../../scripts/pi-bots/skill_resolver.mjs";
 import { tasksDbPath, botsWorkspaceRoot } from "../../../../../scripts/pi-bots/instance-paths.mjs";
@@ -52,11 +53,15 @@ export const TABS = [
 ];
 
 // in-process probe cache (per gateway process), 5-min TTL — probing spawns
-// every MCP server, so we don't redo it on every tools-tab render.
+// every MCP server, so we don't redo it on every tools-tab render. Keyed on
+// crowHome: probeAll() takes an instance argument now, and an unkeyed cache
+// would silently hand a second instance the first instance's stale surface
+// for up to 5 minutes.
 let _probeCache = null;
 let _probeAt = 0;
-export async function probeAll() {
-  if (_probeCache && Date.now() - _probeAt < 300000) return _probeCache;
+let _probeHome = null;
+export async function probeAll(crowHome = resolveCrowHome()) {
+  if (_probeCache && _probeHome === crowHome && Date.now() - _probeAt < 300000) return _probeCache;
   const out = {};
   let canonical;
   try {
@@ -64,11 +69,12 @@ export async function probeAll() {
   } catch (e) {
     return { _error: String(e.message || e) };
   }
-  const names = Object.keys(canonical.mcpServers);
+  const surface = serversForProbe(canonical, crowHome);
+  const names = Object.keys(surface);
   await Promise.all(
     names.map(async (n) => {
       try {
-        out[n] = await probeServerTools(canonical.mcpServers[n], { timeoutMs: 12000 });
+        out[n] = await probeServerTools(surface[n], { timeoutMs: 12000 });
       } catch (e) {
         out[n] = { ok: false, error: String(e.message || e) };
       }
@@ -76,16 +82,22 @@ export async function probeAll() {
   );
   _probeCache = out;
   _probeAt = Date.now();
+  _probeHome = crowHome;
   return out;
 }
 
-// A6: live tool probe for installed EXTENSIONS (addon servers absent from
-// canonical — the canonical ones already render under probeAll above). Cached
-// 5-min like probeAll since each entry spawns its MCP server.
+// A6: live tool probe for installed EXTENSIONS — everything sourced from
+// mcp-addons.json. probeAll (above) covers CORE Crow servers plus any
+// non-Crow entries left in the homedir canonical config; this covers the
+// addon half, which is already instance-correct via mcp-addons.json, so it
+// must stay disjoint from probeAll's surface or every installed addon
+// renders (and spawns) twice in the Tools tab. Cached 5-min like probeAll
+// since each entry spawns its MCP server.
 let _extCache = null;
 let _extAt = 0;
+let _extHome = null;
 export async function probeExtensions(crowHome) {
-  if (_extCache && Date.now() - _extAt < 300000) return _extCache;
+  if (_extCache && _extHome === crowHome && Date.now() - _extAt < 300000) return _extCache;
   const exts = listInstalledExtensions(crowHome).filter((e) => e.needsMint);
   const out = [];
   for (const ext of exts) {
@@ -93,6 +105,7 @@ export async function probeExtensions(crowHome) {
   }
   _extCache = out;
   _extAt = Date.now();
+  _extHome = crowHome;
   return out;
 }
 
