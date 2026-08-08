@@ -32,7 +32,8 @@
 | `scripts/pi-bots/bridge.mjs` | modified, one line in the `PiRpc` constructor. |
 | `scripts/pi-bots/ext_registry.mjs` | modified, `probeAll()` only. |
 | `tests/pibot-crow-server-catalog.test.js` | **new.** Catalog derivation and rebinding. |
-| `tests/pibot-mcp-instance-binding.test.js` | **new.** The invariant, closed-world, `optIn`, and the empty-envelope spawn arg. |
+| `tests/pibot-mcp-instance-binding.test.js` | **new.** The invariant, closed-world, and `optIn`. |
+| `tests/pibot-tools-envelope.test.js` | **new.** The real `--tools` spawn args, via the `PiRpc` stub seam. |
 
 ---
 
@@ -754,49 +755,90 @@ git show --stat HEAD
 
 **Files:**
 - Modify: `scripts/pi-bots/bridge.mjs` (`PiRpc` constructor, the `--tools` branch)
-- Test: `tests/pibot-mcp-instance-binding.test.js` (append)
+- Create: `tests/pibot-tools-envelope.test.js`
 
 **Interfaces:**
-- Consumes: `toolAllowlist`, `applySessionNarrowing` from `bridge.mjs` — both already exported, neither changes.
+- Consumes: `PiRpc` from `bridge.mjs` via its existing `nodeBin` / `cliPath` / `extraEnv` test seams — the same seams `tests/pibot-bridge-exit-surface.test.js` uses, so no real pi and no live MCP server is ever spawned.
 - Produces: nothing new. `PiRpc`'s spawn args gain `--tools ""` where the flag was previously omitted.
+
+**Test the real spawn args, never a mirror of the branch.** `PiRpc` builds its args
+internally and spawns in the constructor, so a stub `cliPath` that records its own
+`process.argv` is the only honest way to assert this. A helper that re-implements the
+`if/else` in the test file would assert nothing about production code.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/pibot-mcp-instance-binding.test.js`:
+Create `tests/pibot-tools-envelope.test.js`:
 
 ```js
-import { toolAllowlist, applySessionNarrowing } from "../scripts/pi-bots/bridge.mjs";
-
 /**
- * Mirrors the --tools branch in the PiRpc constructor. A bot with no builtin
- * and no MCP tools yields "", and omitting the flag hands pi
- * defaultActiveToolNames — bash, edit, write, and every tool registered by
- * every inherited server (pi dist/cli/args.js:85-89 -> dist/core/sdk.js:133-136).
+ * `--tools` is ALWAYS pinned.
+ *
+ * pi falls back to defaultActiveToolNames when the flag is ABSENT
+ * (dist/cli/args.js:85-89 -> dist/core/sdk.js:133-136), so a bot with an empty
+ * envelope used to receive bash, edit, write, and every tool registered by
+ * every inherited MCP server. Three enabled r4 bots were in that state.
+ *
+ * Uses the PiRpc nodeBin/cliPath seam with a stub that records its argv, so no
+ * real pi is spawned. Asserts the ACTUAL spawn args, never a mirror of the
+ * branch under test.
  */
-function toolsArgs(def, narrowedTools) {
-  const tools = toolAllowlist(def);
-  const narrowed = applySessionNarrowing(tools, narrowedTools);
-  const args = [];
-  if (narrowed !== tools) args.push("--tools", narrowed);
-  else args.push("--tools", tools);
-  return args;
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+
+/** Spawn PiRpc against a stub that dumps argv, and return the args pi saw. */
+async function spawnArgs(def, narrowedTools) {
+  const scratch = mkdtempSync(join(tmpdir(), "crow-tools-"));
+  mkdirSync(join(scratch, "sessions"), { recursive: true });
+  const out = join(scratch, "argv.json");
+  const stub = join(scratch, "stub-pi.mjs");
+  writeFileSync(stub,
+    'import { writeFileSync } from "node:fs";\n' +
+    'writeFileSync(process.env.CROW_TEST_ARGV_OUT, JSON.stringify(process.argv.slice(2)));\n' +
+    'process.exit(0);\n');
+  const pi = new PiRpc({
+    def,
+    sessionDir: scratch,
+    resolved: { provider: "stub", model: "stub", key: "stub/stub" },
+    nodeBin: process.execPath,
+    cliPath: stub,
+    narrowedTools,
+    extraEnv: { CROW_TEST_ARGV_OUT: out },
+  });
+  for (let i = 0; i < 100 && !existsSync(out); i++) await new Promise((r) => setTimeout(r, 50));
+  try { pi.close(); } catch { /* already exited */ }
+  assert.ok(existsSync(out), "stub pi never recorded its argv");
+  return JSON.parse(readFileSync(out, "utf8"));
 }
 
-test("an empty tool envelope pins --tools \"\" instead of omitting the flag", () => {
-  const def = { tools: { pi_builtin: [], crow_mcp: [] } };
-  assert.equal(toolAllowlist(def), "", "precondition: the envelope really is empty");
-  assert.deepEqual(toolsArgs(def), ["--tools", ""],
-    "omitting the flag would WIDEN an empty envelope to pi's full default surface");
+/** The value pi received for --tools, or undefined when the flag was omitted. */
+function toolsFlag(argv) {
+  const i = argv.indexOf("--tools");
+  return i === -1 ? undefined : argv[i + 1];
+}
+
+test("an empty tool envelope pins --tools \"\" instead of omitting the flag", async () => {
+  const argv = await spawnArgs({ tools: { pi_builtin: [], crow_mcp: [] } });
+  assert.notEqual(toolsFlag(argv), undefined,
+    "omitting --tools hands pi its full default surface — an empty envelope would WIDEN");
+  assert.equal(toolsFlag(argv), "");
 });
 
-test("a normal envelope still pins its allowlist", () => {
-  const def = { tools: { pi_builtin: ["read"], crow_mcp: ["tasks/tasks_list"] } };
-  assert.deepEqual(toolsArgs(def), ["--tools", "read,mcp__tasks__tasks_list"]);
+test("a normal envelope still pins its allowlist", async () => {
+  const argv = await spawnArgs({ tools: { pi_builtin: ["read"], crow_mcp: ["tasks/tasks_list"] } });
+  assert.equal(toolsFlag(argv), "read,mcp__tasks__tasks_list");
 });
 
-test("narrowing to nothing still pins --tools \"\"", () => {
-  const def = { tools: { pi_builtin: ["read"], crow_mcp: [] } };
-  assert.deepEqual(toolsArgs(def, JSON.stringify(["read"])), ["--tools", ""]);
+test("narrowing every tool away still pins --tools \"\"", async () => {
+  const argv = await spawnArgs(
+    { tools: { pi_builtin: ["read"], crow_mcp: [] } },
+    JSON.stringify(["read"]));
+  assert.equal(toolsFlag(argv), "");
 });
 ```
 
@@ -804,12 +846,10 @@ test("narrowing to nothing still pins --tools \"\"", () => {
 
 ```bash
 export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH
-npm test -- tests/pibot-mcp-instance-binding.test.js
+npm test -- tests/pibot-tools-envelope.test.js
 ```
 
-Expected: FAIL on the first new test — the helper mirrors the current branch, which produces `[]`.
-
-Note: this test asserts the *intended* behavior of the helper. Step 3 changes `bridge.mjs`; Step 4 changes the helper to mirror it again. If the helper and `bridge.mjs` ever diverge, Step 5's grep catches it.
+Expected: FAIL on the first test — `--tools` is absent from argv, so `toolsFlag` returns `undefined`. The other two must already PASS; if they do not, stop and report, because the seam itself is not working.
 
 - [ ] **Step 3: Change the branch in `bridge.mjs`**
 
@@ -847,10 +887,11 @@ with:
 
 ```bash
 export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH
-npm test -- tests/pibot-mcp-instance-binding.test.js
+npm test -- tests/pibot-tools-envelope.test.js
+npm test -- tests/pibot-bridge-exit-surface.test.js tests/perch-narrowing.test.js
 ```
 
-Expected: PASS.
+Expected: all PASS. The latter two already drive `PiRpc` and must be unaffected.
 
 - [ ] **Step 5: Verify bridge exports are unchanged — the soak requires it**
 
@@ -865,7 +906,8 @@ Expected: `OK: no export line changed`, and the export list contains at least `C
 - [ ] **Step 6: Commit**
 
 ```bash
-git commit scripts/pi-bots/bridge.mjs tests/pibot-mcp-instance-binding.test.js \
+git add tests/pibot-tools-envelope.test.js
+git commit scripts/pi-bots/bridge.mjs tests/pibot-tools-envelope.test.js \
   -m "fix(pi-bots): always pin --tools, so an empty envelope means no tools
 
 toolAllowlist() returns \"\" for a bot with no builtin and no MCP tools, and
@@ -1019,13 +1061,13 @@ For each mutation below: apply it, run the named test file, confirm it FAILS, th
 | 3 | in `crow-server-catalog.mjs`, remove `delete clone.optIn` | `pibot-mcp-instance-binding` |
 | 4 | in `mcp_writer.mjs`, delete the closed-world loop | `pibot-mcp-instance-binding` |
 | 5 | in `mcp_writer.mjs`, prefer `canonical` over `catalog` in the resolution order | `pibot-mcp-instance-binding` |
-| 6 | in `bridge.mjs`, restore `else if (tools)` | `pibot-mcp-instance-binding` |
+| 6 | in `bridge.mjs`, restore `else if (tools)` | `pibot-tools-envelope` |
 | 7 | in `crow-server-catalog.mjs`, anchor the bundle regex on `/crow` instead of `/\.crow` | `pibot-crow-server-catalog` (the repo-cwd test) |
 
 ```bash
 export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH
 # after each edit:
-npm test -- tests/pibot-crow-server-catalog.test.js tests/pibot-mcp-instance-binding.test.js
+npm test -- tests/pibot-crow-server-catalog.test.js tests/pibot-mcp-instance-binding.test.js tests/pibot-tools-envelope.test.js
 git checkout scripts/pi-bots/<file>
 ```
 
