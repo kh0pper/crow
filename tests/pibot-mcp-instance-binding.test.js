@@ -100,6 +100,21 @@ test("optIn never survives into an active block", () => {
   assert.ok(!("optIn" in json.mcpServers.gws), "a copied optIn block would never load");
 });
 
+test("RESOLUTION ORDER: the catalog wins over canonical for the same name", () => {
+  const f = twoInstances();
+  // Make canonical's crow-memory STRUCTURALLY distinguishable. rebindBlock
+  // rewrites env and a `.crow*/bundles` cwd, but never `args` — so `args` is
+  // the only witness of WHICH SOURCE won. Without this, both paths yield an
+  // instance-correct block and reversing the order breaks no test, which is
+  // exactly the vacuum a mutation run found.
+  const canon = JSON.parse(readFileSync(f.canonicalPath, "utf8"));
+  canon.mcpServers["crow-memory"].args = ["CANONICAL-WINS.js"];
+  writeFileSync(f.canonicalPath, JSON.stringify(canon));
+  const { json } = write({ tools: { crow_mcp: ["crow-memory"] } }, f);
+  assert.deepEqual(json.mcpServers["crow-memory"].args, ["servers/memory/index.js"],
+    "args must come from the registry catalog, not from the canonical block");
+});
+
 test("a non-Crow server is carried through untouched", () => {
   const f = twoInstances();
   const { json } = write({ tools: { crow_mcp: ["brave-search"] } }, f);
