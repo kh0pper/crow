@@ -698,6 +698,17 @@ with:
   });
 ```
 
+Then forward the two new keys in `writeBotMcp`'s own `return {...}` — without this the
+function silently drops them and Step 1's closed-world test throws
+`Cannot read properties of undefined (reading 'includes')`:
+
+```js
+    journalGuarded: built.journalGuarded,
+    minted: built.minted,
+    rebound: built.rebound,
+    disabled: built.disabled,
+```
+
 - [ ] **Step 6: Run tests to verify they pass**
 
 ```bash
