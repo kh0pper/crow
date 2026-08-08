@@ -28,18 +28,21 @@
  */
 import Database from "better-sqlite3";
 import { CronExpressionParser } from "cron-parser";
-import { generateJobId } from "./job_runner.mjs";
+import { generateJobId, ensureBotJobsSchema } from "./job_runner.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
-import { BOT_JOBS_DDL } from "./bot-jobs-schema.mjs";
 
 export const BOTCRON_PREFIX = "pipeline:botcron:";
 
 // Lazy self-heal of bot_jobs (a fired schedule INSERTs one) — once per process.
+// Shares job_runner.mjs's PRAGMA table_info → ALTER-missing-columns → DDL ensure
+// (no import cycle: job_runner.mjs never imports this module) so a legacy
+// bot_jobs table (no card_id) is migrated in place instead of throwing
+// "no such column: card_id" from BOT_JOBS_DDL's partial index.
 let _botJobsEnsured = false;
 function dbConn() {
   const d = new Database(botsDbPath());
   d.pragma("busy_timeout = 10000");
-  if (!_botJobsEnsured) { try { d.exec(BOT_JOBS_DDL); _botJobsEnsured = true; } catch {} }
+  if (!_botJobsEnsured) { try { ensureBotJobsSchema(d); _botJobsEnsured = true; } catch {} }
   return d;
 }
 

@@ -25,6 +25,11 @@ import { Router } from "express";
 import { createDbClient } from "../../db.js";
 import bus from "../../shared/event-bus.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
+// THE board lock predicate (job rail + session rail). This tick's snapshot is
+// diffed against the SSR render's data-locked attribute by the panel client, so
+// a second, narrower predicate here does not just mis-draw a badge — it makes
+// the two sides permanently disagree and the client reload forever.
+import { lockedCardIds } from "./board-lock.js";
 import { html, raw, sseTurbo } from "../streams/turbo-stream.js";
 // Instance-aware tasks.db resolution (CROW_TASKS_DB_PATH wins; else the db
 // sits beside the crow.db actually in use). Same resolver bot-board-api uses.
@@ -305,8 +310,10 @@ export default function streamsRouter(dashboardAuth) {
   // busy_timeout — it must never overlap itself); cleanup sets a closed
   // flag + clears the interval and closes the clients only when no tick is
   // in flight (else the tick's finally closes them — no use-after-close);
-  // the lock read is ONE batched IN-list query (latest row per card_id),
-  // never a per-card loop ⇒ 2 queries/tick. createDbClient() inherits
+  // the lock read is delegated to board-lock.js's batched form (IN-list per
+  // rail, no per-card loop — two rails, so two queries; the SSR render runs
+  // the same call, which is what keeps the snapshot and the page convergent),
+  // never a per-card loop ⇒ 3 queries/tick. createDbClient() inherits
   // CROW_JOURNAL_MODE=DELETE on this gateway (tasks.db opened DELETE — no
   // WAL flip); no direct better-sqlite3 constructor here. Defensive: on the
   // primary gateway the tables are absent, so the first tick errors, is
@@ -316,7 +323,6 @@ export default function streamsRouter(dashboardAuth) {
     if (!stream) return;
     const { sendRaw } = stream;
     const TASKS_DB = tasksDbPath();
-    const LOCK = new Set(["active", "waiting-user"]);
 
     // Resolve bot or project at connection time (once, not per tick)
     const botId = req.query.bot || null;
@@ -391,14 +397,10 @@ export default function streamsRouter(dashboardAuth) {
           cards = rows.map((c) => ({ id: Number(c.id), status: String(c.status) }));
           const ids = cards.map((c) => c.id).filter((n) => Number.isInteger(n));
           if (ids.length) {
-            const ph = ids.map(() => "?").join(",");
-            const lrows = (await cdb.execute({
-              sql: `SELECT card_id, status FROM bot_sessions WHERE id IN (SELECT MAX(id) FROM bot_sessions WHERE card_id IN (${ph}) GROUP BY card_id)`,
-              args: ids,
-            })).rows || [];
-            for (const r of lrows) {
-              if (LOCK.has(String(r.status))) locks[Number(r.card_id)] = true;
-            }
+            // Same predicate the SSR render uses (panels/bot-board/data-queries
+            // lockMapFor also delegates here), so the stream snapshot and the
+            // rendered board can always converge.
+            for (const cid of await lockedCardIds(cdb, ids)) locks[cid] = true;
           }
         } else {
           return;

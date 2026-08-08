@@ -12,6 +12,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { BOT_JOBS_DDL } from "../scripts/pi-bots/bot-jobs-schema.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "botjobs-test-"));
 const dbPath = join(dir, "crow.db");
@@ -19,33 +20,10 @@ process.env.CROW_DB_PATH = dbPath;
 // Keep the runner's reserved-slot math deterministic regardless of host env.
 process.env.PIBOT_MAX_JOB_ATTEMPTS = "3";
 
-// Schema mirror of scripts/init-db.js bot_jobs (kept in sync by intent).
-const SCHEMA = `
-  CREATE TABLE bot_jobs (
-    job_id        TEXT PRIMARY KEY,
-    bot_id        TEXT NOT NULL,
-    goal          TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'queued',
-    deliver_to    TEXT,
-    source        TEXT,
-    schedule_id   INTEGER,
-    escalate      INTEGER NOT NULL DEFAULT 0,
-    attempts      INTEGER NOT NULL DEFAULT 0,
-    result        TEXT,
-    error         TEXT,
-    pi_session_id TEXT,
-    tool_calls    INTEGER,
-    worker_pid    INTEGER,
-    claimed_at    TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    started_at    TEXT,
-    ended_at      TEXT
-  );`;
-
 let mod;
 before(async () => {
   const init = new Database(dbPath);
-  init.exec(SCHEMA);
+  init.exec(BOT_JOBS_DDL);
   init.close();
   mod = await import("../scripts/pi-bots/job_runner.mjs");
 });
@@ -104,7 +82,7 @@ test("claim respects FIFO (oldest queued first)", () => {
   assert.equal(mod.claimNextJob().job_id, second);
 });
 
-test("stale recovery: dead worker re-queues under the attempts cap", () => {
+test("stale recovery: dead worker re-queues under the attempts cap", async () => {
   reset();
   const id = mod.enqueueJob({ bot_id: "b1", goal: "abandoned" });
   // Simulate a claim by a now-dead host: running, worker_pid unlikely-to-exist, attempts=1.
@@ -112,26 +90,26 @@ test("stale recovery: dead worker re-queues under the attempts cap", () => {
   c.prepare("UPDATE bot_jobs SET status='running', worker_pid=999999, attempts=1, started_at=datetime('now') WHERE job_id=?").run(id);
   c.close();
 
-  mod.recoverStaleClaims(() => {});
+  await mod.recoverStaleClaims(() => {});
   const s = mod.jobStatus(id);
   assert.equal(s.status, "queued", "abandoned (dead worker) job re-queued");
   assert.equal(s.attempts, 1, "attempts preserved across recovery");
 });
 
-test("stale recovery: fails (no re-queue) once attempts hit the cap", () => {
+test("stale recovery: fails (no re-queue) once attempts hit the cap", async () => {
   reset();
   const id = mod.enqueueJob({ bot_id: "b1", goal: "wedged" });
   const c = new Database(dbPath);
   c.prepare("UPDATE bot_jobs SET status='running', worker_pid=999999, attempts=3, started_at=datetime('now') WHERE job_id=?").run(id);
   c.close();
 
-  mod.recoverStaleClaims(() => {});
+  await mod.recoverStaleClaims(() => {});
   const s = mod.jobStatus(id);
   assert.equal(s.status, "failed", "max-attempts abandoned job is failed, not re-queued");
   assert.match(s.error || "", /abandoned/);
 });
 
-test("stale recovery: a LIVE worker's running job is left untouched", () => {
+test("stale recovery: a LIVE worker's running job is left untouched", async () => {
   reset();
   const id = mod.enqueueJob({ bot_id: "b1", goal: "in-flight" });
   const c = new Database(dbPath);
@@ -139,6 +117,6 @@ test("stale recovery: a LIVE worker's running job is left untouched", () => {
   c.prepare("UPDATE bot_jobs SET status='running', worker_pid=?, attempts=1, started_at=datetime('now') WHERE job_id=?").run(process.pid, id);
   c.close();
 
-  mod.recoverStaleClaims(() => {});
+  await mod.recoverStaleClaims(() => {});
   assert.equal(mod.jobStatus(id).status, "running", "live worker's job stays running");
 });
