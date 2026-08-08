@@ -373,3 +373,81 @@ particular spawn failed rather than succeeded against MPA's `tasks.db`.
 
 All database reads were taken from copies of `.db` + `-wal` + `-shm`; no running gateway's database
 was opened directly.
+
+**A.7 — post-implementation acceptance (Task 5, 2026-08-08).**
+
+*Mutation testing* (`tests/pibot-crow-server-catalog.test.js` + `tests/pibot-mcp-instance-binding.test.js`
++ `tests/pibot-tools-envelope.test.js`, run after each mutation, then `git checkout` before the next):
+
+| # | mutation | result |
+|---|---|---|
+| 1 | `rebindBlock` env loop → `for (const k of [])` | **CAUGHT** — 3 failures, incl. "rebindBlock rewrites every instance-scoped env key" and "THE INVARIANT: no active block references the other instance" |
+| 2 | drop `existsSync(target)` guard | **CAUGHT** — 2 failures, incl. "rebindBlock disables a bundle absent on this instance, with a reason" |
+| 3 | remove `delete clone.optIn` | **CAUGHT** — 2 failures: "rebindBlock strips optIn — selection is the opt-in" and "optIn never survives into an active block" |
+| 4 | delete the closed-world loop in `mcp_writer.mjs` | **CAUGHT** — 1 failure: "closed-world: every unselected canonical server is disabled" (`crow-tasks must be disabled`) |
+| 5 | prefer `canonical` over `catalog` (`if (catalog[name])` → `if (catalog[name] && !canonical.mcpServers[name])`) | **NOT CAUGHT — VACUOUS.** 25/25 pass, 0 fail, across the 3 named files and also `tests/remote-mcp-writer.test.js`. See finding below. |
+| 6 | restore `else if (tools)` around the `--tools` push | **CAUGHT** — 1 failure: "an empty tool envelope pins --tools \"\" instead of omitting the flag" — `omitting --tools hands pi its full default surface — an empty envelope would WIDEN` |
+| 7 | anchor `INSTANCE_BUNDLE_CWD` on `/crow` instead of `/\.crow` | **CAUGHT** — 4 failures, incl. the repo-cwd test "rebindBlock leaves the repo cwd alone — the repo is instance-neutral" (`Cannot read properties of undefined (reading 'cwd')`) |
+| 8 | revert `serversForProbe` to `Object.assign(out, catalog)` | **CAUGHT** — 1 failure: "probe surface is CORE catalog servers plus NON-Crow canonical entries" — `addons are NOT folded in — probeExtensions owns them, or tasks would double-list` |
+
+7 of 8 mutations caught. `git status` was clean after every restore.
+
+**FINDING — vacuous test, mutation #5.** Preferring `canonical` over `catalog` when a name is present
+in both does not fail any test in the suite. Root cause: `rebindBlock()` is a "belt" over canonical
+blocks too (per the `buildBotMcp` doc comment), so for the one fixture where a name collides
+(`crow-memory`, present in both `twoInstances()`'s canonical and catalog), `rebindBlock` still rewrites
+`env.CROW_DB_PATH`/`CROW_JOURNAL_MODE` to the correct instance, and `noteMinted` is keyed off
+canonical-absence rather than which branch ran — so every assertion that currently exists (the
+cross-instance-leak invariant, the DB-path check, the minted list) is satisfied by both the catalog
+path and the rebound-canonical path. The only observable difference is `command`/`cwd`/`args`
+(catalog derives `command` from `process.execPath` and `cwd` from `ROOT`; the `twoInstances()`
+canonical fixture uses placeholder `command: "n"`, `cwd: "/repo"`), and no test asserts those fields
+for a name present in both maps. Per this task's instructions, no test was modified — Task 5 is
+evidence-only ("Files: none modified"), which itself conflicts with the brief's Step 1 instruction to
+"fix the test before proceeding." Flagged for the next task/PR round rather than worked around
+silently.
+
+*Full suite* (`npm test`, Node 22.23.1): **3089 pass / 0 fail / 0 cancelled / 0 skipped** (3089 tests,
+13 suites, 64.2s). `tests/models-panel-ui.test.js` passed on this run — the host was not memory-tight
+at run time, so the known memory-dependent flake did not reproduce.
+
+*Live acceptance* — real `writeBotMcp` against the real `r4-assistant` bot definition, read from a
+COPY of r4's `crow.db`+`-wal`+`-shm` (the live gateway/`pibot-gateways@r4` service was never touched;
+run from the worktree `/home/kh0pp/crow-wt-mcp-binding`, not the live `/home/kh0pp/crow` tree the
+brief's snippet names — see Task 5 report for why):
+
+```json
+{
+  "servers": ["tasks", "bots-sql-mcp", "crow-memory"],
+  "disabled": [
+    "brave-search", "crow-blog", "crow-bots-sql", "crow-browser",
+    "crow-projects", "crow-storage", "crow-tasks",
+    "google-workspace", "google-workspace-dayane"
+  ],
+  "rebound": [],
+  "warnings": []
+}
+```
+
+`servers` and `disabled` match the brief's expected set exactly (the `google-workspace*` wildcard
+covers both `google-workspace` and `google-workspace-dayane`). `crow-memory`'s `cwd` resolved to the
+worktree repo root (`/home/kh0pp/crow-wt-mcp-binding`), which the task's own instructions call out as
+expected here, not a leak.
+
+One value did **not** match the brief's stated expectation: `crow-memory.env.CROW_DB_PATH` came out as
+the scratch copy path (e.g. `/tmp/.../r4acc/db/crow.db`), not `/home/kh0pp/.crow-r4/data/crow.db` as
+the brief's "Expected" line states. Cause: the brief's own Step 3 command exports
+`CROW_DB_PATH=$S/db/crow.db` so the bot-definition read never touches the live database — but
+`instanceBinding()`'s `dbPath` falls back to `botsDbPath()`, which reads that same `CROW_DB_PATH` env
+var, so the safety override for the *read* leaks into the *binding* used for the *write*. This is a
+brief-expectation defect, not a code defect: the invariant check below still passes because the
+scratch path names no *other* instance.
+
+Invariant check:
+
+```
+--- INVARIANT: any active block naming another instance? ---
+PASS no active block names another instance
+```
+
+**PASS.**
