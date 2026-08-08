@@ -10,7 +10,44 @@
  * functions read process.env at call time.
  */
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveDataDir } from "../../servers/db.js";
+
+/**
+ * Normalize a SQLite location that may be a `file:` URI into a plain filesystem
+ * path better-sqlite3 can open.
+ *
+ * better-sqlite3 has NO URI support — it passes the string to SQLite as a bare
+ * filename, so `new Database("file:/x/tasks.db")` fails with SQLITE_CANTOPEN
+ * rather than opening `/x/tasks.db`. Production stores exactly that form in
+ * `project_spaces.tasks_db_uri` (r4: `file:/home/kh0pp/.crow-r4/data/tasks.db`),
+ * so every reader of that column must come through here.
+ *
+ * This normalizes the OPEN, deliberately not the resolution: `cardsDbForBot`
+ * still returns the configured value verbatim so logs and errors name what the
+ * database actually holds.
+ *
+ * Anything that is not a `file:`-scheme string is returned untouched — plain
+ * paths, `:memory:`, null, and a path that merely CONTAINS "file:" later on.
+ *
+ * @param {*} p a filesystem path, a `file:` URI, or neither
+ * @returns {*} a path better-sqlite3 can open, or the input unchanged
+ */
+export function resolveSqlitePath(p) {
+  if (typeof p !== "string" || !p.startsWith("file:")) return p;
+  try {
+    const u = new URL(p);
+    // Rebuild without search/hash: SQLite's URI syntax allows ?mode=ro and
+    // friends, and left in place they become part of the filename. `localhost`
+    // is the one authority SQLite (and RFC 8089) treats as the local machine.
+    const host = u.hostname === "localhost" ? "" : u.hostname;
+    return fileURLToPath(new URL(`file://${host}${u.pathname}`));
+  } catch {
+    // Not parseable as a URL — hand it back and let the caller's open fail with
+    // its own error rather than swallowing the problem here.
+    return p;
+  }
+}
 
 /** The data dir holding the crow.db this process uses. */
 function botsDataDir() {

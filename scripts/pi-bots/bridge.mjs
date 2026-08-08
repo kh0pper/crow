@@ -35,7 +35,7 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // see its CYCLE NOTE.
 import { buildBotWorld, prepareSpawn } from "./bot-world.mjs";
 import { runSkillReview } from "./skill_review.mjs";
-import { botsDbPath, tasksDbPath as resolveTasksDbPath } from "./instance-paths.mjs";
+import { botsDbPath, tasksDbPath as resolveTasksDbPath, resolveSqlitePath } from "./instance-paths.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.mjs";
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
@@ -60,7 +60,10 @@ export const TASKS_DB = resolveTasksDbPath();
 const TURN_TIMEOUT_MS = Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
 const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 60000);
 
-export function db(p) { const d = new Database(p); d.pragma("busy_timeout = 10000"); return d; }
+// resolveSqlitePath: project_spaces.tasks_db_uri is stored as a `file:` URI in
+// production and better-sqlite3 has no URI support, so the scheme is stripped
+// at the OPEN. Every card-database path in this module flows through here.
+export function db(p) { const d = new Database(resolveSqlitePath(p)); d.pragma("busy_timeout = 10000"); return d; }
 
 export function toolAllowlist(def, { remoteEnabled = false } = {}) {
   const builtin = (def.tools && def.tools.pi_builtin) || [];
