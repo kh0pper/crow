@@ -194,20 +194,30 @@ pibot soak agreement.
 picker keeps every server it shows today and gains correct instance binding for the Crow ones. This
 is what makes §8's host cleanup survivable.
 
-### 5.4 The alias shim
+### 5.4 Legacy server names — renamed in data, no shim in the product
 
-MPA's bots reference `crow-tasks` and `crow-bots-sql`. The instance-native names for those same
-bundles are `tasks` and `bots-sql-mcp`. Renaming them in the six bot defs would change the tool names
-the model sees (`mcp__crow-tasks__*` → `mcp__tasks__*`), which their system prompts and skills may
-reference.
+Five MPA bots and the dormant `crow-home` on `~/.crow` reference `crow-tasks` and `crow-bots-sql`.
+The instance-native names for those same bundles are `tasks` and `bots-sql-mcp`, which is what
+`mcp-addons.json`, `installed.json` and the gateway proxy all use, and what `r4-assistant` already
+selects.
 
-Ship a two-entry alias map — `crow-tasks → tasks`, `crow-bots-sql → bots-sql-mcp` — documented as a
-compatibility shim with a stated retirement. **Do not migrate bot defs during the soak.**
+An earlier draft carried a two-entry alias map to preserve the legacy names. **It is dropped.** The
+operator confirmed MPA is an experimental building instance he does not use, and the evidence agrees
+(§7): r4 is the only live instance. A permanent compatibility shim in the product is not worth
+carrying for bots on instances nobody uses.
 
-The alias applies at **catalog lookup only**. The emitted block keeps the key the bot selected, so
-`crow-tasks` stays `crow-tasks` in the per-bot file and the model keeps seeing
-`mcp__crow-tasks__tasks_update`. Only the block's contents come from the instance-native `tasks`
-entry. Nothing the model or a system prompt can observe changes.
+Instead the six legacy selections are renamed as a **one-time data step in PR 2** (§8), alongside the
+host cleanup. MPA's `mcp-addons.json` and `bundles/` already carry both servers under the native
+names, so after the rename MPA's bots resolve through the catalog like everything else.
+
+Accepted cost: renaming changes the tool names those bots' models see
+(`mcp__crow-tasks__*` → `mcp__tasks__*`), so any MPA system prompt that spells out a tool name goes
+stale. On experimental bots that is a fair trade for removing permanent product debt.
+
+`crow-home` is **left alone**. `~/.crow` has no `tasks` bundle and no `tasks` addon entry, so under
+this design its `crow-tasks` selection is disabled with a stated reason instead of silently binding
+to MPA's database, which is what it does today. It is dormant — `~/.crow` has no pibot runtime unit
+and 0 cards — so there is nothing to preserve.
 
 This is the one part of the design worth calling ugly. It is contained to two entries and one lookup.
 
@@ -247,6 +257,18 @@ Checked, not assumed. Every MPA bot has a non-empty envelope, so `--tools` is al
 closed-world removes **no capability from any existing bot** — only per-turn spawns. Six MPA-pinned
 Crow servers plus `brave-search` stop being spawned into every r4 bot turn.
 
+**r4 is the only live instance**, which is what makes §5.4's simplification safe:
+
+| instance | cards | newest card | pibot runtime unit |
+|---|---|---|---|
+| `~/.crow-r4` | **137** | 2026-08-08 | `pibot-gateways@r4` — running |
+| `~/.crow-mpa` | 85 | 2026-07-11 | `pibot-gateways@crow-mpa`, `pibot-discord@crow-mpa` — running |
+| `~/.crow` | 0 | — | **none** |
+
+The operator confirmed MPA is an experimental building instance he does not use; the month-stale card
+data agrees. `~/.crow` has a runtime gap, not just disuse: its one enabled bot `crow-home` has no
+service driving it.
+
 Bots and their selected servers at design time:
 
 | instance | bot | selects |
@@ -269,6 +291,9 @@ MPA bots and the GUI picker immediately.
 1. Strip the six Crow entries — `crow-memory`, `crow-projects`, `crow-blog`, `crow-storage`,
    `crow-tasks`, `crow-bots-sql` — from `~/.pi/agent/mcp.json`.
 2. Add `{"disabled": true}` for those same six to `~/r4-tehcy/.mcp.json`.
+3. Rename the legacy selections (§5.4) in MPA's five bot defs: `crow-tasks/*` → `tasks/*`,
+   `crow-bots-sql/*` → `bots-sql-mcp/*`. Data only, no schema change. `crow-home` on `~/.crow` is
+   left alone.
 
 Step 2 closes the **human** door. `~/r4-tehcy/.mcp.json` defines r4-correct servers under *different*
 names (`r4-tasks`, `r4-trackers`, `r4-kb`, `pm-workspace`), so the six MPA-pinned globals currently
@@ -292,7 +317,9 @@ ending ~2026-08-12. Required:
 
 - **Board truth / visual language.** The next arc, scoped in Gitea `kh0pp/crow-engineering`, branch
   `docs/board-truth-and-visual-language-scope`. Not this task.
-- **Migrating bot defs off `crow-tasks` / `crow-bots-sql` names.** Deferred behind the alias shim.
+- **`crow-home` on `~/.crow`.** Dormant (no runtime unit, 0 cards) and left to be disabled with a
+  reason rather than migrated. See §5.4.
+- **`~/.crow`'s missing pibot runtime unit.** Noted while establishing §7; unrelated to this work.
 - **`~/crow/.mcp.json`** (generated) points `CROW_DB_PATH` at `./data/crow.db` — safe only because it
   is relative to the repo cwd. Recorded, not fixed.
 - **`installed.json` drift.** r4's `installed.json` lists neither `tasks` nor `bots-sql-mcp` although
