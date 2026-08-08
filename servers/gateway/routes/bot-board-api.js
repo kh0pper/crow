@@ -70,7 +70,7 @@ import { isStage, stageToStatus, effectiveStage } from "./board-stages.js";
 // THE shared dual-rail lock predicate (job rail + session rail). The SSR board
 // render and the no-JS move handler import the same module — see board-lock.js
 // for why a local copy is not allowed to exist here.
-import { lockState, SESSION_LOCK_STATUSES } from "./board-lock.js";
+import { lockState, sessionRowFor, SESSION_LOCK_STATUSES } from "./board-lock.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -114,13 +114,27 @@ function workerLiveness(pid) {
  * discard completed work.
  *
  * Best-effort: a failure here still leaves the card UNLOCKED (the job row is
- * already terminal), which is the guarantee force-unlock actually owes.
+ * already terminal), which is the guarantee force-unlock actually owes — but it
+ * ALWAYS logs, success or failure. resetStrandedCardBestEffort takes a `log`
+ * precisely so a swallowed SQLITE_BUSY is not indistinguishable from the
+ * stranding bug this rail exists to remove (job_runner's unstrandCard passes one
+ * for the same reason); a silent catch here would reintroduce that.
  */
 async function unstrandCardBestEffort(botId, cardId) {
+  const log = (m) => { try { process.stderr.write("[bot-board force-unlock] " + m + "\n"); } catch {} };
   try {
     const b = await import("../../../scripts/pi-bots/bridge.mjs");
-    return !!b.resetStrandedCardBestEffort(b.cardsDbForBot(String(botId)), Number(cardId));
-  } catch {
+    const cardsDb = b.cardsDbForBot(String(botId));
+    const ok = !!b.resetStrandedCardBestEffort(cardsDb, Number(cardId), log);
+    log("card " + cardId + " (bot " + botId + ") " +
+      (ok ? "un-stranded → backlog/pending" : "NOT un-stranded (no row updated) — already terminal, or it may be stuck") +
+      " in " + cardsDb);
+    return ok;
+  } catch (e) {
+    // cardsDbForBot throws for an unknown/disabled bot, and it is RIGHT to
+    // refuse to guess a database — but refusing silently is how a card goes
+    // missing. Report, then leave the card alone.
+    log("card " + cardId + " (bot " + botId + ") NOT un-stranded — " + ((e && e.message) || e));
     return false;
   }
 }
@@ -550,12 +564,26 @@ export default function botBoardApiRouter(dashboardAuth) {
       // resurrected. No new status value is invented for this.
       if (rail === "job") {
         const jobStatus = String(row.status);
+
+        // BOTH RAILS ARE NORMALLY HELD AT ONCE for a RUNNING card job: the job
+        // executes bridge.handleInbound IN-PROCESS (job_runner runCardExecute),
+        // and handleInbound upserts a bot_sessions row carrying this card_id
+        // with status='active' BEFORE it spawns pi. lockState reports the job
+        // rail first, so without this lookup the session rail's gates —
+        // piLiveness() and the 30-minute staleness window — would simply never
+        // be consulted for a card job. They exist for exactly this case.
+        const sess = await sessionRowFor(cdb, id);
+        const sessionHolds = !!(sess && SESSION_LOCK_STATUSES.has(String(sess.status)));
+
         // A 'queued' job has provably not been claimed — there is no worker to
         // outlive and no work to lose, so no staleness window applies. This is
         // the exact case the operator is stuck in when the pi-bots runtime is
         // down: the job will never start, and until it is failed the card is
         // unwritable. A 'running' job goes through the same fail-closed gate a
-        // session does, against the worker pid that claimed it.
+        // session does, against the worker pid that claimed it AND — because pi
+        // is spawned detached:true and outlives its parent — against the pi
+        // process itself. A dead worker with an orphaned live pi reads 'dead' on
+        // the pid check alone; that is not enough to declare the card free.
         if (jobStatus === "running") {
           const live = workerLiveness(row.worker_pid);
           if (live !== "dead") {
@@ -564,6 +592,16 @@ export default function botBoardApiRouter(dashboardAuth) {
                 ? "refused: the worker process running this job is still alive"
                 : "refused (fail-closed): could not positively confirm the job worker is dead",
             });
+          }
+          if (sessionHolds) {
+            const piLive = piLiveness(sess.pi_session_dir);
+            if (piLive !== "dead") {
+              return res.status(409).json({
+                reason: piLive === "alive"
+                  ? "refused: this card's job has a live pi process (its session row is still " + String(sess.status) + ") — the worker died but pi is detached and outlived it"
+                  : "refused (fail-closed): the card is also held by a bot_sessions row and the pi could not be positively confirmed dead",
+              });
+            }
           }
         }
         // Guarded on the status we OBSERVED: if the runner claimed the queued
@@ -574,10 +612,20 @@ export default function botBoardApiRouter(dashboardAuth) {
           args: ["force-unlocked from the board by an operator (was '" + jobStatus + "')", row.job_id, jobStatus],
         });
         const cleared = Number(upd.rowsAffected) || 0;
-        // Only reset the card when we actually terminated the job — otherwise
-        // something else owns it and the card is legitimately still executing.
-        const cardReset = cleared ? await unstrandCardBestEffort(row.bot_id, id) : false;
-        return res.json({ ok: true, cleared, rail: "job", job_id: row.job_id, card_reset: cardReset });
+        // The card is reset ONLY when we actually terminated the job AND no
+        // other rail still holds the card. Rewriting stage/status while a
+        // session row is live is the same mistake as writing under a live pi —
+        // and it would be pointless anyway: the card stays locked by that rail,
+        // so the operator gains a rewritten card they still cannot dispatch.
+        // The session rail keeps its own gates; force-unlock it separately.
+        const cardReset = (cleared && !sessionHolds) ? await unstrandCardBestEffort(row.bot_id, id) : false;
+        return res.json({
+          ok: true, cleared, rail: "job", job_id: row.job_id, card_reset: cardReset,
+          session_lock: sessionHolds ? { status: String(sess.status), age_s: Number(sess.age_s) } : null,
+          note: sessionHolds
+            ? "the job is terminated, but a bot_sessions row still holds this card — force-unlock again once that session is stale (>= " + STALE_SECONDS + "s) and its pi is confirmed dead"
+            : undefined,
+        });
       }
 
       if (!SESSION_LOCK_STATUSES.has(String(row.status))) {

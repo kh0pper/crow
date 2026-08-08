@@ -13,7 +13,8 @@
 // fetch — the same idiom as tests/board-stage-api.test.js.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
@@ -200,13 +201,162 @@ test("action=move still works on an unlocked card", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. The three predicates are ONE predicate. This is the test that fails if a
+// 4. Both rails are normally held AT ONCE for a running card job: the job runs
+//    bridge.handleInbound in-process, and handleInbound upserts a bot_sessions
+//    row with this card_id BEFORE it spawns pi. pi is spawned detached, so a
+//    dead worker does NOT imply a dead pi.
+// ---------------------------------------------------------------------------
+
+// A process whose /proc entry piLiveness() will match: comm 'node' and a
+// cmdline containing `--session-dir <dir>`.
+function spawnFakePi(sessionDir) {
+  const script = join(dir, "fake-pi.cjs");
+  writeFileSync(script, "setTimeout(function () {}, 60000);\n");
+  return spawn(process.execPath, [script, "--session-dir", sessionDir], { stdio: "ignore" });
+}
+// piLiveness()'s own scan, so the test waits for exactly the condition the
+// route will evaluate rather than for a sleep that might be too short.
+function piVisible(sessionDir) {
+  const needle = "--session-dir " + sessionDir;
+  for (const pid of readdirSync("/proc").filter((n) => /^\d+$/.test(n))) {
+    try {
+      if (readFileSync("/proc/" + pid + "/comm", "utf8").trim() !== "node") continue;
+      if (readFileSync("/proc/" + pid + "/cmdline").toString("utf8").replace(/\0/g, " ").includes(needle)) return true;
+    } catch { /* exited mid-scan */ }
+  }
+  return false;
+}
+async function waitFor(fn, ms = 5000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (fn()) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return false;
+}
+// A pid that is provably gone, so the worker-liveness gate reads 'dead' and the
+// request reaches the session-rail gate under test.
+async function deadPid() {
+  const corpse = spawn(process.execPath, ["-e", "0"], { stdio: "ignore" });
+  const pid = corpse.pid;
+  await new Promise((r) => corpse.on("exit", r));
+  return pid;
+}
+
+test("a running job with a live pi is refused, and clearing it never rewrites the card", async () => {
+  const sessionDir = join(dir, "pi-session-8");
+  mkdirSync(sessionDir, { recursive: true });
+  const worker = await deadPid();
+
+  const t = tasksDb();
+  t.prepare("INSERT INTO tasks_items (id, title, project_id, assigned_bot, stage, status) VALUES (8,'orphaned-pi card',1,'scout','executing','in_progress')").run();
+  t.close();
+  const c = crowDb();
+  c.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, source, card_id, card_action, worker_pid) VALUES ('job-running-8','scout','execute #8','running','card',8,'execute',?)").run(worker);
+  c.prepare("INSERT INTO bot_sessions (bot_id, card_id, status, pi_session_dir) VALUES ('scout', 8, 'active', ?)").run(sessionDir);
+  c.close();
+
+  const fakePi = spawnFakePi(sessionDir);
+  try {
+    assert.ok(await waitFor(() => piVisible(sessionDir)), "fixture: the fake pi must be visible in /proc");
+
+    // (a) The worker is dead, so the pid gate passes — but pi is detached and
+    // outlived it. Without the session-rail lookup this would unlock.
+    const r = await fetch(base + "/card/8/force-unlock", { method: "POST" });
+    assert.equal(r.status, 409, "a live pi for this card must block the job-rail force-unlock");
+    assert.match(String((await r.json()).reason), /live pi|confirmed dead/i);
+    const c1 = crowDb();
+    assert.equal(c1.prepare("SELECT status FROM bot_jobs WHERE job_id='job-running-8'").get().status, "running");
+    c1.close();
+    const t1 = tasksDb();
+    assert.equal(t1.prepare("SELECT stage FROM tasks_items WHERE id=8").get().stage, "executing");
+    t1.close();
+  } finally {
+    fakePi.kill("SIGKILL");
+    await new Promise((r) => fakePi.on("exit", r));
+  }
+  assert.ok(await waitFor(() => !piVisible(sessionDir)), "fixture: the fake pi must be gone");
+
+  // (b) pi is dead now, so the job can be terminated — but the bot_sessions row
+  // still holds the card, so the card row must NOT be rewritten.
+  const r2 = await fetch(base + "/card/8/force-unlock", { method: "POST" });
+  const body = await r2.json();
+  assert.equal(r2.status, 200);
+  assert.equal(body.cleared, 1);
+  assert.equal(body.card_reset, false, "the card must not be reset while the session rail still holds it");
+  assert.equal(body.session_lock && body.session_lock.status, "active");
+  const t2 = tasksDb();
+  assert.equal(t2.prepare("SELECT stage FROM tasks_items WHERE id=8").get().stage, "executing");
+  t2.close();
+  // ...and the card is still locked, by the other rail, which keeps its own gates.
+  const stillLocked = await fetch(base + "/card/8/move", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ stage: "ready" }),
+  });
+  assert.equal(stillLocked.status, 409);
+});
+
+// ---------------------------------------------------------------------------
+// 5. The SSE tick is a FOURTH reader of this predicate. The panel client diffs
+//    the stream snapshot against the SSR render's data-locked attribute and
+//    reloads on any difference — so a narrower predicate here does not mis-draw
+//    a badge, it makes the board reload forever without converging.
+// ---------------------------------------------------------------------------
+test("the SSE bot-board tick's lock snapshot agrees with the rendered board", async () => {
+  const { default: express } = await import("express");
+  const { default: streamsRouter } = await import("../servers/gateway/routes/streams.js");
+  const { lockMapFor } = await import("../servers/gateway/dashboard/panels/bot-board/data-queries.js");
+
+  const app = express();
+  app.use((req, res, next) => { req.dashboardSession = "test-session"; next(); });
+  app.use(streamsRouter((req, res, next) => next())); // auth stub
+  const srv = await new Promise((r) => { const s = app.listen(0, () => r(s)); });
+  const url = "http://127.0.0.1:" + srv.address().port + "/dashboard/streams/bot-board?project=1";
+
+  const ctrl = new AbortController();
+  let snapshot = null;
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const m = buf.match(/^data: (\{.*\})$/m);
+      if (m) { snapshot = JSON.parse(m[1]); break; }
+    }
+    await reader.cancel();
+  } finally {
+    ctrl.abort();
+    await new Promise((r) => srv.close(r));
+  }
+  assert.ok(snapshot && Array.isArray(snapshot.cards), "no SSE snapshot arrived");
+
+  const ids = snapshot.cards.map((c) => Number(c.id));
+  const db = createDbClient();
+  let expected;
+  try {
+    const m = await lockMapFor(db, ids);
+    expected = ids.filter((id) => m.get(id));
+  } finally { db.close(); }
+  const fromStream = Object.keys(snapshot.locks || {}).map(Number).sort((a, b) => a - b);
+  assert.deepEqual(fromStream, expected.sort((a, b) => a - b),
+    "the SSE snapshot and the rendered board must agree, or the panel client reloads forever");
+  // Not vacuous: the fixture must actually contain job-rail locks at this point.
+  assert.ok(expected.length > 0, "fixture must contain at least one locked card");
+});
+
+// ---------------------------------------------------------------------------
+// 6. The three predicates are ONE predicate. This is the test that fails if a
 //    fourth copy is ever pasted back in.
 // ---------------------------------------------------------------------------
 test("the single-card and batched forms agree on every card", async () => {
   const { lockState } = await import("../servers/gateway/routes/board-lock.js");
   const { lockMapFor } = await import("../servers/gateway/dashboard/panels/bot-board/data-queries.js");
-  const ids = [1, 2, 3, 4, 5, 6, 7, 999];
+  const ids = [1, 2, 3, 4, 5, 6, 7, 8, 999];
   const db = createDbClient();
   try {
     const m = await lockMapFor(db, ids);
