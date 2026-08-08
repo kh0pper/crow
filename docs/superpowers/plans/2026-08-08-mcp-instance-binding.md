@@ -66,6 +66,7 @@ import {
   rebindBlock,
   crowServerCatalog,
 } from "../scripts/pi-bots/crow-server-catalog.mjs";
+import { ROOT } from "../scripts/server-registry.js";
 
 /** An instance home with a tasks bundle dir and an mcp-addons.json. */
 function instanceB() {
@@ -147,7 +148,7 @@ test("catalog binds core servers to this instance and serves them from the repo"
   assert.ok(mem, "crow-memory catalogued");
   assert.equal(mem.env.CROW_DB_PATH, join(home, "data", "crow.db"));
   assert.equal(mem.env.CROW_JOURNAL_MODE, "DELETE");
-  assert.match(mem.cwd, /crow$/, "core servers run from the repo root");
+  assert.equal(mem.cwd, ROOT, "core servers run from the repo root");
 });
 
 test("catalog binds bundle servers from this instance's mcp-addons.json", () => {
