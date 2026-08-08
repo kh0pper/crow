@@ -106,3 +106,24 @@ test("a non-Crow server is carried through untouched", () => {
   assert.equal(json.mcpServers["brave-search"].env.BRAVE_API_KEY, "k");
   assert.equal(json.mcpServers["brave-search"].cwd, "/home/x");
 });
+
+test("minted: a catalog server also present in canonical is NOT minted", () => {
+  const f = twoInstances();
+  const { res } = write({ tools: { crow_mcp: ["crow-memory"] } }, f);
+  assert.ok(!res.minted.includes("crow-memory"),
+    "crow-memory is in canonical too — 'minted from extensions' would be false: " + JSON.stringify(res.minted));
+});
+
+test("minted: a catalog server absent from canonical IS minted", () => {
+  const f = twoInstances();
+  const { res } = write({ tools: { crow_mcp: ["tasks"] } }, f);
+  assert.ok(res.minted.includes("tasks"),
+    "'tasks' only exists via mcp-addons.json, not canonical: " + JSON.stringify(res.minted));
+});
+
+test("journalGuarded: a crow.db-touching catalog server is reported", () => {
+  const f = twoInstances();
+  const { res } = write({ tools: { crow_mcp: ["crow-memory"] } }, f);
+  assert.ok(res.journalGuarded.includes("crow-memory"),
+    "the WAL-unlink guard must be observable for the catalog path too: " + JSON.stringify(res.journalGuarded));
+});

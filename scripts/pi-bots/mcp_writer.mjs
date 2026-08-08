@@ -169,11 +169,23 @@ export function buildBotMcp(def, canonical, opts = {}) {
     if (reason) warnings.push(`server '${name}' ${reason}`);
   };
 
+  // `minted` keeps its A5 meaning: resolved from somewhere canonical does NOT
+  // have it. A core server present in BOTH the catalog and canonical is not
+  // minted — logging it as "minted from extensions" would be false on the
+  // commonest path (bot-world.mjs and the regen message both print this).
+  const noteMinted = (name) => { if (!canonical.mcpServers[name]) minted.push(name); };
+  // `journalGuarded` exists to make the WAL-unlink guard OBSERVABLE, so it
+  // reports every active crow.db server carrying the guard — uniformly, on
+  // whichever path resolved it. Reporting only the blocks this function
+  // happened to flip would hide the catalog path, which is now the common one.
+  const noteGuard = (name, block) => { if (touchesCrowDb(block)) journalGuarded.push(name); };
+
   for (const name of want) {
     if (catalog[name]) {
       out.mcpServers[name] = catalog[name];
       active.push(name);
-      minted.push(name);
+      noteMinted(name);
+      noteGuard(name, catalog[name]);
       continue;
     }
     if (unconfigured[name]) {
@@ -201,7 +213,7 @@ export function buildBotMcp(def, canonical, opts = {}) {
       }
       out.mcpServers[name] = clone;
       active.push(name);
-      if (extra[name] && !canonical.mcpServers[name]) minted.push(name);
+      noteMinted(name);
       continue;
     }
     const r = rebindBlock(name, source, binding, crowHome);
@@ -210,10 +222,10 @@ export function buildBotMcp(def, canonical, opts = {}) {
       continue;
     }
     if (r.rebound.length) rebound.push({ name, keys: r.rebound });
-    if (touchesCrowDb(r.block)) journalGuarded.push(name);
+    noteGuard(name, r.block);
     out.mcpServers[name] = r.block;
     active.push(name);
-    if (extra[name] && !canonical.mcpServers[name]) minted.push(name);
+    noteMinted(name);
   }
 
   // Closed-world. Sorted so the written file is diffable.
