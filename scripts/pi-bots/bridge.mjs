@@ -178,15 +178,17 @@ export class PiRpc {
     // non-perch caller) leaves `tools` untouched and the branch below identical
     // to what shipped before.
     const narrowedTools = applySessionNarrowing(tools, opts.narrowedTools);
-    if (narrowedTools !== tools) {
-      // A narrowing that removes EVERY tool must STILL pin `--tools ""`: pi
-      // parses that to an empty allowlist (dist/cli/args.js:85-89 →
-      // core/sdk.js:133-136, verified on 0.82.0), whereas omitting the flag
-      // hands pi its full default surface — narrowing would widen.
-      args.push("--tools", narrowedTools);
-    } else if (tools) {
-      args.push("--tools", tools);
-    }
+    // `--tools` is ALWAYS pinned. pi parses "" to an empty allowlist
+    // (dist/cli/args.js:85-89 → core/sdk.js:133-136, verified on 0.82.0),
+    // whereas OMITTING the flag hands pi defaultActiveToolNames — bash, edit,
+    // write, and every tool registered by every inherited MCP server.
+    //
+    // The narrowing case was already guarded. The EMPTY-ENVELOPE case fell
+    // through the same hole: toolAllowlist() returns "" for a bot with no
+    // builtin and no MCP tools, `else if (tools)` is falsy on "", and three
+    // enabled r4 bots were running with pi's entire default surface.
+    // An empty envelope is a real answer, not an absent one.
+    args.push("--tools", narrowedTools);
     if (opts.appendSystemPromptFile) args.push("--append-system-prompt", opts.appendSystemPromptFile);
     if (opts.piSessionId) args.push("--session", opts.piSessionId);
     // PI_BOT_PERMISSION_POLICY drives the per-bot gate in pi-lab's
