@@ -51,8 +51,22 @@ crow-memory    → CROW_DB_PATH=/home/kh0pp/.crow-mpa/data/crow.db   ❌
 
 The handoff's correction was half right: the *tools* are legitimate, the *binding* is not.
 
-**Not yet fired.** MPA's `memories` table (read from a copy) has 343 rows, newest `2026-07-02`. The
-path is armed and reachable; no cross-instance write has occurred. No data cleanup is required.
+**Reads fired; writes did not.** Corrected 2026-08-08 after the fix shipped — the original text
+here said "not yet fired", which understated it.
+
+No cross-instance **write** occurred: MPA's `memories` table (read from a copy) has 343 rows and
+both `created_at` and `updated_at` max out at `2026-07-02`. No data cleanup is required.
+
+But **reads did occur, and they can be dated.** Sixteen MPA memory rows carry `accessed_at` of
+`2026-08-08 02:13:49`, `02:15:49` and `02:17:45`, with `access_count` incremented on each. That
+window is the failed r4 card job `job-msjqo0g7-9x0mtn`, created `2026-08-08 02:12:43` — the same
+turn whose journal shows `ERR_DLOPEN_FAILED` against MPA's tasks bundle. So an r4 bot really did
+read another instance's memory database, three times, about eleven hours before this fix deployed.
+
+The rows touched were all category `triage` / `process` (memory-review and triage summaries), not
+the `person` or `preference` rows. The `ERR_DLOPEN_FAILED` described elsewhere in this document
+protected only the **tasks** bundle; `crow-memory` had no such crash and did exactly what the defect
+permitted. A hazard this design called reachable was, in fact, already being exercised.
 
 ### Bug 2 — an empty tool envelope hands pi its full default surface
 
@@ -369,7 +383,11 @@ Brave Search MCP Server running on stdio
 MPA's copy of the tasks bundle carries a stale native-module ABI, which is the only reason that
 particular spawn failed rather than succeeded against MPA's `tasks.db`.
 
-**A.6 — no cross-instance write has occurred.** MPA `memories`: 343 rows, newest `2026-07-02`.
+**A.6 — no cross-instance write has occurred, but reads did.** MPA `memories`: 343 rows, both
+`created_at` and `updated_at` newest `2026-07-02`, so nothing was written. Sixteen rows carry
+`accessed_at` of `2026-08-08 02:13:49` / `02:15:49` / `02:17:45` with `access_count` incremented —
+the failed r4 card job `job-msjqo0g7-9x0mtn` (created `02:12:43`) reading another instance's
+memory database. See §2 Bug 1.
 
 All database reads were taken from copies of `.db` + `-wal` + `-shm`; no running gateway's database
 was opened directly.
