@@ -514,6 +514,21 @@ test("optIn never survives into an active block", () => {
   assert.ok(!("optIn" in json.mcpServers.gws), "a copied optIn block would never load");
 });
 
+test("RESOLUTION ORDER: the catalog wins over canonical for the same name", () => {
+  const f = twoInstances();
+  // Make canonical's crow-memory STRUCTURALLY distinguishable. rebindBlock
+  // rewrites env and a `.crow*/bundles` cwd, but never `args` — so `args` is
+  // the only witness of WHICH SOURCE won. Without this, both paths yield an
+  // instance-correct block and reversing the order breaks no test, which is
+  // exactly the vacuum a mutation run found.
+  const canon = JSON.parse(readFileSync(f.canonicalPath, "utf8"));
+  canon.mcpServers["crow-memory"].args = ["CANONICAL-WINS.js"];
+  writeFileSync(f.canonicalPath, JSON.stringify(canon));
+  const { json } = write({ tools: { crow_mcp: ["crow-memory"] } }, f);
+  assert.deepEqual(json.mcpServers["crow-memory"].args, ["servers/memory/index.js"],
+    "args must come from the registry catalog, not from the canonical block");
+});
+
 test("a non-Crow server is carried through untouched", () => {
   const f = twoInstances();
   const { json } = write({ tools: { crow_mcp: ["brave-search"] } }, f);
@@ -1096,11 +1111,15 @@ Expected: pass/fail counts with **0 failures other than** `tests/models-panel-ui
 export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH
 S=$(mktemp -d); mkdir -p $S/db $S/out
 for f in crow.db crow.db-wal crow.db-shm; do cp -a /home/kh0pp/.crow-r4/data/$f $S/db/ 2>/dev/null; done
-cd /home/kh0pp/crow
+cd /home/kh0pp/crow-wt-mcp-binding
+# CROW_DB_PATH names the LIVE instance because that is what instanceBinding()
+# turns into path strings — writeBotMcp never OPENS crow.db. The bot definition
+# is read from the COPY via PIBOT_DEF_DB. Pointing CROW_DB_PATH at the copy
+# instead would bind the output to the scratch dir and prove nothing.
 CROW_HOME=/home/kh0pp/.crow-r4 CROW_DATA_DIR=/home/kh0pp/.crow-r4/data \
-CROW_DB_PATH=$S/db/crow.db node -e "
+CROW_DB_PATH=/home/kh0pp/.crow-r4/data/crow.db PIBOT_DEF_DB=$S/db/crow.db node -e "
 const Database=require('better-sqlite3');
-const d=new Database(process.env.CROW_DB_PATH,{readonly:true});
+const d=new Database(process.env.PIBOT_DEF_DB,{readonly:true});
 const def=JSON.parse(d.prepare('SELECT definition FROM pi_bot_defs WHERE bot_id=?').get('r4-assistant').definition);
 d.close();
 import('./scripts/pi-bots/mcp_writer.mjs').then(m=>{
