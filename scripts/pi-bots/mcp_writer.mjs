@@ -12,8 +12,14 @@
  *
  * So the per-bot <session_dir>/.mcp.json is AUTHORITATIVE, and this writer
  * writes it CLOSED-WORLD: the bot's selected servers with instance-correct
- * bindings, plus {"disabled": true} for every other server pi would inherit.
- * Omission is NOT narrowing — an unmentioned homedir server still loads.
+ * bindings, plus {"disabled": true} for every other server named in CANONICAL
+ * that pi would otherwise inherit. That makes the file the complete statement
+ * of CANONICAL's world, not of the bot's actual world — pi also merges every
+ * cwd-ancestor .mcp.json between the filesystem root and the session dir, and
+ * a server defined only in one of THOSE files (never in canonical) is neither
+ * disabled nor known here, so it can still reach the bot unnarrowed. Omission
+ * of a canonical name is NOT narrowing — an unmentioned homedir server still
+ * loads.
  *
  * Crow servers are never copied out of the homedir file; they are derived
  * per-instance by crow-server-catalog.mjs. See

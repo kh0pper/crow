@@ -27,7 +27,7 @@ import {
   loadEnv,
   resolveEnvValue,
 } from "../server-registry.js";
-import { botsDbPath, tasksDbPath, resolveSqlitePath } from "./instance-paths.mjs";
+import { botsDbPath, resolveSqlitePath } from "./instance-paths.mjs";
 
 /**
  * The env vars that name an instance. r4-deploy.sh warns that a child missing
@@ -41,8 +41,20 @@ export const INSTANCE_ENV_KEYS = [
   "CROW_TASKS_DB_PATH",
 ];
 
+/** The default primary-instance home — the one botsDbPath()/tasksDbPath() fall back to. */
+const DEFAULT_CROW_HOME = join(homedir(), ".crow");
+
 /**
  * This instance's canonical values for the four instance-scoped env vars.
+ *
+ * botsDbPath()/tasksDbPath() (instance-paths.mjs) read CROW_DB_PATH /
+ * CROW_DATA_DIR from the environment but never CROW_HOME, so a caller that
+ * hands us a `crowHome` without ALSO setting one of those two env vars would
+ * otherwise resolve to the PRIMARY instance's database — silently rebinding
+ * a correct block onto the wrong instance, which is worse than not rebinding
+ * at all. So when the env doesn't decide, honor the crowHome argument itself
+ * (unless it IS the default, in which case botsDbPath()'s own fallback is
+ * already correct).
  *
  * The tasks path is normalized through resolveSqlitePath(): production stores
  * `file:` URIs in project_spaces.tasks_db_uri and better-sqlite3 has no URI
@@ -50,12 +62,27 @@ export const INSTANCE_ENV_KEYS = [
  * filename (the PR #278 defect).
  */
 export function instanceBinding(crowHome, opts = {}) {
-  const dbPath = opts.dbPath || botsDbPath();
+  let dbPath = opts.dbPath;
+  if (!dbPath) {
+    if (process.env.CROW_DB_PATH) {
+      dbPath = process.env.CROW_DB_PATH;
+    } else if (process.env.CROW_DATA_DIR) {
+      dbPath = join(process.env.CROW_DATA_DIR, "crow.db");
+    } else if (crowHome && crowHome !== DEFAULT_CROW_HOME) {
+      dbPath = join(crowHome, "data", "crow.db");
+    } else {
+      dbPath = botsDbPath();
+    }
+  }
+  const tasksPath =
+    opts.tasksDbPath ||
+    process.env.CROW_TASKS_DB_PATH ||
+    join(dirname(dbPath), "tasks.db");
   return {
     CROW_HOME: crowHome,
     CROW_DATA_DIR: dirname(dbPath),
     CROW_DB_PATH: dbPath,
-    CROW_TASKS_DB_PATH: resolveSqlitePath(opts.tasksDbPath || tasksDbPath()),
+    CROW_TASKS_DB_PATH: resolveSqlitePath(tasksPath),
   };
 }
 

@@ -140,3 +140,60 @@ test("probe surface rescues a core server absent from canonical entirely", () =>
     "a core server must still reach the picker even when the homedir config never named it");
   assert.equal(surface["crow-memory"].env.CROW_DB_PATH, join(home, "data", "crow.db"));
 });
+
+test("probe surface rebinds a non-core canonical entry pinned to another instance, when its bundle exists here too", () => {
+  const { home } = instanceB();
+  // instanceB() only creates a `tasks` bundle dir; add `rookery` so this
+  // instance has SOMETHING for the cross-instance cwd to rebind onto.
+  mkdirSync(join(home, "bundles", "rookery"), { recursive: true });
+  const canonical = { mcpServers: {
+    "crow-rookery": { command: "n", args: ["server/index.js"], cwd: "/home/x/.crow-mpa/bundles/rookery", env: {} },
+  } };
+  const surface = serversForProbe(canonical, home, { binding: BINDING_B(home) });
+  assert.ok(surface["crow-rookery"], "must be offered — the bundle exists on this instance");
+  assert.equal(surface["crow-rookery"].cwd, join(home, "bundles", "rookery"),
+    "must be rebound to THIS instance's bundle dir, not passed through verbatim");
+});
+
+test("probe surface drops a non-core canonical entry whose bundle is absent on this instance", () => {
+  const { home } = instanceB();
+  const canonical = { mcpServers: {
+    "crow-rookery": { command: "n", args: ["server/index.js"], cwd: "/home/x/.crow-mpa/bundles/rookery", env: {} },
+  } };
+  const surface = serversForProbe(canonical, home, { binding: BINDING_B(home) });
+  assert.ok(!surface["crow-rookery"],
+    "a canonical block pinned to a bundle this instance does not have must not reach the picker");
+});
+
+test("probe surface drops an unconfigured core name rather than falling through to its canonical block", () => {
+  const { home } = instanceB();
+  // crow-storage is a CONDITIONAL core server, unconfigured here (no MinIO env)
+  // per the "catalogued as unconfigured" test above. A canonical entry under
+  // the SAME name must not leak through as a fallback.
+  const canonical = { mcpServers: {
+    "crow-storage": { command: "n", args: ["servers/storage/index.js"], cwd: "/repo",
+      env: { MINIO_ENDPOINT: "http://elsewhere:9000" } },
+  } };
+  const surface = serversForProbe(canonical, home, { binding: BINDING_B(home) });
+  assert.ok(!surface["crow-storage"],
+    "crow-storage is a known core name — unconfigured must not fall through to canonical's cross-instance block");
+});
+
+test("instanceBinding honors the crowHome argument when CROW_DB_PATH and CROW_DATA_DIR are both unset", () => {
+  const savedDb = process.env.CROW_DB_PATH;
+  const savedData = process.env.CROW_DATA_DIR;
+  delete process.env.CROW_DB_PATH;
+  delete process.env.CROW_DATA_DIR;
+  try {
+    const dir = mkdtempSync(join(tmpdir(), "instC-"));
+    const home = join(dir, ".crow-fixture");
+    const b = instanceBinding(home);
+    assert.equal(b.CROW_DATA_DIR, join(home, "data"));
+    assert.equal(b.CROW_DB_PATH, join(home, "data", "crow.db"));
+    assert.ok(!b.CROW_DB_PATH.includes("/.crow/"),
+      "must not resolve to the primary instance's database: " + b.CROW_DB_PATH);
+  } finally {
+    if (savedDb === undefined) delete process.env.CROW_DB_PATH; else process.env.CROW_DB_PATH = savedDb;
+    if (savedData === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = savedData;
+  }
+});
