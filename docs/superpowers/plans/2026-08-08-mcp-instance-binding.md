@@ -30,7 +30,8 @@
 | `scripts/pi-bots/crow-server-catalog.mjs` | **new.** Owns "what Crow servers exist on this instance and how are they bound." Imports only `server-registry.js` and `instance-paths.mjs` — no `ext_registry`, no `mcp_writer` — so there is no import cycle. |
 | `scripts/pi-bots/mcp_writer.mjs` | modified. Consumes the catalog; writes the closed-world per-bot file. Already 447 lines, so the catalog deliberately does not live here. |
 | `scripts/pi-bots/bridge.mjs` | modified, one line in the `PiRpc` constructor. |
-| `scripts/pi-bots/ext_registry.mjs` | modified, `probeAll()` only. |
+| `scripts/pi-bots/ext_registry.mjs` | modified, adds `serversForProbe`. |
+| `servers/gateway/dashboard/panels/bot-builder/data-queries.js` | modified, `probeAll()` — which lives here, not in `ext_registry.mjs`. |
 | `tests/pibot-crow-server-catalog.test.js` | **new.** Catalog derivation and rebinding. |
 | `tests/pibot-mcp-instance-binding.test.js` | **new.** The invariant, closed-world, and `optIn`. |
 | `tests/pibot-tools-envelope.test.js` | **new.** The real `--tools` spawn args, via the `PiRpc` stub seam. |
@@ -925,7 +926,8 @@ git show --stat HEAD
 ### Task 4: The GUI picker keeps every server, correctly bound
 
 **Files:**
-- Modify: `scripts/pi-bots/ext_registry.mjs` (`probeAll` only)
+- Modify: `scripts/pi-bots/ext_registry.mjs` (add `serversForProbe`)
+- Modify: `servers/gateway/dashboard/panels/bot-builder/data-queries.js` (`probeAll` lives HERE, not in ext_registry — it already imports `resolveCrowHome`; callers `wizard.js:404` and `editor.js:133` are both zero-arg)
 - Test: `tests/pibot-crow-server-catalog.test.js` (append)
 
 **Interfaces:**
@@ -993,7 +995,7 @@ export function serversForProbe(canonical, crowHome = resolveCrowHome(), opts = 
 }
 ```
 
-In `probeAll`, replace:
+In `probeAll` — which is in `servers/gateway/dashboard/panels/bot-builder/data-queries.js`, NOT `ext_registry.mjs` — replace:
 
 ```js
   const names = Object.keys(canonical.mcpServers);
