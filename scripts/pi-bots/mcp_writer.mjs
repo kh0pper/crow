@@ -1,24 +1,23 @@
 #!/usr/bin/env node
 /**
- * Crow Bot Builder — per-bot MCP config writer + tool-list prober (Phase 2.1).
+ * Crow Bot Builder — per-bot MCP config writer + tool-list prober.
  *
- * S2/D finding (plan §5, "Verified Claims"): pi-lab/extensions/mcp-client.ts
- * reads `~/.pi/agent/mcp.json` from homedir() UNCONDITIONALLY and merges every
- * cwd-ancestor `.mcp.json`, with the homedir file WINNING on key collision.
- * The bridge pins each pi's cwd to the bot's `session_dir`, so the per-bot
- * config is `<session_dir>/.mcp.json`. Because the merge is additive and
- * homedir wins, this file canNOT remove a homedir server — tool *scoping*
- * stays the `--tools` allowlist (toolAllowlist() in bridge.mjs). What this
- * file IS for:
- *   1. make the bot workspace self-describing / portable,
- *   2. carry a bot-specific server that is NOT in the global homedir file,
- *   3. HARD-GUARANTEE `CROW_JOURNAL_MODE=DELETE` on every crow.db server in
- *      the per-bot file — the WAL-unlink scar guard
- *      ([[feedback_crowdb_wal_flip_new_consumers]]); defends against a future
- *      homedir edit or a bot adding a crow.db server.
+ * PRECEDENCE (verified live against pi 0.82.0 + pi-lab main, 2026-08-08):
+ * pi-lab/extensions/mcp-client.ts merges ~/.pi/agent/mcp.json FIRST, then every
+ * cwd-ancestor .mcp.json from the filesystem root down to cwd — the NEAREST
+ * project file WINS. pi-lab commit 671e116 (2026-07-04) changed this; the old
+ * "homedir wins on collision" rule this file used to assert is FALSE, and
+ * believing it hid three live bugs for a month. A project file may also delete
+ * an inherited server with {"name": {"disabled": true}}.
  *
- * Server blocks are COPIED VERBATIM from the already-working canonical
- * `~/.pi/agent/mcp.json`, so a generated per-bot file is valid by construction.
+ * So the per-bot <session_dir>/.mcp.json is AUTHORITATIVE, and this writer
+ * writes it CLOSED-WORLD: the bot's selected servers with instance-correct
+ * bindings, plus {"disabled": true} for every other server pi would inherit.
+ * Omission is NOT narrowing — an unmentioned homedir server still loads.
+ *
+ * Crow servers are never copied out of the homedir file; they are derived
+ * per-instance by crow-server-catalog.mjs. See
+ * docs/superpowers/specs/2026-08-08-mcp-instance-binding-design.md.
  *
  * Also exports probeServerTools(): a dependency-free MCP stdio `tools/list`
  * (initialize -> notifications/initialized -> tools/list) reusing the
@@ -34,6 +33,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
+import { crowServerCatalog, instanceBinding, rebindBlock } from "./crow-server-catalog.mjs";
 
 const HOME = process.env.HOME || homedir();
 export const CANONICAL_MCP_PATH = HOME + "/.pi/agent/mcp.json";
@@ -122,7 +122,11 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
   const addons = readAddons(crowHome);
   const servers = {};
   for (const name of want) {
-    if (canonical.mcpServers[name]) continue; // canonical present -> homedir wins, no mint
+    // The catalog (crow-server-catalog.mjs) already covers every Crow server on
+    // this instance and is consulted first by buildBotMcp, so this path only
+    // ever fills a NON-Crow name absent from canonical. Kept as a seam for
+    // callers that pass their own canonical without a catalog.
+    if (canonical.mcpServers[name]) continue;
     const addon = addons[name];
     if (!addon) continue; // absent from both -> buildBotMcp warns
     servers[name] = addonSpawnBlock(name, addon, crowHome);
@@ -131,47 +135,95 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
 }
 
 /**
- * Build the per-bot `.mcp.json` object from the bot def + canonical config,
- * plus any minted extension addon blocks (A5). Canonical wins on name collision
- * (matches pi-lab's homedir-wins merge); extension blocks only fill servers
- * absent from canonical. A selected server present in NEITHER is a warning.
- * @param {object} opts.extraServers  {name: block} minted from mcp-addons.json
- * @returns {{ json, servers, warnings, journalGuarded, minted }}
+ * Build the per-bot `.mcp.json` object. CLOSED-WORLD — see the file header.
+ *
+ * Resolution order for a selected name:
+ *   1. catalog   — instance-derived, always correct. Wins.
+ *   2. canonical — for names the catalog does not know (third-party servers,
+ *                  crow-browser). Rebound onto this instance as a belt.
+ *   3. extraServers — the mcp-addons seam retained for callers without a catalog.
+ * Then every OTHER canonical name is emitted as {"disabled": true}, because
+ * canonical is exactly what pi would otherwise inherit.
+ *
+ * @returns {{ json, servers, warnings, journalGuarded, minted, rebound, disabled }}
+ *   `servers` lists ACTIVE names only; disabled names are in `disabled`.
  */
 export function buildBotMcp(def, canonical, opts = {}) {
   const want = serversForBot(def);
+  const catalog = opts.catalog || {};
+  const unconfigured = opts.unconfigured || {};
+  const binding = opts.binding;
+  const crowHome = opts.crowHome;
   const extra = opts.extraServers || {};
   const out = { mcpServers: {} };
   const warnings = [];
   const journalGuarded = [];
   const minted = [];
+  const rebound = [];
+  const disabled = [];
+  const active = [];
+
+  const disable = (name, reason) => {
+    out.mcpServers[name] = { disabled: true };
+    disabled.push(name);
+    if (reason) warnings.push(`server '${name}' ${reason}`);
+  };
+
   for (const name of want) {
-    let block = canonical.mcpServers[name];
-    let isExtra = false;
-    if (!block && extra[name]) {
-      block = extra[name];
-      isExtra = true;
+    if (catalog[name]) {
+      out.mcpServers[name] = catalog[name];
+      active.push(name);
+      minted.push(name);
+      continue;
     }
-    if (!block) {
+    if (unconfigured[name]) {
+      disable(name, unconfigured[name]);
+      continue;
+    }
+    const source = canonical.mcpServers[name] || extra[name];
+    if (!source) {
       warnings.push(
-        "server '" + name + "' is selected but absent from canonical mcp.json AND " +
-        "mcp-addons.json — pi will NOT have it"
+        "server '" + name + "' is selected but absent from the instance catalog, " +
+        "canonical mcp.json AND mcp-addons.json — pi will NOT have it"
       );
       continue;
     }
-    // deep clone so we never mutate the canonical/addon block in memory
-    const clone = JSON.parse(JSON.stringify(block));
-    if (touchesCrowDb(clone)) {
-      clone.env = clone.env || {};
-      if (clone.env.CROW_JOURNAL_MODE !== "DELETE") {
-        clone.env.CROW_JOURNAL_MODE = "DELETE";
-        journalGuarded.push(name);
+    // No binding means a caller that predates instance binding (tests, CLI):
+    // fall back to the old verbatim copy + journal guard rather than crash.
+    if (!binding) {
+      const clone = JSON.parse(JSON.stringify(source));
+      if (touchesCrowDb(clone)) {
+        clone.env = clone.env || {};
+        if (clone.env.CROW_JOURNAL_MODE !== "DELETE") {
+          clone.env.CROW_JOURNAL_MODE = "DELETE";
+          journalGuarded.push(name);
+        }
       }
+      out.mcpServers[name] = clone;
+      active.push(name);
+      if (extra[name] && !canonical.mcpServers[name]) minted.push(name);
+      continue;
     }
-    out.mcpServers[name] = clone;
-    if (isExtra) minted.push(name);
+    const r = rebindBlock(name, source, binding, crowHome);
+    if (r.disabled) {
+      disable(name, r.reason);
+      continue;
+    }
+    if (r.rebound.length) rebound.push({ name, keys: r.rebound });
+    if (touchesCrowDb(r.block)) journalGuarded.push(name);
+    out.mcpServers[name] = r.block;
+    active.push(name);
+    if (extra[name] && !canonical.mcpServers[name]) minted.push(name);
   }
-  return { json: out, servers: Object.keys(out.mcpServers), warnings, journalGuarded, minted };
+
+  // Closed-world. Sorted so the written file is diffable.
+  const selected = new Set(want);
+  for (const name of Object.keys(canonical.mcpServers).sort()) {
+    if (selected.has(name)) continue;
+    disable(name, null);
+  }
+
+  return { json: out, servers: active, warnings, journalGuarded, minted, rebound, disabled };
 }
 
 /**
@@ -194,7 +246,13 @@ export function writeBotMcp(def, opts = {}) {
   // instance explicitly; otherwise CROW_HOME env (MPA service) or ~/.crow.
   const crowHome = opts.crowHome || resolveCrowHome();
   const extraServers = opts.extraServers || extraServersFromExtensions(def, crowHome, { canonical });
-  const built = buildBotMcp(def, canonical, { extraServers });
+  // The instance catalog is the FIRST source for any Crow server. opts.binding
+  // lets tests and the panel pin an instance without mutating process.env.
+  const binding = opts.binding || instanceBinding(crowHome, opts);
+  const { servers: catalog, unconfigured } = crowServerCatalog(crowHome, { binding });
+  const built = buildBotMcp(def, canonical, {
+    extraServers, catalog, unconfigured, binding, crowHome,
+  });
   // F4a L2b: merge cross-instance forward-proxy blocks when the caller has
   // confirmed feature_flags.remote_invocation is on (the DB read is done by the
   // caller — bridge/panel/CLI — since this module is DB-agnostic). Default
@@ -224,6 +282,8 @@ export function writeBotMcp(def, opts = {}) {
     warnings: built.warnings,
     journalGuarded: built.journalGuarded,
     minted: built.minted,
+    rebound: built.rebound,
+    disabled: built.disabled,
     remoteWarnings,
   };
 }
