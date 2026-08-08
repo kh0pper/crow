@@ -1072,6 +1072,7 @@ For each mutation below: apply it, run the named test file, confirm it FAILS, th
 | 5 | in `mcp_writer.mjs`, prefer `canonical` over `catalog` in the resolution order | `pibot-mcp-instance-binding` |
 | 6 | in `bridge.mjs`, restore `else if (tools)` | `pibot-tools-envelope` |
 | 7 | in `crow-server-catalog.mjs`, anchor the bundle regex on `/crow` instead of `/\.crow` | `pibot-crow-server-catalog` (the repo-cwd test) |
+| 8 | in `ext_registry.mjs`, revert `serversForProbe` to fold the whole catalog (`Object.assign(out, catalog)`) | `pibot-crow-server-catalog` (the addon double-listing test) |
 
 ```bash
 export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH
