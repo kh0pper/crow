@@ -308,11 +308,13 @@ async function runCardJob(job, { log, bridge }) {
 }
 
 /**
- * Card EXECUTION: call handleInbound in-process with the exact payload the
- * board's detached `bridge.mjs --inject` child has always sent
- * (servers/gateway/routes/bot-board-api.js POST /card/:id/execute). We do not
- * compose a prompt here — handleInbound builds it, and a second copy is exactly
- * how the dispatcher drifts from the bridge.
+ * Card EXECUTION: call handleInbound in-process with the exact payload
+ * `servers/gateway/routes/bot-board-api.js` POST /card/:id/execute enqueues
+ * onto the job rail (before this branch, that route spawned a detached
+ * `bridge.mjs --inject` child that sent this same payload; the job rail now
+ * carries it here instead). We do not compose a prompt here — handleInbound
+ * builds it, and a second copy is exactly how the dispatcher drifts from the
+ * bridge.
  *
  * Escalation rides the same inbound-only `!escalate` token an operator types:
  * handleInbound detects it on the RAW message and strips it before the prompt is
