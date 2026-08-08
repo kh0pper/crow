@@ -840,14 +840,64 @@ export async function handleInbound(opts) {
 // the SAME tasks db used to read the card; never throws. Do NOT call this
 // after a pi session has actually been started — the post-session error
 // paths carry the signal via the session row + status='error' instead.
-function resetStrandedCardBestEffort(cardsDb, cardId) {
+//
+// EXPORTED (Task 4) because the job runner's terminal paths need the SAME
+// un-stranding — an abandoned/failed/no-progress card job leaves a card in
+// stage='executing' with no worker, which is the exact bug the job rail was
+// adopted to prevent. A second implementation over there would be free to
+// drift (wrong database, no busy_timeout); there is one reset, here.
+//
+// `log` is optional and defaults to a no-op so planCard's existing call sites
+// are unchanged. Callers that CAN report (the job runner) pass one: a
+// silently swallowed SQLITE_BUSY leaves the card stuck with no trace.
+// Returns true only when a card row was actually moved.
+//
+// THE TERMINAL-STATUS GUARD is the mirror of the rule above. handleInbound's
+// error catch is POST-turn: it also wraps the statusToStage reconcile, so a
+// pi.prompt timeout AFTER the bot has already written status='done' through
+// its own tasks_* tools leaves the card at stage='executing', status='done'
+// with the job failed. Resetting that would DISCARD completed work — the
+// dispatcher un-setting 'done' is exactly as wrong as the dispatcher setting
+// it. So a card that has reached a terminal status is never touched; the
+// caller sees changes===0 and logs it, which is the signal an operator wants.
+// 'done'/'cancelled' are the terminal statuses of the stage model
+// (board-stages.js TERMINAL_STAGES + stageToStatus) — they are spelled out
+// rather than derived because a stage whose STAGE_TO_STATUS entry was missing
+// would derive as 'pending' and silently disable un-stranding entirely. A test
+// derives the same list from board-stages and fails if a third one appears.
+export function resetStrandedCardBestEffort(cardsDb, cardId, log = () => {}) {
   try {
     const c = db(cardsDb);
     try {
-      c.prepare("UPDATE tasks_items SET stage='backlog', status='pending', updated_at=datetime('now') WHERE id=?")
-        .run(cardId);
+      const info = c.prepare(
+        "UPDATE tasks_items SET stage='backlog', status='pending', updated_at=datetime('now') " +
+        "WHERE id=? AND status NOT IN ('done','cancelled')"
+      ).run(cardId);
+      return info.changes > 0;
     } finally { c.close(); }
-  } catch { /* best-effort */ }
+  } catch (e) {
+    log("un-strand of card " + cardId + " in " + cardsDb + " FAILED (card may be stuck): " + ((e && e.message) || e));
+    return false;
+  }
+}
+
+/**
+ * The tasks database that holds a bot's cards — the SAME resolution planCard
+ * and handleInbound use (a project's own tasks_db_uri wins; otherwise the
+ * instance tasks.db). Exported so an out-of-module caller cannot get this
+ * wrong: a card can live in a per-project database, so reaching for the global
+ * TASKS_DB unconditionally would silently write to the wrong file.
+ *
+ * Throws for an unknown/disabled bot (loadBot's contract), and that strictness
+ * is deliberate: with no bot there is no project, and guessing the global
+ * tasks.db could update a DIFFERENT project's card that merely shares the id.
+ * A caller that cannot resolve the database must report it, not guess — see
+ * job_runner's unstrandCard, which logs the failure rather than writing blind.
+ */
+export function cardsDbForBot(botId) {
+  const bot = loadBot(String(botId));
+  const space = loadProjectSpace(bot.project_id == null ? null : Number(bot.project_id));
+  return (space && space.tasks_db_uri) || TASKS_DB;
 }
 
 // Board plan dispatch (Plan 1 Task 7): spawn a CONFINED local-model planning

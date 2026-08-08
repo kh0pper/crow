@@ -175,11 +175,17 @@ test("execute: refuses without assigned_bot, refuses when not Ready, dispatches 
   const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
   t3.prepare("UPDATE tasks_items SET stage='ready' WHERE id=1").run();
   t3.close();
-  process.env.CROW_BOARD_DISPATCH_DRYRUN = "1"; // test seam: skip the real spawn
+  // Dispatch enqueues a bot_jobs row (the route creates the table on first use
+  // — this crow.db is seeded without it). Nothing spawns, so no DRYRUN seam is
+  // needed or exists any more.
   const ok = await (await fetch(base + "/card/1/execute", { method: "POST" })).json();
-  delete process.env.CROW_BOARD_DISPATCH_DRYRUN;
   assert.equal(ok.ok, true);
   assert.equal(ok.dispatched, "scout");
+  const c = new Database(process.env.CROW_DB_PATH);
+  const job = c.prepare("SELECT bot_id, card_id, card_action, source, status FROM bot_jobs WHERE job_id=?").get(ok.jobId);
+  c.close();
+  assert.deepEqual(job, { bot_id: "scout", card_id: 1, card_action: "execute", source: "card", status: "queued" },
+    "the dispatch's whole effect is this queued row");
   const t4 = new Database(process.env.CROW_TASKS_DB_PATH);
   const row = t4.prepare("SELECT stage, status FROM tasks_items WHERE id=1").get();
   t4.close();
@@ -187,6 +193,12 @@ test("execute: refuses without assigned_bot, refuses when not Ready, dispatches 
 });
 
 test("plan-dispatch: only legal from backlog/planning; moves stage to planning", async () => {
+  // Card 1 is the SAME card the execute test just dispatched, and its queued
+  // job now locks the card on the job rail — every request below would 409 for
+  // that reason alone. Clear the rail so this test measures the stage rules.
+  const c = new Database(process.env.CROW_DB_PATH);
+  c.prepare("DELETE FROM bot_jobs").run();
+  c.close();
   const t = new Database(process.env.CROW_TASKS_DB_PATH);
   t.prepare("UPDATE tasks_items SET stage='ready', assigned_bot='scout' WHERE id=1").run();
   t.close();
@@ -195,9 +207,7 @@ test("plan-dispatch: only legal from backlog/planning; moves stage to planning",
   const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
   t2.prepare("UPDATE tasks_items SET stage='backlog', status='pending' WHERE id=1").run();
   t2.close();
-  process.env.CROW_BOARD_DISPATCH_DRYRUN = "1";
   const ok = await (await fetch(base + "/card/1/plan-dispatch", { method: "POST" })).json();
-  delete process.env.CROW_BOARD_DISPATCH_DRYRUN;
   assert.equal(ok.ok, true);
   const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
   assert.equal(t3.prepare("SELECT stage FROM tasks_items WHERE id=1").get().stage, "planning");

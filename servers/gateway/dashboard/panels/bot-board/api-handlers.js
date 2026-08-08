@@ -8,7 +8,8 @@
 import { createDbClient } from "../../../../db.js";
 import { setPeerBotEnabled } from "../../../bot-federation-client.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
-import { TASKS_DB, CARD_STATUSES, LOCK_STATUSES } from "./data-queries.js";
+import { TASKS_DB, CARD_STATUSES } from "./data-queries.js";
+import { isCardLocked } from "../../../routes/board-lock.js";
 
 export async function handleBotBoardPost(req, res, { db }) {
   const b = req.body || {};
@@ -20,14 +21,12 @@ export async function handleBotBoardPost(req, res, { db }) {
     if (!Number.isInteger(cardId) || !CARD_STATUSES.includes(status)) {
       return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
     }
+    // BOTH rails (routes/board-lock.js). A session-only check let an operator
+    // drop a card into done/cancelled while its job was still running — and the
+    // bot's own later tasks_* write would then race that move. This is the same
+    // predicate the JSON API and the board render use; it is not re-derived.
     let locked = false;
-    try {
-      const lr = (await db.execute({
-        sql: "SELECT status FROM bot_sessions WHERE card_id=? ORDER BY id DESC LIMIT 1",
-        args: [cardId],
-      })).rows[0];
-      locked = lr && LOCK_STATUSES.has(String(lr.status));
-    } catch { locked = false; }
+    try { locked = await isCardLocked(db, cardId); } catch { locked = false; }
     if (locked) return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=locked`);
     let tdb;
     try {

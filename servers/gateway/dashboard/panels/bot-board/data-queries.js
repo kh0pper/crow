@@ -11,6 +11,7 @@ import { getPeerCapabilities } from "../../capabilities-cache.js";
 import { getTrustedInstances } from "../nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { t } from "../../shared/i18n.js";
+import { SESSION_LOCK_STATUSES, lockMapFor as sharedLockMapFor } from "../../../routes/board-lock.js";
 
 export const TASKS_DB = tasksDbPath();
 
@@ -30,7 +31,11 @@ export function statusLabel(status, lang) {
   return key ? t(key, lang) : (STATUS_LABEL[status] || status);
 }
 
-export const LOCK_STATUSES = new Set(["active", "waiting-user"]);
+// Re-export of the session-rail statuses from THE shared predicate — this file
+// used to declare its own copy. Prefer isCardLocked/lockMapFor over comparing
+// statuses by hand: a card is also locked by an unfinished bot_jobs row, which
+// no bot_sessions status can express.
+export const LOCK_STATUSES = SESSION_LOCK_STATUSES;
 
 // F4a: best-effort federated peer bots. Budgeted; a slow/offline peer is skipped.
 export async function gatherPeerBots(db) {
@@ -63,30 +68,15 @@ export async function tableMissing(db) {
   }
 }
 
-// Lock map for a set of card ids — ONE batched query (the SSE tick uses the
-// same shape; design D5 / plan Step 2: never a per-card LIMIT-1 loop). The
-// predicate is identical to the single-card form: the MAX(id) bot_sessions
-// row for a card_id with status in {active,waiting-user} => locked.
+// Lock map for a set of card ids — batched (the SSE tick uses the same shape;
+// design D5 / plan Step 2: never a per-card LIMIT-1 loop). The predicate is
+// LITERALLY the single-card form now: this delegates to routes/board-lock.js,
+// which is the only place either rail is defined. It stopped being identical
+// once when the job rail was taught to the API and not to this file, and the
+// board drew job-locked cards as unlocked and draggable while every API write
+// on them 409'd. Delegation is what makes the claim enforceable.
 export async function lockMapFor(db, cardIds) {
-  const ids = cardIds.filter((n) => Number.isInteger(n));
-  if (!ids.length) return new Map();
-  const ph = ids.map(() => "?").join(",");
-  let rows = [];
-  try {
-    rows = (await db.execute({
-      sql:
-        `SELECT card_id, status FROM bot_sessions ` +
-        `WHERE id IN (SELECT MAX(id) FROM bot_sessions WHERE card_id IN (${ph}) GROUP BY card_id)`,
-      args: ids,
-    })).rows || [];
-  } catch {
-    // bot_sessions absent / transient — treat as no locks (caller still
-    // gates writes server-side in the API; this only affects UI affordance).
-    return new Map();
-  }
-  const m = new Map();
-  for (const r of rows) m.set(Number(r.card_id), LOCK_STATUSES.has(String(r.status)));
-  return m;
+  return sharedLockMapFor(db, cardIds);
 }
 
 // Derive the plan-file path for a card the same way the bridge does
