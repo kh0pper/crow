@@ -148,6 +148,14 @@ function coreBlock(spec, binding, repoEnv, node) {
  * `unconfigured` is not an error channel — it is what the GUI renders so an
  * operator sees "crow-storage: unconfigured, missing MINIO_ENDPOINT" instead
  * of an opaque spawn failure.
+ *
+ * `coreNames` names the subset of `servers` sourced from the registry
+ * (CORE_SERVERS + CONDITIONAL_SERVERS) rather than from mcp-addons.json. It
+ * exists so a consumer that wants ONLY the registry-sourced servers (the ones
+ * that vanish from the picker once Crow entries leave the homedir config) can
+ * select them without re-deriving the split — `probeExtensions` already owns
+ * the addon half of `servers` and is already instance-correct, so folding
+ * addons back in elsewhere would double-list and double-spawn them.
  */
 export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homedir(), ".crow"), opts = {}) {
   const binding = opts.binding || instanceBinding(crowHome, opts);
@@ -155,15 +163,18 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   const repoEnv = loadEnv();
   const servers = {};
   const unconfigured = {};
+  const coreNames = [];
 
   for (const spec of CORE_SERVERS) {
     const { block } = coreBlock(spec, binding, repoEnv, node);
     servers[spec.name] = block;
+    coreNames.push(spec.name);
   }
   for (const spec of CONDITIONAL_SERVERS) {
     const { block, missing } = coreBlock(spec, binding, repoEnv, node);
     if (missing.length) unconfigured[spec.name] = `unconfigured: missing ${missing.join(", ")}`;
     else servers[spec.name] = block;
+    coreNames.push(spec.name);
   }
   for (const [id, addon] of Object.entries(readAddons(crowHome))) {
     const cwd = resolve(addon.cwd || join(crowHome, "bundles", id));
@@ -175,5 +186,5 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
     if (r.disabled) unconfigured[id] = r.reason;
     else servers[id] = r.block;
   }
-  return { servers, unconfigured };
+  return { servers, unconfigured, coreNames };
 }
