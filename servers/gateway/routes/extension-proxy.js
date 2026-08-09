@@ -38,6 +38,50 @@ function getManifest(bundleId) {
   }
 }
 
+/**
+ * Parse a bundle's own `.env` file (installer-written, per-instance).
+ * Skips blank lines and `#` comments; splits on the first `=`; trims both
+ * sides. Returns `{}` on any read failure — a bundle with no `.env` is
+ * normal, not an error.
+ */
+function readBundleEnv(bundleId) {
+  const path = join(BUNDLES_DIR, bundleId, ".env");
+  const values = {};
+  try {
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq === -1) continue;
+      values[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+    }
+  } catch {
+    // No .env for this bundle — defaults apply.
+  }
+  return values;
+}
+
+/**
+ * The backend port for a bundle's webUI, resolved for THIS instance.
+ *
+ * manifest.webUI.port is a shared constant, so a co-hosted second instance whose
+ * gateway does not export the portEnv override silently proxied to the FIRST
+ * instance's backend — for the browser bundle that meant a secondary dashboard's
+ * VNC iframe driving the primary's Chrome. The instance's own bundle .env is where
+ * that override actually lives (the installer writes it), so read it as the layer
+ * between the process environment and the manifest default.
+ */
+export function resolveWebUIPort(manifest, bundleId) {
+  const key = manifest?.webUI?.portEnv;
+  const fallback = manifest?.webUI?.port;
+  if (!key) return fallback;
+  const fromProcess = Number(process.env[key]);
+  if (fromProcess) return fromProcess;
+  const fromBundle = Number(readBundleEnv(bundleId)[key]);
+  if (fromBundle) return fromBundle;
+  return fallback;
+}
+
 function getProxiedExtensions() {
   if (!existsSync(INSTALLED_PATH)) return [];
   try {
@@ -46,16 +90,10 @@ function getProxiedExtensions() {
     for (const entry of installed) {
       const manifest = getManifest(entry.id);
       if (manifest?.webUI?.port) {
-        // webUI.portEnv names an env var that overrides the manifest port —
-        // lets a per-instance unit remap the backend (e.g. a second browser
-        // container on 6081) without editing the shared manifest.
-        const envPort = manifest.webUI.portEnv
-          ? Number(process.env[manifest.webUI.portEnv]) || null
-          : null;
         proxied.push({
           id: entry.id,
           name: manifest.name || entry.id,
-          port: envPort || manifest.webUI.port,
+          port: resolveWebUIPort(manifest, entry.id),
           path: manifest.webUI.path || "/",
           label: manifest.webUI.label || manifest.name || entry.id,
           proxyMode: manifest.webUI.proxyMode || "subpath",
