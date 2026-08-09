@@ -231,3 +231,30 @@ test("stateRoot ignores a CROW_HOME written inside the bundle .env — it must c
     });
   });
 });
+
+test("docker-compose.yml passes DISPLAY_NUM from CROW_BROWSER_DISPLAY, not a bare DISPLAY=:99", () => {
+  const compose = readFileSync(new URL("../bundles/browser/docker-compose.yml", import.meta.url), "utf8");
+  assert.ok(
+    !/DISPLAY=:99/.test(compose),
+    "a hardcoded DISPLAY=:99 makes a second instance's Xvfb collide with the first's abstract X socket " +
+      "(network_mode: host shares the network namespace) and silently attach to the first instance's display",
+  );
+  assert.match(
+    compose,
+    /DISPLAY_NUM=\$\{CROW_BROWSER_DISPLAY:-99\}/,
+    "docker-compose.yml must pass DISPLAY_NUM through from CROW_BROWSER_DISPLAY so a second instance can pick its own X display number",
+  );
+});
+
+test("entrypoint.sh derives DISP_NUM from DISPLAY_NUM instead of hardcoding it", () => {
+  const entrypoint = readFileSync(new URL("../bundles/browser/entrypoint.sh", import.meta.url), "utf8");
+  assert.ok(
+    !/^DISP_NUM=99$/m.test(entrypoint),
+    "a hardcoded DISP_NUM=99 ignores DISPLAY_NUM from the compose file, so every instance still starts Xvfb on :99",
+  );
+  assert.match(
+    entrypoint,
+    /^DISP_NUM="\$\{DISPLAY_NUM:-99\}"$/m,
+    "entrypoint.sh must read DISP_NUM from ${DISPLAY_NUM:-99} so docker-compose.yml's CROW_BROWSER_DISPLAY pass-through takes effect",
+  );
+});

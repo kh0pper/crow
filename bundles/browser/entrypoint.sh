@@ -6,7 +6,7 @@
 # recycles the container.
 set -uo pipefail
 
-DISP_NUM=99
+DISP_NUM="${DISPLAY_NUM:-99}"
 DISPLAY=":${DISP_NUM}"
 export DISPLAY
 CDP_PORT="${CDP_PORT:-9222}"

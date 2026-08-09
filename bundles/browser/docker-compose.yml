@@ -10,7 +10,12 @@ services:
     container_name: ${CROW_BROWSER_CONTAINER_NAME:-crow-browser}
     network_mode: host
     environment:
-      - DISPLAY=:99
+      # Abstract X sockets (@/tmp/.X11-unix/XNN) are scoped to the NETWORK
+      # namespace, which network_mode:host shares — so a second instance left on
+      # :99 collides with the first, its Xvfb dies with "Cannot establish any
+      # listening sockets", and x11vnc silently attaches to the FIRST instance's
+      # display. Give each co-hosted instance its own number. Proven 2026-08-09.
+      - DISPLAY_NUM=${CROW_BROWSER_DISPLAY:-99}
       - VNC_PASSWORD=${CROW_BROWSER_VNC_PASSWORD:?VNC password is required}
       - CDP_PORT=${CROW_BROWSER_CDP_PORT:-9222}
       - NOVNC_PORT=${CROW_BROWSER_VNC_PORT:-6080}
