@@ -739,10 +739,24 @@ async function getComposeCmd() {
   throw new Error("No docker compose command found. Install docker-compose-plugin or docker-compose.");
 }
 
+/**
+ * The environment every gateway-driven `docker compose` run gets.
+ *
+ * `run()` passes no `env`, so compose would otherwise inherit the gateway's
+ * environment verbatim — and `crow-gateway.service` does not set CROW_HOME, while
+ * `crow-r4-gateway.service` does. The browser bundle's mount requires it
+ * (`${CROW_HOME:?…}`), so an unset value fails the run outright. Resolving it here
+ * means every compose run names its instance explicitly rather than depending on
+ * whichever unit happened to export it.
+ */
+export function composeEnv(base = process.env) {
+  return { ...base, CROW_HOME };
+}
+
 /** Run a docker compose command with the detected compose variant */
 async function runCompose(composeArgs, opts = {}) {
   const compose = await getComposeCmd();
-  return run(compose.cmd, [...compose.prefix, ...composeArgs], opts);
+  return run(compose.cmd, [...compose.prefix, ...composeArgs], { ...opts, env: composeEnv(opts.env) });
 }
 
 /** Read JSON file with fallback */
