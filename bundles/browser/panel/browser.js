@@ -22,11 +22,26 @@ export default {
       pathToFileURL(join(appRoot, "servers/gateway/dashboard/shared/components.js")).href
     );
 
+    // The panel is deployed to <CROW_HOME>/panels/, not the bundle directory, so a
+    // relative import of instance.js can't be correct in both the repo and the
+    // deployed layout — resolve it by absolute path from CROW_HOME instead.
+    //
+    // Fail soft like the docker/curl calls below: if the bundle isn't installed
+    // (instance.js missing), leave everything at its "unknown/empty" default —
+    // never silently fall back to primary-flavoured constants, which is the
+    // defect this resolves.
+    let stateDir = null, containerName = null, cdpPort = null;
+    try {
+      const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+      const instanceUrl = pathToFileURL(join(crowHome, "bundles", "browser", "server", "instance.js")).href;
+      ({ stateDir, containerName, cdpPort } = await import(instanceUrl));
+    } catch {}
+
     // --- Container status ---
     let containerRunning = false;
     let startedAt = null;
     try {
-      const out = execFileSync("docker", ["inspect", "-f", "{{.State.Running}}|{{.State.StartedAt}}", "crow-browser"], { encoding: "utf-8", timeout: 5000 }).trim();
+      const out = execFileSync("docker", ["inspect", "-f", "{{.State.Running}}|{{.State.StartedAt}}", containerName()], { encoding: "utf-8", timeout: 5000 }).trim();
       const parts = out.split("|");
       containerRunning = parts[0] === "true";
       startedAt = parts[1];
@@ -34,14 +49,14 @@ export default {
 
     let cdpConnected = false;
     try {
-      execFileSync("curl", ["-s", "-m", "2", "http://127.0.0.1:9222/json/version"], { encoding: "utf-8", timeout: 5000 });
+      execFileSync("curl", ["-s", "-m", "2", `http://127.0.0.1:${cdpPort()}/json/version`], { encoding: "utf-8", timeout: 5000 });
       cdpConnected = true;
     } catch {}
 
     // --- Saved sessions ---
     let sessions = [];
-    const sessDir = join(homedir(), ".crow", "browser-sessions");
     try {
+      const sessDir = stateDir("browser-sessions");
       if (existsSync(sessDir)) {
         sessions = readdirSync(sessDir)
           .filter(f => f.endsWith(".json"))
@@ -56,8 +71,8 @@ export default {
 
     // --- Installed skills/recipes ---
     let skills = [];
-    const skillsDir = join(homedir(), ".crow", "skills");
     try {
+      const skillsDir = stateDir("skills");
       if (existsSync(skillsDir)) {
         skills = readdirSync(skillsDir)
           .filter(f => f.startsWith("crow-browser") || f.includes("ffff") || f.includes("scrape"))
