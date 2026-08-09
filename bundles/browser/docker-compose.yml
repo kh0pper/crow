@@ -17,7 +17,9 @@ services:
       - RFB_PORT=${CROW_BROWSER_RFB_PORT:-5900}
       - CHROME_PROXY=${CROW_BROWSER_PROXY:-}
     volumes:
-      - ${CROW_HOME:-${HOME}/.crow}/browser-downloads:/downloads
+      # No default: a second instance whose CROW_HOME is unset must fail here rather
+      # than silently mount the primary's downloads directory into its container.
+      - ${CROW_HOME:?CROW_HOME is required so each instance writes downloads to its own directory}/browser-downloads:/downloads
     init: true
     mem_limit: 2g
     shm_size: 1g
