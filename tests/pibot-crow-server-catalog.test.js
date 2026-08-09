@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import {
   INSTANCE_ENV_KEYS,
@@ -21,6 +21,22 @@ function instanceB() {
   writeFileSync(join(home, "mcp-addons.json"), JSON.stringify({
     tasks: { command: "node", args: ["server/index.js"], env: { CROW_TASKS_DB_PATH: "/wrong/tasks.db" } },
     ghost: { command: "node", args: ["server/index.js"] },
+  }));
+  return { dir, home };
+}
+
+/** An instance home with a browser bundle whose addon names no instance env at all. */
+function instanceBrowser() {
+  const dir = mkdtempSync(join(tmpdir(), "instBrowser-"));
+  const home = join(dir, ".crow-r4");
+  mkdirSync(join(home, "bundles", "browser"), { recursive: true });
+  mkdirSync(join(home, "data"), { recursive: true });
+  writeFileSync(join(home, "mcp-addons.json"), JSON.stringify({
+    browser: {
+      command: "node",
+      args: ["server/index.js"],
+      env: { CROW_BROWSER_CDP_PORT: "9223", CROW_BROWSER_CONTAINER_NAME: "crow-browser-r4" },
+    },
   }));
   return { dir, home };
 }
@@ -196,4 +212,29 @@ test("instanceBinding honors the crowHome argument when CROW_DB_PATH and CROW_DA
     if (savedDb === undefined) delete process.env.CROW_DB_PATH; else process.env.CROW_DB_PATH = savedDb;
     if (savedData === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = savedData;
   }
+});
+
+test("catalog stamps CROW_HOME on every bundle server it derives", () => {
+  const { home } = instanceB();
+  const { servers } = crowServerCatalog(home, { binding: BINDING_B(home) });
+  assert.equal(servers.tasks.env.CROW_HOME, home,
+    "a bundle server must be TOLD its instance, not inherit it from the caller's shell");
+});
+
+test("a derived browser block names its own instance and never the primary", () => {
+  const { home } = instanceBrowser();
+  const { servers } = crowServerCatalog(home, { binding: BINDING_B(home) });
+  const block = servers.browser;
+  assert.ok(block, "the browser addon should be in the catalog");
+  assert.equal(block.env.CROW_HOME, home);
+  assert.equal(block.env.CROW_BROWSER_CDP_PORT, "9223", "the addon's own port must survive the stamp");
+  assert.equal(block.env.CROW_BROWSER_CONTAINER_NAME, "crow-browser-r4");
+  assert.equal(block.cwd, join(home, "bundles", "browser"));
+
+  const primary = join(homedir(), ".crow");
+  for (const [k, v] of Object.entries(block.env)) {
+    assert.ok(v !== primary && !String(v).startsWith(primary + "/"),
+      `browser block env ${k} points at the primary instance: ${v}`);
+  }
+  assert.ok(!block.cwd.startsWith(primary + "/"), `browser block cwd points at the primary: ${block.cwd}`);
 });
