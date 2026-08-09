@@ -1,11 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { stateRoot, stateDir } from "../bundles/browser/server/instance.js";
+import { stateRoot, stateDir, containerName, cdpPort, vncPort } from "../bundles/browser/server/instance.js";
 
 const SERVER_JS = new URL("../bundles/browser/server/server.js", import.meta.url);
+
+/** Every executable file in the bundle — server and panel both run code. */
+function bundleSources() {
+  const out = [];
+  for (const sub of ["server", "panel"]) {
+    const dir = new URL(`../bundles/browser/${sub}/`, import.meta.url);
+    for (const f of readdirSync(dir)) {
+      if (f.endsWith(".js")) out.push({ path: `${sub}/${f}`, src: readFileSync(new URL(f, dir), "utf8") });
+    }
+  }
+  return out;
+}
 
 /** Run `fn` with CROW_HOME forced to `value` (or unset when value is null). */
 function withCrowHome(value, fn) {
@@ -17,6 +29,43 @@ function withCrowHome(value, fn) {
   } finally {
     if (prev === undefined) delete process.env.CROW_HOME;
     else process.env.CROW_HOME = prev;
+  }
+}
+
+/** Run `fn` with each key of `overrides` set (or deleted when its value is null), restoring after. */
+function withEnv(overrides, fn) {
+  const prev = {};
+  for (const key of Object.keys(overrides)) prev[key] = process.env[key];
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === null) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    fn();
+  } finally {
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/**
+ * Build a fresh temp instance home with an optional bundles/browser/.env
+ * (one "KEY=value" string per line), run `fn(dir)`, then clean up.
+ *
+ * A fresh mkdtemp dir per call means bundleEnv()'s path-keyed cache in
+ * instance.js naturally invalidates between tests — no need to reset it.
+ */
+function withInstanceHome(envLines, fn) {
+  const dir = mkdtempSync(join(tmpdir(), "crow-browser-instance-"));
+  const bundleDir = join(dir, "bundles", "browser");
+  mkdirSync(bundleDir, { recursive: true });
+  if (envLines) writeFileSync(join(bundleDir, ".env"), envLines.join("\n") + "\n");
+  try {
+    fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -36,12 +85,24 @@ test("state directories fall back to ~/.crow when CROW_HOME is unset", () => {
   });
 });
 
-test("server.js never hardcodes the primary's home", () => {
-  const src = readFileSync(SERVER_JS, "utf8");
-  assert.ok(
-    !/join\(\s*homedir\(\)\s*,\s*"\.crow"/.test(src),
-    "server.js must resolve state through stateDir(), not join(homedir(), \".crow\", ...)",
-  );
+test("no file in the bundle hardcodes the primary's home", () => {
+  // `process.env.CROW_HOME || join(homedir(), ".crow")` is the one legitimate
+  // shape: instance.js's own stateRoot() fallback, and the unavoidable
+  // bootstrap each panel file needs to locate instance.js before it can
+  // delegate to stateDir() (see panel/browser.js and panel/routes.js). Any
+  // OTHER join(homedir(), ".crow", ...) — without that CROW_HOME fallback —
+  // is the defect: a path resolved straight to the primary's home.
+  const HARDCODE = /join\(\s*homedir\(\)\s*,\s*"\.crow"/;
+  const BOOTSTRAP = /process\.env\.CROW_HOME\s*\|\|\s*join\(\s*homedir\(\)\s*,\s*"\.crow"/;
+  for (const { path, src } of bundleSources()) {
+    for (const line of src.split("\n")) {
+      if (!HARDCODE.test(line)) continue;
+      assert.ok(
+        BOOTSTRAP.test(line),
+        `${path} must resolve state through stateDir()/the CROW_HOME fallback, not a bare join(homedir(), ".crow", ...): ${line.trim()}`,
+      );
+    }
+  }
 });
 
 test("containerName honors CROW_BROWSER_CONTAINER_NAME and defaults to crow-browser", async () => {
@@ -58,16 +119,16 @@ test("containerName honors CROW_BROWSER_CONTAINER_NAME and defaults to crow-brow
   }
 });
 
-test("no docker call in server.js hardcodes a container name", () => {
-  const src = readFileSync(SERVER_JS, "utf8");
-  const dockerLines = src.split("\n").filter((l) => l.includes('execFileSync("docker"'));
-  assert.ok(dockerLines.length >= 4, `expected the docker calls to still exist, found ${dockerLines.length}`);
-  for (const line of dockerLines) {
-    assert.ok(
-      !line.includes('"crow-browser"'),
-      `docker call targets the primary's container by name: ${line.trim()}`,
-    );
+test("no docker call in the bundle hardcodes a container name", () => {
+  let dockerLineCount = 0;
+  for (const { path, src } of bundleSources()) {
+    for (const line of src.split("\n")) {
+      if (!line.includes('execFileSync("docker"')) continue;
+      dockerLineCount++;
+      assert.ok(!line.includes('"crow-browser"'), `${path} targets the primary's container by name: ${line.trim()}`);
+    }
   }
+  assert.ok(dockerLineCount >= 9, `expected the bundle's docker calls to still exist, found ${dockerLineCount}`);
 });
 
 test("crow_browser_status reports what the server bound to", () => {
@@ -106,4 +167,67 @@ test("the downloads mount requires CROW_HOME instead of defaulting to the primar
     "a CROW_HOME default lets a hand-run compose mount the primary's downloads into a second instance's container",
   );
   assert.match(compose, /\$\{CROW_HOME:\?/, "the mount must fail loudly when CROW_HOME is unset");
+});
+
+test("containerName, cdpPort, vncPort read the instance's bundle .env when process.env has no override", () => {
+  withInstanceHome([
+    "CROW_BROWSER_CONTAINER_NAME=crow-browser-r4",
+    "CROW_BROWSER_CDP_PORT=9322",
+    "CROW_BROWSER_VNC_PORT=6180",
+  ], (dir) => {
+    withEnv({
+      CROW_HOME: dir,
+      CROW_BROWSER_CONTAINER_NAME: null,
+      CROW_BROWSER_CDP_PORT: null,
+      CROW_BROWSER_VNC_PORT: null,
+    }, () => {
+      assert.equal(containerName(), "crow-browser-r4");
+      assert.equal(cdpPort(), "9322");
+      assert.equal(vncPort(), "6180");
+    });
+  });
+});
+
+test("process.env wins over the instance's bundle .env when both are set", () => {
+  withInstanceHome([
+    "CROW_BROWSER_CONTAINER_NAME=crow-browser-r4",
+    "CROW_BROWSER_CDP_PORT=9322",
+    "CROW_BROWSER_VNC_PORT=6180",
+  ], (dir) => {
+    withEnv({
+      CROW_HOME: dir,
+      CROW_BROWSER_CONTAINER_NAME: "crow-browser-override",
+      CROW_BROWSER_CDP_PORT: "9999",
+      CROW_BROWSER_VNC_PORT: "6999",
+    }, () => {
+      assert.equal(containerName(), "crow-browser-override");
+      assert.equal(cdpPort(), "9999");
+      assert.equal(vncPort(), "6999");
+    });
+  });
+});
+
+test("containerName, cdpPort, vncPort fall back to their defaults when neither process.env nor the bundle .env has a value", () => {
+  withInstanceHome(null, (dir) => {
+    withEnv({
+      CROW_HOME: dir,
+      CROW_BROWSER_CONTAINER_NAME: null,
+      CROW_BROWSER_CDP_PORT: null,
+      CROW_BROWSER_VNC_PORT: null,
+    }, () => {
+      assert.equal(containerName(), "crow-browser");
+      assert.equal(cdpPort(), "9222");
+      assert.equal(vncPort(), "6080");
+    });
+  });
+});
+
+test("stateRoot ignores a CROW_HOME written inside the bundle .env — it must come from process.env only", () => {
+  withInstanceHome([
+    "CROW_HOME=/tmp/should-never-be-used",
+  ], (dir) => {
+    withEnv({ CROW_HOME: dir }, () => {
+      assert.equal(stateRoot(), dir);
+    });
+  });
 });
