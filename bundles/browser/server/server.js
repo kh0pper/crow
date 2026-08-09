@@ -17,7 +17,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSy
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { stateDir, stateRoot, containerName } from "./instance.js";
+import { stateDir, stateRoot, containerName, cdpPort, vncPort } from "./instance.js";
 
 /**
  * Create and configure the crow-browser MCP server.
@@ -30,9 +30,9 @@ import { stateDir, stateRoot, containerName } from "./instance.js";
  */
 export function createBrowserServer(options = {}) {
   const cdpUrl = options.cdpUrl || process.env.CROW_BROWSER_CDP_URL ||
-    `http://127.0.0.1:${process.env.CROW_BROWSER_CDP_PORT || "9222"}`;
+    `http://127.0.0.1:${cdpPort()}`;
   const sessionDir = options.sessionDir || stateDir("browser-sessions");
-  const vncPort = process.env.CROW_BROWSER_VNC_PORT || "6080";
+  const resolvedVncPort = vncPort();
   const container = containerName();
 
   const server = new McpServer(
@@ -170,7 +170,7 @@ export function createBrowserServer(options = {}) {
             type: "text",
             text: JSON.stringify({
               status: "connected",
-              vnc_url: `http://localhost:${vncPort}/vnc.html`,
+              vnc_url: `http://localhost:${resolvedVncPort}/vnc.html`,
               cdp_url: cdpUrl,
               user_agent: profile.ua,
               page_url: page.url(),
@@ -217,7 +217,7 @@ export function createBrowserServer(options = {}) {
             cdp_connected: cdpConnected,
             state_root: stateRoot(),
             current_url: currentUrl,
-            vnc_url: containerRunning ? `http://localhost:${vncPort}/vnc.html` : null,
+            vnc_url: containerRunning ? `http://localhost:${resolvedVncPort}/vnc.html` : null,
           }, null, 2),
         }],
       };
@@ -470,7 +470,7 @@ export function createBrowserServer(options = {}) {
           text: JSON.stringify({
             status: "waiting_for_user",
             message,
-            vnc_url: `http://localhost:${vncPort}/vnc.html`,
+            vnc_url: `http://localhost:${resolvedVncPort}/vnc.html`,
             instruction: "Complete the required action in the VNC viewer, then call crow_browser_wait_for_user with resume=true to continue.",
           }, null, 2),
         }],

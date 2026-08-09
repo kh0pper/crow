@@ -904,7 +904,12 @@ for i in .crow .crow-r4 .crow-mpa; do
 const D = require(\"/home/kh0pp/crow/node_modules/better-sqlite3\");
 const db = new D(\"/home/kh0pp/$i/data/crow.db\", { readonly: true });
 for (const r of db.prepare(\"select bot_id, definition from pi_bot_defs\").all()) {
-  if (/crow-browser/.test(r.definition)) console.log(\"$i\", r.bot_id, \"STILL SELECTS crow-browser\");
+  // Check the SELECTIONS, not the raw definition JSON — several bots mention
+  // crow-browser tool names in their system_prompt prose, which is stale text
+  // but not a resolvable server reference and not what this step is about.
+  const d = JSON.parse(r.definition);
+  const servers = new Set(((d.tools && d.tools.crow_mcp) || []).map((s) => s.split(\"/\")[0]));
+  if (servers.has(\"crow-browser\")) console.log(\"$i\", r.bot_id, \"STILL SELECTS crow-browser\");
 }
 console.log(\"$i checked\");
 "
