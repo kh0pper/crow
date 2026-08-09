@@ -72,7 +72,29 @@ test("no docker call in server.js hardcodes a container name", () => {
 
 test("crow_browser_status reports what the server bound to", () => {
   const src = readFileSync(SERVER_JS, "utf8");
-  for (const field of ["container:", "cdp_url:", "state_root:"]) {
-    assert.ok(src.includes(field), `crow_browser_status must report ${field} so a deploy can be verified by running it`);
+
+  // Scope to the crow_browser_status handler only — checking the whole file lets
+  // unrelated matches (e.g. a Zod field named `container` on a different tool, or
+  // a pre-existing `cdp_url` in the reconnect response) pass the assertion even
+  // when this handler's own payload never mentions the field.
+  const statusStart = src.indexOf('"crow_browser_status"');
+  assert.ok(statusStart !== -1, "could not find the crow_browser_status tool registration");
+  const nextToolStart = src.indexOf("server.tool(", statusStart);
+  const handlerSlice = nextToolStart === -1 ? src.slice(statusStart) : src.slice(statusStart, nextToolStart);
+  assert.ok(handlerSlice.length > 0, "crow_browser_status handler slice must be non-empty");
+
+  // Narrow further to the JSON.stringify(...) payload object itself, so the tool's
+  // own description text ("Check browser container...") can't satisfy the check.
+  const payloadStart = handlerSlice.indexOf("JSON.stringify(");
+  assert.ok(payloadStart !== -1, "could not find the JSON.stringify(...) status payload inside the handler");
+  const payloadEnd = handlerSlice.indexOf("}, null, 2)", payloadStart);
+  assert.ok(payloadEnd !== -1, "could not find the end of the status payload object");
+  const payloadSlice = handlerSlice.slice(payloadStart, payloadEnd);
+  assert.ok(payloadSlice.length > 0, "crow_browser_status payload slice must be non-empty");
+
+  for (const field of ["container", "cdp_url", "state_root"]) {
+    // Word-boundary match: "container" must not be satisfied by "container_running".
+    const re = new RegExp(`\\b${field}\\b`);
+    assert.ok(re.test(payloadSlice), `crow_browser_status payload must report ${field} so a deploy can be verified by running it`);
   }
 });
