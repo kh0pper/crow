@@ -192,7 +192,13 @@ Line 1403, currently `"Trigger a file download by clicking an element, and save 
     "Trigger a file download by clicking an element, and save it to this instance's browser-downloads/ directory on the host (see crow_browser_status for the resolved path). Uses a container bind mount + CDP download behavior.",
 ```
 
-Leave the `homedir` import in place — it is still used elsewhere in the file. If a lint run reports it unused, remove it then, not speculatively.
+**Remove the now-dead `homedir` import.** Those three lines were its only uses in `server.js` (verified 2026-08-09), and `node:os` is imported for nothing else, so delete the whole line at 18:
+
+```js
+import { homedir } from "node:os";
+```
+
+Keep the `join` import — it is still used throughout the file. After the edit, `grep -n 'homedir' bundles/browser/server/server.js` must return nothing.
 
 - [ ] **Step 6: Run the tests and confirm all three pass**
 
