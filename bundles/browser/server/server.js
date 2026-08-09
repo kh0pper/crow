@@ -15,9 +15,9 @@ import { buildStealthScript, getContextOptions, humanType, humanClick, delay } f
 import { getRandomProfile } from "./profiles.js";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { stateDir } from "./instance.js";
 
 /**
  * Create and configure the crow-browser MCP server.
@@ -31,8 +31,7 @@ import { execFileSync } from "node:child_process";
 export function createBrowserServer(options = {}) {
   const cdpUrl = options.cdpUrl || process.env.CROW_BROWSER_CDP_URL ||
     `http://127.0.0.1:${process.env.CROW_BROWSER_CDP_PORT || "9222"}`;
-  const sessionDir = options.sessionDir ||
-    join(process.env.CROW_HOME || join(homedir(), ".crow"), "browser-sessions");
+  const sessionDir = options.sessionDir || stateDir("browser-sessions");
   const vncPort = process.env.CROW_BROWSER_VNC_PORT || "6080";
 
   const server = new McpServer(
@@ -953,11 +952,11 @@ export function createBrowserServer(options = {}) {
     {
       data: z.array(z.record(z.string(), z.any())).describe("Array of data objects to export"),
       format: z.enum(["csv", "json"]).describe("Export format"),
-      filename: z.string().optional().describe("Output filename (saved to ~/.crow/browser-exports/)"),
+      filename: z.string().optional().describe("Output filename (saved to this instance's browser-exports/ directory — see crow_browser_status for the resolved path)"),
     },
     async ({ data, format, filename }) => {
       try {
-        const exportDir = join(homedir(), ".crow", "browser-exports");
+        const exportDir = stateDir("browser-exports");
         if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
 
         const ts = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
@@ -1400,7 +1399,7 @@ export function createBrowserServer(options = {}) {
   // Tool: crow_browser_download
   server.tool(
     "crow_browser_download",
-    "Trigger a file download by clicking an element, and save it to the host at ~/.crow/browser-downloads/. Uses a container bind mount + CDP download behavior.",
+    "Trigger a file download by clicking an element, and save it to this instance's browser-downloads/ directory on the host (see crow_browser_status for the resolved path). Uses a container bind mount + CDP download behavior.",
     {
       selector: z.string().describe("CSS selector of the link/button that starts the download"),
       timeout_ms: z.number().optional().describe("Max wait for the file to finish (default: 30000)"),
@@ -1408,7 +1407,7 @@ export function createBrowserServer(options = {}) {
     async ({ selector, timeout_ms }) => {
       try {
         const p = await getPage();
-        const hostDir = join(homedir(), ".crow", "browser-downloads");
+        const hostDir = stateDir("browser-downloads");
         if (!existsSync(hostDir)) mkdirSync(hostDir, { recursive: true });
 
         // Container writes to /downloads, bind-mounted to hostDir.
