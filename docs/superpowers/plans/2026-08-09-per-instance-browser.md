@@ -688,6 +688,7 @@ git show --stat HEAD
 
 **Files:**
 - Modify: `bundles/browser/manifest.json` (`version`)
+- Modify: `registry/add-ons.json` (regenerated — it is a generated snapshot that pins each bundle's version, so bumping the manifest without rebuilding it drifts and reddens both `tests/bundle-contract.test.js` and `tests/bundle-provider-audit.test.js`, plus the `static-checks` CI job)
 
 **Interfaces:**
 - Consumes: Tasks 1-4.
@@ -703,6 +704,17 @@ In `bundles/browser/manifest.json`, change `"version": "1.0.0",` to:
   "version": "1.1.0",
 ```
 
+- [ ] **Step 1b: Regenerate the add-ons registry**
+
+`registry/add-ons.json` is generated and checked in, and it carries `"version": "1.0.0"` for the `browser` bundle. Bumping the manifest alone leaves the two out of step.
+
+```bash
+cd /home/kh0pp/crow-wt-browser && npm run build-registry
+git diff --stat registry/add-ons.json
+```
+
+Expected: `registry/add-ons.json` changes, and the browser entry's `version` now reads `1.1.0`. Confirm the diff touches only version-related fields for this bundle — if it rewrites unrelated entries, stop and report, because that means the checked-in snapshot was already stale for some other reason.
+
 - [ ] **Step 2: Run the full suite**
 
 ```bash
@@ -717,7 +729,7 @@ Expected: all pass, 0 failures. Baseline before this change was 2961 passing; th
 ```bash
 cd /home/kh0pp/crow-wt-browser
 node scripts/check-port-allocation.js && echo "PORTS OK"
-node scripts/build-registry.js --check && echo "REGISTRY OK"
+node scripts/build-registry.mjs --check && echo "REGISTRY OK"
 ```
 
 Expected: both OK. `check-ports` only scans `bundles/*/docker-compose.yml` for `host:container` mappings and the browser bundle uses `network_mode: host` with no `ports:` list, so it should be unaffected — but run it rather than assume.
@@ -725,11 +737,12 @@ Expected: both OK. `check-ports` only scans `bundles/*/docker-compose.yml` for `
 - [ ] **Step 4: Commit the bump and push**
 
 ```bash
-git commit bundles/browser/manifest.json -m "chore(browser): 1.0.0 -> 1.1.0 so installed bundles refresh
+git commit bundles/browser/manifest.json registry/add-ons.json -m "chore(browser): 1.0.0 -> 1.1.0 so installed bundles refresh
 
 repairInstalledBundleAssets only re-copies server/ when the manifest versions
 differ, so without this the instance fixes never reach ~/.crow/bundles/browser
-or ~/.crow-r4/bundles/browser."
+or ~/.crow-r4/bundles/browser. registry/add-ons.json is generated and pins the
+same version, so it is regenerated in the same commit."
 git show --stat HEAD
 git push -u origin fix/per-instance-browser
 ```
