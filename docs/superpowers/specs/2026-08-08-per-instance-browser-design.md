@@ -104,7 +104,8 @@ bug was bots resolving the canonical block at all.
 
 ## 3. Repo changes
 
-**3.1 One state root.** Extract `bundles/browser/server/paths.js`:
+**3.1 One state root.** Extract `bundles/browser/server/instance.js` — one module whose
+single responsibility is answering "which instance is this server bound to":
 
 ```js
 export const stateRoot = () => process.env.CROW_HOME || join(homedir(), ".crow");
@@ -112,7 +113,7 @@ export const stateDir = (name) => join(stateRoot(), name);
 ```
 
 `server.js` uses it for all three directories. A separate module rather than an export
-from `server.js` so the tests import twenty lines instead of dragging in puppeteer. Fix
+from `server.js` so the tests import twenty lines instead of dragging in playwright. Fix
 the two tool descriptions to describe the resolved directory instead of asserting
 `~/.crow`.
 
@@ -219,3 +220,43 @@ and `docs/developers/port-allocation.md:66` already documents the +1 convention.
 - **The primary's `crow-home` bot selects `crow-tasks`**, a name that exists in neither
   the registry nor any `mcp-addons.json` since the previous session's MPA-only rename. A
   one-row fix, left alone only because it is outside this change's story.
+
+---
+
+## Addendum — 2026-08-09, found while writing the plan
+
+**Finding 8: the browser server ignores its own container name, and one of the calls is
+destructive.** `CROW_BROWSER_CONTAINER_NAME` is declared in `manifest.json:18` as a
+configurable env key, and r4's addon sets it to `crow-browser-r4` — but `server.js` never
+reads it. Four `docker` invocations hardcode the string `"crow-browser"`:
+
+| line | call | effect on a non-primary instance |
+|---|---|---|
+| 125 | `docker inspect … {{range .Config.Env}}` | reads the primary's VNC password |
+| 127 | `docker inspect … compose.project.config_files` | finds the primary's compose file |
+| 155 | `docker restart crow-browser` | **restarts the primary's container** |
+| 200 | `docker inspect -f {{.State.Running}}` | `crow_browser_status` reports the primary |
+
+Line 155 is the sharp one: r4's browser server, asked to restart its own browser, kills
+the primary's Chrome and every session logged into it. Line 39's `{ name: "crow-browser" }`
+is the MCP protocol server name, not a container, and stays as is.
+
+This is the same defect as the rest of §2 — a value that looks instance-neutral and
+silently resolves to the primary — so it is folded into scope as its own task rather than
+deferred. `containerName()` joins `stateRoot()`/`stateDir()` in the extracted module,
+which is therefore named `server/instance.js` rather than `server/paths.js`: its
+responsibility is instance identity, of which paths are one part.
+
+**Consequence for §4's verification step.** The spec proposed verifying with
+`scripts/pi-bots/s0_mcp_probe.mjs`. That was an over-claim on my part — the probe is an
+S0-era spike with `TARGETS` hardcoded to MPA's `tasks` and `bots-sql` bundles, not a
+general resolver. Better, and available once this task lands: `crow_browser_status` today
+reports neither the CDP endpoint nor the container it inspected, so the task adds
+`container`, `cdp_url` and `state_root` to its payload. Verification then becomes a single
+tool call per instance whose output names exactly what it bound to.
+
+**One interaction to expect.** §3.2's `${CROW_HOME:?…}` guard makes the proxy-recreate
+path at lines 136-139 (`docker compose … up -d --force-recreate`, which passes
+`{ ...process.env }`) fail when `CROW_HOME` is unset. That is the correct behavior, not a
+regression: the catalog injection (§3.3) and the operator blocks (§4) both guarantee it is
+set on every path that should be recreating a container.
