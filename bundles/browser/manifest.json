@@ -1,7 +1,7 @@
 {
   "id": "browser",
   "name": "Browser Automation",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
   "type": "bundle",
   "author": "Crow",

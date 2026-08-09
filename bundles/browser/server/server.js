@@ -15,9 +15,9 @@ import { buildStealthScript, getContextOptions, humanType, humanClick, delay } f
 import { getRandomProfile } from "./profiles.js";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { stateDir, stateRoot, containerName } from "./instance.js";
 
 /**
  * Create and configure the crow-browser MCP server.
@@ -31,9 +31,9 @@ import { execFileSync } from "node:child_process";
 export function createBrowserServer(options = {}) {
   const cdpUrl = options.cdpUrl || process.env.CROW_BROWSER_CDP_URL ||
     `http://127.0.0.1:${process.env.CROW_BROWSER_CDP_PORT || "9222"}`;
-  const sessionDir = options.sessionDir ||
-    join(process.env.CROW_HOME || join(homedir(), ".crow"), "browser-sessions");
+  const sessionDir = options.sessionDir || stateDir("browser-sessions");
   const vncPort = process.env.CROW_BROWSER_VNC_PORT || "6080";
+  const container = containerName();
 
   const server = new McpServer(
     { name: "crow-browser", version: "0.1.0" },
@@ -122,9 +122,9 @@ export function createBrowserServer(options = {}) {
           if (browser) { await browser.close().catch(() => {}); browser = null; context = null; page = null; cdpSession = null; }
           let vncpw = "", composeFile = "";
           try {
-            const env = execFileSync("docker", ["inspect", "crow-browser", "--format", "{{range .Config.Env}}{{println .}}{{end}}"], { timeout: 10000 }).toString();
+            const env = execFileSync("docker", ["inspect", container, "--format", "{{range .Config.Env}}{{println .}}{{end}}"], { timeout: 10000 }).toString();
             vncpw = (env.split("\n").find((l) => l.startsWith("VNC_PASSWORD=")) || "").slice("VNC_PASSWORD=".length);
-            composeFile = execFileSync("docker", ["inspect", "crow-browser", "--format", '{{index .Config.Labels "com.docker.compose.project.config_files"}}'], { timeout: 10000 }).toString().trim();
+            composeFile = execFileSync("docker", ["inspect", container, "--format", '{{index .Config.Labels "com.docker.compose.project.config_files"}}'], { timeout: 10000 }).toString().trim();
           } catch { /* fall through to error */ }
           if (!vncpw) return { content: [{ type: "text", text: "Could not read VNC password from the running container — set CROW_BROWSER_PROXY in the environment and recreate the container manually." }], isError: true };
           // Fallback: this bundle's own compose file, derived from our location
@@ -152,7 +152,7 @@ export function createBrowserServer(options = {}) {
             cdpSession = null;
           }
           try {
-            execFileSync("docker", ["restart", "crow-browser"], { timeout: 30000 });
+            execFileSync("docker", ["restart", container], { timeout: 30000 });
             // Wait for Chrome to be ready
             await new Promise((r) => setTimeout(r, 5000));
           } catch {
@@ -197,7 +197,7 @@ export function createBrowserServer(options = {}) {
     async () => {
       const containerRunning = (() => {
         try {
-          const out = execFileSync("docker", ["inspect", "-f", "{{.State.Running}}", "crow-browser"], { encoding: "utf-8", timeout: 5000 }).trim();
+          const out = execFileSync("docker", ["inspect", "-f", "{{.State.Running}}", container], { encoding: "utf-8", timeout: 5000 }).trim();
           return out === "true";
         } catch {
           return false;
@@ -211,8 +211,11 @@ export function createBrowserServer(options = {}) {
         content: [{
           type: "text",
           text: JSON.stringify({
+            container,
             container_running: containerRunning,
+            cdp_url: cdpUrl,
             cdp_connected: cdpConnected,
+            state_root: stateRoot(),
             current_url: currentUrl,
             vnc_url: containerRunning ? `http://localhost:${vncPort}/vnc.html` : null,
           }, null, 2),
@@ -953,11 +956,11 @@ export function createBrowserServer(options = {}) {
     {
       data: z.array(z.record(z.string(), z.any())).describe("Array of data objects to export"),
       format: z.enum(["csv", "json"]).describe("Export format"),
-      filename: z.string().optional().describe("Output filename (saved to ~/.crow/browser-exports/)"),
+      filename: z.string().optional().describe("Output filename (saved to this instance's browser-exports/ directory — see crow_browser_status for the resolved path)"),
     },
     async ({ data, format, filename }) => {
       try {
-        const exportDir = join(homedir(), ".crow", "browser-exports");
+        const exportDir = stateDir("browser-exports");
         if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
 
         const ts = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
@@ -1400,7 +1403,7 @@ export function createBrowserServer(options = {}) {
   // Tool: crow_browser_download
   server.tool(
     "crow_browser_download",
-    "Trigger a file download by clicking an element, and save it to the host at ~/.crow/browser-downloads/. Uses a container bind mount + CDP download behavior.",
+    "Trigger a file download by clicking an element, and save it to this instance's browser-downloads/ directory on the host (see crow_browser_status for the resolved path). Uses a container bind mount + CDP download behavior.",
     {
       selector: z.string().describe("CSS selector of the link/button that starts the download"),
       timeout_ms: z.number().optional().describe("Max wait for the file to finish (default: 30000)"),
@@ -1408,7 +1411,7 @@ export function createBrowserServer(options = {}) {
     async ({ selector, timeout_ms }) => {
       try {
         const p = await getPage();
-        const hostDir = join(homedir(), ".crow", "browser-downloads");
+        const hostDir = stateDir("browser-downloads");
         if (!existsSync(hostDir)) mkdirSync(hostDir, { recursive: true });
 
         // Container writes to /downloads, bind-mounted to hostDir.
