@@ -8,6 +8,7 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
 /** This instance's home. Falls back to the primary, which is correct only for the primary. */
 export function stateRoot() {
@@ -20,6 +21,39 @@ export function stateDir(name) {
 }
 
 /**
+ * The instance's bundle .env, parsed lazily and cached per resolved path.
+ *
+ * The MCP server gets CROW_BROWSER_* from its MCP config block, but the dashboard
+ * panel runs inside the gateway process, which carries none of them — they live in
+ * <CROW_HOME>/bundles/browser/.env. Layering that file under process.env keeps the
+ * server's behaviour identical while making the panel resolve its own instance.
+ */
+let envCache = null;
+function bundleEnv() {
+  const path = join(stateRoot(), "bundles", "browser", ".env");
+  if (envCache && envCache.path === path) return envCache.values;
+  const values = {};
+  try {
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq === -1) continue;
+      values[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+    }
+  } catch {
+    // No .env (fresh checkout, bundle not installed) — defaults apply.
+  }
+  envCache = { path, values };
+  return values;
+}
+
+/** process.env wins, then this instance's bundle .env, then the default. */
+function setting(key, fallback) {
+  return process.env[key] || bundleEnv()[key] || fallback;
+}
+
+/**
  * The docker container this instance's browser runs in.
  *
  * manifest.json declares CROW_BROWSER_CONTAINER_NAME and r4's addon sets it, but
@@ -28,5 +62,15 @@ export function stateDir(name) {
  * killed the primary's Chrome and every session logged into it.
  */
 export function containerName() {
-  return process.env.CROW_BROWSER_CONTAINER_NAME || "crow-browser";
+  return setting("CROW_BROWSER_CONTAINER_NAME", "crow-browser");
+}
+
+/** This instance's Chrome DevTools Protocol port. */
+export function cdpPort() {
+  return setting("CROW_BROWSER_CDP_PORT", "9222");
+}
+
+/** This instance's noVNC port. */
+export function vncPort() {
+  return setting("CROW_BROWSER_VNC_PORT", "6080");
 }
