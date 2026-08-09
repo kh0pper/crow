@@ -210,8 +210,19 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
       continue;
     }
     const r = rebindBlock(id, { ...addon, cwd }, binding, crowHome);
-    if (r.disabled) unconfigured[id] = r.reason;
-    else servers[id] = r.block;
+    if (r.disabled) {
+      unconfigured[id] = r.reason;
+    } else {
+      // A bundle server runs UNDER this instance, so it must be told which one.
+      // rebindBlock only rewrites instance keys a block already carries, and most
+      // addon blocks carry none — which left CROW_HOME to whatever ambient
+      // environment the caller happened to have (the browser bundle wrote its
+      // sessions wherever that pointed). CROW_HOME only: injecting CROW_DB_PATH
+      // would trip touchesCrowDb() and apply the journal guard to bundles that
+      // never open crow.db.
+      r.block.env = { ...(r.block.env || {}), CROW_HOME: crowHome };
+      servers[id] = r.block;
+    }
   }
   return { servers, unconfigured, coreNames };
 }
