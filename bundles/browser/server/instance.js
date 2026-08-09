@@ -18,3 +18,15 @@ export function stateRoot() {
 export function stateDir(name) {
   return join(stateRoot(), name);
 }
+
+/**
+ * The docker container this instance's browser runs in.
+ *
+ * manifest.json declares CROW_BROWSER_CONTAINER_NAME and r4's addon sets it, but
+ * server.js used to hardcode "crow-browser" in all four of its docker calls — one
+ * of which is `docker restart`, so a secondary instance restarting "its" browser
+ * killed the primary's Chrome and every session logged into it.
+ */
+export function containerName() {
+  return process.env.CROW_BROWSER_CONTAINER_NAME || "crow-browser";
+}
