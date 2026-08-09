@@ -54,7 +54,7 @@
     },
     {
       "name": "CROW_BROWSER_DISPLAY",
-      "description": "X display number — co-hosted instances must each use a different number, since network_mode: host shares abstract X sockets and the second instance would silently land on the first's display",
+      "description": "X display number — must differ per co-hosted instance (network_mode: host shares X sockets)",
       "default": "99"
     }
   ],

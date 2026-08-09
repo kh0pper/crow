@@ -47,6 +47,16 @@ for i in $(seq 1 30); do
   sleep 0.5
 done
 [ "$ready" = 1 ] || die "Xvfb did not become ready on :${DISP_NUM} within 15s"
+
+# A display answering is NOT proof it is OURS. Abstract X sockets
+# (@/tmp/.X11-unix/XNN) are scoped to the network namespace, which
+# network_mode:host shares, so a co-hosted instance already on this number
+# answers xdpyinfo while our own Xvfb loses the bind and dies — and x11vnc
+# would then attach to THEIR display. Confirm our process actually survived.
+sleep 0.5
+if ! kill -0 "$XVFB_PID" 2>/dev/null; then
+  die "Xvfb on :${DISP_NUM} died — another container is already using that display. Set CROW_BROWSER_DISPLAY to a number no other Crow instance uses."
+fi
 log "Xvfb ready (pid ${XVFB_PID})."
 
 # --- x11vnc ---

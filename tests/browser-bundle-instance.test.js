@@ -258,3 +258,27 @@ test("entrypoint.sh derives DISP_NUM from DISPLAY_NUM instead of hardcoding it",
     "entrypoint.sh must read DISP_NUM from ${DISPLAY_NUM:-99} so docker-compose.yml's CROW_BROWSER_DISPLAY pass-through takes effect",
   );
 });
+
+test("entrypoint.sh re-checks the Xvfb process after the readiness loop, not only inside it", () => {
+  // A display answering xdpyinfo is not proof it's OURS: under network_mode:host,
+  // a co-hosted instance already on this display number answers on the first
+  // xdpyinfo poll while our own Xvfb is still losing the abstract-socket bind and
+  // dying, so the loop's own kill -0 guard never gets a second iteration to catch
+  // it. Scope strictly to the code AFTER the `ready` assertion (and before x11vnc
+  // starts) so a match inside the polling loop above can't satisfy this.
+  const entrypoint = readFileSync(new URL("../bundles/browser/entrypoint.sh", import.meta.url), "utf8");
+  const readyAssertion = 'die "Xvfb did not become ready on :${DISP_NUM} within 15s"';
+  const readyAssertionIdx = entrypoint.indexOf(readyAssertion);
+  assert.ok(readyAssertionIdx !== -1, "could not find the Xvfb readiness assertion to scope past");
+  const afterReady = entrypoint.slice(readyAssertionIdx + readyAssertion.length);
+  const x11vncStart = afterReady.indexOf("Starting x11vnc");
+  assert.ok(x11vncStart !== -1, "could not find the x11vnc startup section to scope before");
+  const postReadySlice = afterReady.slice(0, x11vncStart);
+  assert.match(
+    postReadySlice,
+    /kill -0 "\$XVFB_PID"/,
+    "entrypoint.sh must re-check kill -0 \"$XVFB_PID\" after the readiness loop — a co-hosted instance on the same " +
+      "display can make xdpyinfo succeed for OUR loop before our own Xvfb has finished dying, so the loop's guard " +
+      "alone isn't enough; declaring ready without re-checking lets x11vnc attach to the other instance's display",
+  );
+});
