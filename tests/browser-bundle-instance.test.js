@@ -98,3 +98,12 @@ test("crow_browser_status reports what the server bound to", () => {
     assert.ok(re.test(payloadSlice), `crow_browser_status payload must report ${field} so a deploy can be verified by running it`);
   }
 });
+
+test("the downloads mount requires CROW_HOME instead of defaulting to the primary", () => {
+  const compose = readFileSync(new URL("../bundles/browser/docker-compose.yml", import.meta.url), "utf8");
+  assert.ok(
+    !compose.includes("${CROW_HOME:-"),
+    "a CROW_HOME default lets a hand-run compose mount the primary's downloads into a second instance's container",
+  );
+  assert.match(compose, /\$\{CROW_HOME:\?/, "the mount must fail loudly when CROW_HOME is unset");
+});
