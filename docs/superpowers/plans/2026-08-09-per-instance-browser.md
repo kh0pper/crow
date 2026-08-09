@@ -278,8 +278,17 @@ test("no docker call in server.js hardcodes a container name", () => {
 
 test("crow_browser_status reports what the server bound to", () => {
   const src = readFileSync(SERVER_JS, "utf8");
+  // Scope to the status handler. A whole-file substring search is vacuous here:
+  // `container:` also matches an unrelated Zod field on crow_browser_scrape and
+  // `cdp_url:` a pre-existing field in the reconnect response, so a file-wide
+  // check passes even when the status payload never gained either.
+  const start = src.indexOf('"crow_browser_status"');
+  assert.ok(start > 0, "could not locate the crow_browser_status registration");
+  const next = src.indexOf("server.tool(", start);
+  const handler = src.slice(start, next > start ? next : undefined);
+  assert.ok(handler.length > 0, "the crow_browser_status slice is empty — the slicing logic broke");
   for (const field of ["container:", "cdp_url:", "state_root:"]) {
-    assert.ok(src.includes(field), `crow_browser_status must report ${field} so a deploy can be verified by running it`);
+    assert.ok(handler.includes(field), `crow_browser_status must report ${field} so a deploy can be verified by running it`);
   }
 });
 ```
