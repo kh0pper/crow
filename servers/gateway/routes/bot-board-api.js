@@ -71,6 +71,7 @@ import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mj
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
 import { parsePlanRef, resolvePlanFile, containedRealPath } from "./plan-ref.js";
 import { isStage, stageToStatus, effectiveStage } from "./board-stages.js";
+import { resolveBoardDef, isValidStatus, isTerminal } from "./board-defs.js";
 // THE shared dual-rail lock predicate (job rail + session rail). The SSR board
 // render and the no-JS move handler import the same module — see board-lock.js
 // for why a local copy is not allowed to exist here.
@@ -312,26 +313,27 @@ export default function botBoardApiRouter(dashboardAuth) {
       const card = (await tdb.execute({
         sql:
           "SELECT id,title,description,status,priority,due_date,owner,tags,parent_id,project_id," +
-          "stage,assigned_bot,plan_ref," +
+          "assigned_bot,plan_ref," +
           "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=?",
         args: [id],
       })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
+      const def = await resolveBoardDef(tdb, { projectId: card.project_id });
       cdb = createDbClient();
       let projects = [];
       try {
         projects = (await cdb.execute({ sql: "SELECT id, name, slug, repo_path FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows || [];
       } catch { projects = []; }
       const { locked } = await lockState(cdb, id);
-      // effectiveStage needs plan existence only for legacy null-stage cards.
-      let planExists = false;
-      if (card.stage == null) {
-        try {
-          const info = await derivePlanPath(cdb, card);
-          planExists = !!(info && existsSync(info.path));
-        } catch { planExists = false; }
-      }
-      return res.json({ card, projects, locked, effectiveStage: effectiveStage(card, planExists) });
+      return res.json({
+        card, projects, locked,
+        board: {
+          status_values: def.status_values,
+          terminal_values: def.terminal_values,
+          fields: def.fields,
+          builtin: def.builtin,
+        },
+      });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
@@ -377,9 +379,6 @@ export default function botBoardApiRouter(dashboardAuth) {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     const b = req.body || {};
-    if (b.status != null && !CARD_STATUSES.has(String(b.status))) {
-      return jsonError(res, 400, "invalid status"); // BEFORE SQL
-    }
     let prio = null, prioSet = false;
     if (b.priority != null && b.priority !== "") {
       prio = Number(b.priority);
@@ -403,8 +402,15 @@ export default function botBoardApiRouter(dashboardAuth) {
         if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
       }
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
+      // Status validated against the card's RESOLVED BOARD DEF, before any
+      // write (Track 0: per-board status values; the old hardcoded allowlist
+      // is now just the builtin fallback def).
+      const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
+      if (b.status != null && !isValidStatus(def, String(b.status))) {
+        return jsonError(res, 400, "invalid status");
+      }
       const sets = ["title=?", "description=?", "due_date=?", "owner=?", "tags=?"];
       const args = [
         typeof b.title === "string" ? b.title.trim() : (b.title == null ? null : String(b.title)),
@@ -418,8 +424,8 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (b.status != null) {
         const ns = String(b.status);
         sets.push("status=?"); args.push(ns);
-        if (TERMINAL.has(ns) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
-        else if (!TERMINAL.has(ns) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
+        if (isTerminal(def, ns) && !isTerminal(def, String(cur.status))) sets.push("completed_at=datetime('now')");
+        else if (!isTerminal(def, ns) && isTerminal(def, String(cur.status))) sets.push("completed_at=NULL");
       }
       sets.push("updated_at=datetime('now')");
       args.push(id);
@@ -438,33 +444,24 @@ export default function botBoardApiRouter(dashboardAuth) {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     const b = req.body || {};
-    const stageReq = b.stage != null ? String(b.stage) : null;
+    // The stage rail is gone (Track 0): a {stage:…} body is an invalid move.
+    if (b.stage != null) return jsonError(res, 400, "invalid status");
     const status = String(b.status || "");
-    if (stageReq != null) {
-      if (!isStage(stageReq)) return jsonError(res, 400, "invalid stage"); // BEFORE SQL
-    } else if (!CARD_STATUSES.has(status)) {
-      return jsonError(res, 400, "invalid status"); // BEFORE SQL (legacy path unchanged)
-    }
+    if (!status) return jsonError(res, 400, "invalid status");
     let tdb, cdb;
     try {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status, stage FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
-      if (stageReq != null) {
-        const proj = stageToStatus(stageReq);
-        const sets = ["stage=?", "status=?", "updated_at=datetime('now')"];
-        if (TERMINAL.has(proj) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
-        else if (!TERMINAL.has(proj) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
-        await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [stageReq, proj, id] });
-      } else {
-        const sets = ["status=?", "updated_at=datetime('now')"];
-        if (TERMINAL.has(status) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
-        else if (!TERMINAL.has(status) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
-        await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [status, id] });
-      }
+      const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
+      if (!isValidStatus(def, status)) return jsonError(res, 400, "invalid status");
+      const sets = ["status=?", "updated_at=datetime('now')"];
+      if (isTerminal(def, status) && !isTerminal(def, String(cur.status))) sets.push("completed_at=datetime('now')");
+      else if (!isTerminal(def, status) && isTerminal(def, String(cur.status))) sets.push("completed_at=NULL");
+      await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [status, id] });
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
@@ -484,8 +481,12 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT id, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
+      const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
+      if (!isValidStatus(def, "cancelled")) {
+        return jsonError(res, 400, "this board has no cancelled status");
+      }
       await tdb.execute({
         sql: "UPDATE tasks_items SET status='cancelled', completed_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
         args: [id],
