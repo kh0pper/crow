@@ -123,6 +123,30 @@ test("edit validates status against the def too", async () => {
   assert.equal(ok.status, 200);
 });
 
+test("card create lands on the board's first status when 'pending' is off the def", async () => {
+  const r = await fetch(base + "/card", { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "new custom card", project_id: 7 }) });
+  assert.equal(r.status, 200);
+  const { id } = await r.json();
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = t.prepare("SELECT status FROM tasks_items WHERE id=?").get(id);
+  t.prepare("DELETE FROM tasks_items WHERE id=?").run(id);
+  t.close();
+  assert.equal(row.status, "todo", "the def's first status, not an off-def DEFAULT 'pending'");
+
+  // builtin project keeps today's DEFAULT behavior
+  const r2 = await fetch(base + "/card", { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "new legacy card", project_id: 1 }) });
+  const { id: id2 } = await r2.json();
+  const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row2 = t2.prepare("SELECT status FROM tasks_items WHERE id=?").get(id2);
+  t2.prepare("DELETE FROM tasks_items WHERE id=?").run(id2);
+  t2.close();
+  assert.equal(row2.status, "pending");
+});
+
 test("board-def endpoints: GET resolves (builtin + custom), POST upserts through validateDefPayload", async () => {
   // GET custom
   const g = await (await fetch(base + "/board-def?project_id=7")).json();

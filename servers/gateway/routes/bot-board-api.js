@@ -310,20 +310,38 @@ export default function botBoardApiRouter(dashboardAuth) {
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      // OMIT status/priority from the column list → rely on DEFAULT 'pending'
-      // / DEFAULT 3 (never NULL-bind over a DEFAULT). created_at/updated_at
-      // via their INSERT DEFAULTs.
-      const r = await tdb.execute({
-        sql: "INSERT INTO tasks_items (title, description, due_date, owner, tags, project_id) VALUES (?,?,?,?,?,?)",
-        args: [
-          title,
-          b.description ? String(b.description) : null,
-          b.due_date ? String(b.due_date) : null,
-          b.owner ? String(b.owner) : null,
-          b.tags ? String(b.tags) : null,
-          projectId,
-        ],
-      });
+      // A new card must land ON its board: the DEFAULT 'pending' is only right
+      // when the resolved def has 'pending'. A custom board's cards start on
+      // its FIRST status — otherwise the card is born off-def.
+      const def = await resolveBoardDef(tdb, { projectId });
+      const explicitStatus = isValidStatus(def, "pending") ? null : def.status_values[0];
+      // OMIT status (when defaultable) / priority from the column list → rely
+      // on DEFAULT 'pending' / DEFAULT 3 (never NULL-bind over a DEFAULT).
+      // created_at/updated_at via their INSERT DEFAULTs.
+      const r = explicitStatus == null
+        ? await tdb.execute({
+            sql: "INSERT INTO tasks_items (title, description, due_date, owner, tags, project_id) VALUES (?,?,?,?,?,?)",
+            args: [
+              title,
+              b.description ? String(b.description) : null,
+              b.due_date ? String(b.due_date) : null,
+              b.owner ? String(b.owner) : null,
+              b.tags ? String(b.tags) : null,
+              projectId,
+            ],
+          })
+        : await tdb.execute({
+            sql: "INSERT INTO tasks_items (title, description, due_date, owner, tags, project_id, status) VALUES (?,?,?,?,?,?,?)",
+            args: [
+              title,
+              b.description ? String(b.description) : null,
+              b.due_date ? String(b.due_date) : null,
+              b.owner ? String(b.owner) : null,
+              b.tags ? String(b.tags) : null,
+              projectId,
+              explicitStatus,
+            ],
+          });
       return res.json({ ok: true, id: r.lastInsertRowid });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));

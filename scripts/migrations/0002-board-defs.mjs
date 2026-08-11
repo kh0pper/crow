@@ -95,8 +95,10 @@ export function run({ dbPath, tasksDbPath, log = () => {} }) {
 
       const newDdl = deriveNewDdl(table.sql);
       const copyCols = cols.filter((c) => c !== "stage");
+      // Indexes AND triggers ride through the rebuild — a DROP TABLE destroys
+      // both, and this migration must tolerate shapes it did not author.
       const indexSqls = tdb.prepare(
-        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='tasks_items' AND sql IS NOT NULL"
+        "SELECT sql FROM sqlite_master WHERE type IN ('index','trigger') AND tbl_name='tasks_items' AND sql IS NOT NULL"
       ).all().map((r) => r.sql);
 
       // foreign_keys must be toggled OUTSIDE the transaction (no-op inside).

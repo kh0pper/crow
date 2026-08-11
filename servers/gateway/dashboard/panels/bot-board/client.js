@@ -63,7 +63,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     api('GET','/card/'+cur.id).then(function(r){
       if(r.ok&&r.j&&r.j.card){var c=r.j.card;
         $('bb-d-title-in').value=c.title||'';
-        $('bb-d-status').value=c.status||'pending';
+        // An off-def status must stay representable: inject it as an option so
+        // Save cannot silently rewrite the card to the first configured value.
+        var ss0=$('bb-d-status'), want=c.status||'pending';
+        if(ss0 && ![].slice.call(ss0.options).some(function(o){return o.value===want;})){
+          ss0.appendChild(optEl(want, want+' (off-board)', false));
+        }
+        $('bb-d-status').value=want;
         $('bb-d-prio').value=c.priority==null?'':String(c.priority);
         $('bb-d-due').value=c.due_date||'';
         $('bb-d-owner').value=c.owner||'';
