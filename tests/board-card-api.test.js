@@ -208,22 +208,27 @@ test("first plan save into a repo with NO .pi/plans tree creates it (contained)"
   t2.close();
 });
 
-test("execute: refuses without assigned_bot, refuses when not Ready, dispatches when Ready", async () => {
+test("execute: refuses without assigned_bot, refuses terminal, dispatches and writes nothing", async () => {
   const t = new Database(process.env.CROW_TASKS_DB_PATH);
-  t.prepare("UPDATE tasks_items SET stage='ready', status='pending', assigned_bot=NULL WHERE id=1").run();
+  t.prepare("UPDATE tasks_items SET status='pending', assigned_bot=NULL WHERE id=1").run();
   t.close();
   const noBot = await fetch(base + "/card/1/execute", { method: "POST" });
   assert.equal(noBot.status, 400);
 
   const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
-  t2.prepare("UPDATE tasks_items SET assigned_bot='scout', stage='backlog', status='pending' WHERE id=1").run();
+  t2.prepare("UPDATE tasks_items SET assigned_bot='scout', status='done' WHERE id=1").run();
   t2.close();
-  const notReady = await fetch(base + "/card/1/execute", { method: "POST" });
-  assert.equal(notReady.status, 409);
+  const terminal = await fetch(base + "/card/1/execute", { method: "POST" });
+  assert.equal(terminal.status, 409, "a terminal card is not dispatchable");
 
   const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
-  t3.prepare("UPDATE tasks_items SET stage='ready' WHERE id=1").run();
+  t3.prepare("UPDATE tasks_items SET status='pending' WHERE id=1").run();
   t3.close();
+  const before = (() => {
+    const d = new Database(process.env.CROW_TASKS_DB_PATH);
+    const r = d.prepare("SELECT * FROM tasks_items WHERE id=1").get();
+    d.close(); return r;
+  })();
   // Dispatch enqueues a bot_jobs row (the route creates the table on first use
   // — this crow.db is seeded without it). Nothing spawns, so no DRYRUN seam is
   // needed or exists any more.
@@ -236,29 +241,29 @@ test("execute: refuses without assigned_bot, refuses when not Ready, dispatches 
   assert.deepEqual(job, { bot_id: "scout", card_id: 1, card_action: "execute", source: "card", status: "queued" },
     "the dispatch's whole effect is this queued row");
   const t4 = new Database(process.env.CROW_TASKS_DB_PATH);
-  const row = t4.prepare("SELECT stage, status FROM tasks_items WHERE id=1").get();
+  const row = t4.prepare("SELECT * FROM tasks_items WHERE id=1").get();
   t4.close();
-  assert.deepEqual([row.stage, row.status], ["executing", "in_progress"]);
+  assert.deepEqual(row, before, "dispatch writes nothing to the card");
 });
 
-test("plan-dispatch: only legal from backlog/planning; moves stage to planning", async () => {
+test("plan-dispatch: gate matches execute; enqueues card_action='plan', card untouched", async () => {
   // Card 1 is the SAME card the execute test just dispatched, and its queued
-  // job now locks the card on the job rail — every request below would 409 for
-  // that reason alone. Clear the rail so this test measures the stage rules.
+  // job now locks the card on the job rail. Clear the rail first.
   const c = new Database(process.env.CROW_DB_PATH);
   c.prepare("DELETE FROM bot_jobs").run();
   c.close();
-  const t = new Database(process.env.CROW_TASKS_DB_PATH);
-  t.prepare("UPDATE tasks_items SET stage='ready', assigned_bot='scout' WHERE id=1").run();
-  t.close();
-  const notBacklog = await fetch(base + "/card/1/plan-dispatch", { method: "POST" });
-  assert.equal(notBacklog.status, 409);
-  const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
-  t2.prepare("UPDATE tasks_items SET stage='backlog', status='pending' WHERE id=1").run();
-  t2.close();
+  const before = (() => {
+    const d = new Database(process.env.CROW_TASKS_DB_PATH);
+    const r = d.prepare("SELECT * FROM tasks_items WHERE id=1").get();
+    d.close(); return r;
+  })();
   const ok = await (await fetch(base + "/card/1/plan-dispatch", { method: "POST" })).json();
   assert.equal(ok.ok, true);
+  const c2 = new Database(process.env.CROW_DB_PATH);
+  assert.equal(c2.prepare("SELECT card_action FROM bot_jobs WHERE card_id=1").get().card_action, "plan");
+  c2.close();
   const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
-  assert.equal(t3.prepare("SELECT stage FROM tasks_items WHERE id=1").get().stage, "planning");
+  const row = t3.prepare("SELECT * FROM tasks_items WHERE id=1").get();
   t3.close();
+  assert.deepEqual(row, before, "plan-dispatch writes nothing to the card");
 });

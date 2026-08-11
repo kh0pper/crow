@@ -89,59 +89,6 @@ function isAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-/**
- * Bridge outcomes that finish a card job WITHOUT doing the card's work.
- *
- * Both are mapped onto a SUCCESSFUL job result (correctly — neither is a
- * failure and neither should burn a retry attempt), so none of the failure
- * paths below ever see them:
- *   - 'deferred' — handleInbound's pi-capacity gate returned without touching
- *     the card. Correct for its original callers (a Gmail/Discord tick simply
- *     reprocesses the same inbound later); a board dispatch has no such tick.
- *   - 'stopped'  — a session whose control='stop' was honoured before any work.
- * The board flips the card to stage='executing' BEFORE the job runs, so either
- * one leaves a completed job and a card stuck in 'executing' forever.
- *
- * A SET, deliberately, and not two if-statements: a third such action added to
- * the bridge must be a one-word change here rather than a silent stranding
- * bug, and the tests iterate this set so an unwired member fails loudly.
- */
-export const NO_PROGRESS_ACTIONS = new Set(["deferred", "stopped"]);
-
-/**
- * Rescue a card whose worker is gone: put it back where an operator (or a
- * retry) can act on it. THE ONLY dispatcher-side card write in the rail.
- *
- * It NEVER sets a card to 'done' — the bot writes its own terminal state
- * through the tasks_* tools and statusToStage reconciles it. Marking cards done
- * from a dispatcher-visible exit code inverts card ownership; that was tried
- * and reverted.
- *
- * The write itself is the bridge's `resetStrandedCardBestEffort` against the
- * bridge's own `cardsDbForBot` resolution (a project's tasks_db_uri wins over
- * the global tasks.db), so there is exactly one reset implementation and one
- * database-resolution rule in the product.
- *
- * Best-effort: never throws, never fails the job — but ALWAYS logs, success or
- * failure. A silently swallowed SQLITE_BUSY here is indistinguishable from the
- * stranding bug this whole rail exists to remove.
- */
-async function unstrandCard(job, { log = () => {}, bridge = null, reason = "" } = {}) {
-  const cardId = Number(job && job.card_id);
-  if (!Number.isInteger(cardId) || cardId <= 0) return false;
-  const jobId = (job && job.job_id) || "?";
-  try {
-    const b = bridge || await import("./bridge.mjs");
-    const cardsDb = b.cardsDbForBot(job.bot_id);
-    const ok = b.resetStrandedCardBestEffort(cardsDb, cardId, log);
-    log(`job ${jobId}: card ${cardId} ${ok ? "un-stranded → backlog/pending" : "NOT un-stranded (no row updated) — it may be stuck"} (${reason})`);
-    return ok;
-  } catch (e) {
-    log(`job ${jobId}: card ${cardId} un-strand FAILED (${reason}) — card may be stuck: ${(e && e.message) || e}`);
-    return false;
-  }
-}
-
 export function generateJobId() {
   return "job-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
 }
@@ -202,18 +149,11 @@ export function claimNextJob(workerPid = process.pid) {
  * re-run infinite loop: a wedged/reaped job's host is usually still alive, so it
  * is NOT re-queued here; only genuinely abandoned jobs are, and only up to the cap.
  *
- * A CARD job that reaches the cap is ALSO un-stranded: its worker is provably
- * dead and it will never be retried, so leaving the card in stage='executing'
- * strands it forever with nothing running. A job re-queued UNDER the cap is
- * deliberately left alone — it is about to run again, and its card is
- * legitimately still 'executing'.
- *
- * async only because un-stranding reaches the bridge (lazily imported, exactly
- * as the pi side already is). Every job-row write still happens synchronously,
- * before the first await.
+ * Track 0: a job going terminal is the whole release — the dispatcher never
+ * wrote the card, so an abandoned job needs no card rescue; the lock predicate
+ * stops reporting the card held the moment the row is terminal.
  */
 export async function recoverStaleClaims(log = () => {}, { bridge = null } = {}) {
-  const stranded = [];
   const c = dbConn();
   try {
     const rows = c.prepare("SELECT job_id, bot_id, worker_pid, attempts, card_id, card_action FROM bot_jobs WHERE status='running'").all();
@@ -226,16 +166,9 @@ export async function recoverStaleClaims(log = () => {}, { bridge = null } = {})
         c.prepare("UPDATE bot_jobs SET status='failed', error=?, ended_at=datetime('now') WHERE job_id=?")
           .run("abandoned: worker died, max attempts reached", r.job_id);
         log(`job ${r.job_id} failed — abandoned, ${r.attempts} attempts`);
-        if (r.card_id != null) stranded.push(r);
       }
     }
   } finally { c.close(); }
-  // Un-strand only AFTER the crow.db handle is released: the cards live in a
-  // different database (often a per-project one), and holding one connection
-  // open across a write to another is how the busy-timeout traps start.
-  for (const r of stranded) {
-    await unstrandCard(r, { log, bridge, reason: `abandoned ${r.card_action || "card"} job, ${r.attempts} attempts` });
-  }
 }
 
 export function finalizeJob(job_id, { status, result, error, tool_calls, pi_session_id }) {
@@ -274,11 +207,11 @@ function buildJobPrompt(goal) {
  *  - planning: planCard's local-model-only refusal ("no config knob reaches a
  *    paid model") and its stricter-than-the-bot confinement (bash deny,
  *    write_paths confined to <repo>/.pi/plans + <repo>/docs, multi_agent
- *    false), plus the plan-file verification, plan_ref/stage='ready' write and
+ *    false), plus the plan-file verification, the plan_ref write and
  *    the audit entry;
  *  - execution: the card prompt (project context block + card number + current
- *    board status + the FULL plan-file text), the tasks_* in_progress→done
- *    instruction, and the statusToStage reconciliation.
+ *    board status + the FULL plan-file text) and the tasks_* in_progress→done
+ *    instruction.
  * Routing here is what keeps those.
  *
  * A 'deferred' outcome (pi capacity) is NOT a failure: planCard has already
@@ -334,14 +267,6 @@ async function runCardExecute(job, { log, bridge }) {
   });
   const action = r && r.action;
   if (action === "error") throw new Error("card execute failed: " + ((r && r.error) || "unknown bridge error"));
-  // COMPLETED WITHOUT PROGRESS. The job is about to finish SUCCESSFULLY (right:
-  // neither outcome is a failure, and throwing would burn a retry attempt), so
-  // none of the failure paths will ever see it — yet the board already flipped
-  // the card to 'executing' and nothing did its work. Un-strand it here or the
-  // card is stuck forever.
-  if (NO_PROGRESS_ACTIONS.has(action)) {
-    await unstrandCard(job, { log, bridge, reason: "execute completed without progress: " + action });
-  }
   if (action === "deferred") {
     return { result: "deferred: " + ((r && r.reason) || "unknown"), toolCalls: 0, sessionId: null };
   }
@@ -487,12 +412,8 @@ export async function deliverResult(job, text, { log = () => {}, deliverChannel 
 /**
  * Run one claimed job to completion and finalize it — the body shared by
  * tickJobs and the --run-once CLI branch, so the terminal-path handling
- * (finalize + un-strand on failure) exists exactly once.
- *
- * A FAILED card job is un-stranded: its worker died with the card already in
- * stage='executing' and nothing running. Note this is deliberately NOT
- * conditioned on card_action — a failed plan job leaves the card stuck in
- * 'planning' for the same reason.
+ * exists exactly once. A failed card job needs no card rescue (Track 0: the
+ * dispatcher never wrote the card; going terminal releases the lock).
  * @returns {Promise<{status:string, result:string|null, error:string|null}>}
  */
 async function runAndFinalize(job, { log = () => {}, bridge = null } = {}) {
@@ -504,9 +425,6 @@ async function runAndFinalize(job, { log = () => {}, bridge = null } = {}) {
     outcome = { status: "failed", result: null, error: String((e && e.message) || e), tool_calls: null, pi_session_id: null };
   }
   finalizeJob(job.job_id, outcome);
-  if (outcome.status === "failed" && job.card_id != null) {
-    await unstrandCard(job, { log, bridge, reason: "job failed: " + outcome.error });
-  }
   return outcome;
 }
 

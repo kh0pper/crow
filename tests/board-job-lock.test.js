@@ -33,21 +33,21 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
   t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
     due_date TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
-    stage TEXT, assigned_bot TEXT, plan_ref TEXT,
+    assigned_bot TEXT, plan_ref TEXT, data_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
   const ins = t.prepare(
-    "INSERT INTO tasks_items (id, title, project_id, assigned_bot, stage, status) VALUES (?,?,1,'scout',?,?)"
+    "INSERT INTO tasks_items (id, title, project_id, assigned_bot, status) VALUES (?,?,1,'scout',?)"
   );
-  ins.run(1, "queued-job card", "executing", "in_progress");   // force-unlock case
-  ins.run(2, "lock-map card", "executing", "in_progress");     // lockMapFor case
-  ins.run(3, "running-job card", "executing", "in_progress");  // action=move case
-  ins.run(4, "free card", "ready", "pending");                 // control: never locked
-  ins.run(5, "session card", "executing", "in_progress");      // session rail, still locked
-  ins.run(6, "old session card", "backlog", "pending");        // session rail, finished
+  ins.run(1, "queued-job card", "in_progress");   // force-unlock case
+  ins.run(2, "lock-map card", "in_progress");     // lockMapFor case
+  ins.run(3, "running-job card", "in_progress");  // action=move case
+  ins.run(4, "free card", "pending");             // control: never locked
+  ins.run(5, "session card", "in_progress");      // session rail, still locked
+  ins.run(6, "old session card", "pending");      // session rail, finished
   // Card 7 belongs to the action=move test alone. Card 3 exists to be REFUSED
   // by force-unlock; if that refusal ever regresses, card 3 becomes unlocked
   // and the move test would start passing/failing for the wrong reason.
-  ins.run(7, "move-refused card", "executing", "in_progress");
+  ins.run(7, "move-refused card", "in_progress");
   t.close();
 
   const c = new Database(process.env.CROW_DB_PATH);
@@ -123,12 +123,9 @@ test("force-unlock releases a card held by a queued job, and the card is workabl
   assert.match(String(job.error), /force-unlock/i);
   assert.ok(job.ended_at, "a terminated job must carry ended_at");
 
-  // The card was un-stranded out of stage='executing' — no manual SQL needed.
-  const t = tasksDb();
-  const card = t.prepare("SELECT stage, status FROM tasks_items WHERE id=1").get();
-  t.close();
-  assert.deepEqual([card.stage, card.status], ["backlog", "pending"]);
-  assert.equal(body.card_reset, true);
+  // Track 0: terminating the job IS the release. The card row is not written —
+  // there is no card_reset in the response and nothing to reset.
+  assert.ok(!Object.hasOwn(body, "card_reset"), "force-unlock no longer resets cards");
 
   // And the same write that was refused above now goes through.
   const nowOk = await fetch(base + "/card/1/move", {
@@ -136,13 +133,6 @@ test("force-unlock releases a card held by a queued job, and the card is workabl
     body: JSON.stringify({ status: "pending" }),
   });
   assert.equal(nowOk.status, 200, "the lock must actually be gone");
-
-  // Execute's gate still requires stage='ready' until Task 4 deletes the stage
-  // machine; seed it directly (the move-by-stage rail that used to do this is
-  // already gone).
-  const tReady = tasksDb();
-  tReady.prepare("UPDATE tasks_items SET stage='ready' WHERE id=1").run();
-  tReady.close();
 
   // Dispatch enqueues a job now — nothing is spawned, so the old
   // CROW_BOARD_DISPATCH_DRYRUN seam is gone with the spawn it guarded.
@@ -262,7 +252,7 @@ test("a running job with a live pi is refused, and clearing it never rewrites th
   const worker = await deadPid();
 
   const t = tasksDb();
-  t.prepare("INSERT INTO tasks_items (id, title, project_id, assigned_bot, stage, status) VALUES (8,'orphaned-pi card',1,'scout','executing','in_progress')").run();
+  t.prepare("INSERT INTO tasks_items (id, title, project_id, assigned_bot, status) VALUES (8,'orphaned-pi card',1,'scout','in_progress')").run();
   t.close();
   const c = crowDb();
   c.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, source, card_id, card_action, worker_pid) VALUES ('job-running-8','scout','execute #8','running','card',8,'execute',?)").run(worker);
@@ -282,7 +272,7 @@ test("a running job with a live pi is refused, and clearing it never rewrites th
     assert.equal(c1.prepare("SELECT status FROM bot_jobs WHERE job_id='job-running-8'").get().status, "running");
     c1.close();
     const t1 = tasksDb();
-    assert.equal(t1.prepare("SELECT stage FROM tasks_items WHERE id=8").get().stage, "executing");
+    assert.equal(t1.prepare("SELECT status FROM tasks_items WHERE id=8").get().status, "in_progress");
     t1.close();
   } finally {
     fakePi.kill("SIGKILL");
@@ -296,10 +286,10 @@ test("a running job with a live pi is refused, and clearing it never rewrites th
   const body = await r2.json();
   assert.equal(r2.status, 200);
   assert.equal(body.cleared, 1);
-  assert.equal(body.card_reset, false, "the card must not be reset while the session rail still holds it");
+  assert.ok(!Object.hasOwn(body, "card_reset"), "force-unlock never writes or reports on the card row");
   assert.equal(body.session_lock && body.session_lock.status, "active");
   const t2 = tasksDb();
-  assert.equal(t2.prepare("SELECT stage FROM tasks_items WHERE id=8").get().stage, "executing");
+  assert.equal(t2.prepare("SELECT status FROM tasks_items WHERE id=8").get().status, "in_progress");
   t2.close();
   // ...and the card is still locked, by the other rail, which keeps its own gates.
   const stillLocked = await fetch(base + "/card/8/move", {

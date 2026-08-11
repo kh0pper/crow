@@ -70,7 +70,6 @@ import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";
 import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mjs";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
 import { parsePlanRef, resolvePlanFile, containedRealPath } from "./plan-ref.js";
-import { isStage, stageToStatus, effectiveStage } from "./board-stages.js";
 import { resolveBoardDef, isValidStatus, isTerminal } from "./board-defs.js";
 // THE shared dual-rail lock predicate (job rail + session rail). The SSR board
 // render and the no-JS move handler import the same module — see board-lock.js
@@ -85,9 +84,7 @@ const CROW_USER_SKILLS = join(process.env.CROW_HOME || join(homedir(), ".crow"),
 
 const HOME = process.env.HOME || homedir();
 const TASKS_DB = tasksDbPath();
-const CARD_STATUSES = new Set(["pending", "in_progress", "done", "cancelled"]);
 const PROJECT_STATUSES = new Set(["active", "paused", "completed", "archived"]);
-const TERMINAL = new Set(["done", "cancelled"]);
 const STALE_SECONDS = 1800; // 30 min — force-unlock staleness threshold (D5)
 const BULK_CAP = 200;
 
@@ -160,45 +157,6 @@ function workerLiveness(pid) {
     if (e && e.code === "ESRCH") return "dead";
     if (e && e.code === "EPERM") return "alive";
     return "unknown";
-  }
-}
-
-/**
- * Put a card back where an operator can act on it after its job was
- * force-unlocked. Delegates to the bridge's OWN reset + its OWN cards-database
- * resolution (a project's tasks_db_uri wins over the instance tasks.db), which
- * is the same seam job_runner's unstrandCard uses — one reset implementation in
- * the product, not two. Lazily imported: bridge.mjs is the pi-side module and
- * the gateway must not pay for it on every boot.
- *
- * The reset refuses to touch a card whose status is already done/cancelled,
- * deliberately — the bot may have finished the work and written its own
- * terminal state before the job row was cleaned up, and un-setting that would
- * discard completed work.
- *
- * Best-effort: a failure here still leaves the card UNLOCKED (the job row is
- * already terminal), which is the guarantee force-unlock actually owes — but it
- * ALWAYS logs, success or failure. resetStrandedCardBestEffort takes a `log`
- * precisely so a swallowed SQLITE_BUSY is not indistinguishable from the
- * stranding bug this rail exists to remove (job_runner's unstrandCard passes one
- * for the same reason); a silent catch here would reintroduce that.
- */
-async function unstrandCardBestEffort(botId, cardId) {
-  const log = (m) => { try { process.stderr.write("[bot-board force-unlock] " + m + "\n"); } catch {} };
-  try {
-    const b = await import("../../../scripts/pi-bots/bridge.mjs");
-    const cardsDb = b.cardsDbForBot(String(botId));
-    const ok = !!b.resetStrandedCardBestEffort(cardsDb, Number(cardId), log);
-    log("card " + cardId + " (bot " + botId + ") " +
-      (ok ? "un-stranded → backlog/pending" : "NOT un-stranded (no row updated) — already terminal, or it may be stuck") +
-      " in " + cardsDb);
-    return ok;
-  } catch (e) {
-    // cardsDbForBot throws for an unknown/disabled bot, and it is RIGHT to
-    // refuse to guess a database — but refusing silently is how a card goes
-    // missing. Report, then leave the card alone.
-    log("card " + cardId + " (bot " + botId + ") NOT un-stranded — " + ((e && e.message) || e));
-    return false;
   }
 }
 
@@ -675,15 +633,13 @@ export default function botBoardApiRouter(dashboardAuth) {
           args: ["force-unlocked from the board by an operator (was '" + jobStatus + "')", row.job_id, jobStatus],
         });
         const cleared = Number(upd.rowsAffected) || 0;
-        // The card is reset ONLY when we actually terminated the job AND no
-        // other rail still holds the card. Rewriting stage/status while a
-        // session row is live is the same mistake as writing under a live pi —
-        // and it would be pointless anyway: the card stays locked by that rail,
-        // so the operator gains a rewritten card they still cannot dispatch.
-        // The session rail keeps its own gates; force-unlock it separately.
-        const cardReset = (cleared && !sessionHolds) ? await unstrandCardBestEffort(row.bot_id, id) : false;
+        // Terminating the job IS the whole release: the card row was never
+        // written by dispatch (Track 0), so there is nothing to reset — the
+        // lock predicate stops reporting the card held the moment this row is
+        // terminal. The session rail keeps its own gates; force-unlock it
+        // separately.
         return res.json({
-          ok: true, cleared, rail: "job", job_id: row.job_id, card_reset: cardReset,
+          ok: true, cleared, rail: "job", job_id: row.job_id,
           session_lock: sessionHolds ? { status: String(sess.status), age_s: Number(sess.age_s) } : null,
           note: sessionHolds
             ? "the job is terminated, but a bot_sessions row still holds this card — force-unlock again once that session is stale (>= " + STALE_SECONDS + "s) and its pi is confirmed dead"
@@ -722,12 +678,11 @@ export default function botBoardApiRouter(dashboardAuth) {
   });
 
   // ---- execute from board (spec: dispatch is explicit; drags never dispatch) ----
-  // ENQUEUES a bot_jobs row instead of spawning a detached `bridge.mjs --inject`
-  // child. The work is identical — job_runner's runCardExecute calls the same
-  // handleInbound with the same board payload — but on the job rail it gets
-  // scan-gated pickup (the pi capacity reserve), stale-claim recovery, retries,
-  // un-stranding and telemetry that a fire-and-forget spawn never had. The
-  // dispatcher records intent; the bot still owns the card's outcome.
+  // ENQUEUES a bot_jobs row and writes NOTHING to the card. "A bot is working
+  // this card" is the lock predicate (board-lock.js), derived from the live
+  // rails — when the job goes terminal the lock releases by itself, so there
+  // is no stranded state and no un-strand rail. Recovery from a dead worker is
+  // re-dispatch. Gate: unlocked, non-terminal on ITS board, has a bot.
   router.post(P + "/card/:id/execute", async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
@@ -738,7 +693,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const card = (await tdb.execute({
-        sql: "SELECT id, status, stage, assigned_bot, plan_ref, project_id FROM tasks_items WHERE id=?",
+        sql: "SELECT id, status, assigned_bot, plan_ref, project_id FROM tasks_items WHERE id=?",
         args: [id],
       })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
@@ -748,26 +703,13 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [bot],
       })).rows[0];
       if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
-      let planExists = false;
-      try {
-        const info = await resolveCardPlan(cdb, card);
-        planExists = !info.error && existsSync(info.path);
-      } catch { planExists = false; }
-      const eff = effectiveStage(card, planExists);
-      if (eff !== "ready") return res.status(409).json({ reason: "card is not Ready (stage: " + eff + ")" });
-      // ENQUEUE FIRST, FLIP THE STAGE SECOND. The reverse order strands the
-      // card: a SQLITE_BUSY (or any ensure/INSERT error) on the enqueue would
-      // return 500 having already written stage='executing' with no job behind
-      // it — and an 'executing' card is neither locked (no job, no session) nor
-      // Ready, so the UI can never re-dispatch it. This way a failed enqueue
-      // leaves the card exactly as the operator left it.
+      const def = await resolveBoardDef(tdb, { projectId: card.project_id });
+      if (isTerminal(def, card.status)) {
+        return res.status(409).json({ reason: "card is in a terminal status (" + String(card.status) + ")" });
+      }
       const jobId = await enqueueCardJob(cdb, {
         botId: bot, cardId: id, action: "execute",
         goal: "Execute board card #" + id,
-      });
-      await tdb.execute({
-        sql: "UPDATE tasks_items SET stage='executing', status='in_progress', updated_at=datetime('now') WHERE id=?",
-        args: [id],
       });
       return res.json({ ok: true, dispatched: bot, jobId });
     } catch (e) {
@@ -792,7 +734,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const card = (await tdb.execute({
-        sql: "SELECT id, status, stage, assigned_bot, plan_ref, project_id FROM tasks_items WHERE id=?",
+        sql: "SELECT id, status, assigned_bot, plan_ref, project_id FROM tasks_items WHERE id=?",
         args: [id],
       })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
@@ -802,19 +744,16 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [bot],
       })).rows[0];
       if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
-      const eff = effectiveStage(card, false);
-      if (eff !== "backlog" && eff !== "planning") {
-        return res.status(409).json({ reason: "plan dispatch is only legal from Backlog (stage: " + eff + ")" });
+      const def = await resolveBoardDef(tdb, { projectId: card.project_id });
+      if (isTerminal(def, card.status)) {
+        return res.status(409).json({ reason: "card is in a terminal status (" + String(card.status) + ")" });
       }
-      // Same ordering rule as execute: enqueue, THEN flip the stage. A failed
-      // enqueue must not leave the card in 'planning' with nothing planning it.
+      // Like execute: the enqueue IS the dispatch — the card is not written.
+      // Re-planning an in_progress card is an operator call; the lock still
+      // blocks live work.
       const jobId = await enqueueCardJob(cdb, {
         botId: bot, cardId: id, action: "plan",
         goal: "Write an implementation plan for board card #" + id,
-      });
-      await tdb.execute({
-        sql: "UPDATE tasks_items SET stage='planning', status='pending', updated_at=datetime('now') WHERE id=?",
-        args: [id],
       });
       return res.json({ ok: true, dispatched: bot, jobId });
     } catch (e) {
