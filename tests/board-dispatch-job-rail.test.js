@@ -1,22 +1,18 @@
 // tests/board-dispatch-job-rail.test.js
 //
-// The board DISPATCHES ONTO THE JOB RAIL.
+// The board DISPATCHES ONTO THE JOB RAIL — and writes NOTHING to the card.
 //
-// Before this, execute/plan-dispatch spawned a detached `bridge.mjs --inject`
-// into the CONVERSATIONAL rail (bot_sessions), so board work never appeared in
-// bot_jobs and never got scan-gated pickup, retry, stale-claim recovery,
-// un-stranding or telemetry — and the spawn used a hardcoded ~/.nvm node path.
-//
-// What the dispatcher does now is deliberately THIN: it writes one queued row
-// recording intent (source='card', card_id, card_action) and flips the card's
-// stage. job_runner routes that row to the bridge, and the BRIDGE owns the
-// prompt, the local-model planning floor, the outcome and the card's terminal
-// state. deliver_to is NULL because there is no dispatcher-side delivery.
+// Track 0 deleted the stage machine and with it the dispatcher's card writes:
+// execute/plan-dispatch record intent as one queued bot_jobs row
+// (source='card', card_id, card_action) and leave tasks_items byte-identical.
+// "A bot is working this card" is the LOCK (routes/board-lock.js), derived
+// from the live rails; when the job goes terminal the lock simply releases —
+// there is nothing to strand and nothing to un-strand, and recovery from a
+// dead worker is re-dispatch, not a card reset.
 //
 // Harness: scratch tasks.db + crow.db via env, ephemeral express server, plain
-// fetch — the idiom of tests/board-stage-api.test.js. No pi engine is spawned:
-// the enqueue returns before anything could claim the job, and nothing in this
-// file runs job_runner.
+// fetch. No pi engine is spawned: the enqueue returns before anything could
+// claim the job, and nothing in this file runs job_runner.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
@@ -60,15 +56,17 @@ function seed() {
   c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('r4-assistant','R4','{}',1,1)").run();
   c.close();
 
+  // The CONVERGED (post-0002) shape: no stage column, no status CHECK.
   const t = new Database(tasksDb);
   t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY, title TEXT NOT NULL,
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
-    project_id INTEGER, stage TEXT, assigned_bot TEXT, plan_ref TEXT,
+    project_id INTEGER, assigned_bot TEXT, plan_ref TEXT, data_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
     completed_at TEXT)`);
-  const ins = t.prepare("INSERT INTO tasks_items (id,title,project_id,status,stage,assigned_bot) VALUES (?,?,1,?,?,'r4-assistant')");
-  ins.run(120, "execute card", "pending", "ready");
-  ins.run(121, "plan card", "pending", "backlog");
+  const ins = t.prepare("INSERT INTO tasks_items (id,title,project_id,status,assigned_bot) VALUES (?,?,1,?,'r4-assistant')");
+  ins.run(120, "execute card", "pending");
+  ins.run(121, "plan card", "pending");
+  ins.run(122, "finished card", "done");
   t.close();
 }
 
@@ -101,9 +99,11 @@ function withTasks(fn) {
   try { return fn(t); } finally { t.close(); }
 }
 const jobs = () => withCrow((c) => c.prepare("SELECT * FROM bot_jobs ORDER BY rowid").all());
-const card = (id) => withTasks((t) => t.prepare("SELECT stage, status FROM tasks_items WHERE id=?").get(id));
+const wholeCard = (id) => withTasks((t) => t.prepare("SELECT * FROM tasks_items WHERE id=?").get(id));
 
-test("execute enqueues exactly one card-sourced job, and migrates a legacy bot_jobs to do it", async () => {
+test("execute enqueues exactly one card-sourced job and leaves the card byte-identical", async () => {
+  const before120 = wholeCard(120);
+
   const res = await post("/dashboard/bot-board-api/card/120/execute");
   assert.equal(res.status, 200, "the legacy table must be migrated by the ensure, not 500 on card_id");
   const body = await res.json();
@@ -119,28 +119,44 @@ test("execute enqueues exactly one card-sourced job, and migrates a legacy bot_j
   assert.equal(rows[0].card_action, "execute");
   assert.equal(rows[0].status, "queued", "the worker claims it — the API must not run it inline");
   assert.equal(rows[0].bot_id, "r4-assistant");
-  // NULL, not {kind:"card"}: the bot reports through its own tasks_* writes and
-  // the plan file. A dispatcher-side delivery is what inverted card ownership.
+  // NULL, not {kind:"card"}: the bot reports through its own writes and the
+  // plan file. A dispatcher-side delivery is what inverted card ownership.
   assert.equal(rows[0].deliver_to, null, "a card job has no dispatcher-side delivery");
 
-  // The stage flip still happens — after the enqueue, not before it.
-  assert.deepEqual(card(120), { stage: "executing", status: "in_progress" });
+  // THE Track 0 contract: dispatch records intent on the rail, never on the card.
+  assert.deepEqual(wholeCard(120), before120, "dispatch must not write the card — the lock is the working state");
 });
 
 test("a second execute while the job is queued is refused, not duplicated", async () => {
-  // The first execute flipped the card to 'executing', which the unrelated
-  // "card is not Ready" guard also 409s on — so without this reset the test
-  // would pass even with the job-rail lock entirely removed. Reset to 'ready'
-  // so the only remaining source of a 409 is lockState seeing the queued job.
-  withTasks((t) => t.prepare("UPDATE tasks_items SET stage='ready', status='pending' WHERE id=120").run());
-
   const res = await post("/dashboard/bot-board-api/card/120/execute");
   assert.equal(res.status, 409, "a queued job must lock the card");
   assert.deepEqual(await res.json(), { reason: "bot is working this card" });
   assert.equal(jobs().length, 1, "the card must not accumulate duplicate work");
 });
 
-test("plan-dispatch enqueues card_action='plan' — the arm that reaches bridge.planCard", async () => {
+test("execute refuses a card in a terminal status on its board", async () => {
+  const res = await post("/dashboard/bot-board-api/card/122/execute");
+  assert.equal(res.status, 409, "done/cancelled cards are not dispatchable");
+  assert.equal(withCrow((c) => c.prepare("SELECT COUNT(*) n FROM bot_jobs WHERE card_id=122").get().n), 0);
+});
+
+test("a terminal job releases the lock with NO card write, and re-execute succeeds", async () => {
+  const before120 = wholeCard(120);
+  // The worker died / the job failed — mark it terminal directly, as
+  // stale-claim recovery would. NOTHING may touch the card for the lock to
+  // release: that is the whole point of deleting the un-strand rail.
+  withCrow((c) => c.prepare("UPDATE bot_jobs SET status='failed', error='worker died', ended_at=datetime('now')").run());
+  assert.deepEqual(wholeCard(120), before120, "job going terminal writes nothing to the card");
+
+  // Recovery is RE-DISPATCH, not a card reset.
+  const res = await post("/dashboard/bot-board-api/card/120/execute");
+  assert.equal(res.status, 200, "an unlocked, non-terminal card is dispatchable again");
+  assert.equal(withCrow((c) => c.prepare("SELECT COUNT(*) n FROM bot_jobs WHERE card_id=120 AND status='queued'").get().n), 1);
+  assert.deepEqual(wholeCard(120), before120);
+});
+
+test("plan-dispatch enqueues card_action='plan' and leaves the card byte-identical", async () => {
+  const before121 = wholeCard(121);
   const res = await post("/dashboard/bot-board-api/card/121/plan-dispatch");
   assert.equal(res.status, 200);
   const body = await res.json();
@@ -155,12 +171,7 @@ test("plan-dispatch enqueues card_action='plan' — the arm that reaches bridge.
   assert.equal(row.status, "queued");
   assert.equal(row.deliver_to, null);
   assert.equal(row.bot_id, "r4-assistant");
-  assert.deepEqual(card(121), { stage: "planning", status: "pending" });
-
-  // ...and the two dispatches disagree on card_action, so a hardcoded literal
-  // in the handler cannot satisfy both.
-  const actions = jobs().map((r) => r.card_action);
-  assert.deepEqual(actions, ["execute", "plan"]);
+  assert.deepEqual(wholeCard(121), before121, "plan-dispatch must not write the card either");
 });
 
 test("the bot_jobs ensure runs ONCE per process, not on every dispatch", async () => {
@@ -170,7 +181,6 @@ test("the bot_jobs ensure runs ONCE per process, not on every dispatch", async (
   // without it, the whole multi-statement DDL runs again on every request.
   withCrow((c) => c.exec("DROP INDEX idx_bot_jobs_card"));
   withCrow((c) => c.prepare("DELETE FROM bot_jobs").run()); // unlock card 120
-  withTasks((t) => t.prepare("UPDATE tasks_items SET stage='ready', status='pending' WHERE id=120").run());
 
   assert.equal((await post("/dashboard/bot-board-api/card/120/execute")).status, 200);
 
@@ -180,12 +190,9 @@ test("the bot_jobs ensure runs ONCE per process, not on every dispatch", async (
   withCrow((c) => c.exec("CREATE INDEX IF NOT EXISTS idx_bot_jobs_card ON bot_jobs(card_id) WHERE card_id IS NOT NULL"));
 });
 
-test("a failed enqueue leaves the card untouched — never stranded in 'executing'", async () => {
-  // Clear the rail and put card 120 back to Ready, so the request below can
-  // only be stopped by the enqueue itself (not by the lock or the Ready guard).
+test("a failed enqueue surfaces as an error and the card is untouched", async () => {
   withCrow((c) => c.prepare("DELETE FROM bot_jobs").run());
-  withTasks((t) => t.prepare("UPDATE tasks_items SET stage='ready', status='pending' WHERE id=120").run());
-  assert.deepEqual(card(120), { stage: "ready", status: "pending" }, "fixture");
+  const before120 = wholeCard(120);
 
   // Make the INSERT — and only the INSERT — fail, the way a SQLITE_BUSY would.
   withCrow((c) => c.exec("CREATE TRIGGER bot_jobs_boom BEFORE INSERT ON bot_jobs BEGIN SELECT RAISE(ABORT, 'enqueue exploded'); END"));
@@ -194,10 +201,7 @@ test("a failed enqueue leaves the card untouched — never stranded in 'executin
     assert.equal(res.status, 500, "an enqueue failure must surface as an error, not a silent success");
     assert.match(String((await res.json()).error), /enqueue exploded/);
     assert.equal(jobs().length, 0, "no job was created");
-    // THE POINT: an 'executing' card with no job is unlocked but not Ready —
-    // the UI can neither dispatch it nor see anything working it.
-    assert.deepEqual(card(120), { stage: "ready", status: "pending" },
-      "the card must be exactly as the operator left it");
+    assert.deepEqual(wholeCard(120), before120, "the card must be exactly as the operator left it");
   } finally {
     withCrow((c) => c.exec("DROP TRIGGER bot_jobs_boom"));
   }

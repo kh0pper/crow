@@ -5,9 +5,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
-import { execFileSync } from "node:child_process";
-
-const NODE = process.execPath;
+import { run } from "../scripts/migrations/0001-board-stages.mjs";
 
 function scratchDbs() {
   const dir = mkdtempSync(join(tmpdir(), "board-mig-"));
@@ -39,10 +37,12 @@ function cols(dbPath, table) {
   return names;
 }
 
-function runMigration(env) {
-  execFileSync(NODE, ["scripts/migrate-board-stages.mjs"], {
-    env: { ...process.env, ...env }, encoding: "utf8",
-  });
+// The deploy-script wrapper (scripts/migrate-board-stages.mjs) is gone —
+// Track 0 removed it with the stage machine. 0001 itself is recorded history
+// and MUST keep running cleanly at boot on legacy stores; invoke its run()
+// directly, the way the registry runner does.
+function runMigration({ CROW_TASKS_DB_PATH, CROW_DB_PATH }) {
+  return run({ dbPath: CROW_DB_PATH, tasksDbPath: CROW_TASKS_DB_PATH, log: () => {} });
 }
 
 test("adds stage/assigned_bot/plan_ref + repo_path + kind, idempotently", () => {
@@ -60,5 +60,6 @@ test("tolerates absent tables (primary gateway)", () => {
   const dir = mkdtempSync(join(tmpdir(), "board-mig-empty-"));
   const tasksDb = join(dir, "tasks.db"); const crowDb = join(dir, "crow.db");
   new Database(tasksDb).close(); new Database(crowDb).close();
-  runMigration({ CROW_TASKS_DB_PATH: tasksDb, CROW_DB_PATH: crowDb }); // must not throw
+  const out = runMigration({ CROW_TASKS_DB_PATH: tasksDb, CROW_DB_PATH: crowDb }); // must not throw
+  assert.equal(out && out.deferred, true, "absent targets defer, exactly as at boot");
 });
