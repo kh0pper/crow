@@ -94,10 +94,13 @@ rails), not from the card row. With the dispatcher's write removed:
   `file:`-URI call sites disappear as a side effect (the bug itself, in `cardsDbForBot`, remains
   out of scope and keeps its own PR for the surviving `planCard` site).
 - `execute`'s "is it Ready" gate (`effectiveStage === 'ready'`) is replaced by: card is not locked,
-  not in a terminal status, has an `assigned_bot`, and its plan file exists (today's
-  `derivePlanPath` derivation, unchanged). That is today's safety intent minus the stage machine —
-  and it makes re-dispatching a card whose bot died possible without any un-strand step. "Ready
-  for a bot" stays derived, per the scope doc, and Track 1 refines it when plans become records.
+  not in a terminal status on its board, and has an `assigned_bot`. An earlier draft of this spec
+  also required the plan file to exist, but that was stricter than today's dominant path (an
+  explicitly-readied card never checked the plan file — only the legacy null-stage inference did)
+  and would have made execute refuse every live card: `plan_ref` is NULL on all of them and no
+  plan files exist on r4. The operator's click is the intent; re-dispatching a card whose bot died
+  needs no un-strand step. "Ready for a bot" stays derived, per the scope doc, and Track 1 refines
+  it when plans become records.
 
 `assigned_bot` stays (dispatch needs a target). `plan_ref` stays as a dormant column with its
 reads/writes untouched in Track 0 — decision 16 drops it inside Track 1's plans-table migration,
