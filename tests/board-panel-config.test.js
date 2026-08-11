@@ -110,6 +110,18 @@ test("drawer status options come from the def, not the hardcoded four", async ()
   assert.ok(builtin.includes('<option value="pending">'), "builtin drawer keeps the four");
 });
 
+test("board renders the configure button and the settings drawer", async () => {
+  const html = await render(7);
+  assert.ok(html.includes('id="bb-cfg-open"'), "configure button");
+  assert.ok(html.includes('id="bb-cfg"'), "settings drawer");
+  assert.ok(html.includes("Board settings"), "cfg i18n (en)");
+  assert.ok(html.includes('data-project="7"'), "drawer carries the project id");
+  // ES parity spot check via the i18n table itself
+  const { t } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  assert.equal(t("botboard.cfgTitle", "es"), "Ajustes del tablero");
+  assert.equal(t("botboard.cfgOpenBtn", "es"), "Configurar tablero");
+});
+
 test("no-JS move validates against the def", async () => {
   const calls = [];
   const res = { redirectAfterPost: (u) => calls.push(u) };

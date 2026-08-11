@@ -208,6 +208,30 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   </div>`;
 }
 
+// Board settings drawer (Track 0) — statuses / terminals / declared fields.
+// Hydrated client-side from GET /board-def; saved via POST /board-def.
+export function boardSettingsDrawerMarkup(lang, projectId) {
+  return `<div class="bb-drawer" id="bb-cfg" aria-hidden="true" data-project="${escapeHtml(String(projectId == null ? "" : projectId))}">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h3 style="font-family:'Fraunces',serif;margin:0">${t("botboard.cfgTitle", lang)}</h3>
+      <button type="button" class="bb-btn bb-sec" id="bb-cfg-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+    </div>
+    <div class="bb-msg" id="bb-cfg-msg"></div>
+    <label>${t("botboard.cfgDisplayName", lang)}</label><input id="bb-cfg-name" type="text">
+    <label>${t("botboard.cfgStatuses", lang)}</label>
+    <textarea id="bb-cfg-statuses" rows="6" spellcheck="false"></textarea>
+    <p style="font-size:.78rem;color:var(--crow-text-muted);margin:.2rem 0 .6rem">${t("botboard.cfgStatusesHelp", lang)}</p>
+    <label>${t("botboard.cfgTerminals", lang)}</label>
+    <div id="bb-cfg-terminals" style="display:flex;flex-wrap:wrap;gap:.5rem;margin:.3rem 0 .6rem"></div>
+    <label>${t("botboard.cfgFields", lang)}</label>
+    <div id="bb-cfg-fields"></div>
+    <button type="button" class="bb-btn bb-sec" id="bb-cfg-addfield">${t("botboard.cfgAddField", lang)}</button>
+    <div style="margin-top:.8rem">
+      <button type="button" class="bb-btn" id="bb-cfg-save">${t("botboard.cfgSave", lang)}</button>
+    </div>
+  </div>`;
+}
+
 // Tracker item drawer — for custom tracker bots
 export function trackerDrawerMarkup(lang) {
   return `<div class="bb-drawer" id="bb-tracker-drawer" aria-hidden="true">
@@ -358,12 +382,15 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
     `<div class="bb-view-toggle">` +
     `<button type="button" class="bb-view-btn bb-view-btn-active" data-view="columns">${t("botboard.viewColumns", lang)}</button>` +
     `<button type="button" class="bb-view-btn" data-view="list">${t("botboard.viewList", lang)}</button>` +
-    `</div></div>`;
+    `</div>` +
+    `<button type="button" class="bb-btn bb-sec" id="bb-cfg-open">⚙ ${t("botboard.cfgOpenBtn", lang)}</button>` +
+    `</div>`;
 
   const content = botBoardStyles() + section(
     `Board — ${escapeHtml(selBot.displayName)}`,
     notice + switcher + filterBarHtml + boardHtml) +
-    drawerMarkup(lang, def) + clientJs(selBot.botId, "kanban", projectId, null, null, lang);
+    drawerMarkup(lang, def) + boardSettingsDrawerMarkup(lang, projectId) +
+    clientJs(selBot.botId, "kanban", projectId, null, null, lang);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });
 }
