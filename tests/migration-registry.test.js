@@ -170,7 +170,10 @@ test("0001-board-stages: adds columns, DEFERS when ANY target table is absent", 
     assert.ok(cols.includes("repo_path"), "present tables must still be migrated");
   } finally { rmSync(mixed.root, { recursive: true, force: true }); }
 
-  // (b) All targets present → applied, columns added, re-runnable.
+  // (b) All targets present → 0001 applies its columns and is re-runnable.
+  // Scoped to 0001's OWN run() — a whole-directory run no longer preserves
+  // these columns (0002 rebuilds the table and drops `stage` by design); the
+  // converged end state is case (c) below.
   const f = fixture();
   try {
     const t = new Database(f.tasksDbPath);
@@ -181,8 +184,9 @@ test("0001-board-stages: adds columns, DEFERS when ANY target table is absent", 
     c.prepare("CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY)").run();
     c.close();
 
-    const r = await runMigrations({ migrationsDir: dir, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath });
-    assert.ok(r.applied.includes("0001-board-stages"), "all targets present → applied");
+    const mod = await import(join(dir, "0001-board-stages.mjs"));
+    const out = await mod.run({ dbPath: f.dbPath, tasksDbPath: f.tasksDbPath, log: () => {} });
+    assert.ok(!out || !out.deferred, "all targets present → not deferred");
 
     const t2 = new Database(f.tasksDbPath);
     const cols = t2.prepare("PRAGMA table_info(tasks_items)").all().map((x) => x.name);
@@ -193,13 +197,43 @@ test("0001-board-stages: adds columns, DEFERS when ANY target table is absent", 
 
     // Shape-level idempotence: re-run directly, bypassing the record. A missing
     // guard would throw "duplicate column name".
-    const mod = await import(join(dir, "0001-board-stages.mjs"));
     await mod.run({ dbPath: f.dbPath, tasksDbPath: f.tasksDbPath, log: () => {} });
     const t3 = new Database(f.tasksDbPath);
     const after = t3.prepare("PRAGMA table_info(tasks_items)").all().map((x) => x.name);
     t3.close();
     assert.deepEqual(after, cols, "a re-run must not change the column set");
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+
+  // (c) The CONVERGED shape: a whole-directory run over a bundle-shaped store
+  // ends with 0002's world — no stage, no status CHECK, data_json + board_defs
+  // present — and every migration recorded.
+  const g = fixture();
+  try {
+    const t = new Database(g.tasksDbPath);
+    t.exec("CREATE TABLE tasks_items (id INTEGER PRIMARY KEY, title TEXT, " +
+      "status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','in_progress','done','cancelled')), " +
+      "phase TEXT, project_id INTEGER)");
+    t.close();
+    const c = new Database(g.dbPath);
+    c.prepare("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY)").run();
+    c.prepare("CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY)").run();
+    c.close();
+
+    const r = await runMigrations({ migrationsDir: dir, dbPath: g.dbPath, tasksDbPath: g.tasksDbPath });
+    assert.ok(r.applied.includes("0001-board-stages"));
+    assert.ok(r.applied.includes("0002-board-defs"));
+
+    const t2 = new Database(g.tasksDbPath);
+    const cols = t2.prepare("PRAGMA table_info(tasks_items)").all().map((x) => x.name);
+    const sql = t2.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks_items'").get().sql;
+    const hasBoardDefs = !!t2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='board_defs'").get();
+    t2.close();
+    assert.ok(!cols.includes("stage"), "converged shape has no stage");
+    assert.ok(cols.includes("data_json"), "converged shape has data_json");
+    assert.ok(cols.includes("assigned_bot") && cols.includes("plan_ref"), "dormant columns survive");
+    assert.ok(!/CHECK\s*\(\s*status/i.test(sql), "converged shape has no status CHECK");
+    assert.ok(hasBoardDefs, "board_defs exists");
+  } finally { rmSync(g.root, { recursive: true, force: true }); }
 });
 
 test("ORDER INVARIANT: registry runs after the schema guard, before the first createDbClient", () => {
