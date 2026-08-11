@@ -123,6 +123,67 @@ test("edit validates status against the def too", async () => {
   assert.equal(ok.status, 200);
 });
 
+test("board-def endpoints: GET resolves (builtin + custom), POST upserts through validateDefPayload", async () => {
+  // GET custom
+  const g = await (await fetch(base + "/board-def?project_id=7")).json();
+  assert.equal(g.builtin, false);
+  assert.deepEqual(g.status_values, ["todo", "doing", "shipped"]);
+  // GET builtin fallback
+  const gb = await (await fetch(base + "/board-def?project_id=1")).json();
+  assert.equal(gb.builtin, true);
+
+  // POST create for project 1 — the no-orphaning guard checks EXISTING cards,
+  // so park card 1 on a status the new list keeps.
+  const t0 = new Database(process.env.CROW_TASKS_DB_PATH);
+  t0.prepare("UPDATE tasks_items SET status='open' WHERE id=1").run();
+  t0.close();
+  const create = await fetch(base + "/board-def", { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ project_id: 1, display_name: "Proj One",
+      status_values: ["open", "closed"], terminal_values: ["closed"], fields: [] }) });
+  assert.equal(create.status, 200, JSON.stringify(await create.clone().json().catch(() => ({}))));
+  const g2 = await (await fetch(base + "/board-def?project_id=1")).json();
+  assert.equal(g2.builtin, false);
+  assert.deepEqual(g2.status_values, ["open", "closed"]);
+
+  // POST update (upsert, still one row)
+  const update = await fetch(base + "/board-def", { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ project_id: 1, display_name: "Proj One",
+      status_values: ["open", "review", "closed"], terminal_values: ["closed"], fields: [] }) });
+  assert.equal(update.status, 200);
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  assert.equal(t.prepare("SELECT COUNT(*) n FROM board_defs WHERE project_id=1").get().n, 1, "upsert");
+  t.close();
+
+  // Validation is validateDefPayload, not re-implemented: terminal ⊄ statuses → 400
+  const bad = await fetch(base + "/board-def", { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ project_id: 1, display_name: "X",
+      status_values: ["a"], terminal_values: ["zz"], fields: [] }) });
+  assert.equal(bad.status, 400);
+
+  // Removing a status that still has cards → 400 with the count; def unchanged.
+  // (card 1 currently carries a legacy status — put it on 'open' first.)
+  const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
+  t2.prepare("UPDATE tasks_items SET status='open' WHERE id=1").run();
+  t2.close();
+  const strand = await fetch(base + "/board-def", { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ project_id: 1, display_name: "Proj One",
+      status_values: ["review", "closed"], terminal_values: ["closed"], fields: [] }) });
+  assert.equal(strand.status, 400);
+  assert.match(String((await strand.json()).error), /open.*1 card|1 card.*open|'open'/i);
+  const g3 = await (await fetch(base + "/board-def?project_id=1")).json();
+  assert.deepEqual(g3.status_values, ["open", "review", "closed"], "def unchanged after refusal");
+
+  // restore card 1 to a builtin-def-compatible state for later tests
+  const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
+  t3.prepare("UPDATE tasks_items SET status='pending' WHERE id=1").run();
+  t3.prepare("DELETE FROM board_defs WHERE project_id=1").run();
+  t3.close();
+});
+
 test("cancel: 400 on a board without 'cancelled', works on the builtin board", async () => {
   const bad = await fetch(base + "/card/3/cancel", { method: "POST" });
   assert.equal(bad.status, 400);

@@ -702,6 +702,79 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     if(savedView==='list') switchView('list');
   }
 
+  // ---- Board settings drawer (Track 0) ----
+  var cfgDrawer=$('bb-cfg');
+  if(cfgDrawer && $('bb-cfg-open')){
+    function cfgTerminalBoxes(statuses, checked){
+      var wrap=$('bb-cfg-terminals'); clearEl(wrap);
+      statuses.forEach(function(sv){
+        var lb=document.createElement('label'); lb.style.fontWeight='normal';
+        var cb=document.createElement('input'); cb.type='checkbox'; cb.value=sv;
+        cb.checked=checked.indexOf(sv)>=0;
+        lb.appendChild(cb); lb.appendChild(document.createTextNode(' '+sv));
+        wrap.appendChild(lb);
+      });
+    }
+    function cfgStatusList(){
+      return $('bb-cfg-statuses').value.split('\n').map(function(x){return x.trim();}).filter(Boolean);
+    }
+    function cfgFieldRow(f){
+      f=f||{};
+      var row=document.createElement('div'); row.className='bb-cfg-field-row';
+      row.style.cssText='display:flex;gap:.4rem;margin:.25rem 0;align-items:center';
+      function inp(cls,ph,val,w){var i=document.createElement('input');i.type='text';i.className=cls;i.placeholder=ph;i.value=val||'';i.style.width=w;return i;}
+      row.appendChild(inp('bb-cfg-f-key','key',f.key,'8rem'));
+      row.appendChild(inp('bb-cfg-f-label','label',f.label,'9rem'));
+      var sel=document.createElement('select'); sel.className='bb-cfg-f-storage';
+      ['data','column'].forEach(function(v){sel.appendChild(optEl(v,v,(f.storage||'data')===v));});
+      row.appendChild(sel);
+      row.appendChild(inp('bb-cfg-f-options','options (comma-separated)',(f.options||[]).join(', '),'14rem'));
+      var rm=document.createElement('button'); rm.type='button'; rm.className='bb-btn bb-sec'; rm.textContent='\u2715';
+      rm.onclick=function(){row.remove();};
+      row.appendChild(rm);
+      return row;
+    }
+    $('bb-cfg-open').onclick=function(){
+      var pid=cfgDrawer.getAttribute('data-project');
+      msg($('bb-cfg-msg'),'','');
+      api('GET','/board-def?project_id='+encodeURIComponent(pid)).then(function(r){
+        if(!r.ok||!r.j){ msg($('bb-cfg-msg'),(r.j&&r.j.error)||'load failed','err'); return; }
+        $('bb-cfg-name').value=r.j.display_name||'';
+        $('bb-cfg-statuses').value=(r.j.status_values||[]).join('\n');
+        cfgTerminalBoxes(r.j.status_values||[], r.j.terminal_values||[]);
+        var fw=$('bb-cfg-fields'); clearEl(fw);
+        (r.j.fields||[]).forEach(function(f){ fw.appendChild(cfgFieldRow(f)); });
+        openDrawer(cfgDrawer);
+      });
+    };
+    $('bb-cfg-close').onclick=function(){ closeDrawer(cfgDrawer); };
+    $('bb-cfg-statuses').addEventListener('input',function(){
+      var checked=[].slice.call(document.querySelectorAll('#bb-cfg-terminals input:checked')).map(function(c){return c.value;});
+      cfgTerminalBoxes(cfgStatusList(), checked);
+    });
+    $('bb-cfg-addfield').onclick=function(){ $('bb-cfg-fields').appendChild(cfgFieldRow()); };
+    $('bb-cfg-save').onclick=function(){
+      var pid=cfgDrawer.getAttribute('data-project');
+      var fields=[].slice.call(document.querySelectorAll('#bb-cfg .bb-cfg-field-row')).map(function(row){
+        var opts=(row.querySelector('.bb-cfg-f-options').value||'').split(',').map(function(x){return x.trim();}).filter(Boolean);
+        var f={key:row.querySelector('.bb-cfg-f-key').value.trim(),
+               label:row.querySelector('.bb-cfg-f-label').value.trim(),
+               storage:row.querySelector('.bb-cfg-f-storage').value};
+        if(opts.length) f.options=opts;
+        return f;
+      }).filter(function(f){return f.key;});
+      var body={project_id:Number(pid),
+        display_name:$('bb-cfg-name').value.trim(),
+        status_values:cfgStatusList(),
+        terminal_values:[].slice.call(document.querySelectorAll('#bb-cfg-terminals input:checked')).map(function(c){return c.value;}),
+        fields:fields};
+      api('POST','/board-def',body).then(function(r){
+        if(r.ok){ msg($('bb-cfg-msg'),'${tJs("botboard.cfgSaved", lang)}','ok'); setTimeout(reload,400); }
+        else msg($('bb-cfg-msg'),(r.j&&(r.j.error||r.j.reason))||'save failed','err');
+      });
+    };
+  }
+
   // ---- EventSource live overlay ----
   if(window.EventSource){
     var esUrl=null;

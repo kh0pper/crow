@@ -70,7 +70,7 @@ import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";
 import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mjs";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
 import { parsePlanRef, resolvePlanFile, containedRealPath } from "./plan-ref.js";
-import { resolveBoardDef, isValidStatus, isTerminal } from "./board-defs.js";
+import { resolveBoardDef, isValidStatus, isTerminal, validateDefPayload } from "./board-defs.js";
 // THE shared dual-rail lock predicate (job rail + session rail). The SSR board
 // render and the no-JS move handler import the same module — see board-lock.js
 // for why a local copy is not allowed to exist here.
@@ -957,6 +957,64 @@ export default function botBoardApiRouter(dashboardAuth) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- board settings (Track 0): read + upsert a project board's def ----
+  router.get(P + "/board-def", async (req, res) => {
+    const projectId = req.query.project_id == null || req.query.project_id === "" ? null : Number(req.query.project_id);
+    if (projectId == null || !Number.isInteger(projectId)) return jsonError(res, 400, "bad project_id");
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      const def = await resolveBoardDef(tdb, { projectId });
+      return res.json({
+        project_id: projectId, display_name: def.display_name,
+        status_values: def.status_values, terminal_values: def.terminal_values,
+        fields: def.fields, builtin: def.builtin,
+      });
+    } catch (e) {
+      return jsonError(res, 500, String(e.message || e));
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
+    }
+  });
+
+  router.post(P + "/board-def", async (req, res) => {
+    const b = req.body || {};
+    const projectId = b.project_id == null || b.project_id === "" ? null : Number(b.project_id);
+    if (projectId == null || !Number.isInteger(projectId)) return jsonError(res, 400, "bad project_id");
+    const v = validateDefPayload(b);
+    if (!v.ok) return jsonError(res, 400, v.error);
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      // Config must never orphan data: refuse to drop a status that still has
+      // cards on it. Renames are remove+add and get the same guard — move the
+      // cards on the board first, then remove the value.
+      const keep = new Set(JSON.parse(v.def.status_values));
+      const counts = (await tdb.execute({
+        sql: "SELECT status, COUNT(*) AS n FROM tasks_items WHERE project_id=? GROUP BY status",
+        args: [projectId],
+      })).rows || [];
+      for (const r of counts) {
+        if (!keep.has(String(r.status))) {
+          return jsonError(res, 400, `status '${r.status}' still has ${r.n} card${Number(r.n) === 1 ? "" : "s"} — move them first`);
+        }
+      }
+      await tdb.execute({
+        sql:
+          "INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (?,?,?,?,?) " +
+          "ON CONFLICT(project_id) DO UPDATE SET display_name=excluded.display_name, " +
+          "status_values=excluded.status_values, terminal_values=excluded.terminal_values, " +
+          "fields_json=excluded.fields_json, updated_at=datetime('now')",
+        args: [projectId, v.def.display_name, v.def.status_values, v.def.terminal_values, v.def.fields_json],
+      });
+      return res.json({ ok: true });
+    } catch (e) {
+      return jsonError(res, 500, String(e.message || e));
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
