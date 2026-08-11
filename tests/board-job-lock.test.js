@@ -318,6 +318,7 @@ test("the SSE bot-board tick's lock snapshot agrees with the rendered board", as
 
   const ctrl = new AbortController();
   let snapshot = null;
+  let boardConfig = null;
   try {
     const res = await fetch(url, { signal: ctrl.signal });
     const reader = res.body.getReader();
@@ -328,8 +329,19 @@ test("the SSE bot-board tick's lock snapshot agrees with the rendered board", as
       const { value, done } = await reader.read();
       if (done) break;
       buf += dec.decode(value, { stream: true });
-      const m = buf.match(/^data: (\{.*\})$/m);
-      if (m) { snapshot = JSON.parse(m[1]); break; }
+      // Parse SSE FRAMES, not bare data lines: the stream also carries a named
+      // `event: board-config` frame (Track 0), and a line-level match would
+      // read its payload as the snapshot.
+      const frames = buf.split("\n\n");
+      buf = frames.pop(); // keep the trailing partial frame
+      for (const frame of frames) {
+        const ev = (frame.match(/^event: (.+)$/m) || [])[1] || null;
+        const data = (frame.match(/^data: (\{.*\})$/m) || [])[1];
+        if (!data) continue;
+        if (ev === "board-config") boardConfig = JSON.parse(data);
+        else if (ev == null) snapshot = JSON.parse(data);
+      }
+      if (snapshot) break;
     }
     await reader.cancel();
   } finally {
@@ -337,6 +349,10 @@ test("the SSE bot-board tick's lock snapshot agrees with the rendered board", as
     await new Promise((r) => srv.close(r));
   }
   assert.ok(snapshot && Array.isArray(snapshot.cards), "no SSE snapshot arrived");
+  // The Track 0 config frame rides the SAME stream as a named event, once at
+  // open — outside the diffed snapshot, so a def edit can't reload-storm.
+  assert.ok(boardConfig && Array.isArray(boardConfig.statuses) && boardConfig.statuses.length,
+    "the board-config frame must arrive before the first snapshot");
 
   const ids = snapshot.cards.map((c) => Number(c.id));
   const db = createDbClient();
