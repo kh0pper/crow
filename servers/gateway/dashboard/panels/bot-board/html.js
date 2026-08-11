@@ -12,11 +12,31 @@ import { createDbClient } from "../../../../db.js";
 import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
 import {
-  TASKS_DB, CARD_STATUSES, STATUS_BADGE,
+  TASKS_DB, STATUS_BADGE,
   lockMapFor, derivePlanPath, readPlan, statusLabel,
 } from "./data-queries.js";
+import { DEFAULT_BOARD_DEF, resolveBoardDef } from "../../../routes/board-defs.js";
 
-export function cardFaceHtml(card, locked, lang) {
+// Display: configured values render raw (tracker-style); only the builtin
+// fallback def keeps the i18n'd four.
+function defStatusLabel(def, s, lang) {
+  return def.builtin ? statusLabel(s, lang) : String(s);
+}
+
+// The card face's meta row for a board's declared fields. `column`-backed
+// fields read the typed column; `data` fields read data_json.
+function declaredFieldMeta(def, card, data) {
+  const parts = [];
+  for (const f of def.fields || []) {
+    const v = f.storage === "column" ? card[f.key] : (data ? data[f.key] : undefined);
+    if (v != null && v !== "") {
+      parts.push(`<span class="bb-meta">${escapeHtml(String(f.label || f.key))}: ${escapeHtml(String(v))}</span>`);
+    }
+  }
+  return parts.join("");
+}
+
+export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
   const prio = card.priority == null ? "" :
     `<span class="bb-prio bb-prio-${escapeHtml(String(card.priority))}" title="${t("botboard.titlePriorityPrefix", lang)} ${escapeHtml(String(card.priority))}">P${escapeHtml(String(card.priority))}</span>`;
   const due = card.due_date ? `<span class="bb-meta">⏱ ${escapeHtml(String(card.due_date))}</span>` : "";
@@ -29,20 +49,32 @@ export function cardFaceHtml(card, locked, lang) {
     ? `<div class="bb-sub">↳ subtask of #${escapeHtml(String(card.parent_id))}</div>` : "";
   const lockBadge = locked
     ? `<span class="bb-lock" title="${t("botboard.cardWorking", lang)}">${t("botboard.cardWorkingBadge", lang)}</span>` : "";
+  let data = {};
+  try { data = JSON.parse(card.data_json || "{}"); } catch { data = {}; }
+  const fieldMeta = declaredFieldMeta(def, card, data);
+  // Search text mirrors the tracker face: everything a human would scan for.
+  const searchParts = [card.title || "", card.status || "", card.owner || "", card.tags || "", card.due_date || ""];
+  for (const f of def.fields || []) {
+    const v = f.storage === "column" ? card[f.key] : data[f.key];
+    if (v != null && v !== "") searchParts.push(String(v));
+  }
+  const searchText = searchParts.join(" ").toLowerCase();
   return `<div class="bb-card${locked ? " bb-locked" : ""}" draggable="${locked ? "false" : "true"}" ` +
     `data-card="${escapeHtml(String(card.id))}" data-status="${escapeHtml(String(card.status))}" ` +
-    `data-locked="${locked ? "1" : "0"}" tabindex="0" role="button" ` +
+    `data-locked="${locked ? "1" : "0"}" data-search-text="${escapeHtml(searchText)}" ` +
+    `data-priority="${card.priority != null ? escapeHtml(String(card.priority)) : ""}" ` +
+    `tabindex="0" role="button" ` +
     `aria-label="card ${escapeHtml(String(card.id))}: ${escapeHtml(String(card.title || ""))}">` +
     `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(card.id))}</span>${lockBadge}</div>` +
     `<div class="bb-title">${escapeHtml(String(card.title || "(untitled)"))}</div>` +
-    `<div class="bb-card-meta">${due}${owner}</div>${tags}${sub}` +
+    `<div class="bb-card-meta">${due}${owner}${fieldMeta}</div>${tags}${sub}` +
     `<form method="POST" action="/dashboard/bot-board" class="bb-nojs-move">` +
     `<input type="hidden" name="action" value="move">` +
     `<input type="hidden" name="card_id" value="${escapeHtml(String(card.id))}">` +
     `<input type="hidden" name="project" value="${escapeHtml(String(card.project_id == null ? "" : card.project_id))}">` +
-    CARD_STATUSES.filter((s) => s !== card.status).map((s) =>
-      `<button type="submit" name="status" value="${s}" ${locked ? "disabled" : ""} ` +
-      `title="${t("botboard.moveTo", lang)}${statusLabel(s, lang)}">${escapeHtml(statusLabel(s, lang))}</button>`).join("") +
+    def.status_values.filter((s) => s !== card.status).map((s) =>
+      `<button type="submit" name="status" value="${escapeHtml(s)}" ${locked ? "disabled" : ""} ` +
+      `title="${t("botboard.moveTo", lang)}${escapeHtml(defStatusLabel(def, s, lang))}">${escapeHtml(defStatusLabel(def, s, lang))}</button>`).join("") +
     `</form></div>`;
 }
 
@@ -104,7 +136,7 @@ export function trackerCardFaceHtml(item, contextFields, statusValues, locked, l
 // Right slide-over drawer (design D6) — populated client-side on card click;
 // the board stays visible + live behind it. Pure static markup (no dynamic
 // data interpolated here); no-JS users never see it (they get &card=M).
-export function drawerMarkup(lang) {
+export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   return `<div class="bb-drawer" id="bb-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-d-title" style="font-family:'Fraunces',serif;margin:0">${t("botboard.drawerCardTitle", lang)}</h3>
@@ -114,7 +146,7 @@ export function drawerMarkup(lang) {
     <div id="bb-d-lock" class="bb-msg warn"></div>
     <label>${t("botboard.labelTitle", lang)}</label><input id="bb-d-title-in" type="text">
     <div class="bb-row">
-      <div><label>${t("botboard.labelStatus", lang)}</label><select id="bb-d-status">${CARD_STATUSES.map((s) => `<option value="${s}">${statusLabel(s, lang)}</option>`).join("")}</select></div>
+      <div><label>${t("botboard.labelStatus", lang)}</label><select id="bb-d-status">${def.status_values.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(defStatusLabel(def, s, lang))}</option>`).join("")}</select></div>
       <div><label>${t("botboard.labelPriority", lang)}</label><select id="bb-d-prio"><option value="">—</option>${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n}</option>`).join("")}</select></div>
     </div>
     <div class="bb-row">
@@ -231,15 +263,15 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
   }
 
   // Cards for the selected project — tasks.db via the journal-safe client.
+  // The resolved board def drives everything below: columns, labels, fields.
   let cards = [];
+  let def = DEFAULT_BOARD_DEF;
   let tdb;
   try {
     tdb = createDbClient(TASKS_DB);
+    def = await resolveBoardDef(tdb, { projectId });
     cards = (await tdb.execute({
-      sql:
-        "SELECT id,title,description,status,priority,due_date,owner,tags,parent_id,project_id," +
-        "datetime(updated_at) AS updated_at, completed_at " +
-        "FROM tasks_items WHERE project_id=? ORDER BY priority ASC, id ASC",
+      sql: "SELECT * FROM tasks_items WHERE project_id=? ORDER BY priority ASC, id ASC",
       args: [projectId],
     })).rows || [];
   } catch {
@@ -279,8 +311,8 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
       `<input type="hidden" name="action" value="move">` +
       `<input type="hidden" name="card_id" value="${cid}">` +
       `<input type="hidden" name="bot" value="${escapeHtml(selBot.botId)}">` +
-      t("botboard.moveLabel", lang) + CARD_STATUSES.filter((s) => s !== card.status).map((s) =>
-        `<button type="submit" name="status" value="${s}" class="bb-btn bb-sec" ${locked ? "disabled" : ""}>${escapeHtml(statusLabel(s, lang))}</button>`).join(" ") +
+      t("botboard.moveLabel", lang) + def.status_values.filter((s) => s !== card.status).map((s) =>
+        `<button type="submit" name="status" value="${escapeHtml(s)}" class="bb-btn bb-sec" ${locked ? "disabled" : ""}>${escapeHtml(defStatusLabel(def, s, lang))}</button>`).join(" ") +
       `</form>`;
     return layout({
       title: `Card #${cid}`,
@@ -297,25 +329,41 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
     });
   }
 
-  // ---- full kanban board ----
-  const byStatus = { pending: [], in_progress: [], done: [], cancelled: [] };
+  // ---- full kanban board (def-driven: columns, count, labels) ----
+  const byStatus = {};
+  for (const sv of def.status_values) byStatus[sv] = [];
   for (const c of cards) (byStatus[c.status] || (byStatus[c.status] = [])).push(c);
-  const columns = CARD_STATUSES.map((st) => {
+  const columns = def.status_values.map((st) => {
     const list = byStatus[st] || [];
     const cardsHtml = list.length
-      ? list.map((c) => cardFaceHtml(c, !!lockMap.get(Number(c.id)), lang)).join("")
+      ? list.map((c) => cardFaceHtml(c, !!lockMap.get(Number(c.id)), lang, def)).join("")
       : `<div style="color:var(--crow-text-muted);font-size:.78rem;padding:.4rem">—</div>`;
-    return `<div class="bb-col" data-col="${st}">` +
-      `<h4><span>${escapeHtml(statusLabel(st, lang))}</span><span>${list.length}</span></h4>` +
-      `<div class="bb-col-body" data-col-body="${st}">${cardsHtml}</div></div>`;
+    return `<div class="bb-col" data-col="${escapeHtml(st)}">` +
+      `<h4><span>${escapeHtml(defStatusLabel(def, st, lang))}</span><span>${list.length}</span>` +
+      `<button type="button" class="bb-col-toggle" title="${t("botboard.collapseColumn", lang)}" aria-label="${t("botboard.collapseColumnAria", lang).replace("{col}", escapeHtml(st))}">−</button></h4>` +
+      `<div class="bb-col-body" data-col-body="${escapeHtml(st)}">${cardsHtml}</div></div>`;
   }).join("");
 
-  const boardHtml = `<div class="bb-board" style="--bb-cols:4">${columns}</div>`;
+  const boardHtml = `<div class="bb-board" id="bb-board" style="--bb-cols:${def.status_values.length || 1}">${columns}</div>` +
+    `<div id="bb-list-wrap" style="display:none"></div>`;
+
+  // The tracker path's affordances, adopted (Track 0): search, status chips,
+  // list toggle. Same markup, same client wiring.
+  const filterBarHtml =
+    `<div class="bb-filter-bar">` +
+    `<input type="text" id="bb-search" class="bb-search" placeholder="${t("botboard.searchCards", lang)}">` +
+    `<div class="bb-chips">` +
+    def.status_values.map((sv) => `<button type="button" class="bb-chip" data-status-filter="${escapeHtml(sv)}">${escapeHtml(defStatusLabel(def, sv, lang))}</button>`).join("") +
+    `</div>` +
+    `<div class="bb-view-toggle">` +
+    `<button type="button" class="bb-view-btn bb-view-btn-active" data-view="columns">${t("botboard.viewColumns", lang)}</button>` +
+    `<button type="button" class="bb-view-btn" data-view="list">${t("botboard.viewList", lang)}</button>` +
+    `</div></div>`;
 
   const content = botBoardStyles() + section(
     `Board — ${escapeHtml(selBot.displayName)}`,
-    notice + switcher + boardHtml) +
-    drawerMarkup(lang) + clientJs(selBot.botId, "kanban", projectId, null, null, lang);
+    notice + switcher + filterBarHtml + boardHtml) +
+    drawerMarkup(lang, def) + clientJs(selBot.botId, "kanban", projectId, null, null, lang);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });
 }

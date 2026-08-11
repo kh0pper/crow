@@ -1367,6 +1367,7 @@ export const translations = {
   // Tracker board messages
   "botboard.noTrackerSlug": { en: "Custom tracker type but no tracker_slug configured.", es: "Tipo de rastreador personalizado pero sin tracker_slug configurado." },
   "botboard.filterActionNeeded": { en: "action needed", es: "acción requerida" },
+  "botboard.searchCards": { en: "Search cards\u2026", es: "Buscar tarjetas\u2026" },
   "botboard.viewColumns": { en: "Columns", es: "Columnas" },
   "botboard.viewList": { en: "List", es: "Lista" },
 

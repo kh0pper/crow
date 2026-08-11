@@ -8,8 +8,9 @@
 import { createDbClient } from "../../../../db.js";
 import { setPeerBotEnabled } from "../../../bot-federation-client.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
-import { TASKS_DB, CARD_STATUSES } from "./data-queries.js";
+import { TASKS_DB } from "./data-queries.js";
 import { isCardLocked } from "../../../routes/board-lock.js";
+import { resolveBoardDef, isValidStatus, isTerminal } from "../../../routes/board-defs.js";
 
 export async function handleBotBoardPost(req, res, { db }) {
   const b = req.body || {};
@@ -18,7 +19,7 @@ export async function handleBotBoardPost(req, res, { db }) {
     const botQ = b.bot ? `?bot=${encodeURIComponent(String(b.bot))}` : (b.project ? `?project=${encodeURIComponent(String(b.project))}` : "");
     const cardId = Number(b.card_id);
     const status = String(b.status || "");
-    if (!Number.isInteger(cardId) || !CARD_STATUSES.includes(status)) {
+    if (!Number.isInteger(cardId) || !status) {
       return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
     }
     // BOTH rails (routes/board-lock.js). A session-only check let an operator
@@ -31,7 +32,15 @@ export async function handleBotBoardPost(req, res, { db }) {
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      const done = status === "done" || status === "cancelled";
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [cardId] })).rows[0];
+      if (!cur) return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
+      // Validated against the card's RESOLVED BOARD DEF — same rule as the
+      // JSON API (routes/board-defs.js), not re-derived here.
+      const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
+      if (!isValidStatus(def, status)) {
+        return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
+      }
+      const done = isTerminal(def, status);
       await tdb.execute({
         sql:
           "UPDATE tasks_items SET status=?, updated_at=datetime('now'), " +

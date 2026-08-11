@@ -469,7 +469,8 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   };
 
   // ---- Search and filter (Feature 1) ----
-  if(TRACKER_TYPE==='custom'){
+  // Track 0: the kanban board adopts the tracker affordances wholesale.
+  if(TRACKER_TYPE==='custom'||TRACKER_TYPE==='kanban'){
     var searchInput=$('bb-search');
     var chips=document.querySelectorAll('.bb-chip');
     var activeStatuses={};
@@ -607,7 +608,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       thead.appendChild(hr);
       table.appendChild(thead);
       var tbody=document.createElement('tbody');
-      var cards=[].slice.call(document.querySelectorAll('.bb-card[data-item-type="tracker"]'));
+      var cards=[].slice.call(document.querySelectorAll(TRACKER_TYPE==='custom'?'.bb-card[data-item-type="tracker"]':'.bb-card'));
       if(sortKey) cards.sort(function(a,b){
         var va=cardSortVal(a,sortKey),vb=cardSortVal(b,sortKey);
         if(va===vb) return 0;
@@ -639,7 +640,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         tr.onclick=function(){
           var cid=this.getAttribute('data-card');
           var orig=document.querySelector('.bb-card[data-card="'+cid+'"]');
-          if(orig) fillTrackerDrawer(orig);
+          if(orig){ if(TRACKER_TYPE==='custom') fillTrackerDrawer(orig); else fillDrawer(orig); }
         };
         tbody.appendChild(tr);
       });
@@ -711,6 +712,19 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     }
     if(esUrl){
       var es=new EventSource(esUrl);
+      es.addEventListener('board-config',function(ev){
+        var cfg; try{ cfg=JSON.parse(ev.data); }catch(e){ return; }
+        if(!cfg||!cfg.statuses||!cfg.statuses.length) return;
+        var rendered=[].slice.call(document.querySelectorAll('.bb-col[data-col]')).map(function(c){return c.getAttribute('data-col');});
+        if(rendered.length && JSON.stringify(rendered)!==JSON.stringify(cfg.statuses)){
+          var now=Date.now(), lastReload=0;
+          try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
+          if(now-lastReload>10000){
+            try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
+            reload();
+          }
+        }
+      });
       es.onmessage=function(ev){
         var d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
         if(!d||!d.cards) return;
