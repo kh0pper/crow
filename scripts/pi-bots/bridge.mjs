@@ -26,7 +26,7 @@ import { join, dirname } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
-import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType } from "./tracker.mjs";
+import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab } from "./tracker.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
@@ -40,7 +40,6 @@ import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
-import { statusToStage } from "../../servers/gateway/routes/board-stages.js";
 import { parsePlanRef, containedRealPath } from "../../servers/gateway/routes/plan-ref.js";
 import { extractPlanFileLine, buildPlanPrompt } from "./plan_dispatch.mjs";
 
@@ -604,10 +603,12 @@ export async function handleInbound(opts) {
 
   if (wantCard != null) {
     const st = cardStatus(wantCard, tasksDbPath);
-    if (st === "done") {
-      log("card " + wantCard + " already done — no re-exec");
+    // Terminal-ness is per-board (Track 0): a custom board's finished status
+    // is whatever its def declares, not the literal 'done'.
+    if (st != null && boardVocab(wantCard, tasksDbPath).terminals.includes(String(st))) {
+      log("card " + wantCard + " already terminal ('" + st + "') — no re-exec");
       if (!session) session = upsertSession({ bot_id, gateway_thread_id, gateway_type, project_id: projectId, status: "waiting-user" });
-      await sendReply("Card #" + wantCard + " is already done — nothing to do.");
+      await sendReply("Card #" + wantCard + " is already " + st + " — nothing to do.");
       return { action: "noop-done", cardId: wantCard };
     }
   }
@@ -661,11 +662,19 @@ export async function handleInbound(opts) {
   let promptText;
   if (cardId != null) {
     // Explicit card reference — full work-the-card workflow.
+    // The status instruction follows the card's BOARD vocabulary (Track 0):
+    // hardcoding 'in_progress, then done' writes off-def values onto custom
+    // boards through the tasks_* door, which no longer has a CHECK behind it.
+    const vocab = boardVocab(cardId, tasksDbPath);
+    const working = vocab.statuses.includes("in_progress") ? "in_progress"
+      : (vocab.statuses.find((v) => !vocab.terminals.includes(v)) || vocab.statuses[0]);
+    const finished = vocab.terminals.includes("done") ? "done" : (vocab.terminals[0] || vocab.statuses[vocab.statuses.length - 1]);
     promptText = projectHeader + "\n\nWork the following card.\n\nCARD #" + cardId +
-      " (current board status: " + cardStatus(cardId, tasksDbPath) + ").\nPLAN FILE (" + plan.path + "):\n---\n" +
+      " (current board status: " + cardStatus(cardId, tasksDbPath) + "; this board's statuses: " + vocab.statuses.join(", ") + ").\nPLAN FILE (" + plan.path + "):\n---\n" +
       (plan.text || "(plan file missing)") + "\n---\n\nUser said: \"" + cleanMsg + "\"\n\n" +
       "Do the work the plan describes. Use the tasks_* tools (scoped to project " + projectId +
-      ") to set this card in_progress, then done. Use the write/edit tools to record your result " +
+      ") to set this card " + working + ", then " + finished + " (only ever use this board's statuses). " +
+      "Use the write/edit tools to record your result " +
       "under the plan file's \"## Result\" section. When finished, reply with a short summary for " +
       "the gateway thread. One card only.";
   } else {
@@ -738,30 +747,12 @@ export async function handleInbound(opts) {
     const calls = pi.toolCalls();
     postTurn = { user: cleanMsg, assistant: text, toolNames: calls.map((c) => c.tool) };
     const newCardStatus = cardId != null ? cardStatus(cardId, tasksDbPath) : null;
-    // Board–plan unification: fold the bot-written status back onto the
-    // canonical stage column (single reconciliation point). Guarded on the
-    // column existing so pre-migration instances are untouched.
-    if (cardId != null && newCardStatus != null) {
-      try {
-        const t = db(tasksDbPath);
-        try {
-          const have = t.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
-          if (have.includes("stage")) {
-            const cur = t.prepare("SELECT stage FROM tasks_items WHERE id=?").get(cardId);
-            // I2: null-stage cards behave exactly as today — a legacy card
-            // with no stage yet must not be stamped onto the stage model just
-            // because its bot-written status round-tripped as "pending".
-            // Only write when the card already carries a stage, or the new
-            // status unambiguously implies a real transition.
-            if ((cur && cur.stage != null) || ["done", "cancelled", "in_progress"].includes(String(newCardStatus))) {
-              t.prepare("UPDATE tasks_items SET stage=?, updated_at=datetime('now') WHERE id=?")
-                .run(statusToStage(newCardStatus, cur && cur.stage), cardId);
-            }
-          }
-        } finally { t.close(); }
-      } catch (e) { log("stage reconcile skipped (non-fatal): " + (e && e.message || e)); }
-    }
-    const status = newCardStatus === "done" ? "done" : "waiting-user";
+    // Track 0: the bot's own status write IS the record — there is no stage
+    // column to reconcile onto any more. "Finished" is per-board terminal-ness,
+    // not the literal 'done': a session left at waiting-user LOCKS the card
+    // (SESSION_LOCK_STATUSES), which must never happen to completed work.
+    const status = (newCardStatus != null && boardVocab(cardId, tasksDbPath).terminals.includes(String(newCardStatus)))
+      ? "done" : "waiting-user";
     session.pi_session_id = piSessionId;
     session.status = status; session.control = "run";
     session.model = resolved.key; session.escalated = resolved.escalated ? 1 : 0;
@@ -837,46 +828,28 @@ export async function handleInbound(opts) {
   return result;
 }
 
-// I3b: the route (bot-board-api.js POST .../plan-dispatch) already flips the
-// card to stage='planning' BEFORE spawning this process. An early refusal in
-// planCard below (card not found / no repo_path / pi-capacity deferred /
-// non-local provider) must not strand the card in Planning with nothing
-// actually running — reset it back to Backlog/pending. Best-effort against
-// the SAME tasks db used to read the card; never throws. Do NOT call this
-// after a pi session has actually been started — the post-session error
-// paths carry the signal via the session row + status='error' instead.
-//
-// EXPORTED (Task 4) because the job runner's terminal paths need the SAME
-// un-stranding — an abandoned/failed/no-progress card job leaves a card in
-// stage='executing' with no worker, which is the exact bug the job rail was
-// adopted to prevent. A second implementation over there would be free to
-// drift (wrong database, no busy_timeout); there is one reset, here.
-//
-// `log` is optional and defaults to a no-op so planCard's existing call sites
-// are unchanged. Callers that CAN report (the job runner) pass one: a
-// silently swallowed SQLITE_BUSY leaves the card stuck with no trace.
-// Returns true only when a card row was actually moved.
-//
-// THE TERMINAL-STATUS GUARD is the mirror of the rule above. handleInbound's
-// error catch is POST-turn: it also wraps the statusToStage reconcile, so a
-// pi.prompt timeout AFTER the bot has already written status='done' through
-// its own tasks_* tools leaves the card at stage='executing', status='done'
-// with the job failed. Resetting that would DISCARD completed work — the
-// dispatcher un-setting 'done' is exactly as wrong as the dispatcher setting
-// it. So a card that has reached a terminal status is never touched; the
-// caller sees changes===0 and logs it, which is the signal an operator wants.
-// 'done'/'cancelled' are the terminal statuses of the stage model
-// (board-stages.js TERMINAL_STAGES + stageToStatus) — they are spelled out
-// rather than derived because a stage whose STAGE_TO_STATUS entry was missing
-// would derive as 'pending' and silently disable un-stranding entirely. A test
-// derives the same list from board-stages and fails if a third one appears.
+// planCard's ONLY card write: the plan pointer. status is the bot's/operator's
+// to write, never machinery's (Track 0) — this helper exists so a test can pin
+// exactly that.
+export function recordPlanRef(cardsDb, cardId, planRef) {
+  const t2 = db(cardsDb);
+  try {
+    t2.prepare("UPDATE tasks_items SET plan_ref=?, updated_at=datetime('now') WHERE id=?")
+      .run(JSON.stringify(planRef), cardId);
+  } finally { t2.close(); }
+}
+
+// Track 0: dispatch writes nothing to cards, so there is no machinery-made
+// state to undo — this survives as a defensive no-op-in-practice ("undo a
+// machinery in_progress") because its export is part of the bridge's stable
+// surface and tests exercise it directly against per-project card databases.
 export function resetStrandedCardBestEffort(cardsDb, cardId, log = () => {}) {
   try {
     const c = db(cardsDb);
     try {
       const info = c.prepare(
-        "UPDATE tasks_items SET stage='backlog', status='pending', updated_at=datetime('now') " +
-        "WHERE id=? AND status NOT IN ('done','cancelled')"
+        "UPDATE tasks_items SET status='pending', updated_at=datetime('now') " +
+        "WHERE id=? AND status='in_progress'"
       ).run(cardId);
       return info.changes > 0;
     } finally { c.close(); }
@@ -923,22 +896,19 @@ export async function planCard(opts) {
   const t = db(cardsDb);
   const card = t.prepare("SELECT id, title, description, project_id FROM tasks_items WHERE id=?").get(cardId);
   t.close();
-  if (!card) { resetStrandedCardBestEffort(cardsDb, cardId); return { action: "error", error: "card not found" }; }
+  if (!card) { return { action: "error", error: "card not found" }; }
 
   const repoRoot = projectSpace && projectSpace.repo_path ? String(projectSpace.repo_path) : null;
   if (!repoRoot || !existsSync(repoRoot)) {
-    resetStrandedCardBestEffort(cardsDb, cardId);
     return { action: "error", error: "project has no repo_path (workspace plan dispatch is not in v1 — edit the plan in the drawer)" };
   }
 
   if (countLivePi() >= LIFECYCLE_DEFAULTS.maxPi) {
-    resetStrandedCardBestEffort(cardsDb, cardId);
     return { action: "deferred", reason: "pi-capacity" };
   }
 
   const resolved = await resolveModel(def, { escalate: false });
   if (String(resolved.provider) !== "crow-local") {
-    resetStrandedCardBestEffort(cardsDb, cardId);
     return { action: "error", error: "plan dispatch is local-only; bot resolves to " + resolved.provider + "/" + resolved.model };
   }
 
@@ -986,10 +956,7 @@ export async function planCard(opts) {
       return { action: "error", error: "planning run produced no verifiable PLAN_FILE (reply tail: " + text.slice(-200) + ")" };
     }
     const planRef = { kind: "repo", path: rel };
-    const t2 = db(cardsDb);
-    t2.prepare("UPDATE tasks_items SET plan_ref=?, stage='ready', status='pending', updated_at=datetime('now') WHERE id=?")
-      .run(JSON.stringify(planRef), cardId);
-    t2.close();
+    recordPlanRef(cardsDb, cardId, planRef);
     session.status = "done"; upsertSession(session);
     appendAuditBridge(projectId, {
       actor_type: "bot", actor_id: botId, action: "bot.plan",

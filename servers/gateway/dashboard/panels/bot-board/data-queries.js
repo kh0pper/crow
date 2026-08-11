@@ -15,11 +15,10 @@ import { SESSION_LOCK_STATUSES, lockMapFor as sharedLockMapFor } from "../../../
 
 export const TASKS_DB = tasksDbPath();
 
-export const CARD_STATUSES = ["pending", "in_progress", "done", "cancelled"];
-
 // STATUS_LABEL: keys are frozen logic/routing values; values are the EN display
 // strings used as i18n key lookup suffixes via statusLabel(status, lang).
-// DO NOT compare STATUS_LABEL values — compare CARD_STATUSES / status column values.
+// The status vocabulary itself lives in routes/board-defs.js (DEFAULT_BOARD_DEF
+// for the builtin board; board_defs rows otherwise) — do not re-declare it.
 export const STATUS_LABEL = { pending: "Pending", in_progress: "In Progress", done: "Done", cancelled: "Cancelled" };
 export const STATUS_BADGE = { pending: "draft", in_progress: "info", done: "connected", cancelled: "draft" };
 

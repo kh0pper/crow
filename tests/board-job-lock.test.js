@@ -33,21 +33,21 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
   t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
     due_date TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
-    stage TEXT, assigned_bot TEXT, plan_ref TEXT,
+    assigned_bot TEXT, plan_ref TEXT, data_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
   const ins = t.prepare(
-    "INSERT INTO tasks_items (id, title, project_id, assigned_bot, stage, status) VALUES (?,?,1,'scout',?,?)"
+    "INSERT INTO tasks_items (id, title, project_id, assigned_bot, status) VALUES (?,?,1,'scout',?)"
   );
-  ins.run(1, "queued-job card", "executing", "in_progress");   // force-unlock case
-  ins.run(2, "lock-map card", "executing", "in_progress");     // lockMapFor case
-  ins.run(3, "running-job card", "executing", "in_progress");  // action=move case
-  ins.run(4, "free card", "ready", "pending");                 // control: never locked
-  ins.run(5, "session card", "executing", "in_progress");      // session rail, still locked
-  ins.run(6, "old session card", "backlog", "pending");        // session rail, finished
+  ins.run(1, "queued-job card", "in_progress");   // force-unlock case
+  ins.run(2, "lock-map card", "in_progress");     // lockMapFor case
+  ins.run(3, "running-job card", "in_progress");  // action=move case
+  ins.run(4, "free card", "pending");             // control: never locked
+  ins.run(5, "session card", "in_progress");      // session rail, still locked
+  ins.run(6, "old session card", "pending");      // session rail, finished
   // Card 7 belongs to the action=move test alone. Card 3 exists to be REFUSED
   // by force-unlock; if that refusal ever regresses, card 3 becomes unlocked
   // and the move test would start passing/failing for the wrong reason.
-  ins.run(7, "move-refused card", "executing", "in_progress");
+  ins.run(7, "move-refused card", "in_progress");
   t.close();
 
   const c = new Database(process.env.CROW_DB_PATH);
@@ -102,7 +102,7 @@ test("force-unlock releases a card held by a queued job, and the card is workabl
   // Precondition: the card really is locked — an ordinary write is refused.
   const blocked = await fetch(base + "/card/1/move", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stage: "ready" }),
+    body: JSON.stringify({ status: "pending" }),
   });
   assert.equal(blocked.status, 409, "a queued job must lock the card against writes");
 
@@ -123,17 +123,14 @@ test("force-unlock releases a card held by a queued job, and the card is workabl
   assert.match(String(job.error), /force-unlock/i);
   assert.ok(job.ended_at, "a terminated job must carry ended_at");
 
-  // The card was un-stranded out of stage='executing' — no manual SQL needed.
-  const t = tasksDb();
-  const card = t.prepare("SELECT stage, status FROM tasks_items WHERE id=1").get();
-  t.close();
-  assert.deepEqual([card.stage, card.status], ["backlog", "pending"]);
-  assert.equal(body.card_reset, true);
+  // Track 0: terminating the job IS the release. The card row is not written —
+  // there is no card_reset in the response and nothing to reset.
+  assert.ok(!Object.hasOwn(body, "card_reset"), "force-unlock no longer resets cards");
 
   // And the same write that was refused above now goes through.
   const nowOk = await fetch(base + "/card/1/move", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stage: "ready" }),
+    body: JSON.stringify({ status: "pending" }),
   });
   assert.equal(nowOk.status, 200, "the lock must actually be gone");
 
@@ -255,7 +252,7 @@ test("a running job with a live pi is refused, and clearing it never rewrites th
   const worker = await deadPid();
 
   const t = tasksDb();
-  t.prepare("INSERT INTO tasks_items (id, title, project_id, assigned_bot, stage, status) VALUES (8,'orphaned-pi card',1,'scout','executing','in_progress')").run();
+  t.prepare("INSERT INTO tasks_items (id, title, project_id, assigned_bot, status) VALUES (8,'orphaned-pi card',1,'scout','in_progress')").run();
   t.close();
   const c = crowDb();
   c.prepare("INSERT INTO bot_jobs (job_id, bot_id, goal, status, source, card_id, card_action, worker_pid) VALUES ('job-running-8','scout','execute #8','running','card',8,'execute',?)").run(worker);
@@ -275,7 +272,7 @@ test("a running job with a live pi is refused, and clearing it never rewrites th
     assert.equal(c1.prepare("SELECT status FROM bot_jobs WHERE job_id='job-running-8'").get().status, "running");
     c1.close();
     const t1 = tasksDb();
-    assert.equal(t1.prepare("SELECT stage FROM tasks_items WHERE id=8").get().stage, "executing");
+    assert.equal(t1.prepare("SELECT status FROM tasks_items WHERE id=8").get().status, "in_progress");
     t1.close();
   } finally {
     fakePi.kill("SIGKILL");
@@ -289,15 +286,15 @@ test("a running job with a live pi is refused, and clearing it never rewrites th
   const body = await r2.json();
   assert.equal(r2.status, 200);
   assert.equal(body.cleared, 1);
-  assert.equal(body.card_reset, false, "the card must not be reset while the session rail still holds it");
+  assert.ok(!Object.hasOwn(body, "card_reset"), "force-unlock never writes or reports on the card row");
   assert.equal(body.session_lock && body.session_lock.status, "active");
   const t2 = tasksDb();
-  assert.equal(t2.prepare("SELECT stage FROM tasks_items WHERE id=8").get().stage, "executing");
+  assert.equal(t2.prepare("SELECT status FROM tasks_items WHERE id=8").get().status, "in_progress");
   t2.close();
   // ...and the card is still locked, by the other rail, which keeps its own gates.
   const stillLocked = await fetch(base + "/card/8/move", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stage: "ready" }),
+    body: JSON.stringify({ status: "pending" }),
   });
   assert.equal(stillLocked.status, 409);
 });
@@ -321,6 +318,7 @@ test("the SSE bot-board tick's lock snapshot agrees with the rendered board", as
 
   const ctrl = new AbortController();
   let snapshot = null;
+  let boardConfig = null;
   try {
     const res = await fetch(url, { signal: ctrl.signal });
     const reader = res.body.getReader();
@@ -331,8 +329,19 @@ test("the SSE bot-board tick's lock snapshot agrees with the rendered board", as
       const { value, done } = await reader.read();
       if (done) break;
       buf += dec.decode(value, { stream: true });
-      const m = buf.match(/^data: (\{.*\})$/m);
-      if (m) { snapshot = JSON.parse(m[1]); break; }
+      // Parse SSE FRAMES, not bare data lines: the stream also carries a named
+      // `event: board-config` frame (Track 0), and a line-level match would
+      // read its payload as the snapshot.
+      const frames = buf.split("\n\n");
+      buf = frames.pop(); // keep the trailing partial frame
+      for (const frame of frames) {
+        const ev = (frame.match(/^event: (.+)$/m) || [])[1] || null;
+        const data = (frame.match(/^data: (\{.*\})$/m) || [])[1];
+        if (!data) continue;
+        if (ev === "board-config") boardConfig = JSON.parse(data);
+        else if (ev == null) snapshot = JSON.parse(data);
+      }
+      if (snapshot) break;
     }
     await reader.cancel();
   } finally {
@@ -340,6 +349,10 @@ test("the SSE bot-board tick's lock snapshot agrees with the rendered board", as
     await new Promise((r) => srv.close(r));
   }
   assert.ok(snapshot && Array.isArray(snapshot.cards), "no SSE snapshot arrived");
+  // The Track 0 config frame rides the SAME stream as a named event, once at
+  // open — outside the diffed snapshot, so a def edit can't reload-storm.
+  assert.ok(boardConfig && Array.isArray(boardConfig.statuses) && boardConfig.statuses.length,
+    "the board-config frame must arrive before the first snapshot");
 
   const ids = snapshot.cards.map((c) => Number(c.id));
   const db = createDbClient();
