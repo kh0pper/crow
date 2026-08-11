@@ -70,7 +70,7 @@ import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";
 import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mjs";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
 import { parsePlanRef, resolvePlanFile, containedRealPath } from "./plan-ref.js";
-import { isStage, stageToStatus, effectiveStage } from "./board-stages.js";
+import { resolveBoardDef, isValidStatus, isTerminal, validateDefPayload } from "./board-defs.js";
 // THE shared dual-rail lock predicate (job rail + session rail). The SSR board
 // render and the no-JS move handler import the same module — see board-lock.js
 // for why a local copy is not allowed to exist here.
@@ -84,9 +84,7 @@ const CROW_USER_SKILLS = join(process.env.CROW_HOME || join(homedir(), ".crow"),
 
 const HOME = process.env.HOME || homedir();
 const TASKS_DB = tasksDbPath();
-const CARD_STATUSES = new Set(["pending", "in_progress", "done", "cancelled"]);
 const PROJECT_STATUSES = new Set(["active", "paused", "completed", "archived"]);
-const TERMINAL = new Set(["done", "cancelled"]);
 const STALE_SECONDS = 1800; // 30 min — force-unlock staleness threshold (D5)
 const BULK_CAP = 200;
 
@@ -159,45 +157,6 @@ function workerLiveness(pid) {
     if (e && e.code === "ESRCH") return "dead";
     if (e && e.code === "EPERM") return "alive";
     return "unknown";
-  }
-}
-
-/**
- * Put a card back where an operator can act on it after its job was
- * force-unlocked. Delegates to the bridge's OWN reset + its OWN cards-database
- * resolution (a project's tasks_db_uri wins over the instance tasks.db), which
- * is the same seam job_runner's unstrandCard uses — one reset implementation in
- * the product, not two. Lazily imported: bridge.mjs is the pi-side module and
- * the gateway must not pay for it on every boot.
- *
- * The reset refuses to touch a card whose status is already done/cancelled,
- * deliberately — the bot may have finished the work and written its own
- * terminal state before the job row was cleaned up, and un-setting that would
- * discard completed work.
- *
- * Best-effort: a failure here still leaves the card UNLOCKED (the job row is
- * already terminal), which is the guarantee force-unlock actually owes — but it
- * ALWAYS logs, success or failure. resetStrandedCardBestEffort takes a `log`
- * precisely so a swallowed SQLITE_BUSY is not indistinguishable from the
- * stranding bug this rail exists to remove (job_runner's unstrandCard passes one
- * for the same reason); a silent catch here would reintroduce that.
- */
-async function unstrandCardBestEffort(botId, cardId) {
-  const log = (m) => { try { process.stderr.write("[bot-board force-unlock] " + m + "\n"); } catch {} };
-  try {
-    const b = await import("../../../scripts/pi-bots/bridge.mjs");
-    const cardsDb = b.cardsDbForBot(String(botId));
-    const ok = !!b.resetStrandedCardBestEffort(cardsDb, Number(cardId), log);
-    log("card " + cardId + " (bot " + botId + ") " +
-      (ok ? "un-stranded → backlog/pending" : "NOT un-stranded (no row updated) — already terminal, or it may be stuck") +
-      " in " + cardsDb);
-    return ok;
-  } catch (e) {
-    // cardsDbForBot throws for an unknown/disabled bot, and it is RIGHT to
-    // refuse to guess a database — but refusing silently is how a card goes
-    // missing. Report, then leave the card alone.
-    log("card " + cardId + " (bot " + botId + ") NOT un-stranded — " + ((e && e.message) || e));
-    return false;
   }
 }
 
@@ -312,26 +271,27 @@ export default function botBoardApiRouter(dashboardAuth) {
       const card = (await tdb.execute({
         sql:
           "SELECT id,title,description,status,priority,due_date,owner,tags,parent_id,project_id," +
-          "stage,assigned_bot,plan_ref," +
+          "assigned_bot,plan_ref," +
           "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=?",
         args: [id],
       })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
+      const def = await resolveBoardDef(tdb, { projectId: card.project_id });
       cdb = createDbClient();
       let projects = [];
       try {
         projects = (await cdb.execute({ sql: "SELECT id, name, slug, repo_path FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows || [];
       } catch { projects = []; }
       const { locked } = await lockState(cdb, id);
-      // effectiveStage needs plan existence only for legacy null-stage cards.
-      let planExists = false;
-      if (card.stage == null) {
-        try {
-          const info = await derivePlanPath(cdb, card);
-          planExists = !!(info && existsSync(info.path));
-        } catch { planExists = false; }
-      }
-      return res.json({ card, projects, locked, effectiveStage: effectiveStage(card, planExists) });
+      return res.json({
+        card, projects, locked,
+        board: {
+          status_values: def.status_values,
+          terminal_values: def.terminal_values,
+          fields: def.fields,
+          builtin: def.builtin,
+        },
+      });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
@@ -350,20 +310,38 @@ export default function botBoardApiRouter(dashboardAuth) {
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      // OMIT status/priority from the column list → rely on DEFAULT 'pending'
-      // / DEFAULT 3 (never NULL-bind over a DEFAULT). created_at/updated_at
-      // via their INSERT DEFAULTs.
-      const r = await tdb.execute({
-        sql: "INSERT INTO tasks_items (title, description, due_date, owner, tags, project_id) VALUES (?,?,?,?,?,?)",
-        args: [
-          title,
-          b.description ? String(b.description) : null,
-          b.due_date ? String(b.due_date) : null,
-          b.owner ? String(b.owner) : null,
-          b.tags ? String(b.tags) : null,
-          projectId,
-        ],
-      });
+      // A new card must land ON its board: the DEFAULT 'pending' is only right
+      // when the resolved def has 'pending'. A custom board's cards start on
+      // its FIRST status — otherwise the card is born off-def.
+      const def = await resolveBoardDef(tdb, { projectId });
+      const explicitStatus = isValidStatus(def, "pending") ? null : def.status_values[0];
+      // OMIT status (when defaultable) / priority from the column list → rely
+      // on DEFAULT 'pending' / DEFAULT 3 (never NULL-bind over a DEFAULT).
+      // created_at/updated_at via their INSERT DEFAULTs.
+      const r = explicitStatus == null
+        ? await tdb.execute({
+            sql: "INSERT INTO tasks_items (title, description, due_date, owner, tags, project_id) VALUES (?,?,?,?,?,?)",
+            args: [
+              title,
+              b.description ? String(b.description) : null,
+              b.due_date ? String(b.due_date) : null,
+              b.owner ? String(b.owner) : null,
+              b.tags ? String(b.tags) : null,
+              projectId,
+            ],
+          })
+        : await tdb.execute({
+            sql: "INSERT INTO tasks_items (title, description, due_date, owner, tags, project_id, status) VALUES (?,?,?,?,?,?,?)",
+            args: [
+              title,
+              b.description ? String(b.description) : null,
+              b.due_date ? String(b.due_date) : null,
+              b.owner ? String(b.owner) : null,
+              b.tags ? String(b.tags) : null,
+              projectId,
+              explicitStatus,
+            ],
+          });
       return res.json({ ok: true, id: r.lastInsertRowid });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
@@ -377,9 +355,6 @@ export default function botBoardApiRouter(dashboardAuth) {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     const b = req.body || {};
-    if (b.status != null && !CARD_STATUSES.has(String(b.status))) {
-      return jsonError(res, 400, "invalid status"); // BEFORE SQL
-    }
     let prio = null, prioSet = false;
     if (b.priority != null && b.priority !== "") {
       prio = Number(b.priority);
@@ -403,8 +378,15 @@ export default function botBoardApiRouter(dashboardAuth) {
         if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
       }
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
+      // Status validated against the card's RESOLVED BOARD DEF, before any
+      // write (Track 0: per-board status values; the old hardcoded allowlist
+      // is now just the builtin fallback def).
+      const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
+      if (b.status != null && !isValidStatus(def, String(b.status))) {
+        return jsonError(res, 400, "invalid status");
+      }
       const sets = ["title=?", "description=?", "due_date=?", "owner=?", "tags=?"];
       const args = [
         typeof b.title === "string" ? b.title.trim() : (b.title == null ? null : String(b.title)),
@@ -418,8 +400,8 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (b.status != null) {
         const ns = String(b.status);
         sets.push("status=?"); args.push(ns);
-        if (TERMINAL.has(ns) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
-        else if (!TERMINAL.has(ns) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
+        if (isTerminal(def, ns) && !isTerminal(def, String(cur.status))) sets.push("completed_at=datetime('now')");
+        else if (!isTerminal(def, ns) && isTerminal(def, String(cur.status))) sets.push("completed_at=NULL");
       }
       sets.push("updated_at=datetime('now')");
       args.push(id);
@@ -438,33 +420,24 @@ export default function botBoardApiRouter(dashboardAuth) {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     const b = req.body || {};
-    const stageReq = b.stage != null ? String(b.stage) : null;
+    // The stage rail is gone (Track 0): a {stage:…} body is an invalid move.
+    if (b.stage != null) return jsonError(res, 400, "invalid status");
     const status = String(b.status || "");
-    if (stageReq != null) {
-      if (!isStage(stageReq)) return jsonError(res, 400, "invalid stage"); // BEFORE SQL
-    } else if (!CARD_STATUSES.has(status)) {
-      return jsonError(res, 400, "invalid status"); // BEFORE SQL (legacy path unchanged)
-    }
+    if (!status) return jsonError(res, 400, "invalid status");
     let tdb, cdb;
     try {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status, stage FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
-      if (stageReq != null) {
-        const proj = stageToStatus(stageReq);
-        const sets = ["stage=?", "status=?", "updated_at=datetime('now')"];
-        if (TERMINAL.has(proj) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
-        else if (!TERMINAL.has(proj) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
-        await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [stageReq, proj, id] });
-      } else {
-        const sets = ["status=?", "updated_at=datetime('now')"];
-        if (TERMINAL.has(status) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
-        else if (!TERMINAL.has(status) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
-        await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [status, id] });
-      }
+      const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
+      if (!isValidStatus(def, status)) return jsonError(res, 400, "invalid status");
+      const sets = ["status=?", "updated_at=datetime('now')"];
+      if (isTerminal(def, status) && !isTerminal(def, String(cur.status))) sets.push("completed_at=datetime('now')");
+      else if (!isTerminal(def, status) && isTerminal(def, String(cur.status))) sets.push("completed_at=NULL");
+      await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [status, id] });
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
@@ -484,12 +457,18 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT id, status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
-      await tdb.execute({
-        sql: "UPDATE tasks_items SET status='cancelled', completed_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
-        args: [id],
-      });
+      const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
+      if (!isValidStatus(def, "cancelled")) {
+        return jsonError(res, 400, "this board has no cancelled status");
+      }
+      // completed_at follows the def's terminal-ness, same transition rule as
+      // move/edit — a board may legally list 'cancelled' as non-terminal.
+      const sets = ["status='cancelled'", "updated_at=datetime('now')"];
+      if (isTerminal(def, "cancelled") && !isTerminal(def, String(cur.status))) sets.push("completed_at=datetime('now')");
+      else if (!isTerminal(def, "cancelled") && isTerminal(def, String(cur.status))) sets.push("completed_at=NULL");
+      await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [id] });
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
@@ -674,15 +653,13 @@ export default function botBoardApiRouter(dashboardAuth) {
           args: ["force-unlocked from the board by an operator (was '" + jobStatus + "')", row.job_id, jobStatus],
         });
         const cleared = Number(upd.rowsAffected) || 0;
-        // The card is reset ONLY when we actually terminated the job AND no
-        // other rail still holds the card. Rewriting stage/status while a
-        // session row is live is the same mistake as writing under a live pi —
-        // and it would be pointless anyway: the card stays locked by that rail,
-        // so the operator gains a rewritten card they still cannot dispatch.
-        // The session rail keeps its own gates; force-unlock it separately.
-        const cardReset = (cleared && !sessionHolds) ? await unstrandCardBestEffort(row.bot_id, id) : false;
+        // Terminating the job IS the whole release: the card row was never
+        // written by dispatch (Track 0), so there is nothing to reset — the
+        // lock predicate stops reporting the card held the moment this row is
+        // terminal. The session rail keeps its own gates; force-unlock it
+        // separately.
         return res.json({
-          ok: true, cleared, rail: "job", job_id: row.job_id, card_reset: cardReset,
+          ok: true, cleared, rail: "job", job_id: row.job_id,
           session_lock: sessionHolds ? { status: String(sess.status), age_s: Number(sess.age_s) } : null,
           note: sessionHolds
             ? "the job is terminated, but a bot_sessions row still holds this card — force-unlock again once that session is stale (>= " + STALE_SECONDS + "s) and its pi is confirmed dead"
@@ -721,12 +698,11 @@ export default function botBoardApiRouter(dashboardAuth) {
   });
 
   // ---- execute from board (spec: dispatch is explicit; drags never dispatch) ----
-  // ENQUEUES a bot_jobs row instead of spawning a detached `bridge.mjs --inject`
-  // child. The work is identical — job_runner's runCardExecute calls the same
-  // handleInbound with the same board payload — but on the job rail it gets
-  // scan-gated pickup (the pi capacity reserve), stale-claim recovery, retries,
-  // un-stranding and telemetry that a fire-and-forget spawn never had. The
-  // dispatcher records intent; the bot still owns the card's outcome.
+  // ENQUEUES a bot_jobs row and writes NOTHING to the card. "A bot is working
+  // this card" is the lock predicate (board-lock.js), derived from the live
+  // rails — when the job goes terminal the lock releases by itself, so there
+  // is no stranded state and no un-strand rail. Recovery from a dead worker is
+  // re-dispatch. Gate: unlocked, non-terminal on ITS board, has a bot.
   router.post(P + "/card/:id/execute", async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
@@ -737,7 +713,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const card = (await tdb.execute({
-        sql: "SELECT id, status, stage, assigned_bot, plan_ref, project_id FROM tasks_items WHERE id=?",
+        sql: "SELECT id, status, assigned_bot, plan_ref, project_id FROM tasks_items WHERE id=?",
         args: [id],
       })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
@@ -747,26 +723,13 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [bot],
       })).rows[0];
       if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
-      let planExists = false;
-      try {
-        const info = await resolveCardPlan(cdb, card);
-        planExists = !info.error && existsSync(info.path);
-      } catch { planExists = false; }
-      const eff = effectiveStage(card, planExists);
-      if (eff !== "ready") return res.status(409).json({ reason: "card is not Ready (stage: " + eff + ")" });
-      // ENQUEUE FIRST, FLIP THE STAGE SECOND. The reverse order strands the
-      // card: a SQLITE_BUSY (or any ensure/INSERT error) on the enqueue would
-      // return 500 having already written stage='executing' with no job behind
-      // it — and an 'executing' card is neither locked (no job, no session) nor
-      // Ready, so the UI can never re-dispatch it. This way a failed enqueue
-      // leaves the card exactly as the operator left it.
+      const def = await resolveBoardDef(tdb, { projectId: card.project_id });
+      if (isTerminal(def, card.status)) {
+        return res.status(409).json({ reason: "card is in a terminal status (" + String(card.status) + ")" });
+      }
       const jobId = await enqueueCardJob(cdb, {
         botId: bot, cardId: id, action: "execute",
         goal: "Execute board card #" + id,
-      });
-      await tdb.execute({
-        sql: "UPDATE tasks_items SET stage='executing', status='in_progress', updated_at=datetime('now') WHERE id=?",
-        args: [id],
       });
       return res.json({ ok: true, dispatched: bot, jobId });
     } catch (e) {
@@ -791,7 +754,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const card = (await tdb.execute({
-        sql: "SELECT id, status, stage, assigned_bot, plan_ref, project_id FROM tasks_items WHERE id=?",
+        sql: "SELECT id, status, assigned_bot, plan_ref, project_id FROM tasks_items WHERE id=?",
         args: [id],
       })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
@@ -801,19 +764,16 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql: "SELECT bot_id FROM pi_bot_defs WHERE bot_id=? AND enabled=1", args: [bot],
       })).rows[0];
       if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
-      const eff = effectiveStage(card, false);
-      if (eff !== "backlog" && eff !== "planning") {
-        return res.status(409).json({ reason: "plan dispatch is only legal from Backlog (stage: " + eff + ")" });
+      const def = await resolveBoardDef(tdb, { projectId: card.project_id });
+      if (isTerminal(def, card.status)) {
+        return res.status(409).json({ reason: "card is in a terminal status (" + String(card.status) + ")" });
       }
-      // Same ordering rule as execute: enqueue, THEN flip the stage. A failed
-      // enqueue must not leave the card in 'planning' with nothing planning it.
+      // Like execute: the enqueue IS the dispatch — the card is not written.
+      // Re-planning an in_progress card is an operator call; the lock still
+      // blocks live work.
       const jobId = await enqueueCardJob(cdb, {
         botId: bot, cardId: id, action: "plan",
         goal: "Write an implementation plan for board card #" + id,
-      });
-      await tdb.execute({
-        sql: "UPDATE tasks_items SET stage='planning', status='pending', updated_at=datetime('now') WHERE id=?",
-        args: [id],
       });
       return res.json({ ok: true, dispatched: bot, jobId });
     } catch (e) {
@@ -1017,6 +977,64 @@ export default function botBoardApiRouter(dashboardAuth) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- board settings (Track 0): read + upsert a project board's def ----
+  router.get(P + "/board-def", async (req, res) => {
+    const projectId = req.query.project_id == null || req.query.project_id === "" ? null : Number(req.query.project_id);
+    if (projectId == null || !Number.isInteger(projectId)) return jsonError(res, 400, "bad project_id");
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      const def = await resolveBoardDef(tdb, { projectId });
+      return res.json({
+        project_id: projectId, display_name: def.display_name,
+        status_values: def.status_values, terminal_values: def.terminal_values,
+        fields: def.fields, builtin: def.builtin,
+      });
+    } catch (e) {
+      return jsonError(res, 500, String(e.message || e));
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
+    }
+  });
+
+  router.post(P + "/board-def", async (req, res) => {
+    const b = req.body || {};
+    const projectId = b.project_id == null || b.project_id === "" ? null : Number(b.project_id);
+    if (projectId == null || !Number.isInteger(projectId)) return jsonError(res, 400, "bad project_id");
+    const v = validateDefPayload(b);
+    if (!v.ok) return jsonError(res, 400, v.error);
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      // Config must never orphan data: refuse to drop a status that still has
+      // cards on it. Renames are remove+add and get the same guard — move the
+      // cards on the board first, then remove the value.
+      const keep = new Set(JSON.parse(v.def.status_values));
+      const counts = (await tdb.execute({
+        sql: "SELECT status, COUNT(*) AS n FROM tasks_items WHERE project_id=? GROUP BY status",
+        args: [projectId],
+      })).rows || [];
+      for (const r of counts) {
+        if (!keep.has(String(r.status))) {
+          return jsonError(res, 400, `status '${r.status}' still has ${r.n} card${Number(r.n) === 1 ? "" : "s"} — move them first`);
+        }
+      }
+      await tdb.execute({
+        sql:
+          "INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (?,?,?,?,?) " +
+          "ON CONFLICT(project_id) DO UPDATE SET display_name=excluded.display_name, " +
+          "status_values=excluded.status_values, terminal_values=excluded.terminal_values, " +
+          "fields_json=excluded.fields_json, updated_at=datetime('now')",
+        args: [projectId, v.def.display_name, v.def.status_values, v.def.terminal_values, v.def.fields_json],
+      });
+      return res.json({ ok: true });
+    } catch (e) {
+      return jsonError(res, 500, String(e.message || e));
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 

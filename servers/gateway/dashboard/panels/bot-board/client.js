@@ -63,7 +63,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     api('GET','/card/'+cur.id).then(function(r){
       if(r.ok&&r.j&&r.j.card){var c=r.j.card;
         $('bb-d-title-in').value=c.title||'';
-        $('bb-d-status').value=c.status||'pending';
+        // An off-def status must stay representable: inject it as an option so
+        // Save cannot silently rewrite the card to the first configured value.
+        var ss0=$('bb-d-status'), want=c.status||'pending';
+        if(ss0 && ![].slice.call(ss0.options).some(function(o){return o.value===want;})){
+          ss0.appendChild(optEl(want, want+' (off-board)', false));
+        }
+        $('bb-d-status').value=want;
         $('bb-d-prio').value=c.priority==null?'':String(c.priority);
         $('bb-d-due').value=c.due_date||'';
         $('bb-d-owner').value=c.owner||'';
@@ -469,7 +475,8 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   };
 
   // ---- Search and filter (Feature 1) ----
-  if(TRACKER_TYPE==='custom'){
+  // Track 0: the kanban board adopts the tracker affordances wholesale.
+  if(TRACKER_TYPE==='custom'||TRACKER_TYPE==='kanban'){
     var searchInput=$('bb-search');
     var chips=document.querySelectorAll('.bb-chip');
     var activeStatuses={};
@@ -482,7 +489,10 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       document.querySelectorAll('.bb-col').forEach(function(col){
         colCounts[col.getAttribute('data-col')]={total:0,visible:0};
       });
-      document.querySelectorAll('.bb-card[data-item-type="tracker"]').forEach(function(card){
+      // Mode-aware: kanban card faces carry no data-item-type (same rule as
+      // buildListTable) — the tracker-only selector here counted zero cards on
+      // every kanban board and rewrote all the column headers to 0.
+      document.querySelectorAll(TRACKER_TYPE==='custom'?'.bb-card[data-item-type="tracker"]':'.bb-card').forEach(function(card){
         var matchSearch=!q||(card.getAttribute('data-search-text')||'').indexOf(q)>=0;
         var st=card.getAttribute('data-status');
         var matchStatus=!statusFilterOn()||!!activeStatuses[st];
@@ -607,7 +617,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       thead.appendChild(hr);
       table.appendChild(thead);
       var tbody=document.createElement('tbody');
-      var cards=[].slice.call(document.querySelectorAll('.bb-card[data-item-type="tracker"]'));
+      var cards=[].slice.call(document.querySelectorAll(TRACKER_TYPE==='custom'?'.bb-card[data-item-type="tracker"]':'.bb-card'));
       if(sortKey) cards.sort(function(a,b){
         var va=cardSortVal(a,sortKey),vb=cardSortVal(b,sortKey);
         if(va===vb) return 0;
@@ -639,7 +649,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         tr.onclick=function(){
           var cid=this.getAttribute('data-card');
           var orig=document.querySelector('.bb-card[data-card="'+cid+'"]');
-          if(orig) fillTrackerDrawer(orig);
+          if(orig){ if(TRACKER_TYPE==='custom') fillTrackerDrawer(orig); else fillDrawer(orig); }
         };
         tbody.appendChild(tr);
       });
@@ -701,6 +711,79 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     if(savedView==='list') switchView('list');
   }
 
+  // ---- Board settings drawer (Track 0) ----
+  var cfgDrawer=$('bb-cfg');
+  if(cfgDrawer && $('bb-cfg-open')){
+    function cfgTerminalBoxes(statuses, checked){
+      var wrap=$('bb-cfg-terminals'); clearEl(wrap);
+      statuses.forEach(function(sv){
+        var lb=document.createElement('label'); lb.style.fontWeight='normal';
+        var cb=document.createElement('input'); cb.type='checkbox'; cb.value=sv;
+        cb.checked=checked.indexOf(sv)>=0;
+        lb.appendChild(cb); lb.appendChild(document.createTextNode(' '+sv));
+        wrap.appendChild(lb);
+      });
+    }
+    function cfgStatusList(){
+      return $('bb-cfg-statuses').value.split('\n').map(function(x){return x.trim();}).filter(Boolean);
+    }
+    function cfgFieldRow(f){
+      f=f||{};
+      var row=document.createElement('div'); row.className='bb-cfg-field-row';
+      row.style.cssText='display:flex;gap:.4rem;margin:.25rem 0;align-items:center';
+      function inp(cls,ph,val,w){var i=document.createElement('input');i.type='text';i.className=cls;i.placeholder=ph;i.value=val||'';i.style.width=w;return i;}
+      row.appendChild(inp('bb-cfg-f-key','key',f.key,'8rem'));
+      row.appendChild(inp('bb-cfg-f-label','label',f.label,'9rem'));
+      var sel=document.createElement('select'); sel.className='bb-cfg-f-storage';
+      ['data','column'].forEach(function(v){sel.appendChild(optEl(v,v,(f.storage||'data')===v));});
+      row.appendChild(sel);
+      row.appendChild(inp('bb-cfg-f-options','options (comma-separated)',(f.options||[]).join(', '),'14rem'));
+      var rm=document.createElement('button'); rm.type='button'; rm.className='bb-btn bb-sec'; rm.textContent='\u2715';
+      rm.onclick=function(){row.remove();};
+      row.appendChild(rm);
+      return row;
+    }
+    $('bb-cfg-open').onclick=function(){
+      var pid=cfgDrawer.getAttribute('data-project');
+      msg($('bb-cfg-msg'),'','');
+      api('GET','/board-def?project_id='+encodeURIComponent(pid)).then(function(r){
+        if(!r.ok||!r.j){ msg($('bb-cfg-msg'),(r.j&&r.j.error)||'load failed','err'); return; }
+        $('bb-cfg-name').value=r.j.display_name||'';
+        $('bb-cfg-statuses').value=(r.j.status_values||[]).join('\n');
+        cfgTerminalBoxes(r.j.status_values||[], r.j.terminal_values||[]);
+        var fw=$('bb-cfg-fields'); clearEl(fw);
+        (r.j.fields||[]).forEach(function(f){ fw.appendChild(cfgFieldRow(f)); });
+        openDrawer(cfgDrawer);
+      });
+    };
+    $('bb-cfg-close').onclick=function(){ closeDrawer(cfgDrawer); };
+    $('bb-cfg-statuses').addEventListener('input',function(){
+      var checked=[].slice.call(document.querySelectorAll('#bb-cfg-terminals input:checked')).map(function(c){return c.value;});
+      cfgTerminalBoxes(cfgStatusList(), checked);
+    });
+    $('bb-cfg-addfield').onclick=function(){ $('bb-cfg-fields').appendChild(cfgFieldRow()); };
+    $('bb-cfg-save').onclick=function(){
+      var pid=cfgDrawer.getAttribute('data-project');
+      var fields=[].slice.call(document.querySelectorAll('#bb-cfg .bb-cfg-field-row')).map(function(row){
+        var opts=(row.querySelector('.bb-cfg-f-options').value||'').split(',').map(function(x){return x.trim();}).filter(Boolean);
+        var f={key:row.querySelector('.bb-cfg-f-key').value.trim(),
+               label:row.querySelector('.bb-cfg-f-label').value.trim(),
+               storage:row.querySelector('.bb-cfg-f-storage').value};
+        if(opts.length) f.options=opts;
+        return f;
+      }).filter(function(f){return f.key;});
+      var body={project_id:Number(pid),
+        display_name:$('bb-cfg-name').value.trim(),
+        status_values:cfgStatusList(),
+        terminal_values:[].slice.call(document.querySelectorAll('#bb-cfg-terminals input:checked')).map(function(c){return c.value;}),
+        fields:fields};
+      api('POST','/board-def',body).then(function(r){
+        if(r.ok){ msg($('bb-cfg-msg'),'${tJs("botboard.cfgSaved", lang)}','ok'); setTimeout(reload,400); }
+        else msg($('bb-cfg-msg'),(r.j&&(r.j.error||r.j.reason))||'save failed','err');
+      });
+    };
+  }
+
   // ---- EventSource live overlay ----
   if(window.EventSource){
     var esUrl=null;
@@ -711,6 +794,24 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     }
     if(esUrl){
       var es=new EventSource(esUrl);
+      es.addEventListener('board-config',function(ev){
+        var cfg; try{ cfg=JSON.parse(ev.data); }catch(e){ return; }
+        if(!cfg||!cfg.statuses||!cfg.statuses.length) return;
+        // Compare against the CONFIGURED list stamped at render (data-statuses),
+        // never the rendered columns: off-def cards legitimately add extra
+        // columns, and diffing those against the def would reload forever.
+        var board=document.getElementById('bb-board');
+        var rendered=null;
+        try{ rendered=board?JSON.parse(board.getAttribute('data-statuses')||'null'):null; }catch(e){ rendered=null; }
+        if(rendered && rendered.length && JSON.stringify(rendered)!==JSON.stringify(cfg.statuses)){
+          var now=Date.now(), lastReload=0;
+          try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
+          if(now-lastReload>10000){
+            try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
+            reload();
+          }
+        }
+      });
       es.onmessage=function(ev){
         var d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
         if(!d||!d.cards) return;

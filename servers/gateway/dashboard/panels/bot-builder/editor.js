@@ -533,14 +533,17 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
           sql: "SELECT status, COUNT(*) AS n FROM tasks_items WHERE project_id=? GROUP BY status",
           args: [Number(pid)],
         })).rows || [];
-        const c = { pending: 0, in_progress: 0, done: 0, cancelled: 0 };
-        for (const r of rows) c[r.status] = Number(r.n);
-        const total = c.pending + c.in_progress + c.done + c.cancelled;
+        // Group-by, not a hardcoded four: boards carry per-board status values
+        // now (board_defs), and a custom status must count rather than vanish.
+        let total = 0;
+        const countParts = rows.map((r) => {
+          total += Number(r.n);
+          return `${escapeHtml(String(r.status))} <b>${Number(r.n)}</b>`;
+        }).join(" &middot; ");
         snap =
           `<div class="btb-snapshot">` +
           `<b>Kanban snapshot</b> (project #${escapeHtml(String(pid))}, ${total} cards): ` +
-          `pending <b>${c.pending}</b> &middot; in_progress <b>${c.in_progress}</b> &middot; ` +
-          `done <b>${c.done}</b> &middot; cancelled <b>${c.cancelled}</b>` +
+          (countParts || "no cards") +
           `<br><a href="${boardHref}">Open board &nearr;</a>` +
           `</div>`;
       } catch {

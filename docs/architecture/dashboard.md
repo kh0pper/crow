@@ -119,7 +119,7 @@ Built-in panels live in `servers/gateway/dashboard/panels/`:
 | Settings | `panels/settings.js` | `/dashboard/settings` | Configuration, quotas, network rules, contact discovery, sync-conflict recovery |
 | Contacts | `panels/contacts.js` | `/dashboard/contacts` | Peer contacts, invites, discovery |
 | Bot Builder | `panels/bot-builder.js` | `/dashboard/bot-builder` | Create and configure bots (personas, skills, channels) |
-| Bot Board | `panels/bot-board.js` | `/dashboard/bot-board` | Monitor running bots, conversations, deliveries |
+| Bot Board | `panels/bot-board.js` | `/dashboard/bot-board` | Kanban cards + custom trackers; per-board statuses and fields from `board_defs` in tasks.db (Track 0), configured via the board's settings drawer. `routes/board-defs.js` is the single resolver/validator; a board with no def falls back to the builtin four statuses. Dispatch (execute/plan-dispatch) enqueues onto the job rail and never writes the card — "a bot is working this card" is the lock predicate (`routes/board-lock.js`); the old `stage` lifecycle and its un-strand machinery are gone (migration `0002-board-defs` drops the column and the status CHECK) |
 | Design System | `panels/design-system.js` | `/dashboard/design-system` | Living reference for tokens and components |
 | Onboarding | `panels/onboarding.js` | (hidden) | First-run setup wizard |
 | Connect | `panels/connect.js` | `/dashboard/connect` | Connect-a-client wizard + local MCP token management |

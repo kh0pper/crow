@@ -362,6 +362,21 @@ export default function streamsRouter(dashboardAuth) {
     let timer = null;
     let last = null;
 
+    // Track 0: the board's configured status list rides a SEPARATE named
+    // event, once per stream open — deliberately OUTSIDE the diffed
+    // {cards, locks} payload. Folding it into the default event would make a
+    // def edit a permanent diff on every already-open board: the reload it
+    // triggers re-detects the same difference forever (the exact reload-storm
+    // the html.js tracker-query comment memorializes). The client compares
+    // against its rendered columns and reloads at most once per guard window.
+    if (tdb && Number.isInteger(resolvedProjectId)) {
+      try {
+        const { resolveBoardDef } = await import("./board-defs.js");
+        const def = await resolveBoardDef(tdb, { projectId: resolvedProjectId });
+        sendRaw(`event: board-config\ndata: ${JSON.stringify({ statuses: def.status_values })}\n\n`);
+      } catch { /* config frame is best-effort; the board renders without it */ }
+    }
+
     const closeClients = () => {
       if (tdb) { try { tdb.close(); } catch {} tdb = null; }
       if (cdb) { try { cdb.close(); } catch {} cdb = null; }
