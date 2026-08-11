@@ -142,6 +142,22 @@ test("board renders the configure button and the settings drawer", async () => {
   assert.equal(t("botboard.cfgOpenBtn", "es"), "Configurar tablero");
 });
 
+test("client filter/search machinery is mode-aware — kanban cards match too", async () => {
+  const { clientJs } = await import("../servers/gateway/dashboard/panels/bot-board/client.js");
+  const js = clientJs("scout", "kanban", 7, null, null, "en");
+  // The applyFilters selector must not be tracker-only: kanban faces carry no
+  // data-item-type, and a tracker-only selector zeroes every column count at
+  // load and makes search/chips inert (review finding, client.js:492).
+  const occurrences = js.split("TRACKER_TYPE==='custom'?'.bb-card[data-item-type=\"tracker\"]':'.bb-card'").length - 1;
+  assert.equal(occurrences, 2, "both applyFilters and buildListTable use the mode-aware selector");
+  // The board-config reload check compares against the configured list stamped
+  // at render (data-statuses), never the rendered columns — off-def extras
+  // would otherwise reload the page every 10s forever.
+  assert.ok(js.includes("data-statuses"), "reload check reads the stamped configured list");
+  const rendered = await render(7);
+  assert.ok(rendered.includes('data-statuses='), "render stamps the configured list");
+});
+
 test("no-JS move validates against the def", async () => {
   const calls = [];
   const res = { redirectAfterPost: (u) => calls.push(u) };

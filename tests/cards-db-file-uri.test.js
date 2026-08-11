@@ -171,4 +171,23 @@ test("a plain path still works — the fix must not regress the common case", ()
   assert.equal(B.resetStrandedCardBestEffort(F.tasksDb, 8), false);
 });
 
+test("boardVocab: legacy fallback without board_defs; per-board vocab through a file: URI", () => {
+  // No board_defs table yet → the legacy vocabulary, never a throw.
+  const legacy = TR.boardVocab(7, B.cardsDbForBot("uri-bot"));
+  assert.deepEqual(legacy.terminals, ["done", "cancelled"]);
+
+  const t = new Database(F.tasksDb);
+  t.exec(`CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE,
+    project_id INTEGER UNIQUE, display_name TEXT NOT NULL, status_values TEXT NOT NULL,
+    terminal_values TEXT NOT NULL, fields_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  t.prepare("INSERT INTO board_defs (project_id, display_name, status_values, terminal_values) VALUES (1,'Custom',?,?)")
+    .run('["todo","doing","shipped"]', '["shipped"]');
+  t.close();
+
+  const vocab = TR.boardVocab(7, B.cardsDbForBot("uri-bot"));
+  assert.deepEqual(vocab.statuses, ["todo", "doing", "shipped"]);
+  assert.deepEqual(vocab.terminals, ["shipped"], "the bridge's completion check follows THIS, not the literal 'done'");
+});
+
 test.after(() => rmSync(F.dir, { recursive: true, force: true }));

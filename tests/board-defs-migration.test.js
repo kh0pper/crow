@@ -75,9 +75,19 @@ before(() => {
   beforeRows = t.prepare(`SELECT ${SURVIVING_COLS.join(",")} FROM tasks_items ORDER BY id`).all();
   t.close();
 
+  // A per-project card store at a file: URI (the form production stores),
+  // legacy-shaped — the migration must converge it too (finding: the CHECK
+  // surviving where the cards actually live makes custom statuses unwritable).
+  const PROJ = join(dir, "proj-tasks.db");
+  const pt = new Database(PROJ);
+  pt.exec("CREATE TABLE tasks_recurrence (id INTEGER PRIMARY KEY AUTOINCREMENT, pattern TEXT)");
+  pt.exec(LEGACY_DDL);
+  pt.prepare("INSERT INTO tasks_items (title, status, project_id, stage) VALUES ('project-store card','pending',7,'ready')").run();
+  pt.close();
+
   const c = new Database(CROW);
-  c.exec("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, archived_at TEXT)");
-  c.prepare("INSERT INTO project_spaces (id, name, slug) VALUES (7, 'TEHCY R4', 'tehcy')").run();
+  c.exec("CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, archived_at TEXT, tasks_db_uri TEXT)");
+  c.prepare("INSERT INTO project_spaces (id, name, slug, tasks_db_uri) VALUES (7, 'TEHCY R4', 'tehcy', ?)").run("file:" + PROJ);
   c.close();
 });
 
@@ -85,8 +95,8 @@ function bakFiles() {
   return readdirSync(dir).filter((f) => f.startsWith("tasks.db.bak-0002-"));
 }
 
-test("run(): rebuild drops CHECK and stage, adds data_json, preserves rows", () => {
-  const out = run({ dbPath: CROW, tasksDbPath: TASKS, log: () => {} });
+test("run(): rebuild drops CHECK and stage, adds data_json, preserves rows", async () => {
+  const out = await run({ dbPath: CROW, tasksDbPath: TASKS, log: () => {} });
   assert.ok(!out || !out.deferred, "must not defer when tasks_items exists");
 
   const t = new Database(TASKS);
@@ -139,6 +149,21 @@ test("board_defs seeded per project: four statuses, phase field only where phase
   } finally { t.close(); }
 });
 
+test("a per-project store behind a file: tasks_db_uri is converged too, with its own backup", () => {
+  const p = new Database(join(dir, "proj-tasks.db"));
+  try {
+    const sql = p.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks_items'").get().sql;
+    const cols = p.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
+    assert.ok(!/CHECK\s*\(\s*status/i.test(sql), "project store: CHECK gone");
+    assert.ok(!cols.includes("stage") && cols.includes("data_json"), "project store: converged shape");
+    assert.equal(p.prepare("SELECT title FROM tasks_items WHERE id=1").get().title, "project-store card", "row survived");
+    // A custom status is writable where the cards live — the whole point.
+    p.prepare("INSERT INTO tasks_items (title, status) VALUES ('x','tea_review')").run();
+    p.prepare("DELETE FROM tasks_items WHERE title='x'").run();
+  } finally { p.close(); }
+  assert.ok(readdirSync(dir).some((f) => f.startsWith("proj-tasks.db.bak-0002-")), "project store got its own backup");
+});
+
 test("sidecar backup exists and holds the OLD shape", () => {
   const baks = bakFiles();
   assert.equal(baks.length, 1);
@@ -152,12 +177,12 @@ test("sidecar backup exists and holds the OLD shape", () => {
   } finally { b.close(); }
 });
 
-test("re-run: no second rebuild, no second backup, data still equal, defs untouched", () => {
+test("re-run: no second rebuild, no second backup, data still equal, defs untouched", async () => {
   const t0 = new Database(TASKS);
   t0.prepare("UPDATE board_defs SET display_name='Edited by hand' WHERE project_id=7").run();
   t0.close();
 
-  const out = run({ dbPath: CROW, tasksDbPath: TASKS, log: () => {} });
+  const out = await run({ dbPath: CROW, tasksDbPath: TASKS, log: () => {} });
   assert.ok(!out || !out.deferred);
   assert.equal(bakFiles().length, 1, "idempotent — no second backup/rebuild");
 
@@ -173,13 +198,13 @@ test("re-run: no second rebuild, no second backup, data still equal, defs untouc
   } finally { t.close(); }
 });
 
-test("fresh dir with no tasks_items: {deferred:true}, board_defs still created", () => {
+test("fresh dir with no tasks_items: {deferred:true}, board_defs still created", async () => {
   const d2 = mkdtempSync(join(tmpdir(), "board-defs-mig-fresh-"));
   const t2 = join(d2, "tasks.db");
   const c2 = join(d2, "crow.db");
   new Database(t2).close(); // empty db file, no tables
   new Database(c2).close();
-  const out = run({ dbPath: c2, tasksDbPath: t2, log: () => {} });
+  const out = await run({ dbPath: c2, tasksDbPath: t2, log: () => {} });
   assert.equal(out && out.deferred, true);
   const t = new Database(t2);
   try {

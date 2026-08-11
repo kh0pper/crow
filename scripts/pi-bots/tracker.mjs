@@ -43,6 +43,33 @@ export function cardStatus(cardId, tasksDbPath) {
   return r ? r.status : null;
 }
 
+// Track 0: statuses and terminal-ness are per-board (board_defs). The bridge
+// must not hardcode 'done' — a custom board's terminal is whatever its def
+// says. Every failure mode (no card, no project, no board_defs table, corrupt
+// JSON) falls back to the legacy vocabulary, which is also the builtin default.
+const LEGACY_VOCAB = Object.freeze({
+  statuses: Object.freeze(["pending", "in_progress", "done", "cancelled"]),
+  terminals: Object.freeze(["done", "cancelled"]),
+});
+
+export function boardVocab(cardId, tasksDbPath) {
+  try {
+    const t = db(tasksDbPath || TASKS_DB);
+    try {
+      const card = t.prepare("SELECT project_id FROM tasks_items WHERE id=?").get(cardId);
+      if (!card || card.project_id == null) return LEGACY_VOCAB;
+      const row = t.prepare("SELECT status_values, terminal_values FROM board_defs WHERE project_id=?").get(card.project_id);
+      if (!row) return LEGACY_VOCAB;
+      const statuses = JSON.parse(row.status_values);
+      const terminals = JSON.parse(row.terminal_values);
+      if (!Array.isArray(statuses) || !statuses.length || !Array.isArray(terminals)) return LEGACY_VOCAB;
+      return { statuses: statuses.map(String), terminals: terminals.map(String) };
+    } finally { t.close(); }
+  } catch {
+    return LEGACY_VOCAB;
+  }
+}
+
 function kanbanContext(projectId, tasksDbPath) {
   return "Kanban:\n" + kanbanText(projectId, tasksDbPath);
 }
