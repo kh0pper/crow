@@ -457,16 +457,18 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT id, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT id, status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
       const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
       if (!isValidStatus(def, "cancelled")) {
         return jsonError(res, 400, "this board has no cancelled status");
       }
-      await tdb.execute({
-        sql: "UPDATE tasks_items SET status='cancelled', completed_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
-        args: [id],
-      });
+      // completed_at follows the def's terminal-ness, same transition rule as
+      // move/edit — a board may legally list 'cancelled' as non-terminal.
+      const sets = ["status='cancelled'", "updated_at=datetime('now')"];
+      if (isTerminal(def, "cancelled") && !isTerminal(def, String(cur.status))) sets.push("completed_at=datetime('now')");
+      else if (!isTerminal(def, "cancelled") && isTerminal(def, String(cur.status))) sets.push("completed_at=NULL");
+      await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [id] });
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));

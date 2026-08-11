@@ -489,7 +489,10 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       document.querySelectorAll('.bb-col').forEach(function(col){
         colCounts[col.getAttribute('data-col')]={total:0,visible:0};
       });
-      document.querySelectorAll('.bb-card[data-item-type="tracker"]').forEach(function(card){
+      // Mode-aware: kanban card faces carry no data-item-type (same rule as
+      // buildListTable) — the tracker-only selector here counted zero cards on
+      // every kanban board and rewrote all the column headers to 0.
+      document.querySelectorAll(TRACKER_TYPE==='custom'?'.bb-card[data-item-type="tracker"]':'.bb-card').forEach(function(card){
         var matchSearch=!q||(card.getAttribute('data-search-text')||'').indexOf(q)>=0;
         var st=card.getAttribute('data-status');
         var matchStatus=!statusFilterOn()||!!activeStatuses[st];
@@ -794,8 +797,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       es.addEventListener('board-config',function(ev){
         var cfg; try{ cfg=JSON.parse(ev.data); }catch(e){ return; }
         if(!cfg||!cfg.statuses||!cfg.statuses.length) return;
-        var rendered=[].slice.call(document.querySelectorAll('.bb-col[data-col]')).map(function(c){return c.getAttribute('data-col');});
-        if(rendered.length && JSON.stringify(rendered)!==JSON.stringify(cfg.statuses)){
+        // Compare against the CONFIGURED list stamped at render (data-statuses),
+        // never the rendered columns: off-def cards legitimately add extra
+        // columns, and diffing those against the def would reload forever.
+        var board=document.getElementById('bb-board');
+        var rendered=null;
+        try{ rendered=board?JSON.parse(board.getAttribute('data-statuses')||'null'):null; }catch(e){ rendered=null; }
+        if(rendered && rendered.length && JSON.stringify(rendered)!==JSON.stringify(cfg.statuses)){
           var now=Date.now(), lastReload=0;
           try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
           if(now-lastReload>10000){

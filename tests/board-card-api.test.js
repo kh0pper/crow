@@ -208,6 +208,23 @@ test("board-def endpoints: GET resolves (builtin + custom), POST upserts through
   t3.close();
 });
 
+test("cancel on a board where 'cancelled' is NON-terminal does not stamp completed_at", async () => {
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  t.prepare("INSERT INTO board_defs (project_id, display_name, status_values, terminal_values) VALUES (11,'NT',?,?)")
+    .run('["open","cancelled","archived"]', '["archived"]');
+  t.prepare("INSERT INTO tasks_items (id, title, project_id, status) VALUES (40,'nt card',11,'open')").run();
+  t.close();
+  const ok = await fetch(base + "/card/40/cancel", { method: "POST" });
+  assert.equal(ok.status, 200);
+  const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = t2.prepare("SELECT status, completed_at FROM tasks_items WHERE id=40").get();
+  t2.prepare("DELETE FROM tasks_items WHERE id=40").run();
+  t2.prepare("DELETE FROM board_defs WHERE project_id=11").run();
+  t2.close();
+  assert.equal(row.status, "cancelled");
+  assert.equal(row.completed_at, null, "non-terminal cancel must not fabricate a completion timestamp");
+});
+
 test("cancel: 400 on a board without 'cancelled', works on the builtin board", async () => {
   const bad = await fetch(base + "/card/3/cancel", { method: "POST" });
   assert.equal(bad.status, 400);

@@ -254,6 +254,30 @@ family, but memory-sync subsystem; it gets its own spec in this arc, sequenced b
 and the fix must be general to any stdio-mounted server); design tokens, Perch ownership flip,
 and all repaint work (Track 2); the roost / board×Perch merge (Track 3).
 
+## Known limits accepted in Phase A (reviewed, reasoned, deferred)
+
+The whole-branch review confirmed these and they are deliberately NOT fixed here:
+
+- **A bot-written `in_progress` survives a dead worker as data, not as a lock.** The job going
+  terminal releases the lock and logs loudly ("card N is unlocked — if it reads in_progress,
+  nothing is working it"); recovery is re-dispatch or a human move. Machinery un-writing a
+  bot-written status is the inversion PR #277's v1 was reverted for; Track 1's result/approval
+  model owns the real answer.
+- **Declared `data`-storage fields render but have no card-level value editor yet.** The settings
+  drawer defines them and card faces display them; values arrive today via the API's edit
+  endpoint or Phase B's tracker convergence (whose items carry data_json natively). The card
+  drawer grows per-field inputs in Phase B, where both card kinds share one drawer.
+- **The `board-config` SSE frame is emitted once at stream open** — an already-open second
+  browser learns of a def edit on reconnect or next reload, by design (the frame exists to catch
+  drift, not to live-sync config).
+- **Re-saving a builtin board's settings makes it a configured board** (`builtin` false, raw
+  labels instead of the i18n'd four). Opening the settings drawer and saving IS opting into
+  configuration; the fallback def exists for boards nobody configured.
+- **`boardVocab` (the bridge's per-board vocabulary read) resolves `board_defs` from the store it
+  is handed.** For the live fleet that is the instance-global tasks.db; a hypothetical divergent
+  per-project store without its own defs falls back to the legacy vocabulary — conservative, and
+  moot until Phase B unifies store topology.
+
 ## Testing and rollout
 
 - Migration tests for `0002`: legacy-shaped db (CHECK + stage + r4-shaped rows incl. phase) →

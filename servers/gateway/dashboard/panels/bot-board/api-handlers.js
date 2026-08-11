@@ -40,13 +40,13 @@ export async function handleBotBoardPost(req, res, { db }) {
       if (!isValidStatus(def, status)) {
         return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
       }
-      const done = isTerminal(def, status);
-      await tdb.execute({
-        sql:
-          "UPDATE tasks_items SET status=?, updated_at=datetime('now'), " +
-          "completed_at=" + (done ? "datetime('now')" : "NULL") + " WHERE id=?",
-        args: [status, cardId],
-      });
+      // Same TRANSITION rule as the JSON API: stamp on entering a terminal,
+      // clear on leaving one, untouched otherwise (a terminal→terminal move
+      // must not refresh the original completion time).
+      const sets = ["status=?", "updated_at=datetime('now')"];
+      if (isTerminal(def, status) && !isTerminal(def, String(cur.status))) sets.push("completed_at=datetime('now')");
+      else if (!isTerminal(def, status) && isTerminal(def, String(cur.status))) sets.push("completed_at=NULL");
+      await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [status, cardId] });
     } catch {
       return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=move_failed`);
     } finally {

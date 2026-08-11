@@ -136,7 +136,7 @@
 
 **Interfaces:**
 - Consumes: `isTerminal`, `resolveBoardDef` (Task 1).
-- Produces: `execute` gate = `!locked && !isTerminal(def, card.status) && card.assigned_bot && planExists` (planExists via the existing `resolveCardPlan`/`existsSync` block already in the handler); after `enqueueCardJob` there is **no** tasks_items UPDATE. plan-dispatch gate, stated explicitly (review): `!locked && !isTerminal(def, card.status) && card.assigned_bot` — note this legalizes plan-dispatch on an `in_progress` card (old gate refused it via stage∈{backlog,planning}); that is intended: re-planning a card someone marked in_progress is an operator call, and the lock still blocks live work. The route's pre-enqueue `stage='planning', status='pending'` write (~814-817) is deleted along with execute's.
+- Produces: `execute` gate = `!locked && !isTerminal(def, card.status) && card.assigned_bot` — the plan-file requirement was dropped during execution (spec §D-T0.2 records the reasoning: the explicit-ready path never checked it and zero plan files exist on any live card, so requiring it would refuse every real dispatch); after `enqueueCardJob` there is **no** tasks_items UPDATE. plan-dispatch gate, stated explicitly (review): `!locked && !isTerminal(def, card.status) && card.assigned_bot` — note this legalizes plan-dispatch on an `in_progress` card (old gate refused it via stage∈{backlog,planning}); that is intended: re-planning a card someone marked in_progress is an operator call, and the lock still blocks live work. The route's pre-enqueue `stage='planning', status='pending'` write (~814-817) is deleted along with execute's.
 
 - [ ] **Step 1: Write the replacement tests first** (in `tests/board-dispatch-job-rail.test.js`):
 

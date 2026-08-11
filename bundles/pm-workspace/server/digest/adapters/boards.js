@@ -30,17 +30,36 @@ async function kanbanSection(config) {
       return section;
     }
 
-    const open = await tdb.execute({
-      sql: `SELECT id, title, status, priority, due_date, phase
+    // "Open" is per-board (Track 0: board_defs carries each board's terminal
+    // set; the frozen 'pending'/'in_progress' pair only describes the builtin
+    // board). Candidates come from SQL; terminal-ness filters in JS against
+    // the resolved per-project sets. "Recently completed" needs no status
+    // literal at all — completed_at is stamped exactly on entry into a
+    // terminal status, whatever that board calls it.
+    const terminalsByProject = new Map();
+    try {
+      for (const r of (await tdb.execute({ sql: "SELECT project_id, terminal_values FROM board_defs WHERE project_id IS NOT NULL", args: [] })).rows || []) {
+        try { terminalsByProject.set(Number(r.project_id), JSON.parse(r.terminal_values).map(String)); } catch { /* corrupt row → legacy */ }
+      }
+    } catch { /* board_defs absent (pre-0002) → legacy terminals everywhere */ }
+    const LEGACY_TERMINALS = ["done", "cancelled"];
+    const isOpen = (row) => {
+      const terms = (row.project_id != null && terminalsByProject.get(Number(row.project_id))) || LEGACY_TERMINALS;
+      return !terms.includes(String(row.status));
+    };
+
+    const candidates = await tdb.execute({
+      sql: `SELECT id, title, status, priority, due_date, phase, project_id
             FROM tasks_items
-            WHERE status IN ('pending','in_progress') AND due_date IS NOT NULL
+            WHERE due_date IS NOT NULL
               AND date(due_date) <= date('now', '+3 days')
-            ORDER BY due_date ASC LIMIT 15`,
+            ORDER BY due_date ASC LIMIT 60`,
       args: [],
     });
+    const open = { rows: (candidates.rows || []).filter(isOpen).slice(0, 15) };
     const done = await tdb.execute({
       sql: `SELECT id, title, completed_at FROM tasks_items
-            WHERE status = 'done' AND completed_at >= datetime('now', '-1 day')
+            WHERE completed_at IS NOT NULL AND completed_at >= datetime('now', '-1 day')
             ORDER BY completed_at DESC LIMIT 10`,
       args: [],
     });

@@ -165,7 +165,8 @@ export async function recoverStaleClaims(log = () => {}, { bridge = null } = {})
       } else {
         c.prepare("UPDATE bot_jobs SET status='failed', error=?, ended_at=datetime('now') WHERE job_id=?")
           .run("abandoned: worker died, max attempts reached", r.job_id);
-        log(`job ${r.job_id} failed — abandoned, ${r.attempts} attempts`);
+        log(`job ${r.job_id} failed — abandoned, ${r.attempts} attempts` +
+          (r.card_id != null ? `; card ${r.card_id} is unlocked — if it reads in_progress, nothing is working it` : ""));
       }
     }
   } finally { c.close(); }
@@ -425,6 +426,13 @@ async function runAndFinalize(job, { log = () => {}, bridge = null } = {}) {
     outcome = { status: "failed", result: null, error: String((e && e.message) || e), tool_calls: null, pi_session_id: null };
   }
   finalizeJob(job.job_id, outcome);
+  if (outcome.status === "failed" && job.card_id != null) {
+    // Track 0: no card rescue (dispatch never wrote the card) — but the BOT
+    // may have written in_progress before dying, and an unlocked in-progress
+    // card looks exactly like live work. Say so, loudly, so the operator
+    // re-dispatches or moves it instead of waiting on nothing.
+    log(`job ${job.job_id} failed — card ${job.card_id} is unlocked; if it reads in_progress, nothing is working it (re-dispatch or move it)`);
+  }
   return outcome;
 }
 

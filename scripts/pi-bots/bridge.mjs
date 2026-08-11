@@ -26,7 +26,7 @@ import { join, dirname } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
-import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType } from "./tracker.mjs";
+import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab } from "./tracker.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
@@ -603,10 +603,12 @@ export async function handleInbound(opts) {
 
   if (wantCard != null) {
     const st = cardStatus(wantCard, tasksDbPath);
-    if (st === "done") {
-      log("card " + wantCard + " already done — no re-exec");
+    // Terminal-ness is per-board (Track 0): a custom board's finished status
+    // is whatever its def declares, not the literal 'done'.
+    if (st != null && boardVocab(wantCard, tasksDbPath).terminals.includes(String(st))) {
+      log("card " + wantCard + " already terminal ('" + st + "') — no re-exec");
       if (!session) session = upsertSession({ bot_id, gateway_thread_id, gateway_type, project_id: projectId, status: "waiting-user" });
-      await sendReply("Card #" + wantCard + " is already done — nothing to do.");
+      await sendReply("Card #" + wantCard + " is already " + st + " — nothing to do.");
       return { action: "noop-done", cardId: wantCard };
     }
   }
@@ -660,11 +662,19 @@ export async function handleInbound(opts) {
   let promptText;
   if (cardId != null) {
     // Explicit card reference — full work-the-card workflow.
+    // The status instruction follows the card's BOARD vocabulary (Track 0):
+    // hardcoding 'in_progress, then done' writes off-def values onto custom
+    // boards through the tasks_* door, which no longer has a CHECK behind it.
+    const vocab = boardVocab(cardId, tasksDbPath);
+    const working = vocab.statuses.includes("in_progress") ? "in_progress"
+      : (vocab.statuses.find((v) => !vocab.terminals.includes(v)) || vocab.statuses[0]);
+    const finished = vocab.terminals.includes("done") ? "done" : (vocab.terminals[0] || vocab.statuses[vocab.statuses.length - 1]);
     promptText = projectHeader + "\n\nWork the following card.\n\nCARD #" + cardId +
-      " (current board status: " + cardStatus(cardId, tasksDbPath) + ").\nPLAN FILE (" + plan.path + "):\n---\n" +
+      " (current board status: " + cardStatus(cardId, tasksDbPath) + "; this board's statuses: " + vocab.statuses.join(", ") + ").\nPLAN FILE (" + plan.path + "):\n---\n" +
       (plan.text || "(plan file missing)") + "\n---\n\nUser said: \"" + cleanMsg + "\"\n\n" +
       "Do the work the plan describes. Use the tasks_* tools (scoped to project " + projectId +
-      ") to set this card in_progress, then done. Use the write/edit tools to record your result " +
+      ") to set this card " + working + ", then " + finished + " (only ever use this board's statuses). " +
+      "Use the write/edit tools to record your result " +
       "under the plan file's \"## Result\" section. When finished, reply with a short summary for " +
       "the gateway thread. One card only.";
   } else {
@@ -738,8 +748,11 @@ export async function handleInbound(opts) {
     postTurn = { user: cleanMsg, assistant: text, toolNames: calls.map((c) => c.tool) };
     const newCardStatus = cardId != null ? cardStatus(cardId, tasksDbPath) : null;
     // Track 0: the bot's own status write IS the record — there is no stage
-    // column to reconcile onto any more.
-    const status = newCardStatus === "done" ? "done" : "waiting-user";
+    // column to reconcile onto any more. "Finished" is per-board terminal-ness,
+    // not the literal 'done': a session left at waiting-user LOCKS the card
+    // (SESSION_LOCK_STATUSES), which must never happen to completed work.
+    const status = (newCardStatus != null && boardVocab(cardId, tasksDbPath).terminals.includes(String(newCardStatus)))
+      ? "done" : "waiting-user";
     session.pi_session_id = piSessionId;
     session.status = status; session.control = "run";
     session.model = resolved.key; session.escalated = resolved.escalated ? 1 : 0;
