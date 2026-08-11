@@ -178,3 +178,19 @@ test("no-JS move validates against the def", async () => {
     t2.close();
   } finally { db.close(); }
 });
+
+test("emitted client script parses as JavaScript in both board modes", async () => {
+  // The client script is emitted from a template literal, where a single-escaped
+  // sequence like '\n' becomes a REAL newline inside a quoted string in the
+  // browser — one SyntaxError kills the whole script: no bb-js class (the no-JS
+  // move buttons stay visible), no card-click drawer, no filters. Caught live on
+  // r4 2026-08-11 (Configure-drawer split('\n')). Parse what we actually serve.
+  const { clientJs } = await import("../servers/gateway/dashboard/panels/bot-board/client.js");
+  for (const [label, js] of [
+    ["kanban", clientJs("scout", "kanban", 7, null, null, "en")],
+    ["tracker", clientJs("scout", "custom", null, "pir", [{ key: "phase", label: "Phase" }], "es")],
+  ]) {
+    const body = js.replace(/^<script>/, "").replace(/<\/script>$/, "");
+    assert.doesNotThrow(() => new Function(body), `${label} client script must parse`);
+  }
+});
