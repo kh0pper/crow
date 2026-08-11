@@ -102,7 +102,7 @@ test("force-unlock releases a card held by a queued job, and the card is workabl
   // Precondition: the card really is locked — an ordinary write is refused.
   const blocked = await fetch(base + "/card/1/move", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stage: "ready" }),
+    body: JSON.stringify({ status: "pending" }),
   });
   assert.equal(blocked.status, 409, "a queued job must lock the card against writes");
 
@@ -133,9 +133,16 @@ test("force-unlock releases a card held by a queued job, and the card is workabl
   // And the same write that was refused above now goes through.
   const nowOk = await fetch(base + "/card/1/move", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stage: "ready" }),
+    body: JSON.stringify({ status: "pending" }),
   });
   assert.equal(nowOk.status, 200, "the lock must actually be gone");
+
+  // Execute's gate still requires stage='ready' until Task 4 deletes the stage
+  // machine; seed it directly (the move-by-stage rail that used to do this is
+  // already gone).
+  const tReady = tasksDb();
+  tReady.prepare("UPDATE tasks_items SET stage='ready' WHERE id=1").run();
+  tReady.close();
 
   // Dispatch enqueues a job now — nothing is spawned, so the old
   // CROW_BOARD_DISPATCH_DRYRUN seam is gone with the spawn it guarded.
@@ -297,7 +304,7 @@ test("a running job with a live pi is refused, and clearing it never rewrites th
   // ...and the card is still locked, by the other rail, which keeps its own gates.
   const stillLocked = await fetch(base + "/card/8/move", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stage: "ready" }),
+    body: JSON.stringify({ status: "pending" }),
   });
   assert.equal(stillLocked.status, 409);
 });
