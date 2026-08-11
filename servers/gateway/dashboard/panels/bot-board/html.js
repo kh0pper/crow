@@ -357,7 +357,16 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
   const byStatus = {};
   for (const sv of def.status_values) byStatus[sv] = [];
   for (const c of cards) (byStatus[c.status] || (byStatus[c.status] = [])).push(c);
-  const columns = def.status_values.map((st) => {
+  // A card is NEVER hidden by configuration: statuses present in the data but
+  // absent from the def (the stdio door and the bridge still write legacy
+  // values, and the CHECK that used to stop them is gone) render as extra
+  // columns after the configured ones — also what makes the /board-def
+  // no-orphan refusal actionable, since the named cards are visible to move.
+  const columnOrder = [
+    ...def.status_values,
+    ...Object.keys(byStatus).filter((s) => !def.status_values.includes(s) && byStatus[s].length),
+  ];
+  const columns = columnOrder.map((st) => {
     const list = byStatus[st] || [];
     const cardsHtml = list.length
       ? list.map((c) => cardFaceHtml(c, !!lockMap.get(Number(c.id)), lang, def)).join("")
@@ -368,7 +377,7 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
       `<div class="bb-col-body" data-col-body="${escapeHtml(st)}">${cardsHtml}</div></div>`;
   }).join("");
 
-  const boardHtml = `<div class="bb-board" id="bb-board" style="--bb-cols:${def.status_values.length || 1}">${columns}</div>` +
+  const boardHtml = `<div class="bb-board" id="bb-board" style="--bb-cols:${columnOrder.length || 1}">${columns}</div>` +
     `<div id="bb-list-wrap" style="display:none"></div>`;
 
   // The tracker path's affordances, adopted (Track 0): search, status chips,

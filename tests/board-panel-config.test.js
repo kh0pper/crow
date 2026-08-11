@@ -110,6 +110,26 @@ test("drawer status options come from the def, not the hardcoded four", async ()
   assert.ok(builtin.includes('<option value="pending">'), "builtin drawer keeps the four");
 });
 
+test("a card whose status is off the def still renders — extra column, never hidden", async () => {
+  // Reachable today: the stdio tasks door and the bridge's own prompt write
+  // legacy statuses ('pending'/'done') onto boards configured without them,
+  // and the CHECK that used to stop them is gone. Hiding the card would also
+  // deadlock /board-def saves (the no-orphan guard names a card nobody can see).
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  t.prepare("INSERT INTO tasks_items (id, title, project_id, status) VALUES (99,'stray legacy card',7,'pending')").run();
+  t.close();
+  try {
+    const html = await render(7);
+    assert.ok(html.includes('data-col="pending"'), "off-def status gets its own column");
+    assert.ok(html.includes("stray legacy card"), "the card itself is visible");
+    assert.ok(html.includes("--bb-cols:4"), "column count includes the extra column");
+  } finally {
+    const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
+    t2.prepare("DELETE FROM tasks_items WHERE id=99").run();
+    t2.close();
+  }
+});
+
 test("board renders the configure button and the settings drawer", async () => {
   const html = await render(7);
   assert.ok(html.includes('id="bb-cfg-open"'), "configure button");
