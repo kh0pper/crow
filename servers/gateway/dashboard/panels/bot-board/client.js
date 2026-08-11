@@ -725,7 +725,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       });
     }
     function cfgStatusList(){
-      return $('bb-cfg-statuses').value.split('\n').map(function(x){return x.trim();}).filter(Boolean);
+      return $('bb-cfg-statuses').value.split('\\n').map(function(x){return x.trim();}).filter(Boolean);
     }
     function cfgFieldRow(f){
       f=f||{};
@@ -749,7 +749,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       api('GET','/board-def?project_id='+encodeURIComponent(pid)).then(function(r){
         if(!r.ok||!r.j){ msg($('bb-cfg-msg'),(r.j&&r.j.error)||'load failed','err'); return; }
         $('bb-cfg-name').value=r.j.display_name||'';
-        $('bb-cfg-statuses').value=(r.j.status_values||[]).join('\n');
+        $('bb-cfg-statuses').value=(r.j.status_values||[]).join('\\n');
         cfgTerminalBoxes(r.j.status_values||[], r.j.terminal_values||[]);
         var fw=$('bb-cfg-fields'); clearEl(fw);
         (r.j.fields||[]).forEach(function(f){ fw.appendChild(cfgFieldRow(f)); });
