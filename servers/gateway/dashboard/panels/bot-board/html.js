@@ -15,7 +15,7 @@ import {
   TASKS_DB, STATUS_BADGE,
   lockMapFor, derivePlanPath, readPlan, statusLabel,
 } from "./data-queries.js";
-import { DEFAULT_BOARD_DEF, resolveBoardDef } from "../../../routes/board-defs.js";
+import { DEFAULT_BOARD_DEF, resolveBoardDef, resolveSlugBoardDef } from "../../../routes/board-defs.js";
 
 // Display: configured values render raw (tracker-style); only the builtin
 // fallback def keeps the i18n'd four.
@@ -417,16 +417,18 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
     });
   }
 
-  // Look up tracker_defs
+  // Look up the slug board def — tasks.db's board_defs (Track 0 Phase B),
+  // same store and resolver family the kanban path uses. A missing def has
+  // no builtin fallback: null keeps the existing "tracker not found" branch.
   let trackerDef = null;
+  let tdb;
   try {
-    trackerDef = (await db.execute({
-      sql: "SELECT id, slug, display_name, columns_json, status_values FROM tracker_defs WHERE slug=?",
-      args: [trackerSlug],
-    })).rows[0] || null;
+    tdb = createDbClient(TASKS_DB);
+    trackerDef = await resolveSlugBoardDef(tdb, trackerSlug);
   } catch { trackerDef = null; }
 
   if (!trackerDef) {
+    if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
     return layout({
       title: `Bot Board — ${selBot.displayName}`,
       content: botBoardStyles() + section(
@@ -436,34 +438,32 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
     });
   }
 
-  let statusValues = [];
-  try { statusValues = JSON.parse(trackerDef.status_values || "[]"); } catch { statusValues = []; }
+  const statusValues = trackerDef.status_values;
 
-  // Use bot's tracker_config.context_fields for card face display (not all columns)
+  // Use bot's tracker_config.context_fields for card face display (not all
+  // fields); fall back to the def's own declared fields when the bot has
+  // none configured.
   const botContextFields = (selBot.definition && selBot.definition.tracker_config && selBot.definition.tracker_config.context_fields) || [];
-  // Fall back to columns_json if bot has no context_fields configured
-  let contextFields = botContextFields.length > 0 ? botContextFields : [];
-  if (!contextFields.length) {
-    try { contextFields = JSON.parse(trackerDef.columns_json || "[]"); } catch { contextFields = []; }
-  }
+  const contextFields = botContextFields.length > 0 ? botContextFields : trackerDef.fields;
 
-  // Query tracker_items for this tracker. The tracker is the unit of
-  // display: items written by external feeds (e.g. a mirror sync) carry
-  // bot_id NULL, and the live stream + bot-board-api already query by
-  // tracker alone — filtering by bot here rendered those boards empty
-  // while the stream kept reporting rows, which the client read as a
-  // permanent diff (reload loop).
+  // Query tasks_items for this board. The board is the unit of display:
+  // items written by external feeds (e.g. a mirror sync) carry bot_id NULL,
+  // and the live stream + bot-board-api already query by board alone —
+  // filtering by bot here rendered those boards empty while the stream kept
+  // reporting rows, which the client read as a permanent diff (reload loop).
   let items = [];
   try {
-    items = (await db.execute({
+    items = (await tdb.execute({
       sql:
-        "SELECT id, tracker_id, bot_id, status, priority, label, data_json, action_needed, " +
+        "SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed, " +
         "next_followup_date, processing_lease, processing_lease_status, " +
         "datetime(created_at) AS created_at, datetime(updated_at) AS updated_at " +
-        "FROM tracker_items WHERE tracker_id=? ORDER BY priority ASC, id ASC",
+        "FROM tasks_items WHERE board_id=? ORDER BY priority ASC, id ASC",
       args: [trackerDef.id],
     })).rows || [];
-  } catch { items = []; }
+  } catch { items = []; } finally {
+    if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+  }
 
   // Build columns from statusValues
   const byStatus = {};

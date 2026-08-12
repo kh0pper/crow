@@ -63,22 +63,22 @@ export async function handleBotBoardPost(req, res, { db }) {
     if (!Number.isInteger(itemId) || !status) {
       return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
     }
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
+      tdb = createDbClient(TASKS_DB);
       // Check lock
-      const cur = (await cdb.execute({
-        sql: "SELECT processing_lease_status, tracker_id FROM tracker_items WHERE id=?",
+      const cur = (await tdb.execute({
+        sql: "SELECT processing_lease_status, board_id FROM tasks_items WHERE id=?",
         args: [itemId],
       })).rows[0];
       if (!cur) return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
       if (String(cur.processing_lease_status) === "in-progress") {
         return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=locked`);
       }
-      // Validate status against tracker_defs.status_values
-      const tdef = (await cdb.execute({
-        sql: "SELECT status_values FROM tracker_defs WHERE id=?",
-        args: [cur.tracker_id],
+      // Validate status against board_defs.status_values
+      const tdef = (await tdb.execute({
+        sql: "SELECT status_values FROM board_defs WHERE id=?",
+        args: [cur.board_id],
       })).rows[0];
       if (tdef) {
         const allowed = JSON.parse(tdef.status_values || "[]");
@@ -86,14 +86,14 @@ export async function handleBotBoardPost(req, res, { db }) {
           return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
         }
       }
-      await cdb.execute({
-        sql: "UPDATE tracker_items SET status=?, updated_at=datetime('now') WHERE id=?",
+      await tdb.execute({
+        sql: "UPDATE tasks_items SET status=?, updated_at=datetime('now') WHERE id=?",
         args: [status, itemId],
       });
     } catch {
       return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=move_failed`);
     } finally {
-      if (cdb) { try { cdb.close(); } catch { /* already closed */ } }
+      if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
     }
     return res.redirectAfterPost(`/dashboard/bot-board${botQ}`);
   }
