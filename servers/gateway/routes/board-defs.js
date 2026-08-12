@@ -78,6 +78,36 @@ export async function resolveBoardDef(tdb, { projectId } = {}) {
   }
 }
 
+/**
+ * Resolve a slug (tracker-style) board. Returns the parsed def or NULL —
+ * slug boards have no builtin fallback; a missing def is "tracker not found".
+ * Never throws.
+ */
+export async function resolveSlugBoardDef(tdb, slug) {
+  const s = typeof slug === "string" ? slug.trim() : "";
+  if (!s) return null;
+  let row;
+  try {
+    row = (await tdb.execute({
+      sql: "SELECT id, slug, project_id, display_name, status_values, terminal_values, fields_json FROM board_defs WHERE slug=?",
+      args: [s],
+    })).rows[0];
+  } catch { return null; }
+  if (!row) return null;
+  try {
+    const status_values = parseArray(row.status_values);
+    if (!status_values.length) return null;
+    const terminal_values = parseArray(row.terminal_values);
+    const fields = JSON.parse(row.fields_json || "[]");
+    if (!Array.isArray(fields)) return null;
+    return {
+      id: Number(row.id), project_id: null, slug: String(row.slug),
+      display_name: String(row.display_name || row.slug),
+      status_values, terminal_values, fields, builtin: false,
+    };
+  } catch { return null; }
+}
+
 export function isValidStatus(def, v) {
   return v != null && def.status_values.includes(String(v));
 }
