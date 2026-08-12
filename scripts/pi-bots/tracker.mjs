@@ -9,7 +9,7 @@
  * tracker_config.type:
  *   "kanban"    — existing tasks_items board (default when absent)
  *   "task-list" — same data as kanban, flat checklist render
- *   "custom"    — tracker_defs + tracker_items in crow.db
+ *   "custom"    — board_defs (slug rows) + tasks_items(board_id=...) in tasks.db
  *   "none"      — no tracker context injected
  */
 import Database from "better-sqlite3";
@@ -92,17 +92,17 @@ function taskListContext(projectId, tasksDbPath) {
   return "Task list:\n" + lines.join("\n");
 }
 
-// ── custom tracker (tracker_defs + tracker_items in crow.db) ───────
+// ── custom tracker (board_defs slug rows + tasks_items in tasks.db) ─
 
-function customTrackerContext(trackerSlug, contextFields, queueFilter) {
-  const c = db(CROW_DB);
-  const def = c.prepare("SELECT id, display_name, columns_json, status_values FROM tracker_defs WHERE slug=?").get(trackerSlug);
-  if (!def) { c.close(); return "(tracker '" + trackerSlug + "' not found)"; }
+function customTrackerContext(trackerSlug, contextFields, queueFilter, tasksDbPath) {
+  const t = db(tasksDbPath || TASKS_DB);
+  const def = t.prepare("SELECT id, display_name, fields_json, status_values FROM board_defs WHERE slug=?").get(trackerSlug);
+  if (!def) { t.close(); return "(tracker '" + trackerSlug + "' not found)"; }
 
-  let rows = c.prepare(
-    "SELECT id, status, priority, label, data_json, action_needed, processing_lease_status FROM tracker_items WHERE tracker_id=? ORDER BY priority ASC, id ASC"
+  let rows = t.prepare(
+    "SELECT id, status, priority, title AS label, data_json, action_needed, processing_lease_status FROM tasks_items WHERE board_id=? ORDER BY priority ASC, id ASC"
   ).all(def.id);
-  c.close();
+  t.close();
 
   if (queueFilter && typeof queueFilter === "object") {
     rows = rows.filter((r) => {
@@ -155,7 +155,7 @@ export function getTrackerContext(def, projectId, tasksDbPath) {
       return taskListContext(tc.project_id != null ? tc.project_id : projectId, tasksDbPath);
     case "custom":
       if (!tc.tracker_slug) return "(tracker_config.type=custom but no tracker_slug set)";
-      return customTrackerContext(tc.tracker_slug, tc.context_fields, tc.queue_filter);
+      return customTrackerContext(tc.tracker_slug, tc.context_fields, tc.queue_filter, tasksDbPath);
     case "kanban":
     default:
       return kanbanContext(tc.project_id != null ? tc.project_id : projectId, tasksDbPath);
