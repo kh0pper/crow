@@ -6,8 +6,9 @@
  * with column_values (id, text, value), group { id }, and updated_at.
  *
  * Modes:
- *   mirror — Monday → tracker_items in the target tracker. Label = item
- *     name, data_json from column_map, status through status_map (or
+ *   mirror — Monday → tasks_items (board_defs slug board) in the target
+ *     tracker. Title = item name, data_json from column_map, status through
+ *     status_map (or
  *     status_default for unmapped labels). Never pushes. Local drift is
  *     overwritten and logged.
  *   twoway — three-way merge against pm_sync_state per item:
@@ -238,14 +239,18 @@ async function upsertSyncState(db, { source, board_id, item_id, local_kind, loca
   });
 }
 
-// ── Mirror mode (Monday → tracker_items) ────────────────────────────────
+// ── Mirror mode (Monday → tasks_items, Track 0 Phase B unified store) ───
+//
+// pm_sync_state/pm_sync_log stay on `cdb` (crow.db); board_defs/tasks_items
+// (the converged tracker_defs/tracker_items) live on `tdb` (tasks.db).
+// local_kind stays 'tracker'; local_id now addresses a tasks_items row.
 
-async function syncMirrorBoard(db, board, items, totals) {
+export async function syncMirrorBoard(cdb, tdb, board, items, totals) {
   const def = (
-    await db.execute({ sql: "SELECT id, slug FROM tracker_defs WHERE slug = ?", args: [board.target.slug] })
+    await tdb.execute({ sql: "SELECT id, slug FROM board_defs WHERE slug = ?", args: [board.target.slug] })
   ).rows[0];
   if (!def) {
-    await logSync(db, {
+    await logSync(cdb, {
       direction: "pull", board_id: board.board_id, action: "error",
       detail: `tracker "${board.target.slug}" not found`, ok: false,
     });
@@ -260,31 +265,31 @@ async function syncMirrorBoard(db, board, items, totals) {
     const rawLabel = remoteStatusLabel(board, item);
     const { status, mapped } = mapStatusLabel(board, rawLabel, rawLabel || "pending");
     if (rawLabel && !mapped && !board.status_default) {
-      await logSync(db, {
+      await logSync(cdb, {
         direction: "pull", board_id: board.board_id, action: "status_unmapped",
         item_ref: item.name, detail: `Monday label "${rawLabel}" has no status_map entry; using raw label`, ok: true,
       });
     }
     const dataJson = JSON.stringify(fields);
-    const state = await getSyncState(db, board.board_id, item.id);
+    const state = await getSyncState(cdb, board.board_id, item.id);
 
     if (state && state.local_id != null) {
       const existing = (
-        await db.execute({ sql: "SELECT id, status, label, data_json FROM tracker_items WHERE id = ?", args: [state.local_id] })
+        await tdb.execute({ sql: "SELECT id, status, title, data_json FROM tasks_items WHERE id = ?", args: [state.local_id] })
       ).rows[0];
       if (existing) {
-        const localHash = contentHash(trackerRowShape(board, existing.label, existing.status, existing.data_json));
+        const localHash = contentHash(trackerRowShape(board, existing.title, existing.status, existing.data_json));
         if (state.content_hash && localHash !== state.content_hash) {
-          await logSync(db, {
+          await logSync(cdb, {
             direction: "pull", board_id: board.board_id, action: "overwrite_local_drift",
-            item_ref: item.name, detail: "local tracker_items edits overwritten by mirror pull", ok: true,
+            item_ref: item.name, detail: "local tasks_items edits overwritten by mirror pull", ok: true,
           });
         }
-        await db.execute({
-          sql: `UPDATE tracker_items SET label = ?, status = ?, data_json = ?, updated_at = datetime('now') WHERE id = ?`,
+        await tdb.execute({
+          sql: `UPDATE tasks_items SET title = ?, status = ?, data_json = ?, updated_at = datetime('now') WHERE id = ?`,
           args: [item.name, status, dataJson, existing.id],
         });
-        await upsertSyncState(db, {
+        await upsertSyncState(cdb, {
           source: "monday", board_id: board.board_id, item_id: item.id,
           local_kind: "tracker", local_id: existing.id,
           content_hash: contentHash(trackerRowShape(board, item.name, status, dataJson)),
@@ -295,29 +300,35 @@ async function syncMirrorBoard(db, board, items, totals) {
       }
     }
 
-    const result = await db.execute({
-      sql: `INSERT INTO tracker_items (tracker_id, status, priority, label, data_json)
+    const result = await tdb.execute({
+      sql: `INSERT INTO tasks_items (board_id, status, priority, title, data_json)
             VALUES (?, ?, 3, ?, ?)`,
       args: [def.id, status, item.name, dataJson],
     });
     const localId = Number(result.lastInsertRowid);
-    await upsertSyncState(db, {
+    await upsertSyncState(cdb, {
       source: "monday", board_id: board.board_id, item_id: item.id,
       local_kind: "tracker", local_id: localId,
       content_hash: contentHash(trackerRowShape(board, item.name, status, dataJson)),
       monday_updated_at: item.updated_at,
     });
-    await logSync(db, {
+    await logSync(cdb, {
       direction: "pull", board_id: board.board_id, action: "create_local",
-      item_ref: item.name, detail: `tracker_items id ${localId}`, ok: true,
+      item_ref: item.name, detail: `tasks_items id ${localId}`, ok: true,
     });
     totals.created++;
   }
 
-  await flagRemoteDeletions(db, board, seen, totals);
+  await flagRemoteDeletions(cdb, board, seen, totals);
 }
 
-/** Items known to sync_state but missing from this pull → flag, never delete. */
+/**
+ * Items known to sync_state but missing from this pull → flag, never delete.
+ * Only touches pm_sync_state/pm_sync_log (`db` = cdb) — it never has to look
+ * up the local row itself, so it stays DB-agnostic even though, post Track 0
+ * Phase B, local_id for BOTH local_kind values ('tracker' and 'kanban')
+ * addresses a tasks_items row on tdb.
+ */
 async function flagRemoteDeletions(db, board, seenItemIds, totals) {
   const { rows } = await db.execute({
     sql: "SELECT item_id, local_kind, local_id FROM pm_sync_state WHERE board_id = ?",
@@ -630,7 +641,9 @@ export async function runSync(db, config) {
       try {
         const items = await pullBoardItems(token, board.board_id, board.group_ids);
         if (board.target.kind === "tracker") {
-          await syncMirrorBoard(db, board, items, totals);
+          if (!tdb) tdb = createTasksDbClient(config);
+          if (!tdb) throw new Error("tasks.db not found (tracker target needs the tasks bundle)");
+          await syncMirrorBoard(db, tdb, board, items, totals);
         } else {
           if (!tdb) tdb = createTasksDbClient(config);
           if (!tdb) throw new Error("tasks.db not found (kanban target needs the tasks bundle)");
