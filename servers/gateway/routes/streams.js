@@ -34,6 +34,9 @@ import { html, raw, sseTurbo } from "../streams/turbo-stream.js";
 // Instance-aware tasks.db resolution (CROW_TASKS_DB_PATH wins; else the db
 // sits beside the crow.db actually in use). Same resolver bot-board-api uses.
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
+// Board config resolution (Track 0 Phase A: project/cards boards; Phase B:
+// slug/custom-tracker boards). Both defs live in tasks.db's board_defs.
+import { resolveBoardDef, resolveSlugBoardDef } from "./board-defs.js";
 
 export default function streamsRouter(dashboardAuth) {
   const router = Router();
@@ -333,8 +336,14 @@ export default function streamsRouter(dashboardAuth) {
 
     let tdb = null;
     let cdb = null;
+    // Phase B: custom (slug) trackers converged into tasks.db too, so tdb is
+    // opened for every board type now — not just kanban/task-list. The def
+    // itself is resolved once here (never re-queried per tick) and reused
+    // both for trackerDefId and for the board-config frame below.
+    let slugDef = null;
     try {
       cdb = createDbClient();
+      tdb = createDbClient(TASKS_DB);
       if (botId) {
         const botRow = (await cdb.execute({ sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
         if (botRow) {
@@ -343,13 +352,10 @@ export default function streamsRouter(dashboardAuth) {
           trackerType = tc.type || "kanban";
           resolvedProjectId = botRow.project_id != null ? Number(botRow.project_id) : null;
           if (trackerType === "custom" && tc.tracker_slug) {
-            const tdef = (await cdb.execute({ sql: "SELECT id FROM tracker_defs WHERE slug=?", args: [tc.tracker_slug] })).rows[0];
-            if (tdef) trackerDefId = tdef.id;
+            slugDef = await resolveSlugBoardDef(tdb, tc.tracker_slug);
+            if (slugDef) trackerDefId = slugDef.id;
           }
         }
-      }
-      if (trackerType === "kanban" || trackerType === "task-list") {
-        tdb = createDbClient(TASKS_DB);
       }
     } catch {
       if (tdb) { try { tdb.close(); } catch {} tdb = null; }
@@ -369,9 +375,18 @@ export default function streamsRouter(dashboardAuth) {
     // triggers re-detects the same difference forever (the exact reload-storm
     // the html.js tracker-query comment memorializes). The client compares
     // against its rendered columns and reloads at most once per guard window.
-    if (tdb && Number.isInteger(resolvedProjectId)) {
+    if (tdb && trackerType === "custom" && slugDef) {
       try {
-        const { resolveBoardDef } = await import("./board-defs.js");
+        sendRaw(`event: board-config\ndata: ${JSON.stringify({ statuses: slugDef.status_values })}\n\n`);
+      } catch { /* config frame is best-effort; the board renders without it */ }
+    // F5: this ELSE-IF is the PROJECT-board config frame — it must not fire
+    // for a custom-typed bot whose slug def is missing/deleted (tdb is now
+    // always open, so resolvedProjectId being an integer alone used to be
+    // enough to reach here even when trackerType === "custom"). Without this
+    // guard a custom bot with a bad tracker_slug — but a project_id still set
+    // — got the PROJECT's board-config (wrong status list) instead of none.
+    } else if (trackerType !== "custom" && tdb && Number.isInteger(resolvedProjectId)) {
+      try {
         const def = await resolveBoardDef(tdb, { projectId: resolvedProjectId });
         sendRaw(`event: board-config\ndata: ${JSON.stringify({ statuses: def.status_values })}\n\n`);
       } catch { /* config frame is best-effort; the board renders without it */ }
@@ -395,9 +410,9 @@ export default function streamsRouter(dashboardAuth) {
         let cards = [];
         let locks = {};
 
-        if (trackerType === "custom" && trackerDefId) {
-          const rows = (await cdb.execute({
-            sql: "SELECT id, status, processing_lease_status FROM tracker_items WHERE tracker_id=? ORDER BY priority ASC, id ASC",
+        if (trackerType === "custom" && trackerDefId && tdb) {
+          const rows = (await tdb.execute({
+            sql: "SELECT id, status, processing_lease_status FROM tasks_items WHERE board_id=? ORDER BY priority ASC, id ASC",
             args: [trackerDefId],
           })).rows || [];
           cards = rows.map((r) => ({ id: Number(r.id), status: String(r.status) }));

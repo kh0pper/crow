@@ -510,9 +510,27 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     let projects = [];
     try { projects = (await db.execute({ sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows; } catch {}
     const projOpts = projects.map((p) => `<option value="${p.id}"${Number(def.project_id) === Number(p.id) ? " selected" : ""}>#${p.id} &mdash; ${escapeHtml(p.name || "")} (${escapeHtml(p.slug || "")})</option>`).join("");
-    // Tracker defs for custom tracker dropdown
+    // Tracker defs for custom tracker dropdown — board_defs slug rows (Track 0
+    // Phase B: tracker_defs/tracker_items converged into tasks.db). status_values
+    // and fields_json AS columns_json MUST be selected here: the def editor below
+    // reads selTracker.status_values / .columns_json from this same array, and
+    // its save handler rebuilds columns_json from whatever it rendered — omitting
+    // these columns fed it undefined/undefined, which wiped the def's fields on
+    // the next "Save tracker definition" click (round-2 data-loss finding).
     let trackerDefs = [];
-    try { trackerDefs = (await db.execute({ sql: "SELECT id, slug, display_name FROM tracker_defs ORDER BY slug", args: [] })).rows; } catch {}
+    {
+      let tdefsDb;
+      try {
+        tdefsDb = createDbClient(TASKS_DB);
+        trackerDefs = (await tdefsDb.execute({
+          sql: "SELECT id, slug, display_name, status_values, fields_json AS columns_json FROM board_defs WHERE slug IS NOT NULL ORDER BY slug",
+          args: [],
+        })).rows;
+      } catch {
+      } finally {
+        if (tdefsDb) { try { tdefsDb.close(); } catch {} }
+      }
+    }
     const tc = def.tracker_config || {};
     const ttype = tc.type || "kanban";
     const ttSel = (v) => ttype === v ? " selected" : "";
@@ -552,10 +570,12 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         if (tdb) { try { tdb.close(); } catch {} }
       }
     } else if (ttype === "custom" && tc.tracker_slug) {
+      let snapDb;
       try {
-        const tdef = (await db.execute({ sql: "SELECT id, display_name, status_values FROM tracker_defs WHERE slug=?", args: [tc.tracker_slug] })).rows[0];
+        snapDb = createDbClient(TASKS_DB);
+        const tdef = (await snapDb.execute({ sql: "SELECT id, display_name, status_values FROM board_defs WHERE slug=?", args: [tc.tracker_slug] })).rows[0];
         if (tdef) {
-          const statusRows = (await db.execute({ sql: "SELECT status, COUNT(*) AS n FROM tracker_items WHERE tracker_id=? GROUP BY status", args: [tdef.id] })).rows || [];
+          const statusRows = (await snapDb.execute({ sql: "SELECT status, COUNT(*) AS n FROM tasks_items WHERE board_id=? GROUP BY status", args: [tdef.id] })).rows || [];
           const statusMap = {}; let total = 0;
           for (const r of statusRows) { statusMap[r.status] = Number(r.n); total += Number(r.n); }
           const statusList = JSON.parse(tdef.status_values || "[]");
@@ -568,6 +588,8 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         }
       } catch {
         snap = `<p class="btb-hint">${t("botbuilder.hintSnapshotUnavailable", lang)}</p>`;
+      } finally {
+        if (snapDb) { try { snapDb.close(); } catch {} }
       }
     }
     body =
