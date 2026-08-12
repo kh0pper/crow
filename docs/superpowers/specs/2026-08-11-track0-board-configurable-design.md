@@ -234,6 +234,26 @@ gateway-served verbs retire properly.
 
 Phase B ships only after Phase A has been deployed and observed on r4.
 
+#### Phase B as built (2026-08-11) — deviations from the paragraph above, with reasons
+
+The following departures from the spec paragraph above were made during implementation and recorded here per the Phase A precedent:
+
+- **(a) PIR scripts dropped from scope.** `scripts/bots/sync_pir_responses.mjs` and `dispatch_pir_processor.mjs` use the `pir_requests` table directly, never the tracker tables. The migration's scope (copy tracker_defs/items, drop from crow.db) does not entail them; verified 2026-08-11.
+
+- **(b) Six new columns are added to tasks_items in 0003.** Beyond the lease columns `processing_lease` and `processing_lease_status` already on tracker_items, the migration adds four more: `board_id` (INTEGER, links to board_defs), `bot_id` (TEXT, inherited from tracker), `action_needed` (text|null, inherited from tracker), and `next_followup_date` (text|null, inherited from tracker). Two indexes are also created: `idx_tasks_items_board` on (board_id, status) and `idx_tasks_items_lease` on (processing_lease_status). The spec's phrase "lease columns carried onto `tasks_items` as plain columns" did not enumerate the full set.
+
+- **(c) Consumer list expands beyond the spec's three.** The spec mentioned `renderCustomTracker` (render folding), but implementation discovered and updated `api-handlers.js` (status enum factory for API responses), `digest boards.js` (consumption of board_defs for digest filtering), and `streams.js` (SSE board-config frame). The tracker-def editor in `bot-builder/editor.js` also consumes board defs (field list and status values) during tracker-board configuration.
+
+- **(d) Tracker item ids cannot survive the copy; `pm_sync_state.local_id` is remapped inside `0003`.** Old `tracker_items.id` values collide with existing `tasks_items` card ids, so moved items receive fresh ids from the tasks store's AUTOINCREMENT. The migration builds an old→new id map during the copy and rewrites `pm_sync_state.local_id` for `local_kind='tracker'` rows from that map — two-phase (negate, then flip sign) so overlapping old/new id ranges cannot chain-corrupt — in the SAME crow.db transaction as the two DROP TABLEs, so a crash cannot strand sync state pointing at discarded ids. Stale tracker rows whose local_id is not in the map are logged loudly for manual clearing.
+
+- **(e) Item copy is DELETE+recopy per board for crash-safety idempotency.** For each board being migrated, the migration runs in one tasks-store transaction: first DELETE any `tasks_items` rows already carrying that board's `board_id` (leftover from a crashed earlier run), then re-insert every row from crow.db's `tracker_items` for that board. Re-runs converge instead of duplicating. The crow.db tracker tables are dropped only at the very end, after a per-row copy-proof (row count and field equality) and an orphan-count guard, together with the pm_sync_state remap in one transaction.
+
+- **(f) `tasks_items` table is never rebuilt in `0003`.** The spec's prose ("the registry migration's own test carries the proof of copy-before-drop") does not mandate a rebuild in `0003` as it did in `0002`. The migration `0003` appends the six new columns via ALTER TABLE ADD COLUMN; the existing data and structure remain untouched. Reason: `0002` rebuilt because a CHECK constraint and the `stage` column had to be removed (SQLite ALTERs cannot drop CHECK); `0003` has no such structural barrier — ALTER ADD COLUMN is safe and preserves data byte-for-byte.
+
+- **(g) `GET /trackers` gained `WHERE slug IS NOT NULL` filter.** After migration, `board_defs` holds both tracker-style slug boards and project-style cards boards (with project_id). The `/trackers` API endpoint, which serves tracker-board metadata to external consumers (PM integrations, digest filtering), filters to `slug IS NOT NULL` to exclude project boards. Reason: trackers and cards are now in the same table but have separate audiences; the filter restores the pre-migration API boundary.
+
+- **(h) Bot-builder `editor.js` tracker-def editor fields-wipe-on-save bug fixed during conversion.** A pre-existing defect: the tracker-def SELECT in `editor.js` omitted `status_values` and `columns_json` from the board-def read, so saving the tracker-board config form in the editor would write empty `fields_json` and wipe the board's field definitions. This bug was discovered and fixed during the migration (SELECT now includes the full def). The corresponding save-handler keep-list (ensure save() preserves and does not wipe the fields) remains recorded as Track 2 debt: the handler will be generalized to preserve all fields, not just the ones hand-coded to survive today.
+
 ## What must not happen (restated from the scope doc, still binding)
 
 - The 143 cards keep their titles, descriptions, tags, priorities, due dates, owners, projects,

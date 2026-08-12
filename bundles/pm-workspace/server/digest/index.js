@@ -18,6 +18,7 @@ import { outlookSections } from "./adapters/outlook.js";
 import { plannerSection } from "../planner.js";
 import { renderDigest } from "./render.js";
 import { send as sendMail, smtpConfigured } from "../mailer.js";
+import { createTasksDbClient } from "../db.js";
 
 const NTFY_TIMEOUT_MS = 10_000;
 
@@ -49,7 +50,20 @@ export async function assembleDigest(db, config) {
 
   // Briefing leads the digest — distilled follow-ups before raw feeds.
   push(await guarded(() => briefingSection(config, localDate()), "Briefing"));
-  push(await guarded(() => boardsSections(db, config), "Boards"));
+
+  // boardsSections' Trackers section reads board_defs/tasks_items on
+  // tasks.db (Track 0 Phase B converged crow.db's tracker_defs/tracker_items
+  // in there) — open one client here and hand it in so trackersSection
+  // doesn't have to manage its own lifecycle; absent tasks.db still degrades
+  // (createTasksDbClient returns null, trackersSection reports unavailable).
+  let tdb = null;
+  try {
+    tdb = createTasksDbClient(config);
+    push(await guarded(() => boardsSections(db, config, tdb), "Boards"));
+  } finally {
+    try { tdb?.close?.(); } catch { /* ignore */ }
+  }
+
   push(await guarded(() => mondayLocalSection(db), "Monday sync"));
   push(await guarded(() => googleSections(config), "Google"));
   push(await guarded(() => boxSection(config), "Box"));

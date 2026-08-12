@@ -70,7 +70,7 @@ import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";
 import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mjs";
 import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
 import { parsePlanRef, resolvePlanFile, containedRealPath } from "./plan-ref.js";
-import { resolveBoardDef, isValidStatus, isTerminal, validateDefPayload } from "./board-defs.js";
+import { resolveBoardDef, resolveSlugBoardDef, isValidStatus, isTerminal, validateDefPayload } from "./board-defs.js";
 // THE shared dual-rail lock predicate (job rail + session rail). The SSR board
 // render and the no-JS move handler import the same module — see board-lock.js
 // for why a local copy is not allowed to exist here.
@@ -272,7 +272,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql:
           "SELECT id,title,description,status,priority,due_date,owner,tags,parent_id,project_id," +
           "assigned_bot,plan_ref," +
-          "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=?",
+          "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=? AND board_id IS NULL",
         args: [id],
       })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
@@ -378,7 +378,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
       }
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
       // Status validated against the card's RESOLVED BOARD DEF, before any
       // write (Track 0: per-board status values; the old hardcoded allowlist
@@ -430,7 +430,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
       const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
       if (!isValidStatus(def, status)) return jsonError(res, 400, "invalid status");
@@ -457,7 +457,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT id, status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT id, status, project_id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
       const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
       if (!isValidStatus(def, "cancelled")) {
@@ -1059,69 +1059,87 @@ export default function botBoardApiRouter(dashboardAuth) {
     }
   });
 
+  // Spread-preserve: client.js reads entry keys beyond key/label (`type`
+  // drives the json-field renderer at client.js:134, `readonly` at :135) — a
+  // keep-list here would silently strip them. Only key/label/storage are
+  // normalized; every other input key rides through unchanged. Same rule as
+  // migration 0003's mapFields (scripts/migrations/0003-tracker-convergence.mjs).
+  function mapTrackerFields(columnsJson) {
+    const cols = Array.isArray(columnsJson) ? columnsJson : [];
+    return cols.filter((c) => c && typeof c === "object" && c.key).map((c) => ({
+      ...c,
+      key: String(c.key),
+      label: String(c.label || c.key),
+      storage: "data",
+    }));
+  }
+
   // ---- create tracker def ----
   router.post(P + "/tracker", async (req, res) => {
     const b = req.body || {};
     const slug = typeof b.slug === "string" ? b.slug.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-") : "";
     const displayName = typeof b.display_name === "string" ? b.display_name.trim() : "";
     if (!slug || !displayName) return jsonError(res, 400, "slug and display_name are required");
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
-      const existing = (await cdb.execute({ sql: "SELECT id FROM tracker_defs WHERE slug=?", args: [slug] })).rows[0];
+      tdb = createDbClient(TASKS_DB);
+      const existing = (await tdb.execute({ sql: "SELECT id FROM board_defs WHERE slug=?", args: [slug] })).rows[0];
       if (existing) return jsonError(res, 409, "tracker slug already exists: " + slug);
       const statusValues = Array.isArray(b.status_values) ? b.status_values : ["pending"];
       const columnsJson = Array.isArray(b.columns_json) ? b.columns_json : [];
-      const r = await cdb.execute({
-        sql: "INSERT INTO tracker_defs (slug, display_name, columns_json, status_values) VALUES (?, ?, ?, ?)",
-        args: [slug, displayName, JSON.stringify(columnsJson), JSON.stringify(statusValues)],
+      // Same rule migration 0003 applied: terminal-seed 'done' iff present.
+      const terminals = statusValues.includes("done") ? ["done"] : [];
+      const fields = mapTrackerFields(columnsJson);
+      const r = await tdb.execute({
+        sql: "INSERT INTO board_defs (slug, display_name, status_values, terminal_values, fields_json) VALUES (?, ?, ?, ?, ?)",
+        args: [slug, displayName, JSON.stringify(statusValues), JSON.stringify(terminals), JSON.stringify(fields)],
       });
       return res.json({ ok: true, id: Number(r.lastInsertRowid), slug });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
-      if (cdb) { try { cdb.close(); } catch {} }
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
   // ---- update tracker def ----
   router.post(P + "/tracker/:slug", async (req, res) => {
     const b = req.body || {};
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
-      const cur = (await cdb.execute({ sql: "SELECT id FROM tracker_defs WHERE slug=?", args: [req.params.slug] })).rows[0];
+      tdb = createDbClient(TASKS_DB);
+      const cur = (await tdb.execute({ sql: "SELECT id FROM board_defs WHERE slug=?", args: [req.params.slug] })).rows[0];
       if (!cur) return jsonError(res, 404, "tracker not found");
       const sets = [], args = [];
       if (b.display_name != null) { sets.push("display_name=?"); args.push(String(b.display_name).trim()); }
       if (b.status_values != null) { sets.push("status_values=?"); args.push(JSON.stringify(Array.isArray(b.status_values) ? b.status_values : [])); }
-      if (b.columns_json != null) { sets.push("columns_json=?"); args.push(JSON.stringify(Array.isArray(b.columns_json) ? b.columns_json : [])); }
+      if (b.columns_json != null) { sets.push("fields_json=?"); args.push(JSON.stringify(mapTrackerFields(Array.isArray(b.columns_json) ? b.columns_json : []))); }
       if (!sets.length) return jsonError(res, 400, "nothing to update");
       sets.push("updated_at=datetime('now')");
       args.push(cur.id);
-      await cdb.execute({ sql: `UPDATE tracker_defs SET ${sets.join(", ")} WHERE id=?`, args });
+      await tdb.execute({ sql: `UPDATE board_defs SET ${sets.join(", ")} WHERE id=?`, args });
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
-      if (cdb) { try { cdb.close(); } catch {} }
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
   // ---- tracker defs list (S3: for custom tracker selector) ----
   router.get(P + "/trackers", async (req, res) => {
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
-      const rows = (await cdb.execute({
-        sql: "SELECT id, slug, display_name, columns_json, status_values FROM tracker_defs ORDER BY slug",
+      tdb = createDbClient(TASKS_DB);
+      const rows = (await tdb.execute({
+        sql: "SELECT id, slug, display_name, fields_json AS columns_json, status_values FROM board_defs WHERE slug IS NOT NULL ORDER BY slug",
         args: [],
       })).rows || [];
       return res.json({ trackers: rows });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
-      if (cdb) { try { cdb.close(); } catch {} }
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
@@ -1136,22 +1154,22 @@ export default function botBoardApiRouter(dashboardAuth) {
   }
 
   router.get(P + "/tracker/:slug/items", async (req, res) => {
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
-      const def = (await cdb.execute({
-        sql: "SELECT id, display_name, columns_json, status_values FROM tracker_defs WHERE slug=?",
+      tdb = createDbClient(TASKS_DB);
+      const def = (await tdb.execute({
+        sql: "SELECT id, display_name, fields_json AS columns_json, status_values FROM board_defs WHERE slug=?",
         args: [req.params.slug],
       })).rows[0];
       if (!def) return jsonError(res, 404, "tracker not found");
-      const clauses = ["tracker_id = ?"];
+      const clauses = ["board_id = ?"];
       const params = [def.id];
       if (req.query.status) { clauses.push("status = ?"); params.push(String(req.query.status)); }
       if (req.query.bot_id) { clauses.push("bot_id = ?"); params.push(String(req.query.bot_id)); }
-      const rows = (await cdb.execute({
-        sql: `SELECT id, tracker_id, bot_id, status, priority, label, data_json, action_needed,
+      const rows = (await tdb.execute({
+        sql: `SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed,
                 next_followup_date, processing_lease, processing_lease_status, created_at, updated_at
-              FROM tracker_items WHERE ${clauses.join(" AND ")}
+              FROM tasks_items WHERE ${clauses.join(" AND ")}
               ORDER BY priority ASC, id ASC LIMIT 500`,
         args: params,
       })).rows || [];
@@ -1167,23 +1185,26 @@ export default function botBoardApiRouter(dashboardAuth) {
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
-      if (cdb) { try { cdb.close(); } catch {} }
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
   router.get(P + "/tracker-item/:id", async (req, res) => {
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
-      const r = (await cdb.execute({
-        sql: "SELECT * FROM tracker_items WHERE id=?", args: [itemId],
+      tdb = createDbClient(TASKS_DB);
+      const r = (await tdb.execute({
+        sql: `SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed,
+                next_followup_date, processing_lease, processing_lease_status, created_at, updated_at
+              FROM tasks_items WHERE id=? AND board_id IS NOT NULL`,
+        args: [itemId],
       })).rows[0];
       if (!r) return jsonError(res, 404, "item not found");
-      const def = (await cdb.execute({
-        sql: "SELECT slug, display_name, columns_json, status_values FROM tracker_defs WHERE id=?",
-        args: [r.tracker_id],
+      const def = (await tdb.execute({
+        sql: "SELECT slug, display_name, fields_json AS columns_json, status_values FROM board_defs WHERE id=?",
+        args: [r.board_id],
       })).rows[0];
       return res.json({
         item: { ...r, data: parseDataJson(r.data_json) },
@@ -1193,7 +1214,7 @@ export default function botBoardApiRouter(dashboardAuth) {
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
-      if (cdb) { try { cdb.close(); } catch {} }
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
@@ -1201,14 +1222,19 @@ export default function botBoardApiRouter(dashboardAuth) {
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
     const b = req.body || {};
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
-      const cur = (await cdb.execute({ sql: "SELECT * FROM tracker_items WHERE id=?", args: [itemId] })).rows[0];
+      tdb = createDbClient(TASKS_DB);
+      const cur = (await tdb.execute({
+        sql: `SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed,
+                next_followup_date, processing_lease, processing_lease_status, created_at, updated_at
+              FROM tasks_items WHERE id=? AND board_id IS NOT NULL`,
+        args: [itemId],
+      })).rows[0];
       if (!cur) return jsonError(res, 404, "item not found");
       if (trackerItemLocked(cur)) return res.status(409).json({ reason: "item is being processed by a bot" });
       if (b.status != null) {
-        const def = (await cdb.execute({ sql: "SELECT status_values FROM tracker_defs WHERE id=?", args: [cur.tracker_id] })).rows[0];
+        const def = (await tdb.execute({ sql: "SELECT status_values FROM board_defs WHERE id=?", args: [cur.board_id] })).rows[0];
         if (def) {
           const allowed = JSON.parse(def.status_values || "[]");
           if (!allowed.includes(String(b.status))) return jsonError(res, 400, "invalid status: " + b.status);
@@ -1217,7 +1243,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const sets = [], args = [];
       if (b.status != null) { sets.push("status=?"); args.push(String(b.status)); }
       if (b.priority != null) { sets.push("priority=?"); args.push(Number(b.priority)); }
-      if (b.label != null) { sets.push("label=?"); args.push(String(b.label)); }
+      if (b.label != null) { sets.push("title=?"); args.push(String(b.label)); }
       if (b.action_needed !== undefined) { sets.push("action_needed=?"); args.push(b.action_needed); }
       if (b.data && typeof b.data === "object") {
         const merged = { ...parseDataJson(cur.data_json), ...b.data };
@@ -1226,12 +1252,12 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (!sets.length) return jsonError(res, 400, "nothing to update");
       sets.push("updated_at=datetime('now')");
       args.push(itemId);
-      await cdb.execute({ sql: `UPDATE tracker_items SET ${sets.join(", ")} WHERE id=?`, args });
+      await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args });
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
-      if (cdb) { try { cdb.close(); } catch {} }
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
@@ -1240,23 +1266,23 @@ export default function botBoardApiRouter(dashboardAuth) {
     if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
     const status = String((req.body || {}).status || "");
     if (!status) return jsonError(res, 400, "status required");
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
-      const cur = (await cdb.execute({ sql: "SELECT * FROM tracker_items WHERE id=?", args: [itemId] })).rows[0];
+      tdb = createDbClient(TASKS_DB);
+      const cur = (await tdb.execute({ sql: "SELECT * FROM tasks_items WHERE id=? AND board_id IS NOT NULL", args: [itemId] })).rows[0];
       if (!cur) return jsonError(res, 404, "item not found");
       if (trackerItemLocked(cur)) return res.status(409).json({ reason: "item is being processed by a bot" });
-      const def = (await cdb.execute({ sql: "SELECT status_values FROM tracker_defs WHERE id=?", args: [cur.tracker_id] })).rows[0];
+      const def = (await tdb.execute({ sql: "SELECT status_values FROM board_defs WHERE id=?", args: [cur.board_id] })).rows[0];
       if (def) {
         const allowed = JSON.parse(def.status_values || "[]");
         if (!allowed.includes(status)) return jsonError(res, 400, "invalid status: " + status);
       }
-      await cdb.execute({ sql: "UPDATE tracker_items SET status=?, updated_at=datetime('now') WHERE id=?", args: [status, itemId] });
+      await tdb.execute({ sql: "UPDATE tasks_items SET status=?, updated_at=datetime('now') WHERE id=?", args: [status, itemId] });
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
-      if (cdb) { try { cdb.close(); } catch {} }
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
@@ -1266,18 +1292,17 @@ export default function botBoardApiRouter(dashboardAuth) {
     const slug = String(b.tracker_slug || "");
     const label = typeof b.label === "string" ? b.label.trim() : "";
     if (!slug || !label) return jsonError(res, 400, "tracker_slug and label are required");
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
-      const def = (await cdb.execute({ sql: "SELECT id, status_values FROM tracker_defs WHERE slug=?", args: [slug] })).rows[0];
+      tdb = createDbClient(TASKS_DB);
+      const def = await resolveSlugBoardDef(tdb, slug);
       if (!def) return jsonError(res, 404, "tracker not found: " + slug);
-      const status = b.status ? String(b.status) : JSON.parse(def.status_values || "[]")[0] || "pending";
-      const allowed = JSON.parse(def.status_values || "[]");
-      if (!allowed.includes(status)) return jsonError(res, 400, "invalid status: " + status);
+      const status = b.status ? String(b.status) : (def.status_values[0] || "pending");
+      if (!def.status_values.includes(status)) return jsonError(res, 400, "invalid status: " + status);
       const priority = b.priority != null ? Number(b.priority) : 3;
       const dataJson = b.data && typeof b.data === "object" ? JSON.stringify(b.data) : "{}";
-      const r = await cdb.execute({
-        sql: `INSERT INTO tracker_items (tracker_id, bot_id, status, priority, label, data_json, action_needed)
+      const r = await tdb.execute({
+        sql: `INSERT INTO tasks_items (board_id, bot_id, status, priority, title, data_json, action_needed)
               VALUES (?, ?, ?, ?, ?, ?, ?)`,
         args: [def.id, b.bot_id || null, status, priority, label, dataJson, b.action_needed || null],
       });
@@ -1285,28 +1310,28 @@ export default function botBoardApiRouter(dashboardAuth) {
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
-      if (cdb) { try { cdb.close(); } catch {} }
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
   router.post(P + "/tracker-item/:id/force-clear-lease", async (req, res) => {
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
-    let cdb;
+    let tdb;
     try {
-      cdb = createDbClient();
-      const cur = (await cdb.execute({ sql: "SELECT processing_lease_status FROM tracker_items WHERE id=?", args: [itemId] })).rows[0];
+      tdb = createDbClient(TASKS_DB);
+      const cur = (await tdb.execute({ sql: "SELECT processing_lease_status FROM tasks_items WHERE id=? AND board_id IS NOT NULL", args: [itemId] })).rows[0];
       if (!cur) return jsonError(res, 404, "item not found");
       if (!trackerItemLocked(cur)) return res.json({ ok: true, message: "already unlocked" });
-      await cdb.execute({
-        sql: "UPDATE tracker_items SET processing_lease=NULL, processing_lease_status=NULL, updated_at=datetime('now') WHERE id=?",
+      await tdb.execute({
+        sql: "UPDATE tasks_items SET processing_lease=NULL, processing_lease_status=NULL, updated_at=datetime('now') WHERE id=?",
         args: [itemId],
       });
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
     } finally {
-      if (cdb) { try { cdb.close(); } catch {} }
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 

@@ -30,10 +30,14 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
 // Seed BEFORE importing anything that reads the env at module load.
 {
   const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  // board_id present (Track 0 Phase B merged the tracker-item id space into
+  // this table — the card-side by-id guards add `AND board_id IS NULL` to
+  // /card/:id/move, which SQLite errors on if the column is absent). Every
+  // INSERT below omits it, so cards land NULL — the correct card shape.
   t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
     due_date TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
-    assigned_bot TEXT, plan_ref TEXT, data_json TEXT NOT NULL DEFAULT '{}',
+    assigned_bot TEXT, plan_ref TEXT, board_id INTEGER, data_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
   const ins = t.prepare(
     "INSERT INTO tasks_items (id, title, project_id, assigned_bot, status) VALUES (?,?,1,'scout',?)"

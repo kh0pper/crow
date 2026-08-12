@@ -3,20 +3,28 @@
  *
  * Reads (1) the kanban tasks DB (tasks bundle: tasks_items in
  * $CROW_TASKS_DB_PATH → $CROW_DATA_DIR/tasks.db) for open items that are
- * due soon / overdue / recently completed, and (2) crow.db's Bot Board
- * trackers (tracker_defs/tracker_items) for per-tracker status counts and
- * action_needed items.
+ * due soon / overdue / recently completed, and (2) that same tasks.db's
+ * slug boards (board_defs/tasks_items — Track 0 Phase B converged the old
+ * crow.db tracker_defs/tracker_items in here) for per-tracker status
+ * counts and action_needed items.
  *
  * Degrades gracefully: absent DBs or tables simply mark their section
  * unavailable — the digest never throws from here.
+ *
+ * `tdb` is optional: kanbanSection still opens/closes its own short-lived
+ * tasks.db client (unchanged), but trackersSection needs one handed in by
+ * the caller (assembleDigest in digest/index.js owns its lifecycle). A
+ * caller that doesn't pass one (e.g. the Crow's Nest panel overview, which
+ * only reads the "Tasks" section) gets a degraded "Trackers" section back,
+ * never a throw.
  */
 
 import { createTasksDbClient } from "../../db.js";
 
-export async function boardsSections(db, config) {
+export async function boardsSections(db, config, tdb) {
   const sections = [];
   sections.push(await kanbanSection(config));
-  sections.push(await trackersSection(db));
+  sections.push(await trackersSection(tdb));
   return sections;
 }
 
@@ -91,11 +99,15 @@ async function kanbanSection(config) {
   return section;
 }
 
-async function trackersSection(db) {
+async function trackersSection(tdb) {
   const section = { title: "Trackers", available: false, items: [], table: null };
+  if (!tdb) {
+    section.reason = "tasks.db not found (tasks bundle not installed?)";
+    return section;
+  }
   try {
-    const defs = await db.execute({
-      sql: "SELECT id, slug, display_name FROM tracker_defs ORDER BY slug",
+    const defs = await tdb.execute({
+      sql: "SELECT id, slug, display_name FROM board_defs WHERE slug IS NOT NULL ORDER BY slug",
       args: [],
     });
     section.available = true;
@@ -106,22 +118,22 @@ async function trackersSection(db) {
 
     const rows = [];
     for (const def of defs.rows) {
-      const counts = await db.execute({
-        sql: "SELECT status, COUNT(*) AS n FROM tracker_items WHERE tracker_id = ? GROUP BY status ORDER BY n DESC",
+      const counts = await tdb.execute({
+        sql: "SELECT status, COUNT(*) AS n FROM tasks_items WHERE board_id = ? GROUP BY status ORDER BY n DESC",
         args: [def.id],
       });
       const countStr = counts.rows.map((r) => `${r.status}: ${r.n}`).join(", ") || "empty";
       rows.push([def.display_name || def.slug, countStr]);
 
-      const action = await db.execute({
-        sql: `SELECT label, action_needed FROM tracker_items
-              WHERE tracker_id = ? AND action_needed IS NOT NULL AND action_needed != ''
+      const action = await tdb.execute({
+        sql: `SELECT title, action_needed FROM tasks_items
+              WHERE board_id = ? AND action_needed IS NOT NULL AND action_needed != ''
               ORDER BY priority ASC LIMIT 5`,
         args: [def.id],
       });
       for (const item of action.rows) {
         section.items.push({
-          label: item.label,
+          label: item.title,
           detail: `Action needed: ${item.action_needed}`,
           meta: `tracker: ${def.slug}`,
           urgent: true,
