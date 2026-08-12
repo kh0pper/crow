@@ -131,3 +131,50 @@ test("the SSE custom-tracker tick reads the unified store and slug boards get bo
   assert.ok(!Object.hasOwn(snapshot.locks, String(freeItemId)) && !Object.hasOwn(snapshot.locks, Number(freeItemId)),
     "the unleased item must not appear in the lock map");
 });
+
+// F5: a custom-typed bot whose tracker_slug doesn't resolve (missing/deleted
+// board_defs row) must get NO board-config frame — not the PROJECT's, even
+// though tdb is now always open and this bot's project_id happens to be set.
+// Before the fix, the `else if` branch only checked `Number.isInteger
+// (resolvedProjectId)` and fired regardless of trackerType, leaking the
+// project's status list onto a custom board that expects its own.
+test("custom tracker with a missing slug def gets no board-config frame (never the project's)", async () => {
+  const c = new Database(process.env.CROW_DB_PATH);
+  c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,?)").run(
+    "ghost", "Ghost",
+    JSON.stringify({ tracker_config: { type: "custom", tracker_slug: "does-not-exist" } }),
+    1
+  );
+  c.close();
+
+  const url = "http://127.0.0.1:" + server.address().port + "/dashboard/streams/bot-board?bot=ghost";
+  const ctrl = new AbortController();
+  // Actively abort after the window — the ghost bot legitimately never sends
+  // ANY frame (custom + no resolvable board = the tick's early `return`), so
+  // waiting on reader.read() alone would block on the 30s heartbeat instead
+  // of the intended short window.
+  const timer = setTimeout(() => ctrl.abort(), 1500);
+  let sawBoardConfig = false;
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    // Sanity: the stream must have actually connected (SSE headers, 200) —
+    // otherwise "no board-config frame" would trivially and uselessly hold.
+    assert.equal(res.status, 200, "the SSE connection itself must succeed");
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      if (buf.includes("event: board-config")) { sawBoardConfig = true; break; }
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") throw e; // abort = the window elapsed with nothing seen — expected
+  } finally {
+    clearTimeout(timer);
+    ctrl.abort();
+  }
+  assert.equal(sawBoardConfig, false,
+    "a custom tracker with a missing slug def must not leak the project's board-config frame");
+});

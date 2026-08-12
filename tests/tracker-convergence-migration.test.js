@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { runMigrations } from "../scripts/migrations/runner.mjs";
+import { failClosedOnBusyMidMove } from "../scripts/migrations/0003-tracker-convergence.mjs";
 
 const DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 
@@ -212,4 +213,36 @@ test("0003 with no tracker tables applies as a column-only no-op; absent tasks_i
     assert.ok(r.deferred.includes("0003-tracker-convergence"));
     assert.ok(!r.applied.includes("0003-tracker-convergence"));
   } finally { rmSync(root2, { recursive: true, force: true }); }
+});
+
+// F3: the gateway's migration carve-out (servers/gateway/index.js ~233-236)
+// tolerates an error matching /SQLITE_BUSY|database is locked/i by deferring
+// to next boot. That is fine for the column-only path — nothing has moved —
+// but if it fires mid-move (tracker_defs confirmed present, items in flight)
+// the gateway would serve Phase B code with the move unrecorded, and a re-run
+// DELETEs+recopies the board, discarding any tracker writes made in the
+// window. failClosedOnBusyMidMove is the small helper the move half wraps its
+// errors through: a BUSY-shaped error comes back with a message that does
+// NOT match the gateway's regex (forcing a hard boot failure instead of a
+// silent defer), with the original preserved as `cause`. Anything else must
+// come back completely unchanged (identity), so the column-only path and
+// every genuine non-BUSY failure keep today's behavior.
+test("failClosedOnBusyMidMove rewrites a BUSY-shaped error to fail closed, preserving the original as cause", () => {
+  const GATEWAY_CARVEOUT_RE = /SQLITE_BUSY|database is locked/i;
+  for (const msg of ["database is locked", "SQLITE_BUSY: database is locked", "DATABASE IS LOCKED"]) {
+    const original = new Error(msg);
+    const wrapped = failClosedOnBusyMidMove(original);
+    assert.notEqual(wrapped, original, "must return a NEW error, not mutate/pass through the original");
+    assert.ok(!GATEWAY_CARVEOUT_RE.test(wrapped.message),
+      `wrapped message "${wrapped.message}" must not match the gateway's carve-out regex`);
+    assert.match(wrapped.message, /0003/, "wrapped message should still name the migration");
+    assert.equal(wrapped.cause, original, "the original error must survive as `cause`");
+    assert.equal(wrapped.cause.message, msg, "the original message text must still be fully recoverable via cause");
+  }
+});
+
+test("failClosedOnBusyMidMove leaves a non-BUSY error completely unchanged", () => {
+  const original = new Error("toolkit-assets copied 1/2 — refusing to drop");
+  const result = failClosedOnBusyMidMove(original);
+  assert.equal(result, original, "a non-BUSY error must propagate identically, not be wrapped");
 });

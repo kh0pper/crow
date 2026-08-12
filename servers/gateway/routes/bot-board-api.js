@@ -272,7 +272,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql:
           "SELECT id,title,description,status,priority,due_date,owner,tags,parent_id,project_id," +
           "assigned_bot,plan_ref," +
-          "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=?",
+          "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=? AND board_id IS NULL",
         args: [id],
       })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
@@ -378,7 +378,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
       }
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
       // Status validated against the card's RESOLVED BOARD DEF, before any
       // write (Track 0: per-board status values; the old hardcoded allowlist
@@ -430,7 +430,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
       const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
       if (!isValidStatus(def, status)) return jsonError(res, 400, "invalid status");
@@ -457,7 +457,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT id, status, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT id, status, project_id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
       const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
       if (!isValidStatus(def, "cancelled")) {
@@ -1198,7 +1198,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const r = (await tdb.execute({
         sql: `SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed,
                 next_followup_date, processing_lease, processing_lease_status, created_at, updated_at
-              FROM tasks_items WHERE id=?`,
+              FROM tasks_items WHERE id=? AND board_id IS NOT NULL`,
         args: [itemId],
       })).rows[0];
       if (!r) return jsonError(res, 404, "item not found");
@@ -1228,7 +1228,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const cur = (await tdb.execute({
         sql: `SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed,
                 next_followup_date, processing_lease, processing_lease_status, created_at, updated_at
-              FROM tasks_items WHERE id=?`,
+              FROM tasks_items WHERE id=? AND board_id IS NOT NULL`,
         args: [itemId],
       })).rows[0];
       if (!cur) return jsonError(res, 404, "item not found");
@@ -1269,7 +1269,7 @@ export default function botBoardApiRouter(dashboardAuth) {
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT * FROM tasks_items WHERE id=?", args: [itemId] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT * FROM tasks_items WHERE id=? AND board_id IS NOT NULL", args: [itemId] })).rows[0];
       if (!cur) return jsonError(res, 404, "item not found");
       if (trackerItemLocked(cur)) return res.status(409).json({ reason: "item is being processed by a bot" });
       const def = (await tdb.execute({ sql: "SELECT status_values FROM board_defs WHERE id=?", args: [cur.board_id] })).rows[0];
@@ -1320,7 +1320,7 @@ export default function botBoardApiRouter(dashboardAuth) {
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT processing_lease_status FROM tasks_items WHERE id=?", args: [itemId] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT processing_lease_status FROM tasks_items WHERE id=? AND board_id IS NOT NULL", args: [itemId] })).rows[0];
       if (!cur) return jsonError(res, 404, "item not found");
       if (!trackerItemLocked(cur)) return res.json({ ok: true, message: "already unlocked" });
       await tdb.execute({

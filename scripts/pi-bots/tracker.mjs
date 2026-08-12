@@ -94,8 +94,17 @@ function taskListContext(projectId, tasksDbPath) {
 
 // ── custom tracker (board_defs slug rows + tasks_items in tasks.db) ─
 
-function customTrackerContext(trackerSlug, contextFields, queueFilter, tasksDbPath) {
-  const t = db(tasksDbPath || TASKS_DB);
+// F1: slug boards live ONLY in the instance-global tasks.db (locked topology
+// decision) — never in a project's per-project store. A project-linked bot's
+// world.tasksDbPath is that PER-PROJECT store (bot-world.mjs resolves
+// project_spaces.tasks_db_uri first), so this branch deliberately does NOT
+// accept a tasksDbPath override the way kanbanContext/taskListContext do: it
+// always resolves the instance-global path itself, freshly (tasksDbPath()
+// reads CROW_TASKS_DB_PATH at call time — the same live-read contract as the
+// rest of instance-paths.mjs), ignoring whatever store the caller is using
+// for cards.
+function customTrackerContext(trackerSlug, contextFields, queueFilter) {
+  const t = db(tasksDbPath());
   const def = t.prepare("SELECT id, display_name, fields_json, status_values FROM board_defs WHERE slug=?").get(trackerSlug);
   if (!def) { t.close(); return "(tracker '" + trackerSlug + "' not found)"; }
 
@@ -155,7 +164,9 @@ export function getTrackerContext(def, projectId, tasksDbPath) {
       return taskListContext(tc.project_id != null ? tc.project_id : projectId, tasksDbPath);
     case "custom":
       if (!tc.tracker_slug) return "(tracker_config.type=custom but no tracker_slug set)";
-      return customTrackerContext(tc.tracker_slug, tc.context_fields, tc.queue_filter, tasksDbPath);
+      // F1: the custom branch ignores the caller's tasksDbPath override — see
+      // customTrackerContext's comment. Not passed through here on purpose.
+      return customTrackerContext(tc.tracker_slug, tc.context_fields, tc.queue_filter);
     case "kanban":
     default:
       return kanbanContext(tc.project_id != null ? tc.project_id : projectId, tasksDbPath);
