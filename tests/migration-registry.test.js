@@ -233,6 +233,10 @@ test("0001-board-stages: adds columns, DEFERS when ANY target table is absent", 
     assert.ok(cols.includes("assigned_bot") && cols.includes("plan_ref"), "dormant columns survive");
     assert.ok(!/CHECK\s*\(\s*status/i.test(sql), "converged shape has no status CHECK");
     assert.ok(hasBoardDefs, "board_defs exists");
+    assert.ok(r.applied.includes("0003-tracker-convergence"),
+      "no tracker tables in the fixture crow.db → 0003 records as a column-only no-op");
+    assert.ok(cols.includes("board_id"), "converged shape has board_id (0003)");
+    assert.ok(cols.includes("processing_lease_status"), "converged shape has the lease columns (0003)");
   } finally { rmSync(g.root, { recursive: true, force: true }); }
 });
 
