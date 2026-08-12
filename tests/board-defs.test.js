@@ -15,6 +15,7 @@ import { createDbClient } from "../servers/db.js";
 import {
   DEFAULT_BOARD_DEF,
   resolveBoardDef,
+  resolveSlugBoardDef,
   isValidStatus,
   isTerminal,
   validateDefPayload,
@@ -166,4 +167,26 @@ test("validateDefPayload: rejections", () => {
   const twentyFive = Array.from({ length: 25 }, (_, i) => "s" + i);
   assert.equal(validateDefPayload({ ...base, status_values: twentyFive }).ok, false, "status cap 24");
   assert.equal(validateDefPayload({ ...base, display_name: "" }).ok, false, "empty display name");
+});
+
+test("resolveSlugBoardDef: parses a slug row; null on missing/corrupt", async () => {
+  const db = createDbClient(freshDb("slug-resolver", true));
+  try {
+    await db.execute({
+      sql: "INSERT INTO board_defs (slug, display_name, status_values, terminal_values, fields_json) VALUES (?,?,?,?,?)",
+      args: ["pir", "PIR", '["open","done"]', '["done"]', '[{"key":"agency","label":"Agency","storage":"data"}]'],
+    });
+    const def = await resolveSlugBoardDef(db, "pir");
+    assert.equal(def.slug, "pir");
+    assert.deepEqual(def.status_values, ["open", "done"]);
+    assert.deepEqual(def.terminal_values, ["done"]);
+    assert.equal(def.fields[0].key, "agency");
+    assert.equal(def.builtin, false);
+    assert.equal(await resolveSlugBoardDef(db, "nope"), null, "unknown slug → null, no builtin default");
+    assert.equal(await resolveSlugBoardDef(db, ""), null);
+    await db.execute({ sql: "UPDATE board_defs SET status_values='not json' WHERE slug='pir'", args: [] });
+    assert.equal(await resolveSlugBoardDef(db, "pir"), null, "corrupt JSON → null, never throws");
+  } finally {
+    db.close();
+  }
 });
