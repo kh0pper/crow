@@ -68,7 +68,7 @@ export async function handleBotBoardPost(req, res, { db }) {
       tdb = createDbClient(TASKS_DB);
       // Check lock
       const cur = (await tdb.execute({
-        sql: "SELECT processing_lease_status, board_id FROM tasks_items WHERE id=?",
+        sql: "SELECT processing_lease_status, board_id FROM tasks_items WHERE id=? AND board_id IS NOT NULL",
         args: [itemId],
       })).rows[0];
       if (!cur) return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);

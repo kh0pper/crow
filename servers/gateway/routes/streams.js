@@ -379,7 +379,13 @@ export default function streamsRouter(dashboardAuth) {
       try {
         sendRaw(`event: board-config\ndata: ${JSON.stringify({ statuses: slugDef.status_values })}\n\n`);
       } catch { /* config frame is best-effort; the board renders without it */ }
-    } else if (tdb && Number.isInteger(resolvedProjectId)) {
+    // F5: this ELSE-IF is the PROJECT-board config frame — it must not fire
+    // for a custom-typed bot whose slug def is missing/deleted (tdb is now
+    // always open, so resolvedProjectId being an integer alone used to be
+    // enough to reach here even when trackerType === "custom"). Without this
+    // guard a custom bot with a bad tracker_slug — but a project_id still set
+    // — got the PROJECT's board-config (wrong status list) instead of none.
+    } else if (trackerType !== "custom" && tdb && Number.isInteger(resolvedProjectId)) {
       try {
         const def = await resolveBoardDef(tdb, { projectId: resolvedProjectId });
         sendRaw(`event: board-config\ndata: ${JSON.stringify({ statuses: def.status_values })}\n\n`);

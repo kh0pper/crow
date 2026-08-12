@@ -84,3 +84,34 @@ test("customTrackerContext: unknown slug reports not-found without throwing", ()
   assert.match(missing, /tracker 'nope' not found/);
   assert.match(text, /Intake tracker:/);
 });
+
+// F1: slug boards live ONLY in the instance-global tasks.db (locked topology
+// decision), but a project-linked bot's world.tasksDbPath is the PER-PROJECT
+// store (bot-world.mjs resolves project_spaces.tasks_db_uri first). The
+// custom branch must ignore that override and always resolve the
+// instance-global store itself — the kanban/task-list branches legitimately
+// keep using the override (cards DO live in per-project stores).
+test("customTrackerContext ignores a per-project tasksDbPath override and reads the instance-global store (CROW_TASKS_DB_PATH)", () => {
+  const otherDir = mkdtempSync(join(tmpdir(), "tracker-context-other-"));
+  const otherDbPath = join(otherDir, "tasks.db");
+  {
+    // A DIFFERENT, empty tasks.db — same shape as the global store, but no
+    // board_defs/tasks_items rows at all. If the custom branch were to use
+    // THIS path (the per-project override) instead of the instance-global
+    // one, the tracker would come back "not found".
+    const o = new Database(otherDbPath);
+    o.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3, project_id INTEGER,
+      board_id INTEGER, bot_id TEXT, data_json TEXT NOT NULL DEFAULT '{}', action_needed TEXT,
+      processing_lease_status TEXT)`);
+    o.exec(`CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE,
+      project_id INTEGER UNIQUE, display_name TEXT NOT NULL, status_values TEXT NOT NULL,
+      terminal_values TEXT NOT NULL, fields_json TEXT NOT NULL DEFAULT '[]')`);
+    o.close();
+  }
+  // Explicit override points at the OTHER (empty) db — as bot-world.mjs would
+  // thread a project's tasks_db_uri through for a project-linked bot.
+  const text = getTrackerContext(botDef(), null, otherDbPath);
+  assert.match(text, /Intake tracker:/, "must resolve against the instance-global store, not the override");
+  assert.match(text, new RegExp("#" + openId1 + " Triage inbox"));
+});

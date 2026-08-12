@@ -16,6 +16,42 @@ import Database from "better-sqlite3";
 
 export const id = "0003-tracker-convergence";
 
+// F3: the gateway's migration carve-out (servers/gateway/index.js ~233-236)
+// tolerates an error whose message matches this regex by deferring the whole
+// migration registry run to next boot — meant for a transient SQLITE_BUSY on
+// a bundle-owned store the gateway does not control. That is safe on the
+// column-only path (nothing has moved), but NOT once tracker_defs is
+// confirmed present in crow.db: a BUSY error firing mid-move would have the
+// gateway serve Phase B code with the move unrecorded, and the next boot's
+// DELETE+recopy per board would discard any tracker writes made in the
+// window. The move half below wraps every error through this helper so a
+// BUSY-shaped one comes back failing CLOSED (gateway boot fails hard) instead
+// of being silently deferred again.
+const GATEWAY_BUSY_CARVEOUT_RE = /SQLITE_BUSY|database is locked/i;
+
+/**
+ * Rethrow-wrap an error from the move half of run() so it can never be
+ * mistaken for the gateway's transient-BUSY carve-out. Non-BUSY errors pass
+ * through completely unchanged (identity) — this only touches the one shape
+ * that would otherwise be deferred silently.
+ * @param {Error} e
+ * @returns {Error}
+ */
+export function failClosedOnBusyMidMove(e) {
+  const msg = e && e.message != null ? String(e.message) : String(e);
+  if (!GATEWAY_BUSY_CARVEOUT_RE.test(msg)) return e;
+  // Deliberately do NOT interpolate the original message text into the
+  // wrapped one: the original IS the string the carve-out regex matches
+  // (that is exactly why we're here), so splicing it in verbatim would leave
+  // the wrapped message matching the very regex it exists to escape. The
+  // original is still fully available via `cause` for logs/diagnostics.
+  const wrapped = new Error(
+    "0003: interrupted mid-move — failing closed to protect tracker data (see cause for the original error)"
+  );
+  wrapped.cause = e;
+  return wrapped;
+}
+
 const NEW_COLS = [
   ["board_id", "INTEGER"],
   ["bot_id", "TEXT"],
@@ -68,6 +104,12 @@ export async function run({ dbPath, tasksDbPath, log = () => {} }) {
         log("  no tracker tables — columns converged, nothing to move");
         return;
       }
+
+      // From here on, a data-bearing move is pending (tracker_defs confirmed
+      // present) — any error whose message matches the gateway's transient-
+      // BUSY carve-out must be rethrown wrapped so it does NOT match, and
+      // fails the gateway boot closed instead of deferring silently (F3).
+      try {
 
       // board_defs may be missing if 0002 deferred on this store shape; it is
       // part of the converged world this migration needs.
@@ -191,6 +233,9 @@ export async function run({ dbPath, tasksDbPath, log = () => {} }) {
         cdb.exec("DROP TABLE tracker_defs");
       })();
       log("  dropped crow.db tracker_items, tracker_defs");
+      } catch (e) {
+        throw failClosedOnBusyMidMove(e);
+      }
     } finally {
       cdb.close();
     }

@@ -19,10 +19,14 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
 // Seed BEFORE importing the router (module reads env at import time).
 {
   const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  // board_id is present (Track 0 Phase B merged the tracker-item id space into
+  // this same table — F2's card-side by-id guards add `AND board_id IS NULL`
+  // to every card endpoint, which SQLite errors on if the column is absent).
+  // Every INSERT below omits it, so cards land NULL — the correct card shape.
   t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
     due_date TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
-    stage TEXT, assigned_bot TEXT, plan_ref TEXT,
+    stage TEXT, assigned_bot TEXT, plan_ref TEXT, board_id INTEGER,
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
   t.prepare("INSERT INTO tasks_items (title, project_id) VALUES ('card one', 1)").run();
   t.exec(`CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE,

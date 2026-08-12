@@ -26,7 +26,7 @@ const dir = mkdtempSync(join(tmpdir(), "tracker-api-"));
 process.env.CROW_TASKS_DB_PATH = join(dir, "tasks.db");
 process.env.CROW_DB_PATH = join(dir, "crow.db");
 
-let boardId, itemAId, itemBId;
+let boardId, itemAId, itemBId, cardId;
 
 // Seed BEFORE importing the router (module reads env at import time).
 {
@@ -65,7 +65,7 @@ let boardId, itemAId, itemBId;
   // A plain project card (project_id set, board_id NULL) — proves isolation
   // the other direction: the tracker items query must not pick it up, and a
   // project-board query (project_id=?) must not pick up tracker items.
-  t.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES ('Standalone Card', 9, 'todo')").run();
+  cardId = Number(t.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES ('Standalone Card', 9, 'todo')").run().lastInsertRowid);
 
   t.close();
 }
@@ -248,4 +248,89 @@ test("POST /tracker-item/:id/force-clear-lease unlocks a locked item, no-ops on 
   const again = await (await fetch(base + "/tracker-item/" + itemBId + "/force-clear-lease", { method: "POST" })).json();
   assert.equal(again.ok, true);
   assert.equal(again.message, "already unlocked");
+});
+
+// F2: tasks_items is a MERGED id space — card ids (board_id NULL) and
+// tracker-item ids (board_id set) share one AUTOINCREMENT sequence. Every
+// tracker-item by-id endpoint must 404 on a card id (never read/write it with
+// card validation skipped), and symmetrically every card by-id endpoint must
+// 404 on a tracker-item id.
+
+test("POST /tracker-item/<cardId>/move 404s on a plain card id and leaves the card untouched", async () => {
+  const before = (() => {
+    const d = new Database(tdbFile);
+    const r = d.prepare("SELECT * FROM tasks_items WHERE id=?").get(cardId);
+    d.close();
+    return r;
+  })();
+  const r = await fetch(base + "/tracker-item/" + cardId + "/move", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "todo" }),
+  });
+  assert.equal(r.status, 404, "a card id must not resolve as a tracker item");
+  const after = (() => {
+    const d = new Database(tdbFile);
+    const r2 = d.prepare("SELECT * FROM tasks_items WHERE id=?").get(cardId);
+    d.close();
+    return r2;
+  })();
+  assert.deepEqual(after, before, "the card row must be byte-unchanged");
+});
+
+test("GET/POST /tracker-item/<cardId> and force-clear-lease all 404 on a plain card id", async () => {
+  const get = await fetch(base + "/tracker-item/" + cardId);
+  assert.equal(get.status, 404);
+  const edit = await fetch(base + "/tracker-item/" + cardId, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "hijacked" }),
+  });
+  assert.equal(edit.status, 404);
+  const clear = await fetch(base + "/tracker-item/" + cardId + "/force-clear-lease", { method: "POST" });
+  assert.equal(clear.status, 404);
+  const d = new Database(tdbFile);
+  const row = d.prepare("SELECT title FROM tasks_items WHERE id=?").get(cardId);
+  d.close();
+  assert.equal(row.title, "Standalone Card", "edit must not have hijacked the card's title");
+});
+
+test("card move endpoint on a tracker-item id 404s and leaves the item untouched (symmetric guard)", async () => {
+  const before = (() => {
+    const d = new Database(tdbFile);
+    const r = d.prepare("SELECT * FROM tasks_items WHERE id=?").get(itemAId);
+    d.close();
+    return r;
+  })();
+  const r = await fetch(base + "/card/" + itemAId + "/move", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "done" }),
+  });
+  assert.equal(r.status, 404, "a tracker-item id must not resolve as a card");
+  const after = (() => {
+    const d = new Database(tdbFile);
+    const r2 = d.prepare("SELECT * FROM tasks_items WHERE id=?").get(itemAId);
+    d.close();
+    return r2;
+  })();
+  assert.deepEqual(after, before, "the tracker item row must be byte-unchanged");
+});
+
+test("card GET/edit/cancel all 404 on a tracker-item id (symmetric guard)", async () => {
+  const before = (() => {
+    const d = new Database(tdbFile);
+    const r = d.prepare("SELECT * FROM tasks_items WHERE id=?").get(itemAId);
+    d.close();
+    return r;
+  })();
+  const get = await fetch(base + "/card/" + itemAId);
+  assert.equal(get.status, 404);
+  const edit = await fetch(base + "/card/" + itemAId, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "hijacked" }),
+  });
+  assert.equal(edit.status, 404);
+  const cancel = await fetch(base + "/card/" + itemAId + "/cancel", { method: "POST" });
+  assert.equal(cancel.status, 404);
+  const after = (() => {
+    const d = new Database(tdbFile);
+    const r = d.prepare("SELECT * FROM tasks_items WHERE id=?").get(itemAId);
+    d.close();
+    return r;
+  })();
+  assert.deepEqual(after, before, "the tracker item row must be byte-unchanged (edit must not have hijacked it)");
 });

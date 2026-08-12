@@ -274,8 +274,14 @@ export async function syncMirrorBoard(cdb, tdb, board, items, totals) {
     const state = await getSyncState(cdb, board.board_id, item.id);
 
     if (state && state.local_id != null) {
+      // F4: tasks_items is a MERGED id space post Track 0 Phase B (card ids
+      // and tracker-item ids share one AUTOINCREMENT sequence). A stale
+      // pm_sync_state row whose local_id has come to collide with a plain
+      // BOARD CARD's id must never let this mirror UPDATE-in-place onto that
+      // card — scope the lookup to THIS def's board_id so a mismatch falls
+      // through to the create-new branch below instead.
       const existing = (
-        await tdb.execute({ sql: "SELECT id, status, title, data_json FROM tasks_items WHERE id = ?", args: [state.local_id] })
+        await tdb.execute({ sql: "SELECT id, status, title, data_json FROM tasks_items WHERE id = ? AND board_id = ?", args: [state.local_id, def.id] })
       ).rows[0];
       if (existing) {
         const localHash = contentHash(trackerRowShape(board, existing.title, existing.status, existing.data_json));

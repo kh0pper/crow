@@ -191,6 +191,60 @@ test("syncMirrorBoard: matched item updates in place, new item inserts, unrelate
   await tdb.close();
 });
 
+// F4: tasks_items is a MERGED id space post Track 0 Phase B — a stale
+// pm_sync_state row's local_id can come to collide with a plain board CARD's
+// id (e.g. the tracker item it once pointed at was deleted, and a later card
+// insert reused that id). The existing-row lookup must be scoped to THIS
+// def's board_id so that collision can never let the mirror overwrite the
+// card in place; it must fall through to INSERT-new + a fresh sync-state row.
+test("syncMirrorBoard: a stale sync row whose local_id collides with a plain card's id never overwrites the card", async () => {
+  const { createDbClient } = await import("../servers/db.js");
+  const { syncMirrorBoard } = await import("../bundles/pm-workspace/server/sync/monday.js");
+
+  const cdb = createDbClient(crowDbPath);
+  const tdb = createDbClient(tasksDbPath);
+
+  // Stale sync-state row: local_id equals the plain card's id, not any
+  // tasks_items row on this board.
+  await cdb.execute({
+    sql: "INSERT INTO pm_sync_state (source, board_id, item_id, local_kind, local_id, content_hash, monday_updated_at) VALUES ('monday',?,?,?,?,?,?)",
+    args: [MONDAY_BOARD_ID, "monday-collision", "tracker", standaloneItemId, "stale-hash", "2026-01-01T00:00:00Z"],
+  });
+
+  const board = {
+    board_id: MONDAY_BOARD_ID,
+    mode: "mirror",
+    target: { kind: "tracker", slug: SLUG },
+    column_map: {},
+    status_map: { "Working on it": "in_progress", "Done": "done" },
+    status_column_id: "status_col",
+  };
+  const items = [
+    {
+      id: "monday-collision", name: "Hijack Attempt", updated_at: "2026-08-11T00:00:00Z",
+      group: { id: "g1" }, column_values: [{ id: "status_col", text: "Working on it", value: null }],
+    },
+  ];
+  const totals = { created: 0, updated: 0, pushed: 0, conflicts: 0, flagged: 0, errors: 0 };
+
+  await syncMirrorBoard(cdb, tdb, board, items, totals);
+
+  // the card must be byte-unchanged
+  const card = (await tdb.execute({ sql: "SELECT title, status, board_id FROM tasks_items WHERE id=?", args: [standaloneItemId] })).rows[0];
+  assert.deepEqual(card, { title: "Standalone Card", status: "todo", board_id: null }, "the card must not be overwritten in place");
+
+  // a NEW tracker item must have been created instead of an UPDATE
+  assert.equal(totals.created, 1, "falls through to INSERT-new rather than UPDATE-in-place");
+  assert.equal(totals.updated, 0);
+  const state = (await cdb.execute({ sql: "SELECT local_id FROM pm_sync_state WHERE board_id=? AND item_id=?", args: [MONDAY_BOARD_ID, "monday-collision"] })).rows[0];
+  assert.notEqual(Number(state.local_id), standaloneItemId, "sync-state must now point at the NEW item, not the hijacked card");
+  const created = (await tdb.execute({ sql: "SELECT title, status, board_id FROM tasks_items WHERE id=?", args: [state.local_id] })).rows[0];
+  assert.deepEqual(created, { title: "Hijack Attempt", status: "in_progress", board_id: boardId });
+
+  await cdb.close();
+  await tdb.close();
+});
+
 // ---------------------------------------------------------------------------
 // editor.js data-loss guard (round-2 Critical #2)
 // ---------------------------------------------------------------------------
