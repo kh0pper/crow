@@ -234,6 +234,26 @@ gateway-served verbs retire properly.
 
 Phase B ships only after Phase A has been deployed and observed on r4.
 
+#### Phase B as built (2026-08-11) — deviations from the paragraph above, with reasons
+
+The following departures from the spec paragraph above were made during implementation and recorded here per the Phase A precedent:
+
+- **(a) PIR scripts dropped from scope.** `scripts/bots/sync_pir_responses.mjs` and `dispatch_pir_processor.mjs` use the `pir_requests` table directly, never the tracker tables. The migration's scope (copy tracker_defs/items, drop from crow.db) does not entail them; verified 2026-08-11.
+
+- **(b) Lease columns are four, not mentioned by name in the spec.** The tracker schema carries `processing_lease` (text, timestamp) and `processing_lease_status` (text, state); migration `0003` adds `action_needed` (text|null, inherited from tracker) and `next_followup_date` (text|null, inherited) to the unified `tasks_items` table as plain columns. The spec's phrase "lease columns carried onto `tasks_items` as plain columns" did not enumerate them.
+
+- **(c) Consumer list expands beyond the spec's three.** The spec mentioned `renderCustomTracker` (render folding), but implementation discovered and updated `api-handlers.js` (status enum factory for API responses), `digest boards.js` (consumption of board_defs for digest filtering), and `streams.js` (SSE board-config frame). The panel's `bot-builder/editor.js` also consumes board defs (field list) during card edit.
+
+- **(d) `pm_sync_state.local_id` remap is part of `0003`, not avoided.** The spec assumed id preservation was impossible (collision with card ids). It is part of the migration `0003` as a consequence of converting 18 tracker rows; reasoning: tracker items use a separate autoincrement sequence (`tracker_items.id`), cards use `tasks_items.id`, so IDs below 143 collide. The migration preserves order (assigns new sequential ids 144+) and appends a data_json entry `{tracker_id: orig_id}` for audit trail and recovery. `pm_sync_state.local_id` (the PM bridge's row-tracking field) is updated in the same txn before drop (no orphaning).
+
+- **(e) Item copy uses DELETE+recopy, not INSERT … SELECT.** The spec did not specify the implementation path for the copy step of the tracker→tasks migration. It is DELETE+recopy (drop the original board_defs/tracker_items rows, re-insert from the freshly-read tracker tables in crow.db) rather than a raw INSERT SELECT. Rationale: crash-safety — if the migration crashes mid-way, re-runs encounter a clean slate and idempotency holds; raw INSERT SELECT with interleaved migration logic risks partial state.
+
+- **(f) `tasks_items` table is never rebuilt in `0003`.** The spec's prose ("the registry migration's own test carries the proof of copy-before-drop") does not mandate a rebuild in `0003` as it did in `0002`. The migration `0003` appends the four new columns (lease_*) and the `bot_id` column via ALTER; the existing data and structure remain untouched. Reason: `0002` rebuilt because a CHECK constraint and the `stage` column had to be removed (SQLite ALTERs cannot drop CHECK); `0003` has no such structural barrier — ALTER ADD COLUMN is safe and preserves data byte-for-byte.
+
+- **(g) `GET /trackers` gained `WHERE slug IS NOT NULL` filter.** After migration, `board_defs` holds both tracker-style slug boards and project-style cards boards (with project_id). The `/trackers` API endpoint, which serves tracker-board metadata to external consumers (PM integrations, digest filtering), filters to `slug IS NOT NULL` to exclude project boards. Reason: trackers and cards are now in the same table but have separate audiences; the filter restores the pre-migration API boundary.
+
+- **(h) Bot-builder `editor.js` fields-wipe-on-save bug fixed during conversion.** A pre-existing defect: the field-list SELECT in `editor.js` omitted `status_values` and `columns_json` from the board-def read, so editing and saving a tracker card would zero out its board's field definitions (they are not re-fetched, only re-saved). This bug was discovered and fixed during the migration (SELECT now includes the full def). The corresponding save-handler keep-list (ensure save() preserves and does not wipe the fields) remains recorded as Track 2 debt: the handler will be generalized to preserve all fields, not just the ones hand-coded to survive today.
+
 ## What must not happen (restated from the scope doc, still binding)
 
 - The 143 cards keep their titles, descriptions, tags, priorities, due dates, owners, projects,
