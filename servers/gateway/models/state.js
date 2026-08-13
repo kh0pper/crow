@@ -38,8 +38,19 @@ import net from "node:net";
 
 import { resolveDataDir } from "../../db.js";
 
-export const PORT_RANGE_START = 18100;
-export const PORT_RANGE_END = 18199; // inclusive
+// The base is env-overridable as a SUITE-ISOLATION knob only (2026-08-13
+// flake hunt: concurrent `npm test` runs bind-probe this range with real
+// sockets, and two runs colliding on a hardwired base was a reproduced
+// cross-process flake). run-suite.mjs assigns each run its own window;
+// production never sets the var. Co-hosted live instances deliberately
+// SHARE the fixed default range — cross-instance overlap is resolved by
+// the bind probe, and that design is unchanged.
+const envRangeStart = Number.parseInt(process.env.CROW_MODELS_PORT_RANGE_START ?? "", 10);
+export const PORT_RANGE_START =
+  Number.isInteger(envRangeStart) && envRangeStart >= 1024 && envRangeStart <= 65435
+    ? envRangeStart
+    : 18100;
+export const PORT_RANGE_END = PORT_RANGE_START + 99; // inclusive
 
 /**
  * Thrown by allocatePort when every port in the range is reserved or

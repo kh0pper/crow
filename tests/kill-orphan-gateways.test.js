@@ -53,6 +53,18 @@ const SCRIPT = join(__dir, "..", "scripts", "ops", "kill-orphan-gateways.sh");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/** Pre-run fixture gate: a native fixture that died at/just after spawn
+ * (observed once, 2026-08-13, cause never captured — the sweep then finds
+ * nothing and the test fails at a misleading assert) should fail HERE,
+ * carrying the fixture's captured stderr as the diagnosis. */
+function assertFixtureLive(pid, binPath, label) {
+  if (isAlive(pid)) return;
+  let err = "";
+  try { err = readFileSync(binPath + ".stderr", "utf8").trim(); } catch { /* no capture */ }
+  assert.fail(`${label}: fixture pid ${pid} died at/just after spawn` +
+    (err ? ` — its stderr:\n${err}` : " — its stderr capture is empty (died without output)"));
+}
+
 /** true while the pid exists and is not a zombie */
 function isAlive(pid) {
   try {
@@ -184,11 +196,19 @@ process.stdout.write(String(c.pid));
  * {@link spawnOrphaned}.
  */
 async function spawnOrphanedBinary(binPath, args = [], opts = {}) {
+  // Fixture stderr is captured beside the binary (2026-08-13 flake hunt):
+  // a fixture that dies within ~100ms of spawn leaves a zombie that fools
+  // a bare /proc-exists aliveness check while pgrep skips its empty
+  // cmdline — the sweep then "finds nothing" and the test fails at the
+  // wrong assert with no evidence. assertFixtureLive reads this file into
+  // its failure message so a died-at-spawn fixture self-diagnoses.
   const bootstrap = `
 const { spawn } = require("node:child_process");
+const { openSync } = require("node:fs");
+const errFd = openSync(${JSON.stringify(binPath + ".stderr")}, "a");
 const c = spawn(${JSON.stringify(binPath)}, ${JSON.stringify(args)}, {
   detached: true,
-  stdio: "ignore",
+  stdio: ["ignore", "ignore", errFd],
   cwd: ${JSON.stringify(opts.cwd || tmpdir())},
 });
 c.unref();
@@ -261,10 +281,69 @@ function makeFakeNativeRuntime() {
  * `runtime.js`'s `buildLlamaServerArgs` shape exactly (the flags Sweep 3's
  * `native_port_of` actually parses). `port` omitted entirely tests the
  * fail-closed "couldn't determine a port" path. */
-function spawnFakeNativeModel(binPath, { port, alias = "test-model" } = {}) {
+async function spawnFakeNativeModel(binPath, { port, alias = "test-model" } = {}) {
+  await awaitProdSweeperClearance();
   const args = ["-c", "import time; time.sleep(600)", "--model", "/fake/model.gguf", "--alias", alias];
   if (port != null) args.push("--port", String(port), "--host", "127.0.0.1");
   return spawnOrphanedBinary(binPath, args);
+}
+
+// ── prod-sweeper avoidance (2026-08-13 flake hunt) ──────────────────────
+// crow-orphan-sweep.timer runs THIS SAME SCRIPT every minute with its
+// DEFAULT native pattern (`runtimes/llamacpp`). A live sweep-3 fixture is
+// BY DESIGN indistinguishable from a real orphan — that identity is what
+// these tests prove — so a fixture whose alive window overlaps a tick gets
+// legitimately reaped (journal-proven: 2026-08-13 07:56:43, the prod
+// sweeper SIGTERMed the dry-run test's port-18141 fixture mid-assertion).
+// Gateway fixtures were renamed out of the default pattern for this exact
+// class of flake (the de-collision test above); native fixtures cannot be,
+// so the spawn steers around the next tick instead. Fail-open: on any
+// surprise (no systemctl, no timer, unparseable output) we proceed exactly
+// as before — the clearance is flake-avoidance, never correctness.
+function parseSystemdSpanMs(str) {
+  if (typeof str !== "string") return null;
+  const t = str.trim();
+  if (!t || /^(infinity|n\/a)$/i.test(t)) return null;
+  const UNIT = { d: 86400000, h: 3600000, min: 60000, s: 1000, ms: 1, us: 0.001 };
+  let ms = 0;
+  for (const tok of t.split(/\s+/)) {
+    const m = /^([\d.]+)(d|h|min|s|ms|us)$/.exec(tok);
+    if (!m) return null;
+    ms += Number(m[1]) * UNIT[m[2]];
+  }
+  return ms;
+}
+
+async function awaitProdSweeperClearance(windowMs = 15000, capMs = 180000) {
+  // Poll-until-runway, never a fixed post-tick margin: systemd timers
+  // default AccuracySec=1min, so the real fire lands anywhere up to a
+  // minute AFTER NextElapse — the first version of this helper waited
+  // "tick + 6s" and the timer fired straight through it (observed
+  // 2026-08-13 08:09:03 vs a computed ~08:08:57 tick). Clear runway means:
+  // the next fire is comfortably far away AND no sweep is running right
+  // now. NextElapse jumps ~1min forward at activation, so both conditions
+  // flip true only after the awaited tick has observably happened.
+  const deadline = Date.now() + capMs;
+  while (Date.now() < deadline) {
+    let shown;
+    try {
+      shown = spawnSync("systemctl", ["show", "crow-orphan-sweep.timer", "-p", "NextElapseUSecMonotonic", "--value"],
+        { encoding: "utf8", timeout: 5000 });
+    } catch { return; }
+    if (!shown || shown.status !== 0) return;
+    const nextMs = parseSystemdSpanMs(shown.stdout);
+    if (nextMs == null || nextMs === 0) return; // timer absent/inactive → nothing to avoid
+    let uptimeMs;
+    try { uptimeMs = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0]) * 1000; } catch { return; }
+    if (!Number.isFinite(uptimeMs)) return;
+    const untilFire = nextMs - uptimeMs; // negative = fired-late window, keep waiting
+    const active = spawnSync("systemctl", ["is-active", "crow-orphan-sweep.service"],
+      { encoding: "utf8", timeout: 5000 });
+    const sweepRunning = (active.stdout || "").trim() === "active";
+    if (!sweepRunning && untilFire >= windowMs) return;
+    await sleep(2000);
+  }
+  // Cap hit — proceed rather than hang the suite; worst case is the old flake odds.
 }
 
 /** Write `T/models/state.json` with a single reservation — the same shape
@@ -558,7 +637,7 @@ test("sweep 3 reaps an orphaned native model runtime process (ppid==1, exe under
   // missing state file as "not reserved", not "protected".
   const pid = await spawnFakeNativeModel(binPath, { port: 18140 });
   spawned.push(pid);
-  assert.ok(isAlive(pid), "native runtime fixture must be alive pre-run");
+  assertFixtureLive(pid, binPath, "native runtime fixture must be alive pre-run");
 
   const { stdout } = await runScript({
     ORPHAN_MATCH_PATTERN: "/nonexistent-orphan-test-path/servers/gateway/index\\.js",
@@ -823,6 +902,7 @@ test("sweep 3 candidate identity check matches on cwd too, not only exe", async 
   // A realistic --port flag so the adoption cross-check (fix round 1) can
   // determine the candidate's port and proceed past its fail-closed guard;
   // no T/models/state.json exists at all, so it's correctly unreserved.
+  await awaitProdSweeperClearance(); // cwd is under runtimes/llamacpp — prod-sweepable like the exe fixtures
   const pid = await spawnOrphaned(script, {
     cwd: releaseDir,
     extraArgs: ["--model", "/fake/model.gguf", "--alias", "cwd-test-model", "--port", "18144", "--host", "127.0.0.1"],
@@ -839,4 +919,29 @@ test("sweep 3 candidate identity check matches on cwd too, not only exe", async 
   await waitFor(() => !isAlive(pid), 5000, "cwd-matched native runtime fixture to die");
   assert.ok(!isAlive(pid), `cwd-matched native runtime fixture ${pid} must be gone`);
   assertProdAlive(prod, "after the cwd-match reap run");
+});
+
+// ---------------------------------------------------------------------------
+// prod-sweeper avoidance plumbing (2026-08-13 flake hunt) — the span parser
+// that awaitProdSweeperClearance feeds /proc/uptime math with. Journal-proven
+// flake: 2026-08-13 07:56:43, crow-orphan-sweep.service (the host's
+// once-a-minute DEFAULT-pattern run of this same script) SIGTERMed the
+// dry-run test's port-18141 fixture mid-assertion — a live sweep-3 fixture
+// is BY DESIGN indistinguishable from a real orphan, so unlike the gateway
+// fixtures (renamed out of the default pattern after the 2026-07-18 flake,
+// see the de-collision test above) native fixtures must steer AROUND the
+// tick instead.
+// ---------------------------------------------------------------------------
+
+test("parseSystemdSpanMs parses systemctl's human-readable monotonic spans", () => {
+  assert.equal(parseSystemdSpanMs("39s"), 39000);
+  assert.equal(parseSystemdSpanMs("1min 2.5s"), 62500);
+  assert.equal(parseSystemdSpanMs("500ms"), 500);
+  const composite = parseSystemdSpanMs("4d 22h 3min 39.930388s");
+  assert.ok(Math.abs(composite - (4 * 86400000 + 22 * 3600000 + 3 * 60000 + 39930.388)) < 0.01,
+    `composite span parsed wrong: ${composite}`);
+  assert.equal(parseSystemdSpanMs(""), null);
+  assert.equal(parseSystemdSpanMs("infinity"), null);
+  assert.equal(parseSystemdSpanMs("n/a"), null);
+  assert.equal(parseSystemdSpanMs("garbage tokens"), null, "unparseable → null → clearance is skipped, never guessed");
 });

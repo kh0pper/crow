@@ -148,17 +148,18 @@ test("dual-stack wildcard (0.0.0.0 + [::]) on same port -> NOT a conflict", () =
 });
 
 // ---------------------------------------------------------------------------
-// Native model port attribution (18100-18199) — Item G, Task 14
+// Native model port attribution (the PORT_RANGE_START..END window;
+// 18100-18199 in production, per-run relocated under npm test) — Item G, Task 14
 // ---------------------------------------------------------------------------
 
 import { loadNativeModelPortMap, GENERIC_LOCAL_MODEL_LABEL } from "../servers/gateway/port-inventory.js";
 
 test("a listening port in the native-model range with a matching reservation attributes to that model id, not foreign", () => {
   const rows = attributeAndDetect(
-    [], [{ port: 18100, boundAddr: "127.0.0.1" }], core,
-    new Map([[18100, "qwen3-4b-instruct"]]),
+    [], [{ port: PORT_RANGE_START, boundAddr: "127.0.0.1" }], core,
+    new Map([[PORT_RANGE_START, "qwen3-4b-instruct"]]),
   );
-  const r = rows.find((x) => x.port === 18100);
+  const r = rows.find((x) => x.port === PORT_RANGE_START);
   assert.equal(r.kind, "local-model");
   assert.equal(r.bundleName, "qwen3-4b-instruct");
   assert.equal(r.bundleId, "qwen3-4b-instruct");
@@ -167,16 +168,16 @@ test("a listening port in the native-model range with a matching reservation att
 });
 
 test("a listening port in the native-model range with NO matching reservation falls back to the generic label, not foreign", () => {
-  const rows = attributeAndDetect([], [{ port: 18150, boundAddr: "127.0.0.1" }], core, new Map());
-  const r = rows.find((x) => x.port === 18150);
+  const rows = attributeAndDetect([], [{ port: PORT_RANGE_START + 50, boundAddr: "127.0.0.1" }], core, new Map());
+  const r = rows.find((x) => x.port === PORT_RANGE_START + 50);
   assert.equal(r.kind, "local-model");
   assert.equal(r.bundleName, GENERIC_LOCAL_MODEL_LABEL);
   assert.equal(r.bundleId, null);
 });
 
 test("nativeModelPorts defaults to an empty map when the 4th arg is omitted (backward compatible call sites)", () => {
-  const rows = attributeAndDetect([], [{ port: 18100, boundAddr: "127.0.0.1" }], core);
-  const r = rows.find((x) => x.port === 18100);
+  const rows = attributeAndDetect([], [{ port: PORT_RANGE_START, boundAddr: "127.0.0.1" }], core);
+  const r = rows.find((x) => x.port === PORT_RANGE_START);
   assert.equal(r.kind, "local-model");
   assert.equal(r.bundleName, GENERIC_LOCAL_MODEL_LABEL);
 });
@@ -205,12 +206,12 @@ test("a bundle-declared endpoint on a port inside the native range still wins (c
   // endpoint branch is checked first in attributeAndDetect regardless — this
   // pins that ordering so a future change can't silently invert it.
   const rows = attributeAndDetect(
-    [ep("some-bundle", 18100, "loopback")],
-    [{ port: 18100, boundAddr: "127.0.0.1" }],
+    [ep("some-bundle", PORT_RANGE_START, "loopback")],
+    [{ port: PORT_RANGE_START, boundAddr: "127.0.0.1" }],
     core,
-    new Map([[18100, "some-model"]]),
+    new Map([[PORT_RANGE_START, "some-model"]]),
   );
-  const r = rows.find((x) => x.port === 18100);
+  const r = rows.find((x) => x.port === PORT_RANGE_START);
   assert.equal(r.kind, "hardcoded"); // ep() fixtures use source:"compose" with no portEnvVar
   assert.equal(r.bundleId, "some-bundle");
 });
