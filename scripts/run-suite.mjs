@@ -107,6 +107,15 @@ env.CROW_DISABLE_PERCH = "1";
 // under test would arm real restart/exit paths inside test processes.
 delete env.INVOCATION_ID;
 delete env.CROW_SUPERVISED;
+// Cross-run port isolation (2026-08-13 flake hunt): models-state /
+// models-registration tests bind-probe the model-port allocator range with
+// REAL sockets. Concurrent suite runs (worktrees, subagent implementers)
+// colliding on the fixed 18100 base was a reproduced flake — give each run
+// its own hundred-port window well away from the production range. Rare
+// same-window collisions between two concurrent runs remain possible
+// (~0.25% per pair) and resolve the old way; this removes the guaranteed
+// collision, not the concept of a shared host.
+env.CROW_MODELS_PORT_RANGE_START = String(20000 + Math.floor(Math.random() * 395) * 100);
 
 // Passthrough flags go BEFORE the positional file list; node --test treats
 // anything after the first positional as a test path.
