@@ -120,13 +120,21 @@ test("releasePort on a modelId with no reservation is a no-op", () => {
 test("allocatePort throws a typed PortRangeExhaustedError once the range is full", async () => {
   const state = { reservations: {}, journal: {}, registry: {} };
   const rangeSize = PORT_RANGE_END - PORT_RANGE_START + 1;
+  // Stubbed probe, same TOCTOU reasoning as the exact-port tests above: the
+  // loop needs exactly rangeSize successful allocations, and a REAL probe
+  // colliding with a concurrent test file's transient bind (observed under
+  // 3× concurrent suites, 2026-08-13: one skipped port → exhaustion one
+  // allocation early) fails the count. Real bind-test behavior is covered
+  // by the "bind-tests and skips" test; THIS test is about map exhaustion
+  // and the typed error.
+  const stub = { canBind: async () => true };
   for (let i = 0; i < rangeSize; i++) {
     // eslint-disable-next-line no-await-in-loop
-    await allocatePort(state, `model-${i}`);
+    await allocatePort(state, `model-${i}`, stub);
   }
   assert.equal(Object.keys(state.reservations).length, rangeSize);
   await assert.rejects(
-    () => allocatePort(state, "model-overflow"),
+    () => allocatePort(state, "model-overflow", stub),
     (err) => {
       assert.ok(err instanceof PortRangeExhaustedError);
       assert.equal(err.code, "PORT_RANGE_EXHAUSTED");
@@ -333,4 +341,28 @@ test("registryEntryRuntimeState: not live + wasLive:false/absent -> plain stoppe
 test("registryEntryRuntimeState: a truthy-but-not-strictly-true wasLive (e.g. a stray string) does not accidentally match", () => {
   assert.equal(registryEntryRuntimeState({ wasLive: "true" }, false), "stopped");
   assert.equal(registryEntryRuntimeState({ wasLive: 1 }, false), "stopped");
+});
+
+// ---------------------------------------------------------------------------
+// CROW_MODELS_PORT_RANGE_START — suite-isolation knob (2026-08-13 flake hunt:
+// concurrent `npm test` runs bind-probe the allocator range with REAL
+// sockets; two runs colliding on the hardwired 18100 base was a reproduced
+// cross-process flake — EADDRINUSE in "allocatePort bind-tests and skips a
+// port actually held on the host"). run-suite.mjs gives each run its own
+// window; production never sets the var and keeps 18100.
+// ---------------------------------------------------------------------------
+
+test("CROW_MODELS_PORT_RANGE_START relocates the allocator range; invalid values keep the default", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const root = join(import.meta.dirname, "..");
+  const probe = (envVal) => execFileSync(process.execPath, ["--input-type=module", "-e",
+    `import { PORT_RANGE_START, PORT_RANGE_END } from "${join(root, "servers/gateway/models/state.js")}";
+     console.log(PORT_RANGE_START, PORT_RANGE_END);`,
+  ], {
+    env: { ...process.env, ...(envVal == null ? {} : { CROW_MODELS_PORT_RANGE_START: envVal }) },
+    encoding: "utf8",
+  }).trim();
+  assert.equal(probe("23400"), "23400 23499", "a valid base relocates the whole 100-port window");
+  assert.equal(probe("abc"), "18100 18199", "garbage keeps the production default");
+  assert.equal(probe("80"), "18100 18199", "sub-1024 bases are refused (privileged ports)");
 });
