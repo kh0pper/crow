@@ -11,6 +11,7 @@ import { basename } from "node:path";
 import { ingestDocument } from "./import.js";
 import { listDocuments, getDocument } from "./queries.js";
 import { loadConfig } from "./config.js";
+import { assertPathAllowed } from "./ingest-guard.js";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const errorText = (t) => ({ content: [{ type: "text", text: t }], isError: true });
@@ -40,14 +41,14 @@ export function createReaderServer(db, options = {}) {
           input = { sourceType: "url", url, title, tags, ocr };
         } else {
           // Path allowlist: local reads only under configured roots
-          // (default: the user home directory).
-          const { resolve } = await import("node:path");
-          const { homedir } = await import("node:os");
-          const roots = (config.READER_INGEST_ROOTS || homedir())
-            .split(":").filter(Boolean).map((r) => resolve(r));
-          const target = resolve(path);
-          if (!roots.some((r) => target === r || target.startsWith(r + "/"))) {
-            return errorText(`Path outside READER_INGEST_ROOTS allowlist: ${target}`);
+          // (default: the user home directory). assertPathAllowed
+          // realpath-resolves both the target and each root so a symlink
+          // planted under an allowed root cannot point outside it.
+          let target;
+          try {
+            target = assertPathAllowed(path, config);
+          } catch (err) {
+            return errorText(err.message);
           }
           input = { sourceType: "mcp", buffer: readFileSync(target),
                     filename: basename(target), title, tags, ocr };

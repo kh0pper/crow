@@ -43,3 +43,22 @@ test("getDocument returns sections with paragraph counts, null for missing id", 
   assert.equal(got.sections[0].paragraph_count, 2);
   assert.equal(await getDocument(db, 9999), null);
 });
+
+test("listDocuments escapes LIKE wildcards in the tag filter", async () => {
+  const localDb = createClient({ url: "file::memory:" });
+  await initReaderTables(localDb);
+  const localConfig = { CROW_DATA_DIR: mkdtempSync(join(tmpdir(), "reader-q-tag-")) };
+  await ingestDocument(localDb, localConfig, {
+    sourceType: "upload", buffer: Buffer.from("Delta paragraph."),
+    filename: "delta.txt", title: "Delta Doc", tags: "a_b",
+  });
+
+  const exact = await listDocuments(localDb, { tag: "a_b" });
+  assert.equal(exact.length, 1);
+  assert.equal(exact[0].title, "Delta Doc");
+
+  // "___" would match "a_b" via unescaped SQL LIKE wildcards (three
+  // single-char wildcards); it must not match once "_" is escaped.
+  const wildcard = await listDocuments(localDb, { tag: "___" });
+  assert.equal(wildcard.length, 0);
+});
