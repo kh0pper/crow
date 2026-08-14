@@ -62,6 +62,35 @@ function textToSections(raw) {
  * independently); fine for a single-user authenticated dashboard.
  * Exported for direct unit testing.
  */
+function isPrivateAddress(address) {
+  return (
+    /^127\.|^10\.|^192\.168\.|^169\.254\.|^0\./.test(address) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(address) ||
+    address === "::1" || /^f[cd]/i.test(address) || /^fe80/i.test(address)
+  );
+}
+
+/**
+ * Unwrap an IPv4-mapped IPv6 address (::ffff:a.b.c.d) to its embedded IPv4
+ * tail. Two textual forms have to be handled: DNS lookups typically report
+ * the dotted-decimal form (::ffff:127.0.0.1), but the WHATWG URL parser
+ * canonicalizes bracketed IPv6 literals to pure hex groups
+ * (::ffff:7f00:1) before assertPublicHost ever sees the hostname. Returns
+ * null when the address isn't an IPv4-mapped IPv6 address.
+ */
+function unwrapIPv4MappedIPv6(address) {
+  const lower = address.toLowerCase();
+  const dotted = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
+  if (dotted) return dotted[1];
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
+  if (hex) {
+    const hi = parseInt(hex[1], 16);
+    const lo = parseInt(hex[2], 16);
+    return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join(".");
+  }
+  return null;
+}
+
 export async function assertPublicHost(url, config) {
   if (config.READER_ALLOW_PRIVATE_URLS === "1") return;
   const { lookup } = await import("node:dns/promises");
@@ -69,11 +98,10 @@ export async function assertPublicHost(url, config) {
   const host = new URL(url).hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
   const addrs = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
   for (const { address } of addrs) {
-    if (
-      /^127\.|^10\.|^192\.168\.|^169\.254\.|^0\./.test(address) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(address) ||
-      address === "::1" || /^f[cd]/i.test(address) || /^fe80/i.test(address)
-    ) {
+    // IPv4-mapped IPv6 embeds a routable-looking IPv4 tail that the
+    // bare-address checks above never match; unwrap and re-check it.
+    const mapped = unwrapIPv4MappedIPv6(address);
+    if (isPrivateAddress(address) || (mapped && isPrivateAddress(mapped))) {
       throw new Error(`URL resolves to a private address (${address}); set READER_ALLOW_PRIVATE_URLS=1 to permit`);
     }
   }
@@ -102,7 +130,8 @@ async function fetchUrl(url, config, fetchImpl) {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     const location = res.headers.get("location");
-    if (res.status >= 300 && res.status < 400 && location) {
+    if (res.status >= 300 && res.status < 400) {
+      if (!location) throw new Error(`redirect without location fetching ${current}`);
       current = new URL(location, current).href;
       continue;
     }

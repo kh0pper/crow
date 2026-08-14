@@ -99,3 +99,69 @@ test("url html import archives the raw page and extracts readable text", async (
     .rows[0].paragraphs_json));
   assert.ok(paras.some((p) => p.includes("moment that matters")));
 });
+
+test("assertPublicHost rejects an IPv4-mapped IPv6 loopback literal", async () => {
+  const { assertPublicHost } = await import("../server/import.js");
+  await assert.rejects(assertPublicHost("http://[::ffff:127.0.0.1]/x", {}), /private address/);
+});
+
+test("ingestDocument rejects a non-http(s) URL scheme", async () => {
+  const fetchImpl = async () => { throw new Error("fetchImpl should not be called"); };
+  const { id, extraction_status } = await ingestDocument(db, config, {
+    sourceType: "url", url: "ftp://example.test/a.pdf",
+  }, { fetchImpl });
+  assert.equal(extraction_status, "failed");
+  const doc = (await db.execute({
+    sql: "SELECT extraction_diagnostics FROM reader_documents WHERE id = ?", args: [id] })).rows[0];
+  assert.match(JSON.parse(String(doc.extraction_diagnostics)).error, /scheme/);
+});
+
+test("ingestDocument fails with too-many-redirects past the redirect cap", async () => {
+  const fetchImpl = async () => new Response(null, {
+    status: 302, headers: { location: "https://example.test/next" } });
+  const { id, extraction_status } = await ingestDocument(db, config, {
+    sourceType: "url", url: "https://example.test/start",
+  }, { fetchImpl });
+  assert.equal(extraction_status, "failed");
+  const doc = (await db.execute({
+    sql: "SELECT extraction_diagnostics FROM reader_documents WHERE id = ?", args: [id] })).rows[0];
+  assert.match(JSON.parse(String(doc.extraction_diagnostics)).error, /too many redirects/);
+});
+
+test("ingestDocument fails with a distinct message for a redirect with no location", async () => {
+  const fetchImpl = async () => new Response(null, { status: 302, headers: {} });
+  const { id, extraction_status } = await ingestDocument(db, config, {
+    sourceType: "url", url: "https://example.test/nowhere",
+  }, { fetchImpl });
+  assert.equal(extraction_status, "failed");
+  const doc = (await db.execute({
+    sql: "SELECT extraction_diagnostics FROM reader_documents WHERE id = ?", args: [id] })).rows[0];
+  assert.match(JSON.parse(String(doc.extraction_diagnostics)).error, /redirect without location/);
+});
+
+test("ingestDocument fails when declared content-length exceeds the byte cap", async () => {
+  const capConfig = { ...config, READER_MAX_UPLOAD_MB: "1" };
+  const fetchImpl = async () => new Response(null, {
+    status: 200, headers: { "content-type": "text/html", "content-length": "2097153" } });
+  const { id, extraction_status } = await ingestDocument(db, capConfig, {
+    sourceType: "url", url: "https://example.test/big",
+  }, { fetchImpl });
+  assert.equal(extraction_status, "failed");
+  const doc = (await db.execute({
+    sql: "SELECT extraction_diagnostics FROM reader_documents WHERE id = ?", args: [id] })).rows[0];
+  assert.match(JSON.parse(String(doc.extraction_diagnostics)).error, /byte cap/);
+});
+
+test("ingestDocument fails when a streamed body exceeds the byte cap despite no honest content-length", async () => {
+  const capConfig = { ...config, READER_MAX_UPLOAD_MB: "1" };
+  const oversized = Buffer.alloc(1_200_000, 65); // 1.2 MB, over the 1 MB cap
+  const fetchImpl = async () => new Response(new Blob([oversized]), {
+    status: 200, headers: { "content-type": "text/html" } });
+  const { id, extraction_status } = await ingestDocument(db, capConfig, {
+    sourceType: "url", url: "https://example.test/stream-big",
+  }, { fetchImpl });
+  assert.equal(extraction_status, "failed");
+  const doc = (await db.execute({
+    sql: "SELECT extraction_diagnostics FROM reader_documents WHERE id = ?", args: [id] })).rows[0];
+  assert.match(JSON.parse(String(doc.extraction_diagnostics)).error, /byte cap/);
+});
