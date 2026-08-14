@@ -1,6 +1,7 @@
 /** Reader — server-authoritative reading progress (forward-only). */
 export async function saveProgress(db, { document_id, section_number = 1, paragraph,
   total_paragraphs = null, audio_time = null }) {
+  if (!Number.isInteger(total_paragraphs) || total_paragraphs <= 0) total_paragraphs = null;
   await db.execute({
     sql: `INSERT INTO reader_progress (document_id, section_number, paragraph, total_paragraphs, audio_time)
           VALUES (?, ?, ?, ?, ?)
