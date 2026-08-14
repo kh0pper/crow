@@ -1,5 +1,5 @@
 /** Reader — read-side queries shared by MCP tools and the panel. */
-import { sanitizeFtsQuery } from "./db.js";
+import { sanitizeFtsQuery, escapeLikePattern } from "./db.js";
 
 export async function listDocuments(db, { query = null, tag = null, limit = 50 } = {}) {
   const args = [];
@@ -12,8 +12,8 @@ export async function listDocuments(db, { query = null, tag = null, limit = 50 }
     }
   }
   if (tag) {
-    where += " AND (',' || COALESCE(d.tags,'') || ',') LIKE ?";
-    args.push(`%,${tag},%`);
+    where += " AND (',' || COALESCE(d.tags,'') || ',') LIKE ? ESCAPE '\\'";
+    args.push(`%,${escapeLikePattern(tag)},%`);
   }
   args.push(limit);
   const { rows } = await db.execute({
