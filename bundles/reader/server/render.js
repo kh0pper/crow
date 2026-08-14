@@ -35,8 +35,8 @@ export function readerPage({ document, section, sections, paragraphs, progress }
 
   const sectionNav = sections.length > 1
     ? `<nav class="er-sections">${sections.map((s) =>
-        `<a href="/reader-app/${Number(document.id)}?section=${s.section_number}"
-           class="${s.section_number === Number(section.section_number) ? "active" : ""}">
+        `<a href="/reader-app/${Number(document.id)}?section=${Number(s.section_number)}"
+           class="${Number(s.section_number) === Number(section.section_number) ? "active" : ""}">
            ${escapeHtml(s.title || `Part ${s.section_number}`)}</a>`).join("")}</nav>`
     : "";
 
