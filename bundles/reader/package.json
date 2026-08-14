@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test test/" },
+  "scripts": { "test": "node --test" },
   "dependencies": {
     "@libsql/client": "^0.14.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
