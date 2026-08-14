@@ -24,3 +24,12 @@ test("sections track independently; missing returns null", async () => {
   assert.equal(Number((await getProgress(db, 1, 2)).paragraph), 3);
   assert.equal(await getProgress(db, 99, 1), null);
 });
+
+test("total_paragraphs: 0 treated as null, preserves prior value", async () => {
+  await saveProgress(db, { document_id: 2, section_number: 1, paragraph: 1, total_paragraphs: 50 });
+  let row = await getProgress(db, 2, 1);
+  assert.equal(Number(row.total_paragraphs), 50);
+  await saveProgress(db, { document_id: 2, section_number: 1, paragraph: 2, total_paragraphs: 0 });
+  row = await getProgress(db, 2, 1);
+  assert.equal(Number(row.total_paragraphs), 50);
+});
