@@ -28,19 +28,20 @@ export default function readerRouter(dashboardAuth) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, importMod, queriesMod, renderMod, configMod, initMod] = await Promise.all([
+      const [dbMod, importMod, queriesMod, renderMod, configMod, initMod, progressMod] = await Promise.all([
         importBundleModule("server/db.js"),
         importBundleModule("server/import.js"),
         importBundleModule("server/queries.js"),
         importBundleModule("server/render.js"),
         importBundleModule("server/config.js"),
         importBundleModule("server/init-tables.js"),
+        importBundleModule("server/progress.js"),
       ]);
       if (!dbMod || !importMod || !queriesMod || !renderMod || !configMod) {
         res.status(500).json({ error: "reader bundle modules not available" });
         return false;
       }
-      mods = { dbMod, importMod, queriesMod, renderMod, configMod, initMod };
+      mods = { dbMod, importMod, queriesMod, renderMod, configMod, initMod, progressMod };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -113,6 +114,39 @@ export default function readerRouter(dashboardAuth) {
       }
       const result = await mods.importMod.ingestDocument(db, config, input);
       res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.post("/api/reader/progress", async (req, res) => {
+    try {
+      if (!(await ensureLoaded(res))) return;
+      const b = req.body || {};
+      const documentId = Number(b.document_id);
+      const paragraph = Number(b.paragraph);
+      if (!Number.isInteger(documentId) || documentId <= 0 ||
+          !Number.isInteger(paragraph) || paragraph < 0) {
+        return res.status(400).json({ error: "document_id and paragraph must be non-negative integers" });
+      }
+      res.json(await mods.progressMod.saveProgress(db, {
+        document_id: documentId,
+        section_number: Number(b.section_number) || 1,
+        paragraph,
+        total_paragraphs: Number.isInteger(Number(b.total_paragraphs)) ? Number(b.total_paragraphs) : null,
+        audio_time: typeof b.audio_time === "number" ? b.audio_time : null,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  router.get("/api/reader/progress/:documentId/:sectionNumber", async (req, res) => {
+    try {
+      if (!(await ensureLoaded(res))) return;
+      const row = await mods.progressMod.getProgress(db,
+        Number(req.params.documentId), Number(req.params.sectionNumber));
+      res.json(row || {});
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
