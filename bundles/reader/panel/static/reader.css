@@ -1,0 +1,27 @@
+:root { --er-bg: #ffffff; --er-fg: #1a1a1a; --er-muted: #666; --er-accent: #2563eb; }
+@media (prefers-color-scheme: dark) {
+  :root { --er-bg: #111418; --er-fg: #e6e6e6; --er-muted: #9aa4b2; }
+}
+body { margin: 0; background: var(--er-bg); color: var(--er-fg);
+  font: 1.05rem/1.7 Georgia, "Times New Roman", serif; }
+.er-header { position: sticky; top: 0; background: var(--er-bg);
+  border-bottom: 1px solid var(--er-muted); padding: .5rem 1rem;
+  display: flex; align-items: center; gap: 1rem;
+  font-family: system-ui, sans-serif; }
+.er-header h1 { font-size: 1rem; margin: 0; flex: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.er-back { color: var(--er-accent); text-decoration: none; font-family: system-ui, sans-serif; }
+.er-reading-pane { max-width: 42rem; margin: 0 auto; padding: 1.5rem 1rem 6rem; }
+.er-para { margin: 0 0 1.1em; }
+.er-para.resume-target { background: color-mix(in srgb, var(--er-accent) 12%, transparent); }
+.er-table-wrap { overflow-x: auto; }
+.er-table-wrap table { border-collapse: collapse; font-family: system-ui, sans-serif;
+  font-size: .85em; }
+.er-table-wrap th, .er-table-wrap td { border: 1px solid var(--er-muted);
+  padding: .3em .6em; text-align: left; }
+.er-status { font-family: system-ui, sans-serif; font-size: .75rem;
+  padding: .1rem .5rem; border-radius: .5rem; background: #b45309; color: #fff; }
+.er-sections { display: flex; gap: .5rem; flex-wrap: wrap; padding: .5rem 1rem;
+  font-family: system-ui, sans-serif; }
+.er-sections a { color: var(--er-accent); text-decoration: none; }
+.er-sections a.active { font-weight: 700; text-decoration: none; }
