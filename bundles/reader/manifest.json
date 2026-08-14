@@ -2,7 +2,7 @@
   "id": "reader",
   "name": "Reader",
   "version": "0.1.0",
-  "description": "E-reader for project material — import PDFs, web pages, and files; read in a clean paragraph view; originals kept as archival copy. TTS, annotations, and memory promotion arrive in later milestones.",
+  "description": "E-reader for project material — import PDFs, web pages, and files; read in a clean paragraph view; originals kept as archival copies. TTS, annotations, and memory promotion arrive in later milestones.",
   "type": "mcp-server",
   "author": "Crow",
   "category": "productivity",
