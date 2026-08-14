@@ -50,3 +50,9 @@ test("kills the subprocess on timeout", { skip }, async () => {
   assert.equal(res.ok, false);
   assert.match(res.error, /timeout/i);
 });
+
+test("resolves ok:false instead of rejecting when spawn args are invalid", async () => {
+  const res = await runExtraction("/any/input.pdf", cfgWith({ READER_UV_BIN: 123 }));
+  assert.equal(res.ok, false);
+  assert.match(res.error, /spawn failed/i);
+});

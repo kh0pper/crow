@@ -21,7 +21,12 @@ export function runExtraction(filePath, config, { ocr = false, scriptPath = DEFA
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    const child = spawn(config.READER_UV_BIN || "uv", args, { detached: true });
+    let child;
+    try {
+      child = spawn(config.READER_UV_BIN || "uv", args, { detached: true });
+    } catch (err) {
+      return resolvePromise({ ok: false, error: `extractor spawn failed: ${err.message}` });
+    }
     const timer = setTimeout(() => {
       timedOut = true;
       try { process.kill(-child.pid, "SIGKILL"); } catch { /* group already gone */ }
