@@ -88,11 +88,15 @@ export default function readerRouter(dashboardAuth) {
     });
   }
   router.post("/api/reader/import", async (req, res, next) => {
-    if (!(await ensureLoaded(res))) return;
-    next();
-  }, uploadSingle, async (req, res) => {
-    const config = mods.configMod.loadConfig();
     try {
+      if (!(await ensureLoaded(res))) return;
+      next();
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }, uploadSingle, async (req, res) => {
+    try {
+      const config = mods.configMod.loadConfig();
       let input;
       if (req.file) {
         input = {
@@ -116,27 +120,32 @@ export default function readerRouter(dashboardAuth) {
 
   // Read view page
   router.get("/reader-app/:id", async (req, res) => {
-    if (!(await ensureLoaded(res))) return;
     const id = Number(req.params.id);
-    const got = await mods.queriesMod.getDocument(db, id);
-    if (!got) return res.status(404).send("Not found");
-    const sectionNumber = Number(req.query.section || 1);
-    const secRow = await db.execute({
-      sql: `SELECT * FROM reader_sections WHERE document_id = ? AND section_number = ?`,
-      args: [id, sectionNumber],
-    });
-    if (secRow.rows.length === 0) return res.status(404).send("Section not found");
-    const progress = await db.execute({
-      sql: `SELECT paragraph FROM reader_progress WHERE document_id = ? AND section_number = ?`,
-      args: [id, sectionNumber],
-    });
-    res.send(mods.renderMod.readerPage({
-      document: got.document,
-      section: secRow.rows[0],
-      sections: got.sections,
-      paragraphs: JSON.parse(String(secRow.rows[0].paragraphs_json)),
-      progress: progress.rows[0] || null,
-    }));
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).send("Bad id");
+    try {
+      if (!(await ensureLoaded(res))) return;
+      const got = await mods.queriesMod.getDocument(db, id);
+      if (!got) return res.status(404).send("Not found");
+      const sectionNumber = Number(req.query.section || 1);
+      const secRow = await db.execute({
+        sql: `SELECT * FROM reader_sections WHERE document_id = ? AND section_number = ?`,
+        args: [id, sectionNumber],
+      });
+      if (secRow.rows.length === 0) return res.status(404).send("Section not found");
+      const progress = await db.execute({
+        sql: `SELECT paragraph FROM reader_progress WHERE document_id = ? AND section_number = ?`,
+        args: [id, sectionNumber],
+      });
+      res.send(mods.renderMod.readerPage({
+        document: got.document,
+        section: secRow.rows[0],
+        sections: got.sections,
+        paragraphs: JSON.parse(String(secRow.rows[0].paragraphs_json)),
+        progress: progress.rows[0] || null,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   return router;

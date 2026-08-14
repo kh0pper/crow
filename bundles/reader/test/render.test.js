@@ -20,13 +20,18 @@ test("readerPage embeds document data and forces a full Turbo reload", () => {
   const html = readerPage({
     document: { id: 7, title: "Guide <b>", extraction_status: "ok" },
     section: { section_number: 1, title: null },
-    sections: [{ section_number: 1, title: null, paragraph_count: 2 }],
+    sections: [
+      { section_number: 1, title: null, paragraph_count: 2 },
+      { section_number: 2, title: null, paragraph_count: 1 },
+    ],
     paragraphs: ["One.", "Two."],
     progress: { paragraph: 1 },
   });
   assert.ok(html.includes('name="turbo-visit-control" content="reload"'));
   assert.ok(html.includes("Guide &lt;b&gt;"));
   assert.ok(html.includes('id="reader-data"'));
+  // Section nav (2+ sections) renders a numeric, unbroken href.
+  assert.ok(html.includes("/reader-app/7?section=2"));
   const m = html.match(/<script type="application\/json" id="reader-data">(.*?)<\/script>/s);
   const data = JSON.parse(m[1]);
   assert.equal(data.documentId, 7);
