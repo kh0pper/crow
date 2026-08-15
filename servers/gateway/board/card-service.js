@@ -85,10 +85,10 @@ async function resolveItemDef(tdb, boardId) {
 
 // ---- lock exemption (moveCard's {lockExempt} option) ----
 
-// Task 3 extends board-lock.js's sessionRowFor to SELECT bot_id; until then
-// the session rail can never satisfy an exemption (bot_id is absent from
-// the row it returns today), so only the job-rail branch is reachable in
-// this repo state. The session-rail exemption test lands with Task 3.
+// board-lock.js's sessionRowFor SELECT carries bot_id (Task 3), so the
+// session-rail branch below is reachable: it matches when the reporting
+// actor's id is the same bot that owns the live session (D-T1.5's
+// result↔lock contract, exercised by result-service.js's reportResult).
 function lockExemptMatches(lock, lockExempt) {
   if (!lockExempt || !lock || !lock.row) return false;
   if (lock.rail === "job") return String(lock.row.job_id) === String(lockExempt.jobId);
