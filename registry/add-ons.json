@@ -5078,6 +5078,107 @@
       "official": true
     },
     {
+      "id": "reader",
+      "name": "Reader",
+      "version": "0.1.0",
+      "description": "E-reader for project material — import PDFs, web pages, and files; read in a clean paragraph view; originals kept as archival copies. TTS, annotations, and memory promotion arrive in later milestones.",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "reader",
+        "ereader",
+        "pdf",
+        "import",
+        "reading"
+      ],
+      "icon": "book-open",
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "READER_SECRETS_FILE",
+          "READER_EMBED_URL",
+          "READER_EMBED_MODEL",
+          "GOOGLE_TOKEN_FILE",
+          "READER_EXPORT_DRIVE_FOLDER_ID",
+          "READER_UV_BIN",
+          "READER_EXTRACT_TIMEOUT_MS",
+          "READER_MAX_UPLOAD_MB",
+          "READER_AUDIO_CACHE_MB",
+          "READER_ALLOW_PRIVATE_URLS",
+          "READER_INGEST_ROOTS"
+        ]
+      },
+      "panel": "panel/reader.js",
+      "panelRoutes": "panel/routes.js",
+      "requires": {
+        "min_ram_mb": 128,
+        "min_disk_mb": 200
+      },
+      "env_vars": [
+        {
+          "name": "READER_SECRETS_FILE",
+          "description": "Optional path to a KEY=VALUE secrets file loaded after $CROW_HOME/env/reader.env (process.env still wins)",
+          "required": false
+        },
+        {
+          "name": "READER_EMBED_URL",
+          "description": "OpenAI-style embeddings base URL for semantic search (POSTs to <url>/embeddings); unset disables semantic search, FTS still works",
+          "required": false
+        },
+        {
+          "name": "READER_EMBED_MODEL",
+          "description": "Embedding model name",
+          "required": false
+        },
+        {
+          "name": "GOOGLE_TOKEN_FILE",
+          "description": "Path to a Google OAuth2 authorized_user JSON; unset hides Drive import and Doc export",
+          "required": false
+        },
+        {
+          "name": "READER_EXPORT_DRIVE_FOLDER_ID",
+          "description": "Drive folder id for Google Doc exports",
+          "required": false
+        },
+        {
+          "name": "READER_UV_BIN",
+          "description": "Path to the uv binary for the Python extractor (default: uv on PATH)",
+          "required": false
+        },
+        {
+          "name": "READER_EXTRACT_TIMEOUT_MS",
+          "description": "Extraction subprocess timeout in ms (default 180000)",
+          "required": false
+        },
+        {
+          "name": "READER_MAX_UPLOAD_MB",
+          "description": "Upload size cap in MB, also caps URL-import downloads (default 50)",
+          "required": false
+        },
+        {
+          "name": "READER_AUDIO_CACHE_MB",
+          "description": "TTS audio cache cap in MB, used from milestone 2 (default 2048)",
+          "required": false
+        },
+        {
+          "name": "READER_ALLOW_PRIVATE_URLS",
+          "description": "Set to 1 to let URL import fetch private/loopback addresses (default: blocked, SSRF guard)",
+          "required": false
+        },
+        {
+          "name": "READER_INGEST_ROOTS",
+          "description": "Colon-separated directory allowlist for crow_reader_ingest local paths (default: the user home directory)",
+          "required": false
+        }
+      ],
+      "notes": "Milestone 1 ships import + Read view. TTS (gateway registry, timing-aware), quote-anchored annotations with crow memory promotion, pdf.js Original view, and Drive/Doc export land in later milestones per the design spec.",
+      "official": true
+    },
+    {
       "id": "romm",
       "name": "RoMM",
       "description": "Retro game library and emulator — browse, organize, and play retro games in the browser",
