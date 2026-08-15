@@ -284,6 +284,27 @@ test("reportResult 409s 'archived' on an archived card", async () => {
   });
 });
 
+test("reportResult 400s 'bad_plan' on a planId that belongs to a different item", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const otherItemId = await makeCard(tdb, 1, "gated");
+    const otherPlan = await savePlan(tdb, otherItemId, "plan for a different card", HUMAN);
+
+    const id = await makeCard(tdb, 1, "gated");
+    await assert.rejects(
+      () => reportResult(tdb, cdb, id, { outcome: "success", planId: otherPlan.id }, BOT),
+      (e) => { assert.equal(e.code, "bad_plan"); assert.equal(e.http, 400); return true; },
+    );
+    // Rejected before any row was written.
+    const results = await listResults(tdb, id);
+    assert.equal(results.length, 0, "a bad_plan rejection must not leave a result row behind");
+
+    await assert.rejects(
+      () => reportResult(tdb, cdb, id, { outcome: "success", planId: 999999 }, BOT),
+      (e) => { assert.equal(e.code, "bad_plan"); assert.equal(e.http, 400); return true; },
+    );
+  });
+});
+
 test("duplicate success after auto-move 409s (replay-proof: card is now terminal)", async () => {
   await withStore(async ({ tdb, cdb }) => {
     const id = await makeCard(tdb, 1, "auto");
@@ -397,6 +418,7 @@ test("result rows surface plan version + superseded flag (listResults join)", as
     await approvePlan(tdb, id, 1, HUMAN, "chat");
 
     const res1 = await reportResult(tdb, cdb, id, { outcome: "partial", summaryMd: "half done", planId: v1.id }, BOT);
+    assert.ok(res1.id, "reportResult with the item's OWN valid planId succeeds");
 
     // A re-run against a newer plan: v1 gets superseded mid-run.
     await savePlan(tdb, id, "v2", HUMAN);

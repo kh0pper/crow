@@ -6,7 +6,11 @@
  * inferred from a process exit. It 409s on a def-terminal-status card
  * ('terminal') and on an archived card ('archived'), which also makes the
  * auto path replay-proof: after an auto-move the card is terminal, so a
- * duplicate 'success' report 409s instead of re-approving.
+ * duplicate 'success' report 409s instead of re-approving. A caller-supplied
+ * `planId` is validated to belong to `itemId` (400 'bad_plan' otherwise) —
+ * load-bearing for Task 6, which passes a user-supplied plan id through:
+ * without this check, a stray or cross-item id would silently attach a
+ * foreign plan's version/superseded status via listResults's LEFT JOIN.
  *
  * The result↔lock contract: a bot reports mid-turn while its own
  * session/job lock is still live. The auto-move is exempt from the
@@ -47,6 +51,14 @@ export async function reportResult(tdb, cdb, itemId, { outcome, summaryMd, planI
 
   const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
   if (isTerminal(def, String(cur.status))) throw fail("card is terminal", "terminal", 409);
+
+  if (planId != null) {
+    const plan = (await tdb.execute({
+      sql: "SELECT id FROM board_plans WHERE id=? AND item_id=?",
+      args: [planId, itemId],
+    })).rows[0];
+    if (!plan) throw fail(`plan ${planId} does not belong to item ${itemId}`, "bad_plan", 400);
+  }
 
   const a = actor || {};
   const ins = await tdb.execute({
