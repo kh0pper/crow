@@ -71,12 +71,19 @@ the dashboard never talks to the MCP mount, it has the HTTP routes). One impleme
 3. **Bots** — per decision 10 bots get the full verb set. A bot's generated MCP config
    (`mcp_writer.mjs`, which already supports headers) gains the same HTTP entry carrying a
    **board token**: a second per-instance static token, same storage/validation pattern as the
-   local token but **path-scoped to `/board/mcp` only**. Rationale: the local token is
+   local token but **path-scoped to the `/board/*` MCP transport paths** (the mount registers
+   `/board/mcp`, `/board/sse`, `/board/messages` — scoping to `/board/mcp` alone would 401
+   SSE-transport clients). Rationale: the local token is
    deliberately full-surface, and embedding IT in every bot config would widen each bot's reach
    to the entire gateway MCP surface and put full-surface raw tokens in bot session dirs; the
-   board token bounds the blast radius to exactly the verbs decision 10 grants. Minted by the
-   gateway on demand (no one-time-reveal ceremony — it is written into generated configs, which
-   is its job; that raw copies live in bot config files is accepted and named here).
+   board token bounds the blast radius to exactly the verbs decision 10 grants. **Raw-token
+   residence** (the config writer runs in the bridge process, deliberately db-agnostic, and the
+   settings registry holds only the hash): the gateway mints at boot when absent, stores the
+   hash in the local-scope settings registry, and persists the raw at `<crowHome>/board-token`
+   mode 0600 — the exact `peer-tokens.json` precedent `mcp_writer.mjs` already reads beside it.
+   `crow-server-catalog.mjs` (today stdio-blocks only) emits its first `{url, headers}` block
+   for the board entry; pi's mcp-client supports url+headers natively. That raw copies land in
+   bot config files is accepted and named here.
 
 The **installed tasks bundle and bots-sql-mcp files stay on disk untouched**. Only `.mcp.json`
 entries/allowlists change — an **ops step on r4, executed with Kevin** in the same deploy
@@ -89,14 +96,14 @@ Verb set (names final, `board_` prefix):
 | `board_list_boards` | defs + counts | slug + project boards |
 | `board_list_items` | list w/ filters | status/tag/search/board; excludes archived unless `include_archived` |
 | `board_get_item` | card or item by id | includes current plan head, latest results (with plan version + superseded flag), recent mutations |
-| `board_create_item` | create | board-aware; def-validated status; `parent_id` supported |
+| `board_create_item` | create | board-aware; def-validated status; `parent_id` supported — validated to exist, and the child inherits the parent's project/board (the `tasks_add_subtask` semantics, not a bare column write) |
 | `board_update_item` | edit fields | def-validated; declared fields via data_json/phase; `parent_id` supported |
 | `board_move_item` | status move | def-validated, terminal stamping — the route's semantics |
 | `board_archive_item` / `board_unarchive_item` | D-T1.6 | refuses a locked card |
 | `board_get_plan` / `board_save_plan` / `board_approve_plan` | D-T1.4 | save creates a new version |
 | `board_report_result` | D-T1.5 | the bot's explicit outcome signal |
 | `board_decide_result` | D-T1.5 | approve/reject a recorded result |
-| `board_store_briefing` / `board_list_briefings` / `board_get_briefing` | tasks_briefings | full read+write parity with the tasks bundle's briefing tools |
+| `board_store_briefing` / `board_list_briefings` / `board_get_briefing` / `board_briefing_snapshot` | tasks_briefings | full parity with the tasks bundle's briefing tools (snapshot computes without storing, exactly like `tasks_briefing_snapshot`) |
 
 Deliberately absent, each named for Kevin's sign-off at the swap:
 - **delete** — archive is the product answer (`tasks_delete` was never allowlisted anyway);
@@ -152,6 +159,19 @@ The card drawer gains a read-only "history" strip (latest mutations, actor-attri
 
 ### D-T1.4 — Plans become records (and the file rail retires)
 
+**Store topology (round-2 critical): `board_plans`, `board_results`, and `board_mutations` are
+instance-global-only** — created in the instance tasks.db and nowhere else (the Phase B F1
+precedent: slug boards are instance-global only, and `customTrackerContext` already pins the
+instance-global store). The bridge's `planForCard` resolves the instance-global store
+**freshly** (never `world.tasksDbPath`, which follows `project_spaces.tasks_db_uri`), because
+gateway verbs only address instance-global cards — a per-project row id sent to
+`board_report_result` would otherwise attach a result to whatever instance-global card shares
+the id: the merged-id-space bug reborn. Named rule for the hypothetical bot whose
+`cardsDbForBot` resolves to a genuinely divergent per-project store: the plan/result surface is
+absent for its cards (prompt carries no plan; `report_result` on an id the instance-global
+store doesn't hold 404s) — logged, not silently wrong. On live r4 the sole project's
+`tasks_db_uri` points at the instance-global file, so this rule bites nothing today.
+
 ```sql
 CREATE TABLE board_plans (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,9 +194,10 @@ CREATE TABLE board_plans (
   `{versions, body_md, version, status}` — the only non-test caller is the panel client
   (client.js:89, :265; verified), which moves in the same PR.
 - **The dispatch prompt reads the record**: `bridge.mjs`'s `planForCard` re-points from the plan
-  file to the card's current `board_plans` record (via the same tasks-store handle the bridge
-  already resolves), and the execute prompt (D-T1.5) carries it. Without this the whole loop is
-  dead — a card with an approved plan would dispatch with "(plan file missing)".
+  file to the card's current `board_plans` record — read from the **instance-global store,
+  resolved freshly** (see the store-topology rule above; NOT `world.tasksDbPath`) — and the
+  execute prompt (D-T1.5) carries it. Without this the whole loop is dead — a card with an
+  approved plan would dispatch with "(plan file missing)".
 - "Ready for a bot" stays derived; an approved plan is NOT a dispatch precondition (the
   operator's click is the intent; a plan-required gate is a future per-card knob, YAGNI).
 
@@ -212,14 +233,21 @@ Terminal-state model (scope §1.4, the PR-#277 lesson made structural):
   each is decided independently, and `board_get_item`/decide surface each result's plan version
   plus a superseded marker (an approved-plan version that was superseded mid-run is visible at
   decide time, not silent).
-- **The result↔lock contract** (the piece v1 of this spec missed): a bot reports mid-turn, while
-  its own session/job lock is live. The service's auto-move is therefore **exempt from the
-  reporting actor's own lock** — the lock predicate already knows the owning job/session; a move
-  performed by `result-service` on behalf of the reporting `job_id` bypasses only THAT lock,
-  nobody else's. And on the bridge side, a turn that reported a result ends its session
-  **`done`** — not `waiting-user` — so a gated card ends its run **unlocked**, awaiting review
-  (today's end-of-turn logic at bridge.mjs:749–755 would otherwise leave every gated run locked
-  and force a force-unlock per card).
+- **The result↔lock contract** (the piece v1 of this spec missed; plumbing made concrete in
+  round 2): a bot reports mid-turn, while its own session/job lock is live. The service's
+  auto-move is **exempt from the reporting actor's own lock** — matched on the **job rail by
+  `job_id`** and on the **session rail by `actor_id === bot_id`** (which requires two plumbing
+  edits this spec now names: `sessionRowFor`'s SELECT gains `bot_id` — today it returns only
+  id/status/dir/age — and `job_runner.runCardExecute` passes `job.job_id` into `handleInbound`
+  → `buildBotWorld` → `writeBotMcp` headers, so `X-Crow-Job-Id` is actually settable on the
+  per-turn config rewrite; without the session-rail match, a chat-driven "do card 5" turn holds
+  a lock no job-id exemption can ever match). And on the bridge side, a turn that reported a
+  result ends its session **`done`** — not `waiting-user` — so a gated card ends its run
+  **unlocked**, awaiting review. **Detection mechanism** (named, race-free): the bridge already
+  captures `pi.toolCalls()` at end-of-turn; a non-error `*__board_report_result` call in THIS
+  turn's transcript is the signal — no `board_results` query (which would race other actors).
+  This requires `board_report_result`'s 409s to surface as MCP `isError` results so a refused
+  report is never counted.
 - On `outcome='success'`: if `autonomy='auto'` AND the board def has `done` **among its terminal
   values**, the service moves the card to `done` (recorded as the bot's mutation) and marks the
   result `approved` with `decided_via='auto'`. Otherwise the result stays `recorded`, the card
@@ -246,7 +274,11 @@ Invariants:
   still exists but is not allowlisted — D-T1.9.)
 - **Default views exclude archived.** The enumeration (each site gets a test; a missed site is a
   ghost card or an SSE reload-loop):
-  - panel kanban + list render; column counts; the SSE kanban tick's row set (`streams.js`);
+  - panel kanban + list render; column counts; the SSE kanban tick's row set (`streams.js`) —
+    **plus a client-side removal check** (round-2: the client diff is one-directional; a DOM
+    card absent from the frame never triggers anything, so a card archived in another view
+    ghosts until manual reload — the client compares the DOM card-id set against the frame's
+    and reloads under the existing 10s storm guard);
   - the list/board API endpoints and `board_list_items`;
   - `bot-board-api.js` `/project/:id/unlinked` (:843) and bulk-assign candidates (:879);
   - pm-workspace digest adapters;
@@ -265,13 +297,17 @@ Invariants:
     so the drift between a hidden local row and a live Monday item is visible, not silent.
   - The `localChanged` push branch (monday.js:534–556) **skips archived rows** — an archived
     card is not a change to publish, including one with a pre-archive unsynced edit (that edit
-    stays local; the next pull may overwrite it, logged). The unmapped create-scan already
-    cannot see archived rows.
+    stays local; the next pull may overwrite it, logged). The unmapped **create-scan gets the
+    same column-guarded `archived_at IS NULL` filter** (round-2 correction: its WHERE today is
+    only project/parent/not-cancelled — without the filter, every archived-but-unmapped done
+    card would be RE-CREATED on Monday by the next scan, resurrecting the backlog remotely).
   - The migration test seeds an archived+synced row and proves a pull round-trip neither
     duplicates nor resurrects it, and that a local edit does not push.
 - **Guards**: archiving a locked card → 409; unarchive flips only `archived_at`. Archived cards
   refuse `move`/`update`/`execute`/`report_result` with a clear 409 ("unarchive first") — frozen
-  at the gateway surface; the two named exceptions (Monday pull; stdio window) are logged.
+  at the gateway surface. Two named exceptions: the Monday pull (logged,
+  `pull_archived_update`) and the stdio cutover window (which bypasses the gateway and
+  therefore CANNOT log — it is bounded instead, per D-T1.9).
 - **UI**: card-face/drawer "Archive", archived view behind the toggle. No bulk archive in v1.
 - **Rollout note**: 69 of the 77 backlog cards are Monday-mapped — the one-time backlog pass is
   two-sided (archive locally via the verb; Kevin archives the same items Monday-side, or accepts
@@ -333,11 +369,19 @@ swap is targeted in the same deploy conversation with Kevin, not left open-ended
    `ADD COLUMN archived_at TEXT`. Validation is service-layer (no CHECK via ALTER).
 4. Log the `kevin-gated` tag count (no data rewrite — flipping cards to `auto` is a deliberate
    per-card operator act later).
-5. `ALTER TABLE tasks_items DROP COLUMN plan_ref` (no index/view/trigger/CHECK — verified).
-6. **Per-project stores**: the ALTERs (3) + (5) also run against every `project_spaces`
-   tasks-store (0002's enumeration precedent), so `archived_at` filters and dropped `plan_ref`
-   are uniform; a store created later by the unowned bundle converges at next boot
-   (readers stay column-guarded, D-T1.6).
+5. `ALTER TABLE tasks_items DROP COLUMN plan_ref` — **probe-guarded**: the column exists only
+   on stores that lived through pre-Track-1 code (the bundle's own CREATE never had it, and the
+   bridge already probes for its absence on "pre-migration DBs"); an unconditional DROP throws
+   on grackle's empty store and any bundle-created store. On the instance-global store the
+   column is all-NULL (verified). 
+6. **Per-project stores**: the ALTERs (3) + (5) also run, probe-guarded, against every
+   `project_spaces` tasks-store (0002's enumeration precedent), each with its own sidecar
+   backup — and **any non-NULL `plan_ref` found there is logged loudly before the drop**
+   (`recordPlanRef` wrote to per-project stores, so "all-NULL" is verified only for the
+   instance-global copy; the referenced plan FILES stay on disk, the log preserves the
+   mapping). The three new tables are NOT created here — they are instance-global-only
+   (D-T1.4). A store created later by the unowned bundle converges at next boot (readers stay
+   column-guarded, D-T1.6).
 7. Idempotent via column/table probes; re-run converges.
 
 `tests/migration-registry.test.js`: the converged-shape case extends to 0004 — and its existing
@@ -385,6 +429,24 @@ is instance-local and never syncs, so these two specs do not interact); the `car
 `file:`-URI bug (own PR); Track 2 (Perch CSS ownership flip first) and Track 3; the
 models-manager resume flake; MCP OAuth; any Funnel exposure change (Kevin's named approval);
 bulk-archive UI; a plan-required execute gate; recurrence verbs (named drop, D-T1.9).
+
+## Review record (round 2, 2026-08-15)
+
+Fresh reviewer verifying the round-1 revisions against code + the live r4 configs. 11 findings,
+all resolved in this revision. The critical one was introduced BY round 1: the plan-record
+re-point read per-project stores where the new tables would not exist, and a per-project card id
+reported to the gateway would attach results to the wrong instance-global card — resolved by the
+store-topology rule (three new tables instance-global-only, planForCard resolves instance-global
+freshly, divergent-store bots get a named absent-surface rule). Also: the lock-exemption's
+missing identity plumbing (sessionRowFor bot_id + job_id through handleInbound→writeBotMcp
+headers); the session-done detection mechanism (pi.toolCalls scan for a non-error
+board_report_result, requiring 409s to be MCP isError); raw board-token residence
+(<crowHome>/board-token 0600, peer-tokens.json precedent, catalog's first url block); the
+create-scan archived filter (would have re-created archived cards on Monday); briefing snapshot
+verb added (parity claim was false without it); probe-guarded plan_ref drops + per-project
+non-NULL logging + per-store backups; the SSE client removal check; token scope wording
+(/board/* transport paths); parent_id gets add-subtask semantics; the stdio-window "logged"
+claim corrected to "bounded".
 
 ## Review record (round 1, 2026-08-15)
 
