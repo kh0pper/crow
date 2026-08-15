@@ -36,15 +36,27 @@
 
 **Interfaces:**
 - Consumes: `scripts/migrations/runner.mjs` conventions (read `0002-board-defs.mjs` and `0003-tracker-convergence.mjs` first — probe-guarded idempotence, `{deferred:true}` when `tasks_items` absent, sidecar backups, `markPhaseADone`-style fixture seeding in `tests/tracker-convergence-migration.test.js:24`).
-- Produces: instance-global tasks.db with tables `board_plans`, `board_results`, `board_mutations` (DDL exactly as in spec D-T1.3/D-T1.4/D-T1.5), columns `tasks_items.autonomy TEXT NOT NULL DEFAULT 'gated'` and `tasks_items.archived_at TEXT`, and NO `plan_ref` column. Per-project stores (from `project_spaces` rows with a `tasks_db_uri`): ONLY the guarded column ALTERs + probe-guarded `DROP COLUMN plan_ref`, each with its own `tasks.db.bak-0004-<utc>` sidecar; log any non-NULL `plan_ref` values loudly before dropping. The three new tables are NOT created in per-project stores.
+- Produces: instance-global tasks.db with tables `board_plans`, `board_results`, `board_mutations` (DDL exactly as in spec D-T1.3/D-T1.4/D-T1.5), columns `tasks_items.autonomy TEXT NOT NULL DEFAULT 'gated'` and `tasks_items.archived_at TEXT`, and NO `plan_ref` column. **Also `tasks_briefings`, probe-guarded** — NOTHING in the repo creates it today (only the installed bundle does), so Task 6's briefing verbs and any bundle-less instance need 0004 to own it. DDL verbatim from the bundle's shape:
+
+```sql
+CREATE TABLE IF NOT EXISTS tasks_briefings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  briefing_date TEXT NOT NULL UNIQUE,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_briefings_date ON tasks_briefings(briefing_date DESC);
+``` Per-project stores (from `project_spaces` rows with a `tasks_db_uri`): ONLY the guarded column ALTERs + probe-guarded `DROP COLUMN plan_ref`, each with its own `tasks.db.bak-0004-<utc>` sidecar; log any non-NULL `plan_ref` values loudly before dropping. The three new tables are NOT created in per-project stores.
 
 - [ ] **Step 1: Write the failing tests.** In `tests/track1-migration.test.js`, using the scratch-env fixture pattern from `tests/tracker-convergence-migration.test.js` (seed `schema_migrations` with `0001-board-stages`, `0002-board-defs`, `0003-tracker-convergence` FIRST or the earlier migrations re-run and crash on duplicate data):
 
 ```js
+// fixture helpers you write in this file: colNames/hasTable/rowCount/readTitle (thin PRAGMA/SELECT wrappers)
 test("0004 adds tables+columns and drops plan_ref on a post-0003 store", async () => {
   // fixture: tasks.db shaped like live r4 post-0003 (tasks_items WITH plan_ref column,
   // a few cards + one tracker item), crow.db with schema_migrations seeded 0001-0003
-  await runMigrations({ migrationsDir, dataDir, log: () => {} });
+  // REAL runner signature (runner.mjs:71-77; usage precedent tests/tracker-convergence-migration.test.js:86):
+  await runMigrations({ migrationsDir, dbPath, tasksDbPath, sha: "test", log: () => {} });
   const cols = colNames(tasksDb, "tasks_items");
   assert.ok(cols.includes("autonomy") && cols.includes("archived_at"));
   assert.ok(!cols.includes("plan_ref"));
@@ -89,7 +101,14 @@ export async function moveCard(tdb, cdb, id, status, actor, { lockExempt } = {})
   // def-validates; refuses archived; refuses locked unless lockExempt matches (Task 3 contract); terminal stamping (completed_at set on entry into terminal, cleared on exit); records 'move'
 export async function archiveCard(tdb, cdb, id, actor)    // refuses locked (409-style error 'locked'); refuses already-archived; sets archived_at; records 'archive'
 export async function unarchiveCard(tdb, id, actor)       // flips archived_at only; records 'unarchive'
+// TRACKER-ITEM side (D-T1.6 is ONE mechanism for both kinds; D-T1.2 converges api-handlers.js's item writes):
+export async function moveItem(tdb, id, status, actor)    // slug-board def-validated; refuses archived; records 'move'
+export async function updateItem(tdb, id, fields, actor)  // incl. processing_lease/processing_lease_status writes (the api-handlers.js:90 semantics); refuses archived for non-lease fields; records 'update'
+export async function archiveItem(tdb, id, actor)         // refuses processing_lease_status='active' (the lease is the item-side lock); records 'archive'
+export async function unarchiveItem(tdb, id, actor)       // flips archived_at only; records 'unarchive'
 export function recordMutation(tdb, { itemId, verb, actor, detail })  // INSERT board_mutations; detail is the {field:[old,new]} object, stored as detail_json
+// Tracker-item mutations RECORD PROVENANCE with the same verb vocabulary — decision 10's
+// "every write recorded" is not card-specific (controller ruling on plan-review Q1).
 ```
 
 Errors are thrown as `Object.assign(new Error(msg), { code, http })` so route callers map them (`archived`→409, `locked`→409, `bad_status`→400, `not_found`→404, `bad_parent`→400).
@@ -109,6 +128,8 @@ test("updateCard records a field diff and refuses archived cards", ...);
 test("moveCard stamps completed_at on terminal entry and clears on exit", ...);
 test("moveCard refuses tracker-item ids (board_id NOT NULL) with not_found", ...);
 test("archiveCard refuses a locked card / unarchive restores exactly", ...);
+test("archiveItem refuses an active lease; moveItem validates against the slug board's def", ...);
+test("item mutations record provenance rows (move/update/archive)", ...);
 test("mutation rows carry job_id for bot actors", ...);
 ```
 
@@ -161,11 +182,12 @@ test("result rows surface plan version + superseded flag via getItemDetail join"
 
 **Files:**
 - Modify: `servers/gateway/routes/bot-board-api.js` (routes become thin service callers; GET `/card/:id` SELECT drops `plan_ref` (~:274); `/card/:id/execute` SELECT drops `plan_ref` (~:716) and gains the `board_id IS NULL` guard, as do `/card/:id/project` (~:575) and `/card/:id/force-unlock`; `/card/:id/plan` GET/POST re-point to plan-service with payload `{versions, body_md, version, status}`; DELETE the `/card/:id/plan-dispatch` route)
-- Modify: `servers/gateway/dashboard/panels/bot-board/api-handlers.js` (no-JS move ~:35–:49 and tracker status/lease writes ~:90 call the services; no-JS move gains the card predicate)
+- Modify: `servers/gateway/dashboard/panels/bot-board/api-handlers.js` (no-JS move ~:35–:49 → `moveCard`; tracker status/lease writes ~:90 → `moveItem`/`updateItem` from Task 2; no-JS move gains the card predicate)
 - Modify: `servers/gateway/dashboard/panels/bot-board/client.js` (drawer Plan tab: version list + view + save-as-new-version + approve button; remove plan mtime logic at ~:89/:265)
 - Modify: `servers/gateway/dashboard/shared/i18n.js` (new strings EN+ES: plan versions, approve, autonomy label/values, history strip, archive labels — full list in Task 5)
 - Delete: `servers/gateway/routes/plan-ref.js` — **only after Task 7 removes `bridge.mjs:43`'s static import** (if executing tasks in order, defer the actual `git rm` to Task 7; the routes stop importing it here)
-- Test: rewrite the plan-shape cases in `tests/board-card-api.test.js` (:70 dormant-column pin, :263–330 `{markdown,mtime}` shapes, :355 plan-dispatch); delete `tests/board-plan-dispatch.test.js`; new cases in `tests/board-card-api.test.js` for the guards
+- Test: rewrite the plan-shape cases in `tests/board-card-api.test.js` (:70 dormant-column pin, :263–330 `{markdown,mtime}` shapes, :355 plan-dispatch); delete `tests/board-plan-dispatch.test.js`; **rewrite `tests/board-dispatch-job-rail.test.js:158–174` HERE** (it POSTs the deleted plan-dispatch route — leaving it to Task 7 keeps the suite red for three tasks); new cases in `tests/board-card-api.test.js` for the guards. **The file's hand-built fixture (:27–31) must be reshaped**: it lacks `autonomy`/`archived_at`/the three new tables, so the moment routes call the services even the kept-green move cases 500 — switch the fixture to migration-built (run 0001–0004 against the temp store, Task 2's pattern).
+- **Full `plan_ref` site list in this file** (":274/:716" is NOT exhaustive): `:274` (GET card SELECT), `:488`/`:522` (plan GET/POST — die in the re-point), `:716` (execute SELECT), `:757` (plan-dispatch — deleted), and the `resolveCardPlan`/`parsePlanRef` helper block at `:189–212` (goes when the plan-ref import is dropped here; the plan-ref.js FILE itself is deleted in Task 7).
 
 **Interfaces:**
 - Consumes: every service function from Tasks 2–3 exactly as signed.
@@ -179,13 +201,13 @@ test("result rows surface plan version + superseded flag via getItemDetail join"
 ### Task 5: Archiving surface (API, panel, SSE, counts, digest)
 
 **Files:**
-- Modify: `servers/gateway/routes/bot-board-api.js` (`POST /card/:id/archive`, `POST /card/:id/unarchive`; list endpoints + `/project/:id/unlinked` (~:843) + bulk-assign candidates (~:879) gain `archived_at IS NULL` with an `?include_archived=1` escape)
+- Modify: `servers/gateway/routes/bot-board-api.js` (`POST /card/:id/archive`, `POST /card/:id/unarchive`, and the tracker-item pair `POST /tracker-item/:id/archive` / `unarchive` via `archiveItem`/`unarchiveItem`; list endpoints + `/project/:id/unlinked` (~:843) + bulk-assign candidates (~:879) gain `archived_at IS NULL` with an `?include_archived=1` escape)
 - Modify: `servers/gateway/routes/streams.js` (kanban tick row sets ~:415/:424 filter archived)
 - Modify: `servers/gateway/dashboard/panels/bot-board/html.js` + `client.js` (card-face/drawer Archive action; "Show archived" filter toggle; archived view with per-card Unarchive; failed-result + awaiting-review markers on card faces; the **client-side removal check**: compare the DOM card-id set against the frame's id set, reload under the existing 10s storm guard ~:833–840)
 - Modify: `servers/gateway/dashboard/panels/bot-builder/editor.js` (tracker-tab status counts ~:551 filter archived, column-guarded)
-- Modify: `bundles/pm-workspace/server/digest/adapters/monday-local.js` + digest board readers (column-guarded `archived_at IS NULL`)
+- Modify: `bundles/pm-workspace/server/digest/adapters/boards.js` (:61, :69, :122, :129 — the digest's actual `tasks_items` reader; `monday-local.js` reads only sync tables and needs NO edit) — column-guarded `archived_at IS NULL`
 - Modify: `servers/gateway/dashboard/shared/i18n.js` (EN+ES: `board.archive`, `board.unarchive`, `board.showArchived`, `board.archivedView`, `board.awaitingReview`, `board.resultFailed`, `board.autonomy`, `board.autonomyGated`, `board.autonomyAuto`, `board.planVersions`, `board.planApprove`, `board.historyTitle`, plus error strings `board.errArchived`, `board.errLocked`)
-- Test: `tests/board-archive.test.js` (new); extend `tests/board-streams.test.js`-family SSE test (parse by event name)
+- Test: `tests/board-archive.test.js` (new); extend `tests/tracker-stream.test.js` (the kanban SSE test — parse by event name)
 
 **Interfaces:** consumes `archiveCard`/`unarchiveCard`; produces the `include_archived` query/param convention Task 6's `board_list_items` reuses.
 
@@ -196,7 +218,7 @@ test("result rows surface plan version + superseded flag via getItemDetail join"
 
 **Files:**
 - Create: `servers/gateway/board-mcp.js` (the McpServer factory: every verb from the spec's table, thin over the services; actor resolution from `requestInfo` headers — `X-Crow-Actor-Kind`/`X-Crow-Actor-Id`/`X-Crow-Job-Id`, honored only on token-auth'd requests, default `session`)
-- Modify: `servers/gateway/local-token.js` (board token: `generateBoardToken(db)` persisting hash in local-scope settings + raw to `join(crowHome(), "board-token")` mode 0600; `applyLocalTokenAuth` accepts EITHER token but scopes the board token to paths matching `^/board/(mcp|sse|messages)`)
+- Modify: `servers/gateway/local-token.js` (board token: `generateBoardToken(db)` persisting hash in local-scope settings + raw to `join(crowHome(), "board-token")` mode 0600; the edit site is **`localTokenAuthMiddleware` (:95–115)** — where `validateLocalToken` runs and `req.localTokenAuth` is set — NOT `applyLocalTokenAuth` (:72–76, which only converts the flag to `req.auth`); `MCP_PATH_RE` (:85) already admits `/board/mcp|sse|messages`, so the only new logic is board-token validation + its path-scope check)
 - Modify: `servers/gateway/boot/mcp-mounts.js` (mount at `/board/mcp` on the same `mountMcpServer` rail; mint the board token at boot when absent)
 - Test: `tests/board-mcp.test.js`
 
@@ -204,7 +226,7 @@ test("result rows surface plan version + superseded flag via getItemDetail join"
 - Consumes: services (Tasks 2–3), `resolveBoardDef`, `tasks_briefings` table (briefing verbs mirror the tasks bundle's: `board_store_briefing` INSERT, `board_list_briefings` by date desc, `board_get_briefing` by id/date, `board_briefing_snapshot` computes without storing — port the computation from the installed bundle's `tasks_briefing_snapshot`, reading it at `~/.crow-r4/bundles/tasks/server/tools.js:497` for reference ONLY, re-implemented against the services).
 - Produces: the wire surface Kevin's sessions and bot configs mount. `board_report_result`'s refusals MUST return MCP `isError: true` (Task 7's session-done detection depends on it).
 
-- [ ] **Step 1: Failing tests** over a real HTTP mount (the existing MCP-mount test pattern — find it with `grep -rl mountMcpServer tests/`): local token reaches `/board/mcp`; **board token reaches `/board/mcp` but 401s on `/memory/mcp`**; verbs round-trip (create → list excludes archived → get includes plan head + latest result + recent mutations → move validates def → archive/unarchive → briefing store/list/get/snapshot); actor headers land in `board_mutations` (`bot` + job id); headerless token call records `session`; `board_report_result` 409 arrives as `isError: true`.
+- [ ] **Step 1: Failing tests** over a real HTTP mount (harness precedents: `tests/peer-invocation-gate.test.js` and `tests/connect-token.test.js` — the only tests exercising the HTTP-MCP/token rails; `grep mountMcpServer tests/` finds nothing): local token reaches `/board/mcp`; **board token reaches `/board/mcp` but 401s on `/memory/mcp`**; verbs round-trip (create → list excludes archived → get includes plan head + latest result + recent mutations → move validates def → archive/unarchive both id spaces → **save_plan → approve_plan → report_result → decide_result** → briefing store/list/get/snapshot); actor headers land in `board_mutations` (`bot` + job id); headerless token call records `session`; `board_report_result` 409 arrives as `isError: true`.
 - [ ] **Step 2–4: fail → implement → green.** **Step 5: Mutation-test** (drop the path-scope check — the 401 test must fail). **Step 6: Commit.**
 
 ### Task 7: Bridge/bot rail — plans, results, prompt, retirement
@@ -212,10 +234,11 @@ test("result rows surface plan version + superseded flag via getItemDetail join"
 **Files:**
 - Modify: `scripts/pi-bots/bridge.mjs` — remove the `routes/plan-ref.js` static import (:43); `planForCard` (~:505–540) reads the current plan from `board_plans` in the **instance-global store resolved freshly** (NOT `world.tasksDbPath`); the execute prompt (~:672–679) rewritten: work the plan, then call `board_report_result` — no more "set this card in_progress, then done"; end-of-turn: a non-error `*__board_report_result` in this turn's `pi.toolCalls()` (captured ~:747) marks the session `done` instead of `waiting-user` (~:754); DELETE `planCard` + `recordPlanRef` exports
 - Modify: `scripts/pi-bots/job_runner.mjs` — delete the `card_action === 'plan'` branch (~:227–238); `runCardExecute` passes `job.job_id` into `handleInbound`
+- Modify: `scripts/pi-bots/bot-world.mjs` — **the missing link in the job_id chain**: `buildBotWorld({ botId, threadId, gatewayType, log })` (:60) gains an optional `jobId`, and its `writeBotMcp` call (:101) passes it through so the header can be emitted; without this edit `X-Crow-Job-Id` cannot reach the generated config and this task's header test cannot pass
 - Modify: `scripts/pi-bots/mcp_writer.mjs` + `scripts/pi-bots/crow-server-catalog.mjs` — the board entry is the catalog's first `{url, headers}` block: url `http://127.0.0.1:<gatewayPort>/board/mcp`, headers `Authorization: Bearer <raw board token read from <crowHome>/board-token>`, `X-Crow-Actor-Kind: bot`, `X-Crow-Actor-Id: <botId>`, `X-Crow-Job-Id: <jobId when present>` (per-turn config rewrite already exists)
 - Modify: `scripts/pi-bots/tracker.mjs` — `kanbanText` (~:33), `taskListContext` (~:84), `customTrackerContext` (~:112) gain **column-guarded** `archived_at IS NULL` (PRAGMA probe precedent at bridge.mjs:515)
 - Delete: `scripts/pi-bots/plan_dispatch.mjs`, `servers/gateway/routes/plan-ref.js`
-- Test: rewrite/delete `tests/board-plan-ref.test.js`; the ~15 planCard-routing tests in `tests/bot-jobs-card-routing.test.js`; `tests/board-dispatch-job-rail.test.js:158–174`; `tests/cards-db-file-uri.test.js:144–156` (recordPlanRef); new `tests/bridge-board-rail.test.js`
+- Test: rewrite/delete `tests/board-plan-ref.test.js`; the planCard-routing tests in `tests/bot-jobs-card-routing.test.js` (~22 references); `tests/cards-db-file-uri.test.js:144–156` (recordPlanRef); new `tests/bridge-board-rail.test.js`. (`tests/board-dispatch-job-rail.test.js:158–174` was already rewritten in Task 4 with the route deletion.)
 
 **Interfaces:** consumes Task 6's mount contract (isError 409s) + Task 3's services (via HTTP only — the bridge process NEVER opens board tables directly except `planForCard`'s read of the instance-global store).
 
@@ -228,7 +251,7 @@ test("result rows surface plan version + superseded flag via getItemDetail join"
 
 **Files:**
 - Modify: `bundles/pm-workspace/server/sync/monday.js` — the `localChanged` push branch (~:534–556) skips archived rows; the unmapped create-scan (~:577–590) gains column-guarded `archived_at IS NULL`; by-id pull writes to an archived row log action `pull_archived_update` (new `pm_sync_log` action string, no schema change)
-- Test: `bundles/pm-workspace/test/` (follow the bundle's existing test layout) + one repo-side integration case in `tests/track1-migration.test.js`: the archived+synced round-trip
+- Test: **`tests/pm-monday-archive.test.js` — in `tests/`, NOT the bundle dir** (run-suite scans only `tests/*.test.js`; a bundle-dir test never runs in CI — the vacuous-test failure mode on the highest-stakes data-safety invariants). Follow the precedent `tests/pm-monday-mirror.test.js:140`, which imports `bundles/pm-workspace/server/sync/monday.js` directly. Plus one integration case in `tests/track1-migration.test.js`: the archived+synced round-trip.
 
 - [ ] **Step 1: Failing tests**: archived+mapped row with a pending local edit does NOT push; archived+unmapped done card is NOT created remotely; a pull targeting an archived row updates in place, stays archived, logs `pull_archived_update`, and does NOT re-INSERT; nothing duplicates on a second pull.
 - [ ] **Step 2–4: fail → implement → green.** **Step 5: Mutation-test** (remove the create-scan filter — the re-creation test must fail). **Step 6: Commit.**
@@ -260,6 +283,26 @@ test("result rows surface plan version + superseded flag via getItemDetail join"
 - [ ] **Step 3:** Merge on green. THEN the r4 deploy checklist — **verbatim from the spec's "Testing and rollout" section, steps 1–5**, which is operator-led: fuser check → Kevin closes tehcy sessions → pause `pibot-gateways@r4` (soak-log) → deploy + verify 0004 journal lines (instance + per-project) + drain queued `plan` jobs → **token bootstrap WITH Kevin (Connect panel one-time reveal — r4 has no local token)** → the `.mcp.json` swap same conversation (r4-tasks → `/board/mcp`; r4-trackers STAYS, tracker_* leave the allowlist; strip the hand-edited tracker block, logged) → the two-sided 77-card archive backlog pass with Kevin.
 
 ---
+
+## Review
+
+**2026-08-15, adversarial staff-engineer subagent review. Verdict: REVISE → all findings
+applied in this revision.** The six criticals: (1) `tasks_briefings` is created by nothing
+in-repo → 0004 now owns it, DDL inlined; (2) plan-dispatch route deletion (Task 4) vs its test
+rewrite (Task 7) left the suite red for three tasks → rewrite moved into Task 4; (3) the job_id
+chain was missing `bot-world.mjs` → added with both call-site edits; (4) D-T1.6's tracker-item
+archive had no implementation → `archiveItem`/`unarchiveItem` + lease-lock guard + item
+endpoints added; (5) api-handlers' item writes had no service to call → `moveItem`/`updateItem`
+signatures added (controller ruling on the reviewer's Q1: item mutations DO record provenance,
+same verb vocabulary; Q2: briefings live in the instance-global tasks.db); (6) bundle-dir tests
+never run in CI → Monday tests moved to `tests/pm-monday-archive.test.js` per the
+pm-monday-mirror precedent. Suggestions applied: real `runMigrations` signature; fixture-helper
+note; Task 6 harness precedents corrected (peer-invocation-gate/connect-token; there is no
+mountMcpServer test); token edit site corrected to `localTokenAuthMiddleware` (:95–115);
+digest adapter corrected to `boards.js` (monday-local.js reads no tasks_items); SSE test file
+corrected to `tracker-stream.test.js`; board-card-api fixture reshape named; the full
+`plan_ref` site list (:274/:488/:522/:716/:757 + helper block :189–212) recorded; the three
+plan/result verbs added to Task 6's wire round-trip.
 
 ## Self-review record
 
