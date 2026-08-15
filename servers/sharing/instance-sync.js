@@ -207,7 +207,10 @@ function _scheduleStorageReset() {
   }, 500);
 }
 
-function shouldSyncRow(table, row) {
+// Exported for real (not just the ForTest alias below): sync-emit.js's
+// emitOrQueue (Task 2) is a second, production, door into this same gate —
+// a row the live emitChange path would filter must never be queued either.
+export function shouldSyncRow(table, row) {
   if (table === "contacts") {
     if (!row) return false;
     // local-bot contacts are hosted on THIS instance (instance-local secp key);
@@ -293,7 +296,9 @@ function shouldSyncRow(table, row) {
   return isSyncable(row.key);
 }
 
-// Test-only alias (keeps the function module-private for production callers).
+// Kept for back-compat with existing test imports now that shouldSyncRow
+// itself is exported (Task 2 needed a real production export, not just a
+// test alias — see the comment above shouldSyncRow).
 export function shouldSyncRowForTest(table, row) { return shouldSyncRow(table, row); }
 
 /**
