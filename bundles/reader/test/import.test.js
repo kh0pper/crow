@@ -105,6 +105,13 @@ test("assertPublicHost rejects an IPv4-mapped IPv6 loopback literal", async () =
   await assert.rejects(assertPublicHost("http://[::ffff:127.0.0.1]/x", {}), /private address/);
 });
 
+test("assertPublicHost rejects CGNAT/Tailscale range 100.64/10", async () => {
+  const { assertPublicHost } = await import("../server/import.js");
+  await assert.rejects(assertPublicHost("http://100.121.254.89/x", {}), /private address/);
+  await assert.rejects(assertPublicHost("http://100.127.255.255/x", {}), /private address/);
+  await assertPublicHost("http://100.63.0.1/x", { READER_ALLOW_PRIVATE_URLS: "1" });
+});
+
 test("ingestDocument rejects a non-http(s) URL scheme", async () => {
   const fetchImpl = async () => { throw new Error("fetchImpl should not be called"); };
   const { id, extraction_status } = await ingestDocument(db, config, {

@@ -31,7 +31,7 @@ milestones don't need a migration.
   never rewinds itself) and resumes on reload.
 - **Library** — `/dashboard/reader` panel: an import card and a table
   of documents with source, extraction status, progress, and tags.
-  FTS5 search over document text backs `crow_reader_list`.
+  FTS5 search over titles, tags, and sources backs `crow_reader_list`.
 - **MCP tools** — `crow_reader_ingest` (import from a local path or
   URL; local paths are checked against an allowlist), `crow_reader_list`
   (FTS-searchable library listing), `crow_reader_get` (one document
