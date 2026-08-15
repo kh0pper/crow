@@ -441,3 +441,238 @@ test("execute: refuses without assigned_bot, refuses terminal, dispatches and wr
   t4.close();
   assert.deepEqual(row, before, "dispatch writes nothing to the card");
 });
+
+// ---------------------------------------------------------------------------
+// Track 1 Task 9: history strip + autonomy UI + drawer polish.
+//
+// Carried item 1 (six-route convergence): card edit/move/cancel and
+// tracker-item edit/move, plus the create routes, all used to write
+// tasks_items directly. Every one below gets its OWN provenance test — a
+// route quietly dropped back to raw SQL fails exactly one test here.
+// ---------------------------------------------------------------------------
+
+function mutationsFor(itemId) {
+  const d = new Database(process.env.CROW_TASKS_DB_PATH);
+  const rows = d.prepare(
+    "SELECT verb, actor_kind, actor_id, job_id FROM board_mutations WHERE item_id=? ORDER BY id ASC"
+  ).all(itemId);
+  d.close();
+  return rows;
+}
+
+async function createTestCard(fields) {
+  const r = await fetch(base + "/card", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "task9 card", project_id: 1, ...fields }),
+  });
+  const body = await r.json();
+  return { status: r.status, body };
+}
+
+test("convergence: POST /card (create) records a 'create' mutation, actor human — response shape unchanged", async () => {
+  const { status, body } = await createTestCard({});
+  assert.equal(status, 200);
+  assert.deepEqual(Object.keys(body).sort(), ["id", "ok"], "response shape is exactly {ok,id} — unchanged");
+  assert.equal(body.ok, true);
+  const rows = mutationsFor(body.id);
+  assert.deepEqual(rows, [{ verb: "create", actor_kind: "human", actor_id: null, job_id: null }]);
+});
+
+test("convergence: POST /card/:id (edit) records an 'update' mutation for field changes", async () => {
+  const { body: created } = await createTestCard({});
+  const r = await fetch(base + "/card/" + created.id, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "edited title" }) });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(await r.json()).sort(), ["ok"], "response shape is exactly {ok} — unchanged");
+  const rows = mutationsFor(created.id);
+  assert.deepEqual(rows.map((m) => m.verb), ["create", "update"]);
+  assert.equal(rows[1].actor_kind, "human");
+});
+
+test("convergence: POST /card/:id (edit) with a status change ALSO records a 'move' mutation", async () => {
+  const { body: created } = await createTestCard({});
+  const r = await fetch(base + "/card/" + created.id, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "still edited", status: "in_progress" }) });
+  assert.equal(r.status, 200);
+  const rows = mutationsFor(created.id);
+  assert.deepEqual(rows.map((m) => m.verb), ["create", "update", "move"]);
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = t.prepare("SELECT status FROM tasks_items WHERE id=?").get(created.id);
+  t.close();
+  assert.equal(row.status, "in_progress");
+});
+
+test("convergence: POST /card/:id/move (drag-and-drop) records a 'move' mutation — response shape unchanged", async () => {
+  const { body: created } = await createTestCard({});
+  const r = await fetch(base + "/card/" + created.id + "/move", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "in_progress" }) });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(await r.json()).sort(), ["ok"]);
+  const rows = mutationsFor(created.id);
+  assert.deepEqual(rows.map((m) => m.verb), ["create", "move"]);
+});
+
+test("convergence: POST /card/:id/cancel records a 'move' mutation to status=cancelled — response shape unchanged", async () => {
+  const { body: created } = await createTestCard({});
+  const r = await fetch(base + "/card/" + created.id + "/cancel", { method: "POST" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(await r.json()).sort(), ["ok"]);
+  const rows = mutationsFor(created.id);
+  assert.deepEqual(rows.map((m) => m.verb), ["create", "move"]);
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = t.prepare("SELECT status FROM tasks_items WHERE id=?").get(created.id);
+  t.close();
+  assert.equal(row.status, "cancelled");
+});
+
+test("convergence: POST /tracker-item (create) records a 'create' mutation — response shape unchanged", async () => {
+  const r = await fetch(base + "/tracker-item", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ tracker_slug: "pir", label: "task9 item" }) });
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.deepEqual(Object.keys(body).sort(), ["id", "ok"]);
+  const rows = mutationsFor(body.id);
+  assert.deepEqual(rows, [{ verb: "create", actor_kind: "human", actor_id: null, job_id: null }]);
+});
+
+test("convergence: POST /tracker-item/:id (edit) records an 'update' mutation — response shape unchanged", async () => {
+  const created = await (await fetch(base + "/tracker-item", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ tracker_slug: "pir", label: "editable item" }) })).json();
+  const r = await fetch(base + "/tracker-item/" + created.id, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "edited item" }) });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(await r.json()).sort(), ["ok"]);
+  const rows = mutationsFor(created.id);
+  assert.deepEqual(rows.map((m) => m.verb), ["create", "update"]);
+});
+
+test("convergence: POST /tracker-item/:id/move records a 'move' mutation — response shape unchanged", async () => {
+  const created = await (await fetch(base + "/tracker-item", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ tracker_slug: "pir", label: "movable item" }) })).json();
+  const r = await fetch(base + "/tracker-item/" + created.id + "/move", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "done" }) });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(await r.json()).sort(), ["ok"]);
+  const rows = mutationsFor(created.id);
+  assert.deepEqual(rows.map((m) => m.verb), ["create", "move"]);
+});
+
+test("autonomy: create and edit accept 'gated'/'auto', reject anything else with 400", async () => {
+  const bad = await createTestCard({ autonomy: "sometimes" });
+  assert.equal(bad.status, 400);
+  const ok = await createTestCard({ autonomy: "auto" });
+  assert.equal(ok.status, 200);
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  assert.equal(t.prepare("SELECT autonomy FROM tasks_items WHERE id=?").get(ok.body.id).autonomy, "auto");
+  t.close();
+
+  // title is always sent alongside every other field on the real drawer's
+  // Save button (client.js) — titl e is NOT NULL, so an edit call must carry
+  // it, same as every other edit test in this file.
+  const badEdit = await fetch(base + "/card/" + ok.body.id, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "task9 card", autonomy: "nope" }) });
+  assert.equal(badEdit.status, 400);
+  const okEdit = await fetch(base + "/card/" + ok.body.id, { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "task9 card", autonomy: "gated" }) });
+  assert.equal(okEdit.status, 200);
+  const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
+  assert.equal(t2.prepare("SELECT autonomy FROM tasks_items WHERE id=?").get(ok.body.id).autonomy, "gated");
+  t2.close();
+});
+
+// ---- GET /card/:id additive keys (D-T1.3/D-T1.4/D-T1.5) ----
+
+test("GET /card/:id gains ADDITIVE keys only: autonomy/plan_head/latest_results/mutations", async () => {
+  const { body: created } = await createTestCard({});
+  const before = await (await fetch(base + "/card/" + created.id)).json();
+  const EXISTING_KEYS = ["card", "projects", "locked", "board"];
+  for (const k of EXISTING_KEYS) assert.ok(Object.hasOwn(before, k), "existing key survives: " + k);
+  assert.deepEqual(Object.keys(before).sort(), [...EXISTING_KEYS, "autonomy", "plan_head", "latest_results", "mutations"].sort(),
+    "additive-only: no existing key dropped, nothing unexpected added");
+  assert.equal(before.autonomy, "gated");
+  assert.equal(before.plan_head, null, "no plan saved yet");
+  assert.deepEqual(before.latest_results, []);
+  assert.equal(before.mutations.length, 1);
+  assert.equal(before.mutations[0].verb, "create");
+});
+
+test("GET /card/:id history strip returns only the latest 10 mutations, newest first", async () => {
+  const { body: created } = await createTestCard({});
+  // 1 create + 11 title edits = 12 mutations total; only the newest 10 come back.
+  for (let i = 0; i < 11; i++) {
+    await fetch(base + "/card/" + created.id, { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "edit " + i }) });
+  }
+  const rows = mutationsFor(created.id);
+  assert.equal(rows.length, 12, "the full ledger has 12 rows");
+  const g = await (await fetch(base + "/card/" + created.id)).json();
+  assert.equal(g.mutations.length, 10, "the drawer strip caps at N=10");
+  assert.equal(g.mutations[0].verb, "update", "newest first");
+  assert.equal(g.mutations[0].detail_json && JSON.parse(g.mutations[0].detail_json).title[1], "edit 10");
+});
+
+// ---- decide-result route + "approve & mark done" (D-T1.5) ----
+
+function seedResult(itemId, outcome) {
+  const d = new Database(process.env.CROW_TASKS_DB_PATH);
+  d.prepare("INSERT INTO board_results (item_id, actor_kind, actor_id, outcome, status) VALUES (?,'bot','scout',?,'recorded')")
+    .run(itemId, outcome);
+  const id = Number(d.prepare("SELECT id FROM board_results WHERE item_id=? ORDER BY id DESC LIMIT 1").get(itemId).id);
+  d.close();
+  return id;
+}
+
+test("POST /card/:id/result/:resultId/decide approves a recorded result and does NOT move the card", async () => {
+  const { body: created } = await createTestCard({});
+  const resultId = seedResult(created.id, "success");
+  const r = await fetch(base + "/card/" + created.id + "/result/" + resultId + "/decide", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ decision: "approved" }) });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(await r.json()).sort(), ["ok"]);
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  const status = t.prepare("SELECT status FROM tasks_items WHERE id=?").get(created.id).status;
+  const resultStatus = t.prepare("SELECT status, decided_via FROM board_results WHERE id=?").get(resultId);
+  t.close();
+  assert.equal(status, "pending", "decide alone never moves the card");
+  assert.deepEqual(resultStatus, { status: "approved", decided_via: "dashboard" });
+});
+
+test("POST /card/:id/result/:resultId/decide rejects a recorded result; re-deciding 409s", async () => {
+  const { body: created } = await createTestCard({});
+  const resultId = seedResult(created.id, "failure");
+  const r = await fetch(base + "/card/" + created.id + "/result/" + resultId + "/decide", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ decision: "rejected" }) });
+  assert.equal(r.status, 200);
+  const again = await fetch(base + "/card/" + created.id + "/result/" + resultId + "/decide", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ decision: "approved" }) });
+  assert.equal(again.status, 409, "an already-decided result refuses a second decision");
+});
+
+test("decide-result: bad decision value 400s; a tracker-item id 404s (D-T1.8 guard)", async () => {
+  const { body: created } = await createTestCard({});
+  const resultId = seedResult(created.id, "success");
+  const bad = await fetch(base + "/card/" + created.id + "/result/" + resultId + "/decide", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ decision: "maybe" }) });
+  assert.equal(bad.status, 400);
+  const onItem = await fetch(base + "/card/" + trackerItemId + "/result/" + resultId + "/decide", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ decision: "approved" }) });
+  assert.equal(onItem.status, 404);
+});
+
+test("\"approve & mark done\": decide + move is two writes, both recorded, and lands the card on 'done'", async () => {
+  const { body: created } = await createTestCard({});
+  const resultId = seedResult(created.id, "success");
+  const decide = await fetch(base + "/card/" + created.id + "/result/" + resultId + "/decide", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ decision: "approved" }) });
+  assert.equal(decide.status, 200);
+  const move = await fetch(base + "/card/" + created.id + "/move", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "done" }) });
+  assert.equal(move.status, 200);
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = t.prepare("SELECT status, completed_at FROM tasks_items WHERE id=?").get(created.id);
+  t.close();
+  assert.equal(row.status, "done");
+  assert.ok(row.completed_at, "the builtin board's 'done' is terminal — completed_at stamps");
+  const rows = mutationsFor(created.id);
+  assert.deepEqual(rows.map((m) => m.verb), ["create", "result_decide", "move"], "both writes recorded, in order");
+});

@@ -139,7 +139,13 @@ export async function createCard(tdb, fields, actor) {
   return { id };
 }
 
-const CARD_UPDATE_FIELDS = ["title", "description", "due_date", "phase", "owner", "tags", "priority", "autonomy"];
+// Track 1 Task 9: "assigned_bot" joined this list so the dashboard's card-edit
+// route (bot-board-api.js POST /card/:id) can converge onto updateCard for
+// EVERY field it writes, including bot assignment — the route still does its
+// own pi_bot_defs existence/enabled lookup first (that's a crow.db read this
+// tasks.db-only service has no business making), but the actual column write
+// and its provenance now go through here like everything else.
+const CARD_UPDATE_FIELDS = ["title", "description", "due_date", "phase", "owner", "tags", "priority", "autonomy", "assigned_bot"];
 
 export async function updateCard(tdb, id, fields, actor) {
   const cur = await getCard(tdb, id);
@@ -380,4 +386,37 @@ export async function unarchiveItem(tdb, id, actor) {
     args: [id],
   });
   await recordMutation(tdb, { itemId: id, verb: "unarchive", actor, detail: { archived_at: [old, null] } });
+}
+
+/**
+ * Create a tracker item on a given board_id (Track 1 Task 9 — the single
+ * writer for tracker-item creation, converged out of board-mcp.js's
+ * createItemImpl and bot-board-api.js's inline POST /tracker-item INSERT,
+ * which used to duplicate this exact logic and only ONE of the two recorded
+ * a mutation. `resolveItemDef` (above) is reused rather than re-deriving the
+ * board→def lookup a third time.
+ */
+export async function createItem(tdb, boardId, fields, actor) {
+  const def = await resolveItemDef(tdb, boardId);
+  if (!def) throw fail(`tracker not found for board_id ${boardId}`, "not_found", 404);
+  const f = fields || {};
+  const status = f.status != null ? String(f.status) : def.status_values[0];
+  if (!isValidStatus(def, status)) throw fail(`invalid status: ${status}`, "bad_status", 400);
+  const dataJson = f.data && typeof f.data === "object" ? JSON.stringify(f.data) : "{}";
+  const r = await tdb.execute({
+    sql: `INSERT INTO tasks_items (board_id, bot_id, status, priority, title, data_json, action_needed)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    args: [
+      boardId,
+      f.bot_id ?? null,
+      status,
+      f.priority != null ? Number(f.priority) : 3,
+      String(f.title ?? ""),
+      dataJson,
+      f.action_needed ?? null,
+    ],
+  });
+  const id = Number(r.lastInsertRowid);
+  await recordMutation(tdb, { itemId: id, verb: "create", actor, detail: {} });
+  return { id };
 }

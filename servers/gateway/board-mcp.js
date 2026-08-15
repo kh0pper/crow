@@ -43,12 +43,12 @@ import { z } from "zod";
 import { createDbClient } from "../db.js";
 import { tasksDbPath } from "../../scripts/pi-bots/instance-paths.mjs";
 import {
-  resolveBoardDef, resolveSlugBoardDef, isValidStatus,
+  resolveBoardDef, resolveSlugBoardDef,
 } from "./routes/board-defs.js";
 import {
   getCard, getItem, createCard, updateCard, moveCard,
   archiveCard, unarchiveCard, moveItem, updateItem, archiveItem, unarchiveItem,
-  recordMutation,
+  createItem,
 } from "./board/card-service.js";
 import { getCurrentPlan, listPlans, savePlan, approvePlan } from "./board/plan-service.js";
 import { reportResult, decideResult, listResults } from "./board/result-service.js";
@@ -115,12 +115,6 @@ async function probeKind(tdb, id) {
   const row = (await tdb.execute({ sql: "SELECT board_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
   if (!row) return null;
   return row.board_id == null ? "card" : "item";
-}
-
-async function resolveDefForBoardId(tdb, boardId) {
-  const row = (await tdb.execute({ sql: "SELECT slug FROM board_defs WHERE id=?", args: [boardId] })).rows[0];
-  if (!row || !row.slug) return null;
-  return resolveSlugBoardDef(tdb, row.slug);
 }
 
 async function dispatchUpdate(tdb, id, fields, actor) {
@@ -240,34 +234,10 @@ async function getItemFullImpl(tdb, id) {
   return { kind, item: row, plan, results, mutations };
 }
 
-/** Tracker-item creation: card-service.js exports no createItem (only its
- *  card half is a Task-2 contract) — this mirrors bot-board-api.js's
- *  POST /tracker-item INSERT, def-validated, with a recordMutation call this
- *  new verb surface owns (the legacy route does not record one; not this
- *  file's job to retrofit it there). */
-async function createItemImpl(tdb, boardId, fields, actor) {
-  const def = await resolveDefForBoardId(tdb, boardId);
-  if (!def) throw fail(`tracker not found for board_id ${boardId}`, "not_found", 404);
-  const status = fields.status != null ? String(fields.status) : def.status_values[0];
-  if (!isValidStatus(def, status)) throw fail(`invalid status: ${status}`, "bad_status", 400);
-  const dataJson = fields.data && typeof fields.data === "object" ? JSON.stringify(fields.data) : "{}";
-  const r = await tdb.execute({
-    sql: `INSERT INTO tasks_items (board_id, bot_id, status, priority, title, data_json, action_needed)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    args: [
-      boardId,
-      fields.bot_id ?? null,
-      status,
-      fields.priority != null ? Number(fields.priority) : 3,
-      String(fields.title ?? ""),
-      dataJson,
-      fields.action_needed ?? null,
-    ],
-  });
-  const id = Number(r.lastInsertRowid);
-  await recordMutation(tdb, { itemId: id, verb: "create", actor, detail: {} });
-  return { id };
-}
+// Tracker-item creation is card-service.js's createItem (Track 1 Task 9) —
+// this file no longer carries its own copy. bot-board-api.js's POST
+// /tracker-item route converges onto the SAME function, so both callers now
+// record a 'create' mutation identically (the old dashboard route did not).
 
 async function briefingSnapshotImpl(tdb) {
   const statusRows = (await tdb.execute({
@@ -354,7 +324,7 @@ export function createBoardMcpServer(options = {}) {
           if (!def) throw fail(`tracker not found: ${fields.slug}`, "not_found", 404);
           boardId = def.id;
         }
-        return createItemImpl(tdb, boardId, fields, actor);
+        return createItem(tdb, boardId, fields, actor);
       }
       return createCard(tdb, fields, actor);
     });
