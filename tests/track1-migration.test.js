@@ -252,3 +252,111 @@ test("0004 logs non-NULL plan_ref before dropping (per-project)", async () => {
     rmSync(projRoot, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task 8 (D-T1.6): Monday sync archiving invariants — integration case.
+// A row that was archived+synced BEFORE the migration converges its schema,
+// then survives a Monday twoway pull round-trip without duplicating (no
+// extra tasks_items row / pm_sync_state row) or resurrecting (archived_at
+// stays set; nothing gets recreated remotely).
+// ---------------------------------------------------------------------------
+function stubFetchThrows() {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("fetch must not be called in this test"); };
+  return () => { globalThis.fetch = original; };
+}
+
+test("0004 + Monday twoway pull: an archived+synced kanban row survives migration and a pull round-trip neither duplicates nor resurrects it", async () => {
+  const f = fixture();
+  const restoreFetch = stubFetchThrows();
+  const ARCHIVE_PROJECT_ID = 99; // isolated from fixture()'s own seeded rows (project_id 1)
+  try {
+    // Pre-migration: a plain kanban card, no archived_at column yet.
+    const t0 = new Database(f.tasksDbPath);
+    const rowId = Number(
+      t0.prepare("INSERT INTO tasks_items (title, status, project_id) VALUES (?,?,?)")
+        .run("Migrated Archived Card", "in_progress", ARCHIVE_PROJECT_ID).lastInsertRowid
+    );
+    t0.close();
+
+    const r = await runMigrations({ migrationsDir: DIR, dbPath: f.dbPath, tasksDbPath: f.tasksDbPath, log: () => {} });
+    assert.ok(r.applied.includes("0004-track1-card-model"));
+
+    // Post-migration: archive the card, then wire up sync bookkeeping
+    // (pm_sync_state/pm_sync_log are bundle-owned — not created by init-db.js
+    // or the migration; same hand-rolled pattern as tests/pm-monday-mirror
+    // .test.js and tests/pm-monday-archive.test.js).
+    const ARCHIVED_AT = "2026-08-10T00:00:00Z";
+    const t1 = new Database(f.tasksDbPath);
+    t1.prepare("UPDATE tasks_items SET archived_at = ? WHERE id = ?").run(ARCHIVED_AT, rowId);
+    t1.close();
+
+    const { createDbClient } = await import("../servers/db.js");
+    const { syncTwowayBoard, contentHash } = await import("../bundles/pm-workspace/server/sync/monday.js");
+
+    const BOARD_ID = "777";
+    const localHash = contentHash({ title: "Migrated Archived Card", status: "in_progress" });
+    const c = new Database(f.dbPath);
+    c.exec(`
+      CREATE TABLE pm_sync_state (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT, board_id TEXT, item_id TEXT, local_kind TEXT, local_id INTEGER,
+        content_hash TEXT, monday_updated_at TEXT, last_synced_at TEXT,
+        UNIQUE(board_id, item_id)
+      );
+      CREATE TABLE pm_sync_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_at TEXT DEFAULT (datetime('now')),
+        direction TEXT, board_id TEXT, action TEXT, item_ref TEXT, detail TEXT, ok INTEGER
+      );
+    `);
+    c.prepare(
+      "INSERT INTO pm_sync_state (source, board_id, item_id, local_kind, local_id, content_hash, monday_updated_at) VALUES ('monday',?,?,?,?,?,?)"
+    ).run(BOARD_ID, "monday-archived-1", "kanban", rowId, localHash, "2026-01-01T00:00:00Z");
+    c.close();
+
+    const cdb = createDbClient(f.dbPath);
+    const tdb = createDbClient(f.tasksDbPath);
+    const board = {
+      board_id: BOARD_ID, mode: "twoway",
+      target: { kind: "kanban", project_id: ARCHIVE_PROJECT_ID },
+      column_map: {}, status_map: { "Working on it": "in_progress" }, status_column_id: "status_col",
+    };
+    const item = {
+      id: "monday-archived-1", name: "Updated From Monday", updated_at: "2026-08-15T00:00:00Z",
+      group: { id: "g1" }, column_values: [{ id: "status_col", text: "Working on it", value: null }],
+    };
+
+    const countRows = async () => Number((await tdb.execute({ sql: "SELECT COUNT(*) AS n FROM tasks_items", args: [] })).rows[0].n);
+    const baseline = await countRows();
+
+    const totals1 = { created: 0, updated: 0, pushed: 0, conflicts: 0, flagged: 0, errors: 0 };
+    await syncTwowayBoard(cdb, tdb, board, [item], "test-token", totals1);
+    assert.equal(totals1.updated, 1, "the pull updates the archived row in place");
+    assert.equal(totals1.created, 0, "no resurrection: nothing new created locally or remotely");
+    assert.equal(totals1.errors, 0);
+    assert.equal(await countRows(), baseline, "no duplicate row from the pull");
+
+    const card = (await tdb.execute({ sql: "SELECT title, archived_at FROM tasks_items WHERE id=?", args: [rowId] })).rows[0];
+    assert.equal(card.title, "Updated From Monday", "updated in place");
+    assert.equal(card.archived_at, ARCHIVED_AT, "stays archived through the pull");
+
+    const logRows = (await cdb.execute({ sql: "SELECT action FROM pm_sync_log WHERE item_ref=?", args: ["Updated From Monday"] })).rows;
+    assert.ok(logRows.some((row) => row.action === "pull_archived_update"), `expected pull_archived_update; got: ${JSON.stringify(logRows)}`);
+
+    // Second identical pull: still no duplication, still no resurrection.
+    const totals2 = { created: 0, updated: 0, pushed: 0, conflicts: 0, flagged: 0, errors: 0 };
+    await syncTwowayBoard(cdb, tdb, board, [item], "test-token", totals2);
+    assert.equal(totals2.created, 0);
+    assert.equal(await countRows(), baseline, "still exactly one row for this card after a second pull");
+
+    const stateCount = (await cdb.execute({ sql: "SELECT COUNT(*) AS n FROM pm_sync_state WHERE board_id=? AND item_id=?", args: [BOARD_ID, "monday-archived-1"] })).rows[0].n;
+    assert.equal(Number(stateCount), 1, "still exactly one mapping row");
+
+    await cdb.close();
+    await tdb.close();
+  } finally {
+    restoreFetch();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
