@@ -36,10 +36,52 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   }
   function reload(){ location.reload(); }
 
-  var drawer=$('bb-drawer'), trackerDrawer=$('bb-tracker-drawer'), cur=null, dragId=null, dragType=null, planMtime=null;
+  var drawer=$('bb-drawer'), trackerDrawer=$('bb-tracker-drawer'), cur=null, dragId=null, dragType=null;
+  // Track 1: plans are RECORDS now (board_plans), not a file — no mtime
+  // optimistic-concurrency any more. planCurrentStatus drives the Approve
+  // button's visibility (only a 'draft' current version is approvable).
+  var planVersions=[], planCurrentVersion=null, planCurrentStatus=null;
   function openDrawer(el){ if(el){el.classList.add('bb-open');el.setAttribute('aria-hidden','false');} }
   function closeDrawer(el){ if(el){el.classList.remove('bb-open');el.setAttribute('aria-hidden','true');} }
   function msg(el,txt,cls){ if(!el) return; el.className='bb-msg '+(cls||''); el.textContent=txt||''; }
+
+  // ---- Plan tab: version history strip + approve button (built once; no
+  // static markup edit needed — inserted next to the existing plan fields) ----
+  var planVersionsWrap=null, planApproveBtn=null;
+  (function buildPlanVersionUi(){
+    var ta=$('bb-d-plan');
+    if(ta && ta.parentNode){
+      planVersionsWrap=document.createElement('div');
+      planVersionsWrap.id='bb-d-plan-versions';
+      planVersionsWrap.className='bb-msg';
+      planVersionsWrap.style.cssText='margin:.3rem 0 .5rem;display:flex;flex-wrap:wrap;gap:.3rem;align-items:center';
+      ta.parentNode.insertBefore(planVersionsWrap, ta);
+    }
+    var saveBtn=$('bb-d-plan-save');
+    if(saveBtn && saveBtn.parentNode){
+      planApproveBtn=document.createElement('button');
+      planApproveBtn.type='button';
+      planApproveBtn.className='bb-btn bb-sec';
+      planApproveBtn.id='bb-d-plan-approve';
+      planApproveBtn.style.cssText='display:none;margin-left:.4rem';
+      planApproveBtn.textContent='${tJs("botboard.btnApprovePlan", lang)}';
+      saveBtn.parentNode.insertBefore(planApproveBtn, saveBtn.nextSibling);
+    }
+  })();
+  function renderPlanVersions(){
+    if(!planVersionsWrap) return;
+    clearEl(planVersionsWrap);
+    if(!planVersions.length) return;
+    var label=document.createElement('span');
+    label.textContent='${tJs("botboard.planVersionsLabel", lang)}';
+    planVersionsWrap.appendChild(label);
+    planVersions.forEach(function(v){
+      var b=document.createElement('span');
+      b.className='bb-list-status';
+      b.textContent='v'+v.version+' ('+v.status+')';
+      planVersionsWrap.appendChild(b);
+    });
+  }
 
   // ---- Kanban card drawer ----
   function cardData(cardEl){
@@ -58,7 +100,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var lk=$('bb-d-lock'), unlock=$('bb-d-unlock');
     if(cur.locked){ lk.textContent='\\uD83D\\uDD12 ${tJs("botboard.jsCardLockedPre", lang)}\\u2014 ${tJs("botboard.jsCardLockedPost", lang)}';
       unlock.style.display=''; } else { lk.textContent=''; unlock.style.display='none'; }
-    ['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save']
+    ['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save','bb-d-plan-approve']
       .forEach(function(i){ var e=$(i); if(e) e.disabled=cur.locked; });
     api('GET','/card/'+cur.id).then(function(r){
       if(r.ok&&r.j&&r.j.card){var c=r.j.card;
@@ -87,8 +129,21 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   function loadPlan(){
     var pm=$('bb-d-plan-msg'); msg(pm,'loading\\u2026','');
     api('GET','/card/'+cur.id+'/plan').then(function(r){
-      if(r.ok&&r.j){ $('bb-d-plan').value=r.j.markdown||''; planMtime=r.j.mtime||null;
-        msg(pm, r.j.exists?'':'(no plan yet)', ''); renderPre();
+      if(r.ok&&r.j){
+        planVersions=r.j.versions||[];
+        renderPlanVersions();
+        if(r.j.current){
+          $('bb-d-plan').value=r.j.current.body_md||'';
+          planCurrentVersion=r.j.current.version;
+          planCurrentStatus=r.j.current.status;
+          msg(pm,'','');
+        } else {
+          $('bb-d-plan').value='';
+          planCurrentVersion=null; planCurrentStatus=null;
+          msg(pm,'${tJs("botboard.planPlaceholder", lang)}','');
+        }
+        if(planApproveBtn) planApproveBtn.style.display=(planCurrentStatus==='draft')?'':'none';
+        renderPre();
       } else { msg(pm, (r.j&&r.j.reason)||'plan unavailable','warn'); }
     }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
   }
@@ -260,12 +315,21 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     this.textContent=planToggled?'${tJs("botboard.jsToggleEdit", lang)}':'${tJs("botboard.jsTogglePreview", lang)}';
   };
   if($('bb-d-plan')) $('bb-d-plan').addEventListener('input',renderPre);
+  // Save ALWAYS appends a new draft version (plan-service.savePlan, D-T1.4) —
+  // there is no mtime optimistic-concurrency any more; a record is never
+  // edited in place, so two saves in flight just produce two versions.
   if($('bb-d-plan-save')) $('bb-d-plan-save').onclick=function(){
     if(!cur||cur.locked) return;
-    api('POST','/card/'+cur.id+'/plan',{markdown:$('bb-d-plan').value,mtime:planMtime}).then(function(r){
-      if(r.ok){ planMtime=(r.j&&r.j.mtime)||planMtime; msg($('bb-d-plan-msg'),'${tJs("botboard.jsPlanSaved", lang)}','ok'); }
-      else if(r.status===409){ msg($('bb-d-plan-msg'),'\\u26A0\\uFE0F Plan changed on disk \\u2014 reloading newer content.','warn'); loadPlan(); }
+    api('POST','/card/'+cur.id+'/plan',{body_md:$('bb-d-plan').value}).then(function(r){
+      if(r.ok){ msg($('bb-d-plan-msg'),'${tJs("botboard.jsPlanSaved", lang)}','ok'); loadPlan(); }
       else msg($('bb-d-plan-msg'),(r.j&&(r.j.error||r.j.reason))||'save failed','err');
+    });
+  };
+  if(planApproveBtn) planApproveBtn.onclick=function(){
+    if(!cur||cur.locked||planCurrentVersion==null) return;
+    api('POST','/card/'+cur.id+'/plan/approve',{version:planCurrentVersion}).then(function(r){
+      if(r.ok){ msg($('bb-d-plan-msg'),'${tJs("botboard.jsPlanApproved", lang)}','ok'); loadPlan(); }
+      else msg($('bb-d-plan-msg'),(r.j&&(r.j.error||r.j.reason))||'approve failed','err');
     });
   };
 

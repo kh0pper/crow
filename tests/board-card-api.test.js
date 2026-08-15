@@ -2,6 +2,13 @@
 // Harness: scratch tasks.db + crow.db via env, ephemeral express server,
 // plain fetch. dashboardAuth stub = pass-through (auth is not under test).
 //
+// Track 1 Task 4: the router now calls into the Task 2/3 services for the
+// plan drawer, so a hand-built fixture 500s the moment any route touches
+// board_plans/board_mutations/autonomy/archived_at. The fixture is
+// migration-built instead — mark 0001-0003 done in bookkeeping, hand-seed a
+// post-0003 shape, run the registry so 0004 executes for real (same pattern
+// as tests/board-card-service.test.js's Task 2 fixture).
+//
 // Track 0 Phase A: status writes validate against the RESOLVED BOARD DEF
 // (routes/board-defs.js) — project 7 carries a custom def; project 1 has no
 // def row and exercises the builtin fallback (today's four statuses).
@@ -11,34 +18,56 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
+import { runMigrations } from "../scripts/migrations/runner.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "board-api-"));
 process.env.CROW_TASKS_DB_PATH = join(dir, "tasks.db");
 process.env.CROW_DB_PATH = join(dir, "crow.db");
 
-// Seed BEFORE importing the router (module reads env at import time).
+const MIGRATIONS_DIR = join(import.meta.dirname, "..", "scripts", "migrations");
+
+function markPriorDone(c) {
+  c.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, sha TEXT)");
+  for (const id of ["0001-board-stages", "0002-board-defs", "0003-tracker-convergence"]) {
+    c.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, datetime('now'))").run(id);
+  }
+}
+
+let trackerItemId; // an id-space guard fixture (board_id NOT NULL): a "wrong kind" id
+
+// Seed BEFORE importing the router (module reads env at import time), then
+// run the REAL 0004 migration so board_plans/board_mutations/autonomy/
+// archived_at exist wherever the services expect them.
 {
   const t = new Database(process.env.CROW_TASKS_DB_PATH);
-  // board_id is present (Track 0 Phase B merged the tracker-item id space into
-  // this same table — F2's card-side by-id guards add `AND board_id IS NULL`
-  // to every card endpoint, which SQLite errors on if the column is absent).
-  // Every INSERT below omits it, so cards land NULL — the correct card shape.
+  // The post-0003 shape (plan_ref present — 0004 drops it for real below).
   t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
-    due_date TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
-    stage TEXT, assigned_bot TEXT, plan_ref TEXT, board_id INTEGER,
-    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
-  t.prepare("INSERT INTO tasks_items (title, project_id) VALUES ('card one', 1)").run();
+    due_date TEXT, phase TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
+    assigned_bot TEXT, plan_ref TEXT, board_id INTEGER, bot_id TEXT, action_needed TEXT,
+    next_followup_date TEXT, processing_lease TEXT, processing_lease_status TEXT,
+    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT, data_json TEXT NOT NULL DEFAULT '{}')`);
   t.exec(`CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE,
     project_id INTEGER UNIQUE, display_name TEXT NOT NULL, status_values TEXT NOT NULL,
     terminal_values TEXT NOT NULL, fields_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  t.prepare("INSERT INTO tasks_items (title, project_id) VALUES ('card one', 1)").run(); // id=1
   t.prepare("INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (7, 'Custom', ?, ?, ?)")
     .run('["todo","doing","shipped"]', '["shipped"]', '[{"key":"phase","label":"Phase","storage":"column"}]');
-  t.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES ('custom two', 7, 'todo')").run();
-  t.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES ('custom three', 7, 'todo')").run();
+  t.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES ('custom two', 7, 'todo')").run(); // id=2
+  t.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES ('custom three', 7, 'todo')").run(); // id=3
+  // A tracker ITEM (board_id NOT NULL) — the "wrong kind" id for the
+  // merged-id-space guard tests (D-T1.8).
+  t.prepare("INSERT INTO board_defs (slug, display_name, status_values, terminal_values, fields_json) VALUES ('pir','PIR',?,?,?)")
+    .run('["open","done"]', '["done"]', '[]');
+  const pirBoardId = t.prepare("SELECT id FROM board_defs WHERE slug='pir'").get().id;
+  const itemR = t.prepare("INSERT INTO tasks_items (board_id, title, status) VALUES (?, 'tracker item', 'open')").run(pirBoardId); // id=4
+  trackerItemId = Number(itemR.lastInsertRowid);
   t.close();
+
   const c = new Database(process.env.CROW_DB_PATH);
+  markPriorDone(c);
   c.exec(`CREATE TABLE project_spaces (id INTEGER PRIMARY KEY, name TEXT, slug TEXT,
       workspace_dir TEXT, tasks_db_uri TEXT, archived_at TEXT, repo_path TEXT);
     CREATE TABLE pi_bot_defs (bot_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
@@ -49,6 +78,11 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
   c.prepare("INSERT INTO project_spaces (id, name, slug, repo_path) VALUES (1, 'proj', 'proj', NULL)").run();
   c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('scout', 'Scout', '{}', 1, 1)").run();
   c.close();
+
+  await runMigrations({
+    migrationsDir: MIGRATIONS_DIR, dbPath: process.env.CROW_DB_PATH,
+    tasksDbPath: process.env.CROW_TASKS_DB_PATH, sha: "test", log: () => {},
+  });
 }
 
 let server, base;
@@ -63,11 +97,12 @@ before(async () => {
 });
 after(() => server && server.close());
 
-test("GET card returns the resolved board def; no stage, no effectiveStage", async () => {
+test("GET card returns the resolved board def; no stage, no effectiveStage, no plan_ref", async () => {
   const r = await (await fetch(base + "/card/2")).json();
   assert.ok(!Object.hasOwn(r, "effectiveStage"), "effectiveStage retired");
   assert.ok(!Object.hasOwn(r.card, "stage"), "stage retired from the response");
-  assert.ok(Object.hasOwn(r.card, "assigned_bot") && Object.hasOwn(r.card, "plan_ref"), "dormant columns still served");
+  assert.ok(Object.hasOwn(r.card, "assigned_bot"), "assigned_bot still served");
+  assert.ok(!Object.hasOwn(r.card, "plan_ref"), "plan_ref retired from the response (D-T1.7)");
   assert.deepEqual(r.board.status_values, ["todo", "doing", "shipped"]);
   assert.deepEqual(r.board.terminal_values, ["shipped"]);
   assert.equal(r.board.builtin, false);
@@ -260,58 +295,113 @@ test("assigned_bot: set to known bot OK, unknown 400, clear OK", async () => {
   assert.equal(clear.status, 200);
 });
 
-test("plan GET/POST honors a repo plan_ref, contained under repo_path", async () => {
-  const { mkdtempSync: mkd, mkdirSync: mkdir, writeFileSync: wf } = await import("node:fs");
-  const repo = mkd(join(tmpdir(), "board-repo-"));
-  mkdir(join(repo, ".pi", "plans"), { recursive: true });
-  wf(join(repo, ".pi", "plans", "card-1.md"), "# the plan\n");
-  const c = new Database(process.env.CROW_DB_PATH);
-  c.prepare("UPDATE project_spaces SET repo_path=? WHERE id=1").run(repo);
-  c.close();
-  const t = new Database(process.env.CROW_TASKS_DB_PATH);
-  t.prepare("UPDATE tasks_items SET plan_ref=? WHERE id=1")
-    .run(JSON.stringify({ kind: "repo", path: ".pi/plans/card-1.md" }));
-  t.close();
-  const g = await (await fetch(base + "/card/1/plan")).json();
-  assert.equal(g.exists, true);
-  assert.equal(g.kind, "repo");
-  assert.equal(g.markdown, "# the plan\n");
-  const p = await fetch(base + "/card/1/plan", { method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ markdown: "# edited\n", mtime: g.mtime }) });
-  assert.equal(p.status, 200);
+// ---- Track 1 Task 4: the plan drawer re-points to plan RECORDS (D-T1.4) ----
+
+test("GET /card/:id/plan starts empty; POST appends draft v1; GET reflects it", async () => {
+  const empty = await (await fetch(base + "/card/1/plan")).json();
+  assert.deepEqual(empty, { versions: [], current: null });
+
+  const save1 = await (await fetch(base + "/card/1/plan", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ body_md: "# v1 plan\n" }) })).json();
+  assert.deepEqual(save1, { ok: true, version: 1 });
+
+  const g1 = await (await fetch(base + "/card/1/plan")).json();
+  assert.equal(g1.versions.length, 1);
+  assert.equal(g1.versions[0].version, 1);
+  assert.equal(g1.versions[0].status, "draft");
+  assert.ok(g1.versions[0].created_at);
+  assert.deepEqual(g1.current, { version: 1, body_md: "# v1 plan\n", status: "draft" });
 });
 
-test("repo plan_ref with no repo_path on the project → 400, never a fallback", async () => {
-  const c = new Database(process.env.CROW_DB_PATH);
-  c.prepare("UPDATE project_spaces SET repo_path=NULL WHERE id=1").run();
-  c.close();
-  const g = await fetch(base + "/card/1/plan");
-  assert.equal(g.status, 400);
-  const t = new Database(process.env.CROW_TASKS_DB_PATH); // restore for later tests
-  t.prepare("UPDATE tasks_items SET plan_ref=NULL WHERE id=1").run();
-  t.close();
+test("plan approve marks the version approved; a newer draft does not displace it as current until IT is approved", async () => {
+  const approve1 = await (await fetch(base + "/card/1/plan/approve", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ version: 1 }) })).json();
+  assert.deepEqual(approve1, { ok: true });
+
+  const afterApprove = await (await fetch(base + "/card/1/plan")).json();
+  assert.equal(afterApprove.current.status, "approved");
+  assert.equal(afterApprove.current.version, 1);
+
+  const save2 = await (await fetch(base + "/card/1/plan", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ body_md: "# v2 plan\n" }) })).json();
+  assert.deepEqual(save2, { ok: true, version: 2 });
+
+  const stillV1 = await (await fetch(base + "/card/1/plan")).json();
+  assert.equal(stillV1.current.version, 1, "an approved plan stays current until the newer draft is itself approved (D-T1.4)");
+  assert.equal(stillV1.versions.length, 2);
+
+  const approve2 = await fetch(base + "/card/1/plan/approve", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ version: 2 }) });
+  assert.equal(approve2.status, 200);
+
+  const nowV2 = await (await fetch(base + "/card/1/plan")).json();
+  assert.equal(nowV2.current.version, 2);
+  assert.equal(nowV2.current.status, "approved");
+  const supersededV1 = nowV2.versions.find((v) => v.version === 1);
+  assert.equal(supersededV1.status, "superseded");
+
+  // Approving an already-superseded version is refused, not silently re-approved.
+  const reapprove = await fetch(base + "/card/1/plan/approve", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ version: 1 }) });
+  assert.equal(reapprove.status, 400);
 });
 
-test("first plan save into a repo with NO .pi/plans tree creates it (contained)", async () => {
-  const { mkdtempSync: mkd } = await import("node:fs");
-  const repo = mkd(join(tmpdir(), "board-repo-bare-"));
-  const c = new Database(process.env.CROW_DB_PATH);
-  c.prepare("UPDATE project_spaces SET repo_path=? WHERE id=1").run(repo);
-  c.close();
-  const t = new Database(process.env.CROW_TASKS_DB_PATH);
-  t.prepare("UPDATE tasks_items SET plan_ref=? WHERE id=1")
-    .run(JSON.stringify({ kind: "repo", path: ".pi/plans/first.md" }));
-  t.close();
-  const p = await fetch(base + "/card/1/plan", { method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ markdown: "# first plan\n" }) });
-  assert.equal(p.status, 200);
-  const g = await (await fetch(base + "/card/1/plan")).json();
-  assert.equal(g.markdown, "# first plan\n");
-  const t2 = new Database(process.env.CROW_TASKS_DB_PATH); // restore for any later tests
-  t2.prepare("UPDATE tasks_items SET plan_ref=NULL WHERE id=1").run();
-  t2.close();
+test("plan approve: 400 on a missing/non-integer version, 404 on a version that does not exist", async () => {
+  const badBody = await fetch(base + "/card/1/plan/approve", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+  assert.equal(badBody.status, 400);
+  const notFound = await fetch(base + "/card/1/plan/approve", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ version: 999 }) });
+  assert.equal(notFound.status, 404);
+});
+
+test("plan-dispatch route is retired (Track 1 / D-T1.7): 404", async () => {
+  const r = await fetch(base + "/card/1/plan-dispatch", { method: "POST" });
+  assert.equal(r.status, 404);
+});
+
+// ---- Track 1 Task 4: merged-id-space guards (D-T1.8) ----
+
+test("id-space guards: a tracker-item id refuses /project, /execute, /force-unlock, /plan (GET+POST+approve)", async () => {
+  const before = (() => {
+    const d = new Database(process.env.CROW_TASKS_DB_PATH);
+    const r = d.prepare("SELECT * FROM tasks_items WHERE id=?").get(trackerItemId);
+    d.close();
+    return r;
+  })();
+
+  // Each of these is a "card not found" refusal in THIS implementation
+  // (board_id IS NULL guard, D-T1.8) — asserted precisely as 404 rather than
+  // "400 or 404" so a dropped guard can't hide behind a coincidental 400
+  // from some other validation (e.g. execute's "no assigned_bot" check).
+  const proj = await fetch(base + "/card/" + trackerItemId + "/project", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ project_id: 1 }) });
+  assert.equal(proj.status, 404, "project: " + proj.status);
+
+  const exec = await fetch(base + "/card/" + trackerItemId + "/execute", { method: "POST" });
+  assert.equal(exec.status, 404, "execute: " + exec.status);
+
+  const unlock = await fetch(base + "/card/" + trackerItemId + "/force-unlock", { method: "POST" });
+  assert.equal(unlock.status, 404, "force-unlock: " + unlock.status);
+
+  const planGet = await fetch(base + "/card/" + trackerItemId + "/plan");
+  assert.equal(planGet.status, 404, "plan GET: " + planGet.status);
+
+  const planPost = await fetch(base + "/card/" + trackerItemId + "/plan", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ body_md: "hijack" }) });
+  assert.equal(planPost.status, 404, "plan POST: " + planPost.status);
+
+  const planApprove = await fetch(base + "/card/" + trackerItemId + "/plan/approve", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ version: 1 }) });
+  assert.equal(planApprove.status, 404, "plan approve: " + planApprove.status);
+
+  const after = (() => {
+    const d = new Database(process.env.CROW_TASKS_DB_PATH);
+    const r = d.prepare("SELECT * FROM tasks_items WHERE id=?").get(trackerItemId);
+    d.close();
+    return r;
+  })();
+  assert.deepEqual(after, before, "the tracker item must be byte-unchanged by every refused card-shaped call");
 });
 
 test("execute: refuses without assigned_bot, refuses terminal, dispatches and writes nothing", async () => {
@@ -350,26 +440,4 @@ test("execute: refuses without assigned_bot, refuses terminal, dispatches and wr
   const row = t4.prepare("SELECT * FROM tasks_items WHERE id=1").get();
   t4.close();
   assert.deepEqual(row, before, "dispatch writes nothing to the card");
-});
-
-test("plan-dispatch: gate matches execute; enqueues card_action='plan', card untouched", async () => {
-  // Card 1 is the SAME card the execute test just dispatched, and its queued
-  // job now locks the card on the job rail. Clear the rail first.
-  const c = new Database(process.env.CROW_DB_PATH);
-  c.prepare("DELETE FROM bot_jobs").run();
-  c.close();
-  const before = (() => {
-    const d = new Database(process.env.CROW_TASKS_DB_PATH);
-    const r = d.prepare("SELECT * FROM tasks_items WHERE id=1").get();
-    d.close(); return r;
-  })();
-  const ok = await (await fetch(base + "/card/1/plan-dispatch", { method: "POST" })).json();
-  assert.equal(ok.ok, true);
-  const c2 = new Database(process.env.CROW_DB_PATH);
-  assert.equal(c2.prepare("SELECT card_action FROM bot_jobs WHERE card_id=1").get().card_action, "plan");
-  c2.close();
-  const t3 = new Database(process.env.CROW_TASKS_DB_PATH);
-  const row = t3.prepare("SELECT * FROM tasks_items WHERE id=1").get();
-  t3.close();
-  assert.deepEqual(row, before, "plan-dispatch writes nothing to the card");
 });

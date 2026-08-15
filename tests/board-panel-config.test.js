@@ -19,15 +19,22 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
 // Seed BEFORE importing (modules read env at import time).
 {
   const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  // board_id + board_mutations (Track 1): moveCard (card-service) is now the
+  // no-JS action=move handler's writer — it filters WHERE board_id IS NULL
+  // and records every move to board_mutations. Every INSERT below omits
+  // board_id, so cards land NULL — the correct card shape.
   t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
     due_date TEXT, phase TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
-    assigned_bot TEXT, plan_ref TEXT, data_json TEXT NOT NULL DEFAULT '{}',
+    assigned_bot TEXT, plan_ref TEXT, board_id INTEGER, data_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
   t.exec(`CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE,
     project_id INTEGER UNIQUE, display_name TEXT NOT NULL, status_values TEXT NOT NULL,
     terminal_values TEXT NOT NULL, fields_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  t.exec(`CREATE TABLE board_mutations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
+    verb TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_id TEXT, job_id TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
   t.prepare("INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (7,'Custom',?,?,?)")
     .run('["todo","doing","shipped"]', '["shipped"]',
       '[{"key":"phase","label":"Phase","storage":"column","options":["Drafting","Final"]}]');

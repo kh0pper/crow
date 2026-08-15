@@ -39,6 +39,11 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
     due_date TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
     assigned_bot TEXT, plan_ref TEXT, board_id INTEGER, data_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
+  // board_mutations (Track 1): the no-JS action=move handler now writes
+  // through card-service's moveCard, which records every move here.
+  t.exec(`CREATE TABLE board_mutations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
+    verb TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_id TEXT, job_id TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
   const ins = t.prepare(
     "INSERT INTO tasks_items (id, title, project_id, assigned_bot, status) VALUES (?,?,1,'scout',?)"
   );
