@@ -159,6 +159,35 @@ export async function updateCard(tdb, id, fields, actor) {
     sets.push(`${key}=?`); args.push(norm);
     detail[key] = [old, norm];
   }
+
+  // parent_id — handled separately from the plain-field loop above: setting a
+  // new parent RE-INHERITS that parent's project_id (createCard's own
+  // semantics — a consistency ruling, not a bug: a card's project always
+  // follows its parent), which the generic key/value loop can't express
+  // (it's a two-column write driven by one input field). Explicitly null
+  // clears parent_id only, no other side effects. Self-parenting and a
+  // nonexistent parent both 400 (bad_parent), same as createCard.
+  if (Object.prototype.hasOwnProperty.call(f, "parent_id")) {
+    const newParentId = f.parent_id == null ? null : Number(f.parent_id);
+    const oldParentId = cur.parent_id ?? null;
+    if (newParentId !== oldParentId) {
+      let newProjectId = cur.project_id ?? null;
+      if (newParentId != null) {
+        if (newParentId === id) throw fail("a card cannot be its own parent", "bad_parent", 400);
+        const parent = await getCard(tdb, newParentId);
+        if (!parent) throw fail(`parent card not found: ${newParentId}`, "bad_parent", 400);
+        newProjectId = parent.project_id == null ? null : Number(parent.project_id);
+      }
+      sets.push("parent_id=?"); args.push(newParentId);
+      detail.parent_id = [oldParentId, newParentId];
+      const oldProjectId = cur.project_id ?? null;
+      if (newProjectId !== oldProjectId) {
+        sets.push("project_id=?"); args.push(newProjectId);
+        detail.project_id = [oldProjectId, newProjectId];
+      }
+    }
+  }
+
   if (!sets.length) return { id, changed: false };
 
   sets.push("updated_at=datetime('now')");

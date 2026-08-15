@@ -312,6 +312,58 @@ test("verb round trip: create -> list excludes archived -> get -> move -> archiv
   await client.close();
 });
 
+test("board_update_item: plain fields, and parent_id re-parents + re-inherits project_id", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+
+  // plain-field update (this tool otherwise had zero wire coverage)
+  const created = payload(await client.callTool({ name: "board_create_item", arguments: { title: "orig", project_id: 1 } }));
+  const updated = payload(await client.callTool({
+    name: "board_update_item",
+    arguments: { id: created.id, title: "changed", owner: "kevin" },
+  }));
+  assert.equal(updated.changed, true);
+  const got = payload(await client.callTool({ name: "board_get_item", arguments: { id: created.id } }));
+  assert.equal(got.item.title, "changed");
+  assert.equal(got.item.owner, "kevin");
+
+  // parent_id round trip: re-parenting onto a card in a different project
+  // re-inherits that project (D-T1.1 "parent_id supported" — same semantics
+  // as create, per card-service.updateCard).
+  const parentA = payload(await client.callTool({ name: "board_create_item", arguments: { title: "parentA", project_id: 1 } }));
+  const parentB = payload(await client.callTool({ name: "board_create_item", arguments: { title: "parentB", project_id: 2 } }));
+  const child = payload(await client.callTool({ name: "board_create_item", arguments: { title: "child", parent_id: parentA.id } }));
+  let gotChild = payload(await client.callTool({ name: "board_get_item", arguments: { id: child.id } }));
+  assert.equal(gotChild.item.project_id, 1, "sanity: inherited parentA's project at create");
+
+  const reparented = payload(await client.callTool({
+    name: "board_update_item",
+    arguments: { id: child.id, parent_id: parentB.id },
+  }));
+  assert.equal(reparented.changed, true);
+  gotChild = payload(await client.callTool({ name: "board_get_item", arguments: { id: child.id } }));
+  assert.equal(gotChild.item.parent_id, parentB.id);
+  assert.equal(gotChild.item.project_id, 2, "re-inherits the new parent's project_id over the wire");
+
+  // a nonexistent parent 400s as isError
+  const badParent = await client.callTool({ name: "board_update_item", arguments: { id: child.id, parent_id: 999999 } });
+  assert.equal(badParent.isError, true);
+  assert.match(badParent.content[0].text, /^\[400 bad_parent\]/);
+
+  // self-parenting 400s as isError
+  const selfParent = await client.callTool({ name: "board_update_item", arguments: { id: child.id, parent_id: child.id } });
+  assert.equal(selfParent.isError, true);
+  assert.match(selfParent.content[0].text, /^\[400 bad_parent\]/);
+
+  // explicit null clears the parent, no project_id side effect
+  const cleared = payload(await client.callTool({ name: "board_update_item", arguments: { id: child.id, parent_id: null } }));
+  assert.equal(cleared.changed, true);
+  gotChild = payload(await client.callTool({ name: "board_get_item", arguments: { id: child.id } }));
+  assert.equal(gotChild.item.parent_id, null);
+  assert.equal(gotChild.item.project_id, 2, "clearing the parent leaves project_id untouched");
+
+  await client.close();
+});
+
 // ---- provenance (D-T1.3 actor resolution) ----
 
 test("actor headers land in board_mutations (bot + job id) on a token-authed request", async () => {

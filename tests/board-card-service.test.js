@@ -178,6 +178,84 @@ test("updateCard records a field diff and refuses archived cards", async () => {
   });
 });
 
+test("updateCard: re-parenting inherits the new parent's project_id, both fields land in the diff", async () => {
+  await withStore(async ({ tdb }) => {
+    const parentA = await createCard(tdb, { title: "parentA", status: "pending", project_id: 1 }, HUMAN);
+    const parentB = await createCard(tdb, { title: "parentB", status: "pending", project_id: 2 }, HUMAN);
+    const { id } = await createCard(tdb, { title: "child", status: "pending", parent_id: parentA.id }, HUMAN);
+    let row = await getCard(tdb, id);
+    assert.equal(row.project_id, 1, "sanity: inherited parentA's project at create");
+
+    const r = await updateCard(tdb, id, { parent_id: parentB.id }, HUMAN);
+    assert.equal(r.changed, true);
+    row = await getCard(tdb, id);
+    assert.equal(row.parent_id, parentB.id);
+    assert.equal(row.project_id, 2, "re-inherits the new parent's project_id");
+
+    const muts = await allMutations(tdb, id);
+    const upd = muts.filter((m) => m.verb === "update").at(-1);
+    const detail = JSON.parse(upd.detail_json);
+    assert.deepEqual(detail.parent_id, [parentA.id, parentB.id]);
+    assert.deepEqual(detail.project_id, [1, 2]);
+  });
+});
+
+test("updateCard: a nonexistent parent_id is refused (bad_parent, 400)", async () => {
+  await withStore(async ({ tdb }) => {
+    const { id } = await createCard(tdb, { title: "t", status: "pending", project_id: 1 }, HUMAN);
+    await assert.rejects(
+      () => updateCard(tdb, id, { parent_id: 999999 }, HUMAN),
+      (e) => { assert.equal(e.code, "bad_parent"); assert.equal(e.http, 400); return true; },
+    );
+    const row = await getCard(tdb, id);
+    assert.equal(row.parent_id, null, "refused write left parent_id untouched");
+  });
+});
+
+test("updateCard: self-parenting is refused (bad_parent, 400)", async () => {
+  await withStore(async ({ tdb }) => {
+    const { id } = await createCard(tdb, { title: "t", status: "pending", project_id: 1 }, HUMAN);
+    await assert.rejects(
+      () => updateCard(tdb, id, { parent_id: id }, HUMAN),
+      (e) => { assert.equal(e.code, "bad_parent"); assert.equal(e.http, 400); return true; },
+    );
+  });
+});
+
+test("updateCard: explicit parent_id=null clears the parent, no other side effects", async () => {
+  await withStore(async ({ tdb }) => {
+    const parent = await createCard(tdb, { title: "parent", status: "pending", project_id: 1 }, HUMAN);
+    const { id } = await createCard(tdb, { title: "child", status: "pending", parent_id: parent.id }, HUMAN);
+    let row = await getCard(tdb, id);
+    assert.equal(row.project_id, 1);
+
+    const r = await updateCard(tdb, id, { parent_id: null }, HUMAN);
+    assert.equal(r.changed, true);
+    row = await getCard(tdb, id);
+    assert.equal(row.parent_id, null);
+    assert.equal(row.project_id, 1, "clearing the parent does not touch project_id");
+
+    const muts = await allMutations(tdb, id);
+    const upd = muts.filter((m) => m.verb === "update").at(-1);
+    const detail = JSON.parse(upd.detail_json);
+    assert.deepEqual(detail.parent_id, [parent.id, null]);
+    assert.ok(!("project_id" in detail), "no project_id side effect recorded");
+  });
+});
+
+test("updateCard: setting parent_id to its current value is a no-op (no mutation row)", async () => {
+  await withStore(async ({ tdb }) => {
+    const parent = await createCard(tdb, { title: "parent", status: "pending", project_id: 1 }, HUMAN);
+    const { id } = await createCard(tdb, { title: "child", status: "pending", parent_id: parent.id }, HUMAN);
+    const before = (await allMutations(tdb, id)).length;
+
+    const r = await updateCard(tdb, id, { parent_id: parent.id }, HUMAN);
+    assert.equal(r.changed, false);
+    const after = await allMutations(tdb, id);
+    assert.equal(after.length, before, "no update mutation recorded for a same-value parent_id");
+  });
+});
+
 // ---- moveCard ----
 
 test("moveCard stamps completed_at on terminal entry and clears on exit", async () => {
