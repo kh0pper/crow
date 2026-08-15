@@ -36,12 +36,27 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
   t.exec(`CREATE TABLE board_mutations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
     verb TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_id TEXT, job_id TEXT,
     detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  // Track 1 Task 9: the kanban card query LEFT JOINs each card's latest
+  // board_results row for the "awaiting review"/failed markers (D-T1.6
+  // carried item 4) — column/table-guarded in html.js, but this fixture
+  // carries the real table so the marker path itself gets exercised here.
+  t.exec(`CREATE TABLE board_results (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
+    plan_id INTEGER, job_id TEXT, actor_kind TEXT NOT NULL, actor_id TEXT, outcome TEXT NOT NULL,
+    summary_md TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'recorded',
+    decided_at TEXT, decided_via TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
   t.prepare("INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (7,'Custom',?,?,?)")
     .run('["todo","doing","shipped"]', '["shipped"]',
       '[{"key":"phase","label":"Phase","storage":"column","options":["Drafting","Final"]}]');
   const ins = t.prepare("INSERT INTO tasks_items (id, title, project_id, status, phase) VALUES (?,?,?,?,?)");
   ins.run(1, "custom card", 7, "todo", "Drafting");
   ins.run(2, "legacy card", 3, "pending", null);
+  // Track 1 Task 9: two more project-7 cards, each carrying a latest
+  // board_results row — one a recorded success (awaiting-review marker), one
+  // a failure (failed marker) — for the card-face marker rendering tests.
+  ins.run(10, "awaiting review card", 7, "todo", "Drafting");
+  ins.run(11, "failed run card", 7, "todo", "Drafting");
+  t.prepare("INSERT INTO board_results (item_id, actor_kind, outcome, status) VALUES (10,'bot','success','recorded')").run();
+  t.prepare("INSERT INTO board_results (item_id, actor_kind, outcome, status) VALUES (11,'bot','failure','recorded')").run();
   t.close();
 
   const c = new Database(process.env.CROW_DB_PATH);
@@ -201,4 +216,93 @@ test("emitted client script parses as JavaScript in both board modes", async () 
     const body = js.replace(/^<script>/, "").replace(/<\/script>$/, "");
     assert.doesNotThrow(() => new Function(body), `${label} client script must parse`);
   }
+});
+
+// ---- Track 1 Task 9: result markers on the card face (D-T1.6 carried item 4) ----
+
+test("card face shows the awaiting-review marker for a recorded-success result", async () => {
+  const html = await render(7);
+  const cardHtml = html.slice(html.indexOf('data-card="10"'));
+  assert.ok(cardHtml.slice(0, cardHtml.indexOf("</div></div>")).includes("bb-marker-waiting"),
+    "card 10 (recorded success) carries the waiting marker");
+  assert.ok(html.includes(">Awaiting review<") || html.includes("board.markerWaiting".split(".")[1]),
+    "the marker text is i18n'd, not a raw code");
+});
+
+test("card face shows the failed marker for a failure-outcome result", async () => {
+  const html = await render(7);
+  const cardHtml = html.slice(html.indexOf('data-card="11"'));
+  assert.ok(cardHtml.slice(0, cardHtml.indexOf("</div></div>")).includes("bb-marker-failed"),
+    "card 11 (failure outcome) carries the failed marker");
+});
+
+test("a card with no board_results row carries neither marker", async () => {
+  const html = await render(7);
+  const cardHtml = html.slice(html.indexOf('data-card="1"'), html.indexOf('data-card="1"') + 800);
+  assert.ok(!cardHtml.includes("bb-marker-waiting") && !cardHtml.includes("bb-marker-failed"),
+    "card 1 has no result row, so no marker either way");
+});
+
+test("marker query column-guards: a store without board_results does not crash the board render", async () => {
+  // html.js's TASKS_DB is resolved from env ONCE at import time (data-queries.js
+  // module scope) — flipping process.env mid-suite would not redirect it, so
+  // the column-guard is exercised the same way D-T1.6's own precedent does it
+  // (tests/board-archive.test.js's digest-adapter guard test): drop the table
+  // on the SAME store, render, then restore it exactly.
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  t.exec("DROP TABLE board_results");
+  t.close();
+  try {
+    const html = await render(7);
+    assert.ok(html.includes("custom card"), "the board still renders — degrades to no markers, not a crash");
+    // bb-marker-waiting/bb-marker-failed are ALSO css.js class-rule names (in
+    // every render's <style> block regardless of markers) — check the actual
+    // marker DIV markup, not a bare-classname substring, or this assertion is
+    // vacuously true on every render.
+    assert.ok(!html.includes('class="bb-marker bb-marker-waiting"') && !html.includes('class="bb-marker bb-marker-failed"'),
+      "no board_results table means no marker DIVs, anywhere on the board");
+  } finally {
+    const t2 = new Database(process.env.CROW_TASKS_DB_PATH);
+    t2.exec(`CREATE TABLE board_results (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
+      plan_id INTEGER, job_id TEXT, actor_kind TEXT NOT NULL, actor_id TEXT, outcome TEXT NOT NULL,
+      summary_md TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'recorded',
+      decided_at TEXT, decided_via TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    t2.prepare("INSERT INTO board_results (item_id, actor_kind, outcome, status) VALUES (10,'bot','success','recorded')").run();
+    t2.prepare("INSERT INTO board_results (item_id, actor_kind, outcome, status) VALUES (11,'bot','failure','recorded')").run();
+    t2.close();
+  }
+});
+
+// ---- Track 1 Task 9: drawer autonomy select + "approve & mark done" gating ----
+
+test("drawer and create-form carry the autonomy select (gated/auto)", async () => {
+  const html = await render(7);
+  assert.ok(html.includes('id="bb-d-autonomy"'), "drawer autonomy select");
+  assert.ok(html.includes('id="bb-nc-autonomy"'), "create-form autonomy select");
+  assert.ok(html.includes('<option value="gated">') && html.includes('<option value="auto">'),
+    "both autonomy values offered");
+});
+
+test("emitted client script gates \"approve & mark done\" on the def's terminal_values carrying 'done'", async () => {
+  const { clientJs } = await import("../servers/gateway/dashboard/panels/bot-board/client.js");
+  const js = clientJs("scout", "kanban", 7, null, null, "en");
+  // The button is created ONLY inside the hasDoneTerminal branch — assert
+  // the gating condition names the SAME source ('done' in board.terminal_values,
+  // read via GET /card/:id's board key) the button-creation code sits under.
+  const gateIdx = js.indexOf("hasDoneTerminal=(terminalValues||[]).indexOf('done')>=0");
+  assert.ok(gateIdx >= 0, "the def-gated predicate must exist verbatim");
+  const branchIdx = js.indexOf("if(latest.outcome==='success'&&hasDoneTerminal)");
+  assert.ok(branchIdx > gateIdx, "the branch reads the predicate computed above it");
+  const btnIdx = js.indexOf("bb-d-approve-done");
+  assert.ok(btnIdx > branchIdx, "the button id is only created inside the gated branch");
+});
+
+test("emitted client script builds the history strip and result banner off GET /card/:id's additive keys", async () => {
+  const { clientJs } = await import("../servers/gateway/dashboard/panels/bot-board/client.js");
+  const js = clientJs("scout", "kanban", 7, null, null, "en");
+  assert.ok(js.includes("renderHistory(r.j.mutations||[])"), "history strip hydrates from the additive 'mutations' key");
+  assert.ok(js.includes("renderResults(r.j.latest_results||[]"), "result banner hydrates from the additive 'latest_results' key");
+  assert.ok(js.includes("r.j.board&&r.j.board.terminal_values"), "gating reads the additive 'board' key's terminal_values");
+  assert.ok(js.includes("bb-d-history"), "history strip container id");
+  assert.ok(js.includes("MUTATION_VERB_LABELS"), "mutation verbs are i18n'd, not raw codes");
 });

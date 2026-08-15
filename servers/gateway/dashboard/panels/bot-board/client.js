@@ -125,7 +125,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     if(cur.locked){ lk.textContent='\\uD83D\\uDD12 ${tJs("botboard.jsCardLockedPre", lang)}\\u2014 ${tJs("botboard.jsCardLockedPost", lang)}';
       unlock.style.display=''; } else { lk.textContent=''; unlock.style.display='none'; }
     var d_archiveBtn=$('bb-d-archive'), d_unarchiveBtn=$('bb-d-unarchive');
-    var DRAWER_FIELD_IDS=['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save','bb-d-plan-approve'];
+    var DRAWER_FIELD_IDS=['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-autonomy','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save','bb-d-plan-approve'];
     applyArchivedUi(d_archiveBtn,d_unarchiveBtn,DRAWER_FIELD_IDS,cur.archived,cur.locked);
     api('GET','/card/'+cur.id).then(function(r){
       if(r.ok&&r.j&&r.j.card){var c=r.j.card;
@@ -146,10 +146,16 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         $('bb-d-owner').value=c.owner||'';
         $('bb-d-tags').value=c.tags||'';
         $('bb-d-desc').value=c.description||'';
+        if($('bb-d-autonomy')) $('bb-d-autonomy').value=r.j.autonomy||c.autonomy||'gated';
         var ps=$('bb-d-project'); clearEl(ps); ps.appendChild(optEl('','\\u2014 none \\u2014',false));
         (r.j.projects||[]).forEach(function(p){
           ps.appendChild(optEl(String(p.id),'#'+p.id+' \\u2014 '+(p.name||''),Number(c.project_id)===Number(p.id)));
         });
+        // Track 1 Task 9 (D-T1.3/D-T1.5): the drawer's history strip and
+        // result/approve affordances hydrate off the SAME GET /card/:id
+        // response — additive keys, no extra round trip.
+        renderHistory(r.j.mutations||[]);
+        renderResults(r.j.latest_results||[], (r.j.board&&r.j.board.terminal_values)||[]);
       } else if(!r.ok){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
     }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
     loadPlan();
@@ -177,6 +183,103 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
   }
   function renderPre(){ var el=$('bb-d-plan-pre'); if(el) el.textContent=$('bb-d-plan').value; }
+
+  // ---- History strip (D-T1.3): read-only, latest N=10 board_mutations,
+  // actor-attributed — GET /card/:id's additive 'mutations' key. ----
+  var MUTATION_VERB_LABELS={
+    create:'${tJs("board.mutationVerb.create", lang)}',
+    update:'${tJs("board.mutationVerb.update", lang)}',
+    move:'${tJs("board.mutationVerb.move", lang)}',
+    archive:'${tJs("board.mutationVerb.archive", lang)}',
+    unarchive:'${tJs("board.mutationVerb.unarchive", lang)}',
+    plan_save:'${tJs("board.mutationVerb.plan_save", lang)}',
+    plan_approve:'${tJs("board.mutationVerb.plan_approve", lang)}',
+    result_report:'${tJs("board.mutationVerb.result_report", lang)}',
+    result_decide:'${tJs("board.mutationVerb.result_decide", lang)}'
+  };
+  function actorLabel(m){
+    if(m.actor_kind==='bot') return m.actor_id||'bot';
+    if(m.actor_kind==='session') return '${tJs("board.actorSession", lang)}';
+    return '${tJs("board.actorHuman", lang)}';
+  }
+  function renderHistory(mutations){
+    var el=$('bb-d-history'); if(!el) return;
+    clearEl(el);
+    if(!mutations||!mutations.length){ el.textContent='${tJs("board.noHistory", lang)}'; return; }
+    mutations.forEach(function(m){
+      var row=document.createElement('div');
+      row.className='bb-history-row';
+      row.style.cssText='font-size:.8rem;padding:.15rem 0;border-bottom:1px solid var(--crow-border-subtle,#0000)';
+      row.textContent=(MUTATION_VERB_LABELS[m.verb]||m.verb)+' \\u2014 '+actorLabel(m)+' \\u2014 '+(m.created_at||'');
+      el.appendChild(row);
+    });
+  }
+
+  // ---- Result banner + approve/reject/"approve & mark done" (D-T1.5) ----
+  // GET /card/:id's additive 'latest_results' key (newest first, D-T1.5's
+  // result-service.listResults). Only the latest 'recorded' result gets an
+  // affordance — a decided (approved/rejected) result is history, not action.
+  function decideResult(resultId,decision){
+    if(!cur) return;
+    api('POST','/card/'+cur.id+'/result/'+resultId+'/decide',{decision:decision}).then(function(r){
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
+      else msg($('bb-d-msg'),errText(r,'failed'),'err');
+    });
+  }
+  function approveAndMarkDone(resultId){
+    if(!cur) return;
+    // Two writes, both recorded (D-T1.5): decide (approve) the result, THEN
+    // move the card to 'done' — decideResult never auto-moves, by design.
+    api('POST','/card/'+cur.id+'/result/'+resultId+'/decide',{decision:'approved'}).then(function(r){
+      if(!r.ok){ msg($('bb-d-msg'),errText(r,'failed'),'err'); return; }
+      api('POST','/card/'+cur.id+'/move',{status:'done'}).then(function(r2){
+        if(r2.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
+        else msg($('bb-d-msg'),errText(r2,'failed'),'err');
+      });
+    });
+  }
+  function renderResults(results,terminalValues){
+    var wrap=$('bb-d-result-wrap'); if(!wrap) return;
+    clearEl(wrap);
+    var latest=(results||[])[0];
+    if(!latest||latest.status!=='recorded') return;
+    var hasDoneTerminal=(terminalValues||[]).indexOf('done')>=0;
+    var box=document.createElement('div');
+    box.className='bb-msg '+(latest.outcome==='success'?'bb-marker-waiting':'bb-marker-failed');
+    var head=document.createElement('div');
+    head.textContent=(latest.outcome==='success'?'${tJs("board.markerWaiting", lang)}':'${tJs("board.markerFailed", lang)}');
+    box.appendChild(head);
+    if(latest.summary_md){
+      var sm=document.createElement('div');
+      sm.style.cssText='white-space:pre-wrap;font-size:.82rem;margin-top:.2rem';
+      sm.textContent=latest.summary_md;
+      box.appendChild(sm);
+    }
+    var btnRow=document.createElement('div'); btnRow.style.marginTop='.4rem';
+    var approveBtn=document.createElement('button');
+    approveBtn.type='button'; approveBtn.className='bb-btn bb-sec';
+    approveBtn.textContent='${tJs("board.btnApproveResult", lang)}';
+    approveBtn.onclick=function(){ decideResult(latest.id,'approved'); };
+    btnRow.appendChild(approveBtn);
+    var rejectBtn=document.createElement('button');
+    rejectBtn.type='button'; rejectBtn.className='bb-btn bb-sec'; rejectBtn.style.marginLeft='.3rem';
+    rejectBtn.textContent='${tJs("board.btnRejectResult", lang)}';
+    rejectBtn.onclick=function(){ decideResult(latest.id,'rejected'); };
+    btnRow.appendChild(rejectBtn);
+    // "approve & mark done" — enabled ONLY on a recorded-SUCCESS result when
+    // the resolved board def carries 'done' among its terminal values (a
+    // board that never reaches 'done' has no affordance to offer here).
+    if(latest.outcome==='success'&&hasDoneTerminal){
+      var doneBtn=document.createElement('button');
+      doneBtn.type='button'; doneBtn.className='bb-btn'; doneBtn.style.marginLeft='.3rem';
+      doneBtn.id='bb-d-approve-done';
+      doneBtn.textContent='${tJs("board.btnApproveMarkDone", lang)}';
+      doneBtn.onclick=function(){ approveAndMarkDone(latest.id); };
+      btnRow.appendChild(doneBtn);
+    }
+    box.appendChild(btnRow);
+    wrap.appendChild(box);
+  }
 
   // ---- Tracker item drawer ----
   function fillTrackerDrawer(cardEl){
@@ -307,7 +410,8 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var body={title:$('bb-d-title-in').value,status:$('bb-d-status').value,
       priority:$('bb-d-prio').value===''?null:Number($('bb-d-prio').value),
       due_date:$('bb-d-due').value||null,owner:$('bb-d-owner').value||null,
-      tags:$('bb-d-tags').value||null,description:$('bb-d-desc').value||null};
+      tags:$('bb-d-tags').value||null,description:$('bb-d-desc').value||null,
+      autonomy:$('bb-d-autonomy')?$('bb-d-autonomy').value:undefined};
     api('POST','/card/'+cur.id,body).then(function(r){
       if(r.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
       else if(r.status===409){ msg($('bb-d-msg'),'\\uD83D\\uDD12 '+errText(r,'locked by a bot'),'err'); }
@@ -342,14 +446,14 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   if($('bb-d-archive')) $('bb-d-archive').onclick=function(){
     if(!cur||cur.locked||cur.archived||!confirm('${tJs("board.archive", lang)}?')) return;
     api('POST','/card/'+cur.id+'/archive').then(function(r){
-      if(r.ok){ msg($('bb-d-msg'),'${tJs("board.archive", lang)}','ok'); setTimeout(reload,400); }
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("board.archivedToast", lang)}','ok'); setTimeout(reload,400); }
       else msg($('bb-d-msg'),errText(r,'archive failed'),'err');
     });
   };
   if($('bb-d-unarchive')) $('bb-d-unarchive').onclick=function(){
     if(!cur||!cur.archived) return;
     api('POST','/card/'+cur.id+'/unarchive').then(function(r){
-      if(r.ok){ msg($('bb-d-msg'),'${tJs("board.unarchive", lang)}','ok'); setTimeout(reload,400); }
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("board.unarchivedToast", lang)}','ok'); setTimeout(reload,400); }
       else msg($('bb-d-msg'),errText(r,'unarchive failed'),'err');
     });
   };
@@ -414,14 +518,14 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   if($('bb-td-archive')) $('bb-td-archive').onclick=function(){
     if(!cur||cur.locked||cur.archived||!confirm('${tJs("board.archive", lang)}?')) return;
     api('POST','/tracker-item/'+cur.id+'/archive').then(function(r){
-      if(r.ok){ msg($('bb-td-msg'),'${tJs("board.archive", lang)}','ok'); setTimeout(reload,400); }
+      if(r.ok){ msg($('bb-td-msg'),'${tJs("board.archivedToast", lang)}','ok'); setTimeout(reload,400); }
       else msg($('bb-td-msg'),errText(r,'archive failed'),'err');
     });
   };
   if($('bb-td-unarchive')) $('bb-td-unarchive').onclick=function(){
     if(!cur||!cur.archived) return;
     api('POST','/tracker-item/'+cur.id+'/unarchive').then(function(r){
-      if(r.ok){ msg($('bb-td-msg'),'${tJs("board.unarchive", lang)}','ok'); setTimeout(reload,400); }
+      if(r.ok){ msg($('bb-td-msg'),'${tJs("board.unarchivedToast", lang)}','ok'); setTimeout(reload,400); }
       else msg($('bb-td-msg'),errText(r,'unarchive failed'),'err');
     });
   };
@@ -484,7 +588,8 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     if(!title){ msg($('bb-nc-msg'),'${tJs("botboard.jsTitleRequired", lang)}','err'); return; }
     api('POST','/card',{title:title,description:$('bb-nc-desc').value||null,
       due_date:$('bb-nc-due').value||null,owner:$('bb-nc-owner').value||null,
-      tags:$('bb-nc-tags').value||null,project_id:PROJECT}).then(function(r){
+      tags:$('bb-nc-tags').value||null,project_id:PROJECT,
+      autonomy:$('bb-nc-autonomy')?$('bb-nc-autonomy').value:undefined}).then(function(r){
       if(r.ok){ msg($('bb-nc-msg'),'Created #'+(r.j&&r.j.id)+'.','ok'); setTimeout(reload,500); }
       else msg($('bb-nc-msg'),(r.j&&(r.j.error||r.j.reason))||'create failed','err');
     });
