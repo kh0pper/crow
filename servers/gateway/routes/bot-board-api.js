@@ -74,6 +74,9 @@ import { resolveBoardDef, resolveSlugBoardDef, isValidStatus, isTerminal, valida
 // records (D-T1.4) — plan-ref.js stops being imported HERE (the file itself
 // is deleted in Task 7, after bridge.mjs:43's static import is removed).
 import { getCurrentPlan, listPlans, savePlan, approvePlan } from "../board/plan-service.js";
+// Track 1 Task 5 (D-T1.6): archive/unarchive is THE single writer for
+// archived_at on both id spaces — thin route callers below.
+import { archiveCard, unarchiveCard, archiveItem, unarchiveItem } from "../board/card-service.js";
 // THE shared dual-rail lock predicate (job rail + session rail). The SSR board
 // render and the no-JS move handler import the same module — see board-lock.js
 // for why a local copy is not allowed to exist here.
@@ -173,9 +176,23 @@ const DASHBOARD_ACTOR = { kind: "human", id: null, jobId: null };
 // fallback everywhere else in this file); everything else is jsonError's
 // {error} shape.
 function serviceError(res, e) {
-  if (e && e.http === 409) return res.status(409).json({ reason: e.message });
+  // `code` rides alongside `reason` (added Track 1 Task 5) so client.js can
+  // map a KNOWN error to an i18n'd string (board.errArchived/board.errLocked)
+  // instead of displaying the raw EN service message — server-side JSON
+  // errors are never translated (no precedent for it anywhere in this file).
+  if (e && e.http === 409) return res.status(409).json({ reason: e.message, code: e.code });
   if (e && e.http) return jsonError(res, e.http, e.message);
   return jsonError(res, 500, String((e && e.message) || e));
+}
+
+// True iff the query/body carries the `include_archived` escape (D-T1.6's
+// convention: default views exclude archived_at IS NOT NULL rows; this is
+// the ONLY way to see them). Accepts "1"/"true" from either query or body —
+// GET list endpoints only ever see query; bulk-assign is a POST that still
+// takes it as a query param (the body is card_ids[] only).
+function wantsArchived(req) {
+  const v = (req.query && req.query.include_archived) ?? (req.body && req.body.include_archived);
+  return v === "1" || v === "true" || v === true;
 }
 
 // Fail-closed pi-liveness (Step-1 pinned pattern, recorded in the plan's
@@ -237,7 +254,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const card = (await tdb.execute({
         sql:
           "SELECT id,title,description,status,priority,due_date,owner,tags,parent_id,project_id," +
-          "assigned_bot," +
+          "assigned_bot,archived_at," +
           "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=? AND board_id IS NULL",
         args: [id],
       })).rows[0];
@@ -344,8 +361,13 @@ export default function botBoardApiRouter(dashboardAuth) {
         if (!botRow) return jsonError(res, 400, "assigned_bot not found or disabled");
       }
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id, archived_at FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
+      // D-T1.6: this route is NOT converged onto card-service (updateCard) —
+      // it writes tasks_items directly — so the archived-refuses-write guard
+      // has to be inline here too, or the JS drawer's Save button (POST
+      // /card/:id) could silently mutate an archived card.
+      if (cur.archived_at != null) return res.status(409).json({ reason: "card is archived", code: "archived" });
       // Status validated against the card's RESOLVED BOARD DEF, before any
       // write (Track 0: per-board status values; the old hardcoded allowlist
       // is now just the builtin fallback def).
@@ -396,8 +418,12 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT status, project_id, archived_at FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
+      // D-T1.6: this JSON route is what drag-and-drop calls (client.js
+      // '/card/'+id+'/move') — not converged onto card-service.moveCard —
+      // so the archived guard is inline, same as the edit route above.
+      if (cur.archived_at != null) return res.status(409).json({ reason: "card is archived", code: "archived" });
       const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
       if (!isValidStatus(def, status)) return jsonError(res, 400, "invalid status");
       const sets = ["status=?", "updated_at=datetime('now')"];
@@ -423,8 +449,9 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT id, status, project_id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
+      const cur = (await tdb.execute({ sql: "SELECT id, status, project_id, archived_at FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "card not found");
+      if (cur.archived_at != null) return res.status(409).json({ reason: "card is archived", code: "archived" });
       const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
       if (!isValidStatus(def, "cancelled")) {
         return jsonError(res, 400, "this board has no cancelled status");
@@ -441,6 +468,39 @@ export default function botBoardApiRouter(dashboardAuth) {
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- archive / unarchive card (D-T1.6) ----
+  router.post(P + "/card/:id/archive", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
+    let tdb, cdb;
+    try {
+      cdb = createDbClient();
+      tdb = createDbClient(TASKS_DB);
+      await archiveCard(tdb, cdb, id, DASHBOARD_ACTOR);
+      return res.json({ ok: true });
+    } catch (e) {
+      return serviceError(res, e);
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  router.post(P + "/card/:id/unarchive", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      await unarchiveCard(tdb, id, DASHBOARD_ACTOR);
+      return res.json({ ok: true });
+    } catch (e) {
+      return serviceError(res, e);
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
     }
   });
 
@@ -677,10 +737,13 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const card = (await tdb.execute({
-        sql: "SELECT id, status, assigned_bot, project_id FROM tasks_items WHERE id=? AND board_id IS NULL",
+        sql: "SELECT id, status, assigned_bot, project_id, archived_at FROM tasks_items WHERE id=? AND board_id IS NULL",
         args: [id],
       })).rows[0];
       if (!card) return jsonError(res, 404, "card not found");
+      // D-T1.6: this route reads the card row directly (never converged onto
+      // card-service) — the archived guard lands HERE, not in a service.
+      if (card.archived_at != null) return res.status(409).json({ reason: "card is archived", code: "archived" });
       const bot = card.assigned_bot ? String(card.assigned_bot) : "";
       if (!bot) return jsonError(res, 400, "card has no assigned_bot");
       const botRow = (await cdb.execute({
@@ -755,12 +818,16 @@ export default function botBoardApiRouter(dashboardAuth) {
   });
 
   // ---- unlinked-cards picker (project_id IS NULL) for bulk-assign ----
+  // D-T1.6: default-hides archived (an archived orphan is not a candidate to
+  // re-home); ?include_archived=1 is the escape.
   router.get(P + "/project/:id/unlinked", async (req, res) => {
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
       const cards = (await tdb.execute({
-        sql: "SELECT id, title FROM tasks_items WHERE project_id IS NULL ORDER BY id LIMIT 500",
+        sql: "SELECT id, title FROM tasks_items WHERE project_id IS NULL"
+          + (wantsArchived(req) ? "" : " AND archived_at IS NULL")
+          + " ORDER BY id LIMIT 500",
         args: [],
       })).rows || [];
       return res.json({ cards });
@@ -795,32 +862,53 @@ export default function botBoardApiRouter(dashboardAuth) {
       let applied = [];
       if (survivors.length) {
         tdb = createDbClient(TASKS_DB);
-        const stmts = survivors.map((cid) => ({
-          sql: "UPDATE tasks_items SET project_id=?, updated_at=datetime('now') WHERE id=?",
-          args: [projectId, cid],
-        }));
-        let results;
-        try {
-          // ONE atomic transaction (createDbClient().batch wraps all in a
-          // single db.transaction — all-or-nothing).
-          results = await tdb.batch(stmts);
-        } catch (e) {
-          // Rejected ⇒ the WHOLE txn rolled back; NOTHING applied.
-          return res.json({
-            ok: false,
-            error: "bulk assignment failed and was rolled back: " + String(e.message || e),
-            applied: [],
-            skipped: skipped.concat(survivors.map((id) => ({ id, reason: "rolled-back" }))),
+        // D-T1.6: archived cards are NOT bulk-assign candidates (the same
+        // rule as move/update — an archived card refuses a write) unless the
+        // caller opts in with ?include_archived=1. Filtered here, AFTER the
+        // lock check, BEFORE the batch is built — one query, no per-card loop.
+        let writable = survivors;
+        if (!wantsArchived(req)) {
+          const placeholders = survivors.map(() => "?").join(",");
+          const archivedRows = (await tdb.execute({
+            sql: `SELECT id FROM tasks_items WHERE id IN (${placeholders}) AND archived_at IS NOT NULL`,
+            args: survivors,
+          })).rows || [];
+          const archivedIds = new Set(archivedRows.map((r) => Number(r.id)));
+          if (archivedIds.size) {
+            writable = survivors.filter((cid) => !archivedIds.has(cid));
+            for (const cid of survivors) {
+              if (archivedIds.has(cid)) skipped.push({ id: cid, reason: "archived" });
+            }
+          }
+        }
+        if (writable.length) {
+          const stmts = writable.map((cid) => ({
+            sql: "UPDATE tasks_items SET project_id=?, updated_at=datetime('now') WHERE id=?",
+            args: [projectId, cid],
+          }));
+          let results;
+          try {
+            // ONE atomic transaction (createDbClient().batch wraps all in a
+            // single db.transaction — all-or-nothing).
+            results = await tdb.batch(stmts);
+          } catch (e) {
+            // Rejected ⇒ the WHOLE txn rolled back; NOTHING applied.
+            return res.json({
+              ok: false,
+              error: "bulk assignment failed and was rolled back: " + String(e.message || e),
+              applied: [],
+              skipped: skipped.concat(writable.map((id) => ({ id, reason: "rolled-back" }))),
+            });
+          }
+          // applied[] derived ONLY from the resolved per-statement rowsAffected
+          // (1 ⇒ applied; 0 ⇒ the row vanished between filter and batch ⇒
+          // skipped:"stale"). Never from the pre-built survivor list.
+          results.forEach((r, i) => {
+            const cid = writable[i];
+            if (Number(r && r.rowsAffected) === 1) applied.push(cid);
+            else skipped.push({ id: cid, reason: "stale" });
           });
         }
-        // applied[] derived ONLY from the resolved per-statement rowsAffected
-        // (1 ⇒ applied; 0 ⇒ the row vanished between filter and batch ⇒
-        // skipped:"stale"). Never from the pre-built survivor list.
-        results.forEach((r, i) => {
-          const cid = survivors[i];
-          if (Number(r && r.rowsAffected) === 1) applied.push(cid);
-          else skipped.push({ id: cid, reason: "stale" });
-        });
       }
       return res.json({ ok: true, applied, skipped });
     } catch (e) {
@@ -1086,9 +1174,11 @@ export default function botBoardApiRouter(dashboardAuth) {
       const params = [def.id];
       if (req.query.status) { clauses.push("status = ?"); params.push(String(req.query.status)); }
       if (req.query.bot_id) { clauses.push("bot_id = ?"); params.push(String(req.query.bot_id)); }
+      // D-T1.6: default view excludes archived; ?include_archived=1 escapes.
+      if (!wantsArchived(req)) clauses.push("archived_at IS NULL");
       const rows = (await tdb.execute({
         sql: `SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed,
-                next_followup_date, processing_lease, processing_lease_status, created_at, updated_at
+                next_followup_date, processing_lease, processing_lease_status, archived_at, created_at, updated_at
               FROM tasks_items WHERE ${clauses.join(" AND ")}
               ORDER BY priority ASC, id ASC LIMIT 500`,
         args: params,
@@ -1117,7 +1207,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       tdb = createDbClient(TASKS_DB);
       const r = (await tdb.execute({
         sql: `SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed,
-                next_followup_date, processing_lease, processing_lease_status, created_at, updated_at
+                next_followup_date, processing_lease, processing_lease_status, archived_at, created_at, updated_at
               FROM tasks_items WHERE id=? AND board_id IS NOT NULL`,
         args: [itemId],
       })).rows[0];
@@ -1147,12 +1237,15 @@ export default function botBoardApiRouter(dashboardAuth) {
       tdb = createDbClient(TASKS_DB);
       const cur = (await tdb.execute({
         sql: `SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed,
-                next_followup_date, processing_lease, processing_lease_status, created_at, updated_at
+                next_followup_date, processing_lease, processing_lease_status, archived_at, created_at, updated_at
               FROM tasks_items WHERE id=? AND board_id IS NOT NULL`,
         args: [itemId],
       })).rows[0];
       if (!cur) return jsonError(res, 404, "item not found");
       if (trackerItemLocked(cur)) return res.status(409).json({ reason: "item is being processed by a bot" });
+      // D-T1.6: this route is not converged onto card-service.updateItem —
+      // inline guard, same rule (an archived item refuses a write).
+      if (cur.archived_at != null) return res.status(409).json({ reason: "item is archived", code: "archived" });
       if (b.status != null) {
         const def = (await tdb.execute({ sql: "SELECT status_values FROM board_defs WHERE id=?", args: [cur.board_id] })).rows[0];
         if (def) {
@@ -1192,6 +1285,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const cur = (await tdb.execute({ sql: "SELECT * FROM tasks_items WHERE id=? AND board_id IS NOT NULL", args: [itemId] })).rows[0];
       if (!cur) return jsonError(res, 404, "item not found");
       if (trackerItemLocked(cur)) return res.status(409).json({ reason: "item is being processed by a bot" });
+      if (cur.archived_at != null) return res.status(409).json({ reason: "item is archived", code: "archived" });
       const def = (await tdb.execute({ sql: "SELECT status_values FROM board_defs WHERE id=?", args: [cur.board_id] })).rows[0];
       if (def) {
         const allowed = JSON.parse(def.status_values || "[]");
@@ -1229,6 +1323,37 @@ export default function botBoardApiRouter(dashboardAuth) {
       return res.json({ ok: true, id: Number(r.lastInsertRowid) });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
+    }
+  });
+
+  // ---- archive / unarchive tracker item (D-T1.6: same mechanism as cards) ----
+  router.post(P + "/tracker-item/:id/archive", async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      await archiveItem(tdb, itemId, DASHBOARD_ACTOR);
+      return res.json({ ok: true });
+    } catch (e) {
+      return serviceError(res, e);
+    } finally {
+      if (tdb) { try { tdb.close(); } catch {} }
+    }
+  });
+
+  router.post(P + "/tracker-item/:id/unarchive", async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
+    let tdb;
+    try {
+      tdb = createDbClient(TASKS_DB);
+      await unarchiveItem(tdb, itemId, DASHBOARD_ACTOR);
+      return res.json({ ok: true });
+    } catch (e) {
+      return serviceError(res, e);
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
     }
