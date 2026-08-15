@@ -267,7 +267,15 @@ export function writeBotMcp(def, opts = {}) {
   // The instance catalog is the FIRST source for any Crow server. opts.binding
   // lets tests and the panel pin an instance without mutating process.env.
   const binding = opts.binding || instanceBinding(crowHome, opts);
-  const { servers: catalog, unconfigured } = crowServerCatalog(crowHome, { binding });
+  // botId/jobId (Track 1 Task 7): threaded into the catalog's board entry so
+  // its X-Crow-Actor-Id/X-Crow-Job-Id headers carry THIS turn's identity —
+  // see crow-server-catalog.mjs's boardBlock(). Absent for callers that
+  // predate the job_id plumbing (job_runner's generic runJob, the GUI regen
+  // handler, the CLI): the board entry then omits those headers and
+  // board-mcp.js's resolveActor falls back to actor_kind='session'.
+  const { servers: catalog, unconfigured } = crowServerCatalog(crowHome, {
+    binding, botId: opts.botId, jobId: opts.jobId,
+  });
   const built = buildBotMcp(def, canonical, {
     extraServers, catalog, unconfigured, binding, crowHome,
   });

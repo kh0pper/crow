@@ -1,17 +1,18 @@
 /**
  * A card job must execute through the BRIDGE, not through runJob's generic goal
- * path. This is a safety property, not a style preference:
- *
- *  - bridge.planCard forces a local model ("no config knob reaches a paid
- *    model") and a confinement policy stricter than the bot's own (bash deny,
- *    confined write_paths, multi_agent false);
- *  - bridge.handleInbound owns the card prompt — project context block, card
- *    number, current board status, the FULL plan-file text, the tasks_*
- *    in_progress→done instruction — and the statusToStage reconciliation.
+ * path. This is a safety property, not a style preference: bridge.handleInbound
+ * owns the card prompt — project context block, card number, current board
+ * status, the current board_plans record (D-T1.4) — and the board_report_result
+ * terminal-state contract (D-T1.5).
  *
  * A generic job gets none of that: the bot's own policy, a bare goal string, an
  * empty temp dir. So a routing regression silently removes the floor, which is
  * why every case below also fails loudly if the generic path is reached.
+ *
+ * D-T1.7: planning retired with plan_ref/planCard — a card job is execution
+ * only now (runCardJob no longer branches on card_action). Plans are
+ * board_plans records, edited via board_save_plan/board_approve_plan, never
+ * dispatched as a job.
  *
  * Nothing here spawns pi or opens a real database: the bridge module is
  * injected, and CROW_DB_PATH is pinned to a throwaway dir as a belt.
@@ -32,95 +33,17 @@ const loadRunner = () => import("../scripts/pi-bots/job_runner.mjs");
 /** Any bridge member a card job must NOT touch blows up with this marker. */
 const GENERIC = () => { throw new Error("REACHED_GENERIC: generic path must not be reached for a card job"); };
 
-test("a plan card job calls bridge.planCard with the card id", async () => {
-  const calls = [];
-  const fakeBridge = {
-    planCard: async (o) => { calls.push(["planCard", o.cardId, o.botId]); return { action: "planned", planRef: { kind: "repo", path: "x.md" } }; },
-    handleInbound: async () => { throw new Error("handleInbound must not be called for a plan job"); },
-    loadBot: GENERIC,
-  };
-  const { runJob } = await loadRunner();
-  const r = await runJob(
-    { job_id: "j1", bot_id: "b1", source: "card", card_action: "plan", card_id: 120, goal: "plan #120" },
-    { log: () => {}, bridge: fakeBridge },
-  );
-  assert.deepEqual(calls, [["planCard", 120, "b1"]]);
-  assert.match(String(r.result), /plan/i);
-  assert.equal(r.toolCalls, 0);
-  assert.equal(r.sessionId, null);
-});
-
-test("a planning job with escalate=1 still routes to planCard, un-escalated, and says so", async () => {
-  // BINDING OPERATOR RULING (2026-08-07): escalation NEVER applies to a
-  // planning card job. planCard refuses any non-local provider, so honouring
-  // job.escalate here would either break the run or — far worse — invite
-  // someone to relax that refusal. It is ignored, and ignored VISIBLY.
-  const seen = [];
-  const lines = [];
-  const fakeBridge = {
-    planCard: async (o) => { seen.push(o); return { action: "planned", planRef: { kind: "repo", path: "p.md" } }; },
-    handleInbound: async () => { throw new Error("handleInbound must not be called for a plan job"); },
-    loadBot: GENERIC,
-  };
-  const { runJob } = await loadRunner();
-  const r = await runJob(
-    { job_id: "j-esc", bot_id: "b1", source: "card", card_action: "plan", card_id: 7, goal: "plan #7", escalate: 1 },
-    { log: (m) => lines.push(String(m)), bridge: fakeBridge },
-  );
-
-  assert.equal(seen.length, 1, "escalate must not divert a planning job away from planCard");
-  assert.equal(seen[0].cardId, 7);
-  // The floor: NOTHING that could select a bigger model may reach planCard.
-  // Pinning the exact key set (not just `escalate === undefined`) also catches
-  // a rename such as `escalated:` or `opts.model`.
-  assert.deepEqual(Object.keys(seen[0]).sort(), ["botId", "cardId", "log"],
-    "planCard must receive exactly {cardId, botId, log} — no escalation knob of any name");
-  // Ignored VISIBLY: an operator who asked for escalation can grep why it
-  // did not happen.
-  assert.ok(lines.some((l) => /escalate ignored/.test(l) && /safety floor/.test(l) && l.includes("j-esc")),
-    "an ignored escalation must be logged greppably; got: " + JSON.stringify(lines));
-  assert.match(String(r.result), /^planned:/);
-});
-
-test("a plan job deferred for pi capacity completes as a result, not a failure", async () => {
-  // planCard has ALREADY reset the card (resetStrandedCardBestEffort) before
-  // returning 'deferred'. Throwing here would burn a retry attempt for a
-  // non-failure.
-  const fakeBridge = {
-    planCard: async () => ({ action: "deferred", reason: "pi-capacity" }),
-    handleInbound: async () => { throw new Error("handleInbound must not be called for a plan job"); },
-    loadBot: GENERIC,
-  };
-  const { runJob } = await loadRunner();
-  const r = await runJob(
-    { job_id: "j2", bot_id: "b1", source: "card", card_action: "plan", card_id: 9 },
-    { log: () => {}, bridge: fakeBridge },
-  );
-  assert.equal(r.result, "deferred: pi-capacity");
-});
-
-test("a plan job error fails the job so the rail can retry it", async () => {
-  const fakeBridge = {
-    planCard: async () => ({ action: "error", error: "plan dispatch is local-only; bot resolves to together/deepseek" }),
-    handleInbound: async () => { throw new Error("handleInbound must not be called for a plan job"); },
-    loadBot: GENERIC,
-  };
-  const { runJob } = await loadRunner();
-  await assert.rejects(
-    () => runJob({ job_id: "j3", bot_id: "b1", source: "card", card_action: "plan", card_id: 9 }, { log: () => {}, bridge: fakeBridge }),
-    /plan dispatch failed: plan dispatch is local-only/,
-  );
-});
-
-test("an execute card job reaches handleInbound with the board --inject payload", async () => {
+test("an execute card job reaches handleInbound with the board --inject payload, carrying job_id", async () => {
   // The payload must match what bot-board-api.js's detached `--inject` child
   // has always sent, so handleInbound composes the SAME card prompt (project
-  // context + board status + full plan text) and runs the SAME statusToStage
-  // reconciliation. Re-implementing prompt composition in the runner is how
-  // dispatcher and bridge drift apart.
+  // context + board status + the current board_plans record). Re-implementing
+  // prompt composition in the runner is how dispatcher and bridge drift apart.
+  // job_id (D-T1.5, Task 7 — the missing link in the chain): runCardExecute
+  // must forward job.job_id so it reaches buildBotWorld -> writeBotMcp -> the
+  // board entry's X-Crow-Job-Id header, which is what lets the job-rail lock
+  // exemption match a job-dispatched auto-move against its OWN bot_jobs row.
   let payload = null;
   const fakeBridge = {
-    planCard: async () => { throw new Error("planCard must not be called for an execute job"); },
     handleInbound: async (o) => {
       payload = o;
       await o.sendReply("Card #120 done: shipped the thing.");
@@ -139,6 +62,7 @@ test("an execute card job reaches handleInbound with the board --inject payload"
   assert.equal(payload.gateway_type, "board");
   assert.equal(payload.gateway_thread_id, "board-card-120");
   assert.equal(payload.user_message, "execute #120");
+  assert.equal(payload.job_id, "j4", "job_id must reach handleInbound for the X-Crow-Job-Id header chain");
   assert.equal(typeof payload.sendReply, "function", "handleInbound awaits sendReply — omitting it crashes the turn");
 
   assert.equal(r.result, "Card #120 done: shipped the thing.");
@@ -148,12 +72,11 @@ test("an execute card job reaches handleInbound with the board --inject payload"
 });
 
 test("an escalated execute job carries the inbound-only !escalate token", async () => {
-  // Escalation IS legitimate for execution (unlike planning). It rides the
-  // committed operator token rather than a second mechanism: handleInbound
-  // detects it on the raw message and strips it before the prompt is built.
+  // Escalation rides the committed operator token rather than a second
+  // mechanism: handleInbound detects it on the raw message and strips it
+  // before the prompt is built.
   let msg = null;
   const fakeBridge = {
-    planCard: async () => { throw new Error("planCard must not be called for an execute job"); },
     handleInbound: async (o) => { msg = o.user_message; await o.sendReply("ok"); return { action: "executed", toolCalls: [] }; },
     loadBot: GENERIC,
   };
@@ -170,7 +93,6 @@ test("an escalated execute job carries the inbound-only !escalate token", async 
 
 test("an execute job deferred for pi capacity completes as a result, not a failure", async () => {
   const fakeBridge = {
-    planCard: async () => { throw new Error("planCard must not be called for an execute job"); },
     handleInbound: async () => ({ action: "deferred", reason: "pi-capacity", livePi: 2 }),
     loadBot: GENERIC,
   };
@@ -185,7 +107,6 @@ test("an execute job deferred for pi capacity completes as a result, not a failu
 
 test("an execute job whose bridge turn errored fails the job", async () => {
   const fakeBridge = {
-    planCard: async () => { throw new Error("planCard must not be called for an execute job"); },
     handleInbound: async (o) => { await o.sendReply("(bridge error: pi died)"); return { action: "error", error: "pi died" }; },
     loadBot: GENERIC,
   };
@@ -198,7 +119,6 @@ test("an execute job whose bridge turn errored fails the job", async () => {
 
 test("a card job with no usable card_id fails before touching the bridge", async () => {
   const fakeBridge = {
-    planCard: async () => { throw new Error("planCard must not be reached without a card id"); },
     handleInbound: async () => { throw new Error("handleInbound must not be reached without a card id"); },
     loadBot: GENERIC,
   };
@@ -215,13 +135,27 @@ test("a card job with no usable card_id fails before touching the bridge", async
 test("a card job defaults to the execute path when card_action is absent", async () => {
   let reached = false;
   const fakeBridge = {
-    planCard: async () => { throw new Error("a card job with no card_action must not silently PLAN"); },
     handleInbound: async (o) => { reached = true; await o.sendReply("ok"); return { action: "executed", toolCalls: [] }; },
     loadBot: GENERIC,
   };
   const { runJob } = await loadRunner();
   await runJob({ job_id: "j9", bot_id: "b1", source: "card", card_id: 5 }, { log: () => {}, bridge: fakeBridge });
   assert.equal(reached, true);
+});
+
+test("a card job STILL executes even when card_action='plan' (D-T1.7: no plan branch survives)", async () => {
+  // A stray legacy 'plan' row (the deploy step drains these before cutover,
+  // but this pins the code path itself, not just the operational runbook): a
+  // card job is execution, full stop — runCardJob no longer branches on
+  // card_action at all.
+  let reached = false;
+  const fakeBridge = {
+    handleInbound: async (o) => { reached = true; await o.sendReply("ok"); return { action: "executed", toolCalls: [] }; },
+    loadBot: GENERIC,
+  };
+  const { runJob } = await loadRunner();
+  await runJob({ job_id: "j12", bot_id: "b1", source: "card", card_id: 88, card_action: "plan" }, { log: () => {}, bridge: fakeBridge });
+  assert.equal(reached, true, "card_action='plan' must still route to handleInbound — there is no other card-job path left");
 });
 
 test("a job carrying a card_id routes to the bridge even when source is not 'card'", async () => {
@@ -234,7 +168,6 @@ test("a job carrying a card_id routes to the bridge even when source is not 'car
   for (const source of [null, undefined, "board", "Card"]) {
     let reached = false;
     const fakeBridge = {
-      planCard: async () => { throw new Error("planCard must not be called for an execute job"); },
       handleInbound: async (o) => { reached = true; await o.sendReply("ok"); return { action: "executed", toolCalls: [] }; },
       loadBot: GENERIC,
     };
@@ -248,26 +181,8 @@ test("a job carrying a card_id routes to the bridge even when source is not 'car
   }
 });
 
-test("a job carrying a card_id and card_action='plan' still hits the planning floor", async () => {
-  // Same widening, plan side: a mislabelled source must not route planning work
-  // through the generic body, which would lose the local-model-only refusal.
-  const seen = [];
-  const fakeBridge = {
-    planCard: async (o) => { seen.push(o.cardId); return { action: "planned", planRef: { kind: "repo", path: "p.md" } }; },
-    handleInbound: async () => { throw new Error("handleInbound must not be called for a plan job"); },
-    loadBot: GENERIC,
-  };
-  const { runJob } = await loadRunner();
-  await runJob(
-    { job_id: "j12", bot_id: "b1", source: null, card_id: 88, card_action: "plan" },
-    { log: () => {}, bridge: fakeBridge },
-  );
-  assert.deepEqual(seen, [88]);
-});
-
 test("a non-card job still takes the generic path", async () => {
   const fakeBridge = {
-    planCard: async () => { throw new Error("planCard must not be called for a scheduled job"); },
     handleInbound: async () => { throw new Error("handleInbound must not be called for a scheduled job"); },
     loadBot: GENERIC,
   };

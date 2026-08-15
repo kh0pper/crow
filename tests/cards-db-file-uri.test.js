@@ -141,21 +141,6 @@ test("the reset never touches a card that is not in_progress (terminal or otherw
   assert.equal(row.status, "done", "a finished card must not be reopened");
 });
 
-test("recordPlanRef writes the plan pointer and NOTHING else — status is never machinery's", () => {
-  const t0 = new Database(F.tasksDb);
-  const before = t0.prepare("SELECT id, title, status, priority, project_id FROM tasks_items WHERE id=8").get();
-  t0.close();
-
-  B.recordPlanRef(B.cardsDbForBot("uri-bot"), 8, { kind: "repo", path: ".pi/plans/card-8.md" });
-
-  const t = new Database(F.tasksDb);
-  const row = t.prepare("SELECT id, title, status, priority, project_id, plan_ref FROM tasks_items WHERE id=8").get();
-  t.close();
-  assert.deepEqual(JSON.parse(row.plan_ref), { kind: "repo", path: ".pi/plans/card-8.md" });
-  const { plan_ref, ...rest } = row;
-  assert.deepEqual(rest, before, "every other column is untouched — status stays the bot's");
-});
-
 test("tracker readers no longer throw through a file: URI", () => {
   const uri = B.cardsDbForBot("uri-bot");
   assert.equal(TR.cardStatus(8, uri), "done");
