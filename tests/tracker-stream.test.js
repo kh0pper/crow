@@ -26,9 +26,14 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
 
 const BOT_ID = "scout";
 const SLUG = "toolkit-assets";
+const KANBAN_BOT_ID = "planner";
+const KANBAN_PROJECT_ID = 42;
 let boardId;
 let lockedItemId;
 let freeItemId;
+let archivedCustomItemId;
+let kanbanFreeCardId;
+let kanbanArchivedCardId;
 
 // Seed BEFORE importing anything that reads the env at module load.
 {
@@ -42,7 +47,7 @@ let freeItemId;
       due_date TEXT, phase TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
       assigned_bot TEXT, plan_ref TEXT, board_id INTEGER, bot_id TEXT, action_needed TEXT,
       next_followup_date TEXT, processing_lease TEXT, processing_lease_status TEXT,
-      data_json TEXT NOT NULL DEFAULT '{}',
+      data_json TEXT NOT NULL DEFAULT '{}', archived_at TEXT,
       created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
   t.prepare(
     "INSERT INTO board_defs (slug, display_name, status_values, terminal_values) VALUES (?,?,?,?)"
@@ -53,6 +58,18 @@ let freeItemId;
   );
   lockedItemId = ins.run("Flyer ES", boardId, BOT_ID, "drafting", 3, "in-progress").lastInsertRowid;
   freeItemId = ins.run("Poster EN", boardId, BOT_ID, "drafted", 2, null).lastInsertRowid;
+  // Track 1 (D-T1.6): an archived custom-tracker item — the SSE tick's
+  // board_id=? row set (streams.js) must exclude it.
+  archivedCustomItemId = ins.run("Retired banner", boardId, BOT_ID, "planned", 1, null).lastInsertRowid;
+  t.prepare("UPDATE tasks_items SET archived_at=datetime('now') WHERE id=?").run(archivedCustomItemId);
+
+  // A SEPARATE project-linked (kanban) bot + cards — exercises the OTHER row
+  // set in the same tick handler (streams.js's project_id=? branch), which
+  // the custom-tracker fixture above never reaches.
+  const insCard = t.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES (?,?,?)");
+  kanbanFreeCardId = insCard.run("Free card", KANBAN_PROJECT_ID, "pending").lastInsertRowid;
+  kanbanArchivedCardId = insCard.run("Archived card", KANBAN_PROJECT_ID, "pending").lastInsertRowid;
+  t.prepare("UPDATE tasks_items SET archived_at=datetime('now') WHERE id=?").run(kanbanArchivedCardId);
   t.close();
 
   const c = new Database(process.env.CROW_DB_PATH);
@@ -61,6 +78,9 @@ let freeItemId;
   c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,1)").run(
     BOT_ID, "Scout",
     JSON.stringify({ tracker_config: { type: "custom", tracker_slug: SLUG } })
+  );
+  c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES (?,?,?,1,?)").run(
+    KANBAN_BOT_ID, "Planner", JSON.stringify({ tracker_config: { type: "kanban" } }), KANBAN_PROJECT_ID
   );
   c.close();
 }
@@ -177,4 +197,32 @@ test("custom tracker with a missing slug def gets no board-config frame (never t
   }
   assert.equal(sawBoardConfig, false,
     "a custom tracker with a missing slug def must not leak the project's board-config frame");
+});
+
+// ---------------------------------------------------------------------------
+// Track 1 Task 5 (D-T1.6): the SSE tick's row sets must exclude archived
+// cards/items — these are TWO separate query sites in streams.js (the
+// custom-tracker board_id=? branch and the kanban/task-list project_id=?
+// branch), each gets its own dedicated test so a mutation dropping just one
+// site's filter fails exactly one of these.
+// ---------------------------------------------------------------------------
+
+test("[SITE streams.js custom-tracker tick] an archived item is excluded from the row set", async () => {
+  const url = "http://127.0.0.1:" + server.address().port + "/dashboard/streams/bot-board?bot=" + BOT_ID;
+  const { snapshot } = await readStream(url);
+  assert.ok(snapshot && Array.isArray(snapshot.cards), "no SSE snapshot arrived");
+  const ids = snapshot.cards.map((c) => Number(c.id));
+  assert.ok(ids.includes(Number(freeItemId)), "sanity: the live item is still present");
+  assert.ok(!ids.includes(Number(archivedCustomItemId)),
+    "an archived custom-tracker item must not appear in the SSE row set");
+});
+
+test("[SITE streams.js kanban/project tick] an archived card is excluded from the row set", async () => {
+  const url = "http://127.0.0.1:" + server.address().port + "/dashboard/streams/bot-board?bot=" + KANBAN_BOT_ID;
+  const { snapshot } = await readStream(url);
+  assert.ok(snapshot && Array.isArray(snapshot.cards), "no SSE snapshot arrived");
+  const ids = snapshot.cards.map((c) => Number(c.id));
+  assert.ok(ids.includes(Number(kanbanFreeCardId)), "sanity: the live card is still present");
+  assert.ok(!ids.includes(Number(kanbanArchivedCardId)),
+    "an archived project-board card must not appear in the SSE row set");
 });

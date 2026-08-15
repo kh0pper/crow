@@ -1385,6 +1385,26 @@ export const translations = {
   "botboard.viewColumns": { en: "Columns", es: "Columnas" },
   "botboard.viewList": { en: "List", es: "Lista" },
 
+  // ─── Board — Track 1 archiving (D-T1.6) ───
+  // board.planVersions / board.planApprove / board.historyTitle / board.autonomy*
+  // are forward-declared here (design doc's full D-T1.3/D-T1.4 string list) for
+  // the mutations-history strip and autonomy toggle — Task 5 built the
+  // archiving surface only; that UI is a follow-up (see task-5-report.md).
+  "board.archive": { en: "Archive", es: "Archivar" },
+  "board.unarchive": { en: "Unarchive", es: "Desarchivar" },
+  "board.showArchived": { en: "Show archived", es: "Mostrar archivados" },
+  "board.archivedView": { en: "Archived view", es: "Vista de archivados" },
+  "board.awaitingReview": { en: "Awaiting review", es: "Pendiente de revisi\u00f3n" },
+  "board.resultFailed": { en: "Result failed", es: "Resultado fallido" },
+  "board.autonomy": { en: "Autonomy", es: "Autonom\u00eda" },
+  "board.autonomyGated": { en: "Gated", es: "Con aprobaci\u00f3n" },
+  "board.autonomyAuto": { en: "Auto", es: "Autom\u00e1tico" },
+  "board.planVersions": { en: "Plan versions", es: "Versiones del plan" },
+  "board.planApprove": { en: "Approve", es: "Aprobar" },
+  "board.historyTitle": { en: "History", es: "Historial" },
+  "board.errArchived": { en: "This card is archived \u2014 unarchive it first.", es: "Esta tarjeta est\u00e1 archivada \u2014 des\u00e1rchivala primero." },
+  "board.errLocked": { en: "A bot is working this card.", es: "Un bot est\u00e1 trabajando en esta tarjeta." },
+
   // ─── Projects Panel (W3-4) ───
   "projects.confirmRevoke": { en: "Revoke {who}?", es: "¿Revocar a {who}?" },
 

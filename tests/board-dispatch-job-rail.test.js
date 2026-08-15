@@ -63,6 +63,7 @@ function seed() {
   t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY, title TEXT NOT NULL,
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
     project_id INTEGER, assigned_bot TEXT, plan_ref TEXT, board_id INTEGER, data_json TEXT NOT NULL DEFAULT '{}',
+    archived_at TEXT,
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
     completed_at TEXT)`);
   const ins = t.prepare("INSERT INTO tasks_items (id,title,project_id,status,assigned_bot) VALUES (?,?,1,?,'r4-assistant')");

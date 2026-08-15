@@ -411,8 +411,11 @@ export default function streamsRouter(dashboardAuth) {
         let locks = {};
 
         if (trackerType === "custom" && trackerDefId && tdb) {
+          // D-T1.6: default view excludes archived — an archived-elsewhere
+          // item must drop out of THIS tick's row set, which is what lets the
+          // client's DOM-vs-frame removal check (client.js) catch it.
           const rows = (await tdb.execute({
-            sql: "SELECT id, status, processing_lease_status FROM tasks_items WHERE board_id=? ORDER BY priority ASC, id ASC",
+            sql: "SELECT id, status, processing_lease_status FROM tasks_items WHERE board_id=? AND archived_at IS NULL ORDER BY priority ASC, id ASC",
             args: [trackerDefId],
           })).rows || [];
           cards = rows.map((r) => ({ id: Number(r.id), status: String(r.status) }));
@@ -421,7 +424,7 @@ export default function streamsRouter(dashboardAuth) {
           }
         } else if ((trackerType === "kanban" || trackerType === "task-list") && tdb && Number.isInteger(resolvedProjectId)) {
           const rows = (await tdb.execute({
-            sql: "SELECT id, status FROM tasks_items WHERE project_id=? ORDER BY priority ASC, id ASC",
+            sql: "SELECT id, status FROM tasks_items WHERE project_id=? AND archived_at IS NULL ORDER BY priority ASC, id ASC",
             args: [resolvedProjectId],
           })).rows || [];
           cards = rows.map((c) => ({ id: Number(c.id), status: String(c.status) }));
