@@ -7,48 +7,64 @@ through a stdio-mounted `servers/memory/server.js`, whose every emit site is gua
 `if (syncManager)` — and `syncManager` is null on every stdio mount. The fix must cover **any**
 stdio-mounted server, present or future, not just memory.
 
-Verified 2026-08-15 against `origin/main` `411692ac`.
+Verified 2026-08-15 against `origin/main` `411692ac`. This revision incorporates the adversarial
+review round (record at the end); the reviewer's two critical findings changed the mechanism —
+write-time lamport minting and strict-append draining are not optional refinements, they are what
+makes the design correct.
 
 ## The defect, precisely
 
-- `InstanceSyncManager.emitChange()` (`servers/sharing/instance-sync.js:1536`) mints a lamport
-  from a persisted counter, signs the entry with the instance ed25519 key, stamps the row's
-  `lamport_ts`, and appends to per-peer **Hypercore out-feeds**. All of that state — counter,
-  identity, feeds, `_pendingPeerEmits` — lives in the gateway process.
-- Emit call sites outside the manager: `servers/memory/server.js` ×6 (memories, crow_context),
-  `servers/gateway/dashboard/settings/registry.js`, `servers/shared/providers-db.js`,
-  `servers/gateway/dashboard/panels/skills.js`, `servers/sharing/{message,contact,group}-sync.js`
-  + `sync-conflict-resolve.js`. Each has its own null-guard idiom (`if (syncManager)`, `sink()?.`,
-  `if (!_syncManager) return`). Dashboard/panel sites only ever run inside the gateway; the
+- `InstanceSyncManager.emitChange()` (`servers/sharing/instance-sync.js:1536`) mints a lamport,
+  signs the entry with the instance ed25519 key, stamps the row's `lamport_ts`, and appends to
+  per-peer **Hypercore out-feeds**. Feeds and identity are gateway-process state; **the lamport
+  counter is NOT** — `_nextLamport` is one atomic `UPDATE sync_state … RETURNING` against
+  crow.db (`instance-sync.js:406–431`), safe from any process (this fact is load-bearing below).
+- Emit call sites outside the manager: `servers/memory/server.js` ×6, dashboard settings
+  registry, `providers-db.js`, the skills panel, and the sharing-side `sink()` family. The
   memory/projects/sharing/blog servers also run as **stdio mounts** (repo `.mcp.json`;
   `~/r4-tehcy/.mcp.json` `crow-memory` runs `servers/memory/index.js` against the r4 data dir —
   with `CROW_JOURNAL_MODE=DELETE`, note below). On a stdio mount the write lands in crow.db and
-  the emission silently never happens: no lamport, no feed entry, no replication — permanently
-  (nothing ever revisits the row).
-- Hypercores are single-writer append-only logs; a second process must never open/append the
-  gateway's out-feeds. Direct emission from stdio processes is therefore structurally off the
-  table — this is why the naive fix (start a sync manager in the stdio process) is wrong, and
-  why the whole sharing stack (Hyperswarm, Nostr) must not boot per-stdio-mount anyway.
+  the emission silently never happens — no lamport, no feed entry, no replication, permanently.
+- Hypercores are single-writer append-only logs; a second process must never open the gateway's
+  out-feeds. Direct feed writing from stdio processes stays structurally off the table (and the
+  sharing network stack must not boot per-mount) — but lamport minting, per the counter fact
+  above, does NOT need the gateway.
 
-## Design: write-time outbox, gateway-time drain
+## Design: write-time stamp + queue, gateway-time strict drain
 
 ### The shared emitter module
 
-`servers/shared/sync-emit.js` exports one function that becomes the ONLY way any server code
-emits a sync change:
+`servers/shared/sync-emit.js` exports one function that becomes the ONLY way server code emits a
+sync change:
 
 ```js
-emitOrQueue(syncManager, db, table, op, row, opts) // → lamport | null | 'queued'
+emitOrQueue(syncManager, db, table, op, row, opts) // → lamport | null | {queued, lamport}
 ```
 
-- With a live `syncManager`: exactly today's `emitChange` call (behavior unchanged in-gateway).
-- Without: durably queue in crow.db — `INSERT INTO sync_outbox (table_name, op, row_json,
-  created_at)`. Fire-and-forget error handling identical to today's emit sites (never throws
-  into the tool path).
-- The module owns `CREATE TABLE IF NOT EXISTS sync_outbox` (bundle-init pattern), so a stdio
-  mount that runs before the gateway has ever migrated still queues. **Not** in `init-db.js` —
-  no `SCHEMA_GENERATION` bump; a registry migration is unnecessary since both writers create
-  idempotently.
+- With a live `syncManager`: exactly today's `emitChange` call (in-gateway behavior unchanged).
+- Without a manager, first the **eligibility gate**: the same predicate the gateway uses
+  (`shouldInitInstanceSync` semantics — `CROW_DISABLE_INSTANCE_SYNC=1` / no-auth) evaluated in
+  the writing process. A deployment that has sync switched off gets today's behavior (emission
+  dropped), NOT an ever-growing queue for a drain that will never come.
+- Eligible writes are stamped **at write time**: mint the lamport with the same atomic
+  `UPDATE sync_state … RETURNING` (the minting + row-stamping logic — table-specific stamping
+  rules included: `dashboard_settings` by key, `crow_context` by composite key, else by id, never
+  on deletes — is **extracted from `instance-sync.js` into a small shared module** that both the
+  manager and `sync-emit.js` call; duplicated stamping logic would drift), then
+  `INSERT INTO sync_outbox (table_name, op, row_json, lamport_ts, created_at)`.
+- **Why write-time minting is mandatory, not nice-to-have** (review finding 1): the apply side is
+  pure last-lamport-wins everywhere (`_checkConflict` :2669, `_applyCrowContext` :1864,
+  `_applyDashboardSetting` :1833). Drain-time minting would give an OLD stdio snapshot a NEWER
+  lamport than a gateway write that happened after it — peers converge to stale content while
+  the origin keeps the newer row, a divergence no future check can see (equal-lamport ties at
+  best). With write-time minting the mixed-doors race resolves correctly by construction, and
+  the drain re-emits in **preserve-mode** (`opts.lamportTs`, instance-sync.js:1542–1561), which
+  skips the mint and the local re-stamp by design (2c C1 machinery, already tested).
+- The module owns `CREATE TABLE IF NOT EXISTS sync_outbox` (bundle-init pattern; NOT in
+  `init-db.js`, no `SCHEMA_GENERATION` bump). DDL under a live gateway just waits on the 30s
+  busy_timeout (`servers/db.js:469`) — accepted cost: better-sqlite3 is synchronous, so a
+  contended first-write can block the stdio server's loop up to that long, once.
+- Error handling identical to today's emit sites: never throws into the tool path.
 
 ```sql
 CREATE TABLE IF NOT EXISTS sync_outbox (
@@ -56,90 +72,126 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
   table_name TEXT NOT NULL,
   op TEXT NOT NULL,                        -- 'insert'|'update'|'delete'
   row_json TEXT NOT NULL,                  -- the row snapshot as the emit site built it
+  lamport_ts INTEGER NOT NULL,             -- minted at write time (see above)
+  claimed_at TEXT,                         -- drain batch claim (see below)
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
 
-All existing emit call sites convert to `emitOrQueue` (the sharing-internal sites keep their
-`sink()` seams but the sink's null branch queues instead of dropping). The sweep is mechanical;
-the test for each site is not (below).
+- **Cap**: 10,000 rows — on overflow, warn loudly and drop-oldest (the `_pendingPeerEmits`
+  256-cap precedent). The cap should never be reachable on a healthy instance; it exists so a
+  misconfigured one degrades like today instead of growing a table without bound.
+
+All existing emit call sites convert to `emitOrQueue` (the sharing-internal `sink()` seams keep
+their shape; the null branch queues instead of dropping). **Two in-gateway zero-emit writers join
+the sweep** (they have a live manager and still never emit — same defect, no excuse): the
+dashboard memory panel's edit/delete (`panels/memory.js:161,170`) and the share-import inserts
+(`sharing/boot.js:928` memories, `:961` research_notes).
 
 ### The drain
 
-The gateway's sync boot (in `boot/mcp-mounts.js`, AFTER `eagerInitPairedPeers()` — emissions
-before feeds arm would park or drop, the exact bug class 2c C3 fixed) drains the outbox, then
-re-drains on an interval (60s) for rows queued by stdio mounts while the gateway runs:
+The gateway's sync boot (in `boot/mcp-mounts.js`, after `eagerInitPairedPeers()`) drains the
+outbox, then re-drains on a 60s interval. The drain is **strict** — the review's finding 2:
+`emitChange` resolving is NOT a durability guarantee (`_appendToPeer` parks in-memory on unarmed
+feeds :1472–1479, swallows append failures :1466–1469, caps parked entries at 256 with silent
+drop-oldest, and `revokeInstance` discards parked slots :3086). Deleting an outbox row against
+that contract converts a survivable queue into permanent loss (the outbox row is the only durable
+record; a parked-then-crashed entry is gone). Therefore:
 
-- Read rows `ORDER BY id ASC` in batches; for each, call `syncManager.emitChange(table, op,
-  JSON.parse(row_json))` and DELETE the row **after** the emit resolves; stop the batch on the
-  first failure (retry next tick — order preserved).
-- Lamports are minted **at drain time, in outbox order** — correct by construction: the queued
-  writes are strictly newer than anything the counter saw before them, and their relative local
-  order is preserved by `id ASC`.
-- Snapshots, not re-reads: if a row was mutated five times offline, five outbox entries emit in
-  order and last-writer-wins converges peers to the final state. A delete after an update emits
-  as a delete. No re-read logic, no special cases.
-- Crash window (emit succeeded, delete lost): the row re-emits next drain with a fresh lamport —
-  a duplicate emission of identical content, which the apply side already treats as idempotent
-  (redelivery is a designed-for case: 2c C1 re-emit). Accepted.
-- `feedsDisabled` (--no-auth) gateways do NOT drain — a scratch gateway must not consume and
-  discard a prod outbox. Drain requires an armed, feeds-enabled manager.
-- Observability: drain logs count on every non-zero pass; the health surface
-  (`provider-residency`-style) gains an outbox-depth stat so a wedged drain is visible, not
-  silent.
+- **Refuse to drain while any paired peer's out-feed is unarmed.** Arming is a local hypercore
+  open, not peer connectivity — after a healthy `eagerInitPairedPeers` every paired peer is
+  armed; the refusal only bites in the failure windows that matter (fd-lock loser during a
+  gateway restart overlap, per-peer init failure), which is exactly when deleting rows would
+  lose data. Depth stat + a warn cover the visible symptom.
+- Drain via a **strict emit mode**: `emitChange(…, {lamportTs, strict: true})` reports per-peer
+  disposition and propagates append failures instead of swallowing them. A row is DELETEd only
+  when every paired peer took a **real append**; on any failure the batch stops and retries next
+  tick (order preserved; entries never park in RAM on the drain path).
+- **Serialization** (finding 5): one in-process drain chain (the `_appendLocks` promise-chain
+  pattern :1443) so interval ticks never overlap a slow batch, plus a transactional batch claim —
+  `BEGIN IMMEDIATE`, stamp `claimed_at` on the batch, commit, emit, delete — so a second
+  feeds-enabled gateway on the same crow.db (the grackle multi-gateway shape) no-ops instead of
+  double-draining; stale claims (older than 10 min) are reclaimable.
+- Batches read `ORDER BY id ASC`. Preserve-mode floors the manager's counter at each entry's
+  lamport (instance-sync.js:1558), so fresh gateway mints always exceed drained values.
+- Crash window (append succeeded, delete lost): re-emit next drain **with the same preserved
+  lamport** — a true redelivery, the case the apply side is built for (2c C1). Idempotent.
+- Observability: drain logs count on non-zero passes; health surface gains outbox depth +
+  oldest-row age; `sync_outbox` is added to the recover-db table set (the known recover-db
+  bundle-table gap otherwise silently drops queued rows on a `.dump` rebuild).
+
+### Scope of the success criterion (finding 3, honestly stated)
+
+This PR's criterion: **the existing emit sites never silently drop, on any mount** — every
+`emitChange`/`sink()` call site plus the two in-gateway zero-emit writers named above. It does
+NOT claim every write path to every synced table now emits. The remaining zero-emit family is
+real and now has names — filed as follow-ups, not silently absorbed: bundle-process writers
+(pm-workspace `memory-index.js:49,54`; maker-lab `server.js:390,567,632` + panel mass-delete;
+meta-glasses `server.js:265,433,595` — which makes the Phase 6 `research_notes`/
+`glasses_note_sessions` replication claim currently dead on arrival at the emit side) and the
+Notion importer (`scripts/sync-notion.js:314,321`). Bundles can adopt `emitOrQueue` through the
+app-root import pattern in a follow-up PR; that work rides its own review.
 
 ### What this deliberately does not do
 
-- **No loopback-POST path.** POSTing to the local gateway fails exactly when durability matters
-  (gateway down/migrating) and would need the outbox as its fallback anyway — the outbox alone
-  is simpler and always correct. Latency (up to one drain interval) is irrelevant for
-  memory/context replication.
-- **No per-stdio sync manager**, no feed sharing, no second Hyperswarm — single-writer feeds
-  (above).
-- **No historical backfill in this PR.** Rows already written through stdio mounts before this
-  fix (NULL `lamport_ts`, never emitted) are real but are an operator-run repair, not write-path
-  code: the existing re-emit rails (2c) plus a one-shot "re-emit rows with NULL lamport_ts"
-  script get their own follow-up task, executed per-instance with Kevin (r4 is the live case).
-  The spec's success criterion is: **from deploy forward, zero silent losses on any mount.**
-
-### Ordering vs live emissions
-
-While the gateway runs, a stdio write queues and a near-simultaneous gateway write emits
-immediately — the queued row's lamport is minted up to 60s later. Both rows are independent
-writes to different rows in practice (two doors, two actors); for the same row the apply side is
-last-lamport-wins, and the drain's later lamport correctly represents "the stdio write happened,
-the gateway learned of it later." No additional coordination is warranted.
+- **No loopback-POST path** — fails exactly when durability matters; the outbox alone is always
+  correct. Latency (≤ one drain interval) is irrelevant for this data.
+- **No per-stdio sync manager, no feed sharing** — single-writer feeds.
+- **No historical backfill in this PR.** Rows written through stdio mounts before this fix are
+  an operator-run repair (the 2c re-emit rails + a one-shot "re-emit rows with NULL lamport_ts"
+  pass), executed per-instance with Kevin; r4 is the live case.
 
 ### The CROW_JOURNAL_MODE=DELETE note
 
-The r4 stdio memory mount forces journal_mode=DELETE onto its connection while the gateway holds
-the same db in WAL. Rollback-journal and WAL modes are mutually exclusive per-database, not
-per-connection — the setting cannot actually demote a WAL db while other connections hold it
-(SQLite refuses), but it CAN succeed during a gateway-down window and then force the next
-gateway boot through a mode flip. That is a pre-existing sharp edge outside this spec's scope;
-the deploy checklist notes it and the `.mcp.json` cleanup (Track 1's ops step) should drop the
-env var while it is in there.
+The r4 stdio memory mount forces journal_mode=DELETE at its connection while the gateway holds
+the db in WAL. The setting cannot demote a WAL db while other connections hold it, but it CAN
+succeed during a gateway-down window and force the next boot through a mode flip. Pre-existing
+sharp edge, out of scope here; Track 1's `.mcp.json` ops step should drop the env var while it
+is in the file.
 
 ## Testing
 
-- Unit: `emitOrQueue` with a manager (passes through, returns lamport), without (row queued,
-  table auto-created), with a throwing db (never throws).
-- Drain: order preservation across batches; stop-on-failure + resume; crash-window duplicate is
-  idempotent at apply (pair with the existing sync apply tests); feedsDisabled refusal;
-  interval re-drain picks up rows queued mid-run.
-- End-to-end: spawn `servers/memory/index.js` as a real stdio child against a scratch
-  CROW_DATA_DIR, store a memory over MCP stdio, assert the outbox row; boot a gateway-shaped
-  manager against the same db, drain, assert the peer feed received the entry (in-memory feed
-  seam) and the row's lamport_ts stamped. This is the test the defect family never had — a
-  MUTUAL multi-process case per the item-2a lesson (prose review is insufficient for
-  distributed state; the gate must be executable).
-- Every emit call-site conversion gets a mutation test (break the queue branch, watch the e2e
-  test fail — not just the unit test).
-- Suite floor 3176/0 held; EN/ES untouched (no UI strings); no new ports.
+- The suite env exports `CROW_DISABLE_INSTANCE_SYNC=1` (`run-suite.mjs:92`), which makes any
+  test-constructed manager `feedsDisabled` AND trips `emitOrQueue`'s eligibility gate — **every
+  test below must override the predicate** (the existing `mgr.feedsDisabled = false` pattern,
+  tests/instance-sync.test.js:76–81, plus an injection seam on the eligibility check) **or the
+  entire suite goes quietly inert** (the item-2a vacuous-test tell, named here so the plan
+  budgets for it).
+- Unit: `emitOrQueue` with a manager (pass-through); without (lamport minted via sync_state, row
+  stamped, outbox row carries the lamport, table auto-created); ineligible (predicate false →
+  dropped, not queued); cap overflow (warn + drop-oldest); throwing db (never throws out).
+- Mixed-doors race (the finding-1 scenario, as a test): stdio write at T0 queued, gateway write
+  of the same row at T1 live-emitted, drain at T2 — peers must converge on the T1 content
+  (preserve-mode lamport comparison), and the local row keeps the T1 stamp.
+- Drain: order across batches; strict mode refuses on an unarmed paired peer and DELETEs
+  nothing; append failure stops the batch with rows intact; claim serialization (a second
+  drainer no-ops on claimed rows; stale claims reclaim); crash-window redelivery preserves the
+  lamport; interval re-drain picks up mid-run queues.
+- End-to-end (the test this defect family never had — MUTUAL multi-process per the item-2a
+  lesson): spawn `servers/memory/index.js` as a real stdio child on a scratch CROW_DATA_DIR,
+  store a memory over MCP stdio, assert the outbox row + stamped lamport; construct a
+  gateway-shaped manager on the same db with stub feeds injected into `mgr.outFeeds` (the
+  established seam, tests/instance-sync.test.js:1432), drain, assert the feed entry carries the
+  write-time lamport and the row is deleted.
+- Every call-site conversion mutation-tested against the e2e (break the queue branch, watch it
+  fail). Suite floor 3176/0 held; no UI strings; no new ports.
 
 ## Out of scope
 
-Track 1's board verbs (own spec — board data is instance-local by design and never syncs);
-retiring stdio mounts as a product direction (the outbox makes them safe instead); the
-historical-rows backfill execution (follow-up task with Kevin per instance); MCP OAuth;
-`CROW_JOURNAL_MODE` policy.
+Track 1's board verbs (board data is instance-local and never syncs — the specs do not
+interact); retiring stdio mounts as a product direction; the historical backfill execution; the
+bundle-writer emit adoption (named follow-up above); MCP OAuth; `CROW_JOURNAL_MODE` policy.
+
+## Review record (round 1, 2026-08-15)
+
+One adversarial reviewer against `411692ac`. 8 findings, all resolved in this revision. The two
+critical ones replaced the mechanism: (1) drain-time lamport minting would resurrect stale
+same-row content on peers AND corrupt the origin's stamp — fixed by write-time minting (the
+counter is a cross-process-safe db op, a fact the v1 draft got wrong) + preserve-mode drain;
+(2) "delete after emitChange resolves" is not durable (in-RAM parking, swallowed append
+failures, parked-slot discards) — fixed by strict per-peer append accounting, refuse-on-unarmed,
+and batch claims. Also: the eligibility gate + cap (kill-switch deployments must not queue
+unbounded), drain serialization incl. the two-gateway case, the honest success-criterion scope
+with the named zero-emit family (+ two in-gateway writers added to this PR), the recover-db
+line, and the suite-env override trap in the test section. The row_json snapshot semantics and
+the e2e seam were verified clean as drafted.
