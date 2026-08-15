@@ -371,6 +371,7 @@ export function createBoardMcpServer(options = {}) {
       tags: z.string().optional(),
       priority: z.number().int().optional(),
       autonomy: z.enum(["gated", "auto"]).optional(),
+      parent_id: z.number().int().nullable().optional(),
       action_needed: z.string().optional(),
       next_followup_date: z.string().optional(),
       processing_lease: z.string().nullable().optional(),
