@@ -178,6 +178,66 @@ test("updateCard records a field diff and refuses archived cards", async () => {
   });
 });
 
+// ---- Track 1 review fix wave (Finding 1 + Finding 3) ----
+
+test("updateCard: project_id is a plain set (no re-inheritance), recorded in the diff", async () => {
+  await withStore(async ({ tdb }) => {
+    const { id } = await createCard(tdb, { title: "orphan", status: "pending" }, HUMAN);
+    let row = await getCard(tdb, id);
+    assert.equal(row.project_id, null);
+
+    const r = await updateCard(tdb, id, { project_id: 1 }, HUMAN);
+    assert.equal(r.changed, true);
+    row = await getCard(tdb, id);
+    assert.equal(row.project_id, 1);
+    const muts = await allMutations(tdb, id);
+    const upd = muts.filter((m) => m.verb === "update").at(-1);
+    const detail = JSON.parse(upd.detail_json);
+    assert.deepEqual(detail.project_id, [null, 1]);
+
+    // clearing back to null is also a plain set, also recorded
+    const r2 = await updateCard(tdb, id, { project_id: null }, HUMAN);
+    assert.equal(r2.changed, true);
+    row = await getCard(tdb, id);
+    assert.equal(row.project_id, null);
+  });
+});
+
+test("updateCard: project_id on an archived card is refused (archived, 409) unless allowArchived", async () => {
+  await withStore(async ({ tdb, cdb }) => {
+    const { id } = await createCard(tdb, { title: "c", status: "pending", project_id: 1 }, HUMAN);
+    await archiveCard(tdb, cdb, id, HUMAN);
+    await assert.rejects(
+      () => updateCard(tdb, id, { project_id: 2 }, HUMAN),
+      (e) => { assert.equal(e.code, "archived"); assert.equal(e.http, 409); return true; },
+    );
+    // the bulk-assign escape hatch (?include_archived=1) threads allowArchived through
+    const r = await updateCard(tdb, id, { project_id: 2 }, HUMAN, { allowArchived: true });
+    assert.equal(r.changed, true);
+    const row = await getCard(tdb, id);
+    assert.equal(row.project_id, 2);
+  });
+});
+
+test("updateCard rejects an invalid autonomy value (bad_autonomy, 400); createCard does too", async () => {
+  await withStore(async ({ tdb }) => {
+    const { id } = await createCard(tdb, { title: "c", status: "pending" }, HUMAN);
+    await assert.rejects(
+      () => updateCard(tdb, id, { autonomy: "yolo" }, HUMAN),
+      (e) => { assert.equal(e.code, "bad_autonomy"); assert.equal(e.http, 400); return true; },
+    );
+    // valid values still work
+    const r = await updateCard(tdb, id, { autonomy: "auto" }, HUMAN);
+    assert.equal(r.changed, true);
+    assert.equal((await getCard(tdb, id)).autonomy, "auto");
+
+    await assert.rejects(
+      () => createCard(tdb, { title: "bad", status: "pending", autonomy: "yolo" }, HUMAN),
+      (e) => { assert.equal(e.code, "bad_autonomy"); assert.equal(e.http, 400); return true; },
+    );
+  });
+});
+
 test("updateCard: re-parenting inherits the new parent's project_id, both fields land in the diff", async () => {
   await withStore(async ({ tdb }) => {
     const parentA = await createCard(tdb, { title: "parentA", status: "pending", project_id: 1 }, HUMAN);

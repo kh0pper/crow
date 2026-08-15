@@ -300,6 +300,34 @@ test("[SITE] bulk-assign skips archived candidates by default; ?include_archived
   assert.ok(body2.applied.includes(bulkArchived), "include_archived=1 must let the archived card through");
 });
 
+// Track 1 review fix wave (Finding 1): bulk-assign converged its raw
+// db.batch() UPDATE onto per-card updateCard() calls so applied cards record
+// provenance too — same as every other card mutation, response shape
+// unchanged ({ok, applied, skipped}).
+test("[SITE] bulk-assign: applied cards record an 'update' mutation with the project_id diff; skipped ones record none — response shape unchanged", async () => {
+  const t = new Database(tasksDbPath);
+  const live1 = Number(t.prepare("INSERT INTO tasks_items (title, status, project_id) VALUES ('prov live 1','pending',2)").run().lastInsertRowid);
+  const live2 = Number(t.prepare("INSERT INTO tasks_items (title, status, project_id) VALUES ('prov live 2','pending',2)").run().lastInsertRowid);
+  const arch = Number(t.prepare("INSERT INTO tasks_items (title, status, project_id) VALUES ('prov archived','pending',2)").run().lastInsertRowid);
+  t.prepare("UPDATE tasks_items SET archived_at=datetime('now') WHERE id=?").run(arch);
+  t.close();
+
+  const res = await post("/project/1/bulk-assign", { card_ids: [live1, live2, arch] });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(Object.keys(body).sort(), ["applied", "ok", "skipped"], "response shape unchanged");
+  assert.deepEqual(body.applied.sort((a, b) => a - b), [live1, live2].sort((a, b) => a - b));
+
+  const t2 = new Database(tasksDbPath);
+  const mutsLive1 = t2.prepare("SELECT verb, actor_kind, detail_json FROM board_mutations WHERE item_id=?").all(live1);
+  const mutsArch = t2.prepare("SELECT verb FROM board_mutations WHERE item_id=?").all(arch);
+  t2.close();
+  assert.deepEqual(mutsLive1.map((m) => m.verb), ["update"]);
+  assert.equal(mutsLive1[0].actor_kind, "human");
+  assert.deepEqual(JSON.parse(mutsLive1[0].detail_json).project_id, [2, 1]);
+  assert.deepEqual(mutsArch, [], "a skipped (archived) card records no mutation");
+});
+
 test("[SITE] panel kanban render (html.js) hides archived by default; the toggle shows it mixed into its column", async () => {
   const db = createDbClient();
   const layout = (o) => o.content;

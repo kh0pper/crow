@@ -365,20 +365,37 @@ export function createBoardMcpServer(options = {}) {
     { id: z.number().int() },
     async ({ id }, extra) => dispatchUnarchive(tdb, id, resolveActor(extra)));
 
+  // Track 1 review fix wave (Finding 2): plans are a CARD concept (D-T1.4) —
+  // plan-service itself trusts item_id blindly (no existence/kind check), so
+  // a tracker-item id or an outright-missing id used to sail through to a
+  // confusing plan-service 404 (save/approve) or a silently-empty result
+  // (get). getCard(tdb, item_id) is the SAME 404-style guard dispatchUpdate
+  // et al. use above — it returns null for both a nonexistent id and a
+  // tracker-item id (getCard filters board_id IS NULL), so one check covers
+  // both cases the finding calls out.
   tool(server, "board_get_plan",
     "Get an item's current plan (latest approved, else latest draft) plus every version.",
     { item_id: z.number().int() },
-    async ({ item_id }) => ({ current: await getCurrentPlan(tdb, item_id), versions: await listPlans(tdb, item_id) }));
+    async ({ item_id }) => {
+      if (!(await getCard(tdb, item_id))) throw fail(`not found: ${item_id}`, "not_found", 404);
+      return { current: await getCurrentPlan(tdb, item_id), versions: await listPlans(tdb, item_id) };
+    });
 
   tool(server, "board_save_plan",
     "Save a new plan draft version for an item.",
     { item_id: z.number().int(), body_md: z.string().min(1) },
-    async ({ item_id, body_md }, extra) => savePlan(tdb, item_id, body_md, resolveActor(extra)));
+    async ({ item_id, body_md }, extra) => {
+      if (!(await getCard(tdb, item_id))) throw fail(`not found: ${item_id}`, "not_found", 404);
+      return savePlan(tdb, item_id, body_md, resolveActor(extra));
+    });
 
   tool(server, "board_approve_plan",
     "Approve a draft plan version (supersedes the item's previously-approved version).",
     { item_id: z.number().int(), version: z.number().int(), via: z.enum(["chat", "dashboard"]).optional() },
-    async ({ item_id, version, via }, extra) => approvePlan(tdb, item_id, version, resolveActor(extra), via || "chat"));
+    async ({ item_id, version, via }, extra) => {
+      if (!(await getCard(tdb, item_id))) throw fail(`not found: ${item_id}`, "not_found", 404);
+      return approvePlan(tdb, item_id, version, resolveActor(extra), via || "chat");
+    });
 
   tool(server, "board_report_result",
     "Report an explicit outcome for an item (success/failure/partial) — the bot's terminal-state signal, never inferred from a process exit. 409s on a terminal-status or archived item.",

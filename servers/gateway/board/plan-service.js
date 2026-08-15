@@ -48,19 +48,36 @@ export async function listPlans(tdb, itemId) {
   })).rows;
 }
 
-/** Appends version n+1 as 'draft'; records 'plan_save'. */
+/**
+ * Appends version n+1 as 'draft'; records 'plan_save'.
+ *
+ * Track 1 review fix wave (Finding 6): the version number used to be
+ * computed by a separate read (SELECT MAX) before the INSERT, with no
+ * transaction tying them together — two concurrent savePlan calls for the
+ * same item could both read the same MAX and both attempt to insert the
+ * same version. board_plans' UNIQUE(item_id, version) turns that into a
+ * loud failure rather than a silent collision, but the loser still 500s for
+ * a caller who did nothing wrong. Fixed by folding the MAX computation into
+ * the INSERT's own subselect, so the read and the write are the SAME
+ * statement — there is no window between them for a second call to land in.
+ */
 export async function savePlan(tdb, itemId, bodyMd, actor) {
-  const maxRow = (await tdb.execute({
-    sql: "SELECT COALESCE(MAX(version), 0) AS mx FROM board_plans WHERE item_id=?",
-    args: [itemId],
-  })).rows[0];
-  const version = Number(maxRow.mx) + 1;
   const a = actor || {};
   const r = await tdb.execute({
     sql: `INSERT INTO board_plans (item_id, version, body_md, status, created_actor_kind, created_actor_id)
-          VALUES (?,?,?,'draft',?,?)`,
-    args: [itemId, version, String(bodyMd ?? ""), a.kind || "human", a.id ?? null],
+          SELECT ?, COALESCE(MAX(version), 0) + 1, ?, 'draft', ?, ?
+          FROM board_plans WHERE item_id=?`,
+    args: [itemId, String(bodyMd ?? ""), a.kind || "human", a.id ?? null, itemId],
   });
+  // The subselect's COALESCE(MAX(version),0)+1 always yields exactly one row
+  // (COALESCE guarantees a result even with zero existing plans), so this
+  // read-back is just recovering the value the INSERT itself computed —
+  // never a second racy computation.
+  const saved = (await tdb.execute({
+    sql: "SELECT version FROM board_plans WHERE id=?",
+    args: [r.lastInsertRowid],
+  })).rows[0];
+  const version = Number(saved.version);
   await recordMutation(tdb, { itemId, verb: "plan_save", actor, detail: { version: [null, version] } });
   return { id: Number(r.lastInsertRowid), version };
 }

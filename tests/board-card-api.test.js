@@ -557,6 +557,57 @@ test("convergence: POST /tracker-item/:id/move records a 'move' mutation — res
   assert.deepEqual(rows.map((m) => m.verb), ["create", "move"]);
 });
 
+// ---- Track 1 review fix wave (Finding 1): /card/:id/project and
+// /tracker-item/:id/force-clear-lease converged onto card-service so these
+// writes record provenance like every other mutation ----
+
+test("convergence: POST /card/:id/project records an 'update' mutation with the project_id diff — response shape unchanged", async () => {
+  const { body: created } = await createTestCard({});
+  const r = await fetch(base + "/card/" + created.id + "/project", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ project_id: 7 }) });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(await r.json()).sort(), ["ok"], "response shape is exactly {ok} — unchanged");
+  const rows = mutationsFor(created.id);
+  assert.deepEqual(rows.map((m) => m.verb), ["create", "update"]);
+  assert.equal(rows[1].actor_kind, "human");
+  const d = new Database(process.env.CROW_TASKS_DB_PATH);
+  const detailRow = d.prepare("SELECT detail_json FROM board_mutations WHERE item_id=? AND verb='update'").get(created.id);
+  d.close();
+  assert.deepEqual(JSON.parse(detailRow.detail_json).project_id, [1, 7]);
+});
+
+test("POST /card/:id/project on an archived card 409s with code 'archived' (NEW behavior — previously wrote through unconditionally)", async () => {
+  const { body: created } = await createTestCard({});
+  const arch = await fetch(base + "/card/" + created.id + "/archive", { method: "POST" });
+  assert.equal(arch.status, 200);
+  const r = await fetch(base + "/card/" + created.id + "/project", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify({ project_id: 7 }) });
+  assert.equal(r.status, 409);
+  const body = await r.json();
+  assert.equal(body.code, "archived");
+  const d = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = d.prepare("SELECT project_id FROM tasks_items WHERE id=?").get(created.id);
+  d.close();
+  assert.equal(row.project_id, 1, "the archived card's project_id must be byte-unchanged");
+});
+
+test("convergence: POST /tracker-item/:id/force-clear-lease records an 'update' mutation — response shape unchanged", async () => {
+  const t = new Database(process.env.CROW_TASKS_DB_PATH);
+  t.prepare("UPDATE tasks_items SET processing_lease='job-x', processing_lease_status='in-progress' WHERE id=?").run(trackerItemId);
+  t.close();
+
+  const r = await fetch(base + "/tracker-item/" + trackerItemId + "/force-clear-lease", { method: "POST" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(Object.keys(await r.json()).sort(), ["ok"], "response shape is exactly {ok} — unchanged");
+  const rows = mutationsFor(trackerItemId);
+  assert.deepEqual(rows.map((m) => m.verb), ["update"], "the lease clear itself is the only mutation recorded here");
+  assert.equal(rows[0].actor_kind, "human");
+  const d = new Database(process.env.CROW_TASKS_DB_PATH);
+  const row = d.prepare("SELECT processing_lease, processing_lease_status FROM tasks_items WHERE id=?").get(trackerItemId);
+  d.close();
+  assert.deepEqual(row, { processing_lease: null, processing_lease_status: null });
+});
+
 test("autonomy: create and edit accept 'gated'/'auto', reject anything else with 400", async () => {
   const bad = await createTestCard({ autonomy: "sometimes" });
   assert.equal(bad.status, 400);
