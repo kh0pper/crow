@@ -53,6 +53,12 @@ emitOrQueue(syncManager, db, table, op, row, opts) // → lamport | null | {queu
   behavior). When on → queue. **A `--no-auth` companion gateway on a shared crow.db (the
   grackle shape) is a non-owner and QUEUES rather than drops** — the primary's drain is exactly
   the machinery that can finally replicate its writes.
+- Before either gate, the **syncability parity check**: `table ∈ SYNCED_TABLES` and
+  `shouldSyncRow(table, row)` run at write time exactly as the live path runs them — a row the
+  live emit would filter must never be queued (its drain emit returns null → no delivery marks
+  → the row wedges claimed/reclaimed forever and eventually cap-evicts real rows). The drain
+  additionally deletes any row whose emit returns the not-syncable null (belt and braces for
+  rows queued by older code). [Plan-review addition, 2026-08-15.]
 - Eligible writes are stamped **at write time**: mint the lamport with the same atomic
   `UPDATE sync_state … RETURNING` (verified cross-process-safe: single-statement autocommit;
   the manager's only in-memory counter state is a non-authoritative seed flag). The minting +
