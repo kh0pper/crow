@@ -25,6 +25,7 @@ import { readTombstone, writeTombstone, clearTombstone } from "./contact-delete.
 import { groupTombstoneStatement, isGroupTombstoned } from "./group-delete.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import bus from "../shared/event-bus.js";
+import { mintLamport, advanceCounter, stampSql } from "../shared/sync-stamp.js";
 
 /**
  * Build the canonical wire row for a crow_context DB row.
@@ -377,9 +378,12 @@ export class InstanceSyncManager {
   /**
    * Idempotent seeder: ensure a sync_state row exists for this instance.
    * INSERT OR IGNORE is atomic against concurrent first-callers; safe to race.
-   * All three sync_state writers call this before their UPDATE so that a fresh
-   * receive-only instance (which never calls _nextLamport) still has a row to
-   * UPDATE — without it the counter advances and checkpoints silently no-op.
+   * Kept for call sites that only need to guarantee a row exists without
+   * minting/advancing (e.g. checkpoint persistence in _setLastAppliedSeq).
+   * _nextLamport and _advanceCounter no longer route through this latch —
+   * they delegate to servers/shared/sync-stamp.js, which seeds unconditionally
+   * on every call (see mintLamport's doc comment for why that's cheap and
+   * race-free).
    */
   async _ensureCounter() {
     if (this._counterSeeded) return;
@@ -398,50 +402,27 @@ export class InstanceSyncManager {
 
   /**
    * Atomically increment and persist the local Lamport counter.
-   * Uses a single UPDATE ... RETURNING so no two concurrent callers can race
-   * on the same value — better-sqlite3 is synchronous, each statement is atomic
-   * with respect to all JS interleavings.
+   * Delegates to servers/shared/sync-stamp.js's mintLamport — the shared
+   * module both this manager and the stdio door's emitOrQueue (Task 2) mint
+   * through, so the counter has one source of truth regardless of which
+   * process is writing. Seeds the sync_state row itself (INSERT OR IGNORE)
+   * on every call, which subsumes the old seed-race retry path here (the
+   * seed always runs immediately before the increment now, in one call —
+   * see sync-stamp.js's mintLamport for why that closes the race outright).
    * @returns {Promise<number>} The new counter value
    */
   async _nextLamport() {
-    await this._ensureCounter();
-    const { rows } = await this.db.execute({
-      sql: `UPDATE sync_state SET local_counter = local_counter + 1, updated_at = datetime('now')
-            WHERE instance_id = ? RETURNING local_counter`,
-      args: [this.localInstanceId],
-    });
-    if (rows.length === 0) {
-      // Seed race: the INSERT OR IGNORE above ran but the UPDATE found no row
-      // (another caller's INSERT lost the race). Seed explicitly and retry once.
-      this._counterSeeded = false;
-      await this._ensureCounter();
-      const retry = await this.db.execute({
-        sql: `UPDATE sync_state SET local_counter = local_counter + 1, updated_at = datetime('now')
-              WHERE instance_id = ? RETURNING local_counter`,
-        args: [this.localInstanceId],
-      });
-      if (!retry.rows[0]) {
-        // Seed + retry both failed — the DB is genuinely unavailable. Throw
-        // with a real message instead of a bare TypeError out of emitChange.
-        throw new Error("[instance-sync] sync_state row missing after seed+retry — DB unavailable?");
-      }
-      return Number(retry.rows[0].local_counter);
-    }
-    return Number(rows[0].local_counter);
+    return mintLamport(this.db, this.localInstanceId);
   }
 
   /**
    * Advance the local counter so it is greater than an incoming Lamport value.
-   * Single atomic MAX(...) UPDATE — no read-check-write race across an await.
+   * Delegates to servers/shared/sync-stamp.js's advanceCounter (MAX-floor —
+   * a floor below the current counter is a no-op, never a regression).
    * @param {number} incomingTs - Lamport timestamp from a remote entry
    */
   async _advanceCounter(incomingTs) {
-    await this._ensureCounter();
-    await this.db.execute({
-      sql: `UPDATE sync_state SET local_counter = MAX(local_counter, CAST(? AS INTEGER) + 1), updated_at = datetime('now')
-            WHERE instance_id = ?`,
-      args: [Number(incomingTs) || 0, this.localInstanceId],
-    });
+    return advanceCounter(this.db, this.localInstanceId, incomingTs);
   }
 
   /**
@@ -1583,29 +1564,13 @@ export class InstanceSyncManager {
     entry.signature = sign(payload, this.identity.ed25519Priv);
 
     // Update the row's lamport_ts in the local database (NEVER in preserve-mode —
-    // the row keeps its original lamport; 2c C1).
+    // the row keeps its original lamport; 2c C1). Statement built by the shared
+    // stamping module (servers/shared/sync-stamp.js) so the stdio door's
+    // emitOrQueue (Task 2) stamps rows the same way this manager does.
     if (op !== "delete" && preservedTs === null) {
       try {
-        if (table === "dashboard_settings" && row.key !== undefined) {
-          await this.db.execute({
-            sql: `UPDATE dashboard_settings SET lamport_ts = ? WHERE key = ?`,
-            args: [lamportTs, row.key],
-          });
-        } else if (table === "crow_context" && row.section_key !== undefined) {
-          // Composite-key stamp; MAX(COALESCE(...)) guards against out-of-order
-          // concurrent emitChange calls — plain MAX(NULL,x) is NULL in SQLite so
-          // the COALESCE is load-bearing.
-          await this.db.execute({
-            sql: `UPDATE crow_context SET lamport_ts = MAX(COALESCE(lamport_ts, 0), ?)
-                  WHERE section_key = ? AND device_id IS ? AND project_id IS ?`,
-            args: [lamportTs, row.section_key, row.device_id ?? null, row.project_id ?? null],
-          });
-        } else if (row.id !== undefined) {
-          await this.db.execute({
-            sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,
-            args: [lamportTs, row.id],
-          });
-        }
+        const stmt = stampSql(table, row, lamportTs);
+        if (stmt) await this.db.execute(stmt);
       } catch {
         // Non-fatal — row may not have lamport_ts column yet
       }

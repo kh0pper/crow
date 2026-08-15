@@ -345,9 +345,23 @@ export function getOrCreateLocalInstanceId() {
   const id = generateInstanceId();
   try {
     mkdirSync(dataDir, { recursive: true });
-    writeFileSync(idPath, id);
+    // Exclusive create (O_EXCL) — atomic against a concurrent first-ever-boot
+    // racer. A plain writeFileSync (or a rename-over-target) is NOT exclusive:
+    // both racers would "succeed" with different in-memory ids while one
+    // silently clobbers the other's file, so a file-content-only check passes
+    // vacuously. On EEXIST we lost the race — re-read and return the winner's
+    // id so both racers agree.
+    writeFileSync(idPath, id, { flag: "wx" });
   } catch (err) {
-    console.warn("[instance-registry] Failed to persist instance-id:", err.message);
+    if (err.code === "EEXIST") {
+      try {
+        return readFileSync(idPath, "utf-8").trim();
+      } catch (readErr) {
+        console.warn("[instance-registry] Failed to re-read winning instance-id:", readErr.message);
+      }
+    } else {
+      console.warn("[instance-registry] Failed to persist instance-id:", err.message);
+    }
   }
   return id;
 }
