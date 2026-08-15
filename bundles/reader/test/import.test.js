@@ -73,6 +73,10 @@ test("assertPublicHost rejects loopback, honors the opt-out", async () => {
   const { assertPublicHost } = await import("../server/import.js");
   await assert.rejects(assertPublicHost("http://127.0.0.1/x", {}), /private address/);
   await assert.rejects(assertPublicHost("http://[::1]/x", {}), /private address/);
+  // IPv6 unspecified — connects to localhost; both literal spellings
+  // canonicalize to "::" in the URL parser.
+  await assert.rejects(assertPublicHost("http://[::]/x", {}), /private address/);
+  await assert.rejects(assertPublicHost("http://[0:0:0:0:0:0:0:0]/x", {}), /private address/);
   await assertPublicHost("http://127.0.0.1/x", { READER_ALLOW_PRIVATE_URLS: "1" });
 });
 
@@ -109,7 +113,9 @@ test("assertPublicHost rejects CGNAT/Tailscale range 100.64/10", async () => {
   const { assertPublicHost } = await import("../server/import.js");
   await assert.rejects(assertPublicHost("http://100.121.254.89/x", {}), /private address/);
   await assert.rejects(assertPublicHost("http://100.127.255.255/x", {}), /private address/);
-  await assertPublicHost("http://100.63.0.1/x", { READER_ALLOW_PRIVATE_URLS: "1" });
+  // Just below the CGNAT range: must pass WITHOUT the opt-out, or the
+  // boundary assertion is vacuous (the opt-out short-circuits the guard).
+  await assertPublicHost("http://100.63.0.1/x", {});
 });
 
 test("ingestDocument rejects a non-http(s) URL scheme", async () => {
