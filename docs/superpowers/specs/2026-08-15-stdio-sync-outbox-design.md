@@ -42,16 +42,33 @@ emitOrQueue(syncManager, db, table, op, row, opts) // → lamport | null | {queu
 ```
 
 - With a live `syncManager`: exactly today's `emitChange` call (in-gateway behavior unchanged).
-- Without a manager, first the **eligibility gate**: the same predicate the gateway uses
-  (`shouldInitInstanceSync` semantics — `CROW_DISABLE_INSTANCE_SYNC=1` / no-auth) evaluated in
-  the writing process. A deployment that has sync switched off gets today's behavior (emission
-  dropped), NOT an ever-growing queue for a drain that will never come.
+- Without a manager, first the **eligibility gate — a db-persisted deployment setting, not
+  process env** (round-2 finding: `shouldInitInstanceSync` reads THIS process's argv/env, and
+  the processes this design couples routinely disagree — the r4 stdio mount's env carries no
+  `CROW_DISABLE_INSTANCE_SYNC` while the gateway's unit might, which would queue forever against
+  a drain that never comes; the inverse inheritance silently drops, i.e. today's defect). The
+  feeds-owning gateway persists its own predicate verdict to a local-scoped setting
+  (`sync_deployment_enabled`) at boot; `emitOrQueue` reads THAT (env/argv only as a fallback
+  when the setting has never been written). When the deployment has sync off → drop (today's
+  behavior). When on → queue. **A `--no-auth` companion gateway on a shared crow.db (the
+  grackle shape) is a non-owner and QUEUES rather than drops** — the primary's drain is exactly
+  the machinery that can finally replicate its writes.
 - Eligible writes are stamped **at write time**: mint the lamport with the same atomic
-  `UPDATE sync_state … RETURNING` (the minting + row-stamping logic — table-specific stamping
-  rules included: `dashboard_settings` by key, `crow_context` by composite key, else by id, never
-  on deletes — is **extracted from `instance-sync.js` into a small shared module** that both the
-  manager and `sync-emit.js` call; duplicated stamping logic would drift), then
-  `INSERT INTO sync_outbox (table_name, op, row_json, lamport_ts, created_at)`.
+  `UPDATE sync_state … RETURNING` (verified cross-process-safe: single-statement autocommit;
+  the manager's only in-memory counter state is a non-authoritative seed flag). The minting +
+  row-stamping logic — table-specific rules included: `dashboard_settings` by key,
+  `crow_context` by composite key, else by id, never on deletes — is **extracted from
+  `instance-sync.js` into a small shared module** that both the manager and `sync-emit.js` call.
+- **Mint + row-stamp + outbox INSERT are ONE atomic batch (MUST).** A crash between the stamp
+  and the queue INSERT would leave a row stamped-but-never-queued: invisible to the NULL-lamport
+  repair rail AND armed to locally reject a peer's later lower-lamport edit the peer never saw —
+  silent permanent divergence, strictly worse than today's unstamped row. One `db.batch()`
+  (counter increment; stamp + INSERT reading the incremented counter via subselect) closes the
+  window.
+- The shared module also owns `CREATE TABLE IF NOT EXISTS sync_state` beside its `sync_outbox`
+  DDL (today only init-db creates it — a fresh-instance stdio mint would otherwise silently
+  fail), and the local-instance-id persist becomes atomic (O_EXCL/rename — the current
+  check-then-write can mint two ids on a concurrent first-ever boot).
 - **Why write-time minting is mandatory, not nice-to-have** (review finding 1): the apply side is
   pure last-lamport-wins everywhere (`_checkConflict` :2669, `_applyCrowContext` :1864,
   `_applyDashboardSetting` :1833). Drain-time minting would give an OLD stdio snapshot a NEWER
@@ -73,14 +90,18 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
   op TEXT NOT NULL,                        -- 'insert'|'update'|'delete'
   row_json TEXT NOT NULL,                  -- the row snapshot as the emit site built it
   lamport_ts INTEGER NOT NULL,             -- minted at write time (see above)
+  delivered_json TEXT NOT NULL DEFAULT '{}', -- {peerId: true} per real append (see drain)
   claimed_at TEXT,                         -- drain batch claim (see below)
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
 
 - **Cap**: 10,000 rows — on overflow, warn loudly and drop-oldest (the `_pendingPeerEmits`
-  256-cap precedent). The cap should never be reachable on a healthy instance; it exists so a
-  misconfigured one degrades like today instead of growing a table without bound.
+  256-cap precedent: LWW makes dropping the OLDEST the safe direction; refuse-new would keep
+  stale snapshots and lose the fresh writes convergence needs). A cap-dropped entry is stamped,
+  which would hide it from the NULL-lamport repair rail — so **a cap-drop NULLs the source
+  row's `lamport_ts`** (and logs the dropped key), keeping the documented repair rail able to
+  find it. The cap should never be reachable on a healthy instance.
 
 All existing emit call sites convert to `emitOrQueue` (the sharing-internal `sink()` seams keep
 their shape; the null branch queues instead of dropping). **Two in-gateway zero-emit writers join
@@ -98,24 +119,42 @@ drop-oldest, and `revokeInstance` discards parked slots :3086). Deleting an outb
 that contract converts a survivable queue into permanent loss (the outbox row is the only durable
 record; a parked-then-crashed entry is gone). Therefore:
 
-- **Refuse to drain while any paired peer's out-feed is unarmed.** Arming is a local hypercore
-  open, not peer connectivity — after a healthy `eagerInitPairedPeers` every paired peer is
-  armed; the refusal only bites in the failure windows that matter (fd-lock loser during a
-  gateway restart overlap, per-peer init failure), which is exactly when deleting rows would
-  lose data. Depth stat + a warn cover the visible symptom.
-- Drain via a **strict emit mode**: `emitChange(…, {lamportTs, strict: true})` reports per-peer
-  disposition and propagates append failures instead of swallowing them. A row is DELETEd only
-  when every paired peer took a **real append**; on any failure the batch stops and retries next
-  tick (order preserved; entries never park in RAM on the drain path).
-- **Serialization** (finding 5): one in-process drain chain (the `_appendLocks` promise-chain
-  pattern :1443) so interval ticks never overlap a slow batch, plus a transactional batch claim —
-  `BEGIN IMMEDIATE`, stamp `claimed_at` on the batch, commit, emit, delete — so a second
-  feeds-enabled gateway on the same crow.db (the grackle multi-gateway shape) no-ops instead of
-  double-draining; stale claims (older than 10 min) are reclaimable.
+- **Per-peer delivery accounting, not refuse-all.** (Round-2 correction: a refuse-drain-while-
+  any-peer-unarmed rule would let ONE broken peer feed — corrupt feed dir, disk error, the
+  warn-and-continue path in `eagerInitPairedPeers` :627–629 — halt delivery to every healthy
+  peer until the cap starts dropping rows: a wider blast radius than the live path, where a
+  broken peer only parks its own entries.) Instead each row carries `delivered_json`
+  ({peerId: true}, stamped per **real append**); a row is DELETEd only when every currently
+  paired peer is marked delivered. A peer whose feed won't arm blocks only its own marks —
+  healthy peers drain normally — and raises an escalating health alert (not just a depth stat):
+  paired-but-unarmed for >N drains is an operator-visible condition.
+- Drain via a **strict emit mode**: `_appendToPeer` gains an explicit disposition contract —
+  `'appended' | 'parked' | 'failed'` (today it returns undefined on all three; the chain at
+  :1448 propagates return values, so this is feasible) — and strict mode **treats `parked` as
+  failure**: entries never park in RAM on the drain path (a mid-batch revoke/disarm discards
+  parked slots :3070–3089, which would silently lose a "strict" entry). Only `'appended'` sets
+  a delivery mark. Append failures propagate; the batch stops and retries next tick.
+- **Serialization** (finding 5, mechanism corrected in round 2): one in-process drain chain
+  (the `_appendLocks` promise-chain pattern :1443) so interval ticks never overlap a slow
+  batch; and the cross-process batch claim is a **single autocommit statement** — no
+  BEGIN IMMEDIATE (the shared client's `batch()` is deferred-transaction and a raw multi-await
+  BEGIN would sweep concurrent gateway statements into the claim txn):
+  `UPDATE sync_outbox SET claimed_at = datetime('now') WHERE id IN (SELECT id FROM sync_outbox
+  WHERE claimed_at IS NULL OR claimed_at < datetime('now','-10 minutes') ORDER BY id LIMIT ?)
+  RETURNING *`. Stale claims reclaim after 10 min; stale-reclaim double-emit is idempotent
+  redelivery (verified: equivalence skip at apply, :2682–2684). The two-gateway case is further
+  bounded by the hypercore fd-lock.
 - Batches read `ORDER BY id ASC`. Preserve-mode floors the manager's counter at each entry's
-  lamport (instance-sync.js:1558), so fresh gateway mints always exceed drained values.
+  lamport (instance-sync.js:1558), so fresh gateway mints always exceed drained values. The
+  apply side has no per-feed lamport-monotonicity assertion (verified) — a feed carrying 90
+  after 100 is tolerated and LWW-resolved.
 - Crash window (append succeeded, delete lost): re-emit next drain **with the same preserved
   lamport** — a true redelivery, the case the apply side is built for (2c C1). Idempotent.
+- **Accepted noise, named so soak doesn't misread it**: when a stdio write and a newer gateway
+  write to the same row interleave, the drained stale entry arrives at peers with a LOWER
+  lamport than the live emit → each peer records a conflict row + notification while correctly
+  keeping the newer content. Correct outcome, noisy signal; the no-same-author-suppression
+  heuristic is deliberate upstream (:2650) and is not changed here.
 - Observability: drain logs count on non-zero passes; health surface gains outbox depth +
   oldest-row age; `sync_outbox` is added to the recover-db table set (the known recover-db
   bundle-table gap otherwise silently drops queued rows on a `.dump` rebuild).
@@ -172,7 +211,14 @@ is in the file.
   store a memory over MCP stdio, assert the outbox row + stamped lamport; construct a
   gateway-shaped manager on the same db with stub feeds injected into `mgr.outFeeds` (the
   established seam, tests/instance-sync.test.js:1432), drain, assert the feed entry carries the
-  write-time lamport and the row is deleted.
+  write-time lamport and the row is deleted. **The stub peers must also be registered as
+  `'active'` rows in `crow_instances`** — the paired-peer set comes from that table, and
+  without registration the delivery-accounting assertions (and the paired-but-unarmed case,
+  which needs one registered peer with NO stub feed) go quietly inert — the vacuous-test tell
+  again.
+- Atomicity: kill the stdio child between logical stamp and queue steps (fault-injection seam
+  in the shared module) and assert no stamped-but-unqueued row can exist (the batch makes the
+  window unobservable).
 - Every call-site conversion mutation-tested against the e2e (break the queue branch, watch it
   fail). Suite floor 3176/0 held; no UI strings; no new ports.
 
@@ -182,16 +228,26 @@ Track 1's board verbs (board data is instance-local and never syncs — the spec
 interact); retiring stdio mounts as a product direction; the historical backfill execution; the
 bundle-writer emit adoption (named follow-up above); MCP OAuth; `CROW_JOURNAL_MODE` policy.
 
-## Review record (round 1, 2026-08-15)
+## Review record (2026-08-15)
 
-One adversarial reviewer against `411692ac`. 8 findings, all resolved in this revision. The two
-critical ones replaced the mechanism: (1) drain-time lamport minting would resurrect stale
-same-row content on peers AND corrupt the origin's stamp — fixed by write-time minting (the
-counter is a cross-process-safe db op, a fact the v1 draft got wrong) + preserve-mode drain;
-(2) "delete after emitChange resolves" is not durable (in-RAM parking, swallowed append
-failures, parked-slot discards) — fixed by strict per-peer append accounting, refuse-on-unarmed,
-and batch claims. Also: the eligibility gate + cap (kill-switch deployments must not queue
-unbounded), drain serialization incl. the two-gateway case, the honest success-criterion scope
-with the named zero-emit family (+ two in-gateway writers added to this PR), the recover-db
-line, and the suite-env override trap in the test section. The row_json snapshot semantics and
-the e2e seam were verified clean as drafted.
+**Round 1** (one reviewer, against `411692ac`): 8 findings. The two critical ones replaced the
+mechanism: drain-time lamport minting would resurrect stale same-row content on peers AND
+corrupt the origin's stamp → write-time minting + preserve-mode drain; "delete after emitChange
+resolves" is not durable (in-RAM parking, swallowed append failures, parked-slot discards) →
+strict append accounting. Also: eligibility gate + cap, drain serialization, the honest
+success-criterion scope with the named zero-emit family (+ two in-gateway writers added to this
+PR), the recover-db line, the suite-env override trap.
+
+**Round 2** (fresh reviewer, verifying the round-1 fixes): core mechanism verified correct
+(cross-process mint safety, preserve-mode transform/filter behavior, no apply-side monotonicity
+assertion, offline peers don't wedge arming, fd-lock bounds the two-gateway case). 9 findings,
+all resolved above: (1-CRIT) stamp+queue must be one atomic batch — a stamped-but-unqueued
+orphan is invisible to the repair rail and armed to reject peer edits; (2-CRIT) the eligibility
+gate moved from process-env (which disagrees across the coupled processes) to a db-persisted
+owner-written setting, and --no-auth companions now queue rather than drop; (3) refuse-all-on-
+one-unarmed replaced by per-peer delivery accounting + escalating health alert; (4) the claim
+became a single autocommit UPDATE…RETURNING (no BEGIN IMMEDIATE on the shared client); (5) the
+`appended|parked|failed` disposition contract, strict-treats-parked-as-failure; (6) mixed-doors
+conflict noise named as accepted; (7) shared module owns sync_state DDL + atomic instance-id
+persist; (8) cap-drop NULLs the source stamp so the repair rail still finds it; (9) e2e must
+register stub peers in crow_instances or the strict assertions are vacuous.
