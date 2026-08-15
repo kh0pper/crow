@@ -52,12 +52,17 @@ function loadBridge() { return import("./bridge.mjs"); }
  * Phase A — identity. The exact sequence handleInbound ran inline before C-11.
  *
  * @param {{botId: string, threadId: string, gatewayType?: string,
- *          log?: (m: string) => void}} opts
+ *          log?: (m: string) => void, jobId?: string|null}} opts
+ *   `jobId` (Track 1 Task 7 — the missing link in the job_id chain):
+ *   job_runner.runCardExecute passes job.job_id through here so it reaches
+ *   writeBotMcp's board-entry headers (X-Crow-Job-Id) — without it the
+ *   result-service job-rail lock exemption (D-T1.5) can never match a
+ *   job-dispatched turn's own bot_jobs row.
  * @returns {Promise<{def, bot, crowHome, projectId, projectSpace, projectMembers,
  *          sessionDir, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
  *          narrowedTools, gatewayType}>}
  */
-export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {} }) {
+export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null }) {
   const B = await loadBridge();
   const bot = B.loadBot(botId);
   const def = bot.def;
@@ -98,7 +103,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     if (remoteEnabled) peerGatewayUrls = B.readPeerGatewayUrls(_conn);
   } finally { _conn.close(); }
   try {
-    const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled, peerGatewayUrls });
+    const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId });
     if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
     if (w.remoteWarnings && w.remoteWarnings.length) {
       for (const warn of w.remoteWarnings) log("remote-tool: " + warn);

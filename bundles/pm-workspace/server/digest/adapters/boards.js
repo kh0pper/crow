@@ -21,6 +21,20 @@
 
 import { createTasksDbClient } from "../../db.js";
 
+// D-T1.6: default views exclude archived — but this digest reads whatever
+// tasks.db CROW_TASKS_DB_PATH resolves to (an installed-bundle store may not
+// have converged through migration 0004 yet), so the filter is
+// COLUMN-GUARDED (PRAGMA probe precedent: scripts/pi-bots/bridge.mjs
+// planForCard ~:515) — never assume archived_at exists before filtering on it.
+async function hasArchivedAtColumn(tdb) {
+  try {
+    const rows = (await tdb.execute("PRAGMA table_info(tasks_items)")).rows || [];
+    return rows.some((r) => r.name === "archived_at");
+  } catch {
+    return false;
+  }
+}
+
 export async function boardsSections(db, config, tdb) {
   const sections = [];
   sections.push(await kanbanSection(config));
@@ -56,18 +70,19 @@ async function kanbanSection(config) {
       return !terms.includes(String(row.status));
     };
 
+    const guardArchived = (await hasArchivedAtColumn(tdb)) ? " AND archived_at IS NULL" : "";
     const candidates = await tdb.execute({
       sql: `SELECT id, title, status, priority, due_date, phase, project_id
             FROM tasks_items
             WHERE due_date IS NOT NULL
-              AND date(due_date) <= date('now', '+3 days')
+              AND date(due_date) <= date('now', '+3 days')${guardArchived}
             ORDER BY due_date ASC LIMIT 60`,
       args: [],
     });
     const open = { rows: (candidates.rows || []).filter(isOpen).slice(0, 15) };
     const done = await tdb.execute({
       sql: `SELECT id, title, completed_at FROM tasks_items
-            WHERE completed_at IS NOT NULL AND completed_at >= datetime('now', '-1 day')
+            WHERE completed_at IS NOT NULL AND completed_at >= datetime('now', '-1 day')${guardArchived}
             ORDER BY completed_at DESC LIMIT 10`,
       args: [],
     });
@@ -116,10 +131,11 @@ async function trackersSection(tdb) {
       return section;
     }
 
+    const guardArchived = (await hasArchivedAtColumn(tdb)) ? " AND archived_at IS NULL" : "";
     const rows = [];
     for (const def of defs.rows) {
       const counts = await tdb.execute({
-        sql: "SELECT status, COUNT(*) AS n FROM tasks_items WHERE board_id = ? GROUP BY status ORDER BY n DESC",
+        sql: `SELECT status, COUNT(*) AS n FROM tasks_items WHERE board_id = ?${guardArchived} GROUP BY status ORDER BY n DESC`,
         args: [def.id],
       });
       const countStr = counts.rows.map((r) => `${r.status}: ${r.n}`).join(", ") || "empty";
@@ -127,7 +143,7 @@ async function trackersSection(tdb) {
 
       const action = await tdb.execute({
         sql: `SELECT title, action_needed FROM tasks_items
-              WHERE board_id = ? AND action_needed IS NOT NULL AND action_needed != ''
+              WHERE board_id = ? AND action_needed IS NOT NULL AND action_needed != ''${guardArchived}
               ORDER BY priority ASC LIMIT 5`,
         args: [def.id],
       });

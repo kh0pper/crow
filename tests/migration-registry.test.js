@@ -227,16 +227,25 @@ test("0001-board-stages: adds columns, DEFERS when ANY target table is absent", 
     const cols = t2.prepare("PRAGMA table_info(tasks_items)").all().map((x) => x.name);
     const sql = t2.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks_items'").get().sql;
     const hasBoardDefs = !!t2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='board_defs'").get();
+    const hasBoardPlans = !!t2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='board_plans'").get();
+    const hasBoardResults = !!t2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='board_results'").get();
+    const hasBoardMutations = !!t2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='board_mutations'").get();
+    const hasTasksBriefings = !!t2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks_briefings'").get();
     t2.close();
     assert.ok(!cols.includes("stage"), "converged shape has no stage");
     assert.ok(cols.includes("data_json"), "converged shape has data_json");
-    assert.ok(cols.includes("assigned_bot") && cols.includes("plan_ref"), "dormant columns survive");
+    assert.ok(cols.includes("assigned_bot"), "dormant column assigned_bot survives");
+    assert.ok(!cols.includes("plan_ref"), "plan_ref is DROPPED by 0004 — no longer a survivor");
     assert.ok(!/CHECK\s*\(\s*status/i.test(sql), "converged shape has no status CHECK");
     assert.ok(hasBoardDefs, "board_defs exists");
     assert.ok(r.applied.includes("0003-tracker-convergence"),
       "no tracker tables in the fixture crow.db → 0003 records as a column-only no-op");
     assert.ok(cols.includes("board_id"), "converged shape has board_id (0003)");
     assert.ok(cols.includes("processing_lease_status"), "converged shape has the lease columns (0003)");
+    assert.ok(r.applied.includes("0004-track1-card-model"), "0004 applies over the converged 0001-0003 shape");
+    assert.ok(cols.includes("autonomy") && cols.includes("archived_at"), "converged shape has autonomy + archived_at (0004)");
+    assert.ok(hasBoardPlans && hasBoardResults && hasBoardMutations, "converged shape has the three Track 1 tables (0004)");
+    assert.ok(hasTasksBriefings, "converged shape has tasks_briefings (0004)");
   } finally { rmSync(g.root, { recursive: true, force: true }); }
 });
 

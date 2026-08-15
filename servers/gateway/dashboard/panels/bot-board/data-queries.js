@@ -4,7 +4,6 @@
  * Constants, DB helpers, and bot-definition utilities for the bot-board panel.
  */
 
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createDbClient } from "../../../../db.js";
 import { tasksDbPath } from "../../../../../scripts/pi-bots/instance-paths.mjs";
 import { getPeerCapabilities } from "../../capabilities-cache.js";
@@ -78,51 +77,9 @@ export async function lockMapFor(db, cardIds) {
   return sharedLockMapFor(db, cardIds);
 }
 
-// Derive the plan-file path for a card the same way the bridge does
-// (bridge.mjs:151-152 — `def.session_dir + "/plans/" + cardId + ".md"`),
-// resolving the owning bot as the first pi_bot_defs row whose project_id
-// (column, M3b — was: definition.project_id JSON) matches the card's
-// project. Single-bot-per-project is the live reality; deterministic
-// lowest-bot_id pick otherwise. Returns { path, sessionDir } or null.
-// Read-only here; the realpath-containment assertion is enforced (cardId
-// is integer-cast, session_dir from trusted DB) so a crafted route param
-// cannot escape the workspace.
-export async function derivePlanPath(db, card) {
-  if (card.project_id == null) return null;
-  let defs = [];
-  try {
-    defs = (await db.execute({
-      sql: "SELECT definition, project_id FROM pi_bot_defs WHERE project_id = ? ORDER BY bot_id",
-      args: [Number(card.project_id)],
-    })).rows || [];
-  } catch {
-    return null;
-  }
-  for (const row of defs) {
-    let def;
-    try { def = JSON.parse(row.definition || "{}"); } catch { continue; }
-    if (def && def.session_dir) {
-      const sessionDir = String(def.session_dir);
-      const path = sessionDir + "/plans/" + Number(card.id) + ".md";
-      return { path, sessionDir };
-    }
-  }
-  return null;
-}
-
-export function readPlan(planInfo) {
-  if (!planInfo || !existsSync(planInfo.path)) return { exists: false, text: "", mtime: "" };
-  try {
-    // Containment: resolved realpath must live under the bot's session_dir.
-    const real = realpathSync(planInfo.path);
-    const rootReal = realpathSync(planInfo.sessionDir);
-    if (real !== rootReal && !real.startsWith(rootReal + "/")) return { exists: false, text: "", mtime: "" };
-    const mtime = String(statSync(planInfo.path).mtimeMs);
-    return { exists: true, text: readFileSync(planInfo.path, "utf8"), mtime };
-  } catch {
-    return { exists: false, text: "", mtime: "" };
-  }
-}
+// derivePlanPath/readPlan (the plan-FILE rail) retired Track 1 (D-T1.7): the
+// no-JS card view now reads plan RECORDS via plan-service.getCurrentPlan —
+// see html.js's renderKanbanBoard &card=M branch. Nothing else imported them.
 
 // ---- Resolve bot info from pi_bot_defs ----
 export function parseBotDef(row) {

@@ -13,9 +13,13 @@ import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
 import {
   TASKS_DB, STATUS_BADGE,
-  lockMapFor, derivePlanPath, readPlan, statusLabel,
+  lockMapFor, statusLabel,
 } from "./data-queries.js";
 import { DEFAULT_BOARD_DEF, resolveBoardDef, resolveSlugBoardDef } from "../../../routes/board-defs.js";
+// Track 1 (carried item 2): the no-JS card view's plan block reads plan
+// RECORDS now (D-T1.4), not the retired file rail — same store the JS
+// drawer's GET /card/:id/plan route (plan-service.getCurrentPlan) reads.
+import { getCurrentPlan } from "../../../board/plan-service.js";
 
 // Display: configured values render raw (tracker-style); only the builtin
 // fallback def keeps the i18n'd four.
@@ -49,6 +53,23 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
     ? `<div class="bb-sub">↳ subtask of #${escapeHtml(String(card.parent_id))}</div>` : "";
   const lockBadge = locked
     ? `<span class="bb-lock" title="${t("botboard.cardWorking", lang)}">${t("botboard.cardWorkingBadge", lang)}</span>` : "";
+  // D-T1.6: an archived card only ever reaches this face when the "Show
+  // archived" toggle is on (the default query hides it) — flag it visually
+  // and let the drawer offer Unarchive instead of Archive.
+  const archived = card.archived_at != null;
+  const archivedBadge = archived
+    ? `<span class="bb-archived-flag" title="${t("board.archivedView", lang)}">${t("board.archive", lang)}</span>` : "";
+  // Track 1 Task 9 (carried item 4): the result marker — read straight off
+  // the list-payload columns the kanban query now carries (D-T1.6). A
+  // 'recorded' success is a gated card sitting there waiting on a human;
+  // failure/partial is worth a visible flag whether or not it's been
+  // decided yet — a failed run must not look identical to still-running.
+  const resultMarker =
+    card.latest_result_outcome === "success" && card.latest_result_status === "recorded"
+      ? `<div class="bb-marker bb-marker-waiting">${t("board.markerWaiting", lang)}</div>`
+      : (card.latest_result_outcome === "failure" || card.latest_result_outcome === "partial")
+        ? `<div class="bb-marker bb-marker-failed">${t("board.markerFailed", lang)}</div>`
+        : "";
   let data = {};
   try { data = JSON.parse(card.data_json || "{}"); } catch { data = {}; }
   const fieldMeta = declaredFieldMeta(def, card, data);
@@ -59,21 +80,21 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
     if (v != null && v !== "") searchParts.push(String(v));
   }
   const searchText = searchParts.join(" ").toLowerCase();
-  return `<div class="bb-card${locked ? " bb-locked" : ""}" draggable="${locked ? "false" : "true"}" ` +
+  return `<div class="bb-card${locked ? " bb-locked" : ""}${archived ? " bb-archived" : ""}" draggable="${locked || archived ? "false" : "true"}" ` +
     `data-card="${escapeHtml(String(card.id))}" data-status="${escapeHtml(String(card.status))}" ` +
-    `data-locked="${locked ? "1" : "0"}" data-search-text="${escapeHtml(searchText)}" ` +
+    `data-locked="${locked ? "1" : "0"}" data-archived="${archived ? "1" : "0"}" data-search-text="${escapeHtml(searchText)}" ` +
     `data-priority="${card.priority != null ? escapeHtml(String(card.priority)) : ""}" ` +
     `tabindex="0" role="button" ` +
     `aria-label="card ${escapeHtml(String(card.id))}: ${escapeHtml(String(card.title || ""))}">` +
-    `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(card.id))}</span>${lockBadge}</div>` +
+    `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(card.id))}</span>${lockBadge}${archivedBadge}</div>` +
     `<div class="bb-title">${escapeHtml(String(card.title || "(untitled)"))}</div>` +
-    `<div class="bb-card-meta">${due}${owner}${fieldMeta}</div>${tags}${sub}` +
+    `<div class="bb-card-meta">${due}${owner}${fieldMeta}</div>${tags}${sub}${resultMarker}` +
     `<form method="POST" action="/dashboard/bot-board" class="bb-nojs-move">` +
     `<input type="hidden" name="action" value="move">` +
     `<input type="hidden" name="card_id" value="${escapeHtml(String(card.id))}">` +
     `<input type="hidden" name="project" value="${escapeHtml(String(card.project_id == null ? "" : card.project_id))}">` +
     def.status_values.filter((s) => s !== card.status).map((s) =>
-      `<button type="submit" name="status" value="${escapeHtml(s)}" ${locked ? "disabled" : ""} ` +
+      `<button type="submit" name="status" value="${escapeHtml(s)}" ${locked || archived ? "disabled" : ""} ` +
       `title="${t("botboard.moveTo", lang)}${escapeHtml(defStatusLabel(def, s, lang))}">${escapeHtml(defStatusLabel(def, s, lang))}</button>`).join("") +
     `</form></div>`;
 }
@@ -83,6 +104,9 @@ export function trackerCardFaceHtml(item, contextFields, statusValues, locked, l
     `<span class="bb-prio bb-prio-${escapeHtml(String(item.priority))}" title="${t("botboard.titlePriorityPrefix", lang)} ${escapeHtml(String(item.priority))}">P${escapeHtml(String(item.priority))}</span>`;
   const lockBadge = locked
     ? `<span class="bb-lock" title="${t("botboard.itemProcessing", lang)}">${t("botboard.itemProcessingBadge", lang)}</span>` : "";
+  const archived = item.archived_at != null;
+  const archivedBadge = archived
+    ? `<span class="bb-archived-flag" title="${t("board.archivedView", lang)}">${t("board.archive", lang)}</span>` : "";
 
   // Extract metadata from data_json for context fields (skip "label" and "status")
   let data = {};
@@ -111,18 +135,18 @@ export function trackerCardFaceHtml(item, contextFields, statusValues, locked, l
 
   // No-JS move buttons using dynamic statusValues
   const moveButtons = statusValues.filter((s) => s !== item.status).map((s) =>
-    `<button type="submit" name="status" value="${escapeHtml(s)}" ${locked ? "disabled" : ""} ` +
+    `<button type="submit" name="status" value="${escapeHtml(s)}" ${locked || archived ? "disabled" : ""} ` +
     `title="${t("botboard.moveTo", lang)}${escapeHtml(s)}">${escapeHtml(s)}</button>`).join("");
 
-  return `<div class="bb-card${locked ? " bb-locked" : ""}" draggable="${locked ? "false" : "true"}" ` +
+  return `<div class="bb-card${locked ? " bb-locked" : ""}${archived ? " bb-archived" : ""}" draggable="${locked || archived ? "false" : "true"}" ` +
     `data-card="${escapeHtml(String(item.id))}" data-status="${escapeHtml(String(item.status))}" ` +
-    `data-locked="${locked ? "1" : "0"}" data-item-type="tracker" ` +
+    `data-locked="${locked ? "1" : "0"}" data-archived="${archived ? "1" : "0"}" data-item-type="tracker" ` +
     `data-search-text="${escapeHtml(searchText)}" data-action-needed="${item.action_needed ? "1" : "0"}" ` +
     `data-priority="${item.priority != null ? escapeHtml(String(item.priority)) : ""}" ` +
     `data-json="${escapeHtml(item.data_json || "{}")}" ` +
     `tabindex="0" role="button" ` +
     `aria-label="item ${escapeHtml(String(item.id))}: ${escapeHtml(String(item.label || ""))}">` +
-    `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(item.id))}</span>${lockBadge}</div>` +
+    `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(item.id))}</span>${lockBadge}${archivedBadge}</div>` +
     `<div class="bb-title">${escapeHtml(String(item.label || "(untitled)"))}</div>` +
     metaHtml + actionHtml +
     `<form method="POST" action="/dashboard/bot-board" class="bb-nojs-move">` +
@@ -156,10 +180,17 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
     <label>${t("botboard.labelTags", lang)}</label><input id="bb-d-tags" type="text">
     <label>${t("botboard.labelDescription", lang)}</label><textarea id="bb-d-desc" rows="3" style="font-family:inherit"></textarea>
     <label>${t("botboard.labelProject", lang)}</label><select id="bb-d-project"></select>
+    <label>${t("board.autonomy", lang)}</label>
+    <select id="bb-d-autonomy">
+      <option value="gated">${t("board.autonomyGated", lang)}</option>
+      <option value="auto">${t("board.autonomyAuto", lang)}</option>
+    </select>
     <div>
       <button type="button" class="bb-btn" id="bb-d-save">${t("botboard.btnSaveCard", lang)}</button>
       <button type="button" class="bb-btn bb-sec" id="bb-d-cancel">${t("botboard.btnCancelCard", lang)}</button>
       <button type="button" class="bb-btn bb-sec" id="bb-d-unlock" style="display:none">${t("botboard.btnForceUnlock", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-archive" style="display:none">${t("board.archive", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-unarchive" style="display:none">${t("board.unarchive", lang)}</button>
     </div>
     <h4 style="margin-top:1rem;display:flex;justify-content:space-between;align-items:center">
       <span>${t("botboard.planFileHeading", lang)}</span>
@@ -169,6 +200,9 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
     <textarea id="bb-d-plan" rows="14" placeholder="${t("botboard.planFilePlaceholder", lang)}"></textarea>
     <div class="bb-pre" id="bb-d-plan-pre" style="display:none"></div>
     <button type="button" class="bb-btn" id="bb-d-plan-save">${t("botboard.btnSavePlan", lang)}</button>
+    <div id="bb-d-result-wrap"></div>
+    <h4 style="margin-top:1rem">${t("board.historyTitle", lang)}</h4>
+    <div id="bb-d-history" class="bb-msg"></div>
   </div>
   <div class="bb-drawer" id="bb-newproj" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
@@ -194,6 +228,11 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
       <div><label>${t("botboard.labelOwner", lang)}</label><input id="bb-nc-owner" type="text"></div>
     </div>
     <label>${t("botboard.labelTags", lang)}</label><input id="bb-nc-tags" type="text">
+    <label>${t("board.autonomy", lang)}</label>
+    <select id="bb-nc-autonomy">
+      <option value="gated">${t("board.autonomyGated", lang)}</option>
+      <option value="auto">${t("board.autonomyAuto", lang)}</option>
+    </select>
     <button type="button" class="bb-btn" id="bb-nc-save">${t("botboard.btnCreateCard", lang)}</button>
   </div>
   <div class="bb-drawer" id="bb-bulk" aria-hidden="true">
@@ -252,6 +291,8 @@ export function trackerDrawerMarkup(lang) {
     <div>
       <button type="button" class="bb-btn" id="bb-td-save">${t("botboard.btnSaveItem", lang)}</button>
       <button type="button" class="bb-btn bb-sec" id="bb-td-clear-lease" style="display:none">${t("botboard.btnForceClearLease", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-td-archive" style="display:none">${t("board.archive", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-td-unarchive" style="display:none">${t("board.unarchive", lang)}</button>
     </div>
   </div>
   <div class="bb-drawer" id="bb-new-tracker-item" aria-hidden="true">
@@ -271,9 +312,29 @@ export function trackerDrawerMarkup(lang) {
   </div>`;
 }
 
+// D-T1.6: the "Show archived" filter-bar affordance, shared by both board
+// types — a plain nav link (works no-JS too) round-tripping the SAME
+// ?include_archived=1 convention the JSON API's list endpoints use. When
+// active it also shows the "archived view" banner text.
+function archivedToggleHtml(botId, includeArchived, lang) {
+  const base = "/dashboard/bot-board?bot=" + encodeURIComponent(botId);
+  if (includeArchived) {
+    return `<span class="bb-msg" style="display:inline-flex;align-items:center;gap:.4rem;margin:0">` +
+      `${escapeHtml(t("board.archivedView", lang))}` +
+      `<a class="bb-btn bb-sec" href="${base}">${escapeHtml(t("botboard.backToBoard", lang))}</a></span>`;
+  }
+  return `<a class="bb-btn bb-sec" href="${base}&include_archived=1">${escapeHtml(t("board.showArchived", lang))}</a>`;
+}
+
 // ---- Kanban board rendering ----
 export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, switcher, q, lang }) {
   const projectId = selBot.projectId != null ? Number(selBot.projectId) : null;
+  // D-T1.6: the "Show archived" filter-bar toggle round-trips as
+  // ?include_archived=1 — the SAME query/param convention the JSON API uses.
+  // Default view excludes archived cards entirely; the toggle mixes them
+  // back into their live column (visually flagged, drag disabled), which is
+  // what lets the drawer's Unarchive button reach them.
+  const includeArchived = q.include_archived === "1" || q.include_archived === "true";
 
   if (projectId == null) {
     return layout({
@@ -282,7 +343,7 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
         `Board — ${escapeHtml(selBot.displayName)}`,
         notice + switcher +
         `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noProjectLinked", lang)}</p>`) +
-        drawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang),
+        drawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang, false),
     });
   }
 
@@ -294,10 +355,33 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
   try {
     tdb = createDbClient(TASKS_DB);
     def = await resolveBoardDef(tdb, { projectId });
-    cards = (await tdb.execute({
-      sql: "SELECT * FROM tasks_items WHERE project_id=? ORDER BY priority ASC, id ASC",
-      args: [projectId],
-    })).rows || [];
+    const archivedClause = includeArchived ? "" : " AND t.archived_at IS NULL";
+    try {
+      // Track 1 Task 9 (carried item 4): LEFT JOIN each card's LATEST
+      // board_results row — outcome + status — onto the row set. This is
+      // "the list payload" the card face's marker (bb-marker-waiting /
+      // bb-marker-failed) reads; a per-card follow-up query would be an
+      // N+1, so the correlated subquery does it in the one list SELECT.
+      cards = (await tdb.execute({
+        sql: `SELECT t.*, r.outcome AS latest_result_outcome, r.status AS latest_result_status
+              FROM tasks_items t
+              LEFT JOIN board_results r ON r.id = (
+                SELECT id FROM board_results WHERE item_id = t.id ORDER BY id DESC LIMIT 1
+              )
+              WHERE t.project_id=?${archivedClause}
+              ORDER BY t.priority ASC, t.id ASC`,
+        args: [projectId],
+      })).rows || [];
+    } catch {
+      // board_results is a Track 1 table (0004): a pre-migration store or a
+      // hand-built test fixture may not carry it yet — column/table-guard
+      // (D-T1.6 precedent) degrades to plain cards, no markers, rather than
+      // losing the whole board.
+      cards = (await tdb.execute({
+        sql: `SELECT * FROM tasks_items WHERE project_id=?${includeArchived ? "" : " AND archived_at IS NULL"} ORDER BY priority ASC, id ASC`,
+        args: [projectId],
+      })).rows || [];
+    }
   } catch {
     cards = [];
   } finally {
@@ -319,14 +403,26 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
       });
     }
     const locked = !!lockMap.get(cid);
-    const planInfo = await derivePlanPath(db, card);
-    const plan = readPlan(planInfo);
+    // Track 1 (carried item 2): the no-JS plan block re-points from the
+    // retired plan-FILE rail (derivePlanPath/readPlan, D-T1.7) to plan
+    // RECORDS (D-T1.4) — plan-service.getCurrentPlan against the
+    // instance-global tasks.db, the SAME store the JS drawer's Plan tab
+    // reads via GET /card/:id/plan. "Current plan" is derived there too:
+    // latest approved, else latest draft, else none.
+    let currentPlan = null;
+    let ptdb;
+    try {
+      ptdb = createDbClient(TASKS_DB);
+      currentPlan = await getCurrentPlan(ptdb, cid);
+    } catch { currentPlan = null; } finally {
+      if (ptdb) { try { ptdb.close(); } catch { /* already closed */ } }
+    }
     const fieldRow = (lbl, val) =>
       `<tr><td style="padding:3px 14px 3px 0;opacity:.7">${escapeHtml(lbl)}</td><td>${escapeHtml(String(val == null ? "—" : val))}</td></tr>`;
-    const planBlock = !planInfo
-      ? `<p class="bb-msg warn">${t("botboard.planNoBot", lang)}</p>`
-      : `<p style="font-size:.8rem;color:var(--crow-text-muted)">${escapeHtml(planInfo.path)}</p>` +
-        `<div class="bb-pre">${escapeHtml(plan.text || t("botboard.planFilePlaceholder", lang))}</div>` +
+    const planBlock = !currentPlan
+      ? `<p class="bb-msg warn">${t("botboard.planPlaceholder", lang)}</p>`
+      : `<p style="font-size:.8rem;color:var(--crow-text-muted)">v${escapeHtml(String(currentPlan.version))} (${escapeHtml(String(currentPlan.status))})</p>` +
+        `<div class="bb-pre">${escapeHtml(currentPlan.body_md || t("botboard.planFilePlaceholder", lang))}</div>` +
         (locked
           ? `<p class="bb-msg warn">${t("botboard.planLocked", lang)}</p>`
           : `<p class="bb-msg">${t("botboard.planJsHint", lang)}</p>`);
@@ -393,19 +489,21 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
     `<button type="button" class="bb-view-btn" data-view="list">${t("botboard.viewList", lang)}</button>` +
     `</div>` +
     `<button type="button" class="bb-btn bb-sec" id="bb-cfg-open">⚙ ${t("botboard.cfgOpenBtn", lang)}</button>` +
+    archivedToggleHtml(selBot.botId, includeArchived, lang) +
     `</div>`;
 
   const content = botBoardStyles() + section(
     `Board — ${escapeHtml(selBot.displayName)}`,
     notice + switcher + filterBarHtml + boardHtml) +
     drawerMarkup(lang, def) + boardSettingsDrawerMarkup(lang, projectId) +
-    clientJs(selBot.botId, "kanban", projectId, null, null, lang);
+    clientJs(selBot.botId, "kanban", projectId, null, null, lang, includeArchived);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });
 }
 
 // ---- Custom tracker rendering ----
 export async function renderCustomTracker(req, res, { db, layout, selBot, bots, notice, switcher, q, lang }) {
+  const includeArchived = q.include_archived === "1" || q.include_archived === "true";
   const trackerSlug = selBot.trackerSlug;
   if (!trackerSlug) {
     return layout({
@@ -456,9 +554,10 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
     items = (await tdb.execute({
       sql:
         "SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed, " +
-        "next_followup_date, processing_lease, processing_lease_status, " +
+        "next_followup_date, processing_lease, processing_lease_status, archived_at, " +
         "datetime(created_at) AS created_at, datetime(updated_at) AS updated_at " +
-        "FROM tasks_items WHERE board_id=? ORDER BY priority ASC, id ASC",
+        "FROM tasks_items WHERE board_id=?" + (includeArchived ? "" : " AND archived_at IS NULL") +
+        " ORDER BY priority ASC, id ASC",
       args: [trackerDef.id],
     })).rows || [];
   } catch { items = []; } finally {
@@ -503,12 +602,15 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
     `<div class="bb-view-toggle">` +
     `<button type="button" class="bb-view-btn bb-view-btn-active" data-view="columns">${t("botboard.viewColumns", lang)}</button>` +
     `<button type="button" class="bb-view-btn" data-view="list">${t("botboard.viewList", lang)}</button>` +
-    `</div></div>`;
+    `</div>` +
+    archivedToggleHtml(selBot.botId, includeArchived, lang) +
+    `</div>`;
 
   const content = botBoardStyles() + section(
     `Board — ${escapeHtml(selBot.displayName)} (${escapeHtml(trackerDef.display_name || trackerSlug)})`,
     notice + switcher + filterBarHtml + boardHtml) +
-    trackerDrawerMarkup(lang) + drawerMarkup(lang) + clientJs(selBot.botId, "custom", null, trackerSlug, contextFields, lang);
+    trackerDrawerMarkup(lang) + drawerMarkup(lang) +
+    clientJs(selBot.botId, "custom", null, trackerSlug, contextFields, lang, includeArchived);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });
 }

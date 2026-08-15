@@ -73,7 +73,7 @@ export async function sessionRowFor(db, cardId) {
   try {
     const r = (await db.execute({
       sql:
-        "SELECT id, status, pi_session_dir, " +
+        "SELECT id, bot_id, status, pi_session_dir, " +
         "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
         "FROM bot_sessions WHERE card_id=? ORDER BY id DESC LIMIT 1",
       args: [cardId],

@@ -26,12 +26,17 @@ let boardId, openItemId, lockedItemId;
     due_date TEXT, phase TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
     board_id INTEGER, bot_id TEXT, assigned_bot TEXT, plan_ref TEXT,
     data_json TEXT NOT NULL DEFAULT '{}', action_needed TEXT, next_followup_date TEXT,
-    processing_lease TEXT, processing_lease_status TEXT,
+    processing_lease TEXT, processing_lease_status TEXT, archived_at TEXT,
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
   t.exec(`CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE,
     project_id INTEGER UNIQUE, display_name TEXT NOT NULL, status_values TEXT NOT NULL,
     terminal_values TEXT NOT NULL, fields_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  // board_mutations (Track 1): the no-JS tracker_move handler now writes
+  // through card-service's moveItem, which records every move here.
+  t.exec(`CREATE TABLE board_mutations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
+    verb TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_id TEXT, job_id TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
 
   const fields = JSON.stringify([{ key: "asset_type", label: "Type", storage: "data" }]);
   t.prepare(

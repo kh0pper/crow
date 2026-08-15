@@ -239,6 +239,23 @@ async function upsertSyncState(db, { source, board_id, item_id, local_kind, loca
   });
 }
 
+// D-T1.6: archived cards are pull-only. Column-guarded (PRAGMA probe, the
+// idiom scripts/pi-bots/tracker.mjs's archivedClause / digest/adapters/
+// boards.js hasArchivedAtColumn use) — an installed-bundle tasks.db may not
+// have converged through migration 0004 yet, so an unguarded reference to
+// tasks_items.archived_at in a WHERE clause would throw on that store.
+// Row-level archived checks elsewhere in this file don't need this probe:
+// they read `row.archived_at` off a `SELECT *` result, which is undefined
+// (falsy) on a store lacking the column — naturally guarded already.
+async function hasArchivedAtColumn(tdb) {
+  try {
+    const rows = (await tdb.execute("PRAGMA table_info(tasks_items)")).rows || [];
+    return rows.some((r) => r.name === "archived_at");
+  } catch {
+    return false;
+  }
+}
+
 // ── Mirror mode (Monday → tasks_items, Track 0 Phase B unified store) ───
 //
 // pm_sync_state/pm_sync_log stay on `cdb` (crow.db); board_defs/tasks_items
@@ -258,6 +275,7 @@ export async function syncMirrorBoard(cdb, tdb, board, items, totals) {
     return;
   }
 
+  const archivedAtCol = await hasArchivedAtColumn(tdb);
   const seen = new Set();
   for (const item of items) {
     seen.add(String(item.id));
@@ -281,7 +299,10 @@ export async function syncMirrorBoard(cdb, tdb, board, items, totals) {
       // card — scope the lookup to THIS def's board_id so a mismatch falls
       // through to the create-new branch below instead.
       const existing = (
-        await tdb.execute({ sql: "SELECT id, status, title, data_json FROM tasks_items WHERE id = ? AND board_id = ?", args: [state.local_id, def.id] })
+        await tdb.execute({
+          sql: `SELECT id, status, title, data_json${archivedAtCol ? ", archived_at" : ""} FROM tasks_items WHERE id = ? AND board_id = ?`,
+          args: [state.local_id, def.id],
+        })
       ).rows[0];
       if (existing) {
         const localHash = contentHash(trackerRowShape(board, existing.title, existing.status, existing.data_json));
@@ -301,6 +322,16 @@ export async function syncMirrorBoard(cdb, tdb, board, items, totals) {
           content_hash: contentHash(trackerRowShape(board, item.name, status, dataJson)),
           monday_updated_at: item.updated_at,
         });
+        // D-T1.6: a by-id pull still writes an archived row in place (never
+        // re-INSERTs) — but that's local-visible-only drift against a live
+        // Monday item, so it's logged under a distinct, greppable action
+        // rather than folded into the normal "this converged silently" case.
+        if (existing.archived_at) {
+          await logSync(cdb, {
+            direction: "pull", board_id: board.board_id, action: "pull_archived_update",
+            item_ref: item.name, detail: `tasks_items id ${existing.id} is archived; updated in place (still archived)`, ok: true,
+          });
+        }
         totals.updated++;
         continue;
       }
@@ -462,7 +493,8 @@ async function createMondayFromLocal(token, board, row) {
   return data.create_item;
 }
 
-async function syncTwowayBoard(db, tdb, board, items, token, totals) {
+export async function syncTwowayBoard(db, tdb, board, items, token, totals) {
+  const archivedAtCol = await hasArchivedAtColumn(tdb);
   const seen = new Set();
 
   for (const item of items) {
@@ -516,6 +548,11 @@ async function syncTwowayBoard(db, tdb, board, items, token, totals) {
     }
 
     if (remoteChanged && !localChanged) {
+      // D-T1.6: an archived row is still a valid by-id pull TARGET — it
+      // updates in place (never re-INSERTs) so a live Monday item never
+      // silently drifts from a hidden local row. The distinct action makes
+      // that drift greppable instead of folding into the ordinary case.
+      const archived = Boolean(row.archived_at);
       const updated = await applyRemoteToKanban(tdb, board, item, row);
       await upsertSyncState(db, {
         source: "monday", board_id: board.board_id, item_id: item.id,
@@ -524,14 +561,27 @@ async function syncTwowayBoard(db, tdb, board, items, token, totals) {
         monday_updated_at: item.updated_at,
       });
       await logSync(db, {
-        direction: "pull", board_id: board.board_id, action: "update_local",
-        item_ref: item.name, detail: "remote-newer → local updated", ok: true,
+        direction: "pull", board_id: board.board_id,
+        action: archived ? "pull_archived_update" : "update_local",
+        item_ref: item.name,
+        detail: archived
+          ? "remote-newer → archived local row updated in place (still archived)"
+          : "remote-newer → local updated",
+        ok: true,
       });
       totals.updated++;
       continue;
     }
 
     if (localChanged && !remoteChanged) {
+      // D-T1.6: an archived card is not a change to publish — including one
+      // with a pre-archive unsynced edit. That edit stays local; a later
+      // pull may overwrite it (logged separately, above). Sync state is
+      // deliberately left untouched so the mismatch keeps landing here
+      // (harmlessly re-skipped) rather than being silently resolved.
+      if (row.archived_at) {
+        continue;
+      }
       try {
         const result = await pushLocalToMonday(token, board, row, item);
         await upsertSyncState(db, {
@@ -565,7 +615,8 @@ async function syncTwowayBoard(db, tdb, board, items, token, totals) {
       monday_updated_at: item.updated_at,
     });
     await logSync(db, {
-      direction: "both", board_id: board.board_id, action: "conflict",
+      direction: "both", board_id: board.board_id,
+      action: row.archived_at ? "pull_archived_update" : "conflict",
       item_ref: item.name,
       detail: "both sides changed; Monday kept team_visible fields, local kept the rest",
       ok: true,
@@ -574,10 +625,15 @@ async function syncTwowayBoard(db, tdb, board, items, token, totals) {
   }
 
   // Local rows in the target project with no mapping → create on Monday.
+  // D-T1.6: archived-but-unmapped rows are excluded — without this an
+  // archived done card gets RE-CREATED on Monday at every scan, resurrecting
+  // the backlog remotely. Column-guarded: an installed-bundle tasks.db may
+  // not have converged through migration 0004 yet.
   if (board.target.project_id != null) {
+    const archivedClause = archivedAtCol ? " AND archived_at IS NULL" : "";
     const { rows: candidates } = await tdb.execute({
       sql: `SELECT * FROM tasks_items
-            WHERE project_id = ? AND parent_id IS NULL AND status != 'cancelled'`,
+            WHERE project_id = ? AND parent_id IS NULL AND status != 'cancelled'${archivedClause}`,
       args: [Number(board.target.project_id)],
     });
     const { rows: mapped } = await db.execute({

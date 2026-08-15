@@ -35,13 +35,31 @@ let boardId, itemAId, itemBId, cardId;
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
     due_date TEXT, phase TEXT, owner TEXT, tags TEXT, parent_id INTEGER, project_id INTEGER,
     board_id INTEGER, bot_id TEXT, assigned_bot TEXT, plan_ref TEXT,
+    autonomy TEXT NOT NULL DEFAULT 'gated',
     data_json TEXT NOT NULL DEFAULT '{}', action_needed TEXT, next_followup_date TEXT,
-    processing_lease TEXT, processing_lease_status TEXT,
+    processing_lease TEXT, processing_lease_status TEXT, archived_at TEXT,
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`);
   t.exec(`CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE,
     project_id INTEGER UNIQUE, display_name TEXT NOT NULL, status_values TEXT NOT NULL,
     terminal_values TEXT NOT NULL, fields_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  // Track 1 Task 9: the six-route convergence means every write below now
+  // goes through card-service.js, which records a board_mutations row and
+  // (for GET /card/:id) reads board_plans/board_results for the additive
+  // plan_head/latest_results keys — all three must exist even though this
+  // fixture predates the 0004 migration (same minimal-table pattern as
+  // tests/board-job-lock.test.js).
+  t.exec(`CREATE TABLE board_mutations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
+    verb TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_id TEXT, job_id TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  t.exec(`CREATE TABLE board_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
+    version INTEGER NOT NULL, body_md TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft',
+    created_actor_kind TEXT NOT NULL, created_actor_id TEXT, decided_at TEXT, decided_via TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  t.exec(`CREATE TABLE board_results (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
+    plan_id INTEGER, job_id TEXT, actor_kind TEXT NOT NULL, actor_id TEXT, outcome TEXT NOT NULL,
+    summary_md TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'recorded',
+    decided_at TEXT, decided_via TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
 
   const fields = JSON.stringify([{ key: "asset_type", label: "Type", type: "text", readonly: false, storage: "data" }]);
   t.prepare(

@@ -20,6 +20,8 @@ import { createRouterServer } from "../router.js";
 import { mountMcpServer } from "../routes/mcp.js";
 import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
+import { createBoardMcpServer } from "../board-mcp.js";
+import { ensureBoardToken } from "../local-token.js";
 
 export async function mountMcpServers(app, deps) {
   const { authMiddleware, noAuth, instructions, routerInstructions, sessionManager } = deps;
@@ -191,6 +193,24 @@ export async function mountMcpServers(app, deps) {
     }
   };
 
+  // Track 1 Task 6 (D-T1.1): mint the board token at boot when absent
+  // (idempotent — a live hash + a readable raw file is a no-op on every
+  // subsequent boot). Best-effort: a failure here must not block gateway
+  // boot — the board mount still works with the full local token even if
+  // the board token mint failed.
+  try {
+    const tokenDb = createDbClient();
+    try {
+      const { minted } = await ensureBoardToken(tokenDb);
+      if (minted) console.log("[gateway] board token minted");
+    } finally {
+      try { tokenDb.close(); } catch {}
+    }
+  } catch (err) {
+    console.warn(`[gateway] ensureBoardToken failed: ${err.message}`);
+  }
+
+  mountMcpServer(app, "/board", () => createBoardMcpServer({ instructions }), sessionManager, authMiddleware, peerExposureGate);
   mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware, peerExposureGate);
   const projectServerFactory = () => createProjectServer(undefined, { instructions });
   mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware, peerExposureGate);
@@ -204,7 +224,7 @@ export async function mountMcpServers(app, deps) {
   // for admin / diagnostic use.
   const CLIENT_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
   const CLIENT_NAME_RESERVED = new Set([
-    "tools", "memory", "projects", "research", "sharing", "storage", "router", "blog-mcp", "wm",
+    "tools", "memory", "projects", "research", "sharing", "storage", "router", "blog-mcp", "wm", "board",
   ]);
   try {
     const clientsPath = join(resolveCrowHome(), "clients.json");

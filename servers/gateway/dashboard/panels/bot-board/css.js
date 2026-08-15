@@ -25,6 +25,11 @@ export function botBoardStyles() {
   .bb-tag{font-size:.68rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);padding:0 .4rem;color:var(--crow-text-muted)}
   .bb-sub{font-size:.7rem;color:var(--crow-text-muted);margin-top:.25rem}
   .bb-lock{margin-left:auto;color:#b8860b;font-weight:600}
+  .bb-archived-flag{margin-left:auto;color:#888;font-weight:600}
+  .bb-card.bb-archived{opacity:.7;border-style:dotted}
+  .bb-marker{font-size:.68rem;border-radius:var(--crow-radius-pill);padding:0 .4rem;margin-top:.25rem;display:inline-block}
+  .bb-marker-waiting{background:#fff3cd;color:#7a5b00}
+  .bb-marker-failed{background:#fbdada;color:#8a1f11}
   .bb-prio{font-weight:700}.bb-prio-1,.bb-prio-2{color:#c0392b}.bb-prio-3{color:#b8860b}.bb-prio-4,.bb-prio-5{color:#888}
   .bb-nojs-move{display:flex;gap:.25rem;flex-wrap:wrap;margin-top:.4rem}
   .bb-nojs-move button{font-size:.66rem;padding:.15rem .4rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-secondary);cursor:pointer}

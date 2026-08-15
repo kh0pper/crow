@@ -9,8 +9,11 @@ import { createDbClient } from "../../../../db.js";
 import { setPeerBotEnabled } from "../../../bot-federation-client.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { TASKS_DB } from "./data-queries.js";
-import { isCardLocked } from "../../../routes/board-lock.js";
-import { resolveBoardDef, isValidStatus, isTerminal } from "../../../routes/board-defs.js";
+import { getItem, moveCard, moveItem } from "../../../board/card-service.js";
+
+// Track 1: every dashboard-originated write is attributed to this actor
+// (D-T1.3 provenance; brief-pinned shape).
+const DASHBOARD_ACTOR = { kind: "human", id: null, jobId: null };
 
 export async function handleBotBoardPost(req, res, { db }) {
   const b = req.body || {};
@@ -22,32 +25,23 @@ export async function handleBotBoardPost(req, res, { db }) {
     if (!Number.isInteger(cardId) || !status) {
       return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
     }
-    // BOTH rails (routes/board-lock.js). A session-only check let an operator
-    // drop a card into done/cancelled while its job was still running — and the
-    // bot's own later tasks_* write would then race that move. This is the same
-    // predicate the JSON API and the board render use; it is not re-derived.
-    let locked = false;
-    try { locked = await isCardLocked(db, cardId); } catch { locked = false; }
-    if (locked) return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=locked`);
+    // THE single card/item writer (Track 1): moveCard applies the card
+    // predicate (board_id IS NULL — a tracker-item id here 404s rather than
+    // silently moving the wrong row, D-T1.8), validates against the card's
+    // resolved board def, checks BOTH lock rails (routes/board-lock.js via
+    // card-service), and records provenance. Not re-derived here.
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT status, project_id FROM tasks_items WHERE id=?", args: [cardId] })).rows[0];
-      if (!cur) return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
-      // Validated against the card's RESOLVED BOARD DEF — same rule as the
-      // JSON API (routes/board-defs.js), not re-derived here.
-      const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
-      if (!isValidStatus(def, status)) {
+      await moveCard(tdb, db, cardId, status, DASHBOARD_ACTOR);
+    } catch (e) {
+      const code = e && e.code;
+      if (code === "locked" || code === "archived") {
+        return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=locked`);
+      }
+      if (code === "not_found" || code === "bad_status") {
         return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
       }
-      // Same TRANSITION rule as the JSON API: stamp on entering a terminal,
-      // clear on leaving one, untouched otherwise (a terminal→terminal move
-      // must not refresh the original completion time).
-      const sets = ["status=?", "updated_at=datetime('now')"];
-      if (isTerminal(def, status) && !isTerminal(def, String(cur.status))) sets.push("completed_at=datetime('now')");
-      else if (!isTerminal(def, status) && isTerminal(def, String(cur.status))) sets.push("completed_at=NULL");
-      await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [status, cardId] });
-    } catch {
       return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=move_failed`);
     } finally {
       if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
@@ -66,31 +60,22 @@ export async function handleBotBoardPost(req, res, { db }) {
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      // Check lock
-      const cur = (await tdb.execute({
-        sql: "SELECT processing_lease_status, board_id FROM tasks_items WHERE id=? AND board_id IS NOT NULL",
-        args: [itemId],
-      })).rows[0];
+      // moveItem (card-service, Task 2) has no lease/lock opinion — that rail
+      // is item-side only (no bot_sessions/bot_jobs row exists for a tracker
+      // item), so the lease check stays here, BEFORE the service call, same
+      // as force-clear-lease's precedent.
+      const cur = await getItem(tdb, itemId);
       if (!cur) return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
       if (String(cur.processing_lease_status) === "in-progress") {
         return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=locked`);
       }
-      // Validate status against board_defs.status_values
-      const tdef = (await tdb.execute({
-        sql: "SELECT status_values FROM board_defs WHERE id=?",
-        args: [cur.board_id],
-      })).rows[0];
-      if (tdef) {
-        const allowed = JSON.parse(tdef.status_values || "[]");
-        if (!allowed.includes(status)) {
-          return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
-        }
+      await moveItem(tdb, itemId, status, DASHBOARD_ACTOR);
+    } catch (e) {
+      const code = e && e.code;
+      if (code === "archived") return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=locked`);
+      if (code === "not_found" || code === "bad_status") {
+        return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=bad_move`);
       }
-      await tdb.execute({
-        sql: "UPDATE tasks_items SET status=?, updated_at=datetime('now') WHERE id=?",
-        args: [status, itemId],
-      });
-    } catch {
       return res.redirectAfterPost(`/dashboard/bot-board${botQ}${botQ ? "&" : "?"}err=move_failed`);
     } finally {
       if (tdb) { try { tdb.close(); } catch { /* already closed */ } }

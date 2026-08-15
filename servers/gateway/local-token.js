@@ -7,12 +7,41 @@
  * docs/superpowers/specs/2026-06-10-f6c2-connect-token-design.md.
  */
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
+import { writeFileSync, existsSync, chmodSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, dirname } from "node:path";
 import {
   readSetting, writeSetting, deleteLocalSetting,
 } from "./dashboard/settings/registry.js";
 
 const HASH_KEY = "mcp_local_token_hash";
 const CREATED_KEY = "mcp_local_token_created";
+
+// Board token (Track 1 Task 6, D-T1.1 §3): a SECOND per-instance static
+// token, same hash-in-settings shape as the local token above, but scoped at
+// the TRANSPORT level to /board/(mcp|sse|messages) — see BOARD_PATH_RE below
+// and its use in localTokenAuthMiddleware. Handing bots this token instead of
+// the full-surface local token bounds their reach to exactly the board-mcp
+// mount (which itself registers ONLY board_* tools), without a second
+// tool-level allowlist. The raw token is never shown in the dashboard (there
+// is no bot-facing UI reveal flow yet) — it is minted at boot when absent and
+// persisted to <crowHome>/board-token mode 0600, the exact peer-tokens.json
+// precedent mcp_writer.mjs already reads beside it (see crow-server-catalog.mjs).
+const BOARD_HASH_KEY = "mcp_board_token_hash";
+const BOARD_CREATED_KEY = "mcp_board_token_created";
+const BOARD_PATH_RE = /^\/board\/(?:mcp|sse|messages)$/;
+
+// Deliberately self-contained (not importing resolveCrowHome from ./proxy.js)
+// — proxy.js pulls in the McpServer/Client/StdioClientTransport machinery for
+// the external-integrations proxy, which this file has no other reason to
+// load. Identical resolution order to proxy.js's resolveCrowHome().
+function crowHome() {
+  return process.env.CROW_HOME || join(homedir(), ".crow");
+}
+
+function boardTokenPath() {
+  return join(crowHome(), "board-token");
+}
 
 function sha256Hex(s) {
   return createHash("sha256").update(s).digest("hex");
@@ -75,6 +104,55 @@ export function applyLocalTokenAuth(req) {
   return true;
 }
 
+/** Generate a new board token, overwriting any existing one. Stores only the
+ *  hash (local-scope setting) plus persists the raw value to
+ *  <crowHome>/board-token mode 0600 (bot configs read the raw file directly,
+ *  db-agnostic mcp_writer.mjs never touches the settings registry). Returns
+ *  the raw token. */
+export async function generateBoardToken(db) {
+  const token = randomBytes(32).toString("hex");
+  await writeSetting(db, BOARD_HASH_KEY, sha256Hex(token), { scope: "local" });
+  await writeSetting(db, BOARD_CREATED_KEY, new Date().toISOString(), { scope: "local" });
+  const path = boardTokenPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, token, { mode: 0o600 });
+  // writeFileSync's `mode` is honored only when it CREATES the file; an
+  // existing-but-empty file would keep whatever perms it had.
+  try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  return token;
+}
+
+export async function validateBoardToken(db, token) {
+  if (!token) return false;
+  const stored = await readSetting(db, BOARD_HASH_KEY);
+  if (!stored) return false;
+  const a = Buffer.from(sha256Hex(token), "hex");
+  const b = Buffer.from(stored, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/** Non-sensitive status. Never returns the raw token or the hash. */
+export async function getBoardTokenMeta(db) {
+  const hash = await readSetting(db, BOARD_HASH_KEY);
+  if (!hash) return { present: false, createdAt: null };
+  const createdAt = await readSetting(db, BOARD_CREATED_KEY);
+  return { present: true, createdAt: createdAt || null };
+}
+
+/** Idempotent boot mint (called from boot/mcp-mounts.js): a hash setting AND
+ *  a readable raw file both present → no-op (the common case on every boot
+ *  after the first). Hash present but the file is missing (deleted disk,
+ *  fresh restore) → re-mint both, since the raw file is the ONLY place a bot
+ *  config could have read the token from — nothing currently holds a valid
+ *  copy if it's gone. No hash at all → mint fresh. Returns {minted:boolean}. */
+export async function ensureBoardToken(db) {
+  const hash = await readSetting(db, BOARD_HASH_KEY);
+  if (hash && existsSync(boardTokenPath())) return { minted: false };
+  await generateBoardToken(db);
+  return { minted: true };
+}
+
 // MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
 // server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,
 // /blog-mcp/mcp; see mcp.js:194-196 and the single-segment mountMcpServer
@@ -99,7 +177,21 @@ export function localTokenAuthMiddleware(db) {
       if (!isMcpPath(req.path)) return next();
       const h = req.headers?.authorization;
       if (!h || !h.startsWith("Bearer ")) return next();
-      if (await validateLocalToken(db, h.slice(7))) {
+      const token = h.slice(7);
+      if (await validateLocalToken(db, token)) {
+        req.localTokenAuth = { token: "local-mcp" };
+        return next();
+      }
+      // Board token (Track 1 Task 6): PATH-SCOPED — only tried, and only ever
+      // authenticates, on the /board/(mcp|sse|messages) transport paths. A
+      // board token presented against any other MCP mount (e.g. /memory/mcp)
+      // falls through unauthenticated here and 401s downstream via OAuth,
+      // same as any other unrecognized bearer token. Synthesizes the SAME
+      // req.localTokenAuth flag as the full local token: the scoping this
+      // token provides is entirely the path check above — /board/mcp itself
+      // registers only board_* tools, so there is no separate tool-level
+      // allowlist to apply.
+      if (BOARD_PATH_RE.test(req.path) && await validateBoardToken(db, token)) {
         req.localTokenAuth = { token: "local-mcp" };
       }
     } catch (err) {
@@ -113,3 +205,4 @@ export function localTokenAuthMiddleware(db) {
 }
 
 export const LOCAL_TOKEN_KEYS = { HASH_KEY, CREATED_KEY };
+export const BOARD_TOKEN_KEYS = { HASH_KEY: BOARD_HASH_KEY, CREATED_KEY: BOARD_CREATED_KEY };

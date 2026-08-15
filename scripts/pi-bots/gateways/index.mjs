@@ -57,9 +57,13 @@ export function gatewayHint(type, threadId) {
       + "(session ref: " + threadId + ")";
   }
   if (type === "board") {
+    // D-T1.5: the durable result is board_report_result (a board_results
+    // record), never a file section — this hint used to point at the
+    // retired plan-file "## Result" rail; keep it in sync with the card
+    // prompt's own instruction (bridge.mjs's cardId!=null branch).
     return "\nGATEWAY: board (card ref: " + threadId + ") — this run was dispatched from the "
-      + "kanban board. Do NOT use gmail/discord tools to reply; write your durable result under "
-      + "the plan file's \"## Result\" section and keep your final reply to a short summary.";
+      + "kanban board. Do NOT use gmail/discord tools to reply; call board_report_result to record "
+      + "your durable outcome and keep your final reply to a short summary.";
   }
   const a = HOST_BY_TYPE[type];
   if (a && typeof a.gatewayHint === "function") return a.gatewayHint(threadId);

@@ -57,10 +57,13 @@ function seed() {
   c.close();
 
   // The CONVERGED (post-0002) shape: no stage column, no status CHECK.
+  // board_id present (Track 1: /card/:id/execute now guards WHERE board_id
+  // IS NULL, D-T1.8) — every INSERT below omits it, so cards land NULL.
   const t = new Database(tasksDb);
   t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY, title TEXT NOT NULL,
     description TEXT, status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3,
-    project_id INTEGER, assigned_bot TEXT, plan_ref TEXT, data_json TEXT NOT NULL DEFAULT '{}',
+    project_id INTEGER, assigned_bot TEXT, plan_ref TEXT, board_id INTEGER, data_json TEXT NOT NULL DEFAULT '{}',
+    archived_at TEXT,
     created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
     completed_at TEXT)`);
   const ins = t.prepare("INSERT INTO tasks_items (id,title,project_id,status,assigned_bot) VALUES (?,?,1,?,'r4-assistant')");
@@ -155,23 +158,17 @@ test("a terminal job releases the lock with NO card write, and re-execute succee
   assert.deepEqual(wholeCard(120), before120);
 });
 
-test("plan-dispatch enqueues card_action='plan' and leaves the card byte-identical", async () => {
+test("plan-dispatch route is retired (Track 1 / D-T1.7): 404, no job, card untouched", async () => {
+  // The route is DELETED here — plans are records now (plan-service.js),
+  // and the drawer never had a plan-dispatch button (its only callers were
+  // tests). Card 121 stays seeded to prove the deletion positively, rather
+  // than dropping the case.
   const before121 = wholeCard(121);
   const res = await post("/dashboard/bot-board-api/card/121/plan-dispatch");
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.ok(body.jobId);
-
+  assert.equal(res.status, 404, "the route must be gone, not merely refuse");
   const row = withCrow((c) => c.prepare("SELECT * FROM bot_jobs WHERE card_id=121").get());
-  assert.ok(row, "plan-dispatch must enqueue too, not only execute");
-  // 'plan' vs 'execute' is the whole routing decision in runCardJob: 'plan'
-  // goes to planCard (local-model-only), anything else to handleInbound.
-  assert.equal(row.card_action, "plan");
-  assert.equal(row.source, "card");
-  assert.equal(row.status, "queued");
-  assert.equal(row.deliver_to, null);
-  assert.equal(row.bot_id, "r4-assistant");
-  assert.deepEqual(wholeCard(121), before121, "plan-dispatch must not write the card either");
+  assert.equal(row, undefined, "a retired route must not enqueue a job");
+  assert.deepEqual(wholeCard(121), before121, "a retired route must not write the card");
 });
 
 test("the bot_jobs ensure runs ONCE per process, not on every dispatch", async () => {
