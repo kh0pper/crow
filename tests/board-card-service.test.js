@@ -221,6 +221,24 @@ test("moveCard refuses off-def status with bad_status", async () => {
   });
 });
 
+test("moveCard/moveItem check archived before bad_status — an archived target with an off-def status still reports 'archived'", async () => {
+  await withStore(async ({ tdb, cdb, intakeBoardId }) => {
+    const { id } = await createCard(tdb, { title: "t", status: "pending", project_id: 1 }, HUMAN);
+    await archiveCard(tdb, cdb, id, HUMAN);
+    await assert.rejects(
+      () => moveCard(tdb, cdb, id, "not-a-status", HUMAN),
+      (e) => { assert.equal(e.code, "archived"); assert.equal(e.http, 409); return true; },
+    );
+
+    const itemId = await insertItem(tdb, intakeBoardId, { title: "leased", status: "planned" });
+    await archiveItem(tdb, itemId, HUMAN);
+    await assert.rejects(
+      () => moveItem(tdb, itemId, "not-a-status", HUMAN),
+      (e) => { assert.equal(e.code, "archived"); assert.equal(e.http, 409); return true; },
+    );
+  });
+});
+
 test("moveCard refuses a locked card unless lockExempt matches the job rail", async () => {
   await withStore(async ({ tdb, cdb }) => {
     const { id } = await createCard(tdb, { title: "t", status: "pending", project_id: 1 }, HUMAN);
@@ -271,10 +289,16 @@ test("archiveCard refuses a locked card / unarchive restores exactly", async () 
       (e) => { assert.equal(e.code, "archived"); assert.equal(e.http, 409); return true; },
     );
 
+    // D-T1.6: unarchive flips ONLY archived_at — updated_at must be
+    // untouched. Stamp a sentinel so a same-second datetime('now') bump
+    // (SQLite's 1s resolution) can't mask a regression.
+    await tdb.execute({ sql: "UPDATE tasks_items SET updated_at='2020-01-01 00:00:00' WHERE id=?", args: [id] });
+
     await unarchiveCard(tdb, id, HUMAN);
     row = await getCard(tdb, id);
     assert.equal(row.archived_at, null, "unarchive restores exactly");
     assert.equal(row.status, "pending", "unarchive touches archived_at only");
+    assert.equal(row.updated_at, "2020-01-01 00:00:00", "unarchive must not bump updated_at");
 
     const muts = await allMutations(tdb, id);
     assert.ok(muts.some((m) => m.verb === "archive"));
@@ -347,10 +371,14 @@ test("unarchiveItem flips archived_at only", async () => {
   await withStore(async ({ tdb, intakeBoardId }) => {
     const itemId = await insertItem(tdb, intakeBoardId, { title: "roundtrip", status: "drafting" });
     await archiveItem(tdb, itemId, HUMAN);
+    // D-T1.6: unarchive flips ONLY archived_at — sentinel updated_at proves
+    // it, regardless of datetime('now')'s 1s resolution.
+    await tdb.execute({ sql: "UPDATE tasks_items SET updated_at='2020-01-01 00:00:00' WHERE id=?", args: [itemId] });
     await unarchiveItem(tdb, itemId, HUMAN);
     const row = await getItem(tdb, itemId);
     assert.equal(row.archived_at, null);
     assert.equal(row.status, "drafting");
+    assert.equal(row.updated_at, "2020-01-01 00:00:00", "unarchive must not bump updated_at");
   });
 });
 

@@ -172,11 +172,11 @@ export async function moveCard(tdb, cdb, id, status, actor, { lockExempt } = {})
   const cur = await getCard(tdb, id);
   if (!cur) throw fail("card not found", "not_found", 404);
 
+  if (cur.archived_at != null) throw fail("card is archived", "archived", 409);
+
   const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
   const ns = String(status);
   if (!isValidStatus(def, ns)) throw fail(`invalid status: ${ns}`, "bad_status", 400);
-
-  if (cur.archived_at != null) throw fail("card is archived", "archived", 409);
 
   const lock = await lockState(cdb, id);
   if (lock.locked && !lockExemptMatches(lock, lockExempt)) {
@@ -224,7 +224,7 @@ export async function unarchiveCard(tdb, id, actor) {
 
   const old = cur.archived_at ?? null;
   await tdb.execute({
-    sql: "UPDATE tasks_items SET archived_at=NULL, updated_at=datetime('now') WHERE id=? AND board_id IS NULL",
+    sql: "UPDATE tasks_items SET archived_at=NULL WHERE id=? AND board_id IS NULL",
     args: [id],
   });
   await recordMutation(tdb, { itemId: id, verb: "unarchive", actor, detail: { archived_at: [old, null] } });
@@ -236,11 +236,11 @@ export async function moveItem(tdb, id, status, actor) {
   const cur = await getItem(tdb, id);
   if (!cur) throw fail("item not found", "not_found", 404);
 
+  if (cur.archived_at != null) throw fail("item is archived", "archived", 409);
+
   const def = await resolveItemDef(tdb, cur.board_id);
   const ns = String(status);
   if (!def || !isValidStatus(def, ns)) throw fail(`invalid status: ${ns}`, "bad_status", 400);
-
-  if (cur.archived_at != null) throw fail("item is archived", "archived", 409);
 
   const wasTerminal = isTerminal(def, String(cur.status));
   const nowTerminal = isTerminal(def, ns);
@@ -347,7 +347,7 @@ export async function unarchiveItem(tdb, id, actor) {
 
   const old = cur.archived_at ?? null;
   await tdb.execute({
-    sql: "UPDATE tasks_items SET archived_at=NULL, updated_at=datetime('now') WHERE id=? AND board_id IS NOT NULL",
+    sql: "UPDATE tasks_items SET archived_at=NULL WHERE id=? AND board_id IS NOT NULL",
     args: [id],
   });
   await recordMutation(tdb, { itemId: id, verb: "unarchive", actor, detail: { archived_at: [old, null] } });
