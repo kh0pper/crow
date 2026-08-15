@@ -115,3 +115,48 @@ test("customTrackerContext ignores a per-project tasksDbPath override and reads 
   assert.match(text, /Intake tracker:/, "must resolve against the instance-global store, not the override");
   assert.match(text, new RegExp("#" + openId1 + " Triage inbox"));
 });
+
+// D-T1.6: the bot turn context must exclude archived cards/items — otherwise
+// every prompt still carries them, which then 409 the instant the bot tries
+// to touch one (board_move_item/board_report_result both refuse an archived
+// card). Column-guarded: this store has no `archived_at` column at all (the
+// tests above just proved every branch tolerates that), so this is a SECOND,
+// separate migrated store that DOES carry the column.
+test("kanbanText/taskListContext/customTrackerContext all exclude archived rows on a migrated store", () => {
+  const dir2 = mkdtempSync(join(tmpdir(), "tracker-context-archived-"));
+  const db2 = join(dir2, "tasks.db");
+  const t = new Database(db2);
+  t.exec(`CREATE TABLE tasks_items (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', priority INTEGER DEFAULT 3, project_id INTEGER,
+    parent_id INTEGER, board_id INTEGER, bot_id TEXT, data_json TEXT NOT NULL DEFAULT '{}',
+    action_needed TEXT, processing_lease_status TEXT, archived_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))`);
+  t.exec(`CREATE TABLE board_defs (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT UNIQUE,
+    project_id INTEGER UNIQUE, display_name TEXT NOT NULL, status_values TEXT NOT NULL,
+    terminal_values TEXT NOT NULL, fields_json TEXT NOT NULL DEFAULT '[]')`);
+  t.prepare("INSERT INTO board_defs (slug, display_name, status_values, terminal_values) VALUES ('arc','Archived-test','[\"open\",\"done\"]','[\"done\"]')").run();
+  const boardId = t.prepare("SELECT id FROM board_defs WHERE slug='arc'").get().id;
+
+  t.prepare("INSERT INTO tasks_items (id, project_id, title, status) VALUES (1, 9, 'live card', 'pending')").run();
+  t.prepare("INSERT INTO tasks_items (id, project_id, title, status, archived_at) VALUES (2, 9, 'archived card', 'pending', datetime('now'))").run();
+  t.prepare("INSERT INTO tasks_items (id, board_id, title, status) VALUES (3, ?, 'live tracker item', 'open')").run(boardId);
+  t.prepare("INSERT INTO tasks_items (id, board_id, title, status, archived_at) VALUES (4, ?, 'archived tracker item', 'open', datetime('now'))").run(boardId);
+  t.close();
+
+  const kanban = getTrackerContext({ tracker_config: { type: "kanban" } }, 9, db2);
+  assert.match(kanban, /live card/);
+  assert.doesNotMatch(kanban, /archived card/);
+
+  const taskList = getTrackerContext({ tracker_config: { type: "task-list" } }, 9, db2);
+  assert.match(taskList, /live card/);
+  assert.doesNotMatch(taskList, /archived card/);
+
+  process.env.CROW_TASKS_DB_PATH = db2; // customTrackerContext always resolves this, ignoring the tasksDbPath arg
+  try {
+    const custom = getTrackerContext({ tracker_config: { type: "custom", tracker_slug: "arc" } }, null);
+    assert.match(custom, /live tracker item/);
+    assert.doesNotMatch(custom, /archived tracker item/);
+  } finally {
+    process.env.CROW_TASKS_DB_PATH = TASKS_DB_PATH;
+  }
+});

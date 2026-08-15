@@ -7,12 +7,18 @@
 
 import { tJs } from "../../shared/i18n.js";
 
-export function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lang) {
+export function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lang, includeArchived) {
   const bi = botId == null ? "null" : JSON.stringify(String(botId));
   const tt = JSON.stringify(String(trackerType || "none"));
   const pj = projectId == null ? "null" : JSON.stringify(Number(projectId));
   const ts = trackerSlug ? JSON.stringify(String(trackerSlug)) : "null";
   const cf = contextFields ? JSON.stringify(contextFields) : "[]";
+  // D-T1.6: the "Show archived" view mixes archived cards INTO the DOM, but
+  // the SSE tick's row set always excludes them (streams.js) — with the live
+  // overlay attached, every archived-visible card would look "removed" on
+  // the very first tick and reload the page immediately. The archived view
+  // is a static inspect/manage screen; skip EventSource entirely for it.
+  const ia = includeArchived ? "true" : "false";
   // Optional notes viewer base URL (e.g. "https://host/notes/"). When unset,
   // the drawer shows plain "note #<id>" text — honest absence over a dead
   // link to somebody's lab host.
@@ -22,6 +28,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   var BOT_ID=${bi};
   var TRACKER_TYPE=${tt};
   var PROJECT=${pj};
+  var INCLUDE_ARCHIVED=${ia};
   window._trackerSlug=${ts};
   window._bbContextFields=${cf};
   document.body.classList.add('bb-js');
@@ -36,17 +43,76 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   }
   function reload(){ location.reload(); }
 
-  var drawer=$('bb-drawer'), trackerDrawer=$('bb-tracker-drawer'), cur=null, dragId=null, dragType=null, planMtime=null;
+  var drawer=$('bb-drawer'), trackerDrawer=$('bb-tracker-drawer'), cur=null, dragId=null, dragType=null;
+  // Track 1: plans are RECORDS now (board_plans), not a file — no mtime
+  // optimistic-concurrency any more. planCurrentStatus drives the Approve
+  // button's visibility (only a 'draft' current version is approvable).
+  var planVersions=[], planCurrentVersion=null, planCurrentStatus=null;
   function openDrawer(el){ if(el){el.classList.add('bb-open');el.setAttribute('aria-hidden','false');} }
   function closeDrawer(el){ if(el){el.classList.remove('bb-open');el.setAttribute('aria-hidden','true');} }
   function msg(el,txt,cls){ if(!el) return; el.className='bb-msg '+(cls||''); el.textContent=txt||''; }
+  // Track 1 (D-T1.6): a 409 from an archive-aware route carries r.j.code —
+  // map the KNOWN codes to the i18n'd string; anything else falls back to
+  // the server's raw (EN-only) reason, same as every other error path here.
+  function errText(r,fallback){
+    if(r&&r.j&&r.j.code==='archived') return '${tJs("board.errArchived", lang)}';
+    if(r&&r.j&&r.j.code==='locked') return '${tJs("board.errLocked", lang)}';
+    return (r&&r.j&&(r.j.reason||r.j.error))||fallback;
+  }
+
+  // ---- Plan tab: version history strip + approve button (built once; no
+  // static markup edit needed — inserted next to the existing plan fields) ----
+  var planVersionsWrap=null, planApproveBtn=null;
+  (function buildPlanVersionUi(){
+    var ta=$('bb-d-plan');
+    if(ta && ta.parentNode){
+      planVersionsWrap=document.createElement('div');
+      planVersionsWrap.id='bb-d-plan-versions';
+      planVersionsWrap.className='bb-msg';
+      planVersionsWrap.style.cssText='margin:.3rem 0 .5rem;display:flex;flex-wrap:wrap;gap:.3rem;align-items:center';
+      ta.parentNode.insertBefore(planVersionsWrap, ta);
+    }
+    var saveBtn=$('bb-d-plan-save');
+    if(saveBtn && saveBtn.parentNode){
+      planApproveBtn=document.createElement('button');
+      planApproveBtn.type='button';
+      planApproveBtn.className='bb-btn bb-sec';
+      planApproveBtn.id='bb-d-plan-approve';
+      planApproveBtn.style.cssText='display:none;margin-left:.4rem';
+      planApproveBtn.textContent='${tJs("botboard.btnApprovePlan", lang)}';
+      saveBtn.parentNode.insertBefore(planApproveBtn, saveBtn.nextSibling);
+    }
+  })();
+  function renderPlanVersions(){
+    if(!planVersionsWrap) return;
+    clearEl(planVersionsWrap);
+    if(!planVersions.length) return;
+    var label=document.createElement('span');
+    label.textContent='${tJs("botboard.planVersionsLabel", lang)}';
+    planVersionsWrap.appendChild(label);
+    planVersions.forEach(function(v){
+      var b=document.createElement('span');
+      b.className='bb-list-status';
+      b.textContent='v'+v.version+' ('+v.status+')';
+      planVersionsWrap.appendChild(b);
+    });
+  }
 
   // ---- Kanban card drawer ----
   function cardData(cardEl){
     return {id:Number(cardEl.getAttribute('data-card')),
             status:cardEl.getAttribute('data-status'),
             locked:cardEl.getAttribute('data-locked')==='1',
+            archived:cardEl.getAttribute('data-archived')==='1',
             itemType:cardEl.getAttribute('data-item-type')||'kanban'};
+  }
+  // Track 1 (D-T1.6): the drawer disables the same field set for an archived
+  // card as for a locked one — archived refuses move/update just like a
+  // bot-held lock does — and swaps which of Archive/Unarchive is shown.
+  function applyArchivedUi(archiveBtn,unarchiveBtn,fieldIds,archived,locked){
+    if(archiveBtn) archiveBtn.style.display=(!archived&&!locked)?'':'none';
+    if(unarchiveBtn) unarchiveBtn.style.display=archived?'':'none';
+    fieldIds.forEach(function(i){ var e=$(i); if(e) e.disabled=locked||archived; });
   }
   function fillDrawer(cardEl){
     cur=cardData(cardEl);
@@ -58,10 +124,15 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var lk=$('bb-d-lock'), unlock=$('bb-d-unlock');
     if(cur.locked){ lk.textContent='\\uD83D\\uDD12 ${tJs("botboard.jsCardLockedPre", lang)}\\u2014 ${tJs("botboard.jsCardLockedPost", lang)}';
       unlock.style.display=''; } else { lk.textContent=''; unlock.style.display='none'; }
-    ['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save']
-      .forEach(function(i){ var e=$(i); if(e) e.disabled=cur.locked; });
+    var d_archiveBtn=$('bb-d-archive'), d_unarchiveBtn=$('bb-d-unarchive');
+    var DRAWER_FIELD_IDS=['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-autonomy','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save','bb-d-plan-approve'];
+    applyArchivedUi(d_archiveBtn,d_unarchiveBtn,DRAWER_FIELD_IDS,cur.archived,cur.locked);
     api('GET','/card/'+cur.id).then(function(r){
       if(r.ok&&r.j&&r.j.card){var c=r.j.card;
+        // Server truth wins over the DOM snapshot (cur.archived came from the
+        // stale card face) — refresh cur + the Archive/Unarchive affordance.
+        cur.archived=c.archived_at!=null;
+        applyArchivedUi(d_archiveBtn,d_unarchiveBtn,DRAWER_FIELD_IDS,cur.archived,cur.locked);
         $('bb-d-title-in').value=c.title||'';
         // An off-def status must stay representable: inject it as an option so
         // Save cannot silently rewrite the card to the first configured value.
@@ -75,10 +146,16 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         $('bb-d-owner').value=c.owner||'';
         $('bb-d-tags').value=c.tags||'';
         $('bb-d-desc').value=c.description||'';
+        if($('bb-d-autonomy')) $('bb-d-autonomy').value=r.j.autonomy||c.autonomy||'gated';
         var ps=$('bb-d-project'); clearEl(ps); ps.appendChild(optEl('','\\u2014 none \\u2014',false));
         (r.j.projects||[]).forEach(function(p){
           ps.appendChild(optEl(String(p.id),'#'+p.id+' \\u2014 '+(p.name||''),Number(c.project_id)===Number(p.id)));
         });
+        // Track 1 Task 9 (D-T1.3/D-T1.5): the drawer's history strip and
+        // result/approve affordances hydrate off the SAME GET /card/:id
+        // response — additive keys, no extra round trip.
+        renderHistory(r.j.mutations||[]);
+        renderResults(r.j.latest_results||[], (r.j.board&&r.j.board.terminal_values)||[]);
       } else if(!r.ok){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
     }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
     loadPlan();
@@ -87,12 +164,122 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   function loadPlan(){
     var pm=$('bb-d-plan-msg'); msg(pm,'loading\\u2026','');
     api('GET','/card/'+cur.id+'/plan').then(function(r){
-      if(r.ok&&r.j){ $('bb-d-plan').value=r.j.markdown||''; planMtime=r.j.mtime||null;
-        msg(pm, r.j.exists?'':'(no plan yet)', ''); renderPre();
+      if(r.ok&&r.j){
+        planVersions=r.j.versions||[];
+        renderPlanVersions();
+        if(r.j.current){
+          $('bb-d-plan').value=r.j.current.body_md||'';
+          planCurrentVersion=r.j.current.version;
+          planCurrentStatus=r.j.current.status;
+          msg(pm,'','');
+        } else {
+          $('bb-d-plan').value='';
+          planCurrentVersion=null; planCurrentStatus=null;
+          msg(pm,'${tJs("botboard.planPlaceholder", lang)}','');
+        }
+        if(planApproveBtn) planApproveBtn.style.display=(planCurrentStatus==='draft')?'':'none';
+        renderPre();
       } else { msg(pm, (r.j&&r.j.reason)||'plan unavailable','warn'); }
     }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
   }
   function renderPre(){ var el=$('bb-d-plan-pre'); if(el) el.textContent=$('bb-d-plan').value; }
+
+  // ---- History strip (D-T1.3): read-only, latest N=10 board_mutations,
+  // actor-attributed — GET /card/:id's additive 'mutations' key. ----
+  var MUTATION_VERB_LABELS={
+    create:'${tJs("board.mutationVerb.create", lang)}',
+    update:'${tJs("board.mutationVerb.update", lang)}',
+    move:'${tJs("board.mutationVerb.move", lang)}',
+    archive:'${tJs("board.mutationVerb.archive", lang)}',
+    unarchive:'${tJs("board.mutationVerb.unarchive", lang)}',
+    plan_save:'${tJs("board.mutationVerb.plan_save", lang)}',
+    plan_approve:'${tJs("board.mutationVerb.plan_approve", lang)}',
+    result_report:'${tJs("board.mutationVerb.result_report", lang)}',
+    result_decide:'${tJs("board.mutationVerb.result_decide", lang)}'
+  };
+  function actorLabel(m){
+    if(m.actor_kind==='bot') return m.actor_id||'bot';
+    if(m.actor_kind==='session') return '${tJs("board.actorSession", lang)}';
+    return '${tJs("board.actorHuman", lang)}';
+  }
+  function renderHistory(mutations){
+    var el=$('bb-d-history'); if(!el) return;
+    clearEl(el);
+    if(!mutations||!mutations.length){ el.textContent='${tJs("board.noHistory", lang)}'; return; }
+    mutations.forEach(function(m){
+      var row=document.createElement('div');
+      row.className='bb-history-row';
+      row.style.cssText='font-size:.8rem;padding:.15rem 0;border-bottom:1px solid var(--crow-border-subtle,#0000)';
+      row.textContent=(MUTATION_VERB_LABELS[m.verb]||m.verb)+' \\u2014 '+actorLabel(m)+' \\u2014 '+(m.created_at||'');
+      el.appendChild(row);
+    });
+  }
+
+  // ---- Result banner + approve/reject/"approve & mark done" (D-T1.5) ----
+  // GET /card/:id's additive 'latest_results' key (newest first, D-T1.5's
+  // result-service.listResults). Only the latest 'recorded' result gets an
+  // affordance — a decided (approved/rejected) result is history, not action.
+  function decideResult(resultId,decision){
+    if(!cur) return;
+    api('POST','/card/'+cur.id+'/result/'+resultId+'/decide',{decision:decision}).then(function(r){
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
+      else msg($('bb-d-msg'),errText(r,'failed'),'err');
+    });
+  }
+  function approveAndMarkDone(resultId){
+    if(!cur) return;
+    // Two writes, both recorded (D-T1.5): decide (approve) the result, THEN
+    // move the card to 'done' — decideResult never auto-moves, by design.
+    api('POST','/card/'+cur.id+'/result/'+resultId+'/decide',{decision:'approved'}).then(function(r){
+      if(!r.ok){ msg($('bb-d-msg'),errText(r,'failed'),'err'); return; }
+      api('POST','/card/'+cur.id+'/move',{status:'done'}).then(function(r2){
+        if(r2.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
+        else msg($('bb-d-msg'),errText(r2,'failed'),'err');
+      });
+    });
+  }
+  function renderResults(results,terminalValues){
+    var wrap=$('bb-d-result-wrap'); if(!wrap) return;
+    clearEl(wrap);
+    var latest=(results||[])[0];
+    if(!latest||latest.status!=='recorded') return;
+    var hasDoneTerminal=(terminalValues||[]).indexOf('done')>=0;
+    var box=document.createElement('div');
+    box.className='bb-msg '+(latest.outcome==='success'?'bb-marker-waiting':'bb-marker-failed');
+    var head=document.createElement('div');
+    head.textContent=(latest.outcome==='success'?'${tJs("board.markerWaiting", lang)}':'${tJs("board.markerFailed", lang)}');
+    box.appendChild(head);
+    if(latest.summary_md){
+      var sm=document.createElement('div');
+      sm.style.cssText='white-space:pre-wrap;font-size:.82rem;margin-top:.2rem';
+      sm.textContent=latest.summary_md;
+      box.appendChild(sm);
+    }
+    var btnRow=document.createElement('div'); btnRow.style.marginTop='.4rem';
+    var approveBtn=document.createElement('button');
+    approveBtn.type='button'; approveBtn.className='bb-btn bb-sec';
+    approveBtn.textContent='${tJs("board.btnApproveResult", lang)}';
+    approveBtn.onclick=function(){ decideResult(latest.id,'approved'); };
+    btnRow.appendChild(approveBtn);
+    var rejectBtn=document.createElement('button');
+    rejectBtn.type='button'; rejectBtn.className='bb-btn bb-sec'; rejectBtn.style.marginLeft='.3rem';
+    rejectBtn.textContent='${tJs("board.btnRejectResult", lang)}';
+    rejectBtn.onclick=function(){ decideResult(latest.id,'rejected'); };
+    btnRow.appendChild(rejectBtn);
+    // "approve & mark done" — enabled ONLY on a recorded-SUCCESS result when
+    // the resolved board def carries 'done' among its terminal values (a
+    // board that never reaches 'done' has no affordance to offer here).
+    if(latest.outcome==='success'&&hasDoneTerminal){
+      var doneBtn=document.createElement('button');
+      doneBtn.type='button'; doneBtn.className='bb-btn'; doneBtn.style.marginLeft='.3rem';
+      doneBtn.id='bb-d-approve-done';
+      doneBtn.textContent='${tJs("board.btnApproveMarkDone", lang)}';
+      doneBtn.onclick=function(){ approveAndMarkDone(latest.id); };
+      btnRow.appendChild(doneBtn);
+    }
+    box.appendChild(btnRow);
+    wrap.appendChild(box);
+  }
 
   // ---- Tracker item drawer ----
   function fillTrackerDrawer(cardEl){
@@ -104,11 +291,14 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var lk=$('bb-td-lock'), clBtn=$('bb-td-clear-lease');
     if(cd.locked){ lk.textContent='\\uD83D\\uDD12 ${tJs("botboard.jsItemLockedPre", lang)}\\u2014 ${tJs("botboard.jsItemLockedPost", lang)}';
       if(clBtn) clBtn.style.display=''; } else { lk.textContent=''; if(clBtn) clBtn.style.display='none'; }
-    ['bb-td-label','bb-td-status','bb-td-prio','bb-td-action','bb-td-save']
-      .forEach(function(i){ var e=$(i); if(e) e.disabled=cd.locked; });
+    var td_archiveBtn=$('bb-td-archive'), td_unarchiveBtn=$('bb-td-unarchive');
+    var TRACKER_FIELD_IDS=['bb-td-label','bb-td-status','bb-td-prio','bb-td-action','bb-td-save'];
+    applyArchivedUi(td_archiveBtn,td_unarchiveBtn,TRACKER_FIELD_IDS,cd.archived,cd.locked);
     api('GET','/tracker-item/'+cd.id).then(function(r){
       if(!r.ok||!r.j||!r.j.item) { msg($('bb-td-msg'),'${tJs("botboard.jsItemLoadFailed", lang)}','err'); crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); return; }
       var item=r.j.item, tracker=r.j.tracker;
+      cur.archived=item.archived_at!=null;
+      applyArchivedUi(td_archiveBtn,td_unarchiveBtn,TRACKER_FIELD_IDS,cur.archived,cd.locked);
       $('bb-td-label').value=item.label||'';
       $('bb-td-prio').value=item.priority==null?'':String(item.priority);
       $('bb-td-action').value=item.action_needed||'';
@@ -216,15 +406,16 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   // ---- Kanban drawer events ----
   if($('bb-d-close')) $('bb-d-close').onclick=function(){ closeDrawer(drawer); cur=null; };
   if($('bb-d-save')) $('bb-d-save').onclick=function(){
-    if(!cur||cur.locked) return;
+    if(!cur||cur.locked||cur.archived) return;
     var body={title:$('bb-d-title-in').value,status:$('bb-d-status').value,
       priority:$('bb-d-prio').value===''?null:Number($('bb-d-prio').value),
       due_date:$('bb-d-due').value||null,owner:$('bb-d-owner').value||null,
-      tags:$('bb-d-tags').value||null,description:$('bb-d-desc').value||null};
+      tags:$('bb-d-tags').value||null,description:$('bb-d-desc').value||null,
+      autonomy:$('bb-d-autonomy')?$('bb-d-autonomy').value:undefined};
     api('POST','/card/'+cur.id,body).then(function(r){
       if(r.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
-      else if(r.status===409){ msg($('bb-d-msg'),'\\uD83D\\uDD12 '+((r.j&&r.j.reason)||'locked by a bot'),'err'); }
-      else { msg($('bb-d-msg'),(r.j&&(r.j.error||r.j.reason))||'save failed','err'); }
+      else if(r.status===409){ msg($('bb-d-msg'),'\\uD83D\\uDD12 '+errText(r,'locked by a bot'),'err'); }
+      else { msg($('bb-d-msg'),errText(r,'save failed'),'err'); }
     });
   };
   var projSel=$('bb-d-project');
@@ -252,6 +443,20 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       else msg($('bb-d-msg'),(r.j&&(r.j.reason||r.j.error))||'refused (fail-closed: pi not confirmed dead)','err');
     });
   };
+  if($('bb-d-archive')) $('bb-d-archive').onclick=function(){
+    if(!cur||cur.locked||cur.archived||!confirm('${tJs("board.archive", lang)}?')) return;
+    api('POST','/card/'+cur.id+'/archive').then(function(r){
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("board.archivedToast", lang)}','ok'); setTimeout(reload,400); }
+      else msg($('bb-d-msg'),errText(r,'archive failed'),'err');
+    });
+  };
+  if($('bb-d-unarchive')) $('bb-d-unarchive').onclick=function(){
+    if(!cur||!cur.archived) return;
+    api('POST','/card/'+cur.id+'/unarchive').then(function(r){
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("board.unarchivedToast", lang)}','ok'); setTimeout(reload,400); }
+      else msg($('bb-d-msg'),errText(r,'unarchive failed'),'err');
+    });
+  };
   var planToggled=false;
   if($('bb-d-plan-toggle')) $('bb-d-plan-toggle').onclick=function(){
     planToggled=!planToggled; renderPre();
@@ -260,19 +465,28 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     this.textContent=planToggled?'${tJs("botboard.jsToggleEdit", lang)}':'${tJs("botboard.jsTogglePreview", lang)}';
   };
   if($('bb-d-plan')) $('bb-d-plan').addEventListener('input',renderPre);
+  // Save ALWAYS appends a new draft version (plan-service.savePlan, D-T1.4) —
+  // there is no mtime optimistic-concurrency any more; a record is never
+  // edited in place, so two saves in flight just produce two versions.
   if($('bb-d-plan-save')) $('bb-d-plan-save').onclick=function(){
     if(!cur||cur.locked) return;
-    api('POST','/card/'+cur.id+'/plan',{markdown:$('bb-d-plan').value,mtime:planMtime}).then(function(r){
-      if(r.ok){ planMtime=(r.j&&r.j.mtime)||planMtime; msg($('bb-d-plan-msg'),'${tJs("botboard.jsPlanSaved", lang)}','ok'); }
-      else if(r.status===409){ msg($('bb-d-plan-msg'),'\\u26A0\\uFE0F Plan changed on disk \\u2014 reloading newer content.','warn'); loadPlan(); }
+    api('POST','/card/'+cur.id+'/plan',{body_md:$('bb-d-plan').value}).then(function(r){
+      if(r.ok){ msg($('bb-d-plan-msg'),'${tJs("botboard.jsPlanSaved", lang)}','ok'); loadPlan(); }
       else msg($('bb-d-plan-msg'),(r.j&&(r.j.error||r.j.reason))||'save failed','err');
+    });
+  };
+  if(planApproveBtn) planApproveBtn.onclick=function(){
+    if(!cur||cur.locked||planCurrentVersion==null) return;
+    api('POST','/card/'+cur.id+'/plan/approve',{version:planCurrentVersion}).then(function(r){
+      if(r.ok){ msg($('bb-d-plan-msg'),'${tJs("botboard.jsPlanApproved", lang)}','ok'); loadPlan(); }
+      else msg($('bb-d-plan-msg'),(r.j&&(r.j.error||r.j.reason))||'approve failed','err');
     });
   };
 
   // ---- Tracker drawer events ----
   if($('bb-td-close')) $('bb-td-close').onclick=function(){ closeDrawer(trackerDrawer); cur=null; };
   if($('bb-td-save')) $('bb-td-save').onclick=function(){
-    if(!cur||cur.locked) return;
+    if(!cur||cur.locked||cur.archived) return;
     var body={label:$('bb-td-label').value,status:$('bb-td-status').value,
       priority:$('bb-td-prio').value===''?null:Number($('bb-td-prio').value),
       action_needed:$('bb-td-action').value||null};
@@ -290,22 +504,36 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     }
     api('POST','/tracker-item/'+cur.id,body).then(function(r){
       if(r.ok){ msg($('bb-td-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
-      else if(r.status===409){ msg($('bb-td-msg'),'\\uD83D\\uDD12 '+((r.j&&r.j.reason)||'locked by a bot'),'err'); }
-      else { msg($('bb-td-msg'),(r.j&&(r.j.error||r.j.reason))||'save failed','err'); }
+      else if(r.status===409){ msg($('bb-td-msg'),'\\uD83D\\uDD12 '+errText(r,'locked by a bot'),'err'); }
+      else { msg($('bb-td-msg'),errText(r,'save failed'),'err'); }
     });
   };
   if($('bb-td-clear-lease')) $('bb-td-clear-lease').onclick=function(){
     if(!cur||!confirm('${tJs("botboard.confirmClearLease", lang)}'.replace('#{id}',cur.id))) return;
     api('POST','/tracker-item/'+cur.id+'/force-clear-lease').then(function(r){
       if(r.ok){ msg($('bb-td-msg'),'${tJs("botboard.jsLeaseCleared", lang)}','ok'); setTimeout(reload,500); }
-      else msg($('bb-td-msg'),(r.j&&(r.j.reason||r.j.error))||'failed','err');
+      else msg($('bb-td-msg'),errText(r,'failed'),'err');
+    });
+  };
+  if($('bb-td-archive')) $('bb-td-archive').onclick=function(){
+    if(!cur||cur.locked||cur.archived||!confirm('${tJs("board.archive", lang)}?')) return;
+    api('POST','/tracker-item/'+cur.id+'/archive').then(function(r){
+      if(r.ok){ msg($('bb-td-msg'),'${tJs("board.archivedToast", lang)}','ok'); setTimeout(reload,400); }
+      else msg($('bb-td-msg'),errText(r,'archive failed'),'err');
+    });
+  };
+  if($('bb-td-unarchive')) $('bb-td-unarchive').onclick=function(){
+    if(!cur||!cur.archived) return;
+    api('POST','/tracker-item/'+cur.id+'/unarchive').then(function(r){
+      if(r.ok){ msg($('bb-td-msg'),'${tJs("board.unarchivedToast", lang)}','ok'); setTimeout(reload,400); }
+      else msg($('bb-td-msg'),errText(r,'unarchive failed'),'err');
     });
   };
 
   // ---- Drag and drop ----
   document.addEventListener('dragstart',function(e){
     var c=e.target.closest&&e.target.closest('.bb-card'); if(!c) return;
-    if(c.getAttribute('data-locked')==='1'){ e.preventDefault(); return; }
+    if(c.getAttribute('data-locked')==='1'||c.getAttribute('data-archived')==='1'){ e.preventDefault(); return; }
     dragId=Number(c.getAttribute('data-card'));
     dragType=c.getAttribute('data-item-type')||'kanban';
     e.dataTransfer.effectAllowed='move';
@@ -322,14 +550,16 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       if(dt==='tracker'){
         api('POST','/tracker-item/'+id+'/move',{status:st}).then(function(r){
           if(r.ok) reload();
+          else if(r.status===409&&r.j&&r.j.code==='archived') crowToast(errText(r,''), {type:'error'});
           else if(r.status===409) crowToast('${tJs("botboard.trackerItemLocked", lang)}'.replace('#{id}',id), {type:'error'});
-          else crowToast((r.j&&(r.j.error||r.j.reason))||'${tJs("botboard.moveItemFailed", lang)}', {type:'error'});
+          else crowToast(errText(r,'${tJs("botboard.moveItemFailed", lang)}'), {type:'error'});
         });
       } else {
         api('POST','/card/'+id+'/move',{status:st}).then(function(r){
           if(r.ok) reload();
+          else if(r.status===409&&r.j&&r.j.code==='archived') crowToast(errText(r,''), {type:'error'});
           else if(r.status===409) crowToast('${tJs("botboard.cardLocked", lang)}'.replace('#{id}',id), {type:'error'});
-          else crowToast((r.j&&(r.j.error||r.j.reason))||'${tJs("botboard.moveFailed", lang)}', {type:'error'});
+          else crowToast(errText(r,'${tJs("botboard.moveFailed", lang)}'), {type:'error'});
         });
       }
     });
@@ -358,7 +588,8 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     if(!title){ msg($('bb-nc-msg'),'${tJs("botboard.jsTitleRequired", lang)}','err'); return; }
     api('POST','/card',{title:title,description:$('bb-nc-desc').value||null,
       due_date:$('bb-nc-due').value||null,owner:$('bb-nc-owner').value||null,
-      tags:$('bb-nc-tags').value||null,project_id:PROJECT}).then(function(r){
+      tags:$('bb-nc-tags').value||null,project_id:PROJECT,
+      autonomy:$('bb-nc-autonomy')?$('bb-nc-autonomy').value:undefined}).then(function(r){
       if(r.ok){ msg($('bb-nc-msg'),'Created #'+(r.j&&r.j.id)+'.','ok'); setTimeout(reload,500); }
       else msg($('bb-nc-msg'),(r.j&&(r.j.error||r.j.reason))||'create failed','err');
     });
@@ -785,7 +1016,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   }
 
   // ---- EventSource live overlay ----
-  if(window.EventSource){
+  if(window.EventSource && !INCLUDE_ARCHIVED){
     var esUrl=null;
     if(BOT_ID!=null){
       esUrl='/dashboard/streams/bot-board?bot='+encodeURIComponent(BOT_ID);
@@ -818,13 +1049,27 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         var openDrawerId = drawer&&drawer.classList.contains('bb-open')&&cur?cur.id:null;
         var busyId = dragId!=null ? dragId : openDrawerId;
         var changed=false;
+        var frameIds={};
         d.cards.forEach(function(c){
+          frameIds[c.id]=true;
           var el=document.querySelector('.bb-card[data-card="'+c.id+'"]');
           var curStatus=el?el.getAttribute('data-status'):null;
           var curLocked=el?(el.getAttribute('data-locked')==='1'):false;
           var newLocked=!!(d.locks&&d.locks[c.id]);
           if(!el || curStatus!==c.status || curLocked!==newLocked){ if(c.id!==busyId) changed=true; }
         });
+        // Track 1 (D-T1.6): the diff above is one-directional — a DOM card
+        // that's ABSENT from the frame (archived from ANOTHER tab/session)
+        // never trips anything on its own, so it would ghost on this board
+        // forever. Compare the DOM card-id set against the frame's id set;
+        // any DOM card missing from the frame counts as a change too.
+        if(!changed){
+          var domCards=document.querySelectorAll('#bb-board .bb-card[data-card]');
+          for(var di=0;di<domCards.length;di++){
+            var domId=Number(domCards[di].getAttribute('data-card'));
+            if(domId!==busyId && !frameIds[domId]){ changed=true; break; }
+          }
+        }
         // Reload-storm guard: if the rendered board can never converge with
         // the stream snapshot (a render/stream query mismatch), an
         // unconditional reload loops forever — each fresh page re-detects

@@ -205,39 +205,18 @@ function buildJobPrompt(goal) {
  * WHY THIS EXISTS (safety property, not style): the generic runJob body below
  * spawns the bot under the bot's OWN permission policy, with a bare goal string
  * and an empty temp session dir. A card job run that way would silently lose
- *  - planning: planCard's local-model-only refusal ("no config knob reaches a
- *    paid model") and its stricter-than-the-bot confinement (bash deny,
- *    write_paths confined to <repo>/.pi/plans + <repo>/docs, multi_agent
- *    false), plus the plan-file verification, the plan_ref write and
- *    the audit entry;
- *  - execution: the card prompt (project context block + card number + current
- *    board status + the FULL plan-file text) and the tasks_* in_progress→done
- *    instruction.
- * Routing here is what keeps those.
+ * the card prompt (project context block + card number + current board status
+ * + the current board_plans record) and the board_report_result terminal-state
+ * contract (D-T1.5). Routing here is what keeps those.
  *
- * A 'deferred' outcome (pi capacity) is NOT a failure: planCard has already
- * reset the card, and throwing would burn a retry attempt. Report it as a
- * result so the job completes and can be re-dispatched.
+ * Planning (D-T1.7): `card_action==='plan'` retired with plan_ref/planCard —
+ * plans are board_plans records now, edited via board_save_plan/
+ * board_approve_plan (the drawer, or a chat turn), never a dispatched job. A
+ * card job is execution, full stop.
  */
 async function runCardJob(job, { log, bridge }) {
   const cardId = Number(job.card_id);
   if (!Number.isInteger(cardId) || cardId <= 0) throw new Error("card job has no usable card_id");
-
-  if (job.card_action === "plan") {
-    // OPERATOR RULING 2026-08-07 (binding): escalation NEVER applies to a
-    // planning card job. planCard refuses any non-local provider; job.escalate
-    // exists to reach a bigger (cloud) model. The safety floor wins — and it is
-    // ignored VISIBLY, so an operator who asked for escalation can grep why it
-    // did not happen. job.escalate is deliberately NOT forwarded below.
-    if (job.escalate) {
-      log(`job ${job.job_id}: escalate ignored — plan dispatch is local-model-only (safety floor)`);
-    }
-    const r = await bridge.planCard({ cardId, botId: job.bot_id, log });
-    if (r.action === "error") throw new Error("plan dispatch failed: " + r.error);
-    if (r.action === "deferred") return { result: "deferred: " + r.reason, toolCalls: 0, sessionId: null };
-    return { result: "planned: " + JSON.stringify(r.planRef), toolCalls: 0, sessionId: null };
-  }
-  // 'execute' (the default for a card job)
   return await runCardExecute(job, { log, bridge });
 }
 
@@ -254,6 +233,14 @@ async function runCardJob(job, { log, bridge }) {
  * handleInbound detects it on the RAW message and strips it before the prompt is
  * built, so the model text is identical either way (model_resolver.ESCALATE_RE /
  * stripEscalateToken). No second escalation mechanism is introduced.
+ *
+ * `job_id` (D-T1.5, Task 7 — the missing link): threaded into handleInbound so
+ * it reaches buildBotWorld -> writeBotMcp -> the board entry's X-Crow-Job-Id
+ * header. Without it, a job-dispatched turn's board_report_result auto-move
+ * can never match this job's OWN bot_jobs row in the lock-exemption check
+ * (card-service.js's lockExemptMatches, job rail) — the report would still
+ * record, but a gated->auto move (or any lock-respecting write) would 409
+ * against the job's own still-live lock.
  */
 async function runCardExecute(job, { log, bridge }) {
   const cardId = Number(job.card_id);
@@ -263,6 +250,7 @@ async function runCardExecute(job, { log, bridge }) {
     gateway_type: "board",
     gateway_thread_id: "board-card-" + cardId,
     user_message: (job.escalate ? "!escalate " : "") + "execute #" + cardId,
+    job_id: job.job_id,
     log,
     sendReply: async (t) => { replies.push(String(t == null ? "" : t)); },
   });
@@ -295,10 +283,9 @@ export async function runJob(job, { log = () => {}, bridge: injectedBridge = nul
   // also get PiRpc without a static cycle.
   const bridge = injectedBridge || await import("./bridge.mjs");
 
-  // Card jobs delegate to the bridge, which owns the prompt, the planning
-  // safety floor, stranding recovery and the audit entry. Branch BEFORE any
-  // generic setup — running a card through the body below silently drops all
-  // of it.
+  // Card jobs delegate to the bridge, which owns the prompt, stranding
+  // recovery and the audit entry. Branch BEFORE any generic setup — running a
+  // card through the body below silently drops all of it.
   //
   // The gate is DELIBERATELY redundant — declarative (source) OR structural
   // (card_id). Nothing validates source on the way in: enqueueJob passes

@@ -50,6 +50,21 @@ const TAB_KEYS = {
   review:      "botbuilder.tabReview",
 };
 
+// D-T1.6: tracker-tab status counts must exclude archived cards/items — but
+// this store is resolved by TASKS_DB (which follows CROW_TASKS_DB_PATH /
+// project tasks_db_uri) and a store created by an unowned bundle after 0004
+// converges only at next boot, so the filter is COLUMN-GUARDED (PRAGMA probe
+// precedent: scripts/pi-bots/bridge.mjs planForCard ~:515) — never assume
+// archived_at exists.
+async function hasArchivedAtColumn(db) {
+  try {
+    const rows = (await db.execute("PRAGMA table_info(tasks_items)")).rows || [];
+    return rows.some((r) => r.name === "archived_at");
+  } catch {
+    return false;
+  }
+}
+
 export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, botId, notice, q }) {
   let bot;
   try {
@@ -547,8 +562,9 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       let tdb;
       try {
         tdb = createDbClient(TASKS_DB);
+        const guardArchived = (await hasArchivedAtColumn(tdb)) ? " AND archived_at IS NULL" : "";
         const rows = (await tdb.execute({
-          sql: "SELECT status, COUNT(*) AS n FROM tasks_items WHERE project_id=? GROUP BY status",
+          sql: `SELECT status, COUNT(*) AS n FROM tasks_items WHERE project_id=?${guardArchived} GROUP BY status`,
           args: [Number(pid)],
         })).rows || [];
         // Group-by, not a hardcoded four: boards carry per-board status values
@@ -575,7 +591,8 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         snapDb = createDbClient(TASKS_DB);
         const tdef = (await snapDb.execute({ sql: "SELECT id, display_name, status_values FROM board_defs WHERE slug=?", args: [tc.tracker_slug] })).rows[0];
         if (tdef) {
-          const statusRows = (await snapDb.execute({ sql: "SELECT status, COUNT(*) AS n FROM tasks_items WHERE board_id=? GROUP BY status", args: [tdef.id] })).rows || [];
+          const guardArchived = (await hasArchivedAtColumn(snapDb)) ? " AND archived_at IS NULL" : "";
+          const statusRows = (await snapDb.execute({ sql: `SELECT status, COUNT(*) AS n FROM tasks_items WHERE board_id=?${guardArchived} GROUP BY status`, args: [tdef.id] })).rows || [];
           const statusMap = {}; let total = 0;
           for (const r of statusRows) { statusMap[r.status] = Number(r.n); total += Number(r.n); }
           const statusList = JSON.parse(tdef.status_values || "[]");
