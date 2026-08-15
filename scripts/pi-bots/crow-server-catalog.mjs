@@ -89,6 +89,51 @@ export function instanceBinding(crowHome, opts = {}) {
 /** A bundle cwd under SOME instance home: /…/.crow<suffix>/bundles/<id>. */
 const INSTANCE_BUNDLE_CWD = /\/\.crow[^/]*\/bundles\/([^/]+)\/?$/;
 
+/**
+ * The board MCP entry (Track 1 Task 7, D-T1.3/D-T1.5) — a direct
+ * streamable-HTTP `{url, headers}` block at THIS instance's gateway
+ * `/board/mcp` mount. Unlike every other catalog entry, there is nothing to
+ * spawn: the gateway process already runs the mount in-process, so this is a
+ * remote reference, not a stdio command.
+ *
+ * Bearer = the RAW board token at `<crowHome>/board-token` (minted by
+ * ensureBoardToken at gateway boot, servers/gateway/local-token.js) — read
+ * directly off disk, the exact peer-tokens.json precedent mcp_writer.mjs
+ * already follows for the remote-forward-proxy blocks (this module stays
+ * DB-agnostic on purpose). Actor headers (D-T1.3) let board-mcp.js's
+ * resolveActor attribute a mutation to this bot and, when a job dispatched
+ * the turn, to that job — the SAME botId/jobId that land in bot_sessions and
+ * bot_jobs, which is what makes the result-service lock exemption
+ * (card-service.js's lockExemptMatches) actually match.
+ *
+ * Missing/unreadable token file -> return null (never throw): config
+ * generation must survive a not-yet-booted gateway or a pre-Task-6 install.
+ * The caller (crowServerCatalog) surfaces this through `unconfigured`, the
+ * same channel every other not-available-right-now server uses — so a bot
+ * that never selects "board" never sees a warning, and one that does gets
+ * exactly one line, once, from buildBotMcp's existing warnings plumbing.
+ */
+function boardTokenPath(crowHome) {
+  return join(crowHome, "board-token");
+}
+
+function boardBlock(crowHome, { botId, jobId, port } = {}) {
+  let token;
+  try {
+    token = readFileSync(boardTokenPath(crowHome), "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (!token) return null;
+  // Same loopback-gateway convention as scripts/pi-bots/warm.mjs
+  // (PIBOT_WARM_GATEWAY_URL / CROW_GATEWAY_PORT, default :3001).
+  const gatewayPort = port || process.env.CROW_GATEWAY_PORT || 3001;
+  const headers = { Authorization: "Bearer " + token, "X-Crow-Actor-Kind": "bot" };
+  if (botId) headers["X-Crow-Actor-Id"] = String(botId);
+  if (jobId) headers["X-Crow-Job-Id"] = String(jobId);
+  return { url: `http://127.0.0.1:${gatewayPort}/board/mcp`, headers };
+}
+
 function applyJournalGuard(env) {
   // The WAL-unlink scar: every server touching a crow.db runs journal DELETE.
   if (env && env.CROW_DB_PATH) env.CROW_JOURNAL_MODE = "DELETE";
@@ -191,6 +236,12 @@ export function crowServerCatalog(crowHome = process.env.CROW_HOME || join(homed
   const servers = {};
   const unconfigured = {};
   const coreNames = [];
+
+  // Board entry FIRST (Track 1 Task 7) — the one {url, headers} block in an
+  // otherwise all-stdio catalog. See boardBlock() above.
+  const board = boardBlock(crowHome, { botId: opts.botId, jobId: opts.jobId, port: opts.gatewayPort });
+  if (board) servers.board = board;
+  else unconfigured.board = "board token not found — mint one from the dashboard (or ensureBoardToken at boot)";
 
   for (const spec of CORE_SERVERS) {
     const { block } = coreBlock(spec, binding, repoEnv, node);

@@ -13,16 +13,25 @@
  * reuse) is a thin wrapper added when a human runs the live §9 E2E; the core
  * loop is proven here via --inject / bridge_e2e.mjs with a capturing sendReply.
  *
- * Authorities (plan §1): bot_sessions.status = runtime (this module owns it);
- * tasks_items.status = board (the tasks tool owns it, via pi); plan file =
- * work content. crow.db opened with busy_timeout only, NO journal_mode pragma;
- * pi spawned with CROW_JOURNAL_MODE=DELETE (memory crowdb-wal-flip-new-consumers).
+ * Authorities (plan §1, updated Track 1 D-T1.4/D-T1.5): bot_sessions.status =
+ * runtime (this module owns it); tasks_items.status = board (the tasks tool
+ * owns it, via pi, or board_move_item over the board-mcp mount); board_plans
+ * (instance-global, D-T1.4 store-topology rule) = work content; board_results
+ * = the bot's explicit terminal-state signal (board_report_result) — never
+ * inferred from a status write or a process exit. crow.db opened with
+ * busy_timeout only, NO journal_mode pragma; pi spawned with
+ * CROW_JOURNAL_MODE=DELETE (memory crowdb-wal-flip-new-consumers).
+ *
+ * Interface note (Task 7): this module reaches board tables directly in
+ * exactly ONE place — planForCard's read of the instance-global tasks.db.
+ * Every write a bot makes to a card goes through the /board/mcp mount (the
+ * board token, minted per-bot into .mcp.json by mcp_writer.mjs's catalog
+ * entry), never a direct DB write from here.
  */
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
@@ -40,8 +49,6 @@ import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.
 import { warmModel } from "./warm.mjs";
 import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
-import { parsePlanRef, containedRealPath } from "../../servers/gateway/routes/plan-ref.js";
-import { extractPlanFileLine, buildPlanPrompt } from "./plan_dispatch.mjs";
 
 const HOME = process.env.HOME || homedir();
 // Package was renamed from @mariozechner/pi-coding-agent to
@@ -498,45 +505,50 @@ function projectContextBlock(space, members) {
   }
   return lines.join("\n");
 }
-function planFor(def, cardId) {
-  const p = def.session_dir + "/plans/" + cardId + ".md";
-  return { path: p, exists: existsSync(p), text: existsSync(p) ? readFileSync(p, "utf8") : "" };
-}
-// plan_ref-aware plan resolution for the execute path (final-review C1).
-// kind:"repo" resolves under the project's repo_path with the same fail-closed
-// containment as the board API; anything else (null ref, workspace ref,
-// pre-migration DBs, missing repo_path) falls back to the legacy workspace
-// path. Sync (better-sqlite3), never throws — a broken ref degrades to legacy.
-function planForCard(def, cardId, tasksDbPathArg) {
+// D-T1.4/D-T1.7 (store-topology rule, binding): plans are `board_plans`
+// RECORDS now, and board_plans is instance-global-only — created in the
+// instance tasks.db and nowhere else (the Phase B F1 precedent tracker.mjs's
+// customTrackerContext already follows for slug boards). This resolves the
+// instance-global store FRESH at call time — resolveTasksDbPath() reads
+// CROW_TASKS_DB_PATH from the environment on every call, never a
+// module-load-time constant — and DELIBERATELY takes no tasksDbPath
+// parameter: gateway board_* verbs (board_report_result in particular) only
+// ever address instance-global cards, so honoring a per-project override
+// here (world.tasksDbPath, which follows project_spaces.tasks_db_uri) would
+// let a per-project row id collide with an instance-global card that merely
+// shares the id — the merged-id-space bug reborn. A bot whose cardsDbForBot
+// genuinely resolves to a divergent per-project store simply has no plan
+// surface for its cards: this returns null (the prompt says "(no plan)"),
+// and a later board_report_result on that id 404s against the
+// instance-global store — logged by the caller, not silently wrong (named in
+// the design doc; nothing bites this on live r4, where the sole project's
+// tasks_db_uri points at the instance-global file already).
+//
+// "Current plan" = latest approved, else latest draft, else null — the same
+// rule as plan-service.js's getCurrentPlan, duplicated here in raw sync SQL
+// because the bridge is a better-sqlite3/sync process that never opens board
+// tables through the async libsql service layer (this module's header
+// Interfaces note). Sync, never throws — probes for board_plans first (the
+// PRAGMA idiom at tracker.mjs's column guards) so a pre-0004 store degrades
+// to "no plan" instead of a crashed turn.
+export function planForCard(cardId) {
   try {
-    const t = db(tasksDbPathArg);
-    let row = null;
+    const t = db(resolveTasksDbPath());
     try {
-      const have = t.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
-      if (have.includes("plan_ref")) {
-        row = t.prepare("SELECT plan_ref, project_id FROM tasks_items WHERE id=?").get(Number(cardId));
-      }
+      const tables = t.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='board_plans'").all();
+      if (!tables.length) return null; // pre-0004 store — no board_plans table yet
+      const approved = t.prepare(
+        "SELECT body_md FROM board_plans WHERE item_id=? AND status='approved' ORDER BY version DESC LIMIT 1"
+      ).get(Number(cardId));
+      if (approved) return approved.body_md;
+      const draft = t.prepare(
+        "SELECT body_md FROM board_plans WHERE item_id=? AND status='draft' ORDER BY version DESC LIMIT 1"
+      ).get(Number(cardId));
+      return draft ? draft.body_md : null;
     } finally { t.close(); }
-    const ref = row ? parsePlanRef(row.plan_ref) : null;
-    if (ref && ref.kind === "repo" && row.project_id != null) {
-      const c = db(CROW_DB);
-      let repoRoot = null;
-      try {
-        const have = c.prepare("PRAGMA table_info(project_spaces)").all().map((col) => col.name);
-        if (have.includes("repo_path")) {
-          const p = c.prepare("SELECT repo_path FROM project_spaces WHERE id=?").get(Number(row.project_id));
-          repoRoot = p && p.repo_path ? String(p.repo_path) : null;
-        }
-      } finally { c.close(); }
-      if (repoRoot) {
-        const path = repoRoot.replace(/\/+$/, "") + "/" + ref.path;
-        if (containedRealPath(path, repoRoot) && existsSync(path)) {
-          return { path, exists: true, text: readFileSync(path, "utf8") };
-        }
-      }
-    }
-  } catch { /* fall through to legacy */ }
-  return planFor(def, cardId);
+  } catch {
+    return null;
+  }
 }
 // C-11: getSession/upsertSession are EXPORTED (additive — no rename) for
 // bot-world.mjs and P2's interactive engine.
@@ -583,6 +595,11 @@ export async function handleInbound(opts) {
   // has therefore always left a refreshed .mcp.json behind; unchanged.
   const world = await buildBotWorld({
     botId: bot_id, threadId: gateway_thread_id, gatewayType: gateway_type, log,
+    // D-T1.5/D-T1.7: threaded through to the board entry's X-Crow-Job-Id
+    // header (job_runner.runCardExecute is the caller that sets this — see
+    // its own comment) so the result-service job-rail lock exemption can
+    // match a job-dispatched turn against its OWN bot_jobs row.
+    jobId: opts.job_id || null,
   });
   const def = world.def;
   const crowHome = world.crowHome;
@@ -635,11 +652,10 @@ export async function handleInbound(opts) {
   const resolved = spawnPrep.resolved;
 
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);
-  // planFor still pulls from def.session_dir for legacy compatibility (where
-  // existing plan files live). Project-native bots that get a project_space
-  // workspace will accumulate plans under <workspace>/bots/<bot_id>/plans/
-  // once any are written; for the transition we look in both locations.
-  const plan = cardId != null ? planForCard(def, cardId, tasksDbPath) : { path: null, exists: false, text: "" };
+  // D-T1.4: plans are board_plans records now, resolved from the
+  // instance-global store — see planForCard's own comment for the
+  // store-topology rule (this call takes no tasksDbPath on purpose).
+  const planBody = cardId != null ? planForCard(cardId) : null;
 
   // M3b: structured project header replaces the bare "Project #N" string.
   // Falls back to a one-liner for legacy bots with no project_spaces row.
@@ -662,21 +678,21 @@ export async function handleInbound(opts) {
   let promptText;
   if (cardId != null) {
     // Explicit card reference — full work-the-card workflow.
-    // The status instruction follows the card's BOARD vocabulary (Track 0):
-    // hardcoding 'in_progress, then done' writes off-def values onto custom
-    // boards through the tasks_* door, which no longer has a CHECK behind it.
+    // D-T1.5: the terminal-state signal is board_report_result, an explicit
+    // tool call with an outcome — never inferred from a status write. This no
+    // longer instructs "set this card in_progress, then done" (bots MAY still
+    // call board_move_item — decision 10, full verbs, provenance, no
+    // restriction — but the model here is report-then-reply, not
+    // move-as-completion).
     const vocab = boardVocab(cardId, tasksDbPath);
-    const working = vocab.statuses.includes("in_progress") ? "in_progress"
-      : (vocab.statuses.find((v) => !vocab.terminals.includes(v)) || vocab.statuses[0]);
-    const finished = vocab.terminals.includes("done") ? "done" : (vocab.terminals[0] || vocab.statuses[vocab.statuses.length - 1]);
     promptText = projectHeader + "\n\nWork the following card.\n\nCARD #" + cardId +
-      " (current board status: " + cardStatus(cardId, tasksDbPath) + "; this board's statuses: " + vocab.statuses.join(", ") + ").\nPLAN FILE (" + plan.path + "):\n---\n" +
-      (plan.text || "(plan file missing)") + "\n---\n\nUser said: \"" + cleanMsg + "\"\n\n" +
-      "Do the work the plan describes. Use the tasks_* tools (scoped to project " + projectId +
-      ") to set this card " + working + ", then " + finished + " (only ever use this board's statuses). " +
-      "Use the write/edit tools to record your result " +
-      "under the plan file's \"## Result\" section. When finished, reply with a short summary for " +
-      "the gateway thread. One card only.";
+      " (current board status: " + cardStatus(cardId, tasksDbPath) + "; this board's statuses: " + vocab.statuses.join(", ") + ").\nPLAN:\n---\n" +
+      (planBody || "(no plan)") + "\n---\n\nUser said: \"" + cleanMsg + "\"\n\n" +
+      "Do the work the plan describes. You may use board_move_item to update this card's status " +
+      "as you go (only ever use this board's statuses). When you are done, call board_report_result " +
+      "with item_id=" + cardId + ", an outcome of success/failure/partial, and a summary_md describing " +
+      "what you did — that call is what ends the run, not a status write. " +
+      "Then reply with a short summary for the gateway thread. One card only.";
   } else {
     // No card reference — let the bot DECIDE based on its system prompt
     // whether to (a) answer briefly without tools (greet, list cards, simple
@@ -716,7 +732,10 @@ export async function handleInbound(opts) {
   // every turn from a caller that never asked for one.
   session = upsertSession(Object.assign({}, session || {}, {
     bot_id, gateway_thread_id, gateway_type, project_id: projectId,
-    card_id: cardId == null ? null : cardId, plan_path: plan.path,
+    // D-T1.4: plans are board_plans records now — there is no plan FILE path
+    // to record. plan_path stays as a column (bot_sessions carries it,
+    // perch.js surfaces it informationally) but is simply null going forward.
+    card_id: cardId == null ? null : cardId, plan_path: null,
     pi_session_dir: sessionDir + "/sessions", status: "active", control: "run",
     model: resolved.key, escalated: resolved.escalated ? 1 : 0,
   }, opts.kind ? { kind: String(opts.kind) } : {}));
@@ -747,12 +766,19 @@ export async function handleInbound(opts) {
     const calls = pi.toolCalls();
     postTurn = { user: cleanMsg, assistant: text, toolNames: calls.map((c) => c.tool) };
     const newCardStatus = cardId != null ? cardStatus(cardId, tasksDbPath) : null;
-    // Track 0: the bot's own status write IS the record — there is no stage
-    // column to reconcile onto any more. "Finished" is per-board terminal-ness,
-    // not the literal 'done': a session left at waiting-user LOCKS the card
-    // (SESSION_LOCK_STATUSES), which must never happen to completed work.
-    const status = (newCardStatus != null && boardVocab(cardId, tasksDbPath).terminals.includes(String(newCardStatus)))
-      ? "done" : "waiting-user";
+    // D-T1.5: terminal-state detection is the explicit board_report_result
+    // signal now, never a board-status write (Track 0's old terminals-check
+    // is retired — the design doc's own words: "the bridge already captures
+    // pi.toolCalls() at end-of-turn; a non-error *__board_report_result call
+    // in THIS turn's transcript is the signal — no board_results query",
+    // which would race other actors reporting concurrently). A session left
+    // at 'waiting-user' LOCKS the card (SESSION_LOCK_STATUSES); a turn that
+    // reported a result must end unlocked ('done'), awaiting review for a
+    // gated card. An isError call — the 409-terminal/409-archived refusal
+    // board-mcp.js surfaces as MCP isError — must never be counted, or a
+    // refused report would look like a completed run.
+    const reportedResult = calls.some((c) => !c.isError && /__board_report_result$/.test(String(c.tool)));
+    const status = reportedResult ? "done" : "waiting-user";
     session.pi_session_id = piSessionId;
     session.status = status; session.control = "run";
     session.model = resolved.key; session.escalated = resolved.escalated ? 1 : 0;
@@ -828,17 +854,6 @@ export async function handleInbound(opts) {
   return result;
 }
 
-// planCard's ONLY card write: the plan pointer. status is the bot's/operator's
-// to write, never machinery's (Track 0) — this helper exists so a test can pin
-// exactly that.
-export function recordPlanRef(cardsDb, cardId, planRef) {
-  const t2 = db(cardsDb);
-  try {
-    t2.prepare("UPDATE tasks_items SET plan_ref=?, updated_at=datetime('now') WHERE id=?")
-      .run(JSON.stringify(planRef), cardId);
-  } finally { t2.close(); }
-}
-
 // Track 0: dispatch writes nothing to cards, so there is no machinery-made
 // state to undo — this survives as a defensive no-op-in-practice ("undo a
 // machinery in_progress") because its export is part of the bridge's stable
@@ -860,8 +875,8 @@ export function resetStrandedCardBestEffort(cardsDb, cardId, log = () => {}) {
 }
 
 /**
- * The tasks database that holds a bot's cards — the SAME resolution planCard
- * and handleInbound use (a project's own tasks_db_uri wins; otherwise the
+ * The tasks database that holds a bot's cards — the SAME resolution
+ * handleInbound uses (a project's own tasks_db_uri wins; otherwise the
  * instance tasks.db). Exported so an out-of-module caller cannot get this
  * wrong: a card can live in a per-project database, so reaching for the global
  * TASKS_DB unconditionally would silently write to the wrong file.
@@ -878,99 +893,6 @@ export function cardsDbForBot(botId) {
   return (space && space.tasks_db_uri) || TASKS_DB;
 }
 
-// Board plan dispatch (Plan 1 Task 7): spawn a CONFINED local-model planning
-// run against the card's project repo. Structural guarantees (spec §Safety):
-// resolved provider MUST be crow-local (no config knob reaches a paid model);
-// write_paths = [<repo>/.pi/plans, <repo>/docs] + bash deny; bot_sessions row
-// kind='planning' takes the same single-writer lock as execution.
-export async function planCard(opts) {
-  const cardId = Number(opts.cardId), botId = String(opts.botId);
-  const log = opts.log || function () {};
-  const bot = loadBot(botId);
-  const def = bot.def;
-  const projectId = bot.project_id == null ? null : Number(bot.project_id);
-  const projectSpace = loadProjectSpace(projectId);
-
-  // Same tasks-db resolution as handleInbound (project override wins).
-  const cardsDb = (projectSpace && projectSpace.tasks_db_uri) || TASKS_DB;
-  const t = db(cardsDb);
-  const card = t.prepare("SELECT id, title, description, project_id FROM tasks_items WHERE id=?").get(cardId);
-  t.close();
-  if (!card) { return { action: "error", error: "card not found" }; }
-
-  const repoRoot = projectSpace && projectSpace.repo_path ? String(projectSpace.repo_path) : null;
-  if (!repoRoot || !existsSync(repoRoot)) {
-    return { action: "error", error: "project has no repo_path (workspace plan dispatch is not in v1 — edit the plan in the drawer)" };
-  }
-
-  if (countLivePi() >= LIFECYCLE_DEFAULTS.maxPi) {
-    return { action: "deferred", reason: "pi-capacity" };
-  }
-
-  const resolved = await resolveModel(def, { escalate: false });
-  if (String(resolved.provider) !== "crow-local") {
-    return { action: "error", error: "plan dispatch is local-only; bot resolves to " + resolved.provider + "/" + resolved.model };
-  }
-
-  const sysFile = join(mkdtempSync(join(tmpdir(), "pibot-plan-")), "sys.md");
-  writeFileSync(sysFile, "You are a careful software planner. You explore code read-only and write ONE plan file.", { mode: 0o600 });
-
-  // Planning session takes the card lock: kind='planning', status active.
-  let session = upsertSession({
-    bot_id: botId, gateway_thread_id: "board-plan-" + cardId, gateway_type: "board",
-    project_id: projectId, card_id: cardId, plan_path: null,
-    pi_session_dir: repoRoot + "/.pi/board-planning", status: "active", control: "run",
-    model: resolved.key, escalated: 0, kind: "planning",
-  });
-  let pi;
-  try {
-    mkdirSync(repoRoot + "/.pi/board-planning", { recursive: true });
-
-    // Confinement belt: write_paths limited to plans+docs, bash denied. The
-    // stored def's policy is NOT used — planning is stricter than the bot.
-    const planningDef = Object.assign({}, def, {
-      // I1: MERGE onto the bot's own policy (keeps external_send/confirm
-      // belts) rather than replacing it wholesale — bash/write/multi_agent
-      // are still forced down for the planning run.
-      permission_policy: Object.assign({}, def.permission_policy || {}, {
-        bash: "deny",
-        write_paths: [repoRoot + "/.pi/plans", repoRoot + "/docs"],
-        multi_agent: false,
-      }),
-      spawn_env: def.spawn_env || {},
-      tools: def.tools,
-    });
-    await warmModel(resolved.provider, log);
-    pi = new PiRpc({ def: planningDef, sessionDir: repoRoot + "/.pi/board-planning",
-      resolved, piSessionId: null, appendSystemPromptFile: sysFile });
-  } catch (e) {
-    session.status = "error"; upsertSession(session);
-    return { action: "error", error: e.message };
-  }
-  try {
-    await pi.prompt(buildPlanPrompt(card, ".pi/plans"), TURN_TIMEOUT_MS);
-    const text = pi.assistantText();
-    const rel = extractPlanFileLine(text);
-    if (!rel || !existsSync(repoRoot + "/" + rel)) {
-      session.status = "error"; upsertSession(session);
-      return { action: "error", error: "planning run produced no verifiable PLAN_FILE (reply tail: " + text.slice(-200) + ")" };
-    }
-    const planRef = { kind: "repo", path: rel };
-    recordPlanRef(cardsDb, cardId, planRef);
-    session.status = "done"; upsertSession(session);
-    appendAuditBridge(projectId, {
-      actor_type: "bot", actor_id: botId, action: "bot.plan",
-      target: "card:" + cardId, payload: { plan_ref: planRef, model: resolved.key },
-    });
-    return { action: "planned", planRef };
-  } catch (e) {
-    session.status = "error"; upsertSession(session);
-    return { action: "error", error: e.message };
-  } finally {
-    await pi.close();
-  }
-}
-
 export function stopSession(botId, threadId) {
   const s = getSession(botId, threadId);
   if (!s) return { ok: false, reason: "no session" };
@@ -984,19 +906,12 @@ if (import.meta.url === "file://" + process.argv[1]) {
     const bot = a[a.indexOf("--bot") + 1], thread = a[a.indexOf("--thread") + 1];
     console.log(JSON.stringify(stopSession(bot, thread))); process.exit(0);
   }
-  if (a.includes("--plan-card")) {
-    const payload = JSON.parse(a[a.indexOf("--plan-card") + 1]);
-    planCard(Object.assign({}, payload, { log: (m) => console.error("[plan] " + m) }))
-      .then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
-      .catch((e) => { console.error("PLAN CRASH " + e.stack); process.exit(2); });
-  } else {
-    const inj = a[a.indexOf("--inject") + 1];
-    if (!inj) { console.error("usage: bridge.mjs --inject '<json>' | --stop --bot B --thread T | --plan-card '<json>'"); process.exit(2); }
-    const payload = JSON.parse(inj);
-    handleInbound(Object.assign({}, payload, {
-      log: (m) => console.error("[bridge] " + m),
-      sendReply: async (t) => console.log("REPLY>>>\n" + t + "\n<<<REPLY"),
-    })).then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
-      .catch((e) => { console.error("BRIDGE CRASH " + e.stack); process.exit(2); });
-  }
+  const inj = a[a.indexOf("--inject") + 1];
+  if (!inj) { console.error("usage: bridge.mjs --inject '<json>' | --stop --bot B --thread T"); process.exit(2); }
+  const payload = JSON.parse(inj);
+  handleInbound(Object.assign({}, payload, {
+    log: (m) => console.error("[bridge] " + m),
+    sendReply: async (t) => console.log("REPLY>>>\n" + t + "\n<<<REPLY"),
+  })).then((r) => { console.log("RESULT " + JSON.stringify(r)); process.exit(r.action === "error" ? 1 : 0); })
+    .catch((e) => { console.error("BRIDGE CRASH " + e.stack); process.exit(2); });
 }

@@ -129,15 +129,16 @@ async function ensureBotJobs(cdb) {
 /**
  * Enqueue ONE board-card job and return its job_id. The board's whole part in a
  * dispatch is this row: job_runner claims it, routes it on source/card_id to
- * runCardJob, and the BRIDGE does the work — planCard (local-model-only, with
- * its confinement policy) or handleInbound. Nothing here composes a prompt or
- * decides an outcome.
+ * runCardJob, and the BRIDGE does the work — handleInbound (D-T1.7: card jobs
+ * are execution-only now; plans are board_plans records, edited via
+ * board_save_plan/board_approve_plan, never dispatched as a job). Nothing here
+ * composes a prompt or decides an outcome.
  *
  * deliver_to is NULL on purpose. A card job reports through the bot's own
- * tasks_* writes and the plan file's `## Result` section; the dispatcher owns
- * no delivery channel and must never write the card's terminal state from a job
- * outcome. (An earlier attempt set {kind:"card"} here, which inverted exactly
- * that ownership and was reverted.)
+ * board_report_result call (D-T1.5); the dispatcher owns no delivery channel
+ * and must never write the card's terminal state from a job outcome. (An
+ * earlier attempt set {kind:"card"} here, which inverted exactly that
+ * ownership and was reverted.)
  */
 async function enqueueCardJob(cdb, { botId, cardId, action, goal }) {
   await ensureBotJobs(cdb);

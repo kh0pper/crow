@@ -24,13 +24,28 @@ const TASKS_DB = tasksDbPath();
 // so without this the whole turn dies with SQLITE_CANTOPEN.
 function db(p) { const d = new Database(resolveSqlitePath(p)); d.pragma("busy_timeout = 10000"); return d; }
 
+// D-T1.6: default bot-turn context excludes archived cards/items — otherwise
+// every prompt still carries archived cards, which then 409 the moment the
+// bot touches them (board_move_item/board_report_result both refuse an
+// archived card). Column-guarded (PRAGMA probe, the idiom bridge.mjs's
+// retired plan_ref check used at planForCard): a store created by the
+// unowned bundle after 0004 converges only at next boot, so an unguarded
+// filter would crash the bot turn on a store that hasn't picked up the
+// column yet.
+function archivedClause(t) {
+  const have = t.prepare("PRAGMA table_info(tasks_items)").all().map((c) => c.name);
+  return have.includes("archived_at") ? " AND archived_at IS NULL" : "";
+}
+
 // ── kanban (existing tasks_items) ──────────────────────────────────
 
 export function kanbanText(projectId, tasksDbPath) {
   if (projectId == null) return "(no project linked)";
   const path = tasksDbPath || TASKS_DB;
   const t = db(path);
-  const rows = t.prepare("SELECT id,title,status FROM tasks_items WHERE project_id=? AND parent_id IS NULL ORDER BY id").all(projectId);
+  const rows = t.prepare(
+    "SELECT id,title,status FROM tasks_items WHERE project_id=? AND parent_id IS NULL" + archivedClause(t) + " ORDER BY id"
+  ).all(projectId);
   t.close();
   return rows.length ? rows.map((r) => "  #" + r.id + " [" + r.status + "] " + r.title).join("\n") : "  (no cards)";
 }
@@ -81,7 +96,7 @@ function taskListContext(projectId, tasksDbPath) {
   const path = tasksDbPath || TASKS_DB;
   const t = db(path);
   const rows = t.prepare(
-    "SELECT id,title,status,priority FROM tasks_items WHERE project_id=? ORDER BY priority ASC, id ASC"
+    "SELECT id,title,status,priority FROM tasks_items WHERE project_id=?" + archivedClause(t) + " ORDER BY priority ASC, id ASC"
   ).all(projectId);
   t.close();
   if (!rows.length) return "Task list: (empty)";
@@ -109,7 +124,7 @@ function customTrackerContext(trackerSlug, contextFields, queueFilter) {
   if (!def) { t.close(); return "(tracker '" + trackerSlug + "' not found)"; }
 
   let rows = t.prepare(
-    "SELECT id, status, priority, title AS label, data_json, action_needed, processing_lease_status FROM tasks_items WHERE board_id=? ORDER BY priority ASC, id ASC"
+    "SELECT id, status, priority, title AS label, data_json, action_needed, processing_lease_status FROM tasks_items WHERE board_id=?" + archivedClause(t) + " ORDER BY priority ASC, id ASC"
   ).all(def.id);
   t.close();
 
