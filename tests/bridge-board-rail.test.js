@@ -36,8 +36,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { runMigrations } from "../scripts/migrations/runner.mjs";
-import { buildBotWorld } from "../scripts/pi-bots/bot-world.mjs";
-
+// NO static import of bot-world.mjs/bridge.mjs here — deliberately. Both
+// transitively static-import mcp_writer.mjs, whose `CANONICAL_MCP_PATH`
+// (`HOME + "/.pi/agent/mcp.json"`) is captured at MODULE LOAD time, and ES
+// module static imports resolve the ENTIRE graph before this file's own
+// top-level body runs — so a `process.env.HOME =` assignment anywhere below
+// a static import of either module would always be too late. On a dev host
+// with a real `~/.pi/agent/mcp.json` (pi-lab) this was invisible; on CI
+// (no such file) `readCanonicalMcp` throws, `buildBotWorld`'s catch swallows
+// it as "non-fatal", and no `.mcp.json` is ever written — a host-state
+// dependency this file must not have. So: point HOME at a scratch dir with a
+// seeded minimal canonical FIRST (below), and import both modules only
+// dynamically, after that.
 const MIGRATIONS_DIR = join(import.meta.dirname, "..", "scripts", "migrations");
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -45,6 +55,20 @@ const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 for (const k of Object.keys(process.env)) {
   if (/^(PI_|PIBOT_)/.test(k)) delete process.env[k];
 }
+
+const SCRATCH_HOME = mkdtempSync(join(tmpdir(), "bridge-board-rail-home-"));
+mkdirSync(join(SCRATCH_HOME, ".pi", "agent"), { recursive: true });
+writeFileSync(join(SCRATCH_HOME, ".pi", "agent", "mcp.json"), JSON.stringify({ mcpServers: {} }));
+const ORIGINAL_HOME = process.env.HOME;
+process.env.HOME = SCRATCH_HOME;
+// Synchronous, no test-runner hook involved — sidesteps the before()/after()
+// hook-scope hazard documented below (an env restore has no reason to race
+// anything, but this file already learned once not to trust a node:test
+// hook for cleanup timing it can't fully control).
+process.on("exit", () => {
+  try { rmSync(SCRATCH_HOME, { recursive: true, force: true }); } catch {}
+  if (ORIGINAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = ORIGINAL_HOME;
+});
 
 // ---------------------------------------------------------------------------
 // shared fixture helpers (board-plan-result-service.test.js's pattern)
@@ -358,6 +382,13 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
     // -> buildBotWorld -> writeBotMcp's board-entry headers. This is the
     // structural proof, end to end, through the REAL buildBotWorld (not a
     // stub) and the REAL board-token file written above.
+    //
+    // Dynamic import, deliberately: buildBotWorld's module (bot-world.mjs)
+    // transitively static-imports mcp_writer.mjs, whose CANONICAL_MCP_PATH
+    // is HOME-captured at load time — importing it here, well after the
+    // module-top SCRATCH_HOME swap above, is what makes that capture see
+    // the scratch HOME instead of whatever the real host's HOME is.
+    const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
     const world = await buildBotWorld({
       botId: "railbot", threadId: "job-id-thread", gatewayType: "board",
       jobId: "job-thread-check", log: () => {},
