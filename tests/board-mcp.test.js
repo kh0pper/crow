@@ -421,3 +421,45 @@ test("board_report_result 409s (archived card) arrive as isError:true", async ()
   assert.match(result.content[0].text, /^\[409 archived\]/);
   await client.close();
 });
+
+// ---- Track 1 review fix wave (Finding 2): plans are card-only; save/approve/
+// get must 404 (not blindly write/read) against a tracker-item id or a
+// nonexistent id ----
+
+test("board_save_plan / board_approve_plan / board_get_plan 404 against a tracker-item id (not a card)", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const trackerItem = payload(await client.callTool({ name: "board_create_item", arguments: { title: "tracker item", slug: "intake" } }));
+
+  const save = await client.callTool({ name: "board_save_plan", arguments: { item_id: trackerItem.id, body_md: "# plan" } });
+  assert.equal(save.isError, true, "save_plan against a tracker-item id must be refused, not silently accepted");
+  assert.match(save.content[0].text, /^\[404 not_found\]/);
+
+  const approve = await client.callTool({ name: "board_approve_plan", arguments: { item_id: trackerItem.id, version: 1 } });
+  assert.equal(approve.isError, true);
+  assert.match(approve.content[0].text, /^\[404 not_found\]/);
+
+  const get = await client.callTool({ name: "board_get_plan", arguments: { item_id: trackerItem.id } });
+  assert.equal(get.isError, true);
+  assert.match(get.content[0].text, /^\[404 not_found\]/);
+
+  await client.close();
+});
+
+test("board_save_plan / board_approve_plan / board_get_plan 404 against a nonexistent id", async () => {
+  const client = await connectClient("/board/mcp", state.localToken);
+  const bogusId = 999999;
+
+  const save = await client.callTool({ name: "board_save_plan", arguments: { item_id: bogusId, body_md: "# plan" } });
+  assert.equal(save.isError, true);
+  assert.match(save.content[0].text, /^\[404 not_found\]/);
+
+  const approve = await client.callTool({ name: "board_approve_plan", arguments: { item_id: bogusId, version: 1 } });
+  assert.equal(approve.isError, true);
+  assert.match(approve.content[0].text, /^\[404 not_found\]/);
+
+  const get = await client.callTool({ name: "board_get_plan", arguments: { item_id: bogusId } });
+  assert.equal(get.isError, true);
+  assert.match(get.content[0].text, /^\[404 not_found\]/);
+
+  await client.close();
+});

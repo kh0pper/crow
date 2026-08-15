@@ -144,6 +144,32 @@ test("savePlan appends version n+1 as draft and records plan_save", async () => 
   });
 });
 
+// Track 1 review fix wave (Finding 6): savePlan's version number now comes
+// from an INSERT...SELECT subselect instead of a separate MAX read before
+// the INSERT (no window for two calls to compute the same next version).
+// The race itself isn't deterministically testable in a single-process
+// sequential suite; what IS pinned here is the atomicity mechanism's
+// observable behavior — versions assigned by rapid sequential calls never
+// skip or collide, exactly like the old MAX+1-then-INSERT did when calls
+// were sequential (this test would pass against the old code too — it
+// exists to lock the SAME contract in place across the rewrite, not to
+// catch the race that only concurrent callers can trigger).
+test("savePlan: 10 rapid sequential saves version 1..10 with no skips or collisions", async () => {
+  await withStore(async ({ tdb }) => {
+    const id = await makeCard(tdb, 1, "gated");
+    const versions = [];
+    for (let i = 1; i <= 10; i++) {
+      const r = await savePlan(tdb, id, `# plan v${i}`, HUMAN);
+      versions.push(r.version);
+    }
+    assert.deepEqual(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+    const rows = await listPlans(tdb, id);
+    assert.equal(rows.length, 10);
+    assert.deepEqual(rows.map((r) => r.version).sort((a, b) => a - b), versions);
+  });
+});
+
 test("getCurrentPlan: null with no plans, latest draft with only drafts, latest approved even under a newer draft", async () => {
   await withStore(async ({ tdb }) => {
     const id = await makeCard(tdb, 1, "gated");

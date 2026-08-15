@@ -38,10 +38,12 @@
  *    realpath asserted under that session_dir (else 400); POST does an
  *    mtime optimistic-concurrency check (409 if changed since the GET).
  *  - bulk-assign: cap ≤200 (400 if exceeded); D5 lock-filter runs FIRST
- *    (partition survivors vs skipped[]); survivors go into ONE atomic
- *    db.batch(); applied[] is derived ONLY from the resolved batch result's
- *    per-statement rowsAffected (1 ⇒ applied, 0 ⇒ skipped:"stale"); a
- *    rejected batch ⇒ {error, applied:[]} (all rolled back).
+ *    (partition survivors vs skipped[]); archived candidates are filtered out
+ *    next (unless ?include_archived=1) before Finding-1's per-card
+ *    updateCard() loop (Track 1 review fix wave) — each card is its own
+ *    provenance-recording write; a card that fails (archived-without-override
+ *    on a race, or vanished) is caught and reported in skipped[], never
+ *    thrown to the client.
  *  - force-unlock, SESSION rail: permitted ONLY when the MAX(id) row is
  *    active/waiting-user AND stale (no updated_at movement ≥ 30 min) AND a
  *    POSITIVE "pi is dead" determination. The liveness check FAILS CLOSED:
@@ -606,6 +608,12 @@ export default function botBoardApiRouter(dashboardAuth) {
   });
 
   // ---- assign / clear / reassign a card's project ----
+  // Track 1 review fix wave (Finding 1): converged onto updateCard so this
+  // write records provenance (board_mutations) like every other card
+  // mutation. This also picks up updateCard's archived guard (409 'archived')
+  // — a behavior change from the old raw-SQL version, which wrote through
+  // regardless of archived_at, and now matches bulk-assign's skip-archived
+  // precedent below.
   router.post(P + "/card/:id/project", async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
@@ -618,15 +626,12 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT id FROM tasks_items WHERE id=? AND board_id IS NULL", args: [id] })).rows[0];
+      const cur = await getCard(tdb, id);
       if (!cur) return jsonError(res, 404, "card not found");
-      await tdb.execute({
-        sql: "UPDATE tasks_items SET project_id=?, updated_at=datetime('now') WHERE id=?",
-        args: [projectId, id],
-      });
+      await updateCard(tdb, id, { project_id: projectId }, DASHBOARD_ACTOR);
       return res.json({ ok: true });
     } catch (e) {
-      return jsonError(res, 500, String(e.message || e));
+      return serviceError(res, e);
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
@@ -912,32 +917,31 @@ export default function botBoardApiRouter(dashboardAuth) {
           }
         }
         if (writable.length) {
-          const stmts = writable.map((cid) => ({
-            sql: "UPDATE tasks_items SET project_id=?, updated_at=datetime('now') WHERE id=?",
-            args: [projectId, cid],
-          }));
-          let results;
-          try {
-            // ONE atomic transaction (createDbClient().batch wraps all in a
-            // single db.transaction — all-or-nothing).
-            results = await tdb.batch(stmts);
-          } catch (e) {
-            // Rejected ⇒ the WHOLE txn rolled back; NOTHING applied.
-            return res.json({
-              ok: false,
-              error: "bulk assignment failed and was rolled back: " + String(e.message || e),
-              applied: [],
-              skipped: skipped.concat(writable.map((id) => ({ id, reason: "rolled-back" }))),
-            });
+          // Track 1 review fix wave (Finding 1): converged off the raw
+          // db.batch() UPDATE onto per-card updateCard() calls so bulk-assign
+          // records provenance (board_mutations) like every other card
+          // mutation. `writable` was already filtered above by the
+          // include_archived pre-check, so the ONLY archived rows that reach
+          // updateCard here are the ones the caller explicitly opted into via
+          // ?include_archived=1 — allowArchived carries that override through
+          // (updateCard's default is to refuse archived cards outright). The
+          // per-card `archived`/`not_found` catch below is the defensive
+          // fallback for a row that changed state between the pre-check query
+          // and this loop (was writable-at-filter-time, isn't anymore) — same
+          // "stale" semantics the old batch-rowsAffected check reported.
+          const allowArchived = wantsArchived(req);
+          for (const cid of writable) {
+            try {
+              await updateCard(tdb, cid, { project_id: projectId }, DASHBOARD_ACTOR, { allowArchived });
+              applied.push(cid);
+            } catch (e) {
+              if (e && (e.code === "archived" || e.code === "not_found")) {
+                skipped.push({ id: cid, reason: e.code === "archived" ? "archived" : "stale" });
+              } else {
+                skipped.push({ id: cid, reason: "error: " + String((e && e.message) || e) });
+              }
+            }
           }
-          // applied[] derived ONLY from the resolved per-statement rowsAffected
-          // (1 ⇒ applied; 0 ⇒ the row vanished between filter and batch ⇒
-          // skipped:"stale"). Never from the pre-built survivor list.
-          results.forEach((r, i) => {
-            const cid = writable[i];
-            if (Number(r && r.rowsAffected) === 1) applied.push(cid);
-            else skipped.push({ id: cid, reason: "stale" });
-          });
         }
       }
       return res.json({ ok: true, applied, skipped });
@@ -1381,22 +1385,24 @@ export default function botBoardApiRouter(dashboardAuth) {
     }
   });
 
+  // Track 1 review fix wave (Finding 1): converged onto updateItem so this
+  // write records provenance too. updateItem's ITEM_LEASE_FIELDS bypass the
+  // archived guard by contract (the lease is the item-side lock; clearing it
+  // must work even on an archived item), so no allowArchived override is
+  // needed here the way bulk-assign needed one for updateCard.
   router.post(P + "/tracker-item/:id/force-clear-lease", async (req, res) => {
     const itemId = Number(req.params.id);
     if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
-      const cur = (await tdb.execute({ sql: "SELECT processing_lease_status FROM tasks_items WHERE id=? AND board_id IS NOT NULL", args: [itemId] })).rows[0];
+      const cur = await getItem(tdb, itemId);
       if (!cur) return jsonError(res, 404, "item not found");
       if (!trackerItemLocked(cur)) return res.json({ ok: true, message: "already unlocked" });
-      await tdb.execute({
-        sql: "UPDATE tasks_items SET processing_lease=NULL, processing_lease_status=NULL, updated_at=datetime('now') WHERE id=?",
-        args: [itemId],
-      });
+      await updateItem(tdb, itemId, { processing_lease: null, processing_lease_status: null }, DASHBOARD_ACTOR);
       return res.json({ ok: true });
     } catch (e) {
-      return jsonError(res, 500, String(e.message || e));
+      return serviceError(res, e);
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
     }

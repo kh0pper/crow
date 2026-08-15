@@ -34,6 +34,14 @@ function fail(msg, code, http) {
   return Object.assign(new Error(msg), { code, http });
 }
 
+// Track 1 review fix wave (Finding 3): the ONLY two valid autonomy values.
+// Both createCard and updateCard were previously trusting the caller (routes
+// already validated at the HTTP boundary, but the service itself — the one
+// place every caller, present and future, funnels through — did not; an
+// invalid value from createCard silently coerced to 'gated' instead of
+// erroring). Validated here so the contract holds regardless of caller.
+const AUTONOMY_VALUES = new Set(["gated", "auto"]);
+
 // A JS-side timestamp in the same shape as SQLite's `datetime('now')`
 // (UTC "YYYY-MM-DD HH:MM:SS"). Used wherever a stamped column also needs to
 // appear in a mutation's diff — going through a placeholder lets the diff
@@ -115,7 +123,11 @@ export async function createCard(tdb, fields, actor) {
   const status = f.status != null ? String(f.status) : def.status_values[0];
   if (!isValidStatus(def, status)) throw fail(`invalid status: ${status}`, "bad_status", 400);
 
-  const autonomy = f.autonomy === "auto" ? "auto" : "gated";
+  let autonomy = "gated";
+  if (f.autonomy != null) {
+    autonomy = String(f.autonomy);
+    if (!AUTONOMY_VALUES.has(autonomy)) throw fail(`invalid autonomy: ${autonomy}`, "bad_autonomy", 400);
+  }
   const r = await tdb.execute({
     sql: `INSERT INTO tasks_items
             (title, description, status, priority, due_date, phase, owner, tags, project_id, parent_id, autonomy)
@@ -145,22 +157,41 @@ export async function createCard(tdb, fields, actor) {
 // own pi_bot_defs existence/enabled lookup first (that's a crow.db read this
 // tasks.db-only service has no business making), but the actual column write
 // and its provenance now go through here like everything else.
-const CARD_UPDATE_FIELDS = ["title", "description", "due_date", "phase", "owner", "tags", "priority", "autonomy", "assigned_bot"];
+//
+// "project_id" joined this list in the final Track 1 review fix wave (Finding
+// 1): the dashboard's POST /card/:id/project and /project/:id/bulk-assign
+// routes used to UPDATE tasks_items directly, bypassing recordMutation
+// entirely (no provenance for the operation that assigns a card to a
+// project). Unlike parent_id's re-inheritance branch below, this is a PLAIN
+// set — project-assignment is its own explicit operation, not something that
+// follows from another field, so it belongs in the generic key/value loop
+// with no special-case logic.
+const CARD_UPDATE_FIELDS = ["title", "description", "due_date", "phase", "owner", "tags", "priority", "autonomy", "assigned_bot", "project_id"];
 
-export async function updateCard(tdb, id, fields, actor) {
+// `allowArchived` (Finding 1 fix wave): bulk-assign's `?include_archived=1`
+// escape hatch (Task 5, D-T1.6) is a deliberate operator override that lets
+// project-assignment reach an archived card — the ONE write bulk-assign has
+// always permitted through archived_at. Converging bulk-assign onto this
+// function must not silently drop that override, so it's threaded through as
+// an explicit opt-in rather than folded into the default (archived-refusing)
+// path every other caller relies on.
+export async function updateCard(tdb, id, fields, actor, { allowArchived } = {}) {
   const cur = await getCard(tdb, id);
   if (!cur) throw fail("card not found", "not_found", 404);
-  if (cur.archived_at != null) throw fail("card is archived", "archived", 409);
+  if (cur.archived_at != null && !allowArchived) throw fail("card is archived", "archived", 409);
 
   const f = fields || {};
   const sets = [], args = [], detail = {};
   for (const key of CARD_UPDATE_FIELDS) {
     if (!Object.prototype.hasOwnProperty.call(f, key)) continue;
     const raw = f[key];
-    const norm = key === "priority"
+    const norm = key === "priority" || key === "project_id"
       ? (raw == null ? null : Number(raw))
       : (raw == null ? null : String(raw));
-    const old = cur[key] ?? null;
+    if (key === "autonomy" && norm != null && !AUTONOMY_VALUES.has(norm)) {
+      throw fail(`invalid autonomy: ${norm}`, "bad_autonomy", 400);
+    }
+    const old = key === "project_id" ? (cur[key] == null ? null : Number(cur[key])) : (cur[key] ?? null);
     if (old === norm) continue;
     sets.push(`${key}=?`); args.push(norm);
     detail[key] = [old, norm];
