@@ -67,7 +67,10 @@ function isPrivateAddress(address) {
     /^127\.|^10\.|^192\.168\.|^169\.254\.|^0\./.test(address) ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(address) ||
     /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(address) ||
-    address === "::1" || /^f[cd]/i.test(address) || /^fe80/i.test(address)
+    // "::" (unspecified) connects to localhost on Linux; URL parsing
+    // canonicalizes every all-zero IPv6 literal to this exact form.
+    address === "::1" || address === "::" ||
+    /^f[cd]/i.test(address) || /^fe80/i.test(address)
   );
 }
 
