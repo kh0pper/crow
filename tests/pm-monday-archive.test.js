@@ -355,7 +355,76 @@ test("syncTwowayBoard: a second identical pull against an archived row does not 
 });
 
 // ---------------------------------------------------------------------------
-// 5. legacy store without archived_at runs every path without crashing
+// 5. archived + mapped row with BOTH local and remote changes (the
+//    both-changed "conflict" path) still writes in place, stays archived,
+//    and logs pull_archived_update instead of the generic conflict action —
+//    otherwise the conflict branch would be a silent write on an archived
+//    row, exactly what D-T1.6's logging exists to prevent.
+// ---------------------------------------------------------------------------
+test("syncTwowayBoard: archived+mapped row with both-sides-changed conflict logs pull_archived_update", async () => {
+  const f = fixture();
+  const fetchStub = stubFetchThrows();
+  try {
+    const { createDbClient } = await import("../servers/db.js");
+    const { syncTwowayBoard } = await import("../bundles/pm-workspace/server/sync/monday.js");
+
+    const t = new Database(f.tasksDbPath);
+    const rowId = Number(
+      t.prepare(
+        "INSERT INTO tasks_items (title, status, project_id, archived_at) VALUES (?,?,?,?)"
+      ).run("Old Title", "in_progress", PROJECT_ID, "2026-08-10T00:00:00Z").lastInsertRowid
+    );
+    t.close();
+
+    // Deliberately stale content_hash → localChanged=true. Deliberately
+    // stale monday_updated_at (item.updated_at differs below) → remoteChanged
+    // =true. Both true → the both-changed conflict branch, not either
+    // single-sided branch.
+    const c = new Database(f.crowDbPath);
+    c.prepare(
+      "INSERT INTO pm_sync_state (source, board_id, item_id, local_kind, local_id, content_hash, monday_updated_at) VALUES ('monday',?,?,?,?,?,?)"
+    ).run(BOARD_ID, "item-conflict", "kanban", rowId, "stale-hash-forces-local-change", "2026-01-01T00:00:00Z");
+    c.close();
+
+    const cdb = createDbClient(f.crowDbPath);
+    const tdb = createDbClient(f.tasksDbPath);
+
+    const board = kanbanBoard();
+    const items = [
+      {
+        id: "item-conflict", name: "Conflict Title From Monday", updated_at: "2026-08-15T00:00:00Z",
+        group: { id: "g1" }, column_values: [{ id: "status_col", text: "Working on it", value: null }],
+      },
+    ];
+    const totals = { created: 0, updated: 0, pushed: 0, conflicts: 0, flagged: 0, errors: 0 };
+
+    await syncTwowayBoard(cdb, tdb, board, items, "test-token", totals);
+
+    assert.equal(totals.conflicts, 1, "must still run the conflict path");
+    assert.equal(totals.created, 0, "no duplicate row");
+    assert.equal(fetchStub.count(), 0, "conflict resolution never calls the Monday API");
+
+    const rowCount = (await tdb.execute({ sql: "SELECT COUNT(*) AS n FROM tasks_items", args: [] })).rows[0].n;
+    assert.equal(Number(rowCount), 1, "no duplicate row");
+
+    const row = (await tdb.execute({ sql: "SELECT title, archived_at FROM tasks_items WHERE id=?", args: [rowId] })).rows[0];
+    assert.equal(row.title, "Conflict Title From Monday", "updated in place");
+    assert.equal(row.archived_at, "2026-08-10T00:00:00Z", "stays archived");
+
+    const logRows = (await cdb.execute({ sql: "SELECT action FROM pm_sync_log WHERE item_ref=?", args: ["Conflict Title From Monday"] })).rows;
+    assert.ok(logRows.some((r) => r.action === "pull_archived_update"), `expected pull_archived_update; got: ${JSON.stringify(logRows)}`);
+    assert.ok(!logRows.some((r) => r.action === "conflict"), "must use the distinct action, not the generic conflict one");
+
+    await cdb.close();
+    await tdb.close();
+  } finally {
+    fetchStub.restore();
+    cleanup(f);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 6. legacy store without archived_at runs every path without crashing
 // ---------------------------------------------------------------------------
 test("syncTwowayBoard: a store without archived_at (legacy shape) runs all paths without crashing", async () => {
   const f = fixture({ legacy: true });

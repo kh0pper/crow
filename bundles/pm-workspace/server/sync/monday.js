@@ -615,7 +615,8 @@ export async function syncTwowayBoard(db, tdb, board, items, token, totals) {
       monday_updated_at: item.updated_at,
     });
     await logSync(db, {
-      direction: "both", board_id: board.board_id, action: "conflict",
+      direction: "both", board_id: board.board_id,
+      action: row.archived_at ? "pull_archived_update" : "conflict",
       item_ref: item.name,
       detail: "both sides changed; Monday kept team_visible fields, local kept the rest",
       ok: true,
