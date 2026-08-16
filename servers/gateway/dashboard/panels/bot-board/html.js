@@ -247,6 +247,44 @@ export function roostDispatchDialogMarkup(lang) {
   </div>`;
 }
 
+// Track 3 Task 13: the session drawer's static shell — a right slide-over
+// (`.bb-drawer.bb-bird-drawer`, `role="dialog"` `aria-modal="true"`), plus
+// its own backdrop element (ESC/backdrop-click close, wired in drawer.js's
+// emitted JS). Pure static markup, no dynamic data interpolated — hydrated
+// entirely client-side, same split as drawerMarkup() below.
+export function birdDrawerMarkup(lang) {
+  return `<div class="bb-bird-backdrop" id="bb-bird-backdrop" aria-hidden="true"></div>
+  <div class="bb-drawer bb-bird-drawer" id="bb-bird-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="bb-bd-name">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem">
+      <div style="min-width:0">
+        <div id="bb-bd-name" style="font-family:var(--crow-body-font);font-weight:600;font-size:1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <span id="bb-bd-state" class="bb-list-status"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.3rem;flex:0 0 auto">
+        <div class="bb-bd-menu-wrap">
+          <button type="button" class="bb-roost-more" id="bb-bd-menu-toggle" aria-haspopup="true" aria-expanded="false" aria-label="${escapeHtml(t("botboard.bdMoreAria", lang))}">⋯</button>
+          <div class="bb-bd-menu" id="bb-bd-menu" aria-hidden="true">
+            <button type="button" id="bb-bd-stop">${t("botboard.bdStop", lang)}</button>
+          </div>
+        </div>
+        <button type="button" class="bb-btn bb-sec" id="bb-bd-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      </div>
+    </div>
+    <div id="bb-bd-card-link-wrap" class="bb-msg" style="display:none"><a id="bb-bd-card-link" href="#"></a></div>
+    <div id="bb-bd-hibernating" class="bb-msg warn" style="display:none">${t("botboard.bdHibernating", lang)}</div>
+    <div id="bb-bd-picker" style="display:none"></div>
+    <div id="bb-bd-transcript" class="bb-pre bb-bd-transcript"></div>
+    <div id="bb-bd-ask"></div>
+    <div id="bb-bd-composer">
+      <textarea id="bb-bd-input" rows="3" style="font-family:inherit" placeholder="${t("botboard.bdComposerPlaceholder", lang)}"></textarea>
+      <div>
+        <button type="button" class="bb-btn" id="bb-bd-send">${t("botboard.bdSend", lang)}</button>
+        <button type="button" class="bb-btn bb-sec" id="bb-bd-abort" style="display:none">${t("botboard.bdAbort", lang)}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 export function trackerCardFaceHtml(item, contextFields, statusValues, locked, lang) {
   const prio = item.priority == null ? "" :
     `<span class="bb-prio bb-prio-${escapeHtml(String(item.priority))}" title="${t("botboard.titlePriorityPrefix", lang)} ${escapeHtml(String(item.priority))}">P${escapeHtml(String(item.priority))}</span>`;
@@ -498,7 +536,7 @@ export async function renderKanbanBoard(req, res, {
         `Board — ${escapeHtml(selBot.displayName)}`,
         notice + switcher +
         `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noProjectLinked", lang)}</p>`) +
-        drawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang, false),
+        drawerMarkup(lang) + birdDrawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang, false),
     });
   }
 
@@ -661,6 +699,7 @@ export async function renderKanbanBoard(req, res, {
     `Board — ${escapeHtml(selBot.displayName)}`,
     notice + switcher + roostHtml + filterBarHtml + boardHtml) +
     drawerMarkup(lang, def) + boardSettingsDrawerMarkup(lang, projectId) + roostDispatchDialogMarkup(lang) +
+    birdDrawerMarkup(lang) +
     clientJs(selBot.botId, "kanban", projectId, null, null, lang, includeArchived);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });

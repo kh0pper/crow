@@ -1410,6 +1410,41 @@ export const translations = {
   "botboard.roostConfirmRecall": { en: "Recall this session? This stops it.", es: "\u00bfRetirar esta sesi\u00f3n? Esto la detiene." },
   "botboard.roostActionFailed": { en: "Action failed.", es: "La acci\u00f3n fall\u00f3." },
 
+  // \u2500\u2500\u2500 Board \u2014 Track 3 Task 13: the session drawer \u2500\u2500\u2500
+  "botboard.bdStateAwake": { en: "Awake", es: "Despierto" },
+  "botboard.bdStateStopped": { en: "Stopped", es: "Detenido" },
+  "botboard.bdStop": { en: "Stop", es: "Detener" },
+  "botboard.bdConfirmStop": { en: "Stop this session?", es: "\u00bfDetener esta sesi\u00f3n?" },
+  "botboard.bdMoreAria": { en: "Session actions", es: "Acciones de la sesi\u00f3n" },
+  // Verbatim per Track 3 spec \u2014 the hibernating banner text.
+  "botboard.bdHibernating": { en: "asleep \u2014 sending will wake it", es: "dormido \u2014 enviarlo lo despertar\u00e1" },
+  "botboard.bdComposerPlaceholder": { en: "Type a message\u2026", es: "Escribe un mensaje\u2026" },
+  "botboard.bdSend": { en: "Send", es: "Enviar" },
+  "botboard.bdSteer": { en: "Steer", es: "Redirigir" },
+  "botboard.bdAbort": { en: "Abort", es: "Abortar" },
+  "botboard.bdSendFailed": { en: "Send failed.", es: "Error al enviar." },
+  "botboard.bdAnswerFailed": { en: "Answer failed.", es: "Error al responder." },
+  "botboard.bdAbortFailed": { en: "Abort failed.", es: "Error al abortar." },
+  "botboard.bdStopFailed": { en: "Stop failed.", es: "Error al detener." },
+  "botboard.bdCopy": { en: "Copy", es: "Copiar" },
+  "botboard.bdCopied": { en: "Copied.", es: "Copiado." },
+  "botboard.bdNoTranscript": { en: "No transcript yet.", es: "A\u00fan no hay transcripci\u00f3n." },
+  "botboard.bdTranscriptFailed": { en: "Could not load transcript.", es: "No se pudo cargar la transcripci\u00f3n." },
+  // Verbatim per Track 3 spec \u2014 a control='interrupted' row's system note.
+  "botboard.bdInterruptedNote": { en: "turn interrupted by gateway restart", es: "turno interrumpido por un reinicio de la puerta de enlace" },
+  "botboard.bdReconnecting": { en: "Reconnecting\u2026", es: "Reconectando\u2026" },
+  "botboard.bdReconnectFailed": { en: "Connection lost \u2014 reload to reconnect.", es: "Conexi\u00f3n perdida \u2014 recarga para reconectar." },
+  "botboard.bdPickSession": { en: "Pick a session", es: "Elige una sesi\u00f3n" },
+  "botboard.bdNoSessions": { en: "No sessions yet.", es: "A\u00fan no hay sesiones." },
+  "botboard.bdSessionsLoadFailed": { en: "Could not load sessions.", es: "No se pudieron cargar las sesiones." },
+  "botboard.bdCardLinkPrefix": { en: "Card #", es: "Tarjeta #" },
+  // Verbatim per Track 3 spec \u2014 answered ask_user cards collapse to this.
+  "botboard.bdAnsweredPrefix": { en: "Answered:", es: "Respondida:" },
+  "botboard.bdAskCancel": { en: "Cancel", es: "Cancelar" },
+  "botboard.bdConfirmYes": { en: "Confirm", es: "Confirmar" },
+  "botboard.bdConfirmNo": { en: "Deny", es: "Denegar" },
+  "botboard.bdNoTurn": { en: "no turn is running", es: "no hay ning\u00fan turno en curso" },
+
   // ─── Board — Track 1 archiving (D-T1.6) ───
   // board.planVersions / board.planApprove / board.historyTitle / board.autonomy*
   // are forward-declared here (design doc's full D-T1.3/D-T1.4 string list) for
