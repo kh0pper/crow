@@ -73,6 +73,28 @@
  * IDENTITY NOTE: `sessionId` IS the `gateway_thread_id` (`perchlive-xxxxxxxx`).
  * One identity, so the P1 transcript endpoint — keyed on threadId — is
  * reachable with the same id the interactive routes use.
+ *
+ * ── Model tracking, control(), options() (Track 3 Task 4) ──────────────────
+ * The session record carries the engine's OWN idea of the serving model
+ * (`currentModel`/`currentModelParts`), separate from `resolved` (what the
+ * last spawn/wake's `prepareSpawn` computed). It is set two ways: a live
+ * `model_select` event forwarded from the child (pi's own /model, an
+ * auto-fallback, or the echo of our own `control()` switch), or `control()`
+ * itself. `startChild` reads it BEFORE `warmModel`/`PiRpc` construction, so a
+ * wake after a switch warms and spawns the RIGHT provider and prices the
+ * right model from turn 1 — not only after pi re-emits `model_select` on its
+ * own. `control()` applies what it can to a LIVE child via `PiRpc.commandSince`
+ * (Task 3) and stores what only binds at the next wake (a model switch made
+ * while hibernating; permission mode, ALWAYS — pi's permission policy is
+ * fixed via env at spawn time, so no live session can adopt a new mode
+ * without a wake it did not ask for).
+ *
+ * RESTART SEMANTICS (named for the reviewer, spec §5.3): `adoptRow` does NOT
+ * restore `permissionMode` from anywhere — an adopted session (gateway
+ * restart, or a session this process never held) resets to `"guarded"`. This
+ * is the fail-safe reading: a restart must never silently resurrect a
+ * `"bypass"` session; the drawer shows the (reset) current mode so the
+ * operator sees it and can consciously re-widen it.
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
@@ -122,6 +144,18 @@ function replyTextOf(end) {
 /** The four ask_user methods that produce an operator-facing card. Everything
  * else pi's extension UI channel carries is chrome we deliberately ignore. */
 const ASK_METHODS = new Set(["select", "input", "confirm", "editor"]);
+
+/** Track 3 Task 4: the engine-owned permission vocabulary (bridge.mjs's
+ * PiRpc constructor option of the same name) — control() rejects anything
+ * outside this set with `bad_request` rather than passing an unknown mode
+ * string through to a live spawn. */
+const PERMISSION_MODES = new Set(["guarded", "ask", "bypass"]);
+
+/** Track 3 Task 4: pi's ThinkingLevel union (rpc-types.d.ts, pi-coding-agent
+ * 0.82.0) — control() validates against this fixed vocabulary so a typo
+ * fails fast as `bad_request` instead of round-tripping to the child only to
+ * come back as an opaque `command_failed`. */
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 /**
  * Build a pendingUi card from an `extension_ui_request`.
@@ -245,6 +279,26 @@ export function createInteractiveEngine({
       piSessionId: null,
       projectId: null,
       resolved: null,
+      // Track 3 Task 4: the ENGINE's own idea of the serving model, distinct
+      // from `resolved` (which prepareSpawn computes fresh every spawn/wake).
+      // `currentModelParts` is the {provider, modelId} pair a wake must
+      // override onto a freshly-resolved `prep.resolved` BEFORE warmModel and
+      // PiRpc construction see it (startChild) — set either by a live
+      // `model_select` event from the child or by control() while awake or
+      // hibernating. `currentModel` is the same value as the "provider/id" key
+      // string snapshot()/stateEvent() report.
+      currentModelParts: null,
+      currentModel: null,
+      // Track 3 Task 4: binds at wake, never applied to a live child (pi's
+      // permission policy is fixed via env at spawn time). Reset to
+      // "guarded" on every adoptRow (gateway restart) — see adoptRow's
+      // comment: this is the fail-safe reading of spec §5.3, a restart must
+      // never silently resurrect "bypass".
+      permissionMode: "guarded",
+      // Track 3 Task 4: mirrored plan-mode state object|null — Task 6 gives
+      // this real behavior; this task only carries the field through
+      // newSession/snapshot/stateEvent/control().
+      planMode: null,
       pendingUi: null,
       lastError: null,
       turn: null,
@@ -263,7 +317,13 @@ export function createInteractiveEngine({
       state: s.state,
       pendingUi: s.pendingUi,
       lastError: s.lastError,
-      model: s.resolved ? s.resolved.key : null,
+      // Track 3 Task 4: the engine-tracked model wins over the raw
+      // prepareSpawn resolution once one is known (a live model_select or a
+      // control() switch), so the lens reports the model actually serving
+      // the NEXT turn, not just the one the last spawn/wake resolved to.
+      model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      permissionMode: s.permissionMode,
+      planMode: s.planMode,
     };
   }
 
@@ -282,6 +342,10 @@ export function createInteractiveEngine({
       state: s.state,
       lastError: s.lastError || null,
       pendingUi: s.pendingUi || null,
+      // Track 3 Task 4: same three additions as snapshot(), same rule.
+      model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      permissionMode: s.permissionMode,
+      planMode: s.planMode,
     };
   }
 
@@ -505,6 +569,15 @@ export function createInteractiveEngine({
       s.piSessionId = row.pi_session_id || null;
       s.projectId = row.project_id == null ? null : Number(row.project_id);
       s.state = row.status === "stopped" ? "stopped" : "hibernating";
+      // Track 3 Task 4 (spec §5.3, RESTART SEMANTICS — named for the
+      // reviewer): deliberately NOT restoring permissionMode from anywhere.
+      // newSession() above already left it at the "guarded" default, and
+      // nothing in this row read (or in bot_sessions at all) carries a
+      // persisted mode to restore even if we wanted to. This is the
+      // fail-safe reading: a gateway restart must never silently resurrect a
+      // "bypass" session — the drawer shows the current (reset) mode so the
+      // operator can see and consciously re-widen it, rather than the
+      // process quietly reinstating a wide-open write policy on its own.
       sessions.set(s.sessionId, s);
       return s;
     } catch {
@@ -555,6 +628,27 @@ export function createInteractiveEngine({
     });
     const prep = await S.prepareSpawn(world, { escalate: false, log: slog });
     s.projectId = world.projectId == null ? null : Number(world.projectId);
+    // Track 3 Task 4 (wake fidelity, review finding 8): if the engine tracks a
+    // model different from what prepareSpawn just resolved fresh (a live
+    // model_select or a control() switch made while this session was awake or
+    // hibernating), override prep.resolved BEFORE warmModel/PiRpc see it —
+    // otherwise a wake would warm and spawn the WRONG provider and the first
+    // turn's metering would price the pre-switch model until pi re-emits its
+    // own model_select. This is a plain value override (never a merge of
+    // provider/model/key alone would leave `escalated`/`source` stale for the
+    // NEW model, but those two fields do not feed metering or spawn args, so
+    // leaving them as prepareSpawn resolved them is harmless — only
+    // provider/model/key are load-bearing here).
+    if (s.currentModelParts &&
+        (s.currentModelParts.provider !== prep.resolved.provider ||
+         s.currentModelParts.modelId !== prep.resolved.model)) {
+      prep.resolved = Object.assign({}, prep.resolved, {
+        provider: s.currentModelParts.provider,
+        model: s.currentModelParts.modelId,
+        key: s.currentModel,
+      });
+      prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved });
+    }
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);
 
@@ -566,6 +660,11 @@ export function createInteractiveEngine({
       // ask-user ctx.ui unlock (PL-3). C-12's spawn_env hygiene guarantees a
       // bot def cannot set this itself for a channel turn.
       extraEnv: { PI_BOT_INTERACTIVE: "1" },
+      // Track 3 Task 4: permissionMode binds at wake — the session record's
+      // current value goes into every spawn/wake's PiRpc opts. Default
+      // "guarded" is a byte-identical no-op for a fresh session (mirrors
+      // every channel caller, which never sets this option at all).
+      permissionMode: s.permissionMode,
     }));
     s.pi = pi;
     s.piSessionId = resume;
@@ -664,10 +763,39 @@ export function createInteractiveEngine({
       case "extension_ui_request":
         onUiRequest(s, m);
         return;
+      case "model_select":
+        onModelSelect(s, m);
+        return;
       default:
-        // agent_end, message_update, model_select, … — not part of the lens
-        // vocabulary. Silence is the contract, not an oversight.
+        // agent_end, message_update, … — not part of the lens vocabulary.
+        // Silence is the contract, not an oversight.
     }
+  }
+
+  /**
+   * Track 3 Task 4: the child (pi's own /model, an auto-fallback, or the
+   * response to OUR OWN control() set_model) picked a model. Real event
+   * shape (verified): `{type:"model_select", model:{provider, id, …},
+   * previousModel, source}` — the Model object has `id`, NOT `modelId`.
+   *
+   * Dedupe by value: control()'s awake model switch already applies the
+   * commandSince RESPONSE (same provider/id pi is about to echo back here as
+   * an event) — without this check, every control()-driven switch would emit
+   * a second, redundant state+log pair once this event lands moments later.
+   */
+  function onModelSelect(s, m) {
+    const model = m && m.model;
+    if (!model || !model.provider || !model.id) return;
+    const key = model.provider + "/" + model.id;
+    if (s.currentModel === key) return;
+    s.currentModelParts = { provider: model.provider, modelId: model.id };
+    s.currentModel = key;
+    // onTurnEnd's meterTurn({resolved: s.resolved}) prices whatever
+    // s.resolved says NOW, not what the turn started on — so the model that
+    // actually served the reply is what gets metered.
+    s.resolved = Object.assign({}, s.resolved, { provider: model.provider, model: model.id, key });
+    emit(s, stateEvent(s));
+    emit(s, { type: "log", text: "now on " + key });
   }
 
   function onUiRequest(s, m) {
@@ -944,6 +1072,130 @@ export function createInteractiveEngine({
     return { turnId: turn.id };
   }
 
+  /**
+   * Track 3 Task 4: engine-owned control surface for model / thinking level /
+   * permission mode / plan mode. Applies live what it can (an awake child gets
+   * a correlated `commandSince` RPC), stores what only binds at the next wake
+   * (permission mode always; a model switch while hibernating), and validates
+   * up front so a bad value never round-trips to a child that would refuse it
+   * with an opaque `command_failed`.
+   *
+   * Refusal order matches the brief's enumeration: no_such_session →
+   * session_stopped → turn_in_progress (model/thinking only — "one clock
+   * owner per turn", the same discipline `message()`'s own turn claim
+   * enforces) → bad_request (unknown values).
+   *
+   * @returns {Promise<{applied: object, bindsAtWake: object}>}
+   */
+  async function control(sessionId, opts = {}) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (s.state === "stopped") throw engineError("session_stopped");
+
+    const hasModel = opts.model != null;
+    const hasThinking = opts.thinking != null;
+    const hasPermissionMode = opts.permissionMode != null;
+    const hasPlanMode = Object.prototype.hasOwnProperty.call(opts, "planMode");
+
+    // Model/thinking switches share the one child clock a turn already owns
+    // (commandSince rides the SAME correlated response stream promptTurn
+    // does) — refused mid-turn rather than racing it. permissionMode/planMode
+    // never touch the live child, so they are never refused here.
+    if ((hasModel || hasThinking) && s.turn) throw engineError("turn_in_progress");
+
+    if (hasModel && (!opts.model.provider || !opts.model.modelId)) throw engineError("bad_request");
+    if (hasThinking && !THINKING_LEVELS.has(opts.thinking)) throw engineError("bad_request");
+    if (hasPermissionMode && !PERMISSION_MODES.has(opts.permissionMode)) throw engineError("bad_request");
+
+    const S = await loadSeams();
+    const applied = {};
+    const bindsAtWake = {};
+
+    if (hasModel) {
+      const { provider, modelId } = opts.model;
+      if (s.pi) {
+        // Warm BEFORE the switch (spec: pi-lab's local-models starter
+        // self-disables when a bot spawns it, so the provider must already be
+        // serving before pi's own set_model tries to route to it).
+        const slog = sessionLog(s);
+        await S.warmModel(provider, slog);
+        const res = await s.pi.commandSince({ type: "set_model", provider, modelId });
+        const data = (res && res.data) || {};
+        const rProvider = data.provider || provider;
+        const rId = data.id || modelId;
+        const rKey = rProvider + "/" + rId;
+        const changed = s.currentModel !== rKey;
+        s.currentModelParts = { provider: rProvider, modelId: rId };
+        s.currentModel = rKey;
+        s.resolved = Object.assign({}, s.resolved, { provider: rProvider, model: rId, key: rKey });
+        applied.model = rKey;
+        // The child's OWN model_select event for this same switch will also
+        // arrive shortly — onModelSelect dedupes on an unchanged value, so
+        // this is the only "now on <key>" log line the operator sees.
+        if (changed) emit(s, { type: "log", text: "now on " + rKey });
+      } else {
+        // Hibernating: nothing live to command. Track it for the next wake's
+        // startChild override (Task 4 behavior 2) instead.
+        const key = provider + "/" + modelId;
+        s.currentModelParts = { provider, modelId };
+        s.currentModel = key;
+        bindsAtWake.model = key;
+      }
+    }
+
+    if (hasThinking) {
+      if (s.pi) {
+        await s.pi.commandSince({ type: "set_thinking_level", level: opts.thinking });
+        applied.thinking = opts.thinking;
+      }
+      // Hibernating: no live child to command, and deliberately NO
+      // persistence — pi's own session file remembers the thinking level
+      // across a `--session` resume with no CLI flag to override it, so
+      // there is nothing for THIS engine to bind at the next wake.
+    }
+
+    if (hasPermissionMode) {
+      // Binds at wake ONLY — pi's permission policy is fixed via env at
+      // spawn time (bridge.mjs's PiRpc constructor), so even an awake
+      // session's mode change cannot take live effect without a restart the
+      // operator did not ask for. Every accepted change still gets a visible
+      // system note (spec §4.1.4) so the drawer's "current mode" reads true
+      // even though nothing live just happened.
+      s.permissionMode = opts.permissionMode;
+      bindsAtWake.permissionMode = opts.permissionMode;
+      emit(s, { type: "log", text: "permission mode → " + opts.permissionMode });
+    }
+
+    if (hasPlanMode) {
+      // Task 6 gives this field real behavior; Task 4 only carries it through
+      // the session record and the control()/snapshot() surface.
+      s.planMode = opts.planMode;
+      applied.planMode = s.planMode;
+    }
+
+    emit(s, stateEvent(s));
+    return { applied, bindsAtWake };
+  }
+
+  /**
+   * Track 3 Task 4: live model/thinking-level menus for the drawer (Task 8).
+   * Wakes are NEVER required just to list — a hibernating session (or one this
+   * process has never held; resolveSession adopts) returns null arrays so the
+   * caller can disable the pickers instead of spawning a child on a mere GET.
+   */
+  async function options(sessionId) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (!s.pi) return { models: null, thinkingLevels: null };
+    const [modelsRes, levelsRes] = await Promise.all([
+      s.pi.commandSince({ type: "get_available_models" }),
+      s.pi.commandSince({ type: "get_available_thinking_levels" }),
+    ]);
+    const models = (modelsRes && modelsRes.data && modelsRes.data.models) || [];
+    const thinkingLevels = (levelsRes && levelsRes.data && levelsRes.data.levels) || [];
+    return { models, thinkingLevels };
+  }
+
   /** Resolve a session this process holds, or adopt its row (gateway restart).
    * Fix round 1 (I-2): EVERY public method resolves through here — before,
    * only message() adopted, so after a restart list() showed sessions that
@@ -1141,6 +1393,8 @@ export function createInteractiveEngine({
   return {
     spawn,
     message,
+    control,
+    options,
     answer,
     abort,
     stop,
