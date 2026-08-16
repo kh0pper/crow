@@ -94,6 +94,64 @@ async function render() {
   } finally { db.close(); }
 }
 
+/** Flush BOTH microtasks (promise .then chains) and any queued macrotask —
+ * a chained decide().then(move()) crosses at least two microtask hops, and a
+ * plain `await Promise.resolve()` isn't guaranteed to drain that; a 0ms
+ * macrotask boundary drains everything queued ahead of it. */
+function flush() {
+  return new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+/** Behavioral fetch double for the two-step decide/move functions below —
+ * records every call, in order, and resolves per a caller-supplied script
+ * keyed by which route a path targets ('decide' | 'move' | default). */
+function fakeApiRecorder(script) {
+  const calls = [];
+  const api = (method, path, payload) => {
+    calls.push({ method, path, payload });
+    const kind = path.includes("/decide") ? "decide" : path.includes("/move") ? "move" : "other";
+    const result = (script && script[kind]) || { ok: true, j: {} };
+    return Promise.resolve(result);
+  };
+  return { api, calls };
+}
+
+/** Isolates client.js's cardResultDecide with an injected fake `api` (and
+ * inert crowToast/errText/reload stand-ins) so the accept/reject flow can be
+ * driven and observed WITHOUT touching the real network or DOM — this is
+ * what lets the mutation-testing round below actually prove the two-step
+ * order at RUNTIME, not merely in the source text (fix round 1 finding). */
+function makeCardResultDecide(body, api) {
+  const fn = extractFunction(body, "cardResultDecide");
+  if (!fn) return null;
+  const runner = new Function("api", "crowToast", "errText", "reload",
+    fn + ";\nreturn cardResultDecide;");
+  return runner(api, () => {}, (r, fallback) => (r && r.j && r.j.error) || fallback, () => {});
+}
+
+function fakeResultActionsEl(cardId, resultId, buttons) {
+  return {
+    closest: (sel) => (sel === ".bb-card" ? { getAttribute: (n) => (n === "data-card" ? String(cardId) : null) } : null),
+    getAttribute: (n) => (n === "data-result-id" ? String(resultId) : null),
+    querySelectorAll: (sel) => (sel === "button" ? buttons : []),
+  };
+}
+function fakeResultActionBtn(action) {
+  return { getAttribute: (n) => (n === "data-result-action" ? action : null) };
+}
+
+/** Same isolation, for the drawer's bdDecideResultGate (drawer.js) — that
+ * function closes over the module-scope `bd` object (for bd.cardId) instead
+ * of reading it off DOM attributes. */
+function makeBdDecideResultGate(js, api, cardId, onLoadResultGate) {
+  const fn = extractFunction(js, "bdDecideResultGate");
+  if (!fn) return null;
+  const bd = { cardId };
+  const runner = new Function("bd", "api", "crowToast", "bdLoadResultGate",
+    fn + ";\nreturn bdDecideResultGate;");
+  return runner(bd, api, () => {}, onLoadResultGate || (() => {}));
+}
+
 function emittedBody(lang = "en") {
   const js = clientJs("scout", "kanban", 9, null, null, lang, false);
   return js.replace(/^<script>/, "").replace(/<\/script>$/, "");
@@ -188,54 +246,106 @@ test("the dragstart handler refuses (preventDefault + return) when starting insi
 });
 
 // ---------------------------------------------------------------------------
-// Card face: Accept handler calls decide THEN move (order asserted in source)
+// Card face: Accept handler calls decide THEN move — driven BEHAVIORALLY
+// (fake `api`, real promise chains) rather than by scanning source text for
+// substring order. Fix round 1 finding: a textual `decideIdx < moveIdx`
+// check stays true even if the `return;` guarding the move call on a FAILED
+// decide is deleted — the source ordering never changes, only the runtime
+// behavior does. These tests drive the actual function and inspect the
+// actual sequence of network calls it made.
 // ---------------------------------------------------------------------------
 
-test("cardResultDecide's accept branch calls decide THEN the existing move-to-'done' call, in that order", async () => {
+test("cardResultDecide (accept, decide FAILS): move is never called, and the buttons re-enable", async () => {
   const body = emittedBody();
-  const fn = extractFunction(body, "cardResultDecide");
-  assert.ok(fn, "cardResultDecide must be present in the emitted source");
-  const acceptStart = fn.indexOf("action==='accept'");
-  assert.ok(acceptStart >= 0, "must find the accept branch");
-  const acceptBranch = fn.slice(acceptStart, fn.indexOf("} else {", acceptStart));
-  const decideIdx = acceptBranch.indexOf("/result/'+resultId+'/decide'");
-  const moveIdx = acceptBranch.indexOf("/move'");
-  assert.ok(decideIdx >= 0, "the decide POST must be present");
-  assert.ok(moveIdx >= 0, "the move POST must be present");
-  assert.ok(decideIdx < moveIdx, "decide must be called BEFORE move — never a combined write");
-  // The move call must be nested inside the decide call's own .then(), i.e.
-  // textually AFTER the decide call's opening, not a sibling top-level call.
-  const decideThenIdx = acceptBranch.indexOf(".then(function(r){", decideIdx);
-  assert.ok(decideThenIdx >= 0 && decideThenIdx < moveIdx, "move must be issued from inside decide's own .then()");
-  assert.match(acceptBranch, /decision:'approved'/, "accept decides 'approved'");
-  assert.match(acceptBranch, /status:'done'/, "accept moves to the 'done' terminal status");
-  assert.doesNotThrow(() => new Function(fn), "cardResultDecide parses standalone");
+  const { api, calls } = fakeApiRecorder({ decide: { ok: false, status: 400, j: { error: "nope" } } });
+  const cardResultDecide = makeCardResultDecide(body, api);
+  assert.ok(cardResultDecide, "cardResultDecide must be present in the emitted source");
+  const buttons = [{ disabled: false }, { disabled: false }];
+  cardResultDecide(fakeResultActionsEl(42, 7, buttons), fakeResultActionBtn("accept"));
+  await flush();
+  assert.equal(calls.length, 1, "only the decide call may fire when it itself fails");
+  assert.equal(calls[0].path, "/card/42/result/7/decide");
+  assert.deepEqual(calls[0].payload, { decision: "approved" });
+  assert.ok(buttons.every((b) => b.disabled === false), "a failed decide must re-enable the buttons, not leave them stuck disabled");
 });
 
-test("cardResultDecide's reject branch decides only — no move call anywhere in that branch", async () => {
+test("cardResultDecide (accept, happy path): decide THEN move fire in that order, with the documented payloads", async () => {
   const body = emittedBody();
-  const fn = extractFunction(body, "cardResultDecide");
-  const elseIdx = fn.indexOf("} else {");
-  const rejectBranch = fn.slice(elseIdx);
-  assert.match(rejectBranch, /decision:'rejected'/, "reject decides 'rejected'");
-  assert.ok(!rejectBranch.includes("/move'"), "reject must never move the card");
+  const { api, calls } = fakeApiRecorder();
+  const cardResultDecide = makeCardResultDecide(body, api);
+  cardResultDecide(fakeResultActionsEl(42, 7, [{ disabled: false }]), fakeResultActionBtn("accept"));
+  await flush();
+  assert.equal(calls.length, 2, "a successful accept must issue exactly two writes — decide, then move");
+  assert.equal(calls[0].path, "/card/42/result/7/decide");
+  assert.deepEqual(calls[0].payload, { decision: "approved" });
+  assert.equal(calls[1].path, "/card/42/move");
+  assert.deepEqual(calls[1].payload, { status: "done" });
+});
+
+test("cardResultDecide (accept, decide OK but move FAILS): buttons re-enable, no second move attempt", async () => {
+  const body = emittedBody();
+  const { api, calls } = fakeApiRecorder({ move: { ok: false, status: 500, j: { error: "boom" } } });
+  const cardResultDecide = makeCardResultDecide(body, api);
+  const buttons = [{ disabled: false }];
+  cardResultDecide(fakeResultActionsEl(42, 7, buttons), fakeResultActionBtn("accept"));
+  await flush();
+  assert.equal(calls.length, 2, "decide then exactly one move attempt");
+  assert.ok(buttons.every((b) => b.disabled === false), "a failed move must re-enable the buttons");
+});
+
+test("cardResultDecide (reject): decides only — move is never called, on success or failure", async () => {
+  const body = emittedBody();
+  const { api, calls } = fakeApiRecorder();
+  const cardResultDecide = makeCardResultDecide(body, api);
+  cardResultDecide(fakeResultActionsEl(42, 7, [{ disabled: false }]), fakeResultActionBtn("reject"));
+  await flush();
+  assert.equal(calls.length, 1, "reject must never touch the move route");
+  assert.equal(calls[0].path, "/card/42/result/7/decide");
+  assert.deepEqual(calls[0].payload, { decision: "rejected" });
 });
 
 // ---------------------------------------------------------------------------
-// Drawer: the in-drawer result gate mirrors the same two-step order
+// Drawer: the in-drawer result gate — SAME behavioral treatment
 // ---------------------------------------------------------------------------
 
-test("the drawer's bdDecideResultGate also calls decide THEN move, on approve only", async () => {
+test("bdDecideResultGate (approve, decide FAILS): move is never called", async () => {
   const js = birdDrawerJs("en");
-  const fn = extractFunction(js, "bdDecideResultGate");
-  assert.ok(fn, "bdDecideResultGate must be present");
-  const approvedIdx = fn.indexOf("decision==='approved'");
-  assert.ok(approvedIdx >= 0);
-  const decideIdx = fn.indexOf("/result/'+resultId+'/decide'");
-  const moveIdx = fn.indexOf("/move'");
-  assert.ok(decideIdx >= 0 && moveIdx >= 0 && decideIdx < moveIdx && approvedIdx < moveIdx,
-    "decide precedes the approve-only move call");
-  assert.doesNotThrow(() => new Function(fn), "bdDecideResultGate parses standalone");
+  const { api, calls } = fakeApiRecorder({ decide: { ok: false, status: 400, j: { error: "nope" } } });
+  const bdDecideResultGate = makeBdDecideResultGate(js, api, 99);
+  assert.ok(bdDecideResultGate, "bdDecideResultGate must be present in the emitted source");
+  const buttons = [{ disabled: false }];
+  bdDecideResultGate(5, "approved", buttons);
+  await flush();
+  assert.equal(calls.length, 1, "a failed decide must never be followed by a move call");
+  assert.equal(calls[0].path, "/card/99/result/5/decide");
+  assert.ok(buttons.every((b) => b.disabled === false), "buttons must re-enable on a failed decide");
+});
+
+test("bdDecideResultGate (approve, happy path): decide THEN move fire in that order, then the gate reloads", async () => {
+  const js = birdDrawerJs("en");
+  const { api, calls } = fakeApiRecorder();
+  let reloadedGate = false;
+  const bdDecideResultGate = makeBdDecideResultGate(js, api, 99, () => { reloadedGate = true; });
+  bdDecideResultGate(5, "approved", [{ disabled: false }]);
+  await flush();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].path, "/card/99/result/5/decide");
+  assert.deepEqual(calls[0].payload, { decision: "approved" });
+  assert.equal(calls[1].path, "/card/99/move");
+  assert.deepEqual(calls[1].payload, { status: "done" });
+  assert.ok(reloadedGate, "a successful move must refresh the result gate");
+});
+
+test("bdDecideResultGate (reject): decides only, move is never called, gate still reloads", async () => {
+  const js = birdDrawerJs("en");
+  const { api, calls } = fakeApiRecorder();
+  let reloadedGate = false;
+  const bdDecideResultGate = makeBdDecideResultGate(js, api, 99, () => { reloadedGate = true; });
+  bdDecideResultGate(5, "rejected", [{ disabled: false }]);
+  await flush();
+  assert.equal(calls.length, 1, "reject must never touch the move route");
+  assert.deepEqual(calls[0].payload, { decision: "rejected" });
+  assert.ok(reloadedGate, "reject still refreshes the gate (the decision itself is the visible change)");
 });
 
 // ---------------------------------------------------------------------------
