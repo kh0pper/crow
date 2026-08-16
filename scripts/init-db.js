@@ -2581,7 +2581,7 @@ await initTable("bot_sessions table", `
     status            TEXT NOT NULL DEFAULT 'active'
                         CHECK (status IN ('active','waiting-user','stopped','done','error')),
     control           TEXT NOT NULL DEFAULT 'run'
-                        CHECK (control IN ('run','stop')),
+                        CHECK (control IN ('run','stop','interrupted')),
     model             TEXT,
     escalated         INTEGER DEFAULT 0,
     kind              TEXT NOT NULL DEFAULT 'chat',
@@ -2610,6 +2610,73 @@ await addColumnIfMissing("bot_sessions", "kind", "TEXT NOT NULL DEFAULT 'chat'")
 // idiom as `kind` above: CREATE body for fresh installs, guarded ALTER for
 // pre-existing ones. Additive-only — no SCHEMA_GENERATION bump.
 await addColumnIfMissing("bot_sessions", "narrowed_tools", "TEXT");
+
+// bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
+// (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
+// when the gateway shut down with control='interrupted' instead of 'run', so
+// the drawer (perch-interactive routes) can render an honest "interrupted,
+// not answered" note rather than a silent 'run'. SQLite has no
+// ALTER TABLE ... MODIFY CHECK, so this is a guarded rebuild — same shape as
+// the shared_items migration far above: detect the OLD constraint text in
+// sqlite_master, and only if present, CREATE the new shape, copy every row by
+// EXPLICIT column list (never SELECT * — kind/narrowed_tools were appended to
+// the PHYSICAL column order by the two addColumnIfMissing calls just above on
+// any pre-existing install, so a positional SELECT * would silently shift
+// values into the wrong columns), DROP + RENAME. Every column and every OTHER
+// CHECK/DEFAULT is byte-identical to the CREATE TABLE body above; only the
+// control CHECK's value list widens. Declared in migration-expectations.js
+// REBUILD_TABLES (the A3 migration guard) and SCHEMA_GENERATION is bumped so
+// this actually runs on an already-migrated prod DB's next boot — see
+// schema-version.js and run scripts/schema-migration-dryrun.sh before deploy.
+await (async () => {
+  try {
+    const tableInfo = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'");
+    const sql = tableInfo.rows[0]?.sql || "";
+    if (sql.includes("CHECK (control IN ('run','stop'))")) {
+      console.log("Migrating bot_sessions table (widening control CHECK to include 'interrupted')...");
+      await db.executeMultiple(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE bot_sessions_new (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_id            TEXT NOT NULL,
+          pi_session_id     TEXT,
+          pi_session_dir    TEXT,
+          gateway_type      TEXT,
+          gateway_thread_id TEXT,
+          project_id        INTEGER,
+          card_id           INTEGER,
+          plan_path         TEXT,
+          status            TEXT NOT NULL DEFAULT 'active'
+                              CHECK (status IN ('active','waiting-user','stopped','done','error')),
+          control           TEXT NOT NULL DEFAULT 'run'
+                              CHECK (control IN ('run','stop','interrupted')),
+          model             TEXT,
+          escalated         INTEGER DEFAULT 0,
+          kind              TEXT NOT NULL DEFAULT 'chat',
+          narrowed_tools    TEXT,
+          created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO bot_sessions_new
+          (id,bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,
+           project_id,card_id,plan_path,status,control,model,escalated,kind,
+           narrowed_tools,created_at,updated_at)
+          SELECT id,bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,
+                 project_id,card_id,plan_path,status,control,model,escalated,kind,
+                 narrowed_tools,created_at,updated_at
+          FROM bot_sessions;
+        DROP TABLE bot_sessions;
+        ALTER TABLE bot_sessions_new RENAME TO bot_sessions;
+        CREATE INDEX IF NOT EXISTS idx_bot_sessions_bot_thread ON bot_sessions (bot_id, gateway_thread_id);
+        CREATE INDEX IF NOT EXISTS idx_bot_sessions_status ON bot_sessions (status);
+        COMMIT;
+      `);
+      console.log("bot_sessions control-CHECK migration complete.");
+    }
+  } catch (e) {
+    console.error("bot_sessions control-CHECK migration failed (non-fatal, continuing):", e.message);
+  }
+})();
 
 await initTable("bot_skill_events table", `
   CREATE TABLE IF NOT EXISTS bot_skill_events (

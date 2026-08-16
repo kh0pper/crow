@@ -723,8 +723,16 @@ test("narrowed_tools is a real column, declared BOTH ways (the #250 convention)"
   assert.match(src, /narrowed_tools\s+TEXT,/, "the CREATE body must declare the column for fresh installs");
   assert.match(src, /addColumnIfMissing\("bot_sessions", "narrowed_tools", "TEXT"\)/,
     "pre-existing installs need the guarded ALTER");
-  assert.equal(/SCHEMA_GENERATION = 8/.test(readFileSync(join(REPO, "servers/shared/schema-version.js"), "utf8")), true,
-    "an additive column must not bump the schema generation");
+  // narrowed_tools itself landed at generation 8 without needing its OWN
+  // bump (an addColumnIfMissing addition, no CHECK/rebuild). A literal `= 8`
+  // here would go stale on every LATER, unrelated bump (e.g. Track 3 Task 7's
+  // 8->9 for the bot_sessions.control CHECK widen) — assert the invariant
+  // this test actually cares about (>= the generation narrowed_tools shipped
+  // at), not a frozen snapshot of an ever-advancing counter.
+  const genSrc = readFileSync(join(REPO, "servers/shared/schema-version.js"), "utf8");
+  const genMatch = genSrc.match(/SCHEMA_GENERATION = (\d+)/);
+  assert.ok(genMatch && Number(genMatch[1]) >= 8,
+    "narrowed_tools's own addition must not have required a schema generation bump");
 });
 
 // ---------------------------------------------------------------------------

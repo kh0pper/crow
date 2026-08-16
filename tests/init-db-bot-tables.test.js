@@ -140,3 +140,112 @@ test("bot_sessions pre-existing WITHOUT kind: re-running init-db.js adds it", ()
     rmSync(migDir, { recursive: true, force: true });
   }
 });
+
+// Track 3 Task 7: stopAll() parks a mid-turn-interrupted session with
+// control='interrupted' (perch-interactive.js), but the ORIGINAL CHECK
+// (control IN ('run','stop')) predates that value — a fresh install already
+// gets the widened CHECK from the CREATE TABLE body (asserted directly
+// below), and a PRE-EXISTING install (the old narrow CHECK, some rows already
+// present) must converge via the guarded rebuild migration on the NEXT
+// init-db.js run, preserving every row and every other column exactly — see
+// the fix comment above the migration block in scripts/init-db.js.
+test("bot_sessions (fresh install) control CHECK allows 'interrupted'", () => {
+  const rw = new Database(join(dir, "crow.db"));
+  try {
+    const info = rw
+      .prepare(
+        "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,status,control,kind) VALUES (?,?,?,?,?,?)"
+      )
+      .run("test-bot-interrupted", "perch", "thread-interrupted", "waiting-user", "interrupted", "perch-live");
+    assert.ok(info.lastInsertRowid > 0);
+    const row = rw.prepare("SELECT control FROM bot_sessions WHERE id=?").get(info.lastInsertRowid);
+    assert.equal(row.control, "interrupted");
+    rw.prepare("DELETE FROM bot_sessions WHERE id=?").run(info.lastInsertRowid);
+  } finally {
+    rw.close();
+  }
+});
+
+test("bot_sessions pre-existing WITH the old control CHECK ('run','stop' only): re-running init-db.js widens it, preserving every row", () => {
+  const migDir = mkdtempSync(join(tmpdir(), "f3-initdb-controlmig-"));
+  try {
+    // First pass: build the full current shape, then rebuild bot_sessions
+    // back to the OLD narrow control CHECK (every other column/CHECK/DEFAULT
+    // untouched) so the guarded migration has something real to detect.
+    execFileSync(process.execPath, ["scripts/init-db.js"], {
+      env: { ...process.env, CROW_DATA_DIR: migDir },
+      stdio: "pipe",
+    });
+    const pre = new Database(join(migDir, "crow.db"));
+    let seededId;
+    try {
+      pre.exec(`
+        CREATE TABLE bot_sessions_old (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_id            TEXT NOT NULL,
+          pi_session_id     TEXT,
+          pi_session_dir    TEXT,
+          gateway_type      TEXT,
+          gateway_thread_id TEXT,
+          project_id        INTEGER,
+          card_id           INTEGER,
+          plan_path         TEXT,
+          status            TEXT NOT NULL DEFAULT 'active'
+                              CHECK (status IN ('active','waiting-user','stopped','done','error')),
+          control           TEXT NOT NULL DEFAULT 'run'
+                              CHECK (control IN ('run','stop')),
+          model             TEXT,
+          escalated         INTEGER DEFAULT 0,
+          kind              TEXT NOT NULL DEFAULT 'chat',
+          narrowed_tools    TEXT,
+          created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO bot_sessions_old
+          (id,bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,
+           project_id,card_id,plan_path,status,control,model,escalated,kind,
+           narrowed_tools,created_at,updated_at)
+          SELECT id,bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,
+                 project_id,card_id,plan_path,status,control,model,escalated,kind,
+                 narrowed_tools,created_at,updated_at
+          FROM bot_sessions;
+        DROP TABLE bot_sessions;
+        ALTER TABLE bot_sessions_old RENAME TO bot_sessions;
+      `);
+      const preSql = pre.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'").get().sql;
+      assert.ok(preSql.includes("CHECK (control IN ('run','stop'))"), "test setup sanity: pre-fix CHECK must be the narrow one");
+      // A real pre-existing row, to prove the rebuild preserves it verbatim.
+      const info = pre
+        .prepare("INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,status,control,kind) VALUES (?,?,?,?,?,?)")
+        .run("carried-bot", "perch", "carried-thread", "active", "run", "perch-live");
+      seededId = info.lastInsertRowid;
+    } finally {
+      pre.close();
+    }
+
+    // Re-run init-db.js against the same data dir — the guarded rebuild must
+    // widen the CHECK, preserve the seeded row exactly, and reject nothing.
+    execFileSync(process.execPath, ["scripts/init-db.js"], {
+      env: { ...process.env, CROW_DATA_DIR: migDir },
+      stdio: "pipe",
+    });
+    const post = new Database(join(migDir, "crow.db"));
+    try {
+      const postSql = post.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'").get().sql;
+      assert.ok(postSql.includes("'interrupted'"), "the CHECK must be widened by a second init-db.js run");
+      const seeded = post.prepare("SELECT bot_id, gateway_thread_id, status, control, kind FROM bot_sessions WHERE id=?").get(seededId);
+      assert.deepEqual(seeded, {
+        bot_id: "carried-bot", gateway_thread_id: "carried-thread", status: "active", control: "run", kind: "perch-live",
+      }, "the pre-existing row must survive the rebuild byte-identical");
+      // And the new value now actually inserts without a CHECK violation.
+      const inserted = post
+        .prepare("INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,status,control,kind) VALUES (?,?,?,?,?,?)")
+        .run("post-mig-bot", "perch", "post-mig-thread", "waiting-user", "interrupted", "perch-live");
+      assert.ok(inserted.lastInsertRowid > 0);
+    } finally {
+      post.close();
+    }
+  } finally {
+    rmSync(migDir, { recursive: true, force: true });
+  }
+});
