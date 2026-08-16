@@ -14,12 +14,19 @@
  */
 
 import { writeTombstone } from "./contact-delete.js";
+import { emitOrQueue } from "../shared/sync-emit.js";
 
 let _mgrMod = null;
 let _testSink = null;
+let _testDb = null;
 
-/** Test seam: inject a spy sink ({ emitChange }), or null to reset. */
-export function __setEmitSinkForTest(sink) { _testSink = sink; }
+/**
+ * Test seam: inject a spy sink ({ emitChange }), or null to reset. `db` is an
+ * optional second arg — only needed by tests exercising the null-branch queue
+ * path (emitContactChange has no db param of its own; production sources it
+ * from the same shared-managers singleton `sink()` already reads).
+ */
+export function __setEmitSinkForTest(sink, db = null) { _testSink = sink; _testDb = db; }
 
 async function sink() {
   if (_testSink) return _testSink;
@@ -27,9 +34,16 @@ async function sink() {
   return _mgrMod.getInstanceSyncManager?.() || null;
 }
 
+/** The db to queue against when there's no live manager — test override, else the shared singleton's db (production; always constructed by the time a sharing entrypoint runs a tool). */
+async function emitDb() {
+  if (_testDb) return _testDb;
+  if (!_mgrMod) { try { _mgrMod = await import("./managers.js"); } catch { return null; } }
+  return _mgrMod.getManagersOrNull?.()?.db || null;
+}
+
 /** @returns {Promise<number|null|undefined>} the emitted lamport, or nullish when suppressed. */
 export async function emitContactChange(op, row) {
-  try { return await (await sink())?.emitChange("contacts", op, row); } catch { /* never throw */ }
+  return await emitOrQueue(await sink(), await emitDb(), "contacts", op, row);
 }
 
 /**
@@ -44,7 +58,7 @@ export async function emitContactChange(op, row) {
  */
 export async function emitContactDelete(db, crowId, fallbackLamportTs) {
   if (!crowId || crowId.startsWith("req:")) return;
-  let lamport = null;
-  try { lamport = await (await sink())?.emitChange("contacts", "delete", { crow_id: crowId }); } catch { /* never throw */ }
+  const result = await emitOrQueue(await sink(), db, "contacts", "delete", { crow_id: crowId });
+  const lamport = result && typeof result === "object" ? result.lamport : result;
   await writeTombstone(db, crowId, lamport ?? fallbackLamportTs);
 }

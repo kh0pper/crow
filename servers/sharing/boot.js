@@ -26,6 +26,7 @@ import { markDelivered, DELIVERY_RECEIPT_SUBTYPE, HANDSHAKE_COMPLETE_SUBTYPE, bu
 import { setReceiveWired } from "./receive-health.js";
 import { wasProcessed, recordProcessedEvent } from "./processed-events.js";
 import { sanitizeDisplayName } from "./display-name.js";
+import { emitOrQueue } from "../shared/sync-emit.js";
 
 /**
  * Read the local user's own display name (dashboard_settings.profile_display_name),
@@ -937,6 +938,21 @@ export async function initSharingRuntime(managers, helpers) {
             ],
           });
           importedItemId = Number(result.lastInsertRowid);
+          // Emit sync entry — mirrors servers/memory/server.js's crow_store_memory
+          // insert shape ({id, content, category, context, tags, source, importance,
+          // instance_id, project_id}); this share-import never sets instance_id/
+          // project_id, so both ride as null (matching the columns' defaults).
+          emitOrQueue(instanceSyncManager, db, "memories", "insert", {
+            id: importedItemId,
+            content: payload.payload.content || "",
+            category: payload.payload.category || "general",
+            importance: payload.payload.importance || 5,
+            context: payload.payload.context || "",
+            source: payload.payload.source || "",
+            tags: payload.payload.tags || "",
+            instance_id: null,
+            project_id: null,
+          }).catch(() => {});
         } else if (payload.share_type === "source") {
           // S4: cap peer-controlled title at 1000 chars — title is FTS5-indexed
           // (research_sources_fts trigger in init-db.js) and is peer-supplied.
@@ -963,6 +979,17 @@ export async function initSharingRuntime(managers, helpers) {
             args: [payload.payload.content || ""],
           });
           importedItemId = Number(result.lastInsertRowid);
+          // Emit sync entry — no memory-server precedent for this table (first
+          // emitter), so re-select the committed full row (same "SELECT then
+          // emit" shape as group-sync.js's emitGroupUpsert). project_id rides
+          // NULL already (this insert never sets it); OUTBOUND_TRANSFORMS.research_notes
+          // NULLs it again on the live emitChange side regardless.
+          {
+            const { rows: noteRows } = await db.execute({ sql: "SELECT * FROM research_notes WHERE id = ?", args: [importedItemId] });
+            if (noteRows.length > 0) {
+              emitOrQueue(instanceSyncManager, db, "research_notes", "insert", noteRows[0]).catch(() => {});
+            }
+          }
         } else if (payload.share_type === "project" && payload.mode === "clone" && payload.payload) {
           // M4: clone-bundle ingestion. Creates a new project_spaces row
           // with `-clone-N` slug + carries sources/notes/audit. Owner is

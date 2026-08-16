@@ -21,6 +21,7 @@ import {
   cosineSim,
 } from "./embeddings.js";
 import { rerank as phase4Rerank } from "./rerank.js";
+import { emitOrQueue } from "../shared/sync-emit.js";
 
 export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -97,13 +98,11 @@ export function createMemoryServer(dbPath, options = {}) {
       storeEmbedding(memoryId, content);
 
       // Emit sync entry (non-blocking)
-      if (syncManager) {
-        syncManager.emitChange("memories", "insert", {
-          id: memoryId, content, category, context: context ?? null,
-          tags: tags ?? null, source: source ?? null, importance,
-          instance_id: instance_id ?? null, project_id: project_id ?? null,
-        }).catch(() => {});
-      }
+      emitOrQueue(syncManager, db, "memories", "insert", {
+        id: memoryId, content, category, context: context ?? null,
+        tags: tags ?? null, source: source ?? null, importance,
+        instance_id: instance_id ?? null, project_id: project_id ?? null,
+      }).catch(() => {});
 
       return {
         content: [
@@ -599,11 +598,11 @@ export function createMemoryServer(dbPath, options = {}) {
       }
 
       // Emit sync entry
-      if (syncManager) {
+      {
         const updated = { id, content, category, tags, importance, context, source: rows[0].source ?? null };
         // Remove undefined fields
         for (const k of Object.keys(updated)) { if (updated[k] === undefined) delete updated[k]; }
-        syncManager.emitChange("memories", "update", updated).catch(() => {});
+        emitOrQueue(syncManager, db, "memories", "update", updated).catch(() => {});
       }
 
       return { content: [{ type: "text", text: `Memory #${id} updated.` }] };
@@ -689,9 +688,7 @@ export function createMemoryServer(dbPath, options = {}) {
       await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [id] });
 
       // Emit sync entry
-      if (syncManager) {
-        syncManager.emitChange("memories", "delete", { id, source: memory.source ?? null }).catch(() => {});
-      }
+      emitOrQueue(syncManager, db, "memories", "delete", { id, source: memory.source ?? null }).catch(() => {});
 
       return { content: [{ type: "text", text: `Memory #${id} deleted.` }] };
     }
@@ -936,7 +933,7 @@ export function createMemoryServer(dbPath, options = {}) {
       // Emit sync entry — post-UPDATE re-select is MANDATORY so the emitted row
       // carries the actual committed values (not the partial param set, which omits
       // enabled/sort_order when not provided, and never carries the pre-update values).
-      if (syncManager) {
+      {
         const { buildCrowContextWireRow } = await import("../sharing/instance-sync.js").catch(() => ({}));
         if (buildCrowContextWireRow) {
           const { rows: emitRows } = await db.execute({
@@ -944,7 +941,7 @@ export function createMemoryServer(dbPath, options = {}) {
             args: whereArgs,
           });
           if (emitRows.length > 0) {
-            syncManager.emitChange("crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
+            emitOrQueue(syncManager, db, "crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
           }
         }
       }
@@ -981,7 +978,7 @@ export function createMemoryServer(dbPath, options = {}) {
 
         // Emit sync entry — post-INSERT re-select captures enabled (DB default)
         // so the wire row is always complete regardless of which fields the tool call provided.
-        if (syncManager) {
+        {
           const { buildCrowContextWireRow } = await import("../sharing/instance-sync.js").catch(() => ({}));
           if (buildCrowContextWireRow) {
             const { rows: emitRows } = await db.execute({
@@ -989,7 +986,7 @@ export function createMemoryServer(dbPath, options = {}) {
               args: [section_key, device_id ?? null, project_id ?? null],
             });
             if (emitRows.length > 0) {
-              syncManager.emitChange("crow_context", "insert", buildCrowContextWireRow(emitRows[0])).catch(() => {});
+              emitOrQueue(syncManager, db, "crow_context", "insert", buildCrowContextWireRow(emitRows[0])).catch(() => {});
             }
           }
         }
@@ -1079,9 +1076,7 @@ export function createMemoryServer(dbPath, options = {}) {
       invalidateContextCache();
 
       // Emit sync entry
-      if (syncManager) {
-        syncManager.emitChange("crow_context", "delete", { section_key, device_id: device_id ?? null, project_id: project_id ?? null }).catch(() => {});
-      }
+      emitOrQueue(syncManager, db, "crow_context", "delete", { section_key, device_id: device_id ?? null, project_id: project_id ?? null }).catch(() => {});
 
       const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
       const target = scope ? ` (${scope})` : "";

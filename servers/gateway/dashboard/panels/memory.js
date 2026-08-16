@@ -21,6 +21,8 @@ import { renderMarkdown } from "../../../blog/renderer.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { hostname as osHostname } from "node:os";
+import { getInstanceSyncManager } from "../../../sharing/server.js";
+import { emitOrQueue } from "../../../shared/sync-emit.js";
 
 const PAGE_SIZE = 20;
 
@@ -158,7 +160,15 @@ export default {
       const { action } = req.body;
 
       if (action === "delete") {
+        // Emit sync entry — mirrors servers/memory/server.js's crow_delete_memory
+        // shape ({id, source}); the pre-delete SELECT is the only way to still
+        // have `source` once the row is gone.
+        const { rows: existing } = await db.execute({ sql: "SELECT source FROM memories WHERE id = ?", args: [req.body.id] });
         await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [req.body.id] });
+        if (existing.length > 0) {
+          const syncMgr = getInstanceSyncManager?.();
+          emitOrQueue(syncMgr, db, "memories", "delete", { id: Number(req.body.id), source: existing[0].source ?? null }).catch(() => {});
+        }
         res.redirectAfterPost("/dashboard/memory");
         return;
       }
@@ -166,10 +176,21 @@ export default {
       if (action === "edit") {
         const { id, content, category, importance } = req.body;
         if (id && content) {
+          const { rows: existing } = await db.execute({ sql: "SELECT source FROM memories WHERE id = ?", args: [id] });
           await db.execute({
             sql: "UPDATE memories SET content = ?, category = ?, importance = ?, updated_at = datetime('now') WHERE id = ?",
             args: [content, category || "general", parseInt(importance, 10) || 5, id],
           });
+          // Emit sync entry — mirrors servers/memory/server.js's crow_update_memory
+          // shape ({id, content, category, tags, importance, context, source});
+          // tags/context are omitted here exactly as they are when the tool call's
+          // optional args are omitted (undefined fields stripped there too).
+          const syncMgr = getInstanceSyncManager?.();
+          emitOrQueue(syncMgr, db, "memories", "update", {
+            id: Number(id), content, category: category || "general",
+            importance: parseInt(importance, 10) || 5,
+            source: existing[0]?.source ?? null,
+          }).catch(() => {});
         }
         res.redirectAfterPost("/dashboard/memory");
         return;
