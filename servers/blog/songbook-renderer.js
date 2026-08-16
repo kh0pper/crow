@@ -13,7 +13,7 @@
 import { parseChordPro, transposeAst, renderChordProHtml, extractChords, parseSongMeta } from "./chordpro.js";
 import { getChordDiagram } from "./chord-diagrams.js";
 import { parsePodcastMeta } from "./podcast-rss.js";
-import { FONT_IMPORT, designTokensCss } from "../gateway/dashboard/shared/design-tokens.js";
+import { LEGACY_FONT_IMPORT as FONT_IMPORT, legacyDesignTokensCss as designTokensCss } from "../gateway/dashboard/shared/design-tokens-legacy.js";
 
 const KEYS = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
 
