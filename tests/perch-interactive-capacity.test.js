@@ -318,6 +318,67 @@ test("cycle: no_such_session and session_stopped refusals", async () => {
   await assert.rejects(() => engine.cycle(s.sessionId), (e) => e.code === "session_stopped");
 });
 
+// Fix round 1 (coordinator-reported Important finding): two concurrent
+// cycle() calls on the SAME session used to race — the second saw `s.pi`
+// already null after the first's hibernate() closed it, no-op'd its own
+// hibernate(), and spawned a competing child; then the first's suspended
+// startChild resumed and spawned a THIRD, clobbering `s.pi` and leaking the
+// second's child as an uncounted orphan. `s.cycling` (set synchronously,
+// before cycle()'s first await; cleared in a finally) closes this the same
+// way `s.turn`'s claim closes message()'s own re-entrancy hole.
+test("cycle: re-entrancy guard — two concurrent cycle() on ONE session produce exactly one respawn, the other gets cycle_busy", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine, "botty");
+  assert.equal(state.instances.length, 1);
+
+  let outcomeA = null;
+  let outcomeB = null;
+  const pA = engine.cycle(s.sessionId).then((r) => { outcomeA = { ok: true, r }; }, (e) => { outcomeA = { ok: false, e }; });
+  const pB = engine.cycle(s.sessionId).then((r) => { outcomeB = { ok: true, r }; }, (e) => { outcomeB = { ok: false, e }; });
+  await Promise.allSettled([pA, pB]);
+
+  const outcomes = [outcomeA, outcomeB];
+  const ok = outcomes.filter((o) => o.ok);
+  const bad = outcomes.filter((o) => !o.ok);
+  assert.equal(ok.length, 1, "exactly one of the two racing cycle() calls succeeds");
+  assert.equal(bad.length, 1, "the other is refused, not left to race");
+  assert.equal(bad[0].e.code, "cycle_busy");
+  assert.equal(state.instances.length, 2, "exactly ONE respawn happened — the original plus ONE fresh child, never two");
+  assert.equal(state.instances[0].closed, 1, "the original child was closed exactly once");
+  assert.equal((await engine.get(s.sessionId)).state, "awake");
+  // The guard clears itself: a THIRD cycle(), after both racers have
+  // settled, is not wedged permanently cycle_busy.
+  const r3 = await engine.cycle(s.sessionId);
+  assert.equal(r3.state, "awake");
+  assert.equal(state.instances.length, 3);
+});
+
+test("cycle: a message() fired mid-cycle gets a typed refusal — exactly one live child survives", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine, "botty");
+  const firstPi = state.instances[0];
+
+  // Hold the respawn inside buildBotWorld so the session is genuinely
+  // mid-cycle — the OLD child already closed by hibernate(), the NEW one not
+  // yet constructed — when message() fires.
+  let release;
+  state.worldGate = new Promise((r) => { release = r; });
+  const cyclePromise = engine.cycle(s.sessionId);
+  await tick();
+  assert.equal(firstPi.closed, 1, "test setup sanity: the old child is already closed mid-cycle");
+  assert.equal(state.instances.length, 1, "test setup sanity: the new child has not been constructed yet");
+
+  await assert.rejects(() => engine.message(s.sessionId, "hi"), (e) => e.code === "cycle_busy",
+    "message() must not try to wake a session cycle() is already respawning");
+
+  release();
+  const r = await cyclePromise;
+  assert.equal(r.state, "awake");
+
+  assert.equal(state.instances.length, 2, "exactly one respawn — message() never spawned a competing child");
+  assert.equal(state.instances[1].closed, 0, "the new child is alive and untouched");
+});
+
 // ---------------------------------------------------------------------------
 // 2. safe-victim eviction
 // ---------------------------------------------------------------------------
