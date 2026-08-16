@@ -59,7 +59,7 @@ function freshLibsql() {
 // (providers-db.js: _syncManager.emitChange("providers", op, row)).
 function spySyncManager() {
   const calls = [];
-  setProviderSyncManager({ emitChange: async (...a) => { calls.push(a); } });
+  setProviderSyncManager({ feedsDisabled: false, emitChange: async (...a) => { calls.push(a); } });
   return calls;
 }
 

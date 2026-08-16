@@ -15,6 +15,7 @@ import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { invalidateContextCache } from "../../../memory/crow-context.js";
 import { getInstanceSyncManager } from "../../../sharing/server.js";
+import { emitOrQueue } from "../../../shared/sync-emit.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_SKILLS_DIR = join(__dirname, "../../../../skills");
@@ -109,25 +110,23 @@ export default {
       if (action === "save-writing-rules") {
         const { content } = req.body;
         await db.execute({
-          sql: 'UPDATE crow_context SET content = ?, updated_at = datetime("now") WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL',
+          sql: "UPDATE crow_context SET content = ?, updated_at = datetime('now') WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL",
           args: [content, "writing_style"],
         });
         invalidateContextCache();
         // D4: emit the post-UPDATE row so this dashboard edit replicates to peers.
         // Zero rows → section absent, skip emit.  Null manager → sharing not initialized, skip silently.
         const syncMgr = getInstanceSyncManager?.();
-        if (syncMgr) {
-          try {
-            const { buildCrowContextWireRow } = await import("../../../sharing/instance-sync.js");
-            const { rows: emitRows } = await db.execute({
-              sql: "SELECT * FROM crow_context WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL",
-              args: ["writing_style"],
-            });
-            if (emitRows.length > 0) {
-              syncMgr.emitChange("crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
-            }
-          } catch {}
-        }
+        try {
+          const { buildCrowContextWireRow } = await import("../../../sharing/instance-sync.js");
+          const { rows: emitRows } = await db.execute({
+            sql: "SELECT * FROM crow_context WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL",
+            args: ["writing_style"],
+          });
+          if (emitRows.length > 0) {
+            emitOrQueue(syncMgr, db, "crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
+          }
+        } catch {}
         res.redirectAfterPost("/dashboard/skills");
         return;
       }
@@ -144,25 +143,23 @@ export default {
           return;
         }
         await db.execute({
-          sql: 'UPDATE crow_context SET content = ?, updated_at = datetime("now") WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL',
+          sql: "UPDATE crow_context SET content = ?, updated_at = datetime('now') WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL",
           args: [content, sectionKey],
         });
         invalidateContextCache();
         // D4: emit the post-UPDATE row so this dashboard edit replicates to peers.
         // Zero rows → section absent, skip emit.  Null manager → sharing not initialized, skip silently.
         const syncMgr = getInstanceSyncManager?.();
-        if (syncMgr) {
-          try {
-            const { buildCrowContextWireRow } = await import("../../../sharing/instance-sync.js");
-            const { rows: emitRows } = await db.execute({
-              sql: "SELECT * FROM crow_context WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL",
-              args: [sectionKey],
-            });
-            if (emitRows.length > 0) {
-              syncMgr.emitChange("crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
-            }
-          } catch {}
-        }
+        try {
+          const { buildCrowContextWireRow } = await import("../../../sharing/instance-sync.js");
+          const { rows: emitRows } = await db.execute({
+            sql: "SELECT * FROM crow_context WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL",
+            args: [sectionKey],
+          });
+          if (emitRows.length > 0) {
+            emitOrQueue(syncMgr, db, "crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
+          }
+        } catch {}
         res.redirectAfterPost("/dashboard/skills");
         return;
       }

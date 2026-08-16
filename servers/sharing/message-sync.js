@@ -14,6 +14,8 @@
  * STATIC-import managers here (nostr.js imports this module). Lazy (cached)
  * dynamic import keeps the load graph acyclic — identical to contact-sync.js.
  */
+import { emitOrQueue } from "../shared/sync-emit.js";
+
 let _mgrMod = null;
 let _testSink = null;
 export function __setEmitSinkForTest(sink) { _testSink = sink; }
@@ -43,6 +45,6 @@ export async function emitMessageInsert(db, { contactId, nostrEventId } = {}) {
     });
     const row = rows[0];
     if (!row || !row.nostr_event_id || !row.crow_id) return;
-    await (await sink())?.emitChange("messages", "insert", row);
+    await emitOrQueue(await sink(), db, "messages", "insert", row);
   } catch { /* never throw — coherence is best-effort */ }
 }

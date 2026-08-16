@@ -23,6 +23,7 @@
  */
 
 import { SYNCED_TABLES, rowsEquivalent } from "./instance-sync.js";
+import { emitOrQueue } from "../shared/sync-emit.js";
 
 // ── Natural-key restore refusals (2c C7 / 2c-F3) ─────────────────────────────
 // These tables key their conflict row_id on a JSON natural key (crow_context:
@@ -257,11 +258,12 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
 
     // emitChange with "delete"
     let syncNote = null;
-    if (instanceSync) {
-      try {
-        await instanceSync.emitChange(table, "delete", { id: rowId });
-      } catch {}
-    } else {
+    const emitResult = await emitOrQueue(instanceSync, db, table, "delete", { id: rowId });
+    if (emitResult && emitResult.queued === true) {
+      syncNote =
+        "Restored locally — change queued for sync; peers will be notified when the " +
+        "gateway next drains.";
+    } else if (!instanceSync) {
       syncNote = "Restored locally (sharing not initialized — peers not notified).";
     }
 
@@ -385,14 +387,18 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
   // ── 6. emitChange so peers receive the restoration ───────────────────────
 
   let syncNote = null;
-  if (instanceSync) {
-    try {
-      // "update" when we UPDATEd; "insert" when we re-INSERTed a since-deleted row.
-      // Emitting "update" for a re-insert would silently no-op on peers that also
-      // lack the row (_applyUpdate matches 0 rows without error).
-      await instanceSync.emitChange(table, applyOp, { ...losingData, id: rowId });
-    } catch {}
-  } else {
+  // "update" when we UPDATEd; "insert" when we re-INSERTed a since-deleted row.
+  // Emitting "update" for a re-insert would silently no-op on peers that also
+  // lack the row (_applyUpdate matches 0 rows without error).
+  const emitResult = await emitOrQueue(instanceSync, db, table, applyOp, {
+    ...losingData,
+    id: rowId,
+  });
+  if (emitResult && emitResult.queued === true) {
+    syncNote =
+      "Restored locally — change queued for sync; peers will be notified when the " +
+      "gateway next drains.";
+  } else if (!instanceSync) {
     syncNote = "Restored locally (sharing not initialized — peers not notified).";
   }
 

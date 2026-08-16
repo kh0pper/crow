@@ -67,7 +67,7 @@ test("zero overlap between SYNC_ALLOWLIST and INSTANCE_SCOPE_KEYS (pattern-aware
 test("writeSetting routing: instance key → global table, NO override, NO emit (D1)", async () => {
   const { db, cleanup } = fresh();
   const emitted = [];
-  setSettingsSyncManager({ emitChange: async (t, op, row) => { emitted.push(row.key); } });
+  setSettingsSyncManager({ feedsDisabled: false, emitChange: async (t, op, row) => { emitted.push(row.key); } });
   try {
     const res = await upsertSetting(db, "auto_update_enabled", "false");
     assert.equal(await globalValue(db, "auto_update_enabled"), "false", "lands in dashboard_settings");
