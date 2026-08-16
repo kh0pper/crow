@@ -17,6 +17,8 @@ const TAG_MAP = {
   reminder: "alarm_clock",
   system: "gear",
   media: "musical_note",
+  // Track 3 Task 8: perch-interactive turn-end / ask-card / gated-result pushes.
+  attention: "bird",
 };
 
 /**

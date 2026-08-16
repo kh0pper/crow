@@ -75,6 +75,28 @@ export async function reportResult(tdb, cdb, itemId, { outcome, summaryMd, planI
       args: [stamp, resultId],
     });
     status = "approved";
+  } else if (cur.autonomy === "gated") {
+    // Track 3 Task 8: a gated card never auto-moves on ANY outcome — this
+    // result_report is the ONLY signal an operator gets that a bot finished
+    // and is waiting on a decision. Blocking event: always pushes,
+    // priority high, same as the engine's ask-card push. Fire-and-forget —
+    // notifications.js's own createNotification already fails open on every
+    // downstream sender, and a notification error must never undo the
+    // result row already committed above. `cdb` (crow.db) is where the
+    // shared notifications table lives — this file never resolves its own
+    // path (module header).
+    try {
+      const { createNotification } = await import("../../shared/notifications.js");
+      await createNotification(cdb, {
+        type: "attention",
+        priority: "high",
+        title: (cur.title ? `"${cur.title}"` : `Card #${itemId}`) + " needs review",
+        body: summaryMd || `${String(outcome)} reported by ${a.kind || "bot"}${a.id ? " " + a.id : ""}`,
+        action_url: "/dashboard/bot-board#card=" + itemId,
+      });
+    } catch {
+      // Non-fatal — the result row is already committed.
+    }
   }
 
   return { id: resultId, status };

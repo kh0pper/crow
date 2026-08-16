@@ -10,7 +10,11 @@
  */
 
 function shouldEmail({ priority, type }) {
-  return priority === "high" || type === "briefing";
+  // Track 3 Task 8: "attention" pushes (bot turn/ask-card/gated-result) are
+  // high-priority by design but are already surfaced live in the drawer and
+  // via ntfy/web-push — email would be redundant noise for a channel meant
+  // to stay quiet. Excluded even at priority='high'.
+  return (priority === "high" && type !== "attention") || type === "briefing";
 }
 
 function escapeHtml(s) {
