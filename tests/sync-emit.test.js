@@ -192,6 +192,59 @@ test("queue path: delete op skips the row-stamp statement — batch carries 3, n
   }
 });
 
+// ── opts.lamportTs preserve-lamport path (Fix 2, finding-1 divergence class) ─
+
+test("queue path: opts.lamportTs is honored — no fresh mint; row + outbox stamped with the SAME provided value; a later normal mint exceeds it", async () => {
+  await ensureSyncTables(shared.db);
+  _setEligibilityForTest(() => true);
+  await insertMemory(shared.db, 707, 0);
+
+  // Deliberately far ahead of the counter's current value, so a fabricated
+  // fresh mint (the bug) would produce a visibly SMALLER lamport than this.
+  const providedLamport = 999999;
+  const result = await emitOrQueue(
+    null,
+    shared.db,
+    "memories",
+    "update",
+    { id: 707, content: "preserved" },
+    { lamportTs: providedLamport },
+  );
+
+  assert.deepEqual(result, { queued: true, lamport: providedLamport }, "must return the PROVIDED lamport verbatim, not a fresh mint");
+
+  const { rows: memRows } = await shared.db.execute({
+    sql: "SELECT lamport_ts FROM memories WHERE id = ?",
+    args: [707],
+  });
+  assert.equal(
+    Number(memRows[0].lamport_ts),
+    providedLamport,
+    "stamped source row must carry the PROVIDED lamport, not a fresh mint",
+  );
+
+  const { rows: outboxRows } = await shared.db.execute(
+    "SELECT lamport_ts, row_json FROM sync_outbox ORDER BY id DESC LIMIT 1",
+  );
+  assert.equal(
+    Number(outboxRows[0].lamport_ts),
+    providedLamport,
+    "outbox row must carry the PROVIDED lamport, identical to the stamped source row",
+  );
+  assert.deepEqual(JSON.parse(outboxRows[0].row_json), { id: 707, content: "preserved" });
+
+  // Floor proven: a subsequent NORMAL (no-opts) mint on the same instance
+  // must exceed the provided value — the counter was floored, not ignored.
+  await insertMemory(shared.db, 708, 0);
+  const nextResult = await emitOrQueue(null, shared.db, "memories", "update", { id: 708, content: "fresh" });
+  assert.ok(
+    nextResult && nextResult.lamport > providedLamport,
+    "a subsequent normal mint must exceed the floored value",
+  );
+
+  _setEligibilityForTest(null);
+});
+
 // ── syncability parity gate ─────────────────────────────────────────────
 
 test("not-syncable: a table outside SYNCED_TABLES returns null and never touches the outbox", async () => {
