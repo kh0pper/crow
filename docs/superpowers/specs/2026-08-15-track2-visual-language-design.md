@@ -104,11 +104,26 @@ not values; no test asserts a palette hex (verified).
 
 Two tokens CANNOT be safely re-valued in place and get explicit handling (review finding 2):
 
-- `--crow-radius-pill` is consumed at **44 sites as a small control radius** (inputs, selects,
-  buttons — e.g. `panels/projects.js:209–210, 474–483`). Re-valuing it to 999px would pill-round
-  every text input. So: new `--crow-radius-control: 10px` (Perch's control radius) is introduced,
-  the 44 existing `radius-pill` consumers are swept onto it in W3 (mechanical, greppable), and only
-  THEN does `--crow-radius-pill` re-value to `999px`, reserved for chips/tags/pills proper.
+- `--crow-radius-pill` is consumed at **44 sites** today. Re-valuing it to 999px blind would
+  pill-round every text input; sweeping ALL sites to a new control token would contradict §1's
+  radius split and strand the pill token. So (round-2 findings 1–2): new
+  `--crow-radius-control: 10px` (Perch's control radius) is introduced, and the 44 sites are
+  **triaged, not blanket-swept**:
+  - **Excluded — frozen surfaces (5 sites):** `servers/blog/songbook-renderer.js:97,203,211,495`
+    and `servers/gateway/routes/blog-public.js:318` are NOT touched — they read
+    `design-tokens-legacy.js` (which keeps `--crow-radius-pill: 8px` and defines no
+    `--crow-radius-control`); sweeping them would compute to radius 0 on the public blog.
+  - **Control-shaped sites → `--crow-radius-control`:** inputs, selects, buttons, `.bb-search`,
+    `.bb-switch`, `.btn-xs`, `.callout`, and kin (e.g. `panels/projects.js:209–210, 474–483`).
+  - **Chip/tag/badge sites STAY on `--crow-radius-pill`** and take the 999px re-value day one:
+    `bot-board/css.js` `.bb-tag`:25 / `.bb-marker`:30 / `.bb-chip`:53 / `.bb-list-status`:71,
+    `bot-builder/css.js` `.btb-tab`:11, `messages/client.js:639,1251` (msg-route-badge — these
+    two live inside the panel-client template-literal emission: no backticks, escapes
+    double-escaped), `messages/css.js:607` (whose existing fallback is already
+    `var(--crow-radius-pill, 999px)` — the intended end state, written in the tree),
+    `providers-tab.js:27`, `ai-profiles.js:126` `.llm-profile-badge`, `components-css.js:12`
+    `.badge`. Chip rounding to 999px is a deliberate day-one visual change (round-2 Q1 decided).
+  Only after the triage does `--crow-radius-pill` re-value to `999px`.
 - `--crow-radius-card` re-values 12px → 14px in place (safe — it is a card radius everywhere).
 
 ### 3.2 The new values
@@ -164,27 +179,31 @@ an indigo-era artifact and reads as grime on `#eef1f3`.
 ### 3.2.1 Contrast policy (review findings 1, 4, 5, 11, 19 — binding on W3)
 
 - **Text on accent/status fills** uses `--crow-accent-contrast`, never a hardcoded `#fff`.
-  Verified: white on light accent `#0e6b62` passes; `#131a1f` on dark accent `#4fbdb0` = 7.7:1.
-  W3 sweeps the ~20 white-on-accent sites (`.btn-primary` `layout.js:1135–1137`, login button
-  :1240–1243, `panels/projects.js:214,275,485`, `shared/player.js`, badge fills) onto it. Status
-  badges (`.badge-published`, `.badge-connected`, …) likewise use `--crow-accent-contrast` on
-  their status fills.
+  Verified (both rounds): white on light accent `#0e6b62` = 6.37:1; `#131a1f` on dark accent
+  `#4fbdb0` = 7.73:1, on hover `#6fd0c4` = 9.62:1; all eight status-fill pairs pass (worst 4.66).
+  W3 sweeps the **~37** white-on-accent sites (grep-driven: same-rule
+  `background: var(--crow-accent)` + `color:#fff/white` — `.btn-primary` `layout.js:1135–1137`,
+  login button :1240–1243, `panels/projects.js:214,275,485`, `shared/player.js`, badge fills, …)
+  onto it. Status badges (`.badge-published`, `.badge-connected`, …) likewise use
+  `--crow-accent-contrast` on their status fills.
 - **Body-size status text is retired as a pattern.** `.alert-success`/`.alert-error`/`.callout-*`
   render `--crow-text-primary` body text on a status-tinted background (`color-mix` on the status
   token) with a status-colored border/icon — status is carried by the container, not by coloring
-  sentence text. Status tokens AS text are reserved for short/large elements (stat values, icons,
-  single-word states) on `bg-surface`, where the revised values pass AA.
-- **`--crow-text-tertiary` and `--crow-text-muted` are large/short-text and decorative tokens** —
-  they do not pass 4.5:1 on every background and are not meant to. W3 re-points today's body-size
-  muted uses (`.empty-state` copy, `.login-subtitle`, `.stat-card .label`) to
-  `--crow-text-secondary`.
+  sentence text. Status tokens AS text are reserved for **WCAG-large text (≥24px, or ≥18.66px
+  bold) and icons** — stat values qualify, body-size state words do not (round-2 finding 3:
+  "short" is not a WCAG size category, and dark error `#d1633e` on `bg-surface` is 4.17:1). At
+  large size all status-on-surface pairs pass 3:1.
+- **`--crow-text-tertiary` is a large/short-text token; `--crow-text-muted` is DECORATIVE-ONLY**
+  (round-2 finding 8: muted misses even 3:1 on bg-deep light / bg-elevated dark — never text that
+  must be read). W3 re-points today's body-size muted uses (`.empty-state` copy,
+  `.login-subtitle`, `.stat-card .label`) to `--crow-text-secondary`.
 - **`--crow-brand-gold` is decorative/large-only** (SVG fills, large numerals). It shares warning's
   values; if a future badge needs gold-as-fill, its text is `--crow-accent-contrast`.
 - **Control boundaries** (WCAG 1.4.11): inputs/selects use `--crow-border-strong` (wire) for their
-  borders. Recorded as an **accepted deviation**: wire on white is ~1.9:1, short of the 3:1
-  non-text ideal — this matches Perch's own control look; focus states (already
-  `outline: 2px solid var(--crow-accent)`, guarded by `tests/a11y-baseline.test.js`) carry the
-  accessible affordance. Round 2 does not need to re-litigate this.
+  borders. Recorded as an **accepted deviation**: wire on white is 2.57:1 (dark: 2.07:1 on
+  surface), short of the 3:1 non-text ideal — this matches Perch's own control look; focus states
+  (already `outline: 2px solid var(--crow-accent)`, guarded by `tests/a11y-baseline.test.js`)
+  carry the accessible affordance.
 
 ### 3.3 Theme mechanism: the OS decides
 
@@ -214,9 +233,12 @@ Everywhere at once — glass is not frozen with the blog, it is removed:
 - CSS blocks deleted: `design-tokens.js:80–119`; `layout.js:1265–1298`;
   `panels/extensions/css.js:398–417`; `settings/menu-renderer.js:179–181`;
   `blog-public.js:299–318` + class composition :332; `songbook-renderer.js` glass rules + the 3
-  class-composition sites (:306, :474, :587); `theme-resolver.js` dies whole (§3.3). Orphan sweep
-  afterward: `grep -rn "crow-glass-blur\|crow-bg-popup\|crow-border-popup\|theme-glass"` over
-  `servers/` and `bundles/` must come back empty (docs history exempt).
+  class-composition sites (:306, :474, :587); `theme-resolver.js` dies whole (§3.3). The
+  `themeGlass` READ fields go too: `blog-public.js:83` (`themeGlass: s.theme_glass === "true"`)
+  and `songbook.js:29`. Orphan sweep afterward:
+  `grep -rn "crow-glass-blur\|crow-bg-popup\|crow-border-popup\|theme-glass\|theme_glass\|themeGlass"`
+  over `servers/` and `bundles/` must come back empty (docs history exempt) — the underscore and
+  camelCase variants are in the pattern deliberately (round-2 finding 9).
 - **Settings section end state (review finding 10, decided):** `settings/sections/theme.js`
   becomes the **"Blog theme"** section (label re-keyed via i18n): a Color Mode select writing
   `blog_theme_mode` (+ the existing blog-surface override select writing `blog_theme_blog_mode`)
@@ -224,16 +246,26 @@ Everywhere at once — glass is not frozen with the blog, it is removed:
   frozen blog. Deleted: the Glass checkbox + its shim (:22, :53–57, :84–86, :122), the Dashboard
   Override select, the now-dead `set_theme`/`set_theme_mode` AJAX handlers (:104–131, tied to the
   retiring `toggleTheme()`), and `getPreview`'s glass read — `getPreview` re-renders from blog
-  mode + serif only.
+  mode + serif only. **A named test casualty** (round-2 finding 5):
+  `tests/instance-scope-cleanups.test.js` case D4 ("set_theme responds ok and writes NOTHING")
+  exercises the deleted `set_theme` handler — D4 is deleted with it (D5 in the same file is
+  unrelated and stays).
 - MCP: `crow_blog_settings` drops BOTH `theme_glass` (zod :456, get :478, display :481, set :509)
   AND `theme_dashboard_mode` (zod :459, set :512 — it would re-create the row the migration
-  deletes; finding 9). Breaking tool-surface change, ours to make.
-- **Settings migration** (net-new; follow `settings/migrations/llm-settings-migration.js`'s
-  registration pattern): delete `blog_theme_glass`, `blog_theme_dashboard_mode`, AND the legacy
-  `dashboard_theme` + `blog_theme` keys (finding 8) from BOTH `dashboard_settings` (global) and
-  `dashboard_settings_overrides` (every `instance_id`). `blog_theme_mode`, `blog_theme_blog_mode`,
-  and `blog_theme_serif` SURVIVE — the frozen blog reads all three. Absent keys read falsy at
-  every read site (`=== "true"` / `|| "dark"` fallbacks), so deletion is the whole migration.
+  deletes; finding 9). The deprecated `theme` alias (zod :451, handler :495–505) KEEPS its
+  `theme_mode`/`theme_serif` mappings but its legacy `blog_theme` write (:504,
+  "keep old key for backward compat") is DELETED — it re-mints the exact legacy key the migration
+  removes (round-2 finding 4). `servers/gateway/tool-manifests.js:86`'s advertised params update
+  to match. Breaking tool-surface change, ours to make.
+- **Settings migration** (net-new): delete `blog_theme_glass`, `blog_theme_dashboard_mode`, AND
+  the legacy `dashboard_theme` + `blog_theme` keys (finding 8) from BOTH `dashboard_settings`
+  (global) and `dashboard_settings_overrides` (every `instance_id`). `blog_theme_mode`,
+  `blog_theme_blog_mode`, and `blog_theme_serif` SURVIVE — the frozen blog reads all three.
+  Absent keys read falsy at every read site (`=== "true"` / `|| "dark"` fallbacks), so deletion
+  is the whole migration. **Invocation pattern precisely** (round-2 finding 10): the precedent
+  `llm-settings-migration.js` does not self-register — it is dynamically imported and run from
+  `servers/gateway/boot/admin-api.js:59–60` at boot, guarded by a `dashboard_settings` flag key;
+  the theme-keys migration hooks the same call site with its own guard flag.
 - **init-db's legacy theme block** (`scripts/init-db.js:2326–2374`) has its `dashboard_theme`
   branch retired in the same PR (finding 8): today it can re-mint `blog_theme_dashboard_mode` from
   a surviving legacy `dashboard_theme` row on any host without `blog_theme_mode` — resurrection of
@@ -278,17 +310,26 @@ exploration each become token consumers:
   `var(--crow-radius-card)`; inputs/`.btn` 8px (:1105, :1127, :1243) → `var(--crow-radius-control)`.
 - Alert tints `rgba(34,197,94,.1)` / `rgba(239,68,68,.1)` (:1197–1198, :1230–1232) → `color-mix`
   on `--crow-success`/`--crow-error`, restructured per §3.2.1's container pattern.
-- Fraunces: `components.js` `section()` heading (:114), `layout.js:908` (`.logo`), :1015, :1184,
-  :1218, and `bundles/media/panel/media.js`'s **10** inline `font-family:'Fraunces'` style literals
-  (:105, :114, :609, :638, :676, :703, :726, :797, :817, :860) → `var(--crow-body-font)`.
-  **Acceptance is a grep** (finding 17): after the sweep, `Fraunces` appears only in
-  `design-tokens-legacy.js`.
+- Fraunces: **the sweep list is the full `grep -rn Fraunces` result over the dashboard tree +
+  bundle panels** (round-2 finding 6 — a hand list undercounts by ~30: beyond `components.js:114`,
+  `layout.js:908,:1015,:1184,:1218`, it includes `panels/nest/css.js:50`, `bot-board/html.js` ×8,
+  `panels/perch.js:110,113`, `panels/projects.js:366`, `panels/skills.js:367,418`,
+  `panels/contacts/css.js:201,379`, `panels/model-catalog.js` ×5, `panels/messages/css.js:591`,
+  `panels/extensions/css.js` ×6 plus `extensions/client.js:92,535` and
+  `bot-builder/engine-gate-client.js:145` — those three are CLIENT-SCRIPT emissions, panel
+  emission constraints apply — and bundles: `podcast/panels/podcast-player.js:198`,
+  `knowledge-base/panel/knowledge-base.js:164`, `media/panel/routes.js:783,786`,
+  `media/panel/media.js` ~24 sites incl. its client script) → `var(--crow-body-font)`.
+  **Acceptance is a scoped grep**: after the sweep, `Fraunces` appears only in
+  `design-tokens-legacy.js`, the three frozen public renderers (`blog-public.js`,
+  `songbook-renderer.js`, `kb-public.js`), the Blog-theme serif-control label (`theme.js:62`),
+  and `blog/server.js`'s zod description text.
 - `nest/css.js` (:222, :224, :227, :299) and `notifications.js` (:301, :401, :431, :519) literal
   indigo/navy → tokens.
 - Brand SVG art recolored to the new palette (art is not CSS; hand-edit): `shared/crow-hero.js`,
   `shared/empty-state-icons.js`, `notifications.js:775–788` (the tamagotchi crow). The crow stays a
   crow; fills move from indigo/gold to ink/teal/gold-as-`#d9a521`.
-- Stale `var(--crow-x, #oldhex)` fallbacks: ~89 dashboard-tree sites + ~35 bundle-PANEL sites
+- Stale `var(--crow-x, #oldhex)` fallbacks: ~89 dashboard-tree sites + ~44 bundle-PANEL sites
   (bundle panels render inside the dashboard — both sets are in the sweep; finding 15), heaviest
   in `panels/messages/css.js`, `panels/contacts/html.js`, `bundles/meta-glasses`,
   `bundles/podcast`. The contacts default group color literal (`contacts/api-handlers.js:305`
@@ -327,14 +368,21 @@ untouched this cycle:
 
 - `panels/perch.js` `renderRunning()` (:126–139): before emitting the iframe, count attached bots
   the same way the gateway does — extract `perchAttached(def)` (duplicated verbatim today at
-  `servers/gateway/routes/perch.js:175` and `perch-interactive-api.js:92`) into a shared module
-  both routes and the panel import; the panel reads bot defs through the same store the routes use.
-- Zero attached → render a callout ABOVE the iframe (not instead — the lens's sessions view still
-  works): "No bot has the Perch channel attached. In Bot Builder, open a bot → Gateways → choose
-  'Perch (dashboard chat)' → Save." with a link to the Bot Builder panel. EN + ES via `i18n.js`
-  (`perch.unattachedTitle`, `perch.unattachedBody`, `perch.unattachedCta`), satisfying
-  `tests/i18n-global-parity.test.js`.
-- Test: panel render with zero attached defs contains the callout; with ≥1 attached def it doesn't.
+  `servers/gateway/routes/perch.js:175` and `perch-interactive-api.js:92`; the duplication's own
+  comment says it exists only because perch.js doesn't export it) into a shared module (importing
+  `missingGatewayFields`) that both routes and the panel use. **The data path is a real, small
+  addition** (round-2 finding 11 — there is no store module): the routes read `pi_bot_defs` rows
+  via `createDbClient` and `JSON.parse(row.definition)` (`routes/perch.js:181–186`); the panel
+  handler does the same query.
+- The count is over **enabled** bots with the perch gateway attached (round-2 Q2 decided: a fleet
+  of disabled-but-attached bots is still an inert perch — the callout must show; the existing
+  routes' unconditional `perchAttached` check is unchanged, this is panel-callout logic only).
+- Zero enabled+attached → render a callout ABOVE the iframe (not instead — the lens's sessions
+  view still works): "No enabled bot has the Perch channel attached. In Bot Builder, open a bot →
+  Gateways → choose 'Perch (dashboard chat)' → Save." with a link to the Bot Builder panel.
+  EN + ES via `i18n.js` (`perch.unattachedTitle`, `perch.unattachedBody`, `perch.unattachedCta`),
+  satisfying `tests/i18n-global-parity.test.js`.
+- Test: panel render with zero enabled+attached defs contains the callout; with ≥1 it doesn't.
 
 ### 5.2 Tags on tracker card faces
 
@@ -408,6 +456,21 @@ r4-assistant's stale tool list (instance data, Kevin-conditional); `bot_sessions
     accent focus outlines as the accessible affordance (§3.2.1).
 
 ## Review record (2026-08-15)
+
+**Round 2** (fresh adversarial reviewer, fable, against revision dec36a65): verdict REVISE, 12
+findings + 2 questions, all applied above. The revised §3.2 contrast table verified sound (all
+accent-contrast and status-fill pairs recomputed and passing); the drift test's payload-wide sweep
+verified day-one-safe; the init-db resurrection description, freeze-importers claim, and §5.3
+cites all verified. The round found exactly the hunted class: round 1's radius fix would have
+LEAKED into the frozen public surfaces (5 radius-pill sites in blog/songbook would compute to
+radius 0) and blanket-swept the genuine chips off the pill token — replaced by the §3.1 triage
+with frozen-surface exclusion. Other catches: dark error-as-text fails on surface at body size
+(status-as-text now WCAG-large-only); the MCP `theme` alias re-mints the deleted legacy
+`blog_theme` key (write deleted, manifest updated); `instance-scope-cleanups` test D4 exercises
+the deleted handler (named for deletion); the Fraunces hand list undercounted by ~30 and its
+acceptance grep was unachievable (now grep-driven + scoped exemptions); plus precision fixes
+(wire ratios 2.57/2.07, muted decorative-only, glass grep gains `theme_glass|themeGlass`,
+migration call-site named, §5.1 data path named, ~37 white-on-accent / ~44 bundle fallbacks).
 
 **Round 1** (adversarial, fable, against @ab250eeb + spec commit 2c86dc30): verdict REVISE, 21
 findings + 4 questions, all applied above. The four criticals each named a would-have-shipped
