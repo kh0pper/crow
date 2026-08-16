@@ -1444,6 +1444,45 @@ export const translations = {
   "botboard.bdConfirmYes": { en: "Confirm", es: "Confirmar" },
   "botboard.bdConfirmNo": { en: "Deny", es: "Denegar" },
   "botboard.bdNoTurn": { en: "no turn is running", es: "no hay ning\u00fan turno en curso" },
+  // ─── Board — Track 3 Task 14: drawer controls / narrowing / files / attach / result gate ───
+  "botboard.bdPermGuarded": { en: "Guarded", es: "Vigilado" },
+  "botboard.bdPermAsk": { en: "Ask", es: "Preguntar" },
+  "botboard.bdPermBypass": { en: "Bypass", es: "Omitir" },
+  "botboard.bdPlanModeLabel": { en: "Plan mode", es: "Modo de plan" },
+  // T3-10 honesty: a permission/model change only binds at the NEXT wake —
+  // the affordance below is the only place that promise is ever displayed.
+  "botboard.bdBindsAtWake": { en: "Applies at the next wake.", es: "Se aplicará en el próximo despertar." },
+  "botboard.bdApplyNow": { en: "Apply now", es: "Aplicar ahora" },
+  "botboard.bdCycleFailed": { en: "Could not apply now.", es: "No se pudo aplicar ahora." },
+  "botboard.bdControlFailed": { en: "Setting failed.", es: "No se pudo guardar el ajuste." },
+  "botboard.bdEnvelopeToggle": { en: "Envelope & tools", es: "Envoltura y herramientas" },
+  "botboard.bdAttachCard": { en: "Attach to card", es: "Vincular a tarjeta" },
+  "botboard.bdEnvelopeModelPrefix": { en: "model ", es: "modelo " },
+  "botboard.bdEnvelopeModelUnset": { en: "unset", es: "sin definir" },
+  "botboard.bdEnvelopeSkillsPrefix": { en: "skills ", es: "habilidades " },
+  // Ported verbatim from bots-page.mjs's controlsHtml() tri-state note (Perch
+  // Hub P1's own narrowing pane) — same three states, same wording, now
+  // i18n'd EN/ES for the dashboard idiom instead of a hardcoded English string.
+  "botboard.bdNarrowNoteSaved": { en: "Unchecking narrows this session only, from the next turn on.",
+    es: "Desmarcar restringe solo esta sesión, a partir del próximo turno." },
+  "botboard.bdNarrowNoteEmpty": { en: "Unchecking narrows this session only, from the next turn on. Nothing is narrowed in this session yet, so the boxes start from the bot's full envelope.",
+    es: "Desmarcar restringe solo esta sesión, a partir del próximo turno. Nada está restringido aún en esta sesión, así que las casillas parten de la envoltura completa del bot." },
+  "botboard.bdNarrowNoteUnknown": { en: "Unchecking narrows this session only, from the next turn on. This Crow build did not report a saved narrowing for this session, so the boxes start from the bot's full envelope.",
+    es: "Desmarcar restringe solo esta sesión, a partir del próximo turno. Esta versión de Crow no reportó una restricción guardada para esta sesión, así que las casillas parten de la envoltura completa del bot." },
+  "botboard.bdNarrowedToPrefix": { en: "Narrowed to ", es: "Restringido a " },
+  "botboard.bdNarrowedToMid": { en: " of ", es: " de " },
+  "botboard.bdNarrowedToSuffix": { en: " tools.", es: " herramientas." },
+  "botboard.bdFullEnvelopeRestored": { en: "Full envelope restored.", es: "Envoltura completa restaurada." },
+  "botboard.bdNarrowRejected": { en: "Rejected: narrowing can only remove tools, never add them.",
+    es: "Rechazado: la restricción solo puede quitar herramientas, nunca agregarlas." },
+  "botboard.bdNarrowFailed": { en: "Not saved.", es: "No se guardó." },
+  "botboard.bdToolsNone": { en: "This bot grants no tools.", es: "Este bot no otorga herramientas." },
+  "botboard.bdAttachFile": { en: "Attach file", es: "Adjuntar archivo" },
+  "botboard.bdFilesQueuedPrefix": { en: "Queued for next send: ", es: "En cola para el próximo envío: " },
+  "botboard.bdFileUploaded": { en: "uploaded:", es: "subido:" },
+  "botboard.bdUploadFailed": { en: "Upload failed.", es: "Error al subir." },
+  "botboard.bdAttachSent": { en: "Attached — updating…", es: "Vinculado — actualizando…" },
+  "botboard.bdResultDecideFailed": { en: "Could not record the decision.", es: "No se pudo registrar la decisión." },
 
   // ─── Board — Track 1 archiving (D-T1.6) ───
   // board.planVersions / board.planApprove / board.historyTitle / board.autonomy*

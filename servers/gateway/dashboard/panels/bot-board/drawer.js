@@ -50,6 +50,18 @@ export function birdDrawerCss() {
   .bb-bd-ask-answered{font-size:.82rem;color:var(--crow-text-muted);font-style:italic;margin:.5rem 0}
   .bb-bd-picker-row{display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid var(--crow-border);font-size:.85rem}
   .bb-card-focus{outline:2px solid ${PERCH_TOKENS.light.teal};outline-offset:2px}
+  .bb-bd-controls-row{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin:.6rem 0}
+  .bb-bd-controls-row select{width:auto;flex:1 1 auto;min-width:110px;padding:.3rem .4rem;font-size:.8rem}
+  .bb-bd-plan-label{display:flex;align-items:center;gap:.3rem;font-size:.8rem;color:var(--crow-text-secondary);text-transform:none;letter-spacing:normal;margin:0;flex:0 0 auto}
+  .bb-bd-plan-label input{width:auto}
+  .bb-bd-controls-toggle-wrap{display:flex;gap:.4rem;flex-wrap:wrap;margin:.3rem 0}
+  .bb-bd-controls-pane{margin:.4rem 0;padding:.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px}
+  .bb-bd-tools{display:flex;flex-direction:column;gap:.25rem;margin:.4rem 0}
+  .bb-bd-tool{display:flex;align-items:center;gap:.4rem;font-size:.82rem;color:var(--crow-text-primary)}
+  .bb-bd-tool-locked{font-size:.78rem;color:var(--crow-text-muted)}
+  .bb-bd-narrow-note{font-size:.72rem;color:var(--crow-text-muted);margin-top:.4rem}
+  .bb-bd-files{display:flex;align-items:center;gap:.5rem;margin:.3rem 0}
+  .bb-bd-files-queue{font-size:.75rem;color:var(--crow-text-muted)}
   @media (prefers-color-scheme: dark) {
     .bb-bd-user .bb-bd-who{color:${PERCH_TOKENS.dark.teal}}
     .bb-card-focus{outline-color:${PERCH_TOKENS.dark.teal}}
@@ -75,6 +87,15 @@ export function birdDrawerJs(lang) {
   var bdPickerEl=$('bb-bd-picker'), bdComposerEl=$('bb-bd-composer');
   var bdTranscriptEl=$('bb-bd-transcript'), bdAskEl=$('bb-bd-ask');
   var bdInputEl=$('bb-bd-input'), bdSendBtn=$('bb-bd-send'), bdAbortBtn=$('bb-bd-abort');
+  // Track 3 Task 14: controls row (model/thinking/permission/plan), the
+  // collapsible envelope+narrowing pane, files, attach-to-card and the
+  // in-drawer result gate.
+  var bdModelSel=$('bb-bd-model'), bdThinkingSel=$('bb-bd-thinking');
+  var bdPermSel=$('bb-bd-permission'), bdPlanToggle=$('bb-bd-plan-toggle');
+  var bdBindsAtWakeEl=$('bb-bd-bindsatwake'), bdApplyNowBtn=$('bb-bd-apply-now');
+  var bdControlsToggle=$('bb-bd-controls-toggle'), bdControlsPaneEl=$('bb-bd-controls-pane');
+  var bdAttachCardBtn=$('bb-bd-attach-card'), bdResultEl=$('bb-bd-result');
+  var bdAttachBtn=$('bb-bd-attach'), bdFileInputEl=$('bb-bd-file-input'), bdFilesQueueEl=$('bb-bd-files-queue');
 
   var BD_STATE_TEXT={
     awake:'${tJs("botboard.bdStateAwake", lang)}',
@@ -84,7 +105,8 @@ export function birdDrawerJs(lang) {
 
   function bdBlank(){
     return {sid:null,botId:null,botName:null,threadId:null,cardId:null,
-      es:null,esTimer:null,esRetries:0,turnInFlight:false,turnHadText:false,pendingCard:null};
+      es:null,esTimer:null,esRetries:0,turnInFlight:false,turnHadText:false,pendingCard:null,
+      savedNarrowing:undefined,uploads:[]};
   }
   var bd=bdBlank();
 
@@ -103,12 +125,352 @@ export function birdDrawerJs(lang) {
     bd.turnInFlight=f;
     if(bdAbortBtn) bdAbortBtn.style.display=f?'':'none';
     if(bdSendBtn) bdSendBtn.textContent=f?'${tJs("botboard.bdSteer", lang)}':'${tJs("botboard.bdSend", lang)}';
+    bdUpdateCycleDisabled();
+  }
+
+  // Track 3 Task 14: "apply now" (POST cycle) is refused mid-turn or with a
+  // pending ask_user card (perch-interactive.js's own cycle_busy guard —
+  // s.turn || s.pendingUi || s.cycling) — the drawer already tracks both
+  // halves of that off the SSE stream (bd.turnInFlight, bd.pendingCard), so
+  // the button disables itself the same way rather than round-tripping to
+  // find out.
+  function bdUpdateCycleDisabled(){
+    if(bdApplyNowBtn) bdApplyNowBtn.disabled=!!(bd.turnInFlight||bd.pendingCard);
   }
 
   function bdSetState(state){
     bd.state=state;
     if(bdStateEl) bdStateEl.textContent=state?(BD_STATE_TEXT[state]||state):'';
     if(bdHibernatingEl) bdHibernatingEl.style.display=(state==='hibernating')?'':'none';
+    if(state==='awake') bdLoadOptions(); else bdSetOptionsDisabled();
+  }
+
+  // ---- model / thinking-level menus (GET options — null when hibernating) ----
+  function bdSetOptionsDisabled(){
+    if(bdModelSel){ clearEl(bdModelSel); bdModelSel.disabled=true; }
+    if(bdThinkingSel){ clearEl(bdThinkingSel); bdThinkingSel.disabled=true; }
+  }
+  function bdRenderOptions(models,thinkingLevels){
+    if(bdModelSel){
+      clearEl(bdModelSel);
+      if(models&&models.length){
+        bdModelSel.disabled=false;
+        models.forEach(function(m){
+          var o=document.createElement('option');
+          o.value=m.provider+'/'+m.id;
+          o.textContent=m.label||(m.provider+'/'+m.id);
+          bdModelSel.appendChild(o);
+        });
+      } else { bdModelSel.disabled=true; }
+    }
+    if(bdThinkingSel){
+      clearEl(bdThinkingSel);
+      if(thinkingLevels&&thinkingLevels.length){
+        bdThinkingSel.disabled=false;
+        thinkingLevels.forEach(function(lvl){
+          var o=document.createElement('option'); o.value=lvl; o.textContent=lvl;
+          bdThinkingSel.appendChild(o);
+        });
+      } else { bdThinkingSel.disabled=true; }
+    }
+  }
+  function bdLoadOptions(){
+    if(!bd.sid) return;
+    var mySid=bd.sid;
+    perchApi('GET','/interactive/'+encodeURIComponent(bd.sid)+'/options').then(function(r){
+      if(bd.sid!==mySid) return;
+      if(!r.ok||!r.j){ bdSetOptionsDisabled(); return; }
+      bdRenderOptions(r.j.models,r.j.thinkingLevels);
+    }).catch(function(){ if(bd.sid===mySid) bdSetOptionsDisabled(); });
+  }
+
+  // ---- POST control (model/thinking/permission/plan) ----
+  function bdShowBindsAtWake(bindsAtWake){
+    var keys=bindsAtWake?Object.keys(bindsAtWake):[];
+    if(bdBindsAtWakeEl) bdBindsAtWakeEl.style.display=keys.length?'':'none';
+    bdUpdateCycleDisabled();
+  }
+  function bdControl(opts,onFail){
+    if(!bd.sid) return;
+    perchApi('POST','/interactive/'+encodeURIComponent(bd.sid)+'/control',opts).then(function(r){
+      if(r.ok) bdShowBindsAtWake(r.j&&r.j.bindsAtWake);
+      else { if(onFail) onFail(); crowToast((r.j&&r.j.error)||'${tJs("botboard.bdControlFailed", lang)}',{type:'error'}); }
+    }).catch(function(){ if(onFail) onFail(); crowToast('${tJs("botboard.bdControlFailed", lang)}',{type:'error'}); });
+  }
+  if(bdModelSel) bdModelSel.onchange=function(){
+    if(!bdModelSel.value) return;
+    var slash=bdModelSel.value.indexOf('/');
+    if(slash<0) return;
+    bdControl({model:{provider:bdModelSel.value.slice(0,slash),id:bdModelSel.value.slice(slash+1)}});
+  };
+  if(bdThinkingSel) bdThinkingSel.onchange=function(){
+    if(!bdThinkingSel.value) return;
+    bdControl({thinking:bdThinkingSel.value});
+  };
+  if(bdPermSel) bdPermSel.onchange=function(){
+    bdControl({permission_mode:bdPermSel.value});
+  };
+  if(bdPlanToggle) bdPlanToggle.onchange=function(){
+    var v=bdPlanToggle.checked;
+    bdControl({plan_mode:v},function(){ bdPlanToggle.checked=!v; });
+  };
+  if(bdApplyNowBtn) bdApplyNowBtn.onclick=function(){
+    if(!bd.sid) return;
+    bdApplyNowBtn.disabled=true;
+    perchApi('POST','/interactive/'+encodeURIComponent(bd.sid)+'/cycle').then(function(r){
+      if(r.ok){ if(bdBindsAtWakeEl) bdBindsAtWakeEl.style.display='none'; }
+      else { bdUpdateCycleDisabled(); crowToast((r.j&&r.j.error)||'${tJs("botboard.bdCycleFailed", lang)}',{type:'error'}); }
+    }).catch(function(){ bdUpdateCycleDisabled(); crowToast('${tJs("botboard.bdCycleFailed", lang)}',{type:'error'}); });
+  };
+
+  // ---- collapsible envelope + narrowing pane (ported from
+  // bots-page.mjs:433-509, restated in THIS module's DOM-building idiom) ----
+  function bdToggleControlsPane(){
+    var open=bdControlsPaneEl && bdControlsPaneEl.style.display!=='none';
+    if(open){
+      if(bdControlsPaneEl) bdControlsPaneEl.style.display='none';
+      if(bdControlsToggle) bdControlsToggle.setAttribute('aria-expanded','false');
+      return;
+    }
+    if(bdControlsToggle) bdControlsToggle.setAttribute('aria-expanded','true');
+    bdLoadControlsPane();
+  }
+  if(bdControlsToggle) bdControlsToggle.onclick=bdToggleControlsPane;
+
+  function bdControlsPaneErr(){
+    clearEl(bdControlsPaneEl);
+    var e=document.createElement('div'); e.className='bb-msg err';
+    e.textContent='${tJs("botboard.loadFailed", lang)}';
+    bdControlsPaneEl.appendChild(e);
+  }
+  function bdLoadControlsPane(){
+    if(!bdControlsPaneEl||!bd.botId) return;
+    clearEl(bdControlsPaneEl);
+    var loading=document.createElement('div'); loading.className='bb-msg';
+    loading.textContent='\\u2026';
+    bdControlsPaneEl.appendChild(loading);
+    bdControlsPaneEl.style.display='';
+    var mySid=bd.sid;
+    perchApi('GET','/bots/'+encodeURIComponent(bd.botId)+'/envelope').then(function(r){
+      if(bd.sid!==mySid) return;
+      if(!r.ok||!r.j){ bdControlsPaneErr(); return; }
+      bdRenderControlsPane(r.j);
+    }).catch(function(){ if(bd.sid===mySid) bdControlsPaneErr(); });
+  }
+  /**
+   * Tri-state saved narrowing off a bot_sessions row (bots-page.mjs
+   * savedNarrowing(), restated): a Set is a real narrowing, null is
+   * "reported, nothing narrowed", undefined is "not reported at all" — the
+   * middle case must never collapse into the last one (that blamed the Crow
+   * build for an empty session, the acceptance finding the source note
+   * there records).
+   */
+  function bdSavedNarrowingFromRow(row){
+    if(!row||!Object.prototype.hasOwnProperty.call(row,'narrowed_tools')) return undefined;
+    var list=row.narrowed_tools;
+    if(list==null) return null;
+    if(typeof list==='string'){
+      try{ list=JSON.parse(list); }catch(e){ return undefined; }
+    }
+    if(!Array.isArray(list)) return undefined;
+    var s={}; list.forEach(function(id){ s[String(id)]=true; });
+    return s;
+  }
+  function bdRenderControlsPane(envelope){
+    clearEl(bdControlsPaneEl);
+    var allowed=envelope.tools||[];
+    var denied=envelope.denied||[];
+    var saved=bd.savedNarrowing;
+    var disabledSet=(saved&&typeof saved==='object')?saved:{};
+    var head=document.createElement('div');
+    head.className='bb-msg';
+    var skillsTxt=(envelope.skills||[]).length?(' \\u00b7 ${tJs("botboard.bdEnvelopeSkillsPrefix", lang)}'+envelope.skills.join(', ')):'';
+    head.textContent='${tJs("botboard.bdEnvelopeModelPrefix", lang)}'+(envelope.model||'${tJs("botboard.bdEnvelopeModelUnset", lang)}')+skillsTxt;
+    bdControlsPaneEl.appendChild(head);
+    var toolsWrap=document.createElement('div'); toolsWrap.className='bb-bd-tools';
+    if(!allowed.length && !denied.length){
+      var none=document.createElement('div'); none.className='bb-bd-tool-locked';
+      none.textContent='${tJs("botboard.bdToolsNone", lang)}';
+      toolsWrap.appendChild(none);
+    }
+    allowed.forEach(function(tool){
+      var label=document.createElement('label'); label.className='bb-bd-tool';
+      var cb=document.createElement('input'); cb.type='checkbox';
+      cb.checked=!disabledSet[String(tool.id)];
+      cb.setAttribute('data-bd-tool',tool.id);
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' '+(tool.label||tool.id)));
+      toolsWrap.appendChild(label);
+    });
+    denied.forEach(function(tool){
+      var locked=document.createElement('div'); locked.className='bb-bd-tool-locked';
+      locked.textContent='\\uD83D\\uDD12 '+(tool.label||tool.id);
+      toolsWrap.appendChild(locked);
+    });
+    bdControlsPaneEl.appendChild(toolsWrap);
+    var note=document.createElement('div'); note.className='bb-bd-narrow-note';
+    note.textContent = (saved&&typeof saved==='object') ? '${tJs("botboard.bdNarrowNoteSaved", lang)}'
+      : saved===null ? '${tJs("botboard.bdNarrowNoteEmpty", lang)}'
+      : '${tJs("botboard.bdNarrowNoteUnknown", lang)}';
+    bdControlsPaneEl.appendChild(note);
+    var narrowMsg=document.createElement('div'); narrowMsg.className='bb-msg';
+    bdControlsPaneEl.appendChild(narrowMsg);
+    toolsWrap.addEventListener('change',function(ev){
+      if(ev.target && ev.target.hasAttribute('data-bd-tool')) bdSaveNarrowing(toolsWrap,narrowMsg,ev.target);
+    });
+  }
+  function bdSaveNarrowing(toolsWrap,narrowMsg,changedInput){
+    if(!bd.botId||!bd.threadId) return;
+    var boxes=[].slice.call(toolsWrap.querySelectorAll('[data-bd-tool]'));
+    var disabled=boxes.filter(function(b){ return !b.checked; }).map(function(b){ return b.getAttribute('data-bd-tool'); });
+    narrowMsg.className='bb-msg';
+    narrowMsg.textContent='\\u2026';
+    perchApi('POST','/bots/'+encodeURIComponent(bd.botId)+'/sessions/'+encodeURIComponent(bd.threadId)+'/narrow',{disabled_tools:disabled}).then(function(r){
+      if(r.ok){
+        narrowMsg.textContent=disabled.length
+          ? '${tJs("botboard.bdNarrowedToPrefix", lang)}'+(boxes.length-disabled.length)+'${tJs("botboard.bdNarrowedToMid", lang)}'+boxes.length+'${tJs("botboard.bdNarrowedToSuffix", lang)}'
+          : '${tJs("botboard.bdFullEnvelopeRestored", lang)}';
+      } else {
+        changedInput.checked=!changedInput.checked;
+        narrowMsg.className='bb-msg err';
+        narrowMsg.textContent=(r.j&&r.j.error==='widening_rejected')?'${tJs("botboard.bdNarrowRejected", lang)}':'${tJs("botboard.bdNarrowFailed", lang)}';
+      }
+    }).catch(function(){
+      changedInput.checked=!changedInput.checked;
+      narrowMsg.className='bb-msg err';
+      narrowMsg.textContent='${tJs("botboard.bdNarrowFailed", lang)}';
+    });
+  }
+
+  // ---- files: attach → base64 upload → queue onto the NEXT send's images ----
+  function bdRenderFilesQueue(){
+    if(!bdFilesQueueEl) return;
+    bdFilesQueueEl.textContent=bd.uploads.length
+      ? '${tJs("botboard.bdFilesQueuedPrefix", lang)}'+bd.uploads.map(function(u){ return u.name; }).join(', ')
+      : '';
+  }
+  if(bdAttachBtn) bdAttachBtn.onclick=function(){ if(bdFileInputEl) bdFileInputEl.click(); };
+  if(bdFileInputEl) bdFileInputEl.onchange=function(){
+    var file=bdFileInputEl.files&&bdFileInputEl.files[0];
+    bdFileInputEl.value='';
+    if(!file||!bd.sid) return;
+    var mySid=bd.sid;
+    var reader=new FileReader();
+    reader.onload=function(){
+      if(bd.sid!==mySid) return;
+      var result=String(reader.result||'');
+      var comma=result.indexOf(',');
+      var b64=comma>=0?result.slice(comma+1):result;
+      perchApi('POST','/interactive/'+encodeURIComponent(bd.sid)+'/files',{name:file.name,data_b64:b64}).then(function(r){
+        if(bd.sid!==mySid) return;
+        if(r.ok){
+          if(/^image\\//.test(file.type)) bd.uploads.push({mime:file.type,data_b64:b64,name:file.name});
+          bdAppendNote('','${tJs("botboard.bdFileUploaded", lang)}'+' '+file.name);
+          bdRenderFilesQueue();
+        } else { crowToast((r.j&&r.j.error)||'${tJs("botboard.bdUploadFailed", lang)}',{type:'error'}); }
+      }).catch(function(){ if(bd.sid===mySid) crowToast('${tJs("botboard.bdUploadFailed", lang)}',{type:'error'}); });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // ---- outputs/<sid>/<rel> links + inline images in bot text/reply (ported
+  // from the workspace confinement contract routes/perch-interactive-api.js
+  // enforces server-side — this is display-only, the actual jail is there).
+  // Plain string scanning, deliberately NOT a regex built from bd.sid — a
+  // dynamic session id has no business being interpolated into a regex
+  // source string (metacharacter-escaping a caller-influenced value for THAT
+  // purpose is exactly the kind of thing that goes quietly wrong). ----
+  function bdIsBoundaryChar(ch){
+    return ch===' '||ch==='\\t'||ch==='\\n'||ch==='\\r'||ch==='"'||ch==="'"||ch==='<'||ch==='>';
+  }
+  var BD_IMG_EXTS=['.png','.jpg','.jpeg','.webp','.gif'];
+  function bdLooksLikeImage(rel){
+    var lower=rel.toLowerCase();
+    for(var i=0;i<BD_IMG_EXTS.length;i++){
+      var ext=BD_IMG_EXTS[i];
+      if(lower.length>=ext.length && lower.slice(lower.length-ext.length)===ext) return true;
+    }
+    return false;
+  }
+  function bdRenderBodyWithLinks(bodyEl,text){
+    if(!bd.sid){ bodyEl.textContent=text; return; }
+    var marker='outputs/'+bd.sid+'/';
+    var pos=0, any=false;
+    var idx=text.indexOf(marker,pos);
+    while(idx>=0){
+      any=true;
+      if(idx>pos) bodyEl.appendChild(document.createTextNode(text.slice(pos,idx)));
+      var relStart=idx+marker.length, relEnd=relStart;
+      while(relEnd<text.length && !bdIsBoundaryChar(text.charAt(relEnd))) relEnd++;
+      var rel=text.slice(relStart,relEnd);
+      var url='/dashboard/perch-api/interactive/'+encodeURIComponent(bd.sid)+'/workspace/'+rel.split('/').map(encodeURIComponent).join('/');
+      if(bdLooksLikeImage(rel)){
+        var img=document.createElement('img');
+        img.src=url; img.alt=rel; img.className='bb-bd-inline-img';
+        bodyEl.appendChild(img);
+      } else {
+        var a=document.createElement('a');
+        a.href=url; a.target='_blank'; a.rel='noopener'; a.textContent=marker+rel;
+        bodyEl.appendChild(a);
+      }
+      pos=relEnd;
+      idx=text.indexOf(marker,pos);
+    }
+    if(!any){ bodyEl.textContent=text; return; }
+    if(pos<text.length) bodyEl.appendChild(document.createTextNode(text.slice(pos)));
+  }
+
+  // ---- attach-to-card: header updates once client.js's dialog confirms ----
+  function bdAfterAttachCard(){ bdLoadSessionMeta(); }
+
+  // ---- result gate: a pending gated result on the session's OWN card ----
+  function bdLoadResultGate(){
+    if(!bdResultEl) return;
+    if(!bd.cardId){ clearEl(bdResultEl); return; }
+    var myCardId=bd.cardId, mySid=bd.sid;
+    api('GET','/card/'+myCardId).then(function(r){
+      if(bd.sid!==mySid||bd.cardId!==myCardId) return;
+      if(!r.ok||!r.j) return;
+      bdRenderResultGate((r.j.latest_results||[])[0]||null);
+    }).catch(function(){});
+  }
+  function bdRenderResultGate(latest){
+    if(!bdResultEl) return;
+    clearEl(bdResultEl);
+    if(!latest||latest.status!=='recorded'||latest.outcome!=='success') return;
+    var box=document.createElement('div'); box.className='bb-msg bb-marker-waiting';
+    var head=document.createElement('div');
+    head.textContent='${tJs("board.markerWaiting", lang)}';
+    box.appendChild(head);
+    var row=document.createElement('div'); row.className='bb-result-actions';
+    var acc=document.createElement('button'); acc.type='button'; acc.className='bb-btn bb-sec';
+    acc.textContent='${tJs("board.btnApproveResult", lang)}';
+    var rej=document.createElement('button'); rej.type='button'; rej.className='bb-btn bb-sec';
+    rej.textContent='${tJs("board.btnRejectResult", lang)}';
+    var buttons=[acc,rej];
+    acc.onclick=function(){ bdDecideResultGate(latest.id,'approved',buttons); };
+    rej.onclick=function(){ bdDecideResultGate(latest.id,'rejected',buttons); };
+    row.appendChild(acc); row.appendChild(rej);
+    box.appendChild(row);
+    bdResultEl.appendChild(box);
+  }
+  function bdDecideResultGate(resultId,decision,buttons){
+    if(!bd.cardId) return;
+    var cardId=bd.cardId;
+    buttons.forEach(function(b){ b.disabled=true; });
+    // Two-step (spec §4), same order as the card-face handler (client.js):
+    // decide first, THEN — on accept only — the existing move-to-'done' call.
+    api('POST','/card/'+cardId+'/result/'+resultId+'/decide',{decision:decision}).then(function(r){
+      if(!r.ok){ buttons.forEach(function(b){ b.disabled=false; }); crowToast((r.j&&r.j.error)||'${tJs("botboard.bdResultDecideFailed", lang)}',{type:'error'}); return; }
+      if(decision==='approved'){
+        api('POST','/card/'+cardId+'/move',{status:'done'}).then(function(r2){
+          if(r2.ok) bdLoadResultGate();
+          else { buttons.forEach(function(b){ b.disabled=false; }); crowToast((r2.j&&r2.j.error)||'${tJs("botboard.bdResultDecideFailed", lang)}',{type:'error'}); }
+        }).catch(function(){ buttons.forEach(function(b){ b.disabled=false; }); crowToast('${tJs("botboard.bdResultDecideFailed", lang)}',{type:'error'}); });
+      } else {
+        bdLoadResultGate();
+      }
+    }).catch(function(){ buttons.forEach(function(b){ b.disabled=false; }); crowToast('${tJs("botboard.bdResultDecideFailed", lang)}',{type:'error'}); });
   }
 
   function bdUpdateHeader(){
@@ -153,7 +515,10 @@ export function birdDrawerJs(lang) {
     row.appendChild(whoEl);
     var bodyEl=document.createElement('span');
     bodyEl.className='bb-bd-body';
-    bodyEl.textContent=text;
+    // Track 3 Task 14: bot text/reply content gets the outputs/<sid>/<rel>
+    // link+inline-image treatment; every other line (user, sys/log/tool)
+    // renders as plain text, unchanged.
+    if(cls==='bot') bdRenderBodyWithLinks(bodyEl,text); else bodyEl.textContent=text;
     row.appendChild(bodyEl);
     if((cls==='bot'||cls==='user') && navigator.clipboard && navigator.clipboard.writeText){
       var copyBtn=document.createElement('button');
@@ -221,11 +586,16 @@ export function birdDrawerJs(lang) {
         if(String(r.j.sessions[i].gateway_thread_id)===String(bd.threadId)){ row=r.j.sessions[i]; break; }
       }
       if(!row) return;
+      // Track 3 Task 14: the SAME row carries this session's tri-state saved
+      // narrowing (bots-page.mjs precedent, restated) — feeds the collapsible
+      // envelope pane whenever it's next opened.
+      bd.savedNarrowing=bdSavedNarrowingFromRow(row);
       if(row.card_id!=null && bdCardLink && bdCardLinkWrap){
         bd.cardId=row.card_id;
         bdCardLink.textContent='${tJs("botboard.bdCardLinkPrefix", lang)}'+row.card_id;
         bdCardLink.href='/dashboard/bot-board#card='+encodeURIComponent(row.card_id);
         bdCardLinkWrap.style.display='';
+        bdLoadResultGate();
       }
       if(row.control==='interrupted'){
         bdAppendNote('warn','${tJs("botboard.bdInterruptedNote", lang)}');
@@ -254,10 +624,12 @@ export function birdDrawerJs(lang) {
     d.textContent='${tJs("botboard.bdAnsweredPrefix", lang)} '+(label==null?'':label);
     bdAskEl.appendChild(d);
     bd.pendingCard=null;
+    bdUpdateCycleDisabled();
   }
 
   function bdRenderAsk(card){
     bd.pendingCard=card;
+    bdUpdateCycleDisabled();
     clearEl(bdAskEl);
     if(!card) return;
     var wrap=document.createElement('div');
@@ -408,7 +780,17 @@ export function birdDrawerJs(lang) {
     }
     bd.turnHadText=false;
     bdSetTurnInFlight(true);
-    perchApi('POST','/interactive/'+encodeURIComponent(bd.sid)+'/message',{message:text}).then(function(r){
+    // Track 3 Task 14: any images attached via the files row queue onto THIS
+    // send only — cleared here regardless of outcome (a failed turn still
+    // consumes the queue; re-attaching is one click away, same discipline the
+    // textarea itself already applies by clearing before the request fires).
+    var body={message:text};
+    if(bd.uploads.length){
+      body.images=bd.uploads.map(function(u){ return {mime:u.mime,data_b64:u.data_b64}; });
+    }
+    bd.uploads=[];
+    bdRenderFilesQueue();
+    perchApi('POST','/interactive/'+encodeURIComponent(bd.sid)+'/message',body).then(function(r){
       if(!r.ok){
         bdSetTurnInFlight(false);
         bdAppendNote('err',(r.j&&r.j.error)||'${tJs("botboard.bdSendFailed", lang)}');
@@ -471,8 +853,26 @@ export function birdDrawerJs(lang) {
     });
   }
 
+  // Track 3 Task 14: every new surface (controls row, bindsAtWake affordance,
+  // envelope pane, files queue, result gate) starts each drawer mount from
+  // the SAME blank slate — called from both entry points below, right after
+  // bdReset() clears the session-scoped bd object those surfaces read.
+  function bdResetControlsUi(){
+    bdSetOptionsDisabled();
+    if(bdPermSel) bdPermSel.value='guarded';
+    if(bdPlanToggle) bdPlanToggle.checked=false;
+    if(bdBindsAtWakeEl) bdBindsAtWakeEl.style.display='none';
+    if(bdControlsPaneEl){ clearEl(bdControlsPaneEl); bdControlsPaneEl.style.display='none'; }
+    if(bdControlsToggle) bdControlsToggle.setAttribute('aria-expanded','false');
+    if(bdResultEl) clearEl(bdResultEl);
+    bd.uploads=[];
+    bdRenderFilesQueue();
+    bdUpdateCycleDisabled();
+  }
+
   function bdShowPicker(botId,botName){
     bdReset();
+    bdResetControlsUi();
     bd.botId=botId||null;
     bd.botName=botName||null;
     bdUpdateHeader();
@@ -488,6 +888,7 @@ export function birdDrawerJs(lang) {
   // ---- the main entry: mount ONE session into the drawer ----
   function bdOpenSession(sid,botId,botName){
     bdReset();
+    bdResetControlsUi();
     bd.sid=String(sid);
     bd.threadId=bd.sid;
     bd.botId=botId||null;
@@ -536,6 +937,16 @@ export function birdDrawerJs(lang) {
       if(sid) openBirdDrawer(sid);
     }
   }
+
+  // Track 3 Task 14: attach-to-card reuses the roost strip's OWN dispatch
+  // dialog/card-picker (client.js's openRoostAttachCard — function
+  // declarations hoist across this whole shared IIFE, so referencing it here
+  // even though it is defined further down in client.js is safe: by the time
+  // this handler can actually FIRE, the entire script has already run once).
+  if(bdAttachCardBtn) bdAttachCardBtn.onclick=function(){
+    if(!bd.sid) return;
+    openRoostAttachCard(bd.sid);
+  };
 
   if($('bb-bd-close')) $('bb-bd-close').onclick=closeBirdDrawer;
   if(bdBackdrop) bdBackdrop.onclick=closeBirdDrawer;
