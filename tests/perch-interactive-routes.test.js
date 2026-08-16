@@ -19,7 +19,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -584,6 +584,45 @@ test("POST /bots/:id/dispatch maps a spawn() throw and never writes assigned_bot
   assert.equal(engineCalls.message.length, 0);
 });
 
+// I6 (final review): eng.spawn() claims the card BEFORE the assigned_bot
+// provenance write. If that write throws, the OLD code let the error
+// propagate past the already-spawned session — the route errored out while
+// the session still existed, still held the claim, and never got its turn-1
+// message: an orphan child on a permanently occupied card, recoverable only
+// by Recall. Simulated here by deleting the card row as a side effect of
+// spawn() succeeding — the realistic shape of the failure (updateCard's own
+// getCard() finds nothing and throws not_found) — without touching the
+// route's internals.
+test("POST /bots/:id/dispatch: a throwing assigned_bot provenance write does not orphan the session — dispatch still succeeds and turn 1 still fires", async () => {
+  const freshCardId = seedCard({ title: "provenance-throw fixture" });
+  engineImpl.spawn = async ({ botId, cardId }) => {
+    engineCalls.spawn.push({ botId, cardId });
+    const t = rawTasks();
+    t.prepare("DELETE FROM tasks_items WHERE id=?").run(cardId);
+    t.close();
+    return { sessionId: "perchlive-provenance-throw", threadId: "perchlive-provenance-throw", state: "awake" };
+  };
+  const { status, body } = await postJson("/bots/chatty/dispatch", { card_id: freshCardId, note: "go" });
+  assert.equal(status, 201, "dispatch must still succeed — the session is worth more than the provenance write");
+  assert.deepEqual(body, { sessionId: "perchlive-provenance-throw", threadId: "perchlive-provenance-throw", state: "awake" });
+  assert.deepEqual(engineCalls.spawn, [{ botId: "chatty", cardId: freshCardId }]);
+  // Turn 1 must still fire — the session is not left waiting for a message
+  // that never arrives because an unrelated provenance write failed.
+  assert.deepEqual(engineCalls.message, [{ sid: "perchlive-provenance-throw", text: "go", images: undefined }]);
+  assert.equal(taskRow(freshCardId), null, "test setup sanity: the card really was deleted");
+});
+
+// I10 (final review): dispatch read body.note with no MESSAGE_CAP slice
+// (every other inbound message route does), so a 1 MB body rode straight
+// into turn 1.
+test("POST /bots/:id/dispatch slices note to MESSAGE_CAP, same as message()/steer()", async () => {
+  const freshCardId = seedCard({ title: "note-cap fixture" });
+  const big = "x".repeat(50_000); // MESSAGE_CAP is 32_000
+  await postJson("/bots/chatty/dispatch", { card_id: freshCardId, note: big });
+  assert.equal(engineCalls.message.at(-1).text.length, 32_000);
+  assert.equal(engineCalls.message.at(-1).text, big.slice(0, 32_000));
+});
+
 // ---------------------------------------------------------------------------
 // POST /interactive/:sid/attach-card — Track 3 Task 9
 // ---------------------------------------------------------------------------
@@ -890,6 +929,66 @@ test("POST /interactive/:sid/files 404s no_such_session for an unknown session",
   const { status, body } = await postJson("/interactive/sess-1/files", { name: "ok.txt", data_b64: Buffer.from("x").toString("base64") });
   assert.equal(status, 404);
   assert.equal(body.error, "no_such_session");
+});
+
+// ---------------------------------------------------------------------------
+// ATTACK: symlink pre-plant at the upload target (final review, C1)
+// ---------------------------------------------------------------------------
+//
+// A prompt-injected pi child writes into its OWN uploadsDir (that's the whole
+// point of the route), so it can pre-plant <uploadsDir>/report.pdf as a
+// symlink pointing anywhere on disk the process can write, e.g. a secret
+// file this test stands in for ~/.crow/.env or ~/.ssh/authorized_keys. The
+// OLD code's plain writeFileSync() followed that symlink and overwrote
+// whatever it pointed at with the operator's next upload of that filename.
+
+test("ATTACK symlink pre-plant: uploading over a pre-planted symlink must NOT write through it", async () => {
+  const uploadsDir = mkdtempSync(join(tmpdir(), "perch-uploads-"));
+  const secretDir = mkdtempSync(join(tmpdir(), "perch-uploads-secret-"));
+  const secretFile = join(secretDir, "authorized_keys");
+  const originalSecret = "ssh-ed25519 AAAA...original-legit-key kevin@crow\n";
+  writeFileSync(secretFile, originalSecret);
+  // The pre-plant: a symlink sitting at the exact name the operator's next
+  // upload will use, pointing at the secret file OUTSIDE uploadsDir.
+  symlinkSync(secretFile, join(uploadsDir, "report.pdf"));
+
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir, outputsDir: null });
+  const attackerBytes = Buffer.from("attacker-controlled bytes — must never land in the secret file");
+  const { status } = await postJson("/interactive/sess-1/files", {
+    name: "report.pdf", data_b64: attackerBytes.toString("base64"),
+  });
+
+  try {
+    assert.equal(status, 400, "the upload must be refused when the target is a symlink");
+    assert.equal(
+      readFileSync(secretFile, "utf8"), originalSecret,
+      "the secret file's content must be byte-identical — the write must never have followed the symlink"
+    );
+    // And the symlink itself must be untouched (not replaced by a regular
+    // file at that name, which would also count as "wrote through it").
+    assert.ok(lstatSync(join(uploadsDir, "report.pdf")).isSymbolicLink());
+  } finally {
+    rmSync(uploadsDir, { recursive: true, force: true });
+    rmSync(secretDir, { recursive: true, force: true });
+  }
+});
+
+test("POST /interactive/:sid/files still overwrites a LEGITIMATE prior upload of the same name (regular file, not a symlink)", async () => {
+  const uploadsDir = mkdtempSync(join(tmpdir(), "perch-uploads-"));
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir, outputsDir: null });
+  try {
+    const first = await postJson("/interactive/sess-1/files", {
+      name: "report.pdf", data_b64: Buffer.from("v1").toString("base64"),
+    });
+    assert.equal(first.status, 200);
+    const second = await postJson("/interactive/sess-1/files", {
+      name: "report.pdf", data_b64: Buffer.from("v2-overwritten").toString("base64"),
+    });
+    assert.equal(second.status, 200);
+    assert.equal(readFileSync(join(uploadsDir, "report.pdf"), "utf8"), "v2-overwritten");
+  } finally {
+    rmSync(uploadsDir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
