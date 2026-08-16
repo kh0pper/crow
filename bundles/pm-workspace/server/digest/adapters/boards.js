@@ -19,21 +19,15 @@
  * never a throw.
  */
 
-import { createTasksDbClient } from "../../db.js";
+import { createTasksDbClient, hasArchivedAtColumn } from "../../db.js";
 
 // D-T1.6: default views exclude archived — but this digest reads whatever
 // tasks.db CROW_TASKS_DB_PATH resolves to (an installed-bundle store may not
 // have converged through migration 0004 yet), so the filter is
 // COLUMN-GUARDED (PRAGMA probe precedent: scripts/pi-bots/bridge.mjs
-// planForCard ~:515) — never assume archived_at exists before filtering on it.
-async function hasArchivedAtColumn(tdb) {
-  try {
-    const rows = (await tdb.execute("PRAGMA table_info(tasks_items)")).rows || [];
-    return rows.some((r) => r.name === "archived_at");
-  } catch {
-    return false;
-  }
-}
+// planForCard ~:515) — never assume archived_at exists before filtering on
+// it. hasArchivedAtColumn itself now converges through db.js (Track 2 Task
+// 10, W4/§5.3 — one helper instead of three copies).
 
 export async function boardsSections(db, config, tdb) {
   const sections = [];
