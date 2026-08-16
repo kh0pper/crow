@@ -501,7 +501,7 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
     try {
       const { rows } = await db.execute({
         sql:
-          "SELECT id, kind, gateway_type, gateway_thread_id, status, card_id, plan_path, " +
+          "SELECT id, kind, gateway_type, gateway_thread_id, status, control, card_id, plan_path, " +
           "narrowed_tools, datetime(updated_at) AS updated_at, " +
           "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
           // One past the cap: the extra row is how we know there IS more,
@@ -518,6 +518,11 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
           gateway_type: row.gateway_type,
           gateway_thread_id: row.gateway_thread_id,
           status: row.status,
+          // Track 3 Task 9: exposed so the drawer can distinguish a plain
+          // idle park ('run') from a shutdown that interrupted a mid-turn
+          // session ('interrupted') — Task 13's interrupted-note UI reads
+          // this field. Present for every row/kind, not just perch-live.
+          control: row.control,
           card_id: row.card_id,
           plan_path: row.plan_path,
           updated_at: row.updated_at,

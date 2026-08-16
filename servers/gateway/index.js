@@ -447,10 +447,15 @@ app.use("/dashboard/login", dashboardLoginLimiter);
 // Body parsing with size limit. Routes with their own route-scoped parser must
 // be skipped here — otherwise the global 1mb parser 413s a large body before
 // the route is reached: /llm (10mb parser; multi-turn voice transcripts with
-// tool history + image parts) and /s/:surface/feedback (4mb parser in the
-// knowledge-base bundle; screenshot-attached feedback).
+// tool history + image parts), /s/:surface/feedback (4mb parser in the
+// knowledge-base bundle; screenshot-attached feedback), and
+// /dashboard/perch-api/interactive/:sid/{files,message} (10mb parsers in
+// perch-interactive-api.js — Track 3 Task 9: a 5MB post-decode base64 file
+// upload is ~6.7MB of JSON text, and 3 × 2MB post-decode message images are
+// ~8.4MB).
 const _jsonParser = express.json({ limit: "1mb" });
-const _hasOwnParser = (p) => p.startsWith("/llm") || /^\/s\/[^/]+\/feedback$/.test(p);
+const _hasOwnParser = (p) => p.startsWith("/llm") || /^\/s\/[^/]+\/feedback$/.test(p) ||
+  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p);
 app.use((req, res, next) => (_hasOwnParser(req.path) ? next() : _jsonParser(req, res, next)));
 
 // --- Static files (PWA manifest, service worker, icons) ---

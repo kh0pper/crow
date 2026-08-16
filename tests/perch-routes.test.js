@@ -194,6 +194,24 @@ test("GET /bots/:id/sessions surfaces channel, board and narrowing columns", asy
   assert.equal(byThread["thread-perch"].kind, "perch");
 });
 
+test("GET /bots/:id/sessions surfaces the control column — Track 3 Task 9, Task 13's interrupted-note UI reads it", async () => {
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control) " +
+    "VALUES ('chatty','perch','thread-run','perch-live','waiting-user','run')"
+  ).run();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control) " +
+    "VALUES ('chatty','perch','thread-interrupted','perch-live','waiting-user','interrupted')"
+  ).run();
+  c.close();
+
+  const { body } = await getJson("/bots/chatty/sessions");
+  const byThread = Object.fromEntries(body.sessions.map((s) => [s.gateway_thread_id, s]));
+  assert.equal(byThread["thread-run"].control, "run");
+  assert.equal(byThread["thread-interrupted"].control, "interrupted");
+});
+
 test("GET /bots/:id/sessions marks a fresh active row live, a stale one not", async () => {
   const c = raw();
   c.prepare(

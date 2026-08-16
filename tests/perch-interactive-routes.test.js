@@ -18,7 +18,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -28,14 +28,25 @@ const dir = mkdtempSync(join(tmpdir(), "perch-interactive-routes-"));
 process.env.CROW_DATA_DIR = dir;
 process.env.CROW_HOME = join(dir, "home");
 delete process.env.CROW_DB_PATH;
+// Track 3 Task 9: dispatch/attach-card read+write the INSTANCE-GLOBAL tasks
+// store (tasksDbPath() from scripts/pi-bots/instance-paths.mjs) — set
+// explicitly rather than relying on the CROW_DATA_DIR-derived default, same
+// as board-card-api.test.js's own idiom.
+process.env.CROW_TASKS_DB_PATH = join(dir, "tasks.db");
 
 const DB_FILE = join(dir, "crow.db");
+const TASKS_DB_FILE = process.env.CROW_TASKS_DB_PATH;
 const REPO = new URL("..", import.meta.url).pathname;
 
 let server, base, _setEngineStatusForTest;
 /** Every opts object handleInboundImpl was called with (P1 turn-route regression). */
 let inboundCalls = [];
 let inboundHook = null;
+
+// Track 3 Task 9 fixture ids (assigned in before()): a live card, an
+// archived one, and a custom-board tracker ITEM (board_id NOT NULL) — the
+// "wrong kind" id dispatch/attach-card must 400 on.
+let liveCardId, archivedCardId, itemId;
 
 /** Mutable fake interactive engine. Reset to these defaults in beforeEach;
  * individual tests overwrite whichever methods they need to observe or fail. */
@@ -51,6 +62,68 @@ function seedBot(botId, def, { name = botId, enabled = 1 } = {}) {
   c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,?)")
     .run(botId, name, JSON.stringify(def), enabled);
   c.close();
+}
+
+// ---------------------------------------------------------------------------
+// Track 3 Task 9: the instance-global tasks store (dispatch/attach-card read
+// + write it directly). A minimal hand-rolled schema — just the columns
+// card-service.js's getCard/updateCard/recordMutation touch, same idiom as
+// tests/board-card-api.test.js's own fixture, without the board_defs/status
+// machinery those routes never exercise (dispatch/attach-card never validate
+// status).
+// ---------------------------------------------------------------------------
+
+function rawTasks() {
+  return new Database(TASKS_DB_FILE);
+}
+
+function initTasksDb() {
+  const t = rawTasks();
+  t.exec(`CREATE TABLE IF NOT EXISTS tasks_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    priority INTEGER DEFAULT 3,
+    due_date TEXT, phase TEXT, owner TEXT, tags TEXT,
+    parent_id INTEGER, project_id INTEGER,
+    assigned_bot TEXT, board_id INTEGER, bot_id TEXT,
+    action_needed TEXT, next_followup_date TEXT,
+    processing_lease TEXT, processing_lease_status TEXT,
+    autonomy TEXT NOT NULL DEFAULT 'gated',
+    archived_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT,
+    data_json TEXT NOT NULL DEFAULT '{}'
+  )`);
+  t.exec(`CREATE TABLE IF NOT EXISTS board_mutations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL,
+    verb TEXT NOT NULL,
+    actor_kind TEXT NOT NULL CHECK(actor_kind IN ('human','session','bot')),
+    actor_id TEXT,
+    job_id TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  t.close();
+}
+
+function seedCard({ title = "card", boardId = null, archivedAt = null, assignedBot = null } = {}) {
+  const t = rawTasks();
+  const r = t.prepare(
+    "INSERT INTO tasks_items (title, board_id, archived_at, assigned_bot) VALUES (?,?,?,?)"
+  ).run(title, boardId, archivedAt, assignedBot);
+  t.close();
+  return Number(r.lastInsertRowid);
+}
+
+function taskRow(id) {
+  const t = rawTasks();
+  const row = t.prepare("SELECT * FROM tasks_items WHERE id=?").get(id);
+  t.close();
+  return row || null;
 }
 
 const PERCH_BOT = {
@@ -80,6 +153,11 @@ before(async () => {
     models: { default: "local/qwen" },
   }, { name: "Quiet" });
 
+  initTasksDb();
+  liveCardId = seedCard({ title: "live card" });
+  archivedCardId = seedCard({ title: "archived card", archivedAt: "2026-01-01T00:00:00.000Z" });
+  itemId = seedCard({ title: "tracker item", boardId: 1 });
+
   ({ _setEngineStatusForTest } = await import("../servers/gateway/dashboard/panels/bot-builder/engine-gate.js"));
   const { default: perchApiRouter } = await import("../servers/gateway/routes/perch.js");
   const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
@@ -88,7 +166,16 @@ before(async () => {
   const fakeAuth = (req, res, next) => { req.dashboardSession = "test-token"; next(); };
 
   const app = express();
-  app.use(express.json());
+  // Mirrors index.js's own global-parser/route-scoped-parser split (its
+  // `_hasOwnParser`): the files-upload and message (images) routes need a
+  // bigger-than-default limit and install their OWN express.json() inside
+  // perch-interactive-api.js — the global parser here must skip both exact
+  // paths or it would consume (and, at default limits, reject) the body
+  // before the route-scoped parser ever sees it.
+  const defaultJsonParser = express.json();
+  app.use((req, res, next) => (
+    /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(req.path) ? next() : defaultJsonParser(req, res, next)
+  ));
   // Both routers mount at the same /dashboard/perch-api prefix, exactly as
   // dashboard/index.js does — their path sets don't collide.
   app.use(perchApiRouter(fakeAuth, {
@@ -111,15 +198,37 @@ beforeEach(() => {
   _setEngineStatusForTest({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
   inboundCalls = [];
   inboundHook = async () => ({ action: "asked" });
-  engineCalls = { spawn: [], message: [], answer: [], abort: [], stop: [], get: [], subscribe: [] };
+  engineCalls = {
+    spawn: [], message: [], answer: [], abort: [], stop: [], get: [], subscribe: [],
+    checkCardFree: [], attachCard: [], control: [], cycle: [], options: [],
+  };
   engineImpl = {
-    async spawn({ botId }) {
-      engineCalls.spawn.push({ botId });
+    async spawn({ botId, cardId }) {
+      engineCalls.spawn.push({ botId, cardId });
       return { sessionId: "perchlive-abc", threadId: "perchlive-abc", state: "awake" };
     },
-    async message(sid, text) {
-      engineCalls.message.push({ sid, text });
+    async message(sid, text, images) {
+      engineCalls.message.push({ sid, text, images });
       return { turnId: "turn-1" };
+    },
+    async checkCardFree(cardId) {
+      engineCalls.checkCardFree.push({ cardId });
+    },
+    async attachCard(sid, cardId) {
+      engineCalls.attachCard.push({ sid, cardId });
+      return { ok: true, cardId, botId: "chatty" };
+    },
+    async control(sid, opts) {
+      engineCalls.control.push({ sid, opts });
+      return { applied: {}, bindsAtWake: {} };
+    },
+    async cycle(sid) {
+      engineCalls.cycle.push({ sid });
+      return { state: "waking" };
+    },
+    async options(sid) {
+      engineCalls.options.push({ sid });
+      return { models: [], thinkingLevels: [] };
     },
     async answer(sid, requestId, value) {
       engineCalls.answer.push({ sid, requestId, value });
@@ -205,7 +314,7 @@ test("POST /bots/:id/interactive 201s and passes botId through to the engine", a
   const { status, body } = await postJson("/bots/chatty/interactive", {});
   assert.equal(status, 201);
   assert.deepEqual(body, { sessionId: "perchlive-abc", threadId: "perchlive-abc", state: "awake" });
-  assert.deepEqual(engineCalls.spawn, [{ botId: "chatty" }]);
+  assert.deepEqual(engineCalls.spawn, [{ botId: "chatty", cardId: undefined }]);
 });
 
 test("POST /bots/:id/interactive 409s engine_required before ever touching the engine", async () => {
@@ -277,7 +386,7 @@ test("POST /interactive/:sid/message 202s with the turnId the engine returns", a
   const { status, body } = await postJson("/interactive/sess-1/message", { message: "hello" });
   assert.equal(status, 202);
   assert.deepEqual(body, { turnId: "turn-1" });
-  assert.deepEqual(engineCalls.message, [{ sid: "sess-1", text: "hello" }]);
+  assert.deepEqual(engineCalls.message, [{ sid: "sess-1", text: "hello", images: undefined }]);
 });
 
 test("the interactive message is capped at 32k before it reaches the engine", async () => {
@@ -351,6 +460,360 @@ test("POST /interactive/:sid/stop returns {ok:true}", async () => {
   assert.equal(status, 200);
   assert.deepEqual(body, { ok: true });
   assert.deepEqual(engineCalls.stop, [{ sid: "sess-1" }]);
+});
+
+// ---------------------------------------------------------------------------
+// POST /bots/:id/dispatch — Track 3 Task 9
+// ---------------------------------------------------------------------------
+
+test("POST /bots/:id/dispatch 201s, spawns with cardId, writes assigned_bot, and fires turn 1 fire-and-forget", async () => {
+  const { status, body } = await postJson("/bots/chatty/dispatch", { card_id: liveCardId, note: "please work this" });
+  assert.equal(status, 201);
+  assert.deepEqual(body, { sessionId: "perchlive-abc", threadId: "perchlive-abc", state: "awake" });
+  assert.deepEqual(engineCalls.spawn, [{ botId: "chatty", cardId: liveCardId }]);
+  assert.deepEqual(engineCalls.checkCardFree, [{ cardId: liveCardId }]);
+  // Fire-and-forget: the route never awaits eng.message(), but the fake's
+  // synchronous prefix (before its first await) has already run by the time
+  // the response is sent — no polling needed.
+  assert.deepEqual(engineCalls.message, [{ sid: "perchlive-abc", text: "please work this", images: undefined }]);
+  assert.equal(taskRow(liveCardId).assigned_bot, "chatty");
+});
+
+test("POST /bots/:id/dispatch defaults note to \"\" when omitted", async () => {
+  await postJson("/bots/chatty/dispatch", { card_id: liveCardId });
+  assert.equal(engineCalls.message.at(-1).text, "");
+});
+
+test("POST /bots/:id/dispatch 400s bad_request for a missing or non-integer card_id, before ever touching the tasks store", async () => {
+  for (const body of [{}, { card_id: "abc" }, { card_id: null }]) {
+    const r = await postJson("/bots/chatty/dispatch", body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.equal(r.body.error, "bad_request", JSON.stringify(body));
+  }
+  assert.equal(engineCalls.spawn.length, 0);
+});
+
+test("POST /bots/:id/dispatch 409s engine_required before ever touching the tasks store", async () => {
+  _setEngineStatusForTest({ state: "absent" });
+  const { status, body } = await postJson("/bots/chatty/dispatch", { card_id: liveCardId });
+  assert.equal(status, 409);
+  assert.equal(body.error, "engine_required");
+  assert.equal(engineCalls.spawn.length, 0);
+});
+
+test("POST /bots/:id/dispatch 403s perch_not_attached for a gmail-only bot", async () => {
+  const { status, body } = await postJson("/bots/quiet/dispatch", { card_id: liveCardId });
+  assert.equal(status, 403);
+  assert.equal(body.error, "perch_not_attached");
+  assert.equal(engineCalls.spawn.length, 0);
+});
+
+test("POST /bots/:id/dispatch 404s an unknown card id", async () => {
+  const { status, body } = await postJson("/bots/chatty/dispatch", { card_id: 999999 });
+  assert.equal(status, 404);
+  assert.equal(body.error, "not_found");
+  assert.equal(engineCalls.spawn.length, 0);
+});
+
+test("POST /bots/:id/dispatch 400s bad_request for a custom-board tracker ITEM id (board_id NOT NULL) — dispatch is cards-only", async () => {
+  const { status, body } = await postJson("/bots/chatty/dispatch", { card_id: itemId });
+  assert.equal(status, 400);
+  assert.equal(body.error, "bad_request");
+  assert.equal(engineCalls.spawn.length, 0);
+});
+
+test("POST /bots/:id/dispatch 409s archived for an archived card", async () => {
+  const { status, body } = await postJson("/bots/chatty/dispatch", { card_id: archivedCardId });
+  assert.equal(status, 409);
+  assert.equal(body.error, "archived");
+  assert.equal(engineCalls.spawn.length, 0);
+});
+
+test("POST /bots/:id/dispatch 409s card_occupied from checkCardFree, before spawn is ever called", async () => {
+  engineImpl.checkCardFree = async () => { throw engineErr("card_occupied"); };
+  const { status, body } = await postJson("/bots/chatty/dispatch", { card_id: liveCardId });
+  assert.equal(status, 409);
+  assert.equal(body.error, "card_occupied");
+  assert.equal(engineCalls.spawn.length, 0);
+});
+
+test("POST /bots/:id/dispatch maps a spawn() throw and never writes assigned_bot or fires turn 1", async () => {
+  const freshCardId = seedCard({ title: "spawn-throw fixture" }); // untouched by any earlier test
+  engineImpl.spawn = async () => { throw engineErr("interactive_capacity"); };
+  const { status, body } = await postJson("/bots/chatty/dispatch", { card_id: freshCardId });
+  assert.equal(status, 409);
+  assert.equal(body.error, "interactive_capacity");
+  assert.equal(taskRow(freshCardId).assigned_bot, null);
+  assert.equal(engineCalls.message.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// POST /interactive/:sid/attach-card — Track 3 Task 9
+// ---------------------------------------------------------------------------
+
+test("POST /interactive/:sid/attach-card 200s, checks occupancy, calls attachCard, and writes assigned_bot from the returned botId", async () => {
+  const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: liveCardId });
+  assert.equal(status, 200);
+  assert.deepEqual(body, { ok: true, cardId: liveCardId });
+  assert.deepEqual(engineCalls.checkCardFree, [{ cardId: liveCardId }]);
+  assert.deepEqual(engineCalls.attachCard, [{ sid: "sess-1", cardId: liveCardId }]);
+  assert.equal(taskRow(liveCardId).assigned_bot, "chatty");
+});
+
+test("POST /interactive/:sid/attach-card 400s bad_request for a missing or non-integer card_id", async () => {
+  const { status, body } = await postJson("/interactive/sess-1/attach-card", {});
+  assert.equal(status, 400);
+  assert.equal(body.error, "bad_request");
+  assert.equal(engineCalls.attachCard.length, 0);
+});
+
+test("POST /interactive/:sid/attach-card 404s an unknown card id", async () => {
+  const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: 999998 });
+  assert.equal(status, 404);
+  assert.equal(body.error, "not_found");
+  assert.equal(engineCalls.attachCard.length, 0);
+});
+
+test("POST /interactive/:sid/attach-card 400s bad_request for a custom-board tracker ITEM id", async () => {
+  const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: itemId });
+  assert.equal(status, 400);
+  assert.equal(body.error, "bad_request");
+  assert.equal(engineCalls.attachCard.length, 0);
+});
+
+test("POST /interactive/:sid/attach-card 409s archived for an archived card", async () => {
+  const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: archivedCardId });
+  assert.equal(status, 409);
+  assert.equal(body.error, "archived");
+  assert.equal(engineCalls.attachCard.length, 0);
+});
+
+test("POST /interactive/:sid/attach-card 409s card_occupied from checkCardFree, before attachCard is ever called", async () => {
+  engineImpl.checkCardFree = async () => { throw engineErr("card_occupied"); };
+  const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: liveCardId });
+  assert.equal(status, 409);
+  assert.equal(body.error, "card_occupied");
+  assert.equal(engineCalls.attachCard.length, 0);
+});
+
+test("POST /interactive/:sid/attach-card maps session_stopped -> 410 stopped, and never writes assigned_bot", async () => {
+  const freshCardId = seedCard({ title: "attach-stopped fixture" }); // untouched by any earlier test
+  engineImpl.attachCard = async () => { throw engineErr("session_stopped"); };
+  const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: freshCardId });
+  assert.equal(status, 410);
+  assert.equal(body.error, "stopped");
+  assert.equal(taskRow(freshCardId).assigned_bot, null);
+});
+
+// ---------------------------------------------------------------------------
+// POST /interactive/:sid/control — snake_case body -> camelCase engine opts
+// ---------------------------------------------------------------------------
+
+test("POST /interactive/:sid/control maps model {provider,id}->modelId, thinking, permission_mode->permissionMode, plan_mode->planMode", async () => {
+  const { status, body } = await postJson("/interactive/sess-1/control", {
+    model: { provider: "crow-local", id: "qwen3.6-35b-a3b" },
+    thinking: "high",
+    permission_mode: "guarded",
+    plan_mode: true,
+  });
+  assert.equal(status, 200);
+  assert.deepEqual(body, { applied: {}, bindsAtWake: {} });
+  assert.deepEqual(engineCalls.control, [{
+    sid: "sess-1",
+    opts: {
+      model: { provider: "crow-local", modelId: "qwen3.6-35b-a3b" },
+      thinking: "high",
+      permissionMode: "guarded",
+      planMode: true,
+    },
+  }]);
+});
+
+test("POST /interactive/:sid/control forwards plan_mode:false — a present falsy value, not an omitted field", async () => {
+  await postJson("/interactive/sess-1/control", { plan_mode: false });
+  assert.deepEqual(engineCalls.control[0].opts, { planMode: false });
+});
+
+test("POST /interactive/:sid/control sends an empty opts object when the body carries no recognized fields", async () => {
+  await postJson("/interactive/sess-1/control", {});
+  assert.deepEqual(engineCalls.control[0].opts, {});
+});
+
+test("POST /interactive/:sid/control maps bad_request, turn_in_progress, session_stopped, no_such_session, and not_awake", async () => {
+  for (const [code, wantStatus, wantError] of [
+    ["bad_request", 400, "bad_request"],
+    ["turn_in_progress", 409, "turn_in_progress"],
+    ["session_stopped", 410, "stopped"],
+    ["no_such_session", 404, "no_such_session"],
+    ["not_awake", 409, "not_awake"],
+  ]) {
+    engineImpl.control = async () => { throw engineErr(code); };
+    const { status, body } = await postJson("/interactive/sess-1/control", { thinking: "low" });
+    assert.equal(status, wantStatus, code);
+    assert.equal(body.error, wantError, code);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /interactive/:sid/cycle
+// ---------------------------------------------------------------------------
+
+test("POST /interactive/:sid/cycle 200s with the engine's own {state}", async () => {
+  const { status, body } = await postJson("/interactive/sess-1/cycle", {});
+  assert.equal(status, 200);
+  assert.deepEqual(body, { state: "waking" });
+  assert.deepEqual(engineCalls.cycle, [{ sid: "sess-1" }]);
+});
+
+test("POST /interactive/:sid/cycle maps cycle_busy and session_stopped", async () => {
+  engineImpl.cycle = async () => { throw engineErr("cycle_busy"); };
+  let r = await postJson("/interactive/sess-1/cycle", {});
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "cycle_busy");
+
+  engineImpl.cycle = async () => { throw engineErr("session_stopped"); };
+  r = await postJson("/interactive/sess-1/cycle", {});
+  assert.equal(r.status, 410);
+  assert.equal(r.body.error, "stopped");
+});
+
+// ---------------------------------------------------------------------------
+// GET /interactive/:sid/options
+// ---------------------------------------------------------------------------
+
+test("GET /interactive/:sid/options 200s with the engine's models/thinkingLevels", async () => {
+  engineImpl.options = async (sid) => {
+    engineCalls.options.push({ sid });
+    return { models: [{ provider: "crow-local", id: "qwen3.6-35b-a3b" }], thinkingLevels: ["low", "high"] };
+  };
+  const { status, body } = await getJson("/interactive/sess-1/options");
+  assert.equal(status, 200);
+  assert.deepEqual(body, { models: [{ provider: "crow-local", id: "qwen3.6-35b-a3b" }], thinkingLevels: ["low", "high"] });
+  assert.deepEqual(engineCalls.options, [{ sid: "sess-1" }]);
+});
+
+test("GET /interactive/:sid/options 404s no_such_session", async () => {
+  engineImpl.options = async () => { throw engineErr("no_such_session"); };
+  const { status, body } = await getJson("/interactive/sess-1/options");
+  assert.equal(status, 404);
+  assert.equal(body.error, "no_such_session");
+});
+
+// ---------------------------------------------------------------------------
+// POST /interactive/:sid/message — images passthrough (Track 3 Task 9)
+// ---------------------------------------------------------------------------
+
+test("POST /interactive/:sid/message normalizes {mime,data_b64} images into pi's ImageContent shape and forwards them to eng.message", async () => {
+  const b64 = Buffer.from("fake-png-bytes").toString("base64");
+  const { status } = await postJson("/interactive/sess-1/message", {
+    message: "look at this",
+    images: [{ mime: "image/png", data_b64: b64 }],
+  });
+  assert.equal(status, 202);
+  assert.deepEqual(engineCalls.message[0].images, [{ type: "image", data: b64, mimeType: "image/png" }]);
+});
+
+test("POST /interactive/:sid/message caps images at 3 — a 4th valid image beyond the cap never reaches the engine", async () => {
+  const ok = Buffer.from("ok").toString("base64");
+  const { status } = await postJson("/interactive/sess-1/message", {
+    message: "hi",
+    images: [
+      { mime: "image/png", data_b64: ok },
+      { mime: "image/gif", data_b64: ok },
+      { mime: "image/webp", data_b64: ok },
+      { mime: "image/jpeg", data_b64: ok }, // 4th — beyond the cap, dropped
+    ],
+  });
+  assert.equal(status, 202);
+  assert.equal(engineCalls.message[0].images.length, 3);
+  assert.deepEqual(engineCalls.message[0].images.map((i) => i.mimeType), ["image/png", "image/gif", "image/webp"]);
+});
+
+test("POST /interactive/:sid/message drops an oversize (post-decode) image and a missing-mime entry, best-effort — same downloadImages() discipline, never throws", async () => {
+  const ok = Buffer.from("ok").toString("base64");
+  const big = Buffer.alloc(2 * 1024 * 1024 + 1, 1).toString("base64");
+  const { status } = await postJson("/interactive/sess-1/message", {
+    message: "hi",
+    images: [
+      { mime: "image/jpeg", data_b64: big }, // oversize post-decode — dropped
+      { mime: "", data_b64: ok },            // missing mime — dropped
+      { mime: "image/png", data_b64: ok },   // the one survivor
+    ],
+  });
+  assert.equal(status, 202);
+  assert.deepEqual(engineCalls.message[0].images, [{ type: "image", data: ok, mimeType: "image/png" }]);
+});
+
+test("POST /interactive/:sid/message omits images entirely (undefined, not []) when none are sent", async () => {
+  await postJson("/interactive/sess-1/message", { message: "hi" });
+  assert.equal(engineCalls.message[0].images, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// POST /interactive/:sid/files — base64 JSON upload into the session's uploadsDir
+// ---------------------------------------------------------------------------
+
+test("POST /interactive/:sid/files writes a sanitized-name file into the session's REAL uploadsDir", async () => {
+  const uploadsDir = mkdtempSync(join(tmpdir(), "perch-uploads-"));
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir, outputsDir: null });
+  const data = Buffer.from("hello upload");
+  const { status, body } = await postJson("/interactive/sess-1/files", {
+    name: "notes.txt", data_b64: data.toString("base64"),
+  });
+  assert.equal(status, 200);
+  assert.deepEqual(body, { path: "notes.txt" });
+  assert.deepEqual(readFileSync(join(uploadsDir, "notes.txt")), data);
+});
+
+test("POST /interactive/:sid/files strips directory components from name (basename) — a traversal attempt lands as a flat file, never escapes", async () => {
+  const uploadsDir = mkdtempSync(join(tmpdir(), "perch-uploads-"));
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir, outputsDir: null });
+  const { status, body } = await postJson("/interactive/sess-1/files", {
+    name: "../../etc/evil.txt", data_b64: Buffer.from("x").toString("base64"),
+  });
+  assert.equal(status, 200);
+  assert.equal(body.path, "evil.txt");
+  assert.ok(readFileSync(join(uploadsDir, "evil.txt"), "utf8"));
+});
+
+test("POST /interactive/:sid/files 400s an empty name, a bare dotfile name, and a missing/empty data_b64", async () => {
+  const uploadsDir = mkdtempSync(join(tmpdir(), "perch-uploads-"));
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir, outputsDir: null });
+  const goodData = Buffer.from("x").toString("base64");
+  for (const body of [
+    { name: "", data_b64: goodData },
+    { name: ".hidden", data_b64: goodData },
+    { name: "..", data_b64: goodData },
+    { name: "ok.txt", data_b64: "" },
+    { name: "ok.txt" },
+  ]) {
+    const r = await postJson("/interactive/sess-1/files", body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.equal(r.body.error, "bad_request", JSON.stringify(body));
+  }
+});
+
+test("POST /interactive/:sid/files 400s a payload over the 5 MB post-decode cap", async () => {
+  const uploadsDir = mkdtempSync(join(tmpdir(), "perch-uploads-"));
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir, outputsDir: null });
+  const big = Buffer.alloc(5 * 1024 * 1024 + 1, 7).toString("base64");
+  const { status, body } = await postJson("/interactive/sess-1/files", { name: "big.bin", data_b64: big });
+  assert.equal(status, 400);
+  assert.equal(body.error, "bad_request");
+});
+
+test("POST /interactive/:sid/files 409s no_session_dir when the session has never been through startChild in this process", async () => {
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir: null, outputsDir: null });
+  const { status, body } = await postJson("/interactive/sess-1/files", { name: "ok.txt", data_b64: Buffer.from("x").toString("base64") });
+  assert.equal(status, 409);
+  assert.equal(body.error, "no_session_dir");
+});
+
+test("POST /interactive/:sid/files 404s no_such_session for an unknown session", async () => {
+  engineImpl.get = async () => null;
+  const { status, body } = await postJson("/interactive/sess-1/files", { name: "ok.txt", data_b64: Buffer.from("x").toString("base64") });
+  assert.equal(status, 404);
+  assert.equal(body.error, "no_such_session");
 });
 
 // ---------------------------------------------------------------------------
@@ -594,6 +1057,22 @@ test("the perch-interactive API is mounted AFTER the dashboard CSRF rail, not at
 
   const boot = readFileSync(join(REPO, "servers/gateway/boot/feature-mounts.js"), "utf8");
   assert.equal(boot.includes("perch-interactive-api.js"), false, "an app-root mount would bypass the CSRF rail");
+});
+
+test("index.js's global 1mb JSON parser skips the files and message routes — their own route-scoped 10mb parsers must be reachable", () => {
+  // Structural check (same idiom as the mount-order test above — plain
+  // source inspection, never a dynamically-executed re-derivation of the
+  // predicate): index.js's _hasOwnParser regex must name both routes under
+  // the perch-interactive prefix, and perch-interactive-api.js must actually
+  // install a bigger parser on both — a mismatch on either side would mean
+  // one of the two either 413s in prod or silently double-parses.
+  const indexSrc = readFileSync(join(REPO, "servers/gateway/index.js"), "utf8");
+  assert.match(indexSrc, /dashboard\\\/perch-api\\\/interactive\\\/\[\^\/\]\+\\\/\(files\|message\)/,
+    "_hasOwnParser must skip BOTH .../interactive/:sid/files and .../message");
+
+  const routesSrc = readFileSync(join(REPO, "servers/gateway/routes/perch-interactive-api.js"), "utf8");
+  assert.match(routesSrc, /router\.use\(P \+ "\/interactive\/:sid\/files", express\.json\(/);
+  assert.match(routesSrc, /router\.use\(P \+ "\/interactive\/:sid\/message", express\.json\(/);
 });
 
 // ---------------------------------------------------------------------------
