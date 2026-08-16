@@ -118,3 +118,15 @@ export function designTokensCss() {
     --crow-text-tertiary: rgba(0,0,0,0.45);
   }`;
 }
+
+// Decision 15 (Track 2): Crow is the authority for the Perch palette. The vendored
+// perch-hub payload must match these values exactly — tests/perch-token-drift.test.js
+// fails CI on any drift, in either direction. Changing a value here REQUIRES the
+// pi-lab edit + scripts/vendor-perch.mjs re-pin dance to land in the same PR.
+export const PERCH_TOKENS = {
+  light: { sky: "#eef1f3", card: "#fff", ink: "#22303a", dim: "#6b7c88",
+           teal: "#0e6b62", tealSoft: "#dcecea", wire: "#94a4ae",
+           alive: "#2fa36b", attn: "#d1633e", line: "#dde4e8" },
+  dark:  { sky: "#131a1f", card: "#1b242b", ink: "#e4ebef", dim: "#8fa0ab",
+           teal: "#4fbdb0", tealSoft: "#16322f", wire: "#46565f", line: "#2a353d" },
+};
