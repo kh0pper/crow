@@ -50,12 +50,13 @@ export function designTokensCss() {
     }
   }
 
-  /* Base radius tokens. --crow-radius-pill stays 8px in this task — Task 7
-     re-values it to 999px after the pill-consumer triage. */
+  /* Base radius tokens. --crow-radius-pill re-valued to 999px (Task 7) after
+     the pill-consumer triage: control-shaped sites moved to
+     --crow-radius-control, chip/tag/badge sites stayed on the pill token. */
   :root {
     --crow-radius-card: 14px;
     --crow-radius-control: 10px;
-    --crow-radius-pill: 8px;
+    --crow-radius-pill: 999px;
   }
 
   /* Sizing scales (theme-independent) */
