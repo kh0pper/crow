@@ -85,13 +85,13 @@ export function registerMessagingTools(server, ctx) {
     {
       name: z.string().max(200).describe("Group name"),
       members: z.array(z.string().max(500)).describe("Array of contact names or Crow IDs to add"),
-      color: z.string().max(20).optional().describe("Group color (hex, e.g. #6366f1)"),
+      color: z.string().max(20).optional().describe("Group color (hex, e.g. #0e6b62)"),
     },
     async ({ name, members, color }) => {
       // Create the group
       const groupResult = await db.execute({
         sql: "INSERT INTO contact_groups (name, color) VALUES (?, ?)",
-        args: [name, color || "#6366f1"],
+        args: [name, color || "#0e6b62"],
       });
       const groupId = Number(groupResult.lastInsertRowid);
 
