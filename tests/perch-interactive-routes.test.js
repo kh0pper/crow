@@ -211,8 +211,8 @@ beforeEach(() => {
       engineCalls.message.push({ sid, text, images });
       return { turnId: "turn-1" };
     },
-    async checkCardFree(cardId) {
-      engineCalls.checkCardFree.push({ cardId });
+    async checkCardFree(cardId, opts) {
+      engineCalls.checkCardFree.push({ cardId, opts });
     },
     async attachCard(sid, cardId) {
       engineCalls.attachCard.push({ sid, cardId });
@@ -471,7 +471,10 @@ test("POST /bots/:id/dispatch 201s, spawns with cardId, writes assigned_bot, and
   assert.equal(status, 201);
   assert.deepEqual(body, { sessionId: "perchlive-abc", threadId: "perchlive-abc", state: "awake" });
   assert.deepEqual(engineCalls.spawn, [{ botId: "chatty", cardId: liveCardId }]);
-  assert.deepEqual(engineCalls.checkCardFree, [{ cardId: liveCardId }]);
+  // Fix round 1: dispatch keeps calling checkCardFree WITHOUT an exclusion —
+  // a fresh spawn always mints a brand-new sessionId, so it can never
+  // collide with its own not-yet-existent row.
+  assert.deepEqual(engineCalls.checkCardFree, [{ cardId: liveCardId, opts: undefined }]);
   // Fire-and-forget: the route never awaits eng.message(), but the fake's
   // synchronous prefix (before its first await) has already run by the time
   // the response is sent — no polling needed.
@@ -555,7 +558,10 @@ test("POST /interactive/:sid/attach-card 200s, checks occupancy, calls attachCar
   const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: liveCardId });
   assert.equal(status, 200);
   assert.deepEqual(body, { ok: true, cardId: liveCardId });
-  assert.deepEqual(engineCalls.checkCardFree, [{ cardId: liveCardId }]);
+  // Fix round 1: attach-card DOES pass an exclusion — the target session's
+  // own sid, so a re-assert of a card it already holds can reach
+  // attachCard()'s idempotent no-op path instead of 409ing against itself.
+  assert.deepEqual(engineCalls.checkCardFree, [{ cardId: liveCardId, opts: { excludeSessionId: "sess-1" } }]);
   assert.deepEqual(engineCalls.attachCard, [{ sid: "sess-1", cardId: liveCardId }]);
   assert.equal(taskRow(liveCardId).assigned_bot, "chatty");
 });
@@ -593,6 +599,42 @@ test("POST /interactive/:sid/attach-card 409s card_occupied from checkCardFree, 
   const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: liveCardId });
   assert.equal(status, 409);
   assert.equal(body.error, "card_occupied");
+  assert.equal(engineCalls.attachCard.length, 0);
+});
+
+// Fix round 1 (coordinator-reported Important): checkCardFree's perch-live
+// rail used to match the CALLING session's own already-attached row, so the
+// route's checkCardFree-then-attachCard sequence 409'd a session
+// re-asserting the card it already holds — attachCard()'s documented
+// idempotent no-op path was unreachable over HTTP. The fake below stands in
+// for the real engine's exclusion semantics: "occupied by sess-1 itself,
+// clears ONLY when excluded by that exact sessionId" — proving the ROUTE
+// actually plumbs `{excludeSessionId: sid}` through, not merely that it
+// calls checkCardFree at all.
+test("POST /interactive/:sid/attach-card to the card THIS session already holds 200s/no-ops — the idempotent path is reachable (fix round 1)", async () => {
+  engineImpl.checkCardFree = async (cardId, opts) => {
+    engineCalls.checkCardFree.push({ cardId, opts });
+    if (!opts || opts.excludeSessionId !== "sess-1") throw engineErr("card_occupied");
+    // else: excluded — the session's own row no longer occupies the card.
+  };
+  const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: liveCardId });
+  assert.equal(status, 200);
+  assert.deepEqual(body, { ok: true, cardId: liveCardId });
+  assert.deepEqual(engineCalls.checkCardFree, [{ cardId: liveCardId, opts: { excludeSessionId: "sess-1" } }]);
+  assert.deepEqual(engineCalls.attachCard, [{ sid: "sess-1", cardId: liveCardId }]);
+});
+
+test("POST /interactive/:sid/attach-card to a card held by a DIFFERENT session still 409s — exclusion is narrowly scoped, never a blanket bypass (fix round 1)", async () => {
+  engineImpl.checkCardFree = async (cardId, opts) => {
+    engineCalls.checkCardFree.push({ cardId, opts });
+    // Occupied by SOME OTHER session — excluding "sess-1" (the caller) can
+    // never clear a claim that belongs to someone else.
+    throw engineErr("card_occupied");
+  };
+  const { status, body } = await postJson("/interactive/sess-1/attach-card", { card_id: liveCardId });
+  assert.equal(status, 409);
+  assert.equal(body.error, "card_occupied");
+  assert.deepEqual(engineCalls.checkCardFree, [{ cardId: liveCardId, opts: { excludeSessionId: "sess-1" } }]);
   assert.equal(engineCalls.attachCard.length, 0);
 });
 

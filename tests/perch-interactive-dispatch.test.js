@@ -387,6 +387,29 @@ test("checkCardFree: an unclaimed card is free", async () => {
   await engine.checkCardFree(206);
 });
 
+test("checkCardFree: excludeSessionId skips the CALLING session's own perch-live row (fix round 1)", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine, { botId: "self-check", cardId: 207 });
+  // Hibernate so the row lands on the perch-live rail (kind='perch-live',
+  // status != 'stopped') rather than rail (a)'s status='active' — the exact
+  // rail the fix targets.
+  await engine._hibernateForTest(s.sessionId);
+  await assert.rejects(() => engine.checkCardFree(207), (e) => e.code === "card_occupied",
+    "without exclusion, the session's own row still occupies the card");
+  await engine.checkCardFree(207, { excludeSessionId: s.sessionId }); // resolves — must not throw
+});
+
+test("checkCardFree: excludeSessionId does NOT skip a DIFFERENT session's perch-live row for the same card (fix round 1)", async () => {
+  const { engine } = makeEngine();
+  const holder = await spawned(engine, { botId: "real-holder", cardId: 208 });
+  await engine._hibernateForTest(holder.sessionId);
+  await assert.rejects(
+    () => engine.checkCardFree(208, { excludeSessionId: "some-other-session-id" }),
+    (e) => e.code === "card_occupied",
+    "excluding a DIFFERENT sessionId must not blanket-bypass the real holder's claim"
+  );
+});
+
 // ---------------------------------------------------------------------------
 // 4. dispatch brief composition
 // ---------------------------------------------------------------------------

@@ -875,8 +875,20 @@ export function createInteractiveEngine({
    *   (c) any `kind='perch-live'` row for this card with status != 'stopped'
    *       — a HIBERNATING card-bound perch session still owns the card (a
    *       card claim outlives hibernation; see the module header).
+   *
+   * Track 3 Task 9 fix round 1 (coordinator-reported Important): the
+   * attach-card ROUTE calls this BEFORE `eng.attachCard()` — a session
+   * re-asserting a card it ALREADY holds hit rail (c) against its OWN row
+   * (that row's `gateway_thread_id` IS the calling session's own
+   * `sessionId`), 409ing before `attachCard()`'s documented idempotent
+   * no-op path was ever reached. `excludeSessionId` skips rail (c) rows
+   * whose `gateway_thread_id` matches it — narrowly, only that one rail,
+   * only that one session; every OTHER live claimant (including this exact
+   * card held by a DIFFERENT session) still 409s. `spawn()`'s own internal
+   * pre-check never passes it — a spawn always mints a brand-new sessionId,
+   * so it can never collide with its own not-yet-existent row.
    */
-  async function checkCardFree(cardId) {
+  async function checkCardFree(cardId, { excludeSessionId } = {}) {
     const cid = Number(cardId);
     const db = createDbClient();
     try {
@@ -888,8 +900,10 @@ export function createInteractiveEngine({
       const job = await jobLockFor(db, cid);
       if (job) throw engineError("card_occupied");
       const live = await db.execute({
-        sql: "SELECT id FROM bot_sessions WHERE card_id=? AND kind='perch-live' AND status != 'stopped' LIMIT 1",
-        args: [cid],
+        sql:
+          "SELECT id FROM bot_sessions WHERE card_id=? AND kind='perch-live' AND status != 'stopped' " +
+          (excludeSessionId != null ? "AND gateway_thread_id != ? " : "") + "LIMIT 1",
+        args: excludeSessionId != null ? [cid, String(excludeSessionId)] : [cid],
       });
       if (live.rows[0]) throw engineError("card_occupied");
     } finally {

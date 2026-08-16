@@ -31,6 +31,11 @@ let engineImpl;
 
 const outputsDir = mkdtempSync(join(tmpdir(), "perch-workspace-outputs-"));
 const secretDir = mkdtempSync(join(tmpdir(), "perch-workspace-secret-"));
+// Fix round 1, finding 2: a DIRECTORY symlink one level up from the leaf —
+// distinct from escape-link.txt's FILE symlink below. realpathSync resolves
+// every symlinked path COMPONENT, not just a leaf, so a symlinked
+// intermediate directory must be caught by the same jail check.
+const outsideDir2 = mkdtempSync(join(tmpdir(), "perch-workspace-outside2-"));
 
 function rawRequest(path, { headers = {} } = {}) {
   return new Promise((resolve, reject) => {
@@ -54,6 +59,11 @@ before(async () => {
   // The money attack: a symlink INSIDE outputsDir whose real target resolves
   // OUTSIDE it.
   symlinkSync(join(secretDir, "secret.txt"), join(outputsDir, "escape-link.txt"));
+  // Finding 2: an INTERMEDIATE directory symlink — outputsDir/sub2 itself is
+  // a symlink to outsideDir2 — with the leaked file one level further down
+  // (leak.txt), reached only by resolving THROUGH the symlinked directory.
+  writeFileSync(join(outsideDir2, "leak.txt"), "LEAKED — must never be served");
+  symlinkSync(outsideDir2, join(outputsDir, "sub2"));
 
   const { default: express } = await import("express");
   const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
@@ -79,6 +89,7 @@ after(() => {
   if (server) server.close();
   rmSync(outputsDir, { recursive: true, force: true });
   rmSync(secretDir, { recursive: true, force: true });
+  rmSync(outsideDir2, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -167,6 +178,17 @@ test("ATTACK symlink escape: a symlink inside outputsDir resolving OUTSIDE it 40
   const r = await rawRequest("/dashboard/perch-api/interactive/sess-1/workspace/escape-link.txt");
   assert.equal(r.status, 404);
   assert.doesNotMatch(r.body.toString("utf8"), /TOP SECRET/);
+});
+
+// Fix round 1, finding 2: same class of attack, one level higher — the
+// symlink is on an INTERMEDIATE directory (outputsDir/sub2), not the leaf
+// file. realpathSync(join(outputsDir, "sub2/leak.txt")) still resolves
+// through it to outsideDir2/leak.txt, so the existing startsWith(outputsReal
+// + sep) check catches this shape too — pinned here so it stays true.
+test("ATTACK symlink escape: an INTERMEDIATE directory symlink (sub2 -> outside) 404s — never serves the leaked file", async () => {
+  const r = await rawRequest("/dashboard/perch-api/interactive/sess-1/workspace/sub2/leak.txt");
+  assert.equal(r.status, 404);
+  assert.doesNotMatch(r.body.toString("utf8"), /LEAKED/);
 });
 
 // ---------------------------------------------------------------------------
