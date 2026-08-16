@@ -2324,13 +2324,17 @@ for (const section of seedSections) {
 }
 
 // --- One-time theme migration (old keys → new unified keys) ---
+// The `dashboard_theme` → `blog_theme_dashboard_mode` re-mint branch retired
+// in Track 2 Task 5 (spec §3.4, finding 8): `blog_theme_dashboard_mode` is
+// one of the four keys `theme-keys-migration.js` deletes at boot, and this
+// branch could resurrect it from a surviving legacy `dashboard_theme` row.
+// The `blog_theme` → `blog_theme_mode`/`blog_theme_serif` branch stays: it
+// only ever writes SURVIVING keys (`blog_theme_mode`, `blog_theme_serif`),
+// never the retired `blog_theme`/`dashboard_theme` keys themselves, so it
+// cannot resurrect anything the migration deletes.
 try {
   const oldTheme = await db.execute({
     sql: "SELECT value FROM dashboard_settings WHERE key = 'blog_theme'",
-    args: [],
-  });
-  const oldDashTheme = await db.execute({
-    sql: "SELECT value FROM dashboard_settings WHERE key = 'dashboard_theme'",
     args: [],
   });
 
@@ -2356,14 +2360,6 @@ try {
           args: [],
         });
       }
-    }
-
-    // Migrate dashboard_theme
-    if (oldDashTheme.rows.length > 0 && oldDashTheme.rows[0].value === "light") {
-      await db.execute({
-        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('blog_theme_dashboard_mode', 'light', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = 'light', updated_at = datetime('now')",
-        args: [],
-      });
     }
     console.log("Theme migration complete (old keys preserved for backward compat).");
   }

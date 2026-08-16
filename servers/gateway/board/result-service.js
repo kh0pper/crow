@@ -28,13 +28,10 @@
 
 import { getCard, moveCard, recordMutation } from "./card-service.js";
 import { resolveBoardDef, isTerminal } from "../routes/board-defs.js";
+import { nowStamp } from "./util.js";
 
 function fail(msg, code, http) {
   return Object.assign(new Error(msg), { code, http });
-}
-
-function nowStamp() {
-  return new Date().toISOString().slice(0, 19).replace("T", " ");
 }
 
 /**

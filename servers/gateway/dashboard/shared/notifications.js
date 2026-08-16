@@ -298,7 +298,7 @@ export const headerIconsCss = `
     top: -4px;
     right: -4px;
     background: var(--crow-brand-gold);
-    color: #1a1a2e;
+    color: var(--crow-accent-contrast);
     font-size: 0.65rem;
     font-weight: 700;
     min-width: 16px;
@@ -398,7 +398,7 @@ export const headerIconsCss = `
     flex-shrink: 0;
     margin-top: 2px;
   }
-  .notif-type-reminder { background: rgba(99,102,241,0.15); color: var(--crow-accent); }
+  .notif-type-reminder { background: color-mix(in srgb, var(--crow-accent) 15%, transparent); color: var(--crow-accent); }
   .notif-type-media { background: rgba(168,85,247,0.15); color: #a855f7; }
   .notif-type-peer { background: rgba(34,197,94,0.15); color: var(--crow-success); }
   .notif-type-system { background: rgba(234,179,8,0.15); color: var(--crow-brand-gold); }
@@ -428,7 +428,7 @@ export const headerIconsCss = `
     color: var(--crow-accent);
   }
   .kiosk-toggle-btn:hover {
-    background: rgba(99,102,241,0.1);
+    background: color-mix(in srgb, var(--crow-accent) 10%, transparent);
   }
   .kiosk-overlay {
     display: none;
@@ -489,7 +489,7 @@ export const headerIconsCss = `
     align-items: center;
     justify-content: center;
     color: #fff;
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
     text-align: center;
     padding: 2rem;
     gap: 1rem;
@@ -513,10 +513,10 @@ export const headerIconsCss = `
     align-items: center;
     gap: 1rem;
     padding: 0.75rem 1.25rem;
-    background: rgba(26,26,46,0.92);
+    background: rgba(34,48,58,0.92);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(99,102,241,0.4);
+    border: 1px solid color-mix(in srgb, var(--crow-accent) 40%, transparent);
     border-radius: 12px;
     box-shadow: 0 8px 32px rgba(0,0,0,0.5);
     transition: top 0.3s ease-out;
@@ -772,30 +772,30 @@ ${kioskBtn}
     <g class="crow-body-group">
       <!-- Feet -->
       <g class="crow-feet">
-        <line x1="19" y1="42" x2="17" y2="48" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"/>
-        <line x1="19" y1="42" x2="21" y2="48" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"/>
-        <line x1="29" y1="42" x2="27" y2="48" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"/>
-        <line x1="29" y1="42" x2="31" y2="48" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="19" y1="42" x2="17" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="19" y1="42" x2="21" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="29" y1="42" x2="27" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="29" y1="42" x2="31" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
       </g>
       <!-- Body -->
-      <ellipse class="crow-body" cx="24" cy="34" rx="12" ry="10" fill="#6366f1"/>
+      <ellipse class="crow-body" cx="24" cy="34" rx="12" ry="10" fill="#0e6b62"/>
       <!-- Wing -->
-      <ellipse class="crow-wing" cx="14" cy="33" rx="6" ry="8" fill="#818cf8" opacity="0.5" transform-origin="14 33"/>
+      <ellipse class="crow-wing" cx="14" cy="33" rx="6" ry="8" fill="#4fbdb0" opacity="0.5" transform-origin="14 33"/>
       <!-- Head -->
-      <circle class="crow-head" cx="24" cy="18" r="9" fill="#6366f1"/>
+      <circle class="crow-head" cx="24" cy="18" r="9" fill="#0e6b62"/>
       <!-- Eye -->
-      <circle class="crow-eye" cx="28" cy="16" r="3" fill="#fbbf24"/>
-      <circle class="crow-pupil" cx="29" cy="16" r="1.5" fill="#0f0f17"/>
+      <circle class="crow-eye" cx="28" cy="16" r="3" fill="#d9a521"/>
+      <circle class="crow-pupil" cx="29" cy="16" r="1.5" fill="#22303a"/>
       <!-- Beak -->
-      <polygon class="crow-beak" points="33,18 40,20 33,22" fill="#fbbf24"/>
+      <polygon class="crow-beak" points="33,18 40,20 33,22" fill="#d9a521"/>
     </g>
     <!-- Thought bubble (notification count) -->
     <g class="crow-bubble" id="crow-bubble" style="display:none">
-      <rect x="32" y="0" width="16" height="14" rx="5" fill="var(--crow-bg-surface, #1a1a2e)" stroke="var(--crow-border, #2a2a3e)" stroke-width="1"/>
-      <text class="crow-bubble-count" id="crow-bubble-count" x="40" y="10.5" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="700" font-family="'JetBrains Mono',monospace">0</text>
+      <rect x="32" y="0" width="16" height="14" rx="5" fill="var(--crow-bg-surface, #22303a)" stroke="var(--crow-border, #2a2a3e)" stroke-width="1"/>
+      <text class="crow-bubble-count" id="crow-bubble-count" x="40" y="10.5" text-anchor="middle" fill="#d9a521" font-size="9" font-weight="700" font-family="'JetBrains Mono',monospace">0</text>
     </g>
     <!-- Alarmed exclamation -->
-    <text class="crow-exclaim" id="crow-exclaim" style="display:none" x="6" y="12" fill="#ef4444" font-size="14" font-weight="900" font-family="'DM Sans',sans-serif">!</text>
+    <text class="crow-exclaim" id="crow-exclaim" style="display:none" x="6" y="12" fill="#ef4444" font-size="14" font-weight="900" font-family="var(--crow-body-font)">!</text>
   </svg>
   <!-- Combined dropdown -->
   <div id="crow-dropdown" class="crow-dropdown" style="display:none" onclick="event.stopPropagation()">
@@ -876,7 +876,7 @@ export const tamagotchiCss = `
     animation: none;
   }
   .crow-happy .crow-beak {
-    fill: #fbbf24;
+    fill: #d9a521;
   }
 
   /* ─ Tired mood ─ */

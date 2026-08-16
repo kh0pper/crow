@@ -7,8 +7,8 @@
 export function botBoardStyles() {
   return `<style>
   .bb-switch{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
-  .bb-switch select,.bb-switch input{padding:.45rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary)}
-  .bb-switch button{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-pill);color:#fff;cursor:pointer}
+  .bb-switch select,.bb-switch input{padding:.45rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)}
+  .bb-switch button{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer}
   .bb-board{display:grid;grid-template-columns:repeat(var(--bb-cols,4),1fr);gap:.75rem;align-items:start;overflow-x:auto}
   .bb-col{background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);padding:.6rem;min-height:120px;min-width:140px}
   .bb-col.bb-dragover{border-color:var(--crow-accent);background:var(--crow-bg-elevated)}
@@ -32,7 +32,7 @@ export function botBoardStyles() {
   .bb-marker-failed{background:#fbdada;color:#8a1f11}
   .bb-prio{font-weight:700}.bb-prio-1,.bb-prio-2{color:#c0392b}.bb-prio-3{color:#b8860b}.bb-prio-4,.bb-prio-5{color:#888}
   .bb-nojs-move{display:flex;gap:.25rem;flex-wrap:wrap;margin-top:.4rem}
-  .bb-nojs-move button{font-size:.66rem;padding:.15rem .4rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-secondary);cursor:pointer}
+  .bb-nojs-move button{font-size:.66rem;padding:.15rem .4rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-secondary);cursor:pointer}
   body.bb-js .bb-nojs-move{display:none}
   .bb-drawer{position:fixed;top:0;right:0;height:100vh;width:min(480px,92vw);background:var(--crow-bg-surface);border-left:1px solid var(--crow-border);box-shadow:-8px 0 24px rgba(0,0,0,.3);transform:translateX(100%);transition:transform .18s ease;z-index:50;overflow-y:auto;padding:1rem}
   .bb-drawer.bb-open{transform:translateX(0)}
@@ -40,26 +40,26 @@ export function botBoardStyles() {
   .bb-drawer input,.bb-drawer select,.bb-drawer textarea{width:100%;padding:.45rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:6px;color:var(--crow-text-primary);font:inherit}
   .bb-drawer textarea{font-family:'JetBrains Mono',monospace;font-size:.82rem;min-height:220px}
   .bb-drawer .bb-row{display:flex;gap:.5rem}.bb-drawer .bb-row>*{flex:1}
-  .bb-btn{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-pill);color:#fff;cursor:pointer;margin:.5rem .4rem 0 0}
+  .bb-btn{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer;margin:.5rem .4rem 0 0}
   .bb-btn.bb-sec{background:var(--crow-bg-elevated);color:var(--crow-text-secondary);border:1px solid var(--crow-border)}
   .bb-btn:disabled{opacity:.5;cursor:not-allowed}
   .bb-msg{font-size:.82rem;margin:.5rem 0;min-height:1.1em}
   .bb-msg.ok{color:#1a7f37}.bb-msg.err{color:#c0392b}.bb-msg.warn{color:#b8860b}
   .bb-pre{background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:6px;padding:.6rem;white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:.82rem;max-height:340px;overflow:auto}
   .bb-filter-bar{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin:.6rem 0}
-  .bb-search{flex:1;min-width:200px;padding:.45rem .7rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary);font:inherit;font-size:.85rem}
+  .bb-search{flex:1;min-width:200px;padding:.45rem .7rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary);font:inherit;font-size:.85rem}
   .bb-search::placeholder{color:var(--crow-text-muted)}
   .bb-chips{display:flex;gap:.3rem;flex-wrap:wrap}
   .bb-chip{padding:.25rem .65rem;font-size:.75rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-secondary);cursor:pointer;transition:all .12s}
   .bb-chip:hover{border-color:var(--crow-accent)}
-  .bb-chip-active{background:var(--crow-accent);border-color:var(--crow-accent);color:#fff}
+  .bb-chip-active{background:var(--crow-accent);border-color:var(--crow-accent);color:var(--crow-accent-contrast)}
   .bb-chip-action{border-color:#b8860b;color:#b8860b}
   .bb-chip-action.bb-chip-active{background:#b8860b;border-color:#b8860b;color:#fff}
   .bb-view-toggle{display:flex;gap:0;margin-left:auto}
   .bb-view-btn{padding:.25rem .65rem;font-size:.75rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);color:var(--crow-text-secondary);cursor:pointer;transition:all .12s}
-  .bb-view-btn:first-child{border-radius:var(--crow-radius-pill) 0 0 var(--crow-radius-pill)}
-  .bb-view-btn:last-child{border-radius:0 var(--crow-radius-pill) var(--crow-radius-pill) 0;border-left:none}
-  .bb-view-btn-active{background:var(--crow-accent);border-color:var(--crow-accent);color:#fff}
+  .bb-view-btn:first-child{border-radius:var(--crow-radius-control) 0 0 var(--crow-radius-control)}
+  .bb-view-btn:last-child{border-radius:0 var(--crow-radius-control) var(--crow-radius-control) 0;border-left:none}
+  .bb-view-btn-active{background:var(--crow-accent);border-color:var(--crow-accent);color:var(--crow-accent-contrast)}
   .bb-list-table{width:100%;border-collapse:collapse;font-size:.85rem}
   .bb-list-table th{text-align:left;padding:.4rem .6rem;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em;color:var(--crow-text-muted);border-bottom:2px solid var(--crow-border);cursor:pointer;user-select:none;white-space:nowrap}
   .bb-list-table th:hover{color:var(--crow-text-primary)}

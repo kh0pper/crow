@@ -945,3 +945,11 @@ test("the perch API is mounted AFTER the dashboard CSRF rail, not at app root", 
   const boot = readFileSync(join(REPO, "servers/gateway/boot/feature-mounts.js"), "utf8");
   assert.equal(boot.includes("perch.js"), false, "an app-root mount would bypass the CSRF rail");
 });
+
+test("perchAttached is imported from the shared module, not redefined locally (Track 2 §5.1)", () => {
+  const src = readFileSync(join(REPO, "servers/gateway/routes/perch.js"), "utf8");
+  assert.match(src, /import\s*\{[^}]*perchAttached[^}]*\}\s*from\s*"\.\.\/shared\/perch-attached\.js"/,
+    "perch.js must import perchAttached from the shared module");
+  assert.doesNotMatch(src, /function perchAttached\(/,
+    "perch.js must not define its own local perchAttached — that is the duplication this task removes");
+});

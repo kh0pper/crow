@@ -10,8 +10,8 @@ export function botBuilderStyles() {
   .btb-tabs{display:flex;gap:.35rem;flex-wrap:wrap;margin:10px 0 16px}
   .btb-tab{display:inline-block;padding:.4rem .75rem;border-radius:var(--crow-radius-pill);text-decoration:none;font-size:.85rem;font-weight:500;background:var(--crow-bg-elevated);color:var(--crow-text-secondary);border:1px solid var(--crow-border);transition:background .12s,color .12s,border-color .12s}
   .btb-tab:hover{background:var(--crow-bg-surface);color:var(--crow-text-primary);border-color:var(--crow-accent)}
-  .btb-tab-active{background:var(--crow-accent);color:#fff;border-color:var(--crow-accent)}
-  .btb-tab-active:hover{background:var(--crow-accent);color:#fff}
+  .btb-tab-active{background:var(--crow-accent);color:var(--crow-accent-contrast);border-color:var(--crow-accent)}
+  .btb-tab-active:hover{background:var(--crow-accent);color:var(--crow-accent-contrast)}
 
   /* Form layout */
   .btb-form{padding:0}
@@ -104,7 +104,7 @@ export function botBuilderStyles() {
   .btb-tdef-msg{font-size:.82rem;min-height:1.1em;margin:.25rem 0}
 
   /* Buttons (reuse bb-btn/bb-sec from bot-board where available) */
-  .btb-btn{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-pill);color:#fff;cursor:pointer;font:inherit}
+  .btb-btn{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer;font:inherit}
   .btb-btn-sec{background:var(--crow-bg-elevated);color:var(--crow-text-secondary);border:1px solid var(--crow-border)}
   .btb-btn-sm{font-size:.78rem;padding:.2rem .5rem}
   .btb-btn-inline{display:inline}

@@ -364,7 +364,7 @@ export default {
 
     const writingRulesSection = `<div class="card" style="margin-bottom:1.5rem;border-left:3px solid #4caf50">
       <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.5rem;border-bottom:1px solid var(--crow-border)">
-        <h3 style="font-family:'Fraunces',serif;font-size:1.1rem;margin:0">Writing Rules</h3>
+        <h3 style="font-family:var(--crow-body-font);font-size:1.1rem;margin:0">Writing Rules</h3>
         ${badge("Always Active", "connected")}
       </div>
       ${writingRulesBody}
@@ -415,7 +415,7 @@ export default {
     const crowContextSection = `<div class="card" style="margin-bottom:1.5rem">
       <details>
         <summary style="cursor:pointer">
-          <h3 style="font-family:'Fraunces',serif;font-size:1.1rem;display:inline">Crow Context (crow.md)</h3>
+          <h3 style="font-family:var(--crow-body-font);font-size:1.1rem;display:inline">Crow Context (crow.md)</h3>
           <span style="color:var(--crow-text-muted);font-size:0.85rem;margin-left:0.5rem">${contextRows.filter((r) => r.section_key !== "writing_style").length} sections</span>
         </summary>
         <div style="margin-top:1rem">

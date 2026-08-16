@@ -50,7 +50,7 @@ export default {
       .sttp-card-name { font-weight:600; font-size:0.95rem; }
       .sttp-card-meta { font-size:0.8rem; color:var(--crow-text-muted); }
       .sttp-card-actions { display:flex; gap:0.5rem; margin-top:0.5rem; flex-wrap:wrap; }
-      .sttp-badge { font-size:0.65rem; padding:0.1rem 0.4rem; border-radius:3px; background:var(--crow-accent); color:#fff; font-weight:600; margin-left:0.4rem; }
+      .sttp-badge { font-size:0.65rem; padding:0.1rem 0.4rem; border-radius:3px; background:var(--crow-accent); color:var(--crow-accent-contrast); font-weight:600; margin-left:0.4rem; }
       .sttp-stream-badge { font-size:0.6rem; padding:0.05rem 0.3rem; border-radius:3px; background:var(--crow-success); color:#fff; font-weight:600; margin-left:0.3rem; }
       .sttp-form { border:1px solid var(--crow-border); border-radius:8px; padding:1rem; margin-top:0.75rem; background:var(--crow-surface); }
       .sttp-field { margin-bottom:0.75rem; }

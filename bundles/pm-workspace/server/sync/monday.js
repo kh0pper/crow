@@ -40,7 +40,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { createTasksDbClient } from "../db.js";
+import { createTasksDbClient, hasArchivedAtColumn } from "../db.js";
 import { loadSyncConfig } from "./mapping.js";
 
 const MONDAY_API = "https://api.monday.com/v2";
@@ -241,20 +241,14 @@ async function upsertSyncState(db, { source, board_id, item_id, local_kind, loca
 
 // D-T1.6: archived cards are pull-only. Column-guarded (PRAGMA probe, the
 // idiom scripts/pi-bots/tracker.mjs's archivedClause / digest/adapters/
-// boards.js hasArchivedAtColumn use) — an installed-bundle tasks.db may not
-// have converged through migration 0004 yet, so an unguarded reference to
+// boards.js use too) — an installed-bundle tasks.db may not have converged
+// through migration 0004 yet, so an unguarded reference to
 // tasks_items.archived_at in a WHERE clause would throw on that store.
 // Row-level archived checks elsewhere in this file don't need this probe:
 // they read `row.archived_at` off a `SELECT *` result, which is undefined
 // (falsy) on a store lacking the column — naturally guarded already.
-async function hasArchivedAtColumn(tdb) {
-  try {
-    const rows = (await tdb.execute("PRAGMA table_info(tasks_items)")).rows || [];
-    return rows.some((r) => r.name === "archived_at");
-  } catch {
-    return false;
-  }
-}
+// hasArchivedAtColumn itself now converges through db.js (Track 2 Task 10,
+// W4/§5.3 — one helper instead of three copies).
 
 // ── Mirror mode (Monday → tasks_items, Track 0 Phase B unified store) ───
 //

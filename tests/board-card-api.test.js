@@ -631,6 +631,18 @@ test("autonomy: create and edit accept 'gated'/'auto', reject anything else with
   t2.close();
 });
 
+test("POST /card/:id on an archived card with a bad status returns 409 (archived), not 400 (Track 2 Task 10 — archived now wins the check order)", async () => {
+  const { body: created } = await createTestCard({});
+  const arch = await fetch(base + "/card/" + created.id + "/archive", { method: "POST" });
+  assert.equal(arch.status, 200);
+  const r = await fetch(base + "/card/" + created.id, { method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "task9 card", status: "not-a-status" }) });
+  assert.equal(r.status, 409, "archived wins over the off-def status check");
+  const body = await r.json();
+  assert.equal(body.code, "archived");
+});
+
 // ---- GET /card/:id additive keys (D-T1.3/D-T1.4/D-T1.5) ----
 
 test("GET /card/:id gains ADDITIVE keys only: autonomy/plan_head/latest_results/mutations", async () => {

@@ -142,7 +142,7 @@ export function engineGateClientJS(lang) {
           var frag = document.createElement("div");
 
           var h3 = document.createElement("h3");
-          h3.style.cssText = "font-family:Fraunces,serif;margin-bottom:0.75rem";
+          h3.style.cssText = "font-family:var(--crow-body-font);margin-bottom:0.75rem";
           h3.textContent = '${tJs("botbuilder.engineGateModalTitle", lang)}';
           frag.appendChild(h3);
 

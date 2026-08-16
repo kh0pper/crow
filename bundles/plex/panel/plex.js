@@ -370,7 +370,7 @@ function plexStyles() {
     .plex-tab:hover { color: var(--crow-text-primary); }
     .plex-tab.active { color: var(--crow-accent); border-bottom-color: var(--crow-accent); }
     .plex-open-btn { margin-left: auto; padding: 0.4rem 0.8rem; background: var(--crow-accent); border-radius: 6px;
-                     color: #fff; text-decoration: none; font-size: 0.85rem; transition: background 0.15s; }
+                     color: var(--crow-accent-contrast); text-decoration: none; font-size: 0.85rem; transition: background 0.15s; }
     .plex-open-btn:hover { background: var(--crow-accent-hover); }
 
     .plex-overview { display: flex; flex-direction: column; gap: 1.5rem; }

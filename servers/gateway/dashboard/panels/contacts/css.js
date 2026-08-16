@@ -111,7 +111,7 @@ export function contactsCss() {
     justify-content: center;
     font-weight: 600;
     font-size: 0.85rem;
-    color: #fff;
+    color: var(--crow-accent-contrast);
     flex-shrink: 0;
     background: var(--crow-accent);
     overflow: hidden;
@@ -159,7 +159,7 @@ export function contactsCss() {
     border-radius: 10px;
     font-size: 0.7rem;
     font-weight: 500;
-    color: #fff;
+    color: var(--crow-accent-contrast);
     background: var(--crow-accent);
   }
 
@@ -184,7 +184,7 @@ export function contactsCss() {
     justify-content: center;
     font-weight: 700;
     font-size: 1.5rem;
-    color: #fff;
+    color: var(--crow-accent-contrast);
     flex-shrink: 0;
     background: var(--crow-accent);
     overflow: hidden;
@@ -198,7 +198,7 @@ export function contactsCss() {
 
   .profile-info h2 {
     margin: 0 0 0.25rem;
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.3rem;
     color: var(--crow-text-primary);
   }
@@ -376,7 +376,7 @@ export function contactsCss() {
 
   .import-modal h3 {
     margin: 0 0 1rem;
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.1rem;
   }
 

@@ -67,6 +67,21 @@ export async function mountAdminApi(app, deps) {
     console.warn("[llm-migration] skipped:", err.message);
   }
 
+  // --- Theme-keys retirement migration (Track 2 visual language, Task 5).
+  // Deletes glass/dashboard-override/legacy theme keys product-wide.
+  // Idempotent; same invocation shape as the LLM migration above. ---
+  try {
+    const { migrateThemeKeys } = await import("../dashboard/settings/migrations/theme-keys-migration.js");
+    const result = await migrateThemeKeys(createDbClient());
+    if (result.skipped) {
+      // already_migrated — silent unless debugging
+    } else {
+      console.log(`[theme-keys-migration] deleted_global=${result.deleted_global} deleted_overrides=${result.deleted_overrides}`);
+    }
+  } catch (err) {
+    console.warn("[theme-keys-migration] skipped:", err.message);
+  }
+
   // --- Provider DB seed + reconciler (owner-asserts, spec D1/D5/R2-C1) ---
   // R2-C1 gate: a --no-auth gateway (the crow-mcp-bridge companion) shares
   // the primary's crow.db with feedsDisabled — its upsert writes land but

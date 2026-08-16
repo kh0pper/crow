@@ -93,7 +93,7 @@ function frigateStyles() {
     .fg-panel { max-width: 1100px; margin: 0 auto; padding: 1rem; }
     .fg-tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--border, #333); margin-bottom: 1rem; }
     .fg-tab { padding: 0.5rem 1rem; text-decoration: none; color: var(--muted, #888); border-bottom: 2px solid transparent; }
-    .fg-tab.active { color: var(--fg, #fff); border-bottom-color: var(--accent, #fbbf24); }
+    .fg-tab.active { color: var(--fg, #fff); border-bottom-color: var(--accent, #d9a521); }
     .fg-section { margin: 1.5rem 0; }
     .fg-section h3 { margin: 0 0 0.5rem; font-size: 1rem; color: var(--muted, #888); text-transform: uppercase; letter-spacing: 0.05em; }
     .fg-cameras { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 0.75rem; }

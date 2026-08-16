@@ -75,7 +75,7 @@ export default {
     width: 36px; height: 36px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     font-size: 14px; font-weight: 700; color: #fff;
-    background: var(--accent, #818cf8);
+    background: var(--accent, #4fbdb0);
   }
   .contact-name { font-size: 14px; font-weight: 600; color: var(--text-primary, #e7e5e4); }
   .contact-id { font-size: 11px; color: var(--text-muted, #78716c); }

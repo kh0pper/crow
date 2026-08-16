@@ -168,7 +168,7 @@ function vaultwardenStyles() {
                border-radius: 12px; padding: 1.2rem; margin-bottom: 1.5rem; }
     .vw-hero p { margin: 0 0 0.8rem; color: var(--crow-text-secondary); }
     .vw-btn { display: inline-block; padding: 0.5rem 1rem; background: var(--crow-accent);
-              color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; }
+              color: var(--crow-accent-contrast); text-decoration: none; border-radius: 8px; font-weight: 600; }
     .vw-btn:hover { filter: brightness(1.1); }
 
     .vw-section { margin-bottom: 1.5rem; }

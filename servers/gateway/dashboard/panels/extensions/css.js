@@ -19,16 +19,16 @@ export function extensionStyles() {
   margin-bottom:1.25rem;
   background:var(--crow-bg-deep);
   border:1px solid var(--crow-border);
-  border-radius:var(--crow-radius-pill, 8px);
+  border-radius:var(--crow-radius-control, 10px);
   width:fit-content; max-width:100%;
 }
 .ext-viewtab {
   display:inline-flex; align-items:center; gap:0.4rem;
   padding:0.45rem 1.1rem;
-  border:none; border-radius:calc(var(--crow-radius-pill, 8px) - 2px);
+  border:none; border-radius:calc(var(--crow-radius-control, 10px) - 2px);
   background:transparent;
   color:var(--crow-text-secondary);
-  font-family:'DM Sans',sans-serif;
+  font-family:var(--crow-body-font);
   font-size:0.85rem; font-weight:500;
   cursor:pointer;
   transition:background 0.18s ease, color 0.18s ease;
@@ -54,7 +54,7 @@ export function extensionStyles() {
 /* Section headings — the type scale IS the hierarchy */
 .ext-section { margin-bottom:2.25rem; }
 .ext-section-title {
-  font-family:'Fraunces',serif;
+  font-family:var(--crow-body-font);
   font-weight:600;
   color:var(--crow-text-primary);
   margin:0 0 0.5rem;
@@ -96,7 +96,7 @@ export function extensionStyles() {
   border-left:3px solid var(--crow-accent);
   border-radius:var(--crow-radius-card, 12px);
   cursor:pointer;
-  font-family:'DM Sans',sans-serif;
+  font-family:var(--crow-body-font);
   transition:transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   animation:fadeInUp 0.4s ease-out both;
 }
@@ -108,7 +108,7 @@ export function extensionStyles() {
 .ext-collection-card:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; }
 .ext-collection-card__icon { font-size:1.6rem; line-height:1; margin-bottom:0.15rem; }
 .ext-collection-card__name {
-  font-family:'Fraunces',serif;
+  font-family:var(--crow-body-font);
   font-size:1.05rem; font-weight:600;
   color:var(--crow-text-primary);
 }
@@ -131,11 +131,11 @@ export function extensionStyles() {
 .ext-group-chip {
   display:inline-flex; align-items:center; gap:0.35rem;
   padding:0.4rem 0.9rem;
-  border-radius:var(--crow-radius-pill, 8px);
+  border-radius:var(--crow-radius-pill, 999px);
   background:transparent;
   border:1px solid var(--crow-border);
   color:var(--crow-text-secondary);
-  font-family:'DM Sans',sans-serif;
+  font-family:var(--crow-body-font);
   font-size:0.8rem; font-weight:500;
   cursor:pointer;
   transition:border-color 0.15s, color 0.15s, background 0.15s;
@@ -165,7 +165,7 @@ export function extensionStyles() {
 
 /* Collection install modal (shell — content is built by the client) */
 .ext-collection-modal__title {
-  font-family:'Fraunces',serif;
+  font-family:var(--crow-body-font);
   font-size:1.2rem; font-weight:600;
   margin:0 0 0.35rem;
   color:var(--crow-text-primary);
@@ -238,7 +238,7 @@ export function extensionStyles() {
   background:var(--crow-bg-surface);
   color:var(--crow-text-primary);
   font-size:0.9rem;
-  font-family:'DM Sans',sans-serif;
+  font-family:var(--crow-body-font);
   transition:border-color 0.15s;
 }
 .ext-search__input:focus { outline:none; border-color:var(--crow-accent); }
@@ -257,7 +257,7 @@ export function extensionStyles() {
 .ext-installed__item:hover { border-color:var(--crow-accent); }
 .ext-installed__icon { flex-shrink:0; width:36px; height:36px; display:flex; align-items:center; justify-content:center; }
 .ext-installed__info { flex:1; min-width:0; display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; }
-.ext-installed__name { font-family:'Fraunces',serif; font-size:0.95rem; font-weight:600; }
+.ext-installed__name { font-family:var(--crow-body-font); font-size:0.95rem; font-weight:600; }
 .ext-installed__meta { font-size:0.75rem; font-family:'JetBrains Mono',monospace; color:var(--crow-text-muted); }
 .ext-installed__actions { display:flex; gap:0.4rem; align-items:center; flex-shrink:0; }
 
@@ -296,7 +296,7 @@ export function extensionStyles() {
 .ext-card__icon > div { width:32px; height:32px; }
 .ext-card__body { flex:1; display:flex; flex-direction:column; align-items:center; width:100%; }
 .ext-card__name {
-  font-family:'Fraunces',serif;
+  font-family:var(--crow-body-font);
   font-size:0.95rem; font-weight:600;
   margin-bottom:0.35rem;
   color:var(--crow-text-primary);
@@ -395,34 +395,12 @@ export function extensionStyles() {
   box-shadow:0 20px 60px rgba(0,0,0,0.5);
 }
 
-/* Glass overrides — every surface on this page has a companion rule here */
-.theme-glass .ext-card,
-.theme-glass .ext-installed__item,
-.theme-glass .ext-stores__header,
-.theme-glass .ext-stores__body,
-.theme-glass .ext-viewtabs,
-.theme-glass .ext-collection-card,
-.theme-glass .ext-group-chip,
-.theme-glass .ext-help,
-.theme-glass .ext-section-count {
-  backdrop-filter:var(--crow-glass-blur);
-  -webkit-backdrop-filter:var(--crow-glass-blur);
-}
-.theme-glass .ext-card:hover { box-shadow:0 8px 32px rgba(0,0,0,0.3); }
-.theme-glass .ext-viewtab--active { box-shadow:0 1px 8px rgba(0,0,0,0.35); }
-.theme-glass .ext-collection-card:hover { box-shadow:0 10px 34px rgba(0,0,0,0.32); }
-.theme-glass .ext-collection-modal__note { backdrop-filter:var(--crow-glass-blur); -webkit-backdrop-filter:var(--crow-glass-blur); }
-.theme-glass .ext-search__input {
-  backdrop-filter:var(--crow-glass-blur);
-  -webkit-backdrop-filter:var(--crow-glass-blur);
-}
-
 /* Detail modal */
 #modal-content { position:relative; }
 .ext-detail__header { display:flex; gap:1rem; align-items:flex-start; margin-bottom:1rem; }
 .ext-detail__icon { flex-shrink:0; width:64px; height:64px; border-radius:16px; display:flex; align-items:center; justify-content:center; }
 .ext-detail__info { flex:1; min-width:0; }
-.ext-detail__title { font-family:'Fraunces',serif; font-size:1.15rem; font-weight:600; margin:0 0 0.25rem; color:var(--crow-text-primary); }
+.ext-detail__title { font-family:var(--crow-body-font); font-size:1.15rem; font-weight:600; margin:0 0 0.25rem; color:var(--crow-text-primary); }
 .ext-detail__author { font-size:0.75rem; font-family:'JetBrains Mono',monospace; color:var(--crow-text-muted); }
 .ext-detail__badges { display:flex; flex-wrap:wrap; gap:0.3rem; margin:0.75rem 0; }
 .ext-detail__desc { font-size:0.9rem; color:var(--crow-text-secondary); line-height:1.6; margin-bottom:1rem; }
