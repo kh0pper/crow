@@ -425,7 +425,13 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       await loadDispatchableCard(tdb, cardId);
 
       const eng = resolveEngine();
-      await eng.checkCardFree(cardId);
+      // Fix round 1 (coordinator-reported Important): exclude THIS session's
+      // own perch-live row from the occupancy check — otherwise a session
+      // re-asserting the card it already holds 409s against itself, and
+      // attachCard()'s documented idempotent no-op path is unreachable over
+      // HTTP. Every OTHER claimant (a different session, a different card)
+      // still 409s — see checkCardFree's own doc.
+      await eng.checkCardFree(cardId, { excludeSessionId: sid });
       const result = await eng.attachCard(sid, cardId);
 
       await updateCard(tdb, cardId, { assigned_bot: result.botId }, DASHBOARD_ACTOR);
