@@ -82,6 +82,22 @@ export async function mountAdminApi(app, deps) {
     console.warn("[theme-keys-migration] skipped:", err.message);
   }
 
+  // --- Notification "attention" type back-fill (Track 3, Task 8). Appends
+  // "attention" to any existing explicit notification_prefs.types_enabled
+  // array that lacks it. Idempotent; same invocation shape as the
+  // theme-keys migration above. ---
+  try {
+    const { backfillAttentionNotificationType } = await import("../dashboard/settings/migrations/notification-attention-migration.js");
+    const result = await backfillAttentionNotificationType(createDbClient());
+    if (result.skipped) {
+      // already_migrated — silent unless debugging
+    } else {
+      console.log(`[notif-attention-migration] appended=${result.appended}`);
+    }
+  } catch (err) {
+    console.warn("[notif-attention-migration] skipped:", err.message);
+  }
+
   // --- Provider DB seed + reconciler (owner-asserts, spec D1/D5/R2-C1) ---
   // R2-C1 gate: a --no-auth gateway (the crow-mcp-bridge companion) shares
   // the primary's crow.db with feedsDisabled — its upsert writes land but

@@ -1592,6 +1592,11 @@ export const translations = {
   "settings.notifMedia": { en: "Media", es: "Medios" },
   "settings.notifPeer": { en: "Peer Messages", es: "Mensajes de pares" },
   "settings.notifSystem": { en: "System", es: "Sistema" },
+  // Track 3 Task 8: the "attention" notification type row (bot turn / ask
+  // card / gated result). Namespaced "notifications.type_*" per the task
+  // brief rather than "settings.notif*" — a deliberate one-off, not the
+  // start of a new convention.
+  "notifications.type_attention": { en: "Attention", es: "Atención" },
 
   // ─── Settings Groups ───
   "settings.group.general": { en: "General", es: "General" },

@@ -262,6 +262,9 @@ export function createInteractiveEngine({
   const maxAwake = () => numEnv("PERCH_INTERACTIVE_MAX_AWAKE", DEFAULT_MAX_AWAKE);
   const turnTimeoutMs = () => numEnv("PIBOT_TURN_TIMEOUT_MS", 600_000);
   const disabled = () => env.CROW_DISABLE_PERCH === "1";
+  // Track 3 Task 8: a turn-end "<bot> replied" push only fires once the turn
+  // ran at least this long — a fast reply doesn't need a nudge.
+  const notifyMinRunS = () => numEnv("PERCH_NOTIFY_MIN_RUN_S", 30);
 
   // ---- seams ---------------------------------------------------------------
 
@@ -424,6 +427,25 @@ export function createInteractiveEngine({
   function emit(s, event) {
     for (const fn of [...s.subscribers]) {
       try { fn(event); } catch { /* a broken subscriber never breaks a turn */ }
+    }
+  }
+
+  /**
+   * Track 3 Task 8: fire an "attention" notification through the shared
+   * notification pipeline (servers/shared/notifications.js). Lazy-imported —
+   * this module's bot-engine seams are already lazy (loadSeams), and the
+   * notification pipeline is a side channel a turn/ask-card/result must
+   * never depend on being loaded eagerly. Reuses this module's own
+   * `createDbClient` import. Fire-and-forget from every call site: a
+   * notification failure (missing table on a scratch DB, a downstream
+   * sender throwing) must never break a turn or an ask card.
+   */
+  async function pushAttention(opts) {
+    try {
+      const { createNotification } = await import("../shared/notifications.js");
+      await createNotification(createDbClient(), opts);
+    } catch (e) {
+      log("attention notify failed (non-fatal): " + ((e && e.message) || e));
     }
   }
 
@@ -1128,6 +1150,17 @@ export function createInteractiveEngine({
       clearStall(s);                                 // paused while a human thinks
       emit(s, { type: "ask_user", ...s.pendingUi });
       armIdle(s);                                    // no-op by design: a pending card blocks it
+      // Track 3 Task 8: an ask card (incl. a permission confirm — "confirm"
+      // is one of ASK_METHODS) is a blocking event — it ALWAYS pushes,
+      // regardless of whether an operator is subscribed live, unlike the
+      // turn-end "replied" push below.
+      pushAttention({
+        type: "attention",
+        priority: "high",
+        title: s.botId + " needs you",
+        body: s.pendingUi.title || s.pendingUi.message || "",
+        action_url: "/dashboard/bot-board#bird=" + s.sessionId,
+      });
       return;
     }
     if (m.method === "notify") {
@@ -1229,7 +1262,25 @@ export function createInteractiveEngine({
 
     // The invariant is stated over the TURN, not over a pre-await snapshot: an
     // abort that landed during the metering awaits still silences the reply.
-    if (!turn.aborted) emit(s, { type: "reply", text: replyTextOf(end) });
+    if (!turn.aborted) {
+      const replyText = replyTextOf(end);
+      emit(s, { type: "reply", text: replyText });
+      // Track 3 Task 8: an operator watching the drawer live (any live
+      // subscriber) already sees the reply — the push is for someone who
+      // is AWAY, and only for a turn that actually took a while.
+      if (s.subscribers.size === 0) {
+        const ranS = (now() - turn.startedAt) / 1000;
+        if (ranS >= notifyMinRunS()) {
+          pushAttention({
+            type: "attention",
+            priority: "normal",
+            title: s.botId + " replied",
+            body: replyText.slice(0, 140),
+            action_url: "/dashboard/bot-board#bird=" + s.sessionId,
+          });
+        }
+      }
+    }
     // r2 S7: bound the child's accumulating log now that nothing is waiting on
     // it. trimLog preserves _seq, so the next turn's `since` correlation holds.
     try { if (s.pi) s.pi.trimLog(); } catch { /* non-fatal */ }
@@ -1419,7 +1470,10 @@ export function createInteractiveEngine({
     // failure needs the same reservation-release cleanup as any other wake
     // failure).
     const pending = needsWake ? reserveWithEviction(S, s) : null;
-    const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null };
+    // Track 3 Task 8: startedAt is this turn's own clock reading, distinct
+    // from any lastEventAt touch — onTurnEnd diffs against it to decide
+    // whether a "<bot> replied" attention push clears PERCH_NOTIFY_MIN_RUN_S.
+    const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null, startedAt: now() };
     s.turn = turn;
     // ---------------------------------------------------------------------
     try {
