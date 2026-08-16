@@ -434,7 +434,12 @@ export class PiRpc {
     const res = await this.waitForSince(since,
       (m) => m.type === "response" && m.id === id && m.command === payload.type,
       ms, payload.type);
-    if (res.success === false) {
+    // Fail-closed (Fix round 1 ruling, supersedes the brief's literal
+    // `=== false`): this serves engine control() for set_model/
+    // set_thinking_level — a malformed/old-protocol response MISSING
+    // `success` must never be treated as a successful model/thinking change.
+    // Mirrors promptTurn's `success !== true` check.
+    if (res.success !== true) {
       const err = new Error(payload.type + " failed: " + (res.error || "unknown"));
       err.code = "command_failed";
       throw err;
