@@ -2617,65 +2617,155 @@ await addColumnIfMissing("bot_sessions", "narrowed_tools", "TEXT");
 // the drawer (perch-interactive routes) can render an honest "interrupted,
 // not answered" note rather than a silent 'run'. SQLite has no
 // ALTER TABLE ... MODIFY CHECK, so this is a guarded rebuild — same shape as
-// the shared_items migration far above: detect the OLD constraint text in
-// sqlite_master, and only if present, CREATE the new shape, copy every row by
-// EXPLICIT column list (never SELECT * — kind/narrowed_tools were appended to
-// the PHYSICAL column order by the two addColumnIfMissing calls just above on
-// any pre-existing install, so a positional SELECT * would silently shift
-// values into the wrong columns), DROP + RENAME. Every column and every OTHER
-// CHECK/DEFAULT is byte-identical to the CREATE TABLE body above; only the
-// control CHECK's value list widens. Declared in migration-expectations.js
-// REBUILD_TABLES (the A3 migration guard) and SCHEMA_GENERATION is bumped so
-// this actually runs on an already-migrated prod DB's next boot — see
-// schema-version.js and run scripts/schema-migration-dryrun.sh before deploy.
+// rebuildMainFKsToProjectSpaces() above (spec: snapshot index/trigger DDL
+// from sqlite_master, abort pre-DDL on unknown columns, preserve
+// sqlite_sequence, explicit ROLLBACK + rethrow on any failure). Every column
+// and every OTHER CHECK/DEFAULT is byte-identical to the CREATE TABLE body
+// above; only the control CHECK's value list widens. Declared in
+// migration-expectations.js REBUILD_TABLES (the A3 migration guard) and
+// SCHEMA_GENERATION is bumped so this actually runs on an already-migrated
+// prod DB's next boot — see schema-version.js and run
+// scripts/schema-migration-dryrun.sh before deploy.
+//
+// C3 (final review): the old version's catch logged "non-fatal, continuing"
+// with the BEGIN IMMEDIATE transaction left OPEN and no ROLLBACK. Two
+// reproduced failure modes this fixes: (a) a mid-script failure (e.g. a
+// leftover bot_sessions_new from a crashed prior run — CREATE TABLE has no
+// IF NOT EXISTS) used to silently roll back everything after this block
+// (bot_skill_events, ~20 addColumnIfMissing calls, the PRAGMA user_version
+// stamp) while init-db still printed "Schema generation set to 9" and exited
+// 0; (b) a lost BEGIN IMMEDIATE write-lock race (another gateway/bridge tick
+// on the shared crow.db) used to leave user_version stamped 9 even though the
+// widen never ran, so needsSchemaInit() never re-tried it and every
+// interrupted-shutdown park threw a CHECK violation forever. Now: ROLLBACK in
+// the catch, then RETHROW — init-db.js exits non-zero and PRAGMA user_version
+// is never reached, so the next run retries the migration.
+//
+// I13: PRAGMA table_info(bot_sessions) is diffed against the canonical
+// 17-column list BEFORE any DDL — an unrecognized host-present column (or a
+// canonical column gone missing) aborts the migration instead of silently
+// vanishing with its data, matching the reference rebuild's C2/N1 guard.
+//
+// I11: index + trigger DDL for bot_sessions is snapshotted from sqlite_master
+// before the drop and replayed verbatim after the rename, instead of a
+// hand-listed CREATE INDEX pair — a future index/trigger on this table is no
+// longer silently dropped by this migration.
+//
+// I12: sqlite_sequence is captured before the DROP and restored after the
+// RENAME (UPDATE first, INSERT only if the UPDATE touched 0 rows) — without
+// this the AUTOINCREMENT high-water mark resets to max(id) present, and since
+// delete-bot.js deletes session rows in production, a stale drawer/board
+// reference to session id N could rebind to a brand-new unrelated session.
+const BOT_SESSIONS_CANONICAL_COLUMNS = [
+  "id", "bot_id", "pi_session_id", "pi_session_dir", "gateway_type",
+  "gateway_thread_id", "project_id", "card_id", "plan_path", "status",
+  "control", "model", "escalated", "kind", "narrowed_tools", "created_at",
+  "updated_at",
+];
 await (async () => {
-  try {
-    const tableInfo = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'");
-    const sql = tableInfo.rows[0]?.sql || "";
-    if (sql.includes("CHECK (control IN ('run','stop'))")) {
-      console.log("Migrating bot_sessions table (widening control CHECK to include 'interrupted')...");
-      await db.executeMultiple(`
-        BEGIN IMMEDIATE;
-        CREATE TABLE bot_sessions_new (
-          id                INTEGER PRIMARY KEY AUTOINCREMENT,
-          bot_id            TEXT NOT NULL,
-          pi_session_id     TEXT,
-          pi_session_dir    TEXT,
-          gateway_type      TEXT,
-          gateway_thread_id TEXT,
-          project_id        INTEGER,
-          card_id           INTEGER,
-          plan_path         TEXT,
-          status            TEXT NOT NULL DEFAULT 'active'
-                              CHECK (status IN ('active','waiting-user','stopped','done','error')),
-          control           TEXT NOT NULL DEFAULT 'run'
-                              CHECK (control IN ('run','stop','interrupted')),
-          model             TEXT,
-          escalated         INTEGER DEFAULT 0,
-          kind              TEXT NOT NULL DEFAULT 'chat',
-          narrowed_tools    TEXT,
-          created_at        TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        INSERT INTO bot_sessions_new
-          (id,bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,
-           project_id,card_id,plan_path,status,control,model,escalated,kind,
-           narrowed_tools,created_at,updated_at)
-          SELECT id,bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,
-                 project_id,card_id,plan_path,status,control,model,escalated,kind,
-                 narrowed_tools,created_at,updated_at
-          FROM bot_sessions;
-        DROP TABLE bot_sessions;
-        ALTER TABLE bot_sessions_new RENAME TO bot_sessions;
-        CREATE INDEX IF NOT EXISTS idx_bot_sessions_bot_thread ON bot_sessions (bot_id, gateway_thread_id);
-        CREATE INDEX IF NOT EXISTS idx_bot_sessions_status ON bot_sessions (status);
-        COMMIT;
-      `);
-      console.log("bot_sessions control-CHECK migration complete.");
-    }
-  } catch (e) {
-    console.error("bot_sessions control-CHECK migration failed (non-fatal, continuing):", e.message);
+  const tableInfo = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'");
+  const sql = tableInfo.rows[0]?.sql || "";
+  if (!sql.includes("CHECK (control IN ('run','stop'))")) {
+    return; // already migrated (widened) or a fresh install
   }
+
+  console.log("Migrating bot_sessions table (widening control CHECK to include 'interrupted')...");
+
+  // I13: abort BEFORE any DDL on schema drift from the canonical shape.
+  const { rows: liveColRows } = await db.execute("PRAGMA table_info(bot_sessions)");
+  const liveCols = liveColRows.map((c) => c.name);
+  const canonicalSet = new Set(BOT_SESSIONS_CANONICAL_COLUMNS);
+  const unknown = liveCols.filter((c) => !canonicalSet.has(c));
+  const missing = BOT_SESSIONS_CANONICAL_COLUMNS.filter((c) => !liveCols.includes(c));
+  if (unknown.length > 0 || missing.length > 0) {
+    throw new Error(
+      `bot_sessions control-CHECK migration: schema drift from the canonical shape ` +
+      `(unknown=[${unknown.join(", ")}] missing=[${missing.join(", ")}]) — ` +
+      `update BOT_SESSIONS_CANONICAL_COLUMNS (and this migration's copy list) or fix the ` +
+      `live column set before retrying. Aborting before any DDL.`
+    );
+  }
+
+  // I11: snapshot index + trigger DDL from sqlite_master before the drop.
+  const { rows: extraDdlRows } = await db.execute(
+    "SELECT sql FROM sqlite_master WHERE tbl_name='bot_sessions' AND type IN ('index','trigger') AND sql IS NOT NULL"
+  );
+
+  // I12: capture sqlite_sequence before the DROP.
+  const { rows: seqRows } = await db.execute(
+    "SELECT seq FROM sqlite_sequence WHERE name = 'bot_sessions'"
+  );
+  const capturedSeq = seqRows.length > 0 ? Number(seqRows[0].seq) : null;
+
+  const colList = liveCols.join(",");
+
+  try {
+    await db.executeMultiple("BEGIN IMMEDIATE");
+
+    await db.execute(`
+      CREATE TABLE bot_sessions_new (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id            TEXT NOT NULL,
+        pi_session_id     TEXT,
+        pi_session_dir    TEXT,
+        gateway_type      TEXT,
+        gateway_thread_id TEXT,
+        project_id        INTEGER,
+        card_id           INTEGER,
+        plan_path         TEXT,
+        status            TEXT NOT NULL DEFAULT 'active'
+                            CHECK (status IN ('active','waiting-user','stopped','done','error')),
+        control           TEXT NOT NULL DEFAULT 'run'
+                            CHECK (control IN ('run','stop','interrupted')),
+        model             TEXT,
+        escalated         INTEGER DEFAULT 0,
+        kind              TEXT NOT NULL DEFAULT 'chat',
+        narrowed_tools    TEXT,
+        created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+
+    await db.execute(
+      `INSERT INTO bot_sessions_new (${colList}) SELECT ${colList} FROM bot_sessions`
+    );
+
+    await db.execute("DROP TABLE bot_sessions");
+    await db.execute("ALTER TABLE bot_sessions_new RENAME TO bot_sessions");
+
+    // I11: replay the snapshotted index/trigger DDL verbatim.
+    for (const row of extraDdlRows) {
+      await db.execute(row.sql);
+    }
+
+    // I12: restore sqlite_sequence — UPDATE first, INSERT only if the RENAME
+    // didn't already carry a row across (0 rows changed).
+    if (capturedSeq !== null) {
+      const { rows: maxRows } = await db.execute("SELECT MAX(id) AS maxId FROM bot_sessions");
+      const maxId = maxRows[0]?.maxId != null ? Number(maxRows[0].maxId) : 0;
+      const restoreSeq = Math.max(capturedSeq, maxId);
+      const upd = await db.execute({
+        sql: "UPDATE sqlite_sequence SET seq = ? WHERE name = 'bot_sessions'",
+        args: [restoreSeq],
+      });
+      if (upd.rowsAffected === 0) {
+        await db.execute({
+          sql: "INSERT INTO sqlite_sequence (name, seq) VALUES ('bot_sessions', ?)",
+          args: [restoreSeq],
+        });
+      }
+    }
+
+    await db.executeMultiple("COMMIT");
+  } catch (err) {
+    // C3: explicit ROLLBACK — an abandoned open transaction holds the write
+    // lock forever — then RETHROW so init-db.js exits non-zero and never
+    // reaches the PRAGMA user_version stamp.
+    try { await db.executeMultiple("ROLLBACK"); } catch {}
+    throw err;
+  }
+
+  console.log("bot_sessions control-CHECK migration complete.");
 })();
 
 await initTable("bot_skill_events table", `
