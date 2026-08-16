@@ -256,3 +256,75 @@ test("cache: injectable now can bypass TTL", async () => {
   await collectHealthSignals(countingDb, { now: clock });
   assert.ok(calls > after1, "after TTL expired, re-hits DB");
 });
+
+// ─── syncOutbox signal (stdio-sync-outbox Task 7 Step 1) ──────────────────────
+
+function sqliteAgo(ms) {
+  return new Date(Date.now() - ms).toISOString().slice(0, 19).replace("T", " ");
+}
+
+function makeOutboxDb({ depth = 0, oldest = null } = {}) {
+  return {
+    async executeMultiple() {},
+    async execute(arg) {
+      const sql = typeof arg === "string" ? arg : arg?.sql;
+      if (sql && sql.includes("FROM sync_outbox")) return { rows: [{ depth, oldest }] };
+      if (sql && sql.includes("pi_bot_defs")) return { rows: [{ c: 0 }] };
+      if (sql && sql.includes("crow_instances")) return { rows: [] };
+      if (sql && sql.includes("auto_update_current_version")) return { rows: [{ value: "1.0.0" }] };
+      if (sql && sql.includes("auto_update_latest_version")) return { rows: [{ value: "1.0.0" }] };
+      return { rows: [] };
+    },
+  };
+}
+
+test("syncOutbox: empty outbox → state ok, value 'empty'", async () => {
+  invalidateHealthCache();
+  const result = await collectHealthSignals(makeOutboxDb({ depth: 0, oldest: null }));
+  const detail = result.details.find(d => d.id === "syncOutbox");
+  assert.ok(detail, "syncOutbox detail must be present");
+  assert.equal(detail.state, "ok");
+  assert.equal(detail.value, "empty");
+});
+
+test("syncOutbox: queued rows, oldest well under the stale window → state ok, not warn", async () => {
+  invalidateHealthCache();
+  const result = await collectHealthSignals(makeOutboxDb({ depth: 3, oldest: sqliteAgo(60_000) }));
+  const detail = result.details.find(d => d.id === "syncOutbox");
+  assert.equal(detail.state, "ok");
+  assert.match(detail.value, /3 queued/);
+  const issue = result.issues.find(i => i.id === "syncOutbox");
+  assert.equal(issue, undefined, "a fresh queue must not surface as an issue");
+});
+
+test("syncOutbox: oldest row past the stale window → state warn with an issue", async () => {
+  invalidateHealthCache();
+  const result = await collectHealthSignals(makeOutboxDb({ depth: 2, oldest: sqliteAgo(20 * 60_000) }));
+  const detail = result.details.find(d => d.id === "syncOutbox");
+  assert.equal(detail.state, "warn");
+  const issue = result.issues.find(i => i.id === "syncOutbox");
+  assert.ok(issue, "a stale outbox must surface as an issue");
+  assert.equal(issue.severity, "warn");
+});
+
+test("syncOutbox: getStats failure (e.g. no executeMultiple) degrades to ok/empty, no throw", async () => {
+  invalidateHealthCache();
+  const badDb = {
+    async execute({ sql }) {
+      if (sql && sql.includes("pi_bot_defs")) return { rows: [{ c: 0 }] };
+      if (sql && sql.includes("crow_instances")) return { rows: [] };
+      if (sql && sql.includes("auto_update_current_version")) return { rows: [{ value: "1.0.0" }] };
+      if (sql && sql.includes("auto_update_latest_version")) return { rows: [{ value: "1.0.0" }] };
+      return { rows: [] };
+    },
+    // deliberately no executeMultiple — matches the plain makeDb() stub used
+    // by the rest of this file / a real db that hasn't run ensureSyncTables
+  };
+
+  let result;
+  await assert.doesNotReject(async () => {
+    result = await collectHealthSignals(badDb);
+  });
+  const detail = result.details.find(d => d.id === "syncOutbox");
+  assert.equal(detail.state, "ok");
+});

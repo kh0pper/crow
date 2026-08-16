@@ -14,6 +14,7 @@
  *   updates   — auto_update_* version comparison (info if update available)
  *   backup    — newest file mtime in CROW_BACKUP_DIR (none → info; >7d → warn)
  *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
+ *   syncOutbox — stdio→gateway outbox depth + oldest-row age (stuck >15min → warn)
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -28,6 +29,7 @@ import { PUBLIC_FUNNEL_PREFIXES } from "../../../funnel.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 import { getProviderHealth } from "../../../provider-health.js";
+import { getStats as getOutboxStats } from "../../../../sharing/sync-outbox-drain.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
 
@@ -300,6 +302,56 @@ async function syncConflictsSignal(db) {
     issueLabel: `${count} sync conflict${count === 1 ? "" : "s"} need${count === 1 ? "s" : ""} review`,
     actionLabel: "Review conflicts",
     actionHref: "/dashboard/settings?section=sync-conflicts",
+  };
+}
+
+// Stdio→gateway sync outbox (stdio-sync-outbox, Task 7 "Observability" —
+// spec: "health surface gains outbox depth + oldest-row age"). Reads
+// sync-outbox-drain.js's getStats(db) — same depth/oldest-age shape the
+// drain itself logs. A depth-only warn would be too eager (queued rows are
+// normal between 60s drain ticks); the warn threshold instead mirrors the
+// drain's own CLAIM_STALE_MINUTES (10 min) window with headroom — a row
+// still queued past 15 minutes has survived several drain ticks and a
+// stale-claim reclaim, so something (drain not running, every paired peer
+// unarmed, gateway down) is actually stuck.
+const OUTBOX_STALE_WARN_MS = 15 * 60 * 1000;
+
+async function outboxSignal(db) {
+  let stats;
+  try {
+    stats = await getOutboxStats(db);
+  } catch {
+    // Fresh install / stub db without executeMultiple — degrade quietly,
+    // same as syncConflictsSignal's older-install catch above.
+    return { id: "syncOutbox", severity: null, state: "ok", label: "Sync outbox", value: "empty" };
+  }
+
+  if (stats.depth === 0) {
+    return { id: "syncOutbox", severity: null, state: "ok", label: "Sync outbox", value: "empty" };
+  }
+
+  const ageLabel = stats.oldestAgeMs != null ? formatAge(stats.oldestAgeMs) : "unknown age";
+  const stale = stats.oldestAgeMs != null && stats.oldestAgeMs > OUTBOX_STALE_WARN_MS;
+
+  if (stale) {
+    return {
+      id: "syncOutbox",
+      severity: "warn",
+      state: "warn",
+      label: "Sync outbox",
+      value: `${stats.depth} queued · oldest ${ageLabel}`,
+      issueLabel: `${stats.depth} queued sync row${stats.depth === 1 ? "" : "s"} waiting, oldest ${ageLabel}`,
+      actionLabel: "View instances",
+      actionHref: "/dashboard/settings?section=paired-instances",
+    };
+  }
+
+  return {
+    id: "syncOutbox",
+    severity: null,
+    state: "ok",
+    label: "Sync outbox",
+    value: `${stats.depth} queued · oldest ${ageLabel}`,
   };
 }
 
@@ -733,6 +785,7 @@ export async function collectHealthSignals(db, opts = {}) {
     updatesSignal(db),
     backupSignal(db, nowFn, lang),
     syncConflictsSignal(db),
+    outboxSignal(db),
     loginsSignal(db, lang),
     exposureSignal(lang, nowFn),
     integrationsSignal(db, lang),
