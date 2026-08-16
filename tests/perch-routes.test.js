@@ -1,11 +1,16 @@
 /**
  * Perch Hub P1, Task C-5 — servers/gateway/routes/perch.js.
  *
+ * Track 3 Task 16 retired the per-turn channel this file used to exercise
+ * (POST /bots/:id/turn, GET /turns/:turnId/events); the ~17 tests for it, and
+ * the handleInbound-injection seam they relied on, were removed with it.
+ * perch-live (perch-interactive.js / perch-interactive-api.js, covered by
+ * tests/perch-interactive-routes.test.js) is now the only interactive rail.
+ *
  * Harness: a real init-db'd scratch crow.db (CROW_DATA_DIR, so nothing can
- * touch the operator's ~/.crow), an ephemeral express server, and an INJECTED
- * handleInbound — no pi is ever spawned, no bridge turn is ever run. Engine
- * state is pinned through engine-gate's _setEngineStatusForTest because CI
- * runners have no pi installed at all.
+ * touch the operator's ~/.crow) and an ephemeral express server. Engine state
+ * is pinned through engine-gate's _setEngineStatusForTest because CI runners
+ * have no pi installed at all.
  *
  * The one exception to "auth is not under test" is deliberate: C-3's cases
  * prove dashboardAuth refuses in isolation, which would keep passing even if
@@ -29,12 +34,7 @@ delete process.env.CROW_DB_PATH;
 const DB_FILE = join(dir, "crow.db");
 const REPO = new URL("..", import.meta.url).pathname;
 
-/** Set per test: the fake handleInbound body. */
-let inboundHook = null;
-/** Every opts object the router handed to handleInbound. */
-let inboundCalls = [];
-
-let server, base, _setEngineStatusForTest, _resetPerchTurnsForTest;
+let server, base, _setEngineStatusForTest;
 
 function raw() {
   return new Database(DB_FILE);
@@ -74,19 +74,12 @@ before(async () => {
   }, { name: "Multi" });
 
   ({ _setEngineStatusForTest } = await import("../servers/gateway/dashboard/panels/bot-builder/engine-gate.js"));
-  const perchModule = await import("../servers/gateway/routes/perch.js");
-  ({ _resetPerchTurnsForTest } = perchModule);
-  const { default: perchApiRouter } = perchModule;
+  const { default: perchApiRouter } = await import("../servers/gateway/routes/perch.js");
   const { default: express } = await import("express");
 
   const app = express();
   app.use(express.json()); // the gateway installs this globally (index.js:386)
-  app.use(perchApiRouter((req, res, next) => next(), {
-    handleInboundImpl: (opts) => {
-      inboundCalls.push(opts);
-      return inboundHook(opts);
-    },
-  }));
+  app.use(perchApiRouter((req, res, next) => next()));
   await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
   base = "http://127.0.0.1:" + server.address().port + "/dashboard/perch-api";
 });
@@ -99,9 +92,6 @@ after(() => {
 
 beforeEach(() => {
   _setEngineStatusForTest({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
-  _resetPerchTurnsForTest();
-  inboundCalls = [];
-  inboundHook = async () => ({ action: "asked" });
 });
 
 const getJson = async (path) => {
@@ -117,31 +107,6 @@ const postJson = async (path, body) => {
   });
   return { status: r.status, body: await r.json().catch(() => null) };
 };
-
-/** Read an SSE response until `until(buffer)` is true (or the server closes). */
-async function readSse(path, until = () => false) {
-  const res = await fetch(base + path);
-  if (res.status !== 200) return { status: res.status, text: await res.text() };
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    if (until(buf)) break;
-  }
-  try { await reader.cancel(); } catch { /* already closed */ }
-  return { status: res.status, text: buf };
-}
-
-/** Every `event: <name>` in an SSE payload, in order. */
-const sseEvents = (text) => [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
-/** The data payload of the first `event: <name>` block. */
-function sseData(text, name) {
-  const m = new RegExp("^event: " + name + "\\ndata: (.*)$", "m").exec(text);
-  return m ? JSON.parse(m[1]) : null;
-}
 
 // ---------------------------------------------------------------------------
 // bots + sessions
@@ -290,339 +255,11 @@ test("GET /bots/:id/envelope 404s an unknown bot", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// turns
+// turns (RETIRED — Track 3 Task 16: POST /bots/:id/turn and
+// GET /turns/:turnId/events, and the ~17 tests that exercised them, were
+// removed. perch-live (perch-interactive.js / perch-interactive-api.js) is
+// now the only interactive rail.)
 // ---------------------------------------------------------------------------
-
-test("POST /turn 202s, passes the perch channel through, and streams the reply", async () => {
-  inboundHook = async (opts) => {
-    await opts.log("thinking\nhard");
-    await opts.sendReply("hello from the bot");
-    return { action: "asked" };
-  };
-  const { status, body } = await postJson("/bots/chatty/turn", { message: "hi" });
-  assert.equal(status, 202);
-  assert.ok(body.turnId);
-  assert.ok(body.sessionId.startsWith("perch-"));
-
-  assert.equal(inboundCalls.length, 1);
-  assert.equal(inboundCalls[0].gateway_type, "perch");
-  assert.equal(inboundCalls[0].bot_id, "chatty");
-  assert.equal(inboundCalls[0].user_message, "hi");
-  assert.equal(inboundCalls[0].kind, "perch"); // C-6 plumbs this through to the row
-
-  const { text } = await readSse("/turns/" + body.turnId + "/events");
-  assert.deepEqual(sseEvents(text), ["log", "reply"]);
-  assert.equal(sseData(text, "reply").text, "hello from the bot");
-  // The lens writes `log` straight into the pending line as raw e.data (it
-  // JSON-parses only the terminal events), and a raw newline would split the
-  // SSE frame — so a log arrives as one plain, single-line string.
-  assert.match(text, /^data: thinking hard$/m);
-
-  // The session row the turn claimed is a real perch row.
-  const c = raw();
-  const row = c.prepare("SELECT gateway_type, kind, status FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id=?").get(body.sessionId);
-  c.close();
-  assert.equal(row.gateway_type, "perch");
-  // `kind` comes from claimTurn's INSERT here (handleInbound is injected in this
-  // file, so the bridge's own upsert never runs). The C-6 plumb that makes the
-  // BRIDGE-created INSERT carry it is proven end-to-end in perch-narrowing.test.js.
-  assert.equal(row.kind, "perch");
-  assert.equal(row.status, "waiting-user", "a finished turn must not leave a live claim behind");
-});
-
-test("SSE fans out to a listener attached while the turn is still running", async () => {
-  let release;
-  inboundHook = (opts) => new Promise((resolve) => {
-    release = async () => { await opts.sendReply("late answer"); resolve({ action: "asked" }); };
-  });
-  const { body } = await postJson("/bots/chatty/turn", { message: "wait for it" });
-  const streamed = readSse("/turns/" + body.turnId + "/events", (buf) => buf.includes("event: reply"));
-  await new Promise((r) => setTimeout(r, 50)); // let the stream attach
-  await release();
-  const { text } = await streamed;
-  assert.deepEqual(sseEvents(text), ["reply"]);
-  assert.equal(sseData(text, "reply").text, "late answer");
-});
-
-test("a deferred turn (pi at capacity) ends with a terminal error — there is no tick to retry it", async () => {
-  inboundHook = async () => ({ action: "deferred", reason: "pi-capacity", livePi: 3 });
-  const { body } = await postJson("/bots/chatty/turn", { message: "hi" });
-  await new Promise((r) => setTimeout(r, 50));
-  const { text } = await readSse("/turns/" + body.turnId + "/events");
-  assert.deepEqual(sseEvents(text), ["error"]);
-  assert.match(sseData(text, "error").text, /busy/);
-  // A deferral never wrote a session row, so the claim must be released.
-  const c = raw();
-  const row = c.prepare("SELECT status FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id=?").get(body.sessionId);
-  c.close();
-  assert.equal(row.status, "waiting-user");
-});
-
-test("an {action:'error'} turn reports the bridge's own message once, not twice", async () => {
-  inboundHook = async (opts) => {
-    await opts.sendReply("(bridge error: pi exited)");
-    return { action: "error", error: "pi exited" };
-  };
-  const { body } = await postJson("/bots/chatty/turn", { message: "hi" });
-  await new Promise((r) => setTimeout(r, 50));
-  const { text } = await readSse("/turns/" + body.turnId + "/events");
-  assert.deepEqual(sseEvents(text), ["reply"], "the failure was already delivered via sendReply");
-  assert.match(sseData(text, "reply").text, /bridge error/);
-});
-
-test("a turn that replies and THEN blows up stays a single terminal event", async () => {
-  // The bridge's failure paths deliver through sendReply and only then return
-  // (or throw). A late error must not append a second terminal event: the lens
-  // finishes the card on the first one, and a replaying client would otherwise
-  // see the turn both answered and failed.
-  inboundHook = async (opts) => {
-    await opts.sendReply("here is your answer");
-    throw new Error("cleanup exploded after the reply");
-  };
-  const { body } = await postJson("/bots/chatty/turn", { message: "hi" });
-  await new Promise((r) => setTimeout(r, 50));
-  const { text } = await readSse("/turns/" + body.turnId + "/events");
-  assert.deepEqual(sseEvents(text), ["reply"]);
-  assert.equal(sseData(text, "reply").text, "here is your answer");
-});
-
-test("a log emitted after the turn is terminal is dropped, not replayed", async () => {
-  inboundHook = async (opts) => {
-    await opts.sendReply("answered");
-    opts.log("a straggler line from a dying child");
-    return { action: "asked" };
-  };
-  const { body } = await postJson("/bots/chatty/turn", { message: "hi" });
-  await new Promise((r) => setTimeout(r, 50));
-  const { text } = await readSse("/turns/" + body.turnId + "/events");
-  assert.deepEqual(sseEvents(text), ["reply"]);
-});
-
-test("a pre-flight throw becomes a terminal error event", async () => {
-  inboundHook = async () => { throw new Error("unknown bot: chatty"); };
-  const { body } = await postJson("/bots/chatty/turn", { message: "hi" });
-  await new Promise((r) => setTimeout(r, 50));
-  const { text } = await readSse("/turns/" + body.turnId + "/events");
-  assert.deepEqual(sseEvents(text), ["error"]);
-  assert.match(sseData(text, "error").text, /unknown bot/);
-});
-
-test("one turn per thread: a second POST is refused while the first is in flight, and allowed after", async () => {
-  let release;
-  inboundHook = (opts) => new Promise((resolve) => {
-    release = async () => { await opts.sendReply("done"); resolve({ action: "asked" }); };
-  });
-  const first = await postJson("/bots/chatty/turn", { message: "one", sessionId: "serial-thread" });
-  assert.equal(first.status, 202);
-  const second = await postJson("/bots/chatty/turn", { message: "two", sessionId: "serial-thread" });
-  assert.equal(second.status, 409);
-  assert.equal(second.body.error, "turn_in_progress");
-  assert.equal(inboundCalls.length, 1, "the refused turn must never reach the bridge");
-
-  await release();
-  await new Promise((r) => setTimeout(r, 50));
-  inboundHook = async (opts) => { await opts.sendReply("second"); return { action: "asked" }; };
-  const third = await postJson("/bots/chatty/turn", { message: "three", sessionId: "serial-thread" });
-  assert.equal(third.status, 202);
-});
-
-test("the in-flight guard is taken BEFORE the first await, so two concurrent turns cannot both start", async () => {
-  // The guard is only meaningful if nothing can yield between the check and
-  // the claim. The one real yield on that path is the lazy bridge import on a
-  // gateway's first turn — a genuine module load, not a microtask — so this
-  // drives a router through `loadBridgeImpl` to reproduce exactly that window.
-  // Injecting `handleInboundImpl` instead would short-circuit before the
-  // import and prove nothing: microtask-only awaits can never interleave with
-  // another request, which is why the defect is invisible to the other tests.
-  const { default: perchApiRouter } = await import("../servers/gateway/routes/perch.js");
-  const { default: express } = await import("express");
-
-  const started = [];
-  const app = express();
-  app.use(express.json());
-  app.use(perchApiRouter((req, res, next) => next(), {
-    loadBridgeImpl: async () => {
-      await new Promise((r) => setTimeout(r, 40)); // the real import's cost
-      return {
-        handleInbound: (opts) => {
-          started.push(opts);
-          return new Promise(() => {}); // a turn that is still running
-        },
-      };
-    },
-  }));
-  const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
-  const b = "http://127.0.0.1:" + srv.address().port + "/dashboard/perch-api";
-  const post = () => fetch(b + "/bots/chatty/turn", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ message: "race", sessionId: "toctou-thread" }),
-  }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
-
-  try {
-    const [one, two] = await Promise.all([post(), post()]);
-    assert.deepEqual([one.status, two.status].sort(), [202, 409],
-      "exactly one of two simultaneous turns may be admitted");
-    assert.equal((one.status === 409 ? one : two).body.error, "turn_in_progress");
-    assert.equal(started.length, 1,
-      "two pi processes resuming ONE session file corrupts the transcript — that is what the guard is for");
-  } finally {
-    srv.close();
-    _resetPerchTurnsForTest(); // the admitted turn never resolves
-  }
-});
-
-test("a stale DB claim from a gateway that died mid-turn does not wedge the thread", async () => {
-  const c = raw();
-  c.prepare(
-    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,status,updated_at) " +
-    "VALUES ('chatty','perch','wedged','active',datetime('now','-3 hours'))"
-  ).run();
-  c.close();
-  const r = await postJson("/bots/chatty/turn", { message: "still there?", sessionId: "wedged" });
-  assert.equal(r.status, 202);
-});
-
-test("a fresh DB claim blocks a turn even with an empty in-memory map (restart mid-turn)", async () => {
-  const c = raw();
-  c.prepare(
-    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,status,updated_at) " +
-    "VALUES ('chatty','perch','restarted','active',datetime('now'))"
-  ).run();
-  c.close();
-  _resetPerchTurnsForTest(); // simulate: this process knows nothing of that turn
-  const r = await postJson("/bots/chatty/turn", { message: "hello?", sessionId: "restarted" });
-  assert.equal(r.status, 409);
-  assert.equal(r.body.error, "turn_in_progress");
-});
-
-// --- F1: sessionId is caller-supplied, so it can name ANOTHER channel's thread -
-//
-// Traced failure this pins shut: pass a live gmail thread id and claimTurn()
-// flips that row to active → the bridge's getSession() RESUMES it → the perch
-// message lands in the gmail conversation's pi session file → upsertSession()
-// relabels the row `perch` permanently, and the lens badges off gateway_type so
-// nothing ever shows it happened.
-
-test("POST /turn refuses to hijack a gmail thread, and leaves its row untouched", async () => {
-  const c = raw();
-  c.prepare(
-    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,pi_session_id,pi_session_dir,updated_at) " +
-    "VALUES ('chatty','gmail','198f0c2a11bd7e4c','chat','waiting-user','gmail-uuid','/tmp/gmail-sessions',datetime('now','-2 days'))"
-  ).run();
-  c.close();
-
-  const r = await postJson("/bots/chatty/turn", { message: "hijack", sessionId: "198f0c2a11bd7e4c" });
-  assert.equal(r.status, 400);
-  assert.equal(r.body.error, "not_a_perch_session");
-  assert.equal(r.body.gateway_type, "gmail", "the refusal names the channel that actually owns the thread");
-  assert.equal(inboundCalls.length, 0, "the bridge must never be handed a turn aimed at another channel");
-
-  const after = raw();
-  const row = after.prepare(
-    "SELECT gateway_type, kind, status, pi_session_id FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id='198f0c2a11bd7e4c'"
-  ).get();
-  after.close();
-  assert.equal(row.gateway_type, "gmail", "the row must not be relabelled");
-  assert.equal(row.kind, "chat");
-  assert.equal(row.pi_session_id, "gmail-uuid", "…and its pi session must stay attached to gmail");
-  assert.equal(row.status, "waiting-user", "…and it must not be left claimed 'active'");
-});
-
-test("a refused hijack does not leave the thread wedged or reported live", async () => {
-  // The in-flight guard is taken before the channel check (it has to be — see
-  // the TOCTOU test), so every refusal AFTER it must hand the guard back.
-  // A leak here would be silent and permanent: the thread would answer 409
-  // turn_in_progress forever, and GET /sessions would badge it `live`.
-  const c = raw();
-  c.prepare(
-    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,updated_at) " +
-    "VALUES ('chatty','discord','wedge-check','chat','waiting-user',datetime('now','-1 day'))"
-  ).run();
-  c.close();
-
-  const first = await postJson("/bots/chatty/turn", { message: "one", sessionId: "wedge-check" });
-  assert.equal(first.status, 400);
-  const second = await postJson("/bots/chatty/turn", { message: "two", sessionId: "wedge-check" });
-  assert.equal(second.status, 400, "a second attempt must still get the HONEST refusal, not 409");
-  assert.equal(second.body.error, "not_a_perch_session");
-
-  const { body } = await getJson("/bots/chatty/sessions");
-  const row = body.sessions.find((s) => s.gateway_thread_id === "wedge-check");
-  assert.equal(row.live, false, "a refused turn must never leave a thread badged live");
-});
-
-test("a thread refused for a fresh DB claim becomes usable again once the claim ages out", async () => {
-  const c = raw();
-  c.prepare(
-    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,status,updated_at) " +
-    "VALUES ('chatty','perch','ages-out','active',datetime('now'))"
-  ).run();
-  c.close();
-  assert.equal((await postJson("/bots/chatty/turn", { message: "hi", sessionId: "ages-out" })).status, 409);
-
-  // The gateway that owned that claim is gone; the row ages past one turn
-  // budget. Nothing in THIS process may still be holding the thread.
-  const c2 = raw();
-  c2.prepare("UPDATE bot_sessions SET updated_at=datetime('now','-3 hours') WHERE gateway_thread_id='ages-out'").run();
-  c2.close();
-  inboundHook = async (opts) => { await opts.sendReply("back"); return { action: "asked" }; };
-  assert.equal((await postJson("/bots/chatty/turn", { message: "hi again", sessionId: "ages-out" })).status, 202);
-  await new Promise((r) => setTimeout(r, 50));
-});
-
-test("POST /turn still resumes a perch thread, and still opens a brand-new one", async () => {
-  // The guard is a channel check, not a blanket ban on `sessionId`: the two
-  // legitimate cases must keep working or the chat card can never hold a
-  // conversation. (Without this pair the F1 fix could be a wholesale refusal.)
-  const c = raw();
-  c.prepare(
-    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,updated_at) " +
-    "VALUES ('chatty','perch','mine-to-resume','perch','waiting-user',datetime('now','-1 hour'))"
-  ).run();
-  // A pre-channel legacy row (gateway_type NULL) is not evidence of another
-  // channel, so it stays usable rather than becoming permanently unreachable.
-  c.prepare(
-    "INSERT INTO bot_sessions (bot_id,gateway_thread_id,status,updated_at) " +
-    "VALUES ('chatty','legacy-null-channel','waiting-user',datetime('now','-1 hour'))"
-  ).run();
-  c.close();
-
-  inboundHook = async (opts) => { await opts.sendReply("resumed"); return { action: "asked" }; };
-  assert.equal((await postJson("/bots/chatty/turn", { message: "again", sessionId: "mine-to-resume" })).status, 202);
-  await new Promise((r) => setTimeout(r, 50));
-  assert.equal((await postJson("/bots/chatty/turn", { message: "again", sessionId: "legacy-null-channel" })).status, 202);
-  await new Promise((r) => setTimeout(r, 50));
-  assert.equal((await postJson("/bots/chatty/turn", { message: "fresh" })).status, 202);
-});
-
-test("turn guards: engine absent 409s, an unattached bot 403s, an empty message 400s", async () => {
-  _setEngineStatusForTest({ state: "absent" });
-  const noEngine = await postJson("/bots/chatty/turn", { message: "hi" });
-  assert.equal(noEngine.status, 409);
-  assert.equal(noEngine.body.error, "engine_required");
-
-  _setEngineStatusForTest({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
-  const notAttached = await postJson("/bots/quiet/turn", { message: "hi" });
-  assert.equal(notAttached.status, 403);
-  assert.equal(notAttached.body.error, "perch_not_attached");
-
-  const empty = await postJson("/bots/chatty/turn", { message: "   " });
-  assert.equal(empty.status, 400);
-  assert.equal((await postJson("/bots/nope/turn", { message: "hi" })).status, 404);
-  assert.equal(inboundCalls.length, 0, "no guard may let a turn through to the bridge");
-});
-
-test("the turn message is capped at 32k before it reaches the bridge", async () => {
-  await postJson("/bots/chatty/turn", { message: "x".repeat(50000) });
-  assert.equal(inboundCalls[0].user_message.length, 32000);
-});
-
-test("GET /turns/:id/events 404s an unknown turn", async () => {
-  const r = await fetch(base + "/turns/does-not-exist/events");
-  assert.equal(r.status, 404);
-  assert.equal((await r.json()).error, "unknown_turn");
-});
 
 // ---------------------------------------------------------------------------
 // narrowing
@@ -707,7 +344,7 @@ test("POST /narrow rejects widening — unknown ids and def-denied ids alike", a
   assert.equal(rows.length, 0, "a rejected narrowing must not create a row");
 });
 
-test("two consecutive narrows on one thread leave exactly ONE row, and the next turn reuses it", async () => {
+test("two consecutive narrows on one thread leave exactly ONE row, updated in place", async () => {
   await postJson("/bots/chatty/sessions/narrow-c/narrow", { disabled_tools: ["bash"] });
   await postJson("/bots/chatty/sessions/narrow-c/narrow", { disabled_tools: ["read", "bash"] });
   const c = raw();
@@ -715,17 +352,6 @@ test("two consecutive narrows on one thread leave exactly ONE row, and the next 
   c.close();
   assert.equal(rows.length, 1, "ON CONFLICT is unusable here — the index is not unique; the upsert must be a transaction");
   assert.equal(rows[0].narrowed_tools, '["read","bash"]');
-
-  inboundHook = async (opts) => { await opts.sendReply("ok"); return { action: "asked" }; };
-  const turn = await postJson("/bots/chatty/turn", { message: "hi", sessionId: "narrow-c" });
-  assert.equal(turn.status, 202);
-  await new Promise((r) => setTimeout(r, 50));
-  const c2 = raw();
-  const after = c2.prepare("SELECT id, narrowed_tools FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id='narrow-c'").all();
-  c2.close();
-  assert.equal(after.length, 1, "the turn must claim the SAME row the narrowing created");
-  assert.equal(after[0].id, rows[0].id);
-  assert.equal(after[0].narrowed_tools, '["read","bash"]', "claiming a turn must not erase the narrowing");
 });
 
 test("narrowed_tools is a real column, declared BOTH ways (the #250 convention)", () => {
@@ -894,15 +520,19 @@ test("an unauthenticated request to a REAL perch route never reaches the handler
     assert.equal(noSession.status, 303);
     assert.equal(noSession.headers.get("location"), "/dashboard/login");
 
-    // Same for a mutating route: a session-less caller cannot drive a bot.
-    const turn = await fetch(b + "/bots/chatty/turn", {
+    // Same for a mutating route: a session-less caller cannot narrow a bot's
+    // tools.
+    const narrow = await fetch(b + "/bots/chatty/sessions/unauth-thread/narrow", {
       method: "POST",
       headers: { "content-type": "application/json", "tailscale-user-login": "someone@example.com" },
-      body: JSON.stringify({ message: "hi" }),
+      body: JSON.stringify({ disabled_tools: ["bash"] }),
       redirect: "manual",
     });
-    assert.equal(turn.status, 303);
-    assert.equal(inboundCalls.length, 0);
+    assert.equal(narrow.status, 303);
+    const c = raw();
+    const rows = c.prepare("SELECT id FROM bot_sessions WHERE gateway_thread_id='unauth-thread'").all();
+    c.close();
+    assert.equal(rows.length, 0, "a refused, session-less narrow must never write a row");
   } finally {
     srv.close();
   }
