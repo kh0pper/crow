@@ -36,6 +36,7 @@ import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab } from "./tracker.mjs";
+import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
@@ -654,8 +655,9 @@ export async function handleInbound(opts) {
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);
   // D-T1.4: plans are board_plans records now, resolved from the
   // instance-global store — see planForCard's own comment for the
-  // store-topology rule (this call takes no tasksDbPath on purpose).
-  const planBody = cardId != null ? planForCard(cardId) : null;
+  // store-topology rule (this call takes no tasksDbPath on purpose). The
+  // actual read now happens inside cardBriefBlock (Track 3 Task 2) — no
+  // standalone planBody local here, so planForCard is only invoked once.
 
   // M3b: structured project header replaces the bare "Project #N" string.
   // Falls back to a one-liner for legacy bots with no project_spaces row.
@@ -684,15 +686,12 @@ export async function handleInbound(opts) {
     // call board_move_item — decision 10, full verbs, provenance, no
     // restriction — but the model here is report-then-reply, not
     // move-as-completion).
-    const vocab = boardVocab(cardId, tasksDbPath);
-    promptText = projectHeader + "\n\nWork the following card.\n\nCARD #" + cardId +
-      " (current board status: " + cardStatus(cardId, tasksDbPath) + "; this board's statuses: " + vocab.statuses.join(", ") + ").\nPLAN:\n---\n" +
-      (planBody || "(no plan)") + "\n---\n\nUser said: \"" + cleanMsg + "\"\n\n" +
-      "Do the work the plan describes. You may use board_move_item to update this card's status " +
-      "as you go (only ever use this board's statuses). When you are done, call board_report_result " +
-      "with item_id=" + cardId + ", an outcome of success/failure/partial, and a summary_md describing " +
-      "what you did — that call is what ends the run, not a status write. " +
-      "Then reply with a short summary for the gateway thread. One card only.";
+    // Track 3 Task 2: the block body (from "Work the following card." through
+    // "...not a status write.") is now a shared pure builder — see
+    // card-brief.mjs — so the interactive dispatch rail can compose the same
+    // brief. projectHeader/gatewayHint and the channel tail stay caller-side.
+    promptText = projectHeader + "\n\n" + cardBriefBlock({ cardId, tasksDbPath, userLine: cleanMsg, planForCard, cardStatus, boardVocab }) +
+      " Then reply with a short summary for the gateway thread. One card only.";
   } else {
     // No card reference — let the bot DECIDE based on its system prompt
     // whether to (a) answer briefly without tools (greet, list cards, simple
