@@ -98,6 +98,22 @@ export async function mountAdminApi(app, deps) {
     console.warn("[notif-attention-migration] skipped:", err.message);
   }
 
+  // --- perch-hub bundle retirement migration (Track 3, Task 17). Removes
+  // the vendored payload dir, minted perch-token file, and installed.json
+  // entry a host that had perch-hub installed is otherwise left with.
+  // Idempotent; same invocation shape as the theme-keys migration above. ---
+  try {
+    const { migratePerchHubRetirement } = await import("../dashboard/settings/migrations/perch-hub-retirement-migration.js");
+    const result = await migratePerchHubRetirement(createDbClient());
+    if (result.skipped) {
+      // already_migrated — silent unless debugging
+    } else if (result.removedPayloadDir || result.removedTokenFile || result.removedInstalledEntry) {
+      console.log(`[perch-hub-retirement-migration] payload=${result.removedPayloadDir} token=${result.removedTokenFile} installedEntry=${result.removedInstalledEntry}`);
+    }
+  } catch (err) {
+    console.warn("[perch-hub-retirement-migration] skipped:", err.message);
+  }
+
   // --- Provider DB seed + reconciler (owner-asserts, spec D1/D5/R2-C1) ---
   // R2-C1 gate: a --no-auth gateway (the crow-mcp-bridge companion) shares
   // the primary's crow.db with feedsDisabled — its upsert writes land but

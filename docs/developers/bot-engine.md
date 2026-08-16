@@ -4,7 +4,7 @@ title: Bot Engine (pi)
 
 # Bot Engine (pi)
 
-The **bot engine** is the agent runtime behind Bot Builder's message-based channels — Gmail, Discord, Telegram, Slack, and [Perch](./perch-hub). It is [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent), pinned to `0.82.0` (requires Node.js >= 22.19). Crow's pi-bots bridge (`scripts/pi-bots/`) spawns it per-turn in RPC mode (`--mode rpc`), feeds it the inbound message plus the bot's definition (model, tools, skills, permission policy), and relays its reply back out the channel it arrived on.
+The **bot engine** is the agent runtime behind Bot Builder's message-based channels — Gmail, Discord, Telegram, Slack, and Perch (the board's roost strip + session drawer). It is [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent), pinned to `0.82.0` (requires Node.js >= 22.19). Crow's pi-bots bridge (`scripts/pi-bots/`) spawns it per-turn in RPC mode (`--mode rpc`), feeds it the inbound message plus the bot's definition (model, tools, skills, permission policy), and relays its reply back out the channel it arrived on.
 
 Bots on **Crow Messages** or a **voice/device** channel never need the engine — those run their own loop directly against the gateway's model router, not pi. The engine only matters once a bot has an engine-channel gateway attached.
 
@@ -103,10 +103,9 @@ Five gateway types need the engine — `gmail`, `discord`, `telegram`, `slack`, 
 
 ## Long-lived (interactive) children
 
-Every mode above assumes a child that lives for exactly one turn: spawn, one `promptTurn`, close. [Perch Hub's interactive sessions](./perch-hub#interactive-sessions-spawn-as-a-bot) are the one exception — a child spawned by `servers/gateway/perch-interactive.js` stays up across many turns, hibernating (closing) when idle and waking (respawning, resuming the same pi session file) on the next message. It is assembled through the same `buildBotWorld`/`prepareSpawn` path as every other engine channel and is gated by the same `ENGINE_CHANNELS` / attach-time engine check as a `perch` gateway generally, so nothing above this section changes for it. What is specific to the long-lived shape — its own state machine, its capacity accounting against this same `PIBOT_MAX_PI` budget, its stall/abort policy, and the `PI_BOT_INTERACTIVE` env marker it alone sets — is documented on the Perch Hub page rather than here, since none of it is reachable outside a spawned interactive session.
+Every mode above assumes a child that lives for exactly one turn: spawn, one `promptTurn`, close. Perch's interactive sessions (the board's roost strip + session drawer) are the one exception — a child spawned by `servers/gateway/perch-interactive.js` stays up across many turns, hibernating (closing) when idle and waking (respawning, resuming the same pi session file) on the next message. It is assembled through the same `buildBotWorld`/`prepareSpawn` path as every other engine channel and is gated by the same `ENGINE_CHANNELS` / attach-time engine check as a `perch` gateway generally, so nothing above this section changes for it. What is specific to the long-lived shape — its own state machine, its capacity accounting against this same `PIBOT_MAX_PI` budget, its stall/abort policy, and the `PI_BOT_INTERACTIVE` env marker it alone sets — lives entirely in `perch-interactive.js`'s own header comment, since none of it is reachable outside a spawned interactive session.
 
 ## See also
 
 - [Self-Hosted Bundles](./bundles) — the general bundle contract this bundle follows.
 - [Bot Builder tutorial](/guide/bot-builder-tutorial) — the operator-facing walkthrough, including where the install prompt appears.
-- [Perch Hub — interactive sessions](./perch-hub#interactive-sessions-spawn-as-a-bot) — the long-lived child shape this page only summarizes.
