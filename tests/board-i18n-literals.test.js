@@ -42,35 +42,70 @@
  * empirically while building this list (2026-08-16) and are why the tiered
  * fallback exists instead of a single fixed pattern.
  *
- * SCOPE: this test only scans the EMITTED CLIENT-SIDE SCRIPT — clientJs()
- * (which already has drawer.js spliced in, per client.js's own import of
- * birdDrawerJs) and birdDrawerJs() standalone — because that's the surface
- * with runtime `lang` branching to diff against. A handful of this track's
- * strings (botboard.bdHibernating "asleep — sending will wake it",
- * botboard.bdBindsAtWake "Applies at the next wake.", botboard.bdAttachCard
- * "Attach to card", botboard.roostActionSendOut "Send out",
- * botboard.roostActionRecall "Recall") are rendered ONLY in html.js's SSR
- * markup via t(lang) at render time — never re-emitted into the client
- * script — so they have no EN/ES DIFFERENTIAL to test here; the emitted
- * script never mentions them in either language, so this test's technique
- * literally cannot see them. (The brief's example list includes "Send out",
- * "Recall", "asleep" and "Attach to card" verbatim; verified against the
- * shipped source on 2026-08-16, all four are SSR-only strings, and "Accept"
- * shipped as "Approve" — the existing board.btnApproveResult key, reused by
- * Task 14 for the card-face gate — and "needs you" belongs to a different
- * track-8 surface, servers/gateway/perch-interactive.js's push-notification
- * title, which is server-side text with no client-script emission at all.)
- * The curated key list below is every botboard.roost* key, every
- * botboard.bd* key, and both board.btn*Result keys actually reached via a
- * tJs(...) call in client.js or drawer.js, hand-verified against the source
- * on 2026-08-16 — see the two KEY LIST groupings for which file(s) each is
- * sourced from.
+ * TWO SURFACES, SAME TECHNIQUE, DIFFERENT MATCH SYNTAX: this file has two
+ * parts. Part 1 scans the EMITTED CLIENT-SIDE SCRIPT — clientJs() (which
+ * already has drawer.js spliced in, per client.js's own import of
+ * birdDrawerJs) and birdDrawerJs() standalone. Part 2 (fix round 1,
+ * 2026-08-16) scans the SSR MARKUP functions in html.js — roostStripHtml(),
+ * roostDispatchDialogMarkup(), birdDrawerMarkup() — which is where MOST of
+ * this track's user-facing strings actually live (botboard.bdHibernating
+ * "asleep — sending will wake it", botboard.bdBindsAtWake "Applies at the
+ * next wake.", botboard.bdAttachCard "Attach to card",
+ * botboard.roostActionSendOut "Send out", botboard.roostActionRecall
+ * "Recall" — the brief's own example strings, verified 2026-08-16 to be
+ * SSR-only, never re-emitted into the client script, which is why Part 1
+ * alone couldn't see them). Both parts use the SAME EN-vs-ES differential
+ * idea (a hardcoded literal is lang-invariant; a real t()/tJs() call is
+ * not) but the boundary syntax differs: Part 1 matches JS-string-literal
+ * quoting (`'value'`); Part 2 matches HTML text-node/attribute boundaries
+ * (`>value<`, `"value"`) since html.js's t() calls land in markup, not JS
+ * string literals. "Accept" shipped as "Approve" — the existing
+ * board.btnApproveResult key, reused by Task 14 for the card-face gate —
+ * and "needs you" belongs to a different track-8 surface,
+ * servers/gateway/perch-interactive.js's push-notification title, which is
+ * server-side-only text with no client-script OR html.js-markup emission at
+ * all (out of scope for both parts of this file).
+ *
+ * Both curated key lists (Part 1 and Part 2) are HAND-MAINTAINED ON
+ * PURPOSE, not scraped from source at test time. A scraped list (e.g.
+ * "every key passed to tJs(...) in this file") is blind to exactly the
+ * regression this test exists to catch: delete the tJs()/t() call for one
+ * key and replace it with a literal, and a scrape done AFTER that mutation
+ * would simply stop looking for that key — a silent, self-defeating pass.
+ * The lists are fixed at the moment they were verified against real output
+ * (2026-08-16); adding a new track-3 user-facing string means manually
+ * extending the relevant list here, not regenerating it.
  */
-import { test } from "node:test";
+import { test, before } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { clientJs } from "../servers/gateway/dashboard/panels/bot-board/client.js";
 import { birdDrawerJs } from "../servers/gateway/dashboard/panels/bot-board/drawer.js";
 import { translations, tJs } from "../servers/gateway/dashboard/shared/i18n.js";
+
+// html.js (Part 2, below) pulls in data-queries.js's TASKS_DB — a path
+// string computed at MODULE-IMPORT time from CROW_TASKS_DB_PATH. Harmless
+// either way for the three pure render functions this file calls (none of
+// them opens a DB connection) — verified empirically before writing this
+// file — but pointed at a scratch dir first regardless, matching the
+// fixture convention tests/roost-strip-ui.test.js and
+// tests/bird-drawer-core.test.js use, so this file never has an opinion
+// about — or any chance of touching — a real ~/.crow. Static `import`
+// declarations are hoisted above ANY same-file statement (env vars included)
+// regardless of source order, so the env vars are set here and html.js is
+// imported dynamically inside before() — the only way to guarantee the env
+// var actually lands before html.js's module body runs.
+const dir = mkdtempSync(join(tmpdir(), "board-i18n-literals-"));
+process.env.CROW_TASKS_DB_PATH = join(dir, "tasks.db");
+process.env.CROW_DB_PATH = join(dir, "crow.db");
+
+let roostStripHtml, roostDispatchDialogMarkup, birdDrawerMarkup;
+before(async () => {
+  ({ roostStripHtml, roostDispatchDialogMarkup, birdDrawerMarkup } =
+    await import("../servers/gateway/dashboard/panels/bot-board/html.js"));
+});
 
 // ---------------------------------------------------------------------------
 // The differential-match helper
@@ -113,6 +148,10 @@ function assertKeysReachClient(enBody, esBody, keys, label) {
       `hardcoded literal — the EN text must NOT appear verbatim in the ES emission`);
   }
 }
+
+// =============================================================================
+// PART 1 — the emitted client-side script (clientJs()/birdDrawerJs())
+// =============================================================================
 
 // ---------------------------------------------------------------------------
 // Group A — keys sourced from client.js (the roost strip + the card-face
@@ -161,7 +200,7 @@ function emittedClientBody(lang) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Part 1 tests
 // ---------------------------------------------------------------------------
 
 test("client.js's roost-strip + card-face-gate strings reach the emitted script through i18n, not as literals", () => {
@@ -192,4 +231,154 @@ test("sanity: reachesClientViaI18n actually distinguishes translated from hardco
   // emissions, exactly what a mutation like `btn.textContent='Approve';`
   // produces regardless of `lang`) must NOT pass.
   assert.ok(!reachesClientViaI18n("x='Approve';", "x='Approve';", "Approve", "Aprobar"));
+});
+
+// =============================================================================
+// PART 2 (fix round 1, 2026-08-16) — the SSR MARKUP functions in html.js
+// =============================================================================
+//
+// roostStripHtml(), roostDispatchDialogMarkup() and birdDrawerMarkup() are
+// where MOST of this track's user-facing strings actually render (see the
+// file header) — they were entirely unguarded before this fix round.
+//
+// Match syntax differs from Part 1 because these are HTML strings, not JS
+// source: t(key, lang) lands as either a text-node's content (bounded by the
+// surrounding tags, `>value<`) or an HTML attribute's value (bounded by
+// quotes, `"value"`), never inside a JS string literal. The same three-tier
+// preference order applies (tightest bound first, bare substring last) for
+// the same reason as Part 1: a bare substring search on a short word risks
+// colliding with an HTML class/id/attribute name that happens to contain it.
+
+/**
+ * SSR analogue of reachesClientViaI18n() — same EN-vs-ES differential idea,
+ * HTML-boundary match syntax instead of JS-string-literal syntax.
+ */
+function reachesSsrViaI18n(enHtml, esHtml, valEn, valEs) {
+  const candidates = [
+    [">" + valEn + "<", ">" + valEs + "<"],   // text-node content (preferred)
+    ["\"" + valEn + "\"", "\"" + valEs + "\""], // HTML attribute value
+    // (aria-label, placeholder — html.js escapeHtml()'s output for these
+    // curated values is identical to the raw value; none of them contain
+    // `&`, `<`, `>`, `"` or `'`)
+    [valEn, valEs],                             // bare substring (last
+    // resort; only used where punctuation/whitespace in the value already
+    // rules out an identifier/class-name collision)
+  ];
+  for (const [enPat, esPat] of candidates) {
+    if (enHtml.includes(enPat) && esHtml.includes(esPat) && !esHtml.includes(enPat)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** SSR analogue of assertKeysReachClient(). */
+function assertKeysReachSsr(enHtml, esHtml, keys, label) {
+  for (const key of keys) {
+    const entry = translations[key];
+    assert.ok(entry, `${key} must exist in translations{} (${label})`);
+    assert.ok(entry.en && entry.es, `${key} must carry both en and es (${label})`);
+    assert.notEqual(entry.en, entry.es,
+      `${key} en/es must differ, or the differential check below is meaningless (${label})`);
+    const ok = reachesSsrViaI18n(enHtml, esHtml, entry.en, entry.es);
+    assert.ok(ok,
+      `${key} ("${entry.en}") must reach the ${label} markup through t(), not as a ` +
+      `hardcoded literal — the EN text must NOT appear verbatim in the ES markup`);
+  }
+}
+
+// Same fixture SHAPE as tests/roost-strip-ui.test.js (five bots, one per
+// roost-fold state) — reused directly here since roostStripHtml(bots,
+// engine, lang) is a pure function of its three arguments (computeRoostBirds
+// only reads bird.definition + engine.list(), never the DB), so no
+// renderKanbanBoard/DB round-trip is needed to reach every t() call inside
+// roostBirdHtml().
+const PERCH_DEF = { gateways: [{ type: "perch" }] };
+const GMAIL_DEF = { gateways: [{ type: "gmail", address: "q@example.com", allowlist: ["a@example.com"] }] };
+const SSR_BOTS = [
+  { botId: "empty-bot", displayName: "Empty Bot", definition: PERCH_DEF }, // idle
+  { botId: "chatty", displayName: "Chatty", definition: PERCH_DEF },       // working
+  { botId: "asker", displayName: "Asker", definition: PERCH_DEF },         // waiting
+  { botId: "sleepy", displayName: "Sleepy", definition: PERCH_DEF },       // hibernating
+  { botId: "quiet", displayName: "Quiet", definition: GMAIL_DEF },         // observing (unattached)
+];
+const SSR_ENGINE_SESSIONS = [
+  { sessionId: "chatty-1", botId: "chatty", state: "awake", pendingUi: null, cardId: null },
+  { sessionId: "asker-a", botId: "asker", state: "awake", pendingUi: { kind: "ask" }, cardId: null },
+  { sessionId: "sleepy-1", botId: "sleepy", state: "hibernating", pendingUi: null, cardId: null },
+];
+const ssrEngine = { list: async () => SSR_ENGINE_SESSIONS };
+
+// ---------------------------------------------------------------------------
+// Group C — keys sourced from html.js's roostStripHtml()/roostBirdHtml()
+// (Task 12: the roost strip's state text, per-state primary action, and the
+// overflow menu every bird carries)
+// ---------------------------------------------------------------------------
+
+const ROOST_SSR_KEYS = [
+  "botboard.roostStateIdle", "botboard.roostStateWorking", "botboard.roostStateWaiting",
+  "botboard.roostStateHibernating", "botboard.roostStateObserving",
+  "botboard.roostActionSendOut", "botboard.roostActionAnswer", "botboard.roostActionOpen",
+  "botboard.roostActionAttach", "botboard.roostActionRecall", "botboard.roostMoreAria",
+  "botboard.roostActionTalk", "botboard.roostActionSessions", "botboard.roostActionSetup",
+];
+
+// ---------------------------------------------------------------------------
+// Group D — keys sourced from html.js's roostDispatchDialogMarkup() (the
+// Send-out card-picker dialog)
+// ---------------------------------------------------------------------------
+
+const DISPATCH_SSR_KEYS = [
+  "botboard.roostDispatchTitle", "botboard.roostDispatchCardLabel",
+  "botboard.roostDispatchNoteLabel", "botboard.roostDispatchConfirm",
+];
+
+// ---------------------------------------------------------------------------
+// Group E — keys sourced from html.js's birdDrawerMarkup() (Task 13's static
+// drawer shell, plus the Task 14 controls-row/attach affordances inside it)
+// ---------------------------------------------------------------------------
+
+const DRAWER_SSR_KEYS = [
+  "botboard.bdMoreAria", "botboard.bdStop", "botboard.bdHibernating",
+  "botboard.bdEnvelopeModelPrefix", "botboard.bdPermGuarded", "botboard.bdPermAsk",
+  "botboard.bdPermBypass", "botboard.bdPlanModeLabel", "botboard.bdBindsAtWake",
+  "botboard.bdApplyNow", "botboard.bdEnvelopeToggle", "botboard.bdAttachCard",
+  "botboard.bdAttachFile", "botboard.bdComposerPlaceholder", "botboard.bdSend", "botboard.bdAbort",
+];
+
+// ---------------------------------------------------------------------------
+// Part 2 tests
+// ---------------------------------------------------------------------------
+
+test("html.js's roost strip renders bird state/action/menu text through i18n, not as literals", async () => {
+  const enHtml = await roostStripHtml(SSR_BOTS, ssrEngine, "en");
+  const esHtml = await roostStripHtml(SSR_BOTS, ssrEngine, "es");
+  assertKeysReachSsr(enHtml, esHtml, ROOST_SSR_KEYS, "roostStripHtml()");
+});
+
+test("html.js's roost strip empty state renders through i18n, not as a literal", async () => {
+  const enHtml = await roostStripHtml([], ssrEngine, "en");
+  const esHtml = await roostStripHtml([], ssrEngine, "es");
+  assertKeysReachSsr(enHtml, esHtml, ["botboard.roostEmpty"], "roostStripHtml() [empty]");
+});
+
+test("html.js's send-out dispatch dialog renders through i18n, not as literals", () => {
+  const enHtml = roostDispatchDialogMarkup("en");
+  const esHtml = roostDispatchDialogMarkup("es");
+  assertKeysReachSsr(enHtml, esHtml, DISPATCH_SSR_KEYS, "roostDispatchDialogMarkup()");
+});
+
+test("html.js's session drawer static shell renders through i18n, not as literals", () => {
+  const enHtml = birdDrawerMarkup("en");
+  const esHtml = birdDrawerMarkup("es");
+  assertKeysReachSsr(enHtml, esHtml, DRAWER_SSR_KEYS, "birdDrawerMarkup()");
+});
+
+test("sanity: reachesSsrViaI18n actually distinguishes translated markup from hardcoded text", () => {
+  // Positive control.
+  assert.ok(reachesSsrViaI18n("<div>Send out</div>", "<div>Enviar</div>", "Send out", "Enviar"));
+  // Negative control: a HARDCODED literal baked into both lang renders
+  // (exactly what mutating `${t("botboard.roostActionSendOut", lang)}` to a
+  // bare `Send out` in html.js produces) must NOT pass.
+  assert.ok(!reachesSsrViaI18n("<div>Send out</div>", "<div>Send out</div>", "Send out", "Enviar"));
 });
