@@ -368,9 +368,14 @@ test("spawn: builds the world, warms, constructs PiRpc with the FULL piRpcOpts +
   assert.equal(row.pi_session_id, state.instances[0].piSessionId);
 });
 
-test("spawn: interactive_capacity at PERCH_INTERACTIVE_MAX_AWAKE — no second child", async () => {
+test("spawn: interactive_capacity at PERCH_INTERACTIVE_MAX_AWAKE, no eligible victim — no second child", async () => {
   const { engine, state } = makeEngine({ env: { PERCH_INTERACTIVE_MAX_AWAKE: "1" } });
-  await spawned(engine, "botty");
+  const r = await spawned(engine, "botty");
+  // Track 3 Task 7: an idle occupant at cap is now a safe-victim eviction
+  // candidate (see the "safe-victim eviction" tests below) — put botty
+  // mid-turn so it is INELIGIBLE, proving this is a genuine capacity refusal
+  // and not just a race lost against eviction.
+  await engine.message(r.sessionId, "stay busy");
   await assert.rejects(() => engine.spawn({ botId: "other" }), (e) => e.code === "interactive_capacity");
   assert.equal(state.instances.length, 1);
 });
@@ -837,13 +842,16 @@ test("wake: a message to a hibernating session rebuilds the world FRESH and resu
   assert.equal(state.instances[1].turns[0].message, "back again");
 });
 
-test("C8: a wake past the interactive cap is refused with the exact code and spawns no child", async () => {
+test("C8: a wake past the interactive cap with no eligible victim is refused with the exact code and spawns no child", async () => {
   const { engine, clock, state } = makeEngine({ env: { PERCH_INTERACTIVE_MAX_AWAKE: "1" } });
   const a = await spawned(engine, "a");
   clock.advance(600_001);
   await tick();                                       // a hibernates
   const b = await spawned(engine, "b");               // b now owns the one slot
   assert.equal(state.instances.length, 2);
+  // Track 3 Task 7: an idle b would now be an eviction candidate — keep it
+  // mid-turn so this proves a genuine refusal, not a race lost to eviction.
+  await engine.message(b.sessionId, "stay busy");
   await assert.rejects(() => engine.message(a.sessionId, "wake me"), (e) => e.code === "interactive_capacity");
   assert.equal(state.instances.length, 2, "no third child");
   assert.equal((await engine.get(a.sessionId)).state, "hibernating", "the failed reservation is released");

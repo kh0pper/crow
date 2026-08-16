@@ -147,7 +147,12 @@ const LEASE_REFRESH_MS = 60_000;
 
 const DEFAULT_IDLE_MS = 600_000;
 const DEFAULT_STALL_MS = 600_000;
-const DEFAULT_MAX_AWAKE = 1;
+/** Track 3 Task 7 (T3-6 decision): 1 -> 3. Safe-victim eviction (below) makes
+ * a saturated awake cap a controlled handover instead of a bare refusal, so
+ * the default no longer needs to hold at the most conservative value. The env
+ * knob (`PERCH_INTERACTIVE_MAX_AWAKE`) is unchanged — only the fallback when
+ * it is unset moves. */
+const DEFAULT_MAX_AWAKE = 3;
 /** How long an aborted turn may take to produce its `agent_end` before the
  * child is treated as abandoned and closed (C-12 carried finding 3). */
 const DEFAULT_ABORT_GRACE_MS = 30_000;
@@ -375,6 +380,13 @@ export function createInteractiveEngine({
       tasksDbPath: null,
       projectSpace: null,
       projectMembers: [],
+      // Track 3 Task 7: safe-victim eviction's recency signal — the oldest
+      // `lastEventAt` among awake/idle candidates is the eviction victim.
+      // Stamped at session-object creation (so a freshly spawned, never-yet-
+      // touched session already has a real value instead of null/0, which
+      // would otherwise always sort first as "oldest") and re-touched on
+      // every child event and every turn end.
+      lastEventAt: now(),
     };
   }
 
@@ -538,13 +550,13 @@ export function createInteractiveEngine({
    * shape is perch.js `saveNarrowing`'s, NOT `claimTurn`'s (which hardcodes
    * kind='perch') and never ON CONFLICT (the index is not unique).
    */
-  async function writeRow(s, { status, piSessionDir = null, model = null }) {
+  async function writeRow(s, { status, piSessionDir = null, model = null }, control = "run") {
     const db = createDbClient();
     try {
       await db.batch([
         {
           sql:
-            "UPDATE bot_sessions SET kind='perch-live', gateway_type='perch', status=?, control='run', " +
+            "UPDATE bot_sessions SET kind='perch-live', gateway_type='perch', status=?, control=?, " +
             "card_id=?, project_id=COALESCE(?, project_id), pi_session_dir=COALESCE(?, pi_session_dir), " +
             "model=COALESCE(?, model), updated_at=datetime('now') " +
             "WHERE id=(SELECT id FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1)",
@@ -552,14 +564,17 @@ export function createInteractiveEngine({
           // entirely by this engine session (never shared with a bridge.mjs
           // chat row), so the engine's own s.cardId (null for a free-chat
           // session) is authoritative on every write, not merely a fallback.
-          args: [status, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
+          // Track 3 Task 7: `control` defaults to 'run' — only stopAll's
+          // interrupted-mid-turn park passes 'interrupted'; every OTHER write
+          // (including this row's own NEXT normal write) resets it to 'run'.
+          args: [status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
         },
         {
           sql:
             "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,card_id,project_id,pi_session_dir,model) " +
-            "SELECT ?,'perch',?,'perch-live',?,'run',?,?,?,? " +
+            "SELECT ?,'perch',?,'perch-live',?,?,?,?,?,? " +
             "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
-          args: [s.botId, s.threadId, status, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
+          args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
         },
       ]);
       const { rows } = await db.execute({
@@ -700,6 +715,83 @@ export function createInteractiveEngine({
     const live = S.countLivePi();
     if (live + reservedNotSpawned >= S.LIFECYCLE_DEFAULTS.maxPi) throw engineError("pi_capacity");
     session.state = "waking";                 // ← the reservation itself
+  }
+
+  /**
+   * Safe-victim fallback for `reserveSlot` (Track 3 Task 7, spec §3.3).
+   * Tries the plain reservation first; on `interactive_capacity` (the AWAKE
+   * cap refusal — `pi_capacity`, the host-wide budget, is never evicted
+   * around and rethrows untouched), synchronously picks the oldest-idle
+   * evictable session (`state==="awake"`, no `turn`, no `pendingUi` — a
+   * pendingUi candidate is never selected, matching hibernate()'s own guard)
+   * and hands its slot to `session`.
+   *
+   * THE HANDOVER is two plain assignments with NO await between them —
+   * `victim.state = "hibernating"` then `session.state = "waking"` — exactly
+   * reserveSlot's own single-block discipline, extended to cover the evicted
+   * slot too. This function is deliberately NOT `async`: the fast path
+   * (reserveSlot succeeds, or throws with no eligible victim) returns/throws
+   * synchronously, so a caller that never needs eviction pays no extra
+   * microtask tick and its OWN "no await between check and reservation" block
+   * stays intact. Only the eviction path returns a Promise — the caller must
+   * await THAT, and only AFTER the synchronous handover above has already
+   * committed (see finishEviction below).
+   *
+   * CALLER CONTRACT: `session` must already be reachable via `sessions`
+   * (spawn adds it to the map BEFORE calling in, precisely so a second
+   * concurrent caller's own reserveSlot count sees this reservation the
+   * instant the handover flips its state, not only after our async tail
+   * resumes — reserveSlot's own `other === session` self-exclusion makes this
+   * safe on the fast, no-eviction path too). message()'s wake path calls in
+   * with a session already resident from resolveSession, so no extra step is
+   * needed there.
+   *
+   * @returns {Promise|null} a promise the caller must await iff an eviction
+   *   was performed (null on the plain, synchronous-only path).
+   */
+  function reserveWithEviction(S, session) {
+    try {
+      reserveSlot(S, session);
+      return null;
+    } catch (e) {
+      if (e.code !== "interactive_capacity") throw e;   // pi_capacity, perch_disabled: never evicted around
+      let victim = null;
+      for (const other of sessions.values()) {
+        if (other === session) continue;
+        if (other.state !== "awake") continue;
+        if (other.turn) continue;
+        if (other.pendingUi) continue;
+        if (!victim || other.lastEventAt < victim.lastEventAt) victim = other;
+      }
+      if (!victim) throw e;                              // no eligible victim: rethrow untouched
+      // ---- the handover: no await between these two lines ------------
+      victim.state = "hibernating";
+      session.state = "waking";
+      // ------------------------------------------------------------------
+      return finishEviction(S, session, victim);
+    }
+  }
+
+  /** The async tail of an eviction: actually close the victim's child, then
+   * re-run the host pi-budget half of the gate — reserveSlot's own
+   * `pi_capacity` check ran BEFORE the eviction and could not see the slot
+   * the victim's close() is about to free, so it was unrunnable evidence
+   * until now. A failure here releases ONLY our own reservation
+   * (`session.state`) — the victim stays evicted; it can be woken again like
+   * any other hibernating session. */
+  async function finishEviction(S, session, victim) {
+    await hibernate(victim);
+    let reservedNotSpawned = 0;
+    for (const other of sessions.values()) {
+      if (other === session) continue;
+      if (other.state !== "awake" && other.state !== "waking") continue;
+      if (!other.pi) reservedNotSpawned += 1;
+    }
+    const live = S.countLivePi();
+    if (live + reservedNotSpawned >= S.LIFECYCLE_DEFAULTS.maxPi) {
+      session.state = "hibernating";                     // release our reservation
+      throw engineError("pi_capacity");
+    }
   }
 
   // ---- card claims (Track 3 Task 6) -----------------------------------------
@@ -971,6 +1063,7 @@ export function createInteractiveEngine({
   function onChildEvent(s, m) {
     if (!m || typeof m !== "object") return;
     touchStall(s);
+    s.lastEventAt = now();                           // Track 3 Task 7: eviction recency
     switch (m.type) {
       case "tool_execution_start":
         emit(s, { type: "tool", name: m.toolName, phase: "start", isError: false });
@@ -1087,6 +1180,7 @@ export function createInteractiveEngine({
       // on the same turn — the mutation-guarded invariant of this engine.
       await writeRow(s, { status: "waiting-user" }).catch(() => {});
       if (s.turn === turn) s.turn = null;
+      s.lastEventAt = now();                          // Track 3 Task 7: became idle now
       emit(s, stateEvent(s));
       armIdle(s);
       return;
@@ -1136,6 +1230,7 @@ export function createInteractiveEngine({
     await writeRow(s, { status: "waiting-user", model: s.resolved ? s.resolved.key : null }).catch(() => {});
     // M-4: the turn is released HERE, after reply + trimLog — never at the top.
     if (s.turn === turn) s.turn = null;
+    s.lastEventAt = now();                            // Track 3 Task 7: became idle now
     emit(s, stateEvent(s));
     armIdle(s);
   }
@@ -1235,12 +1330,24 @@ export function createInteractiveEngine({
     // the card claim) ----
     const threadId = "perchlive-" + randomUUID().slice(0, 8);
     const s = newSession(String(botId), threadId);
-    reserveSlot(S, s);
-    if (cid != null) claimCard(cid, s.sessionId);   // throws card_occupied; s is
-                                                     // not yet in `sessions` so a
-                                                     // throw here leaks nothing
-    s.cardId = cid;
+    // Track 3 Task 7: added to `sessions` BEFORE the reservation attempt, not
+    // after — reserveWithEviction's eviction path awaits the victim's
+    // hibernate() before this call resumes, and a concurrent second caller's
+    // own reserveSlot count must see `s` counted (or not) the instant the
+    // handover flips its state, never only after our tail resumes.
+    // reserveSlot's own `other === session` self-exclusion keeps the plain,
+    // no-eviction path byte-identical to before.
     sessions.set(s.sessionId, s);
+    try {
+      const pending = reserveWithEviction(S, s);
+      if (pending) await pending;
+      if (cid != null) claimCard(cid, s.sessionId);  // throws card_occupied
+      s.cardId = cid;
+    } catch (e) {
+      s.state = "hibernating";                       // release any reservation we got
+      sessions.delete(s.sessionId);
+      throw e;
+    }
     // ---------------------------------------------------------------------
     try {
       await startChild(S, s);
@@ -1289,12 +1396,22 @@ export function createInteractiveEngine({
     if (s.state === "stopped") throw engineError("session_stopped");
     if (s.turn) throw engineError("turn_in_progress");
     const needsWake = !s.pi;
-    if (needsWake) reserveSlot(S, s);                // r1 C8: the wake path re-gates
+    // r1 C8: the wake path re-gates. Track 3 Task 7: reserveWithEviction is
+    // itself synchronous up to its own handover — a synchronous throw here
+    // (interactive_capacity with no eligible victim, pi_capacity,
+    // perch_disabled) propagates BEFORE the turn is ever claimed, exactly
+    // like the old bare reserveSlot() call. Only the EVICTION path returns a
+    // promise; it is awaited INSIDE the try below (its own post-hibernate
+    // pi_capacity re-check can fail AFTER the turn is claimed, so that
+    // failure needs the same reservation-release cleanup as any other wake
+    // failure).
+    const pending = needsWake ? reserveWithEviction(S, s) : null;
     const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null };
     s.turn = turn;
     // ---------------------------------------------------------------------
     try {
       if (needsWake) {
+        if (pending) await pending;
         await assertRowClaimable(s);
         await startChild(S, s);
       } else {
@@ -1365,6 +1482,56 @@ export function createInteractiveEngine({
       .catch((e) => onTurnError(s, turn, e))
       .catch(() => {});
     return { turnId: turn.id };
+  }
+
+  /**
+   * Track 3 Task 7: force a respawn of a session's child so SPAWN-BOUND state
+   * (permissionMode, narrowing) binds NOW instead of waiting for the next
+   * natural idle-hibernate/wake cycle — every spawn/wake rebuilds the world
+   * fresh (startChild's own header note), so closing and immediately
+   * re-opening the child is sufficient; nothing here is card- or
+   * turn-specific.
+   *
+   * Refused with `cycle_busy` while a turn is in flight OR a card is pending
+   * — cycling mid-turn would race promptTurn's own completion path, and
+   * cycling with a pendingUi card would destroy a question a human has not
+   * yet answered (hibernate()'s own I5 guard would silently no-op that case
+   * anyway, but refusing HERE gives the caller an honest, typed reason rather
+   * than a wake that quietly did nothing).
+   */
+  async function cycle(sessionId) {
+    const S = await loadSeams();
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (s.state === "stopped") throw engineError("session_stopped");
+    if (s.turn || s.pendingUi) throw engineError("cycle_busy");
+    await hibernate(s);                                // no-op if already hibernating
+    // ---- one synchronous block: reservation, no await between check+flip --
+    const pending = reserveWithEviction(S, s);
+    // ---------------------------------------------------------------------
+    try {
+      if (pending) await pending;
+      await assertRowClaimable(s);
+      await startChild(S, s);
+    } catch (e) {
+      // Same I-3 discipline as message()'s wake-failure cleanup: release the
+      // reservation unconditionally and first, detach before closing so
+      // attachExit treats the exit as expected, never await the close.
+      const pi = s.pi;
+      s.pi = null;
+      s.state = "hibernating";
+      writeLeases();
+      if (pi) {
+        pi.close().catch(() => { /* already dead */ });
+        if (!e || e.code !== "turn_in_progress") {
+          writeRow(s, { status: "waiting-user" }).catch(() => {});
+        }
+      }
+      throw e;
+    }
+    emit(s, stateEvent(s));
+    armIdle(s);
+    return { state: s.state };
   }
 
   /**
@@ -1663,6 +1830,17 @@ export function createInteractiveEngine({
 
   /** Hibernate: close the child, keep the row. */
   async function hibernate(s) {
+    // Track 3 Task 7 (spec I5): an assertion-style guard — hibernate must
+    // NEVER destroy a session with a pending ask_user card. cycle() refuses
+    // first (cycle_busy) and safe-victim eviction never selects a pendingUi
+    // candidate, so this should be unreachable from either — it exists for
+    // any FUTURE caller that forgets one of those checks: refusing (and
+    // logging) is safer than silently killing the child a human is mid-answer
+    // to and losing the question with it.
+    if (s.pendingUi) {
+      log(s.sessionId + ": hibernate refused — a pendingUi card is in flight");
+      return;
+    }
     if (!s.pi) return;
     const pi = s.pi;
     s.pi = null;
@@ -1693,6 +1871,12 @@ export function createInteractiveEngine({
       clearIdle(s);
       clearStall(s);
       s.pendingUi = null;
+      // Track 3 Task 7: captured BEFORE the existing `s.turn = null` below —
+      // reading it AFTER always reads false (a null turn), so the
+      // interrupted marker would never fire. This session was genuinely
+      // mid-turn when the shutdown interrupted it, distinct from a plain idle
+      // park (control stays 'run').
+      const hadTurn = !!s.turn;
       if (s.turn) s.turn.aborted = true;
       s.turn = null;
       if (s.state !== "stopped") s.state = "hibernating";
@@ -1704,7 +1888,9 @@ export function createInteractiveEngine({
           // restart — assertRowClaimable would 409 the next gateway's wake
           // for a full turn budget. Best-effort, and written before the close
           // so a child that ignores SIGTERM cannot skip it.
-          try { await writeRow(s, { status: "waiting-user" }); } catch { /* best effort */ }
+          try {
+            await writeRow(s, { status: "waiting-user" }, hadTurn ? "interrupted" : "run");
+          } catch { /* best effort */ }
           try { await pi.close(); } catch { /* already dead */ }
         })(),
         new Promise((r) => { timerHandle = setTimeout(r, timeoutMs); }),
@@ -1718,6 +1904,7 @@ export function createInteractiveEngine({
   return {
     spawn,
     message,
+    cycle,
     control,
     options,
     answer,
@@ -1732,6 +1919,19 @@ export function createInteractiveEngine({
     checkCardFree,
     /** Precondition-test surface (r1 S10) — also the internal resolver. */
     _loadSeams: loadSeams,
+    /** Track 3 Task 7: test-only reach into the internal hibernate() — every
+     * LIVE call site (idle timer, safe-victim eviction, cycle()) already
+     * guards against a pendingUi target before calling in, so hibernate()'s
+     * own assertion-style guard (spec I5) is otherwise unreachable through
+     * the public surface. This lets a test prove the guard itself, not just
+     * its callers' defensiveness. Takes a sessionId (not the internal record
+     * `snapshot()` would return) and resolves it through the SAME resident
+     * map every public method uses. */
+    _hibernateForTest: async (sessionId) => {
+      const s = sessions.get(String(sessionId));
+      if (!s) throw engineError("no_such_session");
+      return hibernate(s);
+    },
   };
 }
 
