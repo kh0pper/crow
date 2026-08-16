@@ -47,9 +47,11 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { escapeHtml } from "../shared/components.js";
+import { escapeHtml, callout } from "../shared/components.js";
 import { t, tJs } from "../shared/i18n.js";
 import { PERCH_BUNDLE_ID, perchRuntimeStatus } from "../../perch-runtime.js";
+import { createDbClient } from "../../../db.js";
+import { perchAttached } from "../../shared/perch-attached.js";
 
 /** Where the bots lens lives once the hub is up. The proxy path is
  * `/proxy/<bundle id>` (`routes/extension-proxy.js`) and the prefix is
@@ -60,6 +62,42 @@ export const PERCH_LENS_PATH = `/proxy/${PERCH_BUNDLE_ID}/bots`;
 /** Payload entrypoint, the same file `initPerchRuntime` gates on. */
 function payloadEntrypoint(crowHome) {
   return join(crowHome, "bundles", PERCH_BUNDLE_ID, "payload", "hub", "server.mjs");
+}
+
+/**
+ * Does at least one ENABLED bot have the perch gateway attached?
+ *
+ * §5.1: a fleet of disabled-but-attached bots is still an inert perch, so the
+ * count is over enabled bots only (`pi_bot_defs.enabled` is INTEGER — 1/0,
+ * not a real boolean). Mirrors the routes' own read of `pi_bot_defs`
+ * (`routes/perch.js:181–186` — `createDbClient` + `JSON.parse(row.definition)`);
+ * `perchAttached()` itself is unconditional (any bot, enabled or not) and
+ * stays that way — this is panel-callout logic only, not a change to what
+ * the routes accept.
+ *
+ * Fails safe toward showing the callout: a read error (e.g. a pre-migration
+ * db with no `pi_bot_defs` table) is treated as "nothing attached" rather
+ * than throwing and taking the whole panel down with it.
+ */
+async function anyEnabledBotAttached() {
+  const db = createDbClient();
+  try {
+    const { rows } = await db.execute({ sql: "SELECT definition, enabled FROM pi_bot_defs", args: [] });
+    return rows.some((row) => {
+      if (!row.enabled) return false;
+      let def;
+      try {
+        def = JSON.parse(row.definition || "{}");
+      } catch {
+        return false;
+      }
+      return perchAttached(def && typeof def === "object" ? def : {});
+    });
+  } catch {
+    return false;
+  } finally {
+    try { db.close(); } catch { /* already closed */ }
+  }
 }
 
 /**
@@ -122,8 +160,22 @@ function perchStyles() {
   </style>`;
 }
 
-/** State 1 — the hub is up: frame the bots lens. */
-function renderRunning(lang) {
+/**
+ * State 1 — the hub is up: frame the bots lens.
+ *
+ * §5.1: above the frame (never instead of it — the sessions view still
+ * works), an honest callout when zero ENABLED bots have the perch gateway
+ * attached. Launching Perch with no eligible bot otherwise renders a silent,
+ * inert lens with no chat affordances and no explanation.
+ */
+async function renderRunning(lang) {
+  const attached = await anyEnabledBotAttached();
+  const unattachedCallout = attached ? "" : callout(
+    `<strong>${escapeHtml(t("perch.unattachedTitle", lang))}</strong>` +
+    `<p>${escapeHtml(t("perch.unattachedBody", lang))}</p>` +
+    `<p><a href="/dashboard/bot-builder">${escapeHtml(t("perch.unattachedCta", lang))}</a></p>`,
+    "warning",
+  );
   return `<div class="perch-root">
     <div class="perch-bar">
       <div>
@@ -132,6 +184,7 @@ function renderRunning(lang) {
       </div>
       <a class="btn btn-secondary" href="${PERCH_LENS_PATH}" target="_blank" rel="noopener">${escapeHtml(t("perch.openInTab", lang))}</a>
     </div>
+    ${unattachedCallout}
     <div class="perch-frame-wrap">
       <iframe class="perch-frame" src="${PERCH_LENS_PATH}" title="${escapeHtml(t("perch.frameLabel", lang))}"></iframe>
     </div>
@@ -299,7 +352,7 @@ export default {
     const status = perchRuntimeStatus();
     const state = perchPanelState({ status });
     let body;
-    if (state === "running") body = renderRunning(lang);
+    if (state === "running") body = await renderRunning(lang);
     else if (state === "offline") body = renderOffline(lang, status);
     else body = renderGate(lang);
     return layout({ title: "Perch", content: perchStyles() + body });

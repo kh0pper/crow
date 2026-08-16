@@ -32,8 +32,8 @@ import { Router } from "express";
 import { jsonError } from "./_error.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
 import { resolveEngineStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
-import { missingGatewayFields } from "../dashboard/panels/bot-builder/gateway-fields.js";
 import { createDbClient } from "../../db.js";
+import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
@@ -83,16 +83,6 @@ function parseDef(row) {
   } catch {
     return {};
   }
-}
-
-/** Same test as perch.js's perchAttached() — duplicated rather than imported
- * because perch.js does not export it; both read the def through
- * missingGatewayFields() so they stay true to Bot Builder's own notion of
- * completeness rather than re-deciding it here. */
-function perchAttached(def) {
-  return ((def && def.gateways) || []).some(
-    (gw) => gw && gw.type === "perch" && missingGatewayFields(gw).length === 0
-  );
 }
 
 async function loadBotRow(db, botId) {

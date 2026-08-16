@@ -2152,6 +2152,16 @@ export const translations = {
     es: "No se pudo contactar con la puerta de enlace. Revisa la conexión e inténtalo de nuevo.",
   },
   "perch.gateRetryBtn": { en: "Retry", es: "Reintentar" },
+
+  // ─── Perch panel: unattached-bot guidance (Track 2 §5.1) ───
+  // The running state's lens can be a silent, inert page when no enabled bot
+  // has the perch gateway attached — this callout says why, above the frame.
+  "perch.unattachedTitle": { en: "No bot is attached to Perch", es: "Ningún bot está conectado a Perch" },
+  "perch.unattachedBody": {
+    en: "No enabled bot has the Perch channel attached. In Bot Builder, open a bot → Gateways → choose 'Perch (dashboard chat)' → Save.",
+    es: "Ningún bot habilitado tiene el canal de Perch conectado. En Bot Builder, abre un bot → Puertas de enlace → elige 'Perch (chat del panel)' → Guardar.",
+  },
+  "perch.unattachedCta": { en: "Open Bot Builder", es: "Abrir Bot Builder" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
