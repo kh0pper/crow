@@ -22,6 +22,7 @@ import { enforcePeerExposure } from "../peer-exposure.js";
 import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
 import { ensureBoardToken } from "../local-token.js";
+import { startOutboxDrain } from "../../sharing/sync-outbox-drain.js";
 
 /**
  * Persist the boot's deployment verdict for `emitOrQueue`'s (the stdio
@@ -102,6 +103,21 @@ export async function mountMcpServers(app, deps) {
     }
   } catch (err) {
     console.warn(`[instance-sync] eagerInitPairedPeers at boot failed: ${err.message}`);
+  }
+
+  // stdio-sync-outbox Task 4 ("The drain"): drain sync_outbox rows queued by
+  // servers/shared/sync-emit.js's emitOrQueue (the stdio door — a
+  // memory/research-server process mounted without a live
+  // InstanceSyncManager). Runs a boot pass immediately, then every 60s.
+  // AFTER eagerInitPairedPeers so the first pass has a real chance at armed
+  // feeds instead of parking everything on cold outFeeds. Never blocks
+  // boot — startOutboxDrain's own tick() swallows/logs drain failures.
+  try {
+    if (syncManager) {
+      startOutboxDrain(syncManager, syncManager.db);
+    }
+  } catch (err) {
+    console.warn(`[instance-sync] startOutboxDrain failed: ${err.message}`);
   }
 
   // 2d C5: reset once-backfill flags whose premise died with a lost out-feed
