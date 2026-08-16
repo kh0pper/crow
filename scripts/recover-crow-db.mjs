@@ -170,17 +170,20 @@ if (init.status !== 0) {
 if (!existsSync(TEMP)) bail("init-db.js did not produce the temp DB file.");
 
 // ---------------------------------------------------------------------------
-// 3b. BUNDLE-TABLE GAP — sync_outbox / sync_state are created lazily by
-// ensureSyncTables() (servers/shared/sync-stamp.js), NOT by init-db.js /
-// SCHEMA_GENERATION — a fresh-schema build via init-db.js alone never
-// creates them. Without this step they'd be absent from TEMP's
+// 3b. BUNDLE-TABLE GAP — init-db.js / SCHEMA_GENERATION does create
+// sync_state, but sync_outbox is module-owned DDL that only ever runs
+// lazily via ensureSyncTables() (servers/shared/sync-stamp.js) — a
+// fresh-schema build via init-db.js alone never creates sync_outbox.
+// ensureSyncTables() is idempotent for both tables (CREATE TABLE IF NOT
+// EXISTS), so calling it here is safe even though sync_state already
+// exists. Without this step sync_outbox would be absent from TEMP's
 // sqlite_master, so the per-table copy loop below (driven off
-// main.sqlite_master) would silently never even consider them — dropping
+// main.sqlite_master) would silently never even consider it — dropping
 // any queued-but-undelivered sync_outbox rows on a recovery (stdio-sync-
 // outbox spec, "Observability": "the known recover-db bundle-table gap
-// otherwise silently drops queued rows on a .dump rebuild"). Creating them
-// here (empty) puts them in the known-table set the loop already walks, so
-// the normal readable-copy / completeness-gate path covers them too.
+// otherwise silently drops queued rows on a .dump rebuild"). Creating it
+// here (empty) puts it in the known-table set the loop already walks, so
+// the normal readable-copy / completeness-gate path covers it too.
 // ---------------------------------------------------------------------------
 {
   const { createDbClient } = await import("../servers/db.js");

@@ -1534,6 +1534,24 @@ export class InstanceSyncManager {
    * @param {string} table - Table name (e.g., "memories")
    * @param {"insert"|"update"|"delete"} op - Operation type
    * @param {object} row - The row data (for insert/update) or { id } (for delete)
+   * @param {object} [opts]
+   * @param {number} [opts.lamportTs] - preserve-mode (2c C1): re-emit this row
+   *   at its ORIGINAL lamport instead of minting a fresh one (also skips the
+   *   local re-stamp) — for redelivery paths that must never fabricate
+   *   recency over a peer's newer write. Live mutations must not pass this.
+   * @param {boolean} [opts.strict] - strict-append mode (Task 3,
+   *   stdio-sync-outbox spec "The drain"): collects a per-peer append
+   *   disposition and treats any non-'appended' outcome (parked OR failed)
+   *   as failure of the WHOLE emit. Changes the return shape: non-strict
+   *   (default) returns the lamport as a bare `number` (or `null` if feeds
+   *   are disabled / the row isn't syncable); strict returns
+   *   `{lamport, appended: [peerIds]}` on full success — deliberately not
+   *   the bare-number shape, so a caller can't mistake a strict result for
+   *   a live one — and THROWS when any target peer did not append, with
+   *   `err.dispositions` (the full per-peer map) and `err.appended` (the
+   *   subset that actually landed) attached so a caller like the drain can
+   *   still credit the peers that DID succeed.
+   * @returns {Promise<number|null|{lamport: number, appended: string[]}>}
    */
   async emitChange(table, op, row, opts = {}) {
     // --no-auth companion doesn't drive fleet sync (and has no outFeeds).

@@ -16,7 +16,13 @@
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { readSetting } from "../gateway/dashboard/settings/registry.js";
 import { SYNCED_TABLES, shouldSyncRow, shouldInitInstanceSync } from "../sharing/instance-sync.js";
-import { ensureSyncTables, seedCounterSql, bumpCounterSql, stampSql } from "./sync-stamp.js";
+import {
+  ensureSyncTables,
+  seedCounterSql,
+  bumpCounterSql,
+  floorCounterSql,
+  stampSql,
+} from "./sync-stamp.js";
 
 /** Spec-verbatim: outbox depth should never reach this on a healthy instance. */
 const OUTBOX_CAP = 10000;
@@ -99,6 +105,18 @@ function outboxInsertSql(table, op, row, instanceId) {
 }
 
 /**
+ * The outbox INSERT for the preserve-lamport path — the caller already
+ * knows the exact literal value (it's not being minted in this batch), so
+ * this binds it directly instead of the subselect `outboxInsertSql` uses.
+ */
+function outboxInsertLiteralSql(table, op, row, lamportTs) {
+  return {
+    sql: `INSERT INTO sync_outbox (table_name, op, row_json, lamport_ts) VALUES (?, ?, ?, ?)`,
+    args: [table, op, JSON.stringify(row), lamportTs],
+  };
+}
+
+/**
  * Cap enforcement: run BEFORE the new row's insert. At >= OUTBOX_CAP rows,
  * delete the single oldest queued row and NULL its source row's lamport_ts
  * (via `stampSql`'s own null-safety — passing `null` as lamportTs sets the
@@ -153,6 +171,13 @@ async function enforceOutboxCap(db) {
  * @param {"insert"|"update"|"delete"} op
  * @param {object} row
  * @param {object} [opts]
+ * @param {number} [opts.lamportTs] - preserve-lamport mode (queue path
+ *   only): when finite, do NOT mint a fresh counter value — the caller
+ *   already has a real lamport for this row (e.g. group-sync.js's boot
+ *   backfill re-delivering a row that must not gain fabricated recency).
+ *   The counter is instead floored at this value (never regressed — the
+ *   same MAX-floor semantics `advanceCounter`/`floorCounterSql` use) and
+ *   the row + outbox INSERT are stamped with this literal value.
  * @returns {Promise<number|null|{queued: true, lamport: number}>}
  */
 export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
@@ -179,6 +204,23 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
     const instanceId = getOrCreateLocalInstanceId();
 
     await enforceOutboxCap(db);
+
+    const preserveLamport = Number.isFinite(opts.lamportTs) ? Number(opts.lamportTs) : null;
+
+    if (preserveLamport !== null) {
+      // Preserve-lamport batch: seed, floor (never a fresh mint), row-stamp
+      // (skipped on delete or shape mismatch, same as the mint path), outbox
+      // INSERT — all with the caller's literal value, still one atomic batch.
+      const statements = [seedCounterSql(instanceId), floorCounterSql(instanceId, preserveLamport)];
+      if (op !== "delete") {
+        const stampStmt = stampSql(table, row, preserveLamport);
+        if (stampStmt) statements.push(stampStmt);
+      }
+      statements.push(outboxInsertLiteralSql(table, op, row, preserveLamport));
+
+      await db.batch(statements);
+      return { queued: true, lamport: preserveLamport };
+    }
 
     // ONE atomic batch: seed, counter bump, row-stamp (skipped on delete or
     // when the row's shape doesn't match), outbox INSERT. A stamp failure

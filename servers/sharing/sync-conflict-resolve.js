@@ -258,8 +258,12 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
 
     // emitChange with "delete"
     let syncNote = null;
-    await emitOrQueue(instanceSync, db, table, "delete", { id: rowId });
-    if (!instanceSync) {
+    const emitResult = await emitOrQueue(instanceSync, db, table, "delete", { id: rowId });
+    if (emitResult && emitResult.queued === true) {
+      syncNote =
+        "Restored locally — change queued for sync; peers will be notified when the " +
+        "gateway next drains.";
+    } else if (!instanceSync) {
       syncNote = "Restored locally (sharing not initialized — peers not notified).";
     }
 
@@ -386,8 +390,15 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
   // "update" when we UPDATEd; "insert" when we re-INSERTed a since-deleted row.
   // Emitting "update" for a re-insert would silently no-op on peers that also
   // lack the row (_applyUpdate matches 0 rows without error).
-  await emitOrQueue(instanceSync, db, table, applyOp, { ...losingData, id: rowId });
-  if (!instanceSync) {
+  const emitResult = await emitOrQueue(instanceSync, db, table, applyOp, {
+    ...losingData,
+    id: rowId,
+  });
+  if (emitResult && emitResult.queued === true) {
+    syncNote =
+      "Restored locally — change queued for sync; peers will be notified when the " +
+      "gateway next drains.";
+  } else if (!instanceSync) {
     syncNote = "Restored locally (sharing not initialized — peers not notified).";
   }
 
