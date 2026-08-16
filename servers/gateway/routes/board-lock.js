@@ -82,6 +82,12 @@ export async function jobLockFor(db, cardId) {
  * is in the WHERE clause, not a post-hoc filter on the result, so an older
  * non-perch-live row underneath a newer perch-live one is still found and
  * still reported (including for force-unlock).
+ *
+ * `COALESCE(kind,'')` rather than a bare `kind != 'perch-live'`: SQLite's
+ * three-valued logic makes `NULL != 'perch-live'` evaluate to NULL (neither
+ * true nor false), which WHERE treats as false — a NULL-kind row would
+ * silently stop matching and its lock would vanish. A NULL kind is not a
+ * perch-live claim; only the literal string is excluded.
  */
 export async function sessionRowFor(db, cardId) {
   try {
@@ -89,7 +95,7 @@ export async function sessionRowFor(db, cardId) {
       sql:
         "SELECT id, bot_id, status, pi_session_dir, " +
         "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
-        "FROM bot_sessions WHERE card_id=? AND kind != 'perch-live' ORDER BY id DESC LIMIT 1",
+        "FROM bot_sessions WHERE card_id=? AND COALESCE(kind,'') != 'perch-live' ORDER BY id DESC LIMIT 1",
       args: [cardId],
     })).rows[0];
     return r || null;
@@ -137,11 +143,13 @@ export async function lockedCardIds(db, cardIds) {
     // T3-9: the inner MAX(id) subquery excludes perch-live rows, so a
     // perch-live row can never be the "newest" one selected here — the outer
     // fetch then only ever sees a non-perch-live row (or none, for a card
-    // whose only bot_sessions rows are perch-live).
+    // whose only bot_sessions rows are perch-live). COALESCE(kind,'') here
+    // too — see sessionRowFor's comment: a bare `!=` drops NULL-kind rows
+    // out of the GROUP BY entirely under SQLite's three-valued logic.
     const rows = (await db.execute({
       sql:
         "SELECT card_id, status FROM bot_sessions " +
-        `WHERE id IN (SELECT MAX(id) FROM bot_sessions WHERE card_id IN (${ph}) AND kind != 'perch-live' GROUP BY card_id)`,
+        `WHERE id IN (SELECT MAX(id) FROM bot_sessions WHERE card_id IN (${ph}) AND COALESCE(kind,'') != 'perch-live' GROUP BY card_id)`,
       args: ids,
     })).rows || [];
     for (const r of rows) {

@@ -70,7 +70,7 @@ function fixture() {
     CREATE TABLE bot_jobs (job_id TEXT PRIMARY KEY, bot_id TEXT, card_id INTEGER, card_action TEXT,
       status TEXT, worker_pid INTEGER, started_at TEXT);
     CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, card_id INTEGER, status TEXT,
-      pi_session_dir TEXT, updated_at TEXT DEFAULT (datetime('now')));`);
+      pi_session_dir TEXT, kind TEXT NOT NULL DEFAULT 'chat', updated_at TEXT DEFAULT (datetime('now')));`);
   c.close();
 
   const t = new Database(tasksDbPath);
