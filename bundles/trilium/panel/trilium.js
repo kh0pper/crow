@@ -242,7 +242,7 @@ function triliumStyles() {
                 border-radius: 8px; color: var(--crow-text-primary); font-size: 0.9rem; outline: none; }
     .tn-input:focus { border-color: var(--crow-accent); }
     .tn-btn { padding: 0.6rem 1rem; background: var(--crow-accent); border: none; border-radius: 8px;
-              color: #fff; cursor: pointer; font-size: 0.9rem; transition: background 0.15s; }
+              color: var(--crow-accent-contrast); cursor: pointer; font-size: 0.9rem; transition: background 0.15s; }
     .tn-btn:hover { background: var(--crow-accent-hover); }
 
     /* Notes list */

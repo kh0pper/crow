@@ -1040,7 +1040,7 @@ function css() {
     .age, .persona { color: var(--muted, #888); font-size: 0.85em; }
     .chip { padding: 0.1rem 0.5rem; background: rgba(132,204,22,0.15); color: #84cc16; border-radius: 10px; font-size: 0.75em; }
     .chip.live { background: rgba(239,68,68,0.15); color: #ef4444; }
-    .chip.state-ending { background: rgba(251,191,36,0.2); color: #fbbf24; }
+    .chip.state-ending { background: rgba(217,165,33,0.2); color: #d9a521; }
     .chip.state-revoked { background: rgba(148,163,184,0.2); color: #94a3b8; }
     .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
     .btn { padding: 0.3rem 0.8rem; text-decoration: none; border: 1px solid var(--border, #333); color: inherit; border-radius: 4px; font-size: 0.85em; background: transparent; cursor: pointer; display: inline-flex; align-items: center; gap: 0.25rem; }

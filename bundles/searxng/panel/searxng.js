@@ -200,7 +200,7 @@ function searxngStyles() {
                      border: 1px solid var(--crow-border); border-radius: 8px; color: var(--crow-text-primary);
                      font-size: 0.95rem; }
     .sx-form input:focus { outline: none; border-color: var(--crow-accent); }
-    .sx-form button { padding: 0.6rem 1.2rem; background: var(--crow-accent); color: #fff;
+    .sx-form button { padding: 0.6rem 1.2rem; background: var(--crow-accent); color: var(--crow-accent-contrast);
                       border: none; border-radius: 8px; font-weight: 600; cursor: pointer; }
     .sx-form button:hover { filter: brightness(1.1); }
 

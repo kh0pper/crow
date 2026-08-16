@@ -111,7 +111,7 @@ export function contactsCss() {
     justify-content: center;
     font-weight: 600;
     font-size: 0.85rem;
-    color: #fff;
+    color: var(--crow-accent-contrast);
     flex-shrink: 0;
     background: var(--crow-accent);
     overflow: hidden;
@@ -159,7 +159,7 @@ export function contactsCss() {
     border-radius: 10px;
     font-size: 0.7rem;
     font-weight: 500;
-    color: #fff;
+    color: var(--crow-accent-contrast);
     background: var(--crow-accent);
   }
 
@@ -184,7 +184,7 @@ export function contactsCss() {
     justify-content: center;
     font-weight: 700;
     font-size: 1.5rem;
-    color: #fff;
+    color: var(--crow-accent-contrast);
     flex-shrink: 0;
     background: var(--crow-accent);
     overflow: hidden;

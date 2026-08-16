@@ -92,7 +92,7 @@ function styles() {
     .sc-card { background: var(--card-bg, rgba(255,255,255,0.04)); border: 1px solid var(--border, #333); border-radius: 10px; padding: 1.25rem 1.5rem; margin-bottom: 1rem; }
     .sc-card h2 { margin: 0 0 0.75rem; font-size: 1.05rem; color: #f59e0b; }
     .sc-btn { display: inline-block; padding: 0.6rem 1.2rem; background: #f59e0b; color: #111; text-decoration: none; border-radius: 6px; font-weight: 600; }
-    .sc-btn:hover { background: #fbbf24; }
+    .sc-btn:hover { background: #d9a521; }
     .sc-muted { color: var(--fg-muted, #888); font-size: 0.9rem; margin-top: 0.5rem; }
     .sc-hint { color: var(--fg-muted, #888); font-size: 0.85rem; margin: 0; }
     .sc-embed-wrap { display: flex; flex-direction: column; gap: 0.5rem; }

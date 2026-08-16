@@ -19,13 +19,13 @@ export function extensionStyles() {
   margin-bottom:1.25rem;
   background:var(--crow-bg-deep);
   border:1px solid var(--crow-border);
-  border-radius:var(--crow-radius-pill, 8px);
+  border-radius:var(--crow-radius-control, 10px);
   width:fit-content; max-width:100%;
 }
 .ext-viewtab {
   display:inline-flex; align-items:center; gap:0.4rem;
   padding:0.45rem 1.1rem;
-  border:none; border-radius:calc(var(--crow-radius-pill, 8px) - 2px);
+  border:none; border-radius:calc(var(--crow-radius-control, 10px) - 2px);
   background:transparent;
   color:var(--crow-text-secondary);
   font-family:var(--crow-body-font);
@@ -131,7 +131,7 @@ export function extensionStyles() {
 .ext-group-chip {
   display:inline-flex; align-items:center; gap:0.35rem;
   padding:0.4rem 0.9rem;
-  border-radius:var(--crow-radius-pill, 8px);
+  border-radius:var(--crow-radius-pill, 999px);
   background:transparent;
   border:1px solid var(--crow-border);
   color:var(--crow-text-secondary);

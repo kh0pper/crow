@@ -89,7 +89,7 @@ export default {
       .vp-card-name { font-weight:600; font-size:0.95rem; }
       .vp-card-meta { font-size:0.8rem; color:var(--crow-text-muted); }
       .vp-card-actions { display:flex; gap:0.5rem; margin-top:0.5rem; flex-wrap:wrap; }
-      .vp-badge { font-size:0.65rem; padding:0.1rem 0.4rem; border-radius:3px; background:var(--crow-accent); color:#fff; font-weight:600; margin-left:0.4rem; }
+      .vp-badge { font-size:0.65rem; padding:0.1rem 0.4rem; border-radius:3px; background:var(--crow-accent); color:var(--crow-accent-contrast); font-weight:600; margin-left:0.4rem; }
       .vp-form { border:1px solid var(--crow-border); border-radius:8px; padding:1rem; margin-top:0.75rem; background:var(--crow-surface); }
       .vp-field { margin-bottom:0.75rem; }
       .vp-label { display:block; font-size:0.8rem; color:var(--crow-text-muted); margin-bottom:4px; }

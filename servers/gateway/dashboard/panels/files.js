@@ -154,9 +154,9 @@ export default {
           : `<span class="icon">${icon}</span>`;
 
         const refBadge = f.reference_type === "blog_post"
-          ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-accent);color:#fff;margin-left:0.25rem">${t("files.blogBadge", lang)}</span>`
+          ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-accent);color:var(--crow-accent-contrast);margin-left:0.25rem">${t("files.blogBadge", lang)}</span>`
           : f.reference_type === "shared"
-            ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:#6366f1;color:#fff;margin-left:0.25rem">${t("files.sharedBadge", lang)}</span>`
+            ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-accent);color:var(--crow-accent-contrast);margin-left:0.25rem">${t("files.sharedBadge", lang)}</span>`
             : f.reference_type
               ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-text-muted);color:#fff;margin-left:0.25rem">${escapeHtml(f.reference_type)}</span>`
               : "";
@@ -213,7 +213,7 @@ export default {
 .file-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:1rem; }
 .file-card { background:var(--crow-bg-card,var(--crow-surface)); border:1px solid var(--crow-border); border-radius:8px; overflow:hidden; transition:transform 0.15s; }
 .file-card:hover { transform:translateY(-2px); }
-.file-thumb { height:120px; background:var(--crow-bg-elevated,#1a1a2e); display:flex; align-items:center; justify-content:center; overflow:hidden; }
+.file-thumb { height:120px; background:var(--crow-bg-elevated,#f5f7f8); display:flex; align-items:center; justify-content:center; overflow:hidden; }
 .file-thumb img { width:100%; height:100%; object-fit:cover; }
 .file-thumb .icon { font-size:2.5rem; opacity:0.4; }
 .file-info { padding:0.75rem; }

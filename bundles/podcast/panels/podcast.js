@@ -160,7 +160,7 @@ async function handler(req, res, { db, layout, appRoot }) {
     ? `<div class="form-group" style="margin-bottom:1rem">
         <label style="display:block;font-weight:500;margin-bottom:0.5rem">Episode Artwork <span style="color:var(--crow-text-muted);font-weight:400">(optional)</span></label>
         <div style="display:flex;align-items:center;gap:1rem">
-          <div id="artwork-preview" style="width:64px;height:64px;border-radius:6px;background:var(--crow-bg-elevated,#1a1a2e);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0">
+          <div id="artwork-preview" style="width:64px;height:64px;border-radius:6px;background:var(--crow-bg-elevated,#f5f7f8);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0">
             <span style="opacity:0.3;font-size:1.5rem">&#127912;</span>
           </div>
           <div style="flex:1">
@@ -204,7 +204,7 @@ async function handler(req, res, { db, layout, appRoot }) {
   var audioUrlManual = document.getElementById('audio-url-manual');
 
   audioZone.addEventListener('click', function(e) { if (e.target.tagName !== 'INPUT') audioInput.click(); });
-  audioZone.addEventListener('dragover', function(e) { e.preventDefault(); audioZone.style.borderColor = 'var(--crow-accent)'; audioZone.style.background = 'var(--crow-accent-muted,rgba(99,102,241,0.08))'; });
+  audioZone.addEventListener('dragover', function(e) { e.preventDefault(); audioZone.style.borderColor = 'var(--crow-accent)'; audioZone.style.background = 'var(--crow-accent-muted,color-mix(in srgb, var(--crow-accent) 8%, transparent))'; });
   audioZone.addEventListener('dragleave', function() { audioZone.style.borderColor = ''; audioZone.style.background = ''; });
   audioZone.addEventListener('drop', function(e) {
     e.preventDefault();

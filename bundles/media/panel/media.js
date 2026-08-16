@@ -61,7 +61,7 @@ export default {
     /** Render a single article card */
     function renderArticleCard(a, returnTab) {
       const starIcon = a.is_starred ? "\u2605" : "\u2606";
-      const starColor = a.is_starred ? "color:#fbbf24" : "";
+      const starColor = a.is_starred ? "color:var(--crow-brand-gold)" : "";
       const pubDate = a.pub_date ? formatDate(a.pub_date) : "";
       const readOpacity = a.is_read ? "opacity:0.7;" : "";
       const summary = a.summary ? escapeHtml(a.summary.slice(0, 180)) + (a.summary.length > 180 ? "..." : "") : "";
@@ -501,7 +501,7 @@ export default {
     if (hasIptv) tabs.push({ id: "live", label: "Live" });
     if (hasKodi) tabs.push({ id: "remote", label: "Remote" });
     const tabNav = `<div style="display:flex;gap:0.5rem;margin-bottom:1rem;border-bottom:1px solid var(--crow-border);padding-bottom:0.5rem">
-      ${tabs.map((t) => `<a href="/dashboard/media?tab=${t.id}" style="padding:0.4rem 0.75rem;border-radius:4px;text-decoration:none;font-size:0.85rem;${tab === t.id ? "background:var(--crow-accent);color:white" : "color:var(--crow-text-secondary)"}">${t.label}</a>`).join("")}
+      ${tabs.map((t) => `<a href="/dashboard/media?tab=${t.id}" style="padding:0.4rem 0.75rem;border-radius:4px;text-decoration:none;font-size:0.85rem;${tab === t.id ? "background:var(--crow-accent);color:var(--crow-accent-contrast)" : "color:var(--crow-text-secondary)"}">${t.label}</a>`).join("")}
     </div>`;
 
     // --- Grid CSS (injected once) ---
@@ -514,7 +514,7 @@ export default {
       .media-toolbar input, .media-toolbar select { padding:0.4rem 0.5rem; background:var(--crow-bg-deep); border:1px solid var(--crow-border); border-radius:4px; color:var(--crow-text); font-size:0.8rem; }
       .media-toolbar select { min-width:100px; }
       .filter-btn { padding:0.35rem 0.6rem; border-radius:4px; font-size:0.75rem; text-decoration:none; border:1px solid var(--crow-border); }
-      .filter-btn.active { background:var(--crow-accent); color:white; border-color:var(--crow-accent); }
+      .filter-btn.active { background:var(--crow-accent); color:var(--crow-accent-contrast); border-color:var(--crow-accent); }
       .filter-btn:not(.active) { color:var(--crow-text-secondary); }
     </style>`;
 
