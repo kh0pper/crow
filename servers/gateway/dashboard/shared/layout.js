@@ -1,15 +1,26 @@
 /**
  * Dashboard Layout — HTML shell with Dark Editorial design
  *
- * Generates the full page HTML with sidebar nav, header, theme toggle,
- * Google Fonts, and CSS custom properties.
+ * Generates the full page HTML with sidebar nav, header,
+ * Google Fonts, and CSS custom properties. Theme is OS-driven (design-tokens.js
+ * emits light on :root, dark inside @media (prefers-color-scheme: dark)) — the
+ * dashboard carries no theme state of its own (spec §3.3).
  */
 
 import { CROW_HERO_SVG } from "./crow-hero.js";
-import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
+import { designTokensCss } from "./design-tokens.js";
 import { componentsCss, componentsJs } from "./components-css.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
+
+// Font delivery: one manifest, one mechanism (spec §3.2, review finding 20).
+// Preconnect x2 + a single stylesheet <link> — Inter (400/500/600/700) +
+// JetBrains Mono (400/600). Replaces the 7 drifted <link> sites that used to
+// live across the render path + six standalone pages, and the redundant
+// FONT_IMPORT @import that used to duplicate the request in the style block.
+export const FONT_LINKS = `<link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">`;
 
 // Turbo Drive. Default-on as of the post-Phase-8 flip: inject the vendored
 // Turbo 8.0.5 UMD build unless explicitly opted out with CROW_ENABLE_TURBO=0.
@@ -123,27 +134,19 @@ function turboDiagScript() {
  * @param {string} opts.content - Main content HTML
  * @param {string} opts.activePanel - Active panel ID for nav highlighting
  * @param {Array} opts.panels - Array of { id, name, icon, route, navOrder }
- * @param {string} [opts.theme] - "dark" or "light" (default: dark)
- * @param {boolean} [opts.glass] - Enable glass aesthetic
- * @param {boolean} [opts.serif] - Enable serif headings
  * @param {string} [opts.scripts] - Additional inline JS
  * @param {string} [opts.afterContent] - HTML rendered after </main> inside .dashboard (e.g. persistent player bar)
  * @param {string} [opts.headerIcons] - HTML rendered inside .content-header, right of title (e.g. notification bell, health icon)
  * @param {Array} [opts.navGroups] - Grouped nav: [{ id, name, collapsed, panels: [{ id, name, icon, route, navOrder }] }]
  * @param {Array|null} [opts.instanceTabs] - Unified multi-instance tabs: [{ id, name, status, isLocal }]. Only the nest handler passes this; every other page renders an empty, CSS-hidden strip (body.unified-off).
  */
-export function renderLayout({ title, content, activePanel, panels, theme, glass, serif, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs }) {
-  const themeClass = [
-    theme === "light" ? "theme-light" : "",
-    glass ? "theme-glass" : "",
-    serif ? "theme-serif" : "",
-    // Unified-off class gates the tabs strip visibility via CSS. The strip
-    // is re-rendered on every page (it must NOT be data-turbo-permanent:
-    // Turbo would pin the first-rendered — usually empty — strip across
-    // navigations, hiding the peers on the nest; W1-2) and hidden when the
-    // unified flag is off or no peers are trusted.
-    (Array.isArray(instanceTabs) && instanceTabs.length > 1) ? "" : "unified-off",
-  ].filter(Boolean).join(" ");
+export function renderLayout({ title, content, activePanel, panels, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs }) {
+  // Unified-off class gates the tabs strip visibility via CSS. The strip
+  // is re-rendered on every page (it must NOT be data-turbo-permanent:
+  // Turbo would pin the first-rendered — usually empty — strip across
+  // navigations, hiding the peers on the nest; W1-2) and hidden when the
+  // unified flag is off or no peers are trusted.
+  const bodyClass = (Array.isArray(instanceTabs) && instanceTabs.length > 1) ? "" : "unified-off";
   const sortedPanels = [...panels].sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
 
   // Render the instance tabs strip. Populated with local + peer tabs when
@@ -222,13 +225,11 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="icon" type="image/svg+xml" href="/icons/crow-icon.svg">
   <link rel="apple-touch-icon" href="/icons/crow-icon.svg">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;1,9..144,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
   ${turboHead()}
 </head>
-<body class="${themeClass}">
+<body class="${bodyClass}">
   <div id="kiosk-overlay" class="kiosk-overlay">
     <!-- Always-present close button so a broken/unreachable companion iframe
          never strands the user with no way back to the dashboard. The iframe
@@ -251,9 +252,6 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         ${navItems}
       </nav>
       <div class="sidebar-footer">
-        <button onclick="toggleTheme()" class="theme-toggle" title="${escapeHtml(t("nav.toggleTheme", lang))}">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-        </button>
         <a href="/dashboard/logout" class="nav-item logout" data-turbo="false">${escapeHtml(t("nav.logout", lang))}</a>
       </div>
     </aside>
@@ -274,19 +272,6 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
     ${afterContent || ""}
   </div>
   <script>
-    function toggleTheme() {
-      document.body.classList.toggle('theme-light');
-      fetch('/dashboard/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=set_theme&theme=' + (document.body.classList.contains('theme-light') ? 'light' : 'dark')
-      });
-      fetch('/dashboard/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=set_theme_mode&mode=' + (document.body.classList.contains('theme-light') ? 'light' : 'dark')
-      });
-    }
     // ─── Kiosk Mode ───
     function toggleKioskMode() {
       var overlay = document.getElementById('kiosk-overlay');
@@ -626,9 +611,7 @@ export function renderLogin({ error, isSetup, setupToken, lockoutHelp, lang } = 
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${isSetup ? escapeHtml(t("login.setupTitle", lang)) : escapeHtml(t("login.title", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -665,9 +648,7 @@ export function render2faVerify({ error, lang } = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -703,9 +684,7 @@ export function render2faRecovery({ error, lang } = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faRecoveryTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -739,9 +718,7 @@ export function render2faSetup({ secret, qrDataUri, recoveryCodes, error, lang }
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faSetupTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -750,10 +727,10 @@ export function render2faSetup({ secret, qrDataUri, recoveryCodes, error, lang }
       <h1 class="login-logo" style="font-size:1.5rem">${escapeHtml(t("login.2faSetupTitle", lang))}</h1>
       <p class="login-subtitle">${escapeHtml(t("login.2faSetupSubtitle", lang))}</p>
       ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
-      ${qrDataUri ? `<div style="text-align:center;margin:1rem 0"><img src="${qrDataUri}" alt="QR Code" width="200" height="200" style="border-radius:8px;background:#fff;padding:8px"></div>` : ""}
+      ${qrDataUri ? `<div style="text-align:center;margin:1rem 0"><img src="${qrDataUri}" alt="QR Code" width="200" height="200" style="border-radius:var(--crow-radius-card);background:#fff;padding:8px"></div>` : ""}
       ${secret ? `<p style="font-size:0.75rem;color:var(--crow-text-tertiary);word-break:break-all;text-align:center;margin-bottom:1rem">${escapeHtml(t("login.2faManualKey", lang))}: <code>${escapeHtml(secret)}</code></p>` : ""}
       ${recoveryCodes ? `
-        <div style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin:1rem 0;text-align:center">
+        <div style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);padding:1rem;margin:1rem 0;text-align:center">
           <p style="font-size:0.8rem;font-weight:600;margin-bottom:0.5rem;color:var(--crow-text-secondary)">${escapeHtml(t("login.2faRecoveryCodes", lang))}</p>
           ${codesHtml}
           <p style="font-size:0.7rem;color:var(--crow-text-tertiary);margin-top:0.5rem">${escapeHtml(t("login.2faSaveCodesWarning", lang))}</p>
@@ -779,9 +756,7 @@ export function renderResetRequest({ error, success, isHosted, lang } = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -791,13 +766,13 @@ export function renderResetRequest({ error, success, isHosted, lang } = {}) {
       <h1 class="login-logo">Crow</h1>
       <p class="login-subtitle">${escapeHtml(t("login.resetSubtitle", lang))}</p>
       ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
-      ${success ? `<div style="background:var(--crow-accent-bg,rgba(100,200,100,0.1));border:1px solid var(--crow-accent,#4a9);border-radius:8px;padding:1rem;margin-bottom:1rem;font-size:0.9rem">${escapeHtml(success)}</div>` : ""}
+      ${success ? `<div style="background:var(--crow-accent-bg,rgba(100,200,100,0.1));border:1px solid var(--crow-accent,#4a9);border-radius:var(--crow-radius-card);padding:1rem;margin-bottom:1rem;font-size:0.9rem">${escapeHtml(success)}</div>` : ""}
       ${isHosted ? `
       <form method="POST" action="/dashboard/reset">
         <button type="submit">${escapeHtml(t("login.resetSendButton", lang))}</button>
       </form>` : `
       <p style="font-size:0.9rem;color:var(--crow-text-secondary);margin-bottom:1rem">${escapeHtml(t("login.resetSelfHosted", lang))}</p>
-      <pre style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;font-size:0.85rem;overflow-x:auto">npm run reset-password</pre>`}
+      <pre style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);padding:1rem;font-size:0.85rem;overflow-x:auto">npm run reset-password</pre>`}
       <p style="margin-top:1rem;font-size:0.8rem;color:var(--crow-text-tertiary)">
         <a href="/dashboard/login">${escapeHtml(t("login.backToLogin", lang))}</a>
       </p>
@@ -817,9 +792,7 @@ export function renderResetForm({ error, token, lang } = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -864,20 +837,17 @@ const NAV_ICONS = {
 
 function dashboardCss() {
   return `<style>
-  ${FONT_IMPORT}
-
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   ${designTokensCss()}
   ${componentsCss()}
 
   body {
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
     background: var(--crow-bg-deep);
     color: var(--crow-text-primary);
     line-height: 1.6;
     min-height: 100vh;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
   }
 
   a { color: var(--crow-accent); text-decoration: none; }
@@ -905,7 +875,7 @@ function dashboardCss() {
     border-bottom: 1px solid var(--crow-border);
   }
   .logo {
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.5rem;
     font-weight: 700;
     color: var(--crow-text-primary);
@@ -920,7 +890,7 @@ function dashboardCss() {
     align-items: center;
     gap: 0.75rem;
     padding: 0.6rem 0.75rem;
-    border-radius: 8px;
+    border-radius: var(--crow-radius-control);
     color: var(--crow-text-secondary);
     font-size: 0.9rem;
     font-weight: 500;
@@ -932,7 +902,7 @@ function dashboardCss() {
     color: var(--crow-text-primary);
   }
   .nav-item.active {
-    background: rgba(99,102,241,0.08);
+    background: color-mix(in srgb, var(--crow-accent) 8%, transparent);
     color: var(--crow-accent);
     border-left: 3px solid var(--crow-brand-gold);
     padding-left: calc(0.75rem - 3px);
@@ -980,16 +950,6 @@ function dashboardCss() {
     align-items: center;
     justify-content: space-between;
   }
-  .theme-toggle {
-    background: none;
-    border: 1px solid var(--crow-border);
-    border-radius: 6px;
-    padding: 0.4rem;
-    color: var(--crow-text-muted);
-    cursor: pointer;
-    transition: color 0.15s;
-  }
-  .theme-toggle:hover { color: var(--crow-accent); }
   .logout { font-size: 0.8rem; }
 
   /* Main content */
@@ -1012,7 +972,7 @@ function dashboardCss() {
     gap: 1rem;
   }
   .content-header h2 {
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.25rem;
     font-weight: 600;
     flex: 1;
@@ -1039,14 +999,14 @@ function dashboardCss() {
   .card {
     background: var(--crow-bg-surface);
     border: 1px solid var(--crow-border);
-    border-radius: 12px;
+    border-radius: var(--crow-radius-card);
     padding: 1.25rem;
     animation: fadeInUp 0.4s ease-out both;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 0 1px rgba(99,102,241,0.05);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 0 1px color-mix(in srgb, var(--crow-accent) 5%, transparent);
     transition: box-shadow 0.15s;
   }
   .card:hover {
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3), 0 0 0 1px rgba(99,102,241,0.1);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3), 0 0 0 1px color-mix(in srgb, var(--crow-accent) 10%, transparent);
   }
   .card-grid {
     display: grid;
@@ -1056,13 +1016,13 @@ function dashboardCss() {
   .stat-card {
     background: var(--crow-bg-surface);
     border: 1px solid var(--crow-border);
-    border-radius: 12px;
+    border-radius: var(--crow-radius-card);
     padding: 1.25rem;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 0 1px rgba(99,102,241,0.05);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 0 1px color-mix(in srgb, var(--crow-accent) 5%, transparent);
   }
   .stat-card .label {
     font-size: 0.8rem;
-    color: var(--crow-text-muted);
+    color: var(--crow-text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     margin-bottom: 0.35rem;
@@ -1099,10 +1059,10 @@ function dashboardCss() {
 
   /* Forms */
   input, textarea, select {
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
     background: var(--crow-bg-elevated);
     border: 1px solid var(--crow-border);
-    border-radius: 8px;
+    border-radius: var(--crow-radius-control);
     padding: 0.6rem 0.75rem;
     color: var(--crow-text-primary);
     font-size: 0.9rem;
@@ -1124,17 +1084,17 @@ function dashboardCss() {
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 1rem;
-    border-radius: 8px;
+    border-radius: var(--crow-radius-control);
     font-size: 0.85rem;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.15s;
     border: 1px solid transparent;
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
   }
   .btn-primary {
     background: var(--crow-accent);
-    color: #ffffff;
+    color: var(--crow-accent-contrast);
   }
   .btn-primary:hover { background: var(--crow-accent-hover); }
   .btn-secondary {
@@ -1163,16 +1123,16 @@ function dashboardCss() {
     font-weight: 500;
     text-transform: uppercase;
   }
-  .badge-published { background: var(--crow-success); color: #ffffff; }
+  .badge-published { background: var(--crow-success); color: var(--crow-accent-contrast); }
   .badge-draft { background: var(--crow-bg-elevated); color: var(--crow-text-muted); }
-  .badge-connected { background: var(--crow-success); color: #ffffff; }
-  .badge-error { background: var(--crow-error); color: white; }
+  .badge-connected { background: var(--crow-success); color: var(--crow-accent-contrast); }
+  .badge-error { background: var(--crow-error); color: var(--crow-accent-contrast); }
 
   /* Empty state */
   .empty-state {
     text-align: center;
     padding: 3rem 1rem;
-    color: var(--crow-text-muted);
+    color: var(--crow-text-secondary);
   }
   .empty-state img {
     width: 48px;
@@ -1181,21 +1141,23 @@ function dashboardCss() {
     opacity: 0.6;
   }
   .empty-state h3 {
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.25rem;
     margin-bottom: 0.5rem;
     color: var(--crow-text-secondary);
   }
 
-  /* Alert */
+  /* Alert — status is carried by the container (tinted bg + status border-left),
+     not by coloring the sentence text (§3.2.1: body-size status text retires). */
   .alert {
     padding: 0.75rem 1rem;
-    border-radius: 8px;
+    border-radius: var(--crow-radius-control);
     margin-bottom: 1rem;
     font-size: 0.9rem;
+    color: var(--crow-text-primary);
   }
-  .alert-success { background: rgba(34,197,94,0.1); border: 1px solid var(--crow-success); color: var(--crow-success); }
-  .alert-error { background: rgba(239,68,68,0.1); border: 1px solid var(--crow-error); color: var(--crow-error); }
+  .alert-success { background: color-mix(in srgb, var(--crow-success) 12%, transparent); border-left: 3px solid var(--crow-success); }
+  .alert-error { background: color-mix(in srgb, var(--crow-error) 12%, transparent); border-left: 3px solid var(--crow-error); }
 
   /* Login page */
   .login-page {
@@ -1207,7 +1169,7 @@ function dashboardCss() {
   .login-card {
     background: var(--crow-bg-surface);
     border: 1px solid var(--crow-border);
-    border-radius: 12px;
+    border-radius: var(--crow-radius-card);
     padding: 2.5rem;
     width: 100%;
     max-width: 380px;
@@ -1215,37 +1177,37 @@ function dashboardCss() {
     animation: fadeInUp 0.4s ease-out both;
   }
   .login-logo {
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 2.5rem;
     font-weight: 700;
     color: var(--crow-accent);
     margin-bottom: 0.25rem;
   }
   .login-subtitle {
-    color: var(--crow-text-muted);
+    color: var(--crow-text-secondary);
     margin-bottom: 1.5rem;
     font-size: 0.9rem;
   }
   .login-error {
-    background: rgba(239,68,68,0.1);
-    border: 1px solid var(--crow-error);
-    color: var(--crow-error);
+    color: var(--crow-text-primary);
+    background: color-mix(in srgb, var(--crow-error) 12%, transparent);
+    border-left: 3px solid var(--crow-error);
     padding: 0.5rem 0.75rem;
-    border-radius: 8px;
+    border-radius: var(--crow-radius-control);
     margin-bottom: 1rem;
     font-size: 0.85rem;
   }
   .login-card form { display: flex; flex-direction: column; gap: 0.75rem; }
   .login-card button {
     background: var(--crow-accent);
-    color: #ffffff;
+    color: var(--crow-accent-contrast);
     border: none;
-    border-radius: 8px;
+    border-radius: var(--crow-radius-control);
     padding: 0.65rem;
     font-size: 0.95rem;
     font-weight: 600;
     cursor: pointer;
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
     transition: background 0.15s;
   }
   .login-card button:hover { background: var(--crow-accent-hover); }
@@ -1261,41 +1223,6 @@ function dashboardCss() {
 
   /* Tamagotchi crow */
   ${tamagotchiCss}
-
-  /* Glass overrides for dashboard */
-  .theme-glass .sidebar {
-    backdrop-filter: var(--crow-glass-blur-heavy);
-    -webkit-backdrop-filter: var(--crow-glass-blur-heavy);
-    background: rgba(0,0,0,0.72);
-  }
-  .theme-glass.theme-light .sidebar {
-    background: rgba(245,245,247,0.72);
-  }
-  .theme-glass .card,
-  .theme-glass .stat-card {
-    backdrop-filter: var(--crow-glass-blur);
-    -webkit-backdrop-filter: var(--crow-glass-blur);
-    border-width: 0.5px;
-    box-shadow: none;
-  }
-  .theme-glass .card:hover {
-    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-  }
-  .theme-glass .nav-item.active {
-    background: var(--crow-accent-muted);
-    border-left-color: var(--crow-accent);
-  }
-  /* Glass overrides for popups, modals, and fixed overlays */
-  .theme-glass .header-dropdown,
-  .theme-glass .crow-dropdown,
-  .theme-glass #modal-content,
-  .theme-glass #crow-player-bar,
-  .theme-glass .msg-popover {
-    background: var(--crow-bg-popup);
-    backdrop-filter: var(--crow-glass-blur);
-    -webkit-backdrop-filter: var(--crow-glass-blur);
-    border-color: var(--crow-border-popup);
-  }
 
   /* Sidebar overlay (hidden by default, shown on mobile when sidebar is open) */
   .sidebar-overlay {
@@ -1373,7 +1300,7 @@ function dashboardCss() {
     align-items: center;
     gap: 0.4rem;
     padding: 0.4rem 0.85rem;
-    border-radius: 8px;
+    border-radius: var(--crow-radius-control);
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--crow-text-secondary);
@@ -1385,7 +1312,7 @@ function dashboardCss() {
     transition: background 0.15s, border-color 0.15s, color 0.15s;
   }
   .crow-instance-tab:hover {
-    background: rgba(99,102,241,0.08);
+    background: color-mix(in srgb, var(--crow-accent) 8%, transparent);
     color: var(--crow-text-primary);
   }
   .crow-instance-tab:focus-visible {
@@ -1394,8 +1321,8 @@ function dashboardCss() {
   }
   .crow-instance-tab.active,
   .crow-instance-tab[aria-selected="true"] {
-    background: rgba(99,102,241,0.15);
-    border-color: rgba(99,102,241,0.3);
+    background: color-mix(in srgb, var(--crow-accent) 15%, transparent);
+    border-color: color-mix(in srgb, var(--crow-accent) 30%, transparent);
     color: var(--crow-text-primary);
   }
   .crow-instance-tab[aria-disabled="true"],
@@ -1435,7 +1362,7 @@ function dashboardCss() {
     align-items: flex-start;
     gap: 0.75rem;
     padding: 0.75rem 1rem;
-    border-radius: 8px;
+    border-radius: var(--crow-radius-card);
     background: var(--crow-bg-surface);
     border: 1px solid var(--crow-border);
     box-shadow: 0 4px 14px rgba(0,0,0,0.35);

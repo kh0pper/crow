@@ -36,6 +36,7 @@ import { renderReadiness } from "./checklist.js";
 import { ENGINE_CHANNELS } from "../../../bot-engine-status.js";
 import { isEngineAbsent } from "./engine-gate.js";
 import { engineGateClientJS } from "./engine-gate-client.js";
+import { hasArchivedAtColumn } from "../../../board/util.js";
 
 // Tab id → i18n key map
 const TAB_KEYS = {
@@ -55,15 +56,8 @@ const TAB_KEYS = {
 // project tasks_db_uri) and a store created by an unowned bundle after 0004
 // converges only at next boot, so the filter is COLUMN-GUARDED (PRAGMA probe
 // precedent: scripts/pi-bots/bridge.mjs planForCard ~:515) — never assume
-// archived_at exists.
-async function hasArchivedAtColumn(db) {
-  try {
-    const rows = (await db.execute("PRAGMA table_info(tasks_items)")).rows || [];
-    return rows.some((r) => r.name === "archived_at");
-  } catch {
-    return false;
-  }
-}
+// archived_at exists. hasArchivedAtColumn itself now lives in board/util.js
+// (Track 2 Task 10, W4/§5.3 — one helper instead of three copies).
 
 export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, botId, notice, q }) {
   let bot;

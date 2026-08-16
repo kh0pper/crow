@@ -12,7 +12,7 @@ import { computeSafetyNumber } from "../../../../sharing/identity.js";
 
 /** Color palette for contact avatars (deterministic by contact ID) */
 const AVATAR_COLORS = [
-  "#6366f1", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981",
+  "#0e6b62", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981",
   "#06b6d4", "#f43f5e", "#84cc16", "#d946ef", "#0ea5e9",
 ];
 
@@ -50,7 +50,7 @@ function groupChips(contact, allGroups) {
   return ids.map((gid) => {
     const g = allGroups.find((grp) => grp.id === gid);
     if (!g) return "";
-    return `<span class="group-chip" style="background:${escapeHtml(g.color || "#6366f1")}">${escapeHtml(g.name)}</span>`;
+    return `<span class="group-chip" style="background:${escapeHtml(g.color || "#0e6b62")}">${escapeHtml(g.name)}</span>`;
   }).filter(Boolean).join("");
 }
 
@@ -255,7 +255,7 @@ export function renderContactProfile(contact, activities, groups, allGroups, lan
       ${contactGroups.map((gid) => {
         const g = allGroups.find((grp) => grp.id === gid);
         if (!g) return "";
-        return `<span class="group-chip" style="background:${escapeHtml(g.color || "#6366f1")}">${escapeHtml(g.name)}
+        return `<span class="group-chip" style="background:${escapeHtml(g.color || "#0e6b62")}">${escapeHtml(g.name)}
           <form method="POST" style="display:inline;margin-left:4px">
             <input type="hidden" name="action" value="remove_from_group">
             <input type="hidden" name="group_id" value="${g.id}">
@@ -430,7 +430,7 @@ export function renderGroupManager(groups, contacts, lang) {
     </div>
     <div>
       <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.05em">${t("contacts.groupColor", lang)}</label>
-      <input type="color" name="group_color" value="#6366f1" style="width:40px;height:36px;border:1px solid var(--crow-border);border-radius:6px;cursor:pointer;background:var(--crow-bg-deep)">
+      <input type="color" name="group_color" value="#0e6b62" style="width:40px;height:36px;border:1px solid var(--crow-border);border-radius:6px;cursor:pointer;background:var(--crow-bg-deep)">
     </div>
     <button type="submit" class="btn btn-primary">${t("contacts.createGroup", lang)}</button>
   </form>`;
@@ -452,7 +452,7 @@ export function renderGroupManager(groups, contacts, lang) {
     return `<div class="group-item">
       <div class="group-item-header">
         <div class="group-item-name">
-          <div class="group-color-dot" style="background:${escapeHtml(g.color || "#6366f1")}"></div>
+          <div class="group-color-dot" style="background:${escapeHtml(g.color || "#0e6b62")}"></div>
           ${escapeHtml(g.name)}
           <span class="group-member-count">(${g.member_count || 0})</span>
         </div>

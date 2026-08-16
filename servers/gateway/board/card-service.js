@@ -29,6 +29,7 @@
 
 import { resolveBoardDef, resolveSlugBoardDef, isValidStatus, isTerminal } from "../routes/board-defs.js";
 import { lockState } from "../routes/board-lock.js";
+import { nowStamp } from "./util.js";
 
 function fail(msg, code, http) {
   return Object.assign(new Error(msg), { code, http });
@@ -42,13 +43,19 @@ function fail(msg, code, http) {
 // erroring). Validated here so the contract holds regardless of caller.
 const AUTONOMY_VALUES = new Set(["gated", "auto"]);
 
-// A JS-side timestamp in the same shape as SQLite's `datetime('now')`
-// (UTC "YYYY-MM-DD HH:MM:SS"). Used wherever a stamped column also needs to
-// appear in a mutation's diff — going through a placeholder lets the diff
-// record the EXACT value written, instead of a second read-back after the
-// SQL-side `datetime('now')` literal.
-function nowStamp() {
-  return new Date().toISOString().slice(0, 19).replace("T", " ");
+// Terminal-stamp: the shared status→completed_at write shared by moveCard
+// (card side) and moveItem (item side, D-T1.6's one-mechanism rule). Mutates
+// `sets`/`args`/`detail` in place — same shape both call sites already built
+// by hand before this was converged (Track 2 Task 10, W4/§5.3).
+function stampTerminal(sets, args, detail, cur, wasTerminal, nowTerminal) {
+  if (nowTerminal && !wasTerminal) {
+    const stamp = nowStamp();
+    sets.push("completed_at=?"); args.push(stamp);
+    detail.completed_at = [cur.completed_at ?? null, stamp];
+  } else if (!nowTerminal && wasTerminal) {
+    sets.push("completed_at=NULL");
+    detail.completed_at = [cur.completed_at ?? null, null];
+  }
 }
 
 /** INSERT one board_mutations row. `detail` is stored as detail_json. */
@@ -188,7 +195,11 @@ export async function updateCard(tdb, id, fields, actor, { allowArchived } = {})
     const norm = key === "priority" || key === "project_id"
       ? (raw == null ? null : Number(raw))
       : (raw == null ? null : String(raw));
-    if (key === "autonomy" && norm != null && !AUTONOMY_VALUES.has(norm)) {
+    // Track 2 Task 10 (W4/§5.3): `norm != null` used to let an explicit
+    // `autonomy: null` slip past this guard straight into the UPDATE below
+    // (autonomy is NOT NULL) — the field was present (hasOwnProperty above),
+    // so null is exactly as invalid here as any other non-member value.
+    if (key === "autonomy" && !AUTONOMY_VALUES.has(norm)) {
       throw fail(`invalid autonomy: ${norm}`, "bad_autonomy", 400);
     }
     const old = key === "project_id" ? (cur[key] == null ? null : Number(cur[key])) : (cur[key] ?? null);
@@ -255,14 +266,7 @@ export async function moveCard(tdb, cdb, id, status, actor, { lockExempt } = {})
   const args = [ns];
   const detail = {};
   if (String(cur.status) !== ns) detail.status = [String(cur.status), ns];
-  if (nowTerminal && !wasTerminal) {
-    const stamp = nowStamp();
-    sets.push("completed_at=?"); args.push(stamp);
-    detail.completed_at = [cur.completed_at ?? null, stamp];
-  } else if (!nowTerminal && wasTerminal) {
-    sets.push("completed_at=NULL");
-    detail.completed_at = [cur.completed_at ?? null, null];
-  }
+  stampTerminal(sets, args, detail, cur, wasTerminal, nowTerminal);
   args.push(id);
   await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=? AND board_id IS NULL`, args });
   await recordMutation(tdb, { itemId: id, verb: "move", actor, detail });
@@ -314,14 +318,7 @@ export async function moveItem(tdb, id, status, actor) {
   const args = [ns];
   const detail = {};
   if (String(cur.status) !== ns) detail.status = [String(cur.status), ns];
-  if (nowTerminal && !wasTerminal) {
-    const stamp = nowStamp();
-    sets.push("completed_at=?"); args.push(stamp);
-    detail.completed_at = [cur.completed_at ?? null, stamp];
-  } else if (!nowTerminal && wasTerminal) {
-    sets.push("completed_at=NULL");
-    detail.completed_at = [cur.completed_at ?? null, null];
-  }
+  stampTerminal(sets, args, detail, cur, wasTerminal, nowTerminal);
   args.push(id);
   await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=? AND board_id IS NOT NULL`, args });
   await recordMutation(tdb, { itemId: id, verb: "move", actor, detail });

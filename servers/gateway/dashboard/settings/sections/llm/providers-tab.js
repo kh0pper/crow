@@ -77,7 +77,7 @@ export default {
       .llm-cell-endpoint { font-family:'JetBrains Mono',monospace; font-size:0.78rem; color:var(--crow-text-muted); max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .llm-cell-models { color:var(--crow-text-secondary); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .llm-cell-actions { text-align:right; white-space:nowrap; width:1%; }
-      .btn-xs { padding:3px 10px; font-size:0.75rem; border-radius:var(--crow-radius-pill); }
+      .btn-xs { padding:3px 10px; font-size:0.75rem; border-radius:var(--crow-radius-control); }
       .llm-card {
         border:1px solid var(--crow-border);
         border-radius:var(--crow-radius-card);

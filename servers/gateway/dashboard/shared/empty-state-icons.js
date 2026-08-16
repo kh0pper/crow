@@ -3,22 +3,22 @@
  * All icons are 48x48 and safe for offline/air-gapped environments.
  */
 
-/** Two nodes connected by a line — P2P / sharing concept. Indigo #6366f1 */
+/** Two nodes connected by a line — P2P / sharing concept. Teal #0e6b62 */
 export const ICON_SHARING = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-  <circle cx="10" cy="24" r="7" fill="#6366f1" opacity="0.2" stroke="#6366f1" stroke-width="2"/>
-  <circle cx="38" cy="24" r="7" fill="#6366f1" opacity="0.2" stroke="#6366f1" stroke-width="2"/>
-  <line x1="17" y1="24" x2="31" y2="24" stroke="#6366f1" stroke-width="2" stroke-dasharray="3 2"/>
-  <circle cx="10" cy="24" r="3" fill="#6366f1"/>
-  <circle cx="38" cy="24" r="3" fill="#6366f1"/>
+  <circle cx="10" cy="24" r="7" fill="#0e6b62" opacity="0.2" stroke="#0e6b62" stroke-width="2"/>
+  <circle cx="38" cy="24" r="7" fill="#0e6b62" opacity="0.2" stroke="#0e6b62" stroke-width="2"/>
+  <line x1="17" y1="24" x2="31" y2="24" stroke="#0e6b62" stroke-width="2" stroke-dasharray="3 2"/>
+  <circle cx="10" cy="24" r="3" fill="#0e6b62"/>
+  <circle cx="38" cy="24" r="3" fill="#0e6b62"/>
 </svg>`;
 
-/** Brain / sparkle shape — memory concept. Indigo #6366f1 with gold #fbbf24 sparkle */
+/** Brain / sparkle shape — memory concept. Teal #0e6b62 with gold #d9a521 sparkle */
 export const ICON_MEMORY = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
-  <ellipse cx="22" cy="26" rx="13" ry="11" fill="#6366f1" opacity="0.15" stroke="#6366f1" stroke-width="2"/>
-  <path d="M16 26 C16 20 20 16 24 16 C28 16 32 20 32 26" stroke="#6366f1" stroke-width="2" fill="none" stroke-linecap="round"/>
-  <path d="M20 26 C20 22 22 20 24 20 C26 20 28 22 28 26" stroke="#6366f1" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-  <line x1="24" y1="16" x2="24" y2="13" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"/>
-  <polygon points="35,10 36.2,13.8 40,13.8 37,16.2 38.2,20 35,17.8 31.8,20 33,16.2 30,13.8 33.8,13.8" fill="#fbbf24"/>
+  <ellipse cx="22" cy="26" rx="13" ry="11" fill="#0e6b62" opacity="0.15" stroke="#0e6b62" stroke-width="2"/>
+  <path d="M16 26 C16 20 20 16 24 16 C28 16 32 20 32 26" stroke="#0e6b62" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <path d="M20 26 C20 22 22 20 24 20 C26 20 28 22 28 26" stroke="#0e6b62" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+  <line x1="24" y1="16" x2="24" y2="13" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
+  <polygon points="35,10 36.2,13.8 40,13.8 37,16.2 38.2,20 35,17.8 31.8,20 33,16.2 30,13.8 33.8,13.8" fill="#d9a521"/>
 </svg>`;
 
 /** Upward arrow — deploy / publish concept. Green #10b981 */

@@ -95,6 +95,41 @@ try {
   );
 }
 
+// Track 2 Task 10 (W4/§5.3): hasArchivedAtColumn used to be defined
+// verbatim in three places (this bundle's boards.js digest adapter AND
+// monday.js sync engine, plus the core dashboard's bot-builder editor.js).
+// Converged to one core definition (servers/gateway/board/util.js), loaded
+// the same way as the core db client above — with the same standalone-
+// install fallback (a bundle install with no repo checkout has no
+// servers/gateway/board/util.js to appImport).
+let _coreHasArchivedAtColumn = null;
+try {
+  ({ hasArchivedAtColumn: _coreHasArchivedAtColumn } = await appImport("servers/gateway/board/util.js"));
+} catch (err) {
+  console.warn(
+    `[pm-workspace db] core board util unavailable (${err.message}) — ` +
+    "using a local PRAGMA probe"
+  );
+}
+
+/**
+ * True iff tasks_items on `tdb` carries an archived_at column (an installed
+ * bundle's tasks.db, or a store that hasn't converged through migration
+ * 0004 yet, may not). Delegates to the core helper when available; falls
+ * back to the identical PRAGMA probe standalone.
+ */
+export async function hasArchivedAtColumn(tdb) {
+  if (_coreHasArchivedAtColumn) {
+    try { return await _coreHasArchivedAtColumn(tdb); } catch { /* fall through to local probe */ }
+  }
+  try {
+    const rows = (await tdb.execute("PRAGMA table_info(tasks_items)")).rows || [];
+    return rows.some((r) => r.name === "archived_at");
+  } catch {
+    return false;
+  }
+}
+
 let _coreBroken = false;
 /** Core factory with call-time fallback: better-sqlite3 binds its native
  *  module lazily at construction, so an ABI mismatch (e.g. a node 20

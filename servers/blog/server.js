@@ -453,9 +453,7 @@ export function createBlogServer(dbPath, options = {}) {
       author: z.string().max(200).optional().describe("Default author name"),
       theme: z.enum(["dark", "light", "serif"]).optional().describe("Blog theme (deprecated — use theme_mode/theme_serif instead)"),
       theme_mode: z.enum(["dark", "light"]).optional().describe("Global color mode"),
-      theme_glass: z.boolean().optional().describe("Enable glass aesthetic (blur/transparency/iOS colors)"),
       theme_serif: z.boolean().optional().describe("Enable serif headings (Fraunces font)"),
-      theme_dashboard_mode: z.enum(["dark", "light", ""]).optional().describe("Dashboard color mode override (empty = use global)"),
       theme_blog_mode: z.enum(["dark", "light", ""]).optional().describe("Blog color mode override (empty = use global)"),
       podcast_category: z.string().max(200).optional().describe("iTunes category (e.g. 'Technology', 'Society & Culture > Philosophy')"),
       podcast_type: z.enum(["episodic", "serial"]).optional().describe("iTunes show type: episodic (newest first) or serial (oldest first)"),
@@ -464,7 +462,7 @@ export function createBlogServer(dbPath, options = {}) {
       podcast_language: z.string().max(10).optional().describe("Podcast language code (e.g. 'en', 'es', 'fr')"),
       songbook_on_index: z.boolean().optional().describe("Show songbook posts on the main blog index (default: true)"),
     },
-    async ({ action, title, tagline, author, theme, theme_mode, theme_glass, theme_serif, theme_dashboard_mode, theme_blog_mode, podcast_category, podcast_type, podcast_owner_email, podcast_cover_url, podcast_language, songbook_on_index }) => {
+    async ({ action, title, tagline, author, theme, theme_mode, theme_serif, theme_blog_mode, podcast_category, podcast_type, podcast_owner_email, podcast_cover_url, podcast_language, songbook_on_index }) => {
       if (action === "get") {
         const result = await db.execute({
           sql: "SELECT key, value FROM dashboard_settings WHERE key LIKE 'blog_%'",
@@ -475,11 +473,9 @@ export function createBlogServer(dbPath, options = {}) {
           settings[r.key.replace("blog_", "")] = r.value;
         }
         const effectiveMode = settings.theme_mode || "dark";
-        const glass = settings.theme_glass === "true";
         const serif = settings.theme_serif !== "false";
         let text = `Blog Settings:\n  Title: ${settings.title || "Crow Blog"}\n  Tagline: ${settings.tagline || ""}\n  Author: ${settings.author || ""}\n  Songbook on index: ${settings.songbook_on_index !== "false" ? "yes" : "no"}`;
-        text += `\n\nTheme:\n  Mode: ${effectiveMode}\n  Glass: ${glass ? "on" : "off"}\n  Serif: ${serif ? "on" : "off"}`;
-        if (settings.theme_dashboard_mode) text += `\n  Dashboard override: ${settings.theme_dashboard_mode}`;
+        text += `\n\nTheme:\n  Mode: ${effectiveMode}\n  Serif: ${serif ? "on" : "off"}`;
         if (settings.theme_blog_mode) text += `\n  Blog override: ${settings.theme_blog_mode}`;
         if (settings.podcast_category || settings.podcast_type || settings.podcast_owner_email || settings.podcast_cover_url || settings.podcast_language) {
           text += `\n\nPodcast Settings:\n  Category: ${settings.podcast_category || "Society & Culture"}\n  Type: ${settings.podcast_type || "episodic"}\n  Owner Email: ${settings.podcast_owner_email || "(not set)"}\n  Cover Image: ${settings.podcast_cover_url || "(not set)"}\n  Language: ${settings.podcast_language || "en"}`;
@@ -501,14 +497,11 @@ export function createBlogServer(dbPath, options = {}) {
         } else if (theme === "serif") {
           updates.push(["blog_theme_serif", "true"]);
         }
-        updates.push(["blog_theme", theme]); // keep old key for backward compat
       }
 
       // New theme params
       if (theme_mode !== undefined) updates.push(["blog_theme_mode", theme_mode]);
-      if (theme_glass !== undefined) updates.push(["blog_theme_glass", String(theme_glass)]);
       if (theme_serif !== undefined) updates.push(["blog_theme_serif", String(theme_serif)]);
-      if (theme_dashboard_mode !== undefined) updates.push(["blog_theme_dashboard_mode", theme_dashboard_mode]);
       if (theme_blog_mode !== undefined) updates.push(["blog_theme_blog_mode", theme_blog_mode]);
 
       if (podcast_category !== undefined) updates.push(["blog_podcast_category", podcast_category]);

@@ -339,7 +339,7 @@ export default {
     const nav = views.map((v) => {
       const active = v.id === view;
       const style = active
-        ? "background:var(--crow-accent);color:#fff"
+        ? "background:var(--crow-accent);color:var(--crow-accent-contrast)"
         : "background:var(--crow-bg-surface);color:var(--crow-text-secondary);border:1px solid var(--crow-border)";
       return `<a href="/dashboard/pm-workspace?view=${v.id}"
         style="padding:0.4rem 0.9rem;border-radius:6px;text-decoration:none;font-size:0.85rem;${style}"
@@ -356,7 +356,7 @@ export default {
         .pm-card { background:var(--crow-bg-surface); border:1px solid var(--crow-border); border-radius:8px; padding:0.75rem 1rem; margin-bottom:0.5rem; }
         .pm-card.pm-urgent, tr.pm-urgent td { border-left:3px solid var(--crow-error, #e74c3c); }
         .pm-log-row { padding:0.3rem 0; border-bottom:1px solid var(--crow-border); font-size:0.9rem; }
-        .pm-btn { display:inline-block; padding:0.4rem 0.9rem; background:var(--crow-accent); color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:0.85rem; text-decoration:none; }
+        .pm-btn { display:inline-block; padding:0.4rem 0.9rem; background:var(--crow-accent); color:var(--crow-accent-contrast); border:none; border-radius:6px; cursor:pointer; font-size:0.85rem; text-decoration:none; }
         .pm-btn-danger { background:var(--crow-error, #e74c3c); }
         h3 { margin:1.25rem 0 0.5rem; }
       </style>

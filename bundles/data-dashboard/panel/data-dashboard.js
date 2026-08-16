@@ -76,7 +76,7 @@ export default {
     const dbSelector = databases.length > 0 ? `<div style="margin-bottom:1rem;display:flex;gap:0.5rem;align-items:center">
       <label style="font-size:0.8rem;color:var(--crow-text-secondary)">Database:</label>
       <select onchange="location.href='/dashboard/data-dashboard?tab=${tab}&backend_id='+this.value"
-        style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary);font-size:0.85rem">
+        style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary);font-size:0.85rem">
         <option value="">Select a database</option>
         ${databases.map(d => `<option value="${d.id}"${d.id === backendId ? " selected" : ""}>${escapeHtml(d.name)}${d.project_name ? ` (${escapeHtml(d.project_name)})` : ""}</option>`).join("")}
       </select>
@@ -205,7 +205,7 @@ async function renderSqlTab(db, backendId, queryParam, lang, { escapeHtml, dataT
         background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);
         color:var(--crow-text-primary);resize:vertical">${escapeHtml(sql)}</textarea>
       <div style="display:flex;gap:0.5rem">
-        <button type="submit" style="padding:0.5rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-pill);color:white;cursor:pointer;font-size:0.85rem">Run Query</button>
+        <button type="submit" style="padding:0.5rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer;font-size:0.85rem">Run Query</button>
       </div>
     </form>
     ${resultHtml}

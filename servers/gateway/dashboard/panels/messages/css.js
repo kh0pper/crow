@@ -16,7 +16,7 @@ export function messagesCSS() {
     border: 1px solid var(--crow-border);
     border-radius: 10px;
     overflow: hidden;
-    background: var(--crow-bg-surface, #1a1a2e);
+    background: var(--crow-bg-surface, #ffffff);
     box-sizing: border-box;
   }
 
@@ -27,7 +27,7 @@ export function messagesCSS() {
     display: flex;
     flex-direction: column;
     align-items: center;
-    background: var(--crow-bg-deep, #0f0f17);
+    background: var(--crow-bg-deep, #eef1f3);
     border-right: 1px solid var(--crow-border);
     padding: 8px 0;
     gap: 4px;
@@ -100,7 +100,7 @@ export function messagesCSS() {
 
   /* AI avatar gradient */
   .msg-avatar-ai {
-    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    background: linear-gradient(135deg, #0e6b62, #8b5cf6);
   }
 
   /* Bot avatar gradient */
@@ -110,7 +110,7 @@ export function messagesCSS() {
 
   /* Peer avatar solid colors (generated via data attr) */
   .msg-avatar-peer {
-    background: var(--peer-color, #6366f1);
+    background: var(--peer-color, #0e6b62);
   }
 
   .msg-unread-badge {
@@ -124,8 +124,8 @@ export function messagesCSS() {
     font-size: 0.6rem;
     font-weight: 700;
     border-radius: 8px;
-    background: var(--crow-brand-gold, #fbbf24);
-    color: #000;
+    background: var(--crow-brand-gold, #8f5606);
+    color: var(--crow-accent-contrast);
     padding: 0 3px;
     display: none;
   }
@@ -144,7 +144,7 @@ export function messagesCSS() {
     display: flex;
     flex-direction: column;
     min-width: 0;
-    background: var(--crow-bg-surface, #1a1a2e);
+    background: var(--crow-bg-surface, #ffffff);
   }
 
   .msg-chat-header {
@@ -243,17 +243,17 @@ export function messagesCSS() {
   .msg-bubble.sent {
     align-self: flex-end;
     background: var(--crow-accent);
-    color: #fff;
+    color: var(--crow-accent-contrast);
     border-bottom-right-radius: 4px;
   }
   .msg-bubble.received {
     align-self: flex-start;
-    background: var(--crow-bg-elevated, #2d2d3d);
+    background: var(--crow-bg-elevated, #f5f7f8);
     border-bottom-left-radius: 4px;
   }
   .msg-bubble.tool {
     align-self: flex-start;
-    background: color-mix(in srgb, var(--crow-accent) 10%, var(--crow-bg-deep, #0f0f17));
+    background: color-mix(in srgb, var(--crow-accent) 10%, var(--crow-bg-deep, #eef1f3));
     border: 1px solid var(--crow-border);
     border-radius: 8px;
     padding: 0.5rem 0.75rem;
@@ -433,10 +433,10 @@ export function messagesCSS() {
     border: 1px solid var(--crow-border);
     border-radius: 8px;
     padding: 0.6rem 0.75rem;
-    background: var(--crow-bg-deep, #0f0f17);
+    background: var(--crow-bg-deep, #eef1f3);
     color: var(--crow-text-primary);
     font-size: 0.9rem;
-    font-family: 'DM Sans', system-ui, sans-serif;
+    font-family: var(--crow-body-font);
     min-height: 40px;
     max-height: 120px;
     line-height: 1.4;
@@ -449,7 +449,7 @@ export function messagesCSS() {
   .msg-send-btn {
     padding: 0.6rem 1rem;
     background: var(--crow-accent);
-    color: #fff;
+    color: var(--crow-accent-contrast);
     border: none;
     border-radius: 8px;
     cursor: pointer;
@@ -483,7 +483,7 @@ export function messagesCSS() {
     width: 240px;
     flex-shrink: 0;
     border-left: 1px solid var(--crow-border);
-    background: var(--crow-bg-deep, #0f0f17);
+    background: var(--crow-bg-deep, #eef1f3);
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -588,7 +588,7 @@ export function messagesCSS() {
   .msg-empty h3 {
     margin: 0.5rem 0;
     color: var(--crow-text-primary);
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-weight: 600;
   }
   .msg-empty p { font-size: 0.85rem; }
@@ -602,7 +602,7 @@ export function messagesCSS() {
   }
   .msg-suggest-chip {
     font-size: 0.8rem;
-    background: var(--crow-bg-elevated, #2d2d3d);
+    background: var(--crow-bg-elevated, #f5f7f8);
     border: 1px solid var(--crow-border);
     border-radius: var(--crow-radius-pill, 999px);
     color: var(--crow-text-secondary, var(--crow-text-muted));
@@ -622,7 +622,7 @@ export function messagesCSS() {
     top: 48px;
     left: 4px;
     width: 220px;
-    background: var(--crow-bg-elevated, #2d2d3d);
+    background: var(--crow-bg-elevated, #f5f7f8);
     border: 1px solid var(--crow-border);
     border-radius: 10px;
     padding: 8px;
@@ -654,7 +654,7 @@ export function messagesCSS() {
     border: 1px solid var(--crow-border);
     border-radius: 6px;
     padding: 6px 8px;
-    background: var(--crow-bg-deep, #0f0f17);
+    background: var(--crow-bg-deep, #eef1f3);
     color: var(--crow-text-primary);
     font-size: 0.8rem;
     font-family: 'JetBrains Mono', monospace;
@@ -680,7 +680,7 @@ export function messagesCSS() {
     align-items: center;
     gap: 6px;
     padding: 4px 8px;
-    background: var(--crow-bg-deep, #0f0f17);
+    background: var(--crow-bg-deep, #eef1f3);
     border: 1px solid var(--crow-border);
     border-radius: 8px;
     font-size: 0.78rem;
@@ -730,7 +730,7 @@ export function messagesCSS() {
     border: none;
     border-radius: 6px;
     background: var(--crow-accent);
-    color: #fff;
+    color: var(--crow-accent-contrast);
     cursor: pointer;
     white-space: nowrap;
   }
@@ -758,7 +758,7 @@ export function messagesCSS() {
   .msg-request-meta { font-size: 0.8rem; color: var(--crow-text); }
   .msg-request-count {
     display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 4px;
-    border-radius: 8px; background: var(--crow-accent); color: #fff;
+    border-radius: 8px; background: var(--crow-accent); color: var(--crow-accent-contrast);
     font-size: 0.65rem; line-height: 16px; text-align: center;
   }
   .msg-request-preview {
@@ -781,7 +781,7 @@ export function messagesCSS() {
   .bot-dir-row { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--crow-border); }
   .bot-dir-tagline { font-size:0.75rem; color:var(--crow-text-muted); }
   .bot-dir-btn { font-size:0.75rem; padding:4px 10px; border:1px solid var(--crow-border); border-radius:6px; background:var(--crow-bg-deep); color:var(--crow-text); cursor:pointer; }
-  .bot-dir-btn-primary { background:var(--crow-accent); color:#fff; border-color:var(--crow-accent); }
+  .bot-dir-btn-primary { background:var(--crow-accent); color:var(--crow-accent-contrast); border-color:var(--crow-accent); }
   .bot-dir-added { font-size:0.75rem; color:var(--crow-text-muted); text-decoration:none; }
   .bot-dir-empty { padding:16px; color:var(--crow-text-muted); font-size:0.85rem; }
 

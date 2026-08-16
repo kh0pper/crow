@@ -50,7 +50,7 @@ import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel } from "./panel-registry.js";
 import { resolveNavGroups } from "./nav-registry.js";
-import { readSetting, readSettings } from "./settings/registry.js";
+import { readSetting } from "./settings/registry.js";
 import { csrfMiddleware } from "./shared/csrf.js";
 import federationRouterFactory from "../routes/federation.js";
 import federationCompanionRouterFactory from "../routes/federation-companion.js";
@@ -846,22 +846,14 @@ export default function dashboardRouter(mcpAuthMiddleware) {
         console.warn("[dashboard] Nav groups resolution failed, using flat nav:", err.message);
       }
 
-      // Get theme + tamagotchi + language preferences.
+      // Get tamagotchi + language preferences.
       // These keys are not in the sync allowlist → writes fall to local-scope
-      // dashboard_settings_overrides. Use readSetting/readSettings so the
-      // layout sees the per-instance value, not the stale global row.
-      const [tamaVal, langVal, themeMap] = await Promise.all([
+      // dashboard_settings_overrides. Use readSetting so the layout sees the
+      // per-instance value, not the stale global row.
+      const [tamaVal, langVal] = await Promise.all([
         readSetting(db, "tamagotchi_enabled"),
         readSetting(db, "language"),
-        readSettings(db, "blog_theme_%"),
       ]);
-      const ts = {};
-      for (const [k, v] of themeMap) ts[k.replace("blog_", "")] = v;
-      const globalMode = ts.theme_mode || "dark";
-      const effectiveDashMode = ts.theme_dashboard_mode || globalMode;
-      const theme = effectiveDashMode;
-      const glass = ts.theme_glass === "true";
-      const serif = ts.theme_serif !== "false";
       const tamaEnabled = tamaVal !== "false";
       lang = langVal || "en";
 
@@ -905,9 +897,6 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           activePanel: panelId,
           panels: visiblePanels,
           navGroups,
-          theme,
-          glass,
-          serif,
           lang,
           headerIcons: activeHeaderHtml,
           // companionConfigJs sets window.__crowCompanionUrl before any
@@ -931,7 +920,6 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           content: `<div class="alert alert-error">Something went wrong: ${err.message}</div>`,
           activePanel: panelId,
           panels: getVisiblePanels(),
-          theme: "dark",
           lang,
         }));
       }

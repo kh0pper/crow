@@ -34,10 +34,15 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseHTML } from "linkedom";
+import Database from "better-sqlite3";
+
+const repoRoot = join(import.meta.dirname, "..");
+const PANEL_SRC_PATH = join(repoRoot, "servers/gateway/dashboard/panels/perch.js");
 
 // CROW_HOME must be scratch before the panel module is imported — the gate
 // resolves it per call (proved below), but nothing in this file may ever
@@ -46,6 +51,39 @@ const scratchRoot = mkdtempSync(join(tmpdir(), "perch-panel-test-"));
 process.env.CROW_HOME = join(scratchRoot, "home-initial");
 mkdirSync(process.env.CROW_HOME, { recursive: true });
 
+// CROW_DATA_DIR must ALSO be scratch before the panel module is imported —
+// §5.1's unattached-callout data path reads pi_bot_defs via createDbClient(),
+// which falls back to $HOME/.crow/data when CROW_DATA_DIR is unset (#217
+// class again, this time for the db rather than the bundle payload).
+const dataDir = join(scratchRoot, "data");
+process.env.CROW_DATA_DIR = dataDir;
+delete process.env.CROW_DB_PATH;
+mkdirSync(dataDir, { recursive: true });
+execFileSync(process.execPath, ["scripts/init-db.js"], {
+  env: { ...process.env, CROW_DATA_DIR: dataDir },
+  stdio: "pipe",
+  cwd: repoRoot,
+});
+const DB_FILE = join(dataDir, "crow.db");
+
+function rawDb() {
+  return new Database(DB_FILE);
+}
+
+/** pi_bot_defs.enabled is INTEGER — callers must pass 1/0, never a boolean. */
+function seedBot(botId, def, { name = botId, enabled = 1 } = {}) {
+  const c = rawDb();
+  c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,?)")
+    .run(botId, name, JSON.stringify(def), enabled);
+  c.close();
+}
+
+function clearBots() {
+  const c = rawDb();
+  c.exec("DELETE FROM pi_bot_defs");
+  c.close();
+}
+
 const { registerPanel, getVisiblePanels } = await import("../servers/gateway/dashboard/panel-registry.js");
 const panelMod = await import("../servers/gateway/dashboard/panels/perch.js");
 const perchPanel = panelMod.default;
@@ -53,9 +91,6 @@ const { perchInstalled, perchPanelState, perchGateClientJS, PERCH_LENS_PATH } = 
 const { initPerchRuntime, perchRuntimeStatus, _resetPerchRuntimeForTest } =
   await import("../servers/gateway/perch-runtime.js");
 const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
-
-const repoRoot = join(import.meta.dirname, "..");
-const PANEL_SRC_PATH = join(repoRoot, "servers/gateway/dashboard/panels/perch.js");
 
 registerPanel(perchPanel);
 
@@ -320,7 +355,94 @@ test("no rendered state leaks a raw i18n key as visible text (en + es)", async (
 });
 
 // ---------------------------------------------------------------------------
-// 4. The gate client, executed
+// 4. The unattached-Perch callout (§5.1) — the running state stays honest
+//    when no ENABLED bot has the perch gateway attached.
+// ---------------------------------------------------------------------------
+
+test("running with no enabled+attached bot → the unattached callout renders ABOVE the iframe, not instead of it", async () => {
+  await arrangeRuntime("running");
+  clearBots();
+  seedBot("disabled-attached", { gateways: [{ type: "perch" }] }, { enabled: 0 });
+  seedBot("enabled-unattached", {
+    gateways: [{ type: "gmail", address: "a@example.com", allowlist: ["b@example.com"] }],
+  }, { enabled: 1 });
+
+  const html = await render("en");
+  assert.ok(html.includes(translations["perch.unattachedTitle"].en),
+    "the unattached callout is missing — a disabled-but-attached bot and an enabled-but-unattached bot both leave the perch inert");
+
+  const { document } = parseHTML(`<html><body>${html}</body></html>`);
+  assert.equal(document.querySelectorAll("iframe").length, 1,
+    "the callout must sit ABOVE the iframe — the sessions view still works, so the lens must not disappear");
+
+  const calloutAt = html.indexOf(translations["perch.unattachedTitle"].en);
+  const iframeAt = html.indexOf("<iframe");
+  assert.ok(calloutAt > -1 && iframeAt > -1 && calloutAt < iframeAt,
+    "the callout must render before the iframe in document order");
+});
+
+test("running with at least one enabled+attached bot → no unattached callout", async () => {
+  await arrangeRuntime("running");
+  clearBots();
+  seedBot("disabled-attached", { gateways: [{ type: "perch" }] }, { enabled: 0 });
+  seedBot("enabled-unattached", {
+    gateways: [{ type: "gmail", address: "a@example.com", allowlist: ["b@example.com"] }],
+  }, { enabled: 1 });
+  seedBot("enabled-attached", { gateways: [{ type: "perch" }] }, { enabled: 1 });
+
+  const html = await render("en");
+  assert.ok(!html.includes(translations["perch.unattachedTitle"].en),
+    "a real, enabled, attached bot exists — the callout must not render");
+  const { document } = parseHTML(`<html><body>${html}</body></html>`);
+  assert.equal(document.querySelectorAll("iframe").length, 1);
+});
+
+test("the unattached callout is translated in Spanish too", async () => {
+  await arrangeRuntime("running");
+  clearBots();
+  seedBot("enabled-unattached", { gateways: [] }, { enabled: 1 });
+
+  const html = await render("es");
+  assert.ok(html.includes(translations["perch.unattachedTitle"].es),
+    "the unattached callout must be translated, not left in English for es readers");
+});
+
+test("the unattached callout links to the Bot Builder panel", async () => {
+  await arrangeRuntime("running");
+  clearBots();
+  seedBot("enabled-unattached", { gateways: [] }, { enabled: 1 });
+
+  const html = await render("en");
+  const { document } = parseHTML(`<html><body>${html}</body></html>`);
+  const link = [...document.querySelectorAll("a")].find((a) => a.getAttribute("href") === "/dashboard/bot-builder");
+  assert.ok(link, "the callout must link to the Bot Builder panel so the operator can act on it");
+});
+
+test("a db query error must HIDE the callout, not show it — 'unknown' must never render as 'confirmed zero'", async () => {
+  // A query-level failure (bad connection, locked db, no pi_bot_defs table at
+  // all) is genuinely different from "the table has zero attached rows": the
+  // panel cannot tell whether a bot is attached, so showing the unattached
+  // callout would be a specific, plausible, WRONG diagnosis that sends the
+  // operator to redo working configuration. Point CROW_DATA_DIR at a fresh
+  // directory with no init-db'd schema — better-sqlite3 happily creates the
+  // empty file, so the SELECT itself is what fails (no such table).
+  await arrangeRuntime("running");
+  const brokenDir = mkdtempSync(join(scratch, "broken-db-"));
+  const savedDataDir = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = brokenDir;
+  try {
+    const html = await render("en");
+    assert.ok(!html.includes(translations["perch.unattachedTitle"].en),
+      "a db read error rendered the unattached callout — 'unknown' must never render as 'confirmed zero'");
+    const { document } = parseHTML(`<html><body>${html}</body></html>`);
+    assert.equal(document.querySelectorAll("iframe").length, 1, "the lens must still render on a db error");
+  } finally {
+    process.env.CROW_DATA_DIR = savedDataDir;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5. The gate client, executed
 // ---------------------------------------------------------------------------
 
 /** Mount the gate card's real HTML+script in linkedom and run the script. */
@@ -436,7 +558,7 @@ test("gate client: an install the server refuses outright is reported, not silen
 });
 
 // ---------------------------------------------------------------------------
-// 5. Repo-wide client-JS invariants + i18n coverage
+// 6. Repo-wide client-JS invariants + i18n coverage
 // ---------------------------------------------------------------------------
 
 test("the emitted client <script> block contains ZERO literal backtick characters", () => {

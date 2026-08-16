@@ -639,7 +639,7 @@ function styles() {
       background: none; border: 1px solid var(--crow-border); color: var(--crow-text);
       border-radius: 20px; padding: 0.3rem 0.8rem; font-size: 0.85rem; cursor: pointer;
     }
-    .music-tab.active { background: var(--crow-accent); color: white; border-color: var(--crow-accent); }
+    .music-tab.active { background: var(--crow-accent); color: var(--crow-accent-contrast); border-color: var(--crow-accent); }
     .music-search {
       flex: 1; padding: 0.4rem 0.75rem; background: var(--crow-bg-elevated);
       border: 1px solid var(--crow-border); border-radius: 6px; color: var(--crow-text);

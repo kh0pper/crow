@@ -57,8 +57,8 @@ import { createDbClient } from "../../db.js";
 import { jsonError } from "./_error.js";
 import { openStream } from "../streams/sse.js";
 import { resolveEngineStatus, resolveBotRuntimeStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
-import { missingGatewayFields } from "../dashboard/panels/bot-builder/gateway-fields.js";
 import { PI_BUILTIN, remoteInvocationOn } from "../dashboard/panels/bot-builder/data-queries.js";
+import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
@@ -163,19 +163,6 @@ function parseDef(row) {
   } catch {
     return {};
   }
-}
-
-/**
- * Attach semantics (spec §4): observation is free for every bot; conversation
- * requires a COMPLETE perch gateway record. `GATEWAY_REQUIRED_FIELDS.perch` is
- * `[]`, so a bare `{type:"perch"}` is complete by construction — but the check
- * goes through missingGatewayFields() so it stays true to Bot Builder's own
- * notion of completeness rather than re-deciding it here.
- */
-function perchAttached(def) {
-  return ((def && def.gateways) || []).some(
-    (gw) => gw && gw.type === "perch" && missingGatewayFields(gw).length === 0
-  );
 }
 
 async function loadBotRow(db, botId) {

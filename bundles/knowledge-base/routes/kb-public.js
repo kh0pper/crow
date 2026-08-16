@@ -31,13 +31,17 @@ async function loadSharedModules() {
   const repoRoot = resolve(__dirname, "../../../");
 
   try {
-    const tokens = await import(pathToFileURL(resolve(repoRoot, "servers/gateway/dashboard/shared/design-tokens.js")).href);
-    FONT_IMPORT = tokens.FONT_IMPORT;
-    designTokensCss = tokens.designTokensCss;
-  } catch {
-    // Minimal fallback
+    const tokens = await import(pathToFileURL(resolve(repoRoot, "servers/gateway/dashboard/shared/design-tokens-legacy.js")).href);
+    FONT_IMPORT = tokens.LEGACY_FONT_IMPORT;
+    designTokensCss = tokens.legacyDesignTokensCss;
+  } catch (err) {
+    // Frozen legacy tokens unavailable (install-location mismatch or the
+    // module was removed) — fail LOUD instead of silently drifting from
+    // whatever the legacy snapshot says. Minimal neutral CSS keeps the page
+    // readable while the underlying problem gets fixed.
+    console.error("[kb-public] legacy design tokens unavailable — serving unstyled", err);
     FONT_IMPORT = "";
-    designTokensCss = () => `:root { --crow-bg-deep: #0f0f17; --crow-bg-surface: #1a1a2e; --crow-text-primary: #fafaf9; --crow-text-secondary: #a8a29e; --crow-text-muted: #78716c; --crow-accent: #6366f1; --crow-accent-hover: #818cf8; --crow-border: #3d3d4d; --crow-success: #22c55e; --crow-error: #ef4444; }`;
+    designTokensCss = () => `:root { color-scheme: light; --crow-bg-deep: #ffffff; --crow-bg-surface: #ffffff; --crow-text-primary: #000000; --crow-text-secondary: #000000; --crow-text-muted: #000000; --crow-accent: #000000; --crow-accent-hover: #000000; --crow-border: #000000; --crow-success: #000000; --crow-error: #000000; } body { font-family: system-ui, sans-serif; background: #fff; color: #000; }`;
   }
 
   try {

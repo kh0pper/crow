@@ -478,7 +478,7 @@ function kodiStyles() {
                 padding: 0.6rem 1rem; color: var(--crow-text-primary); cursor: pointer; font-size: 1rem;
                 transition: all 0.15s; }
     .ctrl-btn:hover { background: var(--crow-accent-muted); border-color: var(--crow-accent); }
-    .ctrl-primary { background: var(--crow-accent); border-color: var(--crow-accent); color: #fff; }
+    .ctrl-primary { background: var(--crow-accent); border-color: var(--crow-accent); color: var(--crow-accent-contrast); }
     .ctrl-primary:hover { background: var(--crow-accent-hover); }
     .ctrl-danger { color: var(--crow-error); }
 
@@ -491,7 +491,7 @@ function kodiStyles() {
     .dpad-grid { display: grid; grid-template-columns: repeat(3, 56px); gap: 6px; justify-content: center; margin-bottom: 0.8rem; }
     .dpad-btn { width: 56px; height: 56px; display: flex; align-items: center; justify-content: center;
                 font-size: 1.3rem; padding: 0; }
-    .dpad-center { background: var(--crow-accent); border-color: var(--crow-accent); color: #fff; font-size: 0.85rem; font-weight: 600; }
+    .dpad-center { background: var(--crow-accent); border-color: var(--crow-accent); color: var(--crow-accent-contrast); font-size: 0.85rem; font-weight: 600; }
     .dpad-center:hover { background: var(--crow-accent-hover); }
     .nav-extras { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center; }
     .nav-extras .ctrl-btn { font-size: 0.85rem; padding: 0.5rem 0.8rem; }
@@ -508,7 +508,7 @@ function kodiStyles() {
     .lib-title { font-weight: 600; color: var(--crow-text-primary); margin-bottom: 0.3rem; font-size: 0.95rem; }
     .lib-meta { font-size: 0.8rem; color: var(--crow-text-muted); }
     .play-btn { margin-top: 0.6rem; background: var(--crow-accent); border: none; border-radius: 6px;
-                padding: 0.4rem 0.8rem; color: #fff; cursor: pointer; font-size: 0.85rem; transition: background 0.15s; }
+                padding: 0.4rem 0.8rem; color: var(--crow-accent-contrast); cursor: pointer; font-size: 0.85rem; transition: background 0.15s; }
     .play-btn:hover { background: var(--crow-accent-hover); }
     .library-pager { display: flex; align-items: center; gap: 0.8rem; justify-content: center; margin-top: 1rem;
                      color: var(--crow-text-secondary); font-size: 0.9rem; }

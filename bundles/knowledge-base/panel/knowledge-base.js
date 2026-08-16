@@ -161,7 +161,7 @@ export default {
             <div style="margin-bottom:1rem">
               <a href="/dashboard/knowledge-base?tab=articles${activeCollectionId ? `&collection_id=${activeCollectionId}` : ""}" style="font-size:0.85rem;color:var(--crow-accent)">← Back to articles</a>
             </div>
-            <h2 style="font-family:'Fraunces',serif;margin-bottom:0.25rem">${escapeHtml(a.title)}</h2>
+            <h2 style="font-family:var(--crow-body-font);margin-bottom:0.25rem">${escapeHtml(a.title)}</h2>
             <div style="font-size:0.85rem;color:var(--crow-text-muted);margin-bottom:1rem">
               ${a.language.toUpperCase()} · ${a.status} · ${a.collection_name}
               ${transLinks ? ` · Translations: ${transLinks}` : ""}
@@ -323,7 +323,7 @@ export default {
                   <label for="lan-${c.id}" style="font-size:0.8rem;color:var(--crow-text-secondary);cursor:pointer" title="Advertise this KB on your local network via mDNS so devices can discover it automatically">mDNS discovery</label>
                 </div>
 
-                <button type="submit" style="padding:0.4rem 1rem;background:var(--crow-accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.85rem;font-weight:500">Save</button>
+                <button type="submit" style="padding:0.4rem 1rem;background:var(--crow-accent);color:var(--crow-accent-contrast);border:none;border-radius:6px;cursor:pointer;font-size:0.85rem;font-weight:500">Save</button>
               </form>
             </div>`;
         }).join("");
@@ -373,7 +373,7 @@ export default {
     const tabNav = tabs.map(t => {
       const active = t.id === tab;
       const style = active
-        ? "background:var(--crow-accent);color:#fff"
+        ? "background:var(--crow-accent);color:var(--crow-accent-contrast)"
         : "background:var(--crow-bg-surface);color:var(--crow-text-secondary);border:1px solid var(--crow-border)";
       return `<a href="/dashboard/knowledge-base?tab=${t.id}${activeCollectionId ? `&collection_id=${activeCollectionId}` : ""}"
         style="padding:0.4rem 0.9rem;border-radius:6px;text-decoration:none;font-size:0.85rem;${style};display:inline-flex;align-items:center;gap:0.3rem"

@@ -247,7 +247,7 @@ function shioriStyles() {
     .lib-tag { background: var(--crow-bg-secondary, rgba(255,255,255,0.06)); border-radius: 4px;
                padding: 0.15rem 0.5rem; font-size: 0.75rem; color: var(--crow-text-secondary); }
     .lib-badge { background: var(--crow-accent); border-radius: 4px; padding: 0.15rem 0.5rem;
-                 font-size: 0.7rem; color: #fff; font-weight: 600; }
+                 font-size: 0.7rem; color: var(--crow-accent-contrast); font-weight: 600; }
 
     .np-idle, .np-loading { color: var(--crow-text-muted); font-size: 0.9rem; padding: 1rem;
                             background: var(--crow-bg-elevated); border-radius: 12px; text-align: center; }

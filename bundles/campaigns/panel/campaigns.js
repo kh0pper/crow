@@ -175,7 +175,7 @@ export default {
                 <input type="password" name="password" required
                   style="width:100%;margin-top:0.25rem;padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg);color:var(--crow-text);font-size:0.9rem">
               </label>
-              <button type="submit" style="padding:0.6rem 1.2rem;background:var(--crow-accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:500;font-size:0.9rem;justify-self:start">
+              <button type="submit" style="padding:0.6rem 1.2rem;background:var(--crow-accent);color:var(--crow-accent-contrast);border:none;border-radius:6px;cursor:pointer;font-weight:500;font-size:0.9rem;justify-self:start">
                 Test &amp; Save
               </button>
             </form>

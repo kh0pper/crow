@@ -385,6 +385,15 @@ export default function botBoardApiRouter(dashboardAuth) {
       tdb = createDbClient(TASKS_DB);
       const cur = await getCard(tdb, id);
       if (!cur) return jsonError(res, 404, "card not found");
+      // Track 2 Task 10 (W4/§5.3): archived wins over a bad status. This
+      // check used to run AFTER the status-validity check below, so a
+      // request that was both archived AND carried an off-def status got a
+      // misleading 400 "invalid status" instead of the 409 every other
+      // archived-card write on this route returns — same {reason,code}
+      // shape serviceError produces from card-service's `fail("card is
+      // archived", "archived", 409)`, hand-built here because this check
+      // runs before any card-service call.
+      if (cur.archived_at != null) return res.status(409).json({ reason: "card is archived", code: "archived" });
       // Status validated against the card's RESOLVED BOARD DEF, before any
       // write (Track 0: per-board status values; the old hardcoded allowlist
       // is now just the builtin fallback def) — updateCard itself has no
@@ -394,11 +403,6 @@ export default function botBoardApiRouter(dashboardAuth) {
         const def = await resolveBoardDef(tdb, { projectId: cur.project_id });
         if (!isValidStatus(def, String(b.status))) return jsonError(res, 400, "invalid status");
       }
-      // D-T1.6: the archived guard that used to live here is now provably
-      // covered by updateCard/moveCard (both throw the identical {message:
-      // "card is archived", code:"archived", http:409} — serviceError maps
-      // it to the exact {reason,code} shape this route always returned) —
-      // removed, not duplicated.
       const fields = {
         title: typeof b.title === "string" ? b.title.trim() : (b.title == null ? null : String(b.title)),
         description: b.description == null ? null : String(b.description),

@@ -61,7 +61,7 @@ export default {
     /** Render a single article card */
     function renderArticleCard(a, returnTab) {
       const starIcon = a.is_starred ? "\u2605" : "\u2606";
-      const starColor = a.is_starred ? "color:#fbbf24" : "";
+      const starColor = a.is_starred ? "color:var(--crow-brand-gold)" : "";
       const pubDate = a.pub_date ? formatDate(a.pub_date) : "";
       const readOpacity = a.is_read ? "opacity:0.7;" : "";
       const summary = a.summary ? escapeHtml(a.summary.slice(0, 180)) + (a.summary.length > 180 ? "..." : "") : "";
@@ -102,7 +102,7 @@ export default {
         imageHtml = `<div style="position:relative;padding-top:56.25%;background:linear-gradient(160deg, hsl(${hue},25%,14%), hsl(${hue + 30},20%,10%));border-radius:6px 6px 0 0;overflow:hidden">
       <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:start;justify-content:end;padding:0.75rem 1rem">
         <div style="font-size:0.6rem;letter-spacing:0.08em;text-transform:uppercase;color:hsl(${hue},50%,65%);margin-bottom:0.25rem">via</div>
-        <div style="font-family:'Fraunces',serif;font-size:1.15rem;font-weight:600;color:hsl(${hue},40%,80%);line-height:1.2;text-shadow:0 1px 3px rgba(0,0,0,0.4)">${escapeHtml(publisher)}</div>
+        <div style="font-family:var(--crow-body-font);font-size:1.15rem;font-weight:600;color:hsl(${hue},40%,80%);line-height:1.2;text-shadow:0 1px 3px rgba(0,0,0,0.4)">${escapeHtml(publisher)}</div>
       </div>
       <div style="position:absolute;top:0.6rem;right:0.75rem;font-size:0.55rem;letter-spacing:0.06em;text-transform:uppercase;color:hsl(${hue},30%,45%);border:1px solid hsl(${hue},20%,25%);padding:0.15rem 0.4rem;border-radius:3px">news</div>
     </div>`;
@@ -111,7 +111,7 @@ export default {
         const initial = (a.source_name || "?").charAt(0).toUpperCase();
         const hue = Math.abs(hashCode(a.source_name || "")) % 360;
         imageHtml = `<div style="position:relative;padding-top:56.25%;background:linear-gradient(135deg, hsl(${hue},40%,20%), hsl(${hue + 40},30%,15%));border-radius:6px 6px 0 0;overflow:hidden">
-      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:'Fraunces',serif;font-size:2rem;color:hsla(${hue},60%,70%,0.4)">${escapeHtml(initial)}</div>
+      <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:var(--crow-body-font);font-size:2rem;color:hsla(${hue},60%,70%,0.4)">${escapeHtml(initial)}</div>
     </div>`;
       }
 
@@ -501,7 +501,7 @@ export default {
     if (hasIptv) tabs.push({ id: "live", label: "Live" });
     if (hasKodi) tabs.push({ id: "remote", label: "Remote" });
     const tabNav = `<div style="display:flex;gap:0.5rem;margin-bottom:1rem;border-bottom:1px solid var(--crow-border);padding-bottom:0.5rem">
-      ${tabs.map((t) => `<a href="/dashboard/media?tab=${t.id}" style="padding:0.4rem 0.75rem;border-radius:4px;text-decoration:none;font-size:0.85rem;${tab === t.id ? "background:var(--crow-accent);color:white" : "color:var(--crow-text-secondary)"}">${t.label}</a>`).join("")}
+      ${tabs.map((t) => `<a href="/dashboard/media?tab=${t.id}" style="padding:0.4rem 0.75rem;border-radius:4px;text-decoration:none;font-size:0.85rem;${tab === t.id ? "background:var(--crow-accent);color:var(--crow-accent-contrast)" : "color:var(--crow-text-secondary)"}">${t.label}</a>`).join("")}
     </div>`;
 
     // --- Grid CSS (injected once) ---
@@ -514,7 +514,7 @@ export default {
       .media-toolbar input, .media-toolbar select { padding:0.4rem 0.5rem; background:var(--crow-bg-deep); border:1px solid var(--crow-border); border-radius:4px; color:var(--crow-text); font-size:0.8rem; }
       .media-toolbar select { min-width:100px; }
       .filter-btn { padding:0.35rem 0.6rem; border-radius:4px; font-size:0.75rem; text-decoration:none; border:1px solid var(--crow-border); }
-      .filter-btn.active { background:var(--crow-accent); color:white; border-color:var(--crow-accent); }
+      .filter-btn.active { background:var(--crow-accent); color:var(--crow-accent-contrast); border-color:var(--crow-accent); }
       .filter-btn:not(.active) { color:var(--crow-text-secondary); }
     </style>`;
 
@@ -606,7 +606,7 @@ export default {
       let cardsHtml;
       if (articles.length === 0) {
         cardsHtml = `<div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">
-          <h3 style="font-family:'Fraunces',serif">${searchQuery ? "No results" : "No articles yet"}</h3>
+          <h3 style="font-family:var(--crow-body-font)">${searchQuery ? "No results" : "No articles yet"}</h3>
           <p>${searchQuery ? `No articles found matching "${escapeHtml(searchQuery)}"` : "Add some RSS feeds in the Sources tab to get started."}</p>
         </div>`;
       } else {
@@ -635,7 +635,7 @@ export default {
       // --- Source management ---
       const addRssForm = `
         <div class="card" style="padding:1rem;margin-bottom:1rem">
-          <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Add RSS Feed</h4>
+          <h4 style="margin:0 0 0.75rem;font-family:var(--crow-body-font);font-size:0.95rem">Add RSS Feed</h4>
           <form method="POST" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
             <input type="hidden" name="action" value="add_source">
             <div style="flex:2;min-width:200px">
@@ -673,7 +673,7 @@ export default {
 
       const addGoogleNewsForm = `
         <div class="card" style="padding:1rem;margin-bottom:1rem">
-          <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Add Google News Search</h4>
+          <h4 style="margin:0 0 0.75rem;font-family:var(--crow-body-font);font-size:0.95rem">Add Google News Search</h4>
           <form method="POST" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
             <input type="hidden" name="action" value="add_google_news">
             <div style="flex:2;min-width:200px">
@@ -700,7 +700,7 @@ export default {
           const config = s.config ? JSON.parse(s.config) : {};
           const img = config.image
             ? `<img src="${escapeHtml(config.image)}" alt="" style="width:40px;height:40px;border-radius:6px;object-fit:cover;flex-shrink:0">`
-            : `<div style="width:40px;height:40px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-family:'Fraunces',serif;font-size:1rem;flex-shrink:0">${escapeHtml((s.name || "?").charAt(0))}</div>`;
+            : `<div style="width:40px;height:40px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-family:var(--crow-body-font);font-size:1rem;flex-shrink:0">${escapeHtml((s.name || "?").charAt(0))}</div>`;
 
           const typeBadge = { google_news: badge("Google News", "draft"), youtube: badge("YouTube", "published"), podcast: badge("Podcast", "connected") }[s.source_type] || badge("RSS", "draft");
           const statusBadge = s.last_error ? badge("Error", "error") : badge("Active", "connected");
@@ -723,7 +723,7 @@ export default {
 
       const addYoutubeForm = `
         <div class="card" style="padding:1rem;margin-bottom:1rem">
-          <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Add YouTube Channel</h4>
+          <h4 style="margin:0 0 0.75rem;font-family:var(--crow-body-font);font-size:0.95rem">Add YouTube Channel</h4>
           <form method="POST" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
             <input type="hidden" name="action" value="add_youtube">
             <div style="flex:2;min-width:200px">
@@ -794,7 +794,7 @@ export default {
           tabContent = `<div style="margin-bottom:1rem">
             <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
               <a href="/dashboard/media?tab=playlists" class="btn btn-sm btn-secondary">&larr; Back</a>
-              <h3 style="margin:0;font-family:'Fraunces',serif;font-size:1.1rem;flex:1">${escapeHtml(playlist.name)}</h3>
+              <h3 style="margin:0;font-family:var(--crow-body-font);font-size:1.1rem;flex:1">${escapeHtml(playlist.name)}</h3>
               <select onchange="crowSetPlaylistVisibility(${playlistId},this.value)" style="padding:0.3rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.75rem">
                 <option value="private" ${currentVisibility === "private" ? "selected" : ""}>Private</option>
                 <option value="unlisted" ${currentVisibility === "unlisted" ? "selected" : ""}>Unlisted</option>
@@ -814,7 +814,7 @@ export default {
         );
 
         const createForm = `<div class="card" style="padding:1rem;margin-bottom:1rem">
-          <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Create Playlist</h4>
+          <h4 style="margin:0 0 0.75rem;font-family:var(--crow-body-font);font-size:0.95rem">Create Playlist</h4>
           <form method="POST" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
             <input type="hidden" name="action" value="create_playlist">
             <div style="flex:2;min-width:200px">
@@ -857,7 +857,7 @@ export default {
       const { rows: briefings } = await db.execute("SELECT * FROM media_briefings ORDER BY created_at DESC LIMIT 20");
 
       const generateForm = `<div class="card" style="padding:1rem;margin-bottom:1rem">
-        <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Generate Briefing</h4>
+        <h4 style="margin:0 0 0.75rem;font-family:var(--crow-body-font);font-size:0.95rem">Generate Briefing</h4>
         <div id="briefing-form" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
           <div style="flex:2;min-width:150px">
             <label style="display:block;font-size:0.75rem;color:var(--crow-text-muted);margin-bottom:4px">Topic (optional)</label>
@@ -950,8 +950,8 @@ export default {
         }).join("\n");
       }
 
-      tabContent = `<h4 style="font-family:'Fraunces',serif;font-size:0.95rem;margin:0 0 0.5rem">Subscriptions</h4>${subsHtml}
-        <h4 style="font-family:'Fraunces',serif;font-size:0.95rem;margin:1rem 0 0.5rem">Recent Episodes</h4>${episodesHtml}`;
+      tabContent = `<h4 style="font-family:var(--crow-body-font);font-size:0.95rem;margin:0 0 0.5rem">Subscriptions</h4>${subsHtml}
+        <h4 style="font-family:var(--crow-body-font);font-size:0.95rem;margin:1rem 0 0.5rem">Recent Episodes</h4>${episodesHtml}`;
     }
 
     // --- Folders tab ---
@@ -959,7 +959,7 @@ export default {
       const { rows: folders } = await db.execute("SELECT * FROM media_smart_folders ORDER BY name ASC");
 
       const createForm = `<div class="card" style="padding:1rem;margin-bottom:1rem">
-        <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Create Smart Folder</h4>
+        <h4 style="margin:0 0 0.75rem;font-family:var(--crow-body-font);font-size:0.95rem">Create Smart Folder</h4>
         <form method="POST" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
           <input type="hidden" name="action" value="create_smart_folder">
           <div style="flex:2;min-width:150px">
@@ -1022,7 +1022,7 @@ export default {
       const { rows: digestRows } = await db.execute("SELECT * FROM media_digest_preferences LIMIT 1");
       const digest = digestRows[0] || {};
       const digestForm = `<div class="card" style="padding:1rem;margin-top:1.5rem">
-        <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Email Digest Settings</h4>
+        <h4 style="margin:0 0 0.75rem;font-family:var(--crow-body-font);font-size:0.95rem">Email Digest Settings</h4>
         <form method="POST" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
           <input type="hidden" name="action" value="save_digest_settings">
           <div style="flex:1;min-width:150px">
@@ -1071,7 +1071,7 @@ export default {
               var empty = document.createElement('div');
               empty.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
               var h3 = document.createElement('h3');
-              h3.style.fontFamily = "'Fraunces',serif";
+              h3.style.fontFamily = "var(--crow-body-font)";
               h3.textContent = 'No recent items';
               var p = document.createElement('p');
               p.textContent = 'Your ${escapeHtml(libraryLabel)} library is empty or the server returned no items.';
@@ -1106,7 +1106,7 @@ export default {
                 imgWrap.appendChild(img);
               } else {
                 var letter = document.createElement('div');
-                letter.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:'Fraunces',serif;font-size:2rem;color:hsla(220,60%,70%,0.4)";
+                letter.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:var(--crow-body-font);font-size:2rem;color:hsla(220,60%,70%,0.4)";
                 letter.textContent = title.charAt(0).toUpperCase();
                 imgWrap.style.background = 'linear-gradient(135deg,hsl(220,40%,20%),hsl(260,30%,15%))';
                 imgWrap.appendChild(letter);
@@ -1167,7 +1167,7 @@ export default {
             var errDiv = document.createElement('div');
             errDiv.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
             var h3 = document.createElement('h3');
-            h3.style.fontFamily = "'Fraunces',serif";
+            h3.style.fontFamily = "var(--crow-body-font)";
             h3.textContent = 'Bundle not running';
             var p = document.createElement('p');
             p.textContent = err.message;
@@ -1200,7 +1200,7 @@ export default {
               var empty = document.createElement('div');
               empty.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
               var h3 = document.createElement('h3');
-              h3.style.fontFamily = "'Fraunces',serif";
+              h3.style.fontFamily = "var(--crow-body-font)";
               h3.textContent = 'No favorite channels';
               var p = document.createElement('p');
               p.textContent = 'Mark channels as favorites in the IPTV panel, or no channels are available.';
@@ -1233,7 +1233,7 @@ export default {
               } else {
                 imgWrap.style.background = 'linear-gradient(135deg,hsl(0,40%,20%),hsl(30,30%,15%))';
                 var letter = document.createElement('div');
-                letter.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:'Fraunces',serif;font-size:2rem;color:hsla(0,60%,70%,0.4)";
+                letter.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:var(--crow-body-font);font-size:2rem;color:hsla(0,60%,70%,0.4)";
                 letter.textContent = name.charAt(0).toUpperCase();
                 imgWrap.appendChild(letter);
               }
@@ -1287,7 +1287,7 @@ export default {
             var errDiv = document.createElement('div');
             errDiv.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
             var h3 = document.createElement('h3');
-            h3.style.fontFamily = "'Fraunces',serif";
+            h3.style.fontFamily = "var(--crow-body-font)";
             h3.textContent = 'Bundle not running';
             var p = document.createElement('p');
             p.textContent = err.message;
@@ -1331,7 +1331,7 @@ export default {
             var empty = document.createElement('div');
             empty.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
             var h3 = document.createElement('h3');
-            h3.style.fontFamily = "'Fraunces',serif";
+            h3.style.fontFamily = "var(--crow-body-font)";
             h3.textContent = 'Nothing playing';
             var p = document.createElement('p');
             p.textContent = 'Start playing something on Kodi to see controls here.';
@@ -1367,7 +1367,7 @@ export default {
           var info = document.createElement('div');
           info.style.cssText = 'text-align:center;margin-bottom:1rem';
           var titleEl = document.createElement('h3');
-          titleEl.style.cssText = "margin:0 0 0.25rem;font-family:'Fraunces',serif;font-size:1.1rem";
+          titleEl.style.cssText = "margin:0 0 0.25rem;font-family:var(--crow-body-font);font-size:1.1rem";
           titleEl.textContent = title;
           info.appendChild(titleEl);
           if (subtitle) {
@@ -1451,7 +1451,7 @@ export default {
               var errDiv = document.createElement('div');
               errDiv.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
               var h3 = document.createElement('h3');
-              h3.style.fontFamily = "'Fraunces',serif";
+              h3.style.fontFamily = "var(--crow-body-font)";
               h3.textContent = 'Bundle not running';
               var p = document.createElement('p');
               p.textContent = err.message;

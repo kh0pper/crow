@@ -15,7 +15,6 @@ export const translations = {
   // ─── Nav & Layout ───
   "nav.logout": { en: "Logout", es: "Cerrar sesión" },
   "nav.toggleMenu": { en: "Toggle menu", es: "Alternar menú" },
-  "nav.toggleTheme": { en: "Toggle theme", es: "Cambiar tema" },
   // Panel nav names (keyed by panel id)
   "nav.nest": { en: "Crow's Nest", es: "Nido del Cuervo" },
   "nav.messages": { en: "Messages", es: "Mensajes" },
@@ -1607,6 +1606,7 @@ export const translations = {
   "settings.section.unifiedDashboard": { en: "Unified Dashboard", es: "Panel unificado" },
   "settings.section.sharedStorage": { en: "Shared Storage", es: "Almacenamiento compartido" },
   "settings.section.theme": { en: "Theme", es: "Tema" },
+  "settings.section.blogTheme": { en: "Blog theme", es: "Tema del blog" },
   "settings.section.language": { en: "Language", es: "Idioma" },
   "settings.section.notifications": { en: "Notifications", es: "Notificaciones" },
   "settings.section.ports": { en: "Ports", es: "Puertos" },
@@ -2152,6 +2152,16 @@ export const translations = {
     es: "No se pudo contactar con la puerta de enlace. Revisa la conexión e inténtalo de nuevo.",
   },
   "perch.gateRetryBtn": { en: "Retry", es: "Reintentar" },
+
+  // ─── Perch panel: unattached-bot guidance (Track 2 §5.1) ───
+  // The running state's lens can be a silent, inert page when no enabled bot
+  // has the perch gateway attached — this callout says why, above the frame.
+  "perch.unattachedTitle": { en: "No bot is attached to Perch", es: "Ningún bot está conectado a Perch" },
+  "perch.unattachedBody": {
+    en: "No enabled bot has the Perch channel attached. In Bot Builder, open a bot → Gateways → choose 'Perch (dashboard chat)' → Save.",
+    es: "Ningún bot habilitado tiene el canal de Perch conectado. En Bot Builder, abre un bot → Puertas de enlace → elige 'Perch (chat del panel)' → Guardar.",
+  },
+  "perch.unattachedCta": { en: "Open Bot Builder", es: "Abrir Bot Builder" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
