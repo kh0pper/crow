@@ -176,10 +176,6 @@ function menuCss() {
     border-radius: var(--crow-radius-card, 12px);
     overflow: hidden;
   }
-  .theme-glass .settings-group-card {
-    backdrop-filter: var(--crow-glass-blur, blur(12px));
-    -webkit-backdrop-filter: var(--crow-glass-blur, blur(12px));
-  }
   .settings-row {
     display: flex;
     align-items: center;

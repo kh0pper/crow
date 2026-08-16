@@ -1262,41 +1262,6 @@ function dashboardCss() {
   /* Tamagotchi crow */
   ${tamagotchiCss}
 
-  /* Glass overrides for dashboard */
-  .theme-glass .sidebar {
-    backdrop-filter: var(--crow-glass-blur-heavy);
-    -webkit-backdrop-filter: var(--crow-glass-blur-heavy);
-    background: rgba(0,0,0,0.72);
-  }
-  .theme-glass.theme-light .sidebar {
-    background: rgba(245,245,247,0.72);
-  }
-  .theme-glass .card,
-  .theme-glass .stat-card {
-    backdrop-filter: var(--crow-glass-blur);
-    -webkit-backdrop-filter: var(--crow-glass-blur);
-    border-width: 0.5px;
-    box-shadow: none;
-  }
-  .theme-glass .card:hover {
-    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-  }
-  .theme-glass .nav-item.active {
-    background: var(--crow-accent-muted);
-    border-left-color: var(--crow-accent);
-  }
-  /* Glass overrides for popups, modals, and fixed overlays */
-  .theme-glass .header-dropdown,
-  .theme-glass .crow-dropdown,
-  .theme-glass #modal-content,
-  .theme-glass #crow-player-bar,
-  .theme-glass .msg-popover {
-    background: var(--crow-bg-popup);
-    backdrop-filter: var(--crow-glass-blur);
-    -webkit-backdrop-filter: var(--crow-glass-blur);
-    border-color: var(--crow-border-popup);
-  }
-
   /* Sidebar overlay (hidden by default, shown on mobile when sidebar is open) */
   .sidebar-overlay {
     display: none;

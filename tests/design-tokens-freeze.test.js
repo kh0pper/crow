@@ -22,11 +22,10 @@ test("legacy module has no PERCH_TOKENS export", () => {
   assert.ok(!src.includes("PERCH_TOKENS"), "legacy module must not export PERCH_TOKENS");
 });
 
-// This assertion INVERTS in Task 3 (the current module still carries the old
-// ground until the palette rewrite lands — Task 3 flips this to the new-ground
-// pin `#eef1f3`).
-test("the CURRENT design-tokens.js module still carries the old ground (pre-Task-3)", () => {
-  assert.ok(designTokensCss().includes("#0f0f17"), "design-tokens.js has not been rewritten yet");
+// Inverted in Task 3: the palette rewrite landed, so design-tokens.js now
+// carries the new Perch ground and must NOT carry the old dark ground.
+test("the rewritten design-tokens.js module carries the new Perch ground (post-Task-3)", () => {
+  assert.ok(designTokensCss().includes("#eef1f3") && !designTokensCss().includes("#0f0f17"));
 });
 
 test("LEGACY_FONT_IMPORT is a non-empty font import string", () => {

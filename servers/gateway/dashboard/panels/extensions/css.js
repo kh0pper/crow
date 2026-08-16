@@ -395,28 +395,6 @@ export function extensionStyles() {
   box-shadow:0 20px 60px rgba(0,0,0,0.5);
 }
 
-/* Glass overrides — every surface on this page has a companion rule here */
-.theme-glass .ext-card,
-.theme-glass .ext-installed__item,
-.theme-glass .ext-stores__header,
-.theme-glass .ext-stores__body,
-.theme-glass .ext-viewtabs,
-.theme-glass .ext-collection-card,
-.theme-glass .ext-group-chip,
-.theme-glass .ext-help,
-.theme-glass .ext-section-count {
-  backdrop-filter:var(--crow-glass-blur);
-  -webkit-backdrop-filter:var(--crow-glass-blur);
-}
-.theme-glass .ext-card:hover { box-shadow:0 8px 32px rgba(0,0,0,0.3); }
-.theme-glass .ext-viewtab--active { box-shadow:0 1px 8px rgba(0,0,0,0.35); }
-.theme-glass .ext-collection-card:hover { box-shadow:0 10px 34px rgba(0,0,0,0.32); }
-.theme-glass .ext-collection-modal__note { backdrop-filter:var(--crow-glass-blur); -webkit-backdrop-filter:var(--crow-glass-blur); }
-.theme-glass .ext-search__input {
-  backdrop-filter:var(--crow-glass-blur);
-  -webkit-backdrop-filter:var(--crow-glass-blur);
-}
-
 /* Detail modal */
 #modal-content { position:relative; }
 .ext-detail__header { display:flex; gap:1rem; align-items:flex-start; margin-bottom:1rem; }

@@ -33,9 +33,15 @@ const SIZES = [
   ["2xl", "var(--crow-text-2xl)"],
   ["3xl", "var(--crow-text-3xl)"],
 ];
-const COLORS = ["bg-deep", "bg-surface", "bg-elevated", "border", "text-primary",
-  "text-secondary", "text-tertiary", "text-muted", "accent", "brand-gold",
+const COLORS = ["bg-deep", "bg-surface", "bg-elevated", "border", "border-strong", "text-primary",
+  "text-secondary", "text-tertiary", "text-muted", "accent", "accent-contrast", "brand-gold",
   "success", "error", "warning", "info"];
+
+const RADII = [
+  ["card", "var(--crow-radius-card)"],
+  ["control", "var(--crow-radius-control)"],
+  ["pill", "var(--crow-radius-pill)"],
+];
 
 function swatches() {
   return `<div style="display:flex;flex-wrap:wrap;gap:var(--crow-space-3)">` +
@@ -43,6 +49,22 @@ function swatches() {
       <div style="width:56px;height:56px;border-radius:var(--crow-radius-card);border:1px solid var(--crow-border);background:var(--crow-${c})"></div>
       <div style="margin-top:var(--crow-space-1);color:var(--crow-text-muted)">${c}</div></div>`).join("") +
     `</div>`;
+}
+
+function radiusScale() {
+  return `<div style="display:flex;flex-wrap:wrap;gap:var(--crow-space-4)">` +
+    RADII.map(([name, token]) => `<div style="text-align:center;font-size:var(--crow-text-xs)">
+      <div style="width:72px;height:56px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:${token}"></div>
+      <div style="margin-top:var(--crow-space-1);color:var(--crow-text-muted)">radius-${name}</div></div>`).join("") +
+    `</div>`;
+}
+
+function monoSample() {
+  return `<div style="font-family:var(--crow-mono-font);font-size:var(--crow-text-base);color:var(--crow-text-primary)">--crow-mono-font: 'JetBrains Mono', monospace — the quick brown crow jumps 0123456789</div>`;
+}
+
+function accentButtonDemo() {
+  return `<button style="background:var(--crow-accent);color:var(--crow-accent-contrast);border:none;border-radius:var(--crow-radius-control);padding:var(--crow-space-2) var(--crow-space-4);font-size:var(--crow-text-base);font-weight:600;cursor:pointer">Button on accent</button>`;
 }
 
 function spacingScale() {
@@ -67,6 +89,8 @@ export default {
   async handler(req, res, { layout }) {
     const content =
       section("Colors", swatches()) +
+      section("Radius scale", radiusScale()) +
+      section("Mono font", monoSample()) +
       section("Spacing scale", spacingScale()) +
       section("Type scale", typeScale()) +
       section("Buttons", [
@@ -76,6 +100,7 @@ export default {
         button("Ghost", { variant: "ghost" }),
         button("Small", { variant: "primary", size: "sm" }),
         button("Link", { href: "#", variant: "secondary" }),
+        accentButtonDemo(),
       ].join(" ")) +
       section("Callouts",
         callout("Informational notice.", "info") +
