@@ -1606,6 +1606,7 @@ export const translations = {
   "settings.section.unifiedDashboard": { en: "Unified Dashboard", es: "Panel unificado" },
   "settings.section.sharedStorage": { en: "Shared Storage", es: "Almacenamiento compartido" },
   "settings.section.theme": { en: "Theme", es: "Tema" },
+  "settings.section.blogTheme": { en: "Blog theme", es: "Tema del blog" },
   "settings.section.language": { en: "Language", es: "Idioma" },
   "settings.section.notifications": { en: "Notifications", es: "Notificaciones" },
   "settings.section.ports": { en: "Ports", es: "Puertos" },

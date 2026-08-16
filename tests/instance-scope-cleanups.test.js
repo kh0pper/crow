@@ -1,10 +1,12 @@
 /**
- * Settings-scope coherence D5 + D4:
+ * Settings-scope coherence D5:
  *  - loadVisionProfiles resolves scope like every other vision_profiles reader
  *    (readSetting: override-then-global) instead of raw global (which returned
  *    [] for every install whose section default-wrote local).
- *  - set_theme is response-only: the dashboard_theme write was vestigial
- *    (zero runtime readers) and is gone.
+ *
+ * (D4 — "set_theme responds ok and writes NOTHING" — exercised the set_theme
+ * handler, which retired with glass in Track 2 Task 5, spec §3.4. Deleted
+ * alongside it.)
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -15,7 +17,6 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { loadVisionProfiles } from "../servers/gateway/dashboard/panels/bot-builder/data-queries.js";
 import { writeSetting } from "../servers/gateway/dashboard/settings/registry.js";
-import themeSection from "../servers/gateway/dashboard/settings/sections/theme.js";
 
 function fresh() {
   const dir = mkdtempSync(join(tmpdir(), "iscope-clean-"));
@@ -43,17 +44,4 @@ test("D5: loadVisionProfiles sees a LOCAL-scoped vision_profiles row (apiKey str
     if (prev === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = prev;
     cleanup();
   }
-});
-
-test("D4: set_theme responds ok and writes NOTHING", async () => {
-  const executed = [];
-  const recorderDb = { execute: async (arg) => { executed.push(typeof arg === "string" ? arg : arg.sql); return { rows: [] }; } };
-  let jsonBody = null;
-  const res = { json: (b) => { jsonBody = b; }, setHeader() {} };
-  const handled = await themeSection.handleAction({
-    req: { body: { theme: "light" } }, res, db: recorderDb, action: "set_theme",
-  });
-  assert.equal(handled, true);
-  assert.deepEqual(jsonBody, { ok: true });
-  assert.equal(executed.length, 0, "no DB writes from set_theme");
 });
