@@ -4,8 +4,27 @@
  * Scoped styles for the bot-board panel.
  */
 
+import { PERCH_TOKENS } from "../../shared/design-tokens.js";
+
 export function botBoardStyles() {
+  // Track 3 Task 11 (spec §3.2/§5.6): the card-face bird glyph. OS-driven
+  // theme (light on :root, dark inside @media prefers-color-scheme — same
+  // convention as design-tokens.js/layout.js, no data-theme state of its
+  // own). PERCH_TOKENS.dark has no `alive`/`attn` entries (matches the
+  // vendored payload it's drift-tested against, Decision 15) — working/
+  // waiting keep their light-palette color in both themes; hibernating/idle
+  // use `dim`, which both palettes define.
+  const birdCss = `
+  .bb-bird{display:inline-block;width:.55rem;height:.55rem;border-radius:50%;margin-left:.35rem;vertical-align:middle;background:${PERCH_TOKENS.light.dim}}
+  .bb-bird--working{background:${PERCH_TOKENS.light.alive}}
+  .bb-bird--waiting{background:${PERCH_TOKENS.light.attn};box-shadow:0 0 0 2px ${PERCH_TOKENS.light.attn}33}
+  .bb-bird--hibernating{background:${PERCH_TOKENS.light.dim}}
+  @media (prefers-color-scheme: dark) {
+    .bb-bird{background:${PERCH_TOKENS.dark.dim}}
+    .bb-bird--hibernating{background:${PERCH_TOKENS.dark.dim}}
+  }`;
   return `<style>
+  ${birdCss}
   .bb-switch{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
   .bb-switch select,.bb-switch input{padding:.45rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)}
   .bb-switch button{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer}

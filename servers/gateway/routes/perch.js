@@ -58,8 +58,10 @@ import { jsonError } from "./_error.js";
 import { openStream } from "../streams/sse.js";
 import { resolveEngineStatus, resolveBotRuntimeStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
 import { PI_BUILTIN, remoteInvocationOn } from "../dashboard/panels/bot-builder/data-queries.js";
+import { sessionBirdState, foldBirdStates } from "../dashboard/panels/bot-board/data-queries.js";
 import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
+import { JOB_LOCK_STATUSES } from "./board-lock.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -457,6 +459,19 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
     return typeof interactiveEngine === "function" ? interactiveEngine() : interactiveEngine;
   }
 
+  // /roost (below) must never conjure a live engine into existence just by
+  // being polled — a gateway that has never spawned an interactive session
+  // has to fail soft to "no live birds", never spin one up as a side effect
+  // of a read. The shared `interactiveEngine` seam above defaults to the bare
+  // `getInteractiveEngine` reference (createIfMissing:true, same as every
+  // other perch-interactive route on this router), so this resolver calls it
+  // with `{createIfMissing:false}` ONLY when nothing has overridden the seam;
+  // a test's injected function (or object) is used exactly as given.
+  function resolveRoostEngine() {
+    if (interactiveEngine === getInteractiveEngine) return getInteractiveEngine({ createIfMissing: false });
+    return typeof interactiveEngine === "function" ? interactiveEngine() : interactiveEngine;
+  }
+
   async function resolveHandleInbound() {
     if (handleInboundImpl) return handleInboundImpl;
     return (await loadBridgeImpl()).handleInbound;
@@ -487,6 +502,111 @@ export default function perchApiRouter(dashboardAuth, { handleInboundImpl = null
         };
       });
       res.json({ bots });
+    } catch (err) {
+      jsonError(res, 500, String((err && err.message) || err));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // ---- GET /roost — the roost strip's bird state (Track 3 Task 11, spec §3.2/§5.6) ----
+  //
+  // One query for every bot def, one `eng.list()` call, one bot_sessions
+  // query for card_id/control — never a per-bot loop. The engine is the
+  // truth for awake/pending state; the bot_sessions query fills in card_id
+  // and control, which `eng.list()`'s DB-fallback entries (a prior process's
+  // hibernating rows) do not carry. `occupiedCardIds` is the Send-out
+  // card-picker's source of truth (review finding 15): hibernating claims
+  // deliberately don't LOCK (§5.1), so the DOM's lock badges alone cannot
+  // tell the picker which cards would 409 a dispatch.
+  router.get(P + "/roost", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs ORDER BY bot_id",
+        args: [],
+      });
+
+      const engine = resolveRoostEngine();
+      let sessions = [];
+      if (engine) {
+        try { sessions = await engine.list(); } catch { sessions = []; }
+      }
+
+      // card_id + control for every LIVE perch-live row (excludes 'stopped':
+      // a stopped session holds no card and the strip never shows it as
+      // occupying one). This is the query that backfills what eng.list()'s
+      // DB-fallback entries leave out.
+      const rowById = new Map();
+      try {
+        const { rows: sessRows } = await db.execute({
+          sql: "SELECT gateway_thread_id, card_id, control FROM bot_sessions WHERE kind='perch-live' AND status != 'stopped'",
+          args: [],
+        });
+        for (const r of sessRows) rowById.set(String(r.gateway_thread_id), r);
+      } catch {
+        // bot_sessions absent (primary gateway) — every session's card_id/
+        // control below stays whatever the engine snapshot itself carried.
+      }
+
+      const sessionsByBot = new Map();
+      for (const s of sessions) {
+        const list = sessionsByBot.get(s.botId);
+        if (list) list.push(s); else sessionsByBot.set(s.botId, [s]);
+      }
+
+      // occupiedCardIds: cards a fresh dispatch/attach-card would 409 on —
+      // every non-stopped perch-live claim (the query above) UNION every
+      // active job-rail lock (jobLockFor's own status set, board-lock.js).
+      const occupied = new Set();
+      for (const r of rowById.values()) {
+        if (r.card_id != null) occupied.add(Number(r.card_id));
+      }
+      try {
+        const statuses = [...JOB_LOCK_STATUSES];
+        const ph = statuses.map(() => "?").join(",");
+        const { rows: jobRows } = await db.execute({
+          sql: `SELECT DISTINCT card_id FROM bot_jobs WHERE status IN (${ph}) AND card_id IS NOT NULL`,
+          args: statuses,
+        });
+        for (const r of jobRows) occupied.add(Number(r.card_id));
+      } catch {
+        // bot_jobs absent (primary gateway) — the job rail holds nothing.
+      }
+
+      const birds = rows.map((row) => {
+        const def = parseDef(row);
+        const attached = perchAttached(def);
+        const botSessions = sessionsByBot.get(row.bot_id) || [];
+        const sessionOut = botSessions.map((s) => {
+          const dbRow = rowById.get(String(s.sessionId));
+          const cardId = dbRow && dbRow.card_id != null
+            ? Number(dbRow.card_id)
+            : (s.cardId != null ? Number(s.cardId) : null);
+          return {
+            sessionId: s.sessionId,
+            state: s.state,
+            cardId,
+            pendingUi: !!s.pendingUi,
+            control: dbRow ? dbRow.control : null,
+          };
+        });
+        // spec §3.2 priority fold: waiting-on-you > working > hibernating >
+        // idle, EXCEPT a bot with no complete perch gateway record is always
+        // "observing" (§3.1) — it can never hold a live session to begin with.
+        const state = !attached
+          ? "observing"
+          : (foldBirdStates(botSessions.map(sessionBirdState)) || "idle");
+        return {
+          id: row.bot_id,
+          name: row.display_name || row.bot_id,
+          perch_attached: attached,
+          state,
+          sessions: sessionOut,
+        };
+      });
+
+      res.json({ birds, occupiedCardIds: [...occupied] });
     } catch (err) {
       jsonError(res, 500, String((err && err.message) || err));
     } finally {
