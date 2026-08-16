@@ -774,6 +774,7 @@ test("10. Restore path (happy): UPDATE-of-present-keys; absent columns untouched
   // emitChange spy
   const emitted = [];
   const fakeSync = {
+    feedsDisabled: false,
     emitChange: async (table, op, row) => { emitted.push({ table, op, row }); },
   };
 
@@ -874,6 +875,7 @@ test("10b. Restore path (row-since-gone): plain INSERT + emitChange('insert')", 
 
   const emitted = [];
   const fakeSync = {
+    feedsDisabled: false,
     emitChange: async (table, op, row) => { emitted.push({ table, op, row }); },
   };
 
@@ -979,6 +981,7 @@ test("12a. Stale-snapshot guard: live row changed after conflict logged → NOT 
 
   const emitted = [];
   const fakeSync = {
+    feedsDisabled: false,
     emitChange: async (table, op, row) => { emitted.push({ table, op, row }); },
   };
 
@@ -1085,6 +1088,7 @@ test("13a. Delete-restore: op=delete conflict with current snapshot → row dele
 
   const emitted = [];
   const fakeSync = {
+    feedsDisabled: false,
     emitChange: async (table, op, row) => { emitted.push({ table, op, row }); },
   };
 
@@ -1735,6 +1739,7 @@ test("22b. crow_update_context_section emits post-UPDATE values (not pre-update 
 
   const emitted = [];
   const spySync = {
+    feedsDisabled: false,
     emitChange: async (table, op, row) => { emitted.push({ table, op, row }); return 1; },
   };
 

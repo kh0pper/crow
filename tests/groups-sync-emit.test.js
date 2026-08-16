@@ -49,7 +49,7 @@ test("emitGroupUpsert: attaches ONLY syncable members (I2: local-bot + pending e
   await db.execute({ sql: "INSERT INTO contact_groups (id, name, group_uid) VALUES (10,'Family','g10')" });
   await db.execute({ sql: "INSERT INTO contact_group_members (group_id, contact_id) VALUES (10,1),(10,2),(10,3),(10,4)" });
   const seen = [];
-  __setEmitSinkForTest({ emitChange: async (t, op, row) => seen.push([t, op, row.group_uid, [...(row.members || [])].sort(), row.id]) });
+  __setEmitSinkForTest({ feedsDisabled: false, emitChange: async (t, op, row) => seen.push([t, op, row.group_uid, [...(row.members || [])].sort(), row.id]) });
   await emitGroupUpsert(db, 10);
   assert.equal(seen.length, 1);
   assert.deepEqual(seen[0], ["contact_groups", "update", "g10", ["crow:m1", "crow:m2"], 10], "local-bot + pending members excluded from the wire-map");
@@ -67,7 +67,7 @@ test("emitGroupUpsert: a ROOM group is never emitted", async () => {
 
 test("emitGroupDelete + missing-row + null-sink are all no-throw", async () => {
   const seen = [];
-  __setEmitSinkForTest({ emitChange: async (t, op, row) => seen.push([t, op, row.group_uid]) });
+  __setEmitSinkForTest({ feedsDisabled: false, emitChange: async (t, op, row) => seen.push([t, op, row.group_uid]) });
   await emitGroupDelete("g10");
   assert.deepEqual(seen[0], ["contact_groups", "delete", "g10"]);
   __setEmitSinkForTest(null);

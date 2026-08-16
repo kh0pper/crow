@@ -174,7 +174,7 @@ beforeEach(async () => {
 /** Capture every emitContactChange. The sink REPLACES the SyncManager, so it sees the RAW row. */
 function captureEmits() {
   const emits = [];
-  __setEmitSinkForTest({ emitChange: async (table, op, row) => { emits.push({ table, op, row }); return 1; } });
+  __setEmitSinkForTest({ feedsDisabled: false, emitChange: async (table, op, row) => { emits.push({ table, op, row }); return 1; } });
   return emits;
 }
 

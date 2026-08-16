@@ -66,7 +66,7 @@ test("emitMessageInsert: attaches crow_id via JOIN and forwards to the sink", as
   await db.execute({ sql: "INSERT INTO contacts (id, crow_id, ed25519_pubkey, secp256k1_pubkey) VALUES (11,'crow:e', '', ?)", args: [SECP] });
   await db.execute({ sql: "INSERT INTO messages (id, contact_id, nostr_event_id, content, direction, is_read) VALUES (21, 11, 'ev1', 'hi there', 'sent', 1)" });
   const seen = [];
-  __setEmitSinkForTest({ emitChange: async (t, op, row) => seen.push([t, op, row.crow_id, row.contact_id, row.id, row.nostr_event_id, row.direction]) });
+  __setEmitSinkForTest({ feedsDisabled: false, emitChange: async (t, op, row) => seen.push([t, op, row.crow_id, row.contact_id, row.id, row.nostr_event_id, row.direction]) });
   await emitMessageInsert(db, { contactId: 11, nostrEventId: "ev1" });
   assert.equal(seen.length, 1);
   assert.deepEqual(seen[0], ["messages", "insert", "crow:e", 11, 21, "ev1", "sent"]);

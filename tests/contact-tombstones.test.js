@@ -198,7 +198,7 @@ test("emitContactDelete with a null sink still writes a tombstone at the fallbac
 });
 
 test("emitContactDelete writes the tombstone at the emitted lamport when the emit succeeds", async () => {
-  __setEmitSinkForTest({ emitChange: async () => 999 });
+  __setEmitSinkForTest({ feedsDisabled: false, emitChange: async () => 999 });
   await emitContactDelete(db, "crow:emit", 42); // fallback 42 must be overridden by 999
   assert.equal((await readTombstone(db, "crow:emit")).lamport_ts, 999);
   __setEmitSinkForTest(null);

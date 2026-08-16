@@ -8,7 +8,7 @@ import { emitContactChange, emitContactDelete, __setEmitSinkForTest } from "../s
 
 test("emitContactChange forwards op+row to the sync manager", async () => {
   const seen = [];
-  __setEmitSinkForTest({ emitChange: async (t, op, row) => seen.push([t, op, row.crow_id]) });
+  __setEmitSinkForTest({ feedsDisabled: false, emitChange: async (t, op, row) => seen.push([t, op, row.crow_id]) });
   await emitContactChange("insert", { crow_id: "crow:e1" });
   await emitContactChange("update", { crow_id: "crow:e2", is_blocked: 1 });
   // emitContactDelete(db, crowId, fallbackLamportTs): db=null → writeTombstone no-ops.
@@ -29,7 +29,7 @@ test("emitContactChange is a no-op with no manager (pre-boot / tests)", async ()
 
 test("emitContactDelete ignores an empty crowId", async () => {
   const seen = [];
-  __setEmitSinkForTest({ emitChange: async (...a) => seen.push(a) });
+  __setEmitSinkForTest({ feedsDisabled: false, emitChange: async (...a) => seen.push(a) });
   await emitContactDelete(null, "", 1);
   await emitContactDelete(null, null, 1);
   assert.equal(seen.length, 0);

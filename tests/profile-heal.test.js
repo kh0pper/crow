@@ -38,7 +38,7 @@ test("heal: promotes non-empty stranded overrides (override wins over global), d
   const prev = process.env.CROW_DATA_DIR;
   process.env.CROW_DATA_DIR = dir;
   const emitted = [];
-  setSettingsSyncManager({ emitChange: async (t, op, row) => { emitted.push(row.key); } });
+  setSettingsSyncManager({ feedsDisabled: false, emitChange: async (t, op, row) => { emitted.push(row.key); } });
   try {
     const localId = getOrCreateLocalInstanceId();
     await seedOverride(db, localId, "profile_display_name", "Kevin");   // (a)+(c): promote, wins over global

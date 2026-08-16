@@ -39,7 +39,7 @@ test("upsertSetting on a profile key writes the GLOBAL row (no override) and emi
   const prevDataDir = process.env.CROW_DATA_DIR;
   process.env.CROW_DATA_DIR = dir;
   const emitted = [];
-  setSettingsSyncManager({ emitChange: async (t, op, row) => { emitted.push({ t, op, row }); } });
+  setSettingsSyncManager({ feedsDisabled: false, emitChange: async (t, op, row) => { emitted.push({ t, op, row }); } });
   try {
     await upsertSetting(db, "profile_display_name", "Kevin");
     const g = await db.execute("SELECT value FROM dashboard_settings WHERE key = 'profile_display_name'");
