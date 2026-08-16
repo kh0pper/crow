@@ -208,6 +208,7 @@ test("crow_update_memory and crow_delete_memory emit payloads carrying source='s
 
   const emitted = [];
   const spySync = {
+    feedsDisabled: false,
     emitChange: async (table, op, row) => { emitted.push({ table, op, row }); return 1; },
   };
 
