@@ -145,6 +145,11 @@ function replyTextOf(end) {
  * else pi's extension UI channel carries is chrome we deliberately ignore. */
 const ASK_METHODS = new Set(["select", "input", "confirm", "editor"]);
 
+/** Track 3 Task 5: prefix pi-lab's rpc-state-bridge extension puts on a
+ * `notify` message to mirror bus state (currently plan-mode) over the
+ * extension-UI channel instead of the transcript. */
+const CROW_STATE_PREFIX = "crow-state:";
+
 /** Track 3 Task 4: the engine-owned permission vocabulary (bridge.mjs's
  * PiRpc constructor option of the same name) — control() rejects anything
  * outside this set with `bad_request` rather than passing an unknown mode
@@ -295,9 +300,10 @@ export function createInteractiveEngine({
       // comment: this is the fail-safe reading of spec §5.3, a restart must
       // never silently resurrect "bypass".
       permissionMode: "guarded",
-      // Track 3 Task 4: mirrored plan-mode state object|null — Task 6 gives
-      // this real behavior; this task only carries the field through
-      // newSession/snapshot/stateEvent/control().
+      // Track 3 Task 4 carried this field (newSession/snapshot/stateEvent/
+      // control()) as a mirrored plan-mode state object|null; Task 5 gives
+      // it real behavior — set from the rpc-state-bridge `crow-state:`
+      // mirror in onUiRequest, driven the other way by control({planMode}).
       planMode: null,
       pendingUi: null,
       lastError: null,
@@ -807,7 +813,28 @@ export function createInteractiveEngine({
       return;
     }
     if (m.method === "notify") {
-      emit(s, { type: "log", text: m.message == null ? "" : String(m.message) });
+      const text = m.message == null ? "" : String(m.message);
+      // Track 3 Task 5: pi-lab's rpc-state-bridge extension mirrors the
+      // plan-mode bus over this SAME notify channel, prefixed so it never
+      // collides with an operator-facing note:
+      // `"crow-state:" + JSON.stringify({kind:"plan-mode", state})`. A
+      // frame carrying this prefix is engine protocol, never a transcript
+      // line — malformed JSON after the prefix is swallowed (never a log
+      // line, never a throw), matching a down/stale extension gracefully.
+      if (text.startsWith(CROW_STATE_PREFIX)) {
+        let parsed;
+        try {
+          parsed = JSON.parse(text.slice(CROW_STATE_PREFIX.length));
+        } catch {
+          return;
+        }
+        if (parsed && parsed.kind === "plan-mode") {
+          s.planMode = parsed.state;
+          emit(s, { type: "plan_state", state: parsed.state });
+        }
+        return;
+      }
+      emit(s, { type: "log", text });
       return;
     }
     // setStatus | setWidget | setTitle | set_editor_text — TUI chrome, ignored.
@@ -1097,15 +1124,17 @@ export function createInteractiveEngine({
     const hasPermissionMode = opts.permissionMode != null;
     const hasPlanMode = Object.prototype.hasOwnProperty.call(opts, "planMode");
 
-    // Model/thinking switches share the one child clock a turn already owns
-    // (commandSince rides the SAME correlated response stream promptTurn
-    // does) — refused mid-turn rather than racing it. permissionMode/planMode
-    // never touch the live child, so they are never refused here.
-    if ((hasModel || hasThinking) && s.turn) throw engineError("turn_in_progress");
+    // Model/thinking/planMode switches share the one child clock a turn
+    // already owns (commandSince/promptAckOnly ride the SAME correlated
+    // response stream promptTurn does) — refused mid-turn rather than racing
+    // it. permissionMode never touches the live child, so it alone is never
+    // refused here.
+    if ((hasModel || hasThinking || hasPlanMode) && s.turn) throw engineError("turn_in_progress");
 
     if (hasModel && (!opts.model.provider || !opts.model.modelId)) throw engineError("bad_request");
     if (hasThinking && !THINKING_LEVELS.has(opts.thinking)) throw engineError("bad_request");
     if (hasPermissionMode && !PERMISSION_MODES.has(opts.permissionMode)) throw engineError("bad_request");
+    if (hasPlanMode && typeof opts.planMode !== "boolean") throw engineError("bad_request");
 
     const S = await loadSeams();
     const applied = {};
@@ -1167,10 +1196,28 @@ export function createInteractiveEngine({
     }
 
     if (hasPlanMode) {
-      // Task 6 gives this field real behavior; Task 4 only carries it through
-      // the session record and the control()/snapshot() surface.
-      s.planMode = opts.planMode;
-      applied.planMode = s.planMode;
+      // Track 3 Task 5: plan mode is entirely pi-lab's own extension state —
+      // there is nothing to bind at wake (unlike model/permissionMode, a
+      // hibernating session has no drawer toggle to disable-and-remember;
+      // the operator would just re-open the drawer on wake and see it off).
+      // It ALWAYS needs a live child: pi-lab's `/plan` command is handled by
+      // the extension layer via a fully-acked prompt (never a real agent
+      // turn), so a hibernating session is refused outright rather than
+      // silently queued.
+      if (!s.pi) throw engineError("not_awake");
+      // NEVER bare `/plan` — that's a toggle (pi-lab plan-mode/index.ts) and
+      // a footgun against stale drawer state if this call races a manual
+      // `/plan` the operator just typed in the TUI. `promptAckOnly` waits
+      // only for pi's ack of the prompt, never for agent_end — pi-lab's
+      // `/plan` handler is fully synchronous inside the extension layer and
+      // never starts an agent loop at all.
+      await s.pi.promptAckOnly(opts.planMode ? "/plan on" : "/plan off");
+      // The REAL plan-mode state (enabled/executing/todos…) arrives async
+      // via the rpc-state-bridge mirror (onUiRequest's `crow-state:` notify)
+      // and is what `s.planMode`/snapshot()/stateEvent() report from then on
+      // — `applied.planMode` here only echoes the requested on/off intent,
+      // confirming the ack succeeded, not the full state object.
+      applied.planMode = opts.planMode;
     }
 
     emit(s, stateEvent(s));
@@ -1292,6 +1339,11 @@ export function createInteractiveEngine({
       // hibernate / child exit all clear it, so a late subscriber can never be
       // shown a card no child is waiting on.
       if (s.pendingUi) fn({ type: "ask_user", ...s.pendingUi });
+      // Track 3 Task 5: replay the last known plan-mode mirror so a late
+      // subscriber's drawer opens already showing plan-mode state instead of
+      // waiting for the NEXT bus tick (which may never come if nothing
+      // changes).
+      if (s.planMode) fn({ type: "plan_state", state: s.planMode });
     } catch { /* a broken subscriber is not our problem */ }
     return () => s.subscribers.delete(fn);
   }
