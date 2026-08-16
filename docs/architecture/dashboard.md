@@ -10,53 +10,66 @@ The Crow's Nest (`servers/gateway/dashboard/`) is a server-rendered web interfac
 
 ## Brand Identity
 
-The Crow's Nest uses a cool blue-black palette with indigo accents, defined as CSS custom properties in `servers/gateway/dashboard/shared/layout.js`.
+The Crow's Nest uses the Perch-derived light-first palette, defined as CSS custom properties in `servers/gateway/dashboard/shared/design-tokens.js`.
 
 ### Token architecture (Track 2, 2026-08-15)
 
 `servers/gateway/dashboard/shared/design-tokens.js`'s `designTokensCss()` is light-first: base values live on a plain `:root` block, and dark values override inside a single `@media (prefers-color-scheme: dark)` block — there is no dashboard theme state (no `.theme-light`/`.theme-dark` class, no `theme`/`glass`/`serif` option on `renderLayout()`, no stored dashboard color-mode setting); light vs. dark follows the OS only. The same module exports `PERCH_TOKENS`, the authoritative copy of the Perch palette; `tests/perch-token-drift.test.js` parses the vendored `bundles/perch-hub/payload/hub/server.mjs` payload as text and fails, in either direction, if it and `PERCH_TOKENS` disagree — Crow owns the palette Perch renders with, not the other way around. `.theme-glass` is retired end-to-end (no glass CSS blocks or `theme_glass`/`theme_dashboard_mode` settings remain). The public blog, songbook, and knowledge-base pages don't run on this system yet: `design-tokens-legacy.js` is a frozen snapshot of the pre-rewrite tokens (minus glass) that `servers/gateway/routes/blog-public.js`, `servers/blog/songbook-renderer.js`, and `bundles/knowledge-base/routes/kb-public.js` import instead, so those surfaces keep today's palette until their own adoption wave.
 
-### Color Tokens (Dark — `:root`)
+### Color Tokens (Light — `:root`, base)
 
 | Token | Value | Usage |
 |---|---|---|
-| `--crow-bg-deep` | `#0f0f17` | Page background |
-| `--crow-bg-surface` | `#1a1a2e` | Card/panel backgrounds |
-| `--crow-bg-elevated` | `#2d2d3d` | Raised surfaces, hover states |
-| `--crow-border` | `#3d3d4d` | Borders, dividers |
-| `--crow-text-primary` | `#fafaf9` | Headings, body text |
-| `--crow-text-secondary` | `#a8a29e` | Descriptions, labels |
-| `--crow-text-muted` | `#78716c` | Hints, disabled text |
-| `--crow-accent` | `#6366f1` | Primary accent (indigo) |
-| `--crow-accent-hover` | `#818cf8` | Hover state for accent |
-| `--crow-accent-muted` | `#2d2854` | Subtle accent backgrounds |
-| `--crow-brand-gold` | `#fbbf24` | Active nav highlight, branding |
-| `--crow-success` | `#22c55e` | Success states |
-| `--crow-error` | `#ef4444` | Error states |
-| `--crow-info` | `#38bdf8` | Informational highlights |
+| `--crow-bg-deep` | `#eef1f3` | Page background |
+| `--crow-bg-surface` | `#ffffff` | Card/panel backgrounds |
+| `--crow-bg-elevated` | `#f5f7f8` | Raised surfaces, hover states |
+| `--crow-border` | `#dde4e8` | Borders, dividers |
+| `--crow-border-strong` | `#94a4ae` | Emphasized borders |
+| `--crow-text-primary` | `#22303a` | Headings, body text |
+| `--crow-text-secondary` | `#5c6d79` | Descriptions, labels |
+| `--crow-text-tertiary` | `#6b7c88` | De-emphasized text |
+| `--crow-text-muted` | `#8395a1` | Hints, disabled text |
+| `--crow-accent` | `#0e6b62` | Primary accent |
+| `--crow-accent-hover` | `#0b574f` | Hover state for accent |
+| `--crow-accent-muted` | `#dcecea` | Subtle accent backgrounds |
+| `--crow-accent-contrast` | `#ffffff` | Text/icon color on top of `--crow-accent` |
+| `--crow-success` | `#1d7048` | Success states |
+| `--crow-error` | `#b04a2b` | Error states |
+| `--crow-warning` | `#8f5606` | Warning states |
+| `--crow-info` | `#33688c` | Informational highlights |
+| `--crow-brand-gold` | `#8f5606` | Active nav highlight, branding |
 
-### Color Tokens (Light — `.theme-light`)
+### Color Tokens (Dark — `@media (prefers-color-scheme: dark)`)
 
-| Token | Value |
-|---|---|
-| `--crow-bg-deep` | `#fafaf9` |
-| `--crow-bg-surface` | `#ffffff` |
-| `--crow-bg-elevated` | `#f5f5f4` |
-| `--crow-border` | `#e7e5e4` |
-| `--crow-text-primary` | `#1c1917` |
-| `--crow-text-secondary` | `#57534e` |
-| `--crow-text-muted` | `#a8a29e` |
-| `--crow-accent` | `#4f46e5` |
-| `--crow-accent-hover` | `#6366f1` |
-| `--crow-accent-muted` | `#e0e7ff` |
+| Token | Value | Usage |
+|---|---|---|
+| `--crow-bg-deep` | `#131a1f` | Page background |
+| `--crow-bg-surface` | `#1b242b` | Card/panel backgrounds |
+| `--crow-bg-elevated` | `#232e36` | Raised surfaces, hover states |
+| `--crow-border` | `#2a353d` | Borders, dividers |
+| `--crow-border-strong` | `#46565f` | Emphasized borders |
+| `--crow-text-primary` | `#e4ebef` | Headings, body text |
+| `--crow-text-secondary` | `#8fa0ab` | Descriptions, labels |
+| `--crow-text-tertiary` | `#7d8f9a` | De-emphasized text |
+| `--crow-text-muted` | `#5f707b` | Hints, disabled text |
+| `--crow-accent` | `#4fbdb0` | Primary accent |
+| `--crow-accent-hover` | `#6fd0c4` | Hover state for accent |
+| `--crow-accent-muted` | `#16322f` | Subtle accent backgrounds |
+| `--crow-accent-contrast` | `#131a1f` | Text/icon color on top of `--crow-accent` |
+| `--crow-success` | `#2fa36b` | Success states |
+| `--crow-error` | `#d1633e` | Error states |
+| `--crow-warning` | `#d9a521` | Warning states |
+| `--crow-info` | `#6aa9cc` | Informational highlights |
+| `--crow-brand-gold` | `#d9a521` | Active nav highlight, branding |
+
+Light vs. dark follows the OS only — there is no dashboard theme-mode setting or class toggle (see the Track 2 paragraph above).
 
 ### Typography
 
-- **Headings**: Fraunces (serif, variable weight)
-- **Body**: DM Sans (sans-serif)
-- **Code**: JetBrains Mono (monospace)
+- **Headings & body**: Inter (sans-serif, weights 400/500/600/700)
+- **Code**: JetBrains Mono (monospace, weights 400/600)
 
-All three are loaded via Google Fonts in the layout `<style>` block.
+Both are loaded via `FONT_LINKS` (`servers/gateway/dashboard/shared/layout.js`), a single Google Fonts `<link>` block shared across every page.
 
 ### Visual Details
 
@@ -76,7 +89,7 @@ All three are loaded via Google Fonts in the layout `<style>` block.
 ├────────────────────────────────────────┤
 │           Layout System                │
 │  layout(title, content, options)       │
-│  Navigation, theme toggle, footer     │
+│  Navigation, footer                    │
 ├────────────────────────────────────────┤
 │           Auth System                  │
 │  scrypt hashing, session cookies      │
@@ -175,10 +188,13 @@ renderLayout({
   title,        // page title
   content,      // panel HTML
   activePanel,  // highlights the nav entry
-  theme,        // 'dark' | 'light'
-  lang,         // 'en' | 'es'
+  panels,       // panel registry (for nav rendering)
   scripts,      // extra page scripts
-  // ...plus panels, glass, serif, afterContent, headerIcons, navGroups, instanceTabs
+  afterContent, // markup appended after content (e.g. modals)
+  headerIcons,  // extra header icon slots
+  lang,         // 'en' | 'es'
+  navGroups,    // grouped nav sections
+  instanceTabs, // multi-instance tab bar
 })
 ```
 
@@ -343,18 +359,21 @@ CSS uses custom properties for theming (see the full [Brand Identity](#brand-ide
 
 ```css
 :root {
-  --crow-bg-deep: #0f0f17;
-  --crow-bg-surface: #1a1a2e;
-  --crow-accent: #6366f1;
-  --crow-text-primary: #fafaf9;
-  --crow-brand-gold: #fbbf24;
+  --crow-bg-deep: #eef1f3;
+  --crow-bg-surface: #ffffff;
+  --crow-accent: #0e6b62;
+  --crow-text-primary: #22303a;
+  --crow-brand-gold: #8f5606;
 }
 
-.theme-light {
-  --crow-bg-deep: #fafaf9;
-  --crow-bg-surface: #ffffff;
-  --crow-accent: #4f46e5;
-  --crow-text-primary: #1c1917;
+@media (prefers-color-scheme: dark) {
+  :root {
+    --crow-bg-deep: #131a1f;
+    --crow-bg-surface: #1b242b;
+    --crow-accent: #4fbdb0;
+    --crow-text-primary: #e4ebef;
+    --crow-brand-gold: #d9a521;
+  }
 }
 ```
 
