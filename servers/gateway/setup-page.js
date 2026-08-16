@@ -107,7 +107,7 @@ export async function setupPageHandler(req, res) {
       background: white; color: #86868b; font-size: 12px; font-weight: 600;
       cursor: pointer; text-decoration: none;
     }
-    .lang-btn.active { background: #6366f1; color: white; border-color: #6366f1; }
+    .lang-btn.active { background: #0e6b62; color: white; border-color: #0e6b62; }
   </style>
 </head>
 <body>
@@ -135,7 +135,7 @@ export async function setupPageHandler(req, res) {
           style="flex:1;min-width:160px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
         <input type="password" name="confirm" placeholder="${t.confirmPassword}" required minlength="12"
           style="flex:1;min-width:160px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
-        <button type="submit" style="padding:10px 20px;background:#6366f1;color:white;border:none;border-radius:8px;font-weight:500;font-size:14px;cursor:pointer">${t.setPassword}</button>
+        <button type="submit" style="padding:10px 20px;background:#0e6b62;color:white;border:none;border-radius:8px;font-weight:500;font-size:14px;cursor:pointer">${t.setPassword}</button>
       </form>
     </div>`}
   </div>

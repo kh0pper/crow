@@ -74,7 +74,7 @@ export default {
       .ttsp-card-name { font-weight:600; font-size:0.95rem; }
       .ttsp-card-meta { font-size:0.8rem; color:var(--crow-text-muted); }
       .ttsp-card-actions { display:flex; gap:0.5rem; margin-top:0.5rem; flex-wrap:wrap; }
-      .ttsp-badge { font-size:0.65rem; padding:0.1rem 0.4rem; border-radius:3px; background:var(--crow-accent); color:#fff; font-weight:600; margin-left:0.4rem; }
+      .ttsp-badge { font-size:0.65rem; padding:0.1rem 0.4rem; border-radius:3px; background:var(--crow-accent); color:var(--crow-accent-contrast); font-weight:600; margin-left:0.4rem; }
       .ttsp-form { border:1px solid var(--crow-border); border-radius:8px; padding:1rem; margin-top:0.75rem; background:var(--crow-surface); }
       .ttsp-field { margin-bottom:0.75rem; }
       .ttsp-label { display:block; font-size:0.8rem; color:var(--crow-text-muted); margin-bottom:4px; }

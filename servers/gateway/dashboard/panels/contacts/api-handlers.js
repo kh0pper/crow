@@ -302,7 +302,7 @@ export async function handleContactAction(req, db, {
   // --- Group management ---
   if (action === "create_group") {
     const name = (req.body.group_name || "").trim();
-    const color = (req.body.group_color || "#6366f1").trim();
+    const color = (req.body.group_color || "#0e6b62").trim();
     if (name) {
       const gRes = await db.execute({
         sql: "INSERT INTO contact_groups (name, color) VALUES (?, ?)",

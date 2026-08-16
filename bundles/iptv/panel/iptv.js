@@ -94,7 +94,7 @@ export default {
         const groupBadge = ch.group_title
           ? `<span style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:9px;background:var(--crow-accent-muted);color:var(--crow-accent)">${escapeHtml(ch.group_title)}</span>`
           : "";
-        const favStar = ch.is_favorite ? '<span style="color:#fbbf24;font-size:1.1rem" title="Favorite">&#9733;</span>' : "";
+        const favStar = ch.is_favorite ? '<span style="color:var(--crow-brand-gold);font-size:1.1rem" title="Favorite">&#9733;</span>' : "";
         const logo = ch.logo_url
           ? `<img src="${escapeHtml(ch.logo_url)}" alt="" style="width:48px;height:48px;object-fit:contain;border-radius:6px;background:var(--crow-surface)" loading="lazy" onerror="this.style.display='none'">`
           : `<div style="width:48px;height:48px;border-radius:6px;background:var(--crow-surface);display:flex;align-items:center;justify-content:center;font-size:1.4rem;color:var(--crow-text-secondary)">&#128250;</div>`;
@@ -114,7 +114,7 @@ export default {
               <input type="hidden" name="action" value="${ch.is_favorite ? "remove" : "add"}">
               <button type="submit" title="${ch.is_favorite ? "Remove from favorites" : "Add to favorites"}" style="background:none;border:1px solid var(--crow-border);border-radius:6px;padding:0.25rem 0.5rem;cursor:pointer;font-size:0.8rem;color:var(--crow-text-secondary)">${ch.is_favorite ? "&#9733;" : "&#9734;"}</button>
             </form>
-            <a href="/api/iptv/stream/${ch.id}" target="_blank" rel="noopener" title="Open stream" style="display:inline-flex;align-items:center;justify-content:center;background:var(--crow-accent);color:white;border:none;border-radius:6px;padding:0.25rem 0.5rem;font-size:0.75rem;text-decoration:none">&#9654;</a>
+            <a href="/api/iptv/stream/${ch.id}" target="_blank" rel="noopener" title="Open stream" style="display:inline-flex;align-items:center;justify-content:center;background:var(--crow-accent);color:var(--crow-accent-contrast);border:none;border-radius:6px;padding:0.25rem 0.5rem;font-size:0.75rem;text-decoration:none">&#9654;</a>
           </div>
         </div>`;
       }).join("");
@@ -162,7 +162,7 @@ export default {
           <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.8rem;color:var(--crow-text-secondary)">
             <input type="checkbox" name="favorites" value="true"${favOnly ? " checked" : ""}> Favorites
           </label>
-          <button type="submit" style="padding:0.4rem 0.8rem;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-accent);color:white;font-size:0.8rem;cursor:pointer">Filter</button>
+          <button type="submit" style="padding:0.4rem 0.8rem;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-accent);color:var(--crow-accent-contrast);font-size:0.8rem;cursor:pointer">Filter</button>
         </form>
 
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:0.5rem">

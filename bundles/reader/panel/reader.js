@@ -100,7 +100,7 @@ export default {
         .pm-table td { padding:0.5rem 0.75rem; border-bottom:1px solid var(--crow-border); }
         .pm-muted { color:var(--crow-text-muted); font-size:0.85rem; }
         .pm-card { background:var(--crow-bg-surface); border:1px solid var(--crow-border); border-radius:8px; padding:0.75rem 1rem; margin-bottom:0.5rem; }
-        .pm-btn { display:inline-block; padding:0.4rem 0.9rem; background:var(--crow-accent); color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:0.85rem; text-decoration:none; }
+        .pm-btn { display:inline-block; padding:0.4rem 0.9rem; background:var(--crow-accent); color:var(--crow-accent-contrast); border:none; border-radius:6px; cursor:pointer; font-size:0.85rem; text-decoration:none; }
         h3 { margin:1.25rem 0 0.5rem; }
       </style>
 

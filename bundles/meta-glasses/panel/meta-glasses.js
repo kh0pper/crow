@@ -367,7 +367,7 @@ const SHARED_STYLES = `
   .mg-card-meta { font-size: 0.8rem; color: var(--crow-text-muted); margin-top: 0.25rem; }
   .mg-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
   .mg-empty { text-align: center; color: var(--crow-text-muted); padding: 2rem 1rem; border: 1px dashed var(--crow-border); border-radius: 10px; }
-  .mg-badge { font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 3px; background: var(--crow-accent); color: #fff; font-weight: 600; margin-left: 0.4rem; }
+  .mg-badge { font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 3px; background: var(--crow-accent); color: var(--crow-accent-contrast); font-weight: 600; margin-left: 0.4rem; }
   .mg-badge-warn { background: var(--crow-warning, #b45309); }
   .mg-status-dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.4rem; background: var(--crow-text-muted); }
   .mg-status-dot.online { background: var(--crow-success); }

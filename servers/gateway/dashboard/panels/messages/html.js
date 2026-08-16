@@ -12,7 +12,7 @@ import { renderInviteShare, renderPeerInviteForms, renderShortCodeShare, renderS
 
 /** Color palette for peer avatars (deterministic by contact ID) */
 const PEER_COLORS = [
-  "#6366f1", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981",
+  "#0e6b62", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981",
   "#06b6d4", "#f43f5e", "#84cc16", "#d946ef", "#0ea5e9",
 ];
 

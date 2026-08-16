@@ -766,7 +766,7 @@ export function mediaPublicRouter() {
               <a href="${escapeHtml(item.url || "#")}" target="_blank" rel="noopener" style="color:#e2e8f0;text-decoration:none">${escapeHtml(item.title)}</a>
             </div>
             <div style="font-size:0.75rem;color:#888">${escapeHtml(item.source_name || "")}${item.pub_date ? " \u00b7 " + item.pub_date.split("T")[0] : ""}</div>
-            ${paywalled ? '<span style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:rgba(251,191,36,0.15);color:#fbbf24">Subscriber content</span>' : ""}
+            ${paywalled ? '<span style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:rgba(217,165,33,0.15);color:#d9a521">Subscriber content</span>' : ""}
           </div>
         </div>`;
       }).join("");
@@ -785,7 +785,7 @@ export function mediaPublicRouter() {
   .container{max-width:640px;margin:0 auto;padding:2rem 1rem}
   h1{font-family:'DM Sans',sans-serif;font-weight:700;font-size:1.5rem;margin:0 0 0.25rem}
   .meta{font-size:0.85rem;color:#888;margin-bottom:1.5rem}
-  a{color:#6366f1}</style>
+  a{color:#4fbdb0}</style>
 </head><body>
   <div class="container">
     <h1>${escapeHtml(playlist.name)}</h1>

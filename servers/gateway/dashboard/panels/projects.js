@@ -206,12 +206,12 @@ async function renderListView(db, query, layout, lang) {
 
   // Search + filter bar
   const filterBar = `<form method="GET" action="/dashboard/projects" style="display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap;align-items:center">
-    <input type="text" name="q" value="${escapeHtml(searchQuery || "")}" placeholder="Search projects..." style="flex:1;min-width:150px;padding:0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary)">
-    <select name="status" style="padding:0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary)">
+    <input type="text" name="q" value="${escapeHtml(searchQuery || "")}" placeholder="Search projects..." style="flex:1;min-width:150px;padding:0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)">
+    <select name="status" style="padding:0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)">
       <option value="">All statuses</option>
       ${statusOptions.map(s => `<option value="${s}"${statusFilter === s ? " selected" : ""}>${s.charAt(0).toUpperCase() + s.slice(1)}</option>`).join("")}
     </select>
-    <button type="submit" style="padding:0.5rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-pill);color:white;cursor:pointer">Search</button>
+    <button type="submit" style="padding:0.5rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer">Search</button>
   </form>`;
 
   // Project cards
@@ -272,7 +272,7 @@ async function renderListView(db, query, layout, lang) {
         ${formField("Type", "type", { type: "select", options: [{ value: "research", label: "Research" }, { value: "data_connector", label: "Data Connector" }], value: "research" })}
         ${formField("Tags", "tags", { placeholder: "Comma-separated tags" })}
       </div>
-      <button type="submit" style="padding:0.5rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-pill);color:white;cursor:pointer;align-self:flex-start">Create Project</button>
+      <button type="submit" style="padding:0.5rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer;align-self:flex-start">Create Project</button>
     </form>
   </details>`;
 
@@ -355,7 +355,7 @@ async function renderDetailView(db, projectId, layout, lang) {
   const statusBadge = badge(project.status, STATUS_BADGE_MAP[project.status] || "draft");
   const statusOptions = ["active", "paused", "completed", "archived"]
     .filter(s => s !== project.status)
-    .map(s => `<form method="POST" style="display:inline"><input type="hidden" name="action" value="update_status"><input type="hidden" name="id" value="${project.id}"><input type="hidden" name="status" value="${s}"><button type="submit" style="padding:0.25rem 0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-secondary);cursor:pointer;font-size:0.75rem">${s}</button></form>`)
+    .map(s => `<form method="POST" style="display:inline"><input type="hidden" name="action" value="update_status"><input type="hidden" name="id" value="${project.id}"><input type="hidden" name="status" value="${s}"><button type="submit" style="padding:0.25rem 0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-secondary);cursor:pointer;font-size:0.75rem">${s}</button></form>`)
     .join(" ");
 
   // Overview section
@@ -447,7 +447,7 @@ async function renderDetailView(db, projectId, layout, lang) {
              <input type="hidden" name="action" value="remove_member">
              <input type="hidden" name="id" value="${project.id}">
              <input type="hidden" name="contact_id" value="${m.contact_id}">
-             <button type="submit" style="padding:0.2rem 0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-secondary);cursor:pointer;font-size:0.7rem">revoke</button>
+             <button type="submit" style="padding:0.2rem 0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-secondary);cursor:pointer;font-size:0.7rem">revoke</button>
            </form>`;
       return [
         who,
@@ -471,18 +471,18 @@ async function renderDetailView(db, projectId, layout, lang) {
       <input type="hidden" name="action" value="add_member">
       <input type="hidden" name="id" value="${project.id}">
       <label style="display:flex;flex-direction:column;font-size:0.75rem;color:var(--crow-text-secondary)">Contact
-        <select name="contact_id" required style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary);min-width:180px">
+        <select name="contact_id" required style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary);min-width:180px">
           <option value="">— pick contact —</option>
           ${contactOptions}
         </select>
       </label>
       <label style="display:flex;flex-direction:column;font-size:0.75rem;color:var(--crow-text-secondary)">Role
-        <select name="role" required style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary)">${roleOptions}</select>
+        <select name="role" required style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)">${roleOptions}</select>
       </label>
       <label style="display:flex;flex-direction:column;font-size:0.75rem;color:var(--crow-text-secondary);flex:1;min-width:220px">Capability overrides (JSON, optional)
-        <input type="text" name="capabilities" placeholder='{"invoke_bot":false}' style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary);font-family:monospace;font-size:0.8rem">
+        <input type="text" name="capabilities" placeholder='{"invoke_bot":false}' style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary);font-family:monospace;font-size:0.8rem">
       </label>
-      <button type="submit" style="padding:0.5rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-pill);color:white;cursor:pointer">Add</button>
+      <button type="submit" style="padding:0.5rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer">Add</button>
     </form>`;
 
   // Workspace info (slug, dir, prefix) from project_spaces — shown next to overview.

@@ -225,9 +225,9 @@ function callPageHtml({ roomCode, token, hostName, gatewayUrl, wsUrl }) {
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    background: #0f0f17;
+    background: #131a1f;
     color: #fafaf9;
-    font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+    font-family: system-ui, -apple-system, sans-serif;
     height: 100vh;
     overflow: hidden;
   }
@@ -265,14 +265,14 @@ function callPageError(title, message) {
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    background: #0f0f17; color: #fafaf9;
-    font-family: 'DM Sans', system-ui, sans-serif;
+    background: #131a1f; color: #fafaf9;
+    font-family: system-ui, sans-serif;
     display: flex; align-items: center; justify-content: center;
     height: 100vh;
   }
   .error-box {
     text-align: center; max-width: 400px; padding: 40px;
-    background: rgba(26,26,46,0.5); border-radius: 16px;
+    background: rgba(27,36,43,0.5); border-radius: 16px;
     border: 1px solid rgba(61,61,77,0.4);
   }
   h1 { font-size: 20px; margin-bottom: 12px; color: #ef4444; }

@@ -636,7 +636,7 @@ export function messagesClientJS(opts) {
               // Attach routing badge BEFORE streaming content begins so
               // the user sees the route decision immediately.
               if (pendingRoute && (pendingRoute.model_id || pendingRoute.reason)) {
-                var liveBadge = el('div', { className: 'msg-route-badge', css: 'display:inline-flex;align-items:center;gap:4px;margin-bottom:0.25rem;padding:2px 8px;background:var(--crow-accent-muted);color:var(--crow-accent);border-radius:var(--crow-radius-pill,8px);font-size:0.68rem;font-family:\\'JetBrains Mono\\',monospace;letter-spacing:0.02em' });
+                var liveBadge = el('div', { className: 'msg-route-badge', css: 'display:inline-flex;align-items:center;gap:4px;margin-bottom:0.25rem;padding:2px 8px;background:var(--crow-accent-muted);color:var(--crow-accent);border-radius:var(--crow-radius-pill,999px);font-size:0.68rem;font-family:\\'JetBrains Mono\\',monospace;letter-spacing:0.02em' });
                 liveBadge.textContent = (pendingRoute.model_id || '') + (pendingRoute.reason ? ' · ' + pendingRoute.reason : '');
                 assistantDiv.appendChild(liveBadge);
               }
@@ -1248,7 +1248,7 @@ export function messagesClientJS(opts) {
         // msg._route_reason is transiently set on freshly-sent messages
         // from the SSE smart_route event (not persisted).
         if (msg.model_id || msg._route_reason) {
-          var badge = el('div', { className: 'msg-route-badge', css: 'display:inline-flex;align-items:center;gap:4px;margin-bottom:0.25rem;padding:2px 8px;background:var(--crow-accent-muted);color:var(--crow-accent);border-radius:var(--crow-radius-pill,8px);font-size:0.68rem;font-family:\\'JetBrains Mono\\',monospace;letter-spacing:0.02em' });
+          var badge = el('div', { className: 'msg-route-badge', css: 'display:inline-flex;align-items:center;gap:4px;margin-bottom:0.25rem;padding:2px 8px;background:var(--crow-accent-muted);color:var(--crow-accent);border-radius:var(--crow-radius-pill,999px);font-size:0.68rem;font-family:\\'JetBrains Mono\\',monospace;letter-spacing:0.02em' });
           badge.textContent = (msg.model_id || '') + (msg._route_reason ? ' · ' + msg._route_reason : '');
           div.appendChild(badge);
         }
@@ -1500,7 +1500,7 @@ export function messagesClientJS(opts) {
     // Profile
     var profile = document.getElementById('msg-info-profile');
     profile.textContent = '';
-    var avatar = el('div', { className: 'msg-info-avatar', css: 'background:linear-gradient(135deg,#6366f1,#8b5cf6)' });
+    var avatar = el('div', { className: 'msg-info-avatar', css: 'background:linear-gradient(135deg,#0e6b62,#8b5cf6)' });
     avatar.textContent = (conv.provider || 'AI').substring(0, 2).toUpperCase();
     profile.appendChild(avatar);
     profile.appendChild(el('div', { className: 'msg-info-name', text: conv.title || 'Chat' }));
@@ -1536,7 +1536,7 @@ export function messagesClientJS(opts) {
 
     var profile = document.getElementById('msg-info-profile');
     profile.textContent = '';
-    var colors = ['#6366f1','#8b5cf6','#ec4899','#f59e0b','#10b981','#06b6d4','#f43f5e','#84cc16','#d946ef','#0ea5e9'];
+    var colors = ['#0e6b62','#8b5cf6','#ec4899','#f59e0b','#10b981','#06b6d4','#f43f5e','#84cc16','#d946ef','#0ea5e9'];
     var color = colors[(contact.id || 0) % colors.length];
 
     var avatar = el('div', { className: 'msg-info-avatar', css: 'background:' + color });

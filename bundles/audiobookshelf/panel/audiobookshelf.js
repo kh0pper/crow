@@ -332,7 +332,7 @@ function absStyles() {
     .lib-title { font-weight: 600; color: var(--crow-text-primary); margin-bottom: 0.3rem; font-size: 0.95rem; }
     .lib-meta { font-size: 0.8rem; color: var(--crow-text-muted); }
     .play-btn { display: inline-block; margin-top: 0.6rem; background: var(--crow-accent); border: none;
-                border-radius: 6px; padding: 0.4rem 0.8rem; color: #fff; cursor: pointer; font-size: 0.85rem;
+                border-radius: 6px; padding: 0.4rem 0.8rem; color: var(--crow-accent-contrast); cursor: pointer; font-size: 0.85rem;
                 text-decoration: none; transition: background 0.15s; }
     .play-btn:hover { background: var(--crow-accent-hover); }
 
