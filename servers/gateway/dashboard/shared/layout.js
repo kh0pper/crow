@@ -1189,9 +1189,9 @@ function dashboardCss() {
     font-size: 0.9rem;
   }
   .login-error {
-    background: rgba(239,68,68,0.1);
-    border: 1px solid var(--crow-error);
-    color: var(--crow-error);
+    color: var(--crow-text-primary);
+    background: color-mix(in srgb, var(--crow-error) 12%, transparent);
+    border-left: 3px solid var(--crow-error);
     padding: 0.5rem 0.75rem;
     border-radius: var(--crow-radius-control);
     margin-bottom: 1rem;
