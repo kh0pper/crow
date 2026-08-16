@@ -83,6 +83,19 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     ? (projectSpace.workspace_dir + "/bots/" + botId)
     : def.session_dir;
   const tasksDbPath = (projectSpace && projectSpace.tasks_db_uri) || B.TASKS_DB;
+  // Track 3 Task 6: a bot with neither a project-space workspace nor its own
+  // def.session_dir has nowhere to run — the pre-existing code below would
+  // silently mkdir "undefined/sessions" (the literal `undefined/` bug, for
+  // EVERY rail this function serves: gmail, discord, job_runner, perch). Fail
+  // loud and typed instead, so the caller (perch's free-chat spawn above all —
+  // a bot with no bound project and no session_dir configured) gets an
+  // actionable refusal rather than a mangled path on disk.
+  if (!sessionDir) {
+    throw Object.assign(
+      new Error("bot has no working directory — set one in Bot Builder (session_dir) or bind the bot to a project space"),
+      { code: "no_session_dir" }
+    );
+  }
   mkdirSync(sessionDir + "/sessions", { recursive: true });
 
   // Keep the per-bot <sessionDir>/.mcp.json in sync with the def on every

@@ -560,7 +560,10 @@ export function appendAuditBridge(projectId, opts) {
 // can interact with it (member list filtered to invoke_bot=true), what
 // backends are available, and where its workspace lives. The block is
 // short — bots are line-budget sensitive.
-function projectContextBlock(space, members) {
+// Track 3 Task 6: EXPORTED (additive — no rename) so the interactive engine's
+// dispatch brief (perch-interactive.js loadSeams()) can compose the same
+// header a channel turn gets, instead of growing a second copy.
+export function projectContextBlock(space, members) {
   if (!space) return "";
   const lines = [];
   lines.push("PROJECT: " + space.name + "  (id=" + space.id + ", slug=" + space.slug + ")");
