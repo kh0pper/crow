@@ -387,6 +387,12 @@ export function createInteractiveEngine({
       // would otherwise always sort first as "oldest") and re-touched on
       // every child event and every turn end.
       lastEventAt: now(),
+      // Track 3 Task 7 fix round 1: cycle()'s own re-entrancy claim — set
+      // synchronously (before cycle()'s first await) for the duration of one
+      // cycle() call, cleared in a `finally`. A second concurrent cycle() and
+      // a concurrent message() both check this and refuse rather than racing
+      // the in-flight hibernate()/startChild() pair — see cycle()'s header.
+      cycling: false,
     };
   }
 
@@ -1395,6 +1401,13 @@ export function createInteractiveEngine({
     // ---- one synchronous block: guards + reservation, no await between ----
     if (s.state === "stopped") throw engineError("session_stopped");
     if (s.turn) throw engineError("turn_in_progress");
+    // Track 3 Task 7 fix round 1: a cycle() in flight leaves this session
+    // transiently `s.pi === null` mid-hibernate — WITHOUT this check
+    // `needsWake` below would read true and message() would try to WAKE a
+    // session cycle() is already in the middle of respawning, racing
+    // startChild() the same way two concurrent cycle()s used to. Refuse with
+    // the same typed code cycle() itself uses for "busy right now".
+    if (s.cycling) throw engineError("cycle_busy");
     const needsWake = !s.pi;
     // r1 C8: the wake path re-gates. Track 3 Task 7: reserveWithEviction is
     // itself synchronous up to its own handover — a synchronous throw here
@@ -1492,46 +1505,67 @@ export function createInteractiveEngine({
    * re-opening the child is sufficient; nothing here is card- or
    * turn-specific.
    *
-   * Refused with `cycle_busy` while a turn is in flight OR a card is pending
-   * — cycling mid-turn would race promptTurn's own completion path, and
-   * cycling with a pendingUi card would destroy a question a human has not
-   * yet answered (hibernate()'s own I5 guard would silently no-op that case
-   * anyway, but refusing HERE gives the caller an honest, typed reason rather
-   * than a wake that quietly did nothing).
+   * Refused with `cycle_busy` while a turn is in flight, a card is pending,
+   * OR another cycle() is already running on this session — cycling mid-turn
+   * would race promptTurn's own completion path, cycling with a pendingUi
+   * card would destroy a question a human has not yet answered (hibernate()'s
+   * own I5 guard would silently no-op that case anyway, but refusing HERE
+   * gives the caller an honest, typed reason rather than a wake that quietly
+   * did nothing), and two concurrent cycle()s on ONE session would otherwise
+   * both observe `s.pi` already null after the first's `hibernate()` closes
+   * it (fix round 1, coordinator-reported): the second sees a "hibernating"
+   * session, no-ops its own hibernate(), and spawns a SECOND child — then the
+   * first's suspended `startChild` resumes and spawns a THIRD, clobbering
+   * `s.pi` and orphaning the second's child as an uncounted leaked process.
+   *
+   * `s.cycling` is the re-entrancy claim, set in the SAME synchronous
+   * prefix as the other cycle_busy guards (before the first await) — the
+   * exact idiom `message()`'s own `s.turn` claim and `reserveSlot`'s
+   * capacity reservation already use — and released in a `finally` so a
+   * mid-flight failure never wedges the session cycle-locked forever.
+   * `message()` also checks it (see below): a session is transiently neither
+   * "awake" nor cleanly "hibernating" for the DB-claim purposes while a
+   * cycle is in flight, and without this check a concurrent `message()`
+   * would try to WAKE mid-cycle, racing `startChild` the same way.
    */
   async function cycle(sessionId) {
     const S = await loadSeams();
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     if (s.state === "stopped") throw engineError("session_stopped");
-    if (s.turn || s.pendingUi) throw engineError("cycle_busy");
-    await hibernate(s);                                // no-op if already hibernating
-    // ---- one synchronous block: reservation, no await between check+flip --
-    const pending = reserveWithEviction(S, s);
-    // ---------------------------------------------------------------------
+    if (s.turn || s.pendingUi || s.cycling) throw engineError("cycle_busy");
+    s.cycling = true;                                  // ← the re-entrancy claim
     try {
-      if (pending) await pending;
-      await assertRowClaimable(s);
-      await startChild(S, s);
-    } catch (e) {
-      // Same I-3 discipline as message()'s wake-failure cleanup: release the
-      // reservation unconditionally and first, detach before closing so
-      // attachExit treats the exit as expected, never await the close.
-      const pi = s.pi;
-      s.pi = null;
-      s.state = "hibernating";
-      writeLeases();
-      if (pi) {
-        pi.close().catch(() => { /* already dead */ });
-        if (!e || e.code !== "turn_in_progress") {
-          writeRow(s, { status: "waiting-user" }).catch(() => {});
+      await hibernate(s);                              // no-op if already hibernating
+      // ---- one synchronous block: reservation, no await between check+flip
+      const pending = reserveWithEviction(S, s);
+      // -----------------------------------------------------------------
+      try {
+        if (pending) await pending;
+        await assertRowClaimable(s);
+        await startChild(S, s);
+      } catch (e) {
+        // Same I-3 discipline as message()'s wake-failure cleanup: release
+        // the reservation unconditionally and first, detach before closing
+        // so attachExit treats the exit as expected, never await the close.
+        const pi = s.pi;
+        s.pi = null;
+        s.state = "hibernating";
+        writeLeases();
+        if (pi) {
+          pi.close().catch(() => { /* already dead */ });
+          if (!e || e.code !== "turn_in_progress") {
+            writeRow(s, { status: "waiting-user" }).catch(() => {});
+          }
         }
+        throw e;
       }
-      throw e;
+      emit(s, stateEvent(s));
+      armIdle(s);
+      return { state: s.state };
+    } finally {
+      s.cycling = false;
     }
-    emit(s, stateEvent(s));
-    armIdle(s);
-    return { state: s.state };
   }
 
   /**
