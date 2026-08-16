@@ -418,6 +418,29 @@ test("the unattached callout links to the Bot Builder panel", async () => {
   assert.ok(link, "the callout must link to the Bot Builder panel so the operator can act on it");
 });
 
+test("a db query error must HIDE the callout, not show it — 'unknown' must never render as 'confirmed zero'", async () => {
+  // A query-level failure (bad connection, locked db, no pi_bot_defs table at
+  // all) is genuinely different from "the table has zero attached rows": the
+  // panel cannot tell whether a bot is attached, so showing the unattached
+  // callout would be a specific, plausible, WRONG diagnosis that sends the
+  // operator to redo working configuration. Point CROW_DATA_DIR at a fresh
+  // directory with no init-db'd schema — better-sqlite3 happily creates the
+  // empty file, so the SELECT itself is what fails (no such table).
+  await arrangeRuntime("running");
+  const brokenDir = mkdtempSync(join(scratch, "broken-db-"));
+  const savedDataDir = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = brokenDir;
+  try {
+    const html = await render("en");
+    assert.ok(!html.includes(translations["perch.unattachedTitle"].en),
+      "a db read error rendered the unattached callout — 'unknown' must never render as 'confirmed zero'");
+    const { document } = parseHTML(`<html><body>${html}</body></html>`);
+    assert.equal(document.querySelectorAll("iframe").length, 1, "the lens must still render on a db error");
+  } finally {
+    process.env.CROW_DATA_DIR = savedDataDir;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 5. The gate client, executed
 // ---------------------------------------------------------------------------
