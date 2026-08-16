@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import designSystemPanel from "../servers/gateway/dashboard/panels/design-system.js";
+import { designTokensCss } from "../servers/gateway/dashboard/shared/design-tokens.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,9 +71,19 @@ test("token scales are defined", () => {
   for (const tk of ["--crow-space-1", "--crow-space-4", "--crow-space-8",
                      "--crow-text-xs", "--crow-text-base", "--crow-text-3xl",
                      "--crow-leading-tight", "--crow-leading-relaxed",
-                     "--crow-text-tertiary", "--crow-warning"]) {
+                     "--crow-text-tertiary", "--crow-warning",
+                     "--crow-accent-contrast", "--crow-radius-control", "--crow-border-strong"]) {
     assert.ok(src.includes(tk + ":"), `expected ${tk} defined in design-tokens.js`);
   }
+});
+
+test("designTokensCss: light values on :root, dark values inside the prefers-color-scheme media block", () => {
+  const css = designTokensCss();
+  const rootBlock = css.slice(0, css.indexOf("@media"));
+  assert.ok(rootBlock.includes("#eef1f3"), "expected new light ground #eef1f3 on :root");
+  const darkIdx = css.indexOf("@media (prefers-color-scheme: dark)");
+  assert.ok(darkIdx !== -1, "expected a prefers-color-scheme: dark media block");
+  assert.ok(css.slice(darkIdx).includes("#131a1f"), "expected new dark ground #131a1f inside the dark media block");
 });
 
 test("button: variant/size classes, <a> vs <button>, escaping", () => {

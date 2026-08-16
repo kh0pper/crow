@@ -31,7 +31,6 @@ function formatDate(dateStr) {
 
 /**
  * Scoped songbook CSS — uses design tokens, no hardcoded colors.
- * Glass effects only activate when .theme-glass is set on body.
  */
 function songbookCss() {
   return `
@@ -52,14 +51,6 @@ function songbookCss() {
     background: var(--crow-bg-deep);
     border-bottom: 0.5px solid var(--crow-border);
     padding: 12px 24px;
-  }
-  .theme-glass .nav {
-    backdrop-filter: var(--crow-glass-blur-heavy);
-    -webkit-backdrop-filter: var(--crow-glass-blur-heavy);
-    background: rgba(0,0,0,0.72);
-  }
-  .theme-glass.theme-light .nav {
-    background: rgba(245,245,247,0.72);
   }
   .nav-inner { max-width: 800px; margin: 0 auto; display: flex; align-items: center; gap: 16px; }
   .nav-brand { font-size: 13px; font-weight: 600; letter-spacing: 0.5px; color: var(--crow-text-muted); }
@@ -98,10 +89,6 @@ function songbookCss() {
     padding: 5px 14px; font-size: 13px; font-weight: 500;
     color: var(--crow-text-secondary); border: 0.5px solid var(--crow-border);
   }
-  .theme-glass .pill {
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-  }
   .pill .val { color: var(--crow-text-primary); font-weight: 600; }
 
   /* Transpose */
@@ -129,10 +116,6 @@ function songbookCss() {
     background: var(--crow-bg-surface); border-radius: var(--crow-radius-card);
     border: 0.5px solid var(--crow-border);
     padding: 20px 24px; margin-bottom: 32px;
-  }
-  .theme-glass .diagrams-card {
-    backdrop-filter: var(--crow-glass-blur);
-    -webkit-backdrop-filter: var(--crow-glass-blur);
   }
   .diagrams-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
   .diagrams-header h3 {
@@ -186,10 +169,6 @@ function songbookCss() {
     background: var(--crow-bg-surface); border-radius: var(--crow-radius-card);
     border: 0.5px solid var(--crow-border);
     padding: 24px; margin-bottom: 32px;
-  }
-  .theme-glass .player-card {
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
   }
   .player-title {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
@@ -303,7 +282,6 @@ export function renderSongPage(post, options = {}) {
   const effectiveMode = blogSettings.themeBlogMode || blogSettings.themeMode || "dark";
   const bodyClasses = [
     effectiveMode === "light" ? "theme-light" : "",
-    blogSettings.themeGlass ? "theme-glass" : "",
     blogSettings.themeSerif ? "theme-serif" : "",
   ].filter(Boolean).join(" ");
 
@@ -471,7 +449,6 @@ export function renderSongbookIndex(posts, options = {}) {
   const effectiveMode = blogSettings.themeBlogMode || blogSettings.themeMode || "dark";
   const bodyClasses = [
     effectiveMode === "light" ? "theme-light" : "",
-    blogSettings.themeGlass ? "theme-glass" : "",
     blogSettings.themeSerif ? "theme-serif" : "",
   ].filter(Boolean).join(" ");
 
@@ -584,7 +561,6 @@ export function renderSetlistPage(setlist, items, options = {}) {
   const effectiveMode = blogSettings.themeBlogMode || blogSettings.themeMode || "dark";
   const bodyClasses = [
     effectiveMode === "light" ? "theme-light" : "",
-    blogSettings.themeGlass ? "theme-glass" : "",
     blogSettings.themeSerif ? "theme-serif" : "",
   ].filter(Boolean).join(" ");
 

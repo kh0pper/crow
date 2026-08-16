@@ -4,52 +4,60 @@
  */
 
 /** Google Fonts import URL */
-export const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;1,9..144,400&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=Source+Sans+3:wght@400;500;600&display=swap');`;
+export const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');`;
 
 /** CSS custom property definitions for all themes */
 export function designTokensCss() {
   return `
   :root {
-    --crow-bg-deep: #0f0f17;
-    --crow-bg-surface: #1a1a2e;
-    --crow-bg-elevated: #2d2d3d;
-    --crow-border: #3d3d4d;
-    --crow-text-primary: #fafaf9;
-    --crow-text-secondary: #a8a29e;
-    --crow-text-muted: #78716c;
-    --crow-accent: #6366f1;
-    --crow-accent-hover: #818cf8;
-    --crow-accent-muted: #2d2854;
-    --crow-brand-gold: #fbbf24;
-    --crow-success: #22c55e;
-    --crow-error: #ef4444;
-    --crow-info: #38bdf8;
-    --crow-warning: #f59e0b;
-    --crow-text-tertiary: #8b8680;
-  }
-
-  .theme-light {
-    --crow-bg-deep: #fafaf9;
+    --crow-bg-deep: #eef1f3;
     --crow-bg-surface: #ffffff;
-    --crow-bg-elevated: #f5f5f4;
-    --crow-border: #e7e5e4;
-    --crow-text-primary: #1c1917;
-    --crow-text-secondary: #57534e;
-    --crow-text-muted: #a8a29e;
-    --crow-accent: #4f46e5;
-    --crow-accent-hover: #6366f1;
-    --crow-accent-muted: #e0e7ff;
-    --crow-text-tertiary: #78716c;
-    --crow-warning: #d97706;
+    --crow-bg-elevated: #f5f7f8;
+    --crow-border: #dde4e8;
+    --crow-border-strong: #94a4ae;
+    --crow-text-primary: #22303a;
+    --crow-text-secondary: #5c6d79;
+    --crow-text-tertiary: #6b7c88;
+    --crow-text-muted: #8395a1;
+    --crow-accent: #0e6b62;
+    --crow-accent-hover: #0b574f;
+    --crow-accent-muted: #dcecea;
+    --crow-accent-contrast: #ffffff;
+    --crow-success: #1d7048;
+    --crow-error: #b04a2b;
+    --crow-warning: #8f5606;
+    --crow-info: #33688c;
+    --crow-brand-gold: #8f5606;
   }
 
-  .theme-serif {
-    --crow-body-font: 'Fraunces', serif;
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --crow-bg-deep: #131a1f;
+      --crow-bg-surface: #1b242b;
+      --crow-bg-elevated: #232e36;
+      --crow-border: #2a353d;
+      --crow-border-strong: #46565f;
+      --crow-text-primary: #e4ebef;
+      --crow-text-secondary: #8fa0ab;
+      --crow-text-tertiary: #7d8f9a;
+      --crow-text-muted: #5f707b;
+      --crow-accent: #4fbdb0;
+      --crow-accent-hover: #6fd0c4;
+      --crow-accent-muted: #16322f;
+      --crow-accent-contrast: #131a1f;
+      --crow-success: #2fa36b;
+      --crow-error: #d1633e;
+      --crow-warning: #d9a521;
+      --crow-info: #6aa9cc;
+      --crow-brand-gold: #d9a521;
+    }
   }
 
-  /* Base radius tokens */
+  /* Base radius tokens. --crow-radius-pill stays 8px in this task — Task 7
+     re-values it to 999px after the pill-consumer triage. */
   :root {
-    --crow-radius-card: 12px;
+    --crow-radius-card: 14px;
+    --crow-radius-control: 10px;
     --crow-radius-pill: 8px;
   }
 
@@ -65,6 +73,9 @@ export function designTokensCss() {
 
     --crow-leading-tight: 1.2; --crow-leading-normal: 1.5; --crow-leading-relaxed: 1.7;
 
+    --crow-body-font: 'Inter', system-ui, sans-serif;
+    --crow-mono-font: 'JetBrains Mono', monospace;
+
     /* Compatibility aliases — legacy names used across panels. Prefer the
        canonical token (right side) in NEW code. These reference the canonical
        custom properties, so they track theme overrides automatically. */
@@ -75,47 +86,6 @@ export function designTokensCss() {
     --crow-text: var(--crow-text-primary);
     --crow-border-subtle: var(--crow-border);
     --crow-accent-bg: var(--crow-accent-muted);
-  }
-
-  /* Glass aesthetic — iOS-inspired blur/transparency */
-  .theme-glass {
-    --crow-bg-deep: #000000;
-    --crow-bg-surface: rgba(255,255,255,0.03);
-    --crow-bg-elevated: rgba(255,255,255,0.06);
-    --crow-border: rgba(255,255,255,0.06);
-    --crow-text-primary: #f5f5f7;
-    --crow-text-secondary: rgba(255,255,255,0.55);
-    --crow-text-muted: rgba(255,255,255,0.35);
-    --crow-accent: #2997ff;
-    --crow-accent-hover: #64b5f6;
-    --crow-accent-muted: rgba(41,151,255,0.1);
-    --crow-success: #30d158;
-    --crow-error: #ff453a;
-    --crow-info: #64d2ff;
-    --crow-glass-blur: blur(12px);
-    --crow-glass-blur-heavy: saturate(180%) blur(20px);
-    --crow-radius-card: 16px;
-    --crow-radius-pill: 100px;
-    --crow-bg-popup: rgba(30,30,30,0.85);
-    --crow-border-popup: rgba(255,255,255,0.12);
-    --crow-text-tertiary: rgba(255,255,255,0.45);
-    --crow-warning: #ff9f0a;
-  }
-
-  .theme-glass.theme-light {
-    --crow-bg-deep: #f5f5f7;
-    --crow-bg-surface: rgba(0,0,0,0.03);
-    --crow-bg-elevated: rgba(0,0,0,0.06);
-    --crow-border: rgba(0,0,0,0.08);
-    --crow-text-primary: #1c1917;
-    --crow-text-secondary: rgba(0,0,0,0.55);
-    --crow-text-muted: rgba(0,0,0,0.35);
-    --crow-accent: #0071e3;
-    --crow-accent-hover: #0077ed;
-    --crow-accent-muted: rgba(0,113,227,0.1);
-    --crow-bg-popup: rgba(245,245,247,0.85);
-    --crow-border-popup: rgba(0,0,0,0.12);
-    --crow-text-tertiary: rgba(0,0,0,0.45);
   }`;
 }
 
