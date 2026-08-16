@@ -170,6 +170,27 @@ if (init.status !== 0) {
 if (!existsSync(TEMP)) bail("init-db.js did not produce the temp DB file.");
 
 // ---------------------------------------------------------------------------
+// 3b. BUNDLE-TABLE GAP — sync_outbox / sync_state are created lazily by
+// ensureSyncTables() (servers/shared/sync-stamp.js), NOT by init-db.js /
+// SCHEMA_GENERATION — a fresh-schema build via init-db.js alone never
+// creates them. Without this step they'd be absent from TEMP's
+// sqlite_master, so the per-table copy loop below (driven off
+// main.sqlite_master) would silently never even consider them — dropping
+// any queued-but-undelivered sync_outbox rows on a recovery (stdio-sync-
+// outbox spec, "Observability": "the known recover-db bundle-table gap
+// otherwise silently drops queued rows on a .dump rebuild"). Creating them
+// here (empty) puts them in the known-table set the loop already walks, so
+// the normal readable-copy / completeness-gate path covers them too.
+// ---------------------------------------------------------------------------
+{
+  const { createDbClient } = await import("../servers/db.js");
+  const { ensureSyncTables } = await import("../servers/shared/sync-stamp.js");
+  const bundleDb = createDbClient(TEMP);
+  await ensureSyncTables(bundleDb);
+  bundleDb.close();
+}
+
+// ---------------------------------------------------------------------------
 // 4-5. SALVAGE readable base tables + rebuild FTS
 // ---------------------------------------------------------------------------
 // Federation audit (corrupt-prone, expendable) + ephemeral session state.
