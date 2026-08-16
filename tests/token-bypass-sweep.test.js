@@ -84,7 +84,6 @@ test("check 2: no color:#fff/white in the same rule as background: var(--crow-ac
   // attributes on elements whose style also sets `background:var(--crow-accent)`.
   const BG_ACCENT = /background:\s*var\(--crow-accent\)/i;
   const WHITE_TEXT = /color:\s*(#fff\b|#ffffff\b|white\b)/i;
-  const NOT_WHITE_SPACE = /white-space/i;
   const hits = [];
   for (const { rel, src } of FILES) {
     // Scan rule-ish chunks: split on `}` for CSS blocks and on `>` /`"` boundaries
@@ -93,7 +92,7 @@ test("check 2: no color:#fff/white in the same rule as background: var(--crow-ac
     // block (bounded by `{`/`}` for CSS, or the same style="..." string for HTML).
     const chunks = src.split(/[{}]/);
     for (const chunk of chunks) {
-      if (BG_ACCENT.test(chunk) && WHITE_TEXT.test(chunk) && !NOT_WHITE_SPACE.test(chunk.replace(WHITE_TEXT, ""))) {
+      if (BG_ACCENT.test(chunk) && WHITE_TEXT.test(chunk)) {
         hits.push(`${rel}: ${chunk.trim().slice(0, 160)}`);
       }
     }

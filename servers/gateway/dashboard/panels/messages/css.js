@@ -125,7 +125,7 @@ export function messagesCSS() {
     font-weight: 700;
     border-radius: 8px;
     background: var(--crow-brand-gold, #8f5606);
-    color: #000;
+    color: var(--crow-accent-contrast);
     padding: 0 3px;
     display: none;
   }
@@ -730,7 +730,7 @@ export function messagesCSS() {
     border: none;
     border-radius: 6px;
     background: var(--crow-accent);
-    color: #fff;
+    color: var(--crow-accent-contrast);
     cursor: pointer;
     white-space: nowrap;
   }
