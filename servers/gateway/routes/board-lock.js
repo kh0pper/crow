@@ -35,7 +35,16 @@
 // bot_sessions statuses that mean "a pi turn owns this card right now".
 // NOT a description of jobs — a job's 'queued' is not a session state, and
 // widening this set to cover it would make it lie to every other reader.
-export const SESSION_LOCK_STATUSES = new Set(["active", "waiting-user"]);
+//
+// T3-9 (2026-08-16 board×Perch merge spec): 'waiting-user' no longer locks.
+// It used to mean a turn was paused mid-conversation waiting on a human
+// reply, but Perch's always-on interactive channel now spends most of its
+// life in 'waiting-user' between turns — treating that as a card lock would
+// make an idle perch-live row block dispatch forever. Only 'active' (a turn
+// actually running right now) holds the card. See `kind != 'perch-live'`
+// below for the companion half of T3-9: perch-live rows are excluded from
+// this rail entirely, active or not.
+export const SESSION_LOCK_STATUSES = new Set(["active"]);
 
 // bot_jobs statuses that are not yet terminal. job_runner claims from 'queued'
 // and recovers from 'running'; 'completed'/'failed' are its only end states, so
@@ -68,6 +77,11 @@ export async function jobLockFor(db, cardId) {
 /**
  * The MAX(id) bot_sessions row for a card, or null. Returned even when its
  * status is not a locking one: force-unlock reports what it found.
+ *
+ * T3-9: perch-live rows are invisible to the lock rail — `kind != 'perch-live'`
+ * is in the WHERE clause, not a post-hoc filter on the result, so an older
+ * non-perch-live row underneath a newer perch-live one is still found and
+ * still reported (including for force-unlock).
  */
 export async function sessionRowFor(db, cardId) {
   try {
@@ -75,7 +89,7 @@ export async function sessionRowFor(db, cardId) {
       sql:
         "SELECT id, bot_id, status, pi_session_dir, " +
         "(strftime('%s','now') - strftime('%s', updated_at)) AS age_s " +
-        "FROM bot_sessions WHERE card_id=? ORDER BY id DESC LIMIT 1",
+        "FROM bot_sessions WHERE card_id=? AND kind != 'perch-live' ORDER BY id DESC LIMIT 1",
       args: [cardId],
     })).rows[0];
     return r || null;
@@ -120,10 +134,14 @@ export async function lockedCardIds(db, cardIds) {
     for (const r of rows) locked.add(Number(r.card_id));
   } catch { /* bot_jobs absent — this rail holds nothing */ }
   try {
+    // T3-9: the inner MAX(id) subquery excludes perch-live rows, so a
+    // perch-live row can never be the "newest" one selected here — the outer
+    // fetch then only ever sees a non-perch-live row (or none, for a card
+    // whose only bot_sessions rows are perch-live).
     const rows = (await db.execute({
       sql:
         "SELECT card_id, status FROM bot_sessions " +
-        `WHERE id IN (SELECT MAX(id) FROM bot_sessions WHERE card_id IN (${ph}) GROUP BY card_id)`,
+        `WHERE id IN (SELECT MAX(id) FROM bot_sessions WHERE card_id IN (${ph}) AND kind != 'perch-live' GROUP BY card_id)`,
       args: ids,
     })).rows || [];
     for (const r of rows) {
