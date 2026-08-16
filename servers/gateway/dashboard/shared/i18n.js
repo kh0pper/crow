@@ -1384,6 +1384,31 @@ export const translations = {
   "botboard.viewColumns": { en: "Columns", es: "Columnas" },
   "botboard.viewList": { en: "List", es: "Lista" },
 
+  // \u2500\u2500\u2500 Board \u2014 Track 3 Task 12: the roost strip \u2500\u2500\u2500
+  "botboard.roostEmpty": { en: "No bots yet.", es: "A\u00fan no hay bots." },
+  "botboard.roostStateIdle": { en: "Idle", es: "Inactivo" },
+  "botboard.roostStateWorking": { en: "Working", es: "Trabajando" },
+  "botboard.roostStateWaiting": { en: "Waiting on you", es: "Esperando tu respuesta" },
+  "botboard.roostStateHibernating": { en: "Hibernating", es: "Hibernando" },
+  "botboard.roostStateObserving": { en: "Observing", es: "Observando" },
+  "botboard.roostActionSendOut": { en: "Send out", es: "Enviar" },
+  "botboard.roostActionOpen": { en: "Open", es: "Abrir" },
+  "botboard.roostActionAnswer": { en: "Answer", es: "Responder" },
+  "botboard.roostActionAttach": { en: "Attach", es: "Conectar" },
+  "botboard.roostActionTalk": { en: "Talk", es: "Hablar" },
+  "botboard.roostActionSessions": { en: "Sessions", es: "Sesiones" },
+  "botboard.roostActionRecall": { en: "Recall", es: "Retirar" },
+  "botboard.roostActionSetup": { en: "Setup", es: "Configurar" },
+  "botboard.roostMoreAria": { en: "More actions", es: "M\u00e1s acciones" },
+  "botboard.roostDispatchTitle": { en: "Send out", es: "Enviar" },
+  "botboard.roostDispatchCardLabel": { en: "Card", es: "Tarjeta" },
+  "botboard.roostDispatchNoteLabel": { en: "Note (optional)", es: "Nota (opcional)" },
+  "botboard.roostDispatchNoCards": { en: "No free cards to send this bot to.", es: "No hay tarjetas libres para enviar a este bot." },
+  "botboard.roostDispatchConfirm": { en: "Send", es: "Enviar" },
+  "botboard.roostDispatchOccupied": { en: "That card was just claimed by another session.", es: "Esa tarjeta acaba de ser tomada por otra sesi\u00f3n." },
+  "botboard.roostConfirmRecall": { en: "Recall this session? This stops it.", es: "\u00bfRetirar esta sesi\u00f3n? Esto la detiene." },
+  "botboard.roostActionFailed": { en: "Action failed.", es: "La acci\u00f3n fall\u00f3." },
+
   // ─── Board — Track 1 archiving (D-T1.6) ───
   // board.planVersions / board.planApprove / board.historyTitle / board.autonomy*
   // are forward-declared here (design doc's full D-T1.3/D-T1.4 string list) for
