@@ -51,6 +51,11 @@ let boardId, openItemId, lockedItemId;
   openItemId = Number(insItem.run(boardId, null, "open", 2, "Open Item", '{"asset_type":"poster"}', null, null, null).lastInsertRowid);
   lockedItemId = Number(insItem.run(boardId, "scout", "review", 3, "Locked Item", '{"asset_type":"flyer"}', "needs review", "lease-1", "in-progress").lastInsertRowid);
 
+  // A tagged item (Track 2 Task 10, W4/§5.2) — the tracker face must render
+  // the same bb-tags/bb-tag pills the kanban face already draws.
+  const taggedItemId = Number(insItem.run(boardId, null, "open", 2, "Tagged Item", '{"asset_type":"poster"}', null, null, null).lastInsertRowid);
+  t.prepare("UPDATE tasks_items SET tags=? WHERE id=?").run("grant,urgent", taggedItemId);
+
   // A plain project card (project_id set, board_id NULL) — must NOT appear
   // on the tracker board (isolation).
   t.prepare("INSERT INTO tasks_items (title, project_id, status) VALUES ('Plain Project Card', 9, 'todo')").run();
@@ -100,6 +105,25 @@ test("renderCustomTracker draws a bb-col per def status, items via label, lock b
   const openCardHtmlStart = html.lastIndexOf('<div class="bb-card', openCardStart);
   const openCardTag = html.slice(openCardHtmlStart, openCardHtmlStart + 80);
   assert.ok(!openCardTag.includes("bb-locked"), "open item's card must not carry bb-locked: " + openCardTag);
+});
+
+test("renderCustomTracker draws bb-tag pills for a tracker item carrying tags", async () => {
+  const html = await render("pir");
+  const taggedStart = html.indexOf("Tagged Item");
+  assert.ok(taggedStart >= 0, "tagged item renders");
+  const cardStart = html.lastIndexOf('<div class="bb-card', taggedStart);
+  const cardEnd = html.indexOf("</form></div>", taggedStart) + "</form></div>".length;
+  const cardHtml = html.slice(cardStart, cardEnd);
+  assert.ok(cardHtml.includes('<div class="bb-tags">'), "tagged item's card carries a bb-tags block: " + cardHtml);
+  assert.ok(cardHtml.includes('<span class="bb-tag">grant</span>'), "grant pill renders: " + cardHtml);
+  assert.ok(cardHtml.includes('<span class="bb-tag">urgent</span>'), "urgent pill renders: " + cardHtml);
+
+  // Untagged items must not carry a bb-tags block (Open Item has no tags).
+  const openStart = html.indexOf(`data-card="${openItemId}"`);
+  const openCardStart = html.lastIndexOf('<div class="bb-card', openStart);
+  const openCardEnd = html.indexOf("</form></div>", openStart) + "</form></div>".length;
+  const openCardHtml = html.slice(openCardStart, openCardEnd);
+  assert.ok(!openCardHtml.includes("bb-tags"), "untagged item renders no tags block: " + openCardHtml);
 });
 
 test("contextFields fall back to def.fields when the bot has none configured", async () => {

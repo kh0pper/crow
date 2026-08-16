@@ -27,6 +27,18 @@ function defStatusLabel(def, s, lang) {
   return def.builtin ? statusLabel(s, lang) : String(s);
 }
 
+// Shared tag-pill builder (Track 2 Task 10, W4/§5.2) — the kanban face
+// (cardFaceHtml) and the tracker face (trackerCardFaceHtml) both render a
+// card/item's comma-separated `tags` column as the same `.bb-tags`/`.bb-tag`
+// pill block. Extracted so a tracker-side tags read doesn't drift from the
+// kanban rendering it was copied from.
+function tagPillsHtml(tags) {
+  return tags
+    ? `<div class="bb-tags">${String(tags).split(",").map((s) => s.trim()).filter(Boolean)
+        .map((tg) => `<span class="bb-tag">${escapeHtml(tg)}</span>`).join("")}</div>`
+    : "";
+}
+
 // The card face's meta row for a board's declared fields. `column`-backed
 // fields read the typed column; `data` fields read data_json.
 function declaredFieldMeta(def, card, data) {
@@ -45,10 +57,7 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
     `<span class="bb-prio bb-prio-${escapeHtml(String(card.priority))}" title="${t("botboard.titlePriorityPrefix", lang)} ${escapeHtml(String(card.priority))}">P${escapeHtml(String(card.priority))}</span>`;
   const due = card.due_date ? `<span class="bb-meta">⏱ ${escapeHtml(String(card.due_date))}</span>` : "";
   const owner = card.owner ? `<span class="bb-meta">👤 ${escapeHtml(String(card.owner))}</span>` : "";
-  const tags = card.tags
-    ? `<div class="bb-tags">${String(card.tags).split(",").map((s) => s.trim()).filter(Boolean)
-        .map((tg) => `<span class="bb-tag">${escapeHtml(tg)}</span>`).join("")}</div>`
-    : "";
+  const tags = tagPillsHtml(card.tags);
   const sub = card.parent_id != null
     ? `<div class="bb-sub">↳ subtask of #${escapeHtml(String(card.parent_id))}</div>` : "";
   const lockBadge = locked
@@ -111,12 +120,13 @@ export function trackerCardFaceHtml(item, contextFields, statusValues, locked, l
   // Extract metadata from data_json for context fields (skip "label" and "status")
   let data = {};
   try { data = JSON.parse(item.data_json || "{}"); } catch { data = {}; }
-  const searchParts = [item.label || "", item.status || ""];
+  const searchParts = [item.label || "", item.status || "", item.tags || ""];
   for (const v of Object.values(data)) {
     if (v != null && v !== "") searchParts.push(typeof v === "object" ? JSON.stringify(v) : String(v));
   }
   if (item.action_needed) searchParts.push(String(item.action_needed));
   const searchText = searchParts.join(" ").toLowerCase();
+  const tags = tagPillsHtml(item.tags);
   const metaParts = [];
   for (const cf of contextFields) {
     const key = typeof cf === "string" ? cf : (cf.key || cf.name || "");
@@ -148,7 +158,7 @@ export function trackerCardFaceHtml(item, contextFields, statusValues, locked, l
     `aria-label="item ${escapeHtml(String(item.id))}: ${escapeHtml(String(item.label || ""))}">` +
     `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(item.id))}</span>${lockBadge}${archivedBadge}</div>` +
     `<div class="bb-title">${escapeHtml(String(item.label || "(untitled)"))}</div>` +
-    metaHtml + actionHtml +
+    metaHtml + tags + actionHtml +
     `<form method="POST" action="/dashboard/bot-board" class="bb-nojs-move">` +
     `<input type="hidden" name="action" value="tracker_move">` +
     `<input type="hidden" name="item_id" value="${escapeHtml(String(item.id))}">` +
@@ -553,7 +563,7 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
   try {
     items = (await tdb.execute({
       sql:
-        "SELECT id, board_id, bot_id, status, priority, title AS label, data_json, action_needed, " +
+        "SELECT id, board_id, bot_id, status, priority, title AS label, tags, data_json, action_needed, " +
         "next_followup_date, processing_lease, processing_lease_status, archived_at, " +
         "datetime(created_at) AS created_at, datetime(updated_at) AS updated_at " +
         "FROM tasks_items WHERE board_id=?" + (includeArchived ? "" : " AND archived_at IS NULL") +

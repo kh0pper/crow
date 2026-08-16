@@ -238,6 +238,18 @@ test("updateCard rejects an invalid autonomy value (bad_autonomy, 400); createCa
   });
 });
 
+test("updateCard rejects an explicit autonomy: null with the same bad_autonomy/400 shape (Track 2 Task 10 — norm != null used to let null slip through)", async () => {
+  await withStore(async ({ tdb }) => {
+    const { id } = await createCard(tdb, { title: "c", status: "pending", autonomy: "auto" }, HUMAN);
+    await assert.rejects(
+      () => updateCard(tdb, id, { autonomy: null }, HUMAN),
+      (e) => { assert.equal(e.code, "bad_autonomy"); assert.equal(e.http, 400); return true; },
+    );
+    // the write must not have gone through — autonomy is NOT NULL by contract
+    assert.equal((await getCard(tdb, id)).autonomy, "auto");
+  });
+});
+
 test("updateCard: re-parenting inherits the new parent's project_id, both fields land in the diff", async () => {
   await withStore(async ({ tdb }) => {
     const parentA = await createCard(tdb, { title: "parentA", status: "pending", project_id: 1 }, HUMAN);
