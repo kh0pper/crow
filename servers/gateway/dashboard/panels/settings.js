@@ -3,9 +3,11 @@
  *
  * Thin orchestrator that delegates to section modules in ../settings/sections/.
  * POST dispatch happens BEFORE the ?section check so it works from any page —
- * settings/sections/theme.js's set_theme/set_theme_mode handlers still hang
- * off this dispatch (Blog theme section) even though the dashboard's own
- * sidebar theme toggle that used to post here retired in Task 4 (2026-08-15).
+ * settings/sections/theme.js's update_theme/set_kiosk handlers hang off this
+ * dispatch (Blog theme section) even though the dashboard's own sidebar
+ * theme toggle that used to post here retired in Task 4 (2026-08-15); the
+ * set_theme/set_theme_mode handlers themselves retired in Task 5 (glass
+ * end-to-end retirement, spec §3.4).
  */
 
 import { t } from "../shared/i18n.js";
