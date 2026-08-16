@@ -91,12 +91,28 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF, bird =
   // 'recorded' success is a gated card sitting there waiting on a human;
   // failure/partial is worth a visible flag whether or not it's been
   // decided yet — a failed run must not look identical to still-running.
+  const resultGatedSuccess = card.latest_result_outcome === "success" && card.latest_result_status === "recorded";
   const resultMarker =
-    card.latest_result_outcome === "success" && card.latest_result_status === "recorded"
+    resultGatedSuccess
       ? `<div class="bb-marker bb-marker-waiting">${t("board.markerWaiting", lang)}</div>`
       : (card.latest_result_outcome === "failure" || card.latest_result_outcome === "partial")
         ? `<div class="bb-marker bb-marker-failed">${t("board.markerFailed", lang)}</div>`
         : "";
+  // Track 3 Task 14: Accept/Reject directly on the card face — a gated
+  // success result sitting on THIS card. `data-result-actions` is the guard
+  // both the click-to-open handler and dragstart check for (closest() —
+  // client.js), so a click here never opens the card drawer or starts a
+  // drag; the buttons dispatch their own decide (+ two-step move-to-'done'
+  // on accept, spec §4) via a delegated handler, never a page reload of
+  // their own. Only rendered when latest_result_id actually came back from
+  // the SSR join (a store mid-migration without the column/table degrades to
+  // the marker alone, same guard the marker itself already relies on).
+  const resultActionsHtml = resultGatedSuccess && card.latest_result_id != null
+    ? `<div class="bb-result-actions" data-result-actions data-result-id="${escapeHtml(String(card.latest_result_id))}">` +
+      `<button type="button" class="bb-btn bb-sec" data-result-action="accept">${t("board.btnApproveResult", lang)}</button>` +
+      `<button type="button" class="bb-btn bb-sec" data-result-action="reject">${t("board.btnRejectResult", lang)}</button>` +
+      `</div>`
+    : "";
   let data = {};
   try { data = JSON.parse(card.data_json || "{}"); } catch { data = {}; }
   const fieldMeta = declaredFieldMeta(def, card, data);
@@ -116,7 +132,7 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF, bird =
     `aria-label="card ${escapeHtml(String(card.id))}: ${escapeHtml(String(card.title || ""))}">` +
     `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(card.id))}</span>${birdHtml}${lockBadge}${archivedBadge}</div>` +
     `<div class="bb-title">${escapeHtml(String(card.title || "(untitled)"))}</div>` +
-    `<div class="bb-card-meta">${due}${owner}${fieldMeta}</div>${tags}${sub}${resultMarker}` +
+    `<div class="bb-card-meta">${due}${owner}${fieldMeta}</div>${tags}${sub}${resultMarker}${resultActionsHtml}` +
     `<form method="POST" action="/dashboard/bot-board" class="bb-nojs-move">` +
     `<input type="hidden" name="action" value="move">` +
     `<input type="hidden" name="card_id" value="${escapeHtml(String(card.id))}">` +
@@ -241,8 +257,10 @@ export function roostDispatchDialogMarkup(lang) {
     <div class="bb-msg" id="bb-rd-msg"></div>
     <label>${t("botboard.roostDispatchCardLabel", lang)}</label>
     <select id="bb-rd-card"></select>
-    <label>${t("botboard.roostDispatchNoteLabel", lang)}</label>
-    <textarea id="bb-rd-note" rows="3" style="font-family:inherit"></textarea>
+    <div id="bb-rd-note-wrap">
+      <label>${t("botboard.roostDispatchNoteLabel", lang)}</label>
+      <textarea id="bb-rd-note" rows="3" style="font-family:inherit"></textarea>
+    </div>
     <button type="button" class="bb-btn" id="bb-rd-send">${t("botboard.roostDispatchConfirm", lang)}</button>
   </div>`;
 }
@@ -272,9 +290,34 @@ export function birdDrawerMarkup(lang) {
     </div>
     <div id="bb-bd-card-link-wrap" class="bb-msg" style="display:none"><a id="bb-bd-card-link" href="#"></a></div>
     <div id="bb-bd-hibernating" class="bb-msg warn" style="display:none">${t("botboard.bdHibernating", lang)}</div>
+    <div class="bb-bd-controls-row">
+      <select id="bb-bd-model" disabled aria-label="${escapeHtml(t("botboard.bdEnvelopeModelPrefix", lang))}"></select>
+      <select id="bb-bd-thinking" disabled></select>
+      <select id="bb-bd-permission">
+        <option value="guarded">${t("botboard.bdPermGuarded", lang)}</option>
+        <option value="ask">${t("botboard.bdPermAsk", lang)}</option>
+        <option value="bypass">${t("botboard.bdPermBypass", lang)}</option>
+      </select>
+      <label class="bb-bd-plan-label"><input type="checkbox" id="bb-bd-plan-toggle"> ${t("botboard.bdPlanModeLabel", lang)}</label>
+    </div>
+    <div id="bb-bd-bindsatwake" class="bb-msg warn" style="display:none">
+      <span id="bb-bd-bindsatwake-text">${t("botboard.bdBindsAtWake", lang)}</span>
+      <button type="button" class="bb-btn bb-sec" id="bb-bd-apply-now">${t("botboard.bdApplyNow", lang)}</button>
+    </div>
+    <div class="bb-bd-controls-toggle-wrap">
+      <button type="button" class="bb-btn bb-sec" id="bb-bd-controls-toggle" aria-expanded="false">${t("botboard.bdEnvelopeToggle", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-bd-attach-card">${t("botboard.bdAttachCard", lang)}</button>
+    </div>
+    <div id="bb-bd-controls-pane" style="display:none"></div>
+    <div id="bb-bd-result"></div>
     <div id="bb-bd-picker" style="display:none"></div>
     <div id="bb-bd-transcript" class="bb-pre bb-bd-transcript"></div>
     <div id="bb-bd-ask"></div>
+    <div id="bb-bd-files">
+      <button type="button" class="bb-btn bb-sec" id="bb-bd-attach">${t("botboard.bdAttachFile", lang)}</button>
+      <input type="file" id="bb-bd-file-input" style="display:none" accept="image/*">
+      <span id="bb-bd-files-queue" class="bb-bd-files-queue"></span>
+    </div>
     <div id="bb-bd-composer">
       <textarea id="bb-bd-input" rows="3" style="font-family:inherit" placeholder="${t("botboard.bdComposerPlaceholder", lang)}"></textarea>
       <div>
@@ -556,7 +599,7 @@ export async function renderKanbanBoard(req, res, {
       // bb-marker-failed) reads; a per-card follow-up query would be an
       // N+1, so the correlated subquery does it in the one list SELECT.
       cards = (await tdb.execute({
-        sql: `SELECT t.*, r.outcome AS latest_result_outcome, r.status AS latest_result_status
+        sql: `SELECT t.*, r.id AS latest_result_id, r.outcome AS latest_result_outcome, r.status AS latest_result_status
               FROM tasks_items t
               LEFT JOIN board_results r ON r.id = (
                 SELECT id FROM board_results WHERE item_id = t.id ORDER BY id DESC LIMIT 1
