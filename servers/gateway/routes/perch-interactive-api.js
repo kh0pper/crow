@@ -265,6 +265,24 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     }
   });
 
+  // ---- POST /interactive/:sid/steer — nudge an IN-FLIGHT turn ----
+  // Task 13 (controller ruling): the drawer's composer relabels to this while
+  // a turn is running (POST message would 409 turn_in_progress). Same
+  // MESSAGE_CAP slice as message() above; refusals fall through mapEngineError
+  // (no_turn/pi_gone/session_stopped — see engine.steer()'s own doc).
+  router.post(P + "/interactive/:sid/steer", async (req, res) => {
+    const sid = String(req.params.sid);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const message = String(body.message == null ? "" : body.message).slice(0, MESSAGE_CAP);
+    try {
+      const eng = resolveEngine();
+      const result = await eng.steer(sid, message);
+      res.json(result);
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
   // ---- GET /interactive/:sid/events — persistent SSE ----
   // PRIMITIVE PINNED (r2 CR4): openAuthedStream, not the bare openStream perch.js's
   // per-turn SSE uses — a spawned session outlives one turn, so it needs the

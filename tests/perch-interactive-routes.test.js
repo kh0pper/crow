@@ -199,7 +199,7 @@ beforeEach(() => {
   inboundCalls = [];
   inboundHook = async () => ({ action: "asked" });
   engineCalls = {
-    spawn: [], message: [], answer: [], abort: [], stop: [], get: [], subscribe: [],
+    spawn: [], message: [], steer: [], answer: [], abort: [], stop: [], get: [], subscribe: [],
     checkCardFree: [], attachCard: [], control: [], cycle: [], options: [],
   };
   engineImpl = {
@@ -210,6 +210,10 @@ beforeEach(() => {
     async message(sid, text, images) {
       engineCalls.message.push({ sid, text, images });
       return { turnId: "turn-1" };
+    },
+    async steer(sid, text) {
+      engineCalls.steer.push({ sid, text });
+      return { ok: true };
     },
     async checkCardFree(cardId, opts) {
       engineCalls.checkCardFree.push({ cardId, opts });
@@ -411,6 +415,41 @@ test("POST /interactive/:sid/message maps turn_in_progress, no_such_session (404
   // must read "stopped" — the documented contract, not the engine's vocabulary.
   engineImpl.message = async () => { throw engineErr("session_stopped"); };
   r = await postJson("/interactive/sess-1/message", { message: "hi" });
+  assert.equal(r.status, 410);
+  assert.equal(r.body.error, "stopped");
+});
+
+// ---------------------------------------------------------------------------
+// POST /interactive/:sid/steer (Task 13, controller ruling)
+// ---------------------------------------------------------------------------
+
+test("POST /interactive/:sid/steer 200s {ok:true} and forwards sid + text to the engine", async () => {
+  const { status, body } = await postJson("/interactive/sess-1/steer", { message: "actually, do it differently" });
+  assert.equal(status, 200);
+  assert.deepEqual(body, { ok: true });
+  assert.deepEqual(engineCalls.steer, [{ sid: "sess-1", text: "actually, do it differently" }]);
+});
+
+test("the interactive steer message is capped at 32k before it reaches the engine (same MESSAGE_CAP as /message)", async () => {
+  const big = "x".repeat(40_000);
+  const { status } = await postJson("/interactive/sess-1/steer", { message: big });
+  assert.equal(status, 200);
+  assert.equal(engineCalls.steer[0].text.length, 32_000);
+});
+
+test("POST /interactive/:sid/steer maps no_turn (409), pi_gone (409), and session_stopped→410 stopped", async () => {
+  engineImpl.steer = async () => { throw engineErr("no_turn"); };
+  let r = await postJson("/interactive/sess-1/steer", { message: "hi" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "no_turn");
+
+  engineImpl.steer = async () => { throw engineErr("pi_gone"); };
+  r = await postJson("/interactive/sess-1/steer", { message: "hi" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "pi_gone");
+
+  engineImpl.steer = async () => { throw engineErr("session_stopped"); };
+  r = await postJson("/interactive/sess-1/steer", { message: "hi" });
   assert.equal(r.status, 410);
   assert.equal(r.body.error, "stopped");
 });
