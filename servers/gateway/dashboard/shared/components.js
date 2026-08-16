@@ -111,7 +111,7 @@ export function section(title, content, opts = {}) {
   // The default path stays fully escaped.
   const heading = opts.titleHtml != null ? opts.titleHtml : escapeHtml(title);
   return `<div class="card" style="margin-bottom:var(--crow-space-5);animation-delay:${delay}ms">
-  <h3 style="font-family:'Fraunces',serif;font-size:1.1rem;margin-bottom:var(--crow-space-4);padding-bottom:0.5rem;border-bottom:1px solid var(--crow-border)">${heading}</h3>
+  <h3 style="font-family:var(--crow-body-font);font-size:1.1rem;margin-bottom:var(--crow-space-4);padding-bottom:0.5rem;border-bottom:1px solid var(--crow-border)">${heading}</h3>
   ${content}
 </div>`;
 }

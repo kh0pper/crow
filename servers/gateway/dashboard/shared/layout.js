@@ -8,10 +8,19 @@
  */
 
 import { CROW_HERO_SVG } from "./crow-hero.js";
-import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
+import { designTokensCss } from "./design-tokens.js";
 import { componentsCss, componentsJs } from "./components-css.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
+
+// Font delivery: one manifest, one mechanism (spec §3.2, review finding 20).
+// Preconnect x2 + a single stylesheet <link> — Inter (400/500/600/700) +
+// JetBrains Mono (400/600). Replaces the 7 drifted <link> sites that used to
+// live across the render path + six standalone pages, and the redundant
+// FONT_IMPORT @import that used to duplicate the request in the style block.
+export const FONT_LINKS = `<link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">`;
 
 // Turbo Drive. Default-on as of the post-Phase-8 flip: inject the vendored
 // Turbo 8.0.5 UMD build unless explicitly opted out with CROW_ENABLE_TURBO=0.
@@ -216,9 +225,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="icon" type="image/svg+xml" href="/icons/crow-icon.svg">
   <link rel="apple-touch-icon" href="/icons/crow-icon.svg">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;1,9..144,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
   ${turboHead()}
 </head>
@@ -604,9 +611,7 @@ export function renderLogin({ error, isSetup, setupToken, lockoutHelp, lang } = 
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${isSetup ? escapeHtml(t("login.setupTitle", lang)) : escapeHtml(t("login.title", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -643,9 +648,7 @@ export function render2faVerify({ error, lang } = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -681,9 +684,7 @@ export function render2faRecovery({ error, lang } = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faRecoveryTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -717,9 +718,7 @@ export function render2faSetup({ secret, qrDataUri, recoveryCodes, error, lang }
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faSetupTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -757,9 +756,7 @@ export function renderResetRequest({ error, success, isHosted, lang } = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -795,9 +792,7 @@ export function renderResetForm({ error, token, lang } = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${FONT_LINKS}
   ${dashboardCss()}
 </head>
 <body>
@@ -842,15 +837,13 @@ const NAV_ICONS = {
 
 function dashboardCss() {
   return `<style>
-  ${FONT_IMPORT}
-
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   ${designTokensCss()}
   ${componentsCss()}
 
   body {
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
     background: var(--crow-bg-deep);
     color: var(--crow-text-primary);
     line-height: 1.6;
@@ -882,7 +875,7 @@ function dashboardCss() {
     border-bottom: 1px solid var(--crow-border);
   }
   .logo {
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.5rem;
     font-weight: 700;
     color: var(--crow-text-primary);
@@ -979,7 +972,7 @@ function dashboardCss() {
     gap: 1rem;
   }
   .content-header h2 {
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.25rem;
     font-weight: 600;
     flex: 1;
@@ -1066,7 +1059,7 @@ function dashboardCss() {
 
   /* Forms */
   input, textarea, select {
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
     background: var(--crow-bg-elevated);
     border: 1px solid var(--crow-border);
     border-radius: 8px;
@@ -1097,7 +1090,7 @@ function dashboardCss() {
     cursor: pointer;
     transition: all 0.15s;
     border: 1px solid transparent;
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
   }
   .btn-primary {
     background: var(--crow-accent);
@@ -1148,7 +1141,7 @@ function dashboardCss() {
     opacity: 0.6;
   }
   .empty-state h3 {
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.25rem;
     margin-bottom: 0.5rem;
     color: var(--crow-text-secondary);
@@ -1182,7 +1175,7 @@ function dashboardCss() {
     animation: fadeInUp 0.4s ease-out both;
   }
   .login-logo {
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 2.5rem;
     font-weight: 700;
     color: var(--crow-accent);
@@ -1212,7 +1205,7 @@ function dashboardCss() {
     font-size: 0.95rem;
     font-weight: 600;
     cursor: pointer;
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
     transition: background 0.15s;
   }
   .login-card button:hover { background: var(--crow-accent-hover); }

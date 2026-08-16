@@ -195,7 +195,7 @@ async function handler(req, res, { db, layout, appRoot }) {
     const subCards = subs.map((s) => {
       const img = s.image_url
         ? `<img src="${escapeHtml(s.image_url)}" alt="" style="width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0">`
-        : `<div style="width:48px;height:48px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-family:'Fraunces',serif;font-size:1.2rem;flex-shrink:0">${escapeHtml((s.title || "?").charAt(0))}</div>`;
+        : `<div style="width:48px;height:48px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-family:var(--crow-body-font);font-size:1.2rem;flex-shrink:0">${escapeHtml((s.title || "?").charAt(0))}</div>`;
 
       const lastFetched = s.last_fetched ? new Date(s.last_fetched).toLocaleDateString() : "Never";
 

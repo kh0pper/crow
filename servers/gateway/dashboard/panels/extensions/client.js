@@ -89,7 +89,7 @@ export function extensionsClientJS(lang) {
             var frag = document.createElement("div");
 
             var h3 = document.createElement("h3");
-            h3.style.cssText = "font-family:Fraunces,serif;margin-bottom:0.75rem";
+            h3.style.cssText = "font-family:var(--crow-body-font);margin-bottom:0.75rem";
             h3.textContent = (configureOnly ? '${tJs("extensions.configure", lang)}' : '${tJs("extensions.installTitle", lang)}') + " " + name;
             frag.appendChild(h3);
 
@@ -532,7 +532,7 @@ export function extensionsClientJS(lang) {
           var frag = document.createElement("div");
 
           var h3 = document.createElement("h3");
-          h3.style.cssText = "font-family:Fraunces,serif;margin-bottom:0.75rem";
+          h3.style.cssText = "font-family:var(--crow-body-font);margin-bottom:0.75rem";
           h3.textContent = '${tJs("extensions.remove", lang)}' + " " + name + "?";
           frag.appendChild(h3);
 

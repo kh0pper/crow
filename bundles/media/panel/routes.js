@@ -780,10 +780,10 @@ export function mediaPublicRouter() {
   <meta property="og:title" content="${escapeHtml(playlist.name)}">
   <meta property="og:description" content="Playlist with ${items.length} articles">
   <meta property="og:type" content="music.playlist">
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
   <style>body{margin:0;background:#0f0f1a;color:#e2e8f0;font-family:'DM Sans',sans-serif;min-height:100vh}
   .container{max-width:640px;margin:0 auto;padding:2rem 1rem}
-  h1{font-family:'Fraunces',serif;font-size:1.5rem;margin:0 0 0.25rem}
+  h1{font-family:'DM Sans',sans-serif;font-weight:700;font-size:1.5rem;margin:0 0 0.25rem}
   .meta{font-size:0.85rem;color:#888;margin-bottom:1.5rem}
   a{color:#6366f1}</style>
 </head><body>

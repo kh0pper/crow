@@ -161,7 +161,7 @@ export default {
             <div style="margin-bottom:1rem">
               <a href="/dashboard/knowledge-base?tab=articles${activeCollectionId ? `&collection_id=${activeCollectionId}` : ""}" style="font-size:0.85rem;color:var(--crow-accent)">← Back to articles</a>
             </div>
-            <h2 style="font-family:'Fraunces',serif;margin-bottom:0.25rem">${escapeHtml(a.title)}</h2>
+            <h2 style="font-family:var(--crow-body-font);margin-bottom:0.25rem">${escapeHtml(a.title)}</h2>
             <div style="font-size:0.85rem;color:var(--crow-text-muted);margin-bottom:1rem">
               ${a.language.toUpperCase()} · ${a.status} · ${a.collection_name}
               ${transLinks ? ` · Translations: ${transLinks}` : ""}

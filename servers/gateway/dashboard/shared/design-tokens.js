@@ -3,9 +3,6 @@
  * Used by both the Crow's Nest dashboard (layout.js) and public blog (blog-public.js).
  */
 
-/** Google Fonts import URL */
-export const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');`;
-
 /** CSS custom property definitions for all themes */
 export function designTokensCss() {
   return `
