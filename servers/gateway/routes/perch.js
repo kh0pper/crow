@@ -1,11 +1,12 @@
 /**
- * Perch Hub — the gateway-side API the bots lens calls (Perch Hub P1, C-5).
+ * Perch — the gateway-side API the bots lens calls (originally Perch Hub P1,
+ * C-5; the lens is now the board's own roost strip + session drawer,
+ * Track 3 — the standalone vendored-hub bundle and its proxied page were
+ * retired).
  *
- * The lens itself is a page served BY THE VENDORED HUB, reached only through
- * the session-gated extension proxy at `<gateway>/proxy/perch-hub/bots`. The
- * DATA it renders is Crow's, not Perch's, so every fetch it makes is a
- * root-absolute `/dashboard/perch-api/…` URL that lands here, one level above
- * the proxy prefix. This file is the whole of that contract.
+ * The lens is served in-process by the dashboard itself, so every fetch it
+ * makes is a root-absolute `/dashboard/perch-api/…` URL that lands here.
+ * This file is the whole of that contract.
  *
  * MOUNT — deliberately `/dashboard/perch-api`, NOT a root `/api/perch`:
  *   (a) the general rate limiter (index.js ~:335) SKIPS `/dashboard`; a root
