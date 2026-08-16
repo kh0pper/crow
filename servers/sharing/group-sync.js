@@ -18,15 +18,30 @@
  * to contact-sync.js / message-sync.js. Do NOT "simplify" to a static import.
  */
 import { isGroupTombstoned } from "./group-delete.js";
+import { emitOrQueue } from "../shared/sync-emit.js";
 
 let _mgrMod = null;
 let _testSink = null;
-export function __setEmitSinkForTest(sink) { _testSink = sink; }
+let _testDb = null;
+
+/**
+ * Test seam: inject a spy sink ({ emitChange }), or null to reset. `db` is an
+ * optional second arg — only needed by tests exercising the null-branch queue
+ * path for emitGroupDelete (it has no db param of its own; production sources
+ * it from the same shared-managers singleton `sink()` already reads).
+ */
+export function __setEmitSinkForTest(sink, db = null) { _testSink = sink; _testDb = db; }
 
 async function sink() {
   if (_testSink) return _testSink;
   if (!_mgrMod) { try { _mgrMod = await import("./managers.js"); } catch { return null; } }
   return _mgrMod.getInstanceSyncManager?.() || null;
+}
+
+async function emitDb() {
+  if (_testDb) return _testDb;
+  if (!_mgrMod) { try { _mgrMod = await import("./managers.js"); } catch { return null; } }
+  return _mgrMod.getManagersOrNull?.()?.db || null;
 }
 
 /**
@@ -70,13 +85,12 @@ export async function emitGroupUpsert(db, groupId, opts = {}) {
     const emitOpts = opts && opts.preserveLamport === true
       ? { lamportTs: Number(row.lamport_ts) || 0 }
       : undefined;
-    await (await sink())?.emitChange("contact_groups", "update", row, emitOpts);
+    await emitOrQueue(await sink(), db, "contact_groups", "update", row, emitOpts);
   } catch { /* never throw — group sync is best-effort */ }
 }
 
 /** Emit a group delete by its stable group_uid. Capture the uid BEFORE the local DELETE. */
 export async function emitGroupDelete(groupUid) {
   if (!groupUid) return;
-  try { await (await sink())?.emitChange("contact_groups", "delete", { group_uid: groupUid }); }
-  catch { /* never throw */ }
+  await emitOrQueue(await sink(), await emitDb(), "contact_groups", "delete", { group_uid: groupUid });
 }
