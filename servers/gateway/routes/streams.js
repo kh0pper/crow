@@ -37,9 +37,28 @@ import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 // Board config resolution (Track 0 Phase A: project/cards boards; Phase B:
 // slug/custom-tracker boards). Both defs live in tasks.db's board_defs.
 import { resolveBoardDef, resolveSlugBoardDef } from "./board-defs.js";
+// Track 3 Task 11 (spec §5.6): live bird state is engine-sourced, not
+// DB-derivable — the interactive-engine singleton, plus the shared fold that
+// merges it onto a card set (routes/perch.js's /roost endpoint and the SSR
+// join in dashboard/panels/bot-board/html.js both fold the SAME way).
+import { getInteractiveEngine } from "../perch-interactive.js";
+import { liveBirdsByCard } from "../dashboard/panels/bot-board/data-queries.js";
 
-export default function streamsRouter(dashboardAuth) {
+/**
+ * @param {Function} dashboardAuth
+ * @param {{interactiveEngine?: Function|object}} [seams] test seam (Track 3
+ *   Task 11), same accessor-or-object shape as routes/perch.js's own —
+ *   defaults to `getInteractiveEngine({createIfMissing:false})`: a gateway
+ *   that has never spawned an interactive session must fail soft to "no live
+ *   birds", never conjure the engine singleton into existence just because a
+ *   board tab is open.
+ */
+export default function streamsRouter(dashboardAuth, { interactiveEngine = () => getInteractiveEngine({ createIfMissing: false }) } = {}) {
   const router = Router();
+
+  function resolveInteractiveEngine() {
+    return typeof interactiveEngine === "function" ? interactiveEngine() : interactiveEngine;
+  }
 
   router.use("/dashboard/streams", dashboardAuth);
 
@@ -367,6 +386,9 @@ export default function streamsRouter(dashboardAuth) {
     let tickInFlight = false;
     let timer = null;
     let last = null;
+    // Track 3 Task 11: a SEPARATE diff cache for bird state, deliberately
+    // never folded into `last` above — see the named-event emit below.
+    let lastBirds = null;
 
     // Track 0: the board's configured status list rides a SEPARATE named
     // event, once per stream open — deliberately OUTSIDE the diffed
@@ -444,6 +466,35 @@ export default function streamsRouter(dashboardAuth) {
           last = json;
           sendRaw(`data: ${json}\n\n`);
         }
+
+        // Track 3 Task 11 (spec §5.6): bird state is engine-sourced, not
+        // DB-derivable (an awake-at-rest, hibernated, or interrupted row can
+        // all read the same bot_sessions status) — merge the interactive
+        // engine's live per-card state onto THIS tick's card set. A gateway
+        // with no engine (createIfMissing:false) emits NOTHING on this
+        // channel, ever — that is the literal "no live birds" contract, not
+        // just an empty payload. This rides a NAMED event, on its OWN diff
+        // cache (`lastBirds`, never `last` above): the default event's client
+        // response is a full page reload on any difference (reload-storm), so
+        // a bird waking/sleeping must never touch it.
+        try {
+          const engine = resolveInteractiveEngine();
+          if (engine) {
+            const birds = {};
+            if (cdb && cards.length) {
+              const byCard = await liveBirdsByCard(engine, cdb);
+              for (const c of cards) {
+                const b = byCard.get(c.id);
+                if (b) birds[c.id] = { state: b.state, sid: b.sessionId };
+              }
+            }
+            const birdsJson = JSON.stringify(birds);
+            if (birdsJson !== lastBirds && !closed) {
+              lastBirds = birdsJson;
+              sendRaw(`event: bird-state\ndata: ${birdsJson}\n\n`);
+            }
+          }
+        } catch { /* bird state is best-effort; the board still renders without it */ }
       } catch (e) {
         process.stderr.write(`[bot-board-stream] tick error: ${e && e.message}\n`);
       } finally {

@@ -13,9 +13,14 @@ import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
 import {
   TASKS_DB, STATUS_BADGE,
-  lockMapFor, statusLabel,
+  lockMapFor, statusLabel, liveBirdsByCard,
 } from "./data-queries.js";
 import { DEFAULT_BOARD_DEF, resolveBoardDef, resolveSlugBoardDef } from "../../../routes/board-defs.js";
+// Track 3 Task 11 (spec §5.6): the interactive-engine singleton — live bird
+// state is engine-sourced, not DB-derivable. createIfMissing:false: rendering
+// the board must never conjure the engine into existence; a gateway that has
+// never spawned an interactive session just draws no birds.
+import { getInteractiveEngine } from "../../../perch-interactive.js";
 // Track 1 (carried item 2): the no-JS card view's plan block reads plan
 // RECORDS now (D-T1.4), not the retired file rail — same store the JS
 // drawer's GET /card/:id/plan route (plan-service.getCurrentPlan) reads.
@@ -52,7 +57,15 @@ function declaredFieldMeta(def, card, data) {
   return parts.join("");
 }
 
-export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
+export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF, bird = null) {
+  // Track 3 Task 11 (spec §3.2/§5.6): a bird glyph, present only when a live
+  // (waiting/working/hibernating) session carries this card's id. `bb-bird--
+  // <state>` is PERCH_TOKENS-colored in css.js; `data-bird-sid` is how the
+  // client correlates a later `bird-state` SSE frame (keyed by session id,
+  // not card id) back to this DOM node, and what a click opens the drawer on.
+  const birdHtml = bird
+    ? `<span class="bb-bird bb-bird--${escapeHtml(String(bird.state))}" data-bird-sid="${escapeHtml(String(bird.sessionId))}" title="${escapeHtml(String(bird.state))}"></span>`
+    : "";
   const prio = card.priority == null ? "" :
     `<span class="bb-prio bb-prio-${escapeHtml(String(card.priority))}" title="${t("botboard.titlePriorityPrefix", lang)} ${escapeHtml(String(card.priority))}">P${escapeHtml(String(card.priority))}</span>`;
   const due = card.due_date ? `<span class="bb-meta">⏱ ${escapeHtml(String(card.due_date))}</span>` : "";
@@ -96,7 +109,7 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
     `data-priority="${card.priority != null ? escapeHtml(String(card.priority)) : ""}" ` +
     `tabindex="0" role="button" ` +
     `aria-label="card ${escapeHtml(String(card.id))}: ${escapeHtml(String(card.title || ""))}">` +
-    `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(card.id))}</span>${lockBadge}${archivedBadge}</div>` +
+    `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(card.id))}</span>${birdHtml}${lockBadge}${archivedBadge}</div>` +
     `<div class="bb-title">${escapeHtml(String(card.title || "(untitled)"))}</div>` +
     `<div class="bb-card-meta">${due}${owner}${fieldMeta}</div>${tags}${sub}${resultMarker}` +
     `<form method="POST" action="/dashboard/bot-board" class="bb-nojs-move">` +
@@ -338,7 +351,13 @@ function archivedToggleHtml(botId, includeArchived, lang) {
 }
 
 // ---- Kanban board rendering ----
-export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, switcher, q, lang }) {
+export async function renderKanbanBoard(req, res, {
+  db, layout, selBot, bots, notice, switcher, q, lang,
+  // Track 3 Task 11 test seam — same accessor-or-object shape as the
+  // perch.js/streams.js seams; production never passes this key, so the
+  // createIfMissing:false default above is what actually runs live.
+  engine = getInteractiveEngine({ createIfMissing: false }),
+}) {
   const projectId = selBot.projectId != null ? Number(selBot.projectId) : null;
   // D-T1.6: the "Show archived" filter-bar toggle round-trips as
   // ?include_archived=1 — the SAME query/param convention the JSON API uses.
@@ -400,6 +419,10 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
   }
 
   const lockMap = await lockMapFor(db, cards.map((c) => Number(c.id)));
+  // Track 3 Task 11: engine-sourced bird state, one entry per occupied card —
+  // see data-queries.js's liveBirdsByCard for why this can't be read off the
+  // cards themselves (bot_sessions rows are not the live truth; spec §5.6).
+  const birdsByCard = await liveBirdsByCard(engine, db);
 
   // ---- no-JS dedicated card view (&card=M) ----
   if (q.card != null && q.card !== "") {
@@ -476,7 +499,7 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
   const columns = columnOrder.map((st) => {
     const list = byStatus[st] || [];
     const cardsHtml = list.length
-      ? list.map((c) => cardFaceHtml(c, !!lockMap.get(Number(c.id)), lang, def)).join("")
+      ? list.map((c) => cardFaceHtml(c, !!lockMap.get(Number(c.id)), lang, def, birdsByCard.get(Number(c.id)) || null)).join("")
       : `<div style="color:var(--crow-text-muted);font-size:.78rem;padding:.4rem">—</div>`;
     return `<div class="bb-col" data-col="${escapeHtml(st)}">` +
       `<h4><span>${escapeHtml(defStatusLabel(def, st, lang))}</span><span>${list.length}</span>` +
