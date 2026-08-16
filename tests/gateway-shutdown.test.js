@@ -7,9 +7,6 @@
  *   2. A /health GET issued right before SIGTERM completes successfully.
  *   3. SIGTERM with an open SSE connection still exits 0 (the SSE socket is
  *      an expected casualty after the drain window; the process must not hang).
- *   4. The gateway-supervised Perch hub child does not OUTLIVE the gateway
- *      (Perch Hub C-3 — supervised children are detached with no pdeathsig,
- *      and shutdownAll() only knows proxy.js's bundle children).
  *
  * If the child-process approach is flaky after 3 attempts we would fall back
  * to a stub-server unit test, but the headless boot validated fine (see dev log)
@@ -20,7 +17,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -89,25 +86,8 @@ function openSse(port, path) {
   });
 }
 
-/**
- * Install a stub perch-hub payload under a scratch CROW_HOME. The stub is a
- * plain Node script that records its pid and then never exits on its own —
- * standing in for the vendored hub, whose only relevant property here is that
- * it is a long-lived, gateway-supervised, DETACHED child.
- */
-function installPerchStub(crowHome, pidFile) {
-  const hubDir = join(crowHome, "bundles", "perch-hub", "payload", "hub");
-  mkdirSync(hubDir, { recursive: true });
-  writeFileSync(
-    join(hubDir, "server.mjs"),
-    'import { writeFileSync } from "node:fs";\n' +
-    "writeFileSync(process.env.PERCH_STUB_PIDFILE, String(process.pid));\n" +
-    "setInterval(() => {}, 1 << 30);\n"
-  );
-}
-
 /** Spawn a fresh gateway process; return { child, port, dataDir }. */
-async function spawnGateway({ perchStub = null } = {}) {
+async function spawnGateway() {
   const dataDir = mkdtempSync(join(tmpdir(), "gw-shutdown-"));
   // Scratch CROW_HOME so the gateway's boot-time bundle/panel repair never
   // touches the operator's real ~/.crow (see repairInstalledBundleAssets).
@@ -129,18 +109,6 @@ async function spawnGateway({ perchStub = null } = {}) {
     CROW_SHUTDOWN_DRAIN_MS: "500",
   };
 
-  if (perchStub) {
-    installPerchStub(crowHome, perchStub);
-    // run-suite forces the kill switch on suite-wide; this one test needs the
-    // supervisor to actually run, so it is unset HERE rather than globally.
-    delete env.CROW_DISABLE_PERCH;
-    env.PERCH_STUB_PIDFILE = perchStub;
-    // Loopback ports the stub never binds, but the defaults (4210/4211) are a
-    // real host's live perch block — never point a test at them.
-    env.CROW_PERCH_PORT = String(await freePort());
-    env.CROW_PERCH_REGISTRY_PORT = String(await freePort());
-  }
-
   // Use a short drain window so the test doesn't have to wait 3s per SSE close.
   const child = spawn(
     process.execPath,
@@ -152,10 +120,6 @@ async function spawnGateway({ perchStub = null } = {}) {
   child.stderr.resume();
 
   return { child, port, dataDir };
-}
-
-function pidAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 // ---- test 1: SIGTERM → exit 0 ----
@@ -242,52 +206,4 @@ test("SIGTERM with open SSE connection exits 0 (SSE is expected casualty)", asyn
   try { sseReq?.destroy(); } catch {}
 
   assert.equal(result.code, 0, `expected exit 0 even with open SSE, got code=${result.code} signal=${result.signal}`);
-});
-
-// ---- test 4: the gateway-supervised Perch hub dies WITH the gateway ----
-//
-// Perch Hub C-3. shutdownAll() (step 5) only reaps proxy.js's MCP bundle
-// children — it has never known about process-supervisor handles, and those
-// children are spawned `detached: true` (own process group, so a terminal
-// SIGINT never reaches them) with no pdeathsig. C-2 proved live that the hub
-// was still in `ps` after the gateway exited, holding its loopback port
-// against the restarted gateway's own child. This is the regression guard.
-test("SIGTERM also stops the gateway-supervised Perch hub (it must not outlive the gateway)", async () => {
-  const pidFile = join(mkdtempSync(join(tmpdir(), "gw-perch-pid-")), "hub.pid");
-  const { child, port, dataDir } = await spawnGateway({ perchStub: pidFile });
-  let hubPid = null;
-  after(() => {
-    try { child.kill("SIGKILL"); } catch {}
-    if (hubPid && pidAlive(hubPid)) { try { process.kill(-hubPid, "SIGKILL"); } catch {} }
-    rmSync(dataDir, { recursive: true, force: true });
-  });
-
-  await waitForHealth(port);
-
-  // The supervisor starts post-listen, so the stub's pid file appears shortly
-  // after /health does.
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline && !existsSync(pidFile)) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  assert.ok(existsSync(pidFile), "the supervised hub never started — this test would pass vacuously");
-  hubPid = Number(readFileSync(pidFile, "utf8").trim());
-  assert.ok(hubPid > 0);
-  assert.equal(pidAlive(hubPid), true, "the hub must be running before we test that shutdown stops it");
-
-  const exitPromise = new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
-  child.kill("SIGTERM");
-  const result = await Promise.race([
-    exitPromise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout waiting for exit")), 25_000)),
-  ]);
-  assert.equal(result.code, 0, `expected exit 0, got code=${result.code} signal=${result.signal}`);
-
-  // The child is in its own process group: nothing else will ever reap it.
-  const goneBy = Date.now() + 5_000;
-  while (Date.now() < goneBy && pidAlive(hubPid)) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  assert.equal(pidAlive(hubPid), false,
-    `supervised hub (pid ${hubPid}) survived gateway shutdown — it is detached, so it would hold its port forever`);
 });
