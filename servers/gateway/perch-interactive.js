@@ -66,7 +66,8 @@
  * Session rows go through the gateway's own `createDbClient` in the
  * SELECT-then-UPDATE-or-INSERT shape of perch.js `saveNarrowing` — never
  * `ON CONFLICT` (`idx_bot_sessions_bot_thread` is deliberately not unique) and
- * never perch.js `claimTurn` verbatim (its INSERT hardcodes `kind:'perch'`).
+ * never the retired perch.js `claimTurn` verbatim (its INSERT hardcoded
+ * `kind:'perch'`; Track 3 Task 16 deleted it with the per-turn channel).
  * Metering and audit go through the BRIDGE's own busy-timeout-only connection,
  * exactly as a channel turn does — one path, one price book, one audit shape.
  *

@@ -1,7 +1,9 @@
 /**
  * Perch Hub P2, Task C-15 — servers/gateway/routes/perch-interactive-api.js,
- * plus the perch.js modifications it required (kind='perch-live' refusal on
- * the P1 turn route, `state` on the sessions list).
+ * plus the perch.js modifications it required (`state` on the sessions list).
+ * Track 3 Task 16 retired the per-turn channel this file used to also cover
+ * (POST /bots/:id/turn's kind='perch-live' refusal); that test is gone with
+ * the route.
  *
  * Harness: a real init-db'd scratch crow.db (CROW_DATA_DIR, so nothing can
  * touch the operator's ~/.crow), an ephemeral express server, and an INJECTED
@@ -9,11 +11,10 @@
  * ever spawned, no bridge module is ever loaded except in the one dedicated
  * precondition test.
  *
- * `engineImpl` is mutable module state (mirrors perch-routes.test.js's own
- * `inboundHook` idiom): tests overwrite individual methods, `beforeEach`
- * restores sane defaults. The router is handed `{ engine: () => engineImpl }`
- * — an ACCESSOR, so the swap takes effect on the next request without
- * rebuilding the app.
+ * `engineImpl` is mutable module state: tests overwrite individual methods,
+ * `beforeEach` restores sane defaults. The router is handed
+ * `{ engine: () => engineImpl }` — an ACCESSOR, so the swap takes effect on
+ * the next request without rebuilding the app.
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -39,9 +40,6 @@ const TASKS_DB_FILE = process.env.CROW_TASKS_DB_PATH;
 const REPO = new URL("..", import.meta.url).pathname;
 
 let server, base, _setEngineStatusForTest;
-/** Every opts object handleInboundImpl was called with (P1 turn-route regression). */
-let inboundCalls = [];
-let inboundHook = null;
 
 // Track 3 Task 9 fixture ids (assigned in before()): a live card, an
 // archived one, and a custom-board tracker ITEM (board_id NOT NULL) — the
@@ -179,7 +177,6 @@ before(async () => {
   // Both routers mount at the same /dashboard/perch-api prefix, exactly as
   // dashboard/index.js does — their path sets don't collide.
   app.use(perchApiRouter(fakeAuth, {
-    handleInboundImpl: (opts) => { inboundCalls.push(opts); return inboundHook(opts); },
     interactiveEngine: () => engineImpl,
   }));
   app.use(perchInteractiveApiRouter(fakeAuth, { engine: () => engineImpl }));
@@ -196,8 +193,6 @@ after(() => {
 
 beforeEach(() => {
   _setEngineStatusForTest({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
-  inboundCalls = [];
-  inboundHook = async () => ({ action: "asked" });
   engineCalls = {
     spawn: [], message: [], steer: [], answer: [], abort: [], stop: [], get: [], subscribe: [],
     checkCardFree: [], attachCard: [], control: [], cycle: [], options: [],
@@ -1248,34 +1243,12 @@ test("constructing the router with the DEFAULT engine accessor resolves a real, 
 });
 
 // ---------------------------------------------------------------------------
-// perch.js: P1 turn route refuses kind='perch-live'; sessions list carries state
+// perch.js: sessions list carries state for kind='perch-live' rows
+//
+// (Track 3 Task 16 retired the per-turn channel this section used to also
+// cover — POST /bots/:id/turn's refusal of a kind='perch-live' thread no
+// longer applies, since that route no longer exists.)
 // ---------------------------------------------------------------------------
-
-test("POST /bots/:id/turn refuses a kind='perch-live' thread — the interactive engine owns it, never a per-turn claim", async () => {
-  const c = raw();
-  c.prepare(
-    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status) " +
-    "VALUES ('chatty','perch','live-thread','perch-live','waiting-user')"
-  ).run();
-  c.close();
-  const { status, body } = await postJson("/bots/chatty/turn", { message: "hi", sessionId: "live-thread" });
-  assert.equal(status, 400);
-  assert.equal(body.error, "not_a_perch_session");
-  assert.equal(body.kind, "perch-live");
-  assert.equal(inboundCalls.length, 0, "a per-turn POST must never spawn a second pi against the interactive engine's own session file");
-
-  // Fix-round F5: the refusal must fire BEFORE claimTurn ever touches the row
-  // — a claim written and then refused would still yank status='active' out
-  // from under the interactive engine. Re-read the row: status untouched, and
-  // no second row inserted (claimTurn's INSERT branch never ran either).
-  const check = raw();
-  const rows = check.prepare(
-    "SELECT status FROM bot_sessions WHERE bot_id='chatty' AND gateway_thread_id='live-thread'"
-  ).all();
-  check.close();
-  assert.equal(rows.length, 1, "the refusal must not have inserted a second row for the thread");
-  assert.equal(rows[0].status, "waiting-user", "the perch-live row's claim must be untouched — never flipped to 'active' by a refused per-turn POST");
-});
 
 test("GET /bots/:id/sessions surfaces engine state for kind='perch-live' rows, and derives a fallback when the engine has no snapshot", async () => {
   const c = raw();
