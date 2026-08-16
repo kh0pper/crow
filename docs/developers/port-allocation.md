@@ -11,6 +11,11 @@ This document is the **single source of truth** for every host port consumed by 
 - "Existing" rows are bundles already shipped before this registry was introduced — they are recorded here so future bundles avoid them.
 - "Reserved" rows are claimed by upcoming Phase 2 bundles; do not consume them for unrelated work.
 - "MVP" rows are claimed by the bundles in the current MVP plan.
+- This doc alone is not authoritative. A port is only actually free when it's free across all three registries: this table, every `docker-compose.yml` under `crow-addons/` AND `crow/bundles/` (not just the one you're editing), and live listeners on the host. A same-port/different-bind-address pair (e.g. `127.0.0.1:4210` vs. the tailnet IP on `4210`) can pass both `check-port-allocation.js` and a naive "is anything listening?" check, then show up later as a silent double-allocation — check all three before claiming a number.
+
+## External ports (not Crow's to allocate)
+
+- **4200/4201, pool 4101-4139** — the standalone lab `pi-hub` service (upstream, not a Crow bundle, not gateway-supervised, runs outside this repo's control). Do not "tidy" a future bundle onto these numbers.
 
 ## Known conflicts in current `bundles/`
 
