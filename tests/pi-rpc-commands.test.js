@@ -130,6 +130,29 @@ test("commandSince rejects on success:false with err.code = 'command_failed'", a
   }
 });
 
+test("commandSince rejects with command_failed on a response MISSING the success field (fail-closed, Fix round 1 ruling — mirrors promptTurn's success!==true check)", async () => {
+  // A malformed/old-protocol response missing `success` must never be
+  // treated as a successful model/thinking change — this serves engine
+  // control() for set_model/set_thinking_level.
+  const scratch = scratchDir();
+  const stub = protocolStub(scratch, {
+    onMessageBody: [
+      '    if (m.type === "set_model") {',
+      '      out({ type: "response", command: "set_model", id: m.id });', // no success field at all
+      '    }',
+    ].join("\n"),
+  });
+  const pi = mkPi(scratch, stub);
+  try {
+    await assert.rejects(
+      () => pi.commandSince({ type: "set_model", provider: "crow", modelId: "m" }),
+      (e) => e.code === "command_failed" && /set_model failed: unknown/.test(e.message)
+    );
+  } finally {
+    await pi.close();
+  }
+});
+
 test("commandSince resolves normally for get_available_models/get_available_thinking_levels/set_thinking_level shapes", async () => {
   const scratch = scratchDir();
   const stub = protocolStub(scratch, {
