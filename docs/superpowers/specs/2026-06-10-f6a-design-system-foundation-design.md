@@ -9,6 +9,8 @@
 
 The dashboard has a *partial* design system. Color/theme tokens are solid (`servers/gateway/dashboard/shared/design-tokens.js` — dark/light/glass/serif variants), and a small set of HTML primitives exist (`shared/components.js`: `statCard`, `statGrid`, `dataTable`, `formField`, `badge`, `actionBar`, `section`). But:
 
+> **Superseded 2026-08-16:** the dark/light/glass/serif token structure described here is no longer current — tokens are now light-first with OS-driven dark, and `.theme-glass` is retired end-to-end. See `docs/superpowers/specs/2026-08-15-track2-visual-language-design.md`.
+
 1. **No spacing or type scale.** Spacing and font sizes are hardcoded inline throughout (`margin-bottom:1rem`, `font-size:0.8rem`, `0.35rem`, …), so there is no consistent rhythm and no single place to tune it.
 2. **A latent token bug.** `--crow-text-tertiary` is referenced in `components.js` (login/2FA views) but is **never defined** in `design-tokens.js` — it silently falls back. Nothing catches used-but-undefined tokens.
 3. **Missing primitives.** There is no shared `button`, copy-to-clipboard code block, callout/notice, stepper, or tabs. The upcoming F6b (onboarding wizard) and F6c (connect-to-clients wizard) need exactly these — without them each would invent its own, re-introducing inconsistency.

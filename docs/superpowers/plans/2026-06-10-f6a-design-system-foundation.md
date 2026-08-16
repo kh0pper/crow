@@ -158,6 +158,8 @@ Then, immediately AFTER the existing `:root { --crow-radius-card … --crow-radi
 
 - [ ] **Step 4: Define `--crow-text-tertiary` + `--crow-warning` in the other theme blocks**
 
+> **Superseded 2026-08-16:** the dark-first `:root` + `.theme-light`/`.theme-glass`/`.theme-glass.theme-light` theme-block structure described in this step (and Step 3's "dark defaults" framing) no longer describes the shipped token system — tokens are now light-first with OS-driven dark, and `.theme-glass` is retired end-to-end. See `docs/superpowers/specs/2026-08-15-track2-visual-language-design.md`.
+
 In `.theme-light { … }`, add before its closing `}`:
 ```css
     --crow-text-tertiary: #78716c;

@@ -20,6 +20,7 @@
 - **Network invariant:** nothing added here may become Funnel-reachable. Do not touch `PUBLIC_FUNNEL_PREFIXES`.
 - **Never attribute Claude as co-author** in any commit message.
 - **Design-token discipline:** CSS uses `var(--crow-*)` tokens, `'Fraunces',serif` for display names, `'DM Sans',sans-serif` for body, `'JetBrains Mono',monospace` for metadata; `.theme-glass` overrides mirrored for any new surface.
+  - **Superseded 2026-08-16:** `.theme-glass` is retired end-to-end (Track 2 visual language). See `docs/superpowers/specs/2026-08-15-track2-visual-language-design.md`.
 
 ---
 
