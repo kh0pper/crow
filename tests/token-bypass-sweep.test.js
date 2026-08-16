@@ -2,9 +2,9 @@
 //
 // Grep-as-test over the dashboard render tree + the two standalone hardcoded
 // pages + bundle panel files. Scope EXCLUDES the frozen public surfaces
-// (blog-public.js, songbook-renderer.js, kb-public.js, design-tokens-legacy.js)
-// and the three brand-art files (shared/crow-hero.js, shared/empty-state-icons.js,
-// shared/notifications.js — Task 8 recolors those and re-adds them to scope).
+// (blog-public.js, songbook-renderer.js, kb-public.js, design-tokens-legacy.js).
+// Task 8 recolored the three brand-art files (shared/crow-hero.js,
+// shared/empty-state-icons.js, shared/notifications.js) and brought them into scope.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -19,9 +19,6 @@ const EXCLUDED_ABS = new Set(
     "servers/blog/songbook-renderer.js",
     "bundles/knowledge-base/routes/kb-public.js",
     "servers/gateway/dashboard/shared/design-tokens-legacy.js",
-    "servers/gateway/dashboard/shared/crow-hero.js",
-    "servers/gateway/dashboard/shared/empty-state-icons.js",
-    "servers/gateway/dashboard/shared/notifications.js",
   ].map((p) => join(ROOT, p)),
 );
 
@@ -65,7 +62,7 @@ test("scope sanity: excludes the frozen files and includes the known sweep files
   const rels = new Set(FILES.map((f) => f.rel));
   assert.ok(rels.has("servers/gateway/dashboard/shared/layout.js"));
   assert.ok(rels.has("servers/gateway/routes/calls-page.js"));
-  assert.ok(!rels.has("servers/gateway/dashboard/shared/notifications.js"), "brand-art file excluded until Task 8");
+  assert.ok(rels.has("servers/gateway/dashboard/shared/notifications.js"), "brand-art file back in scope post-Task-8");
   assert.ok(!rels.has("servers/gateway/dashboard/shared/design-tokens-legacy.js"));
 });
 
