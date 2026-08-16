@@ -513,7 +513,7 @@ export const headerIconsCss = `
     align-items: center;
     gap: 1rem;
     padding: 0.75rem 1.25rem;
-    background: rgba(26,26,46,0.92);
+    background: rgba(34,48,58,0.92);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border: 1px solid color-mix(in srgb, var(--crow-accent) 40%, transparent);

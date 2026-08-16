@@ -5,7 +5,7 @@
  */
 
 export const CROW_HERO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none">
-  <circle cx="100" cy="100" r="96" fill="#22303a" stroke="#3d3d4d" stroke-width="1.5"/>
+  <circle cx="100" cy="100" r="96" fill="#22303a" stroke="#46565f" stroke-width="1.5"/>
   <g transform="translate(40, 30)">
     <!-- Body -->
     <path d="M60 140 C20 140, 5 110, 10 80 C15 55, 35 35, 60 30 C75 27, 90 30, 100 40 C110 50, 115 65, 110 85 C108 95, 100 120, 95 130 C90 138, 75 142, 60 140Z" fill="#0e6b62"/>
