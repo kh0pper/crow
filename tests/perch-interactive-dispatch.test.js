@@ -559,3 +559,59 @@ test("restart: adoptRow restores cardId and re-registers the claim — a second 
   const third = await spawned(B.engine, { botId: "freeatlast", cardId: 403 });
   assert.equal((await B.engine.get(third.sessionId)).cardId, 403);
 });
+
+// ---------------------------------------------------------------------------
+// 10. attachCard (Track 3 Task 9) — bind an ALREADY-SPAWNED session to a card
+// ---------------------------------------------------------------------------
+
+test("attachCard: binds a free-chat session to a card — cardId + row write, botId echoed back", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine, { botId: "attacher" });
+  assert.equal((await engine.get(s.sessionId)).cardId, null);
+  const result = await engine.attachCard(s.sessionId, 501);
+  assert.deepEqual(result, { ok: true, cardId: 501, botId: "attacher" });
+  assert.equal((await engine.get(s.sessionId)).cardId, 501);
+  assert.equal(rowFor(s.threadId).card_id, 501);
+});
+
+test("attachCard: refuses card_occupied — the sync claim excludes a SECOND session for the same card", async () => {
+  const { engine } = makeEngine();
+  const holder = await spawned(engine, { botId: "holder", cardId: 502 });
+  const other = await spawned(engine, { botId: "other" });
+  await assert.rejects(() => engine.attachCard(other.sessionId, 502), (e) => e.code === "card_occupied");
+  // The refused attempt must not have touched the holder's own claim/row.
+  assert.equal((await engine.get(holder.sessionId)).cardId, 502);
+  assert.equal((await engine.get(other.sessionId)).cardId, null);
+});
+
+test("attachCard: refuses session_stopped on a stopped session", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine, { botId: "stopper" });
+  await engine.stop(s.sessionId);
+  await assert.rejects(() => engine.attachCard(s.sessionId, 503), (e) => e.code === "session_stopped");
+});
+
+test("attachCard: refuses no_such_session for an unknown sessionId", async () => {
+  const { engine } = makeEngine();
+  await assert.rejects(() => engine.attachCard("ghost-session", 504), (e) => e.code === "no_such_session");
+});
+
+test("attachCard: re-attaching to a DIFFERENT card releases the old claim — a later session can claim it", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine, { botId: "reattacher", cardId: 505 });
+  await engine.attachCard(s.sessionId, 506);
+  assert.equal((await engine.get(s.sessionId)).cardId, 506);
+  assert.equal(rowFor(s.threadId).card_id, 506);
+  // 505 is free again — a fresh session can claim it in-memory (spawn's own
+  // synchronous claim would 409 if the old claim had leaked).
+  const claimant = await spawned(engine, { botId: "claimant505", cardId: 505 });
+  assert.equal((await engine.get(claimant.sessionId)).cardId, 505);
+});
+
+test("attachCard: idempotent reassert of the SAME card is a no-op — no claim churn, no error", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine, { botId: "reasserter", cardId: 507 });
+  const result = await engine.attachCard(s.sessionId, 507);
+  assert.deepEqual(result, { ok: true, cardId: 507, botId: "reasserter" });
+  assert.equal((await engine.get(s.sessionId)).cardId, 507);
+});

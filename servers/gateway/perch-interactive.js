@@ -116,6 +116,14 @@
  * outputs-dir footer and clears `dispatchBrief`; every later `message()` on
  * that session sends raw text, exactly like a non-card session always has.
  *
+ * ATTACH-CARD (Track 3 Task 9): `attachCard(sessionId, cardId)` binds an
+ * ALREADY-SPAWNED session to a card — the drawer's own "attach to this card"
+ * action, distinct from `spawn({cardId})`'s dispatch-time binding. It does
+ * NOT run the async `checkCardFree` DB check itself — the ROUTE runs that
+ * (plus card-existence/archived/kind validation) BEFORE calling in, mirroring
+ * `spawn()`'s own split between the route/engine occupancy halves. Refused on
+ * `session_stopped`.
+ *
  * PER-SESSION DIRS: every spawn/wake (`startChild`) mkdirs an `outputsDir`
  * and `uploadsDir` keyed on `sessionId` under the bot's world `sessionDir`,
  * threading `outputsDir` into the child as `extraWritePaths` (Task 3) — the
@@ -1445,7 +1453,7 @@ export function createInteractiveEngine({
     return { sessionId: s.sessionId, threadId: s.threadId, state: s.state };
   }
 
-  async function message(sessionId, text) {
+  async function message(sessionId, text, images) {
     const S = await loadSeams();
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
@@ -1544,7 +1552,7 @@ export function createInteractiveEngine({
     // only clock. Every engine-held promptTurn carries a .catch — a child that
     // dies mid-turn REJECTS it, and an unhandled rejection in the gateway
     // process is a crash, not a log line.
-    s.pi.promptTurn(promptText, 0)
+    s.pi.promptTurn(promptText, 0, images)
       .then((end) => onTurnEnd(s, turn, end))
       .catch((e) => onTurnError(s, turn, e))
       .catch(() => {});
@@ -1857,6 +1865,50 @@ export function createInteractiveEngine({
     return { ok: true };
   }
 
+  /**
+   * Track 3 Task 9: bind an EXISTING (already-spawned, free-chat or
+   * previously card-bound) session to a card — the drawer's "attach to this
+   * card" action, distinct from `spawn({cardId})`'s dispatch-time binding.
+   * Occupancy is the caller's job: the ROUTE runs the same card validation +
+   * `checkCardFree` DB check `spawn()`'s dispatch route does, BEFORE ever
+   * calling in here — this method only performs the synchronous in-process
+   * claim (`claimCard`, same TOCTOU discipline as spawn's card claim: no
+   * await between the check and the set) and the row/state write. Refused on
+   * `session_stopped` — a stopped session has no future turn to hand the
+   * card's work to.
+   *
+   * Re-attaching to a DIFFERENT card than the one currently held releases the
+   * old claim (only after the new one is safely held) so a session is never
+   * left owning two cards, and a failed row write rolls the claim back
+   * cleanly rather than leaving the in-memory map and the DB row disagreeing.
+   */
+  async function attachCard(sessionId, cardId) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (s.state === "stopped") throw engineError("session_stopped");
+    const cid = Number(cardId);
+    const prevCardId = s.cardId;
+    if (prevCardId === cid) {
+      // Idempotent reassert: the session already holds this exact claim, so
+      // there is no claim or row state to churn. (assigned_bot provenance is
+      // the ROUTE's job on every call, not this method's — it re-writes that
+      // unconditionally regardless of what this returns.)
+      return { ok: true, cardId: cid, botId: s.botId };
+    }
+    claimCard(cid, s.sessionId);                        // throws card_occupied
+    s.cardId = cid;
+    try {
+      await writeRow(s, { status: s.pi ? "active" : "waiting-user" });
+    } catch (e) {
+      s.cardId = prevCardId;
+      releaseCard(cid, s.sessionId);
+      throw e;
+    }
+    if (prevCardId != null) releaseCard(prevCardId, s.sessionId);
+    emit(s, stateEvent(s));
+    return { ok: true, cardId: cid, botId: s.botId };
+  }
+
   async function subscribe(sessionId, fn) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
@@ -2005,6 +2057,8 @@ export function createInteractiveEngine({
     /** Track 3 Task 6: exported so the dispatch ROUTE can 409 a card BEFORE
      * ever reaching spawn() — see the module header. */
     checkCardFree,
+    /** Track 3 Task 9: attach an existing session to a card — see its own doc. */
+    attachCard,
     /** Precondition-test surface (r1 S10) — also the internal resolver. */
     _loadSeams: loadSeams,
     /** Track 3 Task 7: test-only reach into the internal hibernate() — every
