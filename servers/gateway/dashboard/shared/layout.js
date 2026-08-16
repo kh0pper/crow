@@ -1,8 +1,10 @@
 /**
  * Dashboard Layout — HTML shell with Dark Editorial design
  *
- * Generates the full page HTML with sidebar nav, header, theme toggle,
- * Google Fonts, and CSS custom properties.
+ * Generates the full page HTML with sidebar nav, header,
+ * Google Fonts, and CSS custom properties. Theme is OS-driven (design-tokens.js
+ * emits light on :root, dark inside @media (prefers-color-scheme: dark)) — the
+ * dashboard carries no theme state of its own (spec §3.3).
  */
 
 import { CROW_HERO_SVG } from "./crow-hero.js";
@@ -123,27 +125,19 @@ function turboDiagScript() {
  * @param {string} opts.content - Main content HTML
  * @param {string} opts.activePanel - Active panel ID for nav highlighting
  * @param {Array} opts.panels - Array of { id, name, icon, route, navOrder }
- * @param {string} [opts.theme] - "dark" or "light" (default: dark)
- * @param {boolean} [opts.glass] - Enable glass aesthetic
- * @param {boolean} [opts.serif] - Enable serif headings
  * @param {string} [opts.scripts] - Additional inline JS
  * @param {string} [opts.afterContent] - HTML rendered after </main> inside .dashboard (e.g. persistent player bar)
  * @param {string} [opts.headerIcons] - HTML rendered inside .content-header, right of title (e.g. notification bell, health icon)
  * @param {Array} [opts.navGroups] - Grouped nav: [{ id, name, collapsed, panels: [{ id, name, icon, route, navOrder }] }]
  * @param {Array|null} [opts.instanceTabs] - Unified multi-instance tabs: [{ id, name, status, isLocal }]. Only the nest handler passes this; every other page renders an empty, CSS-hidden strip (body.unified-off).
  */
-export function renderLayout({ title, content, activePanel, panels, theme, glass, serif, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs }) {
-  const themeClass = [
-    theme === "light" ? "theme-light" : "",
-    glass ? "theme-glass" : "",
-    serif ? "theme-serif" : "",
-    // Unified-off class gates the tabs strip visibility via CSS. The strip
-    // is re-rendered on every page (it must NOT be data-turbo-permanent:
-    // Turbo would pin the first-rendered — usually empty — strip across
-    // navigations, hiding the peers on the nest; W1-2) and hidden when the
-    // unified flag is off or no peers are trusted.
-    (Array.isArray(instanceTabs) && instanceTabs.length > 1) ? "" : "unified-off",
-  ].filter(Boolean).join(" ");
+export function renderLayout({ title, content, activePanel, panels, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs }) {
+  // Unified-off class gates the tabs strip visibility via CSS. The strip
+  // is re-rendered on every page (it must NOT be data-turbo-permanent:
+  // Turbo would pin the first-rendered — usually empty — strip across
+  // navigations, hiding the peers on the nest; W1-2) and hidden when the
+  // unified flag is off or no peers are trusted.
+  const bodyClass = (Array.isArray(instanceTabs) && instanceTabs.length > 1) ? "" : "unified-off";
   const sortedPanels = [...panels].sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
 
   // Render the instance tabs strip. Populated with local + peer tabs when
@@ -228,7 +222,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
   ${dashboardCss()}
   ${turboHead()}
 </head>
-<body class="${themeClass}">
+<body class="${bodyClass}">
   <div id="kiosk-overlay" class="kiosk-overlay">
     <!-- Always-present close button so a broken/unreachable companion iframe
          never strands the user with no way back to the dashboard. The iframe
@@ -251,9 +245,6 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         ${navItems}
       </nav>
       <div class="sidebar-footer">
-        <button onclick="toggleTheme()" class="theme-toggle" title="${escapeHtml(t("nav.toggleTheme", lang))}">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-        </button>
         <a href="/dashboard/logout" class="nav-item logout" data-turbo="false">${escapeHtml(t("nav.logout", lang))}</a>
       </div>
     </aside>
@@ -274,19 +265,6 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
     ${afterContent || ""}
   </div>
   <script>
-    function toggleTheme() {
-      document.body.classList.toggle('theme-light');
-      fetch('/dashboard/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=set_theme&theme=' + (document.body.classList.contains('theme-light') ? 'light' : 'dark')
-      });
-      fetch('/dashboard/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=set_theme_mode&mode=' + (document.body.classList.contains('theme-light') ? 'light' : 'dark')
-      });
-    }
     // ─── Kiosk Mode ───
     function toggleKioskMode() {
       var overlay = document.getElementById('kiosk-overlay');
@@ -877,7 +855,6 @@ function dashboardCss() {
     color: var(--crow-text-primary);
     line-height: 1.6;
     min-height: 100vh;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
   }
 
   a { color: var(--crow-accent); text-decoration: none; }
@@ -980,16 +957,6 @@ function dashboardCss() {
     align-items: center;
     justify-content: space-between;
   }
-  .theme-toggle {
-    background: none;
-    border: 1px solid var(--crow-border);
-    border-radius: 6px;
-    padding: 0.4rem;
-    color: var(--crow-text-muted);
-    cursor: pointer;
-    transition: color 0.15s;
-  }
-  .theme-toggle:hover { color: var(--crow-accent); }
   .logout { font-size: 0.8rem; }
 
   /* Main content */
