@@ -17,7 +17,7 @@ import { renderMarkdown } from "../../blog/renderer.js";
 import { isChordPro } from "../../blog/chordpro.js";
 import { generateRss, generateAtom } from "../../blog/rss.js";
 import { generatePodcastFeed } from "../../blog/podcast-rss.js";
-import { FONT_IMPORT, designTokensCss } from "../dashboard/shared/design-tokens.js";
+import { LEGACY_FONT_IMPORT as FONT_IMPORT, legacyDesignTokensCss as designTokensCss } from "../dashboard/shared/design-tokens-legacy.js";
 import { isAvailable, getObject } from "../../storage/s3-client.js";
 
 // Slugs under /blog/* that other routers (or earlier routes in this
