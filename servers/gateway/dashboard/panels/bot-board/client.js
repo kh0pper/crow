@@ -6,6 +6,7 @@
  */
 
 import { tJs } from "../../shared/i18n.js";
+import { birdDrawerJs } from "./drawer.js";
 
 export function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lang, includeArchived) {
   const bi = botId == null ? "null" : JSON.stringify(String(botId));
@@ -394,6 +395,17 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
 
   // ---- Click handler: dispatch by item type ----
   document.addEventListener('click',function(ev){
+    // Track 3 Task 13: a card-face bird glyph opens the SESSION drawer, not
+    // the card drawer — checked first so it wins over the card-body handler
+    // below. botId is unknown here (cardFaceHtml's birdHtml carries no
+    // data-bot); the drawer discovers it off the first SSE 'state' frame.
+    var birdGlyph=ev.target.closest && ev.target.closest('.bb-bird[data-bird-sid]');
+    if(birdGlyph && ev.target.closest('.bb-card')){
+      ev.preventDefault();
+      ev.stopPropagation();
+      openBirdDrawer(birdGlyph.getAttribute('data-bird-sid'));
+      return;
+    }
     var c=ev.target.closest && ev.target.closest('.bb-card');
     if(c && !ev.target.closest('.bb-nojs-move')){
       ev.preventDefault();
@@ -758,6 +770,17 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       var sk=Object.keys(activeStatuses);
       if(sk.length) parts.push('status='+sk.join(','));
       if(actionNeededFilter) parts.push('action=1');
+      // Track 3 Task 13: preserve foreign hash keys the drawer owns (bird,
+      // card) — a filter interaction must never blow away a live drawer
+      // deep link (review finding 7). window._bbForeignHash is populated by
+      // parseFilterHash below and by the drawer itself (bdSetHashKey).
+      if(window._bbForeignHash){
+        for(var fk in window._bbForeignHash){
+          if(Object.prototype.hasOwnProperty.call(window._bbForeignHash,fk) && window._bbForeignHash[fk]!=null){
+            parts.push(fk+'='+encodeURIComponent(window._bbForeignHash[fk]));
+          }
+        }
+      }
       var h=parts.length?'#'+parts.join('&'):'';
       if(location.hash!==h) history.replaceState(null,'',location.pathname+location.search+h);
     }
@@ -772,6 +795,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         if(k==='search'&&searchInput) searchInput.value=v;
         if(k==='status') v.split(',').forEach(function(s){ if(s) activeStatuses[s]=1; });
         if(k==='action'&&v==='1') actionNeededFilter=true;
+        // Track 3 Task 13: bird/card are keys THIS parser doesn't own —
+        // remembered so updateFilterHash can round-trip them, and read below
+        // (after parseFilterHash runs) to drive the drawer's own hash open.
+        if(k==='bird'||k==='card'){
+          window._bbForeignHash=window._bbForeignHash||{};
+          window._bbForeignHash[k]=v;
+        }
       });
       chips.forEach(function(chip){
         var sf=chip.getAttribute('data-status-filter');
@@ -798,6 +828,18 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
 
     parseFilterHash();
     applyFilters();
+
+    // Track 3 Task 13: hash-driven drawer open — #bird=<sid> opens straight
+    // to that session, #card=<id> scrolls the card into view and opens its
+    // live bird's drawer if one is on it. Runs AFTER parseFilterHash so a
+    // drawer link co-existing with a search/status hash is never lost.
+    if(window._bbForeignHash){
+      if(window._bbForeignHash.bird && typeof openBirdDrawer==='function'){
+        openBirdDrawer(window._bbForeignHash.bird);
+      } else if(window._bbForeignHash.card && typeof bdFocusCard==='function'){
+        bdFocusCard(window._bbForeignHash.card);
+      }
+    }
 
     // ---- View toggle + list + collapsible columns (Feature 3) ----
     var bbBoard=$('bb-board');
@@ -1042,10 +1084,14 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       .then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,status:r.status,j:j};});});
   }
 
-  // Task 13 owns the drawer (open/answer/talk/sessions all land here) — this
-  // is the stub every roost/bird click routes through until it lands. A
-  // deliberate no-op, not a TODO: Task 13 decides what it does with sessionId.
-  function openBirdDrawer(sessionId){}
+  // Task 13: the session drawer. Its emitted source lives in drawer.js (kept
+  // out of THIS file to stay under the line budget) — spliced in here as a
+  // bare block of statements sharing this IIFE's scope ($, clearEl,
+  // openDrawer/closeDrawer, perchApi, crowToast, msg). Defines
+  // openBirdDrawer(sessionId, botId, botName), closeBirdDrawer() and
+  // bdFocusCard(cardId) — every roost/bird/hash entry point below calls one
+  // of those three.
+  ${birdDrawerJs(lang)}
 
   var roostDispatchEl=$('bb-roost-dispatch'), roostDispatchBotId=null;
   function closeRoostDispatch(){ closeDrawer(roostDispatchEl); roostDispatchBotId=null; }
@@ -1147,11 +1193,17 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var botId=actBtn.getAttribute('data-bot');
     var sid=actBtn.getAttribute('data-sid');
     if(action==='dispatch'){ openRoostDispatch(botId); return; }
-    if(action==='open' || action==='answer'){ openBirdDrawer(sid); return; }
-    if(action==='sessions'){ openBirdDrawer(sid||null); return; }
+    // The DOM already carries the bird's display name (.bb-roost-name,
+    // rendered by roostBirdHtml) — read it here rather than a fresh API
+    // round trip just to fill in the drawer header.
+    var birdWrap=actBtn.closest&&actBtn.closest('.bb-roost-bird');
+    var nameEl=birdWrap&&birdWrap.querySelector('.bb-roost-name');
+    var botName=nameEl?nameEl.textContent:null;
+    if(action==='open' || action==='answer'){ openBirdDrawer(sid,botId,botName); return; }
+    if(action==='sessions'){ openBirdDrawer(sid||null,botId,botName); return; }
     if(action==='talk'){
       perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive').then(function(r){
-        if(r.ok){ openBirdDrawer(r.j&&r.j.sessionId); }
+        if(r.ok){ openBirdDrawer(r.j&&r.j.sessionId,botId,botName); }
         else { crowToast((r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); }
       }).catch(function(){ crowToast('${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); });
       return;

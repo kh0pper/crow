@@ -5,6 +5,7 @@
  */
 
 import { PERCH_TOKENS } from "../../shared/design-tokens.js";
+import { birdDrawerCss } from "./drawer.js";
 
 export function botBoardStyles() {
   // Track 3 Task 11 (spec §3.2/§5.6): the card-face bird glyph. OS-driven
@@ -55,6 +56,7 @@ export function botBoardStyles() {
   return `<style>
   ${birdCss}
   ${roostCss}
+  ${birdDrawerCss()}
   .bb-switch{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
   .bb-switch select,.bb-switch input{padding:.45rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)}
   .bb-switch button{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer}
