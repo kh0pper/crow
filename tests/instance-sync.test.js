@@ -35,6 +35,8 @@ import * as ed from "../node_modules/@noble/ed25519/index.js";
 import { createMemoryServer } from "../servers/memory/server.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { persistSyncDeploymentVerdict } from "../servers/gateway/boot/mcp-mounts.js";
+import { readSetting } from "../servers/gateway/dashboard/settings/registry.js";
 
 // ── Shared setup ──────────────────────────────────────────────────────────────
 
@@ -1788,4 +1790,179 @@ test("2c-C5a. conflict dedupe: identical redelivery adds no row; losing_instance
   assert.equal(await mgr._insertConflictRow(...args), true, "re-surfaces once after resolve");
   assert.equal(await mgr._insertConflictRow(...args), false, "then dedupes against the new unresolved row");
   db.close();
+});
+
+// ── Task 3: strict emit disposition contract + owner-persisted gate ────────
+//
+// Manager-side strict emit ('appended'|'parked'|'failed' per peer) and the
+// mcp-mounts.js setting write that gates emitOrQueue's (stdio door)
+// eligibility check. See docs/superpowers/specs/2026-08-15-stdio-sync-outbox-design.md
+// "The drain".
+
+test("T3a. _appendToPeer disposition contract: appended (armed feed succeeds), parked (feed absent, non-strict), failed (append throws)", async () => {
+  const { mgr, db } = makeManager("inst-t3a");
+  const entry = signEntry({ table: "contacts", op: "insert", row: { crow_id: "crow:t3a" }, lamport_ts: 1, instance_id: "inst-t3a" });
+
+  const captured = [];
+  mgr.outFeeds.set("peer-ok", { append: async (e) => { captured.push(e); } });
+  assert.equal(await mgr._appendToPeer("peer-ok", entry), "appended", "armed feed, append succeeds -> appended");
+  assert.equal(captured.length, 1);
+
+  assert.equal(await mgr._appendToPeer("peer-unarmed", entry), "parked", "no armed feed, non-strict -> parked");
+  assert.deepEqual(mgr._pendingPeerEmits.get("peer-unarmed"), [entry], "non-strict park lands in _pendingPeerEmits (unchanged pre-Task-3 behavior)");
+
+  mgr.outFeeds.set("peer-bad", { append: async () => { throw new Error("boom"); } });
+  assert.equal(await mgr._appendToPeer("peer-bad", entry), "failed", "armed feed, append throws -> failed");
+
+  db.close();
+});
+
+test("T3b. strict _appendToPeer: a would-park entry returns 'parked' WITHOUT pushing to _pendingPeerEmits", async () => {
+  const { mgr, db } = makeManager("inst-t3b");
+  const entry = signEntry({ table: "contacts", op: "insert", row: { crow_id: "crow:t3b" }, lamport_ts: 1, instance_id: "inst-t3b" });
+
+  const d = await mgr._appendToPeer("peer-unarmed", entry, { strict: true });
+  assert.equal(d, "parked");
+  assert.equal(mgr._pendingPeerEmits.has("peer-unarmed"), false, "strict mode never parks in RAM (spec: entries never park on the drain path)");
+
+  db.close();
+});
+
+test("T3c. strict emitChange: all peers appended -> resolves {lamport, appended:[peerIds]}", async () => {
+  const { mgr, db } = makeManager("inst-t3c");
+  const captured = [];
+  mgr.outFeeds.set("peer-1", { append: async (e) => captured.push(e) });
+  mgr.outFeeds.set("peer-2", { append: async (e) => captured.push(e) });
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, lamport_ts) VALUES ('crow:t3c', '', 'p1', 0)",
+    args: [],
+  });
+  const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:t3c'", args: [] });
+
+  const result = await mgr.emitChange("contacts", "update", rows[0], { strict: true });
+
+  assert.equal(typeof result, "object", "strict success shape is an object, not a bare lamport number");
+  assert.ok(Number.isFinite(result.lamport) && result.lamport > 0, `lamport should be a positive number, got ${result.lamport}`);
+  assert.deepEqual(new Set(result.appended), new Set(["peer-1", "peer-2"]), "appended lists both peers");
+  assert.equal(captured.length, 2, "both peers actually received the real append");
+  db.close();
+});
+
+test("T3d. strict emitChange throws on a parked peer; thrown error carries dispositions + appended (controller ruling: partial-delivery accounting for Task 4's drain)", async () => {
+  const { mgr, db } = makeManager("inst-t3d");
+  const captured = [];
+  mgr.outFeeds.set("peer-ok", { append: async (e) => captured.push(e) });
+  // peer-park is PAIRED (crow_instances row) but has no armed outFeed -> would park.
+  await db.execute({
+    sql: "INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?, ?, ?, 'active')",
+    args: ["peer-park", "Peer Park", "crow:park"],
+  });
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, lamport_ts) VALUES ('crow:t3d', '', 'p2', 0)",
+    args: [],
+  });
+  const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:t3d'", args: [] });
+
+  await assert.rejects(
+    () => mgr.emitChange("contacts", "update", rows[0], { strict: true }),
+    (err) => {
+      assert.equal(err.dispositions["peer-ok"], "appended");
+      assert.equal(err.dispositions["peer-park"], "parked");
+      assert.deepEqual(err.appended, ["peer-ok"], "appended lists only the peer that actually appended");
+      return true;
+    },
+    "strict emitChange must throw when any peer disposition is not 'appended'",
+  );
+  assert.equal(captured.length, 1, "the healthy peer still received the real append despite the throw (partial delivery)");
+  assert.equal(mgr._pendingPeerEmits.has("peer-park"), false, "strict-parked entry never lands in _pendingPeerEmits, even inside emitChange");
+  db.close();
+});
+
+test("T3e. strict emitChange throws on a failed append; thrown error carries dispositions + empty appended", async () => {
+  const { mgr, db } = makeManager("inst-t3e");
+  mgr.outFeeds.set("peer-bad", { append: async () => { throw new Error("boom"); } });
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, lamport_ts) VALUES ('crow:t3e', '', 'p3', 0)",
+    args: [],
+  });
+  const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:t3e'", args: [] });
+
+  await assert.rejects(
+    () => mgr.emitChange("contacts", "update", rows[0], { strict: true }),
+    (err) => {
+      assert.equal(err.dispositions["peer-bad"], "failed");
+      assert.deepEqual(err.appended, []);
+      return true;
+    },
+  );
+  db.close();
+});
+
+test("T3f. non-strict emitChange byte-identical: paired-but-unarmed peer parks in _pendingPeerEmits, plain lamport number returned, no throw", async () => {
+  const { mgr, db } = makeManager("inst-t3f");
+  await db.execute({
+    sql: "INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?, ?, ?, 'active')",
+    args: ["peer-unarmed-f", "Peer F", "crow:f"],
+  });
+  await db.execute({
+    sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, lamport_ts) VALUES ('crow:t3f', '', 'p4', 0)",
+    args: [],
+  });
+  const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = 'crow:t3f'", args: [] });
+
+  const ts = await mgr.emitChange("contacts", "update", rows[0]); // no opts.strict
+
+  assert.equal(typeof ts, "number", "non-strict return shape unchanged: bare lamport number, not {lamport, appended}");
+  assert.ok(ts > 0);
+  assert.equal((mgr._pendingPeerEmits.get("peer-unarmed-f") || []).length, 1, "non-strict still parks in RAM exactly as before Task 3");
+  db.close();
+});
+
+// ── Task 3: owner-persisted sync_deployment_enabled setting matrix ─────────
+//
+// persistSyncDeploymentVerdict (servers/gateway/boot/mcp-mounts.js) is the
+// unit extracted from the feeds-owning boot path for direct testing — the
+// full mountMcpServers() boot needs a live Express app + a process-wide
+// sync-manager singleton that this test file's scratch harness doesn't
+// stand up. writeSetting/readSetting resolve the local-scope override by
+// getOrCreateLocalInstanceId(), which reads process.env.CROW_DATA_DIR
+// directly — a dedicated scratch CROW_DATA_DIR is required so this never
+// touches the real ~/.crow/data instance-id file.
+
+function freshSettingsDb(label) {
+  const dir = mkdtempSync(join(tmpdir(), `crow-isync-t3-settings-${label}-`));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: dir },
+    stdio: "pipe",
+  });
+  return { db: createDbClient(join(dir, "crow.db")), dir };
+}
+
+test("T3g. setting matrix: owner+feeds-on writes '1'; owner+env-disabled writes '0'; noAuth companion NEVER writes; pre-seeded owner value survives a companion boot", async () => {
+  const { db, dir } = freshSettingsDb("matrix");
+  const prevDataDir = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = dir;
+  try {
+    // owner, feeds-on -> '1'
+    await persistSyncDeploymentVerdict(db, { feedsDisabled: false, noAuth: false });
+    assert.equal(await readSetting(db, "sync_deployment_enabled"), "1", "owner+feeds-on writes '1'");
+
+    // owner, env-disabled -> '0'
+    await persistSyncDeploymentVerdict(db, { feedsDisabled: true, noAuth: false });
+    assert.equal(await readSetting(db, "sync_deployment_enabled"), "0", "owner+env-disabled writes '0'");
+
+    // Owner re-establishes '1' (simulates the primary's normal boot verdict)...
+    await persistSyncDeploymentVerdict(db, { feedsDisabled: false, noAuth: false });
+    assert.equal(await readSetting(db, "sync_deployment_enabled"), "1");
+
+    // ...then a --no-auth companion boots sharing this same crow.db. Its
+    // manager always has feedsDisabled=true, but noAuth MUST gate the write
+    // off entirely — the owner's '1' must survive untouched.
+    await persistSyncDeploymentVerdict(db, { feedsDisabled: true, noAuth: true });
+    assert.equal(await readSetting(db, "sync_deployment_enabled"), "1", "noAuth boot never writes — pre-seeded owner value survives a companion boot");
+  } finally {
+    db.close();
+    process.env.CROW_DATA_DIR = prevDataDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

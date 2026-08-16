@@ -1443,18 +1443,33 @@ export class InstanceSyncManager {
    * check-then-push outside the chain can strand entries or reorder the feed
    * (spec R2/F2). A failed append is logged and NOT retried (pre-existing
    * semantics; deletes self-heal via the tombstone re-emit).
+   *
+   * Disposition contract (Task 3, stdio-sync-outbox): returns
+   * `'appended' | 'parked' | 'failed'`. In `{ strict: true }` mode a
+   * would-park entry returns `'parked'` WITHOUT pushing to
+   * `_pendingPeerEmits` — the drain path must never park in RAM (spec "The
+   * drain": a mid-batch revoke/disarm discards parked slots, which would
+   * silently lose an entry the strict caller believes is durably accounted
+   * for). Live (non-strict) callers keep the pre-existing park behavior.
+   * @param {string} peerId
+   * @param {object} entry
+   * @param {{strict?: boolean}} [opts]
+   * @returns {Promise<'appended'|'parked'|'failed'>}
    */
-  async _appendToPeer(peerId, entry) {
+  async _appendToPeer(peerId, entry, opts = {}) {
+    const strict = !!opts.strict;
     return this._chainAppendTask(peerId, async () => {
       const feed = this.outFeeds.get(peerId);
       if (feed) {
         try {
           await feed.append(entry);
+          return "appended";
         } catch (err) {
           console.warn(`[instance-sync] Failed to append to feed for ${peerId}:`, err.message);
+          return "failed";
         }
-        return;
       }
+      if (strict) return "parked";
       const slot = this._pendingPeerEmits.get(peerId) || [];
       slot.push(entry);
       if (slot.length > 256) {
@@ -1462,6 +1477,7 @@ export class InstanceSyncManager {
         console.warn(`[instance-sync] pending emit queue overflow for ${peerId} — dropped oldest (LWW-safe direction)`);
       }
       this._pendingPeerEmits.set(peerId, slot);
+      return "parked";
     });
   }
 
@@ -1597,9 +1613,40 @@ export class InstanceSyncManager {
       pairedIds = []; // degraded: armed feeds below still get the entry
     }
     const targets = new Set([...pairedIds, ...this.outFeeds.keys()]);
-    await Promise.all([...targets].map((peerId) => this._appendToPeer(peerId, entry)));
 
-    return lamportTs;
+    if (!opts.strict) {
+      await Promise.all([...targets].map((peerId) => this._appendToPeer(peerId, entry)));
+      return lamportTs;
+    }
+
+    // Strict mode (Task 3, stdio-sync-outbox / spec "The drain"): collect a
+    // per-peer disposition and treat any non-'appended' outcome (parked OR
+    // failed) as failure of the whole emit. CONTROLLER RULING: the thrown
+    // error must NOT lose per-peer results — Task 4's drain needs
+    // partial-delivery accounting ("merge appended peers into
+    // delivered_json") even when some peers parked or failed, so the error
+    // carries both `dispositions` (full per-peer map) and `appended` (the
+    // subset that actually landed). The success shape is
+    // `{lamport, appended: [peerIds]}` — deliberately NOT the bare number
+    // non-strict mode returns, so a caller can't mistake a strict result for
+    // a live one.
+    const dispositions = {};
+    await Promise.all(
+      [...targets].map(async (peerId) => {
+        dispositions[peerId] = await this._appendToPeer(peerId, entry, { strict: true });
+      }),
+    );
+    const appended = Object.keys(dispositions).filter((peerId) => dispositions[peerId] === "appended");
+    if (appended.length !== targets.size) {
+      const err = new Error(
+        `[instance-sync] strict emitChange: not all peers appended (table=${table} op=${op}, ` +
+          `dispositions=${JSON.stringify(dispositions)})`,
+      );
+      err.dispositions = dispositions;
+      err.appended = appended;
+      throw err;
+    }
+    return { lamport: lamportTs, appended };
   }
 
   /**

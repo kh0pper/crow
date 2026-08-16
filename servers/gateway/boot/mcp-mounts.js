@@ -23,6 +23,33 @@ import { connectedServers } from "../proxy.js";
 import { createBoardMcpServer } from "../board-mcp.js";
 import { ensureBoardToken } from "../local-token.js";
 
+/**
+ * Persist the boot's deployment verdict for `emitOrQueue`'s (the stdio
+ * door's) db-persisted eligibility gate — see
+ * `servers/shared/sync-emit.js` `isDeploymentEligible()`, which reads this
+ * same `sync_deployment_enabled` key.
+ *
+ * OWNER-ONLY (stdio-sync-outbox Task 3): a `--no-auth` companion also
+ * constructs a manager on every boot (feedsDisabled=true, `managers.js:37`)
+ * but shares the primary's `crow.db` — an unguarded write would clobber the
+ * owner's `'1'` with `'0'` on every companion boot, undoing the spec's
+ * round-2 fix (spec "The drain", owner-persisted gate). `noAuth` therefore
+ * short-circuits before any write.
+ *
+ * Extracted as its own function (rather than inlined in
+ * `mountMcpServers`) so it's directly unit-testable — the full
+ * `mountMcpServers` boot needs a live Express app and the process-wide
+ * sync-manager singleton, neither of which a focused test should need to
+ * stand up just to exercise this matrix.
+ * @param {object} db
+ * @param {{feedsDisabled: boolean, noAuth: boolean}} opts
+ */
+export async function persistSyncDeploymentVerdict(db, { feedsDisabled, noAuth }) {
+  if (noAuth) return;
+  const { writeSetting } = await import("../dashboard/settings/registry.js");
+  await writeSetting(db, "sync_deployment_enabled", feedsDisabled ? "0" : "1", { scope: "local" });
+}
+
 export async function mountMcpServers(app, deps) {
   const { authMiddleware, noAuth, instructions, routerInstructions, sessionManager } = deps;
 
@@ -30,6 +57,16 @@ export async function mountMcpServers(app, deps) {
   createSharingServer(undefined, { instructions });
   // Get the sync manager so memory server can emit change entries
   const syncManager = getInstanceSyncManager();
+
+  // Persist this boot's deployment verdict — owner-only (see
+  // persistSyncDeploymentVerdict's doc comment above).
+  try {
+    if (syncManager) {
+      await persistSyncDeploymentVerdict(syncManager.db, { feedsDisabled: syncManager.feedsDisabled, noAuth });
+    }
+  } catch (err) {
+    console.warn(`[instance-sync] sync_deployment_enabled persist failed: ${err.message}`);
+  }
 
   // Phase 5-polish: attach syncManager to providers-db so upsert/disable push
   // to paired peers via emitChange (pull-side already covered by SYNCED_TABLES).
