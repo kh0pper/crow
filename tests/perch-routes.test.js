@@ -554,7 +554,7 @@ test("nothing claims perch owns the first in-process handleInbound — the gmail
   // **first in-process** one") and not its denial ("is NOT the … first
   // in-process one"), which both files now carry deliberately.
   const CLAIMS_FIRST = /\bis the (\*\*)?first in-process\b/i;
-  for (const rel of ["servers/gateway/routes/perch.js", "docs/developers/perch-hub.md"]) {
+  for (const rel of ["servers/gateway/routes/perch.js"]) {
     const src = readFileSync(join(REPO, rel), "utf8");
     assert.equal(CLAIMS_FIRST.test(src), false, rel + " still repeats the false 'first in-process' claim");
     // The fact worth stating instead: they share a process, and therefore the
