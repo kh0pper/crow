@@ -533,7 +533,7 @@ export function createInteractiveEngine({
     s.lastError = "turn stalled";
     emit(s, { type: "error", text: "turn stalled" });
     // A single tool silent past the window IS aborted — named operator-facing
-    // policy (r2 S12), documented in the perch-hub developer docs.
+    // policy (r2 S12).
     abortInFlight(s).catch(() => {});
   }
 
@@ -584,8 +584,8 @@ export function createInteractiveEngine({
   /**
    * Write this session's row: UPDATE the newest row for (bot, thread) if one
    * exists, else INSERT. One db.batch() = one better-sqlite3 transaction; the
-   * shape is perch.js `saveNarrowing`'s, NOT `claimTurn`'s (which hardcodes
-   * kind='perch') and never ON CONFLICT (the index is not unique).
+   * shape is perch.js `saveNarrowing`'s, NOT the retired `claimTurn`'s (which
+   * hardcoded kind='perch') and never ON CONFLICT (the index is not unique).
    */
   async function writeRow(s, { status, piSessionDir = null, model = null }, control = "run") {
     const db = createDbClient();

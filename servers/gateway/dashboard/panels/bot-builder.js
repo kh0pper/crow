@@ -15,7 +15,6 @@ import { renderBotEditor } from "./bot-builder/editor.js";
 import { renderBotList } from "./bot-builder/html.js";
 import { renderWizard } from "./bot-builder/wizard.js";
 import { renderDeleteConfirm } from "./bot-builder/delete-bot.js";
-import { perchGateClientJS } from "./perch.js";
 
 const PAGE_CSS = botBuilderStyles();
 
@@ -37,26 +36,12 @@ function botRuntimeOffBanner(lang) {
     `<span id="bot-runtime-enable-status" class="btb-hint"></span></p>`;
 }
 
-// Perch Hub P1, acceptance finding D2 — `warn=perch_not_installed`. The save
-// succeeded; what's missing is the surface the replies would appear on, which
-// is the perch-hub bundle itself. Same banner+button shape as the runtime-off
-// warning above, and the button is driven by the Perch panel's OWN install-job
-// client (`perchGateClientJS`) rather than a second copy of it — one
-// implementation of "install perch-hub", used from both places it is offered.
-function perchNotInstalledBanner(lang) {
-  return `<p class="btb-notice-warn">${escapeHtml(t("botbuilder.perchMissingBody", lang))} ` +
-    `<button type="button" id="perch-install-btn" class="btb-btn btb-btn-sm btb-btn-inline">` +
-    `${escapeHtml(t("perch.gateInstallBtn", lang))}</button> ` +
-    `<span id="perch-install-status" class="btb-hint"></span></p>` +
-    perchGateClientJS(lang);
-}
-
 /**
- * `?warn=` as a LIST. One save can raise two independent warnings (an engine
- * channel on a disarmed runtime that is ALSO a perch attach with no bundle),
- * and api-handlers appends each as its own `&warn=` — which express's query
- * parser hands back as an array. Rendering `String(q.warn)` on that array
- * would print `bot_runtime_off,perch_not_installed` as raw text and drop both
+ * `?warn=` as a LIST. One save can raise more than one independent warning
+ * (e.g. an engine channel on a disarmed runtime alongside a free-form field
+ * error), and api-handlers appends each as its own `&warn=` — which express's
+ * query parser hands back as an array. Rendering `String(q.warn)` on that
+ * array would print the values comma-joined as raw text and drop both
  * banners. Single-value `?warn=` is unchanged, and free-form warn strings are
  * NOT split on anything (several of them legitimately contain commas).
  */
@@ -111,8 +96,7 @@ export default {
     // Independent of the base notice so it can ride alongside a Saved.
     const warnNotice = warnValues(q.warn).map((w) =>
       w === "bot_runtime_off" ? botRuntimeOffBanner(lang)
-        : w === "perch_not_installed" ? perchNotInstalledBanner(lang)
-          : `<p class="btb-notice-warn">${escapeHtml(w)}</p>`).join("");
+        : `<p class="btb-notice-warn">${escapeHtml(w)}</p>`).join("");
     const notice = runtimeBanner + baseNotice + warnNotice;
 
     // ---- guided-creation wizard (Item 5 PR1, spec §D1) ----
