@@ -75,9 +75,17 @@ function payloadEntrypoint(crowHome) {
  * stays that way — this is panel-callout logic only, not a change to what
  * the routes accept.
  *
- * Fails safe toward showing the callout: a read error (e.g. a pre-migration
- * db with no `pi_bot_defs` table) is treated as "nothing attached" rather
- * than throwing and taking the whole panel down with it.
+ * A query-level failure (bad connection, locked db, pre-migration db with no
+ * `pi_bot_defs` table, …) means "unknown," not "confirmed zero" — it must
+ * NOT render the unattached callout, which is a specific, plausible, WRONG
+ * diagnosis ("no bot has Perch attached") that would send the operator off
+ * to redo configuration that isn't broken. So the outer catch fails toward
+ * HIDING the callout (`return true`): on a db error this function reports
+ * "something is attached" and the panel behaves exactly as it did before
+ * this feature existed — silent on that front, but never actively
+ * misleading. A per-row `JSON.parse` failure is different: that row's own
+ * definition is malformed, not the query, so it is treated as "this row is
+ * not attached" while the rest of the rows are still evaluated normally.
  */
 async function anyEnabledBotAttached() {
   const db = createDbClient();
@@ -94,7 +102,7 @@ async function anyEnabledBotAttached() {
       return perchAttached(def && typeof def === "object" ? def : {});
     });
   } catch {
-    return false;
+    return true;
   } finally {
     try { db.close(); } catch { /* already closed */ }
   }
