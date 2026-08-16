@@ -177,6 +177,24 @@ meta-glasses `server.js:265,433,595` — which makes the Phase 6 `research_notes
 Notion importer (`scripts/sync-notion.js:314,321`). Bundles can adopt `emitOrQueue` through the
 app-root import pattern in a follow-up PR; that work rides its own review.
 
+One more named case is NOT fixed by this PR: the repo `.mcp.json`'s `crow-sharing` stdio mount
+(`servers/sharing/index.js`) builds a full `InstanceSyncManager` with feeds enabled (no
+`--no-auth` argv, no env override) — a live-shaped manager, not the no-manager/feeds-disabled
+case `emitOrQueue`'s queue branch exists for. Its `emitChange` calls still mint and stamp a
+lamport, then try to append to per-peer Hypercore out-feeds the gateway process actually owns;
+finding no armed feeds, the append parks in RAM and is lost when the stdio session exits — with
+the row already stamped as if delivered. This is the finding-1 divergence class, just via a
+different door than the one this PR closes. The fix direction is flipping that mount's manager
+to feeds-disabled (e.g. `CROW_DISABLE_INSTANCE_SYNC=1` in the mount's env), at which point this
+PR's queue path takes over for it — filed as a follow-up that needs its own review of what else
+that env var gates in the sharing process before it's set there.
+
+Also named here, beside the bundle-writer family: **drain fault-mode amplification** — while any
+paired peer stays parked/failed, each 60s retry re-appends the head row to every healthy peer's
+feed (the apply-side equivalence skip keeps this correct, but an escalating warn fires on every
+retry). Follow-up: strict-emit target-exclusion for peers the row was already delivered to, or
+per-row backoff.
+
 ### What this deliberately does not do
 
 - **No loopback-POST path** — fails exactly when durability matters; the outbox alone is always

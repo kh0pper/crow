@@ -25,6 +25,7 @@ import { readTombstone, writeTombstone, clearTombstone } from "./contact-delete.
 import { groupTombstoneStatement, isGroupTombstoned } from "./group-delete.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import bus from "../shared/event-bus.js";
+import { mintLamport, advanceCounter, stampSql } from "../shared/sync-stamp.js";
 
 /**
  * Build the canonical wire row for a crow_context DB row.
@@ -206,7 +207,10 @@ function _scheduleStorageReset() {
   }, 500);
 }
 
-function shouldSyncRow(table, row) {
+// Exported for real (not just the ForTest alias below): sync-emit.js's
+// emitOrQueue (Task 2) is a second, production, door into this same gate —
+// a row the live emitChange path would filter must never be queued either.
+export function shouldSyncRow(table, row) {
   if (table === "contacts") {
     if (!row) return false;
     // local-bot contacts are hosted on THIS instance (instance-local secp key);
@@ -292,7 +296,9 @@ function shouldSyncRow(table, row) {
   return isSyncable(row.key);
 }
 
-// Test-only alias (keeps the function module-private for production callers).
+// Kept for back-compat with existing test imports now that shouldSyncRow
+// itself is exported (Task 2 needed a real production export, not just a
+// test alias — see the comment above shouldSyncRow).
 export function shouldSyncRowForTest(table, row) { return shouldSyncRow(table, row); }
 
 /**
@@ -377,9 +383,12 @@ export class InstanceSyncManager {
   /**
    * Idempotent seeder: ensure a sync_state row exists for this instance.
    * INSERT OR IGNORE is atomic against concurrent first-callers; safe to race.
-   * All three sync_state writers call this before their UPDATE so that a fresh
-   * receive-only instance (which never calls _nextLamport) still has a row to
-   * UPDATE — without it the counter advances and checkpoints silently no-op.
+   * Kept for call sites that only need to guarantee a row exists without
+   * minting/advancing (e.g. checkpoint persistence in _setLastAppliedSeq).
+   * _nextLamport and _advanceCounter no longer route through this latch —
+   * they delegate to servers/shared/sync-stamp.js, which seeds unconditionally
+   * on every call (see mintLamport's doc comment for why that's cheap and
+   * race-free).
    */
   async _ensureCounter() {
     if (this._counterSeeded) return;
@@ -398,50 +407,27 @@ export class InstanceSyncManager {
 
   /**
    * Atomically increment and persist the local Lamport counter.
-   * Uses a single UPDATE ... RETURNING so no two concurrent callers can race
-   * on the same value — better-sqlite3 is synchronous, each statement is atomic
-   * with respect to all JS interleavings.
+   * Delegates to servers/shared/sync-stamp.js's mintLamport — the shared
+   * module both this manager and the stdio door's emitOrQueue (Task 2) mint
+   * through, so the counter has one source of truth regardless of which
+   * process is writing. Seeds the sync_state row itself (INSERT OR IGNORE)
+   * on every call, which subsumes the old seed-race retry path here (the
+   * seed always runs immediately before the increment now, in one call —
+   * see sync-stamp.js's mintLamport for why that closes the race outright).
    * @returns {Promise<number>} The new counter value
    */
   async _nextLamport() {
-    await this._ensureCounter();
-    const { rows } = await this.db.execute({
-      sql: `UPDATE sync_state SET local_counter = local_counter + 1, updated_at = datetime('now')
-            WHERE instance_id = ? RETURNING local_counter`,
-      args: [this.localInstanceId],
-    });
-    if (rows.length === 0) {
-      // Seed race: the INSERT OR IGNORE above ran but the UPDATE found no row
-      // (another caller's INSERT lost the race). Seed explicitly and retry once.
-      this._counterSeeded = false;
-      await this._ensureCounter();
-      const retry = await this.db.execute({
-        sql: `UPDATE sync_state SET local_counter = local_counter + 1, updated_at = datetime('now')
-              WHERE instance_id = ? RETURNING local_counter`,
-        args: [this.localInstanceId],
-      });
-      if (!retry.rows[0]) {
-        // Seed + retry both failed — the DB is genuinely unavailable. Throw
-        // with a real message instead of a bare TypeError out of emitChange.
-        throw new Error("[instance-sync] sync_state row missing after seed+retry — DB unavailable?");
-      }
-      return Number(retry.rows[0].local_counter);
-    }
-    return Number(rows[0].local_counter);
+    return mintLamport(this.db, this.localInstanceId);
   }
 
   /**
    * Advance the local counter so it is greater than an incoming Lamport value.
-   * Single atomic MAX(...) UPDATE — no read-check-write race across an await.
+   * Delegates to servers/shared/sync-stamp.js's advanceCounter (MAX-floor —
+   * a floor below the current counter is a no-op, never a regression).
    * @param {number} incomingTs - Lamport timestamp from a remote entry
    */
   async _advanceCounter(incomingTs) {
-    await this._ensureCounter();
-    await this.db.execute({
-      sql: `UPDATE sync_state SET local_counter = MAX(local_counter, CAST(? AS INTEGER) + 1), updated_at = datetime('now')
-            WHERE instance_id = ?`,
-      args: [Number(incomingTs) || 0, this.localInstanceId],
-    });
+    return advanceCounter(this.db, this.localInstanceId, incomingTs);
   }
 
   /**
@@ -1457,18 +1443,33 @@ export class InstanceSyncManager {
    * check-then-push outside the chain can strand entries or reorder the feed
    * (spec R2/F2). A failed append is logged and NOT retried (pre-existing
    * semantics; deletes self-heal via the tombstone re-emit).
+   *
+   * Disposition contract (Task 3, stdio-sync-outbox): returns
+   * `'appended' | 'parked' | 'failed'`. In `{ strict: true }` mode a
+   * would-park entry returns `'parked'` WITHOUT pushing to
+   * `_pendingPeerEmits` — the drain path must never park in RAM (spec "The
+   * drain": a mid-batch revoke/disarm discards parked slots, which would
+   * silently lose an entry the strict caller believes is durably accounted
+   * for). Live (non-strict) callers keep the pre-existing park behavior.
+   * @param {string} peerId
+   * @param {object} entry
+   * @param {{strict?: boolean}} [opts]
+   * @returns {Promise<'appended'|'parked'|'failed'>}
    */
-  async _appendToPeer(peerId, entry) {
+  async _appendToPeer(peerId, entry, opts = {}) {
+    const strict = !!opts.strict;
     return this._chainAppendTask(peerId, async () => {
       const feed = this.outFeeds.get(peerId);
       if (feed) {
         try {
           await feed.append(entry);
+          return "appended";
         } catch (err) {
           console.warn(`[instance-sync] Failed to append to feed for ${peerId}:`, err.message);
+          return "failed";
         }
-        return;
       }
+      if (strict) return "parked";
       const slot = this._pendingPeerEmits.get(peerId) || [];
       slot.push(entry);
       if (slot.length > 256) {
@@ -1476,6 +1477,7 @@ export class InstanceSyncManager {
         console.warn(`[instance-sync] pending emit queue overflow for ${peerId} — dropped oldest (LWW-safe direction)`);
       }
       this._pendingPeerEmits.set(peerId, slot);
+      return "parked";
     });
   }
 
@@ -1532,6 +1534,24 @@ export class InstanceSyncManager {
    * @param {string} table - Table name (e.g., "memories")
    * @param {"insert"|"update"|"delete"} op - Operation type
    * @param {object} row - The row data (for insert/update) or { id } (for delete)
+   * @param {object} [opts]
+   * @param {number} [opts.lamportTs] - preserve-mode (2c C1): re-emit this row
+   *   at its ORIGINAL lamport instead of minting a fresh one (also skips the
+   *   local re-stamp) — for redelivery paths that must never fabricate
+   *   recency over a peer's newer write. Live mutations must not pass this.
+   * @param {boolean} [opts.strict] - strict-append mode (Task 3,
+   *   stdio-sync-outbox spec "The drain"): collects a per-peer append
+   *   disposition and treats any non-'appended' outcome (parked OR failed)
+   *   as failure of the WHOLE emit. Changes the return shape: non-strict
+   *   (default) returns the lamport as a bare `number` (or `null` if feeds
+   *   are disabled / the row isn't syncable); strict returns
+   *   `{lamport, appended: [peerIds]}` on full success — deliberately not
+   *   the bare-number shape, so a caller can't mistake a strict result for
+   *   a live one — and THROWS when any target peer did not append, with
+   *   `err.dispositions` (the full per-peer map) and `err.appended` (the
+   *   subset that actually landed) attached so a caller like the drain can
+   *   still credit the peers that DID succeed.
+   * @returns {Promise<number|null|{lamport: number, appended: string[]}>}
    */
   async emitChange(table, op, row, opts = {}) {
     // --no-auth companion doesn't drive fleet sync (and has no outFeeds).
@@ -1583,29 +1603,13 @@ export class InstanceSyncManager {
     entry.signature = sign(payload, this.identity.ed25519Priv);
 
     // Update the row's lamport_ts in the local database (NEVER in preserve-mode —
-    // the row keeps its original lamport; 2c C1).
+    // the row keeps its original lamport; 2c C1). Statement built by the shared
+    // stamping module (servers/shared/sync-stamp.js) so the stdio door's
+    // emitOrQueue (Task 2) stamps rows the same way this manager does.
     if (op !== "delete" && preservedTs === null) {
       try {
-        if (table === "dashboard_settings" && row.key !== undefined) {
-          await this.db.execute({
-            sql: `UPDATE dashboard_settings SET lamport_ts = ? WHERE key = ?`,
-            args: [lamportTs, row.key],
-          });
-        } else if (table === "crow_context" && row.section_key !== undefined) {
-          // Composite-key stamp; MAX(COALESCE(...)) guards against out-of-order
-          // concurrent emitChange calls — plain MAX(NULL,x) is NULL in SQLite so
-          // the COALESCE is load-bearing.
-          await this.db.execute({
-            sql: `UPDATE crow_context SET lamport_ts = MAX(COALESCE(lamport_ts, 0), ?)
-                  WHERE section_key = ? AND device_id IS ? AND project_id IS ?`,
-            args: [lamportTs, row.section_key, row.device_id ?? null, row.project_id ?? null],
-          });
-        } else if (row.id !== undefined) {
-          await this.db.execute({
-            sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,
-            args: [lamportTs, row.id],
-          });
-        }
+        const stmt = stampSql(table, row, lamportTs);
+        if (stmt) await this.db.execute(stmt);
       } catch {
         // Non-fatal — row may not have lamport_ts column yet
       }
@@ -1627,9 +1631,40 @@ export class InstanceSyncManager {
       pairedIds = []; // degraded: armed feeds below still get the entry
     }
     const targets = new Set([...pairedIds, ...this.outFeeds.keys()]);
-    await Promise.all([...targets].map((peerId) => this._appendToPeer(peerId, entry)));
 
-    return lamportTs;
+    if (!opts.strict) {
+      await Promise.all([...targets].map((peerId) => this._appendToPeer(peerId, entry)));
+      return lamportTs;
+    }
+
+    // Strict mode (Task 3, stdio-sync-outbox / spec "The drain"): collect a
+    // per-peer disposition and treat any non-'appended' outcome (parked OR
+    // failed) as failure of the whole emit. CONTROLLER RULING: the thrown
+    // error must NOT lose per-peer results — Task 4's drain needs
+    // partial-delivery accounting ("merge appended peers into
+    // delivered_json") even when some peers parked or failed, so the error
+    // carries both `dispositions` (full per-peer map) and `appended` (the
+    // subset that actually landed). The success shape is
+    // `{lamport, appended: [peerIds]}` — deliberately NOT the bare number
+    // non-strict mode returns, so a caller can't mistake a strict result for
+    // a live one.
+    const dispositions = {};
+    await Promise.all(
+      [...targets].map(async (peerId) => {
+        dispositions[peerId] = await this._appendToPeer(peerId, entry, { strict: true });
+      }),
+    );
+    const appended = Object.keys(dispositions).filter((peerId) => dispositions[peerId] === "appended");
+    if (appended.length !== targets.size) {
+      const err = new Error(
+        `[instance-sync] strict emitChange: not all peers appended (table=${table} op=${op}, ` +
+          `dispositions=${JSON.stringify(dispositions)})`,
+      );
+      err.dispositions = dispositions;
+      err.appended = appended;
+      throw err;
+    }
+    return { lamport: lamportTs, appended };
   }
 
   /**

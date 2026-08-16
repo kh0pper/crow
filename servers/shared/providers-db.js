@@ -29,6 +29,7 @@ import { createDbClient } from "../db.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { getOwnAddresses, isLocallyOrchestratable } from "./locality.js";
 import { modelsJsonSearchPaths } from "./models-json-paths.js";
+import { emitOrQueue } from "./sync-emit.js";
 
 function readModelsJson() {
   const merged = { providers: {} };
@@ -149,9 +150,8 @@ export async function loadProvidersFromDb(db) {
 let _syncManager = null;
 export function setProviderSyncManager(mgr) { _syncManager = mgr || null; }
 
-async function emitSync(op, row) {
-  if (!_syncManager) return;
-  try { await _syncManager.emitChange("providers", op, row); } catch {}
+async function emitSync(db, op, row) {
+  await emitOrQueue(_syncManager, db, "providers", op, row);
 }
 
 /**
@@ -284,7 +284,7 @@ export async function upsertProvider(db, provider) {
     ],
   });
 
-  await emitSync(existed ? "update" : "insert", {
+  await emitSync(db, existed ? "update" : "insert", {
     id: provider.id,
     base_url: provider.baseUrl || provider.base_url || "",
     api_key: provider.apiKey ?? provider.api_key ?? null,
@@ -318,7 +318,7 @@ export async function disableProvider(db, id) {
     sql: "UPDATE providers SET disabled = 1, lamport_ts = ?, instance_id = ?, updated_at = datetime('now') WHERE id = ?",
     args: [newTs, instanceId, id],
   });
-  await emitSync("update", { ...rows[0], disabled: 1, lamport_ts: newTs, instance_id: instanceId });
+  await emitSync(db, "update", { ...rows[0], disabled: 1, lamport_ts: newTs, instance_id: instanceId });
   return { ok: true, lamport_ts: newTs };
 }
 

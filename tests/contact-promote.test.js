@@ -23,7 +23,7 @@ import { deriveBotIdentity, generateBotInviteCode, parseBotInviteCode } from "..
 function captureSink() {
   const emits = [];
   let lamport = 1000;
-  const sink = { emitChange: async (table, op, row) => { emits.push({ table, op, row }); return ++lamport; } };
+  const sink = { feedsDisabled: false, emitChange: async (table, op, row) => { emits.push({ table, op, row }); return ++lamport; } };
   return { emits, sink, contactOps: () => emits.filter((e) => e.op !== "delete").map((e) => e.op) };
 }
 

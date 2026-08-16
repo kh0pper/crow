@@ -6,6 +6,7 @@
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { emitOrQueue } from "../../../shared/sync-emit.js";
 
 /** @type {Map<string, object>} */
 const sections = new Map();
@@ -127,9 +128,8 @@ import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 // mutations to paired peers. See servers/gateway/index.js startup wiring.
 let _settingsSyncManager = null;
 export function setSettingsSyncManager(mgr) { _settingsSyncManager = mgr || null; }
-async function emitSettingsSync(op, row) {
-  if (!_settingsSyncManager) return;
-  try { await _settingsSyncManager.emitChange("dashboard_settings", op, row); } catch {}
+async function emitSettingsSync(db, op, row) {
+  await emitOrQueue(_settingsSyncManager, db, "dashboard_settings", op, row);
 }
 
 /**
@@ -227,7 +227,7 @@ export async function writeSetting(db, key, value, opts = {}) {
   // per-install and must not emit (the manager's shouldSyncRow gate would
   // drop them anyway — this makes the intent explicit at the source).
   if (isSyncable(key)) {
-    await emitSettingsSync("update", { key, value, instance_id: null });
+    await emitSettingsSync(db, "update", { key, value, instance_id: null });
   }
   return { scope: "global", instance_id: null };
 }

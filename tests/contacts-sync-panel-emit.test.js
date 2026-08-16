@@ -23,7 +23,7 @@ function freshDb() {
 }
 function spy() {
   const seen = [];
-  __setEmitSinkForTest({ emitChange: async (t, op, row) => seen.push({ op, crow_id: row.crow_id, is_blocked: row.is_blocked, request_status: row.request_status }) });
+  __setEmitSinkForTest({ feedsDisabled: false, emitChange: async (t, op, row) => seen.push({ op, crow_id: row.crow_id, is_blocked: row.is_blocked, request_status: row.request_status }) });
   return seen;
 }
 const res = { redirectAfterPost: (u) => ({ redirect: u }) };
