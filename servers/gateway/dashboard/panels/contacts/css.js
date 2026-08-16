@@ -198,7 +198,7 @@ export function contactsCss() {
 
   .profile-info h2 {
     margin: 0 0 0.25rem;
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.3rem;
     color: var(--crow-text-primary);
   }
@@ -376,7 +376,7 @@ export function contactsCss() {
 
   .import-modal h3 {
     margin: 0 0 1rem;
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.1rem;
   }
 

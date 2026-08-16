@@ -363,7 +363,7 @@ async function renderDetailView(db, projectId, layout, lang) {
     <div style="margin-bottom:1rem">${backLink}</div>
     <div style="display:flex;justify-content:space-between;align-items:start;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.5rem">
       <div>
-        <h2 style="font-family:'Fraunces',serif;margin:0">${escapeHtml(project.name)}</h2>
+        <h2 style="font-family:var(--crow-body-font);margin:0">${escapeHtml(project.name)}</h2>
         ${project.description ? `<p style="color:var(--crow-text-secondary);margin:0.25rem 0">${escapeHtml(project.description)}</p>` : ""}
       </div>
       <div>${statusBadge}</div>

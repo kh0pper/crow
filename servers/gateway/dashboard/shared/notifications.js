@@ -489,7 +489,7 @@ export const headerIconsCss = `
     align-items: center;
     justify-content: center;
     color: #fff;
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--crow-body-font);
     text-align: center;
     padding: 2rem;
     gap: 1rem;
@@ -795,7 +795,7 @@ ${kioskBtn}
       <text class="crow-bubble-count" id="crow-bubble-count" x="40" y="10.5" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="700" font-family="'JetBrains Mono',monospace">0</text>
     </g>
     <!-- Alarmed exclamation -->
-    <text class="crow-exclaim" id="crow-exclaim" style="display:none" x="6" y="12" fill="#ef4444" font-size="14" font-weight="900" font-family="'DM Sans',sans-serif">!</text>
+    <text class="crow-exclaim" id="crow-exclaim" style="display:none" x="6" y="12" fill="#ef4444" font-size="14" font-weight="900" font-family="var(--crow-body-font)">!</text>
   </svg>
   <!-- Combined dropdown -->
   <div id="crow-dropdown" class="crow-dropdown" style="display:none" onclick="event.stopPropagation()">

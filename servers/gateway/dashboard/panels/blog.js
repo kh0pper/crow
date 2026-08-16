@@ -262,7 +262,7 @@ export default {
       ${formField(t("blog.titleLabel", lang), "title", { required: true, placeholder: t("blog.titlePlaceholder", lang), value: isEdit ? editPost.title : "" })}
       <style>
         .md-toolbar { display:flex;gap:2px;padding:4px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-bottom:none;border-radius:8px 8px 0 0;flex-wrap:wrap; }
-        .md-btn { background:transparent;border:1px solid transparent;color:var(--crow-text-secondary);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-family:'DM Sans',sans-serif; }
+        .md-btn { background:transparent;border:1px solid transparent;color:var(--crow-text-secondary);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-family:var(--crow-body-font); }
         .md-btn:hover { background:var(--crow-bg-surface);border-color:var(--crow-border);color:var(--crow-text-primary); }
         .md-sep { width:1px;background:var(--crow-border);margin:2px 4px; }
         #create-post-form textarea[name="content"] { border-radius:0 0 8px 8px !important; }

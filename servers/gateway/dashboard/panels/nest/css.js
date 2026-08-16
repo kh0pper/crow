@@ -49,7 +49,7 @@ export function nestCSS() {
     height: 100%;
   }
   .nest-greeting {
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-size: 1.5rem;
     font-weight: 600;
     color: var(--crow-text-primary);

@@ -107,10 +107,10 @@ function perchStyles() {
       height: calc(100vh - 190px); min-height: 480px; background: var(--crow-bg); }
     .perch-frame { width: 100%; height: 100%; border: none; display: block; }
     .perch-bar { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
-    .perch-bar h1 { font-family: Fraunces, serif; margin: 0; font-size: 1.4rem; }
+    .perch-bar h1 { font-family: var(--crow-body-font); margin: 0; font-size: 1.4rem; }
     .perch-sub { color: var(--crow-text-secondary); font-size: .85rem; margin: 0; }
     .perch-card { border: 1px solid var(--crow-border); border-radius: 8px; padding: 1.25rem; max-width: 46rem; }
-    .perch-card h2 { font-family: Fraunces, serif; margin: 0 0 .6rem; font-size: 1.15rem; }
+    .perch-card h2 { font-family: var(--crow-body-font); margin: 0 0 .6rem; font-size: 1.15rem; }
     .perch-card p { color: var(--crow-text-secondary); font-size: .9rem; margin: 0 0 .7rem; }
     .perch-note { color: var(--crow-text-muted); font-size: .8rem; }
     .perch-err-label { color: var(--crow-text-muted); font-size: .75rem; text-transform: uppercase;

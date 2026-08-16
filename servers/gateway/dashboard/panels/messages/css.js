@@ -436,7 +436,7 @@ export function messagesCSS() {
     background: var(--crow-bg-deep, #0f0f17);
     color: var(--crow-text-primary);
     font-size: 0.9rem;
-    font-family: 'DM Sans', system-ui, sans-serif;
+    font-family: var(--crow-body-font);
     min-height: 40px;
     max-height: 120px;
     line-height: 1.4;
@@ -588,7 +588,7 @@ export function messagesCSS() {
   .msg-empty h3 {
     margin: 0.5rem 0;
     color: var(--crow-text-primary);
-    font-family: 'Fraunces', serif;
+    font-family: var(--crow-body-font);
     font-weight: 600;
   }
   .msg-empty p { font-size: 0.85rem; }
