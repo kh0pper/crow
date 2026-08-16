@@ -1405,6 +1405,7 @@ export const translations = {
   "botboard.roostDispatchNoteLabel": { en: "Note (optional)", es: "Nota (opcional)" },
   "botboard.roostDispatchNoCards": { en: "No free cards to send this bot to.", es: "No hay tarjetas libres para enviar a este bot." },
   "botboard.roostDispatchConfirm": { en: "Send", es: "Enviar" },
+  "botboard.roostDispatchSent": { en: "Sent — reloading…", es: "Enviado — recargando…" },
   "botboard.roostDispatchOccupied": { en: "That card was just claimed by another session.", es: "Esa tarjeta acaba de ser tomada por otra sesi\u00f3n." },
   "botboard.roostConfirmRecall": { en: "Recall this session? This stops it.", es: "\u00bfRetirar esta sesi\u00f3n? Esto la detiene." },
   "botboard.roostActionFailed": { en: "Action failed.", es: "La acci\u00f3n fall\u00f3." },

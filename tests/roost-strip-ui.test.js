@@ -71,6 +71,18 @@ const ENGINE_SESSIONS = [
 ];
 const engine = { list: async () => ENGINE_SESSIONS };
 
+// AST-lite bracket-depth scan (no JS parser pulled in) — given a source
+// string and the index of an opening `{`, returns the matching closing `}`
+// index. Shared by every "extract this handler's source" test below.
+function matchBrace(src, braceStart) {
+  let depth = 0, end = -1;
+  for (let i = braceStart; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+  }
+  return end;
+}
+
 async function render({ bots = BOTS, engineOverride = engine } = {}) {
   const db = createDbClient();
   try {
@@ -190,28 +202,72 @@ test("emitted client script (roost strip wiring included) parses as JavaScript",
 
 // ---- Step 1: bird-state handler never reloads ----
 
-test("the bird-state SSE handler patches classes in place and never calls location.reload", async () => {
+test("the bird-state SSE handler patches classes in place directly, never an unguarded location.reload", async () => {
   const js = clientJs("scout", "kanban", 9, null, null, "en");
   const body = js.replace(/^<script>/, "").replace(/<\/script>$/, "");
   const startMarker = "es.addEventListener('bird-state'";
   const start = body.indexOf(startMarker);
   assert.ok(start >= 0, "the bird-state listener must be registered on the EventSource");
-  // Extract the handler by bracket-depth scan from its opening `{` — the
-  // AST-lite parse the brief calls for, without pulling in a JS parser.
   const braceStart = body.indexOf("{", body.indexOf("function(ev)", start));
-  let depth = 0, end = -1;
-  for (let i = braceStart; i < body.length; i++) {
-    if (body[i] === "{") depth++;
-    else if (body[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
-  }
+  const end = matchBrace(body, braceStart);
   assert.ok(end > braceStart, "must find the handler's closing brace");
   const handlerSrc = body.slice(braceStart, end + 1);
-  assert.ok(!handlerSrc.includes("location.reload"), "bird-state must patch in place, never reload:\n" + handlerSrc);
+  // Fix round 1: the handler MAY fall through to the shared guardedReload()
+  // when it can't patch a node into existence — but it must never call
+  // location.reload (or the bare, unguarded reload()) directly itself.
+  assert.ok(!handlerSrc.includes("location.reload"), "bird-state must never reload directly:\n" + handlerSrc);
+  assert.ok(!/[^\w]reload\(\)/.test(handlerSrc), "bird-state must never call the bare reload() — only the guarded wrapper");
   assert.ok(handlerSrc.includes("className="), "it does patch the glyph's class");
   // The handler itself must also be syntactically valid on its own (wrapped
   // as a bare function body) — catches a stray unbalanced brace the whole-
   // script parse above could theoretically paper over.
   assert.doesNotThrow(() => new Function("ev", handlerSrc.slice(1, -1)), "handler body must parse standalone");
+});
+
+test("fix round 1: bird-state falls through to the SHARED guarded reload when it can't patch a node in place", async () => {
+  const js = clientJs("scout", "kanban", 9, null, null, "en");
+  const body = js.replace(/^<script>/, "").replace(/<\/script>$/, "");
+  // guardedReload must be defined exactly once (the shared wrapper the
+  // coordinator asked to be reused), and called from all three live-diff
+  // sites: board-config drift, the default frame's card diff, and bird-state's
+  // can't-patch fallback.
+  const defCount = (body.match(/function guardedReload\(\)/g) || []).length;
+  assert.equal(defCount, 1, "guardedReload must be defined exactly once and reused, not copy-pasted");
+  const callCount = (body.match(/guardedReload\(\)/g) || []).length;
+  assert.ok(callCount >= 4, "at least 1 def + 3 call sites (board-config, default frame diff, bird-state fallback)");
+
+  const start = body.indexOf("es.addEventListener('bird-state'");
+  const braceStart = body.indexOf("{", body.indexOf("function(ev)", start));
+  const handlerSrc = body.slice(braceStart, matchBrace(body, braceStart) + 1);
+  assert.ok(handlerSrc.includes("needsRefresh=true"), "a missing card-glyph or strip-glyph node must flag a refresh");
+  assert.ok(handlerSrc.includes("guardedReload()"), "the fallback is the SAME shared guard, not a bespoke reload");
+});
+
+// ---- Fix round 1: successful dispatch must be visible, not silent ----
+
+test("dispatch success shows a perceivable message and defers to reload(), never closes silently", async () => {
+  const js = clientJs("scout", "kanban", 9, null, null, "en");
+  const body = js.replace(/^<script>/, "").replace(/<\/script>$/, "");
+  const anchor = "$('bb-rd-send').onclick=function(){";
+  const start = body.indexOf(anchor);
+  assert.ok(start >= 0, "the dispatch dialog's send handler must exist");
+  const braceStart = start + anchor.length - 1;
+  const handlerSrc = body.slice(braceStart, matchBrace(body, braceStart) + 1);
+
+  const okStart = handlerSrc.indexOf("if(r.ok){");
+  assert.ok(okStart >= 0, "must find the success branch");
+  const okBraceStart = okStart + "if(r.ok)".length;
+  const okBranch = handlerSrc.slice(okBraceStart, matchBrace(handlerSrc, okBraceStart) + 1);
+
+  assert.ok(okBranch.includes(t("botboard.roostDispatchSent", "en")), "success branch shows the perceivable i18n success line");
+  assert.ok(okBranch.includes("setTimeout(reload,600)"), "success branch defers to reload() with a perceivable delay");
+  assert.ok(!okBranch.includes("closeRoostDispatch()"), "must NOT close silently — the success line is the visible feedback");
+  assert.ok(!okBranch.includes("openBirdDrawer("), "the stub can't show anything real yet — reload is the honest fallback");
+
+  // The 409/error branches must NOT reload — they're inline, in-dialog errors.
+  const restBranch = handlerSrc.slice(matchBrace(handlerSrc, okBraceStart) + 1);
+  assert.ok(!restBranch.includes("setTimeout(reload"), "error/409 branches must stay in-dialog, never reload");
+  assert.doesNotThrow(() => new Function(handlerSrc.slice(1, -1)), "handler body parses standalone");
 });
 
 // ---- i18n ----

@@ -1087,19 +1087,33 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var cardId=sel?sel.value:'';
     if(!cardId) return;
     var note=$('bb-rd-note')?$('bb-rd-note').value:'';
+    var sendBtn=$('bb-rd-send');
+    if(sendBtn) sendBtn.disabled=true;
     perchApi('POST','/bots/'+encodeURIComponent(roostDispatchBotId)+'/dispatch',{card_id:Number(cardId),note:note}).then(function(r){
       if(r.ok){
-        closeRoostDispatch();
-        openBirdDrawer(r.j&&r.j.sessionId);
+        // Fix round 1: a successful dispatch used to close the dialog and
+        // call the (still-stub) openBirdDrawer — invisible, indistinguishable
+        // from a dropped click. The strip/card-face bird can't be patched
+        // into existence client-side (a bird-less card face carries no
+        // .bb-bird span to patch — see the bird-state handler below), so the
+        // honest fix is: show a perceivable success line, THEN reload. The
+        // reloaded SSR renders the bird on the strip + card truthfully.
+        msg($('bb-rd-msg'),'${tJs("botboard.roostDispatchSent", lang)}','ok');
+        setTimeout(reload,600);
       } else if(r.status===409 && r.j && r.j.error==='card_occupied'){
         // A raced dispatch — surfaced as the dialog's OWN error line, not a
         // toast: the picker is still open and the operator needs to pick a
         // different card, not just be told something went wrong elsewhere.
+        if(sendBtn) sendBtn.disabled=false;
         msg($('bb-rd-msg'),'${tJs("botboard.roostDispatchOccupied", lang)}','err');
       } else {
+        if(sendBtn) sendBtn.disabled=false;
         msg($('bb-rd-msg'),(r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}','err');
       }
-    }).catch(function(){ msg($('bb-rd-msg'),'${tJs("botboard.roostActionFailed", lang)}','err'); });
+    }).catch(function(){
+      if(sendBtn) sendBtn.disabled=false;
+      msg($('bb-rd-msg'),'${tJs("botboard.roostActionFailed", lang)}','err');
+    });
   };
 
   // Click delegation over the whole roost strip: the overflow-menu toggle,
@@ -1161,6 +1175,20 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     }
     if(esUrl){
       var es=new EventSource(esUrl);
+      // Reload-storm guard, SHARED by every live-diff path below (board-config
+      // drift, the default frame's card diff, and — fix round 1 — bird-state
+      // falling through to a full refresh): one reload per 10s window,
+      // persisted across the reload it triggers, so a render/stream mismatch
+      // that can never converge degrades to "slow to catch up" instead of a
+      // reload loop.
+      function guardedReload(){
+        var now=Date.now(), lastReload=0;
+        try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
+        if(now-lastReload>10000){
+          try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
+          reload();
+        }
+      }
       es.addEventListener('board-config',function(ev){
         var cfg; try{ cfg=JSON.parse(ev.data); }catch(e){ return; }
         if(!cfg||!cfg.statuses||!cfg.statuses.length) return;
@@ -1171,23 +1199,21 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         var rendered=null;
         try{ rendered=board?JSON.parse(board.getAttribute('data-statuses')||'null'):null; }catch(e){ rendered=null; }
         if(rendered && rendered.length && JSON.stringify(rendered)!==JSON.stringify(cfg.statuses)){
-          var now=Date.now(), lastReload=0;
-          try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
-          if(now-lastReload>10000){
-            try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
-            reload();
-          }
+          guardedReload();
         }
       });
       // Track 3 Task 12: bird-state patches classes IN PLACE — card face
       // glyph AND any roost-strip glyph carrying the SAME session id — and
-      // never reloads. A session starting/ending (idle<->live, an id
-      // appearing/vanishing) is NOT covered here; that is a full-strip
-      // refresh Task 13's drawer close (or the next page load) picks up,
-      // not a per-tick diff this cheap.
+      // never reloads for a transition it CAN patch. A session starting
+      // fresh (a card face with no .bb-bird span to patch at all, or a strip
+      // bird whose glyph carries no matching data-bird-sid) can't be patched
+      // into existence client-side — fix round 1: that falls through to the
+      // SAME guarded-reload path the default frame's card diff uses, so
+      // OTHER tabs converge within a tick instead of staying stale forever.
       es.addEventListener('bird-state',function(ev){
         var d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
         if(!d) return;
+        var needsRefresh=false;
         for(var cid in d){
           if(!Object.prototype.hasOwnProperty.call(d,cid)) continue;
           var info=d[cid]||{};
@@ -1197,9 +1223,12 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
           if(cardGlyph){
             cardGlyph.className='bb-bird bb-bird--'+state;
             if(sid!=null) cardGlyph.setAttribute('data-bird-sid',String(sid));
+          } else {
+            needsRefresh=true;
           }
           if(sid!=null){
             var roostGlyphs=document.querySelectorAll('.bb-roost-bird .bb-bird[data-bird-sid="'+sid+'"]');
+            if(!roostGlyphs.length) needsRefresh=true;
             [].slice.call(roostGlyphs).forEach(function(g){
               g.className='bb-bird bb-bird--'+state;
               var wrap=g.closest&&g.closest('.bb-roost-bird');
@@ -1212,6 +1241,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
             });
           }
         }
+        if(needsRefresh && !document.hidden) guardedReload();
       });
       es.onmessage=function(ev){
         var d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
@@ -1243,15 +1273,11 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         // Reload-storm guard: if the rendered board can never converge with
         // the stream snapshot (a render/stream query mismatch), an
         // unconditional reload loops forever — each fresh page re-detects
-        // the same diff. One reload per 10s window; persisted across the
-        // reload it triggers.
+        // the same diff. SHARED with board-config/bird-state above
+        // (guardedReload — fix round 1): one reload per 10s window,
+        // persisted across the reload it triggers.
         if(changed && !document.hidden){
-          var now=Date.now(), lastReload=0;
-          try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
-          if(now-lastReload>10000){
-            try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
-            reload();
-          }
+          guardedReload();
         }
       };
       es.onerror=function(){ /* EventSource auto-reconnects; server resends a full snapshot */ };
