@@ -131,20 +131,33 @@ contrast policy are BINDING exact values.
   → `import { LEGACY_FONT_IMPORT as FONT_IMPORT, legacyDesignTokensCss as designTokensCss } from
   "../dashboard/shared/design-tokens-legacy.js";` (alias-import keeps the rest of the file
   untouched); same shape in `songbook-renderer.js:16`. `kb-public.js`: point the dynamic-import
-  path resolution at `design-tokens-legacy.js` and replace the silent hardcoded fallback (:40)
-  with `console.error("[kb-public] legacy design tokens unavailable — serving unstyled", err)` +
-  a minimal neutral CSS string (system font, black-on-white) so failure is LOUD.
+  path resolution at `design-tokens-legacy.js` AND rename the property accesses (plan-review
+  finding 3 — `:35–36` read `tokens.FONT_IMPORT`/`tokens.designTokensCss`, which would become
+  `undefined` WITHOUT throwing, so the catch never fires): they become
+  `tokens.LEGACY_FONT_IMPORT`/`tokens.legacyDesignTokensCss`. Replace the silent hardcoded
+  fallback (:40) with `console.error("[kb-public] legacy design tokens unavailable — serving
+  unstyled", err)` + a minimal neutral CSS string (system font, black-on-white) so failure is
+  LOUD. Extend the freeze test's text-check to kb-public (imports legacy path + accesses the
+  legacy names).
 - [ ] **Step 4: Green** `node --test tests/design-tokens-freeze.test.js`; also run any existing
   blog/songbook tests: `grep -l "blog-public\|songbook" tests/ -r` → run those files.
 - [ ] **Step 5: Mutation-test** (point blog-public back at design-tokens.js → test 4 fails;
   restore by EDIT). **Step 6: Commit** all five files.
 
-### Task 3: The token rewrite + gallery (W2, second half)
+### Task 3: The token rewrite + glass CSS deletion + gallery (W2, second half)
 
 **Files:**
 - Modify: `servers/gateway/dashboard/shared/design-tokens.js` (full rewrite of the CSS string;
   PERCH_TOKENS export from Task 1 stays), `servers/gateway/dashboard/panels/design-system.js`,
-  `tests/design-system.test.js`, `tests/design-tokens-freeze.test.js` (flip assertion 3)
+  `tests/design-system.test.js`, `tests/design-tokens-freeze.test.js` (flip assertion 3),
+  AND — plan-review finding 1: glass token DEFINITIONS and CONSUMERS must fall in the same task
+  or `tests/design-system.test.js`'s undefined-token walk fails at the task boundary — every
+  glass CSS consumer and read: `servers/gateway/dashboard/shared/layout.js` (:1265–1298 glass
+  rules), `servers/gateway/dashboard/panels/extensions/css.js` (:398–417),
+  `servers/gateway/dashboard/settings/menu-renderer.js` (:179–181),
+  `servers/gateway/routes/blog-public.js` (:83 `themeGlass` read, :299–318 glass rules, :332
+  class composition), `servers/gateway/routes/songbook.js` (:29 read),
+  `servers/blog/songbook-renderer.js` (glass rules + class-composition sites :306, :474, :587)
 
 **Interfaces:**
 - Produces: `designTokensCss()` now emits: light values on `:root`, dark inside
@@ -180,6 +193,12 @@ contrast policy are BINDING exact values.
   `--crow-mono-font: 'JetBrains Mono', monospace`. Aliases block verbatim. Delete `.theme-light`,
   `.theme-serif`, both glass blocks. `FONT_IMPORT` → the css2 URL for
   `Inter:wght@400;500;600;700` + `JetBrains+Mono:wght@400;600`.
+  **In the same step, delete every glass CSS consumer** (the Files list above): the `.theme-glass`
+  rule blocks in `layout.js`/`extensions/css.js`/`menu-renderer.js`/`blog-public.js`/
+  `songbook-renderer.js`, the `themeGlass` read fields (`blog-public.js:83`, `songbook.js:29`)
+  and their class-composition uses (`blog-public.js:332`, songbook-renderer ×3) — after this
+  task, `var(--crow-glass-*)`/`--crow-bg-popup`/`--crow-border-popup` have zero consumers AND
+  zero definitions, so the design-system undefined-token walk stays green.
 - [ ] **Step 3: Green** `node --test tests/design-system.test.js tests/design-tokens-freeze.test.js
   tests/perch-token-drift.test.js tests/a11y-baseline.test.js`.
 - [ ] **Step 4: Gallery.** `panels/design-system.js`: add `accent-contrast`, `border-strong` to
@@ -199,30 +218,33 @@ contrast policy are BINDING exact values.
 - Delete: `servers/gateway/shared/theme-resolver.js`
 - Test: extend `tests/design-tokens-freeze.test.js` or a small new `tests/dashboard-no-theme-state.test.js`
 
-- [ ] **Step 1: Failing test** (`tests/dashboard-no-theme-state.test.js`): read `layout.js` +
-  `dashboard/index.js` as text — assert no `theme-light`, no `toggleTheme`, no `theme_glass`,
-  no `theme_serif` reads; assert `theme-resolver.js` does not exist (`fs.existsSync` false);
-  assert layout.js has no `fractalNoise`/noise-SVG overlay.
+- [ ] **Step 1: Failing test** (`tests/dashboard-no-theme-state.test.js`): walk the WHOLE
+  `servers/gateway/dashboard/` tree as text (plan-review finding 7 — a two-file check misses
+  `panels/nest/css.js`'s three `.theme-light` rules at :29, :109, :229) — assert no
+  `theme-light`, no `toggleTheme`, no `theme_glass`, no `theme_serif` reads; assert
+  `theme-resolver.js` does not exist (`fs.existsSync` false); assert layout.js has no
+  `fractalNoise`/noise-SVG overlay.
 - [ ] **Step 2: FAIL → implement.** `layout.js`: body class becomes static (drop the
   theme/glass/serif class interpolation at :138); delete the toggle button markup and
-  `toggleTheme()`; delete the noise-texture rule (:879). `dashboard/index.js`: delete the
-  `blog_theme_%` read block (:849–864) and pass no theme params. Delete
-  `servers/gateway/shared/theme-resolver.js` (verified zero importers). Sweep: `grep -rn
-  "theme-resolver" servers/ bundles/` → empty.
+  `toggleTheme()`; delete the noise-texture rule (:880). `panels/nest/css.js`: fold its three
+  `.theme-light` rules into base + dark-media form (their light intent becomes the `:root`
+  default; any dark-specific counterpart moves into the media block) or delete where the base
+  rule already covers it. `dashboard/index.js`: delete the `blog_theme_%` read block (:849–864)
+  and pass no theme params. Delete `servers/gateway/shared/theme-resolver.js` (verified zero
+  importers). Sweep: `grep -rn "theme-resolver" servers/ bundles/` → empty.
 - [ ] **Step 3: Green** — new test + `node --test tests/design-system.test.js` + boot check:
   `CROW_HOME=$(mktemp -d) CROW_DATA_DIR=$(mktemp -d) node servers/gateway/index.js --no-auth`
   starts clean (ctrl-C; scratch env MANDATORY).
 - [ ] **Step 4: Mutation + commit.**
 
-### Task 5: Glass retirement — CSS, settings section, MCP, migration, init-db
+### Task 5: Glass retirement — settings section, MCP, migration, init-db
+
+(The glass CSS blocks, class composition, and `themeGlass` reads were deleted in Task 3 —
+plan-review finding 1. This task owns everything else glass.)
 
 **Files:**
-- Modify: `servers/gateway/dashboard/shared/layout.js` (:1265–1298 glass rules),
-  `servers/gateway/dashboard/panels/extensions/css.js` (:398–417),
-  `servers/gateway/dashboard/settings/menu-renderer.js` (:179–181),
-  `servers/gateway/routes/blog-public.js` (:83 themeGlass read, :299–318 rules, :332 class),
-  `servers/gateway/routes/songbook.js` (:29), `servers/blog/songbook-renderer.js` (glass rules +
-  3 class sites), `servers/gateway/dashboard/settings/sections/theme.js` (section end state),
+- Modify: `servers/gateway/dashboard/settings/sections/theme.js` (section end state — NOTE the
+  `set_kiosk` handler at :106–110 SURVIVES the rewrite untouched, plan-review finding 9),
   `servers/blog/server.js` (MCP params), `servers/gateway/tool-manifests.js` (:86),
   `scripts/init-db.js` (:2326–2374 dashboard_theme branch), `servers/gateway/boot/admin-api.js`
   (:59–60 area — invoke the new migration), `servers/gateway/dashboard/shared/i18n.js` (relabel
@@ -240,11 +262,11 @@ contrast policy are BINDING exact values.
      `dashboard_settings` and `dashboard_settings_overrides` (two fake instance_ids) → run the
      migration → the four retired keys gone from both tables/all instances; `blog_theme_mode` +
      `blog_theme_serif` intact; guard flag set; second run no-ops.
-  3. init-db non-resurrection: with a `dashboard_theme` legacy row and NO `blog_theme_mode`, run
-     init-db (scratch env) → no `blog_theme_dashboard_mode` appears.
+  3. init-db non-resurrection: with a `dashboard_theme` legacy row **whose value is `'light'`**
+     (plan-review finding 4 — the branch at init-db.js:2362–2368 only mints on `'light'`; any
+     other seed value makes this test vacuously green) and NO `blog_theme_mode`, run init-db
+     (scratch env) → no `blog_theme_dashboard_mode` appears.
 - [ ] **Step 2: FAIL → implement.**
-  - Delete every glass CSS block and class-composition/read site listed in Files (blog keeps its
-    OTHER theming: mode/serif class composition stays).
   - `theme.js` → "Blog theme": keep Color Mode (`blog_theme_mode`), blog override
     (`blog_theme_blog_mode`), Serif Headings (`blog_theme_serif`); delete Glass checkbox + shim +
     Dashboard Override + `set_theme`/`set_theme_mode` handlers + glass in `getPreview`. Relabel
@@ -280,9 +302,13 @@ contrast policy are BINDING exact values.
 - Test: `tests/dashboard-fonts.test.js` (new)
 
 - [ ] **Step 1: Failing test**: (a) `layout.js` text contains exactly ONE fonts.googleapis URL
-  constant (a shared `FONT_LINKS` export) and no `@import url('https://fonts` in the dashboard
-  style path; (b) the URL names Inter and JetBrains Mono and NOT DM Sans/Fraunces;
-  (c) grep-as-test: no `'DM Sans'` anywhere under `servers/gateway/dashboard/`;
+  constant (a shared `FONT_LINKS` export) and no `@import url('https://fonts` in `layout.js` OR
+  `design-tokens.js` (scope pinned to those two files — `design-tokens-legacy.js` lives in the
+  same dir and permanently carries the legacy `@import`, plan-review finding 8); (b) the URL
+  names Inter and JetBrains Mono and NOT DM Sans/Fraunces; (c) grep-as-test: no `'DM Sans'`
+  anywhere under `servers/gateway/dashboard/` (note: `servers/gateway/routes/calls-page.js` also
+  hardcodes DM Sans — it is OUTSIDE this scope deliberately: a self-contained page with no token
+  sheet; Task 7 moves its font to `system-ui` during its recolor, finding 12);
   (d) `Fraunces` appears ONLY in `design-tokens-legacy.js` under `servers/` and `bundles/`
   EXCEPT `blog-public.js`, `songbook-renderer.js`, `kb-public.js`, `settings/sections/theme.js`
   (serif label), `servers/blog/server.js` (zod description) — encode the exemption list in the
@@ -312,15 +338,32 @@ contrast policy are BINDING exact values.
 
 - [ ] **Step 1: Failing grep-as-test** (`tests/token-bypass-sweep.test.js`), scope = `servers/gateway/dashboard/`
   + `servers/gateway/setup-page.js` + `servers/gateway/routes/calls-page.js` + `bundles/*/panel*/`
-  (EXCLUDE the three frozen public files and `design-tokens-legacy.js`):
-  1. no old-palette hex literal: `/#0f0f17|#1a1a2e|#2d2d3d|#6366f1|#818cf8|#2d2854|#fbbf24|rgba\(99,102,241/i`;
+  (EXCLUDE the three frozen public files, `design-tokens-legacy.js`, AND — plan-review finding 2
+  — the three brand-art files `shared/crow-hero.js`, `shared/empty-state-icons.js`,
+  `shared/notifications.js`, which Task 8 recolors and re-adds to scope by removing these
+  exclusions):
+  1. no old-palette hex literal:
+     `/#0f0f17|#1a1a2e|#2d2d3d|#6366f1|#818cf8|#2d2854|#fbbf24|rgba\(99,102,241|rgba\(251,191,36/i`
+     (the gold-rgba form included, finding 12);
   2. no `color:\s*(#fff|#ffffff|white)` in the same rule as `background:\s*var\(--crow-accent` —
      implement as a per-file scan for the ~37 known pairs (fix-list from
      `grep -rn "var(--crow-accent)" | grep -i "fff\|white"` at task start);
-  3. no `border-radius:\s*(8px|12px)` in `layout.js` (the token-bypass literals);
+  3. no `border-radius:\s*(8px|12px)` in `layout.js` (the token-bypass literals — the grep will
+     surface ~15 sites, finding 5: :753, :756, :794, :800, :923, :1042, :1059, :1105, :1127,
+     :1193, :1210, :1234, :1243, :1376, :1438 — ALL get the shape triage, not just the 6 named
+     below);
   4. no `var\(--crow-[a-z-]+,\s*#/` stale fallback whose hex is an OLD palette value (the
      old-hex set from check 1).
-- [ ] **Step 2: FAIL → transform, rule by rule:**
+- [ ] **Step 2: FAIL → transform, rule by rule. CATCH-ALL RULE binding on every grep hit not
+  covered by a named rule below** (plan-review finding 5 — the named lists undercount; in-scope
+  files the grep will also surface include `panels/files.js:159,:216`,
+  `panels/messages/html.js:15` avatar hue array, `panels/extensions/html.js:69`,
+  `layout.js:935,:1388,:1397,:1398`, and ~8 bundle panel files — iptv, frigate, calls,
+  scratch-offline, maker-lab, media ×2, podcast): radius literals → control/card triage by
+  shape; old-palette hex → the spec §3.2 new-palette equivalent (indigo → accent, gold →
+  `#d9a521`/brand-gold, navy grounds → bg tokens, indigo-rgba tints → `color-mix` on accent);
+  NEVER weaken or scope-down the test to pass. The messages avatar hue array swaps its indigo
+  entry for the new accent (decided). Then the named rules:
   - white-on-accent → `color: var(--crow-accent-contrast)` (all ~37).
   - shadows `rgba(99,102,241,X)` → `color-mix(in srgb, var(--crow-accent) N%, transparent)`
     (N = round(X×100)).
@@ -338,8 +381,15 @@ contrast policy are BINDING exact values.
   - stale fallbacks: rewrite each `var(--crow-x, #oldhex)` fallback to the NEW light value of
     that token (fallbacks only fire when tokens are absent — light value is the `:root` default).
   - `contacts/api-handlers.js:305` `|| "#6366f1"` → `|| "#0e6b62"`.
+  - `messages/client.js:639,:1251`: while converting, their fallbacks become
+    `var(--crow-radius-pill, 999px)` (matching `messages/css.js:607`'s existing end-state form;
+    finding 12) — CLIENT EMISSION: no backticks, double-escaped.
   - `setup-page.js` + `calls-page.js`: replace hex with the new-palette equivalents (hand
-    recolor — these pages don't load the token sheet; keep them self-contained).
+    recolor — these pages don't load the token sheet; keep them self-contained), and
+    `calls-page.js`'s DM Sans hardcode → `system-ui` stack (finding 12).
+  - Path corrections (finding 10): the providers-tab/ai-profiles chip sites are
+    `servers/gateway/dashboard/settings/sections/llm/providers-tab.js:27` and
+    `settings/sections/llm/ai-profiles.js:126`.
 - [ ] **Step 3: Green** — new test + `node --test tests/design-system.test.js
   tests/messages-client-live.test.js tests/board-panel-config.test.js tests/a11y-baseline.test.js`
   + contacts/messages/nest panel test files.
@@ -354,7 +404,8 @@ contrast policy are BINDING exact values.
   `servers/gateway/dashboard/shared/notifications.js` (:775–788 tamagotchi crow)
 - Test: extend `tests/token-bypass-sweep.test.js` scope to these files
 
-- [ ] **Step 1:** Add the three files to the bypass test's old-hex scope → FAIL (they carry
+- [ ] **Step 1:** REMOVE the three art-file exclusions from `tests/token-bypass-sweep.test.js`'s
+  scope (Task 7 excluded them by name — plan-review finding 2) → FAIL (they carry
   `#6366f1`/`#818cf8`/`#fbbf24`/`#0f0f17`/`#1a1a2e` fills).
 - [ ] **Step 2:** Recolor: indigo fills → teal (`#0e6b62` main / `#4fbdb0` highlights), navy
   grounds → ink (`#22303a`) or transparent, gold → `#d9a521`. The crow silhouette stays a crow;
@@ -385,7 +436,8 @@ contrast policy are BINDING exact values.
 - [ ] **Step 1: Failing tests:** (a) both route files import from `perch-attached.js` and define
   no local `perchAttached` (text check); (b) panel: on a scratch db, seed `pi_bot_defs` rows —
   one enabled+attached (`definition` JSON with `gateways: [{type:"perch"}]`, `enabled: true`),
-  one disabled+attached, one enabled+unattached — render the panel handler: with ONLY the
+  one disabled+attached, one enabled+unattached (`pi_bot_defs.enabled` is INTEGER — seed `1`/`0`,
+  not booleans; plan-review finding 11) — render the panel handler: with ONLY the
   disabled+attached and enabled+unattached rows → output contains the i18n'd callout (assert the
   EN string) AND still contains the iframe; add the enabled+attached row → no callout.
 - [ ] **Step 2: FAIL → implement.** Extract the helper; panel handler queries `pi_bot_defs` via
@@ -410,12 +462,13 @@ contrast policy are BINDING exact values.
   `servers/gateway/dashboard/panels/bot-builder/editor.js` (:59 hasArchivedAtColumn),
   `bundles/pm-workspace/server/digest/adapters/boards.js` (:29), `bundles/pm-workspace/server/
   sync/monday.js` (:250)
-- Test: extend `tests/board-panel-config.test.js` neighbors — find the board test files
-  (`ls tests/ | grep -i board`) and put: tracker-tags render test, autonomy-null rejection test,
-  archived-409 test in the file that already tests the matching surface.
+- Test: the harness files by name (plan-review finding 6 — `ls tests/ | grep -i board` misses
+  the tracker one): tracker-tags render test → `tests/tracker-panel.test.js` (its
+  `renderCustomTracker` fixture's `tasks_items` already has a `tags` column); autonomy-null →
+  `tests/board-card-service.test.js`; archived-409 → `tests/board-card-api.test.js`.
 
-- [ ] **Step 1: Failing tests:** (a) tracker board render (existing tracker-render test harness —
-  find it in the board test files) with an item carrying `tags:"grant,urgent"` shows
+- [ ] **Step 1: Failing tests:** (a) tracker board render (`tests/tracker-panel.test.js`'s
+  existing harness) with an item carrying `tags:"grant,urgent"` shows
   `class="bb-tag"` pills; kanban render unchanged (existing assertions stay green). (b)
   `card-service` update with `autonomy: null` → validation error (assert the error shape other
   invalid values get at :191's normalizer). (c) POST update on an ARCHIVED card with an invalid
@@ -465,3 +518,18 @@ grep-defined with transformation rules (by design, not placeholder).
 `FONT_IMPORT` after T2 removed non-dashboard importers; `perchAttached(def)` (T9) single
 signature; `tagPillsHtml(tags)` (T10) used by both faces. Radius-pill re-values in T7 (not T3) —
 stated in both tasks.
+
+## Review
+
+**2026-08-15, adversarial staff-engineer review (fable). Verdict: REVISE → all 12 findings
+applied.** Critical: glass token definitions (T3) and consumers (then-T5) sat on opposite sides
+of per-task green gates — all glass CSS deletion moved into T3. Importants: T7's test scope
+contradicted T8 (art files now excluded-then-readded); kb-public's accessor rename was missing
+(undefined-without-throwing); the init-db non-resurrection test was vacuous unless seeded
+`'light'`; T7 gained the binding catch-all transform rule + the fuller grep inventory; T10's
+harness files named (`tracker-panel`, `board-card-service`, `board-card-api`). Minors: nest/css.js
+`.theme-light` ×3 folded into T4's tree-wide grep; T6's no-@import scope pinned (legacy exempt);
+`set_kiosk` survival stated; llm/ paths + noise-texture :880 corrected; `pi_bot_defs.enabled` as
+INTEGER; messages/client fallbacks → `,999px`, calls-page DM Sans → system-ui, gold-rgba in the
+regex. Reviewer Q1 resolved: glass CSS folded into T3 (not a separate task). Q2: suite floor
+3380/0 verified by the controller's own run at the branch base.
