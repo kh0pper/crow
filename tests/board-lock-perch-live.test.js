@@ -9,6 +9,13 @@
 // SQL (kind != 'perch-live'), not as a post-hoc check on the newest row,
 // or a perch-live row would shadow a real active session.
 //
+// Fix round 1 (full-suite finding): the exclusion must be NULL-safe. SQLite's
+// three-valued logic makes a bare `kind != 'perch-live'` evaluate to NULL —
+// not true — for a NULL-kind row, and WHERE drops NULL like false, so an
+// active row with a legacy/absent kind would silently stop locking. The
+// fix in board-lock.js is `COALESCE(kind,'') != 'perch-live'`; card 6 below
+// covers that a NULL kind is not a perch-live claim and must still lock.
+//
 // Harness: scratch tasks.db + crow.db via env, better-sqlite3 seeding, then
 // the gateway's async libsql-shaped client (servers/db.js createDbClient) —
 // same idiom as tests/board-job-lock.test.js.
@@ -41,6 +48,7 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
   ins.run(3, "newest row chat active", "in_progress");
   ins.run(4, "bot_jobs running", "in_progress");
   ins.run(5, "newest perch-live waiting-user shadowing an older active chat row", "in_progress");
+  ins.run(6, "active row with NULL kind (legacy/fixture-drift shape) still locks", "in_progress");
   t.close();
 
   const c = new Database(process.env.CROW_DB_PATH);
@@ -50,7 +58,7 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
       definition TEXT, enabled INTEGER NOT NULL DEFAULT 1, project_id INTEGER);
     CREATE TABLE bot_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL,
       card_id INTEGER, status TEXT NOT NULL DEFAULT 'active', control TEXT NOT NULL DEFAULT 'run',
-      pi_session_dir TEXT, kind TEXT NOT NULL DEFAULT 'chat', updated_at TEXT DEFAULT (datetime('now')))`);
+      pi_session_dir TEXT, kind TEXT DEFAULT 'chat', updated_at TEXT DEFAULT (datetime('now')))`);
   c.exec(BOT_JOBS_DDL);
   c.prepare("INSERT INTO project_spaces (id, name, slug) VALUES (1, 'proj', 'proj')").run();
   c.prepare("INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled, project_id) VALUES ('scout','Scout','{}',1,1)").run();
@@ -70,6 +78,11 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
   // underneath it — the card must still read as locked.
   sess.run(5, "chat", "active");
   sess.run(5, "perch-live", "waiting-user");
+  // card 6: active row with an EXPLICIT NULL kind (fixture-drift / legacy-row
+  // shape) -> must still lock. A bare `kind != 'perch-live'` would silently
+  // exclude this row under SQLite's NULL comparison semantics; the fix uses
+  // COALESCE(kind,'') != 'perch-live' so only the literal string is excluded.
+  c.prepare("INSERT INTO bot_sessions (bot_id, card_id, kind, status) VALUES ('scout', 6, NULL, 'active')").run();
 
   // card 4: locked via the job rail instead, rail 'job'.
   c.prepare(
@@ -111,8 +124,12 @@ test("waiting-user no longer locks; perch-live never locks (even as the newest r
     assert.equal(s5.locked, true, "an older active row must not be shadowed by a newer perch-live row");
     assert.equal(s5.rail, "session");
 
-    const set = await lockedCardIds(db, [1, 2, 3, 4, 5]);
-    assert.deepEqual([...set].sort((a, b) => a - b), [3, 4, 5]);
+    const s6 = await lockState(db, 6);
+    assert.equal(s6.locked, true, "an active row with a NULL kind must still lock (NULL is not a perch-live claim)");
+    assert.equal(s6.rail, "session");
+
+    const set = await lockedCardIds(db, [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual([...set].sort((a, b) => a - b), [3, 4, 5, 6]);
   } finally {
     db.close();
   }
