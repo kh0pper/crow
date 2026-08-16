@@ -13,7 +13,7 @@ import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
 import {
   TASKS_DB, STATUS_BADGE,
-  lockMapFor, statusLabel, liveBirdsByCard,
+  lockMapFor, statusLabel, liveBirdsByCard, sessionBirdState, foldBirdStates,
 } from "./data-queries.js";
 import { DEFAULT_BOARD_DEF, resolveBoardDef, resolveSlugBoardDef } from "../../../routes/board-defs.js";
 // Track 3 Task 11 (spec §5.6): the interactive-engine singleton — live bird
@@ -21,6 +21,11 @@ import { DEFAULT_BOARD_DEF, resolveBoardDef, resolveSlugBoardDef } from "../../.
 // the board must never conjure the engine into existence; a gateway that has
 // never spawned an interactive session just draws no birds.
 import { getInteractiveEngine } from "../../../perch-interactive.js";
+// Track 3 Task 12: the roost strip's "observing" fallback (a bot with no
+// COMPLETE perch gateway record can never hold a live session) — the SAME
+// predicate routes/perch.js's /roost endpoint gates on, extracted so this
+// SSR join and that JSON endpoint can never drift on what "attached" means.
+import { perchAttached } from "../../../shared/perch-attached.js";
 // Track 1 (carried item 2): the no-JS card view's plan block reads plan
 // RECORDS now (D-T1.4), not the retired file rail — same store the JS
 // drawer's GET /card/:id/plan route (plan-service.getCurrentPlan) reads.
@@ -120,6 +125,126 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF, bird =
       `<button type="submit" name="status" value="${escapeHtml(s)}" ${locked || archived ? "disabled" : ""} ` +
       `title="${t("botboard.moveTo", lang)}${escapeHtml(defStatusLabel(def, s, lang))}">${escapeHtml(defStatusLabel(def, s, lang))}</button>`).join("") +
     `</form></div>`;
+}
+
+// ---- Track 3 Task 12: the roost strip ("birds on a wire" above the board) ----
+//
+// One glyph per bot (not per card): idle/working/waiting/hibernating/observing,
+// same fold as routes/perch.js's GET /roost — engine-sourced, never conjures
+// the engine into existence (the `engine` argument is whatever renderKanbanBoard
+// resolved, createIfMissing:false in production; see that function's own note).
+const ROOST_STATE_LABEL_KEY = {
+  idle: "botboard.roostStateIdle",
+  working: "botboard.roostStateWorking",
+  waiting: "botboard.roostStateWaiting",
+  hibernating: "botboard.roostStateHibernating",
+  observing: "botboard.roostStateObserving",
+};
+
+// Fold every bot def down to ONE strip entry: {id, name, state, sessionId}.
+// `sessionId` is the session whose state WON the fold (spec §3.2 priority,
+// via the shared foldBirdStates/sessionBirdState — same functions
+// liveBirdsByCard uses, so the strip and the card glyphs never disagree on
+// what a given session's state is) — null for idle/observing, where there is
+// no live session to correlate a later `bird-state` SSE frame against.
+async function computeRoostBirds(bots, engine) {
+  let sessions = [];
+  if (engine) {
+    try { sessions = await engine.list(); } catch { sessions = []; }
+  }
+  const byBot = new Map();
+  for (const s of sessions) {
+    const list = byBot.get(s.botId);
+    if (list) list.push(s); else byBot.set(s.botId, [s]);
+  }
+  return (bots || []).map((b) => {
+    // §3.1: a bot with no complete perch gateway record can never hold a
+    // live session — always "observing", regardless of what engine.list()
+    // might (stalely) say about a bot id that used to carry one.
+    if (!perchAttached(b.definition)) {
+      return { id: b.botId, name: b.displayName, state: "observing", sessionId: null };
+    }
+    const botSessions = byBot.get(b.botId) || [];
+    const state = foldBirdStates(botSessions.map(sessionBirdState)) || "idle";
+    const winner = state === "idle" ? null : botSessions.find((s) => sessionBirdState(s) === state);
+    return { id: b.botId, name: b.displayName, state, sessionId: winner ? winner.sessionId : null };
+  });
+}
+
+// One `.bb-roost-bird[data-bot]` — glyph, name, state text, and the ONE
+// primary action for this state (spec: idle→Send out, working/hibernating→
+// Open, waiting→Answer, observing→a plain link to Bot Builder). The overflow
+// menu (Talk/Sessions/Recall/Setup) is the SAME on every bird; Recall is
+// omitted when there is no live session to stop (idle/observing).
+function roostBirdHtml(bird, lang) {
+  const state = bird.state;
+  const idAttr = escapeHtml(String(bird.id));
+  const stateText = t(ROOST_STATE_LABEL_KEY[state] || ROOST_STATE_LABEL_KEY.idle, lang);
+  // `data-bird-sid` on the GLYPH span — the exact convention cardFaceHtml
+  // uses — so a `bird-state` SSE frame can patch card face AND roost glyph
+  // with the SAME selector (`.bb-bird[data-bird-sid="<sid>"]`), never two.
+  const sidAttr = bird.sessionId != null ? ` data-bird-sid="${escapeHtml(String(bird.sessionId))}"` : "";
+  const sidDataAttr = bird.sessionId != null ? ` data-sid="${escapeHtml(String(bird.sessionId))}"` : "";
+
+  let primaryHtml;
+  if (state === "observing") {
+    primaryHtml = `<a class="bb-roost-primary bb-roost-link" href="/dashboard/bot-builder#${idAttr}">${t("botboard.roostActionAttach", lang)}</a>`;
+  } else if (state === "idle") {
+    primaryHtml = `<button type="button" class="bb-roost-primary" data-roost-action="dispatch" data-bot="${idAttr}">${t("botboard.roostActionSendOut", lang)}</button>`;
+  } else if (state === "waiting") {
+    primaryHtml = `<button type="button" class="bb-roost-primary" data-roost-action="answer" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionAnswer", lang)}</button>`;
+  } else {
+    // working / hibernating
+    primaryHtml = `<button type="button" class="bb-roost-primary" data-roost-action="open" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionOpen", lang)}</button>`;
+  }
+
+  const recallHtml = bird.sessionId != null
+    ? `<button type="button" data-roost-action="recall" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionRecall", lang)}</button>`
+    : "";
+
+  return `<div class="bb-roost-bird" data-bot="${idAttr}" data-roost-state="${escapeHtml(state)}">` +
+    `<span class="bb-bird bb-bird--${escapeHtml(state)}"${sidAttr} title="${escapeHtml(stateText)}"></span>` +
+    `<span class="bb-roost-name">${escapeHtml(String(bird.name))}</span>` +
+    `<span class="bb-roost-state">${escapeHtml(stateText)}</span>` +
+    primaryHtml +
+    `<button type="button" class="bb-roost-more" data-roost-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="${escapeHtml(t("botboard.roostMoreAria", lang))}">⋯</button>` +
+    `<div class="bb-roost-menu" aria-hidden="true">` +
+    `<button type="button" data-roost-action="talk" data-bot="${idAttr}">${t("botboard.roostActionTalk", lang)}</button>` +
+    `<button type="button" data-roost-action="sessions" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionSessions", lang)}</button>` +
+    recallHtml +
+    `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(String(bird.id))}&tab=tracker">${t("botboard.roostActionSetup", lang)}</a>` +
+    `</div></div>`;
+}
+
+// The strip itself — `bots` is the FULL switcher list (every bot on this
+// board's dashboard, not just the selected one): birds-on-a-wire is a
+// roster overview, not a per-board filter.
+export async function roostStripHtml(bots, engine, lang) {
+  const birds = await computeRoostBirds(bots, engine);
+  const body = birds.length
+    ? birds.map((b) => roostBirdHtml(b, lang)).join("")
+    : `<div class="bb-roost-empty">${t("botboard.roostEmpty", lang)}</div>`;
+  return `<div class="bb-roost" id="bb-roost"><div class="bb-roost-track" id="bb-roost-track">${body}</div></div>`;
+}
+
+// The Send-out card-picker dialog (idle→primary action). Static markup only
+// — reuses the SAME `.bb-drawer` slide-over + openDrawer/closeDrawer idiom
+// every other panel dialog uses; the card <select> and note field are filled
+// in client-side from the DOM (minus GET /roost's occupiedCardIds) when it
+// opens, never SSR'd per-bot.
+export function roostDispatchDialogMarkup(lang) {
+  return `<div class="bb-drawer" id="bb-roost-dispatch" aria-hidden="true">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h3 id="bb-rd-title" style="font-family:var(--crow-body-font);margin:0">${t("botboard.roostDispatchTitle", lang)}</h3>
+      <button type="button" class="bb-btn bb-sec" id="bb-rd-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+    </div>
+    <div class="bb-msg" id="bb-rd-msg"></div>
+    <label>${t("botboard.roostDispatchCardLabel", lang)}</label>
+    <select id="bb-rd-card"></select>
+    <label>${t("botboard.roostDispatchNoteLabel", lang)}</label>
+    <textarea id="bb-rd-note" rows="3" style="font-family:inherit"></textarea>
+    <button type="button" class="bb-btn" id="bb-rd-send">${t("botboard.roostDispatchConfirm", lang)}</button>
+  </div>`;
 }
 
 export function trackerCardFaceHtml(item, contextFields, statusValues, locked, lang) {
@@ -526,10 +651,16 @@ export async function renderKanbanBoard(req, res, {
     archivedToggleHtml(selBot.botId, includeArchived, lang) +
     `</div>`;
 
+  // Track 3 Task 12: the roost strip — birds-on-a-wire above the board,
+  // one glyph per bot on this dashboard (the full switcher list, not just
+  // the selected board's bot). Same `engine` seam as birdsByCard above, so
+  // a test overriding it drives BOTH the card glyphs and the strip.
+  const roostHtml = await roostStripHtml(bots, engine, lang);
+
   const content = botBoardStyles() + section(
     `Board — ${escapeHtml(selBot.displayName)}`,
-    notice + switcher + filterBarHtml + boardHtml) +
-    drawerMarkup(lang, def) + boardSettingsDrawerMarkup(lang, projectId) +
+    notice + switcher + roostHtml + filterBarHtml + boardHtml) +
+    drawerMarkup(lang, def) + boardSettingsDrawerMarkup(lang, projectId) + roostDispatchDialogMarkup(lang) +
     clientJs(selBot.botId, "kanban", projectId, null, null, lang, includeArchived);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });

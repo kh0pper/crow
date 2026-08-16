@@ -19,12 +19,42 @@ export function botBoardStyles() {
   .bb-bird--working{background:${PERCH_TOKENS.light.alive}}
   .bb-bird--waiting{background:${PERCH_TOKENS.light.attn};box-shadow:0 0 0 2px ${PERCH_TOKENS.light.attn}33}
   .bb-bird--hibernating{background:${PERCH_TOKENS.light.dim}}
+  .bb-bird--idle{background:${PERCH_TOKENS.light.dim}}
+  .bb-bird--observing{background:${PERCH_TOKENS.light.wire}}
   @media (prefers-color-scheme: dark) {
     .bb-bird{background:${PERCH_TOKENS.dark.dim}}
     .bb-bird--hibernating{background:${PERCH_TOKENS.dark.dim}}
+    .bb-bird--idle{background:${PERCH_TOKENS.dark.dim}}
+    .bb-bird--observing{background:${PERCH_TOKENS.dark.wire}}
+  }`;
+  // Track 3 Task 12: the roost strip — "birds on a wire" above the board.
+  // `.bb-roost-track`'s bottom border IS the wire (PERCH_TOKENS.wire, both
+  // palettes carry it — no OS-driven fallback needed the way birdCss above
+  // needs one for `alive`/`attn`).
+  const roostCss = `
+  .bb-roost{margin:.6rem 0 1rem;padding:.5rem .6rem .7rem;background:${PERCH_TOKENS.light.card};border:1px solid var(--crow-border);border-radius:var(--crow-radius-card)}
+  .bb-roost-track{display:flex;gap:.5rem;overflow-x:auto;padding-bottom:.5rem;border-bottom:2px solid ${PERCH_TOKENS.light.wire}}
+  .bb-roost-empty{font-size:.8rem;color:var(--crow-text-muted);padding:.3rem 0}
+  .bb-roost-bird{position:relative;display:flex;align-items:center;gap:.4rem;padding:.35rem .5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);white-space:nowrap;flex:0 0 auto}
+  .bb-roost-name{font-size:.8rem;font-weight:600;color:var(--crow-text-primary)}
+  .bb-roost-state{font-size:.68rem;color:var(--crow-text-muted)}
+  .bb-roost-primary{font-size:.7rem;padding:.2rem .5rem;background:${PERCH_TOKENS.light.teal};border:none;border-radius:var(--crow-radius-control);color:${PERCH_TOKENS.light.card};cursor:pointer}
+  .bb-roost-primary.bb-roost-link{background:none;color:${PERCH_TOKENS.light.teal};text-decoration:underline;padding:0}
+  .bb-roost-more{background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:.85rem;padding:.1rem .3rem;line-height:1}
+  .bb-roost-more:hover{color:var(--crow-text-primary)}
+  .bb-roost-menu{display:none;position:absolute;top:100%;right:0;margin-top:.2rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.2);padding:.3rem;z-index:20;min-width:130px}
+  .bb-roost-menu.bb-open{display:block}
+  .bb-roost-menu button,.bb-roost-menu a{display:block;width:100%;text-align:left;background:none;border:none;padding:.3rem .4rem;font-size:.75rem;color:var(--crow-text-primary);cursor:pointer;text-decoration:none;border-radius:4px;font:inherit}
+  .bb-roost-menu button:hover,.bb-roost-menu a:hover{background:var(--crow-bg-elevated)}
+  @media (prefers-color-scheme: dark) {
+    .bb-roost{background:${PERCH_TOKENS.dark.card}}
+    .bb-roost-track{border-bottom-color:${PERCH_TOKENS.dark.wire}}
+    .bb-roost-primary{background:${PERCH_TOKENS.dark.teal};color:${PERCH_TOKENS.dark.card}}
+    .bb-roost-primary.bb-roost-link{color:${PERCH_TOKENS.dark.teal}}
   }`;
   return `<style>
   ${birdCss}
+  ${roostCss}
   .bb-switch{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
   .bb-switch select,.bb-switch input{padding:.45rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-control);color:var(--crow-text-primary)}
   .bb-switch button{padding:.45rem .9rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-control);color:var(--crow-accent-contrast);cursor:pointer}

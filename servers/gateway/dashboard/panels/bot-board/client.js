@@ -1015,6 +1015,142 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     };
   }
 
+  // ---- Track 3 Task 12: the roost strip ("birds on a wire") ----
+  // i18n text baked in at render time (SAME idiom as MUTATION_VERB_LABELS
+  // above) — a bird-state SSE frame patches the DOM in place and has no
+  // server round-trip to re-fetch a translated string from.
+  var ROOST_STATE_TEXT={
+    idle:'${tJs("botboard.roostStateIdle", lang)}',
+    working:'${tJs("botboard.roostStateWorking", lang)}',
+    waiting:'${tJs("botboard.roostStateWaiting", lang)}',
+    hibernating:'${tJs("botboard.roostStateHibernating", lang)}',
+    observing:'${tJs("botboard.roostStateObserving", lang)}'
+  };
+  // Only the three LIVE-session states have a primary-action label to patch
+  // (idle→dispatch and observing→attach-link never arrive over this SSE
+  // channel — those are session-existence changes, not a state transition
+  // on an already-live session; see the bird-state handler's own note).
+  var ROOST_ACTION_TEXT={
+    working:'${tJs("botboard.roostActionOpen", lang)}',
+    hibernating:'${tJs("botboard.roostActionOpen", lang)}',
+    waiting:'${tJs("botboard.roostActionAnswer", lang)}'
+  };
+
+  function perchApi(method,path,body){
+    return fetch('/dashboard/perch-api'+path,{method:method,headers:{'Content-Type':'application/json'},
+      body:body?JSON.stringify(body):undefined,credentials:'same-origin'})
+      .then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,status:r.status,j:j};});});
+  }
+
+  // Task 13 owns the drawer (open/answer/talk/sessions all land here) — this
+  // is the stub every roost/bird click routes through until it lands. A
+  // deliberate no-op, not a TODO: Task 13 decides what it does with sessionId.
+  function openBirdDrawer(sessionId){}
+
+  var roostDispatchEl=$('bb-roost-dispatch'), roostDispatchBotId=null;
+  function closeRoostDispatch(){ closeDrawer(roostDispatchEl); roostDispatchBotId=null; }
+  if($('bb-rd-close')) $('bb-rd-close').onclick=closeRoostDispatch;
+
+  // idle→Send out opens this: cards come from the DOM (the currently
+  // rendered board), minus GET /roost's occupiedCardIds — the SAME set a
+  // fresh dispatch would 409 against (hibernating claims don't lock, so the
+  // DOM's own lock badges can't answer this by themselves).
+  function openRoostDispatch(botId){
+    roostDispatchBotId=botId;
+    msg($('bb-rd-msg'),'','');
+    if($('bb-rd-note')) $('bb-rd-note').value='';
+    var sel=$('bb-rd-card');
+    if(sel) clearEl(sel);
+    perchApi('GET','/roost').then(function(r){
+      var occupied={};
+      if(r.ok && r.j && r.j.occupiedCardIds){ r.j.occupiedCardIds.forEach(function(id){ occupied[Number(id)]=true; }); }
+      var cards=[].slice.call(document.querySelectorAll('#bb-board .bb-card[data-card]'));
+      var free=cards.filter(function(c){ return !occupied[Number(c.getAttribute('data-card'))]; });
+      if(!sel) return;
+      clearEl(sel);
+      if(!free.length){
+        msg($('bb-rd-msg'),'${tJs("botboard.roostDispatchNoCards", lang)}','warn');
+        return;
+      }
+      free.forEach(function(c){
+        var id=c.getAttribute('data-card');
+        var titleEl=c.querySelector('.bb-title');
+        sel.appendChild(optEl(id,'#'+id+' '+(titleEl?titleEl.textContent:''),false));
+      });
+    }).catch(function(){ msg($('bb-rd-msg'),'${tJs("botboard.loadFailed", lang)}','err'); });
+    openDrawer(roostDispatchEl);
+  }
+
+  if($('bb-rd-send')) $('bb-rd-send').onclick=function(){
+    if(!roostDispatchBotId) return;
+    var sel=$('bb-rd-card');
+    var cardId=sel?sel.value:'';
+    if(!cardId) return;
+    var note=$('bb-rd-note')?$('bb-rd-note').value:'';
+    perchApi('POST','/bots/'+encodeURIComponent(roostDispatchBotId)+'/dispatch',{card_id:Number(cardId),note:note}).then(function(r){
+      if(r.ok){
+        closeRoostDispatch();
+        openBirdDrawer(r.j&&r.j.sessionId);
+      } else if(r.status===409 && r.j && r.j.error==='card_occupied'){
+        // A raced dispatch — surfaced as the dialog's OWN error line, not a
+        // toast: the picker is still open and the operator needs to pick a
+        // different card, not just be told something went wrong elsewhere.
+        msg($('bb-rd-msg'),'${tJs("botboard.roostDispatchOccupied", lang)}','err');
+      } else {
+        msg($('bb-rd-msg'),(r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}','err');
+      }
+    }).catch(function(){ msg($('bb-rd-msg'),'${tJs("botboard.roostActionFailed", lang)}','err'); });
+  };
+
+  // Click delegation over the whole roost strip: the overflow-menu toggle,
+  // then every data-roost-action button. Plain <a> primary/setup links (the
+  // observing state, and the overflow menu's Setup item) are NOT
+  // data-roost-action — they navigate normally, no JS involved.
+  document.addEventListener('click',function(ev){
+    var menuBtn=ev.target.closest&&ev.target.closest('[data-roost-menu-toggle]');
+    if(menuBtn){
+      ev.preventDefault();
+      var wrap=menuBtn.closest&&menuBtn.closest('.bb-roost-bird');
+      var menu=wrap?wrap.querySelector('.bb-roost-menu'):null;
+      var wasOpen=menu&&menu.classList.contains('bb-open');
+      [].slice.call(document.querySelectorAll('.bb-roost-menu.bb-open')).forEach(function(m){
+        m.classList.remove('bb-open'); m.setAttribute('aria-hidden','true');
+      });
+      [].slice.call(document.querySelectorAll('[data-roost-menu-toggle]')).forEach(function(b){
+        b.setAttribute('aria-expanded','false');
+      });
+      if(menu && !wasOpen){ menu.classList.add('bb-open'); menu.setAttribute('aria-hidden','false'); menuBtn.setAttribute('aria-expanded','true'); }
+      return;
+    }
+    if(!(ev.target.closest && ev.target.closest('.bb-roost-menu'))){
+      [].slice.call(document.querySelectorAll('.bb-roost-menu.bb-open')).forEach(function(m){
+        m.classList.remove('bb-open'); m.setAttribute('aria-hidden','true');
+      });
+    }
+    var actBtn=ev.target.closest&&ev.target.closest('[data-roost-action]');
+    if(!actBtn) return;
+    var action=actBtn.getAttribute('data-roost-action');
+    var botId=actBtn.getAttribute('data-bot');
+    var sid=actBtn.getAttribute('data-sid');
+    if(action==='dispatch'){ openRoostDispatch(botId); return; }
+    if(action==='open' || action==='answer'){ openBirdDrawer(sid); return; }
+    if(action==='sessions'){ openBirdDrawer(sid||null); return; }
+    if(action==='talk'){
+      perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive').then(function(r){
+        if(r.ok){ openBirdDrawer(r.j&&r.j.sessionId); }
+        else { crowToast((r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); }
+      }).catch(function(){ crowToast('${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); });
+      return;
+    }
+    if(action==='recall'){
+      if(!sid || !confirm('${tJs("botboard.roostConfirmRecall", lang)}')) return;
+      perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/stop').then(function(r){
+        if(!r.ok){ crowToast((r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); }
+      }).catch(function(){ crowToast('${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); });
+      return;
+    }
+  });
+
   // ---- EventSource live overlay ----
   if(window.EventSource && !INCLUDE_ARCHIVED){
     var esUrl=null;
@@ -1040,6 +1176,40 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
           if(now-lastReload>10000){
             try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
             reload();
+          }
+        }
+      });
+      // Track 3 Task 12: bird-state patches classes IN PLACE — card face
+      // glyph AND any roost-strip glyph carrying the SAME session id — and
+      // never reloads. A session starting/ending (idle<->live, an id
+      // appearing/vanishing) is NOT covered here; that is a full-strip
+      // refresh Task 13's drawer close (or the next page load) picks up,
+      // not a per-tick diff this cheap.
+      es.addEventListener('bird-state',function(ev){
+        var d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
+        if(!d) return;
+        for(var cid in d){
+          if(!Object.prototype.hasOwnProperty.call(d,cid)) continue;
+          var info=d[cid]||{};
+          var state=info.state, sid=info.sid;
+          if(!state) continue;
+          var cardGlyph=document.querySelector('.bb-card[data-card="'+cid+'"] .bb-bird');
+          if(cardGlyph){
+            cardGlyph.className='bb-bird bb-bird--'+state;
+            if(sid!=null) cardGlyph.setAttribute('data-bird-sid',String(sid));
+          }
+          if(sid!=null){
+            var roostGlyphs=document.querySelectorAll('.bb-roost-bird .bb-bird[data-bird-sid="'+sid+'"]');
+            [].slice.call(roostGlyphs).forEach(function(g){
+              g.className='bb-bird bb-bird--'+state;
+              var wrap=g.closest&&g.closest('.bb-roost-bird');
+              if(!wrap) return;
+              wrap.setAttribute('data-roost-state',state);
+              var stateEl=wrap.querySelector('.bb-roost-state');
+              if(stateEl && ROOST_STATE_TEXT[state]) stateEl.textContent=ROOST_STATE_TEXT[state];
+              var primary=wrap.querySelector('.bb-roost-primary');
+              if(primary && ROOST_ACTION_TEXT[state]) primary.textContent=ROOST_ACTION_TEXT[state];
+            });
           }
         }
       });
