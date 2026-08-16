@@ -471,6 +471,55 @@ test("message: a second message while a turn is in flight is refused with turn_i
   assert.equal(state.instances[0].turns.length, 1);
 });
 
+// ---------------------------------------------------------------------------
+// Track 3 Task 13: steer — fire-and-forget nudge of an IN-FLIGHT turn
+// ---------------------------------------------------------------------------
+
+test("steer: sends a steer frame to the live child, fire-and-forget, and leaves the turn claim untouched", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "one");
+  const pi = state.instances[0];
+  const result = await engine.steer(s.sessionId, "actually do it differently");
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "steer", message: "actually do it differently" });
+  // No waiter added: steer never claims a NEW turn slot — the original
+  // in-flight promptTurn is still the only one the child ever saw.
+  assert.equal(pi.turns.length, 1, "steer must not start a second promptTurn");
+  // A second message() still sees the SAME turn in flight (steer didn't
+  // clear or replace s.turn).
+  await assert.rejects(() => engine.message(s.sessionId, "two"), (e) => e.code === "turn_in_progress");
+});
+
+test("steer: refused with no_turn when there is nothing in flight (idle awake session)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  await assert.rejects(() => engine.steer(s.sessionId, "hello?"), (e) => e.code === "no_turn");
+  assert.equal(pi.sent.length, 0, "nothing is sent to the child on a no_turn refusal");
+});
+
+test("steer: refused with pi_gone when the child's exit code is set but attachExit has not yet cleared the turn (liveness-before-send, same idiom as answer())", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "one");
+  const pi = state.instances[0];
+  // Mutate the exit code directly rather than pi.exit() — the real attachExit
+  // reaction fires on the SAME microtask turn as a genuine exit and would
+  // clear s.turn too, making no_turn (not pi_gone) the observed refusal (see
+  // the sibling no_turn test above). This isolates the liveness check itself.
+  pi._exitCode = 1;
+  await assert.rejects(() => engine.steer(s.sessionId, "still there?"), (e) => e.code === "pi_gone");
+  assert.equal(pi.sent.length, 0, "nothing is sent to a dead child");
+});
+
+test("steer: refused with session_stopped on a stopped session", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await engine.stop(s.sessionId);
+  await assert.rejects(() => engine.steer(s.sessionId, "hello?"), (e) => e.code === "session_stopped");
+});
+
 test("D1: a child that dies during the WAKE's own trailing awaits is caught before promptTurn — and never wedges the session at 'awake' with no child (the worse D1 variant)", async () => {
   const { engine, clock, state } = makeEngine({ env: { PERCH_INTERACTIVE_MAX_AWAKE: "1" } });
   const s = await spawned(engine, "wedgy");

@@ -1574,6 +1574,29 @@ export function createInteractiveEngine({
   }
 
   /**
+   * Track 3 Task 13 (controller ruling): steer an IN-FLIGHT turn — fire-and-
+   * forget, no waiter, no `s.turn` mutation. Unlike message() this never
+   * claims a turn slot and never touches promptTurn: it sends a `steer`
+   * frame at the child pi is already running, which queues it into the
+   * live loop on its own. Refused honestly rather than silently dropped:
+   * `session_stopped` when the session is parked for good, `no_turn` when
+   * there is nothing running to steer, `pi_gone` when the child that WAS
+   * running the turn has since exited out from under it.
+   */
+  async function steer(sessionId, text) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (s.state === "stopped") throw engineError("session_stopped");
+    if (!s.turn) throw engineError("no_turn");
+    const alive = !!(s.pi && s.pi._exitCode == null);
+    if (!alive) throw engineError("pi_gone");
+    const message = String(text == null ? "" : text);
+    s.pi.send({ type: "steer", message });
+    emit(s, { type: "log", text: "steered: " + message.slice(0, 200) });
+    return { ok: true };
+  }
+
+  /**
    * Track 3 Task 7: force a respawn of a session's child so SPAWN-BOUND state
    * (permissionMode, narrowing) binds NOW instead of waiting for the next
    * natural idle-hibernate/wake cycle — every spawn/wake rebuilds the world
@@ -2058,6 +2081,7 @@ export function createInteractiveEngine({
   return {
     spawn,
     message,
+    steer,
     cycle,
     control,
     options,
