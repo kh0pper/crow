@@ -778,11 +778,37 @@ export function createInteractiveEngine({
    * is pre-existing and out of scope (spec §9). */
   const worldBuildLocks = new Map();
 
+  /**
+   * Fix round 1 (coordinator-reported Critical): the original literal
+   * `prev.then(build)` formula poisoned a bot's queue forever after ONE
+   * rejected build — `.then(build)` off a rejected `prev` never calls
+   * `build` again, so every LATER spawn for that bot would silently inherit
+   * the first failure instead of trying again. A transient buildBotWorld
+   * failure (a bad def edit since fixed, a momentary DB hiccup) must not
+   * brick a bot's spawns until this process restarts.
+   *
+   * Fix shape: the promise THIS call returns to its caller (`next`) still
+   * carries the real rejection of THIS build — callers must see their own
+   * failure, unmasked. The promise STORED as the next caller's `prev`
+   * (`tail`) is a never-rejecting shadow of `next` — so a later caller's own
+   * `prev.catch(() => {})` always has something to resume from, regardless
+   * of whether this build succeeded or failed. Serialization still holds
+   * (the next build never starts before this one settles); a failure just
+   * stops propagating sideways into someone else's queue position.
+   */
   function buildWorldSerialized(S, args) {
-    const build = () => S.buildBotWorld(args);
-    const chain = (worldBuildLocks.get(args.botId) || Promise.resolve()).then(build);
-    worldBuildLocks.set(args.botId, chain);
-    return chain;
+    const botId = args.botId;
+    const prev = worldBuildLocks.get(botId) || Promise.resolve();
+    const next = prev.catch(() => {}).then(() => S.buildBotWorld(args));
+    const tail = next.catch(() => {});
+    worldBuildLocks.set(botId, tail);
+    // Hygiene: bound the map. Once this tail settles, drop the entry IF
+    // nothing newer has queued behind it (a newer call would have replaced
+    // the map's value with ITS OWN tail already).
+    tail.then(() => {
+      if (worldBuildLocks.get(botId) === tail) worldBuildLocks.delete(botId);
+    });
+    return next;
   }
 
   // ---- child construction --------------------------------------------------

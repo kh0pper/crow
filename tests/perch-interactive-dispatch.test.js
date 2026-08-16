@@ -130,6 +130,11 @@ function makeBridge(opts = {}) {
     projectMembers: opts.projectMembers === undefined ? [] : opts.projectMembers,
     worldGate: null,
     getStateGate: null,
+    // Fix round 1: inject exactly ONE buildBotWorld rejection for a given
+    // botId, then self-clear — proves a transient failure doesn't poison
+    // that bot's world-build queue for later spawns.
+    worldRejectFor: null,
+    worldRejectError: null,
     modelKey: opts.modelKey || "crow-local/qwen3.6-35b-a3b",
     // Dispatch-brief seams (Track 3 Task 6) — deliberately simple fakes, NOT
     // real tasks.db reads: cardBriefBlock is DB-free by design (Task 2), so
@@ -191,6 +196,10 @@ function makeBridge(opts = {}) {
     countLivePi: () => state.livePi,
     async buildBotWorld(args) {
       state.worlds.push(args);
+      if (state.worldRejectFor === args.botId) {
+        state.worldRejectFor = null;
+        throw state.worldRejectError || new Error("build failed");
+      }
       if (state.worldGate) await state.worldGate;
       return {
         def: { session_dir: join(dir, "bots", args.botId), permission_policy: { bash: "deny", write_paths: [] } },
@@ -486,6 +495,28 @@ test("per-bot world-build mutex: two concurrent spawns of ONE bot never overlap 
   await Promise.all([p1, p2]);
   assert.equal(state.worlds.length, 2, "…but runs once the first settles");
   assert.equal(state.instances.length, 2);
+});
+
+test("per-bot world-build mutex: one buildBotWorld rejection does NOT poison the bot's queue for later spawns (fix round 1)", async () => {
+  const { engine, state } = makeEngine();
+  const boom = new Error("transient build failure");
+  state.worldRejectFor = "flaky";
+  state.worldRejectError = boom;
+
+  await assert.rejects(
+    () => engine.spawn({ botId: "flaky" }),
+    (e) => e === boom,
+    "the caller sees the REAL rejection of its own build"
+  );
+  assert.equal(state.worlds.filter((w) => w.botId === "flaky").length, 1, "the failing build was invoked exactly once");
+  assert.equal(state.worldRejectFor, null, "the injected rejection is one-shot — self-cleared after firing");
+
+  // A second spawn for the SAME bot must invoke buildBotWorld AGAIN — a
+  // poisoned queue (the pre-fix `prev.then(build)` formula) would instead
+  // silently inherit the first failure forever, never calling build() again.
+  const r = await spawned(engine, { botId: "flaky" });
+  assert.equal(r.state, "awake");
+  assert.equal(state.worlds.filter((w) => w.botId === "flaky").length, 2, "buildBotWorld ran again — the queue recovered");
 });
 
 // ---------------------------------------------------------------------------
