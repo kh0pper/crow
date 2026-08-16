@@ -162,6 +162,83 @@ test("drainOnce: partial delivery retains the row with delivered_json merged; un
   cleanup({ db, dir });
 });
 
+// ── 2b. Escalating warn: paired peer unarmed for >3 consecutive drains ──
+
+test("drainOnce: escalating warn fires once a paired peer has stayed unarmed for more than 3 consecutive drains", async () => {
+  const { mgr, db, dir } = freshManager("inst-unarmed-streak");
+  await registerPeer(db, "peer-unarmed-streak"); // paired, but NO outFeed ever registered
+
+  await queueRow(db, { row: { crow_id: "crow:streak" }, lamportTs: 900 });
+
+  const warnCalls = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => { warnCalls.push(args.join(" ")); };
+  try {
+    for (let i = 0; i < 3; i++) {
+      await drainOnce(mgr, db);
+    }
+    assert.ok(
+      !warnCalls.some((m) => m.includes("ESCALATING")),
+      "no escalating warn yet at exactly 3 consecutive unarmed drains",
+    );
+
+    await drainOnce(mgr, db); // 4th consecutive pass — crosses the >3 threshold
+    assert.ok(
+      warnCalls.some((m) => m.includes("ESCALATING") && m.includes("peer-unarmed-streak")),
+      "escalating warn fires once the peer has been unarmed for >3 consecutive drains",
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+  cleanup({ db, dir });
+});
+
+test("drainOnce: unarmed streak resets once the peer arms — a later, unrelated peer starts its own clean streak", async () => {
+  const { mgr, db, dir } = freshManager("inst-unarmed-reset");
+  await registerPeer(db, "peer-reset");
+
+  await queueRow(db, { row: { crow_id: "crow:reset-1" }, lamportTs: 1 });
+
+  const warnCalls = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => { warnCalls.push(args.join(" ")); };
+  try {
+    // peer-reset unarmed for 3 straight passes (streak builds to 3, never
+    // crosses the >3 threshold).
+    for (let i = 0; i < 3; i++) {
+      await drainOnce(mgr, db);
+    }
+
+    // peer-reset arms on the 4th pass — row delivers, streak resets to 0.
+    mgr.outFeeds.set("peer-reset", { append: async () => {} });
+    await drainOnce(mgr, db);
+    assert.ok(
+      !warnCalls.some((m) => m.includes("ESCALATING") && m.includes("peer-reset")),
+      "peer-reset must never escalate — it armed on the pass that would have crossed the threshold",
+    );
+
+    // A brand-new peer, never seen before, starts its OWN streak from zero —
+    // proves tracking is per-peer state, not a leaked/shared counter.
+    await registerPeer(db, "peer-fresh");
+    await queueRow(db, { row: { crow_id: "crow:reset-2" }, lamportTs: 2 });
+    for (let i = 0; i < 3; i++) {
+      await drainOnce(mgr, db);
+    }
+    assert.ok(
+      !warnCalls.some((m) => m.includes("ESCALATING") && m.includes("peer-fresh")),
+      "peer-fresh must not escalate yet — only 3 consecutive unarmed passes so far",
+    );
+    await drainOnce(mgr, db); // 4th consecutive pass for peer-fresh
+    assert.ok(
+      warnCalls.some((m) => m.includes("ESCALATING") && m.includes("peer-fresh")),
+      "peer-fresh escalates independently on its own 4th consecutive unarmed pass",
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+  cleanup({ db, dir });
+});
+
 // ── 3. Claim excludes already-claimed rows (no-op until stale) ─────────
 
 test("drainOnce: claim excludes a hand-claimed (not-yet-stale) row — second call no-ops on it", async () => {

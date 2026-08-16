@@ -24,6 +24,12 @@ import { ensureSyncTables } from "../shared/sync-stamp.js";
 
 const CLAIM_STALE_MINUTES = 10;
 
+/** Consecutive unarmed appearances a paired peer may accumulate before the
+ *  drain starts logging an escalating alert (spec "The drain" —
+ *  "paired-but-unarmed for >N drains is an operator-visible condition";
+ *  task brief pins N=3). */
+const UNARMED_ESCALATE_AFTER = 3;
+
 /**
  * Serializes overlapping drainOnce calls. Same promise-chain pattern
  * instance-sync.js's `_chainAppendTask` uses per peer (`_appendLocks`), but
@@ -111,6 +117,43 @@ async function claimBatch(db, batchSize) {
   return [...rows].sort((a, b) => a.id - b.id);
 }
 
+/**
+ * Track, per peer, consecutive drain passes in which that peer's disposition
+ * came back `'parked'` (paired but unarmed — no outFeed registered; see
+ * instance-sync.js's `_appendToPeer`). State lives on `mgr` (one manager per
+ * drain process, same lifetime as `mgr.outFeeds`/`mgr._pendingPeerEmits`) —
+ * NOT module scope, so distinct managers (tests, or a future multi-instance
+ * host) never share counters.
+ *
+ * Only peers actually present in this pass's `dispositions` are touched:
+ * `'parked'` increments the streak (and logs an escalating alert once it
+ * exceeds UNARMED_ESCALATE_AFTER); any other disposition seen for that peer
+ * this pass (`'appended'` or `'failed'` — both mean the feed IS armed) resets
+ * it to zero. A peer not present in `dispositions` this pass (no row
+ * currently targets it) is left untouched — no information, no update.
+ * @param {object} mgr
+ * @param {Record<string, 'appended'|'parked'|'failed'>} dispositions
+ */
+function trackUnarmedStreaks(mgr, dispositions) {
+  if (!mgr._outboxUnarmedStreaks) mgr._outboxUnarmedStreaks = new Map();
+  const streaks = mgr._outboxUnarmedStreaks;
+  for (const [peerId, disposition] of Object.entries(dispositions)) {
+    if (disposition !== "parked") {
+      streaks.delete(peerId);
+      continue;
+    }
+    const streak = (streaks.get(peerId) || 0) + 1;
+    streaks.set(peerId, streak);
+    if (streak > UNARMED_ESCALATE_AFTER) {
+      console.warn(
+        `[sync-outbox-drain] ESCALATING: peer ${peerId} is paired but has been unarmed for ` +
+          `${streak} consecutive drains — its outbox entries are accumulating undelivered; ` +
+          `check whether its feed should still be paired.`,
+      );
+    }
+  }
+}
+
 async function drainOnceInner(mgr, db, { batchSize }) {
   if (!mgr || mgr.feedsDisabled) {
     // A --no-auth companion shares the primary's db and must never claim or
@@ -166,6 +209,7 @@ async function drainOnceInner(mgr, db, { batchSize }) {
       for (const [peerId, disposition] of Object.entries(dispositions)) {
         if (disposition !== "appended") parkedPeers.add(peerId);
       }
+      trackUnarmedStreaks(mgr, dispositions);
       const delivered = parseDelivered(row.delivered_json);
       for (const peerId of appended) delivered[peerId] = true;
       await unclaimRow(db, row.id, delivered);
