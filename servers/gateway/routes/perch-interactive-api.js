@@ -29,7 +29,16 @@
  * internal vocabulary.
  */
 import express, { Router } from "express";
-import { realpathSync, statSync, writeFileSync } from "node:fs";
+import {
+  realpathSync,
+  openSync,
+  closeSync,
+  fstatSync,
+  ftruncateSync,
+  writeSync,
+  createReadStream,
+  constants as fsConstants,
+} from "node:fs";
 import { basename, extname, join, sep } from "node:path";
 import { jsonError } from "./_error.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
@@ -64,6 +73,19 @@ const UPLOAD_BYTES_CAP = 5 * 1024 * 1024;
 
 /** Extensions the workspace route serves inline (never `attachment`). */
 const WORKSPACE_IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+
+// Test-only barrier (same idiom as routes/bundles.js's own
+// _setInstallSetBarrierForTest): lets a test deterministically pause the
+// workspace-serve route right after it has finished validating the file
+// (open-by-fd + fstat + realpath jail check) and right before it streams —
+// to prove a filesystem swap performed DURING that pause cannot change what
+// gets served, without sleeping or racing wall-clock timing. Production
+// default is null, so `if (_workspaceServeBarrier)` is never entered: no
+// await, no timer.
+let _workspaceServeBarrier = null;
+export function _setWorkspaceServeBarrierForTest(promiseOrNull) {
+  _workspaceServeBarrier = promiseOrNull || null;
+}
 
 /** engine.code → [httpStatus, external error string]. The external string is
  * usually identical to the engine's code; `session_stopped` is the one
@@ -391,7 +413,7 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     const botId = String(req.params.id);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const cardId = parseCardId(body);
-    const note = body.note == null ? "" : String(body.note);
+    const note = body.note == null ? "" : String(body.note).slice(0, MESSAGE_CAP);
     if (cardId == null) return jsonError(res, 400, "bad_request");
 
     const db = createDbClient();
@@ -412,7 +434,24 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       // Provenance: the assigned_bot write goes through the SAME service
       // updateCard()/board_update_item's route uses (bot-board-api.js's own
       // DASHBOARD_ACTOR idiom) — one code path, one recordMutation shape.
-      await updateCard(tdb, cardId, { assigned_bot: botId }, DASHBOARD_ACTOR);
+      //
+      // I6 (final review): eng.spawn() above already claims the card. If this
+      // write throws, the OLD code let the error propagate past the spawned
+      // session — the route errored out while the session still existed,
+      // still held the claim, and never got its turn-1 message: an orphan
+      // child on a permanently occupied card, recoverable only by Recall.
+      // The session itself is more valuable than this provenance write
+      // (a cosmetic "assigned by" field on the card), so a failure here is
+      // logged and dispatch continues — the operator gets a working session,
+      // just without the card-side assignment note.
+      try {
+        await updateCard(tdb, cardId, { assigned_bot: botId }, DASHBOARD_ACTOR);
+      } catch (provenanceErr) {
+        console.error(
+          `[perch-interactive-api] dispatch: assigned_bot provenance write failed for card ${cardId}, session ${result.sessionId} (session still proceeds):`,
+          provenanceErr
+        );
+      }
 
       // Fire-and-forget: dispatch STARTS the turn (spawn() already composed
       // and stored s.dispatchBrief; THIS message() call is what triggers it
@@ -529,7 +568,40 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       const snap = await eng.get(sid);
       if (!snap) return jsonError(res, 404, "no_such_session");
       if (!snap.uploadsDir) return jsonError(res, 409, "no_session_dir");
-      writeFileSync(join(snap.uploadsDir, name), buf);
+
+      // C1 (final review): a prompt-injected pi child can pre-plant
+      // <uploadsDir>/<name> as a symlink to an arbitrary path (e.g.
+      // ~/.crow/.env, ~/.ssh/authorized_keys) — the OLD plain writeFileSync
+      // followed that symlink and wrote attacker-chosen bytes wherever it
+      // pointed on the operator's next upload of that filename. O_NOFOLLOW
+      // makes the open() itself refuse a terminal symlink component (ELOOP)
+      // — a single atomic syscall, no separate lstat-then-open TOCTOU
+      // window. A legitimate re-upload of the same filename (the target is
+      // an ordinary regular file, not a symlink) still overwrites cleanly.
+      let fd;
+      try {
+        fd = openSync(
+          join(snap.uploadsDir, name),
+          fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW,
+          0o600
+        );
+      } catch (openErr) {
+        if (openErr && openErr.code === "ELOOP") {
+          return jsonError(res, 400, "bad_request");
+        }
+        throw openErr;
+      }
+      try {
+        // Belt-and-suspenders: confirm the fd we actually got is a regular
+        // file (O_NOFOLLOW only guards the FINAL path component — this
+        // rejects the pathological case of a non-regular target, e.g. a
+        // FIFO or device node, planted at that name).
+        if (!fstatSync(fd).isFile()) return jsonError(res, 400, "bad_request");
+        ftruncateSync(fd, 0);
+        writeSync(fd, buf, 0, buf.length, 0);
+      } finally {
+        try { closeSync(fd); } catch { /* already closed */ }
+      }
       res.json({ path: name });
     } catch (err) {
       mapEngineError(res, err);
@@ -560,29 +632,76 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       if (!snap) return jsonError(res, 404, "no_such_session");
       if (!snap.outputsDir) return jsonError(res, 409, "no_session_dir");
 
-      let outputsReal, resolved;
+      let outputsReal;
       try {
         outputsReal = realpathSync(snap.outputsDir);
-        resolved = realpathSync(join(snap.outputsDir, rel));
       } catch {
         return jsonError(res, 404, "not_found");
       }
-      if (!resolved.startsWith(outputsReal + sep)) return jsonError(res, 404, "not_found");
 
-      let stat;
-      try { stat = statSync(resolved); } catch { return jsonError(res, 404, "not_found"); }
-      if (!stat.isFile()) return jsonError(res, 404, "not_found");
-
-      if (!WORKSPACE_IMAGE_EXTS.has(extname(resolved).toLowerCase())) {
-        res.set("Content-Disposition", "attachment; filename=\"" + basename(resolved) + "\"");
+      // C2 (final review): the OLD code validated with realpathSync/statSync
+      // on the PATH STRING, then handed that same string to res.sendFile(),
+      // which re-opens it — two separate lookups by path. outputsDir is in
+      // the pi child's extraWritePaths, so a racing child could swap the
+      // validated file for a symlink to e.g. ~/.crow/data/crow.db or a
+      // minted MCP token file in the window between the two, and the
+      // authenticated operator would get THAT file streamed back. Fix: a
+      // SINGLE open() (O_NOFOLLOW — refuses a symlink at the leaf, closing
+      // that half of the window atomically), then every check and the
+      // stream itself operate on that ONE file descriptor — a fd is bound
+      // to an inode, not a path, so nothing that happens to the path AFTER
+      // this open can change what gets read.
+      let fd;
+      try {
+        fd = openSync(join(snap.outputsDir, rel), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      } catch {
+        return jsonError(res, 404, "not_found");
       }
-      // Explicit callback (rather than Express's default next(err) on
-      // failure): a race between the statSync above and this read (the file
-      // vanishing under us) must still 404 through THIS route's JSON
-      // contract, never fall through to the app's generic HTML error page.
-      res.sendFile(resolved, (err) => {
-        if (err && !res.headersSent) jsonError(res, 404, "not_found");
+
+      let stat, fdReal;
+      try {
+        stat = fstatSync(fd);
+        // Re-derive the fd's OWN canonical path from the kernel's fd table,
+        // never by re-resolving `rel`/the join()'d path string again — that
+        // second path-based resolution is exactly the TOCTOU this closes.
+        // Also catches a symlinked INTERMEDIATE directory component (the
+        // leaf itself isn't a symlink — O_NOFOLLOW already covers that —
+        // but a parent dir could be) still landing outside outputsDir.
+        fdReal = realpathSync(`/proc/self/fd/${fd}`);
+      } catch {
+        closeSync(fd);
+        return jsonError(res, 404, "not_found");
+      }
+
+      if (!stat.isFile() || !fdReal.startsWith(outputsReal + sep)) {
+        closeSync(fd);
+        return jsonError(res, 404, "not_found");
+      }
+
+      // Test-only barrier (see _setWorkspaceServeBarrierForTest) — null in
+      // production, so this branch is never entered: no await, no timer.
+      if (_workspaceServeBarrier) await _workspaceServeBarrier;
+
+      // M1 (final review, folded into C2): quote-escape the filename before
+      // it lands in a header (an embedded `"` could otherwise inject extra
+      // header syntax), and pin off MIME sniffing — a served file must never
+      // let the browser guess its way into treating attachment bytes as
+      // executable content.
+      res.set("X-Content-Type-Options", "nosniff");
+      if (!WORKSPACE_IMAGE_EXTS.has(extname(fdReal).toLowerCase())) {
+        res.set(
+          "Content-Disposition",
+          `attachment; filename="${basename(fdReal).replace(/"/g, '\\"')}"`
+        );
+      }
+
+      // Stream from the fd — autoClose:true closes it once the read
+      // completes or errors, so no separate closeSync() call on this path.
+      const stream = createReadStream(null, { fd, autoClose: true });
+      stream.on("error", () => {
+        if (!res.headersSent) jsonError(res, 404, "not_found");
       });
+      stream.pipe(res);
     } catch (err) {
       mapEngineError(res, err);
     }

@@ -21,6 +21,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, readFileSync,
+  unlinkSync, lstatSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
@@ -28,6 +29,28 @@ import http from "node:http";
 
 let server, base, port;
 let engineImpl;
+let setWorkspaceServeBarrier;
+
+/** Same thenable-barrier idiom as tests/install-set-e2e.test.js's own
+ * makeBarrier(): `reached` resolves the instant the route parks on it (no
+ * sleeping/polling needed to know WHEN), `release()` unparks it. */
+function makeBarrier() {
+  let release;
+  let notifyReached;
+  const gate = new Promise((r) => { release = r; });
+  const reached = new Promise((r) => { notifyReached = r; });
+  const barrier = {
+    awaited: 0,
+    reached,
+    release,
+    then(onFulfilled, onRejected) {
+      barrier.awaited++;
+      notifyReached();
+      return gate.then(onFulfilled, onRejected);
+    },
+  };
+  return barrier;
+}
 
 const outputsDir = mkdtempSync(join(tmpdir(), "perch-workspace-outputs-"));
 const secretDir = mkdtempSync(join(tmpdir(), "perch-workspace-secret-"));
@@ -66,7 +89,9 @@ before(async () => {
   symlinkSync(outsideDir2, join(outputsDir, "sub2"));
 
   const { default: express } = await import("express");
-  const { default: perchInteractiveApiRouter } = await import("../servers/gateway/routes/perch-interactive-api.js");
+  const { default: perchInteractiveApiRouter, _setWorkspaceServeBarrierForTest } =
+    await import("../servers/gateway/routes/perch-interactive-api.js");
+  setWorkspaceServeBarrier = _setWorkspaceServeBarrierForTest;
   const fakeAuth = (req, res, next) => next();
 
   engineImpl = {
@@ -225,4 +250,71 @@ test("no_session_dir 409s when the session has never been through startChild in 
 test("a nonexistent file (no attack, just missing) 404s cleanly", async () => {
   const r = await rawRequest("/dashboard/perch-api/interactive/sess-1/workspace/does-not-exist.txt");
   assert.equal(r.status, 404);
+});
+
+// ---------------------------------------------------------------------------
+// ATTACK: TOCTOU race — the validated file swapped for a symlink between
+// validation and streaming (final review, C2)
+// ---------------------------------------------------------------------------
+//
+// outputsDir is in the pi child's extraWritePaths (perch-interactive.js), so
+// a racing child can unlink+re-symlink a file it just wrote at any moment.
+// The OLD code validated the path with realpathSync/statSync, then handed
+// the SAME PATH STRING to res.sendFile(), which re-opens it — two separate
+// by-path lookups with a real (if narrow) window between them. This test
+// proves the fix (single open() by fd, everything downstream reads from
+// THAT fd) is immune to a swap performed in the analogous window, using the
+// _setWorkspaceServeBarrierForTest hook to park the route deterministically
+// right after it finishes validating and right before it streams — no sleep,
+// no timing luck.
+test("ATTACK TOCTOU race: swapping the validated file for a symlink AFTER validation, before streaming, must NOT leak the swapped-in target", async () => {
+  const raceTarget = join(outputsDir, "race-target.bin");
+  const raceSecretDir = mkdtempSync(join(tmpdir(), "perch-workspace-race-secret-"));
+  const raceSecret = join(raceSecretDir, "race-secret.bin");
+  const originalContent = Buffer.alloc(256 * 1024, 0x41); // 256KB of 'A'
+  const secretContent = "TOP-SECRET-RACE-CONTENT-" + Buffer.alloc(256 * 1024, 0x42).toString("binary").slice(0, 100);
+  writeFileSync(raceTarget, originalContent);
+  writeFileSync(raceSecret, secretContent);
+
+  const barrier = makeBarrier();
+  setWorkspaceServeBarrier(barrier);
+  try {
+    const reqPromise = rawRequest("/dashboard/perch-api/interactive/sess-1/workspace/race-target.bin");
+
+    // Wait until the route has ACTUALLY parked on the barrier — i.e. it has
+    // already opened race-target.bin by fd, fstat'd it, and jail-verified
+    // it — before we touch the filesystem. Zero wall-clock waiting.
+    await barrier.reached;
+
+    // The race: swap the validated file for a symlink into the secret dir,
+    // simulating a racing pi child doing exactly this between validation and
+    // streaming.
+    unlinkSync(raceTarget);
+    symlinkSync(raceSecret, raceTarget);
+    // Prove the swap actually took effect on disk (not a no-op) — otherwise
+    // a passing test would be meaningless.
+    assert.ok(lstatSync(raceTarget).isSymbolicLink(), "test setup sanity: the swap must have landed");
+
+    barrier.release();
+    const r = await reqPromise;
+
+    assert.equal(r.status, 200, "the ALREADY-VALIDATED fd must still serve successfully");
+    assert.ok(
+      r.body.equals(originalContent),
+      "the response body must be the ORIGINAL file's content, read via the fd opened before the swap — never the swapped-in target"
+    );
+    assert.doesNotMatch(r.body.toString("binary"), /TOP-SECRET-RACE-CONTENT/,
+      "the secret content must never appear in the response, regardless of what the path resolves to after validation");
+  } finally {
+    setWorkspaceServeBarrier(null);
+    rmSync(raceSecretDir, { recursive: true, force: true });
+    try { unlinkSync(raceTarget); } catch { /* already gone */ }
+  }
+});
+
+test("barrier is a no-op by default — _setWorkspaceServeBarrierForTest(null) never parks a normal request", async () => {
+  setWorkspaceServeBarrier(null);
+  const r = await rawRequest("/dashboard/perch-api/interactive/sess-1/workspace/ok.txt");
+  assert.equal(r.status, 200);
+  assert.equal(r.body.toString("utf8"), "hello ok");
 });
