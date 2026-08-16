@@ -84,3 +84,7 @@ Returns the list of valid memory categories.
 ## Database
 
 Memories are stored in the `memories` table with a companion `memories_fts` FTS5 virtual table for full-text search. SQLite triggers keep the FTS index in sync on insert, update, and delete.
+
+## Cross-instance sync
+
+Every server-side write that needs to reach paired instances — including this server's own calls in `servers/memory/server.js` — goes through `emitOrQueue` (`servers/shared/sync-emit.js`): it is the only legal emit path for server code. When a live, feeds-enabled `InstanceSyncManager` is available, `emitOrQueue` passes the write straight through to `emitChange`; otherwise (no manager at all, or a `--no-auth` companion's feeds-disabled manager — the case for a stdio-mounted MCP process, which has no live manager) it durably queues the write into the `sync_outbox` table instead of dropping it, after checking the same `SYNCED_TABLES`/`shouldSyncRow` syncability gate the live path uses. The gateway process that owns the sync feeds drains `sync_outbox` (`servers/sharing/sync-outbox-drain.js`, started from `servers/gateway/boot/mcp-mounts.js`) in preserve-mode: each queued row is re-emitted through `emitChange` carrying its original queued `lamport_ts` rather than a freshly minted one, and a row is deleted only once every currently paired peer has a real, durable append recorded against it.
