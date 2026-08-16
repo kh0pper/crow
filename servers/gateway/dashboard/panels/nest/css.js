@@ -22,11 +22,13 @@ export function nestCSS() {
     transform: translate(-50%, -50%);
     width: 320px;
     height: 320px;
-    opacity: 0.025;
+    opacity: 0.04;
     pointer-events: none;
     z-index: 0;
   }
-  .theme-light .nest-watermark { opacity: 0.04; }
+  @media (prefers-color-scheme: dark) {
+    .nest-watermark { opacity: 0.025; }
+  }
 
   /* ─── Welcome ─── */
   .nest-welcome {
@@ -94,8 +96,8 @@ export function nestCSS() {
     align-items: center;
     gap: 0.6rem;
     padding: 0.5rem 0.85rem;
-    background: rgba(251,191,36,0.06);
-    border: 1px solid rgba(251,191,36,0.15);
+    background: rgba(251,191,36,0.08);
+    border: 1px solid rgba(251,191,36,0.2);
     border-radius: 10px;
     text-decoration: none;
     color: var(--crow-text-primary);
@@ -106,9 +108,11 @@ export function nestCSS() {
     transition: background 0.15s, border-color 0.15s;
     position: relative;
   }
-  .theme-light .nest-pinned-item {
-    background: rgba(251,191,36,0.08);
-    border-color: rgba(251,191,36,0.2);
+  @media (prefers-color-scheme: dark) {
+    .nest-pinned-item {
+      background: rgba(251,191,36,0.06);
+      border-color: rgba(251,191,36,0.15);
+    }
   }
   .nest-pinned-item:hover {
     background: rgba(251,191,36,0.12);
@@ -219,15 +223,15 @@ export function nestCSS() {
 
   /* Icon color themes */
   .nest-app--panel .nest-app-icon {
-    background: rgba(99,102,241,0.12);
+    background: rgba(79,70,229,0.1);
     color: var(--crow-accent);
     box-shadow: 0 2px 8px rgba(99,102,241,0.1);
   }
   .nest-app--panel:hover .nest-app-icon {
     box-shadow: 0 4px 20px rgba(99,102,241,0.2);
   }
-  .theme-light .nest-app--panel .nest-app-icon {
-    background: rgba(79,70,229,0.1);
+  @media (prefers-color-scheme: dark) {
+    .nest-app--panel .nest-app-icon { background: rgba(99,102,241,0.12); }
   }
 
   .nest-app--bundle .nest-app-icon {

@@ -1,8 +1,12 @@
 /**
  * Settings Section: Theme
  *
- * IMPORTANT: The sidebar toggleTheme() in layout.js POSTs set_theme / set_theme_mode
- * from every dashboard page. These AJAX handlers must remain working.
+ * IMPORTANT: set_theme / set_theme_mode are dispatched from panels/settings.js's
+ * POST handler, reachable from every dashboard page. The dashboard's own sidebar
+ * theme toggle that used to post here retired in Task 4 (2026-08-15, spec §3.3) —
+ * these handlers stay for the Blog theme section (blog_theme_mode) and are exercised
+ * directly by tests/instance-scope-cleanups.test.js D4/D5. Retiring them fully is
+ * Task 5's scope (glass end-to-end retirement).
  */
 
 import { formField } from "../../shared/components.js";

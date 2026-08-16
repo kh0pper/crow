@@ -15,7 +15,6 @@ export const translations = {
   // ─── Nav & Layout ───
   "nav.logout": { en: "Logout", es: "Cerrar sesión" },
   "nav.toggleMenu": { en: "Toggle menu", es: "Alternar menú" },
-  "nav.toggleTheme": { en: "Toggle theme", es: "Cambiar tema" },
   // Panel nav names (keyed by panel id)
   "nav.nest": { en: "Crow's Nest", es: "Nido del Cuervo" },
   "nav.messages": { en: "Messages", es: "Mensajes" },
