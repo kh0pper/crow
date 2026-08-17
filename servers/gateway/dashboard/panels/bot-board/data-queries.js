@@ -93,7 +93,14 @@ export async function lockMapFor(db, cardIds) {
 export function sessionBirdState(session) {
   if (!session) return null;
   if (session.pendingUi) return "waiting";
-  if (session.state === "awake") return "working";
+  // I3 (final review): an awake session with no turn actually in flight is
+  // idle-awake (parked between turns, e.g. right after dispatch claimed the
+  // card but before message() has fired, or between a reply and the next
+  // send) — "working" overclaimed that as active agent work with no turn
+  // check at all. Gated on turnInFlight now that snapshot()/stateEvent()
+  // both expose it; an idle-awake session draws no bird (null), same as a
+  // session this process has never seen.
+  if (session.state === "awake" && session.turnInFlight) return "working";
   if (session.state === "hibernating") return "hibernating";
   return null;
 }

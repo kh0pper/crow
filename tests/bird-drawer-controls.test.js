@@ -246,6 +246,64 @@ test("the dragstart handler refuses (preventDefault + return) when starting insi
 });
 
 // ---------------------------------------------------------------------------
+// I2 + I3 (final review): the drawer's 'state' SSE handler must consume
+// turnInFlight/permissionMode/planMode from the EVENT payload, not rely only
+// on local send-tab bookkeeping (turnInFlight) or the mount-time hard-set
+// default (bdResetControlsUi's 'guarded') — a reopened drawer, second tab, or
+// reconnect must reflect the session's REAL live state, driven behaviorally
+// (the actual handler body, real inputs) rather than by scanning source text.
+// ---------------------------------------------------------------------------
+
+test("the 'state' SSE handler syncs turnInFlight, the permission select, and the plan toggle from the event payload", async () => {
+  const js = birdDrawerJs("en");
+  const anchor = "es.addEventListener('state',function(e){";
+  const start = js.indexOf(anchor);
+  assert.ok(start >= 0, "the state handler must exist");
+  const braceStart = start + anchor.length - 1;
+  const handlerSrc = js.slice(braceStart, matchBrace(js, braceStart) + 1);
+
+  const params = [
+    "e", "bd", "mySid", "parsed",
+    "bdSetState", "bdSetTurnInFlight", "bdRenderAsk",
+    "bdUpdateHeader", "bdLoadTranscript", "bdLoadSessionMeta",
+    "bdPermSel", "bdPlanToggle",
+  ];
+  const runner = new Function(...params, handlerSrc.slice(1, -1));
+
+  function run(payload) {
+    const bd = { sid: "sess-1", esRetries: 0, botId: "x", threadId: "t" };
+    const bdPermSel = { value: "guarded" };
+    const bdPlanToggle = { checked: false };
+    const setTurnInFlightCalls = [];
+    runner(
+      { data: "unused" }, bd, "sess-1", () => payload,
+      () => {}, (f) => setTurnInFlightCalls.push(f), () => {},
+      () => {}, () => {}, () => {},
+      bdPermSel, bdPlanToggle
+    );
+    return { bdPermSel, bdPlanToggle, setTurnInFlightCalls };
+  }
+
+  // A turn in flight, running in 'bypass' with plan mode on — exactly the
+  // shape a reopened drawer mid-turn must reflect, not the mount default.
+  const r1 = run({ state: "awake", turnInFlight: true, permissionMode: "bypass", planMode: true });
+  assert.deepEqual(r1.setTurnInFlightCalls, [true], "turnInFlight:true must be consumed from the event");
+  assert.equal(r1.bdPermSel.value, "bypass", "the permission select must reflect the session's REAL mode, not stay 'guarded'");
+  assert.equal(r1.bdPlanToggle.checked, true, "the plan toggle must reflect the session's real plan mode");
+
+  // Idle-awake — no turn in flight.
+  const r2 = run({ state: "awake", turnInFlight: false, permissionMode: "guarded", planMode: false });
+  assert.deepEqual(r2.setTurnInFlightCalls, [false]);
+  assert.equal(r2.bdPermSel.value, "guarded");
+  assert.equal(r2.bdPlanToggle.checked, false);
+
+  // 'stopped' must force turnInFlight false regardless of a stale
+  // turnInFlight:true still riding on the event.
+  const r3 = run({ state: "stopped", turnInFlight: true, permissionMode: "guarded", planMode: false });
+  assert.deepEqual(r3.setTurnInFlightCalls, [false], "'stopped' must force turnInFlight false even if the event still says true");
+});
+
+// ---------------------------------------------------------------------------
 // Card face: Accept handler calls decide THEN move — driven BEHAVIORALLY
 // (fake `api`, real promise chains) rather than by scanning source text for
 // substring order. Fix round 1 finding: a textual `decideIdx < moveIdx`

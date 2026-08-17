@@ -28,7 +28,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -471,6 +471,31 @@ test("message: a second message while a turn is in flight is refused with turn_i
   assert.equal(state.instances[0].turns.length, 1);
 });
 
+// I3 (final review): neither stateEvent() nor snapshot() used to expose
+// whether a turn is actually in flight, so a reopened drawer / second tab /
+// reconnect on the PRIMARY dispatch flow (turn 1 fires via the route, THEN
+// the operator opens the drawer) had no way to learn a turn was running
+// until the next 'reply'/'stopped' SSE frame.
+test("I3: get()/snapshot() and the emitted 'state' event both expose turnInFlight — false idle, true once a turn is sent", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  assert.equal((await engine.get(s.sessionId)).turnInFlight, false, "idle awake session: no turn in flight");
+
+  const events = [];
+  const off = await engine.subscribe(s.sessionId, (e) => events.push(e));
+  assert.equal(events[0].type, "state");
+  assert.equal(events[0].turnInFlight, false, "the replayed state event must also carry turnInFlight");
+  off();
+
+  await engine.message(s.sessionId, "one");
+  assert.equal((await engine.get(s.sessionId)).turnInFlight, true, "a sent turn must report in-flight via get()/snapshot()");
+
+  const events2 = [];
+  const off2 = await engine.subscribe(s.sessionId, (e) => events2.push(e));
+  assert.equal(events2[0].turnInFlight, true, "a late subscriber's replayed state event must also see the in-flight turn");
+  off2();
+});
+
 // ---------------------------------------------------------------------------
 // Track 3 Task 13: steer — fire-and-forget nudge of an IN-FLIGHT turn
 // ---------------------------------------------------------------------------
@@ -767,6 +792,74 @@ test("onEvent forwarding: every ask_user method carries its OWN fields (r1 S5)",
     for (const [k, v] of Object.entries(expected)) assert.deepEqual(card[k], v, msg.method + "." + k);
     assert.deepEqual((await engine.get(s.sessionId)).pendingUi, { ...expected });
   }
+});
+
+// I4 (final review): pushAttention's DB handle used to be created inline in
+// the createNotification() call — never closed. Every ask-card push leaked
+// an open better-sqlite3 connection. Proven here by literally counting this
+// process's open file descriptors pointed at DB_FILE (/proc/self/fd, Linux)
+// before and after several ask-card pushes: a leak accumulates one fd per
+// push; a properly closed handle does not.
+function countOpenFdsFor(targetPath) {
+  let entries;
+  try { entries = readdirSync("/proc/self/fd"); } catch { return -1; } // non-Linux: skip
+  let count = 0;
+  for (const entry of entries) {
+    try {
+      if (readlinkSync(`/proc/self/fd/${entry}`) === targetPath) count++;
+    } catch { /* fd closed between readdir and readlink — race, ignore */ }
+  }
+  return count;
+}
+
+/** COUNT(*) on the notifications table, via its OWN short-lived connection
+ * (opened and closed within this single call — never left open, so it can
+ * never itself pollute the countOpenFdsFor(DB_FILE) measurement below). */
+function notificationCount() {
+  const c = raw();
+  try { return c.prepare("SELECT COUNT(*) AS n FROM notifications").get().n; } finally { c.close(); }
+}
+
+test("I4: pushAttention closes its DB handle — repeated ask-card pushes do not leak open connections", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const before = countOpenFdsFor(DB_FILE);
+  if (before < 0) return; // skip off Linux — no /proc/self/fd to inspect
+
+  // Five ask-card pushes, SERIALIZED from this test's side (fire one, poll —
+  // bounded, no wall-clock sleep — on its notification row actually landing,
+  // THEN fire the next). onUiRequest's ASK_METHODS branch fires
+  // pushAttention() fire-and-forget on every call regardless of prior
+  // pendingUi state, so this only constrains OBSERVATION order, not
+  // production behavior. Serializing matters for THIS test's own signal:
+  // SQLite's unix VFS can share/stagger fd bookkeeping across truly
+  // concurrent opens of the same file in one process in ways that make a
+  // per-call fd delta unreliable to read; one-in-flight-at-a-time is what
+  // makes "close() actually ran" cleanly observable via the raw fd count.
+  let notifCount = notificationCount();
+  for (let i = 0; i < 5; i++) {
+    pi.emit({ type: "extension_ui_request", id: "leak-check-" + i, method: "confirm", title: "Sure?", message: "go?" });
+    const target = notifCount + 1;
+    for (let tries = 0; tries < 50 && notifCount < target; tries++) {
+      await tick(1);
+      notifCount = notificationCount();
+    }
+    assert.equal(notifCount, target, `push #${i}'s notification row must land before firing the next`);
+  }
+
+  // The notification row landing and the handle's own close() are two
+  // separate steps of the SAME finally-guarded chain — a small bounded
+  // margin for the trailing close() to finish.
+  await tick(5);
+
+  const after = countOpenFdsFor(DB_FILE);
+  assert.ok(
+    after <= before,
+    `pushAttention must not leak a DB fd per call (before=${before} open fds on DB_FILE, after=${after})`
+  );
 });
 
 // ---------------------------------------------------------------------------

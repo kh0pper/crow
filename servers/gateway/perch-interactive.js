@@ -424,6 +424,16 @@ export function createInteractiveEngine({
       model: s.currentModel || (s.resolved ? s.resolved.key : null),
       permissionMode: s.permissionMode,
       planMode: s.planMode,
+      // I3 (final review): neither stateEvent() nor snapshot() used to
+      // expose whether a turn is actually in flight, and drawer.js's
+      // bd.turnInFlight was set only by the SENDING tab — so on the primary
+      // flow (dispatch fires turn 1, operator opens the drawer afterward)
+      // the composer sat in message mode mid-turn (409 turn_in_progress
+      // instead of steering) and "apply now" stayed enabled even though
+      // cycle() would refuse with cycle_busy. Exposing the real state here
+      // lets every consumer (drawer reconnect, sessionBirdState) agree with
+      // the engine instead of inferring it from local send-tab state.
+      turnInFlight: !!s.turn,
       // Track 3 Task 6: a later routes task serves files from BOTH dirs
       // (the drawer's file list + upload target) — the controller ruling is
       // that snapshot() is where it reads them from.
@@ -450,11 +460,21 @@ export function createInteractiveEngine({
    * sender throwing) must never break a turn or an ask card.
    */
   async function pushAttention(opts) {
+    // I4 (final review): the DB handle used to be created inline in the
+    // createNotification() call — never closed. Every ask-card/turn-end/
+    // gated-result push leaked an open better-sqlite3 connection, in the
+    // subsystem with a documented WAL-corruption history. Hold it in a
+    // const and close it in a finally, same as every other short-lived
+    // handle in this module.
+    let db;
     try {
       const { createNotification } = await import("../shared/notifications.js");
-      await createNotification(createDbClient(), opts);
+      db = createDbClient();
+      await createNotification(db, opts);
     } catch (e) {
       log("attention notify failed (non-fatal): " + ((e && e.message) || e));
+    } finally {
+      if (db) { try { db.close(); } catch { /* already closed */ } }
     }
   }
 
@@ -471,6 +491,9 @@ export function createInteractiveEngine({
       model: s.currentModel || (s.resolved ? s.resolved.key : null),
       permissionMode: s.permissionMode,
       planMode: s.planMode,
+      // I3 (final review): same addition, same reasoning, as snapshot()
+      // above — see its comment.
+      turnInFlight: !!s.turn,
     };
   }
 
@@ -717,7 +740,18 @@ export function createInteractiveEngine({
       // re-registers the in-memory claim directly (cardClaims.set, never
       // claimCard's throw-on-conflict path: this is restoring THIS row's own
       // prior claim from the DB, not contesting a new one).
-      if (s.cardId != null && s.state !== "stopped") cardClaims.set(s.cardId, s.sessionId);
+      // M2 (final review): guard against stealing a claim a NEWER session
+      // already holds for the same cardId. adoptRow can run for a STALE row
+      // (e.g. re-touched well after a newer session took over the card) —
+      // without this check, an unconditional set() would silently overwrite
+      // that newer session's in-memory claim. The DB rail (checkCardFree)
+      // still 409s correctly either way, so this is belt-and-suspenders on
+      // the in-memory map only — same idiom as releaseCard's own
+      // current-holder gate just below.
+      if (s.cardId != null && s.state !== "stopped") {
+        const holder = cardClaims.get(s.cardId);
+        if (holder == null || holder === s.sessionId) cardClaims.set(s.cardId, s.sessionId);
+      }
       sessions.set(s.sessionId, s);
       return s;
     } catch {
@@ -2113,6 +2147,13 @@ export function createInteractiveEngine({
       if (!s) throw engineError("no_such_session");
       return hibernate(s);
     },
+    /** M2 (final review) test-only reach into the internal `cardClaims` map
+     * — the DB rail (checkCardFree) always 409s correctly regardless of this
+     * map's state, so no PUBLIC method exposes WHICH sessionId currently
+     * holds a card's in-memory claim. This lets a test prove adoptRow's
+     * conflict guard directly instead of only observing its (identical
+     * either way) DB-rail symptom. */
+    _cardClaimHolderForTest: (cardId) => cardClaims.get(Number(cardId)) ?? null,
   };
 }
 

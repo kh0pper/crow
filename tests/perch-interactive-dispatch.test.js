@@ -583,6 +583,46 @@ test("restart: adoptRow restores cardId and re-registers the claim — a second 
   assert.equal((await B.engine.get(third.sessionId)).cardId, 403);
 });
 
+// M2 (final review): adoptRow's cardClaims.set() had no conflict check — a
+// stale non-stopped row's cardId could steal the in-memory claim from a
+// session that ALREADY legitimately holds it, in the SAME process. The DB
+// rail (checkCardFree) 409s correctly regardless, so this is provable only
+// through the internal cardClaims map itself — see
+// _cardClaimHolderForTest's own doc.
+test("M2: adopting a stale non-stopped row must NOT steal the in-memory card claim from a session that already holds it", async () => {
+  const { engine } = makeEngine();
+  const holder = await spawned(engine, { botId: "legit-holder", cardId: 777 });
+  assert.equal(engine._cardClaimHolderForTest(777), holder.sessionId, "test setup sanity: the legit session holds the claim");
+
+  // A ghost row this process has never touched — some other stale row that
+  // (for whatever reason) still carries card_id=777 and a non-stopped
+  // status, i.e. exactly the shape adoptRow's `s.state !== "stopped"` guard
+  // lets through.
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,card_id) VALUES (?,?,?,?,?,?,?)"
+  ).run("ghost-bot", "perch", "ghost-m2-session", "perch-live", "waiting-user", "run", 777);
+  c.close();
+
+  // get() on the ghost id triggers resolveSession -> adopt() -> adoptRow —
+  // the ONLY code path that writes cardClaims without going through
+  // claimCard()'s own conflict guard.
+  const ghostSnap = await engine.get("ghost-m2-session");
+  assert.equal(ghostSnap.cardId, 777, "adoptRow still restores the GHOST session's OWN cardId field — only the shared-map set is guarded");
+  assert.equal(
+    engine._cardClaimHolderForTest(777), holder.sessionId,
+    "the in-memory claim must still belong to the session that legitimately holds it, not the newly-adopted ghost"
+  );
+
+  // Real consequence, not just a direct-accessor assertion: stop()ping the
+  // LEGITIMATE holder must still actually free the card (releaseCard's
+  // current-holder gate only fires if cardClaims still points at it) — if
+  // the ghost had stolen the claim, this release would silently no-op and
+  // card 777 could never be freed again through the legitimate holder.
+  await engine.stop(holder.sessionId);
+  assert.equal(engine._cardClaimHolderForTest(777), null, "stopping the legit holder must free the card in-memory");
+});
+
 // ---------------------------------------------------------------------------
 // 10. attachCard (Track 3 Task 9) — bind an ALREADY-SPAWNED session to a card
 // ---------------------------------------------------------------------------
