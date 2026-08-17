@@ -258,6 +258,42 @@ test("bdFocusCard scrolls the card into view and opens the drawer for its live b
     "bdFocusCard body parses standalone");
 });
 
+// M3 (final review): cardId comes straight off the URL fragment
+// (#card=<value> -> window._bbForeignHash.card, client.js), with no
+// validation. #card=%22] decodes to a literal '"]', which used to be
+// interpolated directly into a querySelector attribute-selector string —
+// throwing a SyntaxError from an un-wrapped top-level init block and
+// aborting the REST of the board client's own initialization for anyone who
+// followed such a link. Driven behaviorally: the real extracted function
+// body, a document stub that RECORDS every querySelector call rather than
+// trying to replicate a real browser's selector-parser exception.
+test("ATTACK M3: a hash-injected cardId (containing a quote) never reaches document.querySelector", async () => {
+  const body = emittedBody();
+  const focusFn = extractFunction(body, "bdFocusCard");
+  const fnBody = focusFn.slice(focusFn.indexOf("{"), focusFn.lastIndexOf("}") + 1).slice(1, -1);
+  const calls = [];
+  const documentStub = { querySelector: (sel) => { calls.push(sel); return null; } };
+  const run = new Function("document", "cardId", fnBody);
+  // The exact attack shape from the finding.
+  assert.doesNotThrow(() => run(documentStub, "\"]"), "bdFocusCard must not throw on a malformed cardId");
+  assert.equal(calls.length, 0, "a non-integer cardId must never reach document.querySelector at all");
+});
+
+test("bdFocusCard still queries the board for a legitimate integer cardId (fix does not break the happy path)", async () => {
+  const body = emittedBody();
+  const focusFn = extractFunction(body, "bdFocusCard");
+  const fnBody = focusFn.slice(focusFn.indexOf("{"), focusFn.lastIndexOf("}") + 1).slice(1, -1);
+  const calls = [];
+  const documentStub = { querySelector: (sel) => { calls.push(sel); return null; } };
+  const run = new Function("document", "cardId", fnBody);
+  run(documentStub, "42");
+  assert.deepEqual(calls, ['.bb-card[data-card="42"]']);
+  // The hash value arrives as a STRING (URL fragments are always strings) —
+  // must also work, not just a numeric type.
+  run(documentStub, "7");
+  assert.equal(calls[1], '.bb-card[data-card="7"]');
+});
+
 // ---------------------------------------------------------------------------
 // i18n: EN + ES present for every new key, and distinct from each other
 // ---------------------------------------------------------------------------
