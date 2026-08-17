@@ -78,7 +78,7 @@
  */
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { clientJs } from "../servers/gateway/dashboard/panels/bot-board/client.js";
@@ -303,7 +303,7 @@ const SSR_BOTS = [
   { botId: "quiet", displayName: "Quiet", definition: GMAIL_DEF },         // observing (unattached)
 ];
 const SSR_ENGINE_SESSIONS = [
-  { sessionId: "chatty-1", botId: "chatty", state: "awake", pendingUi: null, cardId: null },
+  { sessionId: "chatty-1", botId: "chatty", state: "awake", pendingUi: null, cardId: null, turnInFlight: true },
   { sessionId: "asker-a", botId: "asker", state: "awake", pendingUi: { kind: "ask" }, cardId: null },
   { sessionId: "sleepy-1", botId: "sleepy", state: "hibernating", pendingUi: null, cardId: null },
 ];
@@ -372,6 +372,43 @@ test("html.js's session drawer static shell renders through i18n, not as literal
   const enHtml = birdDrawerMarkup("en");
   const esHtml = birdDrawerMarkup("es");
   assertKeysReachSsr(enHtml, esHtml, DRAWER_SSR_KEYS, "birdDrawerMarkup()");
+});
+
+// ---------------------------------------------------------------------------
+// M4 (final review): aria-label="${tJs(...)}" used the JS-STRING escaper
+// (correct for a value landing inside a `<script>` template literal) inside
+// an HTML ATTRIBUTE instead (needs escapeHtml — & < > " each mean something
+// different in the two contexts). The two attributes the review named
+// (html.js:254/287) share their EXACT text with 7 other close-button
+// aria-labels in the same file (all `aria-label="${tJs("common.close",
+// lang)}"` verbatim) — the same bug, same fix, so all 9 are corrected
+// together rather than leaving 7 identical latent copies of the same class
+// the very next review would just re-flag.
+//
+// WHY a structural (source-scanning) check, breaking this file's own stated
+// "no naive string-presence checks" rule (see the file header): the
+// CURRENT translation value for common.close ("Close"/"Cerrar") contains no
+// & < > " ' — escapeHtml() and tJs() produce byte-IDENTICAL output for it
+// today, so no output-diffing technique can distinguish the fix from the
+// bug (the SSR-key tests above already exercise this string and would pass
+// either way). The wrongness is in ESCAPER CHOICE, not currently-visible
+// output — provable only by reading which escaper the source actually
+// calls for these attributes.
+// ---------------------------------------------------------------------------
+
+test("M4: every close-button aria-label in html.js uses the HTML escaper, never the JS-string escaper", () => {
+  const src = readFileSync(
+    new URL("../servers/gateway/dashboard/panels/bot-board/html.js", import.meta.url),
+    "utf8"
+  );
+  const wrongPattern = /aria-label="\$\{tJs\(/g;
+  const rightPattern = /aria-label="\$\{escapeHtml\(t\(/g;
+  assert.equal(
+    (src.match(wrongPattern) || []).length, 0,
+    "no aria-label may interpolate the JS-string escaper (tJs) directly — it belongs in an HTML attribute value"
+  );
+  const rightCount = (src.match(rightPattern) || []).length;
+  assert.ok(rightCount >= 9, `expected at least the 9 known close-button aria-labels to use escapeHtml(t(...)), found ${rightCount}`);
 });
 
 test("sanity: reachesSsrViaI18n actually distinguishes translated markup from hardcoded text", () => {

@@ -54,7 +54,7 @@ const GMAIL_BOT = { gateways: [{ type: "gmail", address: "q@example.com", allowl
 // the fold must pick 'waiting'. sleepy has one card-less hibernating session.
 // empty and quiet have none.
 const ENGINE_SESSIONS = [
-  { sessionId: "chatty-1", botId: "chatty", state: "awake", pendingUi: null, cardId: 10 },
+  { sessionId: "chatty-1", botId: "chatty", state: "awake", pendingUi: null, cardId: 10, turnInFlight: true },
   { sessionId: "chatty-2", botId: "chatty", state: "stopped", pendingUi: null, cardId: 99 },
   { sessionId: "asker-a", botId: "asker", state: "awake", pendingUi: { kind: "ask" }, cardId: 11 },
   { sessionId: "asker-b", botId: "asker", state: "hibernating", pendingUi: null, cardId: null },

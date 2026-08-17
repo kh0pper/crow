@@ -7,7 +7,7 @@
  */
 
 import { escapeHtml, section, badge } from "../../shared/components.js";
-import { t, tJs } from "../../shared/i18n.js";
+import { t } from "../../shared/i18n.js";
 import { createDbClient } from "../../../../db.js";
 import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
@@ -252,7 +252,7 @@ export function roostDispatchDialogMarkup(lang) {
   return `<div class="bb-drawer" id="bb-roost-dispatch" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-rd-title" style="font-family:var(--crow-body-font);margin:0">${t("botboard.roostDispatchTitle", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-rd-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-rd-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-rd-msg"></div>
     <label>${t("botboard.roostDispatchCardLabel", lang)}</label>
@@ -285,7 +285,7 @@ export function birdDrawerMarkup(lang) {
             <button type="button" id="bb-bd-stop">${t("botboard.bdStop", lang)}</button>
           </div>
         </div>
-        <button type="button" class="bb-btn bb-sec" id="bb-bd-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+        <button type="button" class="bb-btn bb-sec" id="bb-bd-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
       </div>
     </div>
     <div id="bb-bd-card-link-wrap" class="bb-msg" style="display:none"><a id="bb-bd-card-link" href="#"></a></div>
@@ -394,7 +394,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   return `<div class="bb-drawer" id="bb-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-d-title" style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerCardTitle", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-d-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-d-msg"></div>
     <div id="bb-d-lock" class="bb-msg warn"></div>
@@ -437,7 +437,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   <div class="bb-drawer" id="bb-newproj" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerNewProject", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-np-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-np-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-np-msg"></div>
     <label>${t("botboard.labelName", lang)}</label><input id="bb-np-name" type="text">
@@ -447,7 +447,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   <div class="bb-drawer" id="bb-newcard" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerNewCard", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nc-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-nc-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-nc-msg"></div>
     <p style="font-size:.8rem;color:var(--crow-text-muted)">${t("botboard.newCardHelp", lang)}</p>
@@ -468,7 +468,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   <div class="bb-drawer" id="bb-bulk" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerBulkTitle", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-bk-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-bk-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-bk-msg"></div>
     <p style="font-size:.82rem;color:var(--crow-text-muted)">${t("botboard.bulkHelp", lang)}</p>
@@ -483,7 +483,7 @@ export function boardSettingsDrawerMarkup(lang, projectId) {
   return `<div class="bb-drawer" id="bb-cfg" aria-hidden="true" data-project="${escapeHtml(String(projectId == null ? "" : projectId))}">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.cfgTitle", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-cfg-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-cfg-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-cfg-msg"></div>
     <label>${t("botboard.cfgDisplayName", lang)}</label><input id="bb-cfg-name" type="text">
@@ -506,7 +506,7 @@ export function trackerDrawerMarkup(lang) {
   return `<div class="bb-drawer" id="bb-tracker-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-td-title" style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerTrackerItem", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-td-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-td-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-td-msg"></div>
     <div id="bb-td-lock" class="bb-msg warn"></div>
@@ -528,7 +528,7 @@ export function trackerDrawerMarkup(lang) {
   <div class="bb-drawer" id="bb-new-tracker-item" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerNewTrackerItem", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nti-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-nti-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-nti-msg"></div>
     <label>${t("botboard.labelLabelTitle", lang)}</label><input id="bb-nti-label" type="text">
