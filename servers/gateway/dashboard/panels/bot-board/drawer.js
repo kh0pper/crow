@@ -707,7 +707,26 @@ export function birdDrawerJs(lang) {
       if(d.threadId) bd.threadId=String(d.threadId);
       if(learning){ bdUpdateHeader(); bdLoadTranscript(); bdLoadSessionMeta(); }
       bdSetState(d.state);
-      if(d.state==='stopped') bdSetTurnInFlight(false);
+      // I3 (final review): the engine now reports whether a turn is
+      // actually in flight — consume it here instead of relying only on the
+      // SENDING tab's own optimistic bdSetTurnInFlight(true). Without this,
+      // a reopened drawer / second tab / reconnect mid-turn (the PRIMARY
+      // dispatch flow: Send-out fires turn 1, the operator opens the drawer
+      // AFTER) never learns a turn is running until 'reply'/'stopped'.
+      // I3 (final review): the engine now reports whether a turn is
+      // actually in flight — consume it here instead of relying only on the
+      // SENDING tab's own optimistic bdSetTurnInFlight(true). Without this,
+      // a reopened drawer / second tab / reconnect mid-turn (the PRIMARY
+      // dispatch flow: Send-out fires turn 1, the operator opens the drawer
+      // AFTER) never learns a turn is running until 'reply'/'stopped'.
+      bdSetTurnInFlight(d.state==='stopped' ? false : !!d.turnInFlight);
+      // I2 (final review): bdResetControlsUi() hard-sets the permission
+      // select to 'guarded' on every mount, which is the correct fail-safe
+      // for a BRAND NEW session — but a reopened drawer, second tab, or
+      // reconnect must reflect the session's REAL live mode (e.g. 'bypass'),
+      // not silently relabel it 'guarded' while it keeps running unguarded.
+      if(bdPermSel && d.permissionMode!=null) bdPermSel.value=d.permissionMode;
+      if(bdPlanToggle) bdPlanToggle.checked=!!d.planMode;
       bdRenderAsk(d.pendingUi||null);
     });
     es.addEventListener('text',function(e){
