@@ -319,7 +319,7 @@ test("card faces carry no bird glyph when the engine is absent (production defau
 });
 
 test("card face carries the engine-sourced bird glyph and its session id when a live session binds this card", async () => {
-  const engine = { list: async () => [{ sessionId: "s1", botId: "scout", state: "awake", pendingUi: null, cardId: 1 }] };
+  const engine = { list: async () => [{ sessionId: "s1", botId: "scout", state: "awake", pendingUi: null, cardId: 1, turnInFlight: true }] };
   const html = await render(7, {}, engine);
   const cardHtml = html.slice(html.indexOf('data-card="1"'), html.indexOf('data-card="1"') + 800);
   assert.ok(cardHtml.includes('class="bb-bird bb-bird--working"'), "an awake session with no pending card folds to 'working'");

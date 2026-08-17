@@ -65,7 +65,7 @@ const BOTS = [
 ];
 
 const ENGINE_SESSIONS = [
-  { sessionId: "chatty-1", botId: "chatty", state: "awake", pendingUi: null, cardId: null },
+  { sessionId: "chatty-1", botId: "chatty", state: "awake", pendingUi: null, cardId: null, turnInFlight: true },
   { sessionId: "asker-a", botId: "asker", state: "awake", pendingUi: { kind: "ask" }, cardId: null },
   { sessionId: "sleepy-1", botId: "sleepy", state: "hibernating", pendingUi: null, cardId: null },
 ];
