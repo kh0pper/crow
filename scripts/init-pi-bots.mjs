@@ -86,7 +86,19 @@ const DDL = [
      status            TEXT NOT NULL DEFAULT 'active'
                           CHECK (status IN ('active','waiting-user','stopped','done','error')),
      control           TEXT NOT NULL DEFAULT 'run'
-                          CHECK (control IN ('run','stop')),
+                          -- M5 (final review): 'interrupted' added (Track 3
+                          -- Task 7, stopAll() parks a mid-turn-interrupted
+                          -- session with control='interrupted') so this
+                          -- CREATE ... IF NOT EXISTS matches init-db.js's own
+                          -- shape on a truly fresh install. init-db.js's
+                          -- guarded rebuild migration self-heals a
+                          -- pre-existing narrow-CHECK table (its own
+                          -- CHECK-text detection is an exact-substring match
+                          -- on "CHECK (control IN ('run','stop'))"), but
+                          -- this file re-planting the narrow CHECK on any
+                          -- fresh MPA install was the pre-migration shape
+                          -- coming right back.
+                          CHECK (control IN ('run','stop','interrupted')),
      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
      updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
    )`,

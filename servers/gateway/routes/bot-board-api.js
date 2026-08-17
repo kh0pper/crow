@@ -31,7 +31,9 @@
  *  - Whole-card single-writer lock (D5): every card write re-checks BOTH rails
  *    via the shared predicate in ./board-lock.js — an unfinished bot_jobs row
  *    (queued/running) for that card_id, else the MAX(id) bot_sessions row with
- *    status ∈ {active,waiting-user} ⇒ 409 {reason}. The SSR board render and
+ *    status ∈ {active} ⇒ 409 {reason} (M6, final review: 'waiting-user' stopped
+ *    locking after T3-9 — SESSION_LOCK_STATUSES in board-lock.js is already
+ *    just {'active'}; this comment was vestigial). The SSR board render and
  *    the no-JS move handler import that SAME module; a local copy here is what
  *    let the three predicates drift apart once already.
  *  - Plan file = DERIVED <def.session_dir>/plans/<cardId>.md; resolved
@@ -45,7 +47,8 @@
  *    on a race, or vanished) is caught and reported in skipped[], never
  *    thrown to the client.
  *  - force-unlock, SESSION rail: permitted ONLY when the MAX(id) row is
- *    active/waiting-user AND stale (no updated_at movement ≥ 30 min) AND a
+ *    active (M6: 'waiting-user' stopped locking after T3-9) AND stale (no
+ *    updated_at movement ≥ 30 min) AND a
  *    POSITIVE "pi is dead" determination. The liveness check FAILS CLOSED:
  *    anything ambiguous / errored / unverifiable ⇒ refuse (card stays locked;
  *    manual SQL remains the escape hatch). Idempotent SQL guarded by status IN.
@@ -747,8 +750,13 @@ export default function botBoardApiRouter(dashboardAuth) {
       }
       // Idempotent: WHERE-guard prevents clobbering an already-moved row;
       // it does NOT replace the liveness gate above. 'error' ∈ the CHECK.
+      // M6 (final review): narrowed from IN ('active','waiting-user') —
+      // 'waiting-user' stopped locking after T3-9 (SESSION_LOCK_STATUSES in
+      // board-lock.js is already just {'active'}, and the gate just above
+      // this UPDATE already refused any row whose status isn't 'active'), so
+      // the wider IN-list here was unreachable dead code, not a real guard.
       const r = await cdb.execute({
-        sql: "UPDATE bot_sessions SET status='error', updated_at=datetime('now') WHERE id=? AND status IN ('active','waiting-user')",
+        sql: "UPDATE bot_sessions SET status='error', updated_at=datetime('now') WHERE id=? AND status='active'",
         args: [row.id],
       });
       return res.json({ ok: true, cleared: Number(r.rowsAffected) || 0 });
