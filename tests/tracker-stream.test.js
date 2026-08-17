@@ -280,7 +280,7 @@ test("bird-state rides its own named SSE event; a gateway with no engine emits n
     async list() {
       return [{
         sessionId: "bird-1", botId: KANBAN_BOT_ID, state: "awake", pendingUi: null,
-        cardId: Number(kanbanFreeCardId),
+        cardId: Number(kanbanFreeCardId), turnInFlight: true,
       }];
     },
   };
