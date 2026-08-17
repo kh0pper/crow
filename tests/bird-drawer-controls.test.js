@@ -363,6 +363,96 @@ test("cardResultDecide (reject): decides only — move is never called, on succe
 });
 
 // ---------------------------------------------------------------------------
+// I5 (final review): bdRenderResultGate must offer the decide affordance on
+// ANY recorded outcome (result-service.js pushes the "needs review"
+// notification regardless of outcome), not just success — mirroring
+// client.js's renderResults() marker/button split. Driven behaviorally:
+// extract the real function, run it with a fake bdResultEl/document, and
+// inspect the actual DOM-shaped output.
+// ---------------------------------------------------------------------------
+
+function makeBdRenderResultGate(js) {
+  const fn = extractFunction(js, "bdRenderResultGate");
+  if (!fn) return null;
+  function El() { this.children = []; this.style = {}; }
+  El.prototype.appendChild = function (c) { this.children.push(c); };
+  const documentStub = {
+    createElement: (tag) => { const e = new El(); e.tag = tag; return e; },
+  };
+  const bdResultEl = new El();
+  const clearEl = (el) => { el.children = []; };
+  const runner = new Function("document", "bdResultEl", "clearEl", fn + ";\nreturn bdRenderResultGate;");
+  const renderFn = runner(documentStub, bdResultEl, clearEl);
+  return { renderFn, bdResultEl };
+}
+
+/** Walk the fake DOM tree the render produced and pull out every button's
+ * textContent, regardless of nesting depth (buttons sit inside a row div). */
+function collectButtonTexts(el) {
+  const out = [];
+  for (const c of el.children || []) {
+    if (c.tag === "button") out.push(c.textContent);
+    out.push(...collectButtonTexts(c));
+  }
+  return out;
+}
+
+test("ATTACK/gap: a recorded FAILURE result renders the marker + Approve/Reject — NOT dropped by the early return", async () => {
+  const js = birdDrawerJs("en");
+  const { renderFn, bdResultEl } = makeBdRenderResultGate(js);
+  assert.ok(renderFn, "bdRenderResultGate must be present in the emitted source");
+  renderFn({ id: 5, status: "recorded", outcome: "failure" }, []);
+  assert.equal(bdResultEl.children.length, 1, "a card must be rendered, not silently dropped");
+  const box = bdResultEl.children[0];
+  assert.equal(box.className, "bb-msg bb-marker-failed", "a failure must use the failed marker class, not the success one");
+  const texts = collectButtonTexts(bdResultEl);
+  assert.ok(texts.some((t) => /approve/i.test(t)), "Approve must be offered on a failure result");
+  assert.ok(texts.some((t) => /reject/i.test(t)), "Reject must be offered on a failure result");
+  assert.ok(!texts.some((t) => /mark done/i.test(t)), "a non-success outcome must NEVER offer 'approve & mark done'");
+});
+
+test("a recorded PARTIAL result also renders the decide affordance (same as failure)", async () => {
+  const js = birdDrawerJs("en");
+  const { renderFn, bdResultEl } = makeBdRenderResultGate(js);
+  renderFn({ id: 5, status: "recorded", outcome: "partial" }, ["done"]);
+  const texts = collectButtonTexts(bdResultEl);
+  assert.ok(texts.some((t) => /approve/i.test(t)) && texts.some((t) => /reject/i.test(t)));
+  assert.ok(!texts.some((t) => /mark done/i.test(t)), "'approve & mark done' is success-only, even if the board reaches 'done'");
+});
+
+test("a recorded SUCCESS result with a done-reaching board additionally offers 'approve & mark done'", async () => {
+  const js = birdDrawerJs("en");
+  const { renderFn, bdResultEl } = makeBdRenderResultGate(js);
+  renderFn({ id: 5, status: "recorded", outcome: "success" }, ["done"]);
+  const box = bdResultEl.children[0];
+  assert.equal(box.className, "bb-msg bb-marker-waiting");
+  const texts = collectButtonTexts(bdResultEl);
+  assert.equal(texts.filter((t) => /approve/i.test(t)).length, 2, "success+done-reaching board: plain Approve AND 'approve & mark done'");
+});
+
+test("a recorded SUCCESS result on a board that never reaches 'done' does NOT offer 'approve & mark done'", async () => {
+  const js = birdDrawerJs("en");
+  const { renderFn, bdResultEl } = makeBdRenderResultGate(js);
+  renderFn({ id: 5, status: "recorded", outcome: "success" }, ["archived"]);
+  const texts = collectButtonTexts(bdResultEl);
+  assert.ok(!texts.some((t) => /mark done/i.test(t)));
+});
+
+test("a non-'recorded' status (already decided) renders nothing", async () => {
+  const js = birdDrawerJs("en");
+  const { renderFn, bdResultEl } = makeBdRenderResultGate(js);
+  renderFn({ id: 5, status: "decided", outcome: "success" }, ["done"]);
+  assert.equal(bdResultEl.children.length, 0);
+});
+
+test("no latest result at all renders nothing", async () => {
+  const js = birdDrawerJs("en");
+  const { renderFn, bdResultEl } = makeBdRenderResultGate(js);
+  renderFn(null, []);
+  assert.equal(bdResultEl.children.length, 0);
+});
+
+// ---------------------------------------------------------------------------
 // Drawer: the in-drawer result gate — SAME behavioral treatment
 // ---------------------------------------------------------------------------
 
@@ -379,12 +469,31 @@ test("bdDecideResultGate (approve, decide FAILS): move is never called", async (
   assert.ok(buttons.every((b) => b.disabled === false), "buttons must re-enable on a failed decide");
 });
 
-test("bdDecideResultGate (approve, happy path): decide THEN move fire in that order, then the gate reloads", async () => {
+// I5 (final review): the plain "Approve" button no longer auto-moves the
+// card to 'done' on every approval — that conflated "approve" with
+// "approve & mark done" (client.js's card face keeps these as two SEPARATE
+// buttons/actions, and auto-moving on a failure/partial's approval would be
+// actively wrong). bdDecideResultGate now takes an explicit alsoMoveDone
+// flag; only the dedicated "approve & mark done" button passes true.
+test("bdDecideResultGate (approve, alsoMoveDone omitted — the plain Approve button): decides only, move is never called, gate still reloads", async () => {
   const js = birdDrawerJs("en");
   const { api, calls } = fakeApiRecorder();
   let reloadedGate = false;
   const bdDecideResultGate = makeBdDecideResultGate(js, api, 99, () => { reloadedGate = true; });
   bdDecideResultGate(5, "approved", [{ disabled: false }]);
+  await flush();
+  assert.equal(calls.length, 1, "a plain approve must never auto-move the card to done");
+  assert.equal(calls[0].path, "/card/99/result/5/decide");
+  assert.deepEqual(calls[0].payload, { decision: "approved" });
+  assert.ok(reloadedGate, "the decision itself still refreshes the gate");
+});
+
+test("bdDecideResultGate (approve, alsoMoveDone=true — the 'approve & mark done' button): decide THEN move fire in that order, then the gate reloads", async () => {
+  const js = birdDrawerJs("en");
+  const { api, calls } = fakeApiRecorder();
+  let reloadedGate = false;
+  const bdDecideResultGate = makeBdDecideResultGate(js, api, 99, () => { reloadedGate = true; });
+  bdDecideResultGate(5, "approved", [{ disabled: false }], true);
   await flush();
   assert.equal(calls.length, 2);
   assert.equal(calls[0].path, "/card/99/result/5/decide");
@@ -575,6 +684,60 @@ test("bdRenderBodyWithLinks turns an outputs/<sid>/<rel> path into a workspace l
   assert.equal(img.src, "/dashboard/perch-api/interactive/sess-42/workspace/chart.png");
   const plainText = bodyEl.children.filter((c) => c.type === "text").map((c) => c.t).join("");
   assert.ok(plainText.includes("outputs/other-session/x.txt"), "a DIFFERENT session's outputs path is never linkified");
+});
+
+// I1 (final review): encodeURIComponent does not encode '.', so a bot
+// emitting outputs/<sid>/../../../../dashboard/<path> used to produce an
+// <img src> the BROWSER path-normalizes before ever requesting it — an
+// authenticated same-origin GET to an arbitrary gateway route, fired on
+// transcript render with zero operator interaction.
+test("ATTACK traversal: outputs/<sid>/../../dashboard/<path> is rendered as PLAIN TEXT, never a link or <img src>", async () => {
+  const js = birdDrawerJs("en");
+  const start = js.indexOf("function bdIsBoundaryChar");
+  const end = js.indexOf("// ---- attach-to-card");
+  const block = js.slice(start, end);
+
+  function El() { this.children = []; }
+  El.prototype.appendChild = function (c) { this.children.push(c); };
+  const documentStub = {
+    createElement: (tag) => { const e = new El(); e.tag = tag; return e; },
+    createTextNode: (txt) => ({ type: "text", t: txt }),
+  };
+  const bd = { sid: "sess-42" };
+  const fn = new Function("document", "bd", block + ";return bdRenderBodyWithLinks;");
+  const renderFn = fn(documentStub, bd);
+
+  const bodyEl = new El();
+  const evil = "outputs/sess-42/../../../../dashboard/settings.png";
+  renderFn(bodyEl, "see " + evil + " here");
+
+  assert.equal(bodyEl.children.find((c) => c.tag === "a"), undefined, "a traversal rel must never become a link");
+  assert.equal(bodyEl.children.find((c) => c.tag === "img"), undefined, "a traversal rel must never become an <img> (zero-interaction fire)");
+  const plainText = bodyEl.children.filter((c) => c.type === "text").map((c) => c.t).join("");
+  assert.ok(plainText.includes(evil), "the marker+rel must still render as inert plain text, matching the no-marker fallback");
+});
+
+test("ATTACK traversal variants: doubled slash, bare '.', and a bare '..' segment are all rejected as unsafe", async () => {
+  const js = birdDrawerJs("en");
+  const start = js.indexOf("function bdIsBoundaryChar");
+  const end = js.indexOf("// ---- attach-to-card");
+  const block = js.slice(start, end);
+  function El() { this.children = []; }
+  El.prototype.appendChild = function (c) { this.children.push(c); };
+  const documentStub = {
+    createElement: (tag) => { const e = new El(); e.tag = tag; return e; },
+    createTextNode: (txt) => ({ type: "text", t: txt }),
+  };
+  const bd = { sid: "sess-42" };
+  const fn = new Function("document", "bd", block + ";return bdRenderBodyWithLinks;");
+  const renderFn = fn(documentStub, bd);
+
+  for (const rel of ["a//b.txt", "./secret.txt", "../secret.txt", "a/./b.txt", "a/../b.txt"]) {
+    const bodyEl = new El();
+    renderFn(bodyEl, "outputs/sess-42/" + rel + " x");
+    assert.equal(bodyEl.children.find((c) => c.tag === "a" || c.tag === "img"), undefined,
+      "rel=" + rel + " must never become a link/image");
+  }
 });
 
 // ---------------------------------------------------------------------------

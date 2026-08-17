@@ -392,6 +392,26 @@ export function birdDrawerJs(lang) {
     }
     return false;
   }
+  // I1 (final review): encodeURIComponent does NOT encode '.', so a bot
+  // emitting outputs/<sid>/../../../../dashboard/<path> used to reach here
+  // as rel='../../../../dashboard/<path>' and, once joined onto the /
+  // workspace/ URL and rendered into an <img src>, the BROWSER path-
+  // normalizes the resulting URL before ever requesting it — an
+  // authenticated same-origin GET to an arbitrary gateway route, fired on
+  // transcript render with zero operator interaction. Reject any rel whose
+  // /-split contains an empty string (a doubled or leading/trailing '/'),
+  // '.', or '..' — the workspace route's own server-side jail (dotfile
+  // segments refused, realpath-confined) is the actual security boundary,
+  // this is display-only defense-in-depth so the drawer never even OFFERS
+  // a link/image that could resolve outside it.
+  function bdRelSegmentsSafe(rel){
+    var parts=rel.split('/');
+    for(var i=0;i<parts.length;i++){
+      var seg=parts[i];
+      if(seg===''||seg==='.'||seg==='..') return false;
+    }
+    return true;
+  }
   function bdRenderBodyWithLinks(bodyEl,text){
     if(!bd.sid){ bodyEl.textContent=text; return; }
     var marker='outputs/'+bd.sid+'/';
@@ -403,6 +423,14 @@ export function birdDrawerJs(lang) {
       var relStart=idx+marker.length, relEnd=relStart;
       while(relEnd<text.length && !bdIsBoundaryChar(text.charAt(relEnd))) relEnd++;
       var rel=text.slice(relStart,relEnd);
+      if(!bdRelSegmentsSafe(rel)){
+        // I1: never build a link/image out of an unsafe rel — render the
+        // marker+rel as plain text instead, same as the no-marker-at-all path.
+        bodyEl.appendChild(document.createTextNode(marker+rel));
+        pos=relEnd;
+        idx=text.indexOf(marker,pos);
+        continue;
+      }
       var url='/dashboard/perch-api/interactive/'+encodeURIComponent(bd.sid)+'/workspace/'+rel.split('/').map(encodeURIComponent).join('/');
       if(bdLooksLikeImage(rel)){
         var img=document.createElement('img');
@@ -431,16 +459,41 @@ export function birdDrawerJs(lang) {
     api('GET','/card/'+myCardId).then(function(r){
       if(bd.sid!==mySid||bd.cardId!==myCardId) return;
       if(!r.ok||!r.j) return;
-      bdRenderResultGate((r.j.latest_results||[])[0]||null);
+      // I5: pass terminal_values through — the same input client.js's
+      // renderResults() reads (r.j.board.terminal_values) — so the "approve
+      // & mark done" affordance's board-reaches-'done' gate can be applied
+      // here too, not just on the card face.
+      bdRenderResultGate((r.j.latest_results||[])[0]||null, (r.j.board&&r.j.board.terminal_values)||[]);
     }).catch(function(){});
   }
-  function bdRenderResultGate(latest){
+  // I5 (final review): the OLD code returned early unless
+  // latest.outcome==='success', but result-service.js pushes a "needs
+  // review" attention notification for a gated card on ANY outcome
+  // (success/failure/partial) — an operator clicking that push for a
+  // failure/partial found NO decide affordance here, while the card face
+  // (client.js's renderResults) already offers Approve/Reject regardless of
+  // outcome. Mirrors that split now: any recorded result gets the marker +
+  // Approve/Reject; only a recorded SUCCESS with a board that reaches
+  // 'done' additionally gets a separate "approve & mark done" button.
+  //
+  // This also corrects a real (not just missing-feature) bug found while
+  // mirroring: the OLD bdDecideResultGate unconditionally moved the card to
+  // 'done' on ANY 'approved' decision — meaning the drawer's plain Approve
+  // button silently closed the card out as done even for a SUCCESS result,
+  // conflating "approve" with "approve & mark done" (client.js keeps these
+  // as two separate buttons/actions, and a 'failure'/'partial' approval
+  // moving the card to 'done' would be actively wrong). bdDecideResultGate
+  // now takes an explicit alsoMoveDone flag — only the new "approve & mark
+  // done" button passes true.
+  function bdRenderResultGate(latest,terminalValues){
     if(!bdResultEl) return;
     clearEl(bdResultEl);
-    if(!latest||latest.status!=='recorded'||latest.outcome!=='success') return;
-    var box=document.createElement('div'); box.className='bb-msg bb-marker-waiting';
+    if(!latest||latest.status!=='recorded') return;
+    var hasDoneTerminal=(terminalValues||[]).indexOf('done')>=0;
+    var box=document.createElement('div');
+    box.className='bb-msg '+(latest.outcome==='success'?'bb-marker-waiting':'bb-marker-failed');
     var head=document.createElement('div');
-    head.textContent='${tJs("board.markerWaiting", lang)}';
+    head.textContent=(latest.outcome==='success'?'${tJs("board.markerWaiting", lang)}':'${tJs("board.markerFailed", lang)}');
     box.appendChild(head);
     var row=document.createElement('div'); row.className='bb-result-actions';
     var acc=document.createElement('button'); acc.type='button'; acc.className='bb-btn bb-sec';
@@ -448,21 +501,30 @@ export function birdDrawerJs(lang) {
     var rej=document.createElement('button'); rej.type='button'; rej.className='bb-btn bb-sec';
     rej.textContent='${tJs("board.btnRejectResult", lang)}';
     var buttons=[acc,rej];
-    acc.onclick=function(){ bdDecideResultGate(latest.id,'approved',buttons); };
-    rej.onclick=function(){ bdDecideResultGate(latest.id,'rejected',buttons); };
+    acc.onclick=function(){ bdDecideResultGate(latest.id,'approved',buttons,false); };
+    rej.onclick=function(){ bdDecideResultGate(latest.id,'rejected',buttons,false); };
     row.appendChild(acc); row.appendChild(rej);
+    if(latest.outcome==='success'&&hasDoneTerminal){
+      var doneBtn=document.createElement('button');
+      doneBtn.type='button'; doneBtn.className='bb-btn'; doneBtn.style.marginLeft='.3rem';
+      doneBtn.textContent='${tJs("board.btnApproveMarkDone", lang)}';
+      buttons.push(doneBtn);
+      doneBtn.onclick=function(){ bdDecideResultGate(latest.id,'approved',buttons,true); };
+      row.appendChild(doneBtn);
+    }
     box.appendChild(row);
     bdResultEl.appendChild(box);
   }
-  function bdDecideResultGate(resultId,decision,buttons){
+  function bdDecideResultGate(resultId,decision,buttons,alsoMoveDone){
     if(!bd.cardId) return;
     var cardId=bd.cardId;
     buttons.forEach(function(b){ b.disabled=true; });
     // Two-step (spec §4), same order as the card-face handler (client.js):
-    // decide first, THEN — on accept only — the existing move-to-'done' call.
+    // decide first, THEN — only when alsoMoveDone is explicitly requested —
+    // the existing move-to-'done' call.
     api('POST','/card/'+cardId+'/result/'+resultId+'/decide',{decision:decision}).then(function(r){
       if(!r.ok){ buttons.forEach(function(b){ b.disabled=false; }); crowToast((r.j&&r.j.error)||'${tJs("botboard.bdResultDecideFailed", lang)}',{type:'error'}); return; }
-      if(decision==='approved'){
+      if(alsoMoveDone){
         api('POST','/card/'+cardId+'/move',{status:'done'}).then(function(r2){
           if(r2.ok) bdLoadResultGate();
           else { buttons.forEach(function(b){ b.disabled=false; }); crowToast((r2.j&&r2.j.error)||'${tJs("botboard.bdResultDecideFailed", lang)}',{type:'error'}); }
@@ -943,9 +1005,22 @@ export function birdDrawerJs(lang) {
   }
 
   /** #card=<id> focus branch: scroll the card into view, and if a live bird
-   * glyph sits on it, open the drawer for that session too. */
+   * glyph sits on it, open the drawer for that session too.
+   *
+   * M3 (final review): cardId comes straight from the URL fragment
+   * (window._bbForeignHash.card, client.js) — a crafted #card=%22] hash
+   * decodes to a literal "]-shaped string that used to be interpolated directly into
+   * the querySelector string, throwing a SyntaxError from an invalid
+   * attribute selector. This runs inside an un-wrapped top-level init
+   * block, so that throw aborted the REST of the board client's own
+   * initialization for anyone who followed such a link. Validate the
+   * fragment as an integer FIRST — a card id is always one — and bail
+   * before it ever reaches string interpolation.
+   */
   function bdFocusCard(cardId){
-    var card=document.querySelector('.bb-card[data-card="'+cardId+'"]');
+    var idNum=Number(cardId);
+    if(!Number.isFinite(idNum)||Math.floor(idNum)!==idNum) return;
+    var card=document.querySelector('.bb-card[data-card="'+idNum+'"]');
     if(!card) return;
     if(card.scrollIntoView) card.scrollIntoView({block:'center'});
     card.classList.add('bb-card-focus');
