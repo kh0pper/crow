@@ -103,6 +103,58 @@ test("migration is a safe no-op when none of the perch-hub debris is present", a
   }
 });
 
+// I14 (final review): the ORIGINAL migration only stripped the perch-hub
+// entry when installed.json parsed to an ARRAY, but routes/bundles.js's own
+// getInstalled() still supports the legacy object-map form ({id: {...}}
+// keyed by bundle id) — on such a host the entry survived here, yet the
+// done-flag was still written (this migration never re-runs), so
+// Extensions permanently listed a bundle whose files were already deleted.
+test("migration strips the perch-hub entry from a LEGACY object-map installed.json (not just an array)", async () => {
+  const { dir, db, cleanup } = freshScratchHome();
+  try {
+    const { migratePerchHubRetirement } = await import("../servers/gateway/dashboard/settings/migrations/perch-hub-retirement-migration.js");
+    // The legacy object-map shape: keyed by bundle id, NOT an array —
+    // exactly what routes/bundles.js's getInstalled() still normalizes.
+    writeFileSync(
+      join(dir, "installed.json"),
+      JSON.stringify({
+        "perch-hub": { type: "bundle", version: "0.1.0" },
+        "browser": { type: "bundle", version: "0.1.0" },
+      }, null, 2),
+    );
+
+    const result = await migratePerchHubRetirement(db, dir);
+    assert.equal(result.removedInstalledEntry, true, "the entry must be found and removed on the legacy object-map shape too");
+
+    const installed = JSON.parse(readFileSync(join(dir, "installed.json"), "utf8"));
+    assert.ok(Array.isArray(installed), "the rewrite normalizes to an array — the SAME convention bundles.js's own saveInstalled() follows");
+    assert.deepEqual(installed.map((i) => i.id), ["browser"], "only the perch-hub entry must be dropped, on either shape");
+
+    // Second run must genuinely no-op — proves the flag was correctly
+    // earned this time (the OLD bug wrote the flag even when it failed to
+    // remove the entry, permanently masking the leftover).
+    const second = await migratePerchHubRetirement(db, dir);
+    assert.equal(second.skipped, "already_migrated");
+  } finally {
+    cleanup();
+  }
+});
+
+test("migration leaves a legacy object-map installed.json with no perch-hub key untouched", async () => {
+  const { dir, db, cleanup } = freshScratchHome();
+  try {
+    const { migratePerchHubRetirement } = await import("../servers/gateway/dashboard/settings/migrations/perch-hub-retirement-migration.js");
+    writeFileSync(
+      join(dir, "installed.json"),
+      JSON.stringify({ "browser": { type: "bundle", version: "0.1.0" } }, null, 2),
+    );
+    const result = await migratePerchHubRetirement(db, dir);
+    assert.equal(result.removedInstalledEntry, false, "nothing to remove — must not rewrite the file unnecessarily");
+  } finally {
+    cleanup();
+  }
+});
+
 test("migration leaves a present installed.json with no perch-hub row untouched", async () => {
   const { dir, db, cleanup } = freshScratchHome();
   try {

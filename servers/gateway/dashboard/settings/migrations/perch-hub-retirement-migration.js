@@ -59,13 +59,24 @@ export async function migratePerchHubRetirement(db, crowHome = CROW_HOME) {
   const installedPath = join(crowHome, "installed.json");
   if (existsSync(installedPath)) {
     try {
-      const installed = JSON.parse(readFileSync(installedPath, "utf8"));
-      if (Array.isArray(installed)) {
-        const filtered = installed.filter((i) => i?.id !== "perch-hub");
-        if (filtered.length !== installed.length) {
-          writeFileSync(installedPath, JSON.stringify(filtered, null, 2));
-          removedInstalledEntry = true;
-        }
+      const raw = JSON.parse(readFileSync(installedPath, "utf8"));
+      // I14 (final review): this used to strip the perch-hub entry ONLY
+      // when installed.json parsed to an ARRAY, but routes/bundles.js's own
+      // getInstalled() still supports the legacy object-map form ({id:
+      // {...}} keyed by bundle id) — on such a host the entry survived
+      // here, yet the done-flag below was still written (this migration
+      // never re-runs), so Extensions permanently listed a bundle whose
+      // files this migration had already deleted. Normalized with the
+      // EXACT SAME expression bundles.js's getInstalled() uses, so this
+      // migration recognizes the entry on either shape. bundles.js's own
+      // write path (saveInstalled) always writes back as an array
+      // regardless of the form it read — same convention followed here,
+      // not a new one.
+      const installed = Array.isArray(raw) ? raw : Object.entries(raw).map(([id, v]) => ({ id, ...v }));
+      const filtered = installed.filter((i) => i?.id !== "perch-hub");
+      if (filtered.length !== installed.length) {
+        writeFileSync(installedPath, JSON.stringify(filtered, null, 2));
+        removedInstalledEntry = true;
       }
     } catch {
       // Unreadable/malformed installed.json — leave it for the operator
