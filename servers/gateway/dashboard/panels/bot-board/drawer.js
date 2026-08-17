@@ -775,12 +775,6 @@ export function birdDrawerJs(lang) {
       // a reopened drawer / second tab / reconnect mid-turn (the PRIMARY
       // dispatch flow: Send-out fires turn 1, the operator opens the drawer
       // AFTER) never learns a turn is running until 'reply'/'stopped'.
-      // I3 (final review): the engine now reports whether a turn is
-      // actually in flight — consume it here instead of relying only on the
-      // SENDING tab's own optimistic bdSetTurnInFlight(true). Without this,
-      // a reopened drawer / second tab / reconnect mid-turn (the PRIMARY
-      // dispatch flow: Send-out fires turn 1, the operator opens the drawer
-      // AFTER) never learns a turn is running until 'reply'/'stopped'.
       bdSetTurnInFlight(d.state==='stopped' ? false : !!d.turnInFlight);
       // I2 (final review): bdResetControlsUi() hard-sets the permission
       // select to 'guarded' on every mount, which is the correct fail-safe

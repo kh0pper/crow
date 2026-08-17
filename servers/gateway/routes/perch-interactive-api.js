@@ -74,6 +74,25 @@ const UPLOAD_BYTES_CAP = 5 * 1024 * 1024;
 /** Extensions the workspace route serves inline (never `attachment`). */
 const WORKSPACE_IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
+/** Coordinator fix-wave follow-up (C2 residual): the SAME extension set as
+ * WORKSPACE_IMAGE_EXTS above, mapped to a mime type — res.sendFile() used to
+ * derive Content-Type from the `send`/`mime-types` packages automatically;
+ * the fd-based rewrite (C2) dropped that, and the drawer's inline `<img
+ * src>` path served an image with NO Content-Type next to the new nosniff
+ * header, breaking inline rendering. No new dependency — this reuses
+ * exactly the extensions the route already special-cases for the
+ * image-inline decision. Anything outside this set (the `attachment` path)
+ * gets the standard safe generic default; combined with
+ * Content-Disposition: attachment + nosniff, the browser downloads it
+ * rather than guessing/rendering it. */
+const WORKSPACE_MIME_BY_EXT = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
+
 // Test-only barrier (same idiom as routes/bundles.js's own
 // _setInstallSetBarrierForTest): lets a test deterministically pause the
 // workspace-serve route right after it has finished validating the file
@@ -688,7 +707,21 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       // let the browser guess its way into treating attachment bytes as
       // executable content.
       res.set("X-Content-Type-Options", "nosniff");
-      if (!WORKSPACE_IMAGE_EXTS.has(extname(fdReal).toLowerCase())) {
+      // Coordinator fix-wave follow-up (C2 residual): res.sendFile() used to
+      // supply Content-Type/Content-Length/Accept-Ranges/ETag/Last-Modified/
+      // Cache-Control automatically; the fd-based rewrite dropped all of
+      // them. Restoring Content-Type (from the SAME verified fd's extname,
+      // via WORKSPACE_MIME_BY_EXT above) and Content-Length (from the
+      // fstat() already captured in `stat` — no second lookup) fixes the
+      // two load-bearing ones: inline images need a real Content-Type to
+      // render at all, and every client needs a real Content-Length. Range/
+      // conditional-GET (Accept-Ranges/ETag/Last-Modified/Cache-Control)
+      // were send()'s extras on top of those two — not restored here, out
+      // of this residual's scope.
+      const ext = extname(fdReal).toLowerCase();
+      res.set("Content-Type", WORKSPACE_MIME_BY_EXT[ext] || "application/octet-stream");
+      res.set("Content-Length", String(stat.size));
+      if (!WORKSPACE_IMAGE_EXTS.has(ext)) {
         res.set(
           "Content-Disposition",
           `attachment; filename="${basename(fdReal).replace(/"/g, '\\"')}"`

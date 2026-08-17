@@ -141,6 +141,27 @@ test("serves an image extension WITHOUT Content-Disposition: attachment — the 
   assert.equal(r.headers["content-disposition"], undefined);
 });
 
+// Coordinator fix-wave follow-up (C2 residual): res.sendFile() used to
+// supply Content-Type/Content-Length automatically; the fd-based rewrite
+// (C2) dropped both — an inline <img src> served with NO Content-Type next
+// to the new nosniff header broke inline image rendering entirely.
+test("C2 residual: an inline image carries a real Content-Type and a correct Content-Length, next to nosniff", async () => {
+  const r = await rawRequest("/dashboard/perch-api/interactive/sess-1/workspace/photo.png");
+  assert.equal(r.status, 200);
+  assert.equal(r.headers["content-type"], "image/png", "inline images need a real Content-Type to render at all");
+  assert.equal(Number(r.headers["content-length"]), Buffer.byteLength("fake-png-bytes"), "Content-Length must match the actual byte length");
+  assert.equal(r.headers["x-content-type-options"], "nosniff", "nosniff must still be present");
+});
+
+test("C2 residual: a non-image attachment still carries a real Content-Type, Content-Length, and its attachment disposition", async () => {
+  const r = await rawRequest("/dashboard/perch-api/interactive/sess-1/workspace/ok.txt");
+  assert.equal(r.status, 200);
+  assert.equal(r.headers["content-type"], "application/octet-stream");
+  assert.equal(Number(r.headers["content-length"]), Buffer.byteLength("hello ok"));
+  assert.match(r.headers["content-disposition"], /^attachment/, "the attachment path must be unaffected by the header fix");
+  assert.equal(r.headers["x-content-type-options"], "nosniff");
+});
+
 // ---------------------------------------------------------------------------
 // no directory listing
 // ---------------------------------------------------------------------------
