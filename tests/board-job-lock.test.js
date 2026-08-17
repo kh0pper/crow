@@ -58,6 +58,10 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
   // by force-unlock; if that refusal ever regresses, card 3 becomes unlocked
   // and the move test would start passing/failing for the wrong reason.
   ins.run(7, "move-refused card", "in_progress");
+  // M6 (final review): SESSION-rail force-unlock end-to-end coverage —
+  // neither card existed before this fix wave.
+  ins.run(9, "stale active session card", "in_progress");  // force-unlock SESSION rail happy path
+  ins.run(10, "waiting-user session card", "in_progress"); // must be reported as NOT locked
   t.close();
 
   const c = new Database(process.env.CROW_DB_PATH);
@@ -86,6 +90,24 @@ process.env.CROW_DB_PATH = join(dir, "crow.db");
 
   c.prepare("INSERT INTO bot_sessions (bot_id, card_id, status) VALUES ('scout', 5, 'active')").run();
   c.prepare("INSERT INTO bot_sessions (bot_id, card_id, status) VALUES ('scout', 6, 'done')").run();
+  // M6: card 9 — an 'active' row, stale (updated_at 2h in the past, well past
+  // STALE_SECONDS=1800), pi_session_dir pointing nowhere real so piLiveness()
+  // scans /proc and finds nothing matching — a positive "dead" determination.
+  // Every precondition for force-unlock's SESSION rail to actually reach and
+  // execute its UPDATE.
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id, card_id, status, pi_session_dir, updated_at) " +
+    "VALUES ('scout', 9, 'active', '/nonexistent/board-job-lock-m6-test-session-dir', datetime('now','-2 hours'))"
+  ).run();
+  // M6: card 10 — 'waiting-user', ALSO stale, ALSO pi-dead — every OTHER
+  // precondition satisfied, differing only in status. SESSION_LOCK_STATUSES
+  // (board-lock.js) no longer includes 'waiting-user' (T3-9), so this row
+  // must be reported as NOT locked and force-unlock must refuse with "card
+  // is not locked", never reach the UPDATE at all.
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id, card_id, status, pi_session_dir, updated_at) " +
+    "VALUES ('scout', 10, 'waiting-user', '/nonexistent/board-job-lock-m6-test-session-dir', datetime('now','-2 hours'))"
+  ).run();
   c.close();
 }
 
@@ -162,6 +184,60 @@ test("force-unlock refuses a running job whose worker is alive (fail-closed)", a
   const c = crowDb();
   assert.equal(c.prepare("SELECT status FROM bot_jobs WHERE job_id='job-running-3'").get().status, "running");
   c.close();
+});
+
+// ---------------------------------------------------------------------------
+// M6 (final review): the SESSION rail — force-unlock's UPDATE used to
+// hardcode WHERE status IN ('active','waiting-user'), vestigial after T3-9
+// retired 'waiting-user' as a locking status (SESSION_LOCK_STATUSES in
+// board-lock.js is already just {'active'}, and the gate immediately above
+// the UPDATE already refuses any row whose status isn't 'active' — so the
+// wider IN-list was unreachable dead code). No prior test exercised the
+// SESSION rail's force-unlock end-to-end at all.
+// ---------------------------------------------------------------------------
+
+test("force-unlock (SESSION rail): an active, stale, pi-confirmed-dead session is force-unlocked to 'error'", async () => {
+  const r = await fetch(base + "/card/9/force-unlock", { method: "POST" });
+  const body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  const c = crowDb();
+  const row = c.prepare("SELECT status FROM bot_sessions WHERE card_id=9").get();
+  c.close();
+  assert.equal(row.status, "error", "the SESSION rail must actually flip the row to 'error'");
+});
+
+test("force-unlock (SESSION rail): a 'waiting-user' row is reported as NOT locked and is never touched by the UPDATE", async () => {
+  const c0 = crowDb();
+  const before = c0.prepare("SELECT status, updated_at FROM bot_sessions WHERE card_id=10").get();
+  c0.close();
+  assert.equal(before.status, "waiting-user", "test setup sanity");
+
+  const r = await fetch(base + "/card/10/force-unlock", { method: "POST" });
+  assert.equal(r.status, 409);
+  assert.match(String((await r.json()).reason), /not locked/i, "'waiting-user' must be reported as unlocked, not stale/pi-alive");
+
+  const c = crowDb();
+  const after = c.prepare("SELECT status, updated_at FROM bot_sessions WHERE card_id=10").get();
+  c.close();
+  assert.deepEqual(after, before, "a refused force-unlock must never touch the row (status OR updated_at)");
+});
+
+// The literal SQL text is the load-bearing artifact for M6 itself: even
+// though the gate above makes the wider IN-list unreachable today (proven
+// by the two behavioral tests above), a hardcoded 'waiting-user' left in
+// the WHERE clause is a live landmine for the NEXT person who touches the
+// gate — read the actual route source, not just its current observable
+// behavior.
+test("M6: the SESSION-rail force-unlock UPDATE's WHERE clause no longer mentions 'waiting-user'", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(
+    new URL("../servers/gateway/routes/bot-board-api.js", import.meta.url),
+    "utf8"
+  );
+  const updateMatch = src.match(/UPDATE bot_sessions SET status='error'[^"]*/);
+  assert.ok(updateMatch, "the force-unlock SESSION-rail UPDATE statement must be present");
+  assert.doesNotMatch(updateMatch[0], /waiting-user/, "the UPDATE's WHERE clause must not hardcode 'waiting-user'");
+  assert.match(updateMatch[0], /status='active'/, "the UPDATE must narrow to status='active'");
 });
 
 // ---------------------------------------------------------------------------
