@@ -326,6 +326,19 @@ test("board_update_item: plain fields, and parent_id re-parents + re-inherits pr
   assert.equal(got.item.title, "changed");
   assert.equal(got.item.owner, "kevin");
 
+  // action_needed / next_followup_date persist on CARDS too (regression:
+  // they were in the tool schema but missing from CARD_UPDATE_FIELDS, so a
+  // card update carrying only these fields silently dropped them and
+  // returned changed:false).
+  const flagged = payload(await client.callTool({
+    name: "board_update_item",
+    arguments: { id: created.id, action_needed: "review the doc", next_followup_date: "2026-08-25" },
+  }));
+  assert.equal(flagged.changed, true, "action_needed-only card update reports changed");
+  const gotFlagged = payload(await client.callTool({ name: "board_get_item", arguments: { id: created.id } }));
+  assert.equal(gotFlagged.item.action_needed, "review the doc");
+  assert.equal(gotFlagged.item.next_followup_date, "2026-08-25");
+
   // parent_id round trip: re-parenting onto a card in a different project
   // re-inherits that project (D-T1.1 "parent_id supported" — same semantics
   // as create, per card-service.updateCard).
