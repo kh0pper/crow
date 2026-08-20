@@ -173,7 +173,11 @@ export async function createCard(tdb, fields, actor) {
 // set — project-assignment is its own explicit operation, not something that
 // follows from another field, so it belongs in the generic key/value loop
 // with no special-case logic.
-const CARD_UPDATE_FIELDS = ["title", "description", "due_date", "phase", "owner", "tags", "priority", "autonomy", "assigned_bot", "project_id"];
+// "action_needed" and "next_followup_date" joined this list 2026-08-20: the
+// board_update_item tool schema has always advertised both for cards, but only
+// updateItem's ITEM_PLAIN_FIELDS wrote them — on a card they were silently
+// dropped (and an update passing only those fields returned changed:false).
+const CARD_UPDATE_FIELDS = ["title", "description", "due_date", "phase", "owner", "tags", "priority", "autonomy", "assigned_bot", "project_id", "action_needed", "next_followup_date"];
 
 // `allowArchived` (Finding 1 fix wave): bulk-assign's `?include_archived=1`
 // escape hatch (Task 5, D-T1.6) is a deliberate operator override that lets
