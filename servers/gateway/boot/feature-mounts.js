@@ -288,6 +288,34 @@ export async function mountFeatureRoutes(app, deps) {
     console.warn("[fileview] Failed to mount:", err.message);
   }
 
+  // --- Mount authenticated static apps (env-driven) ---
+  // GATEWAY_AUTH_STATIC_MOUNTS="name=/abs/dir[,name2=/abs/dir2]" serves each
+  // directory at /apps/<name>/ behind the dashboard session (dashboardAuth),
+  // for self-contained static builds a logged-in user should reach without a
+  // bundle or a public route. Names are [a-z0-9-]; missing dirs are skipped
+  // with a warning so a stale env entry cannot take the gateway down.
+  try {
+    const staticMounts = (process.env.GATEWAY_AUTH_STATIC_MOUNTS || "")
+      .split(",").map((s) => s.trim()).filter(Boolean);
+    if (staticMounts.length) {
+      const { existsSync } = await import("node:fs");
+      const { default: express } = await import("express");
+      for (const pair of staticMounts) {
+        const eq = pair.indexOf("=");
+        const name = eq > 0 ? pair.slice(0, eq).trim() : "";
+        const dir = eq > 0 ? pair.slice(eq + 1).trim() : "";
+        if (!/^[a-z0-9-]+$/.test(name) || !dir || !existsSync(dir)) {
+          console.warn(`[static-apps] Skipping "${pair}": bad name or missing directory`);
+          continue;
+        }
+        app.use(`/apps/${name}`, dashboardAuth, express.static(dir));
+        console.log(`Authenticated static app mounted at /apps/${name} -> ${dir}`);
+      }
+    }
+  } catch (err) {
+    console.warn("[static-apps] Failed to mount:", err.message);
+  }
+
   // --- Mount Push Subscription API ---
   try {
     const { default: pushRouter } = await import("../routes/push.js");
