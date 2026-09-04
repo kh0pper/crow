@@ -208,6 +208,9 @@ beforeEach(() => {
     },
     async steer(sid, text) {
       engineCalls.steer.push({ sid, text });
+      // Mirrors the real engine's contract (acceptance F3): a blank steer is
+      // a client bug, refused before anything else is checked.
+      if (!String(text == null ? "" : text).trim()) throw engineErr("empty_message");
       return { ok: true };
     },
     async checkCardFree(cardId, opts) {
@@ -430,6 +433,19 @@ test("the interactive steer message is capped at 32k before it reaches the engin
   const { status } = await postJson("/interactive/sess-1/steer", { message: big });
   assert.equal(status, 200);
   assert.equal(engineCalls.steer[0].text.length, 32_000);
+});
+
+test("POST /interactive/:sid/steer with no message is a 400 empty_message, never a silent 200 (acceptance F3)", async () => {
+  let r = await postJson("/interactive/sess-1/steer", {});
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "empty_message");
+  r = await postJson("/interactive/sess-1/steer", { message: "   " });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, "empty_message");
+  r = await postJson("/interactive/sess-1/steer", { message: "go left" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { ok: true });
+  assert.equal(engineCalls.steer[engineCalls.steer.length - 1].text, "go left");
 });
 
 test("POST /interactive/:sid/steer maps no_turn (409), pi_gone (409), and session_stopped→410 stopped", async () => {

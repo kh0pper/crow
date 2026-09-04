@@ -139,7 +139,7 @@
  * (spec §9).
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -313,6 +313,8 @@ export function createInteractiveEngine({
       projectContextBlock: br.projectContextBlock,
       cardStatus: tracker.cardStatus,
       boardVocab: tracker.boardVocab,
+      // Acceptance F1: the card's title/description ride in the brief.
+      cardText: tracker.cardText,
       // Metering wants a better-sqlite3 connection opened busy_timeout-ONLY
       // (metering.mjs's header: createDbClient would WAL-flip the prod crow.db
       // out from under the bridge). Use the bridge's own db()/CROW_DB, exactly
@@ -504,6 +506,22 @@ export function createInteractiveEngine({
       log(s.sessionId + ": " + text);
       emit(s, { type: "log", text });
     };
+  }
+
+  /**
+   * Acceptance F4: ": N MCP server(s) minted" for the "world rebuilt" log
+   * line, read off the per-bot .mcp.json writeBotMcp just wrote into the
+   * world's sessionDir. Never throws — an absent file (a test world, a
+   * skipped write) yields "" and the line stays "world rebuilt".
+   */
+  function mintedSummary(world) {
+    try {
+      const j = JSON.parse(readFileSync(join(world.sessionDir, ".mcp.json"), "utf8"));
+      const names = Object.keys((j && j.mcpServers) || {}).filter((n) => !(j.mcpServers[n] && j.mcpServers[n].disabled));
+      return ": " + names.length + " MCP server(s) minted";
+    } catch {
+      return "";
+    }
   }
 
   // ---- timers --------------------------------------------------------------
@@ -998,9 +1016,18 @@ export function createInteractiveEngine({
   async function startChild(S, s) {
     const slog = sessionLog(s);
     // Track 3 Task 6: serialized per-bot — see buildWorldSerialized's comment.
+    // acceptance F2: a card-bound session must be able to call
+    // board_report_result — cardBound makes the world builder mint the
+    // board MCP entry whatever the def's own tool selection says.
     const world = await buildWorldSerialized(S, {
       botId: s.botId, threadId: s.threadId, gatewayType: "perch", log: slog,
+      cardBound: s.cardId != null,
     });
+    // Acceptance F4: narrate the rebuild for the drawer (spawn, wake and
+    // cycle all come through here). The world itself does not expose what
+    // writeBotMcp minted, so count the active entries off the .mcp.json it
+    // just wrote — best-effort, a missing/unreadable file just drops the count.
+    slog("world rebuilt" + mintedSummary(world));
     const prep = await S.prepareSpawn(world, { escalate: false, log: slog });
     s.projectId = world.projectId == null ? null : Number(world.projectId);
     // Track 3 Task 6: refreshed on EVERY startChild (spawn and wake alike),
@@ -1031,6 +1058,7 @@ export function createInteractiveEngine({
     }
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);
+    slog("model warm: " + (s.currentModel || (prep.resolved && prep.resolved.key) || "?"));
 
     // Track 3 Task 6: per-session outputs/uploads dirs — every spawn/wake,
     // not just card-bound ones (a free-chat session gets a workspace too).
@@ -1594,6 +1622,7 @@ export function createInteractiveEngine({
         planForCard: S.planForCard,
         cardStatus: S.cardStatus,
         boardVocab: S.boardVocab,
+        cardText: S.cardText,
       }) + "\n\nDeliverables you produce as files go in: " + s.outputsDir;
       s.dispatchBrief = null;
     }
@@ -1622,10 +1651,14 @@ export function createInteractiveEngine({
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     if (s.state === "stopped") throw engineError("session_stopped");
+    // Acceptance F3: a blank steer is a client bug (the drawer's composer
+    // sent nothing), never a silent no-op — refused BEFORE the no_turn/
+    // pi_gone checks so it is reported even when no turn is running.
+    const message = String(text == null ? "" : text);
+    if (!message.trim()) throw engineError("empty_message");
     if (!s.turn) throw engineError("no_turn");
     const alive = !!(s.pi && s.pi._exitCode == null);
     if (!alive) throw engineError("pi_gone");
-    const message = String(text == null ? "" : text);
     s.pi.send({ type: "steer", message });
     emit(s, { type: "log", text: "steered: " + message.slice(0, 200) });
     return { ok: true };
@@ -1669,6 +1702,10 @@ export function createInteractiveEngine({
     if (s.state === "stopped") throw engineError("session_stopped");
     if (s.turn || s.pendingUi || s.cycling) throw engineError("cycle_busy");
     s.cycling = true;                                  // ← the re-entrancy claim
+    // Acceptance F4: the drawer renders `log` events, and a cycle is several
+    // seconds of world rebuild + model warm + spawn during which the operator
+    // previously saw nothing at all. Narrate the moments they wait on.
+    emit(s, { type: "log", text: "cycling: stopping the child and rebuilding its world (spawn-bound settings apply now)" });
     try {
       await hibernate(s);                              // no-op if already hibernating
       // ---- one synchronous block: reservation, no await between check+flip
@@ -1696,6 +1733,7 @@ export function createInteractiveEngine({
       }
       emit(s, stateEvent(s));
       armIdle(s);
+      emit(s, { type: "log", text: "ready — the first turn re-reads its full transcript, which can take a minute on long sessions" });
       return { state: s.state };
     } finally {
       s.cycling = false;

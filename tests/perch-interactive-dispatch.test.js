@@ -248,6 +248,7 @@ function makeBridge(opts = {}) {
     projectContextBlock,
     cardStatus: () => state.cardStatusVal,
     boardVocab: () => state.vocab,
+    cardText: () => ({ title: "T", description: null }),
   };
   return seam;
 }
@@ -432,6 +433,7 @@ test("dispatch: spawn stores the brief; the FIRST message() composes header+brie
     planForCard: () => "PLAN BODY",
     cardStatus: () => "in_progress",
     boardVocab: () => ({ statuses: ["todo", "in_progress", "done"], terminals: ["done"] }),
+    cardText: () => ({ title: "T", description: null }),
   });
   const expected = expectedHeader + "\n\n" + expectedBody + "\n\nDeliverables you produce as files go in: " + snap.outputsDir;
   assert.equal(pi.turns[0].message, expected, "the composed prompt is byte-identical to a directly-built cardBriefBlock golden");
@@ -480,6 +482,15 @@ test("startChild passes extraWritePaths=[outputsDir] and both outputs/uploads di
 // ---------------------------------------------------------------------------
 // 6. free-chat cwd refusal (bot-world.mjs)
 // ---------------------------------------------------------------------------
+
+test("spawn passes cardBound to buildBotWorld: true for a card-bound spawn, false for free chat (acceptance F2)", async () => {
+  const { engine, state } = makeEngine();
+  await spawned(engine, { botId: "cardbot", cardId: 77 });
+  await spawned(engine, { botId: "freebot" });
+  const byBot = Object.fromEntries(state.worlds.map((w) => [w.botId, w]));
+  assert.equal(byBot.cardbot.cardBound, true, "card-bound spawn asks the world builder for the board entry");
+  assert.equal(byBot.freebot.cardBound, false, "free chat keeps the def's closed-world selection");
+});
 
 test("buildBotWorld with no def.session_dir and no project workspace throws code no_session_dir", async () => {
   const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");

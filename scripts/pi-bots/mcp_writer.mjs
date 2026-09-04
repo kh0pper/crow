@@ -155,7 +155,14 @@ export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), op
  *   `servers` lists ACTIVE names only; disabled names are in `disabled`.
  */
 export function buildBotMcp(def, canonical, opts = {}) {
-  const want = serversForBot(def);
+  // opts.ensureServers (Track 3 acceptance F2): names unioned into the
+  // selection BEFORE catalog resolution, so a card-bound session gets the
+  // board entry (it must be able to call board_report_result — that call is
+  // what ends the run) even when the def never selected board/*. An ensured
+  // name absent from the catalog rides the same unconfigured/soft-warning
+  // path as a selected-but-absent server.
+  const ensure = (opts.ensureServers || []).filter((n) => typeof n === "string" && n);
+  const want = [...new Set([...serversForBot(def), ...ensure])];
   const catalog = opts.catalog || {};
   const unconfigured = opts.unconfigured || {};
   const binding = opts.binding;
@@ -278,6 +285,7 @@ export function writeBotMcp(def, opts = {}) {
   });
   const built = buildBotMcp(def, canonical, {
     extraServers, catalog, unconfigured, binding, crowHome,
+    ensureServers: opts.ensureServers,
   });
   // F4a L2b: merge cross-instance forward-proxy blocks when the caller has
   // confirmed feature_flags.remote_invocation is on (the DB read is done by the
