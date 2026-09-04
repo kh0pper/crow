@@ -87,9 +87,9 @@ test("parameterized endpoint listening -> up, not conflict, shows bound addr", (
 });
 
 test("template-bound model bundle listening on resolved addr -> status up (not down)", () => {
-  const rows = attributeAndDetect([ep("vllm-rocm-qwen3", 8001, "template")],
-    [{ port: 8001, boundAddr: "100.118.41.122" }], core);
-  const r = rows.find(x => x.port === 8001);
+  const rows = attributeAndDetect([ep("vllm-rocm-qwen35-4b", 8011, "template")],
+    [{ port: 8011, boundAddr: "100.118.41.122" }], core);
+  const r = rows.find(x => x.port === 8011);
   assert.equal(r.status, "up");
   assert.equal(r.conflict, false);
 });
@@ -105,7 +105,7 @@ test(":8004 two listeners on different specific addrs -> NOT a conflict", () => 
 
 test("swap-group: two declared, one live listener -> shared, up, not conflict", () => {
   const rows = attributeAndDetect(
-    [ep("vllm-rocm-kimi", 8003, "template"), ep("llamacpp-qwen72b", 8003, "template")],
+    [ep("swap-model-a", 8003, "template"), ep("swap-model-b", 8003, "template")],
     [{ port: 8003, boundAddr: "100.118.41.122" }], core);
   const r = rows.find(x => x.port === 8003);
   assert.equal(r.shared, true);
