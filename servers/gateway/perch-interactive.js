@@ -313,6 +313,8 @@ export function createInteractiveEngine({
       projectContextBlock: br.projectContextBlock,
       cardStatus: tracker.cardStatus,
       boardVocab: tracker.boardVocab,
+      // Acceptance F1: the card's title/description ride in the brief.
+      cardText: tracker.cardText,
       // Metering wants a better-sqlite3 connection opened busy_timeout-ONLY
       // (metering.mjs's header: createDbClient would WAL-flip the prod crow.db
       // out from under the bridge). Use the bridge's own db()/CROW_DB, exactly
@@ -1594,6 +1596,7 @@ export function createInteractiveEngine({
         planForCard: S.planForCard,
         cardStatus: S.cardStatus,
         boardVocab: S.boardVocab,
+        cardText: S.cardText,
       }) + "\n\nDeliverables you produce as files go in: " + s.outputsDir;
       s.dispatchBrief = null;
     }

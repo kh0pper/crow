@@ -248,6 +248,7 @@ function makeBridge(opts = {}) {
     projectContextBlock,
     cardStatus: () => state.cardStatusVal,
     boardVocab: () => state.vocab,
+    cardText: () => ({ title: "T", description: null }),
   };
   return seam;
 }
@@ -432,6 +433,7 @@ test("dispatch: spawn stores the brief; the FIRST message() composes header+brie
     planForCard: () => "PLAN BODY",
     cardStatus: () => "in_progress",
     boardVocab: () => ({ statuses: ["todo", "in_progress", "done"], terminals: ["done"] }),
+    cardText: () => ({ title: "T", description: null }),
   });
   const expected = expectedHeader + "\n\n" + expectedBody + "\n\nDeliverables you produce as files go in: " + snap.outputsDir;
   assert.equal(pi.turns[0].message, expected, "the composed prompt is byte-identical to a directly-built cardBriefBlock golden");
