@@ -762,12 +762,32 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   // only honored under llama-server's jinja engine; scoped per-model — the
   // other catalog models are not template-verified under --jinja.
   let extraArgs = [];
+  let catalogEntry = null;
   try {
-    const entry = (loadCatalogFn()?.models || []).find((m) => m.id === providerName);
-    if (entry && entry.chat_template_kwargs && typeof entry.chat_template_kwargs === "object") {
-      extraArgs = ["--jinja"];
+    catalogEntry = (loadCatalogFn()?.models || []).find((m) => m.id === providerName) || null;
+  } catch { /* catalog unreadable → no catalog-driven args, model starts as before */ }
+  if (catalogEntry && catalogEntry.chat_template_kwargs && typeof catalogEntry.chat_template_kwargs === "object") {
+    extraArgs = ["--jinja"];
+  }
+
+  // Schema v2 companion + task flags (model catalog curation, 2026-09):
+  //   - an `mmproj` companion on the registry row (written by manager.js's
+  //     registerModel, stored under the same flat blob dir as the model)
+  //     is the vision projector -> `--mmproj <path>`;
+  //   - an `mtp` companion adds NO flag: llama.cpp's multi-token-prediction
+  //     loading is build-specific, so the file is kept beside the model for
+  //     the operator's own launchers rather than guessed at here;
+  //   - shards need no flag either: llama-server discovers the
+  //     `-0000N-of-0000M` siblings from the primary part it is given;
+  //   - catalog task embedding -> `--embedding`, rerank -> `--reranking`
+  //     (chat and vision get no task flag).
+  for (const c of Array.isArray(regEntry.companions) ? regEntry.companions : []) {
+    if (c && c.kind === "mmproj" && typeof c.file === "string" && c.file) {
+      extraArgs.push("--mmproj", join(dir, "models", "blobs", c.file));
     }
-  } catch { /* catalog unreadable → no extra args, model starts as before */ }
+  }
+  if (catalogEntry?.task === "embedding") extraArgs.push("--embedding");
+  else if (catalogEntry?.task === "rerank") extraArgs.push("--reranking");
 
   console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port}, readinessTimeoutMs=${readinessTimeoutMs}) requested-by=${opts.requester || "-"}`);
   const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn, onTerminal: wrappedOnTerminal, extraArgs });

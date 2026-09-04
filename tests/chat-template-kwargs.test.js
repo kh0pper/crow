@@ -21,7 +21,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
@@ -173,24 +173,31 @@ test("resolveProviderConfig returns undefined chatTemplateKwargs for a row witho
   assert.equal(cfg.chatTemplateKwargs, undefined);
 });
 
+/** The live catalog's entry that carries chat_template_kwargs (the
+ * first_run_default small model) — read dynamically so the test follows
+ * the curated catalog instead of pinning an id. */
+const LIVE_CATALOG = JSON.parse(readFileSync(join(import.meta.dirname, "..", "registry", "model-catalog.json"), "utf8"));
+const KWARGS_MODEL = LIVE_CATALOG.models.find((m) => m.chat_template_kwargs && typeof m.chat_template_kwargs === "object");
+
 test("resolveProviderConfig heals a pre-Task-1 native row (no chatTemplateKwargs) from the catalog", async () => {
   // Pre-Task-1 registration shape: models[] entry has no chatTemplateKwargs
   // field at all, but gpu_policy.runtime is "native" and the provider id IS
-  // the catalog model id (qwen3-4b) — exactly crow prod's shape before this
-  // change shipped.
+  // the catalog model id — exactly crow prod's shape before this change
+  // shipped.
+  assert.ok(KWARGS_MODEL, "the live catalog carries a model with chat_template_kwargs");
   await upsertProvider(db, {
-    id: "qwen3-4b",
+    id: KWARGS_MODEL.id,
     baseUrl: "http://127.0.0.1:9412/v1",
     host: "local",
     bundleId: null,
     description: "test",
-    models: [{ id: "qwen3-4b" }],
+    models: [{ id: KWARGS_MODEL.id }],
     disabled: false,
     providerType: null,
     gpuPolicy: { runtime: "native", mutexGroup: "local-llm" },
   });
-  const cfg = await resolveProviderConfig(db, "qwen3-4b", "qwen3-4b");
-  assert.deepEqual(cfg.chatTemplateKwargs, { enable_thinking: false });
+  const cfg = await resolveProviderConfig(db, KWARGS_MODEL.id, KWARGS_MODEL.id);
+  assert.deepEqual(cfg.chatTemplateKwargs, KWARGS_MODEL.chat_template_kwargs);
 });
 
 test("healing fallback does NOT apply to non-native gpu_policy rows (docker runtime at a catalog-colliding id)", async () => {

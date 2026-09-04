@@ -65,8 +65,10 @@ import {
   fetchHfPathInfo,
   downloadHfFile,
   fetchModelBlob,
+  planFiles,
+  companionFilename,
 } from "../servers/gateway/models/manager.js";
-import { loadState } from "../servers/gateway/models/state.js";
+import { loadState, saveState } from "../servers/gateway/models/state.js";
 
 // Every fixture server in this file is plain http (no TLS) — this is the
 // explicit test-only escape from the manager's https-only enforcement.
@@ -1384,4 +1386,365 @@ test("downloadHfFile: rejects an invalid repo id / filename shape before any net
     () => downloadHfFile({ hfRepo: "org/repo", file: "../../x.gguf", dir: scratchDir("hf-bad-file") }),
     UnsafeDestinationError,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Schema v2: multi-part GGUFs (shards) + companion files (mmproj / mtp)
+// ---------------------------------------------------------------------------
+
+/** Distinct per-part content: the fill byte depends on `seed`, so no two
+ * parts share a prefix (a resumed/overwritten part can never accidentally
+ * hash to a sibling's sha256). */
+function makeSeededBlob(size, seed) {
+  const buf = Buffer.alloc(size);
+  for (let i = 0; i < size; i++) buf[i] = (i * 7 + seed) % 256;
+  return buf;
+}
+const sha = (buf) => createHash("sha256").update(buf).digest("hex");
+const mb = (buf) => buf.length / 1_000_000;
+
+const MULTI_REPO = "test/multi";
+const MULTI_PRIMARY = "Q4/multi-Q4-00001-of-00003.gguf";
+const MULTI_SHARD2 = "Q4/multi-Q4-00002-of-00003.gguf";
+const MULTI_SHARD3 = "Q4/multi-Q4-00003-of-00003.gguf";
+const MULTI_MMPROJ = "mmproj-F16.gguf";
+const MULTI_PARTS = {
+  [MULTI_PRIMARY]: makeSeededBlob(120_000, 1),
+  [MULTI_SHARD2]: makeSeededBlob(90_000, 2),
+  [MULTI_SHARD3]: makeSeededBlob(60_000, 3),
+  [MULTI_MMPROJ]: makeSeededBlob(30_000, 4),
+};
+const MULTI_TOTAL_BYTES = Object.values(MULTI_PARTS).reduce((n, b) => n + b.length, 0);
+
+function makeMultiCatalog({ shard2Sha = sha(MULTI_PARTS[MULTI_SHARD2]) } = {}) {
+  const total = mb(MULTI_PARTS[MULTI_PRIMARY]) + mb(MULTI_PARTS[MULTI_SHARD2]) + mb(MULTI_PARTS[MULTI_SHARD3]);
+  return {
+    version: 1,
+    models: [
+      {
+        id: "multi-model",
+        hf_repo: MULTI_REPO,
+        task: "chat",
+        default_quant: "Q4",
+        quants: [{
+          file: MULTI_PRIMARY,
+          quant: "Q4",
+          size_mb: total,
+          min_ram_mb: total,
+          min_vram_mb: 0,
+          sha256: sha(MULTI_PARTS[MULTI_PRIMARY]),
+          shards: [
+            { file: MULTI_SHARD2, size_mb: mb(MULTI_PARTS[MULTI_SHARD2]), sha256: shard2Sha },
+            { file: MULTI_SHARD3, size_mb: mb(MULTI_PARTS[MULTI_SHARD3]), sha256: sha(MULTI_PARTS[MULTI_SHARD3]) },
+          ],
+        }],
+        companions: [
+          { kind: "mmproj", file: MULTI_MMPROJ, size_mb: mb(MULTI_PARTS[MULTI_MMPROJ]), sha256: sha(MULTI_PARTS[MULTI_MMPROJ]) },
+        ],
+      },
+    ],
+  };
+}
+
+/** Serves each part by the path after `/resolve/main/`, range-aware, and
+ * counts requests per part. `killOnce` names parts whose FIRST request is
+ * severed at half — the second request is served normally. `serve`
+ * overrides the bytes served for a part (wrong-content fixtures). */
+function multiPartHandler({ killOnce = [], serve = {} } = {}) {
+  const requests = {};
+  const killed = new Set();
+  const handler = (req, res) => {
+    const m = /\/resolve\/main\/(.+)$/.exec(req.url);
+    const part = m ? decodeURIComponent(m[1]) : null;
+    const blob = part && (serve[part] || MULTI_PARTS[part]);
+    if (!blob) {
+      res.writeHead(404);
+      res.end("no such part");
+      return;
+    }
+    requests[part] = (requests[part] || 0) + 1;
+    if (killOnce.includes(part) && !killed.has(part)) {
+      killed.add(part);
+      killAtHalfHandler(blob)(req, res);
+      return;
+    }
+    rangeAwareHandler(blob)(req, res);
+  };
+  return { handler, requests };
+}
+
+const blobPath = (dir, name) => join(dir, "models", "blobs", name);
+
+test("planFiles: primary, then shards in order, then companions — flat basenames, per-file sha, companions namespaced by model id", () => {
+  const catalog = makeMultiCatalog();
+  const { model, quantEntry } = resolveEntry(catalog, "multi-model");
+  const plan = planFiles(model, quantEntry, { baseUrl: "http://huggingface.co:1" });
+  assert.deepEqual(plan.map((f) => f.role), ["primary", "shard", "shard", "companion"]);
+  assert.deepEqual(plan.map((f) => f.dest), [
+    "multi-Q4-00001-of-00003.gguf",
+    "multi-Q4-00002-of-00003.gguf",
+    "multi-Q4-00003-of-00003.gguf",
+    companionFilename("multi-model", MULTI_MMPROJ),
+  ]);
+  assert.deepEqual(plan.map((f) => f.url), [
+    `http://huggingface.co:1/${MULTI_REPO}/resolve/main/${MULTI_PRIMARY}`,
+    `http://huggingface.co:1/${MULTI_REPO}/resolve/main/${MULTI_SHARD2}`,
+    `http://huggingface.co:1/${MULTI_REPO}/resolve/main/${MULTI_SHARD3}`,
+    `http://huggingface.co:1/${MULTI_REPO}/resolve/main/${MULTI_MMPROJ}`,
+  ]);
+  assert.deepEqual(plan.map((f) => f.expectedSha), [
+    sha(MULTI_PARTS[MULTI_PRIMARY]), sha(MULTI_PARTS[MULTI_SHARD2]), sha(MULTI_PARTS[MULTI_SHARD3]), sha(MULTI_PARTS[MULTI_MMPROJ]),
+  ]);
+  assert.equal(plan[3].kind, "mmproj");
+  assert.equal(plan[0].kind, undefined);
+  // sizeMb: the primary's share is the quant total minus its shards.
+  assert.ok(Math.abs(plan[0].sizeMb - mb(MULTI_PARTS[MULTI_PRIMARY])) < 1e-6, `primary sizeMb ${plan[0].sizeMb}`);
+  assert.equal(plan[1].sizeMb, mb(MULTI_PARTS[MULTI_SHARD2]));
+  assert.equal(plan[3].sizeMb, mb(MULTI_PARTS[MULTI_MMPROJ]));
+  // blobDir joins the destinations; the default (real huggingface.co) URL shape is unchanged.
+  const withDir = planFiles(model, quantEntry, { blobDir: "/x/blobs" });
+  assert.equal(withDir[0].dest, "/x/blobs/multi-Q4-00001-of-00003.gguf");
+  assert.equal(withDir[0].url, `https://huggingface.co/${MULTI_REPO}/resolve/main/${MULTI_PRIMARY}`);
+});
+
+test("planFiles: a legacy single-file quant with no shards/companions plans exactly one primary file", () => {
+  const { model, quantEntry } = resolveEntry(makeCatalog(), "test-model");
+  const plan = planFiles(model, quantEntry);
+  assert.equal(plan.length, 1);
+  assert.equal(plan[0].role, "primary");
+  assert.equal(plan[0].dest, "blob.gguf");
+  assert.equal(plan[0].expectedSha, BLOB_SHA256);
+});
+
+test("companionFilename: namespaced by model id so two vision models' mmproj-F16.gguf never collide in the flat blob dir", () => {
+  assert.equal(companionFilename("qwen3.5-4b", "mmproj-F16.gguf"), "qwen3.5-4b--mmproj-F16.gguf");
+  assert.equal(companionFilename("qwen3.8-flash-next", "MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf"), "qwen3.8-flash-next--mtp-Qwen3.8-Flash-Next-Q8_0.gguf");
+  assert.notEqual(companionFilename("a", "mmproj-F16.gguf"), companionFilename("b", "mmproj-F16.gguf"));
+});
+
+test("downloadModel (multi-part): fetches primary + every shard + every companion into the blob dir, each sha-verified; returns every file", async () => {
+  const { handler, requests } = multiPartHandler();
+  const { srv, port } = await startServer(handler);
+  try {
+    const dir = scratchDir("multi-full");
+    try {
+      const progress = [];
+      const result = await downloadModel({
+        modelId: "multi-model",
+        dir,
+        catalog: makeMultiCatalog(),
+        lookup: lookupToLocalhost,
+        baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF,
+        onProgress: (p) => progress.push(p),
+      });
+      const expectedNames = [
+        "multi-Q4-00001-of-00003.gguf",
+        "multi-Q4-00002-of-00003.gguf",
+        "multi-Q4-00003-of-00003.gguf",
+        companionFilename("multi-model", MULTI_MMPROJ),
+      ];
+      assert.equal(result.path, blobPath(dir, expectedNames[0]));
+      assert.equal(result.sha256, sha(MULTI_PARTS[MULTI_PRIMARY]));
+      assert.deepEqual(result.files.map((f) => f.path), expectedNames.map((n) => blobPath(dir, n)));
+      assert.deepEqual(result.files.map((f) => f.sha256), [
+        sha(MULTI_PARTS[MULTI_PRIMARY]), sha(MULTI_PARTS[MULTI_SHARD2]), sha(MULTI_PARTS[MULTI_SHARD3]), sha(MULTI_PARTS[MULTI_MMPROJ]),
+      ]);
+      assert.deepEqual(readFileSync(blobPath(dir, expectedNames[0])), MULTI_PARTS[MULTI_PRIMARY]);
+      assert.deepEqual(readFileSync(blobPath(dir, expectedNames[1])), MULTI_PARTS[MULTI_SHARD2]);
+      assert.deepEqual(readFileSync(blobPath(dir, expectedNames[2])), MULTI_PARTS[MULTI_SHARD3]);
+      assert.deepEqual(readFileSync(blobPath(dir, expectedNames[3])), MULTI_PARTS[MULTI_MMPROJ]);
+      assert.deepEqual(requests, { [MULTI_PRIMARY]: 1, [MULTI_SHARD2]: 1, [MULTI_SHARD3]: 1, [MULTI_MMPROJ]: 1 });
+      assert.equal(loadState(dir).journal["multi-model"], undefined, "journal cleared on success");
+
+      // (c) progress is cumulative across files.
+      assert.ok(progress.length > 0);
+      const last = progress.at(-1);
+      assert.equal(last.bytesDone, MULTI_TOTAL_BYTES);
+      assert.equal(last.totalBytes, MULTI_TOTAL_BYTES);
+      assert.equal(last.fileCount, 4);
+      assert.equal(last.fileIndex, 3);
+      assert.equal(last.file, expectedNames[3]);
+      for (let i = 1; i < progress.length; i++) {
+        assert.ok(progress[i].bytesDone >= progress[i - 1].bytesDone, "cumulative bytesDone never goes backwards");
+      }
+      assert.ok(progress.every((p) => p.totalBytes === MULTI_TOTAL_BYTES), "totalBytes is the sum of every part from the first event");
+      assert.ok(progress.some((p) => p.fileIndex === 0 && p.file === expectedNames[0]));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await stopServer(srv);
+  }
+});
+
+test("downloadModel (multi-part): wrong bytes for shard 2 -> ChecksumError naming that file; the verified primary is kept, the bad shard deleted", async () => {
+  const wrong = makeSeededBlob(MULTI_PARTS[MULTI_SHARD2].length, 99);
+  const { handler, requests } = multiPartHandler({ serve: { [MULTI_SHARD2]: wrong } });
+  const { srv, port } = await startServer(handler);
+  try {
+    const dir = scratchDir("multi-badsha");
+    try {
+      await assert.rejects(
+        () => downloadModel({
+          modelId: "multi-model",
+          dir,
+          catalog: makeMultiCatalog(),
+          lookup: lookupToLocalhost,
+          baseUrl: `http://huggingface.co:${port}`,
+          insecureHttpHosts: INSECURE_HF,
+        }),
+        (err) => {
+          assert.ok(err instanceof ChecksumError, `expected ChecksumError, got ${err}`);
+          assert.equal(err.expectedSha, sha(MULTI_PARTS[MULTI_SHARD2]));
+          assert.equal(err.file, blobPath(dir, "multi-Q4-00002-of-00003.gguf"));
+          assert.match(err.message, /multi-Q4-00002-of-00003\.gguf/);
+          return true;
+        },
+      );
+      assert.ok(existsSync(blobPath(dir, "multi-Q4-00001-of-00003.gguf")), "verified primary part is kept");
+      assert.equal(existsSync(blobPath(dir, "multi-Q4-00002-of-00003.gguf")), false, "bad shard deleted");
+      assert.equal(requests[MULTI_SHARD3], undefined, "download stops at the bad part");
+
+      // The journal remembers the primary is done, so a retry skips it.
+      const entry = loadState(dir).journal["multi-model"];
+      assert.ok(entry && Array.isArray(entry.files), "journal keeps the multi-file record");
+      assert.equal(entry.files[0].done, true);
+      assert.equal(entry.files[1].done, false);
+      assert.equal(entry.files[1].bytesDone, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await stopServer(srv);
+  }
+});
+
+test("downloadModel (multi-part): resume after an interruption in file 2 skips the finished file 1 and fetches files 2-4", async () => {
+  const port = await getFreePort();
+  const dir = scratchDir("multi-resume");
+  try {
+    const catalog = makeMultiCatalog();
+    const phase1 = multiPartHandler({ killOnce: [MULTI_SHARD2] });
+    const srv1 = await startServerOnPort(port, phase1.handler);
+    await assert.rejects(() => downloadModel({
+      modelId: "multi-model",
+      dir,
+      catalog,
+      lookup: lookupToLocalhost,
+      baseUrl: `http://huggingface.co:${port}`,
+      insecureHttpHosts: INSECURE_HF,
+    }));
+    await stopServer(srv1.srv);
+    assert.deepEqual(phase1.requests, { [MULTI_PRIMARY]: 1, [MULTI_SHARD2]: 1 });
+
+    const journaled = loadState(dir).journal["multi-model"];
+    assert.ok(journaled && Array.isArray(journaled.files) && journaled.files.length === 4, "journal has one record per file");
+    assert.equal(journaled.files[0].done, true);
+    assert.equal(journaled.files[1].done, false);
+    assert.ok(journaled.files[1].bytesDone > 0 && journaled.files[1].bytesDone < MULTI_PARTS[MULTI_SHARD2].length);
+    // Top-level mirror of the in-flight file, so the existing single-file
+    // readers (resumableDownloads, the panel) keep seeing url/dest/bytesDone.
+    assert.equal(journaled.dest, blobPath(dir, "multi-Q4-00002-of-00003.gguf"));
+    assert.equal(journaled.bytesDone, journaled.files[1].bytesDone);
+    const resumeAt = journaled.files[1].bytesDone;
+
+    const phase2 = multiPartHandler();
+    const ranges = {};
+    const srv2 = await startServerOnPort(port, (req, res) => {
+      const m = /\/resolve\/main\/(.+)$/.exec(req.url);
+      ranges[m[1]] = req.headers.range || null;
+      phase2.handler(req, res);
+    });
+    try {
+      const progress = [];
+      const result = await downloadModel({
+        modelId: "multi-model",
+        dir,
+        catalog,
+        lookup: lookupToLocalhost,
+        baseUrl: `http://huggingface.co:${port}`,
+        insecureHttpHosts: INSECURE_HF,
+        onProgress: (p) => progress.push(p),
+      });
+      assert.deepEqual(phase2.requests, { [MULTI_SHARD2]: 1, [MULTI_SHARD3]: 1, [MULTI_MMPROJ]: 1 }, "file 1 is never re-requested");
+      assert.equal(ranges[MULTI_SHARD2], `bytes=${resumeAt}-`, "file 2 resumes from the journaled offset");
+      assert.equal(ranges[MULTI_SHARD3], null);
+      assert.equal(result.files.length, 4);
+      assert.equal(result.files[0].sha256, sha(MULTI_PARTS[MULTI_PRIMARY]), "a previously-verified file reports its sha");
+      assert.deepEqual(readFileSync(blobPath(dir, "multi-Q4-00002-of-00003.gguf")), MULTI_PARTS[MULTI_SHARD2]);
+      assert.deepEqual(readFileSync(blobPath(dir, companionFilename("multi-model", MULTI_MMPROJ))), MULTI_PARTS[MULTI_MMPROJ]);
+      assert.equal(loadState(dir).journal["multi-model"], undefined);
+      const last = progress.at(-1);
+      assert.equal(last.bytesDone, MULTI_TOTAL_BYTES, "cumulative progress counts the already-finished file 1");
+      assert.equal(last.totalBytes, MULTI_TOTAL_BYTES);
+    } finally {
+      await stopServer(srv2.srv);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("downloadModel: an old-shape journal entry ({url,dest,bytesDone}) from before the multi-file journal still resumes with a Range header", async () => {
+  const port = await getFreePort();
+  const dir = scratchDir("legacy-journal");
+  try {
+    const catalog = makeCatalog();
+    const phase1 = await startServerOnPort(port, killAtHalfHandler(BLOB));
+    await assert.rejects(() => downloadModel({
+      modelId: "test-model", dir, catalog, lookup: lookupToLocalhost,
+      baseUrl: `http://huggingface.co:${port}`, insecureHttpHosts: INSECURE_HF,
+    }));
+    await stopServer(phase1.srv);
+
+    // Rewrite the journal in the pre-v2 shape: no `files` array at all.
+    const state = loadState(dir);
+    const { url, dest, bytesDone, expectedSha, startedAt } = state.journal["test-model"];
+    assert.ok(bytesDone > 0 && bytesDone < BLOB.length);
+    state.journal["test-model"] = { url, dest, bytesDone, expectedSha, startedAt };
+    saveState(dir, state);
+
+    let seenRange;
+    const phase2 = await startServerOnPort(port, (req, res) => {
+      seenRange = req.headers.range || null;
+      rangeAwareHandler(BLOB)(req, res);
+    });
+    try {
+      const result = await downloadModel({
+        modelId: "test-model", dir, catalog, lookup: lookupToLocalhost,
+        baseUrl: `http://huggingface.co:${port}`, insecureHttpHosts: INSECURE_HF,
+      });
+      assert.equal(seenRange, `bytes=${bytesDone}-`);
+      assert.equal(result.sha256, BLOB_SHA256);
+      assert.deepEqual(result.files, [{ path: result.path, sha256: BLOB_SHA256 }]);
+    } finally {
+      await stopServer(phase2.srv);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("deleteModel (multi-part): removes every part and companion", async () => {
+  const { handler } = multiPartHandler();
+  const { srv, port } = await startServer(handler);
+  try {
+    const dir = scratchDir("multi-delete");
+    try {
+      const catalog = makeMultiCatalog();
+      const result = await downloadModel({
+        modelId: "multi-model", dir, catalog, lookup: lookupToLocalhost,
+        baseUrl: `http://huggingface.co:${port}`, insecureHttpHosts: INSECURE_HF,
+      });
+      for (const f of result.files) assert.ok(existsSync(f.path));
+      const del = deleteModel({ modelId: "multi-model", dir, catalog });
+      assert.equal(del.deleted, true);
+      for (const f of result.files) assert.equal(existsSync(f.path), false, `${f.path} removed`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await stopServer(srv);
+  }
 });

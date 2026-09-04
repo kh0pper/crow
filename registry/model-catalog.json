@@ -26,172 +26,522 @@
   },
   "models": [
     {
-      "id": "qwen3-4b",
-      "family": "qwen3",
+      "id": "qwen3.5-4b",
+      "family": "qwen3.5",
       "lab": "Qwen",
-      "hf_repo": "Qwen/Qwen3-4B-GGUF",
+      "hf_repo": "unsloth/Qwen3.5-4B-GGUF",
       "license": "apache-2.0",
       "gated": false,
       "task": "chat",
-      "context_len": 8192,
+      "context_len": 32768,
       "min_runtime_version": "b10068",
-      "default_quant": "Q4_K_M",
+      "default_quant": "UD-Q4_K_XL",
       "first_run_default": true,
-      "chat_template_kwargs": { "enable_thinking": false },
-      "tags": ["chat", "small", "cpu-capable"],
-      "notes": "Small class default. Runs on CPU alone (min_vram_mb: 0) on an 8 GB RAM machine; this is the first model Crow offers on a fresh install. chat_template_kwargs suppresses Qwen3's <think> reasoning block: on a small model the thinking preamble is noisy filler that ruins the first-chat experience, and the llm-router's fast voice route already defaults to the same enable_thinking:false.",
+      "chat_template_kwargs": {
+        "enable_thinking": false
+      },
+      "tags": [
+        "small",
+        "chat",
+        "vision",
+        "cpu-capable",
+        "voice"
+      ],
+      "notes": "The fast route. This is the voice/companion model on this box (crow-voice): every Meta Glasses and AI Companion turn hits it first and only escalates to the 35B on a leading !escalate. It is also the fresh-install default \u2014 the UD-Q4_K_XL quant runs on CPU alone in under 8 GB of RAM. chat_template_kwargs suppresses Qwen's <think> block: on a 4B the reasoning preamble is noisy filler that ruins a first chat and adds latency to a voice turn. Natively vision-language; the mmproj companion is downloaded beside it and passed to llama-server as --mmproj so image turns work out of the box.",
+      "companions": [
+        {
+          "kind": "mmproj",
+          "file": "mmproj-F16.gguf",
+          "size_mb": 672.42,
+          "sha256": "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"
+        }
+      ],
       "quants": [
         {
-          "file": "Qwen3-4B-Q4_K_M.gguf",
-          "quant": "Q4_K_M",
-          "size_mb": 2497.28,
-          "min_ram_mb": 6030,
+          "file": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+          "quant": "UD-Q4_K_XL",
+          "size_mb": 2912.11,
+          "min_ram_mb": 7720,
           "min_vram_mb": 0,
-          "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"
-        }
-      ]
-    },
-    {
-      "id": "phi-4-mini-instruct",
-      "family": "phi4",
-      "lab": "Microsoft",
-      "hf_repo": "unsloth/Phi-4-mini-instruct-GGUF",
-      "license": "mit",
-      "gated": false,
-      "task": "chat",
-      "context_len": 8192,
-      "min_runtime_version": "b10068",
-      "default_quant": "Q4_K_M",
-      "tags": ["chat", "small", "cpu-capable"],
-      "notes": "GGUF requantized by unsloth from Microsoft's Phi-4-mini-instruct (3.8B). CPU-capable second small-class option alongside the Qwen default.",
-      "quants": [
+          "sha256": "b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7"
+        },
         {
-          "file": "Phi-4-mini-instruct-Q4_K_M.gguf",
-          "quant": "Q4_K_M",
-          "size_mb": 2491.87,
-          "min_ram_mb": 6226,
+          "file": "Qwen3.5-4B-Q8_0.gguf",
+          "quant": "Q8_0",
+          "size_mb": 4482.4,
+          "min_ram_mb": 9290,
           "min_vram_mb": 0,
-          "sha256": "88c00229914083cd112853aab84ed51b87bdf6b9ce42f532d8c85c7c63b1730a"
+          "sha256": "10cc391b403021dd11c614679d2fd92f611c3681d29e29651b717316965d61e1"
         }
       ]
     },
     {
-      "id": "llama-3.1-8b-instruct",
-      "family": "llama3.1",
-      "lab": "Meta",
-      "hf_repo": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
-      "license": "llama3.1",
-      "gated": false,
-      "task": "chat",
-      "context_len": 8192,
-      "min_runtime_version": "b10068",
-      "default_quant": "Q4_K_M",
-      "tags": ["chat", "mid"],
-      "notes": "Community GGUF requantization by bartowski (275k+ downloads) — Meta does not publish official GGUF files for Llama 3.1. min_vram_mb is an engineering estimate (quant size rounded up + ~1 GiB headroom for KV/activations at this entry's context_len), not a vendor-published figure.",
-      "quants": [
-        {
-          "file": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
-          "quant": "Q4_K_M",
-          "size_mb": 4920.74,
-          "min_ram_mb": 9728,
-          "min_vram_mb": 6144,
-          "sha256": "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c"
-        }
-      ]
-    },
-    {
-      "id": "ministral-8b-instruct",
-      "family": "ministral",
-      "lab": "Mistral AI",
-      "hf_repo": "bartowski/Ministral-8B-Instruct-2410-GGUF",
-      "license": "mrl",
-      "gated": false,
-      "task": "chat",
-      "context_len": 8192,
-      "min_runtime_version": "b10068",
-      "default_quant": "Q4_K_M",
-      "tags": ["chat", "mid"],
-      "notes": "Mistral Research License (MRL) — non-commercial use only, not permissive; documented here so the catalog card shows it honestly. min_vram_mb is an engineering estimate (see llama-3.1-8b-instruct entry for the methodology).",
-      "quants": [
-        {
-          "file": "Ministral-8B-Instruct-2410-Q4_K_M.gguf",
-          "quant": "Q4_K_M",
-          "size_mb": 4911.5,
-          "min_ram_mb": 10256,
-          "min_vram_mb": 6144,
-          "sha256": "bbe8d91c196491b1802b20aba121d2ef38945a8e6c6c6a8710bfd2ef393fe73f"
-        }
-      ]
-    },
-    {
-      "id": "qwen3-14b",
-      "family": "qwen3",
-      "lab": "Qwen",
-      "hf_repo": "Qwen/Qwen3-14B-GGUF",
-      "license": "apache-2.0",
-      "gated": false,
-      "task": "chat",
-      "context_len": 8192,
-      "min_runtime_version": "b10068",
-      "default_quant": "Q4_K_M",
-      "tags": ["chat", "mid"],
-      "notes": "Official Qwen GGUF. min_vram_mb is an engineering estimate (see llama-3.1-8b-instruct entry for the methodology).",
-      "quants": [
-        {
-          "file": "Qwen3-14B-Q4_K_M.gguf",
-          "quant": "Q4_K_M",
-          "size_mb": 9001.75,
-          "min_ram_mb": 16225,
-          "min_vram_mb": 10240,
-          "sha256": "500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0"
-        }
-      ]
-    },
-    {
-      "id": "deepseek-r1-distill-qwen-32b",
-      "family": "deepseek-r1-distill",
-      "lab": "DeepSeek",
-      "hf_repo": "bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF",
-      "license": "mit",
-      "gated": false,
-      "task": "chat",
-      "context_len": 8192,
-      "min_runtime_version": "b10068",
-      "default_quant": "Q4_K_M",
-      "tags": ["chat", "large", "reasoning"],
-      "notes": "DeepSeek-R1 reasoning distilled onto a Qwen2.5-32B base, released by DeepSeek under MIT; GGUF requantized by bartowski. Large class — needs a real GPU or a lot of RAM to be usable; min_vram_mb is an engineering estimate (see llama-3.1-8b-instruct entry for the methodology).",
-      "quants": [
-        {
-          "file": "DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
-          "quant": "Q4_K_M",
-          "size_mb": 19851.34,
-          "min_ram_mb": 31101,
-          "min_vram_mb": 21504,
-          "sha256": "bed9b0f551f5b95bf9da5888a48f0f87c37ad6b72519c4cbd775f54ac0b9fc62"
-        }
-      ]
-    },
-    {
-      "id": "gemma-3-27b-it",
-      "family": "gemma3",
+      "id": "gemma-4-e2b-it",
+      "family": "gemma4",
       "lab": "Google",
-      "hf_repo": "google/gemma-3-27b-it-qat-q4_0-gguf",
+      "hf_repo": "unsloth/gemma-4-E2B-it-GGUF",
       "license": "gemma",
-      "gated": true,
+      "gated": false,
       "task": "chat",
-      "context_len": 8192,
+      "context_len": 32768,
       "min_runtime_version": "b10068",
       "default_quant": "Q4_0",
-      "tags": ["chat", "large", "gated"],
-      "notes": "Official Google QAT (quantization-aware training) GGUF, gated on Hugging Face (gated: \"manual\" — requires an HF account that has clicked accept on the Gemma license before download works, even with a valid token). Exercises the catalog's three-state gated-download flow. This repo's blobs=true metadata endpoint happened to still expose a real sha256 for the quant file despite the gate (only the actual file download at /resolve/ enforces it) — verified independently against the HF tree API's file-size field, which matches exactly. Large class — needs a real GPU or a lot of RAM to be usable; min_vram_mb is an engineering estimate (see llama-3.1-8b-instruct entry for the methodology). The repo also ships a multimodal mmproj file that is NOT included here — this entry is text-chat only.",
+      "tags": [
+        "small",
+        "chat",
+        "vision",
+        "cpu-capable"
+      ],
+      "notes": "Google's Gemma 4 E2B (effective 2B parameters) instruction-tuned, unsloth GGUF. The second small-class option: a different lineage from the Qwen default for comparing small-model behavior, CPU-capable, vision-capable through its mmproj companion. Gemma license, not Apache \u2014 the card shows it honestly. Not gated on Hugging Face (unlike the older official Gemma 3 QAT repo this catalog used to carry).",
+      "companions": [
+        {
+          "kind": "mmproj",
+          "file": "mmproj-F16.gguf",
+          "size_mb": 985.65,
+          "sha256": "140be8d7849741f88c50757d529b84373ee8e27052cc2236855b537f4a8215fa"
+        }
+      ],
       "quants": [
         {
-          "file": "gemma-3-27b-it-q4_0.gguf",
+          "file": "gemma-4-E2B-it-Q4_0.gguf",
           "quant": "Q4_0",
-          "size_mb": 17229.63,
-          "min_ram_mb": 28664,
-          "min_vram_mb": 18432,
-          "sha256": "7b131f721b95bd06ef4066e18ed2febed15ad6620f61c6eaf37832837ca109fe"
+          "size_mb": 3041.38,
+          "min_ram_mb": 4728,
+          "min_vram_mb": 0,
+          "sha256": "31d3a3c630d4e71a7416498c42660dd3805066948acaec76a47e1ffac7010132"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-embedding-0.6b",
+      "family": "qwen3",
+      "lab": "Qwen",
+      "hf_repo": "Qwen/Qwen3-Embedding-0.6B-GGUF",
+      "license": "apache-2.0",
+      "gated": false,
+      "task": "embedding",
+      "context_len": 8192,
+      "min_runtime_version": "b10068",
+      "default_quant": "Q8_0",
+      "tags": [
+        "small",
+        "embedding",
+        "cpu-capable"
+      ],
+      "notes": "The fleet embedding model. Every Crow memory in this lab is embedded with it \u2014 grackle serves it under vLLM today (grackle-embed) \u2014 and this entry lets a fresh install or a CPU-only box serve the same vector space with llama-server --embedding, so memories stay comparable across instances without a re-embed. Switching to a different embedding model means re-embedding everything (see the AI providers guide). Official Qwen GGUF; min_ram_mb is computed at its 8k context.",
+      "quants": [
+        {
+          "file": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+          "quant": "Q8_0",
+          "size_mb": 639.15,
+          "min_ram_mb": 2091,
+          "min_vram_mb": 0,
+          "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-reranker-0.6b",
+      "family": "qwen3",
+      "lab": "Qwen",
+      "hf_repo": "mradermacher/Qwen3-Reranker-0.6B-GGUF",
+      "license": "apache-2.0",
+      "gated": false,
+      "task": "rerank",
+      "context_len": 8192,
+      "min_runtime_version": "b10068",
+      "default_quant": "Q8_0",
+      "tags": [
+        "small",
+        "rerank",
+        "cpu-capable"
+      ],
+      "notes": "The fleet reranker, paired with the embedding model above for two-stage retrieval (embed, take the top k, rerank). Runs on grackle under vLLM today; this entry serves it with llama-server --reranking. GGUF by mradermacher \u2014 Qwen publishes no official GGUF for the reranker, and the file is named with a dot before the quant (Qwen3-Reranker-0.6B.Q8_0.gguf) in that repo's convention.",
+      "quants": [
+        {
+          "file": "Qwen3-Reranker-0.6B.Q8_0.gguf",
+          "quant": "Q8_0",
+          "size_mb": 639.15,
+          "min_ram_mb": 2091,
+          "min_vram_mb": 0,
+          "sha256": "c525a7449243f690a7062e6377d6cf5adbb289354bd4316312367cd20e187ab7"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-vl-4b-instruct",
+      "family": "qwen3-vl",
+      "lab": "Qwen",
+      "hf_repo": "unsloth/Qwen3-VL-4B-Instruct-GGUF",
+      "license": "apache-2.0",
+      "gated": false,
+      "task": "vision",
+      "context_len": 32768,
+      "min_runtime_version": "b10068",
+      "default_quant": "Q4_K_M",
+      "tags": [
+        "small",
+        "vision",
+        "chat",
+        "cpu-capable"
+      ],
+      "notes": "The fleet vision specialist (grackle-vision under vLLM today). A dedicated vision-language model for turns where the image is the point \u2014 the 35B's mmproj covers casual vision, this is the tier the dashboard smart-router sends image turns to (vision \u2192 grackle-vision today). Small enough for CPU; the mmproj companion downloads beside it. Registered as task vision, so it does not join the chat mutex group and can sit next to a resident chat model.",
+      "companions": [
+        {
+          "kind": "mmproj",
+          "file": "mmproj-F16.gguf",
+          "size_mb": 836.18,
+          "sha256": "1b9f4e92f0fbda14d7d7b58baed86039b8a980fe503d9d6a9393f25c0028f1fc"
+        }
+      ],
+      "quants": [
+        {
+          "file": "Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
+          "quant": "Q4_K_M",
+          "size_mb": 2497.28,
+          "min_ram_mb": 7842,
+          "min_vram_mb": 0,
+          "sha256": "d4dcd426bfba75752a312b266b80fec8136fbaca13c62d93b7ac41fa67f0492b"
+        },
+        {
+          "file": "Qwen3-VL-4B-Instruct-Q8_0.gguf",
+          "quant": "Q8_0",
+          "size_mb": 4280.41,
+          "min_ram_mb": 9625,
+          "min_vram_mb": 0,
+          "sha256": "e30b41d2f2cc48149dfbba1b3fb2c023c7e6bf2def75833d4d43820df75efeb3"
+        }
+      ]
+    },
+    {
+      "id": "qwen3.6-35b-a3b",
+      "family": "qwen3.6",
+      "lab": "Qwen",
+      "hf_repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+      "license": "apache-2.0",
+      "gated": false,
+      "task": "chat",
+      "context_len": 262144,
+      "min_runtime_version": "b10068",
+      "default_quant": "UD-Q5_K_XL",
+      "tags": [
+        "mid",
+        "chat",
+        "vision",
+        "agentic",
+        "default-workhorse"
+      ],
+      "notes": "The resident workhorse. crow-chat on this box: a 35B mixture-of-experts with 3B active parameters, which is why it runs at interactive speed on the Strix Halo's unified memory and why it stays loaded \u2014 every bot, every Bot Builder turn, the dashboard chat, and the companion's !escalate target all land here. Agentic tool-calling is its strength; multimodal via the mmproj companion. UD-Q5_K_XL is the daily quant, UD-Q4_K_XL for a tighter box. 256k context is the model's; min_ram_mb is computed at a 32k fit context \u2014 budget more RAM for long agentic sessions.",
+      "companions": [
+        {
+          "kind": "mmproj",
+          "file": "mmproj-F16.gguf",
+          "size_mb": 899.28,
+          "sha256": "8971ee4f331ff0a4c609374f32984b3d4e6dc086c0aa35f1d637fad1829e887f"
+        }
+      ],
+      "quants": [
+        {
+          "file": "Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf",
+          "quant": "UD-Q5_K_XL",
+          "size_mb": 26592.51,
+          "min_ram_mb": 29789,
+          "min_vram_mb": 0,
+          "sha256": "25233af7642e3a91bd52cc4aeefdbd4a117479088e06cf1aea5b6bedb443c506"
+        },
+        {
+          "file": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+          "quant": "UD-Q4_K_XL",
+          "size_mb": 22360.46,
+          "min_ram_mb": 25557,
+          "min_vram_mb": 0,
+          "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+        }
+      ]
+    },
+    {
+      "id": "qwen3.8-27b",
+      "family": "qwen3.8",
+      "lab": "Qwen",
+      "hf_repo": "unsloth/Qwen3.8-27B-GGUF",
+      "license": "apache-2.0",
+      "gated": false,
+      "task": "chat",
+      "context_len": 262144,
+      "min_runtime_version": "b10068",
+      "default_quant": "UD-Q6_K_XL",
+      "tags": [
+        "mid",
+        "chat",
+        "vision",
+        "coding",
+        "copilot",
+        "long-context"
+      ],
+      "notes": "The dense copilot and critic. Where the 35B is the fast agentic hand, the 27B is the second opinion: code review, plan critique, and long-context batch work (a 512k-YaRN variant exposed as a bot model is a separate queued item). It shares the chat mutex group with the 35B, so starting it evicts the workhorse \u2014 deliberate: on this box it is a batch model, not a resident. UD-Q6_K_XL is the quality quant; UD-Q4_K_XL when RAM is tight. Vision via the mmproj companion; min_ram_mb is computed at a 32k fit context.",
+      "companions": [
+        {
+          "kind": "mmproj",
+          "file": "mmproj-F16.gguf",
+          "size_mb": 927.61,
+          "sha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e"
+        }
+      ],
+      "quants": [
+        {
+          "file": "Qwen3.8-27B-UD-Q6_K_XL.gguf",
+          "quant": "UD-Q6_K_XL",
+          "size_mb": 25299.06,
+          "min_ram_mb": 34401,
+          "min_vram_mb": 0,
+          "sha256": "701d8fa9ed214ab21bfc130cd2a7df19ca89bbef7713e2dfb19f3c63696aa917"
+        },
+        {
+          "file": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+          "quant": "UD-Q4_K_XL",
+          "size_mb": 17559.18,
+          "min_ram_mb": 26662,
+          "min_vram_mb": 0,
+          "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+        }
+      ]
+    },
+    {
+      "id": "qwen3.8-flash-next",
+      "family": "qwen3.8",
+      "lab": "Qwen",
+      "hf_repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+      "license": "apache-2.0",
+      "gated": false,
+      "task": "chat",
+      "context_len": 262144,
+      "min_runtime_version": "b10068",
+      "default_quant": "UD-Q4_K_XL",
+      "tags": [
+        "large",
+        "chat",
+        "bench",
+        "mtp"
+      ],
+      "notes": "Benchmark-window heavy. A four-part UD-Q4_K_XL (about 111 GB total) that needs the whole box: start it only inside a registered CROW-SCHEDULE window \u2014 the orchestrator's reservation gate refuses on-demand starts while a window is active for anything else. Ships a multi-token-prediction (MTP) head as a companion: the catalog downloads it beside the model for the operator's own llama-server launchers but passes no MTP flag, because MTP loading is build-specific in llama.cpp. Needs a llama.cpp build with the Qwen3.8-Flash-Next architecture; the operator runs it from his own builds today, and the stock runtime release may not load it.",
+      "companions": [
+        {
+          "kind": "mtp",
+          "file": "MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf",
+          "size_mb": 4137.43,
+          "sha256": "cd87e5d1a4dadaeed63e35929f3b2f28d13e081b4cd32e00f2835095ec09351e"
+        }
+      ],
+      "quants": [
+        {
+          "file": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+          "quant": "UD-Q4_K_XL",
+          "size_mb": 111334.65,
+          "min_ram_mb": 115068,
+          "min_vram_mb": 0,
+          "sha256": "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082",
+          "shards": [
+            {
+              "file": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+              "size_mb": 49859.58,
+              "sha256": "3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9"
+            },
+            {
+              "file": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+              "size_mb": 49376.14,
+              "sha256": "56758f40269cad5cd9b0d3d6fbae0f40f6d5be6de49e4ab392dbe83157d9cbd3"
+            },
+            {
+              "file": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+              "size_mb": 12087.98,
+              "sha256": "753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glm-5.3-flash",
+      "family": "glm5",
+      "lab": "Z.ai",
+      "hf_repo": "unsloth/GLM-5.3-Flash-GGUF",
+      "license": "mit",
+      "gated": false,
+      "task": "chat",
+      "context_len": 131072,
+      "min_runtime_version": "b10068",
+      "default_quant": "UD-IQ2_XXS",
+      "tags": [
+        "large",
+        "chat",
+        "vision",
+        "bench",
+        "two-box"
+      ],
+      "notes": "Benchmark-window heavy, replacing the GLM-5.2 bench entry. Z.ai's GLM-5.3-Flash in unsloth dynamic quants of four to six parts: UD-IQ2_XXS (about 102 GB) fits this box alone, UD-IQ4_XS (about 157 GB) and UD-Q4_K_XL (about 200 GB) are the two-box split. Vision via the mmproj companion. Requires a llama.cpp build with glm5_next support \u2014 the operator runs it from his own builds today; the catalog's stock runtime release will not load it. Reservation-gated like the other heavies: register a CROW-SCHEDULE window before starting.",
+      "companions": [
+        {
+          "kind": "mmproj",
+          "file": "mmproj-F16.gguf",
+          "size_mb": 1128.05,
+          "sha256": "96ccc182997646ad4405385a1987b1ac1e6adccd2669de43c3ea39692699ed27"
+        }
+      ],
+      "quants": [
+        {
+          "file": "UD-IQ2_XXS/GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf",
+          "quant": "UD-IQ2_XXS",
+          "size_mb": 101844.96,
+          "min_ram_mb": 102934,
+          "min_vram_mb": 0,
+          "sha256": "d9605eec5aa2c14fc9ccff1ba3341a1e9a1476b08714d41cd43d0e10a4db3f7a",
+          "shards": [
+            {
+              "file": "UD-IQ2_XXS/GLM-5.3-Flash-UD-IQ2_XXS-00002-of-00004.gguf",
+              "size_mb": 49896.3,
+              "sha256": "d51a3d9ca05022d53e71753df75ee64ed5fd4e47655650ae023e9717b3ec158d"
+            },
+            {
+              "file": "UD-IQ2_XXS/GLM-5.3-Flash-UD-IQ2_XXS-00003-of-00004.gguf",
+              "size_mb": 49248.51,
+              "sha256": "89180f13784dc1128586b98adf1ca876279881a20bc4f01747703ce352563372"
+            },
+            {
+              "file": "UD-IQ2_XXS/GLM-5.3-Flash-UD-IQ2_XXS-00004-of-00004.gguf",
+              "size_mb": 2690.72,
+              "sha256": "9e0ef47daa1fdffce3cf2ac1594ce4634d176ad018be6e692729757f38d5fbf6"
+            }
+          ]
+        },
+        {
+          "file": "UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00001-of-00005.gguf",
+          "quant": "UD-IQ4_XS",
+          "size_mb": 156822.11,
+          "min_ram_mb": 157911,
+          "min_vram_mb": 0,
+          "sha256": "eec97673e9acb38f8682250e778f88991e731771bab8d3c0b787985949aacefa",
+          "shards": [
+            {
+              "file": "UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00002-of-00005.gguf",
+              "size_mb": 49989.33,
+              "sha256": "7d64cf0395672c4322012841abec502ea7e20518299bb5e3069003f06f9e6de9"
+            },
+            {
+              "file": "UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00003-of-00005.gguf",
+              "size_mb": 49607.03,
+              "sha256": "7c2c63c9c30f8060428fdf2ac935dbf2ee9ad8f771d62b6ae47a7f7f2c1520e7"
+            },
+            {
+              "file": "UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00004-of-00005.gguf",
+              "size_mb": 49486.53,
+              "sha256": "06c90f191871317c92dd9d25a353b687aed44c50f3ac6c713e9fe410bc2d26dd"
+            },
+            {
+              "file": "UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00005-of-00005.gguf",
+              "size_mb": 7729.79,
+              "sha256": "66ebf9ec85e04d3f44af674ae4f694acbc89cc53db75e42f2f4d3646bf321c0d"
+            }
+          ]
+        },
+        {
+          "file": "UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL-00001-of-00006.gguf",
+          "quant": "UD-Q4_K_XL",
+          "size_mb": 199707.33,
+          "min_ram_mb": 200797,
+          "min_vram_mb": 0,
+          "sha256": "00dceaf3ed08781b1e44513a44ebb19e96248d01ba2a80b17f675a2b6fa9a1ee",
+          "shards": [
+            {
+              "file": "UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL-00002-of-00006.gguf",
+              "size_mb": 49198.04,
+              "sha256": "d3ecb6ff3957a99878f9a0352676a0913748a431a9a4a1b1ffa5ade9b8947a74"
+            },
+            {
+              "file": "UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL-00003-of-00006.gguf",
+              "size_mb": 49988.63,
+              "sha256": "328073c004e7c5395b208247feed26089db247b94dd8fa4ab0f2569d86c1d770"
+            },
+            {
+              "file": "UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL-00004-of-00006.gguf",
+              "size_mb": 48700.7,
+              "sha256": "6803ab7effa6da4a0b02c9c7865952fdd6c5b2e10e53903348da369e90bd13f9"
+            },
+            {
+              "file": "UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL-00005-of-00006.gguf",
+              "size_mb": 49026.03,
+              "sha256": "852f3df9dacde3d196796f9fe738468e80c8701555ff0a8c30bc010fb8974dd8"
+            },
+            {
+              "file": "UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL-00006-of-00006.gguf",
+              "size_mb": 2784.5,
+              "sha256": "c6ba510fafc1e12cc0addbc361a329c0c592ab96980098e7e25e107d8faa983e"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "family": "deepseek4",
+      "lab": "DeepSeek",
+      "hf_repo": "unsloth/DeepSeek-V4-Flash-0731-GGUF",
+      "license": "mit",
+      "gated": false,
+      "task": "chat",
+      "context_len": 131072,
+      "min_runtime_version": "b10068",
+      "default_quant": "UD-IQ3_XXS",
+      "tags": [
+        "large",
+        "chat",
+        "bench"
+      ],
+      "notes": "Benchmark-window heavy. DeepSeek-V4-Flash (0731) in unsloth dynamic quants of three to four parts (about 97 to 104 GB). Text-only. Requires a llama.cpp build with deepseek4 support \u2014 the operator runs it from his own builds today; the catalog's stock runtime release will not load it. Reservation-gated like the other heavies: register a CROW-SCHEDULE window before starting, and expect the whole box for the duration.",
+      "quants": [
+        {
+          "file": "UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+          "quant": "UD-IQ3_XXS",
+          "size_mb": 104207.85,
+          "min_ram_mb": 106344,
+          "min_vram_mb": 0,
+          "sha256": "dec1cee704800267d9d836d5a61aefc33705be939bbb3058fa9006d98191576d",
+          "shards": [
+            {
+              "file": "UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00002-of-00004.gguf",
+              "size_mb": 49910.53,
+              "sha256": "3064d3c4c1d6363e9f9ad88e90a3e2c5fb2d6f7ae16ca72135c3ce6a5c984da5"
+            },
+            {
+              "file": "UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00003-of-00004.gguf",
+              "size_mb": 49257.86,
+              "sha256": "2e9b2732eca7da8324f731653624a4f5c9846258926fd9f468cc703afb51a019"
+            },
+            {
+              "file": "UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf",
+              "size_mb": 5034.2,
+              "sha256": "4ca79d8e5107dd1b9bb57b176a7c09948837425dee49f0f1dfd6547a3769fea7"
+            }
+          ]
+        },
+        {
+          "file": "UD-Q2_K_XL/DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00001-of-00003.gguf",
+          "quant": "UD-Q2_K_XL",
+          "size_mb": 96832.51,
+          "min_ram_mb": 98968,
+          "min_vram_mb": 0,
+          "sha256": "de65c5bb660817b95cc281bf54935f9d1bcc3b22535f2eae63b35a14c7c5724b",
+          "shards": [
+            {
+              "file": "UD-Q2_K_XL/DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00002-of-00003.gguf",
+              "size_mb": 49437.01,
+              "sha256": "c8728a298862cd8736782e2e4056e5e3e03c415ba552a38173264494e41ef327"
+            },
+            {
+              "file": "UD-Q2_K_XL/DeepSeek-V4-Flash-0731-UD-Q2_K_XL-00003-of-00003.gguf",
+              "size_mb": 47390.24,
+              "sha256": "a4bae0788c025c1b2388754592c98fefa1372981748ac9875039bf6a30e6eeb4"
+            }
+          ]
         }
       ]
     }

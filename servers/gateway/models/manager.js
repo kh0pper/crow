@@ -34,13 +34,17 @@
  *     to re-feed the bytes already on disk into a fresh hash before
  *     appending the rest). Knows nothing about `state.js` or catalogs.
  *
- *   - `downloadModel()` — the orchestrator. Resolves a catalog entry to a
- *     URL + a sanitized on-disk destination, consults the journal (from
- *     `state.js`) to decide whether this is a fresh download or a resume,
- *     and journals progress (throttled) back through `loadState`/
+ *   - `downloadModel()` — the orchestrator. Resolves a catalog entry to the
+ *     ordered list of files it needs (`planFiles`: the quant's primary
+ *     part, then its `shards`, then the model's `companions` — schema v2,
+ *     multi-part GGUFs + mmproj/mtp sidecars), each with its own URL,
+ *     sanitized on-disk destination and sha256; consults the journal (from
+ *     `state.js`) to decide, PER FILE, whether it is finished, resumable or
+ *     fresh; and journals progress (throttled) back through `loadState`/
  *     `saveState` so a killed process can pick up where it left off. This
  *     is the layer real callers (the model panel, Task 7's provider
- *     registration) use.
+ *     registration) use. A legacy single-file entry plans exactly one
+ *     file and behaves exactly as before.
  *
  * `enqueueDownload()` is a module-level serial queue over `downloadModel`:
  * concurrency defaults to 1 and is honored up to a max of 2 via
@@ -95,12 +99,16 @@ export class HostNotAllowedError extends Error {
  * this is thrown — a mismatched blob is never left on disk to be
  * mistaken for a good one. */
 export class ChecksumError extends Error {
-  constructor(expectedSha, actualSha) {
-    super(`Checksum mismatch: expected ${expectedSha}, got ${actualSha}`);
+  constructor(expectedSha, actualSha, file) {
+    super(`Checksum mismatch: expected ${expectedSha}, got ${actualSha}${file ? ` for ${basename(String(file))}` : ""}`);
     this.name = "ChecksumError";
     this.code = "CHECKSUM_MISMATCH";
     this.expectedSha = expectedSha;
     this.actualSha = actualSha;
+    /** Destination path of the file that failed verification (multi-part
+     * downloads: names WHICH part, since the verified earlier parts are
+     * kept on disk). */
+    this.file = file || null;
   }
 }
 
@@ -594,7 +602,7 @@ export async function fetchModelBlob({
   const sha256 = hash.digest("hex");
   if (expectedSha && sha256.toLowerCase() !== String(expectedSha).toLowerCase()) {
     try { unlinkSync(dest); } catch { /* best effort */ }
-    throw new ChecksumError(expectedSha, sha256);
+    throw new ChecksumError(expectedSha, sha256, dest);
   }
   return { path: dest, sha256, bytesDone };
 }
@@ -607,10 +615,107 @@ function modelsBlobDir(dir) {
   return join(dir, "models", "blobs");
 }
 
+/** On-disk basename for a companion file. Namespaced by the model id
+ * because every vision repo ships its projector under the SAME name
+ * (`mmproj-F16.gguf`) and the blob dir is flat — two vision models
+ * installed side by side must never overwrite each other's projector. */
+export function companionFilename(modelId, file) {
+  return sanitizeFilename(`${modelId}--${sanitizeFilename(file)}`);
+}
+
 /**
- * Download a model's quant file, journaling progress to `state.js` so a
- * killed/restarted process can resume. See module doc for the full
- * contract; `dir` is the injected CROW_HOME/data dir (never guessed).
+ * The ordered list of files a catalog quant needs on disk (schema v2):
+ * the quant's primary part, then each `shards[i]` (parts 2..n of a
+ * multi-part GGUF, in catalog order), then each of the model's
+ * `companions` (mmproj / mtp sidecars). Pure: no I/O.
+ *
+ * Each entry: `{ url, dest, expectedSha, sizeMb, role, kind? }` —
+ * `role` is "primary" | "shard" | "companion", `kind` is the companion
+ * kind ("mmproj" | "mtp") and absent otherwise. `dest` is the sanitized
+ * basename, joined under `blobDir` when one is given. `sizeMb` for the
+ * primary is the quant's TOTAL `size_mb` minus its shards (the catalog
+ * records the total on the quant), so the entries' sizes sum to the whole
+ * download — used to seed cumulative progress before every part has been
+ * HEAD-ed. `baseUrl` is the test-only override `downloadModel` accepts.
+ */
+export function planFiles(model, quantEntry, { baseUrl, blobDir } = {}) {
+  const url = (file) => (baseUrl ? buildDownloadUrl(model.hf_repo, file, baseUrl) : buildDownloadUrl(model.hf_repo, file));
+  const place = (name) => (blobDir ? join(blobDir, name) : name);
+  const num = (n) => (typeof n === "number" && Number.isFinite(n) ? n : null);
+
+  const shards = Array.isArray(quantEntry.shards) ? quantEntry.shards : [];
+  const companions = Array.isArray(model.companions) ? model.companions : [];
+
+  const shardTotal = shards.reduce((acc, sh) => acc + (num(sh.size_mb) || 0), 0);
+  const total = num(quantEntry.size_mb);
+  const primarySize = total == null ? null : Math.max(0, total - shardTotal);
+
+  const plan = [{
+    url: url(quantEntry.file),
+    dest: place(sanitizeFilename(quantEntry.file)),
+    expectedSha: quantEntry.sha256 || null,
+    sizeMb: primarySize,
+    role: "primary",
+  }];
+  for (const sh of shards) {
+    plan.push({
+      url: url(sh.file),
+      dest: place(sanitizeFilename(sh.file)),
+      expectedSha: sh.sha256 || null,
+      sizeMb: num(sh.size_mb),
+      role: "shard",
+    });
+  }
+  for (const c of companions) {
+    plan.push({
+      url: url(c.file),
+      dest: place(companionFilename(model.id, c.file)),
+      expectedSha: c.sha256 || null,
+      sizeMb: num(c.size_mb),
+      role: "companion",
+      kind: c.kind,
+    });
+  }
+  return plan;
+}
+
+/** Normalize a journal entry to its per-file list. Entries written before
+ * the multi-file journal (`{url,dest,bytesDone,expectedSha,startedAt}`,
+ * no `files`) are read as a one-file list — never a crash. */
+function journalFiles(entry) {
+  if (!entry || typeof entry !== "object") return [];
+  if (Array.isArray(entry.files)) return entry.files.filter((f) => f && typeof f === "object");
+  if (entry.url && entry.dest) {
+    return [{ url: entry.url, dest: entry.dest, bytesDone: entry.bytesDone || 0, expectedSha: entry.expectedSha ?? null, done: false }];
+  }
+  return [];
+}
+
+/**
+ * Download every file a model's quant needs (see `planFiles`), journaling
+ * progress to `state.js` so a killed/restarted process can resume. See
+ * module doc for the full contract; `dir` is the injected CROW_HOME/data
+ * dir (never guessed).
+ *
+ * Journal entry shape (`state.journal[modelId]`):
+ *   `{ url, dest, bytesDone, expectedSha, startedAt,
+ *      files: [ { url, dest, bytesDone, expectedSha, done }, ... ] }`
+ * `files` is one record per planned file, in download order; a file with
+ * `done:true` was fully downloaded AND sha-verified and is skipped on
+ * resume. The top-level `url`/`dest`/`bytesDone`/`expectedSha` mirror the
+ * file currently in flight so every pre-existing single-file reader
+ * (`state.js`'s `resumableDownloads`, the panel's progress view) keeps
+ * working unchanged. An old-shape entry with no `files` is read as a
+ * one-file list (`journalFiles`).
+ *
+ * `onProgress({ bytesDone, totalBytes, file, fileIndex, fileCount })` —
+ * `bytesDone`/`totalBytes` are CUMULATIVE across all files (finished files
+ * count in full; not-yet-started files contribute their catalog size);
+ * `file` is the in-flight file's basename.
+ *
+ * Returns `{ path, sha256, files: [ { path, sha256 }, ... ] }` — `path`/
+ * `sha256` are the primary part's (the pre-v2 return shape), `files` lists
+ * every part in plan order.
  *
  * `baseUrl`, `lookup`, and `insecureHttpHosts` exist purely for tests —
  * production never sets them (real huggingface.co, real DNS, https
@@ -636,21 +741,38 @@ export async function downloadModel({
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
   const blobDir = modelsBlobDir(dir);
   mkdirSync(blobDir, { recursive: true });
-  const dest = join(blobDir, sanitizeFilename(quantEntry.file));
-  assertNotSymlink(dest);
-
-  const url = baseUrl ? buildDownloadUrl(model.hf_repo, quantEntry.file, baseUrl) : buildDownloadUrl(model.hf_repo, quantEntry.file);
-  const expectedSha = quantEntry.sha256 || null;
+  const plan = planFiles(model, quantEntry, { baseUrl, blobDir });
+  for (const f of plan) assertNotSymlink(f.dest);
 
   const initialState = loadState(dir);
-  const existingEntry = initialState.journal[modelId];
-  const resumeFrom = existingEntry && existingEntry.url === url && existingEntry.dest === dest ? existingEntry.bytesDone || 0 : 0;
-  const startedAt = (existingEntry && existingEntry.url === url && existingEntry.dest === dest && existingEntry.startedAt) || new Date().toISOString();
+  const prior = journalFiles(initialState.journal[modelId]);
+  let matchedPrior = false;
+  const files = plan.map((f) => {
+    const p = prior.find((e) => e.url === f.url && e.dest === f.dest);
+    if (p) matchedPrior = true;
+    return {
+      url: f.url,
+      dest: f.dest,
+      expectedSha: f.expectedSha,
+      sizeMb: f.sizeMb,
+      bytesDone: p ? (p.bytesDone || 0) : 0,
+      done: !!(p && p.done === true),
+      sha256: p && p.done === true ? (p.expectedSha ?? null) : null,
+    };
+  });
+  const startedAt = (matchedPrior && initialState.journal[modelId]?.startedAt) || new Date().toISOString();
 
-  // Seed/refresh the journal entry immediately, before any network I/O, so
-  // even an interruption in the first instant leaves a resumable record.
-  initialState.journal[modelId] = { url, dest, bytesDone: resumeFrom, expectedSha, startedAt };
-  saveState(dir, initialState);
+  const journalEntry = (idx) => {
+    const cur = files[idx] || files[files.length - 1];
+    return {
+      url: cur.url,
+      dest: cur.dest,
+      bytesDone: cur.bytesDone,
+      expectedSha: cur.expectedSha,
+      startedAt,
+      files: files.map(({ url, dest, bytesDone, expectedSha, done }) => ({ url, dest, bytesDone, expectedSha, done })),
+    };
+  };
 
   // Persisting reloads state fresh each time (rather than reusing one
   // in-memory object across the whole download) to minimize — though not
@@ -658,58 +780,105 @@ export async function downloadModel({
   // when CROW_MODEL_DL_CONCURRENCY=2. state.json has no real locking; this
   // is a known, accepted v1 limitation (matches state.js's own
   // documented tradeoffs), not something this task solves.
-  const persistJournal = (bytesDone) => {
+  const persistJournal = (idx) => {
     const s = loadState(dir);
-    s.journal[modelId] = { url, dest, bytesDone, expectedSha, startedAt };
+    s.journal[modelId] = journalEntry(idx);
     saveState(dir, s);
   };
-
-  let lastSave = Date.now();
-  const wrappedOnProgress = ({ bytesDone, totalBytes }) => {
-    if (typeof onProgress === "function") onProgress({ bytesDone, totalBytes });
-    const now = Date.now();
-    if (now - lastSave >= journalIntervalMs) {
-      lastSave = now;
-      persistJournal(bytesDone);
-    }
-  };
-
-  try {
-    const result = await fetchModelBlob({
-      url,
-      dest,
-      resumeFrom,
-      expectedSha,
-      lookup,
-      maxRedirects,
-      createWriteStream,
-      insecureHttpHosts,
-      timeoutMs,
-      extraHeaders,
-      onProgress: wrappedOnProgress,
-    });
+  const clearJournal = () => {
     const s = loadState(dir);
     delete s.journal[modelId];
     saveState(dir, s);
-    return { path: result.path, sha256: result.sha256 };
-  } catch (err) {
-    if (err instanceof ChecksumError) {
-      // fetchModelBlob already deleted the bad file — the journal entry
-      // for it is equally stale, drop it rather than offering a "resume"
-      // that would just re-download from scratch anyway.
-      const s = loadState(dir);
-      delete s.journal[modelId];
-      saveState(dir, s);
+  };
+
+  // Seed/refresh the journal entry immediately, before any network I/O, so
+  // even an interruption in the first instant leaves a resumable record.
+  persistJournal(files.findIndex((f) => !f.done));
+
+  const estimateBytes = (f) => (f.sizeMb == null ? 0 : Math.round(f.sizeMb * 1_000_000));
+
+  for (let idx = 0; idx < files.length; idx++) {
+    const f = files[idx];
+    if (f.done) continue;
+
+    let liveTotal = null;
+    let lastSave = Date.now();
+    const cumulative = () => {
+      let bytesDone = 0;
+      let totalBytes = 0;
+      files.forEach((g, i) => {
+        if (i === idx) {
+          bytesDone += g.bytesDone;
+          totalBytes += liveTotal != null ? liveTotal : estimateBytes(g);
+        } else if (g.done) {
+          bytesDone += g.bytesDone;
+          totalBytes += g.bytesDone;
+        } else {
+          totalBytes += estimateBytes(g);
+        }
+      });
+      return { bytesDone, totalBytes };
+    };
+    const wrappedOnProgress = ({ bytesDone, totalBytes }) => {
+      f.bytesDone = bytesDone;
+      if (totalBytes != null) liveTotal = totalBytes;
+      if (typeof onProgress === "function") {
+        onProgress({ ...cumulative(), file: basename(f.dest), fileIndex: idx, fileCount: files.length });
+      }
+      const now = Date.now();
+      if (now - lastSave >= journalIntervalMs) {
+        lastSave = now;
+        persistJournal(idx);
+      }
+    };
+
+    try {
+      const result = await fetchModelBlob({
+        url: f.url,
+        dest: f.dest,
+        resumeFrom: f.bytesDone,
+        expectedSha: f.expectedSha,
+        lookup,
+        maxRedirects,
+        createWriteStream,
+        insecureHttpHosts,
+        timeoutMs,
+        extraHeaders,
+        onProgress: wrappedOnProgress,
+      });
+      f.bytesDone = result.bytesDone;
+      f.done = true;
+      f.sha256 = result.sha256;
+      if (idx < files.length - 1) persistJournal(idx + 1);
+    } catch (err) {
+      if (err instanceof ChecksumError) {
+        // fetchModelBlob already deleted the bad file — its record is
+        // equally stale. Earlier parts that verified are KEPT on disk and
+        // stay `done` in the journal so a retry only re-fetches this one;
+        // when nothing was verified yet, drop the entry rather than
+        // offering a "resume" that would re-download from scratch anyway.
+        f.bytesDone = 0;
+        f.done = false;
+        if (files.some((g) => g.done)) persistJournal(idx);
+        else clearJournal();
+        throw err;
+      }
+      // Any other failure (host refused, interrupted connection, disk full,
+      // ...): flush the latest known bytesDone unconditionally, bypassing
+      // the throttle, so a subsequent call always resumes from an accurate
+      // point rather than losing up to journalIntervalMs of progress.
+      if (typeof err.bytesDone === "number") f.bytesDone = err.bytesDone;
+      persistJournal(idx);
       throw err;
     }
-    // Any other failure (host refused, interrupted connection, disk full,
-    // ...): flush the latest known bytesDone unconditionally, bypassing
-    // the throttle, so a subsequent call always resumes from an accurate
-    // point rather than losing up to journalIntervalMs of progress.
-    const bytesDone = typeof err.bytesDone === "number" ? err.bytesDone : resumeFrom;
-    persistJournal(bytesDone);
-    throw err;
   }
+
+  clearJournal();
+  return {
+    path: files[0].dest,
+    sha256: files[0].sha256,
+    files: files.map((f) => ({ path: f.dest, sha256: f.sha256 })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -926,21 +1095,27 @@ export async function downloadHfFile({
 }
 
 /**
- * Remove a downloaded model's blob (and its journal entry, if any) from
- * `dir`. Task 7 extends this to also unregister the corresponding
- * provider row; this task's version only ever touches the filesystem +
- * `state.js`.
+ * Remove a downloaded model's blob — every part and companion file
+ * `planFiles` names — (and its journal entry, if any) from `dir`. Task 7
+ * extends this to also unregister the corresponding provider row; this
+ * task's version only ever touches the filesystem + `state.js`.
+ * `deleted` is true when at least one file was actually removed; `path`
+ * is the primary part's.
  */
 export function deleteModel({ modelId, quant, dir, catalog }) {
-  const { quantEntry } = resolveEntry(catalog, modelId, quant);
-  const dest = join(modelsBlobDir(dir), sanitizeFilename(quantEntry.file));
+  const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
+  const plan = planFiles(model, quantEntry, { blobDir: modelsBlobDir(dir) });
+  const dest = plan[0].dest;
 
+  // Every part and companion, not just the primary (schema v2).
   let deleted = false;
-  try {
-    unlinkSync(dest);
-    deleted = true;
-  } catch (err) {
-    if (err && err.code !== "ENOENT") throw err;
+  for (const f of plan) {
+    try {
+      unlinkSync(f.dest);
+      deleted = true;
+    } catch (err) {
+      if (err && err.code !== "ENOENT") throw err;
+    }
   }
 
   const state = loadState(dir);
@@ -1205,12 +1380,20 @@ export async function registerModel({
   }
 
   const port = await allocatePortFn(state, modelId, { crowHome: dir, pid: process.pid });
+  // Schema v2: the row records every on-disk file the install owns —
+  // `shardFiles` (parts 2..n of a multi-part GGUF; llama-server finds them
+  // beside the primary) and `companions` (mmproj → `--mmproj` on native
+  // start; mtp kept beside the model) — so `unregisterModel` can remove
+  // them all. Both are empty arrays for a plain single-file quant.
+  const plannedFiles = planFiles(model, quantEntry);
   state.registry[modelId] = {
     file: sanitizeFilename(quantEntry.file),
     quant: quantEntry.quant,
     catalogId: model.id,
     registeredAt: new Date().toISOString(),
     sizeMb: Number.isFinite(quantEntry.size_mb) ? quantEntry.size_mb : null,
+    shardFiles: plannedFiles.filter((f) => f.role === "shard").map((f) => f.dest),
+    companions: plannedFiles.filter((f) => f.role === "companion").map((f) => ({ kind: f.kind, file: f.dest })),
     ...registryExtra,
   };
   saveState(dir, state);
@@ -1270,7 +1453,8 @@ export async function registerModel({
  * Tear down a registered native model: stop its process (if a live runtime
  * handle is given — no process supervisor exists yet as of Task 7, this is
  * a forward-looking seam for the task that adds one), free its port
- * reservation, delete its blob, soft-delete its provider row, and
+ * reservation, delete its blob (every part and companion the registry row
+ * names), soft-delete its provider row, and
  * invalidate the providers cache. Order is binding (asserted via injected
  * spies in tests) — each step only starts once the previous one has
  * settled.
@@ -1302,9 +1486,18 @@ export async function unregisterModel({
   delete state.registry[modelId];
   saveState(dir, state);
 
+  // Primary part, then shards, then companions (schema v2) — a legacy row
+  // with neither field unlinks exactly its one file, as before.
+  const ownedFiles = regEntry?.file
+    ? [
+      regEntry.file,
+      ...(Array.isArray(regEntry.shardFiles) ? regEntry.shardFiles : []),
+      ...(Array.isArray(regEntry.companions) ? regEntry.companions.map((c) => c && c.file) : []),
+    ].filter((name) => typeof name === "string" && name.length > 0)
+    : [];
   let deleted = false;
-  if (regEntry?.file) {
-    const dest = join(modelsBlobDir(dir), regEntry.file);
+  for (const name of ownedFiles) {
+    const dest = join(modelsBlobDir(dir), name);
     try {
       unlinkFn(dest);
       deleted = true;

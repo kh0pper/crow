@@ -28,6 +28,23 @@
  *     strings, and null are rejected) — it is threaded verbatim into
  *     llama-server's --jinja request body and into the openai adapter's
  *     chat_template_kwargs pass-through (C1 Task 1).
+ *
+ * Schema v2 (model catalog curation, 2026-09):
+ *   - task is an enum: chat | embedding | rerank | vision. The native start
+ *     path maps embedding/rerank to llama-server's --embedding/--reranking.
+ *   - a quant may carry `shards`: parts 2..n of a multi-part GGUF
+ *     (`-00002-of-0000N` siblings; llama-server discovers them from the
+ *     primary part). Each shard has file, positive size_mb and sha256
+ *     (sha256 optional only when the model is gated). The quant's size_mb
+ *     is the TOTAL of every part, so it must be >= sum(shards) + 1 (the
+ *     primary part is never zero-sized) and min_ram_mb is checked against
+ *     that total.
+ *   - a model may carry `companions`: sidecar GGUFs downloaded beside the
+ *     quant — kind mmproj (vision projector, passed as --mmproj) or mtp
+ *     (multi-token-prediction head, kept beside the model; no flag). Same
+ *     file/size_mb/sha256 rules as shards.
+ *   - every file basename within a model (quant files, shards, companions)
+ *     must be unique: the downloader stores blobs in ONE flat directory.
  */
 
 import { readFileSync } from "node:fs";
@@ -45,6 +62,46 @@ const KNOWN_RUNTIME_ASSET_KEYS = new Set([
 ]);
 
 const SHA256_RE = /^[0-9a-f]{64}$/i;
+
+const TASKS = ["chat", "embedding", "rerank", "vision"];
+const COMPANION_KINDS = ["mmproj", "mtp"];
+
+/** Basename of a catalog file path (catalog paths use "/" — HF repo paths). */
+function fileBasename(file) {
+  const str = String(file ?? "");
+  const idx = str.lastIndexOf("/");
+  return idx >= 0 ? str.slice(idx + 1) : str;
+}
+
+/**
+ * Shared checks for a shard or companion entry: file present, positive
+ * size_mb, sha256 present (unless gated) and well-formed. Pushes errors
+ * prefixed with `label`; returns the entry's basename (or null when it has
+ * no usable file) so the caller can run the per-model uniqueness check.
+ */
+function checkSidecarFile(entry, label, gated, errors) {
+  if (!entry || typeof entry !== "object") {
+    errors.push(`${label}: entry must be an object`);
+    return null;
+  }
+  let base = null;
+  if (typeof entry.file !== "string" || fileBasename(entry.file).length === 0) {
+    errors.push(`${label}: file must be a non-empty string`);
+  } else {
+    base = fileBasename(entry.file);
+  }
+  if (typeof entry.size_mb !== "number" || !(entry.size_mb > 0)) {
+    errors.push(`${label}: size_mb must be a positive number`);
+  }
+  if (entry.sha256 == null) {
+    if (!gated) {
+      errors.push(`${label}: missing sha256 (only allowed when the model is gated:true)`);
+    }
+  } else if (!SHA256_RE.test(entry.sha256)) {
+    errors.push(`${label}: sha256 is not a valid 64-char hex string`);
+  }
+  return base;
+}
 
 /** Parse a llama.cpp release tag "b<number>" into its numeric build. Returns NaN on malformed input. */
 function parseBuildNumber(tag) {
@@ -120,6 +177,24 @@ export function validateCatalog(catalog) {
       firstRunDefaults.push(model);
     }
 
+    if (!TASKS.includes(model.task)) {
+      errors.push(`${label}: task must be one of ${TASKS.join(", ")}, got ${JSON.stringify(model.task)}`);
+    }
+
+    // Every file basename this model owns (quant files, shards, companions)
+    // — the downloader writes them all to one flat blob dir, so a
+    // collision would silently overwrite a sibling.
+    const seenBasenames = new Map(); // basename -> label of the first owner
+    const claimBasename = (base, owner) => {
+      if (base == null) return;
+      const prior = seenBasenames.get(base);
+      if (prior) {
+        errors.push(`${owner}: file basename "${base}" duplicates ${prior} in the same model`);
+      } else {
+        seenBasenames.set(base, owner);
+      }
+    };
+
     if (model.chat_template_kwargs !== undefined) {
       const isPlainObject = model.chat_template_kwargs !== null
         && typeof model.chat_template_kwargs === "object"
@@ -145,6 +220,30 @@ export function validateCatalog(catalog) {
       errors.push(`${label}: must have at least one quant`);
     }
 
+    // Claim every quant's primary basename first so a shard/companion that
+    // collides with ANY quant file is reported against the sidecar, not
+    // the quant.
+    quants.forEach((quant, qidx) => {
+      if (quant && typeof quant === "object" && typeof quant.file === "string" && fileBasename(quant.file)) {
+        claimBasename(fileBasename(quant.file), `${label} quant[${qidx}] file`);
+      }
+    });
+
+    if (model.companions !== undefined) {
+      if (!Array.isArray(model.companions)) {
+        errors.push(`${label}: companions must be an array when present`);
+      } else {
+        model.companions.forEach((companion, cidx) => {
+          const clabel = `${label} companion[${cidx}]`;
+          const base = checkSidecarFile(companion, clabel, model.gated === true, errors);
+          if (companion && typeof companion === "object" && !COMPANION_KINDS.includes(companion.kind)) {
+            errors.push(`${clabel}: kind must be one of ${COMPANION_KINDS.join(", ")}, got ${JSON.stringify(companion.kind)}`);
+          }
+          claimBasename(base, clabel);
+        });
+      }
+    }
+
     quants.forEach((quant, qidx) => {
       const qlabel = `${label} quant[${qidx}]${quant && quant.quant ? ` (${quant.quant})` : ""}`;
 
@@ -167,6 +266,25 @@ export function validateCatalog(catalog) {
 
       if (typeof quant.size_mb !== "number" || !(quant.size_mb > 0)) {
         errors.push(`${qlabel}: size_mb must be a positive number`);
+      }
+
+      if (quant.shards !== undefined) {
+        if (!Array.isArray(quant.shards)) {
+          errors.push(`${qlabel}: shards must be an array when present`);
+        } else {
+          let shardTotal = 0;
+          quant.shards.forEach((shard, sidx) => {
+            const slabel = `${qlabel} shard[${sidx}]`;
+            const base = checkSidecarFile(shard, slabel, gated, errors);
+            if (shard && typeof shard.size_mb === "number" && shard.size_mb > 0) shardTotal += shard.size_mb;
+            claimBasename(base, slabel);
+          });
+          if (quant.shards.length > 0 && typeof quant.size_mb === "number" && quant.size_mb < shardTotal + 1) {
+            errors.push(
+              `${qlabel}: size_mb (${quant.size_mb}) must be at least the shards' total (${shardTotal}) + 1 — size_mb is the TOTAL of all parts and the primary part is never zero-sized`
+            );
+          }
+        }
       }
       if (typeof quant.min_ram_mb !== "number") {
         errors.push(`${qlabel}: min_ram_mb must be a number`);
