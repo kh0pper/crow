@@ -301,6 +301,34 @@ after(() => {
 });
 
 // ---------------------------------------------------------------------------
+// 0. steer: an empty message is a client bug, refused loudly (acceptance F3)
+// ---------------------------------------------------------------------------
+
+test("steer: empty / whitespace message is refused with empty_message and nothing is sent to pi", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go"); // turn in flight (promptTurn pending)
+  const pi = state.instances[0];
+  const before = pi.sent.length;
+  await assert.rejects(() => engine.steer(s.sessionId, "   "), (e) => e.code === "empty_message");
+  await assert.rejects(() => engine.steer(s.sessionId, ""), (e) => e.code === "empty_message");
+  await assert.rejects(() => engine.steer(s.sessionId, null), (e) => e.code === "empty_message");
+  assert.equal(pi.sent.length, before, "no steer frame reached pi");
+  const r = await engine.steer(s.sessionId, "  go left ");
+  assert.deepEqual(r, { ok: true });
+  assert.equal(pi.sent.length, before + 1, "a real steer still goes through unchanged");
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+});
+
+test("steer: empty message is reported as empty_message even when no turn is running (client bug beats no_turn)", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await assert.rejects(() => engine.steer(s.sessionId, " "), (e) => e.code === "empty_message");
+  await assert.rejects(() => engine.steer(s.sessionId, "x"), (e) => e.code === "no_turn");
+});
+
+// ---------------------------------------------------------------------------
 // 1. model_select event tracking
 // ---------------------------------------------------------------------------
 
