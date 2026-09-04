@@ -16,9 +16,8 @@ import { lines } from "./data-queries.js";
 
 export const SIMPLE_GATEWAY_TYPES = ["gmail", "discord", "telegram", "slack", "perch", "none"];
 
-/** The one gateway type whose surface is a BUNDLE rather than a remote
- * service, so a save can be complete and still have nowhere to show a reply
- * (acceptance finding D2 — both save surfaces warn on it). */
+/** The one gateway type whose surface is native to the dashboard (the board's
+ * roost strip + session drawer, Track 3) rather than a remote service. */
 export const PERCH_GATEWAY_TYPE = "perch";
 
 /**
@@ -39,10 +38,10 @@ export const GATEWAY_REQUIRED_FIELDS = {
   // device.bound_bot_id; a type-only record is a UI draft, W1-4).
   glasses: ["device_id"],
   companion: ["device_id"],
-  // Perch (Perch Hub P1, C-4): the chat surface is the supervised perch-hub
-  // bundle, addressed by bot id — there is nothing per-bot to collect, so the
-  // record is complete the moment the type is chosen. Modelled explicitly as
-  // [] rather than left out: an ABSENT entry means "unknown type, make no
+  // Perch (originally Perch Hub P1, C-4): the chat surface is native to the
+  // dashboard, addressed by bot id — there is nothing per-bot to collect, so
+  // the record is complete the moment the type is chosen. Modelled explicitly
+  // as [] rather than left out: an ABSENT entry means "unknown type, make no
   // claims" (missingGatewayFields bails), which would stop the C4 attach gate
   // from ever seeing a perch record as a real attach.
   perch: [],
@@ -102,8 +101,8 @@ export function renderGatewayFields(gwType, gw, lang) {
     };
   }
   if (gwType === "perch") {
-    // No inputs — the Perch chat surface is the perch-hub bundle's own page,
-    // which addresses the bot by id. Hint only.
+    // No inputs — the Perch chat surface is the board's own roost strip +
+    // session drawer, which addresses the bot by id. Hint only.
     return { fields: "", hint: `<p class="btb-hint">${t("botbuilder.gwHintPerch", lang)}</p>` };
   }
   if (gwType === "none") {

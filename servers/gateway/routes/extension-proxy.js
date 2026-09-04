@@ -98,8 +98,8 @@ function getProxiedExtensions() {
           label: manifest.webUI.label || manifest.name || entry.id,
           proxyMode: manifest.webUI.proxyMode || "subpath",
           // Name of a file under CROW_HOME holding a bearer token for the
-          // backend (perch-hub's `perch-token`). Never a path the manifest
-          // can point outside CROW_HOME — see readAuthToken().
+          // backend. Never a path the manifest can point outside CROW_HOME
+          // — see readAuthToken().
           authTokenFile: manifest.webUI.authTokenFile || null,
         });
       }
@@ -114,8 +114,8 @@ function getProxiedExtensions() {
  * Read the bearer token an extension's manifest named in
  * `webUI.authTokenFile`, or null when there is none / it is not there yet.
  *
- * LAZY BY CONTRACT. The perch-hub token is minted by `perch-runtime.js` from
- * the post-listen boot step, while this proxy's route table is built earlier
+ * LAZY BY CONTRACT. A backend's token can be minted by its own supervisor
+ * well after boot, while this proxy's route table is built earlier
  * (boot/late-mounts.js) — a read at factory-construction time gets nothing on
  * the very first boot after install, and would then serve an empty header for
  * the whole process lifetime. So this runs per request instead.
@@ -212,10 +212,11 @@ export default function extensionProxyFactory(authMiddleware, { createProxy = cr
         // csrfMiddleware)`), because proxied backends serve their own forms
         // and cannot echo Crow's `X-Crow-Csrf`.
         //
-        // For perch-hub that backend exposes `POST /api/hub/spawn`, which its
-        // own header documents as arbitrary code execution. The ONLY thing
-        // preventing a cross-site POST from riding a logged-in operator's
-        // session into it is `SameSite=Lax` on `crow_session`
+        // A proxied backend can expose an endpoint as dangerous as
+        // `POST /api/hub/spawn` (documented by such a backend as arbitrary
+        // code execution). The ONLY thing preventing a cross-site POST from
+        // riding a logged-in operator's session into it is `SameSite=Lax` on
+        // `crow_session`
         // (dashboard/auth.js setSessionCookie) — Lax withholds the cookie from
         // cross-site POSTs, so the request arrives session-less and
         // authMiddleware rejects it before we ever inject a bearer.

@@ -1231,7 +1231,7 @@ export function createMemoryServer(dbPath, options = {}) {
     "Check pending notifications. Returns unread notifications filtered by type. Automatically cleans expired and snoozed items. Call at session start to surface reminders.",
     {
       unread_only: z.boolean().default(true).describe("Only return unread, non-dismissed notifications"),
-      type: z.string().max(50).optional().describe("Filter by type: reminder, media, peer, system"),
+      type: z.string().max(50).optional().describe("Filter by type: reminder, media, peer, system, attention"),
       limit: z.number().max(100).default(20).describe("Maximum results"),
     },
     async ({ unread_only, type, limit }) => {
@@ -1280,7 +1280,7 @@ export function createMemoryServer(dbPath, options = {}) {
     {
       title: z.string().max(500).describe("Short headline"),
       body: z.string().max(5000).optional().describe("Longer description"),
-      type: z.string().max(50).default("reminder").describe("Type: reminder, media, peer, system"),
+      type: z.string().max(50).default("reminder").describe("Type: reminder, media, peer, system, attention"),
       priority: z.enum(["low", "normal", "high"]).default("normal").describe("Priority level"),
       action_url: z.string().max(1000).optional().describe("Dashboard link to navigate to"),
       metadata: z.record(z.any()).optional().describe("Structured data (stored as JSON)"),
@@ -1366,7 +1366,7 @@ export function createMemoryServer(dbPath, options = {}) {
     "Get or update notification preferences (which types are enabled).",
     {
       action: z.enum(["get", "set"]).describe("Get current settings or set new ones"),
-      types_enabled: z.array(z.string()).optional().describe("Enabled notification types (only for action=set). E.g. ['reminder', 'media', 'peer', 'system']"),
+      types_enabled: z.array(z.string()).optional().describe("Enabled notification types (only for action=set). E.g. ['reminder', 'media', 'peer', 'system', 'attention']"),
     },
     async ({ action, types_enabled }) => {
       if (action === "get") {
@@ -1375,7 +1375,7 @@ export function createMemoryServer(dbPath, options = {}) {
           args: [],
         });
         if (rows.length === 0) {
-          return { content: [{ type: "text", text: 'Notification preferences: all types enabled (default)\n  Types: reminder, media, peer, system' }] };
+          return { content: [{ type: "text", text: 'Notification preferences: all types enabled (default)\n  Types: reminder, media, peer, system, attention' }] };
         }
         let prefs;
         try {

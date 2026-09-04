@@ -66,13 +66,77 @@
  * Session rows go through the gateway's own `createDbClient` in the
  * SELECT-then-UPDATE-or-INSERT shape of perch.js `saveNarrowing` — never
  * `ON CONFLICT` (`idx_bot_sessions_bot_thread` is deliberately not unique) and
- * never perch.js `claimTurn` verbatim (its INSERT hardcodes `kind:'perch'`).
+ * never the retired perch.js `claimTurn` verbatim (its INSERT hardcoded
+ * `kind:'perch'`; Track 3 Task 16 deleted it with the per-turn channel).
  * Metering and audit go through the BRIDGE's own busy-timeout-only connection,
  * exactly as a channel turn does — one path, one price book, one audit shape.
  *
  * IDENTITY NOTE: `sessionId` IS the `gateway_thread_id` (`perchlive-xxxxxxxx`).
  * One identity, so the P1 transcript endpoint — keyed on threadId — is
  * reachable with the same id the interactive routes use.
+ *
+ * ── Model tracking, control(), options() (Track 3 Task 4) ──────────────────
+ * The session record carries the engine's OWN idea of the serving model
+ * (`currentModel`/`currentModelParts`), separate from `resolved` (what the
+ * last spawn/wake's `prepareSpawn` computed). It is set two ways: a live
+ * `model_select` event forwarded from the child (pi's own /model, an
+ * auto-fallback, or the echo of our own `control()` switch), or `control()`
+ * itself. `startChild` reads it BEFORE `warmModel`/`PiRpc` construction, so a
+ * wake after a switch warms and spawns the RIGHT provider and prices the
+ * right model from turn 1 — not only after pi re-emits `model_select` on its
+ * own. `control()` applies what it can to a LIVE child via `PiRpc.commandSince`
+ * (Task 3) and stores what only binds at the next wake (a model switch made
+ * while hibernating; permission mode, ALWAYS — pi's permission policy is
+ * fixed via env at spawn time, so no live session can adopt a new mode
+ * without a wake it did not ask for).
+ *
+ * RESTART SEMANTICS (named for the reviewer, spec §5.3): `adoptRow` does NOT
+ * restore `permissionMode` from anywhere — an adopted session (gateway
+ * restart, or a session this process never held) resets to `"guarded"`. This
+ * is the fail-safe reading: a restart must never silently resurrect a
+ * `"bypass"` session; the drawer shows the (reset) current mode so the
+ * operator sees it and can consciously re-widen it.
+ *
+ * ── Card binding, occupancy, dispatch (Track 3 Task 6) ──────────────────────
+ * `spawn({botId, cardId})` binds a session to a board card. `cardClaims`
+ * (cardId → sessionId, this engine instance's own state) enforces exclusion
+ * SYNCHRONOUSLY, in the same statement run as `reserveSlot()` — no await
+ * between the check and the claim, same TOCTOU discipline as capacity. The
+ * async `checkCardFree()` is the DB-backed half: it is what a FRESH engine
+ * (no in-memory claims yet, a restart) or the dispatch ROUTE (before it ever
+ * reaches this engine) relies on. A card claim OUTLIVES hibernation — only
+ * `stop()` (or an exit that lands on an already-`stopped` session) releases
+ * it, so a card dispatched to a now-sleeping Perch session cannot be
+ * re-dispatched out from under it.
+ *
+ * DISPATCH STARTS THE TURN (review Q1, job-rail analog): `spawn()` stores
+ * `s.dispatchBrief` (the card + world context needed to compose the prompt,
+ * not the prompt itself — the operator's note is not known until the first
+ * `message()` call). The FIRST `message(sid, note)` after a card-bound spawn
+ * composes the real prompt as `projectContextBlock` + `cardBriefBlock` + an
+ * outputs-dir footer and clears `dispatchBrief`; every later `message()` on
+ * that session sends raw text, exactly like a non-card session always has.
+ *
+ * ATTACH-CARD (Track 3 Task 9): `attachCard(sessionId, cardId)` binds an
+ * ALREADY-SPAWNED session to a card — the drawer's own "attach to this card"
+ * action, distinct from `spawn({cardId})`'s dispatch-time binding. It does
+ * NOT run the async `checkCardFree` DB check itself — the ROUTE runs that
+ * (plus card-existence/archived/kind validation) BEFORE calling in, mirroring
+ * `spawn()`'s own split between the route/engine occupancy halves. Refused on
+ * `session_stopped`.
+ *
+ * PER-SESSION DIRS: every spawn/wake (`startChild`) mkdirs an `outputsDir`
+ * and `uploadsDir` keyed on `sessionId` under the bot's world `sessionDir`,
+ * threading `outputsDir` into the child as `extraWritePaths` (Task 3) — the
+ * only place the child may write files it wants the operator to see. A later
+ * routes task serves both back to the drawer; `snapshot()` exposes both.
+ *
+ * PER-BOT WORLD-BUILD MUTEX (spec §3.2/I9): `.mcp.json` content varies by
+ * jobId, so two in-gateway `buildBotWorld()` calls for the SAME bot (two
+ * sessions, or a session racing a card job run in-gateway) would race the
+ * write. `worldBuildLocks` (botId → promise chain) serializes them. The
+ * cross-process bridge-tick race is pre-existing and explicitly out of scope
+ * (spec §9).
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
@@ -80,6 +144,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { createDbClient } from "../db.js";
+import { jobLockFor } from "./routes/board-lock.js";
+import { cardBriefBlock } from "../../scripts/pi-bots/card-brief.mjs";
 
 /** Lease file name under CROW_HOME. Consumed by C-14's reaper exemption. */
 export const LEASE_FILENAME = "perch-interactive-leases.json";
@@ -90,7 +156,12 @@ const LEASE_REFRESH_MS = 60_000;
 
 const DEFAULT_IDLE_MS = 600_000;
 const DEFAULT_STALL_MS = 600_000;
-const DEFAULT_MAX_AWAKE = 1;
+/** Track 3 Task 7 (T3-6 decision): 1 -> 3. Safe-victim eviction (below) makes
+ * a saturated awake cap a controlled handover instead of a bare refusal, so
+ * the default no longer needs to hold at the most conservative value. The env
+ * knob (`PERCH_INTERACTIVE_MAX_AWAKE`) is unchanged — only the fallback when
+ * it is unset moves. */
+const DEFAULT_MAX_AWAKE = 3;
 /** How long an aborted turn may take to produce its `agent_end` before the
  * child is treated as abandoned and closed (C-12 carried finding 3). */
 const DEFAULT_ABORT_GRACE_MS = 30_000;
@@ -122,6 +193,23 @@ function replyTextOf(end) {
 /** The four ask_user methods that produce an operator-facing card. Everything
  * else pi's extension UI channel carries is chrome we deliberately ignore. */
 const ASK_METHODS = new Set(["select", "input", "confirm", "editor"]);
+
+/** Track 3 Task 5: prefix pi-lab's rpc-state-bridge extension puts on a
+ * `notify` message to mirror bus state (currently plan-mode) over the
+ * extension-UI channel instead of the transcript. */
+const CROW_STATE_PREFIX = "crow-state:";
+
+/** Track 3 Task 4: the engine-owned permission vocabulary (bridge.mjs's
+ * PiRpc constructor option of the same name) — control() rejects anything
+ * outside this set with `bad_request` rather than passing an unknown mode
+ * string through to a live spawn. */
+const PERMISSION_MODES = new Set(["guarded", "ask", "bypass"]);
+
+/** Track 3 Task 4: pi's ThinkingLevel union (rpc-types.d.ts, pi-coding-agent
+ * 0.82.0) — control() validates against this fixed vocabulary so a typo
+ * fails fast as `bad_request` instead of round-tripping to the child only to
+ * come back as an opaque `command_failed`. */
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 /**
  * Build a pendingUi card from an `extension_ui_request`.
@@ -183,6 +271,9 @@ export function createInteractiveEngine({
   const maxAwake = () => numEnv("PERCH_INTERACTIVE_MAX_AWAKE", DEFAULT_MAX_AWAKE);
   const turnTimeoutMs = () => numEnv("PIBOT_TURN_TIMEOUT_MS", 600_000);
   const disabled = () => env.CROW_DISABLE_PERCH === "1";
+  // Track 3 Task 8: a turn-end "<bot> replied" push only fires once the turn
+  // ran at least this long — a fast reply doesn't need a nudge.
+  const notifyMinRunS = () => numEnv("PERCH_NOTIFY_MIN_RUN_S", 30);
 
   // ---- seams ---------------------------------------------------------------
 
@@ -198,12 +289,13 @@ export function createInteractiveEngine({
       seams = bridge;
       return seams;
     }
-    const [world, br, life, warm, metering] = await Promise.all([
+    const [world, br, life, warm, metering, tracker] = await Promise.all([
       import("../../scripts/pi-bots/bot-world.mjs"),
       import("../../scripts/pi-bots/bridge.mjs"),
       import("../../scripts/pi-bots/pi_lifecycle.mjs"),
       import("../../scripts/pi-bots/warm.mjs"),
       import("../../scripts/pi-bots/metering.mjs"),
+      import("../../scripts/pi-bots/tracker.mjs"),
     ]);
     seams = {
       buildBotWorld: world.buildBotWorld,
@@ -212,6 +304,15 @@ export function createInteractiveEngine({
       warmModel: warm.warmModel,
       countLivePi: life.countLivePi,
       LIFECYCLE_DEFAULTS: life.LIFECYCLE_DEFAULTS,
+      // Track 3 Task 6: the dispatch brief's seams — planForCard/
+      // projectContextBlock from bridge.mjs (the latter EXPORTED for this),
+      // cardStatus/boardVocab straight from tracker.mjs (bridge imports them
+      // but never re-exports them, so this module pulls them directly rather
+      // than growing bridge.mjs's export surface just to re-forward two names).
+      planForCard: br.planForCard,
+      projectContextBlock: br.projectContextBlock,
+      cardStatus: tracker.cardStatus,
+      boardVocab: tracker.boardVocab,
       // Metering wants a better-sqlite3 connection opened busy_timeout-ONLY
       // (metering.mjs's header: createDbClient would WAL-flip the prod crow.db
       // out from under the bridge). Use the bridge's own db()/CROW_DB, exactly
@@ -245,12 +346,65 @@ export function createInteractiveEngine({
       piSessionId: null,
       projectId: null,
       resolved: null,
+      // Track 3 Task 4: the ENGINE's own idea of the serving model, distinct
+      // from `resolved` (which prepareSpawn computes fresh every spawn/wake).
+      // `currentModelParts` is the {provider, modelId} pair a wake must
+      // override onto a freshly-resolved `prep.resolved` BEFORE warmModel and
+      // PiRpc construction see it (startChild) — set either by a live
+      // `model_select` event from the child or by control() while awake or
+      // hibernating. `currentModel` is the same value as the "provider/id" key
+      // string snapshot()/stateEvent() report.
+      currentModelParts: null,
+      currentModel: null,
+      // Track 3 Task 4: binds at wake, never applied to a live child (pi's
+      // permission policy is fixed via env at spawn time). Reset to
+      // "guarded" on every adoptRow (gateway restart) — see adoptRow's
+      // comment: this is the fail-safe reading of spec §5.3, a restart must
+      // never silently resurrect "bypass".
+      permissionMode: "guarded",
+      // Track 3 Task 4 carried this field (newSession/snapshot/stateEvent/
+      // control()) as a mirrored plan-mode state object|null; Task 5 gives
+      // it real behavior — set from the rpc-state-bridge `crow-state:`
+      // mirror in onUiRequest, driven the other way by control({planMode}).
+      planMode: null,
       pendingUi: null,
       lastError: null,
       turn: null,
       subscribers: new Set(),
       idleTimer: null,
       stallTimer: null,
+      // Track 3 Task 6: card binding. `cardId` is the board card this
+      // session is dispatched to (null for an ordinary free-chat session).
+      // `dispatchBrief` holds the world context (tasksDbPath/projectSpace/
+      // projectMembers) a card-bound spawn captured, PENDING until the first
+      // message() composes the real prompt from it and clears it back to
+      // null — see the module header.
+      cardId: null,
+      dispatchBrief: null,
+      // Per-session dirs (every spawn/wake, not just card-bound ones) — the
+      // child's confined write target and upload landing zone. Set by
+      // startChild; null until the first spawn/wake completes.
+      outputsDir: null,
+      uploadsDir: null,
+      // World context, refreshed on every startChild (spawn AND wake) so a
+      // dispatch brief composed after a wake reflects the CURRENT world, not
+      // a stale one from a prior spawn.
+      tasksDbPath: null,
+      projectSpace: null,
+      projectMembers: [],
+      // Track 3 Task 7: safe-victim eviction's recency signal — the oldest
+      // `lastEventAt` among awake/idle candidates is the eviction victim.
+      // Stamped at session-object creation (so a freshly spawned, never-yet-
+      // touched session already has a real value instead of null/0, which
+      // would otherwise always sort first as "oldest") and re-touched on
+      // every child event and every turn end.
+      lastEventAt: now(),
+      // Track 3 Task 7 fix round 1: cycle()'s own re-entrancy claim — set
+      // synchronously (before cycle()'s first await) for the duration of one
+      // cycle() call, cleared in a `finally`. A second concurrent cycle() and
+      // a concurrent message() both check this and refuse rather than racing
+      // the in-flight hibernate()/startChild() pair — see cycle()'s header.
+      cycling: false,
     };
   }
 
@@ -263,13 +417,64 @@ export function createInteractiveEngine({
       state: s.state,
       pendingUi: s.pendingUi,
       lastError: s.lastError,
-      model: s.resolved ? s.resolved.key : null,
+      // Track 3 Task 4: the engine-tracked model wins over the raw
+      // prepareSpawn resolution once one is known (a live model_select or a
+      // control() switch), so the lens reports the model actually serving
+      // the NEXT turn, not just the one the last spawn/wake resolved to.
+      model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      permissionMode: s.permissionMode,
+      planMode: s.planMode,
+      // I3 (final review): neither stateEvent() nor snapshot() used to
+      // expose whether a turn is actually in flight, and drawer.js's
+      // bd.turnInFlight was set only by the SENDING tab — so on the primary
+      // flow (dispatch fires turn 1, operator opens the drawer afterward)
+      // the composer sat in message mode mid-turn (409 turn_in_progress
+      // instead of steering) and "apply now" stayed enabled even though
+      // cycle() would refuse with cycle_busy. Exposing the real state here
+      // lets every consumer (drawer reconnect, sessionBirdState) agree with
+      // the engine instead of inferring it from local send-tab state.
+      turnInFlight: !!s.turn,
+      // Track 3 Task 6: a later routes task serves files from BOTH dirs
+      // (the drawer's file list + upload target) — the controller ruling is
+      // that snapshot() is where it reads them from.
+      cardId: s.cardId,
+      outputsDir: s.outputsDir,
+      uploadsDir: s.uploadsDir,
     };
   }
 
   function emit(s, event) {
     for (const fn of [...s.subscribers]) {
       try { fn(event); } catch { /* a broken subscriber never breaks a turn */ }
+    }
+  }
+
+  /**
+   * Track 3 Task 8: fire an "attention" notification through the shared
+   * notification pipeline (servers/shared/notifications.js). Lazy-imported —
+   * this module's bot-engine seams are already lazy (loadSeams), and the
+   * notification pipeline is a side channel a turn/ask-card/result must
+   * never depend on being loaded eagerly. Reuses this module's own
+   * `createDbClient` import. Fire-and-forget from every call site: a
+   * notification failure (missing table on a scratch DB, a downstream
+   * sender throwing) must never break a turn or an ask card.
+   */
+  async function pushAttention(opts) {
+    // I4 (final review): the DB handle used to be created inline in the
+    // createNotification() call — never closed. Every ask-card/turn-end/
+    // gated-result push leaked an open better-sqlite3 connection, in the
+    // subsystem with a documented WAL-corruption history. Hold it in a
+    // const and close it in a finally, same as every other short-lived
+    // handle in this module.
+    let db;
+    try {
+      const { createNotification } = await import("../shared/notifications.js");
+      db = createDbClient();
+      await createNotification(db, opts);
+    } catch (e) {
+      log("attention notify failed (non-fatal): " + ((e && e.message) || e));
+    } finally {
+      if (db) { try { db.close(); } catch { /* already closed */ } }
     }
   }
 
@@ -282,6 +487,13 @@ export function createInteractiveEngine({
       state: s.state,
       lastError: s.lastError || null,
       pendingUi: s.pendingUi || null,
+      // Track 3 Task 4: same three additions as snapshot(), same rule.
+      model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      permissionMode: s.permissionMode,
+      planMode: s.planMode,
+      // I3 (final review): same addition, same reasoning, as snapshot()
+      // above — see its comment.
+      turnInFlight: !!s.turn,
     };
   }
 
@@ -344,7 +556,7 @@ export function createInteractiveEngine({
     s.lastError = "turn stalled";
     emit(s, { type: "error", text: "turn stalled" });
     // A single tool silent past the window IS aborted — named operator-facing
-    // policy (r2 S12), documented in the perch-hub developer docs.
+    // policy (r2 S12).
     abortInFlight(s).catch(() => {});
   }
 
@@ -395,27 +607,34 @@ export function createInteractiveEngine({
   /**
    * Write this session's row: UPDATE the newest row for (bot, thread) if one
    * exists, else INSERT. One db.batch() = one better-sqlite3 transaction; the
-   * shape is perch.js `saveNarrowing`'s, NOT `claimTurn`'s (which hardcodes
-   * kind='perch') and never ON CONFLICT (the index is not unique).
+   * shape is perch.js `saveNarrowing`'s, NOT the retired `claimTurn`'s (which
+   * hardcoded kind='perch') and never ON CONFLICT (the index is not unique).
    */
-  async function writeRow(s, { status, piSessionDir = null, model = null }) {
+  async function writeRow(s, { status, piSessionDir = null, model = null }, control = "run") {
     const db = createDbClient();
     try {
       await db.batch([
         {
           sql:
-            "UPDATE bot_sessions SET kind='perch-live', gateway_type='perch', status=?, control='run', " +
-            "project_id=COALESCE(?, project_id), pi_session_dir=COALESCE(?, pi_session_dir), " +
+            "UPDATE bot_sessions SET kind='perch-live', gateway_type='perch', status=?, control=?, " +
+            "card_id=?, project_id=COALESCE(?, project_id), pi_session_dir=COALESCE(?, pi_session_dir), " +
             "model=COALESCE(?, model), updated_at=datetime('now') " +
             "WHERE id=(SELECT id FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1)",
-          args: [status, s.projectId, piSessionDir, model, s.botId, s.threadId],
+          // Track 3 Task 6: card_id is COALESCE-free — this row is owned
+          // entirely by this engine session (never shared with a bridge.mjs
+          // chat row), so the engine's own s.cardId (null for a free-chat
+          // session) is authoritative on every write, not merely a fallback.
+          // Track 3 Task 7: `control` defaults to 'run' — only stopAll's
+          // interrupted-mid-turn park passes 'interrupted'; every OTHER write
+          // (including this row's own NEXT normal write) resets it to 'run'.
+          args: [status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
         },
         {
           sql:
-            "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,project_id,pi_session_dir,model) " +
-            "SELECT ?,'perch',?,'perch-live',?,'run',?,?,? " +
+            "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,card_id,project_id,pi_session_dir,model) " +
+            "SELECT ?,'perch',?,'perch-live',?,?,?,?,?,? " +
             "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
-          args: [s.botId, s.threadId, status, s.projectId, piSessionDir, model, s.botId, s.threadId],
+          args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
         },
       ]);
       const { rows } = await db.execute({
@@ -494,7 +713,7 @@ export function createInteractiveEngine({
     try {
       const { rows } = await db.execute({
         sql:
-          "SELECT id, bot_id, gateway_thread_id, status, model, pi_session_id, project_id " +
+          "SELECT id, bot_id, gateway_thread_id, status, model, pi_session_id, project_id, card_id " +
           "FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1",
         args: [sessionId],
       });
@@ -504,7 +723,35 @@ export function createInteractiveEngine({
       s.rowId = Number(row.id);
       s.piSessionId = row.pi_session_id || null;
       s.projectId = row.project_id == null ? null : Number(row.project_id);
+      s.cardId = row.card_id == null ? null : Number(row.card_id);
       s.state = row.status === "stopped" ? "stopped" : "hibernating";
+      // Track 3 Task 4 (spec §5.3, RESTART SEMANTICS — named for the
+      // reviewer): deliberately NOT restoring permissionMode from anywhere.
+      // newSession() above already left it at the "guarded" default, and
+      // nothing in this row read (or in bot_sessions at all) carries a
+      // persisted mode to restore even if we wanted to. This is the
+      // fail-safe reading: a gateway restart must never silently resurrect a
+      // "bypass" session — the drawer shows the current (reset) mode so the
+      // operator can see and consciously re-widen it, rather than the
+      // process quietly reinstating a wide-open write policy on its own.
+      //
+      // Track 3 Task 6: a card claim OUTLIVES hibernation (occupancy rule
+      // (c)) — a row adopted here that is still card-bound and not stopped
+      // re-registers the in-memory claim directly (cardClaims.set, never
+      // claimCard's throw-on-conflict path: this is restoring THIS row's own
+      // prior claim from the DB, not contesting a new one).
+      // M2 (final review): guard against stealing a claim a NEWER session
+      // already holds for the same cardId. adoptRow can run for a STALE row
+      // (e.g. re-touched well after a newer session took over the card) —
+      // without this check, an unconditional set() would silently overwrite
+      // that newer session's in-memory claim. The DB rail (checkCardFree)
+      // still 409s correctly either way, so this is belt-and-suspenders on
+      // the in-memory map only — same idiom as releaseCard's own
+      // current-holder gate just below.
+      if (s.cardId != null && s.state !== "stopped") {
+        const holder = cardClaims.get(s.cardId);
+        if (holder == null || holder === s.sessionId) cardClaims.set(s.cardId, s.sessionId);
+      }
       sessions.set(s.sessionId, s);
       return s;
     } catch {
@@ -541,6 +788,206 @@ export function createInteractiveEngine({
     session.state = "waking";                 // ← the reservation itself
   }
 
+  /**
+   * Safe-victim fallback for `reserveSlot` (Track 3 Task 7, spec §3.3).
+   * Tries the plain reservation first; on `interactive_capacity` (the AWAKE
+   * cap refusal — `pi_capacity`, the host-wide budget, is never evicted
+   * around and rethrows untouched), synchronously picks the oldest-idle
+   * evictable session (`state==="awake"`, no `turn`, no `pendingUi` — a
+   * pendingUi candidate is never selected, matching hibernate()'s own guard)
+   * and hands its slot to `session`.
+   *
+   * THE HANDOVER is two plain assignments with NO await between them —
+   * `victim.state = "hibernating"` then `session.state = "waking"` — exactly
+   * reserveSlot's own single-block discipline, extended to cover the evicted
+   * slot too. This function is deliberately NOT `async`: the fast path
+   * (reserveSlot succeeds, or throws with no eligible victim) returns/throws
+   * synchronously, so a caller that never needs eviction pays no extra
+   * microtask tick and its OWN "no await between check and reservation" block
+   * stays intact. Only the eviction path returns a Promise — the caller must
+   * await THAT, and only AFTER the synchronous handover above has already
+   * committed (see finishEviction below).
+   *
+   * CALLER CONTRACT: `session` must already be reachable via `sessions`
+   * (spawn adds it to the map BEFORE calling in, precisely so a second
+   * concurrent caller's own reserveSlot count sees this reservation the
+   * instant the handover flips its state, not only after our async tail
+   * resumes — reserveSlot's own `other === session` self-exclusion makes this
+   * safe on the fast, no-eviction path too). message()'s wake path calls in
+   * with a session already resident from resolveSession, so no extra step is
+   * needed there.
+   *
+   * @returns {Promise|null} a promise the caller must await iff an eviction
+   *   was performed (null on the plain, synchronous-only path).
+   */
+  function reserveWithEviction(S, session) {
+    try {
+      reserveSlot(S, session);
+      return null;
+    } catch (e) {
+      if (e.code !== "interactive_capacity") throw e;   // pi_capacity, perch_disabled: never evicted around
+      let victim = null;
+      for (const other of sessions.values()) {
+        if (other === session) continue;
+        if (other.state !== "awake") continue;
+        if (other.turn) continue;
+        if (other.pendingUi) continue;
+        if (!victim || other.lastEventAt < victim.lastEventAt) victim = other;
+      }
+      if (!victim) throw e;                              // no eligible victim: rethrow untouched
+      // ---- the handover: no await between these two lines ------------
+      victim.state = "hibernating";
+      session.state = "waking";
+      // ------------------------------------------------------------------
+      return finishEviction(S, session, victim);
+    }
+  }
+
+  /** The async tail of an eviction: actually close the victim's child, then
+   * re-run the host pi-budget half of the gate — reserveSlot's own
+   * `pi_capacity` check ran BEFORE the eviction and could not see the slot
+   * the victim's close() is about to free, so it was unrunnable evidence
+   * until now. A failure here releases ONLY our own reservation
+   * (`session.state`) — the victim stays evicted; it can be woken again like
+   * any other hibernating session. */
+  async function finishEviction(S, session, victim) {
+    await hibernate(victim);
+    let reservedNotSpawned = 0;
+    for (const other of sessions.values()) {
+      if (other === session) continue;
+      if (other.state !== "awake" && other.state !== "waking") continue;
+      if (!other.pi) reservedNotSpawned += 1;
+    }
+    const live = S.countLivePi();
+    if (live + reservedNotSpawned >= S.LIFECYCLE_DEFAULTS.maxPi) {
+      session.state = "hibernating";                     // release our reservation
+      throw engineError("pi_capacity");
+    }
+  }
+
+  // ---- card claims (Track 3 Task 6) -----------------------------------------
+
+  /** cardId (Number) → sessionId currently holding it. This engine INSTANCE's
+   * own state, rebuilt lazily by adoptRow — never populated eagerly on
+   * construction, so rows claimed before this process existed are covered
+   * ONLY by the async `checkCardFree()` DB check below until this process
+   * happens to touch that row (adoptRow, on a message/get/subscribe/stop). */
+  const cardClaims = new Map();
+
+  /**
+   * Synchronous check-then-claim. MUST run in the same statement sequence as
+   * `reserveSlot()` — no await between the check and the set (spec §5.1),
+   * the same TOCTOU discipline reserveSlot itself documents above. Idempotent
+   * for the SAME sessionId (a session re-asserting the claim it already
+   * holds is a no-op, never a self-conflict); throws `card_occupied` for any
+   * OTHER live session.
+   */
+  function claimCard(cardId, sessionId) {
+    const holder = cardClaims.get(cardId);
+    if (holder != null && holder !== sessionId) throw engineError("card_occupied");
+    cardClaims.set(cardId, sessionId);
+  }
+
+  /** Release, gated on the releasing session actually being the current
+   * holder — a superseded session object's own teardown must never steal
+   * back a claim a NEWER session (e.g. adoptRow re-registering after a
+   * restart) already holds for the same cardId. */
+  function releaseCard(cardId, sessionId) {
+    if (cardId == null) return;
+    if (cardClaims.get(cardId) === sessionId) cardClaims.delete(cardId);
+  }
+
+  /**
+   * DB-backed occupancy check — the half that covers what this engine
+   * instance's in-memory `cardClaims` cannot: rows claimed before this
+   * process existed, and (the route's use) a check made before ANY engine
+   * call is reached at all. Three independent rails, each throwing
+   * `card_occupied`:
+   *   (a) any `bot_sessions` row for this card with status='active' (ANY
+   *       kind — a live conversational OR job-dispatched turn owns it now);
+   *   (b) an unfinished `bot_jobs` row (board-lock.js's job rail — reused,
+   *       never re-derived);
+   *   (c) any `kind='perch-live'` row for this card with status != 'stopped'
+   *       — a HIBERNATING card-bound perch session still owns the card (a
+   *       card claim outlives hibernation; see the module header).
+   *
+   * Track 3 Task 9 fix round 1 (coordinator-reported Important): the
+   * attach-card ROUTE calls this BEFORE `eng.attachCard()` — a session
+   * re-asserting a card it ALREADY holds hit rail (c) against its OWN row
+   * (that row's `gateway_thread_id` IS the calling session's own
+   * `sessionId`), 409ing before `attachCard()`'s documented idempotent
+   * no-op path was ever reached. `excludeSessionId` skips rail (c) rows
+   * whose `gateway_thread_id` matches it — narrowly, only that one rail,
+   * only that one session; every OTHER live claimant (including this exact
+   * card held by a DIFFERENT session) still 409s. `spawn()`'s own internal
+   * pre-check never passes it — a spawn always mints a brand-new sessionId,
+   * so it can never collide with its own not-yet-existent row.
+   */
+  async function checkCardFree(cardId, { excludeSessionId } = {}) {
+    const cid = Number(cardId);
+    const db = createDbClient();
+    try {
+      const active = await db.execute({
+        sql: "SELECT id FROM bot_sessions WHERE card_id=? AND status='active' LIMIT 1",
+        args: [cid],
+      });
+      if (active.rows[0]) throw engineError("card_occupied");
+      const job = await jobLockFor(db, cid);
+      if (job) throw engineError("card_occupied");
+      const live = await db.execute({
+        sql:
+          "SELECT id FROM bot_sessions WHERE card_id=? AND kind='perch-live' AND status != 'stopped' " +
+          (excludeSessionId != null ? "AND gateway_thread_id != ? " : "") + "LIMIT 1",
+        args: excludeSessionId != null ? [cid, String(excludeSessionId)] : [cid],
+      });
+      if (live.rows[0]) throw engineError("card_occupied");
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  }
+
+  // ---- per-bot world-build mutex (Track 3 Task 6, spec §3.2/I9) -------------
+
+  /** botId → promise chain. `.mcp.json` content varies by jobId, so two
+   * in-gateway `buildBotWorld()` calls for the SAME bot must never run
+   * concurrently — the second waits for the first to settle (success OR
+   * failure) before its own build starts. The cross-process bridge-tick race
+   * is pre-existing and out of scope (spec §9). */
+  const worldBuildLocks = new Map();
+
+  /**
+   * Fix round 1 (coordinator-reported Critical): the original literal
+   * `prev.then(build)` formula poisoned a bot's queue forever after ONE
+   * rejected build — `.then(build)` off a rejected `prev` never calls
+   * `build` again, so every LATER spawn for that bot would silently inherit
+   * the first failure instead of trying again. A transient buildBotWorld
+   * failure (a bad def edit since fixed, a momentary DB hiccup) must not
+   * brick a bot's spawns until this process restarts.
+   *
+   * Fix shape: the promise THIS call returns to its caller (`next`) still
+   * carries the real rejection of THIS build — callers must see their own
+   * failure, unmasked. The promise STORED as the next caller's `prev`
+   * (`tail`) is a never-rejecting shadow of `next` — so a later caller's own
+   * `prev.catch(() => {})` always has something to resume from, regardless
+   * of whether this build succeeded or failed. Serialization still holds
+   * (the next build never starts before this one settles); a failure just
+   * stops propagating sideways into someone else's queue position.
+   */
+  function buildWorldSerialized(S, args) {
+    const botId = args.botId;
+    const prev = worldBuildLocks.get(botId) || Promise.resolve();
+    const next = prev.catch(() => {}).then(() => S.buildBotWorld(args));
+    const tail = next.catch(() => {});
+    worldBuildLocks.set(botId, tail);
+    // Hygiene: bound the map. Once this tail settles, drop the entry IF
+    // nothing newer has queued behind it (a newer call would have replaced
+    // the map's value with ITS OWN tail already).
+    tail.then(() => {
+      if (worldBuildLocks.get(botId) === tail) worldBuildLocks.delete(botId);
+    });
+    return next;
+  }
+
   // ---- child construction --------------------------------------------------
 
   /**
@@ -550,13 +997,52 @@ export function createInteractiveEngine({
    */
   async function startChild(S, s) {
     const slog = sessionLog(s);
-    const world = await S.buildBotWorld({
+    // Track 3 Task 6: serialized per-bot — see buildWorldSerialized's comment.
+    const world = await buildWorldSerialized(S, {
       botId: s.botId, threadId: s.threadId, gatewayType: "perch", log: slog,
     });
     const prep = await S.prepareSpawn(world, { escalate: false, log: slog });
     s.projectId = world.projectId == null ? null : Number(world.projectId);
+    // Track 3 Task 6: refreshed on EVERY startChild (spawn and wake alike),
+    // so a dispatch brief composed after a wake reflects the current world.
+    s.tasksDbPath = world.tasksDbPath;
+    s.projectSpace = world.projectSpace;
+    s.projectMembers = world.projectMembers;
+    // Track 3 Task 4 (wake fidelity, review finding 8): if the engine tracks a
+    // model different from what prepareSpawn just resolved fresh (a live
+    // model_select or a control() switch made while this session was awake or
+    // hibernating), override prep.resolved BEFORE warmModel/PiRpc see it —
+    // otherwise a wake would warm and spawn the WRONG provider and the first
+    // turn's metering would price the pre-switch model until pi re-emits its
+    // own model_select. This is a plain value override (never a merge of
+    // provider/model/key alone would leave `escalated`/`source` stale for the
+    // NEW model, but those two fields do not feed metering or spawn args, so
+    // leaving them as prepareSpawn resolved them is harmless — only
+    // provider/model/key are load-bearing here).
+    if (s.currentModelParts &&
+        (s.currentModelParts.provider !== prep.resolved.provider ||
+         s.currentModelParts.modelId !== prep.resolved.model)) {
+      prep.resolved = Object.assign({}, prep.resolved, {
+        provider: s.currentModelParts.provider,
+        model: s.currentModelParts.modelId,
+        key: s.currentModel,
+      });
+      prep.piRpcOpts = Object.assign({}, prep.piRpcOpts, { resolved: prep.resolved });
+    }
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);
+
+    // Track 3 Task 6: per-session outputs/uploads dirs — every spawn/wake,
+    // not just card-bound ones (a free-chat session gets a workspace too).
+    // Keyed on sessionId (stable across hibernate/wake, unlike a per-turn
+    // scratch dir) so files the operator uploaded before a hibernation are
+    // still there when the bird wakes back up.
+    const outputsDir = join(world.sessionDir, "outputs", s.sessionId);
+    const uploadsDir = join(world.sessionDir, ".pi", "uploads", s.sessionId);
+    mkdirSync(outputsDir, { recursive: true });
+    mkdirSync(uploadsDir, { recursive: true });
+    s.outputsDir = outputsDir;
+    s.uploadsDir = uploadsDir;
 
     const resume = (world.session && world.session.pi_session_id) || s.piSessionId || null;
     const pi = new S.PiRpc(Object.assign({}, prep.piRpcOpts, {
@@ -566,6 +1052,14 @@ export function createInteractiveEngine({
       // ask-user ctx.ui unlock (PL-3). C-12's spawn_env hygiene guarantees a
       // bot def cannot set this itself for a channel turn.
       extraEnv: { PI_BOT_INTERACTIVE: "1" },
+      // Track 3 Task 4: permissionMode binds at wake — the session record's
+      // current value goes into every spawn/wake's PiRpc opts. Default
+      // "guarded" is a byte-identical no-op for a fresh session (mirrors
+      // every channel caller, which never sets this option at all).
+      permissionMode: s.permissionMode,
+      // Track 3 Task 6 (Task 3's extraWritePaths option): the child's ONLY
+      // confined write target for deliverables it wants the operator to see.
+      extraWritePaths: [outputsDir],
     }));
     s.pi = pi;
     s.piSessionId = resume;
@@ -627,6 +1121,13 @@ export function createInteractiveEngine({
       } catch { /* keep the generic message */ }
       s.lastError = message;
       if (s.state !== "stopped") s.state = "hibernating";
+      // Track 3 Task 6: a card claim outlives hibernation (occupancy rule
+      // (c)) — release it ONLY in the branch where this exit lands on a
+      // session already `stopped` (stop() itself already released the claim
+      // in the normal case; this is the defensive belt-and-braces twin named
+      // in the module header, for an exit that lands after state was marked
+      // stopped by some other path).
+      if (s.state === "stopped") releaseCard(s.cardId, s.sessionId);
       writeLeases();
       emit(s, { type: "error", text: message });
       emit(s, stateEvent(s));
@@ -647,6 +1148,7 @@ export function createInteractiveEngine({
   function onChildEvent(s, m) {
     if (!m || typeof m !== "object") return;
     touchStall(s);
+    s.lastEventAt = now();                           // Track 3 Task 7: eviction recency
     switch (m.type) {
       case "tool_execution_start":
         emit(s, { type: "tool", name: m.toolName, phase: "start", isError: false });
@@ -664,10 +1166,39 @@ export function createInteractiveEngine({
       case "extension_ui_request":
         onUiRequest(s, m);
         return;
+      case "model_select":
+        onModelSelect(s, m);
+        return;
       default:
-        // agent_end, message_update, model_select, … — not part of the lens
-        // vocabulary. Silence is the contract, not an oversight.
+        // agent_end, message_update, … — not part of the lens vocabulary.
+        // Silence is the contract, not an oversight.
     }
+  }
+
+  /**
+   * Track 3 Task 4: the child (pi's own /model, an auto-fallback, or the
+   * response to OUR OWN control() set_model) picked a model. Real event
+   * shape (verified): `{type:"model_select", model:{provider, id, …},
+   * previousModel, source}` — the Model object has `id`, NOT `modelId`.
+   *
+   * Dedupe by value: control()'s awake model switch already applies the
+   * commandSince RESPONSE (same provider/id pi is about to echo back here as
+   * an event) — without this check, every control()-driven switch would emit
+   * a second, redundant state+log pair once this event lands moments later.
+   */
+  function onModelSelect(s, m) {
+    const model = m && m.model;
+    if (!model || !model.provider || !model.id) return;
+    const key = model.provider + "/" + model.id;
+    if (s.currentModel === key) return;
+    s.currentModelParts = { provider: model.provider, modelId: model.id };
+    s.currentModel = key;
+    // onTurnEnd's meterTurn({resolved: s.resolved}) prices whatever
+    // s.resolved says NOW, not what the turn started on — so the model that
+    // actually served the reply is what gets metered.
+    s.resolved = Object.assign({}, s.resolved, { provider: model.provider, model: model.id, key });
+    emit(s, stateEvent(s));
+    emit(s, { type: "log", text: "now on " + key });
   }
 
   function onUiRequest(s, m) {
@@ -676,10 +1207,42 @@ export function createInteractiveEngine({
       clearStall(s);                                 // paused while a human thinks
       emit(s, { type: "ask_user", ...s.pendingUi });
       armIdle(s);                                    // no-op by design: a pending card blocks it
+      // Track 3 Task 8: an ask card (incl. a permission confirm — "confirm"
+      // is one of ASK_METHODS) is a blocking event — it ALWAYS pushes,
+      // regardless of whether an operator is subscribed live, unlike the
+      // turn-end "replied" push below.
+      pushAttention({
+        type: "attention",
+        priority: "high",
+        title: s.botId + " needs you",
+        body: s.pendingUi.title || s.pendingUi.message || "",
+        action_url: "/dashboard/bot-board#bird=" + s.sessionId,
+      });
       return;
     }
     if (m.method === "notify") {
-      emit(s, { type: "log", text: m.message == null ? "" : String(m.message) });
+      const text = m.message == null ? "" : String(m.message);
+      // Track 3 Task 5: pi-lab's rpc-state-bridge extension mirrors the
+      // plan-mode bus over this SAME notify channel, prefixed so it never
+      // collides with an operator-facing note:
+      // `"crow-state:" + JSON.stringify({kind:"plan-mode", state})`. A
+      // frame carrying this prefix is engine protocol, never a transcript
+      // line — malformed JSON after the prefix is swallowed (never a log
+      // line, never a throw), matching a down/stale extension gracefully.
+      if (text.startsWith(CROW_STATE_PREFIX)) {
+        let parsed;
+        try {
+          parsed = JSON.parse(text.slice(CROW_STATE_PREFIX.length));
+        } catch {
+          return;
+        }
+        if (parsed && parsed.kind === "plan-mode") {
+          s.planMode = parsed.state;
+          emit(s, { type: "plan_state", state: parsed.state });
+        }
+        return;
+      }
+      emit(s, { type: "log", text });
       return;
     }
     // setStatus | setWidget | setTitle | set_editor_text — TUI chrome, ignored.
@@ -713,6 +1276,7 @@ export function createInteractiveEngine({
       // on the same turn — the mutation-guarded invariant of this engine.
       await writeRow(s, { status: "waiting-user" }).catch(() => {});
       if (s.turn === turn) s.turn = null;
+      s.lastEventAt = now();                          // Track 3 Task 7: became idle now
       emit(s, stateEvent(s));
       armIdle(s);
       return;
@@ -755,13 +1319,32 @@ export function createInteractiveEngine({
 
     // The invariant is stated over the TURN, not over a pre-await snapshot: an
     // abort that landed during the metering awaits still silences the reply.
-    if (!turn.aborted) emit(s, { type: "reply", text: replyTextOf(end) });
+    if (!turn.aborted) {
+      const replyText = replyTextOf(end);
+      emit(s, { type: "reply", text: replyText });
+      // Track 3 Task 8: an operator watching the drawer live (any live
+      // subscriber) already sees the reply — the push is for someone who
+      // is AWAY, and only for a turn that actually took a while.
+      if (s.subscribers.size === 0) {
+        const ranS = (now() - turn.startedAt) / 1000;
+        if (ranS >= notifyMinRunS()) {
+          pushAttention({
+            type: "attention",
+            priority: "normal",
+            title: s.botId + " replied",
+            body: replyText.slice(0, 140),
+            action_url: "/dashboard/bot-board#bird=" + s.sessionId,
+          });
+        }
+      }
+    }
     // r2 S7: bound the child's accumulating log now that nothing is waiting on
     // it. trimLog preserves _seq, so the next turn's `since` correlation holds.
     try { if (s.pi) s.pi.trimLog(); } catch { /* non-fatal */ }
     await writeRow(s, { status: "waiting-user", model: s.resolved ? s.resolved.key : null }).catch(() => {});
     // M-4: the turn is released HERE, after reply + trimLog — never at the top.
     if (s.turn === turn) s.turn = null;
+    s.lastEventAt = now();                            // Track 3 Task 7: became idle now
     emit(s, stateEvent(s));
     armIdle(s);
   }
@@ -845,19 +1428,46 @@ export function createInteractiveEngine({
 
   // ---- public surface ------------------------------------------------------
 
-  async function spawn({ botId }) {
+  async function spawn({ botId, cardId = null }) {
     if (!botId) throw engineError("bad_request");
     const S = await loadSeams();
-    // ---- one synchronous block: gates + reservation, no await between ----
+    const cid = cardId == null ? null : Number(cardId);
+    // Async double-check (Track 3 Task 6): DB-backed, ahead of the
+    // synchronous claim below — the thing that catches a card claimed by a
+    // row this engine instance has never adopted (a fresh process, or
+    // another gateway on the same DB). Never a substitute for the
+    // synchronous claim: two callers racing THIS process still need the
+    // in-memory exclusion below, which no await-laden pre-check can provide.
+    if (cid != null) await checkCardFree(cid);
+    // ---- one synchronous block: gates + reservation + card claim, no await
+    // between any of them (spec §5.1 — the P1 F3 TOCTOU class, extended to
+    // the card claim) ----
     const threadId = "perchlive-" + randomUUID().slice(0, 8);
     const s = newSession(String(botId), threadId);
-    reserveSlot(S, s);
+    // Track 3 Task 7: added to `sessions` BEFORE the reservation attempt, not
+    // after — reserveWithEviction's eviction path awaits the victim's
+    // hibernate() before this call resumes, and a concurrent second caller's
+    // own reserveSlot count must see `s` counted (or not) the instant the
+    // handover flips its state, never only after our tail resumes.
+    // reserveSlot's own `other === session` self-exclusion keeps the plain,
+    // no-eviction path byte-identical to before.
     sessions.set(s.sessionId, s);
+    try {
+      const pending = reserveWithEviction(S, s);
+      if (pending) await pending;
+      if (cid != null) claimCard(cid, s.sessionId);  // throws card_occupied
+      s.cardId = cid;
+    } catch (e) {
+      s.state = "hibernating";                       // release any reservation we got
+      sessions.delete(s.sessionId);
+      throw e;
+    }
     // ---------------------------------------------------------------------
     try {
       await startChild(S, s);
     } catch (e) {
       sessions.delete(s.sessionId);                  // release the reservation
+      if (cid != null) releaseCard(cid, s.sessionId); // …and the card claim
       // I-3 discipline: detach the child BEFORE closing (attachExit's
       // `s.pi !== pi` guard then swallows the expected exit) and never await
       // the close — a child that ignores SIGTERM must not hold the caller.
@@ -874,25 +1484,58 @@ export function createInteractiveEngine({
       writeLeases();
       throw e;
     }
+    // Track 3 Task 6: dispatch STARTS the work — the brief is stored, not
+    // sent. The world context is what startChild just captured on `s`; the
+    // operator's note (unknown until the first message() call) is filled in
+    // there, at which point this is composed and cleared. See the module
+    // header ("DISPATCH STARTS THE TURN").
+    if (cid != null) {
+      s.dispatchBrief = {
+        cardId: cid,
+        tasksDbPath: s.tasksDbPath,
+        projectSpace: s.projectSpace,
+        projectMembers: s.projectMembers,
+      };
+    }
     emit(s, stateEvent(s));
     armIdle(s);
     return { sessionId: s.sessionId, threadId: s.threadId, state: s.state };
   }
 
-  async function message(sessionId, text) {
+  async function message(sessionId, text, images) {
     const S = await loadSeams();
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     // ---- one synchronous block: guards + reservation, no await between ----
     if (s.state === "stopped") throw engineError("session_stopped");
     if (s.turn) throw engineError("turn_in_progress");
+    // Track 3 Task 7 fix round 1: a cycle() in flight leaves this session
+    // transiently `s.pi === null` mid-hibernate — WITHOUT this check
+    // `needsWake` below would read true and message() would try to WAKE a
+    // session cycle() is already in the middle of respawning, racing
+    // startChild() the same way two concurrent cycle()s used to. Refuse with
+    // the same typed code cycle() itself uses for "busy right now".
+    if (s.cycling) throw engineError("cycle_busy");
     const needsWake = !s.pi;
-    if (needsWake) reserveSlot(S, s);                // r1 C8: the wake path re-gates
-    const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null };
+    // r1 C8: the wake path re-gates. Track 3 Task 7: reserveWithEviction is
+    // itself synchronous up to its own handover — a synchronous throw here
+    // (interactive_capacity with no eligible victim, pi_capacity,
+    // perch_disabled) propagates BEFORE the turn is ever claimed, exactly
+    // like the old bare reserveSlot() call. Only the EVICTION path returns a
+    // promise; it is awaited INSIDE the try below (its own post-hibernate
+    // pi_capacity re-check can fail AFTER the turn is claimed, so that
+    // failure needs the same reservation-release cleanup as any other wake
+    // failure).
+    const pending = needsWake ? reserveWithEviction(S, s) : null;
+    // Track 3 Task 8: startedAt is this turn's own clock reading, distinct
+    // from any lastEventAt touch — onTurnEnd diffs against it to decide
+    // whether a "<bot> replied" attention push clears PERCH_NOTIFY_MIN_RUN_S.
+    const turn = { id: randomUUID(), aborted: false, toolNames: [], statsBefore: null, graceTimer: null, startedAt: now() };
     s.turn = turn;
     // ---------------------------------------------------------------------
     try {
       if (needsWake) {
+        if (pending) await pending;
         await assertRowClaimable(s);
         await startChild(S, s);
       } else {
@@ -933,15 +1576,274 @@ export function createInteractiveEngine({
     if (refuseIfPiGone(s, turn)) throw engineError("pi_gone");
     armStall(s);
     emit(s, stateEvent(s));
+    // Track 3 Task 6: the FIRST message() after a card-bound spawn composes
+    // the real prompt from the stored dispatch brief — the operator's note
+    // (this call's `text`, "" when the dispatch route was given none) becomes
+    // cardBriefBlock's userLine, defaulting to "Work this card." unwritten.
+    // Every later message() on this session sends raw text (dispatchBrief is
+    // cleared here, once) — the exact same path a non-card session always
+    // took.
+    let promptText = text;
+    if (s.dispatchBrief) {
+      const brief = s.dispatchBrief;
+      const header = S.projectContextBlock(brief.projectSpace, brief.projectMembers);
+      promptText = header + "\n\n" + cardBriefBlock({
+        cardId: brief.cardId,
+        tasksDbPath: brief.tasksDbPath,
+        userLine: text || "Work this card.",
+        planForCard: S.planForCard,
+        cardStatus: S.cardStatus,
+        boardVocab: S.boardVocab,
+      }) + "\n\nDeliverables you produce as files go in: " + s.outputsDir;
+      s.dispatchBrief = null;
+    }
     // ms=0: no bridge turn budget. The stall watchdog above is this turn's
     // only clock. Every engine-held promptTurn carries a .catch — a child that
     // dies mid-turn REJECTS it, and an unhandled rejection in the gateway
     // process is a crash, not a log line.
-    s.pi.promptTurn(text, 0)
+    s.pi.promptTurn(promptText, 0, images)
       .then((end) => onTurnEnd(s, turn, end))
       .catch((e) => onTurnError(s, turn, e))
       .catch(() => {});
     return { turnId: turn.id };
+  }
+
+  /**
+   * Track 3 Task 13 (controller ruling): steer an IN-FLIGHT turn — fire-and-
+   * forget, no waiter, no `s.turn` mutation. Unlike message() this never
+   * claims a turn slot and never touches promptTurn: it sends a `steer`
+   * frame at the child pi is already running, which queues it into the
+   * live loop on its own. Refused honestly rather than silently dropped:
+   * `session_stopped` when the session is parked for good, `no_turn` when
+   * there is nothing running to steer, `pi_gone` when the child that WAS
+   * running the turn has since exited out from under it.
+   */
+  async function steer(sessionId, text) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (s.state === "stopped") throw engineError("session_stopped");
+    if (!s.turn) throw engineError("no_turn");
+    const alive = !!(s.pi && s.pi._exitCode == null);
+    if (!alive) throw engineError("pi_gone");
+    const message = String(text == null ? "" : text);
+    s.pi.send({ type: "steer", message });
+    emit(s, { type: "log", text: "steered: " + message.slice(0, 200) });
+    return { ok: true };
+  }
+
+  /**
+   * Track 3 Task 7: force a respawn of a session's child so SPAWN-BOUND state
+   * (permissionMode, narrowing) binds NOW instead of waiting for the next
+   * natural idle-hibernate/wake cycle — every spawn/wake rebuilds the world
+   * fresh (startChild's own header note), so closing and immediately
+   * re-opening the child is sufficient; nothing here is card- or
+   * turn-specific.
+   *
+   * Refused with `cycle_busy` while a turn is in flight, a card is pending,
+   * OR another cycle() is already running on this session — cycling mid-turn
+   * would race promptTurn's own completion path, cycling with a pendingUi
+   * card would destroy a question a human has not yet answered (hibernate()'s
+   * own I5 guard would silently no-op that case anyway, but refusing HERE
+   * gives the caller an honest, typed reason rather than a wake that quietly
+   * did nothing), and two concurrent cycle()s on ONE session would otherwise
+   * both observe `s.pi` already null after the first's `hibernate()` closes
+   * it (fix round 1, coordinator-reported): the second sees a "hibernating"
+   * session, no-ops its own hibernate(), and spawns a SECOND child — then the
+   * first's suspended `startChild` resumes and spawns a THIRD, clobbering
+   * `s.pi` and orphaning the second's child as an uncounted leaked process.
+   *
+   * `s.cycling` is the re-entrancy claim, set in the SAME synchronous
+   * prefix as the other cycle_busy guards (before the first await) — the
+   * exact idiom `message()`'s own `s.turn` claim and `reserveSlot`'s
+   * capacity reservation already use — and released in a `finally` so a
+   * mid-flight failure never wedges the session cycle-locked forever.
+   * `message()` also checks it (see below): a session is transiently neither
+   * "awake" nor cleanly "hibernating" for the DB-claim purposes while a
+   * cycle is in flight, and without this check a concurrent `message()`
+   * would try to WAKE mid-cycle, racing `startChild` the same way.
+   */
+  async function cycle(sessionId) {
+    const S = await loadSeams();
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (s.state === "stopped") throw engineError("session_stopped");
+    if (s.turn || s.pendingUi || s.cycling) throw engineError("cycle_busy");
+    s.cycling = true;                                  // ← the re-entrancy claim
+    try {
+      await hibernate(s);                              // no-op if already hibernating
+      // ---- one synchronous block: reservation, no await between check+flip
+      const pending = reserveWithEviction(S, s);
+      // -----------------------------------------------------------------
+      try {
+        if (pending) await pending;
+        await assertRowClaimable(s);
+        await startChild(S, s);
+      } catch (e) {
+        // Same I-3 discipline as message()'s wake-failure cleanup: release
+        // the reservation unconditionally and first, detach before closing
+        // so attachExit treats the exit as expected, never await the close.
+        const pi = s.pi;
+        s.pi = null;
+        s.state = "hibernating";
+        writeLeases();
+        if (pi) {
+          pi.close().catch(() => { /* already dead */ });
+          if (!e || e.code !== "turn_in_progress") {
+            writeRow(s, { status: "waiting-user" }).catch(() => {});
+          }
+        }
+        throw e;
+      }
+      emit(s, stateEvent(s));
+      armIdle(s);
+      return { state: s.state };
+    } finally {
+      s.cycling = false;
+    }
+  }
+
+  /**
+   * Track 3 Task 4: engine-owned control surface for model / thinking level /
+   * permission mode / plan mode. Applies live what it can (an awake child gets
+   * a correlated `commandSince` RPC), stores what only binds at the next wake
+   * (permission mode always; a model switch while hibernating), and validates
+   * up front so a bad value never round-trips to a child that would refuse it
+   * with an opaque `command_failed`.
+   *
+   * Refusal order matches the brief's enumeration: no_such_session →
+   * session_stopped → turn_in_progress (model/thinking only — "one clock
+   * owner per turn", the same discipline `message()`'s own turn claim
+   * enforces) → bad_request (unknown values).
+   *
+   * @returns {Promise<{applied: object, bindsAtWake: object}>}
+   */
+  async function control(sessionId, opts = {}) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (s.state === "stopped") throw engineError("session_stopped");
+
+    const hasModel = opts.model != null;
+    const hasThinking = opts.thinking != null;
+    const hasPermissionMode = opts.permissionMode != null;
+    const hasPlanMode = Object.prototype.hasOwnProperty.call(opts, "planMode");
+
+    // Model/thinking/planMode switches share the one child clock a turn
+    // already owns (commandSince/promptAckOnly ride the SAME correlated
+    // response stream promptTurn does) — refused mid-turn rather than racing
+    // it. permissionMode never touches the live child, so it alone is never
+    // refused here.
+    if ((hasModel || hasThinking || hasPlanMode) && s.turn) throw engineError("turn_in_progress");
+
+    if (hasModel && (!opts.model.provider || !opts.model.modelId)) throw engineError("bad_request");
+    if (hasThinking && !THINKING_LEVELS.has(opts.thinking)) throw engineError("bad_request");
+    if (hasPermissionMode && !PERMISSION_MODES.has(opts.permissionMode)) throw engineError("bad_request");
+    if (hasPlanMode && typeof opts.planMode !== "boolean") throw engineError("bad_request");
+
+    const S = await loadSeams();
+    const applied = {};
+    const bindsAtWake = {};
+
+    if (hasModel) {
+      const { provider, modelId } = opts.model;
+      if (s.pi) {
+        // Warm BEFORE the switch (spec: pi-lab's local-models starter
+        // self-disables when a bot spawns it, so the provider must already be
+        // serving before pi's own set_model tries to route to it).
+        const slog = sessionLog(s);
+        await S.warmModel(provider, slog);
+        const res = await s.pi.commandSince({ type: "set_model", provider, modelId });
+        const data = (res && res.data) || {};
+        const rProvider = data.provider || provider;
+        const rId = data.id || modelId;
+        const rKey = rProvider + "/" + rId;
+        const changed = s.currentModel !== rKey;
+        s.currentModelParts = { provider: rProvider, modelId: rId };
+        s.currentModel = rKey;
+        s.resolved = Object.assign({}, s.resolved, { provider: rProvider, model: rId, key: rKey });
+        applied.model = rKey;
+        // The child's OWN model_select event for this same switch will also
+        // arrive shortly — onModelSelect dedupes on an unchanged value, so
+        // this is the only "now on <key>" log line the operator sees.
+        if (changed) emit(s, { type: "log", text: "now on " + rKey });
+      } else {
+        // Hibernating: nothing live to command. Track it for the next wake's
+        // startChild override (Task 4 behavior 2) instead.
+        const key = provider + "/" + modelId;
+        s.currentModelParts = { provider, modelId };
+        s.currentModel = key;
+        bindsAtWake.model = key;
+      }
+    }
+
+    if (hasThinking) {
+      if (s.pi) {
+        await s.pi.commandSince({ type: "set_thinking_level", level: opts.thinking });
+        applied.thinking = opts.thinking;
+      }
+      // Hibernating: no live child to command, and deliberately NO
+      // persistence — pi's own session file remembers the thinking level
+      // across a `--session` resume with no CLI flag to override it, so
+      // there is nothing for THIS engine to bind at the next wake.
+    }
+
+    if (hasPermissionMode) {
+      // Binds at wake ONLY — pi's permission policy is fixed via env at
+      // spawn time (bridge.mjs's PiRpc constructor), so even an awake
+      // session's mode change cannot take live effect without a restart the
+      // operator did not ask for. Every accepted change still gets a visible
+      // system note (spec §4.1.4) so the drawer's "current mode" reads true
+      // even though nothing live just happened.
+      s.permissionMode = opts.permissionMode;
+      bindsAtWake.permissionMode = opts.permissionMode;
+      emit(s, { type: "log", text: "permission mode → " + opts.permissionMode });
+    }
+
+    if (hasPlanMode) {
+      // Track 3 Task 5: plan mode is entirely pi-lab's own extension state —
+      // there is nothing to bind at wake (unlike model/permissionMode, a
+      // hibernating session has no drawer toggle to disable-and-remember;
+      // the operator would just re-open the drawer on wake and see it off).
+      // It ALWAYS needs a live child: pi-lab's `/plan` command is handled by
+      // the extension layer via a fully-acked prompt (never a real agent
+      // turn), so a hibernating session is refused outright rather than
+      // silently queued.
+      if (!s.pi) throw engineError("not_awake");
+      // NEVER bare `/plan` — that's a toggle (pi-lab plan-mode/index.ts) and
+      // a footgun against stale drawer state if this call races a manual
+      // `/plan` the operator just typed in the TUI. `promptAckOnly` waits
+      // only for pi's ack of the prompt, never for agent_end — pi-lab's
+      // `/plan` handler is fully synchronous inside the extension layer and
+      // never starts an agent loop at all.
+      await s.pi.promptAckOnly(opts.planMode ? "/plan on" : "/plan off");
+      // The REAL plan-mode state (enabled/executing/todos…) arrives async
+      // via the rpc-state-bridge mirror (onUiRequest's `crow-state:` notify)
+      // and is what `s.planMode`/snapshot()/stateEvent() report from then on
+      // — `applied.planMode` here only echoes the requested on/off intent,
+      // confirming the ack succeeded, not the full state object.
+      applied.planMode = opts.planMode;
+    }
+
+    emit(s, stateEvent(s));
+    return { applied, bindsAtWake };
+  }
+
+  /**
+   * Track 3 Task 4: live model/thinking-level menus for the drawer (Task 8).
+   * Wakes are NEVER required just to list — a hibernating session (or one this
+   * process has never held; resolveSession adopts) returns null arrays so the
+   * caller can disable the pickers instead of spawning a child on a mere GET.
+   */
+  async function options(sessionId) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (!s.pi) return { models: null, thinkingLevels: null };
+    const [modelsRes, levelsRes] = await Promise.all([
+      s.pi.commandSince({ type: "get_available_models" }),
+      s.pi.commandSince({ type: "get_available_thinking_levels" }),
+    ]);
+    const models = (modelsRes && modelsRes.data && modelsRes.data.models) || [];
+    const thinkingLevels = (levelsRes && levelsRes.data && levelsRes.data.levels) || [];
+    return { models, thinkingLevels };
   }
 
   /** Resolve a session this process holds, or adopt its row (gateway restart).
@@ -1023,11 +1925,60 @@ export function createInteractiveEngine({
     clearIdle(s);
     s.pendingUi = null;
     s.state = "stopped";
+    // Track 3 Task 6: released on stop() — a stopped session's card is free
+    // for a fresh dispatch. This is the primary release path (attachExit's
+    // twin above only fires for an exit that lands on an already-stopped
+    // session, which stop() itself just produced by nulling s.pi first).
+    releaseCard(s.cardId, s.sessionId);
     if (pi) { try { await pi.close(); } catch { /* already dead */ } }
     writeLeases();
     await writeRow(s, { status: "stopped" }).catch(() => {});
     emit(s, stateEvent(s));
     return { ok: true };
+  }
+
+  /**
+   * Track 3 Task 9: bind an EXISTING (already-spawned, free-chat or
+   * previously card-bound) session to a card — the drawer's "attach to this
+   * card" action, distinct from `spawn({cardId})`'s dispatch-time binding.
+   * Occupancy is the caller's job: the ROUTE runs the same card validation +
+   * `checkCardFree` DB check `spawn()`'s dispatch route does, BEFORE ever
+   * calling in here — this method only performs the synchronous in-process
+   * claim (`claimCard`, same TOCTOU discipline as spawn's card claim: no
+   * await between the check and the set) and the row/state write. Refused on
+   * `session_stopped` — a stopped session has no future turn to hand the
+   * card's work to.
+   *
+   * Re-attaching to a DIFFERENT card than the one currently held releases the
+   * old claim (only after the new one is safely held) so a session is never
+   * left owning two cards, and a failed row write rolls the claim back
+   * cleanly rather than leaving the in-memory map and the DB row disagreeing.
+   */
+  async function attachCard(sessionId, cardId) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (s.state === "stopped") throw engineError("session_stopped");
+    const cid = Number(cardId);
+    const prevCardId = s.cardId;
+    if (prevCardId === cid) {
+      // Idempotent reassert: the session already holds this exact claim, so
+      // there is no claim or row state to churn. (assigned_bot provenance is
+      // the ROUTE's job on every call, not this method's — it re-writes that
+      // unconditionally regardless of what this returns.)
+      return { ok: true, cardId: cid, botId: s.botId };
+    }
+    claimCard(cid, s.sessionId);                        // throws card_occupied
+    s.cardId = cid;
+    try {
+      await writeRow(s, { status: s.pi ? "active" : "waiting-user" });
+    } catch (e) {
+      s.cardId = prevCardId;
+      releaseCard(cid, s.sessionId);
+      throw e;
+    }
+    if (prevCardId != null) releaseCard(prevCardId, s.sessionId);
+    emit(s, stateEvent(s));
+    return { ok: true, cardId: cid, botId: s.botId };
   }
 
   async function subscribe(sessionId, fn) {
@@ -1040,6 +1991,11 @@ export function createInteractiveEngine({
       // hibernate / child exit all clear it, so a late subscriber can never be
       // shown a card no child is waiting on.
       if (s.pendingUi) fn({ type: "ask_user", ...s.pendingUi });
+      // Track 3 Task 5: replay the last known plan-mode mirror so a late
+      // subscriber's drawer opens already showing plan-mode state instead of
+      // waiting for the NEXT bus tick (which may never come if nothing
+      // changes).
+      if (s.planMode) fn({ type: "plan_state", state: s.planMode });
     } catch { /* a broken subscriber is not our problem */ }
     return () => s.subscribers.delete(fn);
   }
@@ -1086,6 +2042,17 @@ export function createInteractiveEngine({
 
   /** Hibernate: close the child, keep the row. */
   async function hibernate(s) {
+    // Track 3 Task 7 (spec I5): an assertion-style guard — hibernate must
+    // NEVER destroy a session with a pending ask_user card. cycle() refuses
+    // first (cycle_busy) and safe-victim eviction never selects a pendingUi
+    // candidate, so this should be unreachable from either — it exists for
+    // any FUTURE caller that forgets one of those checks: refusing (and
+    // logging) is safer than silently killing the child a human is mid-answer
+    // to and losing the question with it.
+    if (s.pendingUi) {
+      log(s.sessionId + ": hibernate refused — a pendingUi card is in flight");
+      return;
+    }
     if (!s.pi) return;
     const pi = s.pi;
     s.pi = null;
@@ -1116,6 +2083,12 @@ export function createInteractiveEngine({
       clearIdle(s);
       clearStall(s);
       s.pendingUi = null;
+      // Track 3 Task 7: captured BEFORE the existing `s.turn = null` below —
+      // reading it AFTER always reads false (a null turn), so the
+      // interrupted marker would never fire. This session was genuinely
+      // mid-turn when the shutdown interrupted it, distinct from a plain idle
+      // park (control stays 'run').
+      const hadTurn = !!s.turn;
       if (s.turn) s.turn.aborted = true;
       s.turn = null;
       if (s.state !== "stopped") s.state = "hibernating";
@@ -1127,7 +2100,9 @@ export function createInteractiveEngine({
           // restart — assertRowClaimable would 409 the next gateway's wake
           // for a full turn budget. Best-effort, and written before the close
           // so a child that ignores SIGTERM cannot skip it.
-          try { await writeRow(s, { status: "waiting-user" }); } catch { /* best effort */ }
+          try {
+            await writeRow(s, { status: "waiting-user" }, hadTurn ? "interrupted" : "run");
+          } catch { /* best effort */ }
           try { await pi.close(); } catch { /* already dead */ }
         })(),
         new Promise((r) => { timerHandle = setTimeout(r, timeoutMs); }),
@@ -1141,6 +2116,10 @@ export function createInteractiveEngine({
   return {
     spawn,
     message,
+    steer,
+    cycle,
+    control,
+    options,
     answer,
     abort,
     stop,
@@ -1148,8 +2127,33 @@ export function createInteractiveEngine({
     get,
     list,
     stopAll,
+    /** Track 3 Task 6: exported so the dispatch ROUTE can 409 a card BEFORE
+     * ever reaching spawn() — see the module header. */
+    checkCardFree,
+    /** Track 3 Task 9: attach an existing session to a card — see its own doc. */
+    attachCard,
     /** Precondition-test surface (r1 S10) — also the internal resolver. */
     _loadSeams: loadSeams,
+    /** Track 3 Task 7: test-only reach into the internal hibernate() — every
+     * LIVE call site (idle timer, safe-victim eviction, cycle()) already
+     * guards against a pendingUi target before calling in, so hibernate()'s
+     * own assertion-style guard (spec I5) is otherwise unreachable through
+     * the public surface. This lets a test prove the guard itself, not just
+     * its callers' defensiveness. Takes a sessionId (not the internal record
+     * `snapshot()` would return) and resolves it through the SAME resident
+     * map every public method uses. */
+    _hibernateForTest: async (sessionId) => {
+      const s = sessions.get(String(sessionId));
+      if (!s) throw engineError("no_such_session");
+      return hibernate(s);
+    },
+    /** M2 (final review) test-only reach into the internal `cardClaims` map
+     * — the DB rail (checkCardFree) always 409s correctly regardless of this
+     * map's state, so no PUBLIC method exposes WHICH sessionId currently
+     * holds a card's in-memory claim. This lets a test prove adoptRow's
+     * conflict guard directly instead of only observing its (identical
+     * either way) DB-rail symptom. */
+    _cardClaimHolderForTest: (cardId) => cardClaims.get(Number(cardId)) ?? null,
   };
 }
 

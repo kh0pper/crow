@@ -55,6 +55,15 @@ services:
       - --spec-draft-n-max
       - "2"
       - --jinja
-    restart: always
+    # unless-stopped, matching every other model bundle. `always` differs in one
+    # way that matters here: it resurrects a container on docker daemon restart
+    # EVEN IF it was explicitly stopped. A DSv4 eval window takes the box by
+    # stopping this container, so under `always` a daemon restart or upgrade
+    # mid-window would load a 25 GiB model onto a box already holding a 77-97
+    # GiB one — with no call site any guard could intercept.
+    # Reboot behaviour is unchanged: unless-stopped still restarts a container
+    # that was running at shutdown. The two policies differ only for containers
+    # that were deliberately stopped, which is exactly the window's case.
+    restart: unless-stopped
     ipc: host
     shm_size: 16g

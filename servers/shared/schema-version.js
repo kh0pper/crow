@@ -13,7 +13,9 @@
 //
 // Generation history:
 //   7 -> 8: group_tombstones (Item 2b)
-export const SCHEMA_GENERATION = 8;
+//   8 -> 9: bot_sessions.control CHECK widen, 'run'/'stop' -> +'interrupted'
+//           (Track 3 Task 7 — stopAll's mid-turn interruption marker)
+export const SCHEMA_GENERATION = 9;
 
 // Pure decision helper for the gateway boot gate. Returns true when the DB
 // needs init-db to run: either core tables are missing (fresh/incomplete

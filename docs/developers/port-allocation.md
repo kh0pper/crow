@@ -11,7 +11,11 @@ This document is the **single source of truth** for every host port consumed by 
 - "Existing" rows are bundles already shipped before this registry was introduced — they are recorded here so future bundles avoid them.
 - "Reserved" rows are claimed by upcoming Phase 2 bundles; do not consume them for unrelated work.
 - "MVP" rows are claimed by the bundles in the current MVP plan.
-- Not every row is a Docker port: bundles whose payload is supervised directly by the gateway (e.g. `perch-hub`, a vendored Node process) claim their loopback ports here too, so nothing else takes them. The `perch-hub` block deliberately sits clear of upstream Perch's own defaults (4200/4201, pool 4101-4139) so a crow-supervised hub and a standalone `pi-hub` can coexist on one host — do not "tidy" them onto those numbers.
+- This doc alone is not authoritative. A port is only actually free when it's free across all three registries: this table, every `docker-compose.yml` under `crow-addons/` AND `crow/bundles/` (not just the one you're editing), and live listeners on the host. A same-port/different-bind-address pair (e.g. `127.0.0.1:4210` vs. the tailnet IP on `4210`) can pass both `check-port-allocation.js` and a naive "is anything listening?" check, then show up later as a silent double-allocation — check all three before claiming a number.
+
+## External ports (not Crow's to allocate)
+
+- **4200/4201, pool 4101-4139** — the standalone lab `pi-hub` service (upstream, not a Crow bundle, not gateway-supervised, runs outside this repo's control). Do not "tidy" a future bundle onto these numbers.
 
 ## Known conflicts in current `bundles/`
 
@@ -51,9 +55,6 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 3061 | 127.0.0.1 | rookery (OpenScience reviewer) | PR #157 |
 | 3080 | 127.0.0.1 | romm (existing) | existing |
 | 3456 | 127.0.0.1 | vikunja (existing) | existing |
-| 4141-4179 | 127.0.0.1 | perch-hub — pi session pool (one port per live session, allocated by the hub; `PI_HUB_POOL_START`/`PI_HUB_POOL_END`) | perch-hub P1 |
-| 4210 | 127.0.0.1 | perch-hub — hub web UI, reached only via the gateway proxy at `/proxy/perch-hub` (`CROW_PERCH_PORT`) | perch-hub P1 |
-| 4211 | 127.0.0.1 | perch-hub — session registry (hub-internal, never proxied) (`CROW_PERCH_REGISTRY_PORT`) | perch-hub P1 |
 | 4533 | 127.0.0.1 | navidrome (existing) | existing |
 | 5000 | 127.0.0.1 | kavita (existing) | existing |
 | 5006 | 127.0.0.1 | actual-budget (existing) | existing |

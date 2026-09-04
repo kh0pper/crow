@@ -80,12 +80,12 @@ function selBot(projectId) {
 }
 const layout = (o) => o.content;
 
-async function render(projectId, q = {}) {
+async function render(projectId, q = {}, engineOverride) {
   const db = createDbClient();
   try {
-    return await renderKanbanBoard({}, {}, {
-      db, layout, selBot: selBot(projectId), bots: [], notice: "", switcher: "", q, lang: "en",
-    });
+    const opts = { db, layout, selBot: selBot(projectId), bots: [], notice: "", switcher: "", q, lang: "en" };
+    if (engineOverride !== undefined) opts.engine = engineOverride;
+    return await renderKanbanBoard({}, {}, opts);
   } finally { db.close(); }
 }
 
@@ -305,4 +305,33 @@ test("emitted client script builds the history strip and result banner off GET /
   assert.ok(js.includes("r.j.board&&r.j.board.terminal_values"), "gating reads the additive 'board' key's terminal_values");
   assert.ok(js.includes("bb-d-history"), "history strip container id");
   assert.ok(js.includes("MUTATION_VERB_LABELS"), "mutation verbs are i18n'd, not raw codes");
+});
+
+// ---- Track 3 Task 11: engine-sourced bird glyph on the card face ----
+
+test("card faces carry no bird glyph when the engine is absent (production default: nothing ever spawned)", async () => {
+  const html = await render(7);
+  // Not a bare 'bb-bird' substring check — css.js's stylesheet defines the
+  // .bb-bird{...} rule on every render regardless of any bird being present
+  // (same precedent as the result-marker test above), so this checks for
+  // the actual glyph markup.
+  assert.ok(!html.includes('class="bb-bird bb-bird--'), "no live engine means no bird glyphs anywhere on the board");
+});
+
+test("card face carries the engine-sourced bird glyph and its session id when a live session binds this card", async () => {
+  const engine = { list: async () => [{ sessionId: "s1", botId: "scout", state: "awake", pendingUi: null, cardId: 1, turnInFlight: true }] };
+  const html = await render(7, {}, engine);
+  const cardHtml = html.slice(html.indexOf('data-card="1"'), html.indexOf('data-card="1"') + 800);
+  assert.ok(cardHtml.includes('class="bb-bird bb-bird--working"'), "an awake session with no pending card folds to 'working'");
+  assert.ok(cardHtml.includes('data-bird-sid="s1"'), "the glyph carries the session id for client correlation");
+  // Sanity: a card with no bound session in the SAME render carries none.
+  const otherCardHtml = html.slice(html.indexOf('data-card="10"'), html.indexOf('data-card="10"') + 800);
+  assert.ok(!otherCardHtml.includes('class="bb-bird bb-bird--'), "an unrelated card in the same render stays bird-less");
+});
+
+test("a pending ask_user session folds to the 'waiting' glyph, the loudest state", async () => {
+  const engine = { list: async () => [{ sessionId: "s2", botId: "scout", state: "awake", pendingUi: { kind: "ask" }, cardId: 10 }] };
+  const html = await render(7, {}, engine);
+  const cardHtml = html.slice(html.indexOf('data-card="10"'), html.indexOf('data-card="10"') + 800);
+  assert.ok(cardHtml.includes('class="bb-bird bb-bird--waiting"'));
 });

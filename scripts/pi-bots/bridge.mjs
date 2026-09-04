@@ -36,6 +36,7 @@ import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab } from "./tracker.mjs";
+import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 // C-11: the per-turn world assembly (identity + spawn readiness) lives in
@@ -217,6 +218,31 @@ export class PiRpc {
       piPolicy.write_paths = (Array.isArray(piPolicy.write_paths) ? piPolicy.write_paths.slice() : [])
         .concat(opts.selfAuthoringDir);
     }
+    // Track 3 Task 3: extraWritePaths appended to the write_paths COPY exactly
+    // like selfAuthoringDir above (never mutates the stored def). Channel
+    // callers never pass this — absent leaves write_paths untouched (golden
+    // guard, tests/bot-world.test.js).
+    if (opts.extraWritePaths) {
+      piPolicy.write_paths = (Array.isArray(piPolicy.write_paths) ? piPolicy.write_paths.slice() : [])
+        .concat(opts.extraWritePaths);
+    }
+    // Track 3 Task 3: permissionMode ("guarded" default | "ask" | "bypass"),
+    // applied to the piPolicy COPY, after the write_paths appends above.
+    // "guarded"/absent is a no-op — byte-identical policy for every channel
+    // caller (golden guard). "ask" flips pi-lab's interactive_ask flag.
+    // "bypass" opens write_paths to "/" and REMOVES external_send rather than
+    // setting it to a permissive value: pi-lab's botPolicyGate only blocks
+    // external-send tools when policy.external_send === "draft_only"
+    // (pi-lab extensions/permission-gating.ts:47,127) — any other value,
+    // including absence, already falls through unblocked, so there is no
+    // "allow" value in the real vocabulary to set; deleting the key is the
+    // correct permissive representation.
+    if (opts.permissionMode === "ask") {
+      piPolicy.interactive_ask = true;
+    } else if (opts.permissionMode === "bypass") {
+      piPolicy.write_paths = ["/"];
+      delete piPolicy.external_send;
+    }
     // C-12 spawn_env hygiene (r1 S3 — security): a bot def could otherwise set
     // PI_BOT_INTERACTIVE (flipping a channel turn's ask_user into an
     // unanswerable "ui" hang) or clobber PI_BOT_PERMISSION_POLICY (a
@@ -394,6 +420,51 @@ export class PiRpc {
   // id we send (rpc-mode success()). getState tolerates the stale match only
   // because sessionId is invariant; token counts change per turn, so we can't.
   async getSessionStats() { const id = "stats_" + (this._statsSeq = (this._statsSeq || 0) + 1); this.send({ type: "get_session_stats", id }); return this.waitFor((m) => m.type === "response" && m.id === id && m.command === "get_session_stats", 15000, "get_session_stats"); }
+  // Track 3 Task 3: correlated slash-command RPCs (set_model,
+  // set_thinking_level, get_available_models, get_available_thinking_levels).
+  // Mirrors getSessionStats' id idiom, but also scopes the wait to messages
+  // parsed after this call started (waitForSince's `_seq` filter) — the same
+  // stale-match defense promptTurn uses on the far hotter prompt/agent_end
+  // path, since a long-lived child can otherwise have an accumulated
+  // same-command response sitting in `this.responses` from a PRIOR call.
+  async commandSince(payload, ms = 15000) {
+    const id = "cmd_" + (this._cmdSeq = (this._cmdSeq || 0) + 1);
+    const since = this._seq || 0;
+    this.send(Object.assign({}, payload, { id }));
+    const res = await this.waitForSince(since,
+      (m) => m.type === "response" && m.id === id && m.command === payload.type,
+      ms, payload.type);
+    // Fail-closed (Fix round 1 ruling, supersedes the brief's literal
+    // `=== false`): this serves engine control() for set_model/
+    // set_thinking_level — a malformed/old-protocol response MISSING
+    // `success` must never be treated as a successful model/thinking change.
+    // Mirrors promptTurn's `success !== true` check.
+    if (res.success !== true) {
+      const err = new Error(payload.type + " failed: " + (res.error || "unknown"));
+      err.code = "command_failed";
+      throw err;
+    }
+    return res;
+  }
+  // Track 3 Task 3: promptTurn's first half, verbatim, WITHOUT the agent_end
+  // wait. A pi-lab slash command that is fully handled by the extension layer
+  // acks and never starts an agent loop at all (spec §5.2) — waiting for
+  // agent_end after such an ack would wedge forever (no ms=0 backstop for the
+  // engine's own watchdog, since there is nothing coming).
+  async promptAckOnly(message, ms = PROMPT_ACK_TIMEOUT_MS) {
+    const id = "prompt_" + (this._promptSeq = (this._promptSeq || 0) + 1);
+    const since = this._seq || 0;
+    this.send({ type: "prompt", id, message });
+    const ack = await this.waitForSince(since,
+      (m) => m.type === "response" && m.command === "prompt" && m.id === id,
+      ms, "prompt-ack");
+    if (ack.success !== true) {
+      const err = new Error("prompt refused: " + (ack.error || "unknown"));
+      err.code = "prompt_refused";
+      throw err;
+    }
+    return ack;
+  }
   async abort() { this.send({ type: "abort" }); return this.waitFor((m) => m.type === "response" && m.command === "abort", 15000, "abort").catch(() => null); }
   assistantText() {
     let last = null; for (const e of this.events) if (e.type === "agent_end") last = e;
@@ -489,7 +560,10 @@ export function appendAuditBridge(projectId, opts) {
 // can interact with it (member list filtered to invoke_bot=true), what
 // backends are available, and where its workspace lives. The block is
 // short — bots are line-budget sensitive.
-function projectContextBlock(space, members) {
+// Track 3 Task 6: EXPORTED (additive — no rename) so the interactive engine's
+// dispatch brief (perch-interactive.js loadSeams()) can compose the same
+// header a channel turn gets, instead of growing a second copy.
+export function projectContextBlock(space, members) {
   if (!space) return "";
   const lines = [];
   lines.push("PROJECT: " + space.name + "  (id=" + space.id + ", slug=" + space.slug + ")");
@@ -654,8 +728,9 @@ export async function handleInbound(opts) {
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);
   // D-T1.4: plans are board_plans records now, resolved from the
   // instance-global store — see planForCard's own comment for the
-  // store-topology rule (this call takes no tasksDbPath on purpose).
-  const planBody = cardId != null ? planForCard(cardId) : null;
+  // store-topology rule (this call takes no tasksDbPath on purpose). The
+  // actual read now happens inside cardBriefBlock (Track 3 Task 2) — no
+  // standalone planBody local here, so planForCard is only invoked once.
 
   // M3b: structured project header replaces the bare "Project #N" string.
   // Falls back to a one-liner for legacy bots with no project_spaces row.
@@ -684,15 +759,12 @@ export async function handleInbound(opts) {
     // call board_move_item — decision 10, full verbs, provenance, no
     // restriction — but the model here is report-then-reply, not
     // move-as-completion).
-    const vocab = boardVocab(cardId, tasksDbPath);
-    promptText = projectHeader + "\n\nWork the following card.\n\nCARD #" + cardId +
-      " (current board status: " + cardStatus(cardId, tasksDbPath) + "; this board's statuses: " + vocab.statuses.join(", ") + ").\nPLAN:\n---\n" +
-      (planBody || "(no plan)") + "\n---\n\nUser said: \"" + cleanMsg + "\"\n\n" +
-      "Do the work the plan describes. You may use board_move_item to update this card's status " +
-      "as you go (only ever use this board's statuses). When you are done, call board_report_result " +
-      "with item_id=" + cardId + ", an outcome of success/failure/partial, and a summary_md describing " +
-      "what you did — that call is what ends the run, not a status write. " +
-      "Then reply with a short summary for the gateway thread. One card only.";
+    // Track 3 Task 2: the block body (from "Work the following card." through
+    // "...not a status write.") is now a shared pure builder — see
+    // card-brief.mjs — so the interactive dispatch rail can compose the same
+    // brief. projectHeader/gatewayHint and the channel tail stay caller-side.
+    promptText = projectHeader + "\n\n" + cardBriefBlock({ cardId, tasksDbPath, userLine: cleanMsg, planForCard, cardStatus, boardVocab }) +
+      " Then reply with a short summary for the gateway thread. One card only.";
   } else {
     // No card reference — let the bot DECIDE based on its system prompt
     // whether to (a) answer briefly without tools (greet, list cards, simple

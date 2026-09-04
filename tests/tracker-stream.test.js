@@ -226,3 +226,98 @@ test("[SITE streams.js kanban/project tick] an archived card is excluded from th
   assert.ok(!ids.includes(Number(kanbanArchivedCardId)),
     "an archived project-board card must not appear in the SSE row set");
 });
+
+// ---------------------------------------------------------------------------
+// Track 3 Task 11 (spec §5.6): bird state is engine-sourced and rides a
+// SEPARATE named `bird-state` SSE event — it must never fold into the
+// default {cards, locks} frame (whose client response is a full reload on
+// any diff). Two servers against the SAME fixture DB, one with a fake
+// interactive engine and one with none, prove: (a) the default frame is
+// byte-for-byte identical either way, (b) a gateway with no engine emits no
+// bird-state event at all, and (c) an engine-backed one does, shaped
+// {<cardId>: {state, sid}}.
+// ---------------------------------------------------------------------------
+
+// Frame reader that keeps the default frame's RAW `data:` text (for a strict
+// byte comparison) alongside the parsed named `bird-state` event, if any.
+async function readFramesRaw(url, { expectBirdState } = {}) {
+  const ctrl = new AbortController();
+  let snapshotRaw = null;
+  let birdState = null;
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const frames = buf.split("\n\n");
+      buf = frames.pop();
+      for (const frame of frames) {
+        const ev = (frame.match(/^event: (.+)$/m) || [])[1] || null;
+        const dataMatch = frame.match(/^data: (.*)$/m);
+        if (!dataMatch) continue;
+        if (ev === "bird-state") birdState = JSON.parse(dataMatch[1]);
+        else if (ev == null) snapshotRaw = dataMatch[1];
+      }
+      if (snapshotRaw && (birdState || !expectBirdState)) break;
+    }
+    await reader.cancel();
+  } finally {
+    ctrl.abort();
+  }
+  return { snapshotRaw, birdState };
+}
+
+test("bird-state rides its own named SSE event; a gateway with no engine emits none at all", async () => {
+  const { default: express } = await import("express");
+  const { default: streamsRouter } = await import("../servers/gateway/routes/streams.js");
+
+  const fakeEngine = {
+    async list() {
+      return [{
+        sessionId: "bird-1", botId: KANBAN_BOT_ID, state: "awake", pendingUi: null,
+        cardId: Number(kanbanFreeCardId), turnInFlight: true,
+      }];
+    },
+  };
+
+  const appNoEngine = express();
+  appNoEngine.use((req, res, next) => { req.dashboardSession = "test-session"; next(); });
+  appNoEngine.use(streamsRouter((req, res, next) => next(), { interactiveEngine: () => null }));
+  const srvNoEngine = await new Promise((r) => { const s = appNoEngine.listen(0, () => r(s)); });
+
+  const appEngine = express();
+  appEngine.use((req, res, next) => { req.dashboardSession = "test-session"; next(); });
+  appEngine.use(streamsRouter((req, res, next) => next(), { interactiveEngine: () => fakeEngine }));
+  const srvEngine = await new Promise((r) => { const s = appEngine.listen(0, () => r(s)); });
+
+  const urlNoEngine = "http://127.0.0.1:" + srvNoEngine.address().port + "/dashboard/streams/bot-board?bot=" + KANBAN_BOT_ID;
+  const urlEngine = "http://127.0.0.1:" + srvEngine.address().port + "/dashboard/streams/bot-board?bot=" + KANBAN_BOT_ID;
+
+  try {
+    const noEngine = await readFramesRaw(urlNoEngine, { expectBirdState: false });
+    const withEngine = await readFramesRaw(urlEngine, { expectBirdState: true });
+
+    assert.ok(noEngine.snapshotRaw, "the no-engine server's default frame arrived");
+    assert.ok(withEngine.snapshotRaw, "the engine-backed server's default frame arrived");
+    assert.equal(withEngine.snapshotRaw, noEngine.snapshotRaw,
+      "the default frame is byte-for-byte identical whether or not bird state exists");
+
+    assert.equal(noEngine.birdState, null, "a gateway with no engine must emit no bird-state event at all");
+
+    assert.ok(withEngine.birdState, "the engine-backed server sent a bird-state named event");
+    assert.deepEqual(withEngine.birdState, { [String(kanbanFreeCardId)]: { state: "working", sid: "bird-1" } });
+  } finally {
+    // closeAllConnections: an aborted-but-not-yet-reaped keep-alive socket
+    // otherwise leaves plain close() waiting on the OS/undici pool to reap it
+    // (observed ~4s on the first of the two servers torn down here) — force it.
+    srvNoEngine.closeAllConnections();
+    srvEngine.closeAllConnections();
+    await new Promise((r) => srvNoEngine.close(r));
+    await new Promise((r) => srvEngine.close(r));
+  }
+});

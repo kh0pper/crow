@@ -1,18 +1,12 @@
 /**
- * Perch Hub C-3 — install/uninstall lifecycle for bundles that declare a
- * `webUI` block (`servers/gateway/routes/bundles.js`).
+ * Install/uninstall lifecycle for bundles that declare a `webUI` block
+ * (`servers/gateway/routes/bundles.js`).
  *
- * Two gaps this covers, both of which make the install→use flow impossible
- * without a restart the user is never told about:
- *   1. INSTALL — extension-proxy computes its entire route table once, at
- *      factory-construction time, and perch-runtime's supervisor starts in the
- *      post-listen boot step. A bundle installed into a RUNNING gateway
- *      therefore has neither a /proxy/<id> route nor a supervised child, so
- *      runInstallJob must report needsRestart.
- *   2. UNINSTALL — the payload dir is rm -rf'd while the supervised child's
- *      cwd is inside it. The child must be stopped FIRST, awaited (stop
- *      resolves on the child's exit), but bounded, so a wedged child cannot
- *      hang the uninstall job forever.
+ * The gap this covers: extension-proxy computes its entire route table once,
+ * at factory-construction time. A bundle installed into a RUNNING gateway
+ * therefore has no /proxy/<id> route until the process restarts, so
+ * runInstallJob must report needsRestart on install, and uninstall must flag
+ * the same restart need (the route survives until then).
  *
  * bundles.js resolves CROW_HOME at module load — scratch dir set before the
  * import (tests/bundles-install-job.test.js header explains the live incident
@@ -46,11 +40,9 @@ const {
   _finishJobForTest,
   _setAppBundlesForTest,
   _setRestartHookForTest,
-  _setWebUiStopHookForTest,
 } = await import("../servers/gateway/routes/bundles.js");
 
 after(() => {
-  _setWebUiStopHookForTest(null);
   _setRestartHookForTest(null);
   try { rmSync(CROW_HOME, { recursive: true, force: true }); } catch {}
   try { rmSync(APP_BUNDLES_FIXTURE, { recursive: true, force: true }); } catch {}
@@ -129,7 +121,7 @@ async function uninstall(base, bundleId) {
 
 test("installing a manifest with a webUI block reports needsRestart", async () => {
   const id = "fx-webui-restart";
-  const manifest = writeSourceManifest(id, { webUI: { port: 4210, portEnv: "CROW_PERCH_PORT", path: "/", label: "Perch", authTokenFile: "perch-token" } });
+  const manifest = writeSourceManifest(id, { webUI: { port: 4210, portEnv: "CROW_FX_WEBUI_PORT", path: "/", label: "Fixture Web UI", authTokenFile: "fx-token" } });
   const job = _createJobForTest(id, "install");
   try {
     const out = await runInstallJob(id, {}, { job, installedSnapshot: [], consentVerified: false, manifest });
@@ -159,94 +151,34 @@ test("installing an otherwise identical manifest WITHOUT a webUI block does not 
 // uninstall
 // ---------------------------------------------------------------------------
 
-test("uninstalling perch-hub stops the supervised child BEFORE deleting its payload, and flags a restart", async () => {
-  const bundleDir = seedInstalledBundle("perch-hub", { webUI: { port: 4210, authTokenFile: "perch-token" } });
-  const calls = [];
-  const restarts = [];
-  _setWebUiStopHookForTest({
-    stop: async () => {
-      // The child's cwd is inside this dir — if rmSync already ran, we are
-      // yanking the payload out from under a live process.
-      calls.push({ payloadStillPresent: existsSync(join(bundleDir, "payload", "hub", "server.mjs")) });
-      return true;
-    },
-  });
-  _setRestartHookForTest((delay) => restarts.push(delay));
-  try {
-    await withRouter(async (base) => {
-      const job = await uninstall(base, "perch-hub");
-      assert.equal(job.status, "complete_restart",
-        `the extension proxy still holds a /proxy/perch-hub route until the gateway restarts — job log: ${job.log.join(" | ")}`);
-      assert.deepEqual(calls, [{ payloadStillPresent: true }],
-        "stop must be awaited exactly once, before the payload is removed");
-      assert.ok(job.log.some((l) => /Stopped supervised web UI/.test(l)), `job log: ${job.log.join(" | ")}`);
-      assert.equal(existsSync(bundleDir), false, "bundle files must still be removed");
-      assert.deepEqual(restarts, [3000]);
-    });
-  } finally {
-    _setWebUiStopHookForTest(null);
-    _setRestartHookForTest(null);
-  }
-});
-
-test("a wedged child cannot hang the uninstall job — the stop is bounded, then uninstall proceeds", async () => {
-  const bundleDir = seedInstalledBundle("perch-hub", { webUI: { port: 4210, authTokenFile: "perch-token" } });
-  _setWebUiStopHookForTest({
-    // A child that ignores SIGTERM never fires "exit", so handle.stop()'s
-    // promise never settles. Same shape here.
-    stop: () => new Promise(() => {}),
-    timeoutMs: 150,
-  });
-  _setRestartHookForTest(() => {});
-  try {
-    await withRouter(async (base) => {
-      const started = Date.now();
-      const job = await uninstall(base, "perch-hub");
-      assert.ok(Date.now() - started < 5000, "the uninstall must not wait on an unresolvable stop");
-      assert.equal(job.status, "complete_restart");
-      assert.ok(job.log.some((l) => /did not exit in time/.test(l)),
-        `the timeout must be reported, not swallowed — job log: ${job.log.join(" | ")}`);
-      assert.equal(existsSync(bundleDir), false, "uninstall must still complete after giving up on the child");
-    });
-  } finally {
-    _setWebUiStopHookForTest(null);
-    _setRestartHookForTest(null);
-  }
-});
-
-test("uninstalling a DIFFERENT webUI bundle flags a restart but never touches the Perch child", async () => {
+test("uninstalling a webUI bundle flags a restart (the /proxy/<id> route survives until then)", async () => {
   const bundleDir = seedInstalledBundle("fx-other-webui", { webUI: { port: 6080, label: "Browser" } });
-  const calls = [];
-  _setWebUiStopHookForTest({ stop: async () => { calls.push(1); return true; } });
-  _setRestartHookForTest(() => {});
+  const restarts = [];
+  _setRestartHookForTest((delay) => restarts.push(delay));
   try {
     await withRouter(async (base) => {
       const job = await uninstall(base, "fx-other-webui");
       assert.equal(job.status, "complete_restart", "its /proxy/<id> route also survives until restart");
-      assert.deepEqual(calls, [],
-        "stopping the Perch hub while uninstalling some other web UI would kill a healthy, unrelated process");
-      assert.equal(existsSync(bundleDir), false);
+      assert.equal(existsSync(bundleDir), false, "bundle files must still be removed");
+      assert.deepEqual(restarts, [3000]);
     });
   } finally {
-    _setWebUiStopHookForTest(null);
     _setRestartHookForTest(null);
   }
 });
 
-test("uninstalling a bundle with no webUI block neither stops a child nor forces a restart", async () => {
+test("uninstalling a bundle with no webUI block does not force a restart", async () => {
   const bundleDir = seedInstalledBundle("fx-plain-bundle", {});
-  const calls = [];
-  _setWebUiStopHookForTest({ stop: async () => { calls.push(1); return true; } });
-  _setRestartHookForTest(() => {});
+  const restarts = [];
+  _setRestartHookForTest((delay) => restarts.push(delay));
   try {
     await withRouter(async (base) => {
       const job = await uninstall(base, "fx-plain-bundle");
       assert.equal(job.status, "complete", "a plain bundle uninstall must not start forcing gateway restarts");
-      assert.deepEqual(calls, []);
+      assert.deepEqual(restarts, []);
       assert.equal(existsSync(bundleDir), false);
     });
   } finally {
-    _setWebUiStopHookForTest(null);
     _setRestartHookForTest(null);
   }
 });

@@ -46,81 +46,68 @@ A gateway connects an agent to a place where people talk to it. The same agent d
 - **Discord**: The agent joins a Discord server as a bot and answers in channels and DMs, with a per-agent user allowlist.
 - **Meta Glasses**: A paired pair of Ray-Ban Meta (Gen 2) glasses binds to one agent. That agent then drives the fast voice turn: its persona, its skills, its scoped tools, and its permissions, spoken through the speech and voice profiles you picked. See the [Meta Glasses guide](/guide/meta-glasses).
 - **Crow Messages**: The agent becomes reachable as a contact. People you invite can message it, you can browse and add the bots running across your Crows, and you can put people and bots together in a group room. See the [Crow Messages guide](/guide/crow-messages).
-- **Perch**: The agent becomes chattable from the Perch page in your own dashboard. There is nothing to configure — choosing the channel is the whole setup. Perch needs the Perch Hub extension installed. See [Perch](#perch-talk-to-an-agent-from-your-own-dashboard) below.
+- **Perch**: The agent becomes chattable right on the board in your own dashboard. There is nothing to configure — choosing the channel is the whole setup, and nothing to install. See [Perch](#perch-talk-to-an-agent-from-your-own-dashboard) below.
 
 Binding glasses to an agent is one-to-one: a device drives one agent at a time, and choosing a new agent for a device releases the old binding.
 
 ## Perch: talk to an agent from your own dashboard
 
-Perch is an extension that adds a **Perch** page to the Crow's Nest. It shows every agent on your Crow, every conversation each one has had on any channel, and the transcript of each. For agents you attach the Perch channel to, it also gives you a message box.
+Perch is the board's own **roost strip** — a row of birds, one per agent, sitting above the cards — plus a **session drawer** that opens beside the board when you click one. Together they show every agent's live and recent sessions, their transcripts, and a place to message them directly. It is native to the board: nothing to install, nothing to configure beyond attaching the channel.
 
-Nothing about Perch is exposed to the internet. It runs on your machine, listens only there, and is reachable only through your dashboard login.
+Nothing about it is exposed to the internet. It runs as part of the gateway, listens only there, and is reachable only through your dashboard login.
 
-### 1. Install Perch
-
-Install **Perch Hub** from the Extensions page, or open **Perch** in the nav and use the **Install Perch** button on the card you land on. Perch registers a small local service, so Crow restarts itself to route it; the page reloads on its own when the gateway is back, and a **Perch** entry appears in the nav.
-
-If Perch says it is offline right after installing, that is usually the restart still pending — the card tells you which case you are in, and says so plainly when the supervisor has recorded a real error instead.
-
-### 2. Attach the Perch channel to an agent
+### 1. Attach the Perch channel to an agent
 
 Open the agent in Bot Builder, go to the **Gateways** tab, choose **Perch (dashboard chat)**, and save. There are no fields to fill in. You can also pick Perch as the channel while creating an agent in the wizard.
 
 Perch turns run on the same bot engine that Gmail and Discord use, so if the engine is not installed yet Crow will offer to install it before letting you save.
 
-You can attach the channel before installing Perch itself, and the save goes through — but Crow warns you, because the page that would show the agent's replies is the Perch extension. The warning comes with an **Install Perch** button beside it, and once the install and restart finish you land back on the same agent without the warning.
+Agents without the channel attached appear in the roost strip too, as **Observing** — you can jump to Bot Builder to attach them, but there is no session to open until you do.
 
-Agents without the channel attached still appear in Perch. You can read their sessions and transcripts; you just cannot message them. Watching is free, talking is the part you opt into.
+### 2. Find the agent in the roost strip
 
-### 3. Message the agent
+Open the board. Each attached agent is a bird with a state and one primary action:
 
-Open **Perch**. Each agent is a card. Attached agents have a message box at the bottom of theirs: type, send, and the reply streams back as the agent produces it. If something goes wrong — the engine is not ready, the agent is already busy with another message in the same conversation — the card says so in place of the reply, rather than spinning.
+- **Idle** — no live session. The button is **Send out**: type a message, send it, and a new session starts.
+- **Waiting on you** — the agent asked a question mid-session and is paused for your answer. The button is **Answer**.
+- **Working** / **Hibernating** — a session is live or has gone quietly idle. The button is **Open**.
+- **Observing** — no channel attached yet (see step 1). The link goes straight to Bot Builder.
 
-Each conversation is a session. It shows up in the session list under the agent with a **transcript** you can open, and the agent picks the thread back up where you left it.
+An overflow menu on every bird also offers **Talk** (start a fresh session even if one is already open), **Sessions** (pick from the agent's other recent sessions), **Recall** (stop the live session), and **Setup** (jump to the agent in Bot Builder).
 
-### 4. Narrow an agent's tools for one conversation
+### 3. The session drawer
 
-Open **Controls** on any session row. You see the agent's full envelope: every tool it is allowed to use, each with a checkbox, plus its model and skills.
+Clicking a bird — or a session badge on a board card — opens the drawer: the transcript, a composer to send a message or steer a running turn, and an **Abort** button while a turn is in flight. Tool activity streams in as it happens, so you can see what the agent is doing before the reply lands.
 
-Uncheck a tool and it is switched off **for that conversation only**, from the next message onward. The agent's definition is untouched, and every other conversation keeps the full set. This is for the moment when you want an agent to answer a question without touching your files, without editing anything, without reaching out over the network — for this one thread, right now.
+Each session carries a state: **Awake** while the agent can take a message right now, hibernating once it has gone idle and quietly shut itself down (nothing is lost — the next message wakes it back up mid-conversation), and **Stopped** once you or Recall have ended it for good. A stopped session cannot be woken again — start a new one from **Send out** or **Talk** if you want to keep talking to that agent this way.
 
-Tools shown with a padlock are ones the agent is not allowed at all. They are not togglable here; they link to Bot Builder, which is the only place that grants a tool. Perch can only ever take away.
+Only one session per agent runs at a time by default, and every session competes for the same processing slots every other agent turn uses — Gmail replies, Discord replies, background jobs. Leaving a session awake and idle for a long stretch can make those wait; let it hibernate (it will, on its own) or stop it when you're done.
 
-### 5. Reading the badges
+### 4. Narrow an agent's tools for one session
 
-Every session row carries badges:
+Open **Envelope & tools** in the drawer. You see the agent's full envelope: every tool it is allowed to use, each with a checkbox, plus its model and skills.
 
-- the **channel** it came in on — `perch`, `gmail`, `discord`, and so on;
-- a **card** badge when the session was started by a bot-board dispatch, linking straight back to the card on the board;
-- a **live** badge while a turn is actually running.
+Uncheck a tool and it is switched off **for that session only**, from the next message onward. The agent's definition is untouched, and every other session keeps the full set. This is for the moment when you want an agent to answer without touching your files, without editing anything, without reaching out over the network — for this one session, right now.
 
-### 6. Spawn as a bot: a live session instead of a turn
+Tools shown with a padlock are ones the agent is not allowed at all. They are not togglable here; they link to Bot Builder, which is the only place that grants a tool. The drawer can only ever take away.
 
-Every agent card that has the Perch channel attached also gets a **Spawn as bot** button. A message in the box from step 3 is a single, self-contained turn — send it, get a reply, done. Spawning is different: it opens a live session, one agent process that stays running across several messages, the way the agent behaves when it is talking to itself over several steps of a task rather than answering one question.
+### 5. Answering a question the agent asks you
 
-The session card carries a state badge: **awake** while the agent is up and can take a message right now, **hibernating** once it has gone idle and quietly shut itself down (nothing is lost — the next message wakes it back up mid-conversation), **waking** for the moment a message is bringing a hibernating session back, **stopped** once you have ended the session for good, and **error** if the last thing it did failed. A stopped session cannot be woken again; spawn a new one if you want to keep talking to that agent this way.
+Some skills ask you something mid-task instead of guessing — pick from a list, confirm before doing something, type free text, or edit a block of text. That shows up in the drawer as a card in place of the reply: the question, and the way to answer it. Answer it and the agent continues right where it left off. If a card is still waiting on you when you navigate away, it is there again when you come back to the session — the roost bird shows **Waiting on you** in the meantime.
 
-Only one spawned session can be awake at a time by default, and it competes for the same processing slots every other agent turn uses — Gmail replies, Discord replies, background jobs. Leaving a spawned session awake and idle for a long stretch can make those wait. If you're done with a session for now, let it hibernate (it will, on its own) or stop it.
+### 6. Coming back later
 
-While a turn is running, tool activity streams into the card as it happens, so you can see what the agent is doing before the reply lands. An **Abort** button appears during a turn if you want to cut it short.
+Reload the board and every attached agent's roost state and most recent session pick up right where you left them — reopen the drawer and the transcript, live state, and any pending question are all still there. You never have to hunt for which session was which.
 
-### 7. Answering a question the agent asks you
-
-Some skills ask you something mid-task instead of guessing — pick from a list, confirm before doing something, type free text, or edit a block of text. In a spawned session, that shows up as a **card** in place of the reply: the question, and the way to answer it. Answer it and the agent continues right where it left off. If a card is still waiting on you when you navigate away, it is there again when you come back to the session.
-
-### 8. Coming back later
-
-Reload the Perch page and every agent's most recent conversation on each channel reopens where you left it — the message-box thread from step 3 with its transcript, and any spawned session from step 6 with its live state and transcript both. You never have to hunt for which session was which.
-
-### Before you install it
+### Before you attach it
 
 A few things are worth knowing, because Perch does not hide them.
 
-Everyone who can sign in to your dashboard can read **every** agent's transcripts in Perch. There is no per-agent access control.
+Everyone who can sign in to your dashboard can read **every** agent's transcripts in the drawer. There is no per-agent access control.
 
-Spawning a session (step 6) extends that from reading to driving: anyone who can sign in can also hold a live conversation as any agent, using that agent's own tools and permissions, not just watch what it already did. This is the same trust boundary as the transcript point above, not a new one — a dashboard session could already trigger an agent by messaging it through Perch's chat box, or through the agent's real channel (an email, a Discord message). Spawning just removes the "goes out and back through a channel" step.
+Messaging or steering a session extends that from reading to driving: anyone who can sign in can hold a live conversation as any agent, using that agent's own tools and permissions, not just watch what it already did. This is not a new trust boundary — a dashboard session could already trigger an agent by messaging it through its real channel (an email, a Discord message). Perch just makes that reachable straight from the board, without going out and back through a channel.
 
-Perch also carries its full original session manager, which can start programs on the machine it runs on. That is deliberate — it is a self-hosted operator tool, and it is behind your dashboard login and nothing else. Install it on a Crow whose dashboard login you treat as seriously as shell access on that machine, and not on one where the login is shared more widely than that.
+Attach the Perch channel only on a Crow whose dashboard login you treat as seriously as shell access on that machine — a live session can run any tool the agent's own permission policy allows, including ones that start programs on the machine it runs on.
 
 ## Permissions and safety
 
@@ -159,7 +146,6 @@ The Review / Deploy tab summarizes the agent before you commit it. Once deployed
 - [Meta Glasses](/guide/meta-glasses): Run an agent hands-free on Ray-Ban Meta glasses
 - [Crow Messages](/guide/crow-messages): Share a bot, browse bots across your Crows, and build group rooms
 - [Bot Builder Architecture](/architecture/bot-builder): The engine, data model, and voice dispatch internals
-- [Perch Hub](/developers/perch-hub): How the Perch extension is supervised, proxied, and updated
 - [Extensions](/guide/extensions): Install extensions that contribute tools and skills
 - [Writing Skills](/developers/skills): Author the behavioral prompts agents use
 - [AI Providers (BYOAI)](/guide/ai-providers): Configure the models agents run on

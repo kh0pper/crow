@@ -447,10 +447,15 @@ app.use("/dashboard/login", dashboardLoginLimiter);
 // Body parsing with size limit. Routes with their own route-scoped parser must
 // be skipped here — otherwise the global 1mb parser 413s a large body before
 // the route is reached: /llm (10mb parser; multi-turn voice transcripts with
-// tool history + image parts) and /s/:surface/feedback (4mb parser in the
-// knowledge-base bundle; screenshot-attached feedback).
+// tool history + image parts), /s/:surface/feedback (4mb parser in the
+// knowledge-base bundle; screenshot-attached feedback), and
+// /dashboard/perch-api/interactive/:sid/{files,message} (10mb parsers in
+// perch-interactive-api.js — Track 3 Task 9: a 5MB post-decode base64 file
+// upload is ~6.7MB of JSON text, and 3 × 2MB post-decode message images are
+// ~8.4MB).
 const _jsonParser = express.json({ limit: "1mb" });
-const _hasOwnParser = (p) => p.startsWith("/llm") || /^\/s\/[^/]+\/feedback$/.test(p);
+const _hasOwnParser = (p) => p.startsWith("/llm") || /^\/s\/[^/]+\/feedback$/.test(p) ||
+  /^\/dashboard\/perch-api\/interactive\/[^/]+\/(files|message)$/.test(p);
 app.use((req, res, next) => (_hasOwnParser(req.path) ? next() : _jsonParser(req, res, next)));
 
 // --- Static files (PWA manifest, service worker, icons) ---
@@ -754,40 +759,25 @@ async function gracefulShutdown() {
     new Promise((resolve) => setTimeout(resolve, 10_000)),
   ]);
 
-  // Step 5b — stop the gateway-supervised Perch hub.
+  // Step 5b — kill any long-lived interactive bot children (perch-live).
   //
   // shutdownAll() above only reaps proxy.js's MCP bundle children; it knows
-  // nothing about process-supervisor handles, and those children are spawned
-  // `detached: true` (own process group, so a terminal SIGINT never reaches
-  // them) with pdeathsig only when setpriv exists. Without this the hub
-  // SURVIVES gateway shutdown — proven live during Perch Hub C-2, where the
-  // stub hub was still in `ps` after the gateway exited, holding its port
-  // against the restarted gateway's own child.
-  //
-  // Bounded: a child ignoring SIGTERM must not hold the shutdown open.
-  // (Follow-up, deliberately NOT fixed here: bot-runtime.js's Discord child
-  // has the identical gap and needs its own change + test.)
-  try {
-    const { stopPerchRuntimeBounded } = await import("./perch-runtime.js");
-    await stopPerchRuntimeBounded();
-  } catch {
-    // Module missing or stop threw — never block the exit on it.
-  }
-
-  // Step 5c — kill any long-lived interactive bot children (Perch Hub P2).
-  //
-  // Same gap as the hub above, one level worse: an interactive `pi --mode rpc`
+  // nothing about process-supervisor handles. An interactive `pi --mode rpc`
   // child is spawned `detached: true` (its own process group, so it survives a
   // terminal SIGINT) AND holds a model plus a fistful of MCP children. Bounded
-  // for the same reason; `createIfMissing:false` so THIS shutdown call itself
-  // never mints an engine. It is not a guarantee the process ran no session —
-  // perch.js's `GET /bots/:id/sessions` (the lens's own list refresh) calls
-  // `getInteractiveEngine()` with its default `createIfMissing:true` on any
-  // `kind='perch-live'` row, so the singleton (and its lease file) is commonly
-  // minted well before any spawn. An engine that exists but never woke a child
-  // is `stopAll()`-safe regardless (nothing to kill), and an empty lease file
-  // exempts nobody from the host reaper — only a session actually awake does.
-  // Rows persist — the sessions hibernate, they are not destroyed.
+  // so a child ignoring SIGTERM must not hold the shutdown open;
+  // `createIfMissing:false` so THIS shutdown call itself never mints an
+  // engine. It is not a guarantee the process ran no session —
+  // routes/perch.js's `GET /bots/:id/sessions` (the board's own list refresh)
+  // calls `getInteractiveEngine()` with its default `createIfMissing:true` on
+  // any `kind='perch-live'` row, so the singleton (and its lease file) is
+  // commonly minted well before any spawn. An engine that exists but never
+  // woke a child is `stopAll()`-safe regardless (nothing to kill), and an
+  // empty lease file exempts nobody from the host reaper — only a session
+  // actually awake does. Rows persist — the sessions hibernate, they are not
+  // destroyed.
+  // (Follow-up, deliberately NOT fixed here: bot-runtime.js's Discord child
+  // has the identical gap and needs its own change + test.)
   try {
     const { getInteractiveEngine } = await import("./perch-interactive.js");
     const engine = getInteractiveEngine({ createIfMissing: false });

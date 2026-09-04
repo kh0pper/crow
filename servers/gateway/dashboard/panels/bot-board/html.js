@@ -7,15 +7,25 @@
  */
 
 import { escapeHtml, section, badge } from "../../shared/components.js";
-import { t, tJs } from "../../shared/i18n.js";
+import { t } from "../../shared/i18n.js";
 import { createDbClient } from "../../../../db.js";
 import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
 import {
   TASKS_DB, STATUS_BADGE,
-  lockMapFor, statusLabel,
+  lockMapFor, statusLabel, liveBirdsByCard, sessionBirdState, foldBirdStates,
 } from "./data-queries.js";
 import { DEFAULT_BOARD_DEF, resolveBoardDef, resolveSlugBoardDef } from "../../../routes/board-defs.js";
+// Track 3 Task 11 (spec §5.6): the interactive-engine singleton — live bird
+// state is engine-sourced, not DB-derivable. createIfMissing:false: rendering
+// the board must never conjure the engine into existence; a gateway that has
+// never spawned an interactive session just draws no birds.
+import { getInteractiveEngine } from "../../../perch-interactive.js";
+// Track 3 Task 12: the roost strip's "observing" fallback (a bot with no
+// COMPLETE perch gateway record can never hold a live session) — the SAME
+// predicate routes/perch.js's /roost endpoint gates on, extracted so this
+// SSR join and that JSON endpoint can never drift on what "attached" means.
+import { perchAttached } from "../../../shared/perch-attached.js";
 // Track 1 (carried item 2): the no-JS card view's plan block reads plan
 // RECORDS now (D-T1.4), not the retired file rail — same store the JS
 // drawer's GET /card/:id/plan route (plan-service.getCurrentPlan) reads.
@@ -52,7 +62,15 @@ function declaredFieldMeta(def, card, data) {
   return parts.join("");
 }
 
-export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
+export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF, bird = null) {
+  // Track 3 Task 11 (spec §3.2/§5.6): a bird glyph, present only when a live
+  // (waiting/working/hibernating) session carries this card's id. `bb-bird--
+  // <state>` is PERCH_TOKENS-colored in css.js; `data-bird-sid` is how the
+  // client correlates a later `bird-state` SSE frame (keyed by session id,
+  // not card id) back to this DOM node, and what a click opens the drawer on.
+  const birdHtml = bird
+    ? `<span class="bb-bird bb-bird--${escapeHtml(String(bird.state))}" data-bird-sid="${escapeHtml(String(bird.sessionId))}" title="${escapeHtml(String(bird.state))}"></span>`
+    : "";
   const prio = card.priority == null ? "" :
     `<span class="bb-prio bb-prio-${escapeHtml(String(card.priority))}" title="${t("botboard.titlePriorityPrefix", lang)} ${escapeHtml(String(card.priority))}">P${escapeHtml(String(card.priority))}</span>`;
   const due = card.due_date ? `<span class="bb-meta">⏱ ${escapeHtml(String(card.due_date))}</span>` : "";
@@ -73,12 +91,28 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
   // 'recorded' success is a gated card sitting there waiting on a human;
   // failure/partial is worth a visible flag whether or not it's been
   // decided yet — a failed run must not look identical to still-running.
+  const resultGatedSuccess = card.latest_result_outcome === "success" && card.latest_result_status === "recorded";
   const resultMarker =
-    card.latest_result_outcome === "success" && card.latest_result_status === "recorded"
+    resultGatedSuccess
       ? `<div class="bb-marker bb-marker-waiting">${t("board.markerWaiting", lang)}</div>`
       : (card.latest_result_outcome === "failure" || card.latest_result_outcome === "partial")
         ? `<div class="bb-marker bb-marker-failed">${t("board.markerFailed", lang)}</div>`
         : "";
+  // Track 3 Task 14: Accept/Reject directly on the card face — a gated
+  // success result sitting on THIS card. `data-result-actions` is the guard
+  // both the click-to-open handler and dragstart check for (closest() —
+  // client.js), so a click here never opens the card drawer or starts a
+  // drag; the buttons dispatch their own decide (+ two-step move-to-'done'
+  // on accept, spec §4) via a delegated handler, never a page reload of
+  // their own. Only rendered when latest_result_id actually came back from
+  // the SSR join (a store mid-migration without the column/table degrades to
+  // the marker alone, same guard the marker itself already relies on).
+  const resultActionsHtml = resultGatedSuccess && card.latest_result_id != null
+    ? `<div class="bb-result-actions" data-result-actions data-result-id="${escapeHtml(String(card.latest_result_id))}">` +
+      `<button type="button" class="bb-btn bb-sec" data-result-action="accept">${t("board.btnApproveResult", lang)}</button>` +
+      `<button type="button" class="bb-btn bb-sec" data-result-action="reject">${t("board.btnRejectResult", lang)}</button>` +
+      `</div>`
+    : "";
   let data = {};
   try { data = JSON.parse(card.data_json || "{}"); } catch { data = {}; }
   const fieldMeta = declaredFieldMeta(def, card, data);
@@ -96,9 +130,9 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
     `data-priority="${card.priority != null ? escapeHtml(String(card.priority)) : ""}" ` +
     `tabindex="0" role="button" ` +
     `aria-label="card ${escapeHtml(String(card.id))}: ${escapeHtml(String(card.title || ""))}">` +
-    `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(card.id))}</span>${lockBadge}${archivedBadge}</div>` +
+    `<div class="bb-card-top">${prio}<span class="bb-id">#${escapeHtml(String(card.id))}</span>${birdHtml}${lockBadge}${archivedBadge}</div>` +
     `<div class="bb-title">${escapeHtml(String(card.title || "(untitled)"))}</div>` +
-    `<div class="bb-card-meta">${due}${owner}${fieldMeta}</div>${tags}${sub}${resultMarker}` +
+    `<div class="bb-card-meta">${due}${owner}${fieldMeta}</div>${tags}${sub}${resultMarker}${resultActionsHtml}` +
     `<form method="POST" action="/dashboard/bot-board" class="bb-nojs-move">` +
     `<input type="hidden" name="action" value="move">` +
     `<input type="hidden" name="card_id" value="${escapeHtml(String(card.id))}">` +
@@ -107,6 +141,191 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
       `<button type="submit" name="status" value="${escapeHtml(s)}" ${locked || archived ? "disabled" : ""} ` +
       `title="${t("botboard.moveTo", lang)}${escapeHtml(defStatusLabel(def, s, lang))}">${escapeHtml(defStatusLabel(def, s, lang))}</button>`).join("") +
     `</form></div>`;
+}
+
+// ---- Track 3 Task 12: the roost strip ("birds on a wire" above the board) ----
+//
+// One glyph per bot (not per card): idle/working/waiting/hibernating/observing,
+// same fold as routes/perch.js's GET /roost — engine-sourced, never conjures
+// the engine into existence (the `engine` argument is whatever renderKanbanBoard
+// resolved, createIfMissing:false in production; see that function's own note).
+const ROOST_STATE_LABEL_KEY = {
+  idle: "botboard.roostStateIdle",
+  working: "botboard.roostStateWorking",
+  waiting: "botboard.roostStateWaiting",
+  hibernating: "botboard.roostStateHibernating",
+  observing: "botboard.roostStateObserving",
+};
+
+// Fold every bot def down to ONE strip entry: {id, name, state, sessionId}.
+// `sessionId` is the session whose state WON the fold (spec §3.2 priority,
+// via the shared foldBirdStates/sessionBirdState — same functions
+// liveBirdsByCard uses, so the strip and the card glyphs never disagree on
+// what a given session's state is) — null for idle/observing, where there is
+// no live session to correlate a later `bird-state` SSE frame against.
+async function computeRoostBirds(bots, engine) {
+  let sessions = [];
+  if (engine) {
+    try { sessions = await engine.list(); } catch { sessions = []; }
+  }
+  const byBot = new Map();
+  for (const s of sessions) {
+    const list = byBot.get(s.botId);
+    if (list) list.push(s); else byBot.set(s.botId, [s]);
+  }
+  return (bots || []).map((b) => {
+    // §3.1: a bot with no complete perch gateway record can never hold a
+    // live session — always "observing", regardless of what engine.list()
+    // might (stalely) say about a bot id that used to carry one.
+    if (!perchAttached(b.definition)) {
+      return { id: b.botId, name: b.displayName, state: "observing", sessionId: null };
+    }
+    const botSessions = byBot.get(b.botId) || [];
+    const state = foldBirdStates(botSessions.map(sessionBirdState)) || "idle";
+    const winner = state === "idle" ? null : botSessions.find((s) => sessionBirdState(s) === state);
+    return { id: b.botId, name: b.displayName, state, sessionId: winner ? winner.sessionId : null };
+  });
+}
+
+// One `.bb-roost-bird[data-bot]` — glyph, name, state text, and the ONE
+// primary action for this state (spec: idle→Send out, working/hibernating→
+// Open, waiting→Answer, observing→a plain link to Bot Builder). The overflow
+// menu (Talk/Sessions/Recall/Setup) is the SAME on every bird; Recall is
+// omitted when there is no live session to stop (idle/observing).
+function roostBirdHtml(bird, lang) {
+  const state = bird.state;
+  const idAttr = escapeHtml(String(bird.id));
+  const stateText = t(ROOST_STATE_LABEL_KEY[state] || ROOST_STATE_LABEL_KEY.idle, lang);
+  // `data-bird-sid` on the GLYPH span — the exact convention cardFaceHtml
+  // uses — so a `bird-state` SSE frame can patch card face AND roost glyph
+  // with the SAME selector (`.bb-bird[data-bird-sid="<sid>"]`), never two.
+  const sidAttr = bird.sessionId != null ? ` data-bird-sid="${escapeHtml(String(bird.sessionId))}"` : "";
+  const sidDataAttr = bird.sessionId != null ? ` data-sid="${escapeHtml(String(bird.sessionId))}"` : "";
+
+  let primaryHtml;
+  if (state === "observing") {
+    primaryHtml = `<a class="bb-roost-primary bb-roost-link" href="/dashboard/bot-builder#${idAttr}">${t("botboard.roostActionAttach", lang)}</a>`;
+  } else if (state === "idle") {
+    primaryHtml = `<button type="button" class="bb-roost-primary" data-roost-action="dispatch" data-bot="${idAttr}">${t("botboard.roostActionSendOut", lang)}</button>`;
+  } else if (state === "waiting") {
+    primaryHtml = `<button type="button" class="bb-roost-primary" data-roost-action="answer" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionAnswer", lang)}</button>`;
+  } else {
+    // working / hibernating
+    primaryHtml = `<button type="button" class="bb-roost-primary" data-roost-action="open" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionOpen", lang)}</button>`;
+  }
+
+  const recallHtml = bird.sessionId != null
+    ? `<button type="button" data-roost-action="recall" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionRecall", lang)}</button>`
+    : "";
+
+  return `<div class="bb-roost-bird" data-bot="${idAttr}" data-roost-state="${escapeHtml(state)}">` +
+    `<span class="bb-bird bb-bird--${escapeHtml(state)}"${sidAttr} title="${escapeHtml(stateText)}"></span>` +
+    `<span class="bb-roost-name">${escapeHtml(String(bird.name))}</span>` +
+    `<span class="bb-roost-state">${escapeHtml(stateText)}</span>` +
+    primaryHtml +
+    `<button type="button" class="bb-roost-more" data-roost-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="${escapeHtml(t("botboard.roostMoreAria", lang))}">⋯</button>` +
+    `<div class="bb-roost-menu" aria-hidden="true">` +
+    `<button type="button" data-roost-action="talk" data-bot="${idAttr}">${t("botboard.roostActionTalk", lang)}</button>` +
+    `<button type="button" data-roost-action="sessions" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionSessions", lang)}</button>` +
+    recallHtml +
+    `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(String(bird.id))}&tab=tracker">${t("botboard.roostActionSetup", lang)}</a>` +
+    `</div></div>`;
+}
+
+// The strip itself — `bots` is the FULL switcher list (every bot on this
+// board's dashboard, not just the selected one): birds-on-a-wire is a
+// roster overview, not a per-board filter.
+export async function roostStripHtml(bots, engine, lang) {
+  const birds = await computeRoostBirds(bots, engine);
+  const body = birds.length
+    ? birds.map((b) => roostBirdHtml(b, lang)).join("")
+    : `<div class="bb-roost-empty">${t("botboard.roostEmpty", lang)}</div>`;
+  return `<div class="bb-roost" id="bb-roost"><div class="bb-roost-track" id="bb-roost-track">${body}</div></div>`;
+}
+
+// The Send-out card-picker dialog (idle→primary action). Static markup only
+// — reuses the SAME `.bb-drawer` slide-over + openDrawer/closeDrawer idiom
+// every other panel dialog uses; the card <select> and note field are filled
+// in client-side from the DOM (minus GET /roost's occupiedCardIds) when it
+// opens, never SSR'd per-bot.
+export function roostDispatchDialogMarkup(lang) {
+  return `<div class="bb-drawer" id="bb-roost-dispatch" aria-hidden="true">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h3 id="bb-rd-title" style="font-family:var(--crow-body-font);margin:0">${t("botboard.roostDispatchTitle", lang)}</h3>
+      <button type="button" class="bb-btn bb-sec" id="bb-rd-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
+    </div>
+    <div class="bb-msg" id="bb-rd-msg"></div>
+    <label>${t("botboard.roostDispatchCardLabel", lang)}</label>
+    <select id="bb-rd-card"></select>
+    <div id="bb-rd-note-wrap">
+      <label>${t("botboard.roostDispatchNoteLabel", lang)}</label>
+      <textarea id="bb-rd-note" rows="3" style="font-family:inherit"></textarea>
+    </div>
+    <button type="button" class="bb-btn" id="bb-rd-send">${t("botboard.roostDispatchConfirm", lang)}</button>
+  </div>`;
+}
+
+// Track 3 Task 13: the session drawer's static shell — a right slide-over
+// (`.bb-drawer.bb-bird-drawer`, `role="dialog"` `aria-modal="true"`), plus
+// its own backdrop element (ESC/backdrop-click close, wired in drawer.js's
+// emitted JS). Pure static markup, no dynamic data interpolated — hydrated
+// entirely client-side, same split as drawerMarkup() below.
+export function birdDrawerMarkup(lang) {
+  return `<div class="bb-bird-backdrop" id="bb-bird-backdrop" aria-hidden="true"></div>
+  <div class="bb-drawer bb-bird-drawer" id="bb-bird-drawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="bb-bd-name">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem">
+      <div style="min-width:0">
+        <div id="bb-bd-name" style="font-family:var(--crow-body-font);font-weight:600;font-size:1rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <span id="bb-bd-state" class="bb-list-status"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.3rem;flex:0 0 auto">
+        <div class="bb-bd-menu-wrap">
+          <button type="button" class="bb-roost-more" id="bb-bd-menu-toggle" aria-haspopup="true" aria-expanded="false" aria-label="${escapeHtml(t("botboard.bdMoreAria", lang))}">⋯</button>
+          <div class="bb-bd-menu" id="bb-bd-menu" aria-hidden="true">
+            <button type="button" id="bb-bd-stop">${t("botboard.bdStop", lang)}</button>
+          </div>
+        </div>
+        <button type="button" class="bb-btn bb-sec" id="bb-bd-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
+      </div>
+    </div>
+    <div id="bb-bd-card-link-wrap" class="bb-msg" style="display:none"><a id="bb-bd-card-link" href="#"></a></div>
+    <div id="bb-bd-hibernating" class="bb-msg warn" style="display:none">${t("botboard.bdHibernating", lang)}</div>
+    <div class="bb-bd-controls-row">
+      <select id="bb-bd-model" disabled aria-label="${escapeHtml(t("botboard.bdEnvelopeModelPrefix", lang))}"></select>
+      <select id="bb-bd-thinking" disabled></select>
+      <select id="bb-bd-permission">
+        <option value="guarded">${t("botboard.bdPermGuarded", lang)}</option>
+        <option value="ask">${t("botboard.bdPermAsk", lang)}</option>
+        <option value="bypass">${t("botboard.bdPermBypass", lang)}</option>
+      </select>
+      <label class="bb-bd-plan-label"><input type="checkbox" id="bb-bd-plan-toggle"> ${t("botboard.bdPlanModeLabel", lang)}</label>
+    </div>
+    <div id="bb-bd-bindsatwake" class="bb-msg warn" style="display:none">
+      <span id="bb-bd-bindsatwake-text">${t("botboard.bdBindsAtWake", lang)}</span>
+      <button type="button" class="bb-btn bb-sec" id="bb-bd-apply-now">${t("botboard.bdApplyNow", lang)}</button>
+    </div>
+    <div class="bb-bd-controls-toggle-wrap">
+      <button type="button" class="bb-btn bb-sec" id="bb-bd-controls-toggle" aria-expanded="false">${t("botboard.bdEnvelopeToggle", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-bd-attach-card">${t("botboard.bdAttachCard", lang)}</button>
+    </div>
+    <div id="bb-bd-controls-pane" style="display:none"></div>
+    <div id="bb-bd-result"></div>
+    <div id="bb-bd-picker" style="display:none"></div>
+    <div id="bb-bd-transcript" class="bb-pre bb-bd-transcript"></div>
+    <div id="bb-bd-ask"></div>
+    <div id="bb-bd-files">
+      <button type="button" class="bb-btn bb-sec" id="bb-bd-attach">${t("botboard.bdAttachFile", lang)}</button>
+      <input type="file" id="bb-bd-file-input" style="display:none" accept="image/*">
+      <span id="bb-bd-files-queue" class="bb-bd-files-queue"></span>
+    </div>
+    <div id="bb-bd-composer">
+      <textarea id="bb-bd-input" rows="3" style="font-family:inherit" placeholder="${t("botboard.bdComposerPlaceholder", lang)}"></textarea>
+      <div>
+        <button type="button" class="bb-btn" id="bb-bd-send">${t("botboard.bdSend", lang)}</button>
+        <button type="button" class="bb-btn bb-sec" id="bb-bd-abort" style="display:none">${t("botboard.bdAbort", lang)}</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 export function trackerCardFaceHtml(item, contextFields, statusValues, locked, lang) {
@@ -175,7 +394,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   return `<div class="bb-drawer" id="bb-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-d-title" style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerCardTitle", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-d-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-d-msg"></div>
     <div id="bb-d-lock" class="bb-msg warn"></div>
@@ -218,7 +437,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   <div class="bb-drawer" id="bb-newproj" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerNewProject", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-np-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-np-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-np-msg"></div>
     <label>${t("botboard.labelName", lang)}</label><input id="bb-np-name" type="text">
@@ -228,7 +447,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   <div class="bb-drawer" id="bb-newcard" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerNewCard", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nc-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-nc-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-nc-msg"></div>
     <p style="font-size:.8rem;color:var(--crow-text-muted)">${t("botboard.newCardHelp", lang)}</p>
@@ -249,7 +468,7 @@ export function drawerMarkup(lang, def = DEFAULT_BOARD_DEF) {
   <div class="bb-drawer" id="bb-bulk" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerBulkTitle", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-bk-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-bk-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-bk-msg"></div>
     <p style="font-size:.82rem;color:var(--crow-text-muted)">${t("botboard.bulkHelp", lang)}</p>
@@ -264,7 +483,7 @@ export function boardSettingsDrawerMarkup(lang, projectId) {
   return `<div class="bb-drawer" id="bb-cfg" aria-hidden="true" data-project="${escapeHtml(String(projectId == null ? "" : projectId))}">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.cfgTitle", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-cfg-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-cfg-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-cfg-msg"></div>
     <label>${t("botboard.cfgDisplayName", lang)}</label><input id="bb-cfg-name" type="text">
@@ -287,7 +506,7 @@ export function trackerDrawerMarkup(lang) {
   return `<div class="bb-drawer" id="bb-tracker-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-td-title" style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerTrackerItem", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-td-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-td-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-td-msg"></div>
     <div id="bb-td-lock" class="bb-msg warn"></div>
@@ -309,7 +528,7 @@ export function trackerDrawerMarkup(lang) {
   <div class="bb-drawer" id="bb-new-tracker-item" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:var(--crow-body-font);margin:0">${t("botboard.drawerNewTrackerItem", lang)}</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nti-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-nti-close" aria-label="${escapeHtml(t("common.close", lang))}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-nti-msg"></div>
     <label>${t("botboard.labelLabelTitle", lang)}</label><input id="bb-nti-label" type="text">
@@ -338,7 +557,13 @@ function archivedToggleHtml(botId, includeArchived, lang) {
 }
 
 // ---- Kanban board rendering ----
-export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, switcher, q, lang }) {
+export async function renderKanbanBoard(req, res, {
+  db, layout, selBot, bots, notice, switcher, q, lang,
+  // Track 3 Task 11 test seam — same accessor-or-object shape as the
+  // perch.js/streams.js seams; production never passes this key, so the
+  // createIfMissing:false default above is what actually runs live.
+  engine = getInteractiveEngine({ createIfMissing: false }),
+}) {
   const projectId = selBot.projectId != null ? Number(selBot.projectId) : null;
   // D-T1.6: the "Show archived" filter-bar toggle round-trips as
   // ?include_archived=1 — the SAME query/param convention the JSON API uses.
@@ -354,7 +579,7 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
         `Board — ${escapeHtml(selBot.displayName)}`,
         notice + switcher +
         `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noProjectLinked", lang)}</p>`) +
-        drawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang, false),
+        drawerMarkup(lang) + birdDrawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang, false),
     });
   }
 
@@ -374,7 +599,7 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
       // bb-marker-failed) reads; a per-card follow-up query would be an
       // N+1, so the correlated subquery does it in the one list SELECT.
       cards = (await tdb.execute({
-        sql: `SELECT t.*, r.outcome AS latest_result_outcome, r.status AS latest_result_status
+        sql: `SELECT t.*, r.id AS latest_result_id, r.outcome AS latest_result_outcome, r.status AS latest_result_status
               FROM tasks_items t
               LEFT JOIN board_results r ON r.id = (
                 SELECT id FROM board_results WHERE item_id = t.id ORDER BY id DESC LIMIT 1
@@ -400,6 +625,10 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
   }
 
   const lockMap = await lockMapFor(db, cards.map((c) => Number(c.id)));
+  // Track 3 Task 11: engine-sourced bird state, one entry per occupied card —
+  // see data-queries.js's liveBirdsByCard for why this can't be read off the
+  // cards themselves (bot_sessions rows are not the live truth; spec §5.6).
+  const birdsByCard = await liveBirdsByCard(engine, db);
 
   // ---- no-JS dedicated card view (&card=M) ----
   if (q.card != null && q.card !== "") {
@@ -476,7 +705,7 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
   const columns = columnOrder.map((st) => {
     const list = byStatus[st] || [];
     const cardsHtml = list.length
-      ? list.map((c) => cardFaceHtml(c, !!lockMap.get(Number(c.id)), lang, def)).join("")
+      ? list.map((c) => cardFaceHtml(c, !!lockMap.get(Number(c.id)), lang, def, birdsByCard.get(Number(c.id)) || null)).join("")
       : `<div style="color:var(--crow-text-muted);font-size:.78rem;padding:.4rem">—</div>`;
     return `<div class="bb-col" data-col="${escapeHtml(st)}">` +
       `<h4><span>${escapeHtml(defStatusLabel(def, st, lang))}</span><span>${list.length}</span>` +
@@ -503,10 +732,17 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
     archivedToggleHtml(selBot.botId, includeArchived, lang) +
     `</div>`;
 
+  // Track 3 Task 12: the roost strip — birds-on-a-wire above the board,
+  // one glyph per bot on this dashboard (the full switcher list, not just
+  // the selected board's bot). Same `engine` seam as birdsByCard above, so
+  // a test overriding it drives BOTH the card glyphs and the strip.
+  const roostHtml = await roostStripHtml(bots, engine, lang);
+
   const content = botBoardStyles() + section(
     `Board — ${escapeHtml(selBot.displayName)}`,
-    notice + switcher + filterBarHtml + boardHtml) +
-    drawerMarkup(lang, def) + boardSettingsDrawerMarkup(lang, projectId) +
+    notice + switcher + roostHtml + filterBarHtml + boardHtml) +
+    drawerMarkup(lang, def) + boardSettingsDrawerMarkup(lang, projectId) + roostDispatchDialogMarkup(lang) +
+    birdDrawerMarkup(lang) +
     clientJs(selBot.botId, "kanban", projectId, null, null, lang, includeArchived);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });

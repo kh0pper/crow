@@ -28,7 +28,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -368,9 +368,14 @@ test("spawn: builds the world, warms, constructs PiRpc with the FULL piRpcOpts +
   assert.equal(row.pi_session_id, state.instances[0].piSessionId);
 });
 
-test("spawn: interactive_capacity at PERCH_INTERACTIVE_MAX_AWAKE — no second child", async () => {
+test("spawn: interactive_capacity at PERCH_INTERACTIVE_MAX_AWAKE, no eligible victim — no second child", async () => {
   const { engine, state } = makeEngine({ env: { PERCH_INTERACTIVE_MAX_AWAKE: "1" } });
-  await spawned(engine, "botty");
+  const r = await spawned(engine, "botty");
+  // Track 3 Task 7: an idle occupant at cap is now a safe-victim eviction
+  // candidate (see the "safe-victim eviction" tests below) — put botty
+  // mid-turn so it is INELIGIBLE, proving this is a genuine capacity refusal
+  // and not just a race lost against eviction.
+  await engine.message(r.sessionId, "stay busy");
   await assert.rejects(() => engine.spawn({ botId: "other" }), (e) => e.code === "interactive_capacity");
   assert.equal(state.instances.length, 1);
 });
@@ -464,6 +469,80 @@ test("message: a second message while a turn is in flight is refused with turn_i
   await engine.message(s.sessionId, "one");
   await assert.rejects(() => engine.message(s.sessionId, "two"), (e) => e.code === "turn_in_progress");
   assert.equal(state.instances[0].turns.length, 1);
+});
+
+// I3 (final review): neither stateEvent() nor snapshot() used to expose
+// whether a turn is actually in flight, so a reopened drawer / second tab /
+// reconnect on the PRIMARY dispatch flow (turn 1 fires via the route, THEN
+// the operator opens the drawer) had no way to learn a turn was running
+// until the next 'reply'/'stopped' SSE frame.
+test("I3: get()/snapshot() and the emitted 'state' event both expose turnInFlight — false idle, true once a turn is sent", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  assert.equal((await engine.get(s.sessionId)).turnInFlight, false, "idle awake session: no turn in flight");
+
+  const events = [];
+  const off = await engine.subscribe(s.sessionId, (e) => events.push(e));
+  assert.equal(events[0].type, "state");
+  assert.equal(events[0].turnInFlight, false, "the replayed state event must also carry turnInFlight");
+  off();
+
+  await engine.message(s.sessionId, "one");
+  assert.equal((await engine.get(s.sessionId)).turnInFlight, true, "a sent turn must report in-flight via get()/snapshot()");
+
+  const events2 = [];
+  const off2 = await engine.subscribe(s.sessionId, (e) => events2.push(e));
+  assert.equal(events2[0].turnInFlight, true, "a late subscriber's replayed state event must also see the in-flight turn");
+  off2();
+});
+
+// ---------------------------------------------------------------------------
+// Track 3 Task 13: steer — fire-and-forget nudge of an IN-FLIGHT turn
+// ---------------------------------------------------------------------------
+
+test("steer: sends a steer frame to the live child, fire-and-forget, and leaves the turn claim untouched", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "one");
+  const pi = state.instances[0];
+  const result = await engine.steer(s.sessionId, "actually do it differently");
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "steer", message: "actually do it differently" });
+  // No waiter added: steer never claims a NEW turn slot — the original
+  // in-flight promptTurn is still the only one the child ever saw.
+  assert.equal(pi.turns.length, 1, "steer must not start a second promptTurn");
+  // A second message() still sees the SAME turn in flight (steer didn't
+  // clear or replace s.turn).
+  await assert.rejects(() => engine.message(s.sessionId, "two"), (e) => e.code === "turn_in_progress");
+});
+
+test("steer: refused with no_turn when there is nothing in flight (idle awake session)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const pi = state.instances[0];
+  await assert.rejects(() => engine.steer(s.sessionId, "hello?"), (e) => e.code === "no_turn");
+  assert.equal(pi.sent.length, 0, "nothing is sent to the child on a no_turn refusal");
+});
+
+test("steer: refused with pi_gone when the child's exit code is set but attachExit has not yet cleared the turn (liveness-before-send, same idiom as answer())", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "one");
+  const pi = state.instances[0];
+  // Mutate the exit code directly rather than pi.exit() — the real attachExit
+  // reaction fires on the SAME microtask turn as a genuine exit and would
+  // clear s.turn too, making no_turn (not pi_gone) the observed refusal (see
+  // the sibling no_turn test above). This isolates the liveness check itself.
+  pi._exitCode = 1;
+  await assert.rejects(() => engine.steer(s.sessionId, "still there?"), (e) => e.code === "pi_gone");
+  assert.equal(pi.sent.length, 0, "nothing is sent to a dead child");
+});
+
+test("steer: refused with session_stopped on a stopped session", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await engine.stop(s.sessionId);
+  await assert.rejects(() => engine.steer(s.sessionId, "hello?"), (e) => e.code === "session_stopped");
 });
 
 test("D1: a child that dies during the WAKE's own trailing awaits is caught before promptTurn — and never wedges the session at 'awake' with no child (the worse D1 variant)", async () => {
@@ -715,6 +794,74 @@ test("onEvent forwarding: every ask_user method carries its OWN fields (r1 S5)",
   }
 });
 
+// I4 (final review): pushAttention's DB handle used to be created inline in
+// the createNotification() call — never closed. Every ask-card push leaked
+// an open better-sqlite3 connection. Proven here by literally counting this
+// process's open file descriptors pointed at DB_FILE (/proc/self/fd, Linux)
+// before and after several ask-card pushes: a leak accumulates one fd per
+// push; a properly closed handle does not.
+function countOpenFdsFor(targetPath) {
+  let entries;
+  try { entries = readdirSync("/proc/self/fd"); } catch { return -1; } // non-Linux: skip
+  let count = 0;
+  for (const entry of entries) {
+    try {
+      if (readlinkSync(`/proc/self/fd/${entry}`) === targetPath) count++;
+    } catch { /* fd closed between readdir and readlink — race, ignore */ }
+  }
+  return count;
+}
+
+/** COUNT(*) on the notifications table, via its OWN short-lived connection
+ * (opened and closed within this single call — never left open, so it can
+ * never itself pollute the countOpenFdsFor(DB_FILE) measurement below). */
+function notificationCount() {
+  const c = raw();
+  try { return c.prepare("SELECT COUNT(*) AS n FROM notifications").get().n; } finally { c.close(); }
+}
+
+test("I4: pushAttention closes its DB handle — repeated ask-card pushes do not leak open connections", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const before = countOpenFdsFor(DB_FILE);
+  if (before < 0) return; // skip off Linux — no /proc/self/fd to inspect
+
+  // Five ask-card pushes, SERIALIZED from this test's side (fire one, poll —
+  // bounded, no wall-clock sleep — on its notification row actually landing,
+  // THEN fire the next). onUiRequest's ASK_METHODS branch fires
+  // pushAttention() fire-and-forget on every call regardless of prior
+  // pendingUi state, so this only constrains OBSERVATION order, not
+  // production behavior. Serializing matters for THIS test's own signal:
+  // SQLite's unix VFS can share/stagger fd bookkeeping across truly
+  // concurrent opens of the same file in one process in ways that make a
+  // per-call fd delta unreliable to read; one-in-flight-at-a-time is what
+  // makes "close() actually ran" cleanly observable via the raw fd count.
+  let notifCount = notificationCount();
+  for (let i = 0; i < 5; i++) {
+    pi.emit({ type: "extension_ui_request", id: "leak-check-" + i, method: "confirm", title: "Sure?", message: "go?" });
+    const target = notifCount + 1;
+    for (let tries = 0; tries < 50 && notifCount < target; tries++) {
+      await tick(1);
+      notifCount = notificationCount();
+    }
+    assert.equal(notifCount, target, `push #${i}'s notification row must land before firing the next`);
+  }
+
+  // The notification row landing and the handle's own close() are two
+  // separate steps of the SAME finally-guarded chain — a small bounded
+  // margin for the trailing close() to finish.
+  await tick(5);
+
+  const after = countOpenFdsFor(DB_FILE);
+  assert.ok(
+    after <= before,
+    `pushAttention must not leak a DB fd per call (before=${before} open fds on DB_FILE, after=${after})`
+  );
+});
+
 // ---------------------------------------------------------------------------
 // 4. answer
 // ---------------------------------------------------------------------------
@@ -837,13 +984,16 @@ test("wake: a message to a hibernating session rebuilds the world FRESH and resu
   assert.equal(state.instances[1].turns[0].message, "back again");
 });
 
-test("C8: a wake past the interactive cap is refused with the exact code and spawns no child", async () => {
+test("C8: a wake past the interactive cap with no eligible victim is refused with the exact code and spawns no child", async () => {
   const { engine, clock, state } = makeEngine({ env: { PERCH_INTERACTIVE_MAX_AWAKE: "1" } });
   const a = await spawned(engine, "a");
   clock.advance(600_001);
   await tick();                                       // a hibernates
   const b = await spawned(engine, "b");               // b now owns the one slot
   assert.equal(state.instances.length, 2);
+  // Track 3 Task 7: an idle b would now be an eviction candidate — keep it
+  // mid-turn so this proves a genuine refusal, not a race lost to eviction.
+  await engine.message(b.sessionId, "stay busy");
   await assert.rejects(() => engine.message(a.sessionId, "wake me"), (e) => e.code === "interactive_capacity");
   assert.equal(state.instances.length, 2, "no third child");
   assert.equal((await engine.get(a.sessionId)).state, "hibernating", "the failed reservation is released");

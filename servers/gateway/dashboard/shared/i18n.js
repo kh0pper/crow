@@ -27,7 +27,6 @@ export const translations = {
   "nav.settings": { en: "Settings", es: "Ajustes" },
   "nav.contacts": { en: "Contacts", es: "Contactos" },
   "nav.projects": { en: "Projects", es: "Proyectos" },
-  "nav.perch": { en: "Perch", es: "Perch" },
   // Nav group headers — spine-aligned (W3-6)
   "nav.group.home": { en: "Home", es: "Inicio" },
   "nav.group.agents": { en: "Agents", es: "Agentes" },
@@ -969,7 +968,7 @@ export const translations = {
   "botbuilder.gwHintHousehold": { en: "Household profiles (multiple named users, each with their own avatar & voice) are configured in Settings → Companion → Household — they apply to the whole companion, not per bot.", es: "Los perfiles del hogar (varios usuarios con su propio avatar y voz) se configuran en Ajustes → Companion → Hogar; aplican a todo el companion, no por bot." },
   "botbuilder.gwHintNone": { en: "No gateway — this bot is driven only by direct injection / cards, not inbound messages.", es: "Sin gateway — este bot solo es impulsado por inyección directa / tarjetas, no por mensajes entrantes." },
   "botbuilder.gwHintGmail": { en: "The Gmail gateway polls the address configured on the Gateways tab via bridge_tick.mjs (pibot-bridge.timer, ~1 min).", es: "La puerta de enlace de Gmail sondea la dirección configurada en la pestaña Puertas de enlace a través de bridge_tick.mjs (pibot-bridge.timer, ~1 min)." },
-  "botbuilder.gwHintPerch": { en: "Nothing to configure — you chat with this bot from the Perch page in your dashboard, and replies stream back live. Perch needs the Perch Hub extension installed; each conversation there becomes a session you can inspect and narrow.", es: "Nada que configurar: hablas con este bot desde la página Perch de tu panel y las respuestas llegan en vivo. Perch necesita la extensión Perch Hub instalada; cada conversación se convierte en una sesión que puedes inspeccionar y acotar." },
+  "botbuilder.gwHintPerch": { en: "Nothing to configure — you chat with this bot from the board in your dashboard, and replies stream back live. Each conversation there becomes a session you can inspect and narrow.", es: "Nada que configurar: hablas con este bot desde el tablero de tu panel y las respuestas llegan en vivo. Cada conversación se convierte en una sesión que puedes inspeccionar y acotar." },
   // Create-form honesty (Item 4 PR1, §2.1)
   "botbuilder.createProvidersLink": { en: "Configure a model provider", es: "Configura un proveedor de modelos" },
   "botbuilder.createModelInvalid": { en: "Model is required and must be one of this instance's available models — the bot was not created.", es: "El modelo es obligatorio y debe ser uno de los modelos disponibles en esta instancia — el bot no fue creado." },
@@ -1208,14 +1207,6 @@ export const translations = {
   "botbuilder.runtimeOffEnabling": { en: "Enabling...", es: "Activando..." },
   "botbuilder.runtimeOffEnabled": { en: "Enabled — bots start polling within about a minute.", es: "Activado — los bots empezarán a sondear en aproximadamente un minuto." },
   "botbuilder.runtimeOffEnableFailed": { en: "Could not enable. Try again from Settings → Bot Runtime.", es: "No se pudo activar. Intenta de nuevo desde Ajustes → Runtime de bots." },
-  // Perch Hub P1, acceptance finding D2: the Perch channel is saved, but the
-  // surface that would show the bot's replies IS the perch-hub bundle, and it
-  // isn't installed here. A warning, never a block — same shape as the
-  // runtime-off banner above, with a one-click install beside it.
-  "botbuilder.perchMissingBody": {
-    en: "Saved. The Perch channel is attached, but the Perch Hub extension isn't installed on this instance — there is nowhere to read this bot's replies until it is.",
-    es: "Guardado. El canal Perch está conectado, pero la extensión Perch Hub no está instalada en esta instancia — no hay dónde leer las respuestas de este bot hasta que lo esté.",
-  },
   "botbuilder.engineGateModalTitle": { en: "Install the bot engine", es: "Instalar el motor de bots" },
   "botbuilder.engineGateModalBody": {
     en: "Gmail, Discord, Telegram, and Slack channels are driven by pi, the same coding-agent engine Bot Builder uses to run every bot's turns. It isn't installed on this instance yet.",
@@ -1383,6 +1374,106 @@ export const translations = {
   "botboard.searchCards": { en: "Search cards (title, tag, #id)\u2026", es: "Buscar tarjetas (t\u00edtulo, etiqueta, #id)\u2026" },
   "botboard.viewColumns": { en: "Columns", es: "Columnas" },
   "botboard.viewList": { en: "List", es: "Lista" },
+
+  // \u2500\u2500\u2500 Board \u2014 Track 3 Task 12: the roost strip \u2500\u2500\u2500
+  "botboard.roostEmpty": { en: "No bots yet.", es: "A\u00fan no hay bots." },
+  "botboard.roostStateIdle": { en: "Idle", es: "Inactivo" },
+  "botboard.roostStateWorking": { en: "Working", es: "Trabajando" },
+  "botboard.roostStateWaiting": { en: "Waiting on you", es: "Esperando tu respuesta" },
+  "botboard.roostStateHibernating": { en: "Hibernating", es: "Hibernando" },
+  "botboard.roostStateObserving": { en: "Observing", es: "Observando" },
+  "botboard.roostActionSendOut": { en: "Send out", es: "Enviar" },
+  "botboard.roostActionOpen": { en: "Open", es: "Abrir" },
+  "botboard.roostActionAnswer": { en: "Answer", es: "Responder" },
+  "botboard.roostActionAttach": { en: "Attach", es: "Conectar" },
+  "botboard.roostActionTalk": { en: "Talk", es: "Hablar" },
+  "botboard.roostActionSessions": { en: "Sessions", es: "Sesiones" },
+  "botboard.roostActionRecall": { en: "Recall", es: "Retirar" },
+  "botboard.roostActionSetup": { en: "Setup", es: "Configurar" },
+  "botboard.roostMoreAria": { en: "More actions", es: "M\u00e1s acciones" },
+  "botboard.roostDispatchTitle": { en: "Send out", es: "Enviar" },
+  "botboard.roostDispatchCardLabel": { en: "Card", es: "Tarjeta" },
+  "botboard.roostDispatchNoteLabel": { en: "Note (optional)", es: "Nota (opcional)" },
+  "botboard.roostDispatchNoCards": { en: "No free cards to send this bot to.", es: "No hay tarjetas libres para enviar a este bot." },
+  "botboard.roostDispatchConfirm": { en: "Send", es: "Enviar" },
+  "botboard.roostDispatchSent": { en: "Sent — reloading…", es: "Enviado — recargando…" },
+  "botboard.roostDispatchOccupied": { en: "That card was just claimed by another session.", es: "Esa tarjeta acaba de ser tomada por otra sesi\u00f3n." },
+  "botboard.roostConfirmRecall": { en: "Recall this session? This stops it.", es: "\u00bfRetirar esta sesi\u00f3n? Esto la detiene." },
+  "botboard.roostActionFailed": { en: "Action failed.", es: "La acci\u00f3n fall\u00f3." },
+
+  // \u2500\u2500\u2500 Board \u2014 Track 3 Task 13: the session drawer \u2500\u2500\u2500
+  "botboard.bdStateAwake": { en: "Awake", es: "Despierto" },
+  "botboard.bdStateStopped": { en: "Stopped", es: "Detenido" },
+  "botboard.bdStop": { en: "Stop", es: "Detener" },
+  "botboard.bdConfirmStop": { en: "Stop this session?", es: "\u00bfDetener esta sesi\u00f3n?" },
+  "botboard.bdMoreAria": { en: "Session actions", es: "Acciones de la sesi\u00f3n" },
+  // Verbatim per Track 3 spec \u2014 the hibernating banner text.
+  "botboard.bdHibernating": { en: "asleep \u2014 sending will wake it", es: "dormido \u2014 enviarlo lo despertar\u00e1" },
+  "botboard.bdComposerPlaceholder": { en: "Type a message\u2026", es: "Escribe un mensaje\u2026" },
+  "botboard.bdSend": { en: "Send", es: "Enviar" },
+  "botboard.bdSteer": { en: "Steer", es: "Redirigir" },
+  "botboard.bdAbort": { en: "Abort", es: "Abortar" },
+  "botboard.bdSendFailed": { en: "Send failed.", es: "Error al enviar." },
+  "botboard.bdAnswerFailed": { en: "Answer failed.", es: "Error al responder." },
+  "botboard.bdAbortFailed": { en: "Abort failed.", es: "Error al abortar." },
+  "botboard.bdStopFailed": { en: "Stop failed.", es: "Error al detener." },
+  "botboard.bdCopy": { en: "Copy", es: "Copiar" },
+  "botboard.bdCopied": { en: "Copied.", es: "Copiado." },
+  "botboard.bdNoTranscript": { en: "No transcript yet.", es: "A\u00fan no hay transcripci\u00f3n." },
+  "botboard.bdTranscriptFailed": { en: "Could not load transcript.", es: "No se pudo cargar la transcripci\u00f3n." },
+  // Verbatim per Track 3 spec \u2014 a control='interrupted' row's system note.
+  "botboard.bdInterruptedNote": { en: "turn interrupted by gateway restart", es: "turno interrumpido por un reinicio de la puerta de enlace" },
+  "botboard.bdReconnecting": { en: "Reconnecting\u2026", es: "Reconectando\u2026" },
+  "botboard.bdReconnectFailed": { en: "Connection lost \u2014 reload to reconnect.", es: "Conexi\u00f3n perdida \u2014 recarga para reconectar." },
+  "botboard.bdPickSession": { en: "Pick a session", es: "Elige una sesi\u00f3n" },
+  "botboard.bdNoSessions": { en: "No sessions yet.", es: "A\u00fan no hay sesiones." },
+  "botboard.bdSessionsLoadFailed": { en: "Could not load sessions.", es: "No se pudieron cargar las sesiones." },
+  "botboard.bdCardLinkPrefix": { en: "Card #", es: "Tarjeta #" },
+  // Verbatim per Track 3 spec \u2014 answered ask_user cards collapse to this.
+  "botboard.bdAnsweredPrefix": { en: "Answered:", es: "Respondida:" },
+  "botboard.bdAskCancel": { en: "Cancel", es: "Cancelar" },
+  "botboard.bdConfirmYes": { en: "Confirm", es: "Confirmar" },
+  "botboard.bdConfirmNo": { en: "Deny", es: "Denegar" },
+  "botboard.bdNoTurn": { en: "no turn is running", es: "no hay ning\u00fan turno en curso" },
+  // ─── Board — Track 3 Task 14: drawer controls / narrowing / files / attach / result gate ───
+  "botboard.bdPermGuarded": { en: "Guarded", es: "Vigilado" },
+  "botboard.bdPermAsk": { en: "Ask", es: "Preguntar" },
+  "botboard.bdPermBypass": { en: "Bypass", es: "Omitir" },
+  "botboard.bdPlanModeLabel": { en: "Plan mode", es: "Modo de plan" },
+  // T3-10 honesty: a permission/model change only binds at the NEXT wake —
+  // the affordance below is the only place that promise is ever displayed.
+  "botboard.bdBindsAtWake": { en: "Applies at the next wake.", es: "Se aplicará en el próximo despertar." },
+  "botboard.bdApplyNow": { en: "Apply now", es: "Aplicar ahora" },
+  "botboard.bdCycleFailed": { en: "Could not apply now.", es: "No se pudo aplicar ahora." },
+  "botboard.bdControlFailed": { en: "Setting failed.", es: "No se pudo guardar el ajuste." },
+  "botboard.bdEnvelopeToggle": { en: "Envelope & tools", es: "Envoltura y herramientas" },
+  "botboard.bdAttachCard": { en: "Attach to card", es: "Vincular a tarjeta" },
+  "botboard.bdEnvelopeModelPrefix": { en: "model ", es: "modelo " },
+  "botboard.bdEnvelopeModelUnset": { en: "unset", es: "sin definir" },
+  "botboard.bdEnvelopeSkillsPrefix": { en: "skills ", es: "habilidades " },
+  // Ported verbatim from bots-page.mjs's controlsHtml() tri-state note (Perch
+  // Hub P1's own narrowing pane) — same three states, same wording, now
+  // i18n'd EN/ES for the dashboard idiom instead of a hardcoded English string.
+  "botboard.bdNarrowNoteSaved": { en: "Unchecking narrows this session only, from the next turn on.",
+    es: "Desmarcar restringe solo esta sesión, a partir del próximo turno." },
+  "botboard.bdNarrowNoteEmpty": { en: "Unchecking narrows this session only, from the next turn on. Nothing is narrowed in this session yet, so the boxes start from the bot's full envelope.",
+    es: "Desmarcar restringe solo esta sesión, a partir del próximo turno. Nada está restringido aún en esta sesión, así que las casillas parten de la envoltura completa del bot." },
+  "botboard.bdNarrowNoteUnknown": { en: "Unchecking narrows this session only, from the next turn on. This Crow build did not report a saved narrowing for this session, so the boxes start from the bot's full envelope.",
+    es: "Desmarcar restringe solo esta sesión, a partir del próximo turno. Esta versión de Crow no reportó una restricción guardada para esta sesión, así que las casillas parten de la envoltura completa del bot." },
+  "botboard.bdNarrowedToPrefix": { en: "Narrowed to ", es: "Restringido a " },
+  "botboard.bdNarrowedToMid": { en: " of ", es: " de " },
+  "botboard.bdNarrowedToSuffix": { en: " tools.", es: " herramientas." },
+  "botboard.bdFullEnvelopeRestored": { en: "Full envelope restored.", es: "Envoltura completa restaurada." },
+  "botboard.bdNarrowRejected": { en: "Rejected: narrowing can only remove tools, never add them.",
+    es: "Rechazado: la restricción solo puede quitar herramientas, nunca agregarlas." },
+  "botboard.bdNarrowFailed": { en: "Not saved.", es: "No se guardó." },
+  "botboard.bdToolsNone": { en: "This bot grants no tools.", es: "Este bot no otorga herramientas." },
+  "botboard.bdAttachFile": { en: "Attach file", es: "Adjuntar archivo" },
+  "botboard.bdFilesQueuedPrefix": { en: "Queued for next send: ", es: "En cola para el próximo envío: " },
+  "botboard.bdFileUploaded": { en: "uploaded:", es: "subido:" },
+  "botboard.bdUploadFailed": { en: "Upload failed.", es: "Error al subir." },
+  "botboard.bdAttachSent": { en: "Attached — updating…", es: "Vinculado — actualizando…" },
+  "botboard.bdResultDecideFailed": { en: "Could not record the decision.", es: "No se pudo registrar la decisión." },
 
   // ─── Board — Track 1 archiving (D-T1.6) ───
   // board.planVersions / board.planApprove / board.historyTitle / board.autonomy*
@@ -1592,6 +1683,11 @@ export const translations = {
   "settings.notifMedia": { en: "Media", es: "Medios" },
   "settings.notifPeer": { en: "Peer Messages", es: "Mensajes de pares" },
   "settings.notifSystem": { en: "System", es: "Sistema" },
+  // Track 3 Task 8: the "attention" notification type row (bot turn / ask
+  // card / gated result). Namespaced "notifications.type_*" per the task
+  // brief rather than "settings.notif*" — a deliberate one-off, not the
+  // start of a new convention.
+  "notifications.type_attention": { en: "Attention", es: "Atención" },
 
   // ─── Settings Groups ───
   "settings.group.general": { en: "General", es: "General" },
@@ -2102,66 +2198,6 @@ export const translations = {
     en: "No starter memories left to clear.",
     es: "No quedan memorias iniciales por borrar.",
   },
-
-  // ─── Perch panel (Perch Hub Phase 1, Task C-7) ───
-  // Three honest states: running (framed lens), installed-but-down, and
-  // not-installed (gate card + one-click install).
-  "perch.runningTitle": { en: "Perch — sessions", es: "Perch — sesiones" },
-  "perch.runningSubtitle": {
-    en: "Every session your bots are running, their channels, transcripts, and a place to message them directly.",
-    es: "Todas las sesiones que ejecutan tus bots, sus canales, transcripciones y un lugar para escribirles directamente.",
-  },
-  "perch.frameLabel": { en: "Perch bots lens", es: "Vista de bots de Perch" },
-  "perch.openInTab": { en: "Open in a new tab", es: "Abrir en una pestaña nueva" },
-  "perch.offlineTitle": { en: "Perch is offline", es: "Perch está desconectado" },
-  "perch.offlineBody": {
-    en: "The Perch hub is installed, but the gateway is not currently running it — so there are no sessions to show.",
-    es: "El hub de Perch está instalado, pero la puerta de enlace no lo está ejecutando ahora mismo, así que no hay sesiones que mostrar.",
-  },
-  "perch.offlineErrorLabel": { en: "Last error", es: "Último error" },
-  "perch.offlineNoError": {
-    en: "The supervisor recorded no error. Perch was most likely installed after this gateway started, and has not been supervised yet.",
-    es: "El supervisor no registró ningún error. Lo más probable es que Perch se instalara después de iniciar esta puerta de enlace y aún no esté supervisado.",
-  },
-  "perch.offlineHint": {
-    en: "Restart the gateway, then reload this page. If Perch stays offline, look for [perch-hub] lines in the gateway log.",
-    es: "Reinicia la puerta de enlace y vuelve a cargar esta página. Si Perch sigue desconectado, busca líneas [perch-hub] en el registro de la puerta de enlace.",
-  },
-  "perch.offlineRetryBtn": { en: "Check again", es: "Comprobar de nuevo" },
-  "perch.gateTitle": { en: "Perch is not installed", es: "Perch no está instalado" },
-  "perch.gateBody": {
-    en: "Perch is the session observatory for your bots: every session with its channel and transcript, plus a chat card for messaging a bot directly.",
-    es: "Perch es el observatorio de sesiones de tus bots: cada sesión con su canal y su transcripción, además de una tarjeta de chat para escribir a un bot directamente.",
-  },
-  "perch.gateDiskNote": {
-    en: "Installs a small local service that listens only on this machine, behind your dashboard login. About 20 MB of disk.",
-    es: "Instala un pequeño servicio local que solo escucha en esta máquina, detrás del inicio de sesión de tu panel. Unos 20 MB de disco.",
-  },
-  "perch.gateInstallBtn": { en: "Install Perch", es: "Instalar Perch" },
-  "perch.gateInstallingBtn": { en: "Installing…", es: "Instalando…" },
-  "perch.gateWorking": { en: "Working…", es: "Trabajando…" },
-  "perch.gateDone": { en: "Installed. Restarting the gateway…", es: "Instalado. Reiniciando la puerta de enlace…" },
-  "perch.gateRestarting": {
-    en: "The gateway is restarting — this page will reload on its own.",
-    es: "La puerta de enlace se está reiniciando; esta página se recargará sola.",
-  },
-  "perch.gateFailedPrefix": { en: "Install failed:", es: "La instalación falló:" },
-  "perch.gateUnknownError": { en: "unknown error", es: "error desconocido" },
-  "perch.gateNetworkError": {
-    en: "Could not reach the gateway. Check the connection and try again.",
-    es: "No se pudo contactar con la puerta de enlace. Revisa la conexión e inténtalo de nuevo.",
-  },
-  "perch.gateRetryBtn": { en: "Retry", es: "Reintentar" },
-
-  // ─── Perch panel: unattached-bot guidance (Track 2 §5.1) ───
-  // The running state's lens can be a silent, inert page when no enabled bot
-  // has the perch gateway attached — this callout says why, above the frame.
-  "perch.unattachedTitle": { en: "No bot is attached to Perch", es: "Ningún bot está conectado a Perch" },
-  "perch.unattachedBody": {
-    en: "No enabled bot has the Perch channel attached. In Bot Builder, open a bot → Gateways → choose 'Perch (dashboard chat)' → Save.",
-    es: "Ningún bot habilitado tiene el canal de Perch conectado. En Bot Builder, abre un bot → Puertas de enlace → elige 'Perch (chat del panel)' → Guardar.",
-  },
-  "perch.unattachedCta": { en: "Open Bot Builder", es: "Abrir Bot Builder" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

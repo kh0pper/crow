@@ -165,7 +165,6 @@ test("rejectFunneled middleware: the Perch surfaces are never funnel-exposed", a
       "/proxy/browser/vnc.html",
       "/dashboard/perch-api/bots",
       "/dashboard/perch-api/bots/1/turn",
-      "/dashboard/perch-api/turns/abc/events",
       // Perch Hub P2 (C-15): the interactive ("spawn as bot") surfaces —
       // same private prefix, same reasoning (a long-lived session's SSE
       // stream and its ask_user answers are exactly as private as a turn).
