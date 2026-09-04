@@ -34,6 +34,7 @@ import { Readable } from "node:stream";
 import { createDbClient } from "../../db.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { maybeAcquireLocalProvider, warmProviderByName } from "../gpu-orchestrator.js";
+import { requesterTag } from "../requester-tag.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
@@ -216,7 +217,8 @@ async function handleChat(req, res) {
   // companion sees a warm-up simply as this await taking longer, same as
   // before this task.
   const [providerId] = splitKey(key);
-  await maybeAcquireLocalProvider(providerId);
+  const requester = requesterTag(req);
+  await maybeAcquireLocalProvider(providerId, { requester });
 
   let up;
   try {
@@ -228,7 +230,7 @@ async function handleChat(req, res) {
   body.model = up.model;
   const url = `${up.baseUrl}/chat/completions`;
   const t0 = Date.now();
-  console.log(`[llm-router] route=${escalate ? `escalate(${escReason})` : "fast"} -> ${key} (${up.model}) stream=${!!body.stream}`);
+  console.log(`[llm-router] route=${escalate ? `escalate(${escReason})` : "fast"} -> ${key} (${up.model}) stream=${!!body.stream} requester=${requester}`);
 
   let upstream;
   try {
@@ -333,7 +335,7 @@ export default function llmRouterRouter() {
     const provider = req.body && (req.body.provider || req.body.providerId);
     if (!provider) return res.status(400).json({ ok: false, error: "provider required" });
     try {
-      const warmed = await warmProviderByName(provider);
+      const warmed = await warmProviderByName(provider, { requester: requesterTag(req) });
       res.json({ ok: warmed !== false, warmed, provider });
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });

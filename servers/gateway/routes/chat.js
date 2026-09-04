@@ -700,7 +700,7 @@ export default function chatRouter(dashboardAuth) {
         const { maybeAcquireLocalProvider, isNativeRuntimeProvider } = await import("../gpu-orchestrator.js");
         const isNative = isNativeRuntimeProvider(effectiveProvider);
         sendEvent("provider_warming", nativeWarmingEvent(effectiveProvider, isNative, lang));
-        const warmed = await maybeAcquireLocalProvider(effectiveProvider);
+        const warmed = await maybeAcquireLocalProvider(effectiveProvider, { requester: "dashboard-chat" });
         if (warmed === false) {
           sendEvent("error", providerNotReadyError(effectiveProvider, isNative, lang));
           closeStream();
