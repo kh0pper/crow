@@ -20,6 +20,11 @@
  * breaks default profile resolution — see resolve-profile.js's
  * firstModelId() returning null with nothing to pick from. See
  * .superpowers/sdd/task-15-report.md for the full investigation.
+ *
+ * 2026-09: the four originally-pinned static-provider bundles (llamacpp-qwen72b,
+ * vllm-rocm-{kimi,qwen3,qwen3-32b}) were retired — no weights on any lab box —
+ * so the guards below now pin the two resident Strix Halo bundles
+ * (llamacpp-vulkan-qwen36-35b-a3b → crow-chat, vllm-rocm-qwen35-4b → crow-voice).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -49,14 +54,12 @@ function composeHostPort(composeText) {
   return m ? Number(m[1]) : null;
 }
 
-// --- 1. The four bundles with a real, statically-known served model get a
+// --- 1. Bundles with a real, statically-known served model get a
 //        providers[] block whose port matches their compose file. ---
 
 const STATIC_PROVIDER_BUNDLES = {
-  "llamacpp-qwen72b": { providerId: "crow-swap-qwen72b", modelId: "qwen2.5-72b" },
-  "vllm-rocm-kimi": { providerId: "crow-swap-kimi", modelId: "kimi-linear-48b" },
-  "vllm-rocm-qwen3": { providerId: "crow-dispatch", modelId: "qwen3-4b" },
-  "vllm-rocm-qwen3-32b": { providerId: "crow-mode-a-32b", modelId: "qwen3-32b" },
+  "llamacpp-vulkan-qwen36-35b-a3b": { providerId: "crow-chat", modelId: "qwen3.6-35b-a3b" },
+  "vllm-rocm-qwen35-4b": { providerId: "crow-voice", modelId: "qwen3.5-4b" },
 };
 
 for (const [bundleId, expect] of Object.entries(STATIC_PROVIDER_BUNDLES)) {
@@ -74,15 +77,6 @@ for (const [bundleId, expect] of Object.entries(STATIC_PROVIDER_BUNDLES)) {
     assert.equal(m.port, hostPort, `${bundleId} manifest.port must match the compose-exposed host port`);
   });
 }
-
-test("llamacpp-qwen72b / vllm-rocm-kimi share the 8003-swap mutex group and both conflict with crow-chat", () => {
-  const qwen72b = manifest("llamacpp-qwen72b").providers[0].models[0];
-  const kimi = manifest("vllm-rocm-kimi").providers[0].models[0];
-  assert.equal(qwen72b.mutexGroup, "8003-swap");
-  assert.equal(kimi.mutexGroup, "8003-swap");
-  assert.ok(qwen72b.conflictsWith.includes("crow-chat"));
-  assert.ok(kimi.conflictsWith.includes("crow-chat"));
-});
 
 // --- 2. ollama + vllm (base): dynamic/unknowable served model → no_auto_provider,
 //        NOT an empty providers[] block. ---
@@ -157,10 +151,10 @@ async function dbRow(db, id) {
   return rows[0];
 }
 
-test("install path: registering vllm-rocm-qwen3's manifest.providers[0] writes a crow-dispatch row with the right base_url/port/host", async () => {
+test("install path: registering vllm-rocm-qwen35-4b's manifest.providers[0] writes a crow-voice row with the right base_url/port/host", async () => {
   const { db, cleanup } = freshLibsql();
   try {
-    const m = manifest("vllm-rocm-qwen3");
+    const m = manifest("vllm-rocm-qwen35-4b");
     const providerDef = m.providers[0];
     // Mirrors bundles.js's install-time call exactly: host:"local" (or unset)
     // → hostIp stays the loopback default; port comes from manifest.port.
@@ -168,16 +162,16 @@ test("install path: registering vllm-rocm-qwen3's manifest.providers[0] writes a
     const result = await registerProviderFromManifest({
       db, manifest: m, providerDef, port: m.port, hostIp,
     });
-    assert.equal(result.id, "crow-dispatch");
+    assert.equal(result.id, "crow-voice");
 
-    const row = await dbRow(db, "crow-dispatch");
+    const row = await dbRow(db, "crow-voice");
     assert.ok(row, "provider row must exist after registration");
-    assert.equal(row.base_url, "http://127.0.0.1:8001/v1");
+    assert.equal(row.base_url, "http://127.0.0.1:8011/v1");
     assert.equal(row.host, "local");
-    assert.equal(row.bundle_id, "vllm-rocm-qwen3");
+    assert.equal(row.bundle_id, "vllm-rocm-qwen35-4b");
     const models = JSON.parse(row.models);
-    assert.equal(models[0].id, "qwen3-4b");
-    assert.equal(models[0].priority, "maker_lab");
+    assert.equal(models[0].id, "qwen3.5-4b");
+    assert.equal(models[0].priority, "voice");
   } finally { cleanup(); }
 });
 
@@ -208,8 +202,8 @@ test("committed registry/add-ons.json carries the new providers[]/no_auto_provid
   const current = readFileSync(join(APP_ROOT, "registry", "add-ons.json"), "utf8");
   assert.equal(current, generated, "registry drift — run `npm run build-registry`");
 
-  const dispatch = registry["add-ons"].find((e) => e.id === "vllm-rocm-qwen3");
-  assert.equal(dispatch.providers[0].id, "crow-dispatch");
+  const voice = registry["add-ons"].find((e) => e.id === "vllm-rocm-qwen35-4b");
+  assert.equal(voice.providers[0].id, "crow-voice");
   const ollama = registry["add-ons"].find((e) => e.id === "ollama");
   assert.equal(typeof ollama.no_auto_provider, "string");
 });
