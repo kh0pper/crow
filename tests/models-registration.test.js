@@ -101,6 +101,37 @@ function makeCatalog() {
           { file: "embed-test-model-Q4_K_M.gguf", quant: "Q4_K_M", size_mb: 1, min_ram_mb: 1, min_vram_mb: 0, sha256: "def" },
         ],
       },
+      {
+        id: "multi-test-model",
+        family: "TestMultiFamily",
+        lab: "TestLab",
+        hf_repo: "test/multi-test-model-GGUF",
+        license: "apache-2.0",
+        gated: false,
+        task: "chat",
+        context_len: 8192,
+        min_runtime_version: "b10068",
+        default_quant: "Q4_K_M",
+        tags: ["chat", "vision"],
+        notes: "test fixture: multi-part quant + mmproj companion",
+        quants: [
+          {
+            file: "Q4_K_M/multi-test-model-Q4_K_M-00001-of-00003.gguf",
+            quant: "Q4_K_M",
+            size_mb: 3,
+            min_ram_mb: 3,
+            min_vram_mb: 0,
+            sha256: "a1",
+            shards: [
+              { file: "Q4_K_M/multi-test-model-Q4_K_M-00002-of-00003.gguf", size_mb: 1, sha256: "a2" },
+              { file: "Q4_K_M/multi-test-model-Q4_K_M-00003-of-00003.gguf", size_mb: 1, sha256: "a3" },
+            ],
+          },
+        ],
+        companions: [
+          { kind: "mmproj", file: "mmproj-F16.gguf", size_mb: 1, sha256: "a4" },
+        ],
+      },
     ],
   };
 }
@@ -631,5 +662,68 @@ test("providerBindings: no ai_profiles row / no pi_bot_defs rows at all -> both 
     const { profiles, bots } = await providerBindings(db, "chat-test-model");
     assert.deepEqual(profiles, []);
     assert.deepEqual(bots, []);
+  } finally { cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// Schema v2: registry row carries companions + shardFiles; unregister removes all
+// ---------------------------------------------------------------------------
+
+const MULTI_ON_DISK = [
+  "multi-test-model-Q4_K_M-00001-of-00003.gguf",
+  "multi-test-model-Q4_K_M-00002-of-00003.gguf",
+  "multi-test-model-Q4_K_M-00003-of-00003.gguf",
+  "multi-test-model--mmproj-F16.gguf",
+];
+
+test("registerModel: a legacy single-file model records empty companions/shardFiles", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
+    const entry = loadState(dir).registry["chat-test-model"];
+    assert.equal(entry.file, "chat-test-model-Q4_K_M.gguf");
+    assert.deepEqual(entry.companions, []);
+    assert.deepEqual(entry.shardFiles, []);
+  } finally { cleanup(); }
+});
+
+test("registerModel: a sharded model with an mmproj companion records shardFiles + companions (on-disk basenames) on the registry row", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    const result = await registerModel({ modelId: "multi-test-model", catalog: makeCatalog(), db, dir });
+    assert.equal(result.id, "multi-test-model");
+    const entry = loadState(dir).registry["multi-test-model"];
+    assert.equal(entry.file, MULTI_ON_DISK[0]);
+    assert.deepEqual(entry.shardFiles, [MULTI_ON_DISK[1], MULTI_ON_DISK[2]]);
+    assert.deepEqual(entry.companions, [{ kind: "mmproj", file: MULTI_ON_DISK[3] }]);
+    assert.equal(entry.sizeMb, 3, "sizeMb is the quant's TOTAL");
+  } finally { cleanup(); }
+});
+
+test("unregisterModel: removes the primary, every shard and every companion; a missing part is not an error", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    await registerModel({ modelId: "multi-test-model", catalog: makeCatalog(), db, dir });
+    mkdirSync(join(dir, "models", "blobs"), { recursive: true });
+    for (const name of MULTI_ON_DISK) writeFileSync(blobPathFor(dir, name), "fake bytes");
+
+    const unlinked = [];
+    const outcome = await unregisterModel({
+      modelId: "multi-test-model",
+      db,
+      dir,
+      unlinkFn: (p) => { unlinked.push(p); return unlinkSync(p); },
+    });
+    assert.equal(outcome.deleted, true);
+    assert.deepEqual(unlinked, MULTI_ON_DISK.map((n) => blobPathFor(dir, n)));
+    for (const name of MULTI_ON_DISK) assert.ok(!existsSync(blobPathFor(dir, name)), `${name} removed`);
+    assert.equal(loadState(dir).registry["multi-test-model"], undefined);
+
+    // Second registration, only the companion left on disk: still fine.
+    await registerModel({ modelId: "multi-test-model", catalog: makeCatalog(), db, dir });
+    writeFileSync(blobPathFor(dir, MULTI_ON_DISK[3]), "fake bytes");
+    const again = await unregisterModel({ modelId: "multi-test-model", db, dir });
+    assert.equal(again.deleted, true);
+    assert.ok(!existsSync(blobPathFor(dir, MULTI_ON_DISK[3])));
   } finally { cleanup(); }
 });
