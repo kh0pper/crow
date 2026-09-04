@@ -21,7 +21,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { nativeWarmingEvent, providerNotReadyError } from "../servers/gateway/routes/chat.js";
+import { nativeWarmingEvent, providerNotReadyError, boxReservedError } from "../servers/gateway/routes/chat.js";
 import { t, fill } from "../servers/gateway/dashboard/shared/i18n.js";
 
 // --- Docker/cloud path: unchanged from pre-Task-10 behavior ----------------
@@ -87,4 +87,21 @@ test("providerNotReadyError: an unsupported lang falls back to English (t()'s ow
   const fr = providerNotReadyError("qwen3-4b", true, "fr");
   const en = providerNotReadyError("qwen3-4b", true, "en");
   assert.equal(fr.message, en.message);
+});
+
+test("boxReservedError: names the owner + expiry in both langs, code box_reserved (never the generic not-ready copy)", () => {
+  const err = { code: "box_reserved", owner: "win", expires_at: "2026-09-04T23:00:00.000Z" };
+  const en = boxReservedError(err, "en");
+  const es = boxReservedError(err, "es");
+  assert.equal(en.code, "box_reserved");
+  assert.equal(en.owner, "win");
+  assert.equal(en.expires_at, "2026-09-04T23:00:00.000Z");
+  assert.equal(en.message, fill(t("chat.box_reserved", "en"), { owner: "win", until: "2026-09-04T23:00:00.000Z" }));
+  assert.equal(es.message, fill(t("chat.box_reserved", "es"), { owner: "win", until: "2026-09-04T23:00:00.000Z" }));
+  assert.notEqual(en.message, es.message);
+  assert.match(en.message, /win/);
+  assert.match(en.message, /2026-09-04T23:00:00\.000Z/);
+  assert.notEqual(en.message, providerNotReadyError("x", true, "en").message);
+  const bare = boxReservedError({}, "en");
+  assert.match(bare.message, /unknown/);
 });
