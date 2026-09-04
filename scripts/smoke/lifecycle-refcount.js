@@ -51,10 +51,11 @@ for (let i = 0; i < 5; i++) await releaseModel("grackle-embed");
 const snap2 = getLifecycleSnapshot();
 t("refcount returns to 0 after matching releases", snap2["grackle-embed"].refs === 0);
 
-// -- 5. Pinned provider (Maker Lab) rejects release --
-// The existing Qwen3-4B provider is pinned priority=maker_lab in models.json
-await ensureModelWarm("crow-dispatch");
-const r5 = await releaseModel("crow-dispatch");
+// -- 5. Pinned provider rejects release --
+// crow-voice (Qwen3.5-4B, :8011) is the pinned always-warm provider since the
+// crow-dispatch (:8001) bundle was retired in Sep 2026.
+await ensureModelWarm("crow-voice");
+const r5 = await releaseModel("crow-voice");
 t("pinned provider release is a no-op", r5.ok && r5.pinned === true, JSON.stringify(r5));
 
 // -- 6. Unknown provider rejected --

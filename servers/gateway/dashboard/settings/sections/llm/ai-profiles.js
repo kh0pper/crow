@@ -7,6 +7,7 @@ import { t, tJs } from "../../../shared/i18n.js";
 import { upsertSetting } from "../../registry.js";
 import { renderScopeToggle, scopeToggleScript } from "../../../shared/scope-toggle.js";
 import { listProvidersAll } from "../../../../../shared/providers-db.js";
+import { DEFAULT_ROUTES } from "../../../../ai/smart-router.js";
 
 // Canonical route ids the Smart Chat router dispatches to. Keep in sync
 // with DEFAULT_ROUTES in servers/gateway/ai/smart-router.js.
@@ -165,7 +166,7 @@ export default {
       <div class="pf-auto-block" id="pf-auto-block" style="display:none">
         <h4>Auto-routing rules</h4>
         <div style="font-size:0.78rem;color:var(--crow-text-secondary);margin-bottom:0.65rem;line-height:1.45">
-          Per-route provider override. Leave blank to use the baked-in default (<code>code</code>→crow-swap-coder, <code>vision</code>→grackle-vision, <code>fast</code>→crow-dispatch, <code>deep</code>→crow-swap-deep, <code>default</code>→crow-chat). Precedence: slash-command &gt; attachment &gt; keyword &gt; default.
+          Per-route provider override. Leave blank to use the baked-in default (${AUTO_ROUTES.map((r) => `<code>${escapeHtml(r.id)}</code>→${escapeHtml(DEFAULT_ROUTES[r.id] || DEFAULT_ROUTES.default)}`).join(", ")}). Precedence: slash-command &gt; attachment &gt; keyword &gt; default.
         </div>
         ${AUTO_ROUTES.map((r) => `
           <div class="pf-route-row">
