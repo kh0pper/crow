@@ -66,6 +66,8 @@ export const REBUILD_TABLES = {
   shared_items: "strict",
   crow_context: "dedup-tolerant",
   dashboard_settings: "strict",
+  // Track 3 Task 7: control CHECK widen ('run'/'stop' -> +'interrupted').
+  bot_sessions: "strict",
 };
 
 // sqlite_master objects init-db removes WITHOUT recreating (legacy trigger and

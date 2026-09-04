@@ -6,6 +6,7 @@
  */
 
 import { tJs } from "../../shared/i18n.js";
+import { birdDrawerJs } from "./drawer.js";
 
 export function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lang, includeArchived) {
   const bi = botId == null ? "null" : JSON.stringify(String(botId));
@@ -238,6 +239,35 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       });
     });
   }
+  // Track 3 Task 14: the SAME Accept/Reject affordance, now on the card FACE
+  // itself (data-result-actions, html.js's cardFaceHtml) — reads cardId/
+  // resultId off the delegated click's own DOM instead of the drawer's cur.
+  function cardResultDecide(actionsEl,btnEl){
+    var cardEl=actionsEl.closest('.bb-card');
+    var cardId=cardEl?Number(cardEl.getAttribute('data-card')):null;
+    var resultId=Number(actionsEl.getAttribute('data-result-id'));
+    if(cardId==null||!Number.isFinite(cardId)||!resultId) return;
+    var action=btnEl.getAttribute('data-result-action');
+    var buttons=[].slice.call(actionsEl.querySelectorAll('button'));
+    buttons.forEach(function(b){ b.disabled=true; });
+    if(action==='accept'){
+      // Two-step (spec §4), same order as the drawer's own
+      // approveAndMarkDone above: decide (approve) THEN the existing
+      // move-to-'done' call — never a combined endpoint.
+      api('POST','/card/'+cardId+'/result/'+resultId+'/decide',{decision:'approved'}).then(function(r){
+        if(!r.ok){ buttons.forEach(function(b){ b.disabled=false; }); crowToast(errText(r,'failed'),{type:'error'}); return; }
+        api('POST','/card/'+cardId+'/move',{status:'done'}).then(function(r2){
+          if(r2.ok) reload();
+          else { buttons.forEach(function(b){ b.disabled=false; }); crowToast(errText(r2,'failed'),{type:'error'}); }
+        });
+      }).catch(function(){ buttons.forEach(function(b){ b.disabled=false; }); crowToast('${tJs("botboard.loadFailed", lang)}',{type:'error'}); });
+    } else {
+      api('POST','/card/'+cardId+'/result/'+resultId+'/decide',{decision:'rejected'}).then(function(r){
+        if(r.ok) reload();
+        else { buttons.forEach(function(b){ b.disabled=false; }); crowToast(errText(r,'failed'),{type:'error'}); }
+      }).catch(function(){ buttons.forEach(function(b){ b.disabled=false; }); crowToast('${tJs("botboard.loadFailed", lang)}',{type:'error'}); });
+    }
+  }
   function renderResults(results,terminalValues){
     var wrap=$('bb-d-result-wrap'); if(!wrap) return;
     clearEl(wrap);
@@ -394,6 +424,31 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
 
   // ---- Click handler: dispatch by item type ----
   document.addEventListener('click',function(ev){
+    // Track 3 Task 14: card-face result-gate Accept/Reject — checked FIRST,
+    // before the bird glyph AND the card-open branches below, and returns
+    // unconditionally: a click anywhere inside the .bb-result-actions
+    // wrapper (data-result-actions) must NEVER also open the card drawer.
+    var resultActionsEl=ev.target.closest && ev.target.closest('[data-result-actions]');
+    if(resultActionsEl){
+      var resultActionBtn=ev.target.closest('[data-result-action]');
+      if(resultActionBtn){
+        ev.preventDefault();
+        ev.stopPropagation();
+        cardResultDecide(resultActionsEl,resultActionBtn);
+      }
+      return;
+    }
+    // Track 3 Task 13: a card-face bird glyph opens the SESSION drawer, not
+    // the card drawer — checked first so it wins over the card-body handler
+    // below. botId is unknown here (cardFaceHtml's birdHtml carries no
+    // data-bot); the drawer discovers it off the first SSE 'state' frame.
+    var birdGlyph=ev.target.closest && ev.target.closest('.bb-bird[data-bird-sid]');
+    if(birdGlyph && ev.target.closest('.bb-card')){
+      ev.preventDefault();
+      ev.stopPropagation();
+      openBirdDrawer(birdGlyph.getAttribute('data-bird-sid'));
+      return;
+    }
     var c=ev.target.closest && ev.target.closest('.bb-card');
     if(c && !ev.target.closest('.bb-nojs-move')){
       ev.preventDefault();
@@ -532,6 +587,10 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
 
   // ---- Drag and drop ----
   document.addEventListener('dragstart',function(e){
+    // Track 3 Task 14: the SAME data-result-actions guard the click handler
+    // above uses — a drag started from inside the Accept/Reject buttons must
+    // never pick up the whole card.
+    if(e.target.closest && e.target.closest('[data-result-actions]')){ e.preventDefault(); return; }
     var c=e.target.closest&&e.target.closest('.bb-card'); if(!c) return;
     if(c.getAttribute('data-locked')==='1'||c.getAttribute('data-archived')==='1'){ e.preventDefault(); return; }
     dragId=Number(c.getAttribute('data-card'));
@@ -758,6 +817,17 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       var sk=Object.keys(activeStatuses);
       if(sk.length) parts.push('status='+sk.join(','));
       if(actionNeededFilter) parts.push('action=1');
+      // Track 3 Task 13: preserve foreign hash keys the drawer owns (bird,
+      // card) — a filter interaction must never blow away a live drawer
+      // deep link (review finding 7). window._bbForeignHash is populated by
+      // parseFilterHash below and by the drawer itself (bdSetHashKey).
+      if(window._bbForeignHash){
+        for(var fk in window._bbForeignHash){
+          if(Object.prototype.hasOwnProperty.call(window._bbForeignHash,fk) && window._bbForeignHash[fk]!=null){
+            parts.push(fk+'='+encodeURIComponent(window._bbForeignHash[fk]));
+          }
+        }
+      }
       var h=parts.length?'#'+parts.join('&'):'';
       if(location.hash!==h) history.replaceState(null,'',location.pathname+location.search+h);
     }
@@ -772,6 +842,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         if(k==='search'&&searchInput) searchInput.value=v;
         if(k==='status') v.split(',').forEach(function(s){ if(s) activeStatuses[s]=1; });
         if(k==='action'&&v==='1') actionNeededFilter=true;
+        // Track 3 Task 13: bird/card are keys THIS parser doesn't own —
+        // remembered so updateFilterHash can round-trip them, and read below
+        // (after parseFilterHash runs) to drive the drawer's own hash open.
+        if(k==='bird'||k==='card'){
+          window._bbForeignHash=window._bbForeignHash||{};
+          window._bbForeignHash[k]=v;
+        }
       });
       chips.forEach(function(chip){
         var sf=chip.getAttribute('data-status-filter');
@@ -798,6 +875,18 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
 
     parseFilterHash();
     applyFilters();
+
+    // Track 3 Task 13: hash-driven drawer open — #bird=<sid> opens straight
+    // to that session, #card=<id> scrolls the card into view and opens its
+    // live bird's drawer if one is on it. Runs AFTER parseFilterHash so a
+    // drawer link co-existing with a search/status hash is never lost.
+    if(window._bbForeignHash){
+      if(window._bbForeignHash.bird && typeof openBirdDrawer==='function'){
+        openBirdDrawer(window._bbForeignHash.bird);
+      } else if(window._bbForeignHash.card && typeof bdFocusCard==='function'){
+        bdFocusCard(window._bbForeignHash.card);
+      }
+    }
 
     // ---- View toggle + list + collapsible columns (Feature 3) ----
     var bbBoard=$('bb-board');
@@ -1015,6 +1104,217 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     };
   }
 
+  // ---- Track 3 Task 12: the roost strip ("birds on a wire") ----
+  // i18n text baked in at render time (SAME idiom as MUTATION_VERB_LABELS
+  // above) — a bird-state SSE frame patches the DOM in place and has no
+  // server round-trip to re-fetch a translated string from.
+  var ROOST_STATE_TEXT={
+    idle:'${tJs("botboard.roostStateIdle", lang)}',
+    working:'${tJs("botboard.roostStateWorking", lang)}',
+    waiting:'${tJs("botboard.roostStateWaiting", lang)}',
+    hibernating:'${tJs("botboard.roostStateHibernating", lang)}',
+    observing:'${tJs("botboard.roostStateObserving", lang)}'
+  };
+  // Only the three LIVE-session states have a primary-action label to patch
+  // (idle→dispatch and observing→attach-link never arrive over this SSE
+  // channel — those are session-existence changes, not a state transition
+  // on an already-live session; see the bird-state handler's own note).
+  var ROOST_ACTION_TEXT={
+    working:'${tJs("botboard.roostActionOpen", lang)}',
+    hibernating:'${tJs("botboard.roostActionOpen", lang)}',
+    waiting:'${tJs("botboard.roostActionAnswer", lang)}'
+  };
+
+  function perchApi(method,path,body){
+    return fetch('/dashboard/perch-api'+path,{method:method,headers:{'Content-Type':'application/json'},
+      body:body?JSON.stringify(body):undefined,credentials:'same-origin'})
+      .then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,status:r.status,j:j};});});
+  }
+
+  // Task 13: the session drawer. Its emitted source lives in drawer.js (kept
+  // out of THIS file to stay under the line budget) — spliced in here as a
+  // bare block of statements sharing this IIFE's scope ($, clearEl,
+  // openDrawer/closeDrawer, perchApi, crowToast, msg). Defines
+  // openBirdDrawer(sessionId, botId, botName), closeBirdDrawer() and
+  // bdFocusCard(cardId) — every roost/bird/hash entry point below calls one
+  // of those three.
+  ${birdDrawerJs(lang)}
+
+  var roostDispatchEl=$('bb-roost-dispatch'), roostDispatchBotId=null;
+  // Track 3 Task 14: the SAME dialog doubles as the drawer's attach-to-card
+  // card picker — roostDispatchMode selects which POST 'bb-rd-send' below
+  // fires; roostDispatchSid carries the already-live session it attaches
+  // (dispatch mode never sets it, attach mode never sets roostDispatchBotId).
+  var roostDispatchMode='dispatch', roostDispatchSid=null;
+  function closeRoostDispatch(){ closeDrawer(roostDispatchEl); roostDispatchBotId=null; roostDispatchMode='dispatch'; roostDispatchSid=null; }
+  if($('bb-rd-close')) $('bb-rd-close').onclick=closeRoostDispatch;
+
+  // Card options come from the DOM (the currently rendered board), minus GET
+  // /roost's occupiedCardIds — the SAME set a fresh dispatch OR attach would
+  // 409 against (hibernating claims don't lock, so the DOM's own lock badges
+  // can't answer this by themselves). Shared by both openRoostDispatch and
+  // openRoostAttachCard below — the only difference between the two modes is
+  // what 'bb-rd-send' posts, never how the card list is built.
+  function bdLoadRoostDispatchCards(){
+    var sel=$('bb-rd-card');
+    if(sel) clearEl(sel);
+    perchApi('GET','/roost').then(function(r){
+      var occupied={};
+      if(r.ok && r.j && r.j.occupiedCardIds){ r.j.occupiedCardIds.forEach(function(id){ occupied[Number(id)]=true; }); }
+      var cards=[].slice.call(document.querySelectorAll('#bb-board .bb-card[data-card]'));
+      var free=cards.filter(function(c){ return !occupied[Number(c.getAttribute('data-card'))]; });
+      if(!sel) return;
+      clearEl(sel);
+      if(!free.length){
+        msg($('bb-rd-msg'),'${tJs("botboard.roostDispatchNoCards", lang)}','warn');
+        return;
+      }
+      free.forEach(function(c){
+        var id=c.getAttribute('data-card');
+        var titleEl=c.querySelector('.bb-title');
+        sel.appendChild(optEl(id,'#'+id+' '+(titleEl?titleEl.textContent:''),false));
+      });
+    }).catch(function(){ msg($('bb-rd-msg'),'${tJs("botboard.loadFailed", lang)}','err'); });
+  }
+
+  // idle→Send out opens this.
+  function openRoostDispatch(botId){
+    roostDispatchMode='dispatch';
+    roostDispatchSid=null;
+    roostDispatchBotId=botId;
+    msg($('bb-rd-msg'),'','');
+    if($('bb-rd-note')) $('bb-rd-note').value='';
+    if($('bb-rd-note-wrap')) $('bb-rd-note-wrap').style.display='';
+    bdLoadRoostDispatchCards();
+    openDrawer(roostDispatchEl);
+  }
+
+  // Track 3 Task 14: the drawer's "Attach to card" button opens this — SAME
+  // dialog, SAME free-card picker, but posts attach-card against an
+  // ALREADY-LIVE session instead of spawning a new one via dispatch. No note
+  // field (attach-card's route takes no note).
+  function openRoostAttachCard(sid){
+    roostDispatchMode='attach';
+    roostDispatchSid=sid;
+    roostDispatchBotId=null;
+    msg($('bb-rd-msg'),'','');
+    if($('bb-rd-note-wrap')) $('bb-rd-note-wrap').style.display='none';
+    bdLoadRoostDispatchCards();
+    openDrawer(roostDispatchEl);
+  }
+
+  if($('bb-rd-send')) $('bb-rd-send').onclick=function(){
+    var sel=$('bb-rd-card');
+    var cardId=sel?sel.value:'';
+    if(!cardId) return;
+    var sendBtn=$('bb-rd-send');
+    if(roostDispatchMode==='attach'){
+      if(!roostDispatchSid) return;
+      if(sendBtn) sendBtn.disabled=true;
+      perchApi('POST','/interactive/'+encodeURIComponent(roostDispatchSid)+'/attach-card',{card_id:Number(cardId)}).then(function(r){
+        if(!r.ok){
+          if(sendBtn) sendBtn.disabled=false;
+          msg($('bb-rd-msg'),(r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}','err');
+          return;
+        }
+        msg($('bb-rd-msg'),'${tJs("botboard.bdAttachSent", lang)}','ok');
+        var attachedSid=roostDispatchSid;
+        closeRoostDispatch();
+        // Header updates: the drawer's own card-link + result gate re-read
+        // straight off GET /bots/:id/sessions — the SAME source
+        // bdLoadSessionMeta already hydrates from on open.
+        if(bd.sid===attachedSid) bdAfterAttachCard();
+      }).catch(function(){
+        if(sendBtn) sendBtn.disabled=false;
+        msg($('bb-rd-msg'),'${tJs("botboard.roostActionFailed", lang)}','err');
+      });
+      return;
+    }
+    if(!roostDispatchBotId) return;
+    var note=$('bb-rd-note')?$('bb-rd-note').value:'';
+    if(sendBtn) sendBtn.disabled=true;
+    perchApi('POST','/bots/'+encodeURIComponent(roostDispatchBotId)+'/dispatch',{card_id:Number(cardId),note:note}).then(function(r){
+      if(r.ok){
+        // Fix round 1: a successful dispatch used to close the dialog and
+        // call the (still-stub) openBirdDrawer — invisible, indistinguishable
+        // from a dropped click. The strip/card-face bird can't be patched
+        // into existence client-side (a bird-less card face carries no
+        // .bb-bird span to patch — see the bird-state handler below), so the
+        // honest fix is: show a perceivable success line, THEN reload. The
+        // reloaded SSR renders the bird on the strip + card truthfully.
+        msg($('bb-rd-msg'),'${tJs("botboard.roostDispatchSent", lang)}','ok');
+        setTimeout(reload,600);
+      } else if(r.status===409 && r.j && r.j.error==='card_occupied'){
+        // A raced dispatch — surfaced as the dialog's OWN error line, not a
+        // toast: the picker is still open and the operator needs to pick a
+        // different card, not just be told something went wrong elsewhere.
+        if(sendBtn) sendBtn.disabled=false;
+        msg($('bb-rd-msg'),'${tJs("botboard.roostDispatchOccupied", lang)}','err');
+      } else {
+        if(sendBtn) sendBtn.disabled=false;
+        msg($('bb-rd-msg'),(r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}','err');
+      }
+    }).catch(function(){
+      if(sendBtn) sendBtn.disabled=false;
+      msg($('bb-rd-msg'),'${tJs("botboard.roostActionFailed", lang)}','err');
+    });
+  };
+
+  // Click delegation over the whole roost strip: the overflow-menu toggle,
+  // then every data-roost-action button. Plain <a> primary/setup links (the
+  // observing state, and the overflow menu's Setup item) are NOT
+  // data-roost-action — they navigate normally, no JS involved.
+  document.addEventListener('click',function(ev){
+    var menuBtn=ev.target.closest&&ev.target.closest('[data-roost-menu-toggle]');
+    if(menuBtn){
+      ev.preventDefault();
+      var wrap=menuBtn.closest&&menuBtn.closest('.bb-roost-bird');
+      var menu=wrap?wrap.querySelector('.bb-roost-menu'):null;
+      var wasOpen=menu&&menu.classList.contains('bb-open');
+      [].slice.call(document.querySelectorAll('.bb-roost-menu.bb-open')).forEach(function(m){
+        m.classList.remove('bb-open'); m.setAttribute('aria-hidden','true');
+      });
+      [].slice.call(document.querySelectorAll('[data-roost-menu-toggle]')).forEach(function(b){
+        b.setAttribute('aria-expanded','false');
+      });
+      if(menu && !wasOpen){ menu.classList.add('bb-open'); menu.setAttribute('aria-hidden','false'); menuBtn.setAttribute('aria-expanded','true'); }
+      return;
+    }
+    if(!(ev.target.closest && ev.target.closest('.bb-roost-menu'))){
+      [].slice.call(document.querySelectorAll('.bb-roost-menu.bb-open')).forEach(function(m){
+        m.classList.remove('bb-open'); m.setAttribute('aria-hidden','true');
+      });
+    }
+    var actBtn=ev.target.closest&&ev.target.closest('[data-roost-action]');
+    if(!actBtn) return;
+    var action=actBtn.getAttribute('data-roost-action');
+    var botId=actBtn.getAttribute('data-bot');
+    var sid=actBtn.getAttribute('data-sid');
+    if(action==='dispatch'){ openRoostDispatch(botId); return; }
+    // The DOM already carries the bird's display name (.bb-roost-name,
+    // rendered by roostBirdHtml) — read it here rather than a fresh API
+    // round trip just to fill in the drawer header.
+    var birdWrap=actBtn.closest&&actBtn.closest('.bb-roost-bird');
+    var nameEl=birdWrap&&birdWrap.querySelector('.bb-roost-name');
+    var botName=nameEl?nameEl.textContent:null;
+    if(action==='open' || action==='answer'){ openBirdDrawer(sid,botId,botName); return; }
+    if(action==='sessions'){ openBirdDrawer(sid||null,botId,botName); return; }
+    if(action==='talk'){
+      perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive').then(function(r){
+        if(r.ok){ openBirdDrawer(r.j&&r.j.sessionId,botId,botName); }
+        else { crowToast((r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); }
+      }).catch(function(){ crowToast('${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); });
+      return;
+    }
+    if(action==='recall'){
+      if(!sid || !confirm('${tJs("botboard.roostConfirmRecall", lang)}')) return;
+      perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/stop').then(function(r){
+        if(!r.ok){ crowToast((r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); }
+      }).catch(function(){ crowToast('${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); });
+      return;
+    }
+  });
+
   // ---- EventSource live overlay ----
   if(window.EventSource && !INCLUDE_ARCHIVED){
     var esUrl=null;
@@ -1025,6 +1325,20 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     }
     if(esUrl){
       var es=new EventSource(esUrl);
+      // Reload-storm guard, SHARED by every live-diff path below (board-config
+      // drift, the default frame's card diff, and — fix round 1 — bird-state
+      // falling through to a full refresh): one reload per 10s window,
+      // persisted across the reload it triggers, so a render/stream mismatch
+      // that can never converge degrades to "slow to catch up" instead of a
+      // reload loop.
+      function guardedReload(){
+        var now=Date.now(), lastReload=0;
+        try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
+        if(now-lastReload>10000){
+          try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
+          reload();
+        }
+      }
       es.addEventListener('board-config',function(ev){
         var cfg; try{ cfg=JSON.parse(ev.data); }catch(e){ return; }
         if(!cfg||!cfg.statuses||!cfg.statuses.length) return;
@@ -1035,13 +1349,49 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         var rendered=null;
         try{ rendered=board?JSON.parse(board.getAttribute('data-statuses')||'null'):null; }catch(e){ rendered=null; }
         if(rendered && rendered.length && JSON.stringify(rendered)!==JSON.stringify(cfg.statuses)){
-          var now=Date.now(), lastReload=0;
-          try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
-          if(now-lastReload>10000){
-            try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
-            reload();
+          guardedReload();
+        }
+      });
+      // Track 3 Task 12: bird-state patches classes IN PLACE — card face
+      // glyph AND any roost-strip glyph carrying the SAME session id — and
+      // never reloads for a transition it CAN patch. A session starting
+      // fresh (a card face with no .bb-bird span to patch at all, or a strip
+      // bird whose glyph carries no matching data-bird-sid) can't be patched
+      // into existence client-side — fix round 1: that falls through to the
+      // SAME guarded-reload path the default frame's card diff uses, so
+      // OTHER tabs converge within a tick instead of staying stale forever.
+      es.addEventListener('bird-state',function(ev){
+        var d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
+        if(!d) return;
+        var needsRefresh=false;
+        for(var cid in d){
+          if(!Object.prototype.hasOwnProperty.call(d,cid)) continue;
+          var info=d[cid]||{};
+          var state=info.state, sid=info.sid;
+          if(!state) continue;
+          var cardGlyph=document.querySelector('.bb-card[data-card="'+cid+'"] .bb-bird');
+          if(cardGlyph){
+            cardGlyph.className='bb-bird bb-bird--'+state;
+            if(sid!=null) cardGlyph.setAttribute('data-bird-sid',String(sid));
+          } else {
+            needsRefresh=true;
+          }
+          if(sid!=null){
+            var roostGlyphs=document.querySelectorAll('.bb-roost-bird .bb-bird[data-bird-sid="'+sid+'"]');
+            if(!roostGlyphs.length) needsRefresh=true;
+            [].slice.call(roostGlyphs).forEach(function(g){
+              g.className='bb-bird bb-bird--'+state;
+              var wrap=g.closest&&g.closest('.bb-roost-bird');
+              if(!wrap) return;
+              wrap.setAttribute('data-roost-state',state);
+              var stateEl=wrap.querySelector('.bb-roost-state');
+              if(stateEl && ROOST_STATE_TEXT[state]) stateEl.textContent=ROOST_STATE_TEXT[state];
+              var primary=wrap.querySelector('.bb-roost-primary');
+              if(primary && ROOST_ACTION_TEXT[state]) primary.textContent=ROOST_ACTION_TEXT[state];
+            });
           }
         }
+        if(needsRefresh && !document.hidden) guardedReload();
       });
       es.onmessage=function(ev){
         var d; try{ d=JSON.parse(ev.data); }catch(e){ return; }
@@ -1073,15 +1423,11 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         // Reload-storm guard: if the rendered board can never converge with
         // the stream snapshot (a render/stream query mismatch), an
         // unconditional reload loops forever — each fresh page re-detects
-        // the same diff. One reload per 10s window; persisted across the
-        // reload it triggers.
+        // the same diff. SHARED with board-config/bird-state above
+        // (guardedReload — fix round 1): one reload per 10s window,
+        // persisted across the reload it triggers.
         if(changed && !document.hidden){
-          var now=Date.now(), lastReload=0;
-          try{ lastReload=Number(sessionStorage.getItem('bb-live-reload'))||0; }catch(e){}
-          if(now-lastReload>10000){
-            try{ sessionStorage.setItem('bb-live-reload',String(now)); }catch(e){}
-            reload();
-          }
+          guardedReload();
         }
       };
       es.onerror=function(){ /* EventSource auto-reconnects; server resends a full snapshot */ };

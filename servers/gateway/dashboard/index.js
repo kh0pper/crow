@@ -79,7 +79,6 @@ import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost, han
 import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
-import perchPanel from "./panels/perch.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 import perchApiRouter from "../routes/perch.js";
@@ -114,11 +113,6 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(connectPanel);
   registerPanel(fediversePanel);
   registerPanel(meteringPanel);
-  // Carries a `hidden` PREDICATE (fediverse idiom): the nav entry appears
-  // only once the perch-hub bundle is installed. The route stays mounted
-  // regardless — that is what makes the gate card's one-click install
-  // reachable on an instance that does not have Perch yet.
-  registerPanel(perchPanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {

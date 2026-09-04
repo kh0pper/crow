@@ -217,7 +217,7 @@ test("channel step offers perch and renders its hint (no inputs) — Perch Hub P
   });
   assert.match(html, /name="step" value="3"/, "reload stays on channel");
   assert.match(html, /<option value="perch" selected>/, "perch must be an offered channel and stay selected");
-  assert.match(html, /Perch Hub extension installed/,
+  assert.match(html, /chat with this bot from the board/,
     "the perch hint must render — the wizard reaches it via SIMPLE_GATEWAY_TYPES, so a missing " +
     "entry there silently falls through to the generic no-channel note");
   assert.ok(!/name="gw_token"|name="gw_address"|name="gw_bot_token"/.test(html),

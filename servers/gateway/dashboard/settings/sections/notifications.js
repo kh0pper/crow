@@ -18,16 +18,16 @@ export default {
   navOrder: 30,
 
   async getPreview({ settings, lang }) {
-    let prefs = { types_enabled: ["reminder", "media", "peer", "system"] };
+    let prefs = { types_enabled: ["reminder", "media", "peer", "system", "attention"] };
     try {
       if (settings.notification_prefs) prefs = JSON.parse(settings.notification_prefs);
     } catch {}
     const enabled = prefs.types_enabled?.length || 0;
-    return `${enabled} of 4 enabled`;
+    return `${enabled} of 5 enabled`;
   },
 
   async render({ req, db, lang }) {
-    let notifPrefs = { types_enabled: ["reminder", "media", "peer", "system"] };
+    let notifPrefs = { types_enabled: ["reminder", "media", "peer", "system", "attention"] };
     try {
       const { rows } = await db.execute({
         sql: "SELECT value FROM dashboard_settings WHERE key = 'notification_prefs'",
@@ -41,6 +41,8 @@ export default {
       { key: "media", label: t("settings.notifMedia", lang) },
       { key: "peer", label: t("settings.notifPeer", lang) },
       { key: "system", label: t("settings.notifSystem", lang) },
+      // Track 3 Task 8: mirrors the block above verbatim, new key.
+      { key: "attention", label: t("notifications.type_attention", lang) },
     ];
 
     const checkboxes = notifTypes.map(({ key, label }) => {
@@ -230,6 +232,7 @@ export default {
     if (req.body.type_media) typesEnabled.push("media");
     if (req.body.type_peer) typesEnabled.push("peer");
     if (req.body.type_system) typesEnabled.push("system");
+    if (req.body.type_attention) typesEnabled.push("attention");
     const prefs = JSON.stringify({ types_enabled: typesEnabled });
     await upsertSetting(db, "notification_prefs", prefs);
     res.redirectAfterPost("/dashboard/settings?section=notifications");

@@ -16,7 +16,10 @@ const MAX_NOTIFICATIONS = 500;
  * @param {object} opts
  * @param {string} opts.title - Short headline (required)
  * @param {string} [opts.body] - Longer description
- * @param {string} [opts.type='system'] - 'reminder', 'media', 'peer', 'system'
+ * @param {string} [opts.type='system'] - 'reminder', 'media', 'peer', 'system',
+ *   'attention' (Track 3 Task 8: a bot turn/ask-card/gated-result needs an
+ *   operator's eyes — the gate below is data-driven off dashboard_settings,
+ *   so this comment is documentation only, never enforced)
  * @param {string} [opts.source] - Origin identifier (e.g. 'scheduler', 'media:briefing')
  * @param {string} [opts.priority='normal'] - 'low', 'normal', 'high'
  * @param {string} [opts.action_url] - Dashboard link

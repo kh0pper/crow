@@ -380,7 +380,6 @@ export default defineConfig({
           { text: 'Core Tools', link: '/developers/core-tools' },
           { text: 'Self-Hosted Bundles', link: '/developers/bundles' },
           { text: 'Bot Engine (pi)', link: '/developers/bot-engine' },
-          { text: 'Perch Hub', link: '/developers/perch-hub' },
           { text: 'Community Directory', link: '/developers/directory' },
           { text: 'Data Dashboard Dev', link: '/developers/data-dashboard' },
           { text: 'Nominatim GIS Dev', link: '/developers/nominatim' },

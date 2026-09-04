@@ -46,81 +46,68 @@ Un gateway conecta un agente con un lugar donde la gente habla con él. La misma
 - **Discord**: El agente se une a un servidor de Discord como bot y responde en canales y mensajes directos, con una lista de usuarios permitidos por agente.
 - **Lentes Meta**: Un par de lentes Ray-Ban Meta (Gen 2) emparejados se vincula a un agente. Ese agente entonces dirige el turno de voz rápido: su persona, sus skills, sus herramientas delimitadas y sus permisos, hablados a través de los perfiles de habla y voz que elegiste. Consulta la [guía de Lentes Meta](/es/guide/meta-glasses).
 - **Crow Messages**: El agente se vuelve accesible como un contacto. Las personas que invites pueden enviarle mensajes, puedes explorar y agregar los bots que corren en tus Crows, y puedes reunir a personas y bots en una sala grupal. Consulta la [guía de Crow Messages](/es/guide/crow-messages).
-- **Perch**: El agente se vuelve conversable desde la página Perch de tu propio panel. No hay nada que configurar: elegir el canal es toda la configuración. Perch necesita la extensión Perch Hub instalada. Consulta [Perch](#perch-habla-con-un-agente-desde-tu-propio-panel) más abajo.
+- **Perch**: El agente se vuelve conversable directamente en el tablero de tu propio panel. No hay nada que configurar: elegir el canal es toda la configuración, y nada que instalar. Consulta [Perch](#perch-habla-con-un-agente-desde-tu-propio-panel) más abajo.
 
 Vincular los lentes a un agente es uno a uno: un dispositivo dirige un agente a la vez, y elegir un nuevo agente para un dispositivo libera el vínculo anterior.
 
 ## Perch: habla con un agente desde tu propio panel
 
-Perch es una extensión que agrega una página **Perch** al Crow's Nest. Muestra todos los agentes de tu Crow, todas las conversaciones que cada uno ha tenido en cualquier canal, y la transcripción de cada una. Para los agentes a los que les adjuntes el canal Perch, además te da una caja de mensajes.
+Perch es la propia **franja de percha (roost)** del tablero: una fila de aves, una por agente, encima de las tarjetas — más un **panel lateral de sesión** que se abre junto al tablero al hacer clic en una de ellas. Juntos muestran las sesiones en vivo y recientes de cada agente, sus transcripciones, y un lugar para escribirles directamente. Es nativo del tablero: nada que instalar, nada que configurar más allá de adjuntar el canal.
 
-Nada de Perch queda expuesto a internet. Corre en tu máquina, escucha solo ahí, y solo es accesible a través del inicio de sesión de tu panel.
+Nada de esto queda expuesto a internet. Corre como parte de la puerta de enlace, escucha solo ahí, y solo es accesible a través del inicio de sesión de tu panel.
 
-### 1. Instala Perch
-
-Instala **Perch Hub** desde la página de Extensiones, o abre **Perch** en la navegación y usa el botón **Instalar Perch** de la tarjeta que aparece. Perch registra un pequeño servicio local, así que Crow se reinicia para poder enrutarlo; la página se recarga sola cuando la puerta de enlace vuelve, y aparece una entrada **Perch** en la navegación.
-
-Si Perch dice que está desconectado justo después de instalarlo, normalmente es el reinicio que aún está pendiente: la tarjeta te dice en cuál de los dos casos estás, y lo dice con claridad cuando el supervisor sí registró un error real.
-
-### 2. Adjunta el canal Perch a un agente
+### 1. Adjunta el canal Perch a un agente
 
 Abre el agente en el Bot Builder, ve a la pestaña **Gateways**, elige **Perch (chat del panel)** y guarda. No hay campos que llenar. También puedes elegir Perch como canal mientras creas un agente en el asistente.
 
 Los turnos de Perch corren sobre el mismo motor de bots que usan Gmail y Discord, así que si el motor todavía no está instalado, Crow te ofrecerá instalarlo antes de dejarte guardar.
 
-Puedes adjuntar el canal antes de instalar Perch, y el guardado sí se completa — pero Crow te avisa, porque la página que mostraría las respuestas del agente es justamente la extensión Perch. El aviso trae al lado un botón **Instalar Perch**, y cuando la instalación y el reinicio terminan vuelves al mismo agente ya sin el aviso.
+Los agentes sin el canal adjunto también aparecen en la franja de percha, como **Observando** — puedes saltar al Bot Builder para adjuntarlos, pero no hay sesión que abrir hasta que lo hagas.
 
-Los agentes sin el canal adjunto igual aparecen en Perch. Puedes leer sus sesiones y transcripciones; simplemente no puedes escribirles. Observar es gratis, hablar es la parte que eliges activar.
+### 2. Encuentra al agente en la franja de percha
 
-### 3. Escríbele al agente
+Abre el tablero. Cada agente adjunto es un ave con un estado y una acción principal:
 
-Abre **Perch**. Cada agente es una tarjeta. Los agentes con el canal adjunto tienen una caja de mensajes al pie de la suya: escribe, envía, y la respuesta llega en vivo a medida que el agente la produce. Si algo sale mal — el motor no está listo, el agente ya está ocupado con otro mensaje de la misma conversación — la tarjeta lo dice en lugar de la respuesta, en vez de quedarse girando.
+- **Inactivo** — sin sesión en vivo. El botón es **Enviar**: escribe un mensaje, envíalo, y arranca una sesión nueva.
+- **Esperando tu respuesta** — el agente hizo una pregunta a mitad de la sesión y está en pausa esperando tu respuesta. El botón es **Responder**.
+- **Trabajando** / **Hibernando** — hay una sesión en vivo o que se puso inactiva sola. El botón es **Abrir**.
+- **Observando** — todavía sin canal adjunto (ver paso 1). El enlace va directo al Bot Builder.
 
-Cada conversación es una sesión. Aparece en la lista de sesiones del agente con una **transcripción** que puedes abrir, y el agente retoma el hilo donde lo dejaste.
+Un menú desplegable en cada ave también ofrece **Hablar** (iniciar una sesión nueva aunque ya haya una abierta), **Sesiones** (elegir entre las demás sesiones recientes del agente), **Retirar** (detener la sesión en vivo) y **Configurar** (saltar al agente en el Bot Builder).
 
-### 4. Acota las herramientas de un agente para una sola conversación
+### 3. El panel lateral de sesión
 
-Abre **Controls** en cualquier fila de sesión. Verás el envelope completo del agente: todas las herramientas que tiene permitidas, cada una con una casilla, además de su modelo y sus skills.
+Al hacer clic en un ave — o en una insignia de sesión de una tarjeta del tablero — se abre el panel lateral: la transcripción, un cuadro para enviar un mensaje o redirigir un turno en curso, y un botón **Abortar** mientras hay un turno corriendo. La actividad de las herramientas se transmite en tiempo real, así que puedes ver qué está haciendo el agente antes de que llegue la respuesta.
 
-Desmarca una herramienta y queda apagada **solo para esa conversación**, a partir del siguiente mensaje. La definición del agente no se toca, y todas las demás conversaciones conservan el conjunto completo. Esto es para el momento en que quieres que un agente responda una pregunta sin tocar tus archivos, sin editar nada, sin salir a la red: en este hilo, ahora mismo.
+Cada sesión lleva un estado: **Despierto** mientras el agente puede recibir un mensaje ahora mismo, hibernando una vez que ha estado inactiva y se apagó sola (no se pierde nada: el siguiente mensaje la despierta de nuevo a mitad de la conversación), y **Detenido** una vez que tú o Retirar la terminaron definitivamente. Una sesión detenida no se puede volver a despertar — inicia una nueva desde **Enviar** o **Hablar** si quieres seguir hablando con ese agente de esta forma.
 
-Las herramientas que aparecen con un candado son las que el agente no tiene permitidas en absoluto. Ahí no se pueden activar; enlazan al Bot Builder, que es el único lugar que otorga una herramienta. Perch solo puede quitar, nunca dar.
+Por defecto solo una sesión por agente corre a la vez, y cada sesión compite por los mismos cupos de procesamiento que usa cualquier otro turno de agente: respuestas de Gmail, respuestas de Discord, trabajos en segundo plano. Dejar una sesión despierta e inactiva por un rato largo puede hacer que esos esperen; deja que hiberne (lo hará sola) o deténla cuando termines.
 
-### 5. Cómo leer las insignias
+### 4. Acota las herramientas de un agente para una sola sesión
 
-Cada fila de sesión lleva insignias:
+Abre **Envoltura y herramientas** en el panel lateral. Verás el envelope completo del agente: todas las herramientas que tiene permitidas, cada una con una casilla, además de su modelo y sus skills.
 
-- el **canal** por el que llegó: `perch`, `gmail`, `discord`, etc.;
-- una insignia de **tarjeta** cuando la sesión fue iniciada por un despacho del bot-board, que enlaza de vuelta a la tarjeta en el tablero;
-- una insignia **live** mientras un turno está corriendo de verdad.
+Desmarca una herramienta y queda apagada **solo para esa sesión**, a partir del siguiente mensaje. La definición del agente no se toca, y todas las demás sesiones conservan el conjunto completo. Esto es para el momento en que quieres que un agente responda sin tocar tus archivos, sin editar nada, sin salir a la red: en esta sesión, ahora mismo.
 
-### 6. Genera un agente en vivo: una sesión en lugar de un turno
+Las herramientas que aparecen con un candado son las que el agente no tiene permitidas en absoluto. Ahí no se pueden activar; enlazan al Bot Builder, que es el único lugar que otorga una herramienta. El panel lateral solo puede quitar, nunca dar.
 
-Cada tarjeta de agente que tenga el canal Perch adjunto también recibe un botón **Generar como agente**. Un mensaje en la caja del paso 3 es un turno único y autocontenido: lo envías, recibes una respuesta, y termina ahí. Generar es distinto: abre una sesión en vivo, un proceso del agente que se mantiene corriendo a través de varios mensajes, de la misma forma que el agente se comporta cuando trabaja consigo mismo a lo largo de varios pasos de una tarea, en vez de responder una sola pregunta.
+### 5. Responder una pregunta que te hace el agente
 
-La tarjeta de la sesión lleva una insignia de estado: **awake** (despierto) mientras el agente está activo y puede recibir un mensaje ahora mismo, **hibernating** (hibernando) una vez que ha estado inactivo y se apagó solo (no se pierde nada: el siguiente mensaje lo despierta de nuevo a mitad de la conversación), **waking** (despertando) durante el instante en que un mensaje está trayendo de vuelta a una sesión hibernando, **stopped** (detenido) una vez que terminaste la sesión definitivamente, y **error** si lo último que hizo falló. Una sesión detenida no se puede volver a despertar; genera una nueva si quieres seguir hablando con ese agente de esta forma.
+Algunas skills te preguntan algo a mitad de la tarea en vez de adivinar: elegir de una lista, confirmar antes de hacer algo, escribir texto libre, o editar un bloque de texto. Eso aparece en el panel lateral como una tarjeta en lugar de la respuesta: la pregunta, y la forma de responderla. Respóndela y el agente continúa justo donde se quedó. Si una tarjeta sigue esperando tu respuesta cuando sales de la página, ahí sigue cuando vuelves a la sesión — mientras tanto, el ave muestra **Esperando tu respuesta**.
 
-Por defecto solo una sesión generada puede estar despierta a la vez, y compite por los mismos cupos de procesamiento que usa cualquier otro turno de agente: respuestas de Gmail, respuestas de Discord, trabajos en segundo plano. Dejar una sesión generada despierta e inactiva por un rato largo puede hacer que esos esperen. Si ya terminaste con una sesión por ahora, deja que hiberne (lo hará sola) o deténla.
+### 6. Volver más tarde
 
-Mientras un turno está corriendo, la actividad de las herramientas se transmite a la tarjeta en tiempo real, así que puedes ver qué está haciendo el agente antes de que llegue la respuesta. Aparece un botón **Abortar** durante un turno si quieres interrumpirlo.
+Recarga el tablero y el estado de percha y la sesión más reciente de cada agente adjunto siguen justo donde los dejaste — reabre el panel lateral y la transcripción, el estado en vivo y cualquier pregunta pendiente siguen ahí. Nunca tienes que buscar cuál sesión era cuál.
 
-### 7. Responder una pregunta que te hace el agente
-
-Algunas skills te preguntan algo a mitad de la tarea en vez de adivinar: elegir de una lista, confirmar antes de hacer algo, escribir texto libre, o editar un bloque de texto. En una sesión generada, eso aparece como una **tarjeta** en lugar de la respuesta: la pregunta, y la forma de responderla. Respóndela y el agente continúa justo donde se quedó. Si una tarjeta sigue esperando tu respuesta cuando sales de la página, ahí sigue cuando vuelves a la sesión.
-
-### 8. Volver más tarde
-
-Recarga la página de Perch y la conversación más reciente de cada agente en cada canal se reabre donde la dejaste: el hilo de la caja de mensajes del paso 3 con su transcripción, y cualquier sesión generada del paso 6 con su estado en vivo y su transcripción, ambos. Nunca tienes que buscar cuál sesión era cuál.
-
-### Antes de instalarlo
+### Antes de adjuntarlo
 
 Vale la pena saber varias cosas, porque Perch no las esconde.
 
-Cualquiera que pueda entrar a tu panel puede leer las transcripciones de **todos** los agentes en Perch. No hay control de acceso por agente.
+Cualquiera que pueda entrar a tu panel puede leer las transcripciones de **todos** los agentes en el panel lateral. No hay control de acceso por agente.
 
-Generar una sesión (paso 6) extiende eso de leer a conducir: cualquiera que pueda iniciar sesión también puede sostener una conversación en vivo como cualquier agente, usando las herramientas y permisos propios de ese agente, no solo observar lo que ya hizo. Es el mismo límite de confianza que el punto anterior sobre transcripciones, no uno nuevo: una sesión del panel ya podía activar a un agente escribiéndole por la caja de chat de Perch, o por el canal real del agente (un correo, un mensaje de Discord). Generar solo elimina el paso de "sale y vuelve por un canal".
+Escribir o redirigir una sesión extiende eso de leer a conducir: cualquiera que pueda iniciar sesión puede sostener una conversación en vivo como cualquier agente, usando las herramientas y permisos propios de ese agente, no solo observar lo que ya hizo. No es un límite de confianza nuevo: una sesión del panel ya podía activar a un agente escribiéndole por su canal real (un correo, un mensaje de Discord). Perch solo lo hace alcanzable directamente desde el tablero, sin salir y volver por un canal.
 
-Perch además trae su gestor de sesiones original completo, que puede iniciar programas en la máquina donde corre. Eso es deliberado: es una herramienta de operador autoalojada, y está detrás del inicio de sesión de tu panel y de nada más. Instálalo en un Crow cuyo inicio de sesión trates con la misma seriedad que el acceso por shell a esa máquina, y no en uno donde ese inicio de sesión esté compartido más ampliamente.
+Adjunta el canal Perch solo en un Crow cuyo inicio de sesión trates con la misma seriedad que el acceso por shell a esa máquina — una sesión en vivo puede ejecutar cualquier herramienta que la política de permisos propia del agente permita, incluyendo las que inician programas en la máquina donde corre.
 
 ## Permisos y seguridad
 
