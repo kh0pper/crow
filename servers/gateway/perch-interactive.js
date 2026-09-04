@@ -1000,8 +1000,12 @@ export function createInteractiveEngine({
   async function startChild(S, s) {
     const slog = sessionLog(s);
     // Track 3 Task 6: serialized per-bot — see buildWorldSerialized's comment.
+    // acceptance F2: a card-bound session must be able to call
+    // board_report_result — cardBound makes the world builder mint the
+    // board MCP entry whatever the def's own tool selection says.
     const world = await buildWorldSerialized(S, {
       botId: s.botId, threadId: s.threadId, gatewayType: "perch", log: slog,
+      cardBound: s.cardId != null,
     });
     const prep = await S.prepareSpawn(world, { escalate: false, log: slog });
     s.projectId = world.projectId == null ? null : Number(world.projectId);
