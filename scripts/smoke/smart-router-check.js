@@ -72,7 +72,7 @@ async function pick(content, { attachments, autoRules } = {}) {
 
 // slash > everything
 const r1 = await pick("/code write me a function");
-checkTrue("slash /code → crow-swap-coder", r1.provider_id === "crow-swap-coder");
+checkTrue("slash /code → crow-chat", r1.provider_id === "crow-chat");
 checkTrue("slash reason includes /code", r1.reason.includes("matched /code"));
 
 const r2 = await pick("/vision what is this");
@@ -85,20 +85,20 @@ checkTrue("attachment reason", r3.reason.includes("image attachment"));
 
 // slash BEATS attachment
 const r4 = await pick("/code hello", { attachments: [{ mime_type: "image/jpeg" }] });
-checkTrue("slash /code > attachment", r4.provider_id === "crow-swap-coder");
+checkTrue("slash /code > attachment", r4.provider_id === "crow-chat");
 
 // keyword: code-fence
 const r5 = await pick("please debug this:\n```js\nfoo()\n```\nwhy broken");
-checkTrue("code-fence → crow-swap-coder", r5.provider_id === "crow-swap-coder");
+checkTrue("code-fence → crow-chat", r5.provider_id === "crow-chat");
 
 // keyword: write-a-X
 const r6 = await pick("write a function that reverses a string");
-checkTrue("write-a → crow-swap-coder", r6.provider_id === "crow-swap-coder");
+checkTrue("write-a → crow-chat", r6.provider_id === "crow-chat");
 
 // keyword: deep — requires >=200 chars
 const deepMsg = "summarize the following long passage: " + "x".repeat(220);
 const r7 = await pick(deepMsg);
-checkTrue("summarize + long → crow-swap-deep", r7.provider_id === "crow-swap-deep");
+checkTrue("summarize + long → crow-chat (deep tier)", r7.provider_id === "crow-chat");
 
 // keyword: deep too short → falls through to default
 const r8 = await pick("summarize this");
@@ -114,10 +114,10 @@ const r10 = await pick("/code ignored", { autoRules: { disabled: ["slash"] } });
 checkTrue("disabled:slash ignores /code", r10.provider_id === "crow-chat");
 
 // autoRules.overrides — point /code at a different provider than the baked-in
-// default (which is crow-swap-coder since Apr 2026). Override to crow-chat
-// (the default route) so we can observe the override actually takes effect.
-const r11 = await pick("/code foo", { autoRules: { overrides: { code: "crow-chat" } } });
-checkTrue("overrides.code honored", r11.provider_id === "crow-chat");
+// default (crow-chat since Sep 2026, when the swap bundles were retired).
+// Override to crow-voice so we can observe the override actually takes effect.
+const r11 = await pick("/code foo", { autoRules: { overrides: { code: "crow-voice" } } });
+checkTrue("overrides.code honored", r11.provider_id === "crow-voice");
 
 // cross-vendor tool-lock: insert a tool_calls row to force hasActiveToolCalls=true
 await db.execute({

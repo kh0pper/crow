@@ -14,11 +14,20 @@
  * with a baked-in default fallback. An empty overrides map means "pick
  * the best-known local provider for this route" — the defaults are:
  *
- *   code    → crow-swap-coder (Qwen3-coder-30B-A3B — purpose-built coder)
+ *   code    → crow-chat   (env CROW_SMART_ROUTER_CODE)
  *   vision  → grackle-vision
- *   fast    → crow-dispatch
- *   deep    → crow-swap-deep
+ *   fast    → crow-voice  (env CROW_SMART_ROUTER_FAST; Qwen3.5-4B, :8011)
+ *   deep    → crow-chat   (env CROW_SMART_ROUTER_DEEP)
  *   default → crow-chat (also the final fallback; Qwen3.6-35B-A3B as of Apr 2026)
+ *
+ * The on-demand swap bundles the code/fast/deep tiers used to point at
+ * (crow-swap-coder, crow-dispatch, crow-swap-deep) were retired in Sep 2026
+ * — no weights on any lab box — so those tiers now default to the resident
+ * providers. An operator with a purpose-built coder (or any other
+ * specialist) points a tier at it with CROW_SMART_ROUTER_<TIER>=<provider id>
+ * on the gateway unit. The env is read ONCE at module load (restart to
+ * apply); a blank value is ignored. Per-profile auto_rules.overrides still
+ * beat these defaults.
  *
  * Feature-flag gating: chooseProvider() first reads
  * dashboard_settings.feature_flags.smart_chat (local-only via
@@ -39,13 +48,19 @@ export class SmartChatDisabled extends Error {
   constructor() { super("Smart Chat disabled"); this.code = "smart_chat_disabled"; }
 }
 
-const DEFAULT_ROUTES = {
-  code:    "crow-swap-coder",
+/** Baked-in tier default, overridable by CROW_SMART_ROUTER_<TIER> (see header). */
+function tierDefault(tier, fallback) {
+  const v = process.env[`CROW_SMART_ROUTER_${tier.toUpperCase()}`];
+  return typeof v === "string" && v.trim() ? v.trim() : fallback;
+}
+
+export const DEFAULT_ROUTES = Object.freeze({
+  code:    tierDefault("code", "crow-chat"),
   vision:  "grackle-vision",
-  fast:    "crow-dispatch",
-  deep:    "crow-swap-deep",
+  fast:    tierDefault("fast", "crow-voice"),
+  deep:    tierDefault("deep", "crow-chat"),
   default: "crow-chat",
-};
+});
 
 // Regex fixtures — narrow, documentable patterns. Not LLM-based.
 const SLASH_RE    = /^\/(code|vision|fast|deep)\b/i;
