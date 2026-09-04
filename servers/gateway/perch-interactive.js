@@ -139,7 +139,7 @@
  * (spec §9).
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -506,6 +506,22 @@ export function createInteractiveEngine({
       log(s.sessionId + ": " + text);
       emit(s, { type: "log", text });
     };
+  }
+
+  /**
+   * Acceptance F4: ": N MCP server(s) minted" for the "world rebuilt" log
+   * line, read off the per-bot .mcp.json writeBotMcp just wrote into the
+   * world's sessionDir. Never throws — an absent file (a test world, a
+   * skipped write) yields "" and the line stays "world rebuilt".
+   */
+  function mintedSummary(world) {
+    try {
+      const j = JSON.parse(readFileSync(join(world.sessionDir, ".mcp.json"), "utf8"));
+      const names = Object.keys((j && j.mcpServers) || {}).filter((n) => !(j.mcpServers[n] && j.mcpServers[n].disabled));
+      return ": " + names.length + " MCP server(s) minted";
+    } catch {
+      return "";
+    }
   }
 
   // ---- timers --------------------------------------------------------------
@@ -1007,6 +1023,11 @@ export function createInteractiveEngine({
       botId: s.botId, threadId: s.threadId, gatewayType: "perch", log: slog,
       cardBound: s.cardId != null,
     });
+    // Acceptance F4: narrate the rebuild for the drawer (spawn, wake and
+    // cycle all come through here). The world itself does not expose what
+    // writeBotMcp minted, so count the active entries off the .mcp.json it
+    // just wrote — best-effort, a missing/unreadable file just drops the count.
+    slog("world rebuilt" + mintedSummary(world));
     const prep = await S.prepareSpawn(world, { escalate: false, log: slog });
     s.projectId = world.projectId == null ? null : Number(world.projectId);
     // Track 3 Task 6: refreshed on EVERY startChild (spawn and wake alike),
@@ -1037,6 +1058,7 @@ export function createInteractiveEngine({
     }
     s.resolved = prep.resolved;
     await S.warmModel(prep.resolved.provider, slog);
+    slog("model warm: " + (s.currentModel || (prep.resolved && prep.resolved.key) || "?"));
 
     // Track 3 Task 6: per-session outputs/uploads dirs — every spawn/wake,
     // not just card-bound ones (a free-chat session gets a workspace too).
@@ -1680,6 +1702,10 @@ export function createInteractiveEngine({
     if (s.state === "stopped") throw engineError("session_stopped");
     if (s.turn || s.pendingUi || s.cycling) throw engineError("cycle_busy");
     s.cycling = true;                                  // ← the re-entrancy claim
+    // Acceptance F4: the drawer renders `log` events, and a cycle is several
+    // seconds of world rebuild + model warm + spawn during which the operator
+    // previously saw nothing at all. Narrate the moments they wait on.
+    emit(s, { type: "log", text: "cycling: stopping the child and rebuilding its world (spawn-bound settings apply now)" });
     try {
       await hibernate(s);                              // no-op if already hibernating
       // ---- one synchronous block: reservation, no await between check+flip
@@ -1707,6 +1733,7 @@ export function createInteractiveEngine({
       }
       emit(s, stateEvent(s));
       armIdle(s);
+      emit(s, { type: "log", text: "ready — the first turn re-reads its full transcript, which can take a minute on long sessions" });
       return { state: s.state };
     } finally {
       s.cycling = false;
