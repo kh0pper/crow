@@ -1250,3 +1250,25 @@ test("GET /api/models/probe + POST /api/models/reprobe", async () => {
     });
   } finally { await h.cleanup(); }
 });
+
+test("POST /api/models/:id/start: a box reservation (ReservedError) maps to 409 BOX_RESERVED with owner + expiry", async () => {
+  const h = freshLibsql();
+  try {
+    const token = await seedSession(h.db);
+    const { registerModel } = await import("../servers/gateway/models/manager.js");
+    await registerModel({ modelId: "panel-test-model", quant: "Q4_K_M", catalog: makeCatalog(), db: h.db, dir: h.dir });
+    const { ReservedError } = await import("../servers/gateway/box-reservation.js");
+    await withServer({
+      dir: h.dir, loadCatalogFn: makeCatalog, getCachedProbeFn: () => FIXED_PROBE,
+      maybeAcquireLocalProviderFn: async (id) => { throw new ReservedError({ owner: "win", expires_at: "2026-09-04T23:00:00.000Z" }, id); },
+    }, async (base) => {
+      const r = await fetch(base + "/api/models/panel-test-model/start", { method: "POST", headers: authHeaders(token) });
+      assert.equal(r.status, 409);
+      const body = await r.json();
+      assert.equal(body.code, "BOX_RESERVED");
+      assert.equal(body.owner, "win");
+      assert.equal(body.expires_at, "2026-09-04T23:00:00.000Z");
+      assert.match(body.error, /reserved by win/);
+    });
+  } finally { await h.cleanup(); }
+});
