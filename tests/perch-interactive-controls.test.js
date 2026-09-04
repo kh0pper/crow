@@ -329,6 +329,52 @@ test("steer: empty message is reported as empty_message even when no turn is run
 });
 
 // ---------------------------------------------------------------------------
+// 0b. cycle/wake progress is visible in the drawer (acceptance F4)
+// ---------------------------------------------------------------------------
+
+test("cycle emits progress log lines: cycling, world rebuilt, model warm, context re-read warning", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  // The fake world writes no .mcp.json; seed one where the real writeBotMcp
+  // would put it so the "world rebuilt" line can report the ACTIVE count
+  // (disabled entries are canonical leftovers, not minted servers).
+  writeFileSync(join(dir, "bots", "botty", ".mcp.json"), JSON.stringify({
+    mcpServers: { tasks: { command: "node" }, board: { url: "http://127.0.0.1:1/board/mcp" }, other: { disabled: true } },
+  }));
+  const logs = [];
+  const unsub = await engine.subscribe(s.sessionId, (ev) => { if (ev.type === "log") logs.push(ev.text); });
+  await engine.cycle(s.sessionId);
+  unsub();
+  assert.ok(logs.some((t) => /^cycling: stopping the child/.test(t)), logs.join("|"));
+  assert.ok(logs.some((t) => t === "world rebuilt: 2 MCP server(s) minted"), logs.join("|"));
+  assert.ok(logs.some((t) => /^model warm: crow-local\/qwen3\.6-35b-a3b/.test(t)), logs.join("|"));
+  assert.ok(logs.some((t) => /re-reads its full transcript/.test(t)), logs.join("|"));
+  // Order matters to an operator watching the drawer: the warning that the
+  // first turn will be slow is the LAST line, after the child is up.
+  const idx = (re) => logs.findIndex((t) => re.test(t));
+  assert.ok(idx(/^cycling:/) < idx(/^world rebuilt/), "cycling precedes world rebuilt");
+  assert.ok(idx(/^world rebuilt/) < idx(/^model warm:/), "world rebuilt precedes model warm");
+  assert.ok(idx(/^model warm:/) < idx(/re-reads its full transcript/), "model warm precedes the ready line");
+});
+
+test("wake (hibernate -> message) emits the world rebuilt + model warm lines too", async () => {
+  const { engine, clock, state } = makeEngine();
+  const s = await spawned(engine);
+  clock.advance(600_001); // idle timer -> hibernate
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+  const logs = [];
+  const unsub = await engine.subscribe(s.sessionId, (ev) => { if (ev.type === "log") logs.push(ev.text); });
+  await engine.message(s.sessionId, "wake up");
+  unsub();
+  assert.ok(logs.some((t) => /^world rebuilt/.test(t)), logs.join("|"));
+  assert.ok(logs.some((t) => /^model warm:/.test(t)), logs.join("|"));
+  const pi = state.instances[state.instances.length - 1];
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+});
+
+// ---------------------------------------------------------------------------
 // 1. model_select event tracking
 // ---------------------------------------------------------------------------
 
