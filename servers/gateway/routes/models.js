@@ -585,7 +585,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       // captures it (opt-in seam on maybeAcquireLocalProvider, see its
       // doc) so it can ride along in the response body as `cause`.
       let startError = null;
-      const result = await maybeAcquireLocalProviderFn(modelId, { onError: (err) => { startError = err; } });
+      const result = await maybeAcquireLocalProviderFn(modelId, { requester: "models-panel", onError: (err) => { startError = err; } });
       if (result === true) return res.json({ running: true });
       if (result === false) {
         const cause = startError ? { code: startError.code || "UNKNOWN", message: startError.message } : null;

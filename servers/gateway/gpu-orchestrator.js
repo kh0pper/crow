@@ -493,11 +493,11 @@ export function resolveWarmableProviderName(cfg, name, ownAddrs = getOwnAddresse
  * (returns null — no-op). Backs POST /llm/acquire for the pi-bots background-job /
  * bridge warm path; the gateway chat path already warms inline.
  */
-export async function warmProviderByName(name) {
+export async function warmProviderByName(name, opts = {}) {
   if (!name) return null;
   const target = resolveWarmableProviderName(loadProviders(), name);
   if (!target) return null;
-  return maybeAcquireLocalProvider(target);
+  return maybeAcquireLocalProvider(target, opts);
 }
 
 // Test/introspection helpers — exported for smoke scripts.
@@ -700,7 +700,7 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
     }
   } catch { /* catalog unreadable → no extra args, model starts as before */ }
 
-  console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port}, readinessTimeoutMs=${readinessTimeoutMs})`);
+  console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port}, readinessTimeoutMs=${readinessTimeoutMs}) requested-by=${opts.requester || "-"}`);
   const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn, onTerminal: wrappedOnTerminal, extraArgs });
   _nativeHandles.set(providerName, handle);
 
@@ -983,7 +983,7 @@ export async function acquireProvider(providerName, opts = {}) {
     }
 
     // Start target.
-    console.log(`[gpu-orchestrator] starting ${providerName} (bundleId=${p.bundleId})`);
+    console.log(`[gpu-orchestrator] starting ${providerName} (bundleId=${p.bundleId}) requested-by=${opts.requester || "-"}`);
     await bundleUpFn(p.bundleId);
     const ready = await waitForReadyFn(p.baseUrl);
     if (ready) {
@@ -1026,7 +1026,7 @@ async function checkIdleRevert() {
       if (idleFor < IDLE_REVERT_MS) continue;
       console.log(`[gpu-orchestrator] ${m.name} idle ${Math.round(idleFor / 1000)}s — reverting to ${group.default}`);
       try {
-        await acquireProvider(group.default);
+        await acquireProvider(group.default, { requester: "idle-revert" });
       } catch (err) {
         console.warn(`[gpu-orchestrator] auto-revert to ${group.default} failed: ${err.message}`);
       }
@@ -1111,8 +1111,9 @@ async function ensureNativeResident(name, p, cfg, opts = {}) {
 export async function ensureResident(name, cfg = loadProviders(), opts = {}) {
   try {
     const p = (cfg.providers || {})[name];
+    const requester = opts.requester || "residency";
     if (p && isNativeRuntime(p)) {
-      return await ensureNativeResident(name, p, cfg, opts);
+      return await ensureNativeResident(name, p, cfg, { ...opts, requester });
     }
     if (!p?.bundleId) {
       console.warn(`[gpu-orchestrator] ${name} has no bundleId — skipping`);
@@ -1122,7 +1123,7 @@ export async function ensureResident(name, cfg = loadProviders(), opts = {}) {
       console.log(`[gpu-orchestrator] ${name} already resident`);
       return false;
     }
-    console.log(`[gpu-orchestrator] starting ${name} (bundleId=${p.bundleId})`);
+    console.log(`[gpu-orchestrator] starting ${name} (bundleId=${p.bundleId}) requested-by=${requester}`);
     await bundleUp(p.bundleId);
     const ready = await waitForReady(p.baseUrl);
     if (!ready) {
@@ -1153,7 +1154,7 @@ export async function retryDeferredResidents({
     if (!isLocallyOrchestratable(p, ownAddrs)) continue; // still not ours — stays parked
     _deferredResidents.delete(name);
     console.log(`[gpu-orchestrator] deferred alwaysResident ${name} is now locally hosted — ensuring (its interface came up after boot)`);
-    if (await ensure(name, cfg)) embedRecovered = true;
+    if (await ensure(name, cfg, { requester: "residency-retry" })) embedRecovered = true;
     ensured.push(name);
   }
   if (embedRecovered) triggerEmbedBackfill();
@@ -1461,7 +1462,7 @@ export async function initOrchestrator() {
     }
     let embedRecovered = false;
     for (const name of residents) {
-      if (await ensureResident(name, cfg)) embedRecovered = true;
+      if (await ensureResident(name, cfg, { requester: "residency" })) embedRecovered = true;
     }
     startIdleRevertTimer();
     if (embedRecovered) {

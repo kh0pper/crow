@@ -30,7 +30,9 @@ export async function warmModel(provider, log = () => {}) {
   try {
     const r = await fetch(`${WARM_BASE}/llm/acquire`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      // Model-start attribution: the gateway logs this tag beside every
+      // start it makes on our behalf (see servers/gateway/requester-tag.js).
+      headers: { "content-type": "application/json", "x-crow-client": "pibot-warm" },
       body: JSON.stringify({ provider }),
       signal: AbortSignal.timeout(WARM_TIMEOUT_MS),
     });

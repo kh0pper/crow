@@ -944,3 +944,56 @@ test("Finding c: persisting the marker against an unwritable dir never throws an
   const result = await acquireProvider("native-target", startCapableOpts({ cfg, identityProbeFn }));
   assert.equal(result, true, "an unwritable/fake persistence dir never blocks a successful start");
 });
+
+// --- model-start attribution (log-only): every native start line names its
+// requester via `opts.requester`, threaded through the existing opts bag ---
+
+/** Capture `console.log` lines for the duration of `fn`. */
+async function captureLogs(fn) {
+  const logs = [];
+  const orig = console.log;
+  console.log = (m) => logs.push(String(m));
+  try { await fn(); } finally { console.log = orig; }
+  return logs;
+}
+
+/** identityProbe stub: "down" on the fast-path check, "resident" after. */
+function downThenResident() {
+  let calls = 0;
+  return async () => (++calls === 1 ? "down" : "resident");
+}
+
+test("attribution: acquireProvider native start log carries requested-by=<opts.requester>", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18120, "qwen3-4b") } };
+  const logs = await captureLogs(async () => {
+    const result = await acquireProvider("native-target", {
+      ...startCapableOpts({ cfg, identityProbeFn: downThenResident() }),
+      requester: "10.0.0.5 ua=curl/8 client=companion",
+    });
+    assert.equal(result, true);
+  });
+  const line = logs.find((l) => l.includes("starting native native-target"));
+  assert.ok(line, `expected a 'starting native' line, got:\n${logs.join("\n")}`);
+  assert.ok(line.endsWith(" requested-by=10.0.0.5 ua=curl/8 client=companion"), line);
+});
+
+test("attribution: a native start with no requester logs requested-by=-", async () => {
+  const cfg = { providers: { "native-target": nativeProv(18121, "qwen3-4b") } };
+  const logs = await captureLogs(async () => {
+    await acquireProvider("native-target", startCapableOpts({ cfg, identityProbeFn: downThenResident() }));
+  });
+  const line = logs.find((l) => l.includes("starting native native-target"));
+  assert.ok(line, `expected a 'starting native' line, got:\n${logs.join("\n")}`);
+  assert.ok(line.endsWith(" requested-by=-"), line);
+});
+
+test("attribution: ensureResident's native start is attributed to residency", async () => {
+  const p = nativeProv(18122, "qwen3-4b", { gpuPolicy: { alwaysResident: true, runtime: "native" } });
+  const cfg = { providers: { "native-target": p } };
+  const logs = await captureLogs(async () => {
+    await ensureResident("native-target", cfg, startCapableOpts({ cfg, identityProbeFn: downThenResident() }));
+  });
+  const line = logs.find((l) => l.includes("starting native native-target"));
+  assert.ok(line, `expected a 'starting native' line, got:\n${logs.join("\n")}`);
+  assert.ok(line.endsWith(" requested-by=residency"), line);
+});
