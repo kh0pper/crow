@@ -1629,10 +1629,14 @@ export function createInteractiveEngine({
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
     if (s.state === "stopped") throw engineError("session_stopped");
+    // Acceptance F3: a blank steer is a client bug (the drawer's composer
+    // sent nothing), never a silent no-op — refused BEFORE the no_turn/
+    // pi_gone checks so it is reported even when no turn is running.
+    const message = String(text == null ? "" : text);
+    if (!message.trim()) throw engineError("empty_message");
     if (!s.turn) throw engineError("no_turn");
     const alive = !!(s.pi && s.pi._exitCode == null);
     if (!alive) throw engineError("pi_gone");
-    const message = String(text == null ? "" : text);
     s.pi.send({ type: "steer", message });
     emit(s, { type: "log", text: "steered: " + message.slice(0, 200) });
     return { ok: true };

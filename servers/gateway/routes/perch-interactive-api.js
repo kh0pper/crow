@@ -127,6 +127,8 @@ const ERROR_MAP = {
   no_such_request: [409, "no_such_request"],
   no_turn: [409, "no_turn"],
   bad_request: [400, "bad_request"],
+  // Acceptance F3: a blank steer is a client bug, not a silent 200.
+  empty_message: [400, "empty_message"],
   // Track 3 Task 9 additions.
   card_occupied: [409, "card_occupied"],
   no_session_dir: [409, "no_session_dir"],
