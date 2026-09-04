@@ -35,7 +35,7 @@ import { dirname } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
-import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab } from "./tracker.mjs";
+import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType, boardVocab, cardText } from "./tracker.mjs";
 import { cardBriefBlock } from "./card-brief.mjs";
 import { resolveNodeBin, requirePiCli } from "./pi_resolver.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
@@ -763,7 +763,7 @@ export async function handleInbound(opts) {
     // "...not a status write.") is now a shared pure builder — see
     // card-brief.mjs — so the interactive dispatch rail can compose the same
     // brief. projectHeader/gatewayHint and the channel tail stay caller-side.
-    promptText = projectHeader + "\n\n" + cardBriefBlock({ cardId, tasksDbPath, userLine: cleanMsg, planForCard, cardStatus, boardVocab }) +
+    promptText = projectHeader + "\n\n" + cardBriefBlock({ cardId, tasksDbPath, userLine: cleanMsg, planForCard, cardStatus, boardVocab, cardText }) +
       " Then reply with a short summary for the gateway thread. One card only.";
   } else {
     // No card reference — let the bot DECIDE based on its system prompt
