@@ -307,6 +307,7 @@ export default defineConfig({
           { text: 'Songbook', link: '/architecture/songbook' },
           { text: "Crow's Nest", link: '/architecture/dashboard' },
           { text: 'Gateway', link: '/architecture/gateway' },
+          { text: 'Box Reservation', link: '/architecture/box-reservation' },
           { text: 'Crow OS', link: '/architecture/crow-os' },
           { text: 'Portable Identity', link: '/architecture/portable-identity' },
           { text: 'Context Management', link: '/architecture/context-management' },
