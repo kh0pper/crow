@@ -29,9 +29,19 @@ let logs, origLog;
 beforeEach(() => {
   orch._setReservationReaderForTest(null);
   orch._resetReservationNoticesForTest();
+  // The default notice sender writes a notification row through createDbClient().
+  // Every test here trips a notice (deferred residency, refusals), so the sender
+  // MUST be stubbed for the whole file — run raw (outside scripts/run-suite.mjs's
+  // scratch env) the default would land rows in the operator's live crow.db.
+  // (It did, on 2026-09-04: 16 phantom "Box reserved by win" notifications.)
+  orch._setReservationNoticeSenderForTest(async () => {});
   logs = []; origLog = console.log; console.log = (m) => logs.push(String(m));
 });
-afterEach(() => { console.log = origLog; orch._setReservationReaderForTest(null); });
+afterEach(() => {
+  console.log = origLog;
+  orch._setReservationReaderForTest(null);
+  orch._setReservationNoticeSenderForTest(null);
+});
 
 test("reserved + provider not ready + not allowed -> ReservedError; bundleUp never called", async () => {
   orch._setReservationReaderForTest(() => RES);
