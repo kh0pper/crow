@@ -301,6 +301,80 @@ after(() => {
 });
 
 // ---------------------------------------------------------------------------
+// 0. steer: an empty message is a client bug, refused loudly (acceptance F3)
+// ---------------------------------------------------------------------------
+
+test("steer: empty / whitespace message is refused with empty_message and nothing is sent to pi", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go"); // turn in flight (promptTurn pending)
+  const pi = state.instances[0];
+  const before = pi.sent.length;
+  await assert.rejects(() => engine.steer(s.sessionId, "   "), (e) => e.code === "empty_message");
+  await assert.rejects(() => engine.steer(s.sessionId, ""), (e) => e.code === "empty_message");
+  await assert.rejects(() => engine.steer(s.sessionId, null), (e) => e.code === "empty_message");
+  assert.equal(pi.sent.length, before, "no steer frame reached pi");
+  const r = await engine.steer(s.sessionId, "  go left ");
+  assert.deepEqual(r, { ok: true });
+  assert.equal(pi.sent.length, before + 1, "a real steer still goes through unchanged");
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+});
+
+test("steer: empty message is reported as empty_message even when no turn is running (client bug beats no_turn)", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await assert.rejects(() => engine.steer(s.sessionId, " "), (e) => e.code === "empty_message");
+  await assert.rejects(() => engine.steer(s.sessionId, "x"), (e) => e.code === "no_turn");
+});
+
+// ---------------------------------------------------------------------------
+// 0b. cycle/wake progress is visible in the drawer (acceptance F4)
+// ---------------------------------------------------------------------------
+
+test("cycle emits progress log lines: cycling, world rebuilt, model warm, context re-read warning", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  // The fake world writes no .mcp.json; seed one where the real writeBotMcp
+  // would put it so the "world rebuilt" line can report the ACTIVE count
+  // (disabled entries are canonical leftovers, not minted servers).
+  writeFileSync(join(dir, "bots", "botty", ".mcp.json"), JSON.stringify({
+    mcpServers: { tasks: { command: "node" }, board: { url: "http://127.0.0.1:1/board/mcp" }, other: { disabled: true } },
+  }));
+  const logs = [];
+  const unsub = await engine.subscribe(s.sessionId, (ev) => { if (ev.type === "log") logs.push(ev.text); });
+  await engine.cycle(s.sessionId);
+  unsub();
+  assert.ok(logs.some((t) => /^cycling: stopping the child/.test(t)), logs.join("|"));
+  assert.ok(logs.some((t) => t === "world rebuilt: 2 MCP server(s) minted"), logs.join("|"));
+  assert.ok(logs.some((t) => /^model warm: crow-local\/qwen3\.6-35b-a3b/.test(t)), logs.join("|"));
+  assert.ok(logs.some((t) => /re-reads its full transcript/.test(t)), logs.join("|"));
+  // Order matters to an operator watching the drawer: the warning that the
+  // first turn will be slow is the LAST line, after the child is up.
+  const idx = (re) => logs.findIndex((t) => re.test(t));
+  assert.ok(idx(/^cycling:/) < idx(/^world rebuilt/), "cycling precedes world rebuilt");
+  assert.ok(idx(/^world rebuilt/) < idx(/^model warm:/), "world rebuilt precedes model warm");
+  assert.ok(idx(/^model warm:/) < idx(/re-reads its full transcript/), "model warm precedes the ready line");
+});
+
+test("wake (hibernate -> message) emits the world rebuilt + model warm lines too", async () => {
+  const { engine, clock, state } = makeEngine();
+  const s = await spawned(engine);
+  clock.advance(600_001); // idle timer -> hibernate
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+  const logs = [];
+  const unsub = await engine.subscribe(s.sessionId, (ev) => { if (ev.type === "log") logs.push(ev.text); });
+  await engine.message(s.sessionId, "wake up");
+  unsub();
+  assert.ok(logs.some((t) => /^world rebuilt/.test(t)), logs.join("|"));
+  assert.ok(logs.some((t) => /^model warm:/.test(t)), logs.join("|"));
+  const pi = state.instances[state.instances.length - 1];
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+});
+
+// ---------------------------------------------------------------------------
 // 1. model_select event tracking
 // ---------------------------------------------------------------------------
 

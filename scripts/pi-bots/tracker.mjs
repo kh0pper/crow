@@ -58,6 +58,16 @@ export function cardStatus(cardId, tasksDbPath) {
   return r ? r.status : null;
 }
 
+/** Track 3 acceptance F1: the card's own words for the dispatch brief. */
+export function cardText(cardId, tasksDbPath) {
+  const path = tasksDbPath || TASKS_DB;
+  const t = db(path);
+  try {
+    const r = t.prepare("SELECT title, description FROM tasks_items WHERE id=?").get(cardId);
+    return { title: r && r.title ? String(r.title) : "", description: r && r.description ? String(r.description) : null };
+  } finally { t.close(); }
+}
+
 // Track 0: statuses and terminal-ness are per-board (board_defs). The bridge
 // must not hardcode 'done' — a custom board's terminal is whatever its def
 // says. Every failure mode (no card, no project, no board_defs table, corrupt
