@@ -997,3 +997,105 @@ test("attribution: ensureResident's native start is attributed to residency", as
   assert.ok(line, `expected a 'starting native' line, got:\n${logs.join("\n")}`);
   assert.ok(line.endsWith(" requested-by=residency"), line);
 });
+
+// --- Schema v2: companion + task flags on native start ---------------------
+//
+// `regEntry.companions` (written by manager.js's registerModel) and the
+// catalog entry's `task` drive extra llama-server args: an mmproj
+// companion -> `--mmproj <blob path>`, task embedding -> `--embedding`,
+// task rerank -> `--reranking`. Shards need no flag (llama-server finds
+// the -0000N-of-0000M siblings from the primary part) and mtp companions
+// add none either.
+
+function v2StartOpts({ registryEntry, catalogEntry, startCalls }) {
+  const cfg = { providers: { "native-target": nativeProv(18160, "native-target") } };
+  let probeCalls = 0;
+  const identityProbeFn = async () => {
+    probeCalls += 1;
+    return probeCalls === 1 ? "down" : "resident";
+  };
+  return {
+    ...startCapableOpts({ cfg, identityProbeFn, startCalls }),
+    loadStateFn: () => ({ registry: { "native-target": registryEntry } }),
+    loadCatalogFn: () => ({ runtime: { release: "b1", assets: {} }, models: catalogEntry ? [catalogEntry] : [] }),
+  };
+}
+
+test("v2 native start: an mmproj companion on the registry row adds --mmproj with the companion's blob path", async () => {
+  const startCalls = [];
+  const ok = await acquireProvider("native-target", v2StartOpts({
+    registryEntry: { file: "model.gguf", shardFiles: [], companions: [{ kind: "mmproj", file: "native-target--mmproj-F16.gguf" }] },
+    catalogEntry: { id: "native-target", task: "chat" },
+    startCalls,
+  }));
+  assert.equal(ok, true);
+  assert.equal(startCalls.length, 1);
+  assert.equal(startCalls[0].ggufPath, join("/fake/crow-home", "models", "blobs", "model.gguf"));
+  assert.deepEqual(startCalls[0].extraArgs, ["--mmproj", join("/fake/crow-home", "models", "blobs", "native-target--mmproj-F16.gguf")]);
+});
+
+test("v2 native start: an mtp companion adds NO flag; shards add no flag", async () => {
+  const startCalls = [];
+  const ok = await acquireProvider("native-target", v2StartOpts({
+    registryEntry: {
+      file: "big-00001-of-00003.gguf",
+      shardFiles: ["big-00002-of-00003.gguf", "big-00003-of-00003.gguf"],
+      companions: [{ kind: "mtp", file: "native-target--mtp-big-Q8_0.gguf" }],
+    },
+    catalogEntry: { id: "native-target", task: "chat" },
+    startCalls,
+  }));
+  assert.equal(ok, true);
+  assert.equal(startCalls[0].ggufPath, join("/fake/crow-home", "models", "blobs", "big-00001-of-00003.gguf"));
+  assert.deepEqual(startCalls[0].extraArgs, []);
+});
+
+test("v2 native start: task embedding adds --embedding; task rerank adds --reranking", async () => {
+  for (const [task, flag] of [["embedding", "--embedding"], ["rerank", "--reranking"]]) {
+    _setNativeHandleForTest("native-target", null);
+    _resetProviderHealth();
+    const startCalls = [];
+    const ok = await acquireProvider("native-target", v2StartOpts({
+      registryEntry: { file: "model.gguf", shardFiles: [], companions: [] },
+      catalogEntry: { id: "native-target", task },
+      startCalls,
+    }));
+    assert.equal(ok, true, task);
+    assert.deepEqual(startCalls[0].extraArgs, [flag], task);
+  }
+});
+
+test("v2 native start: --jinja (chat_template_kwargs) and --mmproj compose, jinja first", async () => {
+  const startCalls = [];
+  await acquireProvider("native-target", v2StartOpts({
+    registryEntry: { file: "model.gguf", companions: [{ kind: "mmproj", file: "native-target--mmproj-F16.gguf" }] },
+    catalogEntry: { id: "native-target", task: "vision", chat_template_kwargs: { enable_thinking: false } },
+    startCalls,
+  }));
+  assert.deepEqual(startCalls[0].extraArgs, ["--jinja", "--mmproj", join("/fake/crow-home", "models", "blobs", "native-target--mmproj-F16.gguf")]);
+});
+
+test("v2 native start: a chat model with no companions and no kwargs gets exactly today's args (empty extraArgs); a legacy row with no companions field is fine", async () => {
+  const startCalls = [];
+  const ok = await acquireProvider("native-target", v2StartOpts({
+    registryEntry: { file: "model.gguf" },
+    catalogEntry: { id: "native-target", task: "chat" },
+    startCalls,
+  }));
+  assert.equal(ok, true);
+  assert.deepEqual(startCalls[0].extraArgs, []);
+  assert.equal(startCalls[0].ggufPath, join("/fake/crow-home", "models", "blobs", "model.gguf"));
+  assert.equal(startCalls[0].alias, "native-target");
+  assert.equal(startCalls[0].port, 18160);
+});
+
+test("v2 native start: a model absent from the catalog (Browse-HF install) still starts, with only its companion flags", async () => {
+  const startCalls = [];
+  const ok = await acquireProvider("native-target", v2StartOpts({
+    registryEntry: { file: "model.gguf", companions: [{ kind: "mmproj", file: "native-target--mmproj-F16.gguf" }] },
+    catalogEntry: null,
+    startCalls,
+  }));
+  assert.equal(ok, true);
+  assert.deepEqual(startCalls[0].extraArgs, ["--mmproj", join("/fake/crow-home", "models", "blobs", "native-target--mmproj-F16.gguf")]);
+});
