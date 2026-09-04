@@ -68,6 +68,18 @@ export function nativeWarmingEvent(providerName, isNative, lang) {
  * file, so it must NEVER see that hint — it gets the new, real-i18n
  * `chat.native_model_load_failed` copy and a distinct `code` instead.
  */
+/** Box reservation (docs/architecture/box-reservation.md): the start was
+ *  refused on purpose — say who holds the box and until when, never the
+ *  generic "didn't load in time". */
+export function boxReservedError(err, lang) {
+  return {
+    message: fill(t("chat.box_reserved", lang), { owner: (err && err.owner) || "unknown", until: (err && err.expires_at) || "?" }),
+    code: "box_reserved",
+    owner: (err && err.owner) || null,
+    expires_at: (err && err.expires_at) || null,
+  };
+}
+
 export function providerNotReadyError(providerName, isNative, lang) {
   if (isNative) {
     return {
@@ -707,6 +719,11 @@ export default function chatRouter(dashboardAuth) {
           return;
         }
       } catch (err) {
+        if (err && err.code === "box_reserved") {
+          sendEvent("error", boxReservedError(err, lang));
+          closeStream();
+          return;
+        }
         console.warn(`[chat] gpu-orchestrator acquire(${effectiveProvider}) failed: ${err.message}`);
         // fall through — adapter will surface the real connection error.
       }

@@ -585,7 +585,17 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       // captures it (opt-in seam on maybeAcquireLocalProvider, see its
       // doc) so it can ride along in the response body as `cause`.
       let startError = null;
-      const result = await maybeAcquireLocalProviderFn(modelId, { requester: "models-panel", onError: (err) => { startError = err; } });
+      let result;
+      try {
+        result = await maybeAcquireLocalProviderFn(modelId, { requester: "models-panel", onError: (err) => { startError = err; } });
+      } catch (err) {
+        // Box reservation: maybeAcquireLocalProvider rethrows ReservedError so
+        // callers can tell a refusal from a failure (docs/architecture/box-reservation.md).
+        if (err && err.code === "box_reserved") {
+          return res.status(409).json({ error: err.message, code: "BOX_RESERVED", owner: err.owner || null, expires_at: err.expires_at || null });
+        }
+        throw err;
+      }
       if (result === true) return res.json({ running: true });
       if (result === false) {
         const cause = startError ? { code: startError.code || "UNKNOWN", message: startError.message } : null;
