@@ -83,7 +83,8 @@ export function cardFaceHtml(card, locked, lang, def = DEFAULT_BOARD_DEF) {
   try { data = JSON.parse(card.data_json || "{}"); } catch { data = {}; }
   const fieldMeta = declaredFieldMeta(def, card, data);
   // Search text mirrors the tracker face: everything a human would scan for.
-  const searchParts = [card.title || "", card.status || "", card.owner || "", card.tags || "", card.due_date || ""];
+  // The id leads so a typed "#284" (or a bare "284") finds one card among hundreds.
+  const searchParts = [`#${card.id}`, card.title || "", card.status || "", card.owner || "", card.tags || "", card.due_date || ""];
   for (const f of def.fields || []) {
     const v = f.storage === "column" ? card[f.key] : data[f.key];
     if (v != null && v !== "") searchParts.push(String(v));
@@ -120,7 +121,7 @@ export function trackerCardFaceHtml(item, contextFields, statusValues, locked, l
   // Extract metadata from data_json for context fields (skip "label" and "status")
   let data = {};
   try { data = JSON.parse(item.data_json || "{}"); } catch { data = {}; }
-  const searchParts = [item.label || "", item.status || "", item.tags || ""];
+  const searchParts = [`#${item.id}`, item.label || "", item.status || "", item.tags || ""];
   for (const v of Object.values(data)) {
     if (v != null && v !== "") searchParts.push(typeof v === "object" ? JSON.stringify(v) : String(v));
   }
@@ -604,7 +605,7 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
 
   const filterBarHtml =
     `<div class="bb-filter-bar">` +
-    `<input type="text" id="bb-search" class="bb-search" placeholder="Search items…">` +
+    `<input type="text" id="bb-search" class="bb-search" placeholder="Search items (label, tag, #id)…">` +
     `<div class="bb-chips">` +
     statusValues.map((sv) => `<button type="button" class="bb-chip" data-status-filter="${escapeHtml(sv)}">${escapeHtml(sv)}</button>`).join("") +
     `<button type="button" class="bb-chip bb-chip-action" data-filter="action-needed">${t("botboard.filterActionNeeded", lang)}</button>` +

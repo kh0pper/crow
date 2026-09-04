@@ -1380,7 +1380,7 @@ export const translations = {
   "botboard.cfgAddField": { en: "+ Add field", es: "+ A\u00f1adir campo" },
   "botboard.cfgSave": { en: "Save board settings", es: "Guardar ajustes del tablero" },
   "botboard.cfgSaved": { en: "Saved \u2014 reloading\u2026", es: "Guardado \u2014 recargando\u2026" },
-  "botboard.searchCards": { en: "Search cards\u2026", es: "Buscar tarjetas\u2026" },
+  "botboard.searchCards": { en: "Search cards (title, tag, #id)\u2026", es: "Buscar tarjetas (t\u00edtulo, etiqueta, #id)\u2026" },
   "botboard.viewColumns": { en: "Columns", es: "Columnas" },
   "botboard.viewList": { en: "List", es: "Lista" },
 
