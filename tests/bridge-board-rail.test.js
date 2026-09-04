@@ -407,4 +407,35 @@ describe("handleInbound board rail (execute prompt + board_report_result detecti
     const mcpNoJob = JSON.parse(readFileSync(join(worldNoJob.sessionDir, ".mcp.json"), "utf8"));
     assert.ok(!("X-Crow-Job-Id" in mcpNoJob.mcpServers.board.headers));
   });
+
+  test("buildBotWorld(cardBound:true) mints the board entry for a def that never selected board/*; default does not (acceptance F2)", async () => {
+    // Track 3 acceptance F2: the dispatch brief ends the run with
+    // board_report_result, so a card-bound perch session whose def never
+    // selected board/* used to spawn with NO board entry and could only
+    // time out. railbot selects board itself (above), so this needs a bot
+    // that does not — same scratch HOME/canonical/board-token as the jobId
+    // test, same REAL buildBotWorld.
+    const c = new Database(CROW_DB);
+    c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,?)").run(
+      "plainbot", "Plain Bot",
+      JSON.stringify({
+        system_prompt: "You are a bot with no board tools.",
+        models: { default: "stub/m1" },
+        tools: { pi_builtin: ["read"], crow_mcp: [] },
+        permission_policy: { bash: "deny", write_paths: [], multi_agent: false },
+        session_dir: join(ROOT, "bots", "plainbot"),
+      }), 1,
+    );
+    c.close();
+    const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
+    const a = await buildBotWorld({ botId: "plainbot", threadId: "cardbound-a", gatewayType: "perch", cardBound: true, log: () => {} });
+    const mcpA = JSON.parse(readFileSync(join(a.sessionDir, ".mcp.json"), "utf8"));
+    assert.ok(mcpA.mcpServers.board && !mcpA.mcpServers.board.disabled, "card-bound: board entry minted and active");
+    assert.equal(mcpA.mcpServers.board.headers["X-Crow-Actor-Id"], "plainbot");
+    assert.ok(!("X-Crow-Job-Id" in mcpA.mcpServers.board.headers), "card-bound without a job: no job header");
+
+    const b = await buildBotWorld({ botId: "plainbot", threadId: "cardbound-b", gatewayType: "perch", log: () => {} });
+    const mcpB = JSON.parse(readFileSync(join(b.sessionDir, ".mcp.json"), "utf8"));
+    assert.ok(!mcpB.mcpServers.board || mcpB.mcpServers.board.disabled, "default (free chat): closed-world selection unchanged");
+  });
 });

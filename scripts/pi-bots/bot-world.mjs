@@ -52,17 +52,21 @@ function loadBridge() { return import("./bridge.mjs"); }
  * Phase A — identity. The exact sequence handleInbound ran inline before C-11.
  *
  * @param {{botId: string, threadId: string, gatewayType?: string,
- *          log?: (m: string) => void, jobId?: string|null}} opts
+ *          log?: (m: string) => void, jobId?: string|null, cardBound?: boolean}} opts
  *   `jobId` (Track 1 Task 7 — the missing link in the job_id chain):
  *   job_runner.runCardExecute passes job.job_id through here so it reaches
  *   writeBotMcp's board-entry headers (X-Crow-Job-Id) — without it the
  *   result-service job-rail lock exemption (D-T1.5) can never match a
  *   job-dispatched turn's own bot_jobs row.
+ *   `cardBound` (Track 3 acceptance F2): a perch session spawned against a
+ *   card. Like a job turn, it must be able to call board_report_result (the
+ *   dispatch brief ends the run with that call), so the board MCP entry is
+ *   ensured regardless of the def's own crow_mcp selection.
  * @returns {Promise<{def, bot, crowHome, projectId, projectSpace, projectMembers,
  *          sessionDir, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
  *          narrowedTools, gatewayType}>}
  */
-export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null }) {
+export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null, cardBound = false }) {
   const B = await loadBridge();
   const bot = B.loadBot(botId);
   const def = bot.def;
@@ -116,7 +120,12 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     if (remoteEnabled) peerGatewayUrls = B.readPeerGatewayUrls(_conn);
   } finally { _conn.close(); }
   try {
-    const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId });
+    // acceptance F2: a card-bound session (or a job turn) must be able to
+    // call board_report_result — ensure the board entry is minted.
+    const w = writeBotMcp(def, {
+      sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId,
+      ensureServers: (jobId || cardBound) ? ["board"] : [],
+    });
     if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
     if (w.remoteWarnings && w.remoteWarnings.length) {
       for (const warn of w.remoteWarnings) log("remote-tool: " + warn);
