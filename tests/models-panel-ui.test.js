@@ -345,8 +345,12 @@ test("panel route: authenticated request renders 200 with the curated tab, runti
       assert.match(html, /data-tab-panel="curated"/);
       assert.match(html, /data-tab-panel="browse-hf"/);
       // real registry/model-catalog.json content — the small, permissively
-      // licensed first_run_default entry must be present
-      assert.match(html, /data-model-id="qwen3-4b"/);
+      // licensed first_run_default entry must be present (read dynamically,
+      // never pinned to an id the curated catalog may retire)
+      const liveCatalog = JSON.parse(readFileSync(new URL("../registry/model-catalog.json", import.meta.url), "utf8"));
+      const firstRunDefault = liveCatalog.models.find((m) => m.first_run_default === true);
+      assert.ok(firstRunDefault, "catalog has a first_run_default model");
+      assert.ok(html.includes(`data-model-id="${firstRunDefault.id}"`), `card for ${firstRunDefault.id} rendered`);
       assert.match(html, /data-action="download"/);
       assert.match(html, /id="mcat-hf-search-input"/);
     });
