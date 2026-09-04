@@ -362,6 +362,7 @@ export const translations = {
 
   // ─── Chat — native model runtime (Item G, Task 10) ───
   "chat.native_model_loading": { en: "Loading local model \"{provider}\" — this can take a few minutes for larger models.", es: "Cargando el modelo local \"{provider}\" — esto puede tardar varios minutos en modelos más grandes." },
+  "chat.box_reserved": { en: "The box is reserved by {owner} until {until}; local models can't start right now. Try a smaller resident model or wait.", es: "El equipo está reservado por {owner} hasta {until}; los modelos locales no pueden iniciarse ahora. Prueba un modelo residente más pequeño o espera." },
   "chat.native_model_load_failed": { en: "The local model \"{provider}\" didn't load in time. Check the gateway logs for details.", es: "El modelo local \"{provider}\" no cargó a tiempo. Consulta los registros del gateway para más detalles." },
 
   // ─── Peer invite share (Messages Phase 2 PR1) ───

@@ -82,6 +82,8 @@ import { loadState, saveState, reconcileOnBoot } from "./models/state.js";
 import { acquireHostLock } from "./models/native-lock.js";
 import { identityProbe, startModel, stopModel, ensureRuntime, nativeReadinessTimeoutMs } from "./models/runtime.js";
 import { getCachedProbe, reprobe } from "./models/probe.js";
+import { readReservation, isStartAllowed, ReservedError } from "./box-reservation.js";
+import { createNoticeState, reservationNotices, sendReservationNotice } from "./box-reservation-notify.js";
 import { enqueueDownload } from "./models/manager.js";
 import { listProvidersAll } from "../shared/providers-db.js";
 
@@ -428,6 +430,70 @@ export async function isProviderReady(providerName) {
  * caller ever saw — the actual cause previously reached nothing but
  * this function's own `console.warn` below.
  */
+
+// ---- box reservation gate (docs/architecture/box-reservation.md) --------------
+//
+// While /run/user/<uid>/crow-box-reservation.json exists, NO path below may
+// START a provider the reservation did not allow: on-demand acquire (docker
+// and native), boot/retry residency, and the idle-revert timer all pass
+// through startBlockedBy(). A provider that is already running is never
+// touched — reservations gate starts, not residency. The reader is a seam so
+// tests never touch the real tmpfs file.
+let _reservationReader = null;
+export function _setReservationReaderForTest(fn) { _reservationReader = fn; }
+let _noticeState = createNoticeState();
+let _noticeSender = sendReservationNotice;
+export function _setReservationNoticeSenderForTest(fn) { _noticeSender = fn ? (n) => fn(n) : sendReservationNotice; }
+const _deferNoticed = new Set();
+export function _resetReservationNoticesForTest() { _noticeState = createNoticeState(); _deferNoticed.clear(); }
+
+function currentReservation() {
+  try { return (_reservationReader || readReservation)(); }
+  catch (err) {
+    // A reader that throws is a corrupt-file case in disguise: fail closed.
+    console.warn(`[gpu-orchestrator] reservation read failed (treating as reserved): ${err.message}`);
+    return { owner: "unknown", reason: "unreadable reservation file", started_at: null, expires_at: null, allow: [], corrupt: true, key: "corrupt" };
+  }
+}
+
+/** The reservation blocking `providerName` from starting right now, else null. */
+function startBlockedBy(providerName) {
+  const r = currentReservation();
+  if (!r || isStartAllowed(r, providerName)) return null;
+  return r;
+}
+
+function emitReservationNotices(input) {
+  for (const n of reservationNotices(_noticeState, input)) {
+    Promise.resolve().then(() => _noticeSender(n)).catch(() => { /* sender never throws; belt and braces */ });
+  }
+}
+
+/** Refuse a start: log with the requester, notify once per reservation, return the error to throw. */
+function refuseStart(reservation, providerName, opts = {}) {
+  const requester = opts.requester || "-";
+  console.log(`[gpu-orchestrator] refusing to start ${providerName}: box reserved by ${reservation.owner} until ${reservation.expires_at || "?"} (requested-by=${requester})`);
+  emitReservationNotices({ reservation, refused: { provider: providerName, requester } });
+  return new ReservedError(reservation, providerName);
+}
+
+/** Residency paths never throw — they announce once per reservation and skip. */
+function noteDeferred(reservation, what) {
+  emitReservationNotices({ reservation });
+  const k = reservation.key + ":" + what;
+  if (_deferNoticed.has(k)) return;
+  _deferNoticed.add(k);
+  console.log(`[gpu-orchestrator] residency deferred: box reserved by ${reservation.owner} until ${reservation.expires_at || "?"} (${what})`);
+}
+
+/** Called from the residency tick so a NEW reservation is announced even
+ *  before anything tries to start (scope §3.5). Returns the reservation. */
+export function noticeReservation() {
+  const r = currentReservation();
+  if (r) emitReservationNotices({ reservation: r });
+  return r;
+}
+
 export async function maybeAcquireLocalProvider(providerName, opts = {}) {
   if (!providerName) return null;
   const cfg = opts.cfg || loadProviders();
@@ -439,6 +505,9 @@ export async function maybeAcquireLocalProvider(providerName, opts = {}) {
   try {
     return await acquireProvider(providerName, opts);
   } catch (err) {
+    // A reservation is a decision, not a failure: callers degrade on it
+    // (llm-router, chat, models panel) and must be able to tell it apart.
+    if (err instanceof ReservedError) throw err;
     console.warn(`[gpu-orchestrator] maybeAcquireLocalProvider(${providerName}) failed: ${err.message}`);
     if (typeof opts.onError === "function") {
       try { opts.onError(err); } catch { /* caller's observer must never break this function */ }
@@ -823,6 +892,11 @@ async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
     // "down" — fall through to sibling swap + lock + start.
   }
 
+  {
+    const blocked = startBlockedBy(providerName);
+    if (blocked) throw refuseStart(blocked, providerName, opts);
+  }
+
   const siblings = getMutexSiblings(providerName, cfg);
   for (const sibName of siblings) {
     const sib = getProvider(sibName, cfg);
@@ -945,6 +1019,12 @@ export async function acquireProvider(providerName, opts = {}) {
       return true;
     }
 
+    // Box reservation: a start (and the sibling eviction that precedes it)
+    // needs the box; a caller not on the allow list is refused here, BEFORE
+    // any sibling is stopped.
+    const blocked = startBlockedBy(providerName);
+    if (blocked) throw refuseStart(blocked, providerName, opts);
+
     // Stop mutex siblings first. A sibling can be native (Task 9 review
     // round 1, finding 3: same-PROCESS symmetric eviction — a native
     // sibling with a live handle in _nativeHandles is stopped via that
@@ -1024,6 +1104,8 @@ async function checkIdleRevert() {
       }
       const idleFor = Date.now() - last;
       if (idleFor < IDLE_REVERT_MS) continue;
+      const blocked = startBlockedBy(group.default);
+      if (blocked) { noteDeferred(blocked, "idle-revert:" + group.default); continue; }
       console.log(`[gpu-orchestrator] ${m.name} idle ${Math.round(idleFor / 1000)}s — reverting to ${group.default}`);
       try {
         await acquireProvider(group.default, { requester: "idle-revert" });
@@ -1094,7 +1176,15 @@ async function ensureNativeResident(name, p, cfg, opts = {}) {
   // that started a model without taking/holding its mutexGroup's host
   // lock would leave that lock free for a DIFFERENT gateway process to
   // walk right past while this model is genuinely resident.
-  const result = await acquireOrStartNative(name, p, cfg, opts);
+  let result;
+  try {
+    result = await acquireOrStartNative(name, p, cfg, opts);
+  } catch (err) {
+    // Residency never throws on a reservation: a resident native provider
+    // returns before the gate; a cold one is deferred (logged once).
+    if (err instanceof ReservedError) { noteDeferred(currentReservation() || err, name); return false; }
+    throw err;
+  }
   if (!result.freshStart) {
     console.log(`[gpu-orchestrator] ${name} already resident`);
     return false;
@@ -1119,13 +1209,16 @@ export async function ensureResident(name, cfg = loadProviders(), opts = {}) {
       console.warn(`[gpu-orchestrator] ${name} has no bundleId — skipping`);
       return false;
     }
-    if (await probeReady(p.baseUrl)) {
+    const { probeReadyFn = probeReady, bundleUpFn = bundleUp, waitForReadyFn = waitForReady } = opts;
+    if (await probeReadyFn(p.baseUrl)) {
       console.log(`[gpu-orchestrator] ${name} already resident`);
       return false;
     }
+    const blocked = startBlockedBy(name);
+    if (blocked) { noteDeferred(blocked, name); return false; }
     console.log(`[gpu-orchestrator] starting ${name} (bundleId=${p.bundleId}) requested-by=${requester}`);
-    await bundleUp(p.bundleId);
-    const ready = await waitForReady(p.baseUrl);
+    await bundleUpFn(p.bundleId);
+    const ready = await waitForReadyFn(p.baseUrl);
     if (!ready) {
       console.warn(`[gpu-orchestrator] ${name} did NOT warm up in time`);
       return false;
@@ -1152,6 +1245,8 @@ export async function retryDeferredResidents({
     const p = (cfg.providers || {})[name];
     if (!p) { _deferredResidents.delete(name); continue; }
     if (!isLocallyOrchestratable(p, ownAddrs)) continue; // still not ours — stays parked
+    const blocked = startBlockedBy(name);
+    if (blocked) { noteDeferred(blocked, "residency-retry:" + name); continue; } // reserved — stays parked
     _deferredResidents.delete(name);
     console.log(`[gpu-orchestrator] deferred alwaysResident ${name} is now locally hosted — ensuring (its interface came up after boot)`);
     if (await ensure(name, cfg, { requester: "residency-retry" })) embedRecovered = true;
@@ -1177,6 +1272,9 @@ export async function retryDeferredResidents({
  */
 export async function pollResidency(opts = {}) {
   const probed = [];
+  // Scope §3.5: announce a new box reservation on the tick, even before any
+  // start is attempted, so the operator sees it from the phone.
+  try { noticeReservation(); } catch { /* never let visibility break residency */ }
   try {
     const cfg = opts.cfg !== undefined ? opts.cfg : loadProviders();
     const ownAddrs = opts.ownAddrs !== undefined ? opts.ownAddrs : getOwnAddresses();

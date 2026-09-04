@@ -35,6 +35,7 @@ import { createDbClient } from "../../db.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { maybeAcquireLocalProvider, warmProviderByName } from "../gpu-orchestrator.js";
 import { requesterTag } from "../requester-tag.js";
+import { ReservedError } from "../box-reservation.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
 import { resolveTenantId } from "../../shared/tenancy.js";
@@ -183,7 +184,17 @@ function stripEscalate(body) {
   }
 }
 
-async function handleChat(req, res) {
+/** Is the fast model answering right now? A 2 s GET on its models list —
+ *  same shape as the orchestrator's readiness probe, kept local so the
+ *  router's degrade decision has no orchestrator dependency. */
+async function defaultProbeReady(baseUrl) {
+  try {
+    const r = await fetch(`${baseUrl}/models`, { signal: AbortSignal.timeout(2_000) });
+    return r.ok;
+  } catch { return false; }
+}
+
+async function handleChat(req, res, deps) {
   const body = req.body && typeof req.body === "object" ? req.body : null;
   if (!body) return res.status(400).json({ error: { message: "invalid JSON body" } });
 
@@ -192,7 +203,8 @@ async function handleChat(req, res) {
   const toolEsc = !manualEsc && wantsToolEscalation(body);
   const escalate = manualEsc || toolEsc;
   const escReason = manualEsc ? "manual" : toolEsc ? "tool-intent" : null;
-  const key = escalate ? ESC_KEY : FAST_KEY;
+  let key = escalate ? ESC_KEY : FAST_KEY;
+  let routeLabel = escalate ? `escalate(${escReason})` : "fast";
 
   // Voice quality: the fast model (Qwen3.5-4B) emits its chain-of-thought as
   // PLAIN text ("Thinking Process: ...") that the avatar would speak aloud, so
@@ -216,13 +228,38 @@ async function handleChat(req, res) {
   // frames, so there is no event channel to put a "warming" notice on. The
   // companion sees a warm-up simply as this await taking longer, same as
   // before this task.
-  const [providerId] = splitKey(key);
+  let [providerId] = splitKey(key);
   const requester = requesterTag(req);
-  await maybeAcquireLocalProvider(providerId, { requester });
+  try {
+    await deps.acquireFn(providerId, { requester });
+  } catch (err) {
+    if (!(err instanceof ReservedError)) throw err;
+    // Box reserved (docs/architecture/box-reservation.md): DEGRADE, never
+    // stall and never retry — a retry is exactly what turned one refused
+    // start into a second ownership strike on 2026-08-29. An escalation
+    // falls back to the resident fast model with a note; anything else (or
+    // a cold fast model) gets a fast 503 the client can show or wait on.
+    const fast = escalate ? await deps.resolveKeyFn(FAST_KEY).catch(() => null) : null;
+    if (fast && await deps.probeReadyFn(fast.baseUrl)) {
+      key = FAST_KEY;
+      [providerId] = splitKey(key);
+      routeLabel = "degraded(box_reserved)";
+      body.messages = [
+        ...(Array.isArray(body.messages) ? body.messages : []),
+        { role: "system", content: `Note: the box is reserved (by ${err.owner} until ${err.expires_at || "?"}); the larger model is unavailable, answer with what you have.` },
+      ];
+    } else {
+      const secs = Math.round((Date.parse(err.expires_at || 0) - Date.now()) / 1000);
+      const retryAfter = Math.max(60, Number.isFinite(secs) ? secs : 60);
+      console.log(`[llm-router] route=refused(box_reserved) -> ${key} requester=${requester} owner=${err.owner}`);
+      res.setHeader("Retry-After", String(retryAfter));
+      return res.status(503).json({ error: { code: "box_reserved", message: err.message, owner: err.owner, expires_at: err.expires_at, retry_after: retryAfter } });
+    }
+  }
 
   let up;
   try {
-    up = await resolveKey(key);
+    up = await deps.resolveKeyFn(key);
   } catch (e) {
     return res.status(502).json({ error: { message: `model routing failed for ${key}: ${e.message}` } });
   }
@@ -230,7 +267,7 @@ async function handleChat(req, res) {
   body.model = up.model;
   const url = `${up.baseUrl}/chat/completions`;
   const t0 = Date.now();
-  console.log(`[llm-router] route=${escalate ? `escalate(${escReason})` : "fast"} -> ${key} (${up.model}) stream=${!!body.stream} requester=${requester}`);
+  console.log(`[llm-router] route=${routeLabel} -> ${key} (${up.model}) stream=${!!body.stream} requester=${requester}`);
 
   let upstream;
   try {
@@ -317,14 +354,23 @@ async function handleModels(res) {
  *
  * @returns {import('express').Router}
  */
-export default function llmRouterRouter() {
+export default function llmRouterRouter(opts = {}) {
+  // Seams (tests): acquireFn/resolveKeyFn/probeReadyFn/warmFn default to the
+  // real orchestrator + providers table.
+  const deps = {
+    acquireFn: maybeAcquireLocalProvider,
+    resolveKeyFn: resolveKey,
+    probeReadyFn: defaultProbeReady,
+    warmFn: warmProviderByName,
+    ...opts,
+  };
   const router = express.Router();
   // Route-scoped 10mb JSON limit: the global parser is 1mb and a multi-turn
   // companion/glasses transcript (with tool history + base64 image parts) can
   // exceed that and 413.
   router.use("/llm", express.json({ limit: "10mb" }));
   router.get("/llm/v1/models", (req, res) => handleModels(res));
-  router.post("/llm/v1/chat/completions", (req, res) => handleChat(req, res));
+  router.post("/llm/v1/chat/completions", (req, res) => handleChat(req, res, deps));
   // POST /llm/acquire { provider } — warm a local model bundle and wait until it's
   // ready. The gateway chat path warms inline before a turn; this gives the same
   // capability to the pi-bots host (background jobs + bridge) which runs in a
@@ -335,9 +381,12 @@ export default function llmRouterRouter() {
     const provider = req.body && (req.body.provider || req.body.providerId);
     if (!provider) return res.status(400).json({ ok: false, error: "provider required" });
     try {
-      const warmed = await warmProviderByName(provider, { requester: requesterTag(req) });
+      const warmed = await deps.warmFn(provider, { requester: requesterTag(req) });
       res.json({ ok: warmed !== false, warmed, provider });
     } catch (err) {
+      if (err instanceof ReservedError) {
+        return res.status(409).json({ ok: false, error: "box_reserved", owner: err.owner, expires_at: err.expires_at, message: err.message });
+      }
       res.status(500).json({ ok: false, error: err.message });
     }
   });
