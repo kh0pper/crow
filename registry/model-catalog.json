@@ -131,13 +131,13 @@
         "cpu-capable"
       ],
       "launch": { "ctx": 32768, "ngl": 999, "flash_attn": "on", "no_mmap": true, "parallel": 8, "extra_args": ["--pooling", "mean", "-b", "4096", "-ub", "4096"] },
-      "notes": "The fleet embedding model. Every Crow memory in this lab is embedded with it \u2014 grackle serves it under vLLM today (grackle-embed) \u2014 and this entry lets a fresh install or a CPU-only box serve the same vector space with llama-server --embedding, so memories stay comparable across instances without a re-embed. Switching to a different embedding model means re-embedding everything (see the AI providers guide). Official Qwen GGUF; min_ram_mb is computed at its 8k context.",
+      "notes": "The fleet embedding model. Every Crow memory in this lab is embedded with it \u2014 grackle serves it under vLLM today (grackle-embed) \u2014 and this entry lets a fresh install or a CPU-only box serve the same vector space with llama-server --embedding, so memories stay comparable across instances without a re-embed. Switching to a different embedding model means re-embedding everything (see the AI providers guide). Official Qwen GGUF; min_ram_mb is computed at the 32k fit context the launch block uses.",
       "quants": [
         {
           "file": "Qwen3-Embedding-0.6B-Q8_0.gguf",
           "quant": "Q8_0",
           "size_mb": 639.15,
-          "min_ram_mb": 2091,
+          "min_ram_mb": 4900,
           "min_vram_mb": 0,
           "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
         }
@@ -361,7 +361,7 @@
         "bench",
         "mtp"
       ],
-      "launch": { "ctx": 262144, "ngl": 999, "flash_attn": "on", "no_mmap": true, "parallel": 1, "jinja": true, "spec": { "type": "draft-mtp", "draft_n_max": 2 } },
+      "launch": { "ctx": 262144, "ngl": 999, "flash_attn": "on", "no_mmap": true, "parallel": 1, "jinja": true },
       "notes": "Benchmark-window heavy. A four-part UD-Q4_K_XL (about 111 GB total) that needs the whole box: start it only inside a registered CROW-SCHEDULE window \u2014 the orchestrator's reservation gate refuses on-demand starts while a window is active for anything else. Ships a multi-token-prediction (MTP) head as a companion: the catalog downloads it beside the model for the operator's own llama-server launchers but passes no MTP flag, because MTP loading is build-specific in llama.cpp. Needs a llama.cpp build with the Qwen3.8-Flash-Next architecture; the operator runs it from his own builds today, and the stock runtime release may not load it.",
       "companions": [
         {
