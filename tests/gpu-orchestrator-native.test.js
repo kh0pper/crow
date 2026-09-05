@@ -1360,3 +1360,44 @@ test("C3: the same row, owned by THIS instance, still starts through ensureResid
   await ensureResident("native-target", cfg, opts);
   assert.equal(startCalls.length, 1, "an owned row is unaffected by the new gate");
 });
+
+// ---------------------------------------------------------------------------
+// Final review I1: the baseUrl port fallback is for PRE-ARC loopback rows only.
+// A door URL's port is the GATEWAY's (3001) — falling back to it aims the
+// orchestrator at itself.
+// ---------------------------------------------------------------------------
+
+test("I1: a door-shaped baseUrl with no gpu_policy.port has NO port — it never falls back to the gateway's", async () => {
+  const startCalls = [];
+  const p = nativeProv(18100, "native-target", {
+    baseUrl: "http://100.118.41.122:3001/llm/v1",
+    gpuPolicy: { owner: "this-instance" },
+  });
+  delete p.gpuPolicy.port;
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+  await assert.rejects(acquireProvider("native-target", opts), /has no port/);
+  assert.equal(startCalls.length, 0, "never spawned llama-server on the gateway's own port");
+});
+
+test("I1: a door-shaped baseUrl with no owner declared ALSO has no port (the path alone is disqualifying)", async () => {
+  const startCalls = [];
+  const p = nativeProv(18100, "native-target", { baseUrl: "http://127.0.0.1:3001/llm/v1" });
+  delete p.gpuPolicy.port;
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down"]), startCalls });
+  await assert.rejects(acquireProvider("native-target", opts), /has no port/);
+  assert.equal(startCalls.length, 0);
+});
+
+test("I1: an owner-declaring row with a loopback /v1 baseUrl and no gpu_policy.port still has no port", async () => {
+  const startCalls = [];
+  const p = nativeProv(18134, "native-target", { gpuPolicy: { owner: "this-instance" } });
+  delete p.gpuPolicy.port;
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+  await assert.rejects(acquireProvider("native-target", opts), /has no port/);
+  assert.equal(startCalls.length, 0);
+});

@@ -355,9 +355,27 @@ function orchestratableHere(p, opts = {}, ownAddrs = getOwnAddresses()) {
   if (typeof owner !== "string" || !owner) return isLocallyOrchestratable(p, ownAddrs);
   return isOrchestratableHere(p, { ownAddrs, ownInstanceId: ownInstanceId(opts) });
 }
+/** The loopback port llama-server binds for a native row.
+ *
+ * `gpu_policy.port` is authoritative. The `baseUrl` fallback exists only for
+ * PRE-ARC rows, whose `baseUrl` literally IS the llama-server loopback
+ * (`http://127.0.0.1:<port>/v1`). It must NOT be applied to a door-shaped
+ * baseUrl (`…/llm/v1`) or to any row that declares an `owner` — the port in a
+ * door URL is the GATEWAY's (3001), so falling back to it would have the
+ * orchestrator bind/probe itself. Those rows have no port; returning `null`
+ * surfaces `startNativeAndAwaitReady`'s explicit "has no port" error. */
 function nativePort(p) {
   const gp = Number(p?.gpuPolicy?.port);
-  return Number.isInteger(gp) && gp > 0 ? gp : portFromBaseUrl(p?.baseUrl);
+  if (Number.isInteger(gp) && gp > 0) return gp;
+  if (typeof p?.gpuPolicy?.owner === "string" && p.gpuPolicy.owner) return null;
+  let path;
+  try {
+    path = new URL(p?.baseUrl).pathname;
+  } catch {
+    return null;
+  }
+  if (path.replace(/\/+$/, "").endsWith("/llm/v1")) return null;
+  return portFromBaseUrl(p?.baseUrl);
 }
 /** Local URL the orchestrator probes/forwards to for a native row: loopback + native port (never the door). */
 function nativeLocalUrl(p) {
