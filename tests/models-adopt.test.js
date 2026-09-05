@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -181,4 +181,18 @@ test("I2: download then adopt gives path/adopted, and the runtime markers surviv
     assert.equal(entry.wasLive, true, "the orchestrator's runtime marker is preserved across a re-register");
     assert.equal(entry.lastStoppedAt, null);
   } finally { h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
+test("adoptModel: a relative path is refused before anything is hashed or registered", async () => {
+  const h = freshLibsql();
+  try {
+    await assert.rejects(
+      adoptModel({ modelId: "adopt-test", quant: "Q8_0", path: "weights/big.gguf", catalog: catalogFor({ primary: Buffer.from("primary-bytes") }), ...OPTS(h) }),
+      (e) => e instanceof AdoptMismatchError && e.code === "ADOPT_PATH_NOT_ABSOLUTE" && /must be absolute/.test(e.message)
+    );
+    await assert.rejects(
+      adoptModel({ modelId: "adopt-test", quant: "Q8_0", catalog: catalogFor({ primary: Buffer.from("primary-bytes") }), ...OPTS(h) }),
+      (e) => e.code === "ADOPT_PATH_NOT_ABSOLUTE"
+    );
+    assert.equal(Object.keys(loadState(h.dir).registry).length, 0, "nothing registered");
+  } finally { h.cleanup(); }
 });

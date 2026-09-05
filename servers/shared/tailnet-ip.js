@@ -1,3 +1,11 @@
+/**
+ * This host's own tailnet IPv4 address, for building a native model's door URL
+ * (`servers/gateway/models/door.js`). `tailscale ip -4` is the source of
+ * truth; `CROW_TAILNET_IP` overrides it (tests, and hosts where the CLI is not
+ * on PATH). A host with no tailnet address at all yields `null`, and callers
+ * fall back to a loopback door marked `local_only` — correct, but only for as
+ * long as that stays true, which is why a failed probe is never cached.
+ */
 import { execFileSync } from "node:child_process";
 let _cached; // undefined = not yet probed
 export function _resetTailnetIpCache() { _cached = undefined; }

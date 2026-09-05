@@ -1,23 +1,37 @@
 /**
  * Models state store + port allocator (Item G, native model runtime).
  *
- * One JSON state file per CROW_HOME (`<dir>/models/state.json`) holding
- * three independent maps keyed by modelId:
+ * One JSON state file per CROW_HOME (`<dir>/models/state.json`) holding four
+ * independent maps plus one scalar:
  *
- *   - reservations: ephemeral port claims for a locally-spawned model
- *     runtime process (18100-18199), each with an owner {crowHome, pid}
- *     and createdAt so a later boot can tell a live claim from a stale one.
- *   - journal: in-progress model downloads (url/dest/bytesDone/expectedSha/
- *     startedAt) so a killed download can resume instead of restarting.
- *   - registry: models this CROW_HOME has actually installed (file/quant/
- *     catalogId/registeredAt/sizeMb), independent of whether a runtime is
- *     currently running for them. Two optional fields ride the same entry:
- *     `wasLive`/`lastStoppedAt` (Task 13 fix round 1, finding c — see
- *     `registryEntryRuntimeState` below, written by `gpu-orchestrator.js`)
- *     and `source` (e.g. `"hf-browser"` — Task 13 fix round 1, finding 1,
- *     written by `manager.js`'s `registerModel` via its `registryExtra`
- *     param) distinguishing an un-vetted Browse-Hugging-Face registration
- *     from a curated one.
+ *   - reservations (keyed by PROVIDER id): ephemeral port claims for a
+ *     locally-spawned model runtime process (18100-18199), each with an owner
+ *     {crowHome, pid} and createdAt so a later boot can tell a live claim from
+ *     a stale one.
+ *   - journal (keyed by model id): in-progress model downloads (url/dest/
+ *     bytesDone/expectedSha/startedAt) so a killed download can resume instead
+ *     of restarting.
+ *   - registry (keyed `<catalogId>@<quant>` — see `registryKey`): models this
+ *     CROW_HOME has actually installed (file/quant/catalogId/registeredAt/
+ *     sizeMb/shardFiles/companions), independent of whether a runtime is
+ *     currently running for them. The key is what lets two quants of the SAME
+ *     catalog model coexist; entries written before that (Item G, keyed by the
+ *     bare model id) are re-keyed on every `loadState` by
+ *     `migrateRegistryKeys`, so callers resolving an entry from a provider row
+ *     must go through `findRegistryEntryForProvider`/`findRegistryEntries`
+ *     rather than assuming either key shape. Optional fields ride the same
+ *     entry: `wasLive`/`lastStoppedAt` (Task 13 fix round 1, finding c — see
+ *     `registryEntryRuntimeState` below, written by `gpu-orchestrator.js`),
+ *     `source` (e.g. `"hf-browser"` — Task 13 fix round 1, finding 1, written
+ *     by `manager.js`'s `registerModel` via its `registryExtra` param)
+ *     distinguishing an un-vetted Browse-Hugging-Face registration from a
+ *     curated one, and `path`/`adopted`/`verified` for weights adopted from
+ *     disk instead of downloaded.
+ *   - conversions (keyed by provider id): a snapshot of the Docker-bundle
+ *     provider row a native registration replaced, so an operator can see or
+ *     restore what that provider id used to be.
+ *   - runtimeOverride: `null`, or `{ bin, version }` naming an operator-chosen
+ *     llama-server binary that wins over the catalog's release.
  *
  * `dir` is always injected by the caller — this module never guesses a
  * path itself. Production callers pass `resolveDataDir()` (the same
@@ -107,7 +121,14 @@ export function migrateRegistryKeys(registry) {
       typeof entry.catalogId === "string" &&
       typeof entry.quant === "string";
     const newKey = legacy ? registryKey(entry.catalogId, entry.quant) : key;
-    if (!(newKey in out)) out[newKey] = entry;
+    if (newKey in out) {
+      // Two entries claim the same key (a legacy entry alongside an already
+      // migrated one, most likely). First writer wins; say so rather than
+      // dropping an install silently.
+      console.warn(`[models/state] registry migration: dropping duplicate entry "${key}" — "${newKey}" is already taken`);
+      continue;
+    }
+    out[newKey] = entry;
   }
   return out;
 }
