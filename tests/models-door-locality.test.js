@@ -59,3 +59,37 @@ test("localizeNativeRow rewrites an owned native row to loopback and keeps the d
   const noPort = { baseUrl: "http://127.0.0.1:18100/v1", gpuPolicy: { runtime: "native", owner: "crow" } };
   assert.equal(localizeNativeRow(noPort, "crow").baseUrl, "http://127.0.0.1:18100/v1"); // pre-arc row: already loopback, no rewrite
 });
+
+test("getOwnTailnetIp: IPv6-first output extracts the first IPv4 address", () => {
+  _resetTailnetIpCache();
+  const exec = () => "fd7a:115c::1\n100.118.41.122\n";
+  assert.equal(getOwnTailnetIp({ env: {}, execFileSyncImpl: exec }), "100.118.41.122");
+});
+
+test("getOwnTailnetIp: cache: false bypasses cache on every call", () => {
+  _resetTailnetIpCache();
+  let calls = 0;
+  const exec = () => { calls++; return "100.118.41.122\n"; };
+  assert.equal(getOwnTailnetIp({ env: {}, execFileSyncImpl: exec, cache: false }), "100.118.41.122");
+  assert.equal(getOwnTailnetIp({ env: {}, execFileSyncImpl: exec, cache: false }), "100.118.41.122");
+  assert.equal(calls, 2);
+  // After cache:false calls, a cache:true call should still probe because _cached was never set
+  assert.equal(getOwnTailnetIp({ env: {}, execFileSyncImpl: exec, cache: true }), "100.118.41.122");
+  assert.equal(calls, 3);
+});
+
+test("isOwnedHere: empty string owner is null (falsy but not undeclared)", () => {
+  assert.equal(isOwnedHere({ gpuPolicy: { owner: "" } }, "A"), null);
+});
+
+test("isOrchestratableHere: empty owner falls back to baseUrl rule; loopback in OWN -> true", () => {
+  const row = { baseUrl: "http://127.0.0.1:18100/v1", gpuPolicy: { owner: "" } };
+  assert.equal(isOrchestratableHere(row, { ownAddrs: OWN, ownInstanceId: "crow" }), true);
+});
+
+test("localizeNativeRow: string port (numeric) is converted and used", () => {
+  const row = { baseUrl: "http://100.118.41.122:3001/llm/v1", gpuPolicy: { runtime: "native", owner: "crow", port: "18100" } };
+  const local = localizeNativeRow(row, "crow");
+  assert.equal(local.baseUrl, "http://127.0.0.1:18100/v1");
+  assert.equal(local.doorUrl, "http://100.118.41.122:3001/llm/v1");
+});
