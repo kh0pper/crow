@@ -49,6 +49,7 @@ import https from "node:https";
 import { join, relative } from "node:path";
 
 import { superviseProcess } from "../process-supervisor.js";
+import { renderLaunchArgs } from "./launch.js";
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -191,6 +192,7 @@ export function glibcAtLeast(actual, required) {
 // ---------------------------------------------------------------------------
 
 const LINUX_VULKAN_KEY = "linux-x64-vulkan";
+const LINUX_CUDA_KEY = "linux-x64-cuda";
 const LINUX_CPU_KEY = "linux-x64-cpu";
 const DEFAULT_RUNTIME_BASE_URL = "https://github.com/ggml-org/llama.cpp";
 
@@ -275,6 +277,12 @@ export function resolveAsset(probe, runtimeBlock, opts = {}) {
   const wantsGpu = !forceCpu && (probe.accel === "vulkan" || probe.accel === "cuda");
 
   if (wantsGpu) {
+    if (probe.accel === "cuda") {
+      const cudaAsset = assets[LINUX_CUDA_KEY];
+      if (cudaAsset && glibcAtLeast(parseGlibcVersion(lddOutput), cudaAsset.min_glibc)) {
+        return { key: LINUX_CUDA_KEY, url: buildRuntimeDownloadUrl(release, cudaAsset.file, baseUrl), sha256: cudaAsset.sha256 };
+      }
+    }
     const vkAsset = assets[LINUX_VULKAN_KEY];
     if (!vkAsset) {
       return { error: new RuntimeAssetError(`No runtime asset for "${LINUX_VULKAN_KEY}" in catalog`, "NO_ASSET", { key: LINUX_VULKAN_KEY }) };
@@ -903,8 +911,8 @@ export function defaultIdleMinutes() {
  * out in the spec's "MUST include" list because that list is about the
  * identity/networking flags a caller can verify without knowing
  * llama-server's full CLI surface). */
-export function buildLlamaServerArgs({ ggufPath, alias, port, host = "127.0.0.1", extraArgs = [] }) {
-  return ["--model", ggufPath, "--alias", alias, "--port", String(port), "--host", host, ...extraArgs];
+export function buildLlamaServerArgs({ ggufPath, alias, port, host = "127.0.0.1", launch = null, extraArgs = [] }) {
+  return ["--model", ggufPath, "--alias", alias, "--port", String(port), "--host", host, ...renderLaunchArgs(launch), ...extraArgs];
 }
 
 // Status snapshot registry for the panel (Task 9 wires this into
@@ -967,6 +975,7 @@ export function startModel({
   alias,
   port,
   host = "127.0.0.1",
+  launch = null,
   extraArgs = [],
   spawn = spawnCb,
   keepWarm = false,
@@ -979,7 +988,7 @@ export function startModel({
   clearTimeoutFn = clearTimeout,
   onTerminal = () => {},
 }) {
-  const args = buildLlamaServerArgs({ ggufPath, alias, port, host, extraArgs });
+  const args = buildLlamaServerArgs({ ggufPath, alias, port, host, launch, extraArgs });
 
   // Generic spawn/restart/idle/kill supervision lives in
   // `process-supervisor.js` (C4 Task 1) — this function only adds the
@@ -1005,6 +1014,7 @@ export function startModel({
 
   handle.alias = alias;
   handle.port = port;
+  handle.argv = args;
 
   const genericStatus = handle.status;
   handle.status = function status() {
@@ -1012,6 +1022,7 @@ export function startModel({
     return {
       alias,
       port,
+      argv: args,
       state: s.state,
       live: s.live,
       restartCount: s.restartCount,
