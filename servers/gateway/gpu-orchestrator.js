@@ -966,6 +966,19 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
  *   recovery), `true` when this call actually started it.
  */
 async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
+  // Owner gate, defence in depth (final review C3). Every caller is
+  // SUPPOSED to gate first, but this is the single funnel through which a
+  // native process is ever spawned, and one caller (`retryDeferredResidents`
+  // → `ensureResident` → `ensureNativeResident`) reached it through a
+  // weaker, hostname-only check. On a co-hosted box a peer's door row shares
+  // our tailnet address, so a hostname check passes and we would start (and
+  // later stop) ANOTHER instance's model. Refuse here, always.
+  if (!orchestratableHere(p, opts)) {
+    console.warn(`[gpu-orchestrator] refusing to start native ${providerName}: owned by ${p?.gpuPolicy?.owner || "another host"}, not this instance`);
+    const err = new Error(`orchestrator: native provider "${providerName}" is owned by another instance — refusing to start it here`);
+    err.code = "NOT_OWNER";
+    throw err;
+  }
   const {
     acquireHostLockFn = acquireHostLock,
     identityProbeFn = identityProbe,
@@ -1348,7 +1361,10 @@ export async function retryDeferredResidents({
   for (const name of [..._deferredResidents]) {
     const p = (cfg.providers || {})[name];
     if (!p) { _deferredResidents.delete(name); continue; }
-    if (!isLocallyOrchestratable(p, ownAddrs)) continue; // still not ours — stays parked
+    // Owner gate, not the bare hostname rule (final review C3): a peer's
+    // door row shares this box's tailnet address, so `isLocallyOrchestratable`
+    // alone would un-park it here and start another instance's model.
+    if (!orchestratableHere(p, {}, ownAddrs)) continue; // still not ours — stays parked
     const blocked = startBlockedBy(name);
     if (blocked) { noteDeferred(blocked, "residency-retry:" + name); continue; } // reserved — stays parked
     _deferredResidents.delete(name);

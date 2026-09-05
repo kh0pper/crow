@@ -1302,3 +1302,61 @@ test("C1: a pre-arc native row (no catalogId/quant in gpu_policy) still starts a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Final review C3: `acquireOrStartNative` is the single funnel through which a
+// native process is ever spawned, and `ensureResident`'s boot/residency path
+// reaches it WITHOUT acquireProvider's outer owner gate. It must refuse a
+// foreign-owned row itself.
+// ---------------------------------------------------------------------------
+
+test("C3: ensureResident never starts a foreign-owned native row — acquireOrStartNative refuses with NOT_OWNER", async () => {
+  const startCalls = [];
+  // A peer instance's door row. On a co-hosted box its tailnet address IS
+  // one of ours, so the hostname-only rule would happily start it.
+  const p = nativeProv(18100, "native-target", {
+    baseUrl: "http://100.118.41.122:3001/llm/v1",
+    gpuPolicy: { owner: "r4-instance", port: 18100, alwaysResident: true },
+  });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+
+  const warned = [];
+  const errored = [];
+  const realWarn = console.warn;
+  const realError = console.error;
+  console.warn = (msg) => warned.push(String(msg));
+  console.error = (msg) => errored.push(String(msg));
+  let result;
+  try {
+    result = await ensureResident("native-target", cfg, opts);
+  } finally {
+    console.warn = realWarn;
+    console.error = realError;
+  }
+
+  assert.equal(result, false, "residency reports failure rather than starting someone else's model");
+  assert.equal(startCalls.length, 0, "startModel was never called for a row this instance does not own");
+  assert.ok(
+    warned.some((m) => m.includes("refusing to start native native-target") && m.includes("r4-instance")),
+    `expected the refusal warning naming the owner, got: ${JSON.stringify(warned)}`
+  );
+  assert.ok(
+    errored.some((m) => m.includes("owned by another instance")),
+    `expected the NOT_OWNER error to surface through ensureResident's log, got: ${JSON.stringify(errored)}`
+  );
+});
+
+test("C3: the same row, owned by THIS instance, still starts through ensureResident (the gate is ownership, not the door URL)", async () => {
+  const startCalls = [];
+  const p = nativeProv(18100, "native-target", {
+    baseUrl: "http://100.118.41.122:3001/llm/v1",
+    gpuPolicy: { owner: "this-instance", port: 18100, alwaysResident: true },
+  });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+  await ensureResident("native-target", cfg, opts);
+  assert.equal(startCalls.length, 1, "an owned row is unaffected by the new gate");
+});

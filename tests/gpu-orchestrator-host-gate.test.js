@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   getOwnAddresses, isLocallyOrchestratable,
   alwaysResidentProviders, resolveWarmableProviderName,
-  retryDeferredResidents, _setDeferredResidentsForTest,
+  retryDeferredResidents, _setDeferredResidentsForTest, _setOwnInstanceIdForTest,
 } from "../servers/gateway/gpu-orchestrator.js";
 
 // Real fleet shapes (models.json fallback on a fresh install):
@@ -83,4 +83,42 @@ test("R2-C1: a peer's resident parks forever without ensure calls or errors", as
   assert.deepEqual(await retryDeferredResidents({ cfg: CFG, ownAddrs: CROW, ensure }), []);
   assert.deepEqual(calls, []);
   _setDeferredResidentsForTest([]); // isolation for later tests
+});
+
+// ---------------------------------------------------------------------------
+// Final review C3: the deferred-residency retry used the bare hostname rule.
+// On a co-hosted box (crow primary + r4) a PEER's native door row carries this
+// box's own tailnet address, so the hostname rule un-parks it and hands it to
+// ensureResident, which starts another instance's model.
+// ---------------------------------------------------------------------------
+
+const PEER_NATIVE = { providers: {
+  "peer-native": {
+    baseUrl: "http://100.118.41.122:3001/llm/v1", // the SHARED box address
+    host: "local", bundleId: null,
+    models: [{ id: "peer-model", task: "chat" }],
+    gpuPolicy: { runtime: "native", owner: "r4-instance", port: 18170, alwaysResident: true },
+  },
+} };
+
+test("C3: a deferred native row owned by a co-hosted PEER stays parked, never ensured", async () => {
+  try {
+    _setOwnInstanceIdForTest("crow-primary");
+    _setDeferredResidentsForTest(["peer-native"]);
+    const calls = [];
+    const ensure = async (name) => { calls.push(name); return false; };
+
+    assert.deepEqual(await retryDeferredResidents({ cfg: PEER_NATIVE, ownAddrs: CROW, ensure }), []);
+    assert.deepEqual(calls, [], "a peer's row is never handed to ensureResident");
+    // Second pass: it is still IN the deferred set (not silently dropped) —
+    // proven by flipping ownership and watching the very same set drain.
+    assert.deepEqual(await retryDeferredResidents({ cfg: PEER_NATIVE, ownAddrs: CROW, ensure }), []);
+
+    _setOwnInstanceIdForTest("r4-instance");
+    assert.deepEqual(await retryDeferredResidents({ cfg: PEER_NATIVE, ownAddrs: CROW, ensure }), ["peer-native"]);
+    assert.deepEqual(calls, ["peer-native"], "the OWNING instance still self-heals its own deferred resident");
+  } finally {
+    _setOwnInstanceIdForTest(null);
+    _setDeferredResidentsForTest([]);
+  }
 });
