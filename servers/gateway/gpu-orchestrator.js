@@ -399,7 +399,12 @@ function registryKeyOf(p, providerName, state) {
   const found = findRegistryEntryForProvider(state, p);
   if (found) return found.key;
   if (state?.registry?.[providerName]) return providerName;
-  return findRegistryEntries(state, providerName)[0]?.key ?? providerName;
+  const matches = findRegistryEntries(state, providerName);
+  if (matches.length === 1) return matches[0].key;
+  if (matches.length > 1) {
+    console.warn(`[gpu-orchestrator] ${matches.length} registry entries match legacy provider "${providerName}" (${matches.map((m) => m.key).join(", ")}) — refusing to guess; re-register the provider with an explicit quant`);
+  }
+  return providerName; // → the existing loud "no model registry entry" error
 }
 
 function getMutexSiblings(name, cfg = loadProviders()) {
