@@ -44,14 +44,28 @@ export class RuntimeOverrideError extends Error {
 }
 
 /**
- * `"version: 10068 (abc1234)\nbuilt with cc\n"` -> `"b10068"`.
- * Unrecognized output falls back to its first line, trimmed.
+ * Find the `version:` line anywhere in `--version` output (it can land on
+ * either stdout or stderr, and may not be the first line — e.g. a blank
+ * leading line when stdout was empty and stderr carried the text).
+ *
+ * Two llama-server version formats are recognized:
+ *   - stock release tarballs: `"version: 10068 (abc1234)"` -> `"b10068"`
+ *   - modern/dev builds: `"version: 0.2.0-dev (build 405, commit b21e4de74)"`
+ *     -> `"0.2.0-dev (build 405, commit b21e4de74)"` (returned verbatim,
+ *     since there's no single build-number token to compress it to)
+ *
+ * With no recognizable `version:` line, falls back to the first non-blank
+ * line, trimmed (or `""` if the output is empty/all-blank).
  */
 export function parseLlamaServerVersion(output) {
-  const text = String(output || "");
-  const m = text.match(/version:\s*(\d+)/i);
-  if (m) return `b${m[1]}`;
-  return (text.split("\n")[0] || "").trim();
+  const lines = String(output || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const versionLine = lines.find((l) => /^version:/i.test(l));
+  if (versionLine) {
+    const legacy = versionLine.match(/^version:\s*(\d+)\s*\(/i);
+    if (legacy) return `b${legacy[1]}`;
+    return versionLine.replace(/^version:\s*/i, "").trim();
+  }
+  return lines[0] || "";
 }
 
 function validateBinary(bin, { accessSyncImpl = accessSync, spawnSyncImpl = spawnSync } = {}) {

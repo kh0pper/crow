@@ -19,6 +19,20 @@ test("parseLlamaServerVersion maps llama-server's version line to a b-tag", () =
   assert.equal(parseLlamaServerVersion("something else\n"), "something else");
 });
 
+test("parseLlamaServerVersion returns a modern dev-build version line verbatim", () => {
+  assert.equal(
+    parseLlamaServerVersion("version: 0.2.0-dev (build 405, commit b21e4de74)\nbuilt with GNU 13.3.0"),
+    "0.2.0-dev (build 405, commit b21e4de74)"
+  );
+});
+
+test("parseLlamaServerVersion finds the version line past a leading blank line", () => {
+  assert.equal(
+    parseLlamaServerVersion("\nversion: 0.3.0-dev (build 1, commit 035e227)\n"),
+    "0.3.0-dev (build 1, commit 035e227)"
+  );
+});
+
 test("getRuntimeOverride is null with no record and no env", () => withDir((dir) => {
   assert.equal(getRuntimeOverride(dir, { env: {} }), null);
 }));
@@ -29,6 +43,12 @@ test("setRuntimeOverride validates and persists { bin, label, version, setAt }",
   assert.deepEqual(rec, { bin: "/opt/llama/llama-server", label: "rocm-7.2.3", version: "b10068", setAt: "2026-09-05T00:00:00.000Z" });
   assert.deepEqual(loadState(dir).runtimeOverride, rec);
   assert.equal(getRuntimeOverride(dir, { env: {} }).source, "state");
+}));
+
+test("setRuntimeOverride stores a modern dev-build version line verbatim", () => withDir((dir) => {
+  const rec = setRuntimeOverride(dir, { bin: "/opt/llama/llama-server" },
+    { spawnSyncImpl: () => ({ status: 0, stdout: "", stderr: "version: 0.2.0-dev (build 405, commit b21e4de74)\n" }), accessSyncImpl: okAccess });
+  assert.equal(rec.version, "0.2.0-dev (build 405, commit b21e4de74)");
 }));
 
 test("setRuntimeOverride refuses a relative path, a non-executable, and a binary whose --version fails", () => withDir((dir) => {
