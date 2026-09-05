@@ -93,3 +93,17 @@ test("localizeNativeRow: string port (numeric) is converted and used", () => {
   assert.equal(local.baseUrl, "http://127.0.0.1:18100/v1");
   assert.equal(local.doorUrl, "http://100.118.41.122:3001/llm/v1");
 });
+
+test("I4: a FAILED probe is not cached — a gateway that boots before tailscaled picks the IP up later", () => {
+  _resetTailnetIpCache();
+  assert.equal(getOwnTailnetIp({ env: {}, execFileSyncImpl: () => { throw new Error("no tailscale yet"); } }), null);
+  // No _resetTailnetIpCache() here: the retry must happen on its own.
+  let calls = 0;
+  const exec = () => { calls++; return "100.118.41.122\n"; };
+  assert.equal(getOwnTailnetIp({ env: {}, execFileSyncImpl: exec }), "100.118.41.122", "tailscaled came up — the next call probes again");
+  assert.equal(calls, 1);
+  // ...and the successful result IS cached from then on.
+  assert.equal(getOwnTailnetIp({ env: {}, execFileSyncImpl: exec }), "100.118.41.122");
+  assert.equal(calls, 1);
+  _resetTailnetIpCache();
+});
