@@ -1,6 +1,6 @@
 # Model bundles → catalog + Hugging Face browser — DESIGN (2026-09-04)
 
-Status: **DESIGN APPROVED in brainstorm 2026-09-04** (Kevin, section by section); plan not yet written.
+Status: **DESIGN APPROVED in brainstorm 2026-09-04** (Kevin, section by section); step-time decisions D12–D14 taken 2026-09-05; plan not yet written.
 Predecessors: `docs/superpowers/handoffs/2026-09-04-catalog-v2-shipped-next-bundles-to-catalog-arc.md`
 (seed facts), `docs/superpowers/plans/2026-09-04-model-catalog-curation.md` (catalog v2 + stale
 bundle retirement, shipped as PRs #303/#304), `docs/architecture/box-reservation.md`.
@@ -75,6 +75,9 @@ What the code says about the gap:
 | D9 | Bundle fate | **Delete crow's model bundles after migration.** Correction accepted in §7: the orchestrator's docker branch and the `inference: true` contract stay until the fleet arc, because grackle's gateway still starts its specialists with them. |
 | D10 | Arc shape | **Incremental cutover by provider role** (embed → voice → chat → 27B variants → gemma → retire), each inside a registered reservation window, bundle branch as rollback. |
 | D11 | Registry key | `<catalogId>@<quant>`; vision models join the chat mutex group by default. |
+| D12 | Voice quant (2026-09-05) | **Q8_0** for crow-voice (the bundle served BF16; Q4_K_XL stays the fresh-install default). |
+| D13 | wayfinder-embed (2026-09-05) | **Not adopted.** It stays r4's own launcher. |
+| D14 | Gemma embedding (2026-09-05) | **EmbeddingGemma-300M joins the catalog** as an optional alternative to Qwen3-Embedding-0.6B (`ggml-org/embeddinggemma-300M-GGUF`, Q8_0, ungated, Gemma license; byte-identical to the file r4 runs). Same vector space caveat as any embedding change: switching the fleet embedder re-embeds; it is offered, not made the default. |
 
 ## 3. Data model
 
@@ -107,6 +110,14 @@ no_mmap, spec draft-mtp n2); 27B (ctx 262144, fa on, kv q8_0, no_mmap, np 1, spe
 Qwen thinking-mode sampling); embed (ctx 32768, parallel 8, `--pooling mean -b 4096 -ub 4096`);
 4B voice (ctx 32768, fa on); gemma (ctx 8192, `--reasoning-budget 0`); Flash-Next, GLM-5.3-Flash,
 DSv4-Flash (ctx as bench notes; `spec` where the companion exists).
+
+**New catalog entry (D14):** `embeddinggemma-300m` — family `gemma3`, lab Google, `hf_repo`
+`ggml-org/embeddinggemma-300M-GGUF`, license `gemma`, `gated: false`, `task: embedding`,
+`context_len: 2048`, quant `Q8_0` (`embeddinggemma-300M-Q8_0.gguf`, 333,590,944 bytes, sha256
+`b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63`), tags `small, embedding,
+cpu-capable, alternative`, `launch: {ctx: 2048}` with **no pooling flag** (the GGUF declares mean
+pooling and llama.cpp honours it; overriding it changes the vectors). Dimensions 768. Notes state
+it is the optional alternative to `qwen3-embedding-0.6b` and that switching embedders re-embeds.
 
 ### 3.2 Provider row (`providers.gpu_policy`, JSON)
 
@@ -243,9 +254,9 @@ reservation held; deploys only when `box-reserve.mjs status` shows no reservatio
 1. **crow-embed.** Adopt `hf-cache/qwen3-embedding-0.6b/Qwen3-Embedding-0.6B-Q8_0.gguf`; convert;
    start native; a memory recall embeds through it; stop and remove the container. Proves the
    allow-list exemption on the reservation gate.
-2. **crow-voice.** Catalog 4B already downloaded (UD-Q4_K_XL). Kevin decides the quant at this step
-   (recommendation: Q8_0 for voice quality, the bundle served BF16). Convert with `alwaysResident`,
-   no group. Companion and glasses already use `/llm/v1`; unchanged.
+2. **crow-voice.** Download the catalog 4B at **Q8_0** (D12; the UD-Q4_K_XL already on disk stays
+   registered as the fresh-install default row `qwen3.5-4b`). Convert `crow-voice` with
+   `alwaysResident`, no group. Companion and glasses already use `/llm/v1`; unchanged.
 3. **crow-chat.** Adopt 35B UD-Q5_K_XL + `mmproj-F16.gguf` from `hf-cache/qwen36-35b-a3b-mtp`;
    launch from §3.1; default member of `crow-strix-vram`. Acceptance: a bot round-trip and
    single-stream code tok/s within 10% of the bundle baseline (~70 tok/s). If the stock release is
@@ -253,9 +264,9 @@ reservation held; deploys only when `box-reserve.mjs status` shows no reservatio
 4. **27B variants.** Adopt UD-Q6_K_XL + mmproj once; register `crow-local-27b`, `-copilot`, `-512k`
    with per-variant `launch` (512k carries YaRN `extra_args`); retire the raw-port alias rows
    (`crow-local`, `crow-swap-agentic`, `crow-llm` reviewed individually); ship the pi-lab change.
-5. **gemma for r4.** Adopt from the wayfinder models path; `alwaysResident`, no group; r4's
-   `ASK_LLM_URL` moves to the door. `wayfinder-embed` inspected here: adopted the same way or left
-   to r4 (decided at the step, not in this spec).
+5. **gemma for r4.** Adopt `gemma-4-E2B-it-Q4_0.gguf` from the wayfinder models path;
+   `alwaysResident`, no group; r4's `ASK_LLM_URL` moves to the door. `wayfinder-embed` is **not**
+   adopted (D13): it keeps serving r4's `kb_embeddings` on `127.0.0.1:3794` from its own compose.
 6. **Retire.** Delete `bundles/llamacpp-vulkan-qwen36-35b-a3b`, `vllm-rocm-qwen35-4b`,
    `llamacpp-vulkan-qwen3-embed`, `llamacpp-cpu-qwen3-embed`; regenerate the registry; port table
    rows; their `installed.json` entries and `~/.crow/bundles` copies; the `~/crow-addons` model
