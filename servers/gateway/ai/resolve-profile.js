@@ -15,6 +15,8 @@ import { readFileSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadProviders as loadCachedProviders } from "../../shared/providers.js";
+import { localizeDbBaseUrl } from "../../shared/native-locality.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const MODEL_CATALOG_PATH = resolve(dirname(__filename), "..", "..", "..", "registry", "model-catalog.json");
@@ -56,7 +58,14 @@ function firstModelId(models) {
   return typeof m === "string" ? m : m.id || null;
 }
 
-async function resolveFromDb(db, providerId, modelId) {
+/** DB-first resolve for one provider row.
+ *
+ * This is one of the three read paths that turn a providers row into a
+ * request target, so it must localize an OWNED native row's door `base_url`
+ * back to loopback (`servers/shared/native-locality.js`) — otherwise the
+ * owning gateway posts chat completions to its own `/llm/v1` door and
+ * recurses into itself. `ownInstanceIdFn` is injectable for tests. */
+async function resolveFromDb(db, providerId, modelId, ownInstanceIdFn = getOrCreateLocalInstanceId) {
   if (!db) return null;
   let rows;
   try {
@@ -78,6 +87,9 @@ async function resolveFromDb(db, providerId, modelId) {
     pickedModel = modelId;
   }
 
+  let policy = null;
+  try { policy = typeof r.gpu_policy === "string" ? JSON.parse(r.gpu_policy) : r.gpu_policy; } catch {}
+
   const pickedEntry = models.find((m) => typeof m === "object" && m.id === pickedModel);
   let chatTemplateKwargs =
     pickedEntry && pickedEntry.chatTemplateKwargs && typeof pickedEntry.chatTemplateKwargs === "object"
@@ -87,8 +99,6 @@ async function resolveFromDb(db, providerId, modelId) {
     // Healing fallback: rows registered before the catalog carried the
     // field. Only for native-runtime rows (provider id IS the catalog
     // model id) — see catalogModelEntry's doc.
-    let policy = null;
-    try { policy = typeof r.gpu_policy === "string" ? JSON.parse(r.gpu_policy) : r.gpu_policy; } catch {}
     if (policy && policy.runtime === "native") {
       const cat = catalogModelEntry(providerId);
       if (cat && cat.chat_template_kwargs && typeof cat.chat_template_kwargs === "object") {
@@ -98,7 +108,7 @@ async function resolveFromDb(db, providerId, modelId) {
   }
 
   return {
-    baseUrl: r.base_url,
+    baseUrl: localizeDbBaseUrl(r.base_url, policy, ownInstanceIdFn),
     apiKey: r.api_key || "none",
     model: pickedModel,
     provider_id: providerId,
@@ -133,9 +143,9 @@ function resolveFromModelsJson(providerId, modelId) {
  * @param {string} [modelId]     if omitted, uses the provider's first model
  * @returns {Promise<{ baseUrl, apiKey, model, provider_id, provider_type, host }>}
  */
-export async function resolveProviderConfig(db, providerId, modelId) {
+export async function resolveProviderConfig(db, providerId, modelId, { ownInstanceIdFn } = {}) {
   if (!providerId) throw new Error("providerId required");
-  const fromDb = await resolveFromDb(db, providerId, modelId);
+  const fromDb = await resolveFromDb(db, providerId, modelId, ownInstanceIdFn || getOrCreateLocalInstanceId);
   if (fromDb) return fromDb;
   const fromJson = resolveFromModelsJson(providerId, modelId);
   if (fromJson) return fromJson;
