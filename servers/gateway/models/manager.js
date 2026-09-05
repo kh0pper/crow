@@ -1644,13 +1644,26 @@ export async function registerModel({
   // them all. Both are empty arrays for a plain single-file quant. Keyed
   // by `registryKey`, NOT `providerId` — a second variant of the same
   // catalog model+quant shares this same entry.
+  // Only three fields survive a RE-register: `registeredAt` (the install's
+  // original date) and the `wasLive`/`lastStoppedAt` runtime markers that
+  // gpu-orchestrator.js owns. Everything else — `path`, `adopted`,
+  // `verified`, `source`, `companions`, `shardFiles`, `file`, `quant`,
+  // `catalogId`, `sizeMb` — is re-derived from THIS call (plus
+  // `registryExtra`). Spreading the whole previous entry instead would let a
+  // stale `path`/`adopted` from an earlier adopt survive a later download of
+  // the same key, leaving the entry pointing at weights this install no
+  // longer owns (final review I2).
   const plannedFiles = planFiles(model, quantEntry);
+  const prevEntry = state.registry[key] || {};
+  const carriedRuntimeState = {};
+  if (prevEntry.wasLive !== undefined) carriedRuntimeState.wasLive = prevEntry.wasLive;
+  if (prevEntry.lastStoppedAt !== undefined) carriedRuntimeState.lastStoppedAt = prevEntry.lastStoppedAt;
   state.registry[key] = {
-    ...(state.registry[key] || {}),
+    ...carriedRuntimeState,
     file: sanitizeFilename(quantEntry.file),
     quant: quantEntry.quant,
     catalogId: model.id,
-    registeredAt: state.registry[key]?.registeredAt || new Date().toISOString(),
+    registeredAt: prevEntry.registeredAt || new Date().toISOString(),
     sizeMb: Number.isFinite(quantEntry.size_mb) ? quantEntry.size_mb : null,
     shardFiles: plannedFiles.filter((f) => f.role === "shard").map((f) => f.dest),
     companions: plannedFiles.filter((f) => f.role === "companion").map((f) => ({ kind: f.kind, file: f.dest })),
