@@ -40,7 +40,7 @@ import { t, tJs, fill } from "../shared/i18n.js";
 import { escapeHtml, button, callout, tabs } from "../shared/components.js";
 import { resolveDataDir } from "../../../db.js";
 import { getCachedProbe, reprobe, fitBadge } from "../../models/probe.js";
-import { loadState, registryEntryRuntimeState } from "../../models/state.js";
+import { loadState, registryEntryRuntimeState, findRegistryEntries } from "../../models/state.js";
 import { getStatusSnapshot } from "../../models/runtime.js";
 import { getNativeHandle } from "../../gpu-orchestrator.js";
 import { listProvidersAll } from "../../../shared/providers-db.js";
@@ -57,6 +57,15 @@ function defaultLoadCatalog() {
   } catch {
     return { runtime: {}, models: [] };
   }
+}
+
+// Registry keys are now `<catalogId>@<quant>` (Task 5), but this panel
+// looks entries up by catalog id — same helper as `routes/models.js`'s
+// `regEntryFor` (mirrored here rather than shared, matching this file's
+// existing pattern of re-implementing routes/models.js's read-only data
+// assembly directly, see module doc).
+function regEntryFor(state, id) {
+  return state.registry[id] || (findRegistryEntries(state, id)[0]?.entry ?? null);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +157,7 @@ export async function loadPanelData({
   const state = loadStateFn(resolvedDir);
 
   const models = (catalog.models || []).map((model) => {
-    const regEntry = state.registry[model.id] || null;
+    const regEntry = regEntryFor(state, model.id);
     const handle = getNativeHandleFn(model.id);
     const quants = (model.quants || []).map((q) => ({
       quant: q.quant,
@@ -178,22 +187,29 @@ export async function loadPanelData({
 
   const snapshot = getStatusSnapshotFn();
   const byAlias = new Map(snapshot.map((s) => [s.alias, s]));
-  const runtimeModels = Object.keys(state.registry).map((modelId) => {
+  // Registry keys are now `<catalogId>@<quant>` (Task 5); mirrors
+  // routes/models.js's GET /api/models/runtime assembly — see that route
+  // for why `modelId` (the alias the process supervisor + this panel's
+  // client JS both key on) is `entry.catalogId || key`, with the real
+  // registry key carried alongside as `registryKey`.
+  const runtimeModels = Object.entries(state.registry).map(([key, entry]) => {
+    const modelId = entry.catalogId || key;
     // Task 13 fix round 3: hf-browser-registered models have no curated
     // card (they're not in the catalog at all), so the runtime strip is
     // their ONLY surface — it needs to know their source to offer a
     // Remove affordance there instead.
-    const source = state.registry[modelId]?.source || "curated";
+    const source = entry?.source || "curated";
     const status = byAlias.get(modelId);
-    if (status) return { modelId, source, ...status };
+    if (status) return { modelId, registryKey: key, quant: entry.quant, source, ...status };
     // Task 13 fix round 1, finding c: distinguish "never started" from
     // "was resident when the gateway restarted, hasn't re-warmed yet" via
     // the persisted wasLive marker — same classification GET /api/models/
     // runtime uses, mirrored here for SSR (see state.js's
     // registryEntryRuntimeState doc for the exact contract).
-    const entry = state.registry[modelId];
     return {
       modelId,
+      registryKey: key,
+      quant: entry.quant,
       source,
       state: registryEntryRuntimeStateFn(entry, false),
       live: false, port: null, restartCount: 0, lastError: null, startedAt: null, pid: null,
@@ -212,8 +228,10 @@ export async function loadPanelData({
   }
   for (const rm of runtimeModels) {
     if (!rm.live) continue;
-    const regEntry = state.registry[rm.modelId];
-    const quant = regEntry ? regEntry.quant : null;
+    // rm.modelId is the catalog id (see runtimeModels above), so this
+    // lookup by catalog id keeps working; rm.quant (added alongside
+    // registryKey) is this specific install's quant, no re-lookup needed.
+    const quant = rm.quant || null;
     const q = quant && quantLookup.get(rm.modelId)?.get(quant);
     if (q) {
       estimatedRamMb += q.min_ram_mb || 0;
