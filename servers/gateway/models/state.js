@@ -65,7 +65,7 @@ export class PortRangeExhaustedError extends Error {
 }
 
 function emptyState() {
-  return { reservations: {}, journal: {}, registry: {} };
+  return { reservations: {}, journal: {}, registry: {}, conversions: {}, runtimeOverride: null };
 }
 
 /** Path to the state file for a given (injected) CROW_HOME/data dir. */
@@ -74,9 +74,51 @@ export function statePath(dir) {
 }
 
 /**
+ * Registry keys were the model id (Item G). This arc keys them
+ * `<catalogId>@<quant>` instead, so the same catalog id can carry multiple
+ * quants side by side. `registryKey`/`parseRegistryKey` are the two halves
+ * of that encoding — `parseRegistryKey` returns `null` for a legacy
+ * (no-"@") key so callers can tell old- from new-style keys apart.
+ */
+export function registryKey(catalogId, quant) {
+  return `${catalogId}@${quant}`;
+}
+
+export function parseRegistryKey(key) {
+  const at = typeof key === "string" ? key.indexOf("@") : -1;
+  if (at <= 0 || at === key.length - 1) return null;
+  return { catalogId: key.slice(0, at), quant: key.slice(at + 1) };
+}
+
+/**
+ * Re-key every legacy (Item G) registry entry that carries both
+ * `catalogId` and `quant` to `<catalogId>@<quant>`. Entries that already
+ * use the new key form, or that lack one of those two fields (e.g.
+ * hf-browser rows registered before this arc), keep their existing key.
+ * Pure (returns a new object) and idempotent — running it twice over its
+ * own output is a no-op.
+ */
+export function migrateRegistryKeys(registry) {
+  const out = {};
+  for (const [key, entry] of Object.entries(registry || {})) {
+    const legacy =
+      parseRegistryKey(key) === null &&
+      entry &&
+      typeof entry.catalogId === "string" &&
+      typeof entry.quant === "string";
+    const newKey = legacy ? registryKey(entry.catalogId, entry.quant) : key;
+    if (!(newKey in out)) out[newKey] = entry;
+  }
+  return out;
+}
+
+/**
  * Load state from `<dir>/models/state.json`. Missing file or unparsable
  * JSON both resolve to a fresh empty state rather than throwing — a
- * corrupt/absent state file must never block boot.
+ * corrupt/absent state file must never block boot. Legacy registry keys
+ * are migrated to `<catalogId>@<quant>` on every load (see
+ * `migrateRegistryKeys`); the migration is idempotent, so re-loading an
+ * already-migrated file is a no-op.
  */
 export function loadState(dir) {
   const path = statePath(dir);
@@ -84,14 +126,52 @@ export function loadState(dir) {
   try {
     const raw = readFileSync(path, "utf8");
     const parsed = JSON.parse(raw);
+    const obj = (k) => (parsed && typeof parsed[k] === "object" && parsed[k]) || {};
     return {
-      reservations: (parsed && typeof parsed.reservations === "object" && parsed.reservations) || {},
-      journal: (parsed && typeof parsed.journal === "object" && parsed.journal) || {},
-      registry: (parsed && typeof parsed.registry === "object" && parsed.registry) || {},
+      reservations: obj("reservations"),
+      journal: obj("journal"),
+      registry: migrateRegistryKeys(obj("registry")),
+      conversions: obj("conversions"),
+      runtimeOverride:
+        parsed && parsed.runtimeOverride && typeof parsed.runtimeOverride === "object"
+          ? parsed.runtimeOverride
+          : null,
     };
   } catch {
     return emptyState();
   }
+}
+
+/**
+ * Every registry entry for a given catalog id, across all its installed
+ * quants — including a legacy (pre-migration, or fields-incomplete)
+ * entry keyed by the bare catalog id itself.
+ *
+ * @returns {{key: string, entry: object}[]}
+ */
+export function findRegistryEntries(state, catalogId) {
+  const out = [];
+  for (const [key, entry] of Object.entries(state?.registry || {})) {
+    const parsed = parseRegistryKey(key);
+    if ((parsed && parsed.catalogId === catalogId) || (!parsed && key === catalogId)) {
+      out.push({ key, entry });
+    }
+  }
+  return out;
+}
+
+/**
+ * Resolve a provider row's `gpuPolicy.{catalogId,quant}` to its registry
+ * entry, or `null` if either field is missing or no entry matches.
+ *
+ * @returns {{key: string, entry: object} | null}
+ */
+export function findRegistryEntryForProvider(state, provider) {
+  const gp = provider?.gpuPolicy || {};
+  if (typeof gp.catalogId !== "string" || typeof gp.quant !== "string") return null;
+  const key = registryKey(gp.catalogId, gp.quant);
+  const entry = state?.registry?.[key];
+  return entry ? { key, entry } : null;
 }
 
 /**

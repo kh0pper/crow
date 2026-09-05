@@ -16,6 +16,10 @@ import {
   releasePort,
   reconcileOnBoot,
   registryEntryRuntimeState,
+  registryKey,
+  parseRegistryKey,
+  findRegistryEntries,
+  findRegistryEntryForProvider,
 } from "../servers/gateway/models/state.js";
 
 function scratchDir(tag) {
@@ -156,7 +160,7 @@ test("statePath derives from the injected dir, never os.homedir()", () => {
 test("loadState on a missing state file returns an empty state, not a throw", async () => {
   await withScratch("load-missing", async (dir) => {
     const state = loadState(dir);
-    assert.deepEqual(state, { reservations: {}, journal: {}, registry: {} });
+    assert.deepEqual(state, { reservations: {}, journal: {}, registry: {}, conversions: {}, runtimeOverride: null });
     assert.ok(!existsSync(statePath(dir)));
   });
 });
@@ -171,8 +175,14 @@ test("saveState + loadState round-trip atomically and deep-equal", async () => {
         "model-b": { url: "https://example.test/model-b.gguf", dest: "/tmp/model-b.gguf.part", bytesDone: 1024, expectedSha: "abc123", startedAt: "2026-07-18T00:01:00.000Z" },
       },
       registry: {
-        "model-c": { file: "model-c-q4.gguf", quant: "Q4_K_M", catalogId: "model-c", registeredAt: "2026-07-17T00:00:00.000Z" },
+        // Already in the post-migration <catalogId>@<quant> form -- a bare
+        // "model-c" key here would trigger migrateRegistryKeys and this
+        // test is about round-trip fidelity, not migration (see the
+        // dedicated migration test below).
+        "model-c@Q4_K_M": { file: "model-c-q4.gguf", quant: "Q4_K_M", catalogId: "model-c", registeredAt: "2026-07-17T00:00:00.000Z" },
       },
+      conversions: {},
+      runtimeOverride: null,
     };
     saveState(dir, state);
     assert.ok(existsSync(statePath(dir)));
@@ -194,7 +204,7 @@ test("loadState on a corrupt (non-JSON) state file returns an empty state, not a
     mkdirSync(join(dir, "models"), { recursive: true });
     writeFileSync(statePath(dir), "{ not valid json", "utf8");
     const state = loadState(dir);
-    assert.deepEqual(state, { reservations: {}, journal: {}, registry: {} });
+    assert.deepEqual(state, { reservations: {}, journal: {}, registry: {}, conversions: {}, runtimeOverride: null });
   });
 });
 
@@ -365,4 +375,57 @@ test("CROW_MODELS_PORT_RANGE_START relocates the allocator range; invalid values
   assert.equal(probe("23400"), "23400 23499", "a valid base relocates the whole 100-port window");
   assert.equal(probe("abc"), "18100 18199", "garbage keeps the production default");
   assert.equal(probe("80"), "18100 18199", "sub-1024 bases are refused (privileged ports)");
+});
+
+test("registryKey/parseRegistryKey round-trip; legacy key parses to null", () => {
+  assert.equal(registryKey("qwen3.5-4b", "UD-Q4_K_XL"), "qwen3.5-4b@UD-Q4_K_XL");
+  assert.deepEqual(parseRegistryKey("qwen3.5-4b@UD-Q4_K_XL"), { catalogId: "qwen3.5-4b", quant: "UD-Q4_K_XL" });
+  assert.equal(parseRegistryKey("qwen3.5-4b"), null);
+});
+
+test("loadState migrates a legacy <modelId> registry key to <catalogId>@<quant> exactly once (idempotent)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "models-state-"));
+  try {
+    saveState(dir, { reservations: {}, journal: {}, registry: {
+      "qwen3.5-4b": { file: "Qwen3.5-4B-UD-Q4_K_XL.gguf", quant: "UD-Q4_K_XL", catalogId: "qwen3.5-4b", sizeMb: 2912 },
+      "mystery": { file: "m.gguf" }, // no catalogId/quant -> left alone
+    } });
+    const s1 = loadState(dir);
+    assert.ok(s1.registry["qwen3.5-4b@UD-Q4_K_XL"]);
+    assert.equal(s1.registry["qwen3.5-4b"], undefined);
+    assert.ok(s1.registry["mystery"]);
+    saveState(dir, s1);
+    const s2 = loadState(dir);
+    assert.deepEqual(s2.registry, s1.registry);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("loadState returns conversions {} and runtimeOverride null by default and round-trips them", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "models-state-"));
+  try {
+    assert.deepEqual(loadState(dir).conversions, {});
+    assert.equal(loadState(dir).runtimeOverride, null);
+    const s = loadState(dir);
+    s.conversions["crow-chat"] = { row: { id: "crow-chat" }, at: "2026-09-05T00:00:00Z" };
+    s.runtimeOverride = { bin: "/x/llama-server", label: "x", version: "b1", setAt: "2026-09-05T00:00:00Z" };
+    saveState(dir, s);
+    assert.deepEqual(loadState(dir).conversions["crow-chat"].row, { id: "crow-chat" });
+    assert.equal(loadState(dir).runtimeOverride.bin, "/x/llama-server");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("findRegistryEntries returns every quant for a catalog id, including a legacy-keyed entry", () => {
+  const state = { registry: {
+    "a@Q4": { catalogId: "a", quant: "Q4" }, "a@Q8": { catalogId: "a", quant: "Q8" }, "b@Q4": { catalogId: "b", quant: "Q4" }, "c": { file: "c.gguf" },
+  } };
+  assert.deepEqual(findRegistryEntries(state, "a").map((x) => x.key).sort(), ["a@Q4", "a@Q8"]);
+  assert.deepEqual(findRegistryEntries(state, "c").map((x) => x.key), ["c"]);
+  assert.deepEqual(findRegistryEntries(state, "zzz"), []);
+});
+
+test("findRegistryEntryForProvider resolves via gpuPolicy.catalogId/quant, else null", () => {
+  const state = { registry: { "a@Q4": { catalogId: "a", quant: "Q4" } } };
+  assert.equal(findRegistryEntryForProvider(state, { gpuPolicy: { catalogId: "a", quant: "Q4" } }).key, "a@Q4");
+  assert.equal(findRegistryEntryForProvider(state, { gpuPolicy: { catalogId: "a", quant: "Q8" } }), null);
+  assert.equal(findRegistryEntryForProvider(state, { gpuPolicy: {} }), null);
 });
