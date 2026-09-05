@@ -79,6 +79,7 @@ function makeCatalog() {
         min_runtime_version: "b10068",
         default_quant: "Q4_K_M",
         tags: ["chat"],
+        launch: { ctx: 4096, ngl: 999 },
         notes: "test fixture",
         quants: [
           { file: "chat-test-model-Q4_K_M.gguf", quant: "Q4_K_M", size_mb: 1, min_ram_mb: 1, min_vram_mb: 0, sha256: "abc" },
@@ -168,8 +169,10 @@ test("registerModel: writes a provider row with the FINAL base_url, models[], an
     const result = await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
 
     assert.equal(result.id, "chat-test-model");
-    assert.match(result.baseUrl, /^http:\/\/127\.0\.0\.1:\d+\/v1$/);
-    assert.equal(result.baseUrl, `http://127.0.0.1:${result.port}/v1`);
+    // base_url is now the DOOR url (routed through the gateway's
+    // /llm/v1), not the model's own port directly -- the model's own
+    // port lives at gpu_policy.port / the `port` return field instead.
+    assert.match(result.baseUrl, /^http:\/\/\d+\.\d+\.\d+\.\d+:\d+\/llm\/v1$/);
 
     const row = await dbRow(db, "chat-test-model");
     assert.ok(row, "provider row exists");
@@ -181,6 +184,7 @@ test("registerModel: writes a provider row with the FINAL base_url, models[], an
 
     const gpuPolicy = JSON.parse(row.gpu_policy);
     assert.equal(gpuPolicy.runtime, "native");
+    assert.equal(gpuPolicy.port, result.port, "the model's own port lives at gpu_policy.port");
     assert.equal(gpuPolicy.mutexGroup, "local-llm", "sole chat model with no existing groups falls back to local-llm");
   } finally { cleanup(); }
 });
@@ -192,9 +196,9 @@ test("registerModel: allocates a port already recorded in state.json reservation
     const state = loadState(dir);
     assert.ok(state.reservations["chat-test-model"], "port reservation persisted");
     assert.equal(state.reservations["chat-test-model"].port, result.port);
-    assert.ok(state.registry["chat-test-model"], "registry entry persisted for later unregister");
-    assert.equal(state.registry["chat-test-model"].file, "chat-test-model-Q4_K_M.gguf");
-    assert.equal(state.registry["chat-test-model"].quant, "Q4_K_M");
+    assert.ok(state.registry["chat-test-model@Q4_K_M"], "registry entry persisted for later unregister");
+    assert.equal(state.registry["chat-test-model@Q4_K_M"].file, "chat-test-model-Q4_K_M.gguf");
+    assert.equal(state.registry["chat-test-model@Q4_K_M"].quant, "Q4_K_M");
   } finally { cleanup(); }
 });
 
@@ -562,16 +566,25 @@ test("register -> unregister -> re-register cycle: port freed and re-used, disab
     // cleared by unregister.
     const second = await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
 
-    assert.equal(second.port, firstPort, "the freed port is the lowest free port again, so it's re-used");
-    assert.equal(second.baseUrl, `http://127.0.0.1:${firstPort}/v1`, "no stale base_url from the torn-down registration");
+    // The surviving (disabled) row still carries the old native
+    // gpu_policy.port, so registerModel reuses it directly rather than
+    // reallocating -- this is deliberate (Task 8): reallocating would
+    // fail to reuse a port that's still actively bound by a LIVE process
+    // on a metadata-only re-register, so a disabled-but-present row's
+    // port is trusted as-is instead. One consequence: a fresh
+    // `state.reservations` entry is NOT written on this path (that's left
+    // to boot-time reconciliation) -- only the DB row and the registry
+    // entry are guaranteed current.
+    assert.equal(second.port, firstPort, "the DB row's own recorded port is reused, not reallocated");
+    assert.equal(second.baseUrl, first.baseUrl, "no stale base_url from the torn-down registration -- same door url as before");
 
     const rowAfterSecond = await dbRow(db, "chat-test-model");
     assert.equal(Number(rowAfterSecond.disabled), 0, "disabled flips back to 0");
     assert.equal(rowAfterSecond.base_url, second.baseUrl);
+    assert.equal(JSON.parse(rowAfterSecond.gpu_policy).port, firstPort);
 
     const stateAfterSecond = loadState(dir);
-    assert.equal(stateAfterSecond.reservations["chat-test-model"].port, firstPort);
-    assert.ok(stateAfterSecond.registry["chat-test-model"], "registry entry rewritten on re-register");
+    assert.ok(stateAfterSecond.registry["chat-test-model@Q4_K_M"], "registry entry rewritten on re-register");
   } finally { cleanup(); }
 });
 
@@ -680,7 +693,7 @@ test("registerModel: a legacy single-file model records empty companions/shardFi
   const { db, dir, cleanup } = freshLibsql();
   try {
     await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
-    const entry = loadState(dir).registry["chat-test-model"];
+    const entry = loadState(dir).registry["chat-test-model@Q4_K_M"];
     assert.equal(entry.file, "chat-test-model-Q4_K_M.gguf");
     assert.deepEqual(entry.companions, []);
     assert.deepEqual(entry.shardFiles, []);
@@ -692,7 +705,7 @@ test("registerModel: a sharded model with an mmproj companion records shardFiles
   try {
     const result = await registerModel({ modelId: "multi-test-model", catalog: makeCatalog(), db, dir });
     assert.equal(result.id, "multi-test-model");
-    const entry = loadState(dir).registry["multi-test-model"];
+    const entry = loadState(dir).registry["multi-test-model@Q4_K_M"];
     assert.equal(entry.file, MULTI_ON_DISK[0]);
     assert.deepEqual(entry.shardFiles, [MULTI_ON_DISK[1], MULTI_ON_DISK[2]]);
     assert.deepEqual(entry.companions, [{ kind: "mmproj", file: MULTI_ON_DISK[3] }]);
@@ -726,4 +739,145 @@ test("unregisterModel: removes the primary, every shard and every companion; a m
     assert.equal(again.deleted, true);
     assert.ok(!existsSync(blobPathFor(dir, MULTI_ON_DISK[3])));
   } finally { cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// Task 8: roles, variants, conversion, door + owner; unregister adopted-
+// and shared-weights-safe; vision joins the chat mutex group.
+// ---------------------------------------------------------------------------
+
+const REG_OPTS = (h) => ({ db: h.db, dir: h.dir, allocatePortFn: async (state, id) => { state.reservations[id] = { port: 18150, owner: {} }; return 18150; },
+  ownInstanceIdFn: () => "inst-A", tailnetIpFn: () => "100.118.41.122", gatewayPortFn: () => 3001 });
+
+test("registerModel: row carries the door base_url, owner, port, catalogId/quant; registry key is <id>@<quant>", async () => {
+  const h = freshLibsql();
+  try {
+    const r = await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), ...REG_OPTS(h) });
+    assert.equal(r.baseUrl, "http://100.118.41.122:3001/llm/v1");
+    assert.equal(r.port, 18150);
+    assert.equal(r.registryKey, "chat-test-model@Q4_K_M");
+    const row = await dbRow(h.db, "chat-test-model");
+    const gp = JSON.parse(row.gpu_policy);
+    assert.equal(row.base_url, "http://100.118.41.122:3001/llm/v1");
+    assert.deepEqual({ runtime: gp.runtime, catalogId: gp.catalogId, quant: gp.quant, port: gp.port, owner: gp.owner, alwaysResident: gp.alwaysResident, defaultMember: gp.defaultMember },
+      { runtime: "native", catalogId: "chat-test-model", quant: "Q4_K_M", port: 18150, owner: "inst-A", alwaysResident: false, defaultMember: false });
+    assert.ok(loadState(h.dir).registry["chat-test-model@Q4_K_M"]);
+    assert.equal(loadState(h.dir).registry["chat-test-model"], undefined);
+  } finally { h.cleanup(); }
+});
+
+test("registerModel: no tailnet ip -> loopback door and local_only:true", async () => {
+  const h = freshLibsql();
+  try {
+    const r = await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), ...REG_OPTS(h), tailnetIpFn: () => null });
+    assert.equal(r.baseUrl, "http://127.0.0.1:3001/llm/v1");
+    assert.equal(JSON.parse((await dbRow(h.db, "chat-test-model")).gpu_policy).local_only, true);
+  } finally { h.cleanup(); }
+});
+
+test("registerModel: providerId decouples the row id from the model id (a role)", async () => {
+  const h = freshLibsql();
+  try {
+    const r = await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), providerId: "crow-chat", ...REG_OPTS(h) });
+    assert.equal(r.id, "crow-chat");
+    const row = await dbRow(h.db, "crow-chat");
+    assert.equal(JSON.parse(row.models)[0].id, "chat-test-model");
+    assert.equal(loadState(h.dir).reservations["crow-chat"].port, 18150);
+  } finally { h.cleanup(); }
+});
+
+test("registerModel: two variants share one registry entry; unregistering one keeps the weights and the entry", async () => {
+  const h = freshLibsql();
+  let n = 0;
+  const alloc = async (state, id) => { const port = 18160 + n++; state.reservations[id] = { port, owner: {} }; return port; };
+  try {
+    const opts = { ...REG_OPTS(h), allocatePortFn: alloc };
+    await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), providerId: "v-solo", launch: { ctx: 4096 }, ...opts });
+    await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), providerId: "v-copilot", launch: { ctx: 2048 }, ...opts });
+    assert.equal(Object.keys(loadState(h.dir).registry).length, 1);
+    assert.equal(JSON.parse((await dbRow(h.db, "v-copilot")).gpu_policy).launch.ctx, 2048);
+    let unlinked = 0;
+    await unregisterModel({ modelId: "v-copilot", db: h.db, dir: h.dir, unlinkFn: () => { unlinked++; } });
+    assert.equal(unlinked, 0, "shared weights untouched while v-solo still references them");
+    assert.ok(loadState(h.dir).registry["chat-test-model@Q4_K_M"]);
+    assert.equal((await dbRow(h.db, "v-copilot")).disabled, 1);
+    await unregisterModel({ modelId: "v-solo", db: h.db, dir: h.dir, unlinkFn: () => { unlinked++; } });
+    assert.ok(unlinked >= 1, "last reference removes the blob");
+    assert.equal(loadState(h.dir).registry["chat-test-model@Q4_K_M"], undefined);
+  } finally { h.cleanup(); }
+});
+
+test("registerModel: launch override is validated against the catalog context_len", async () => {
+  const h = freshLibsql();
+  try {
+    await assert.rejects(
+      registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), launch: { ctx: 999999 }, ...REG_OPTS(h) }),
+      (e) => e.code === "INVALID_LAUNCH" && /exceeds context_len/.test(e.message));
+  } finally { h.cleanup(); }
+});
+
+test("registerModel: converts an existing BUNDLE row of the same id, snapshotting it to state.conversions", async () => {
+  const h = freshLibsql();
+  try {
+    await upsertProvider(h.db, { id: "crow-chat", baseUrl: "http://100.118.41.122:8003/v1", host: "local", bundleId: "llamacpp-vulkan-qwen36-35b-a3b",
+      models: [{ id: "qwen3.6-35b-a3b", task: "chat" }], gpuPolicy: { mutexGroup: "crow-strix-vram", alwaysResident: false, defaultMember: true } });
+    const r = await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), providerId: "crow-chat", defaultMember: true, ...REG_OPTS(h) });
+    assert.equal(r.converted, true);
+    const row = await dbRow(h.db, "crow-chat");
+    assert.equal(row.bundle_id, null);
+    assert.equal(JSON.parse(row.gpu_policy).mutexGroup, "crow-strix-vram", "auto mutex joins the group the converted row already had");
+    const snap = loadState(h.dir).conversions["crow-chat"];
+    assert.equal(snap.row.bundle_id, "llamacpp-vulkan-qwen36-35b-a3b");
+    assert.equal(snap.row.base_url, "http://100.118.41.122:8003/v1");
+    assert.match(snap.at, /^\d{4}-/);
+  } finally { h.cleanup(); }
+});
+
+test("registerModel: still refuses to clobber a foreign non-bundle, non-native row (cloud provider)", async () => {
+  const h = freshLibsql();
+  try {
+    await upsertProvider(h.db, { id: "zai", baseUrl: "https://api.z.ai/v1", host: "cloud", models: [{ id: "glm-5" }] });
+    await assert.rejects(registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), providerId: "zai", ...REG_OPTS(h) }), ProviderIdConflictError);
+  } finally { h.cleanup(); }
+});
+
+test("registerModel: mutexGroup null = none even for chat; explicit string wins; alwaysResident/defaultMember persisted", async () => {
+  const h = freshLibsql();
+  try {
+    await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), providerId: "voice", mutexGroup: null, alwaysResident: true, ...REG_OPTS(h) });
+    const gp = JSON.parse((await dbRow(h.db, "voice")).gpu_policy);
+    assert.equal("mutexGroup" in gp, false);
+    assert.equal(gp.alwaysResident, true);
+    await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), providerId: "chat2", mutexGroup: "my-group", defaultMember: true, ...REG_OPTS(h) });
+    const gp2 = JSON.parse((await dbRow(h.db, "chat2")).gpu_policy);
+    assert.equal(gp2.mutexGroup, "my-group");
+    assert.equal(gp2.defaultMember, true);
+  } finally { h.cleanup(); }
+});
+
+test("registerModel: a vision-task model joins the chat mutex group by default", async () => {
+  const h = freshLibsql();
+  try {
+    const catalog = makeCatalog();
+    catalog.models.push({ ...catalog.models[0], id: "vl-test", task: "vision", quants: catalog.models[0].quants });
+    await registerModel({ modelId: "vl-test", quant: "Q4_K_M", catalog, ...REG_OPTS(h) });
+    assert.equal(JSON.parse((await dbRow(h.db, "vl-test")).gpu_policy).mutexGroup, "local-llm");
+  } finally { h.cleanup(); }
+});
+
+test("pickChatMutexGroup counts vision rows as chat-class", () => {
+  const rows = [{ id: "a", gpuPolicy: { mutexGroup: "g1" }, models: [{ id: "m", task: "vision" }] }];
+  assert.equal(pickChatMutexGroup(rows), "g1");
+});
+
+test("unregisterModel: never unlinks an adopted entry", async () => {
+  const h = freshLibsql();
+  try {
+    await registerModel({ modelId: "chat-test-model", quant: "Q4_K_M", catalog: makeCatalog(), ...REG_OPTS(h),
+      registryExtra: { path: "/mnt/weights/chat.gguf", adopted: true, verified: true } });
+    let unlinked = 0;
+    await unregisterModel({ modelId: "chat-test-model", db: h.db, dir: h.dir, unlinkFn: () => { unlinked++; } });
+    assert.equal(unlinked, 0);
+    assert.equal(loadState(h.dir).registry["chat-test-model@Q4_K_M"], undefined);
+  } finally { h.cleanup(); }
 });
