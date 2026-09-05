@@ -571,10 +571,9 @@ test("register -> unregister -> re-register cycle: port freed and re-used, disab
     // reallocating -- this is deliberate (Task 8): reallocating would
     // fail to reuse a port that's still actively bound by a LIVE process
     // on a metadata-only re-register, so a disabled-but-present row's
-    // port is trusted as-is instead. One consequence: a fresh
-    // `state.reservations` entry is NOT written on this path (that's left
-    // to boot-time reconciliation) -- only the DB row and the registry
-    // entry are guaranteed current.
+    // port is trusted as-is instead. registerModel also re-records the
+    // reservation on reuse (it was cleared by the earlier unregisterModel),
+    // so state.reservations is guaranteed current again after this call.
     assert.equal(second.port, firstPort, "the DB row's own recorded port is reused, not reallocated");
     assert.equal(second.baseUrl, first.baseUrl, "no stale base_url from the torn-down registration -- same door url as before");
 
@@ -585,6 +584,8 @@ test("register -> unregister -> re-register cycle: port freed and re-used, disab
 
     const stateAfterSecond = loadState(dir);
     assert.ok(stateAfterSecond.registry["chat-test-model@Q4_K_M"], "registry entry rewritten on re-register");
+    assert.ok(stateAfterSecond.reservations["chat-test-model"], "reservation re-recorded on reuse, not left missing");
+    assert.equal(stateAfterSecond.reservations["chat-test-model"].port, firstPort);
   } finally { cleanup(); }
 });
 
@@ -829,6 +830,7 @@ test("registerModel: converts an existing BUNDLE row of the same id, snapshottin
     const snap = loadState(h.dir).conversions["crow-chat"];
     assert.equal(snap.row.bundle_id, "llamacpp-vulkan-qwen36-35b-a3b");
     assert.equal(snap.row.base_url, "http://100.118.41.122:8003/v1");
+    assert.equal(snap.row.disabled, false);
     assert.match(snap.at, /^\d{4}-/);
   } finally { h.cleanup(); }
 });

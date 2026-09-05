@@ -1470,11 +1470,20 @@ export async function registerModel({
 
   // Port: keep the port an existing native row already advertises (a
   // re-register of the same providerId); a fresh row (or a converted
-  // bundle row, which never had a native port) allocates.
+  // bundle row, which never had a native port) allocates. Reusing the
+  // port never calls allocatePortFn (reallocating could hand back a
+  // DIFFERENT port if the existing one is currently bound by a LIVE
+  // process — see the doc comment above), but the reservation is still
+  // re-recorded below if a prior unregisterModel (or a fresh state.json)
+  // left `state.reservations` without it, so a disabled-but-present row's
+  // port is never left un-reserved after this call returns.
   const existingPort = existingRow?.gpuPolicy?.runtime === NATIVE_RUNTIME ? Number(existingRow.gpuPolicy.port) : NaN;
   const port = Number.isInteger(existingPort) && existingPort > 0
     ? existingPort
     : await allocatePortFn(state, providerId, { crowHome: dir, pid: process.pid });
+  if (!state.reservations[providerId]) {
+    state.reservations[providerId] = { port, owner: { crowHome: dir, pid: process.pid }, createdAt: new Date().toISOString() };
+  }
 
   if (converted) {
     // Snapshot the bundle row being replaced so an operator can see/restore
@@ -1491,6 +1500,7 @@ export async function registerModel({
         models: existingRow.models,
         provider_type: existingRow.provider_type ?? null,
         gpu_policy: existingRow.gpuPolicy ?? null,
+        disabled: !!existingRow.disabled,
       },
     };
   }
