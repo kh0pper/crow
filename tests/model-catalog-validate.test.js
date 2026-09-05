@@ -444,3 +444,43 @@ test("companions that is not an array fails; an empty array is fine", () => {
   result = validateCatalog(catalog);
   assert.deepEqual(result.errors, []);
 });
+
+test("launch: a valid block on a model validates", () => {
+  const c = clone(loadSeed());
+  otherModel(c).launch = { ctx: 8192, ngl: 999, flash_attn: "on" };
+  assert.deepEqual(validateCatalog(c).errors, []);
+});
+
+test("launch: ctx above the model's context_len fails, naming the model", () => {
+  const c = clone(loadSeed());
+  const m = otherModel(c);
+  m.launch = { ctx: m.context_len * 2 };
+  const { errors } = validateCatalog(c);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], new RegExp(`${m.id}.*launch.*exceeds context_len`));
+});
+
+test("launch: extra_args carrying an owned flag fails", () => {
+  const c = clone(loadSeed());
+  otherModel(c).launch = { extra_args: ["--alias", "x"] };
+  assert.match(validateCatalog(c).errors[0], /extra_args may not contain "--alias"/);
+});
+
+test("launch: spec is accepted only with an mtp companion or the mtp tag", () => {
+  const c = clone(loadSeed());
+  const m = otherModel(c);
+  m.launch = { spec: { type: "draft-mtp", draft_n_max: 2 } };
+  m.tags = (m.tags || []).filter((t) => t !== "mtp");
+  m.companions = (m.companions || []).filter((x) => x && x.kind !== "mtp");
+  assert.match(validateCatalog(c).errors[0], /spec requires an mtp companion or the "mtp" tag/);
+  m.tags.push("mtp");
+  assert.deepEqual(validateCatalog(c).errors, []);
+});
+
+test("runtime asset key linux-x64-cuda is accepted and requires min_glibc", () => {
+  const c = clone(loadSeed());
+  c.runtime.assets["linux-x64-cuda"] = { file: "llama-b1-bin-ubuntu-cuda-x64.tar.gz", sha256: "a".repeat(64) };
+  assert.match(validateCatalog(c).errors[0], /linux-x64-cuda.*min_glibc/);
+  c.runtime.assets["linux-x64-cuda"].min_glibc = "2.34";
+  assert.deepEqual(validateCatalog(c).errors, []);
+});
