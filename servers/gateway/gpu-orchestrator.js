@@ -74,7 +74,7 @@ import {
   pruneResidency, getProviderHealth,
 } from "./provider-health.js";
 import { resolveDataDir, createDbClient } from "../db.js";
-import { loadState, saveState, reconcileOnBoot, registryKey, findRegistryEntryForProvider } from "./models/state.js";
+import { loadState, saveState, reconcileOnBoot, findRegistryEntries, findRegistryEntryForProvider } from "./models/state.js";
 // wasLive-marker plumbing lives in this file (not state.js) so it can reuse
 // `startNativeAndAwaitReady`'s ALREADY-resolved `dir` — see
 // `persistLivenessMarker`'s doc below for why this deliberately never
@@ -364,10 +364,24 @@ function nativeLocalUrl(p) {
   const port = nativePort(p);
   return port ? `http://127.0.0.1:${port}/v1` : p?.baseUrl;
 }
+/** Registry key for a provider row, in three descending-confidence steps:
+ *
+ *   1. `gpuPolicy.{catalogId,quant}` → `<catalogId>@<quant>` (the arc shape).
+ *   2. A registry entry literally keyed by the provider name — a pre-arc row
+ *      whose legacy entry `loadState`'s migration could NOT re-key (it lacked
+ *      `catalogId` or `quant`, e.g. an hf-browser registration).
+ *   3. Any entry whose key parses to catalogId === providerName. This is the
+ *      case that keeps a LIVE pre-arc native row startable: provider id ==
+ *      model id == legacy key, and `loadState` re-keyed its entry to
+ *      `<providerName>@<quant>` on load, so step 2 no longer finds it. Without
+ *      this step `startNativeAndAwaitReady` throws `no model registry entry`
+ *      for every native row that predates the keyed registry.
+ */
 function registryKeyOf(p, providerName, state) {
   const found = findRegistryEntryForProvider(state, p);
   if (found) return found.key;
-  return providerName; // pre-arc rows: provider id == model id == legacy key (migrated on load if it carried catalogId+quant)
+  if (state?.registry?.[providerName]) return providerName;
+  return findRegistryEntries(state, providerName)[0]?.key ?? providerName;
 }
 
 function getMutexSiblings(name, cfg = loadProviders()) {
