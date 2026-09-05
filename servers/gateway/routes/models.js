@@ -60,7 +60,7 @@ import { isAllowedNetwork, verifySession, parseCookies } from "../dashboard/auth
 import { listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
 import { invalidateProvidersCache } from "../../shared/providers.js";
 import { getCachedProbe, reprobe, fitBadge } from "../models/probe.js";
-import { loadState, registryEntryRuntimeState } from "../models/state.js";
+import { loadState, registryEntryRuntimeState, findRegistryEntries } from "../models/state.js";
 import {
   enqueueDownload, registerModel, unregisterModel, providerBindings,
   downloadHfFile, fetchHfPathInfo, isValidHfRepoId, isValidHfFilename, deriveModelIdFromFilename,
@@ -182,6 +182,15 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
 
   const router = Router();
 
+  // Registry keys are now `<catalogId>@<quant>` (Task 5), but callers here
+  // only have the catalog/provider id. `findRegistryEntries` returns every
+  // entry for that catalog id (including a legacy bare-id key); this picks
+  // the direct hit first (already-keyed lookups, and the legacy shape) and
+  // falls back to the first matching keyed entry otherwise.
+  function regEntryFor(state, id) {
+    return state.registry[id] || (findRegistryEntries(state, id)[0]?.entry ?? null);
+  }
+
   function resolveDir() {
     return typeof staticDir === "string" && staticDir ? staticDir : resolveDataDir();
   }
@@ -225,7 +234,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       }
       const state = loadStateFn(resolveDir());
       const models = (catalog.models || []).map((model) => {
-        const regEntry = state.registry[model.id] || null;
+        const regEntry = regEntryFor(state, model.id);
         const handle = getNativeHandleFn(model.id);
         const quants = (model.quants || []).map((q) => ({
           quant: q.quant,
@@ -529,7 +538,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     const model = findModel(catalog, modelId);
     const dir = resolveDir();
     const state = loadStateFn(dir);
-    const regEntry = state.registry[modelId];
+    const regEntry = regEntryFor(state, modelId);
     if (!model && !regEntry) {
       return res.status(400).json({ error: `Unknown model id: ${modelId}`, code: "UNKNOWN_MODEL" });
     }
@@ -571,7 +580,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     const catalog = loadCatalogFn();
     const model = findModel(catalog, modelId);
     const state = loadStateFn(resolveDir());
-    const regEntry = state.registry[modelId];
+    const regEntry = regEntryFor(state, modelId);
     if (!model && !regEntry) {
       return res.status(400).json({ error: `Unknown model id: ${modelId}`, code: "UNKNOWN_MODEL" });
     }
@@ -617,7 +626,7 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
     const catalog = loadCatalogFn();
     const model = findModel(catalog, modelId);
     const state = loadStateFn(resolveDir());
-    const regEntry = state.registry[modelId];
+    const regEntry = regEntryFor(state, modelId);
     if (!model && !regEntry) {
       return res.status(400).json({ error: `Unknown model id: ${modelId}`, code: "UNKNOWN_MODEL" });
     }
@@ -640,16 +649,24 @@ export default function modelsRouter(dashboardAuth, opts = {}) {
       const state = loadStateFn(resolveDir());
       const snapshot = getStatusSnapshotFn();
       const byAlias = new Map(snapshot.map((s) => [s.alias, s]));
-      const models = Object.keys(state.registry).map((modelId) => {
+      // Registry keys are now `<catalogId>@<quant>` (Task 5), but the
+      // process supervisor's status snapshot is still keyed by alias =
+      // catalog id (`entry.catalogId`, falling back to a legacy bare-id
+      // key). `registryKey` carries the real registry key alongside so
+      // callers that need to address this specific install (DELETE,
+      // start/stop today still address by catalog id) have it.
+      const models = Object.entries(state.registry).map(([key, entry]) => {
+        const modelId = entry.catalogId || key;
         const status = byAlias.get(modelId);
-        if (status) return { modelId, ...status };
+        if (status) return { modelId, registryKey: key, quant: entry.quant, ...status };
         // Task 13 fix round 1, finding c: distinguish "never started" from
         // "was resident when the gateway went down and hasn't re-warmed
-        // yet" via the persisted wasLive marker (state.registry[modelId])
+        // yet" via the persisted wasLive marker (state.registry entry)
         // — see registryEntryRuntimeState's doc for the exact contract.
-        const entry = state.registry[modelId];
         return {
           modelId,
+          registryKey: key,
+          quant: entry.quant,
           state: registryEntryRuntimeStateFn(entry, false),
           live: false, port: null, restartCount: 0, lastError: null, startedAt: null, pid: null,
         };
