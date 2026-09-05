@@ -6,8 +6,8 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
-import { adoptModel, hashFileSha256, AdoptMismatchError } from "../servers/gateway/models/manager.js";
-import { loadState } from "../servers/gateway/models/state.js";
+import { adoptModel, registerModel, hashFileSha256, AdoptMismatchError } from "../servers/gateway/models/manager.js";
+import { loadState, saveState } from "../servers/gateway/models/state.js";
 import { setProviderSyncManager } from "../servers/shared/providers-db.js";
 
 function freshLibsql() {
@@ -124,5 +124,61 @@ test("adoptModel: passes providerId/launch/mutexGroup through to registerModel",
     assert.equal(r.id, "crow-chat");
     assert.equal(r.gpuPolicy.launch.ctx, 4096);
     assert.equal(r.gpuPolicy.mutexGroup, "crow-strix-vram");
+  } finally { h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// Final review I2: a re-register must NOT carry the previous registry entry
+// over wholesale. Only `registeredAt` and the `wasLive`/`lastStoppedAt`
+// runtime markers survive; `path`/`adopted`/`verified`/`companions` are
+// re-derived from the call that is registering now.
+// ---------------------------------------------------------------------------
+
+test("I2: adopt then re-register (download shape) drops path/adopted and restores blob-dir companions", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    const primary = Buffer.from("primary-bytes"), mmproj = Buffer.from("mmproj-bytes");
+    writeFileSync(join(weights, "big.gguf"), primary); writeFileSync(join(weights, "proj.gguf"), mmproj);
+    const catalog = catalogFor({ primary, mmproj });
+
+    await adoptModel({ modelId: "adopt-test", quant: "Q8_0", path: join(weights, "big.gguf"),
+      companionPaths: { mmproj: join(weights, "proj.gguf") }, catalog, ...OPTS(h) });
+    const adopted = loadState(h.dir).registry["adopt-test@Q8_0"];
+    assert.equal(adopted.adopted, true);
+
+    // The same catalogId+quant registered the ordinary (downloaded) way.
+    await registerModel({ modelId: "adopt-test", quant: "Q8_0", catalog, ...OPTS(h) });
+    const entry = loadState(h.dir).registry["adopt-test@Q8_0"];
+    assert.equal(entry.adopted, undefined, "the stale adopted marker is gone");
+    assert.equal(entry.path, undefined, "the stale absolute path is gone — these weights live in the blob dir now");
+    assert.equal(entry.verified, undefined);
+    assert.deepEqual(entry.companions, [{ kind: "mmproj", file: "adopt-test--mmproj-F16.gguf" }], "companions are the planned blob-dir ones, with no absolute path");
+    assert.equal(entry.registeredAt, adopted.registeredAt, "the original install date is the one field that carries over");
+  } finally { h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
+});
+
+test("I2: download then adopt gives path/adopted, and the runtime markers survive both directions", async () => {
+  const h = freshLibsql();
+  const weights = mkdtempSync(join(tmpdir(), "weights-"));
+  try {
+    const primary = Buffer.from("primary-bytes"), mmproj = Buffer.from("mmproj-bytes");
+    writeFileSync(join(weights, "big.gguf"), primary); writeFileSync(join(weights, "proj.gguf"), mmproj);
+    const catalog = catalogFor({ primary, mmproj });
+
+    await registerModel({ modelId: "adopt-test", quant: "Q8_0", catalog, ...OPTS(h) });
+    // gpu-orchestrator.js stamps these on the entry while the model is live.
+    const seeded = loadState(h.dir);
+    seeded.registry["adopt-test@Q8_0"].wasLive = true;
+    seeded.registry["adopt-test@Q8_0"].lastStoppedAt = null;
+    saveState(h.dir, seeded);
+
+    await adoptModel({ modelId: "adopt-test", quant: "Q8_0", path: join(weights, "big.gguf"),
+      companionPaths: { mmproj: join(weights, "proj.gguf") }, catalog, ...OPTS(h) });
+    const entry = loadState(h.dir).registry["adopt-test@Q8_0"];
+    assert.equal(entry.adopted, true);
+    assert.equal(entry.path, join(weights, "big.gguf"));
+    assert.equal(entry.wasLive, true, "the orchestrator's runtime marker is preserved across a re-register");
+    assert.equal(entry.lastStoppedAt, null);
   } finally { h.cleanup(); rmSync(weights, { recursive: true, force: true }); }
 });
