@@ -73,7 +73,7 @@ import {
 } from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { allocatePort, loadState, releasePort, saveState, registryKey, findRegistryEntryForProvider } from "./state.js";
 import { disableProvider, listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
@@ -313,6 +313,138 @@ export function resolveEntry(catalog, modelId, quant) {
   const quantEntry = (model.quants || []).find((q) => q.quant === quantId);
   if (!quantEntry) throw new Error(`Unknown quant "${quantId}" for model ${modelId}`);
   return { model, quantEntry };
+}
+
+/** Thrown by `adoptModel` when weights already on disk don't match the
+ * catalog's expectation for a given quant/companion/shard — either the
+ * file is missing outright, or its sha256 (verified mode) or byte size
+ * (unverified mode, `allowUnverified: true`) doesn't line up. */
+export class AdoptMismatchError extends Error {
+  constructor(message, code, details = {}) {
+    super(message);
+    this.name = "AdoptMismatchError";
+    this.code = code;
+    Object.assign(this, details);
+  }
+}
+
+/** sha256 of a file's contents, hex-encoded, computed by streaming (never
+ * loads the whole file into memory — model weights can be tens of GB). */
+export function hashFileSha256(path, { createReadStreamImpl = createReadStream } = {}) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    createReadStreamImpl(path)
+      .on("data", (c) => hash.update(c))
+      .on("error", reject)
+      .on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+function sizeMatches(actualBytes, sizeMb) {
+  const expected = sizeMb * 1e6;
+  return Math.abs(actualBytes - expected) <= expected * 0.005;
+}
+
+/** Verify one adopted file against its catalog expectation. Returns `true`
+ * if the check was a sha256 match (verified mode), `false` if it was a
+ * size-only match (unverified mode). Throws `AdoptMismatchError` (missing
+ * file / sha mismatch / size mismatch) otherwise. */
+async function checkAdoptFile({ path, expectedSha, sizeMb, allowUnverified, hashFileFn, statFn, what }) {
+  let st;
+  try {
+    st = statFn(path);
+  } catch {
+    throw new AdoptMismatchError(`${what}: file not found at ${path}`, "ADOPT_FILE_MISSING", { file: path });
+  }
+  if (!allowUnverified) {
+    const actual = await hashFileFn(path);
+    if (actual !== expectedSha) {
+      throw new AdoptMismatchError(`${what}: sha256 of ${path} is ${actual}, expected ${expectedSha}`, "ADOPT_SHA_MISMATCH", { file: path, expected: expectedSha, actual });
+    }
+    return true;
+  }
+  if (!sizeMatches(st.size, sizeMb)) {
+    throw new AdoptMismatchError(`${what}: ${path} is ${st.size} bytes, expected about ${Math.round(sizeMb * 1e6)}`, "ADOPT_SIZE_MISMATCH", { file: path, expected: Math.round(sizeMb * 1e6), actual: st.size });
+  }
+  return false;
+}
+
+/** Register weights that are ALREADY on disk (never downloaded or copied
+ * by this module) — the "adopt" path for pre-existing installs. Verified
+ * mode (default) hashes `path` and every catalog companion/shard against
+ * the catalog's recorded sha256; `allowUnverified: true` instead accepts a
+ * byte-size match within 0.5%, for the case where re-hashing a huge file
+ * isn't worth it and the operator already trusts the provenance. Delegates
+ * the actual registry/DB write to `registerModel`, which spreads
+ * `registryExtra` last so `path/adopted/verified/companions/shardFiles`
+ * here override its planned-file defaults. */
+export async function adoptModel({
+  modelId,
+  quant,
+  path,
+  companionPaths = {},
+  catalog,
+  allowUnverified = false,
+  hashFileFn = hashFileSha256,
+  statFn = statSync,
+  ...registerOpts
+}) {
+  const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
+  const what = `${model.id} ${quantEntry.quant} (${quantEntry.file})`;
+  const shards = Array.isArray(quantEntry.shards) ? quantEntry.shards : [];
+  const primarySizeMb = quantEntry.size_mb - shards.reduce((s, x) => s + x.size_mb, 0);
+  const verifiedPrimary = await checkAdoptFile({
+    path,
+    expectedSha: quantEntry.sha256,
+    sizeMb: primarySizeMb,
+    allowUnverified,
+    hashFileFn,
+    statFn,
+    what,
+  });
+
+  const shardFiles = [];
+  for (const shard of shards) {
+    const shardPath = join(dirname(path), basename(shard.file));
+    await checkAdoptFile({
+      path: shardPath,
+      expectedSha: shard.sha256,
+      sizeMb: shard.size_mb,
+      allowUnverified,
+      hashFileFn,
+      statFn,
+      what: `${what} shard ${basename(shard.file)}`,
+    });
+    shardFiles.push(basename(shard.file));
+  }
+
+  const companions = [];
+  for (const c of Array.isArray(model.companions) ? model.companions : []) {
+    const cPath = companionPaths[c.kind];
+    if (!cPath) {
+      throw new AdoptMismatchError(`${what}: catalog companion ${c.kind} (${c.file}) needs a path`, "ADOPT_COMPANION_MISSING", { kind: c.kind, file: c.file });
+    }
+    await checkAdoptFile({
+      path: cPath,
+      expectedSha: c.sha256,
+      sizeMb: c.size_mb,
+      allowUnverified,
+      hashFileFn,
+      statFn,
+      what: `${what} companion ${c.kind}`,
+    });
+    companions.push({ kind: c.kind, file: basename(cPath), path: cPath });
+  }
+
+  const verified = verifiedPrimary === true;
+  const result = await registerModel({
+    modelId,
+    quant,
+    catalog,
+    ...registerOpts,
+    registryExtra: { ...(registerOpts.registryExtra || {}), path, adopted: true, verified, companions, shardFiles },
+  });
+  return { ...result, adopted: true, verified };
 }
 
 function assertNotSymlink(dest) {
