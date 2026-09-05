@@ -898,7 +898,7 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   if (_nativeHandles.get(providerName) === handle) _nativeHandles.delete(providerName);
 
   if (result === "conflict") {
-    throw new NativePortConflictError(providerName, p.baseUrl);
+    throw new NativePortConflictError(providerName, nativeLocalUrl(p));
   }
   // "down" — the process never reported itself resident within the
   // timeout. Never silently rebind on a different port; surface it.
@@ -977,7 +977,7 @@ async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
       return { freshStart: false };
     }
     if (fastStatus === "conflict") {
-      throw new NativePortConflictError(providerName, p.baseUrl);
+      throw new NativePortConflictError(providerName, nativeLocalUrl(p));
     }
     // "down" — fall through to sibling swap + lock + start.
   }

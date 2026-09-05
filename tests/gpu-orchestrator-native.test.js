@@ -1221,3 +1221,32 @@ test("liveness marker is written under the registry key, not the provider name",
     assert.equal(s.registry["crow-x"], undefined);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (task review): NativePortConflictError must name the loopback
+// probe URL (never the tailnet door), and nativePort's baseUrl-port fallback
+// needs direct coverage.
+// ---------------------------------------------------------------------------
+
+test("NativePortConflictError names the loopback probe URL, not the tailnet door, for an owned row", async () => {
+  const p = nativeProv(18100, "native-target", { baseUrl: "http://100.118.41.122:3001/llm/v1", gpuPolicy: { owner: "this-instance", port: 18100 } });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["conflict"]) });
+  opts.ownInstanceIdFn = () => "this-instance";
+  await assert.rejects(acquireProvider("native-target", opts), (e) => {
+    assert.ok(e instanceof NativePortConflictError, `expected NativePortConflictError, got ${e}`);
+    assert.ok(e.message.includes("127.0.0.1:18100"), `expected the loopback URL in the message, got: ${e.message}`);
+    assert.ok(!e.message.includes("3001/llm/v1"), `expected the tailnet door URL NOT to appear in the message, got: ${e.message}`);
+    return true;
+  });
+});
+
+test("nativePort falls back to the baseUrl port when gpuPolicy.port is absent", async () => {
+  const startCalls = [];
+  const p = nativeProv(18133, "native-target");
+  delete p.gpuPolicy.port;
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].port, 18133, "port fell back to baseUrl's port");
+});
