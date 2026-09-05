@@ -1304,6 +1304,53 @@ test("C1: a pre-arc native row (no catalogId/quant in gpu_policy) still starts a
 });
 
 // ---------------------------------------------------------------------------
+// registryKeyOf must refuse to guess when a pre-branch provider row's
+// catalog id has MORE THAN ONE registered quant: `findRegistryEntries`
+// returns 2+ matches, and picking `[0]` would silently start the wrong
+// quant's weights. It must instead fall through to the loud
+// "no model registry entry" error, and never call startModelFn.
+// ---------------------------------------------------------------------------
+
+test("registryKeyOf refuses an ambiguous legacy match: two quants for the same catalog id, provider has no catalogId/quant", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-ambiguous-"));
+  try {
+    saveState(dir, {
+      reservations: {},
+      journal: {},
+      registry: {
+        "legacy-target@Q4_K_M": { file: "m-q4.gguf", quant: "Q4_K_M", catalogId: "legacy-target", sizeMb: 1 },
+        "legacy-target@Q8_0": { file: "m-q8.gguf", quant: "Q8_0", catalogId: "legacy-target", sizeMb: 2 },
+      },
+    });
+    const startCalls = [];
+    const cfg = {
+      providers: {
+        "legacy-target": {
+          baseUrl: "http://127.0.0.1:18100/v1",
+          host: "local",
+          bundleId: null,
+          models: [{ id: "legacy-target", task: "chat" }],
+          gpuPolicy: { runtime: "native", mutexGroup: "local-llm" },
+        },
+      },
+    };
+    const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+    opts.loadStateFn = loadState; // the REAL loader
+    opts.resolveDataDirFn = () => dir;
+    opts.existsSyncFn = () => true;
+
+    await assert.rejects(
+      () => acquireProvider("legacy-target", opts),
+      /no model registry entry "legacy-target"/
+    );
+    assert.equal(startCalls.length, 0, "startModelFn must never be called for an ambiguous match");
+  } finally {
+    _setNativeHandleForTest("legacy-target", null);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Final review C3: `acquireOrStartNative` is the single funnel through which a
 // native process is ever spawned, and `ensureResident`'s boot/residency path
 // reaches it WITHOUT acquireProvider's outer owner gate. It must refuse a
