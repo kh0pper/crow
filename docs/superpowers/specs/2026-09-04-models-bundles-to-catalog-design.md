@@ -1,6 +1,6 @@
 # Model bundles → catalog + Hugging Face browser — DESIGN (2026-09-04)
 
-Status: **DESIGN APPROVED in brainstorm 2026-09-04** (Kevin, section by section); step-time decisions D12–D14 taken 2026-09-05; plan not yet written.
+Status: **DESIGN APPROVED in brainstorm 2026-09-04** (Kevin, section by section); step-time decisions D12–D14 taken 2026-09-05; **plan 1 of 4 written**: `docs/superpowers/plans/2026-09-05-models-core-launch-roles-adopt.md` (its tail fixes the scope of plans 2–4).
 Predecessors: `docs/superpowers/handoffs/2026-09-04-catalog-v2-shipped-next-bundles-to-catalog-arc.md`
 (seed facts), `docs/superpowers/plans/2026-09-04-model-catalog-curation.md` (catalog v2 + stale
 bundle retirement, shipped as PRs #303/#304), `docs/architecture/box-reservation.md`.
@@ -93,6 +93,7 @@ What the code says about the gap:
   "kv_type": "q8_0",        // -ctk/-ctv     one of llama.cpp's cache types; optional
   "spec": { "type": "draft-mtp", "draft_n_max": 2 },   // --spec-type / --spec-draft-n-max; optional
   "sampling": { "temp": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0 },
+  "jinja": true,            // --jinja (also implied by chat_template_kwargs); the 35B compose passes it without kwargs
   "extra_args": ["--pooling", "mean", "-b", "4096", "-ub", "4096"]
 }
 ```
@@ -110,6 +111,19 @@ no_mmap, spec draft-mtp n2); 27B (ctx 262144, fa on, kv q8_0, no_mmap, np 1, spe
 Qwen thinking-mode sampling); embed (ctx 32768, parallel 8, `--pooling mean -b 4096 -ub 4096`);
 4B voice (ctx 32768, fa on); gemma (ctx 8192, `--reasoning-budget 0`); Flash-Next, GLM-5.3-Flash,
 DSv4-Flash (ctx as bench notes; `spec` where the companion exists).
+
+**Weights-on-disk evidence (sha256, 2026-09-05) that shapes the catalog data:**
+- `hf-cache/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf` = `9de9a942…` and its `mmproj-F16.gguf` =
+  `71f3cbc1…` — both are `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`, not the non-MTP repo the catalog v2 entry
+  cites. **The catalog 35B entry switches to the MTP repo** (the build this box runs; `tag: mtp`, `launch.spec`
+  draft-mtp n2).
+- `hf-cache/qwen3-embedding-0.6b/…Q8_0.gguf` = `06507c7b…` = the catalog entry. Adopts verified.
+- `hf-cache/qwen38-27b/Qwen3.8-27B-UD-Q6_K_XL.gguf` = `73920218…` matches **no current file** in
+  `unsloth/Qwen3.8-27B-GGUF` (its mmproj does): unsloth re-cut the repo on 2026-08-19 and moved MTP to a
+  separate `MTP/mtp-Qwen3.8-27B-Q4_0.gguf`. Migration step 4 therefore carries an operator decision: adopt
+  the on-disk file unverified (keeps in-GGUF MTP), or re-download the current UD-Q6_K_XL (25.3 GB, MTP
+  only via the separate companion once llama.cpp's flag for it is confirmed). The catalog 27B `launch` omits
+  `spec` until that is settled.
 
 **New catalog entry (D14):** `embeddinggemma-300m` — family `gemma3`, lab Google, `hf_repo`
 `ggml-org/embeddinggemma-300M-GGUF`, license `gemma`, `gated: false`, `task: embedding`,
