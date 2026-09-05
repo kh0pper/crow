@@ -87,17 +87,17 @@ function fakeHandle(overrides = {}) {
 /** Injectable seams that get a fresh native provider all the way to
  * "started and ready" without touching a real binary/download/process. */
 function startCapableOpts({ cfg, identityProbeFn, startCalls = [], startModelFn }) {
-  // Registry keyed BOTH ways: "native-target@Q4" is what a provider whose
-  // gpuPolicy.catalogId/quant default to ("native-target", "Q4") resolves
-  // to via findRegistryEntryForProvider; the bare "native-target" key is
-  // the pre-arc fallback (registryKeyOf falls back to the provider NAME
-  // when catalogId/quant don't match anything in the registry) — several
-  // pre-existing fixtures in this file deliberately give a native
-  // provider's `models[0].id` (its llama-server alias, e.g. "qwen3-4b")
-  // a DIFFERENT value than the cfg key ("native-target") to prove alias
-  // and provider-name are independent concepts, so their default
-  // gpuPolicy.catalogId (== alias) never matches "native-target" and must
-  // land on the bare-key fallback instead.
+  // Registry keyed exactly the way production keys it — `<catalogId>@<quant>`,
+  // and ONLY that (a bare "native-target" alias key here would mask C1: the
+  // real `loadState` re-keys every legacy entry, so the bare key does not
+  // survive a load in production). Several pre-existing fixtures in this file
+  // deliberately give a native provider's `models[0].id` (its llama-server
+  // alias, e.g. "qwen3-4b") a DIFFERENT value than the cfg key
+  // ("native-target"), to prove alias and provider-name are independent
+  // concepts; their default gpuPolicy.catalogId (== alias) therefore does not
+  // match this entry, and they resolve through `registryKeyOf`'s third step
+  // (an entry whose key parses to catalogId === the provider NAME) — the same
+  // step that keeps a live pre-arc row startable after the migration.
   const registryEntry = { file: "model.gguf", catalogId: "native-target", quant: "Q4" };
   return {
     cfg,
@@ -108,7 +108,7 @@ function startCapableOpts({ cfg, identityProbeFn, startCalls = [], startModelFn 
       return fakeHandle();
     }),
     ensureRuntimeFn: async () => "/fake/runtimes/llamacpp/b1/llama-server",
-    loadStateFn: () => ({ registry: { "native-target": registryEntry, "native-target@Q4": registryEntry } }),
+    loadStateFn: () => ({ registry: { "native-target@Q4": registryEntry } }),
     resolveDataDirFn: () => "/fake/crow-home",
     loadCatalogFn: () => ({ runtime: { release: "b1", assets: {} } }),
     getCachedProbeFn: () => ({ platform: "linux", accel: "cpu" }),
@@ -873,6 +873,10 @@ test("Finding c: a successful native start persists wasLive:true on the registry
 
     const result = await acquireProvider("native-target", {
       ...startCapableOpts({ cfg, identityProbeFn }),
+      // Read the SAME scratch state this test wrote (not startCapableOpts's
+      // canned registry), so the key the marker lands under is the one the
+      // real loadState resolves for this row.
+      loadStateFn: () => loadState(dir),
       resolveDataDirFn: () => dir,
     });
 
@@ -905,6 +909,7 @@ test("Finding c: the handle reaching a terminal state (stop/crash) clears wasLiv
 
     const result = await acquireProvider("native-target", {
       ...startCapableOpts({ cfg, identityProbeFn, startModelFn }),
+      loadStateFn: () => loadState(dir),
       resolveDataDirFn: () => dir,
     });
     assert.equal(result, true);
@@ -1249,4 +1254,51 @@ test("nativePort falls back to the baseUrl port when gpuPolicy.port is absent", 
   const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
   assert.equal(await acquireProvider("native-target", opts), true);
   assert.equal(startCalls[0].port, 18133, "port fell back to baseUrl's port");
+});
+
+// ---------------------------------------------------------------------------
+// Final review C1: a pre-branch native row must still start after loadState's
+// legacy registry migration re-keys its entry to `<catalogId>@<quant>`. The
+// LIVE primary carries exactly this shape (`qwen3.5-4b`, gpu_policy
+// `{runtime:"native", mutexGroup:"local-llm"}` — no catalogId/quant/port).
+// ---------------------------------------------------------------------------
+
+test("C1: a pre-arc native row (no catalogId/quant in gpu_policy) still starts against the REAL loadState migration", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-legacy-"));
+  try {
+    // A LEGACY (Item G) state file: registry keyed by the bare model id.
+    // `loadState` re-keys it to "legacy-target@Q4_K_M" on every load, so the
+    // bare key the old fallback reached for is simply not there any more.
+    saveState(dir, {
+      reservations: {},
+      journal: {},
+      registry: { "legacy-target": { file: "m.gguf", quant: "Q4_K_M", catalogId: "legacy-target", sizeMb: 1 } },
+    });
+    const startCalls = [];
+    const cfg = {
+      providers: {
+        "legacy-target": {
+          baseUrl: "http://127.0.0.1:18100/v1",
+          host: "local",
+          bundleId: null,
+          models: [{ id: "legacy-target", task: "chat" }],
+          gpuPolicy: { runtime: "native", mutexGroup: "local-llm" },
+        },
+      },
+    };
+    const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+    opts.loadStateFn = loadState; // the REAL loader, migration and all
+    opts.resolveDataDirFn = () => dir;
+    opts.existsSyncFn = () => true;
+
+    assert.equal(await acquireProvider("legacy-target", opts), true);
+    assert.equal(startCalls.length, 1);
+    assert.ok(
+      startCalls[0].ggufPath.endsWith(join("models", "blobs", "m.gguf")),
+      `expected the blob-dir path for the migrated entry, got: ${startCalls[0].ggufPath}`
+    );
+  } finally {
+    _setNativeHandleForTest("legacy-target", null);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
