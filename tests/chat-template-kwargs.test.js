@@ -78,6 +78,7 @@ function baseNativeOpts({ cfg, identityProbeFn, loadCatalogFn, startCalls }) {
     resolveDataDirFn: () => "/fake/crow-home",
     loadCatalogFn,
     getCachedProbeFn: () => ({ platform: "linux", accel: "cpu" }),
+    existsSyncFn: () => true,
     readinessTimeoutMs: 200,
     readinessPollMs: 5,
     readinessInitialDelayMs: 0,
@@ -104,8 +105,9 @@ test("native start threads --jinja when the catalog entry carries chat_template_
   const ok = await acquireProvider("qwen3-4b", baseNativeOpts({ cfg, identityProbeFn, loadCatalogFn, startCalls }));
   assert.equal(ok, true);
   assert.equal(startCalls.length, 1);
-  assert.ok(Array.isArray(startCalls[0].extraArgs) && startCalls[0].extraArgs.includes("--jinja"),
-    `expected extraArgs to include --jinja, got ${JSON.stringify(startCalls[0].extraArgs)}`);
+  assert.equal(startCalls[0].launch?.jinja, true, "--jinja is rendered via launch.jinja, not extraArgs");
+  assert.ok(!startCalls[0].extraArgs || !startCalls[0].extraArgs.includes("--jinja"),
+    `expected extraArgs to NOT include --jinja, got ${JSON.stringify(startCalls[0].extraArgs)}`);
 });
 
 test("native start omits --jinja when the catalog entry has no chat_template_kwargs", async () => {
@@ -125,6 +127,7 @@ test("native start omits --jinja when the catalog entry has no chat_template_kwa
   const ok = await acquireProvider("qwen3-4b", baseNativeOpts({ cfg, identityProbeFn, loadCatalogFn, startCalls }));
   assert.equal(ok, true);
   assert.equal(startCalls.length, 1);
+  assert.ok(!startCalls[0].launch?.jinja, "launch.jinja must not be set without chat_template_kwargs");
   assert.ok(!startCalls[0].extraArgs || startCalls[0].extraArgs.length === 0,
     `expected extraArgs to be absent/empty, got ${JSON.stringify(startCalls[0].extraArgs)}`);
 });
