@@ -45,11 +45,19 @@
  *     file/size_mb/sha256 rules as shards.
  *   - every file basename within a model (quant files, shards, companions)
  *     must be unique: the downloader stores blobs in ONE flat directory.
+ *
+ * Schema v3 (launch profiles, 2026-09):
+ *   - a model may carry a `launch` object with typed knobs (ctx, ngl, flash_attn,
+ *     parallel, no_mmap, kv_type, spec, sampling, jinja) and extra_args. Launch
+ *     blocks are validated: ctx must not exceed the model's context_len, extra_args
+ *     may not contain ownership-reserved flags, spec requires an mtp companion or
+ *     the "mtp" tag on the model.
  */
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateLaunch } from "../servers/gateway/models/launch.js";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CATALOG_PATH = join(REPO_ROOT, "registry/model-catalog.json");
@@ -57,6 +65,7 @@ const CATALOG_PATH = join(REPO_ROOT, "registry/model-catalog.json");
 const KNOWN_RUNTIME_ASSET_KEYS = new Set([
   "linux-x64-vulkan",
   "linux-x64-cpu",
+  "linux-x64-cuda",
   "darwin-arm64",
   "darwin-x64",
 ]);
@@ -201,6 +210,14 @@ export function validateCatalog(catalog) {
         && !Array.isArray(model.chat_template_kwargs);
       if (!isPlainObject) {
         errors.push(`${label}: chat_template_kwargs must be a plain object when present, got ${JSON.stringify(model.chat_template_kwargs)}`);
+      }
+    }
+
+    if (model.launch !== undefined) {
+      const hasMtp = (Array.isArray(model.tags) && model.tags.includes("mtp"))
+        || (Array.isArray(model.companions) && model.companions.some((c) => c && c.kind === "mtp"));
+      for (const e of validateLaunch(model.launch, { contextLen: model.context_len, label: `${label} launch`, hasMtp })) {
+        errors.push(e);
       }
     }
 

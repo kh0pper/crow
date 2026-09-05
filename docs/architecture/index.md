@@ -146,3 +146,7 @@ For the full workflow, see the [Cross-Platform Guide](../guide/cross-platform).
 ## Context Management
 
 Crow includes a smart tool loading system to reduce context window usage. The gateway router (`/router/mcp`) consolidates 126+ tools into 10 category tools (a ~90% context reduction). For stdio deployments, `crow-core` provides on-demand server activation. See the [Context Management architecture reference](/architecture/context-management) for details.
+
+## Models
+
+Local models run natively (`llama-server`, spawned by the gateway's GPU orchestrator from a curated catalog) or as legacy Docker bundles; an in-progress arc is moving every provider role from the bundle path onto the native one. See the [Models architecture reference](/architecture/models) for the catalog schema, the keyed model registry, provider row shape, and the start sequence.

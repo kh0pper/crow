@@ -1449,3 +1449,50 @@ test("ensureRuntime's stale-tmp sweep failure never blocks the real install", as
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// launch block — render into argv, expose on handle, CUDA asset preference
+// ---------------------------------------------------------------------------
+
+test("buildLlamaServerArgs renders the launch block between identity flags and extraArgs", () => {
+  const args = buildLlamaServerArgs({
+    ggufPath: "/m/x.gguf", alias: "x", port: 18150, host: "127.0.0.1",
+    launch: { ctx: 8192, no_mmap: true }, extraArgs: ["--mmproj", "/m/p.gguf"],
+  });
+  assert.deepEqual(args, ["--model", "/m/x.gguf", "--alias", "x", "--port", "18150", "--host", "127.0.0.1", "-c", "8192", "--no-mmap", "--mmproj", "/m/p.gguf"]);
+});
+
+test("buildLlamaServerArgs without launch is byte-identical to the pre-launch shape", () => {
+  assert.deepEqual(
+    buildLlamaServerArgs({ ggufPath: "/m/x.gguf", alias: "x", port: 1, host: "h" }),
+    ["--model", "/m/x.gguf", "--alias", "x", "--port", "1", "--host", "h"],
+  );
+});
+
+test("startModel passes launch through and exposes the rendered argv on the handle and its status()", async () => {
+  const spawned = [];
+  const fakeSpawn = (cmd, args) => { spawned.push({ cmd, args }); return fakeChild(9601); };
+  const handle = startModel({ binPath: "/bin/llama-server", ggufPath: "/m/x.gguf", alias: "x", port: 18151,
+    launch: { ctx: 4096 }, spawn: fakeSpawn, setprivAvailable: false, setTimeoutFn: () => 0, clearTimeoutFn: () => {} });
+  assert.ok(handle.argv.includes("-c") && handle.argv.includes("4096"));
+  assert.deepEqual(handle.status().argv, handle.argv);
+  assert.ok(spawned[0].args.includes("4096"));
+  await handle.stop();
+});
+
+test("resolveAsset: a cuda probe prefers linux-x64-cuda when the catalog ships it", () => {
+  const rt = { release: "b1", assets: {
+    "linux-x64-vulkan": { file: "v.tar.gz", sha256: "a".repeat(64), min_glibc: "2.34" },
+    "linux-x64-cuda": { file: "c.tar.gz", sha256: "b".repeat(64), min_glibc: "2.34" },
+    "linux-x64-cpu": { file: "p.tar.gz", sha256: "c".repeat(64), min_glibc: "2.34" } } };
+  const r = resolveAsset({ platform: "linux", accel: "cuda" }, rt, { lddOutput: "ldd (GNU libc) 2.39" });
+  assert.equal(r.key, "linux-x64-cuda");
+});
+
+test("resolveAsset: a cuda probe without a cuda asset still falls to vulkan (unchanged v1 rule)", () => {
+  const rt = { release: "b1", assets: {
+    "linux-x64-vulkan": { file: "v.tar.gz", sha256: "a".repeat(64), min_glibc: "2.34" },
+    "linux-x64-cpu": { file: "p.tar.gz", sha256: "c".repeat(64), min_glibc: "2.34" } } };
+  const r = resolveAsset({ platform: "linux", accel: "cuda" }, rt, { lddOutput: "ldd (GNU libc) 2.39" });
+  assert.equal(r.key, "linux-x64-vulkan");
+});

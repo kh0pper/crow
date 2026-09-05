@@ -73,11 +73,15 @@ import {
 } from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { basename, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
-import { allocatePort, loadState, releasePort, saveState } from "./state.js";
+import { allocatePort, loadState, releasePort, saveState, registryKey, findRegistryEntryForProvider } from "./state.js";
 import { disableProvider, listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
 import { invalidateProvidersCache, invalidateAndRefreshProvidersCache } from "../../shared/providers.js";
+import { validateLaunch } from "./launch.js";
+import { doorBaseUrl, gatewayPort } from "./door.js";
+import { getOwnTailnetIp } from "../../shared/tailnet-ip.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -309,6 +313,151 @@ export function resolveEntry(catalog, modelId, quant) {
   const quantEntry = (model.quants || []).find((q) => q.quant === quantId);
   if (!quantEntry) throw new Error(`Unknown quant "${quantId}" for model ${modelId}`);
   return { model, quantEntry };
+}
+
+/** Thrown by `adoptModel` when weights already on disk don't match the
+ * catalog's expectation for a given quant/companion/shard — either the
+ * file is missing outright, or its sha256 (verified mode) or byte size
+ * (unverified mode, `allowUnverified: true`) doesn't line up. */
+export class AdoptMismatchError extends Error {
+  constructor(message, code, details = {}) {
+    super(message);
+    this.name = "AdoptMismatchError";
+    this.code = code;
+    Object.assign(this, details);
+  }
+}
+
+/** sha256 of a file's contents, hex-encoded, computed by streaming (never
+ * loads the whole file into memory — model weights can be tens of GB). */
+export function hashFileSha256(path, { createReadStreamImpl = createReadStream } = {}) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    createReadStreamImpl(path)
+      .on("data", (c) => hash.update(c))
+      .on("error", reject)
+      .on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+function sizeMatches(actualBytes, sizeMb) {
+  const expected = sizeMb * 1e6;
+  return Math.abs(actualBytes - expected) <= expected * 0.005;
+}
+
+/** Verify one adopted file against its catalog expectation. Returns `true`
+ * if the check was a sha256 match (verified mode), `false` if it was a
+ * size-only match (unverified mode). Throws `AdoptMismatchError` (missing
+ * file / sha mismatch / size mismatch) otherwise. */
+async function checkAdoptFile({ path, expectedSha, sizeMb, allowUnverified, hashFileFn, statFn, what }) {
+  let st;
+  try {
+    st = statFn(path);
+  } catch {
+    throw new AdoptMismatchError(`${what}: file not found at ${path}`, "ADOPT_FILE_MISSING", { file: path });
+  }
+  if (!allowUnverified) {
+    const actual = await hashFileFn(path);
+    if (actual !== expectedSha) {
+      throw new AdoptMismatchError(`${what}: sha256 of ${path} is ${actual}, expected ${expectedSha}`, "ADOPT_SHA_MISMATCH", { file: path, expected: expectedSha, actual });
+    }
+    return true;
+  }
+  if (!sizeMatches(st.size, sizeMb)) {
+    throw new AdoptMismatchError(`${what}: ${path} is ${st.size} bytes, expected about ${Math.round(sizeMb * 1e6)}`, "ADOPT_SIZE_MISMATCH", { file: path, expected: Math.round(sizeMb * 1e6), actual: st.size });
+  }
+  return false;
+}
+
+/** Register weights that are ALREADY on disk (never downloaded or copied
+ * by this module) — the "adopt" path for pre-existing installs. Verified
+ * mode (default) hashes `path` and every catalog companion/shard against
+ * the catalog's recorded sha256; `allowUnverified: true` instead accepts a
+ * byte-size match within 0.5%, for the case where re-hashing a huge file
+ * isn't worth it and the operator already trusts the provenance. Delegates
+ * the actual registry/DB write to `registerModel`, which spreads
+ * `registryExtra` last so `path/adopted/verified/companions/shardFiles`
+ * here override its planned-file defaults. `path` must be ABSOLUTE
+ * (`ADOPT_PATH_NOT_ABSOLUTE`). */
+export async function adoptModel({
+  modelId,
+  quant,
+  path,
+  companionPaths = {},
+  catalog,
+  allowUnverified = false,
+  hashFileFn = hashFileSha256,
+  statFn = statSync,
+  ...registerOpts
+}) {
+  // A relative path would be resolved against whatever cwd the gateway
+  // happens to have — which is not the operator's shell, and is not stable
+  // across a systemd restart. The registry stores this string verbatim and
+  // `startNativeAndAwaitReady` hands it straight to llama-server, so it has
+  // to be absolute or the entry is a time bomb.
+  if (typeof path !== "string" || !isAbsolute(path)) {
+    throw new AdoptMismatchError(
+      `adopt: weights path must be absolute, got ${JSON.stringify(path)}`,
+      "ADOPT_PATH_NOT_ABSOLUTE",
+      { file: path }
+    );
+  }
+  const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
+  const what = `${model.id} ${quantEntry.quant} (${quantEntry.file})`;
+  const shards = Array.isArray(quantEntry.shards) ? quantEntry.shards : [];
+  const primarySizeMb = quantEntry.size_mb - shards.reduce((s, x) => s + x.size_mb, 0);
+  const verifiedPrimary = await checkAdoptFile({
+    path,
+    expectedSha: quantEntry.sha256,
+    sizeMb: primarySizeMb,
+    allowUnverified,
+    hashFileFn,
+    statFn,
+    what,
+  });
+
+  const shardFiles = [];
+  for (const shard of shards) {
+    const shardPath = join(dirname(path), basename(shard.file));
+    await checkAdoptFile({
+      path: shardPath,
+      expectedSha: shard.sha256,
+      sizeMb: shard.size_mb,
+      allowUnverified,
+      hashFileFn,
+      statFn,
+      what: `${what} shard ${basename(shard.file)}`,
+    });
+    shardFiles.push(basename(shard.file));
+  }
+
+  const companions = [];
+  for (const c of Array.isArray(model.companions) ? model.companions : []) {
+    const cPath = companionPaths[c.kind];
+    if (!cPath) {
+      throw new AdoptMismatchError(`${what}: catalog companion ${c.kind} (${c.file}) needs a path`, "ADOPT_COMPANION_MISSING", { kind: c.kind, file: c.file });
+    }
+    await checkAdoptFile({
+      path: cPath,
+      expectedSha: c.sha256,
+      sizeMb: c.size_mb,
+      allowUnverified,
+      hashFileFn,
+      statFn,
+      what: `${what} companion ${c.kind}`,
+    });
+    companions.push({ kind: c.kind, file: basename(cPath), path: cPath });
+  }
+
+  const verified = verifiedPrimary === true;
+  const result = await registerModel({
+    modelId,
+    quant,
+    catalog,
+    ...registerOpts,
+    registryExtra: { ...(registerOpts.registryExtra || {}), path, adopted: true, verified, companions, shardFiles },
+  });
+  return { ...result, adopted: true, verified };
 }
 
 function assertNotSymlink(dest) {
@@ -1244,11 +1393,25 @@ const DEFAULT_CHAT_MUTEX_GROUP = "local-llm";
 /**
  * A provider row (as returned by `listProvidersAll`) counts as a
  * "chat-class member" of its mutex group when at least one of its `models[]`
- * entries carries `task === "chat"`. Rows without a mutex group, disabled
- * rows, and rows with no chat-tagged model entries are not counted.
+ * entries carries `task === "chat"` or `task === "vision"` (Task 8: a
+ * vision model shares the GPU/VRAM budget with chat models, so it joins the
+ * same mutex group by default). Rows without a mutex group, disabled
+ * rows, and rows with no chat/vision-tagged model entries are not counted.
  */
 function isChatClassRow(row) {
-  return Array.isArray(row.models) && row.models.some((m) => m && m.task === "chat");
+  return Array.isArray(row.models) && row.models.some((m) => m && (m.task === "chat" || m.task === "vision"));
+}
+
+/** Thrown by `registerModel` when a `launch` override fails
+ * `validateLaunch` against the catalog model's `context_len` (and mtp
+ * companion presence, for `spec`). */
+export class InvalidLaunchError extends Error {
+  constructor(errors) {
+    super(`invalid launch override: ${errors.join("; ")}`);
+    this.name = "InvalidLaunchError";
+    this.code = "INVALID_LAUNCH";
+    this.errors = errors;
+  }
 }
 
 /**
@@ -1284,70 +1447,124 @@ export function pickChatMutexGroup(existingRows) {
 /**
  * Register a downloaded model as a native-runtime provider row.
  *
- * Order (binding — later tasks' process supervisor depends on this exact
- * sequence): allocate + bind-test the port → persist the reservation +
- * registry entry to state.json → insert the provider row with its FINAL
- * `base_url` (the port never changes after this point — no placeholder,
- * no later "update base_url once the process is up") → invalidate the
- * providers cache LAST, so no reader can observe a cache miss that
- * refetches a still-mid-write row.
+ * Task 8 generalizes this from "one catalog model = one provider row" to
+ * roles/variants: `providerId` (defaults to `modelId`, so every pre-Task-8
+ * call site is unaffected) is the row's `id` — a caller can register the
+ * SAME catalog model+quant under several provider ids (e.g. "v-solo" and
+ * "v-copilot", two `launch` variants) or under a role id decoupled from
+ * the catalog id entirely (e.g. "crow-chat"). The on-disk weights and the
+ * `state.registry` entry, however, are keyed by `registryKey(catalogId,
+ * quant)` — `"<catalogId>@<quant>"` — NOT by `providerId`, so N provider
+ * rows can share one registry entry (and therefore one set of files);
+ * `unregisterModel` only deletes the entry/files once no other enabled
+ * native row still references that key (see below).
  *
- * The `dir`-scoped `state.registry[modelId]` entry this writes (`file`,
- * `quant`, `catalogId`, `registeredAt`, `sizeMb`) is what lets
- * `unregisterModel` find the on-disk blob to delete without needing a
- * `catalog` argument of its own — the registry entry IS the durable record
- * of which file this modelId's row corresponds to. `sizeMb` (the quant's
- * catalog `size_mb`, MB, may be a float) is read back by
- * `gpu-orchestrator.js`'s native acquire path to scale the readiness
+ * Order (binding — later tasks' process supervisor depends on this exact
+ * sequence): allocate + bind-test the port (skipped/reused when an
+ * existing native row at `providerId` already advertises one — see
+ * "Conversion" below) → persist the reservation + registry entry to
+ * state.json → insert the provider row with its FINAL `base_url` (the door
+ * URL; the port never changes after this point — no placeholder, no later
+ * "update base_url once the process is up") → invalidate the providers
+ * cache LAST, so no reader can observe a cache miss that refetches a
+ * still-mid-write row.
+ *
+ * `base_url` is now the DOOR url (`doorBaseUrl({ tailnetIp, port:
+ * gatewayPortFn() })` — routed through the gateway's `/llm/v1`, not the
+ * model's own port directly). The model's own port still lives at
+ * `gpu_policy.port` and is still returned as `port`. When `tailnetIpFn()`
+ * has no tailnet ip, the door falls back to loopback and `gpu_policy`
+ * carries `local_only: true` so callers know this instance isn't reachable
+ * over the tailnet.
+ *
+ * Conversion: `providerId` may already name an existing BUNDLE row (a
+ * user's llamacpp-container provider for this same slot, e.g. converting
+ * "crow-chat" from a Docker bundle to a native download). That's allowed
+ * — the existing row is snapshotted to `state.conversions[providerId]`
+ * (`{ at, row }`) before being overwritten, `bundle_id` is cleared, and
+ * (when `mutexGroup` is left to auto-resolve) the converted row's own
+ * `gpuPolicy.mutexGroup` is inherited rather than recomputed, since the
+ * row was almost certainly already sharing a VRAM budget with other rows.
+ * A foreign non-bundle, non-native row (e.g. a cloud provider) at
+ * `providerId` is still refused — see the collision guard below.
+ *
+ * `launch`, if given, is validated with `validateLaunch()` against the
+ * catalog model's `context_len` (and mtp-companion presence, for `spec`)
+ * and thrown as `InvalidLaunchError` (`code: "INVALID_LAUNCH"`) on
+ * failure — validated BEFORE any state/DB mutation, same as the collision
+ * guard, so a rejected call leaves nothing behind.
+ *
+ * `mutexGroup`: `undefined` (the default) auto-resolves — chat/vision
+ * models join `pickChatMutexGroup()`'s pick (or the converted row's
+ * existing group, see above); every other task gets no mutexGroup key at
+ * all. `null` means "explicitly none" (even for a chat/vision model — an
+ * `alwaysResident` model deliberately outside the shared VRAM budget, say).
+ * A non-empty string wins outright.
+ *
+ * The `dir`-scoped `state.registry[registryKey(catalogId, quant)]` entry
+ * this writes (`file`, `quant`, `catalogId`, `registeredAt`, `sizeMb`) is
+ * what lets `unregisterModel` find the on-disk blob to delete without
+ * needing a `catalog` argument of its own — the registry entry IS the
+ * durable record of which files this catalogId+quant corresponds to.
+ * `sizeMb` (the quant's catalog `size_mb`, MB, may be a float) is read back
+ * by `gpu-orchestrator.js`'s native acquire path to scale the readiness
  * timeout to the model's actual size (Item G, Task 10) — it is NOT used by
  * `unregisterModel` or anything else in this file. Two more fields ride the
  * same object but are NOT written here: `wasLive`/`lastStoppedAt`
  * (Task 13 fix round 1, finding c) are set by `gpu-orchestrator.js` the
  * first time the model actually becomes resident, not at registration time
- * — a freshly-registered, never-started model correctly has neither.
+ * — a freshly-registered, never-started model correctly has neither. A
+ * re-register of an already-registered key preserves the existing entry's
+ * `registeredAt` (and any other fields not explicitly overwritten here) —
+ * only `registryExtra` (below) and the recomputed file lists change.
  *
  * `registryExtra` (Task 13 fix round 1, finding 1), if given, is
- * shallow-merged into the registry entry AFTER the fields above — the only
- * caller today is `routes/models.js`'s `POST /hf-download` handler, which
- * passes `{ source: "hf-browser" }` so the panel/registry can tell a
- * Browse-Hugging-Face registration apart from a curated one. Defaults to
- * `{}` (no-op) so every existing call site is unaffected.
+ * shallow-merged onto the registry entry LAST (after every field above,
+ * including a pre-existing entry's carried-over fields) — this is how the
+ * model-adopt flow (Task 9) marks a registry entry `{ path, adopted:
+ * true, verified, companions }` for weights that live outside the managed
+ * blobs dir and must never be unlinked by `unregisterModel` (see below).
+ * The `POST /hf-download` handler passes `{ source: "hf-browser" }` so the
+ * panel/registry can tell a Browse-Hugging-Face registration apart from a
+ * curated one. Defaults to `{}` (no-op) so every existing call site is
+ * unaffected.
  *
  * Injectable seams (`allocatePortFn`/`listProvidersAllFn`/`upsertProviderFn`/
- * `invalidateCacheFn`) default to the real implementations; tests use them
- * to observe call order without needing to intercept module internals.
- * `invalidateCacheFn` defaults to `invalidateAndRefreshProvidersCache`
- * (Item G, PR G-F, defect 2), NOT the plain sync `invalidateProvidersCache`
- * — this function's caller (the download-then-register route, or any
- * caller that immediately turns around and asks whether the model it just
- * registered is startable) needs the row to be visible in the very next
- * `loadProviders()` call, which the plain invalidate can't guarantee (it
- * only clears the cache; the next `loadProviders()` call fires an
- * un-awaited background DB refresh and returns the stale/fallback
- * snapshot in the meantime). Awaiting the real refresh here closes that
- * window.
+ * `invalidateCacheFn`/`ownInstanceIdFn`/`tailnetIpFn`/`gatewayPortFn`)
+ * default to the real implementations; tests use them to observe call
+ * order / pin deterministic values without needing to intercept module
+ * internals. `invalidateCacheFn` defaults to
+ * `invalidateAndRefreshProvidersCache` (Item G, PR G-F, defect 2), NOT the
+ * plain sync `invalidateProvidersCache` — this function's caller (the
+ * download-then-register route, or any caller that immediately turns
+ * around and asks whether the model it just registered is startable)
+ * needs the row to be visible in the very next `loadProviders()` call,
+ * which the plain invalidate can't guarantee (it only clears the cache;
+ * the next `loadProviders()` call fires an un-awaited background DB
+ * refresh and returns the stale/fallback snapshot in the meantime).
+ * Awaiting the real refresh here closes that window.
  *
- * Provider-id collision guard: `modelId` doubles as the provider row's `id`
- * (see the section header comment), which means a user's own cloud/bundle
- * provider could already occupy that id by coincidence — an unrelated row
- * that this call must never clobber. BEFORE anything else (before even
- * allocating a port, so a rejected call never leaks a reservation), any
- * existing row at this id is checked for ownership: it's "ours" only if its
+ * Provider-id collision guard: `providerId` (defaulting to `modelId`) is
+ * the provider row's `id`, which means a user's own cloud/bundle provider
+ * could already occupy that id by coincidence — an unrelated row that this
+ * call must never clobber. BEFORE anything else (before even allocating a
+ * port, so a rejected call never leaks a reservation), any existing row at
+ * this id is checked: it's "ours" (a prior registration of this exact
+ * catalog model by this runtime — ownership must survive a
+ * register→unregister→re-register cycle on the same instance) if its
  * `gpu_policy.runtime === "native"` AND its own `models[]` array already
- * carries an entry for this catalog model's id (i.e. it's a row THIS
- * registration path wrote, for THIS model — the row itself is the durable
- * record, deliberately NOT the local, ephemeral `state.registry` map,
- * which `unregisterModel` clears on every teardown; ownership must survive
- * a register→unregister→re-register cycle on the same instance). Anything
- * else (a foreign provider, or a native-tagged row for a different model)
- * throws `ProviderIdConflictError` with the existing row completely
- * untouched.
+ * carries an entry for this catalog model's id; it's a convertible BUNDLE
+ * row if it carries a `bundle_id`; anything else (a foreign provider, or a
+ * native-tagged row for a different model) throws `ProviderIdConflictError`
+ * with the existing row completely untouched.
  *
  * @throws {ProviderIdConflictError} if a provider already exists at this id
- *   and isn't a prior registration of this same model by this runtime.
- * @returns {Promise<object>} the registered provider row shape:
- *   `{ id, baseUrl, port, apiKey, host, bundleId, description, models,
- *      gpuPolicy, disabled, lamport_ts }`
+ *   and isn't a prior registration of this same model by this runtime, or
+ *   a convertible bundle row.
+ * @throws {InvalidLaunchError} if `launch` fails `validateLaunch()`.
+ * @returns {Promise<object>} `{ id, providerId, registryKey, baseUrl
+ *   (door), doorUrl, port, apiKey, host, bundleId, description, models,
+ *   gpuPolicy, disabled, converted, lamport_ts }`
  */
 export async function registerModel({
   modelId,
@@ -1355,42 +1572,118 @@ export async function registerModel({
   catalog,
   db,
   dir,
+  providerId = modelId,
+  launch = null,
+  mutexGroup,
+  alwaysResident = false,
+  defaultMember = false,
+  registryExtra = {},
+  ownInstanceIdFn = getOrCreateLocalInstanceId,
+  tailnetIpFn = getOwnTailnetIp,
+  gatewayPortFn = gatewayPort,
   allocatePortFn = allocatePort,
   listProvidersAllFn = listProvidersAll,
   upsertProviderFn = upsertProvider,
   invalidateCacheFn = invalidateAndRefreshProvidersCache,
-  registryExtra = {},
 }) {
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
+  const key = registryKey(model.id, quantEntry.quant);
+
+  if (launch !== null && launch !== undefined) {
+    const hasMtp = (Array.isArray(model.tags) && model.tags.includes("mtp"))
+      || (Array.isArray(model.companions) && model.companions.some((c) => c && c.kind === "mtp"));
+    const errs = validateLaunch(launch, { contextLen: model.context_len, label: "launch", hasMtp });
+    if (errs.length) throw new InvalidLaunchError(errs);
+  }
 
   const state = loadState(dir);
 
-  // Collision guard — read-only, runs BEFORE any state/DB mutation (in
-  // particular before allocatePortFn, so a rejected call leaves no
-  // reservation behind to clean up).
+  // Collision / conversion guard — read-only, runs BEFORE any state/DB
+  // mutation (in particular before allocatePortFn, so a rejected call
+  // leaves no reservation behind to clean up).
   const existingRows = await listProvidersAllFn(db);
-  const existingRow = existingRows.find((r) => r.id === modelId);
+  const existingRow = existingRows.find((r) => r.id === providerId) || null;
+  let converted = false;
   if (existingRow) {
     const isOurs = existingRow.gpuPolicy?.runtime === NATIVE_RUNTIME
       && Array.isArray(existingRow.models)
       && existingRow.models.some((m) => m && m.id === model.id);
-    if (!isOurs) {
-      throw new ProviderIdConflictError(modelId);
-    }
+    const isBundleRow = !!existingRow.bundleId;
+    if (!isOurs && !isBundleRow) throw new ProviderIdConflictError(providerId);
+    converted = isBundleRow;
   }
 
-  const port = await allocatePortFn(state, modelId, { crowHome: dir, pid: process.pid });
+  // Port: keep the port an existing native row already advertises (a
+  // re-register of the same providerId); a fresh row (or a converted
+  // bundle row, which never had a native port) allocates. Reusing the
+  // port never calls allocatePortFn (reallocating could hand back a
+  // DIFFERENT port if the existing one is currently bound by a LIVE
+  // process — see the doc comment above), but the reservation is still
+  // re-recorded below if a prior unregisterModel (or a fresh state.json)
+  // left `state.reservations` without it, so a disabled-but-present row's
+  // port is never left un-reserved after this call returns.
+  const existingPort = existingRow?.gpuPolicy?.runtime === NATIVE_RUNTIME ? Number(existingRow.gpuPolicy.port) : NaN;
+  // ...unless some OTHER provider has since been given that port. A disabled
+  // row keeps its `gpu_policy.port` after `unregisterModel` frees the
+  // reservation, so the very next registration can legitimately be handed it;
+  // re-registering the old row must then take a fresh port rather than
+  // double-book a live one (final review I3).
+  const portClaimedByAnother = Number.isInteger(existingPort) && existingPort > 0
+    && Object.entries(state.reservations).some(([id, r]) => id !== providerId && Number(r?.port) === existingPort);
+  const port = Number.isInteger(existingPort) && existingPort > 0 && !portClaimedByAnother
+    ? existingPort
+    : await allocatePortFn(state, providerId, { crowHome: dir, pid: process.pid });
+  if (!state.reservations[providerId]) {
+    state.reservations[providerId] = { port, owner: { crowHome: dir, pid: process.pid }, createdAt: new Date().toISOString() };
+  }
+
+  if (converted) {
+    // Snapshot the bundle row being replaced so an operator can see/restore
+    // what this providerId used to be (Task 9's adopt/convert UI reads this).
+    state.conversions[providerId] = {
+      at: new Date().toISOString(),
+      row: {
+        id: existingRow.id,
+        base_url: existingRow.baseUrl,
+        api_key: existingRow.apiKey ?? null,
+        host: existingRow.host,
+        bundle_id: existingRow.bundleId,
+        description: existingRow.description ?? null,
+        models: existingRow.models,
+        provider_type: existingRow.provider_type ?? null,
+        gpu_policy: existingRow.gpuPolicy ?? null,
+        disabled: !!existingRow.disabled,
+      },
+    };
+  }
+
   // Schema v2: the row records every on-disk file the install owns —
   // `shardFiles` (parts 2..n of a multi-part GGUF; llama-server finds them
   // beside the primary) and `companions` (mmproj → `--mmproj` on native
   // start; mtp kept beside the model) — so `unregisterModel` can remove
-  // them all. Both are empty arrays for a plain single-file quant.
+  // them all. Both are empty arrays for a plain single-file quant. Keyed
+  // by `registryKey`, NOT `providerId` — a second variant of the same
+  // catalog model+quant shares this same entry.
+  // Only three fields survive a RE-register: `registeredAt` (the install's
+  // original date) and the `wasLive`/`lastStoppedAt` runtime markers that
+  // gpu-orchestrator.js owns. Everything else — `path`, `adopted`,
+  // `verified`, `source`, `companions`, `shardFiles`, `file`, `quant`,
+  // `catalogId`, `sizeMb` — is re-derived from THIS call (plus
+  // `registryExtra`). Spreading the whole previous entry instead would let a
+  // stale `path`/`adopted` from an earlier adopt survive a later download of
+  // the same key, leaving the entry pointing at weights this install no
+  // longer owns (final review I2).
   const plannedFiles = planFiles(model, quantEntry);
-  state.registry[modelId] = {
+  const prevEntry = state.registry[key] || {};
+  const carriedRuntimeState = {};
+  if (prevEntry.wasLive !== undefined) carriedRuntimeState.wasLive = prevEntry.wasLive;
+  if (prevEntry.lastStoppedAt !== undefined) carriedRuntimeState.lastStoppedAt = prevEntry.lastStoppedAt;
+  state.registry[key] = {
+    ...carriedRuntimeState,
     file: sanitizeFilename(quantEntry.file),
     quant: quantEntry.quant,
     catalogId: model.id,
-    registeredAt: new Date().toISOString(),
+    registeredAt: prevEntry.registeredAt || new Date().toISOString(),
     sizeMb: Number.isFinite(quantEntry.size_mb) ? quantEntry.size_mb : null,
     shardFiles: plannedFiles.filter((f) => f.role === "shard").map((f) => f.dest),
     companions: plannedFiles.filter((f) => f.role === "companion").map((f) => ({ kind: f.kind, file: f.dest })),
@@ -1398,17 +1691,37 @@ export async function registerModel({
   };
   saveState(dir, state);
 
-  const gpuPolicy = { runtime: NATIVE_RUNTIME };
-  if (model.task === "chat") {
-    // Exclude this model's own (pre-existing, legitimate-re-register) row
-    // from the mutex-group count — it must never vote for its own group.
-    const otherRows = existingRows.filter((r) => r.id !== modelId);
-    gpuPolicy.mutexGroup = pickChatMutexGroup(otherRows);
-  }
-  // embed-class (and any other non-chat task): no mutexGroup key at all —
-  // embedding servers don't contend for the chat mutex group.
+  const owner = ownInstanceIdFn();
+  const tailnetIp = tailnetIpFn();
+  const gpuPolicy = {
+    runtime: NATIVE_RUNTIME,
+    catalogId: model.id,
+    quant: quantEntry.quant,
+    port,
+    owner,
+    alwaysResident: !!alwaysResident,
+    defaultMember: !!defaultMember,
+  };
+  if (!tailnetIp) gpuPolicy.local_only = true;
+  if (launch !== null && launch !== undefined) gpuPolicy.launch = launch;
 
-  const baseUrl = `http://127.0.0.1:${port}/v1`;
+  if (mutexGroup === undefined) {
+    if (model.task === "chat" || model.task === "vision") {
+      // A converted bundle row inherits its own prior mutex group (it was
+      // almost certainly already sharing a VRAM budget); otherwise resolve
+      // the usual way, excluding this providerId's own (pre-existing,
+      // legitimate-re-register) row from the count — it must never vote
+      // for its own group.
+      const inherited = converted ? existingRow.gpuPolicy?.mutexGroup : null;
+      gpuPolicy.mutexGroup = inherited || pickChatMutexGroup(existingRows.filter((r) => r.id !== providerId));
+    }
+    // embed-class (and any other non-chat/vision task): no mutexGroup key
+    // at all — embedding servers don't contend for the chat mutex group.
+  } else if (typeof mutexGroup === "string" && mutexGroup) {
+    gpuPolicy.mutexGroup = mutexGroup;
+  } // mutexGroup === null -> explicitly none, no key at all
+
+  const baseUrl = doorBaseUrl({ tailnetIp, port: gatewayPortFn() });
   const models = [{
     id: model.id,
     task: model.task,
@@ -1420,7 +1733,7 @@ export async function registerModel({
   const description = `${model.family} ${quantEntry.quant} (native)`;
 
   const upserted = await upsertProviderFn(db, {
-    id: modelId,
+    id: providerId,
     baseUrl,
     apiKey: null,
     host: "local",
@@ -1435,8 +1748,11 @@ export async function registerModel({
   await invalidateCacheFn();
 
   return {
-    id: modelId,
+    id: providerId,
+    providerId,
+    registryKey: key,
     baseUrl,
+    doorUrl: baseUrl,
     port,
     apiKey: null,
     host: "local",
@@ -1445,6 +1761,7 @@ export async function registerModel({
     models,
     gpuPolicy,
     disabled: false,
+    converted,
     lamport_ts: upserted.lamport_ts,
   };
 }
@@ -1454,10 +1771,27 @@ export async function registerModel({
  * handle is given — no process supervisor exists yet as of Task 7, this is
  * a forward-looking seam for the task that adds one), free its port
  * reservation, delete its blob (every part and companion the registry row
- * names), soft-delete its provider row, and
+ * names) — UNLESS another enabled row still references the same registry
+ * key (variants sharing weights, Task 8) or the entry is `adopted` (Task
+ * 9: weights outside the managed blobs dir that this pipeline never
+ * downloaded and must never delete) — soft-delete its provider row, and
  * invalidate the providers cache. Order is binding (asserted via injected
  * spies in tests) — each step only starts once the previous one has
  * settled.
+ *
+ * `modelId` here is really the provider row's `id` (a role or variant, not
+ * necessarily a catalog id — see `registerModel`'s `providerId`). The
+ * registry key to act on is resolved from THIS row's own
+ * `gpu_policy.{catalogId,quant}` (`findRegistryEntryForProvider`), falling
+ * back to the bare `modelId` for a legacy row that predates the
+ * `<catalogId>@<quant>` keying (or one already gone from the DB — the row
+ * is looked up in `listProvidersAllFn`, and its absence is not an error).
+ * Once the key is known, every OTHER enabled row whose own
+ * `gpu_policy.{catalogId,quant}` maps to that same key is a still-live
+ * reference: if any exist, the registry entry (and therefore the on-disk
+ * weights) survive this teardown — only this row's provider entry is
+ * disabled/released. The registry entry (and, unless adopted, the files it
+ * names) is removed only when this is the LAST reference.
  *
  * `runtimeHandle`, if given, is duck-typed as `{ live: boolean, stop():
  * Promise<void> }` — `stop()` is only called when `live` is truthy.
@@ -1475,6 +1809,7 @@ export async function unregisterModel({
   unlinkFn = unlinkSync,
   disableProviderFn = disableProvider,
   invalidateCacheFn = invalidateProvidersCache,
+  listProvidersAllFn = listProvidersAll,
 }) {
   if (runtimeHandle && runtimeHandle.live) {
     await runtimeHandle.stop();
@@ -1482,27 +1817,41 @@ export async function unregisterModel({
 
   const state = loadState(dir);
   releasePortFn(state, modelId);
-  const regEntry = state.registry[modelId];
-  delete state.registry[modelId];
+
+  const rows = await listProvidersAllFn(db);
+  const self = rows.find((r) => r.id === modelId) || null;
+  const found = self ? findRegistryEntryForProvider(state, self) : null;
+  const key = found ? found.key : modelId;
+  const regEntry = state.registry[key];
+  const otherRefs = rows.filter((r) => r.id !== modelId && !r.disabled && r.gpuPolicy?.runtime === NATIVE_RUNTIME
+    && r.gpuPolicy.catalogId && r.gpuPolicy.quant && registryKey(r.gpuPolicy.catalogId, r.gpuPolicy.quant) === key);
+  const lastReference = otherRefs.length === 0;
+  if (lastReference) delete state.registry[key];
   saveState(dir, state);
 
   // Primary part, then shards, then companions (schema v2) — a legacy row
-  // with neither field unlinks exactly its one file, as before.
-  const ownedFiles = regEntry?.file
-    ? [
-      regEntry.file,
-      ...(Array.isArray(regEntry.shardFiles) ? regEntry.shardFiles : []),
-      ...(Array.isArray(regEntry.companions) ? regEntry.companions.map((c) => c && c.file) : []),
-    ].filter((name) => typeof name === "string" && name.length > 0)
-    : [];
+  // with neither field unlinks exactly its one file, as before. An
+  // `adopted` entry (Task 9) is never unlinked — those weights live
+  // outside the managed blobs dir and this pipeline doesn't own them.
+  // `regEntry.path`, when present, is the adopted file's absolute path;
+  // otherwise every name is a basename resolved under `modelsBlobDir`.
   let deleted = false;
-  for (const name of ownedFiles) {
-    const dest = join(modelsBlobDir(dir), name);
-    try {
-      unlinkFn(dest);
-      deleted = true;
-    } catch (err) {
-      if (err && err.code !== "ENOENT") throw err;
+  if (lastReference && regEntry?.file && !regEntry.adopted) {
+    const primary = regEntry.path || join(modelsBlobDir(dir), regEntry.file);
+    const owned = [
+      primary,
+      ...(Array.isArray(regEntry.shardFiles) ? regEntry.shardFiles.map((n) => join(modelsBlobDir(dir), n)) : []),
+      ...(Array.isArray(regEntry.companions)
+        ? regEntry.companions.map((c) => c && (c.path || (c.file && join(modelsBlobDir(dir), c.file))))
+        : []),
+    ].filter((p) => typeof p === "string" && p.length > 0);
+    for (const dest of owned) {
+      try {
+        unlinkFn(dest);
+        deleted = true;
+      } catch (err) {
+        if (err && err.code !== "ENOENT") throw err;
+      }
     }
   }
 

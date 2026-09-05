@@ -36,7 +36,7 @@ import { createClient } from "@libsql/client";
 
 import modelsRouter, { requireDashboardSessionJson, HF_TOKEN_PROVIDER_ID } from "../servers/gateway/routes/models.js";
 import { setProviderSyncManager } from "../servers/shared/providers-db.js";
-import { loadState } from "../servers/gateway/models/state.js";
+import { loadState, registryKey } from "../servers/gateway/models/state.js";
 
 const repoRoot = join(import.meta.dirname, "..");
 
@@ -705,8 +705,11 @@ test("POST /api/models/hf-download -> GET /api/models/downloads: job carries sou
     });
 
     const state = loadState(h.dir);
-    assert.equal(state.registry[derivedId].source, "hf-browser");
-    assert.equal(state.registry[derivedId].catalogId, derivedId);
+    // Registry keys are `<catalogId>@<quant>` (Task 5) — the hf-browser
+    // catalog above registers this model under quant "hf".
+    const regEntry = state.registry[registryKey(derivedId, "hf")];
+    assert.equal(regEntry.source, "hf-browser");
+    assert.equal(regEntry.catalogId, derivedId);
   } finally { await h.cleanup(); }
 });
 

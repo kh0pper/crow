@@ -28,6 +28,7 @@ import { readFileSync } from "fs";
 import { createDbClient } from "../db.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { getOwnAddresses, isLocallyOrchestratable } from "./locality.js";
+import { localizeNativeRow } from "./native-locality.js";
 import { modelsJsonSearchPaths } from "./models-json-paths.js";
 import { emitOrQueue } from "./sync-emit.js";
 
@@ -111,8 +112,14 @@ export async function seedProvidersFromModelsJson(db) {
  * `resolveProvider`) continue to work.
  *
  * Shape: { providers: { <id>: { baseUrl, apiKey, host, bundleId, models[] } }, _source }
+ *
+ * `ownInstanceId` defaults to this gateway's own instance id (Task 7's
+ * `localizeNativeRow`); every native row this instance owns (per
+ * `gpuPolicy.owner`) gets its `baseUrl` rewritten to the loopback door
+ * (`127.0.0.1:<gpuPolicy.port>`) with the original door URL preserved as
+ * `doorUrl` — a foreign-owned or non-native row passes through unchanged.
  */
-export async function loadProvidersFromDb(db) {
+export async function loadProvidersFromDb(db, { ownInstanceId = getOrCreateLocalInstanceId() } = {}) {
   const dbClient = db || createDbClient();
   const { rows } = await dbClient.execute({
     sql: "SELECT * FROM providers WHERE disabled = 0 ORDER BY id",
@@ -126,7 +133,7 @@ export async function loadProvidersFromDb(db) {
     try { models = JSON.parse(r.models || "[]"); } catch {}
     let gpuPolicy = null;
     try { gpuPolicy = r.gpu_policy ? JSON.parse(r.gpu_policy) : null; } catch {}
-    providers[r.id] = {
+    providers[r.id] = localizeNativeRow({
       baseUrl: r.base_url,
       apiKey: r.api_key,
       host: r.host,
@@ -134,7 +141,7 @@ export async function loadProvidersFromDb(db) {
       description: r.description,
       models,
       gpuPolicy,
-    };
+    }, ownInstanceId);
   }
   return { providers, _source: "db:providers" };
 }

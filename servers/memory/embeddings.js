@@ -13,6 +13,8 @@
 
 import { loadProviders } from "../shared/providers.js";
 import { createDbClient } from "../db.js";
+import { localizeDbBaseUrl } from "../shared/native-locality.js";
+import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 
 // Fallback when no provider is configured via env or the dashboard setting.
 const FALLBACK_PROVIDER = "grackle-embed";
@@ -79,18 +81,31 @@ async function resolveEmbedConfig(providerName = FALLBACK_PROVIDER) {
   return { baseUrl: p.baseUrl, apiKey: p.apiKey, model, dim, name: providerName };
 }
 
-async function loadProviderFromDb(id) {
+/** Cold-cache providers-table read for one embedding provider.
+ *
+ * One of the three read paths that turn a providers row into a request
+ * target, so an OWNED native row's door `base_url` is localized back to
+ * loopback here too (`servers/shared/native-locality.js`) — a locally
+ * owned embedding model must be called on its llama-server port, not
+ * through this gateway's own `/llm/v1` door. Exported for tests. */
+export async function loadProviderFromDb(id, { ownInstanceIdFn = getOrCreateLocalInstanceId } = {}) {
   try {
     const db = createDbClient();
     try {
       const { rows } = await db.execute({
-        sql: "SELECT base_url, api_key, models FROM providers WHERE id = ? AND (disabled IS NULL OR disabled = 0) LIMIT 1",
+        sql: "SELECT base_url, api_key, models, gpu_policy FROM providers WHERE id = ? AND (disabled IS NULL OR disabled = 0) LIMIT 1",
         args: [id],
       });
       if (!rows.length) return null;
       let models = [];
       try { models = JSON.parse(rows[0].models || "[]"); } catch {}
-      return { baseUrl: rows[0].base_url, apiKey: rows[0].api_key, models };
+      let gpuPolicy = null;
+      try { gpuPolicy = rows[0].gpu_policy ? JSON.parse(rows[0].gpu_policy) : null; } catch {}
+      return {
+        baseUrl: localizeDbBaseUrl(rows[0].base_url, gpuPolicy, ownInstanceIdFn),
+        apiKey: rows[0].api_key,
+        models,
+      };
     } finally {
       db.close?.();
     }

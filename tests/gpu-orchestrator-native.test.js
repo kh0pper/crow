@@ -55,7 +55,7 @@ function nativeProv(port, alias, extra = {}) {
     host: "local",
     bundleId: null,
     models: [{ id: alias, task: "chat" }],
-    gpuPolicy: { runtime: "native", ...gpuPolicy },
+    gpuPolicy: { runtime: "native", catalogId: alias, quant: "Q4", port, ...gpuPolicy },
     ...rest,
   };
 }
@@ -87,6 +87,18 @@ function fakeHandle(overrides = {}) {
 /** Injectable seams that get a fresh native provider all the way to
  * "started and ready" without touching a real binary/download/process. */
 function startCapableOpts({ cfg, identityProbeFn, startCalls = [], startModelFn }) {
+  // Registry keyed exactly the way production keys it — `<catalogId>@<quant>`,
+  // and ONLY that (a bare "native-target" alias key here would mask C1: the
+  // real `loadState` re-keys every legacy entry, so the bare key does not
+  // survive a load in production). Several pre-existing fixtures in this file
+  // deliberately give a native provider's `models[0].id` (its llama-server
+  // alias, e.g. "qwen3-4b") a DIFFERENT value than the cfg key
+  // ("native-target"), to prove alias and provider-name are independent
+  // concepts; their default gpuPolicy.catalogId (== alias) therefore does not
+  // match this entry, and they resolve through `registryKeyOf`'s third step
+  // (an entry whose key parses to catalogId === the provider NAME) — the same
+  // step that keeps a live pre-arc row startable after the migration.
+  const registryEntry = { file: "model.gguf", catalogId: "native-target", quant: "Q4" };
   return {
     cfg,
     identityProbeFn,
@@ -96,10 +108,13 @@ function startCapableOpts({ cfg, identityProbeFn, startCalls = [], startModelFn 
       return fakeHandle();
     }),
     ensureRuntimeFn: async () => "/fake/runtimes/llamacpp/b1/llama-server",
-    loadStateFn: () => ({ registry: { "native-target": { file: "model.gguf" } } }),
+    loadStateFn: () => ({ registry: { "native-target@Q4": registryEntry } }),
     resolveDataDirFn: () => "/fake/crow-home",
     loadCatalogFn: () => ({ runtime: { release: "b1", assets: {} } }),
     getCachedProbeFn: () => ({ platform: "linux", accel: "cpu" }),
+    existsSyncFn: () => true,
+    getRuntimeOverrideFn: () => null,
+    ownInstanceIdFn: () => "this-instance",
     readinessTimeoutMs: 200,
     readinessPollMs: 5,
     readinessInitialDelayMs: 0,
@@ -430,6 +445,7 @@ test("ensureResident native: no live handle -> starts it and reports embed capab
     resolveDataDirFn: () => "/fake/crow-home",
     loadCatalogFn: () => ({ runtime: { release: "b1", assets: {} } }),
     getCachedProbeFn: () => ({ platform: "linux", accel: "cpu" }),
+    existsSyncFn: () => true,
     readinessTimeoutMs: 200,
     readinessPollMs: 5,
     readinessInitialDelayMs: 0,
@@ -568,6 +584,7 @@ test("Fix 1: acquire native with a null initial probe cache awaits reprobeFn exa
     loadCatalogFn: () => ({ runtime: { release: "b1", assets: {} } }),
     getCachedProbeFn,
     reprobeFn,
+    existsSyncFn: () => true,
     readinessTimeoutMs: 200,
     readinessPollMs: 5,
     readinessInitialDelayMs: 0,
@@ -856,6 +873,10 @@ test("Finding c: a successful native start persists wasLive:true on the registry
 
     const result = await acquireProvider("native-target", {
       ...startCapableOpts({ cfg, identityProbeFn }),
+      // Read the SAME scratch state this test wrote (not startCapableOpts's
+      // canned registry), so the key the marker lands under is the one the
+      // real loadState resolves for this row.
+      loadStateFn: () => loadState(dir),
       resolveDataDirFn: () => dir,
     });
 
@@ -888,6 +909,7 @@ test("Finding c: the handle reaching a terminal state (stop/crash) clears wasLiv
 
     const result = await acquireProvider("native-target", {
       ...startCapableOpts({ cfg, identityProbeFn, startModelFn }),
+      loadStateFn: () => loadState(dir),
       resolveDataDirFn: () => dir,
     });
     assert.equal(result, true);
@@ -1065,14 +1087,15 @@ test("v2 native start: task embedding adds --embedding; task rerank adds --reran
   }
 });
 
-test("v2 native start: --jinja (chat_template_kwargs) and --mmproj compose, jinja first", async () => {
+test("v2 native start: --jinja (chat_template_kwargs) and --mmproj compose, jinja is rendered via launch.jinja, not extraArgs", async () => {
   const startCalls = [];
   await acquireProvider("native-target", v2StartOpts({
     registryEntry: { file: "model.gguf", companions: [{ kind: "mmproj", file: "native-target--mmproj-F16.gguf" }] },
     catalogEntry: { id: "native-target", task: "vision", chat_template_kwargs: { enable_thinking: false } },
     startCalls,
   }));
-  assert.deepEqual(startCalls[0].extraArgs, ["--jinja", "--mmproj", join("/fake/crow-home", "models", "blobs", "native-target--mmproj-F16.gguf")]);
+  assert.equal(startCalls[0].launch.jinja, true);
+  assert.deepEqual(startCalls[0].extraArgs, ["--mmproj", join("/fake/crow-home", "models", "blobs", "native-target--mmproj-F16.gguf")]);
 });
 
 test("v2 native start: a chat model with no companions and no kwargs gets exactly today's args (empty extraArgs); a legacy row with no companions field is fine", async () => {
@@ -1098,4 +1121,330 @@ test("v2 native start: a model absent from the catalog (Browse-HF install) still
   }));
   assert.equal(ok, true);
   assert.deepEqual(startCalls[0].extraArgs, ["--mmproj", join("/fake/crow-home", "models", "blobs", "native-target--mmproj-F16.gguf")]);
+});
+
+// ---------------------------------------------------------------------------
+// Item G, Task 10 (models-core launch roles arc): registry-key resolution,
+// adopted `path`, launch-profile merge, ctx guard, missing-file gate,
+// runtime-override binary, and the owner gate.
+// ---------------------------------------------------------------------------
+
+/** `identityProbeFn` stand-in driven by an explicit state sequence — the
+ * last state repeats once the sequence is exhausted (mirrors
+ * `downThenResident`'s shape but for arbitrary state lists). */
+function probeSequence(states) { let i = 0; return async () => states[Math.min(i++, states.length - 1)]; }
+
+test("native start: launch = catalog defaults merged under the provider override, rendered into startModel's launch", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18100, "native-target", { gpuPolicy: { launch: { ctx: 4096 } } }) } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.loadCatalogFn = () => ({ runtime: { release: "b1", assets: {} }, models: [{ id: "native-target", task: "chat", context_len: 8192, launch: { ctx: 8192, ngl: 999 }, chat_template_kwargs: { enable_thinking: false } }] });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.deepEqual(startCalls[0].launch, { ctx: 4096, ngl: 999, jinja: true });
+  assert.ok(!startCalls[0].extraArgs.includes("--jinja"), "--jinja is rendered via launch.jinja, not extraArgs");
+});
+
+test("native start: resolved ctx above context_len is refused with CTX_EXCEEDS_MODEL before any spawn", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18100, "native-target", { gpuPolicy: { launch: { ctx: 16384 } } }) } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down"]), startCalls });
+  opts.loadCatalogFn = () => ({ runtime: { release: "b1", assets: {} }, models: [{ id: "native-target", task: "chat", context_len: 8192 }] });
+  await assert.rejects(acquireProvider("native-target", opts), (e) => e.code === "CTX_EXCEEDS_MODEL");
+  assert.equal(startCalls.length, 0);
+});
+
+test("native start: registry entry resolved by gpuPolicy.catalogId@quant; ggufPath uses entry.path when set", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "crow-chat": nativeProv(18100, "qwen3.6-35b-a3b", { gpuPolicy: { catalogId: "qwen3.6-35b-a3b", quant: "UD-Q5_K_XL", port: 18100 } }) } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.loadStateFn = () => ({ registry: { "qwen3.6-35b-a3b@UD-Q5_K_XL": { file: "x.gguf", catalogId: "qwen3.6-35b-a3b", quant: "UD-Q5_K_XL", path: "/mnt/w/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf",
+    companions: [{ kind: "mmproj", file: "mmproj-F16.gguf", path: "/mnt/w/mmproj-F16.gguf" }] } } });
+  assert.equal(await acquireProvider("crow-chat", opts), true);
+  assert.equal(startCalls[0].ggufPath, "/mnt/w/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf");
+  assert.deepEqual(startCalls[0].extraArgs, ["--mmproj", "/mnt/w/mmproj-F16.gguf"]);
+  assert.equal(startCalls[0].alias, "qwen3.6-35b-a3b");
+});
+
+test("native start: a missing model file fails with MODEL_FILE_MISSING and never spawns", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18100, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down"]), startCalls });
+  opts.existsSyncFn = () => false;
+  await assert.rejects(acquireProvider("native-target", opts), (e) => e.code === "MODEL_FILE_MISSING");
+  assert.equal(startCalls.length, 0);
+});
+
+test("native start: the runtime override binary wins over the catalog release; a vanished override falls back", async () => {
+  const startCalls = [];
+  const cfg = { providers: { "native-target": nativeProv(18100, "native-target") } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.getRuntimeOverrideFn = () => ({ bin: "/opt/mine/llama-server", version: "b10500" });
+  opts.existsSyncFn = (p) => true;
+  let ensured = 0; opts.ensureRuntimeFn = async () => { ensured++; return "/fake/release/llama-server"; };
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].binPath, "/opt/mine/llama-server");
+  assert.equal(ensured, 0, "ensureRuntime skipped under an override");
+  _setNativeHandleForTest("native-target", null);
+  const opts2 = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts2.getRuntimeOverrideFn = () => ({ bin: "/opt/gone/llama-server" });
+  opts2.existsSyncFn = (p) => p !== "/opt/gone/llama-server";
+  assert.equal(await acquireProvider("native-target", opts2), true);
+  assert.equal(startCalls[1].binPath, "/fake/runtimes/llamacpp/b1/llama-server");
+});
+
+test("owner gate: a native row owned by another instance is never orchestrated here even when its host is one of ours", async () => {
+  const startCalls = [];
+  const p = nativeProv(18100, "native-target", { baseUrl: "http://127.0.0.1:3001/llm/v1", gpuPolicy: { owner: "other-instance", port: 18100 } });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+  assert.equal(await maybeAcquireLocalProvider("native-target", opts), null);
+  assert.equal(await acquireProvider("native-target", opts), null);
+  assert.equal(startCalls.length, 0);
+});
+
+test("owner gate: a native row owned by THIS instance orchestrates even though its base_url is the tailnet door", async () => {
+  const startCalls = [];
+  const p = nativeProv(18100, "native-target", { baseUrl: "http://100.118.41.122:3001/llm/v1", gpuPolicy: { owner: "this-instance", port: 18100 } });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].port, 18100, "port from gpuPolicy.port, not from the door URL");
+});
+
+test("liveness marker is written under the registry key, not the provider name", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-"));
+  try {
+    saveState(dir, { reservations: {}, journal: {}, registry: { "native-target@Q4": { file: "m.gguf", catalogId: "native-target", quant: "Q4" } } });
+    const cfg = { providers: { "crow-x": nativeProv(18100, "native-target", { gpuPolicy: { catalogId: "native-target", quant: "Q4", port: 18100 } }) } };
+    const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]) });
+    opts.loadStateFn = () => loadState(dir); opts.resolveDataDirFn = () => dir; opts.existsSyncFn = () => true;
+    assert.equal(await acquireProvider("crow-x", opts), true);
+    const s = loadState(dir);
+    assert.equal(s.registry["native-target@Q4"].wasLive, true);
+    assert.equal(s.registry["crow-x"], undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (task review): NativePortConflictError must name the loopback
+// probe URL (never the tailnet door), and nativePort's baseUrl-port fallback
+// needs direct coverage.
+// ---------------------------------------------------------------------------
+
+test("NativePortConflictError names the loopback probe URL, not the tailnet door, for an owned row", async () => {
+  const p = nativeProv(18100, "native-target", { baseUrl: "http://100.118.41.122:3001/llm/v1", gpuPolicy: { owner: "this-instance", port: 18100 } });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["conflict"]) });
+  opts.ownInstanceIdFn = () => "this-instance";
+  await assert.rejects(acquireProvider("native-target", opts), (e) => {
+    assert.ok(e instanceof NativePortConflictError, `expected NativePortConflictError, got ${e}`);
+    assert.ok(e.message.includes("127.0.0.1:18100"), `expected the loopback URL in the message, got: ${e.message}`);
+    assert.ok(!e.message.includes("3001/llm/v1"), `expected the tailnet door URL NOT to appear in the message, got: ${e.message}`);
+    return true;
+  });
+});
+
+test("nativePort falls back to the baseUrl port when gpuPolicy.port is absent", async () => {
+  const startCalls = [];
+  const p = nativeProv(18133, "native-target");
+  delete p.gpuPolicy.port;
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  assert.equal(await acquireProvider("native-target", opts), true);
+  assert.equal(startCalls[0].port, 18133, "port fell back to baseUrl's port");
+});
+
+// ---------------------------------------------------------------------------
+// Final review C1: a pre-branch native row must still start after loadState's
+// legacy registry migration re-keys its entry to `<catalogId>@<quant>`. The
+// LIVE primary carries exactly this shape (`qwen3.5-4b`, gpu_policy
+// `{runtime:"native", mutexGroup:"local-llm"}` — no catalogId/quant/port).
+// ---------------------------------------------------------------------------
+
+test("C1: a pre-arc native row (no catalogId/quant in gpu_policy) still starts against the REAL loadState migration", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-legacy-"));
+  try {
+    // A LEGACY (Item G) state file: registry keyed by the bare model id.
+    // `loadState` re-keys it to "legacy-target@Q4_K_M" on every load, so the
+    // bare key the old fallback reached for is simply not there any more.
+    saveState(dir, {
+      reservations: {},
+      journal: {},
+      registry: { "legacy-target": { file: "m.gguf", quant: "Q4_K_M", catalogId: "legacy-target", sizeMb: 1 } },
+    });
+    const startCalls = [];
+    const cfg = {
+      providers: {
+        "legacy-target": {
+          baseUrl: "http://127.0.0.1:18100/v1",
+          host: "local",
+          bundleId: null,
+          models: [{ id: "legacy-target", task: "chat" }],
+          gpuPolicy: { runtime: "native", mutexGroup: "local-llm" },
+        },
+      },
+    };
+    const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+    opts.loadStateFn = loadState; // the REAL loader, migration and all
+    opts.resolveDataDirFn = () => dir;
+    opts.existsSyncFn = () => true;
+
+    assert.equal(await acquireProvider("legacy-target", opts), true);
+    assert.equal(startCalls.length, 1);
+    assert.ok(
+      startCalls[0].ggufPath.endsWith(join("models", "blobs", "m.gguf")),
+      `expected the blob-dir path for the migrated entry, got: ${startCalls[0].ggufPath}`
+    );
+  } finally {
+    _setNativeHandleForTest("legacy-target", null);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// registryKeyOf must refuse to guess when a pre-branch provider row's
+// catalog id has MORE THAN ONE registered quant: `findRegistryEntries`
+// returns 2+ matches, and picking `[0]` would silently start the wrong
+// quant's weights. It must instead fall through to the loud
+// "no model registry entry" error, and never call startModelFn.
+// ---------------------------------------------------------------------------
+
+test("registryKeyOf refuses an ambiguous legacy match: two quants for the same catalog id, provider has no catalogId/quant", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-ambiguous-"));
+  try {
+    saveState(dir, {
+      reservations: {},
+      journal: {},
+      registry: {
+        "legacy-target@Q4_K_M": { file: "m-q4.gguf", quant: "Q4_K_M", catalogId: "legacy-target", sizeMb: 1 },
+        "legacy-target@Q8_0": { file: "m-q8.gguf", quant: "Q8_0", catalogId: "legacy-target", sizeMb: 2 },
+      },
+    });
+    const startCalls = [];
+    const cfg = {
+      providers: {
+        "legacy-target": {
+          baseUrl: "http://127.0.0.1:18100/v1",
+          host: "local",
+          bundleId: null,
+          models: [{ id: "legacy-target", task: "chat" }],
+          gpuPolicy: { runtime: "native", mutexGroup: "local-llm" },
+        },
+      },
+    };
+    const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+    opts.loadStateFn = loadState; // the REAL loader
+    opts.resolveDataDirFn = () => dir;
+    opts.existsSyncFn = () => true;
+
+    await assert.rejects(
+      () => acquireProvider("legacy-target", opts),
+      /no model registry entry "legacy-target"/
+    );
+    assert.equal(startCalls.length, 0, "startModelFn must never be called for an ambiguous match");
+  } finally {
+    _setNativeHandleForTest("legacy-target", null);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Final review C3: `acquireOrStartNative` is the single funnel through which a
+// native process is ever spawned, and `ensureResident`'s boot/residency path
+// reaches it WITHOUT acquireProvider's outer owner gate. It must refuse a
+// foreign-owned row itself.
+// ---------------------------------------------------------------------------
+
+test("C3: ensureResident never starts a foreign-owned native row — acquireOrStartNative refuses with NOT_OWNER", async () => {
+  const startCalls = [];
+  // A peer instance's door row. On a co-hosted box its tailnet address IS
+  // one of ours, so the hostname-only rule would happily start it.
+  const p = nativeProv(18100, "native-target", {
+    baseUrl: "http://100.118.41.122:3001/llm/v1",
+    gpuPolicy: { owner: "r4-instance", port: 18100, alwaysResident: true },
+  });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+
+  const warned = [];
+  const errored = [];
+  const realWarn = console.warn;
+  const realError = console.error;
+  console.warn = (msg) => warned.push(String(msg));
+  console.error = (msg) => errored.push(String(msg));
+  let result;
+  try {
+    result = await ensureResident("native-target", cfg, opts);
+  } finally {
+    console.warn = realWarn;
+    console.error = realError;
+  }
+
+  assert.equal(result, false, "residency reports failure rather than starting someone else's model");
+  assert.equal(startCalls.length, 0, "startModel was never called for a row this instance does not own");
+  assert.ok(
+    warned.some((m) => m.includes("refusing to start native native-target") && m.includes("r4-instance")),
+    `expected the refusal warning naming the owner, got: ${JSON.stringify(warned)}`
+  );
+  assert.ok(
+    errored.some((m) => m.includes("owned by another instance")),
+    `expected the NOT_OWNER error to surface through ensureResident's log, got: ${JSON.stringify(errored)}`
+  );
+});
+
+test("C3: the same row, owned by THIS instance, still starts through ensureResident (the gate is ownership, not the door URL)", async () => {
+  const startCalls = [];
+  const p = nativeProv(18100, "native-target", {
+    baseUrl: "http://100.118.41.122:3001/llm/v1",
+    gpuPolicy: { owner: "this-instance", port: 18100, alwaysResident: true },
+  });
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down", "resident"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+  await ensureResident("native-target", cfg, opts);
+  assert.equal(startCalls.length, 1, "an owned row is unaffected by the new gate");
+});
+
+// ---------------------------------------------------------------------------
+// Final review I1: the baseUrl port fallback is for PRE-ARC loopback rows only.
+// A door URL's port is the GATEWAY's (3001) — falling back to it aims the
+// orchestrator at itself.
+// ---------------------------------------------------------------------------
+
+test("I1: a door-shaped baseUrl with no gpu_policy.port has NO port — it never falls back to the gateway's", async () => {
+  const startCalls = [];
+  const p = nativeProv(18100, "native-target", {
+    baseUrl: "http://100.118.41.122:3001/llm/v1",
+    gpuPolicy: { owner: "this-instance" },
+  });
+  delete p.gpuPolicy.port;
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+  await assert.rejects(acquireProvider("native-target", opts), /has no port/);
+  assert.equal(startCalls.length, 0, "never spawned llama-server on the gateway's own port");
+});
+
+test("I1: a door-shaped baseUrl with no owner declared ALSO has no port (the path alone is disqualifying)", async () => {
+  const startCalls = [];
+  const p = nativeProv(18100, "native-target", { baseUrl: "http://127.0.0.1:3001/llm/v1" });
+  delete p.gpuPolicy.port;
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down"]), startCalls });
+  await assert.rejects(acquireProvider("native-target", opts), /has no port/);
+  assert.equal(startCalls.length, 0);
+});
+
+test("I1: an owner-declaring row with a loopback /v1 baseUrl and no gpu_policy.port still has no port", async () => {
+  const startCalls = [];
+  const p = nativeProv(18134, "native-target", { gpuPolicy: { owner: "this-instance" } });
+  delete p.gpuPolicy.port;
+  const cfg = { providers: { "native-target": p } };
+  const opts = startCapableOpts({ cfg, identityProbeFn: probeSequence(["down"]), startCalls });
+  opts.ownInstanceIdFn = () => "this-instance";
+  await assert.rejects(acquireProvider("native-target", opts), /has no port/);
+  assert.equal(startCalls.length, 0);
 });
