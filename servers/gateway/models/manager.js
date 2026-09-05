@@ -73,7 +73,7 @@ import {
 } from "node:fs";
 import http from "node:http";
 import https from "node:https";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 import { allocatePort, loadState, releasePort, saveState, registryKey, findRegistryEntryForProvider } from "./state.js";
 import { disableProvider, listProvidersAll, upsertProvider } from "../../shared/providers-db.js";
@@ -377,7 +377,8 @@ async function checkAdoptFile({ path, expectedSha, sizeMb, allowUnverified, hash
  * isn't worth it and the operator already trusts the provenance. Delegates
  * the actual registry/DB write to `registerModel`, which spreads
  * `registryExtra` last so `path/adopted/verified/companions/shardFiles`
- * here override its planned-file defaults. */
+ * here override its planned-file defaults. `path` must be ABSOLUTE
+ * (`ADOPT_PATH_NOT_ABSOLUTE`). */
 export async function adoptModel({
   modelId,
   quant,
@@ -389,6 +390,18 @@ export async function adoptModel({
   statFn = statSync,
   ...registerOpts
 }) {
+  // A relative path would be resolved against whatever cwd the gateway
+  // happens to have — which is not the operator's shell, and is not stable
+  // across a systemd restart. The registry stores this string verbatim and
+  // `startNativeAndAwaitReady` hands it straight to llama-server, so it has
+  // to be absolute or the entry is a time bomb.
+  if (typeof path !== "string" || !isAbsolute(path)) {
+    throw new AdoptMismatchError(
+      `adopt: weights path must be absolute, got ${JSON.stringify(path)}`,
+      "ADOPT_PATH_NOT_ABSOLUTE",
+      { file: path }
+    );
+  }
   const { model, quantEntry } = resolveEntry(catalog, modelId, quant);
   const what = `${model.id} ${quantEntry.quant} (${quantEntry.file})`;
   const shards = Array.isArray(quantEntry.shards) ? quantEntry.shards : [];
