@@ -1,0 +1,3 @@
+{ "catalogId": "gemma-4-e2b-it", "source": "crow-addons/llamacpp-vulkan-gemma4-e2b/docker-compose.yml",
+  "command": ["-m", "/models/gemma-4-E2B-it-Q4_0.gguf", "--alias", "gemma-4-e2b", "--host", "0.0.0.0", "--port", "8000",
+    "-ngl", "999", "-fa", "on", "-c", "8192", "--jinja", "--reasoning-budget", "0"] }

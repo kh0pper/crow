@@ -1,0 +1,4 @@
+{ "catalogId": "qwen3-embedding-0.6b", "source": "bundles/llamacpp-vulkan-qwen3-embed/docker-compose.yml",
+  "command": ["-m", "/models/qwen3-embedding-0.6b/Qwen3-Embedding-0.6B-Q8_0.gguf", "--alias", "qwen3-embedding-0.6b", "--embedding",
+    "--pooling", "mean", "--host", "0.0.0.0", "--port", "8000", "-ngl", "999", "-fa", "on", "--no-mmap",
+    "-c", "32768", "--parallel", "8", "-b", "4096", "-ub", "4096"] }
