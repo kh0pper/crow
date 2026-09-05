@@ -47,6 +47,7 @@
         "cpu-capable",
         "voice"
       ],
+      "launch": { "ctx": 32768, "ngl": 999, "flash_attn": "on" },
       "notes": "The fast route. This is the voice/companion model on this box (crow-voice): every Meta Glasses and AI Companion turn hits it first and only escalates to the 35B on a leading !escalate. It is also the fresh-install default \u2014 the UD-Q4_K_XL quant runs on CPU alone in under 8 GB of RAM. chat_template_kwargs suppresses Qwen's <think> block: on a 4B the reasoning preamble is noisy filler that ruins a first chat and adds latency to a voice turn. Natively vision-language; the mmproj companion is downloaded beside it and passed to llama-server as --mmproj so image turns work out of the box.",
       "companions": [
         {
@@ -92,6 +93,7 @@
         "vision",
         "cpu-capable"
       ],
+      "launch": { "ctx": 8192, "ngl": 999, "flash_attn": "on", "jinja": true, "extra_args": ["--reasoning-budget", "0"] },
       "notes": "Google's Gemma 4 E2B (effective 2B parameters) instruction-tuned, unsloth GGUF. The second small-class option: a different lineage from the Qwen default for comparing small-model behavior, CPU-capable, vision-capable through its mmproj companion. Gemma license, not Apache \u2014 the card shows it honestly. Not gated on Hugging Face (unlike the older official Gemma 3 QAT repo this catalog used to carry).",
       "companions": [
         {
@@ -120,7 +122,7 @@
       "license": "apache-2.0",
       "gated": false,
       "task": "embedding",
-      "context_len": 8192,
+      "context_len": 32768,
       "min_runtime_version": "b10068",
       "default_quant": "Q8_0",
       "tags": [
@@ -128,6 +130,7 @@
         "embedding",
         "cpu-capable"
       ],
+      "launch": { "ctx": 32768, "ngl": 999, "flash_attn": "on", "no_mmap": true, "parallel": 8, "extra_args": ["--pooling", "mean", "-b", "4096", "-ub", "4096"] },
       "notes": "The fleet embedding model. Every Crow memory in this lab is embedded with it \u2014 grackle serves it under vLLM today (grackle-embed) \u2014 and this entry lets a fresh install or a CPU-only box serve the same vector space with llama-server --embedding, so memories stay comparable across instances without a re-embed. Switching to a different embedding model means re-embedding everything (see the AI providers guide). Official Qwen GGUF; min_ram_mb is computed at its 8k context.",
       "quants": [
         {
@@ -156,6 +159,7 @@
         "rerank",
         "cpu-capable"
       ],
+      "launch": { "ctx": 8192, "ngl": 999, "flash_attn": "on" },
       "notes": "The fleet reranker, paired with the embedding model above for two-stage retrieval (embed, take the top k, rerank). Runs on grackle under vLLM today; this entry serves it with llama-server --reranking. GGUF by mradermacher \u2014 Qwen publishes no official GGUF for the reranker, and the file is named with a dot before the quant (Qwen3-Reranker-0.6B.Q8_0.gguf) in that repo's convention.",
       "quants": [
         {
@@ -167,6 +171,36 @@
           "sha256": "c525a7449243f690a7062e6377d6cf5adbb289354bd4316312367cd20e187ab7"
         }
       ]
+    },
+    {
+      "id": "embeddinggemma-300m",
+      "family": "gemma3",
+      "lab": "Google",
+      "hf_repo": "ggml-org/embeddinggemma-300M-GGUF",
+      "license": "gemma",
+      "gated": false,
+      "task": "embedding",
+      "context_len": 2048,
+      "min_runtime_version": "b10068",
+      "default_quant": "Q8_0",
+      "tags": [
+        "small",
+        "embedding",
+        "cpu-capable",
+        "alternative"
+      ],
+      "quants": [
+        {
+          "file": "embeddinggemma-300M-Q8_0.gguf",
+          "quant": "Q8_0",
+          "size_mb": 333.59,
+          "min_ram_mb": 1100,
+          "min_vram_mb": 0,
+          "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63"
+        }
+      ],
+      "launch": { "ctx": 2048, "ngl": 999 },
+      "notes": "The optional alternative to Qwen3-Embedding-0.6B: Google's EmbeddingGemma (300M, 768-dimensional, Gemma license). The GGUF declares mean pooling and llama-server honours it, so no --pooling flag is passed — overriding it would change the vectors. This is the exact file r4's wayfinder knowledge base has embedded with since 2026-07. Switching the fleet embedder from Qwen to this re-embeds every memory; it is offered, not made the default."
     },
     {
       "id": "qwen3-vl-4b-instruct",
@@ -185,6 +219,7 @@
         "chat",
         "cpu-capable"
       ],
+      "launch": { "ctx": 32768, "ngl": 999, "flash_attn": "on" },
       "notes": "The fleet vision specialist (grackle-vision under vLLM today). A dedicated vision-language model for turns where the image is the point \u2014 the 35B's mmproj covers casual vision, this is the tier the dashboard smart-router sends image turns to (vision \u2192 grackle-vision today). Small enough for CPU; the mmproj companion downloads beside it. Registered as task vision, so it does not join the chat mutex group and can sit next to a resident chat model.",
       "companions": [
         {
@@ -217,7 +252,7 @@
       "id": "qwen3.6-35b-a3b",
       "family": "qwen3.6",
       "lab": "Qwen",
-      "hf_repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+      "hf_repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
       "license": "apache-2.0",
       "gated": false,
       "task": "chat",
@@ -229,33 +264,35 @@
         "chat",
         "vision",
         "agentic",
-        "default-workhorse"
+        "default-workhorse",
+        "mtp"
       ],
-      "notes": "The resident workhorse. crow-chat on this box: a 35B mixture-of-experts with 3B active parameters, which is why it runs at interactive speed on the Strix Halo's unified memory and why it stays loaded \u2014 every bot, every Bot Builder turn, the dashboard chat, and the companion's !escalate target all land here. Agentic tool-calling is its strength; multimodal via the mmproj companion. UD-Q5_K_XL is the daily quant, UD-Q4_K_XL for a tighter box. 256k context is the model's; min_ram_mb is computed at a 32k fit context \u2014 budget more RAM for long agentic sessions.",
+      "launch": { "ctx": 262144, "ngl": 999, "flash_attn": "on", "parallel": 1, "no_mmap": true, "jinja": true, "spec": { "type": "draft-mtp", "draft_n_max": 2 } },
+      "notes": "The resident workhorse. crow-chat on this box: a 35B mixture-of-experts with 3B active parameters, which is why it runs at interactive speed on the Strix Halo's unified memory and why it stays loaded \u2014 every bot, every Bot Builder turn, the dashboard chat, and the companion's !escalate target all land here. Agentic tool-calling is its strength; multimodal via the mmproj companion. UD-Q5_K_XL is the daily quant, UD-Q4_K_XL for a tighter box. 256k context is the model's; min_ram_mb is computed at a 32k fit context \u2014 budget more RAM for long agentic sessions. The MTP build (multi-token prediction inside the GGUF) is the one this box runs; the bench notes in scripts/bench/results measured it at ~70 tok/s single-stream with draft-n 2.",
       "companions": [
         {
           "kind": "mmproj",
           "file": "mmproj-F16.gguf",
           "size_mb": 899.28,
-          "sha256": "8971ee4f331ff0a4c609374f32984b3d4e6dc086c0aa35f1d637fad1829e887f"
+          "sha256": "71f3cbc1f7cc0f30d09d41cfa924c0060827ebc33bf15ace7e86661e856f0160"
         }
       ],
       "quants": [
         {
           "file": "Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf",
           "quant": "UD-Q5_K_XL",
-          "size_mb": 26592.51,
-          "min_ram_mb": 29789,
+          "size_mb": 27159.12,
+          "min_ram_mb": 30356,
           "min_vram_mb": 0,
-          "sha256": "25233af7642e3a91bd52cc4aeefdbd4a117479088e06cf1aea5b6bedb443c506"
+          "sha256": "9de9a9420f61a0bb59bb2ca1ea170a6a57f6821fa1deec915bcaef523730a919"
         },
         {
           "file": "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
           "quant": "UD-Q4_K_XL",
-          "size_mb": 22360.46,
-          "min_ram_mb": 25557,
+          "size_mb": 22853.66,
+          "min_ram_mb": 26050,
           "min_vram_mb": 0,
-          "sha256": "707a55a8a4397ecde44de0c499d3e68c1ad1d240d1da65826b4949d1043f4450"
+          "sha256": "55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1"
         }
       ]
     },
@@ -278,7 +315,8 @@
         "copilot",
         "long-context"
       ],
-      "notes": "The dense copilot and critic. Where the 35B is the fast agentic hand, the 27B is the second opinion: code review, plan critique, and long-context batch work (a 512k-YaRN variant exposed as a bot model is a separate queued item). It shares the chat mutex group with the 35B, so starting it evicts the workhorse \u2014 deliberate: on this box it is a batch model, not a resident. UD-Q6_K_XL is the quality quant; UD-Q4_K_XL when RAM is tight. Vision via the mmproj companion; min_ram_mb is computed at a 32k fit context.",
+      "launch": { "ctx": 262144, "ngl": 999, "flash_attn": "on", "kv_type": "q8_0", "no_mmap": true, "parallel": 1, "jinja": true, "sampling": { "temp": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0 } },
+      "notes": "The dense copilot and critic. Where the 35B is the fast agentic hand, the 27B is the second opinion: code review, plan critique, and long-context batch work (a 512k-YaRN variant exposed as a bot model is a separate queued item). It shares the chat mutex group with the 35B, so starting it evicts the workhorse \u2014 deliberate: on this box it is a batch model, not a resident. UD-Q6_K_XL is the quality quant; UD-Q4_K_XL when RAM is tight. Vision via the mmproj companion; min_ram_mb is computed at a 32k fit context. unsloth re-cut this repo on 2026-08-19 and moved MTP to a separate MTP/ GGUF; the catalog file therefore runs without draft-mtp until the MTP companion is verified.",
       "companions": [
         {
           "kind": "mmproj",
@@ -323,6 +361,7 @@
         "bench",
         "mtp"
       ],
+      "launch": { "ctx": 262144, "ngl": 999, "flash_attn": "on", "no_mmap": true, "parallel": 1, "jinja": true, "spec": { "type": "draft-mtp", "draft_n_max": 2 } },
       "notes": "Benchmark-window heavy. A four-part UD-Q4_K_XL (about 111 GB total) that needs the whole box: start it only inside a registered CROW-SCHEDULE window \u2014 the orchestrator's reservation gate refuses on-demand starts while a window is active for anything else. Ships a multi-token-prediction (MTP) head as a companion: the catalog downloads it beside the model for the operator's own llama-server launchers but passes no MTP flag, because MTP loading is build-specific in llama.cpp. Needs a llama.cpp build with the Qwen3.8-Flash-Next architecture; the operator runs it from his own builds today, and the stock runtime release may not load it.",
       "companions": [
         {
@@ -378,6 +417,7 @@
         "bench",
         "two-box"
       ],
+      "launch": { "ctx": 131072, "ngl": 999, "flash_attn": "on", "no_mmap": true, "jinja": true },
       "notes": "Benchmark-window heavy, replacing the GLM-5.2 bench entry. Z.ai's GLM-5.3-Flash in unsloth dynamic quants of four to six parts: UD-IQ2_XXS (about 102 GB) fits this box alone, UD-IQ4_XS (about 157 GB) and UD-Q4_K_XL (about 200 GB) are the two-box split. Vision via the mmproj companion. Requires a llama.cpp build with glm5_next support \u2014 the operator runs it from his own builds today; the catalog's stock runtime release will not load it. Reservation-gated like the other heavies: register a CROW-SCHEDULE window before starting.",
       "companions": [
         {
@@ -496,6 +536,7 @@
         "chat",
         "bench"
       ],
+      "launch": { "ctx": 131072, "ngl": 999, "flash_attn": "on", "no_mmap": true, "jinja": true },
       "notes": "Benchmark-window heavy. DeepSeek-V4-Flash (0731) in unsloth dynamic quants of three to four parts (about 97 to 104 GB). Text-only. Requires a llama.cpp build with deepseek4 support \u2014 the operator runs it from his own builds today; the catalog's stock runtime release will not load it. Reservation-gated like the other heavies: register a CROW-SCHEDULE window before starting, and expect the whole box for the duration.",
       "quants": [
         {
