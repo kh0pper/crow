@@ -74,7 +74,7 @@ import {
   pruneResidency, getProviderHealth,
 } from "./provider-health.js";
 import { resolveDataDir, createDbClient } from "../db.js";
-import { loadState, saveState, reconcileOnBoot } from "./models/state.js";
+import { loadState, saveState, reconcileOnBoot, registryKey, findRegistryEntryForProvider } from "./models/state.js";
 // wasLive-marker plumbing lives in this file (not state.js) so it can reuse
 // `startNativeAndAwaitReady`'s ALREADY-resolved `dir` — see
 // `persistLivenessMarker`'s doc below for why this deliberately never
@@ -86,6 +86,10 @@ import { readReservation, isStartAllowed, ReservedError } from "./box-reservatio
 import { createNoticeState, reservationNotices, sendReservationNotice } from "./box-reservation-notify.js";
 import { enqueueDownload } from "./models/manager.js";
 import { listProvidersAll } from "../shared/providers-db.js";
+import { mergeLaunch } from "./models/launch.js";
+import { getRuntimeOverride } from "./models/runtime-override.js";
+import { isOrchestratableHere } from "../shared/native-locality.js";
+import { getOrCreateLocalInstanceId } from "./instance-registry.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
@@ -336,6 +340,36 @@ function portFromBaseUrl(baseUrl) {
   }
 }
 
+let _ownInstanceIdForTest = null;
+export function _setOwnInstanceIdForTest(id) { _ownInstanceIdForTest = id; }
+function ownInstanceId(opts = {}) {
+  if (typeof opts.ownInstanceIdFn === "function") return opts.ownInstanceIdFn();
+  if (_ownInstanceIdForTest) return _ownInstanceIdForTest;
+  try { return getOrCreateLocalInstanceId(); } catch { return null; }
+}
+/** Owner gate (spec §4): a row that declares gpu_policy.owner is orchestrated ONLY by that instance;
+ * an undeclared row keeps the baseUrl-hostname rule. Reads the instance id ONLY when an owner is
+ * actually declared (Ruling 3) — an undeclared-owner row never touches `getOrCreateLocalInstanceId`. */
+function orchestratableHere(p, opts = {}, ownAddrs = getOwnAddresses()) {
+  const owner = p?.gpuPolicy?.owner;
+  if (typeof owner !== "string" || !owner) return isLocallyOrchestratable(p, ownAddrs);
+  return isOrchestratableHere(p, { ownAddrs, ownInstanceId: ownInstanceId(opts) });
+}
+function nativePort(p) {
+  const gp = Number(p?.gpuPolicy?.port);
+  return Number.isInteger(gp) && gp > 0 ? gp : portFromBaseUrl(p?.baseUrl);
+}
+/** Local URL the orchestrator probes/forwards to for a native row: loopback + native port (never the door). */
+function nativeLocalUrl(p) {
+  const port = nativePort(p);
+  return port ? `http://127.0.0.1:${port}/v1` : p?.baseUrl;
+}
+function registryKeyOf(p, providerName, state) {
+  const found = findRegistryEntryForProvider(state, p);
+  if (found) return found.key;
+  return providerName; // pre-arc rows: provider id == model id == legacy key (migrated on load if it carried catalogId+quant)
+}
+
 function getMutexSiblings(name, cfg = loadProviders()) {
   const p = getProvider(name, cfg);
   const group = mutexGroupOf(p);
@@ -361,7 +395,7 @@ export function declaredAlwaysResident(cfg = loadProviders()) {
  *  so the 120s poll doesn't re-emit the boot skip line on every tick. */
 export function localAlwaysResident(cfg = loadProviders(), ownAddrs = getOwnAddresses()) {
   return Object.entries(cfg.providers || {})
-    .filter(([, v]) => isAlwaysResident(v) && isLocallyOrchestratable(v, ownAddrs))
+    .filter(([, v]) => isAlwaysResident(v) && orchestratableHere(v, {}, ownAddrs))
     .map(([n]) => n);
 }
 
@@ -501,7 +535,7 @@ export async function maybeAcquireLocalProvider(providerName, opts = {}) {
   if (!p?.bundleId && !isNativeRuntime(p)) return null;
   // host unset defaults to local (matches resolveFromModelsJson).
   if (p.host && p.host !== "local") return null;
-  if (!isLocallyOrchestratable(p)) return null; // F-INSTALL-10: not this machine's bundle
+  if (!orchestratableHere(p, opts)) return null; // F-INSTALL-10 / owner gate: not this machine's/instance's bundle
   try {
     return await acquireProvider(providerName, opts);
   } catch (err) {
@@ -609,6 +643,12 @@ async function resolveNativeBinPath(p, opts = {}) {
     reprobeFn = reprobe,
   } = opts;
   const dir = resolveDataDirFn();
+  const { getRuntimeOverrideFn = getRuntimeOverride, existsSyncFn = existsSync } = opts;
+  const override = getRuntimeOverrideFn(dir);
+  if (override && typeof override.bin === "string") {
+    if (existsSyncFn(override.bin)) return override.bin;
+    console.warn(`[gpu-orchestrator] runtime override ${override.bin} is missing — falling back to the catalog release`);
+  }
   const catalog = loadCatalogFn();
   // Fix 1 (final-review fix wave, CRITICAL): the cache is null until
   // reprobe() runs, and nothing on the production boot path ever calls it
@@ -727,20 +767,36 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
     storageClass = "ssd",
     nativeReadinessTimeoutMsFn = nativeReadinessTimeoutMs,
     loadCatalogFn = defaultLoadCatalog,
+    existsSyncFn = existsSync,
   } = opts;
 
   const alias = nativeAlias(p);
   if (!alias) throw new Error(`orchestrator: native provider "${providerName}" has no model alias (models[0].id)`);
-  const port = portFromBaseUrl(p.baseUrl);
-  if (!port) throw new Error(`orchestrator: native provider "${providerName}" has an unparseable baseUrl port (${p.baseUrl})`);
+  const port = nativePort(p);
+  if (!port) throw new Error(`orchestrator: native provider "${providerName}" has no port (gpu_policy.port or baseUrl)`);
 
   const dir = resolveDataDirFn();
   const state = loadStateFn(dir);
-  const regEntry = state.registry?.[providerName];
+  // Registry-key resolution (models-core launch roles, Task 10): a row
+  // whose gpuPolicy declares catalogId+quant resolves via that key
+  // (`registryKey`, shared with `state.js`'s adoptModel/state writers —
+  // lets multiple quants of the same catalog id coexist); a pre-arc row
+  // lacking either field falls back to the provider name itself, matching
+  // this function's ORIGINAL (pre-Task-10) lookup.
+  const key = registryKeyOf(p, providerName, state);
+  const regEntry = state.registry?.[key];
   if (!regEntry?.file) {
-    throw new Error(`orchestrator: no model registry entry for native provider "${providerName}" — was it registered?`);
+    throw new Error(`orchestrator: no model registry entry "${key}" for native provider "${providerName}" — was it registered?`);
   }
-  const ggufPath = join(dir, "models", "blobs", regEntry.file);
+  const blobDir = join(dir, "models", "blobs");
+  // Adopted weights (Task 9) carry an absolute `path` outside the flat
+  // blob dir; a normally-downloaded row has none and lives under blobDir.
+  const ggufPath = regEntry.path || join(blobDir, regEntry.file);
+  if (!existsSyncFn(ggufPath)) {
+    const err = new Error(`orchestrator: model file for "${providerName}" is missing at ${ggufPath}`);
+    err.code = "MODEL_FILE_MISSING";
+    throw err;
+  }
 
   const readinessTimeoutMs = readinessTimeoutMsOverride != null
     ? readinessTimeoutMsOverride
@@ -753,27 +809,39 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   // terminal transition also clears the wasLive marker BEFORE the lock
   // frees and BEFORE any restart could happen — finding c above. Reuses
   // this function's own already-resolved `dir`, never re-resolves it.
+  // Keyed by the REGISTRY key, not the provider name — the registry is
+  // the thing that actually carries the `wasLive` field.
   const wrappedOnTerminal = (reason) => {
-    persistLivenessMarker(dir, providerName, { wasLive: false });
+    persistLivenessMarker(dir, key, { wasLive: false });
     if (typeof onTerminal === "function") onTerminal(reason);
   };
 
-  // Scoped --jinja (C1 Task 1): chat_template_kwargs in request bodies is
-  // only honored under llama-server's jinja engine; scoped per-model — the
+  // Launch profile (spec §3.1/§4, Task 10): catalog defaults merged under
+  // the provider row's `gpuPolicy.launch` override via `mergeLaunch`, then
+  // rendered by `runtime.js`'s `startModel` into llama-server flags.
+  // Scoped --jinja (C1 Task 1, now folded into `launch.jinja` instead of a
+  // raw extraArgs push): chat_template_kwargs in request bodies is only
+  // honored under llama-server's jinja engine; scoped per-model — the
   // other catalog models are not template-verified under --jinja.
-  let extraArgs = [];
+  const catalogId = p.gpuPolicy?.catalogId || providerName;
   let catalogEntry = null;
   try {
-    catalogEntry = (loadCatalogFn()?.models || []).find((m) => m.id === providerName) || null;
+    catalogEntry = (loadCatalogFn()?.models || []).find((m) => m.id === catalogId) || null;
   } catch { /* catalog unreadable → no catalog-driven args, model starts as before */ }
-  if (catalogEntry && catalogEntry.chat_template_kwargs && typeof catalogEntry.chat_template_kwargs === "object") {
-    extraArgs = ["--jinja"];
+
+  const jinja = !!(catalogEntry && catalogEntry.chat_template_kwargs && typeof catalogEntry.chat_template_kwargs === "object");
+  const launch = mergeLaunch(mergeLaunch(catalogEntry?.launch, p.gpuPolicy?.launch), jinja ? { jinja: true } : null);
+  if (Number.isInteger(launch.ctx) && Number.isFinite(catalogEntry?.context_len) && launch.ctx > catalogEntry.context_len) {
+    const err = new Error(`orchestrator: launch ctx ${launch.ctx} exceeds ${catalogId} context_len ${catalogEntry.context_len}`);
+    err.code = "CTX_EXCEEDS_MODEL";
+    throw err;
   }
 
   // Schema v2 companion + task flags (model catalog curation, 2026-09):
   //   - an `mmproj` companion on the registry row (written by manager.js's
-  //     registerModel, stored under the same flat blob dir as the model)
-  //     is the vision projector -> `--mmproj <path>`;
+  //     registerModel, stored under the same flat blob dir as the model —
+  //     or its own adopted `path`) is the vision projector -> `--mmproj
+  //     <path>`;
   //   - an `mtp` companion adds NO flag: llama.cpp's multi-token-prediction
   //     loading is build-specific, so the file is kept beside the model for
   //     the operator's own launchers rather than guessed at here;
@@ -781,19 +849,21 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   //     `-0000N-of-0000M` siblings from the primary part it is given;
   //   - catalog task embedding -> `--embedding`, rerank -> `--reranking`
   //     (chat and vision get no task flag).
+  const extraArgs = [];
   for (const c of Array.isArray(regEntry.companions) ? regEntry.companions : []) {
-    if (c && c.kind === "mmproj" && typeof c.file === "string" && c.file) {
-      extraArgs.push("--mmproj", join(dir, "models", "blobs", c.file));
+    if (c && c.kind === "mmproj" && (c.path || c.file)) {
+      extraArgs.push("--mmproj", c.path || join(blobDir, c.file));
     }
   }
   if (catalogEntry?.task === "embedding") extraArgs.push("--embedding");
   else if (catalogEntry?.task === "rerank") extraArgs.push("--reranking");
 
   console.log(`[gpu-orchestrator] starting native ${providerName} (alias=${alias}, port=${port}, readinessTimeoutMs=${readinessTimeoutMs}) requested-by=${opts.requester || "-"}`);
-  const handle = startModelFn({ binPath, ggufPath, alias, port, spawn: spawnFn, onTerminal: wrappedOnTerminal, extraArgs });
+  const handle = startModelFn({ binPath, ggufPath, alias, port, launch, spawn: spawnFn, onTerminal: wrappedOnTerminal, extraArgs });
   _nativeHandles.set(providerName, handle);
+  console.log(`[gpu-orchestrator] native ${providerName} argv=${JSON.stringify(handle.argv || [])}`);
 
-  const result = await waitForNativeReady(p.baseUrl, alias, {
+  const result = await waitForNativeReady(nativeLocalUrl(p), alias, {
     totalTimeoutMs: readinessTimeoutMs,
     pollMs: readinessPollMs,
     initialDelayMs: readinessInitialDelayMs,
@@ -804,7 +874,7 @@ async function startNativeAndAwaitReady(providerName, p, opts = {}) {
   if (result === "resident") {
     console.log(`[gpu-orchestrator] ${providerName} ready`);
     _lastUsedAt.set(providerName, Date.now());
-    persistLivenessMarker(dir, providerName, { wasLive: true });
+    persistLivenessMarker(dir, key, { wasLive: true });
     return true;
   }
 
@@ -893,7 +963,7 @@ async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
 
   const alias = nativeAlias(p);
   if (alias) {
-    const fastStatus = await identityProbeFn(p.baseUrl, alias, fetchImpl);
+    const fastStatus = await identityProbeFn(nativeLocalUrl(p), alias, fetchImpl);
     if (fastStatus === "resident") {
       _lastUsedAt.set(providerName, Date.now());
       // Fix 2 (final-review fix wave, CRITICAL): handle.touch() resets
@@ -920,7 +990,7 @@ async function acquireOrStartNative(providerName, p, cfg, opts = {}) {
   const siblings = getMutexSiblings(providerName, cfg);
   for (const sibName of siblings) {
     const sib = getProvider(sibName, cfg);
-    if (!sib || !isLocallyOrchestratable(sib)) continue;
+    if (!sib || !orchestratableHere(sib, opts)) continue;
     if (isNativeRuntime(sib)) {
       const sibHandle = _nativeHandles.get(sibName);
       if (sibHandle && sibHandle.live) {
@@ -997,8 +1067,8 @@ export async function acquireProvider(providerName, opts = {}) {
   if (!p) throw new Error(`orchestrator: unknown provider "${providerName}"`);
 
   if (isNativeRuntime(p)) {
-    if (!isLocallyOrchestratable(p)) {
-      console.warn(`[gpu-orchestrator] refusing to orchestrate ${providerName} — its baseUrl is not on this machine`);
+    if (!orchestratableHere(p, opts)) {
+      console.warn(`[gpu-orchestrator] refusing to orchestrate ${providerName} — its baseUrl is not on this machine/instance`);
       return null;
     }
     // Resolve the runtime binary BEFORE touching _swapInFlight (Task 9
@@ -1015,8 +1085,8 @@ export async function acquireProvider(providerName, opts = {}) {
   }
 
   if (!p.bundleId) throw new Error(`orchestrator: provider "${providerName}" has no bundleId`);
-  if (!isLocallyOrchestratable(p)) {
-    console.warn(`[gpu-orchestrator] refusing to orchestrate ${providerName} — its baseUrl is not on this machine`);
+  if (!orchestratableHere(p, opts)) {
+    console.warn(`[gpu-orchestrator] refusing to orchestrate ${providerName} — its baseUrl is not on this machine/instance`);
     return null;
   }
 
@@ -1059,7 +1129,7 @@ export async function acquireProvider(providerName, opts = {}) {
     const siblings = getMutexSiblings(providerName, cfg);
     for (const sibName of siblings) {
       const sib = getProvider(sibName, cfg);
-      if (!sib || !isLocallyOrchestratable(sib)) continue;
+      if (!sib || !orchestratableHere(sib, opts)) continue;
       if (isNativeRuntime(sib)) {
         const sibHandle = _nativeHandles.get(sibName);
         if (sibHandle && sibHandle.live) {
@@ -1567,7 +1637,7 @@ export async function initOrchestrator() {
     _deferredResidents = new Set(
       Object.entries(cfg.providers || {})
         .filter(([, v]) => (v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true)
-          && !isLocallyOrchestratable(v, ownAddrs))
+          && !orchestratableHere(v, {}, ownAddrs))
         .map(([n]) => n)
     );
     if (residents.length === 0 && _deferredResidents.size === 0) {
