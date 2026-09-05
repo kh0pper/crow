@@ -883,3 +883,46 @@ test("unregisterModel: never unlinks an adopted entry", async () => {
     assert.equal(loadState(h.dir).registry["chat-test-model@Q4_K_M"], undefined);
   } finally { h.cleanup(); }
 });
+
+// ---------------------------------------------------------------------------
+// Final review I3: reusing a disabled row's old port is right only while
+// nothing ELSE holds it. `unregisterModel` frees the reservation but leaves
+// `gpu_policy.port` on the row, so the next registration can be handed that
+// exact port — re-registering the old row must not double-book it.
+// ---------------------------------------------------------------------------
+
+test("I3: re-register takes a FRESH port when another provider's reservation has since claimed the old one", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    const first = await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
+    const oldPort = first.port;
+
+    await unregisterModel({ modelId: "chat-test-model", db, dir });
+    assert.equal(loadState(dir).reservations["chat-test-model"], undefined, "sanity: the port was freed");
+
+    // Another model is registered and lands on exactly that freed port.
+    const seeded = loadState(dir);
+    seeded.reservations["other-model"] = { port: oldPort, owner: { crowHome: dir, pid: process.pid }, createdAt: new Date().toISOString() };
+    saveState(dir, seeded);
+
+    const second = await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
+
+    assert.notEqual(second.port, oldPort, "the old port is taken — a fresh one was allocated instead");
+    const state = loadState(dir);
+    assert.equal(state.reservations["other-model"].port, oldPort, "the other provider keeps its port");
+    assert.equal(state.reservations["chat-test-model"].port, second.port, "both reservations exist, on different ports");
+
+    const row = await dbRow(db, "chat-test-model");
+    assert.equal(JSON.parse(row.gpu_policy).port, second.port, "the row advertises the port it actually holds");
+  } finally { cleanup(); }
+});
+
+test("I3: an UNCLAIMED old port is still reused (the disabled-row reuse rule is unchanged)", async () => {
+  const { db, dir, cleanup } = freshLibsql();
+  try {
+    const first = await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
+    await unregisterModel({ modelId: "chat-test-model", db, dir });
+    const second = await registerModel({ modelId: "chat-test-model", catalog: makeCatalog(), db, dir });
+    assert.equal(second.port, first.port);
+  } finally { cleanup(); }
+});

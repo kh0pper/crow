@@ -1610,7 +1610,14 @@ export async function registerModel({
   // left `state.reservations` without it, so a disabled-but-present row's
   // port is never left un-reserved after this call returns.
   const existingPort = existingRow?.gpuPolicy?.runtime === NATIVE_RUNTIME ? Number(existingRow.gpuPolicy.port) : NaN;
-  const port = Number.isInteger(existingPort) && existingPort > 0
+  // ...unless some OTHER provider has since been given that port. A disabled
+  // row keeps its `gpu_policy.port` after `unregisterModel` frees the
+  // reservation, so the very next registration can legitimately be handed it;
+  // re-registering the old row must then take a fresh port rather than
+  // double-book a live one (final review I3).
+  const portClaimedByAnother = Number.isInteger(existingPort) && existingPort > 0
+    && Object.entries(state.reservations).some(([id, r]) => id !== providerId && Number(r?.port) === existingPort);
+  const port = Number.isInteger(existingPort) && existingPort > 0 && !portClaimedByAnother
     ? existingPort
     : await allocatePortFn(state, providerId, { crowHome: dir, pid: process.pid });
   if (!state.reservations[providerId]) {
