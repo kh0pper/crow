@@ -744,6 +744,8 @@ test("a settings change applies by key (idempotent, no UNIQUE throw)", async () 
 ```
 
 > If `applyRemoteOp` is not already an exported testable seam over the apply dispatch, add a thin exported wrapper `export async function applyRemoteOp(db, table, op, row)` that routes to the same per-table handlers the live sync uses — do NOT fork the logic. Confirm the real handler name by reading `instance-sync.js:1761–1834` first.
+>
+> **Implementation shape (plan re-review):** the live handlers are **instance methods** on `InstanceSyncManager` (class at `instance-sync.js:319`) using `this.db`, and `_applyDashboardSetting` writes `lamport_ts`/`updated_at` (`~:1885`) — columns the ramble tables do NOT have. So do not literally copy that method. Instead write **module-level** `applyRambleMark(db,op,row)` / `applyRambleSetting(...)` / `applyRambleGroup(...)` functions; have BOTH the instance-method dispatch and the exported `applyRemoteOp` delegate to them (take `db` as a param, no `this`, no `lamport_ts`). **Conflict resolution:** ramble tables carry no `lamport_ts`, so phase-1 same-user sync is **last-delivered-wins** — acceptable here; note it explicitly and revisit if a later phase needs LWW.
 
 - [ ] **Step 2: Run, expect FAIL** — `node scripts/run-suite.mjs tests/ramble-sync.test.js` (also confirm `SYNCED_TABLES`/`EXCLUDED_COLUMNS` are exported; if not, export them.)
 
@@ -844,15 +846,15 @@ git show --stat HEAD
 
 - [ ] **Step 2: Run, expect FAIL** — `node scripts/run-suite.mjs tests/ramble-grid.test.js`
 
-- [ ] **Step 3: Implement `grid.js`**; make the drain filter `pending` marks through `emitAllowed(grid, visibilityAudience, "geo")`.
+- [ ] **Step 3: Implement `grid.js`**; make the drain filter `pending` marks through `emitAllowed(grid, visibilityAudience, "geo")`. **Update `tests/ramble-transport.test.js` (plan re-review):** gating the drain here will make Task 10's transport test fail (it published with no grid, and the default is `master=false`/all-off). Seed an enabling grid in that test — `setMaster(db, true)` + `setCell(db, "public", "geo", true)` before the drain — and include `tests/ramble-transport.test.js` in this task's commit.
 
-- [ ] **Step 4: Run, expect PASS**
+- [ ] **Step 4: Run, expect PASS** — run both `node scripts/run-suite.mjs tests/ramble-grid.test.js` and `node scripts/run-suite.mjs tests/ramble-transport.test.js`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add bundles/ramble/server/grid.js bundles/ramble/server/server.js servers/gateway/boot/ramble-transport.js tests/ramble-grid.test.js
-git commit bundles/ramble/server/grid.js bundles/ramble/server/server.js servers/gateway/boot/ramble-transport.js tests/ramble-grid.test.js -m "feat(ramble): privacy grid + master visible switch gating egress"
+git add bundles/ramble/server/grid.js bundles/ramble/server/server.js servers/gateway/boot/ramble-transport.js tests/ramble-grid.test.js tests/ramble-transport.test.js
+git commit bundles/ramble/server/grid.js bundles/ramble/server/server.js servers/gateway/boot/ramble-transport.js tests/ramble-grid.test.js tests/ramble-transport.test.js -m "feat(ramble): privacy grid + master visible switch gating egress"
 git show --stat HEAD
 ```
 
@@ -984,3 +986,9 @@ git show --stat HEAD
 **Suggestions applied:** drain guards the `published` UPDATE on a non-empty relay result (no silent drop when relays are down); subscriber dedups on `nostr_event_id` OR `mark_id` and skips own-persona echoes; Task 12 in-process authoring emits `bus.emit("ramble:drain")` instead of claiming synchronous publish; `insertRemoteMark` uses relative-TTL on receipt to tolerate cross-instance clock skew.
 
 **Question resolved:** the pet render seam — the header `updateCrowMood` is a closure, not reachable from the panel; Task 14 now renders a panel-scoped `#ramble-pet` crow, with header integration deferred to phase 2.
+
+### Review round 2 (2026-09-06) — APPROVE
+
+Follow-up adversarial review confirmed all three criticals resolved with no invented APIs and no regressions (`_applyDashboardSetting`/`_applyMessage` verified real at `instance-sync.js:1861`/dispatch `1761–1835`; `applyRemoteOp` correctly framed as a to-be-added wrapper; no dangling `lock.js`/`sealLocked`/`ramble-lock` refs; `unlockMark` signature consistent at every call site; milestones consistent). **Verdict: execution-ready.** Two minor notes folded in inline:
+- **Task 11 breaks Task 10's transport test** (the grid gate blocks the ungated test's publish) — Task 11 now seeds an enabling grid and includes `tests/ramble-transport.test.js` in its commit.
+- **`applyRemoteOp` cannot call the instance methods** (they write `lamport_ts`/`updated_at`, absent from ramble tables) — Task 8 now specifies module-level `applyRamble*` functions both paths delegate to, and documents last-delivered-wins as the phase-1 conflict model.
