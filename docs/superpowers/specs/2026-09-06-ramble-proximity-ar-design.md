@@ -119,10 +119,17 @@ Bundle-owned tables in the shared `crow.db` (created idempotently at server star
   anywhere; **content unlocks only within range** of its anchor (near the coord / on the
   LAN / in BLE range / matching the room fingerprint). Once unlocked, it **stays
   unlocked** for that user ("revisit later").
-- Enforcement: content encrypted with a key **derived from the anchor** + per-tag secret,
-  so a relay/scraper holding the event still cannot read it. v1 is client- + crypto-
-  enforced; a self-hosted world server (§8) can add server enforcement later without
-  schema change.
+- Enforcement (revised after plan review 2026-09-06): **`reveal:"locked"` is an in-range
+  teaser gate enforced by our client/gateway, NOT cryptography.** Anchor-derived content
+  encryption was dropped: for a *public geo* mark, discovery is by the published geohash,
+  which is also the only usable key input, so a relay scraper would hold both the key
+  material and the ciphertext — no real confidentiality is possible in a pure-relay model
+  (the cell must be coarse enough for a legit nearby user to match). **Confidentiality
+  against relays comes only from the audience layer:** public marks travel in the clear
+  (a `locked:true` flag asks honest clients to withhold display until in range);
+  contacts/group marks are encrypted to recipients, so a relay sees ciphertext regardless
+  of reveal. Real cryptographic public-geo locking needs the self-hosted world server (§8)
+  that can gate content release on a proximity proof, and is **deferred** to that phase.
 - **Actions on an unlocked tag (v1):** react (emoji), reply (threaded, same visibility as
   the tag), report/hide (public). **No** collecting / scores / inventory at v1.
 
@@ -149,7 +156,9 @@ Rides **Nostr** (already used for Crow messaging — no new relay infra):
 - **contacts marks** → gift-wrapped per contact (as messages are today).
 - **group marks** → one event encrypted to the shared group key.
 - **caws (presence)** → Nostr **ephemeral** events (forwarded, never stored; self-expire).
-- **locked content** → encrypted with the anchor-derived key.
+- **locked reveal** → an in-range **teaser gate** in the client/gateway (see revised
+  §4 Discovery/reveal). No anchor-derived crypto in phase 1; public locked content is not
+  scraper-proof, contacts/group content is protected by the audience encryption above.
 
 **Media (photos):** content-hash addressed. An **optional self-hostable media server**
 (Blossom-style, a small later bundle) hosts full-size blobs; a small **encrypted
@@ -159,7 +168,10 @@ instance when reachable. **Public photo marks require a media server to be confi
 
 **Same-user instance sync:** `ramble_marks` / `ramble_pet` / `ramble_settings` /
 `ramble_groups` / `ramble_blocks` go through the Lamport outbox (`emitOrQueue`) and are
-added to `SYNCED_TABLES` (`servers/sharing/instance-sync.js`). BLE/LAN detections are
+added to `SYNCED_TABLES` (`servers/sharing/instance-sync.js`). **These use natural keys
+(`mark_id`/`key`/`group_id`), so allowlisting alone is insufficient — each needs a
+natural-key apply handler in the apply dispatch (like `_applyDashboardSetting`), or
+updates/deletes silently fail** (plan review 2026-09-06). BLE/LAN detections are
 device-local and not synced. **Carry-risk:** forget the allowlist → instance-local
 forever.
 
@@ -289,8 +301,11 @@ layers → run `tests/auth-network.test.js`.
 
 - Server + tables: `node scripts/run-suite.mjs tests/<file>` (never bare `node --test` —
   it can write the live crow.db). Node 22 rail on PATH.
-- Anchor encryption / locked-reveal: unit tests that a locked mark's content is
-  unreadable without the anchor-derived key, readable with it.
+- Locked-reveal: unit tests that a locked mark's content is withheld from the teaser/list
+  and returned only when the viewer is within range of its anchor (client/gateway gate;
+  no crypto — see revised §4).
+- Same-user sync: a real two-instance insert+delete round-trip through the apply handlers
+  (not just `SYNCED_TABLES` membership), since natural-key tables need bespoke handlers.
 - Privacy grid: a matrix test that a cell being off blocks that (audience, channel) emit,
   and the master switch drops everything — modeled on the executable, multi-instance gate
   discipline (memory `crow-item-2a-prune-design`).
