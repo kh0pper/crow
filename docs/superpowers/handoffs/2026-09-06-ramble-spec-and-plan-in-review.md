@@ -2,13 +2,12 @@
 
 ## TL;DR for the next session
 
-The **Ramble** sidequest (from `crow-proximity-ar-extension-idea.md` / the 2026-09-05 handoff) is at: **brainstorm done, spec approved by Kevin, phase-1 implementation plan written, plan-reviewer skill run once (REVISE → 3 criticals fixed), a follow-up re-review was dispatched but its result is NOT yet in this doc.** Nothing has been built. Everything is docs-only in **PR #307** (branch `docs/ramble-proximity-ar-spec`), **not merged**.
+The **Ramble** sidequest (from `crow-proximity-ar-extension-idea.md` / the 2026-09-05 handoff) is at: **brainstorm done, spec approved by Kevin, phase-1 implementation plan written and plan-reviewed TWICE — round 1 REVISE (3 criticals fixed), round 2 APPROVE (execution-ready).** Nothing has been built. Everything is docs-only in **PR #307** (branch `docs/ramble-proximity-ar-spec`), **not merged**.
 
 **Do first in the new session:**
-1. Check PR #307 and the branch head. Current head at handoff time: `42fc7c64` (branch `docs/ramble-proximity-ar-spec`, based on main `0742e1d2`).
-2. **Re-run the plan-review follow-up** on `docs/superpowers/plans/2026-09-06-ramble-phase1-core.md` (the previous session dispatched one whose result never got recorded). Verify the 3 criticals stayed fixed and nothing new broke. If REVISE, fix inline + re-commit to the branch; if APPROVE, record it in the plan's `## Review` section.
-3. Then it's **Kevin's call** (he answered "Review the plan first" when asked build-vs-defer): either build phase 1 (subagent-driven-development, starting Task 1) or defer and move to the models arc.
-4. **After the sidequest**, return to the models arc: `superpowers:writing-plans` for **models plan 2** (gateway doors, replication fix, pi-lab), from the tail of `docs/superpowers/plans/2026-09-05-models-core-launch-roles-adopt.md` + the carry items in `docs/superpowers/handoffs/2026-09-05-models-plan1-shipped-sidequest-proximity-ar.md`.
+1. Check PR #307 and the branch head. Current head at handoff time: `e0affa18` (branch `docs/ramble-proximity-ar-spec`, based on main `0742e1d2`). The plan's `## Review` section records both rounds (round 2 = APPROVE).
+2. It's **Kevin's call** (he answered "Review the plan first" when asked build-vs-defer). If he says build: `superpowers:subagent-driven-development` on `docs/superpowers/plans/2026-09-06-ramble-phase1-core.md`, starting Task 1; merge PR #307 first (docs) while the box is free, or carry the plan forward on a fresh feature branch. If he defers: move to the models arc.
+3. **After the sidequest**, return to the models arc: `superpowers:writing-plans` for **models plan 2** (gateway doors, replication fix, pi-lab), from the tail of `docs/superpowers/plans/2026-09-05-models-core-launch-roles-adopt.md` + the carry items in `docs/superpowers/handoffs/2026-09-05-models-plan1-shipped-sidequest-proximity-ar.md`.
 
 ## Artifacts (all in PR #307)
 
@@ -37,7 +36,7 @@ The **Ramble** sidequest (from `crow-proximity-ar-extension-idea.md` / the 2026-
 
 Suggestions also applied: drain guards the `published` UPDATE on a non-empty relay result; subscriber dedups on `nostr_event_id` OR `mark_id` and skips own-echo; Task 12 uses `bus.emit("ramble:drain")` (no synchronous-publish claim); `insertRemoteMark` uses relative-TTL on receipt for clock skew; the pet renders a panel-scoped `#ramble-pet` crow (the header `updateCrowMood` is a closure, not reachable from the panel).
 
-**⚠ Watch item for the re-review / executor:** the round-1 reviewer flagged a possible ORDERING concern — Task 10's drain "checks the privacy grid" but the grid is built in **Task 11 (after Task 10)**. Confirm whether the drain needs the grid before Task 11, or reorder / make the grid read default-safe (all-off) when its table is absent. The follow-up review was dispatched to check exactly this; its result was not captured — re-run it.
+**Round 2 review = APPROVE (execution-ready).** The ordering concern is resolved by design: Task 10 ships an ungated drain, Task 11 adds the grid gate. Two minor notes were folded in: (a) Task 11 now seeds an enabling grid in `tests/ramble-transport.test.js` and includes it in its commit (else the gate breaks Task 10's test); (b) `applyRemoteOp` must be **module-level** `applyRamble*` functions both the instance dispatch and the wrapper delegate to (the live instance methods write `lamport_ts`/`updated_at`, columns ramble tables lack), and phase-1 same-user sync is **last-delivered-wins**. Both are in the plan (Tasks 8 and 11) and the `## Review` section.
 
 ## Verified codebase facts (trust these; the plan's code was written against them)
 
@@ -62,4 +61,4 @@ Suggestions also applied: drain guards the `published` UPDATE on a non-empty rel
 
 ## PR #307 state at handoff
 
-- Branch `docs/ramble-proximity-ar-spec`, head `42fc7c64`, base main `0742e1d2`. Contains: spec, phase-1 plan, and the review-fix commit. Not merged. CI was green on the earlier head (`static-checks`+`audit` pass; `suite` is docs-only). Re-check check-runs on `42fc7c64` before any merge.
+- Branch `docs/ramble-proximity-ar-spec`, head `e0affa18`, base main `0742e1d2`. Contains: spec, phase-1 plan, and the review-fix commit. Not merged. CI: re-check check-runs on the current head before any merge (docs-only; suite auto-runs the new ramble tests once code lands, not in this docs PR).
