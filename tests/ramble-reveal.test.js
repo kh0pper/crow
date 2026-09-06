@@ -16,3 +16,18 @@ test("revealContent gates locked content on range, open is always revealed", () 
   assert.equal(revealContent(locked, { lat: 30.2673, lon: -97.7431 }).content.content_text, "secret spot");
   assert.equal(revealContent(open, null).unlocked, true);
 });
+
+test("teaser locked allowlist excludes exact coordinates and anchor_ref", () => {
+  const teasered = teaser(locked);
+  assert.equal(teasered.lat, undefined, "lat must be withheld");
+  assert.equal(teasered.lon, undefined, "lon must be withheld");
+  assert.equal(teasered.anchor_ref, undefined, "anchor_ref must be withheld");
+  assert.equal(teasered.content_text, undefined, "content_text must be withheld");
+});
+
+test("teaser treats reveal:undefined as locked", () => {
+  const noReveal = { ...locked, reveal: undefined };
+  const teasered = teaser(noReveal);
+  assert.equal(teasered.lat, undefined, "undefined reveal is locked");
+  assert.equal(teasered.content_text, undefined);
+});

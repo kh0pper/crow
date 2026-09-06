@@ -26,11 +26,19 @@ export function haversineMeters(a, b) {
 }
 
 export function withinRange(anchor, here) {
+  // Fail closed on malformed anchors
+  if (!anchor) return false;
+  const validKinds = ["geo", "lan", "beacon", "fingerprint", "visual"];
+  if (!validKinds.includes(anchor.anchor_kind)) return false;
+
   if (anchor.anchor_kind === "geo") {
     if (here == null || here.lat == null) return false;
     return haversineMeters({ lat: anchor.lat, lon: anchor.lon }, here) <= (anchor.accuracy_m || 75);
   }
-  return !!here && here.ref === anchor.anchor_ref;
+
+  // For ref kinds (lan, beacon, fingerprint, visual): exact match on anchor_ref
+  if (!anchor.anchor_ref || !here?.ref) return false;
+  return here.ref === anchor.anchor_ref;
 }
 
 export function geohashNeighborsPrefix(geohash, precision) {
