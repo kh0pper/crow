@@ -1,4 +1,4 @@
-# Handoff 2026-09-06 — Ramble (proximity + shared-AR extension): spec APPROVED, phase-1 plan written & under plan-review; NEXT = finish review loop → Kevin's build decision → then models arc plan 2
+# Handoff 2026-09-06 — Ramble (proximity + shared-AR extension): spec APPROVED, phase-1 plan written & plan-reviewed (round 2 = APPROVE, execution-ready); NEXT = Kevin's build-or-defer call → then models arc plan 2
 
 ## TL;DR for the next session
 
