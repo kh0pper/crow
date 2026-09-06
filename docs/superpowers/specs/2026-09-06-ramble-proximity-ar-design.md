@@ -131,7 +131,9 @@ Bundle-owned tables in the shared `crow.db` (created idempotently at server star
   of reveal. Real cryptographic public-geo locking needs the self-hosted world server (§8)
   that can gate content release on a proximity proof, and is **deferred** to that phase.
 - **Actions on an unlocked tag (v1):** react (emoji), reply (threaded, same visibility as
-  the tag), report/hide (public). **No** collecting / scores / inventory at v1.
+  the tag), block/hide by persona (public; phase 1 — blocked personas are dropped on
+  receipt and hidden in lists, blocks replicate to the user's own instances). **No**
+  collecting / scores / inventory at v1.
 
 ### Persona
 - Per-user `public_identity_level` (§2). Resolves the `author` field per audience.
@@ -166,14 +168,35 @@ thumbnail** rides inline; contacts/groups fall back to fetching from the author'
 instance when reachable. **Public photo marks require a media server to be configured**
 (stated plainly — no silent failure).
 
-**Same-user instance sync:** `ramble_marks` / `ramble_pet` / `ramble_settings` /
-`ramble_groups` / `ramble_blocks` go through the Lamport outbox (`emitOrQueue`) and are
-added to `SYNCED_TABLES` (`servers/sharing/instance-sync.js`). **These use natural keys
-(`mark_id`/`key`/`group_id`), so allowlisting alone is insufficient — each needs a
+**Same-user instance sync:** `ramble_marks` / `ramble_settings` / `ramble_blocks` go
+through the Lamport outbox (`emitOrQueue`) and are added to `SYNCED_TABLES`
+(`servers/sharing/instance-sync.js`). `ramble_pet` is per-instance (not synced);
+`ramble_groups` joins the list in phase 1b with its first writer. **These use natural
+keys (`mark_id`/`key`/`persona`), so allowlisting alone is insufficient — each needs a
 natural-key apply handler in the apply dispatch (like `_applyDashboardSetting`), or
-updates/deletes silently fail** (plan review 2026-09-06). BLE/LAN detections are
-device-local and not synced. **Carry-risk:** forget the allowlist → instance-local
-forever.
+updates/deletes silently fail** (plan review 2026-09-06). **Every synced table carries
+`lamport_ts`** — the stdio outbox row-stamps by `id` inside one atomic batch, and a table
+without the column makes every MCP-authored write silently fail to queue (review round 3).
+A replicated row is applied with `origin='sync'` so the receiving instance never
+re-publishes it. BLE/LAN detections are device-local and not synced. **Carry-risk:**
+forget the allowlist → instance-local forever.
+
+### Phase-1 wire scope + conventions (review round 3, 2026-09-06)
+- **Phase 1 publishes public marks/caws only.** Contacts/group marks are stored, synced to
+  the user's own instances, and shown on the map, but are **not delivered to contacts or
+  group members** until **phase 1b** (per-contact gift-wrap fan-out, a group-key primitive
+  that is not pairwise NIP-44, the inbound `#p` subscription + decrypt path, group
+  create/join + invite). Half of that path must never ship alone.
+- **Kinds:** marks = `30397` (addressable, `d` = mark id), caws = `20397` (ephemeral).
+  `30078` was rejected (NIP-78 application data).
+- **Geohash tags at every prefix length** (NIP-52 convention) because relay tag filters
+  are exact-match; clients subscribe at their chosen cell precision.
+- **Expiry is NIP-40** (`expiration` tag, relay-enforced), owner deletes are NIP-09 —
+  "ephemeral by default" must be true on relays, not just locally.
+- **Caws carry only the coarse geohash** (no coordinates) — presence is the user's own
+  position; marks (places) carry full coordinates so clients can range-gate.
+- **Author = x-only Nostr pubkey** everywhere (rows, blocks, own-echo). Under `real`, the
+  event adds a `crow` tag with the `crow_id`.
 
 ---
 
@@ -212,8 +235,9 @@ The data model (§4) and privacy grid (§2) are shared and are **not** re-litiga
 phase. writing-plans targets **phase 1** first.
 
 1. **Ramble core** — tag/anchor store; the **geo** channel; **map** + compose + the
-   settings grid; Nostr public/contacts/groups; the pet fed by **geo activity**; MCP
-   tools. Ships value with **zero Android work**; proves the world.
+   settings grid; Nostr **public** marks/caws; block/hide; same-user sync; the pet fed by
+   **geo activity**; MCP tools. Ships value with **zero Android work**; proves the world.
+   **1b** — contacts/group delivery over Nostr + groups create/join (see §5).
 2. **Proximity channels** — the Android bridge: BLE friend beacon, Wi-Fi sensing + the
    `fingerprint` anchor, LAN/mDNS. Feeds the pet the radio world; enables stranger
    meetings.
@@ -319,11 +343,10 @@ layers → run `tests/auth-network.test.js`.
 
 ## 11. Open questions for writing-plans (phase 1)
 
-- Exact Nostr event kinds for public marks vs ephemeral caws (custom kind numbers +
-  geohash tag convention).
-- Anchor-key derivation function specifics (geo precision → key; how "within range"
-  tolerance maps to decryptability without leaking exact position).
+- ~~Exact Nostr event kinds / geohash tag convention~~ — **answered** (§5 conventions:
+  30397 / 20397, `g` at every prefix, NIP-40 expiry).
+- ~~Anchor-key derivation~~ — **moot**: anchor-derived crypto was removed (§4 reveal).
 - Map tile source for vendored Leaflet (self-hosted vs public tiles — public-repo /
-  privacy implications).
-- Whether phase 1 pet is fed by geo activity alone (proposed: yes) until phase 2 adds the
-  radio feed.
+  privacy implications). Phase-1 default: OpenStreetMap public tiles with attribution,
+  configurable tile URL in settings; revisit when a self-hosted option exists.
+- ~~Whether phase 1 pet is fed by geo activity alone~~ — **yes** (plan Task 14).

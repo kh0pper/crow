@@ -17,7 +17,16 @@
 - **Panel middleware is path-scoped:** `router.use("/api/ramble", dashboardAuth)` — never an unpathed `router.use(mw)` (starves later panels; refused under `STRICT_PANEL_MOUNT=1`).
 - **Network-exposure invariant:** ramble routes, panel, MCP, and streams are private. NEVER add any ramble path to `PUBLIC_FUNNEL_PREFIXES`. If any gateway auth/network layer is touched, run `tests/auth-network.test.js`.
 - **Nostr transport is gateway-side only:** reuse the singleton `getManagersOrNull()` / `getSharedManagers()` from `servers/sharing/managers.js`. Do NOT construct a second `NostrManager` (duplicate relay connections under one identity). MCP-process code never touches Nostr; it only writes DB rows with `publish_state='pending'`.
-- **Sync:** every ramble table write that must replicate to the user's own instances goes through `emitOrQueue(syncManager, db, table, op, row).catch(() => {})`, and the table name is appended to `SYNCED_TABLES` in `servers/sharing/instance-sync.js`. **Appending to `SYNCED_TABLES` is NOT sufficient by itself:** any table whose wire row lacks an `id` needs a natural-key apply handler in the apply dispatch (`instance-sync.js` ~lines 1761–1834), exactly like `_applyDashboardSetting` (keyed on `key`) or `_applyMessage` (keyed on `nostr_event_id`). Without it, updates fail their `WHERE id=?` and deletes no-op. Ramble tables use natural keys (`ramble_marks.mark_id`, `ramble_settings.key`, `ramble_groups.group_id`) and MUST add handlers + a `shouldSyncRow` gate — see Task 8.
+- **Sync:** every ramble table write that must replicate to the user's own instances goes through `emitOrQueue(syncManager, db, table, op, row).catch(() => {})`, and the table name is appended to `SYNCED_TABLES` in `servers/sharing/instance-sync.js`. **Appending to `SYNCED_TABLES` is NOT sufficient by itself:** any table whose wire row lacks an `id` needs a natural-key apply handler in the apply dispatch (`instance-sync.js` ~lines 1761–1834), exactly like `_applyDashboardSetting` (keyed on `key`) or `_applyMessage` (keyed on `nostr_event_id`). Without it, updates fail their `WHERE id=?` and deletes no-op. Ramble tables use natural keys (`ramble_marks.mark_id`, `ramble_settings.key`, `ramble_blocks.persona`) and MUST add handlers + a `shouldSyncRow` gate — see Task 8.
+- **Every synced ramble table MUST carry `lamport_ts INTEGER DEFAULT 0` (review round 3, C1).** The stdio outbox path (`servers/shared/sync-emit.js` ~:230, the path every MCP-authored write takes) row-stamps via `stampSql`, which for any row carrying `id` runs `UPDATE <table> SET lamport_ts=? WHERE id=?` inside ONE atomic batch. A table without that column throws, the batch is rolled back, `emitOrQueue` returns `null` with a warn, and the write never replicates — silently. The in-gateway `emitChange` path tolerates the missing column (non-fatal stamp), so panel-authored rows would sync while MCP-authored rows would not. Precedent: `glasses_note_sessions` (`scripts/init-db.js:710`). The column is `EXCLUDED_COLUMNS`-stripped on the wire (lamport rides in the envelope) and the apply handlers use the envelope lamport for real last-writer-wins.
+- **Replicated rows must not be re-published (review round 3, C2).** `EXCLUDED_COLUMNS` strips `publish_state`/`origin`, so a mark applied on a peer instance would otherwise land with the defaults `pending`/`local` and that peer's drain would publish it to Nostr a second time under the same seed-derived key. `applyRambleMark` MUST write `origin='sync'` and `publish_state='synced'` explicitly; the drain selects only `origin='local'`.
+- **Phase-1 wire is PUBLIC-ONLY (review round 3, D1).** Only `visibility='public'` marks/caws leave the instance over Nostr. Contacts/group marks are stored locally, replicate to the user's own instances via the Lamport outbox, and are shown on the map — but they are NOT delivered to contacts or group members in phase 1 (the drain skips them; `markToEvent` refuses non-public rows). Contacts/group Nostr delivery (gift-wrap fan-out per contact, a group-key primitive that is not pairwise NIP-44, the inbound `#p` subscription + decrypt path) is **phase 1b**, its own plan. Never encrypt-and-send half of that path.
+- **Nostr wire conventions (review round 3, C3/C4/D2/D3/D4):**
+  - **Kinds:** public marks = kind `30397` (addressable; `d` = `mark_id`), caws = kind `20397` (ephemeral). Both chosen as unregistered in the NIP kind registry at the time of writing; `30078` was rejected because it is NIP-78 application data.
+  - **Geohash tags at every prefix:** Nostr tag filters are exact-match, so an event carries `["g", geohash.slice(0, n)]` for every `n` from 1 to the full length (NIP-52 convention). The subscriber filters `#g` at the user's configured cell precision.
+  - **Expiry:** use the NIP-40 tag `["expiration", String(unixSeconds)]` (relays honor it), not a custom tag. Owner deletes of a still-live public mark publish a NIP-09 kind-5 deletion (Task 10).
+  - **Caws are coarse:** a caw event carries ONLY the geohash truncated to the configured precision (`RAMBLE_DEFAULT_GEOHASH_PRECISION`, default 5) — never `lat`/`lon`/`accuracy_m`. Marks (places, not people) carry full coords so the client can range-gate.
+  - **Pubkeys are x-only:** `deriveBotIdentity().secp256k1Pubkey` is 66-hex *compressed*; `event.pubkey` is 64-hex *x-only*. `resolvePersona` normalizes `author` to x-only (strip the 2-char prefix; `NostrManager` does the same at `nostr.js:503`). `ramble_marks.author`, `ramble_blocks.persona`, and the own-echo comparison all use the x-only form. Under `level:"real"` the event additionally carries `["crow", crowId]`.
 - **Locked-reveal is NOT cryptographic against a relay scraper in phase 1 (design fact, see Task 4):** confidentiality against relays comes only from the audience layer — public marks travel in the clear in the relay event, contacts/group marks are encrypted to recipients. `reveal:"locked"` is an in-range **teaser gate** enforced by our client/gateway (list/query withhold content until an in-range unlock). Real cryptographic public-geo locking needs the world server and is deferred to a later phase. Do not claim a public locked mark resists a scraper.
 - **zod strings:** every `z.string()` in a tool schema carries a `.max(...)` bound.
 - **Tests:** run a single file with `node scripts/run-suite.mjs tests/<file>.test.js` (bare `node --test` can write the live crow.db). Bundle table/unit tests open their **own** in-memory client: `createClient({ url: "file::memory:" })` from `@libsql/client`. Node 22 rail on PATH: `export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH` before running.
@@ -104,7 +113,7 @@ cp bundles/reader/server/db.js bundles/ramble/server/db.js
   "category": "social",
   "tags": ["proximity", "map", "ar", "social", "geo"],
   "icon": "🐦",
-  "notes": "Proximity broadcasts (caws) + a shared/private map of discoverable marks, with a crow pet. Phase 1: geo channel, map, Nostr, pet.",
+  "description": "Proximity broadcasts (caws) + a shared/private map of discoverable marks, with a crow pet. Phase 1: geo channel, map, Nostr, pet.",
   "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CROW_APP_ROOT", "CROW_DATA_DIR", "CROW_HOME"] },
   "panel": "panel/ramble.js",
   "panelRoutes": "panel/routes.js",
@@ -138,7 +147,7 @@ export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH
 npm run build-registry
 node -e "const r=require('./registry/add-ons.json'); if(!r.find?.(x=>x.id==='ramble') && !JSON.stringify(r).includes('\"ramble\"')) throw new Error('ramble missing from registry'); console.log('ramble in registry OK')"
 ```
-Expected: build succeeds, ramble present. (`server.js`/`init-tables.js` do not exist yet — the registry build reads the manifest only, not the server code.)
+Expected: build succeeds, ramble present. (`server.js`/`init-tables.js` do not exist yet — the registry build reads the manifest only, not the server code.) The build runs `validateManifest` (`scripts/lib/bundle-contract.mjs`): the five universal-required fields are `id`, `name`, `description`, `type`, `category` — `description` (not `notes`) is mandatory (review round 3, C5). `server.args[0]` must exist on disk, which is why the minimal `server/index.js` lands in this task.
 
 - [ ] **Step 5: Commit**
 
@@ -158,7 +167,8 @@ git show --stat HEAD
 
 **Interfaces:**
 - Produces: `export async function initRambleTables(db)`. Tables: `ramble_marks`, `ramble_pet`, `ramble_settings`, `ramble_groups`, `ramble_blocks`, FTS `ramble_marks_fts`.
-- `ramble_marks` columns (the wire/store shape every later task uses): `id INTEGER PK AUTOINCREMENT`, `mark_id TEXT UNIQUE` (uuid), `author TEXT` (persona pubkey hex), `author_level TEXT` (`rotating|pseudonym|real`), `kind TEXT` (`caw|mark`), `anchor_kind TEXT` (`geo|lan|beacon|fingerprint|visual`), `geohash TEXT`, `lat REAL`, `lon REAL`, `accuracy_m REAL`, `anchor_ref TEXT` (salted lan id / beacon id / fingerprint hash / opaque visual), `visibility TEXT` (`public|contacts|group:<id>`), `reveal TEXT` (`open|locked`), `content_text TEXT`, `content_kind TEXT` (`none|photo|sticker|link`), `content_ref TEXT`, `thumb_enc TEXT`, `locked_blob TEXT` (reserved for a future crypto phase — unused in phase 1; see Task 4), `created_at INTEGER`, `expires_at INTEGER` NULL, `nostr_event_id TEXT UNIQUE` NULL, `publish_state TEXT DEFAULT 'pending'` (`pending|published|remote`), `origin TEXT` (`local|remote`).
+- `ramble_marks` columns (the wire/store shape every later task uses): `id INTEGER PK AUTOINCREMENT`, `mark_id TEXT UNIQUE` (uuid), `author TEXT` (persona pubkey hex), `author_level TEXT` (`rotating|pseudonym|real`), `kind TEXT` (`caw|mark`), `anchor_kind TEXT` (`geo|lan|beacon|fingerprint|visual`), `geohash TEXT`, `lat REAL`, `lon REAL`, `accuracy_m REAL`, `anchor_ref TEXT` (salted lan id / beacon id / fingerprint hash / opaque visual), `visibility TEXT` (`public|contacts|group:<id>`), `reveal TEXT` (`open|locked`), `content_text TEXT`, `content_kind TEXT` (`none|photo|sticker|link`), `content_ref TEXT`, `thumb_enc TEXT`, `locked_blob TEXT` (reserved for a future crypto phase — unused in phase 1; see Task 4), `created_at INTEGER`, `expires_at INTEGER` NULL, `nostr_event_id TEXT UNIQUE` NULL, `publish_state TEXT DEFAULT 'pending'` (`pending|published|remote|synced`), `origin TEXT` (`local|remote|sync`), `lamport_ts INTEGER DEFAULT 0` (sync stamp — REQUIRED, Global Constraints C1).
+- `ramble_settings`, `ramble_blocks` also carry `lamport_ts INTEGER DEFAULT 0` (they replicate). `ramble_groups` is created (schema reserved for phase 1b) but has no phase-1 writer and is not synced. `ramble_pet` is per-instance, not synced.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -184,6 +194,13 @@ test("all ramble tables + fts exist", async () => {
   const names = rows.map((r) => r.name);
   for (const t of ["ramble_marks", "ramble_pet", "ramble_settings", "ramble_groups", "ramble_blocks", "ramble_marks_fts"]) {
     assert.ok(names.includes(t), `missing ${t}`);
+  }
+});
+
+test("synced tables carry lamport_ts (outbox stamp requirement)", async () => {
+  for (const t of ["ramble_marks", "ramble_settings", "ramble_blocks"]) {
+    const { rows } = await db.execute(`PRAGMA table_info(${t})`);
+    assert.ok(rows.some((r) => r.name === "lamport_ts"), `${t} missing lamport_ts`);
   }
 });
 
@@ -231,7 +248,8 @@ export async function initRambleTables(db) {
       expires_at INTEGER,
       nostr_event_id TEXT UNIQUE,
       publish_state TEXT NOT NULL DEFAULT 'pending',
-      origin TEXT NOT NULL DEFAULT 'local'
+      origin TEXT NOT NULL DEFAULT 'local',
+      lamport_ts INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS ramble_marks_geohash ON ramble_marks(geohash);
     CREATE INDEX IF NOT EXISTS ramble_marks_pubstate ON ramble_marks(publish_state);`);
@@ -265,7 +283,8 @@ export async function initRambleTables(db) {
   await initTable(db, "ramble_settings", `
     CREATE TABLE IF NOT EXISTS ramble_settings (
       key TEXT PRIMARY KEY,
-      value TEXT
+      value TEXT,
+      lamport_ts INTEGER DEFAULT 0
     );`);
 
   await initTable(db, "ramble_groups", `
@@ -281,7 +300,8 @@ export async function initRambleTables(db) {
     CREATE TABLE IF NOT EXISTS ramble_blocks (
       persona TEXT PRIMARY KEY,
       reason TEXT,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      lamport_ts INTEGER DEFAULT 0
     );`);
 }
 ```
@@ -489,11 +509,11 @@ git show --stat HEAD
 
 **Interfaces:**
 - Consumes: `deriveBotIdentity(seed, botId)` and `loadInstanceSeed(dataDir)`/`loadOrCreateIdentity()` + `computeCrowId` from `servers/sharing/identity.js` (via `appImport`).
-- Produces: `resolvePersona(identity, seed, { level, kind, sessionId }) -> { author, author_level, secp256k1Priv, secp256k1Pubkey }`. **Split by `kind` under rotating (plan review critical #3, spec §2):** placed marks must be attributable so reports/blocks survive a session, only presence rotates.
-  - `level:"real"` → the instance identity (`author = crowId`, real signing keys) for any kind.
-  - `level:"pseudonym"` → `deriveBotIdentity(seed, "ramble-world")` (stable, non-crow_id) for any kind.
-  - `level:"rotating"` → `kind:"mark"` uses the stable `deriveBotIdentity(seed, "ramble-world")` pseudonym (so `ramble_blocks` keyed on `persona` works next session); `kind:"caw"` uses `deriveBotIdentity(seed, "ramble-session:" + sessionId)` (fresh per session, presence only).
-  - `author` is the persona's `secp256k1Pubkey` for pseudonym/rotating, the `crowId` for real. `author_level` records the level (`rotating`/`pseudonym`/`real`).
+- Produces: `resolvePersona(identity, seed, { level, kind, sessionId, _derive }) -> { author, author_level, crowId, secp256k1Priv }`. **Split by `kind` under rotating (plan review critical #3, spec §2):** placed marks must be attributable so reports/blocks survive a session, only presence rotates.
+  - `level:"real"` → the instance identity's signing key for any kind; `crowId` is populated (the wire adds a `["crow", crowId]` tag, Task 9).
+  - `level:"pseudonym"` → `deriveBotIdentity(seed, "ramble-world")` (stable, non-crow_id) for any kind; `crowId` null.
+  - `level:"rotating"` → `kind:"mark"` uses the stable `deriveBotIdentity(seed, "ramble-world")` pseudonym (so `ramble_blocks` keyed on `persona` works next session); `kind:"caw"` uses `deriveBotIdentity(seed, "ramble-session:" + sessionId)` (fresh per session, presence only); `crowId` null.
+  - **`author` is ALWAYS the x-only 64-hex Nostr pubkey** of whichever key signs (review round 3, C4): `secp256k1Pubkey` from `identity.js` is 66-hex compressed, so strip the leading 2 chars (exactly what `NostrManager` does at `nostr.js:503`). This is the value `event.pubkey` will carry, so own-echo skips and `ramble_blocks.persona` compare equal. `author_level` records the level (`rotating`/`pseudonym`/`real`).
 
 - [ ] **Step 1: Write the failing test** (pure-function slice; inject a fake identity/seed so no gateway state is needed)
 
@@ -502,24 +522,37 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePersona } from "../bundles/ramble/server/persona.js";
 
-// Inject a deterministic deriver so the test needs no real identity.
-const fakeDerive = (seed, botId) => ({ secp256k1Pubkey: "pk-" + botId, secp256k1Priv: Buffer.from(botId) });
-const realId = { crowId: "crow_ABC", secp256k1Pubkey: "pk-real", secp256k1Priv: Buffer.from("real") };
+import { createHash } from "node:crypto";
 
-test("rotating caw rotates per session; rotating mark is the stable pseudonym; real = crowId", () => {
+// Inject a deterministic deriver so the test needs no real identity. Keys are
+// shaped like identity.js output: 66-hex COMPRESSED secp256k1 pubkeys.
+const compressed = (s) => "02" + createHash("sha256").update(s).digest("hex");
+const fakeDerive = (seed, botId) => ({ secp256k1Pubkey: compressed(seed + botId), secp256k1Priv: Buffer.from(botId) });
+const realId = { crowId: "crow_ABC", secp256k1Pubkey: compressed("real"), secp256k1Priv: Buffer.from("real") };
+
+test("rotating caw rotates per session; rotating mark is the stable pseudonym; real carries crowId", () => {
   const cawA = resolvePersona(realId, "seed", { level: "rotating", kind: "caw", sessionId: "s1", _derive: fakeDerive });
   const cawB = resolvePersona(realId, "seed", { level: "rotating", kind: "caw", sessionId: "s2", _derive: fakeDerive });
   assert.notEqual(cawA.author, cawB.author); // presence rotates
   const markA = resolvePersona(realId, "seed", { level: "rotating", kind: "mark", sessionId: "s1", _derive: fakeDerive });
   const markB = resolvePersona(realId, "seed", { level: "rotating", kind: "mark", sessionId: "s2", _derive: fakeDerive });
   assert.equal(markA.author, markB.author); // placed marks stay attributable across sessions
-  assert.equal(markA.author, "pk-ramble-world");
+  assert.equal(markA.author, compressed("seed" + "ramble-world").slice(2));
+  assert.equal(markA.crowId, null);
   const p1 = resolvePersona(realId, "seed", { level: "pseudonym", kind: "caw", _derive: fakeDerive });
   const p2 = resolvePersona(realId, "seed", { level: "pseudonym", kind: "mark", _derive: fakeDerive });
   assert.equal(p1.author, p2.author);
   const r = resolvePersona(realId, "seed", { level: "real", kind: "mark", _derive: fakeDerive });
-  assert.equal(r.author, "crow_ABC");
+  assert.equal(r.author, compressed("real").slice(2)); // x-only, NOT the crow_id
+  assert.equal(r.crowId, "crow_ABC");
   assert.equal(r.author_level, "real");
+});
+
+test("author is always x-only 64-hex (matches event.pubkey)", () => {
+  for (const level of ["rotating", "pseudonym", "real"]) {
+    const p = resolvePersona(realId, "seed", { level, kind: "mark", sessionId: "s", _derive: fakeDerive });
+    assert.match(p.author, /^[0-9a-f]{64}$/, level);
+  }
 });
 ```
 
@@ -528,17 +561,22 @@ test("rotating caw rotates per session; rotating mark is the stable pseudonym; r
 - [ ] **Step 3: Implement `persona.js`** (the `_derive` seam lets tests inject; production passes the real `deriveBotIdentity`)
 
 ```js
+/** 66-hex compressed secp256k1 pubkey -> 64-hex x-only (what Nostr `event.pubkey` carries). */
+export function xOnly(pubkeyHex) {
+  return pubkeyHex.length === 66 ? pubkeyHex.slice(2) : pubkeyHex;
+}
+
 export function resolvePersona(identity, seed, { level = "rotating", kind = "mark", sessionId = "0", _derive } = {}) {
   const derive = _derive; // production callers pass deriveBotIdentity from identity.js
   if (level === "real") {
-    return { author: identity.crowId, author_level: "real", secp256k1Priv: identity.secp256k1Priv, secp256k1Pubkey: identity.secp256k1Pubkey };
+    return { author: xOnly(identity.secp256k1Pubkey), author_level: "real", crowId: identity.crowId, secp256k1Priv: identity.secp256k1Priv };
   }
   // pseudonym: always the stable world pseudonym. rotating: marks use the stable pseudonym (attributable),
   // only caws (presence) use a fresh per-session key.
   const rotatesThisKind = level === "rotating" && kind === "caw";
   const botId = rotatesThisKind ? "ramble-session:" + sessionId : "ramble-world";
   const k = derive(seed, botId);
-  return { author: k.secp256k1Pubkey, author_level: level, secp256k1Priv: k.secp256k1Priv, secp256k1Pubkey: k.secp256k1Pubkey };
+  return { author: xOnly(k.secp256k1Pubkey), author_level: level, crowId: null, secp256k1Priv: k.secp256k1Priv };
 }
 ```
 
@@ -568,7 +606,8 @@ git show --stat HEAD
   - `getMark(db, mark_id) -> row|null` (full row, for internal/owner use).
   - `unlockMark(db, mark_id, here) -> { unlocked:boolean, content }` — loads the mark and returns `revealContent(row, here)` (in-range gate; no crypto/secret).
   - `expireMarks(db, now=Date.now()) -> count` — deletes rows with `expires_at IS NOT NULL AND expires_at <= now`. **Emits a delete through `emit` for each swept LOCAL row** (so expiry propagates via Task 8).
-  - `insertRemoteMark(db, row) -> {inserted:boolean}` — idempotent by `nostr_event_id` OR `mark_id` (dedup both, per plan review), sets `origin='remote'`, `publish_state='remote'`. **Relative-TTL on receipt (plan review):** if the incoming `expires_at` is present, store `expires_at = Date.now() + max(0, author_expires_at - author_created_at)` to tolerate cross-instance clock skew.
+  - `insertRemoteMark(db, row) -> {inserted:boolean, blocked?:true}` — idempotent by `nostr_event_id` OR `mark_id` (dedup both, per plan review), sets `origin='remote'`, `publish_state='remote'`. **Drops the row without inserting when `row.author` is in `ramble_blocks`** (review round 3, D5). **Relative-TTL on receipt (plan review):** if the incoming `expires_at` is present, store `expires_at = Date.now() + max(0, author_expires_at - author_created_at)` to tolerate cross-instance clock skew.
+  - **Blocks (review round 3, D5 — spec §4 lists report/hide as a v1 action):** `blockPersona(db, persona, reason, { emit } = {}) -> row` (upsert into `ramble_blocks`, emits `insert` for sync), `unblockPersona(db, persona, { emit } = {})` (emits `delete`), `isBlocked(db, persona) -> boolean`. `listMarks` excludes rows whose `author` is blocked (`author NOT IN (SELECT persona FROM ramble_blocks)`). Blocking also deletes already-stored remote marks by that persona.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -616,11 +655,22 @@ test("expired marks are swept", async () => {
   const swept = await expireMarks(db, Date.now());
   assert.ok(swept >= 1);
 });
+
+test("blocked personas are dropped on receipt and hidden in lists", async () => {
+  const remote = { mark_id: "r1", author: "badpk", kind: "mark", anchor_kind: "geo", geohash: "9v6m2a", lat: 30.2672, lon: -97.7431, visibility: "public", reveal: "open", content_text: "spam", created_at: Date.now(), nostr_event_id: "ev1" };
+  assert.equal((await insertRemoteMark(db, remote)).inserted, true);
+  await blockPersona(db, "badpk", "spam");
+  assert.ok(!(await listMarks(db, { visibility: "public" })).some((r) => r.author === "badpk")); // existing rows purged/hidden
+  const again = await insertRemoteMark(db, { ...remote, mark_id: "r2", nostr_event_id: "ev2" });
+  assert.equal(again.inserted, false);
+  assert.equal(again.blocked, true);
+});
 ```
+(add `insertRemoteMark`, `blockPersona` to the import line.)
 
 - [ ] **Step 2: Run, expect FAIL** — `node scripts/run-suite.mjs tests/ramble-marks.test.js`
 
-- [ ] **Step 3: Implement `marks.js`** using `anchors.js` (`encodeGeohash` for geo rows) and `reveal.js` (`teaser` in `listMarks`, `revealContent` in `unlockMark`), `randomUUID()` for `mark_id`, parameterized `await db.execute({ sql, args })`. Derive columns from `anchor`, default TTLs by kind/visibility, `INSERT` with `publish_state='pending'`; `listMarks` selects the full row then maps through `teaser`; `expireMarks` selects the local rows it will delete, deletes them, and calls `emit(row, "delete")` for each so Task 8 replicates the deletion. No `locked_blob`/`secret` handling (removed in Task 4).
+- [ ] **Step 3: Implement `marks.js`** using `anchors.js` (`encodeGeohash` for geo rows) and `reveal.js` (`teaser` in `listMarks`, `revealContent` in `unlockMark`), `randomUUID()` for `mark_id`, parameterized `await db.execute({ sql, args })`. Derive columns from `anchor`, default TTLs by kind/visibility, `INSERT` with `publish_state='pending'`; `listMarks` selects the full row (minus blocked authors) then maps through `teaser`; `expireMarks` selects the local rows it will delete, deletes them, and calls `emit(row, "delete")` for each so Task 8 replicates the deletion. `insertRemoteMark` checks `isBlocked` first. Blocks helpers live in this module (small; no separate file). No `locked_blob`/`secret` handling (removed in Task 4). The `emit(row, op)` hook signature is `emit(row, op = "insert")`; the row passed to `emit` is the stored row (it includes `id` and `lamport_ts` — both fine: the stamp path needs `id`, and `EXCLUDED_COLUMNS` strips both on the wire).
 
 - [ ] **Step 4: Run, expect PASS** — `node scripts/run-suite.mjs tests/ramble-marks.test.js`
 
@@ -643,7 +693,10 @@ git show --stat HEAD
 
 **Interfaces:**
 - Consumes: `marks.js` functions; `createDbClient` (db.js).
-- Produces: `export function createRambleServer(db, options = {})` registering tools: `ramble_leave_mark`, `ramble_caw`, `ramble_query_world`, `ramble_unlock`, `ramble_pet_state`, `ramble_group_create`, `ramble_group_join`. Each `z.string()` has `.max()`. Handlers return `text(JSON.stringify(...))`. Author/persona is resolved server-side from settings (default `rotating`); tools do NOT accept raw keys.
+- Produces: `export function createRambleServer(db, options = {})` registering tools: `ramble_leave_mark`, `ramble_caw`, `ramble_query_world`, `ramble_unlock`, `ramble_pet_state`, `ramble_block` (`{ persona, reason? }` → `blockPersona`), `ramble_unblock`. Each `z.string()` has `.max()`. Handlers return `text(JSON.stringify(...))`. Author/persona is resolved server-side from settings (default `rotating`); tools do NOT accept raw keys.
+- **Groups are NOT in phase 1** (review round 3, D8): `ramble_group_create`/`ramble_group_join` had no key-generation or invite specification and, with the phase-1 wire being public-only, a local-only group has no purpose. They move to phase 1b with the contacts/group delivery path. The `ramble_groups` table stays (schema reserved).
+- **Identity seam (review round 3, D8):** `options.identity`, `options.seed`, `options._derive` are injectable; when absent the server resolves them once at startup from `appImport("servers/sharing/identity.js")` → `loadOrCreateIdentity()` + `loadInstanceSeed(dataDir)` + `deriveBotIdentity`. The test injects all three so no identity files are generated. `sessionId` for rotating caws = a `randomUUID()` minted once per server process.
+- **Sync emit from the stdio process:** `createMark`/`blockPersona` are called with `emit: (row, op) => emitOrQueue(null, db, table, op, row).catch(() => {})` where `emitOrQueue` comes from `appImport("servers/shared/sync-emit.js")` — the stdio process has no manager, so this queues to `sync_outbox` for the gateway drain (the C1 lamport column makes this batch succeed). In tests, `options.emit` may be a no-op spy.
 
 - [ ] **Step 1: Write the failing test** (drive tools through the registered handlers against an in-memory db; use `server.tool` registration introspection or call the exported handler map — implement `createRambleServer` to also return handlers for testability via `options._exposeHandlers`)
 
@@ -659,18 +712,29 @@ before(async () => {
   db = createClient({ url: "file::memory:" });
   await initRambleTables(db);
   const handlers = {};
-  createRambleServer(db, { _exposeHandlers: handlers });
+  const compressed = (s) => "02" + createHash("sha256").update(s).digest("hex");
+  const fakeDerive = (seed, botId) => ({ secp256k1Pubkey: compressed(seed + botId), secp256k1Priv: Buffer.from(botId) });
+  const identity = { crowId: "crow_T", secp256k1Pubkey: compressed("real"), secp256k1Priv: Buffer.from("real") };
+  createRambleServer(db, { _exposeHandlers: handlers, identity, seed: "seed", _derive: fakeDerive, emit: async () => {} });
   h = handlers;
 });
 
-test("leave_mark then query_world returns it", async () => {
+test("leave_mark then query_world returns it, attributed to the x-only world pseudonym", async () => {
   const r = await h.ramble_leave_mark({ lat: 30.2672, lon: -97.7431, text: "hello", visibility: "public", reveal: "open" });
   assert.ok(!r.isError);
   const q = await h.ramble_query_world({ lat: 30.2672, lon: -97.7431, visibility: "public" });
   const payload = JSON.parse(q.content[0].text);
-  assert.ok(payload.marks.some((m) => m.content_text === "hello"));
+  const m = payload.marks.find((m) => m.content_text === "hello");
+  assert.ok(m);
+  assert.match(m.author, /^[0-9a-f]{64}$/);
+});
+
+test("ramble_block hides that persona's marks", async () => {
+  const r = await h.ramble_block({ persona: "a".repeat(64), reason: "test" });
+  assert.ok(!r.isError);
 });
 ```
+(import `createHash` from `node:crypto`.)
 
 - [ ] **Step 2: Run, expect FAIL** — `node scripts/run-suite.mjs tests/ramble-tools.test.js`
 
@@ -682,7 +746,7 @@ test("leave_mark then query_world returns it", async () => {
 
 ```bash
 git add bundles/ramble/server/server.js bundles/ramble/server/index.js tests/ramble-tools.test.js
-git commit bundles/ramble/server/server.js bundles/ramble/server/index.js tests/ramble-tools.test.js -m "feat(ramble): MCP tools (leave_mark/caw/query_world/unlock/pet_state/groups)"
+git commit bundles/ramble/server/server.js bundles/ramble/server/index.js tests/ramble-tools.test.js -m "feat(ramble): MCP tools (leave_mark/caw/query_world/unlock/pet_state/block)"
 git show --stat HEAD
 ```
 
@@ -692,64 +756,92 @@ git show --stat HEAD
 
 ## Task 8: Same-user sync (allowlist + natural-key apply handlers)
 
-> **Design correction (plan review critical #1).** Appending to `SYNCED_TABLES` is necessary but NOT sufficient. `ramble_marks` excludes `id` and `ramble_settings`/`ramble_groups` have no `id` at all, so the generic apply path (`instance-sync.js` ~line 1834, `WHERE id=?`) can never match an update and never no-op-safely delete. Each needs a natural-key apply handler in the apply dispatch (the pattern of `_applyDashboardSetting` keyed on `key`, `_applyMessage` keyed on `nostr_event_id`). **The test MUST be a real two-instance insert+delete round-trip, not allowlist membership.**
+> **Design correction (plan review critical #1).** Appending to `SYNCED_TABLES` is necessary but NOT sufficient. `ramble_marks` excludes `id` and `ramble_settings`/`ramble_blocks` have no `id` at all, so the generic apply path (`instance-sync.js` ~line 1834, `WHERE id=?`) can never match an update and never no-op-safely delete. Each needs a natural-key apply handler in the apply dispatch (the pattern of `_applyDashboardSetting` keyed on `key`, `_applyMessage` keyed on `nostr_event_id`). **The test MUST be a real two-instance insert+delete round-trip, not allowlist membership.**
 
 **Files:**
-- Modify: `servers/sharing/instance-sync.js` (append tables to `SYNCED_TABLES`; add `EXCLUDED_COLUMNS`; add `_applyRambleMark`/`_applyRambleSetting`/`_applyRambleGroup` to the apply dispatch; extend `shouldSyncRow`)
-- Modify: `bundles/ramble/server/marks.js` (emit insert on create, delete on expire/purge)
+- Modify: `servers/sharing/instance-sync.js` (append tables to `SYNCED_TABLES`; add `EXCLUDED_COLUMNS`; add module-level `applyRambleMark`/`applyRambleSetting`/`applyRambleBlock` + dispatch; extend `shouldSyncRow`)
+- Modify: `bundles/ramble/server/marks.js` (emit insert on create/block, delete on expire/purge/unblock)
 - Test: `tests/ramble-sync.test.js`
 
 **Interfaces:**
 - Consumes: `emitOrQueue(syncManager, db, table, op, row)` (`servers/shared/sync-emit.js`); the existing apply dispatch + `shouldSyncRow(table, row)` in `instance-sync.js`.
 - Produces:
-  - `SYNCED_TABLES` gains `"ramble_marks"`, `"ramble_groups"`, `"ramble_settings"`.
-  - `EXCLUDED_COLUMNS`: `ramble_marks: ["id","publish_state","origin"]` (rowid + per-instance state), `ramble_groups: []`, `ramble_settings: []`.
-  - Apply dispatch: for `table==='ramble_marks'` upsert on `mark_id` (INSERT … ON CONFLICT(mark_id) DO UPDATE; delete by `mark_id`); `ramble_settings` upsert/delete on `key`; `ramble_groups` upsert/delete on `group_id`. Follow the exact shape of `_applyDashboardSetting`.
-  - `shouldSyncRow('ramble_marks', row)` returns `false` unless `row.mark_id` is present (guards against half-formed rows).
+  - `SYNCED_TABLES` gains `"ramble_marks"`, `"ramble_settings"`, `"ramble_blocks"` (NOT `ramble_groups` — no phase-1 writer; NOT `ramble_pet` — per-instance).
+  - `EXCLUDED_COLUMNS`: `ramble_marks: ["id","publish_state","origin","lamport_ts"]` (rowid + per-instance state; lamport rides in the envelope, precedent `providers`), `ramble_settings: ["lamport_ts"]`, `ramble_blocks: ["lamport_ts"]`.
+  - Module-level handlers `applyRambleMark(db, op, row, lamportTs)` (upsert on `mark_id`: `INSERT … ON CONFLICT(mark_id) DO UPDATE`; delete by `mark_id`), `applyRambleSetting(db, op, row, lamportTs)` (on `key`), `applyRambleBlock(db, op, row, lamportTs)` (on `persona`). **Last-writer-wins on the envelope lamport, exactly like `_applyDashboardSetting` (`instance-sync.js:1861`)**: read the local row's `lamport_ts`; if `lamportTs < localTs` skip; write `lamport_ts = lamportTs`. **`applyRambleMark` MUST set `origin='sync'`, `publish_state='synced'`** (Global Constraints C2) so the receiving instance's drain never re-publishes; on conflict-update it must NOT overwrite a local row's `origin`/`publish_state`/`nostr_event_id` if that row is `origin='local'` (the authoring instance keeps its own publish bookkeeping — only content/anchor/expiry columns update).
+  - The instance-method dispatch in `_applyEntry` routes the three tables to these functions with `this.db`; an exported `applyRemoteOp(db, table, op, row, lamportTs = 0)` delegates to the same functions (the test seam — do NOT fork the logic).
+  - `shouldSyncRow('ramble_marks', row)` returns `false` unless `row.mark_id` is present; `ramble_settings` requires `row.key`; `ramble_blocks` requires `row.persona`.
 
-- [ ] **Step 1: Write the failing test — a real two-instance round-trip.** Model the existing instance-sync tests (find one that spins two `InstanceSyncManager`s or applies a wire op directly to a second db). Minimum viable without full transport: apply a captured wire op to a second in-memory db through the apply dispatch and assert the row lands, then apply a delete and assert it's gone.
+- [ ] **Step 1: Write the failing test — a real round-trip through BOTH doors.** (a) The **outbox door**: `emitOrQueue(null, db, "ramble_marks", "insert", storedRow)` with no manager must produce a `sync_outbox` row (this is the path every MCP-authored write takes; it fails silently without the `lamport_ts` column — C1). (b) The **apply door**: apply captured wire ops to a second in-memory db through `applyRemoteOp` and assert insert / LWW / delete semantics and the `origin='sync'` stamp.
 
 ```js
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { SYNCED_TABLES, EXCLUDED_COLUMNS, applyRemoteOp } from "../servers/sharing/instance-sync.js";
+import { emitOrQueue, _setEligibilityForTest } from "../servers/shared/sync-emit.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
+import { createMark } from "../bundles/ramble/server/marks.js";
 
-let b; // "other instance"
-before(async () => { b = createClient({ url: "file::memory:" }); await initRambleTables(b); });
-
-test("allowlist + exclusions", () => {
-  for (const t of ["ramble_marks", "ramble_groups", "ramble_settings"]) assert.ok(SYNCED_TABLES.includes(t), t);
-  assert.ok(EXCLUDED_COLUMNS.ramble_marks.includes("id"));
-  assert.ok(EXCLUDED_COLUMNS.ramble_marks.includes("publish_state"));
+let a, b; // instance A (author) and B (peer)
+before(async () => {
+  a = createClient({ url: "file::memory:" }); await initRambleTables(a);
+  b = createClient({ url: "file::memory:" }); await initRambleTables(b);
+  _setEligibilityForTest(() => true);
 });
 
-test("a mark inserted on A applies then deletes on B by mark_id", async () => {
+test("allowlist + exclusions", () => {
+  for (const t of ["ramble_marks", "ramble_settings", "ramble_blocks"]) assert.ok(SYNCED_TABLES.includes(t), t);
+  assert.ok(!SYNCED_TABLES.includes("ramble_groups"));
+  for (const c of ["id", "publish_state", "origin", "lamport_ts"]) assert.ok(EXCLUDED_COLUMNS.ramble_marks.includes(c), c);
+});
+
+test("outbox door: an MCP-process write (no manager) lands in sync_outbox", async () => {
+  const row = await createMark(a, {
+    author: "a".repeat(64), author_level: "rotating", kind: "mark", visibility: "public", reveal: "open",
+    anchor: { anchor_kind: "geo", lat: 30.2672, lon: -97.7431, accuracy_m: 75 }, content: { content_text: "queued" },
+  });
+  const res = await emitOrQueue(null, a, "ramble_marks", "insert", row);
+  assert.ok(res && res.queued, "emitOrQueue returned null — the stamp batch failed (missing lamport_ts?)");
+  const { rows } = await a.execute("SELECT table_name, op FROM sync_outbox");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].table_name, "ramble_marks");
+});
+
+test("apply door: insert lands on B as origin=sync, LWW by lamport, delete by mark_id", async () => {
   const row = { mark_id: "m9", author: "pk1", kind: "mark", anchor_kind: "geo", geohash: "9v6", visibility: "public", reveal: "open", content_text: "hi", created_at: 1000 };
-  await applyRemoteOp(b, "ramble_marks", "insert", row);
-  let got = await b.execute({ sql: "SELECT content_text FROM ramble_marks WHERE mark_id=?", args: ["m9"] });
+  await applyRemoteOp(b, "ramble_marks", "insert", row, 5);
+  let got = await b.execute({ sql: "SELECT content_text, origin, publish_state, lamport_ts FROM ramble_marks WHERE mark_id=?", args: ["m9"] });
   assert.equal(got.rows[0].content_text, "hi");
-  await applyRemoteOp(b, "ramble_marks", "delete", { mark_id: "m9" });
+  assert.equal(got.rows[0].origin, "sync");       // C2: the peer's drain must never publish this
+  assert.equal(got.rows[0].publish_state, "synced");
+  assert.equal(got.rows[0].lamport_ts, 5);
+  await applyRemoteOp(b, "ramble_marks", "update", { ...row, content_text: "stale" }, 3); // older → ignored
+  await applyRemoteOp(b, "ramble_marks", "update", { ...row, content_text: "newer" }, 7);
+  got = await b.execute({ sql: "SELECT content_text FROM ramble_marks WHERE mark_id=?", args: ["m9"] });
+  assert.equal(got.rows[0].content_text, "newer");
+  await applyRemoteOp(b, "ramble_marks", "delete", { mark_id: "m9" }, 8);
   got = await b.execute({ sql: "SELECT 1 FROM ramble_marks WHERE mark_id=?", args: ["m9"] });
   assert.equal(got.rows.length, 0);
 });
 
-test("a settings change applies by key (idempotent, no UNIQUE throw)", async () => {
-  await applyRemoteOp(b, "ramble_settings", "update", { key: "public_identity_level", value: "pseudonym" });
-  await applyRemoteOp(b, "ramble_settings", "update", { key: "public_identity_level", value: "real" });
+test("settings + blocks apply by natural key (idempotent, no UNIQUE throw)", async () => {
+  await applyRemoteOp(b, "ramble_settings", "update", { key: "public_identity_level", value: "pseudonym" }, 1);
+  await applyRemoteOp(b, "ramble_settings", "update", { key: "public_identity_level", value: "real" }, 2);
   const got = await b.execute({ sql: "SELECT value FROM ramble_settings WHERE key=?", args: ["public_identity_level"] });
   assert.equal(got.rows[0].value, "real");
+  await applyRemoteOp(b, "ramble_blocks", "insert", { persona: "b".repeat(64), reason: "x", created_at: 1 }, 1);
+  await applyRemoteOp(b, "ramble_blocks", "insert", { persona: "b".repeat(64), reason: "x", created_at: 1 }, 1);
+  await applyRemoteOp(b, "ramble_blocks", "delete", { persona: "b".repeat(64) }, 2);
+  assert.equal((await b.execute("SELECT 1 FROM ramble_blocks")).rows.length, 0);
 });
 ```
 
-> If `applyRemoteOp` is not already an exported testable seam over the apply dispatch, add a thin exported wrapper `export async function applyRemoteOp(db, table, op, row)` that routes to the same per-table handlers the live sync uses — do NOT fork the logic. Confirm the real handler name by reading `instance-sync.js:1761–1834` first.
->
-> **Implementation shape (plan re-review):** the live handlers are **instance methods** on `InstanceSyncManager` (class at `instance-sync.js:319`) using `this.db`, and `_applyDashboardSetting` writes `lamport_ts`/`updated_at` (`~:1885`) — columns the ramble tables do NOT have. So do not literally copy that method. Instead write **module-level** `applyRambleMark(db,op,row)` / `applyRambleSetting(...)` / `applyRambleGroup(...)` functions; have BOTH the instance-method dispatch and the exported `applyRemoteOp` delegate to them (take `db` as a param, no `this`, no `lamport_ts`). **Conflict resolution:** ramble tables carry no `lamport_ts`, so phase-1 same-user sync is **last-delivered-wins** — acceptable here; note it explicitly and revisit if a later phase needs LWW.
+> **Implementation shape:** the live handlers are **instance methods** on `InstanceSyncManager` (class at `instance-sync.js:319`) using `this.db`; `_applyDashboardSetting` (`:1861`) is the shape to copy — read it first. Write **module-level** `applyRambleMark(db, op, row, lamportTs)` / `applyRambleSetting(...)` / `applyRambleBlock(...)`; have BOTH the `_applyEntry` dispatch (add three `if (table === "ramble_…")` blocks beside the `contact_groups` one, passing `this.db` and the envelope `lamport_ts`) and the exported `applyRemoteOp` delegate to them. `emitOrQueue` in the outbox test needs `getOrCreateLocalInstanceId()` (`servers/gateway/instance-registry.js`) to work under the scratch env — it does in `tests/sync-emit.test.js` / `tests/sync-outbox-e2e.test.js`; model on those (they show the `_setEligibilityForTest` + null-manager queue path; `emitOrQueue` calls `ensureSyncTables` itself).
 
-- [ ] **Step 2: Run, expect FAIL** — `node scripts/run-suite.mjs tests/ramble-sync.test.js` (also confirm `SYNCED_TABLES`/`EXCLUDED_COLUMNS` are exported; if not, export them.)
+- [ ] **Step 2: Run, expect FAIL** — `node scripts/run-suite.mjs tests/ramble-sync.test.js`
 
-- [ ] **Step 3: Implement** — append the table names; add the `EXCLUDED_COLUMNS` entries; add the three natural-key apply handlers (copy `_applyDashboardSetting`'s shape); extend `shouldSyncRow`; export `applyRemoteOp`; wire `createMark` (emit `insert`) and `expireMarks`/master-purge (emit `delete`) through the `emit` hook.
+- [ ] **Step 3: Implement** — append the table names; add the `EXCLUDED_COLUMNS` entries; add the three module-level natural-key handlers + dispatch; extend `shouldSyncRow`; export `applyRemoteOp`; wire `createMark`/`blockPersona` (emit `insert`) and `expireMarks`/master-purge/`unblockPersona` (emit `delete`) through the `emit` hook.
 
 - [ ] **Step 4: Run, expect PASS**, then run the existing sync suite to confirm no regression: `node scripts/run-suite.mjs tests/instance-sync.test.js` (if present) and `node scripts/run-suite.mjs tests/auth-network.test.js`.
 
@@ -770,9 +862,14 @@ git show --stat HEAD
 - Test: `tests/ramble-nostr-map.test.js`
 
 **Interfaces:**
-- Produces: `markToEvent(row, { encryptFor } = {}) -> { kind, created_at, tags, content }` — kind `30078` (addressable/parameterized) for persistent public marks, kind `20078` (ephemeral) for caws; tags `[["g", geohash], ["d", mark_id], ["k", anchor_kind], ["rv", reveal], ["exp", String(expires_at)]]`. **`content` is audience-scoped, no per-tag secret:** for `visibility==='public'` it is the JSON envelope in the clear — `reveal:'locked'` still ships the content (phase-1 limitation, Task 4) but with a `"locked":true` flag so honest clients gate display; for `visibility` contacts/group the transport (Task 10) passes `encryptFor` and the content JSON is encrypted (NIP-44 to each contact / group shared_key) so a relay sees ciphertext only. `eventToMark(event) -> row` — inverse, sets `origin:'remote'`, `nostr_event_id: event.id`, parses tags back to columns; when content is ciphertext it leaves `content_text` null until decrypted by the recipient path. Pure functions (no signing here; Task 10 finalizes/signs).
+- Produces: `markToEvent(row, { precision = 5, crowId = null } = {}) -> { kind, created_at, tags, content }` for **`visibility==='public'` rows ONLY** (throws `RambleNotPublic` for anything else — phase-1 wire is public-only, Global Constraints D1):
+  - **Kinds:** `MARK_KIND = 30397` (addressable; tag `["d", mark_id]`) for marks, `CAW_KIND = 20397` (ephemeral) for caws. Export both constants.
+  - **Tags:** `["g", geohash.slice(0, n)]` for every `n` in `1..geohash.length` (exact-match filters, C3); `["d", mark_id]` (marks only); `["k", anchor_kind]`; `["rv", reveal]`; `["expiration", String(Math.floor(expires_at/1000))]` when `expires_at` is set (NIP-40 — relays drop it, D2); `["crow", crowId]` when `crowId` is given (level `real`).
+  - **Content (JSON, in the clear):** marks → `{ v:1, text, content_kind, content_ref, lat, lon, accuracy_m, locked: reveal==='locked' }` (`reveal:'locked'` still ships the text — phase-1 limitation, Task 4 — with `locked:true` so honest clients gate display). **Caws → `{ v:1, text, locked:false }` with NO coordinates**, and the caw's `g` tags are truncated to `precision` (D3: presence is coarse; a caw is the user's own position).
+  - `eventToMark(event) -> row` — inverse: `author = event.pubkey` (already x-only), `nostr_event_id = event.id`, `origin:'remote'`, `publish_state:'remote'`, `geohash` = the LONGEST `g` tag, `mark_id` = the `d` tag or (for caws) `event.id`, `created_at = event.created_at*1000`, `expires_at` from `expiration`, `kind` from the event kind, lat/lon from content when present. Rejects (returns `null`) events with neither `g` tag nor parseable JSON content.
+  - Pure functions (no signing here; Task 10 finalizes/signs).
 
-- [ ] **Step 1: Write the failing test** — round-trip a public open mark and a public locked mark; assert the `g` tag equals the geohash, ephemeral kind for caws, the locked event carries `"locked":true`, and `eventToMark(markToEvent(row)).geohash === row.geohash`.
+- [ ] **Step 1: Write the failing test** — round-trip a public open mark, a public locked mark, and a caw. Assert: every prefix of the geohash appears as a `g` tag (and no other); marks are `MARK_KIND` with a `d` tag, caws are `CAW_KIND` with no `d` tag; the locked event's content carries `"locked":true`; a caw's content has no `lat`/`lon` and its longest `g` tag is `precision` chars; an `expiration` tag (seconds) is present when `expires_at` is set; a `crow` tag appears only when `crowId` is passed; `eventToMark(markToEvent(row)).geohash === row.geohash` for marks; `markToEvent` throws for `visibility:'contacts'`.
 
 - [ ] **Step 2: Run, expect FAIL** — `node scripts/run-suite.mjs tests/ramble-nostr-map.test.js`
 
@@ -798,12 +895,13 @@ git show --stat HEAD
 - Test: `tests/ramble-transport.test.js`
 
 **Interfaces:**
-- Consumes: `getManagersOrNull()` (`servers/sharing/managers.js`) → `{ nostrManager, identity, db }`; `finalizeEvent` (nostr-tools); `nostrManager.publishRendezvousEvent(event)`; `nostrManager.connectRelays()`; `markToEvent`/`eventToMark`; `insertRemoteMark` (marks.js); `bus.emit("ramble:nearby", payload)` (`servers/shared/event-bus.js`); `resolvePersona` + real `deriveBotIdentity`.
-- Produces: `export async function startRambleTransport({ db, nostrManager, identity, seed, bus, intervalMs = 15000 })` returning `{ stop(), drainOnce(), onEvent(event) }` (the last two exposed for tests; the interval just calls `drainOnce`). Also listens for `bus.on("ramble:drain", () => drainOnce())` so in-process authoring (Task 12) publishes without waiting for the interval.
-  - **drain** — `SELECT * FROM ramble_marks WHERE publish_state='pending' AND origin='local'`; for each: check the privacy grid allows this (audience, `geo`) with master on (Task 11) — skip if not; resolve persona **passing `kind`** → `markToEvent` (pass `encryptFor` for contacts/group) → `finalizeEvent(template, persona.secp256k1Priv)` → `const published = await publishRendezvousEvent(event)`. **Guard (plan review):** only `UPDATE ... SET publish_state='published', nostr_event_id=?` when `published.length > 0`; otherwise leave `pending` (and bump an in-memory retry counter) so an all-relays-down moment does not silently drop the mark.
-  - **subscribe** — build a filter over the user's active geohash cells (from `ramble_settings.active_area`) and audiences allowed by the grid; `onEvent(event)`: **skip events whose author == any of our own personas** (own-echo), else `insertRemoteMark(eventToMark(event))` (idempotent on `nostr_event_id` OR `mark_id`, per plan review) then, if newly inserted, `bus.emit("ramble:nearby", { geohash })`.
+- Consumes: `getManagersOrNull()` (`servers/sharing/managers.js`) → `{ nostrManager, identity, db }`; `finalizeEvent` (nostr-tools); `nostrManager.publishRendezvousEvent(event)` (returns the array of relay urls that accepted); `nostrManager.connectRelays()`; **`nostrManager.relays` (a `Map<url, Relay>`) + `makeResilientSub(relay, filter, onevent, opts)` from `servers/sharing/resilient-subscribe.js`** — `NostrManager` has NO generic subscribe API (review round 3, D6), so the subscriber owns its own sub handles and runs its own `ensureHealthy()` loop (the manager's health loop only knows contact subs); `markToEvent`/`eventToMark`; `insertRemoteMark` (marks.js); `bus.emit("ramble:nearby", payload)` (`servers/shared/event-bus.js`); `resolvePersona` + real `deriveBotIdentity`; `getGrid`/`emitAllowed` (Task 11).
+- Produces: `export async function startRambleTransport({ db, nostrManager, identity, seed, bus, intervalMs = 15000, _derive })` returning `{ stop(), drainOnce(), onEvent(event), currentFilter(), resubscribe() }` (exposed for tests; the interval just calls `drainOnce`). Also listens for `bus.on("ramble:drain", () => drainOnce())` so in-process authoring (Task 12) publishes without waiting for the interval, and `bus.on("ramble:area", () => resubscribe())` when the active area changes.
+  - **Startup:** init-if-missing the ramble tables (the knowledge-base precedent at `feature-mounts.js:148–176`: probe `sqlite_master` for `ramble_marks`, call `initRambleTables` only when absent — review round 3, D7; the gateway must not depend on the stdio child having started first).
+  - **drain** — `SELECT * FROM ramble_marks WHERE publish_state='pending' AND origin='local'`; for each: **skip unless `visibility='public'`** (phase-1 wire is public-only; leave the row `pending` — it is still a valid local/synced mark); check the privacy grid allows `(public, geo)` with master on (Task 11) — skip if not; resolve persona **passing `kind`** → `markToEvent(row, { precision, crowId: persona.crowId })` → `finalizeEvent(template, persona.secp256k1Priv)` → `const published = await publishRendezvousEvent(event)`. **Guard (plan review):** only `UPDATE ... SET publish_state='published', nostr_event_id=?` when `published.length > 0`; otherwise leave `pending` (and bump an in-memory retry counter) so an all-relays-down moment does not silently drop the mark. **Deletes:** `marks.js` records owner-deletes of a `published` public mark in an in-memory/`ramble_settings`-backed tombstone list the drain reads to publish a NIP-09 kind-5 event `["e", nostr_event_id]` signed by the same persona (D2); expiry needs no deletion event (relays honor `expiration`).
+  - **subscribe** — filter `{ kinds: [MARK_KIND, CAW_KIND], "#g": cells }` where `cells` = the user's active cells at the configured precision (`ramble_settings.active_area`, a JSON array of geohash prefixes written by `POST /api/ramble/area`, Task 12; empty → no subscription). One `makeResilientSub` per relay in `nostrManager.relays`; a `setInterval` calls `ensureHealthy()` on each handle every 30 s; `stop()` closes them. `onEvent(event)`: **skip events whose `event.pubkey` equals any of our own personas' `author`** (own-echo — x-only compare, C4; keep a Set of personas resolved this process), else `insertRemoteMark(eventToMark(event))` (idempotent on `nostr_event_id` OR `mark_id`; drops blocked personas) then, if newly inserted, `bus.emit("ramble:nearby", { geohash })`.
 
-- [ ] **Step 1: Write the failing test** — inject a fake `nostrManager` (records `publishRendezvousEvent` calls, returns `["relay"]`), a fake `deriveBotIdentity`, an in-memory db with one `pending` mark; run one drain tick; assert the mark flips to `published` and the fake received one event whose tags include `["g", <geohash>]`. Then feed a synthetic incoming event to the subscribe handler and assert a `remote` row is inserted (idempotent on a second feed) and `bus` emitted `ramble:nearby`.
+- [ ] **Step 1: Write the failing test** — inject a fake `nostrManager` (`relays: new Map([["wss://fake", fakeRelay]])`, records `publishRendezvousEvent` calls, returns `["wss://fake"]`), a fake `_derive`, an in-memory db (tables NOT pre-initialized — assert the transport initializes them, D7) with one `pending` public mark and one `pending` `contacts` mark; seed `active_area` = `["9v6m2"]`; run one drain tick; assert the public mark flips to `published` with a `nostr_event_id`, the contacts mark stays `pending` and nothing was published for it, and the published event's tags include `["g", "9v6m2"]` (the precision-5 prefix) as well as the full geohash. Assert `currentFilter()["#g"]` contains `"9v6m2"` and `kinds` contains both kinds. Then feed a synthetic incoming event (author ≠ ours) to `onEvent` and assert a `remote` row is inserted (idempotent on a second feed) and `bus` emitted `ramble:nearby`; feed an event whose `pubkey` equals our world persona's `author` and assert it is NOT inserted.
 
 ```js
 import { test, before } from "node:test";
@@ -818,7 +916,7 @@ import { startRambleTransport } from "../servers/gateway/boot/ramble-transport.j
 
 - [ ] **Step 2: Run, expect FAIL** — `node scripts/run-suite.mjs tests/ramble-transport.test.js`
 
-- [ ] **Step 3: Implement `ramble-transport.js`** (expose `drainOnce()` and `onEvent(event)` on the returned handle for tests; the interval just calls `drainOnce`). Then in `feature-mounts.js`, after the existing installed-bundle checks (the knowledge-base lan-discovery block is the pattern), if `ramble` is installed call `getManagersOrNull()` and `startRambleTransport(...)`, guarding on `nostrManager` being present.
+- [ ] **Step 3: Implement `ramble-transport.js`** (expose `drainOnce()`, `onEvent(event)`, `currentFilter()`, `resubscribe()` on the returned handle for tests; the interval just calls `drainOnce`). Import the bundle modules by **path** the same way feature-mounts imports knowledge-base (`$CROW_HOME/bundles/ramble/server/*.js` if installed there, else the repo's `bundles/ramble/server/*.js`, via `pathToFileURL(...).href`) — the transport lives in core and must not hard-import a bundle path that may not exist. Then in `feature-mounts.js`, after the existing installed-bundle checks (the knowledge-base lan-discovery block is the pattern), if the ramble bundle dir exists call `getManagersOrNull()` and `startRambleTransport(...)`, guarding on `nostrManager` being present, and `loadInstanceSeed(dataDir)` for the seed.
 
 - [ ] **Step 4: Run, expect PASS**
 
@@ -840,7 +938,7 @@ git show --stat HEAD
 - Test: `tests/ramble-grid.test.js`
 
 **Interfaces:**
-- Produces: `getGrid(db) -> { master, cells, identityLevel, activeArea }` (reads `ramble_settings`, defaults: `master=false`, every cell `false`, `identityLevel="rotating"`); `setCell(db, audience, channel, on)`, `setMaster(db, on)`, `setIdentityLevel(db, level)`; `emitAllowed(grid, audience, channel) -> boolean` (`grid.master && grid.cells[audience]?.[channel]`). The drain publishes a mark only for audiences whose (audience, `geo`) cell is on and `master` is true; `setMaster(false)` also deletes live caws (`DELETE FROM ramble_marks WHERE kind='caw' AND origin='local'`).
+- Produces: `getGrid(db) -> { master, cells, identityLevel, activeArea }` (reads `ramble_settings`, defaults: `master=false`, every cell `false`, `identityLevel="rotating"`); `setCell(db, audience, channel, on)`, `setMaster(db, on)`, `setIdentityLevel(db, level)`; `emitAllowed(grid, audience, channel) -> boolean` (`grid.master && grid.cells[audience]?.[channel]`). The drain publishes a mark only for audiences whose (audience, `geo`) cell is on and `master` is true; `setMaster(db, false, { emit })` also deletes live caws (`DELETE FROM ramble_marks WHERE kind='caw' AND origin='local'`, emitting a sync `delete` per row through the same `emit` hook as `expireMarks`). Grid/identity writes go through `emit` too (`ramble_settings` replicates, Task 8).
 
 - [ ] **Step 1: Write the failing test** — default grid blocks all; turning on `(public, geo)` with master on allows public/geo; master off blocks everything and clears caws.
 
@@ -868,7 +966,8 @@ git show --stat HEAD
 
 **Interfaces:**
 - Consumes: `layout({title, content})`; `dashboardAuth`; `marks.js`, `grid.js` via dynamic import from `$CROW_HOME/bundles/ramble` (panel runs in the gateway process).
-- Produces: panel handler object `{ id:"ramble", name:"Ramble", icon:"map-pin", route:"/dashboard/ramble", navOrder:120, category:"social", async handler(req,res,{db,layout,appRoot}) }`; router `export default (dashboardAuth) => Router` with **path-scoped** `router.use("/api/ramble", dashboardAuth)` and `router.use("/api/ramble", express.json({limit:"1mb"}))`; API routes `GET /api/ramble/marks`, `POST /api/ramble/marks` (in-process authoring: write via `createMark`, then `bus.emit("ramble:drain")` so the transport publishes on the next tick — the drain is the single egress, Task 10; do NOT re-implement publishing here, and do not claim synchronous publish), `GET/POST /api/ramble/grid`, `POST /api/ramble/unlock` (calls `unlockMark(db, mark_id, here)`).
+- Produces: panel handler object `{ id:"ramble", name:"Ramble", icon:"map-pin", route:"/dashboard/ramble", navOrder:120, category:"social", async handler(req,res,{db,layout,appRoot}) }`; router `export default (dashboardAuth) => Router` with **path-scoped** `router.use("/api/ramble", dashboardAuth)` and `router.use("/api/ramble", express.json({limit:"1mb"}))`; API routes `GET /api/ramble/marks`, `POST /api/ramble/marks` (in-process authoring: write via `createMark` with `emit` = `emitOrQueue(getInstanceSyncManager(), db, …)`, then `bus.emit("ramble:drain")` so the transport publishes on the next tick — the drain is the single egress, Task 10; do NOT re-implement publishing here, and do not claim synchronous publish), `DELETE /api/ramble/marks/:mark_id` (owner delete: local delete + sync delete emit + tombstone for the NIP-09 drain, Task 10), `GET/POST /api/ramble/grid`, `POST /api/ramble/unlock` (calls `unlockMark(db, mark_id, here)`), **`POST /api/ramble/area`** (body `{ lat, lon }` or `{ cells:[…] }` → writes `ramble_settings.active_area` as the precision-N cell(s) and `bus.emit("ramble:area")` — the subscriber's only input, D6; the client posts it when the map view settles), `POST /api/ramble/block` (`blockPersona`), `GET /api/ramble/pet` (Task 14 fills it; stub `{mood:"happy"}` here).
+- Persona in the gateway process: `identity` from `getManagersOrNull().identity`, seed via `loadInstanceSeed`, `deriveBotIdentity` real — same `resolvePersona` call as the MCP server (Task 7 seam), `kind` passed.
 
 - [ ] **Step 1: Write the failing test** — mount the router with a stub `dashboardAuth` and assert: `GET /api/ramble/marks` requires auth (401 without), the panel handler object has the right `route`/`navOrder`, and `POST /api/ramble/marks` inserts a row. (Use `supertest`-style via the router if available in the repo; otherwise assert the exported handler object shape + call the route handlers directly.)
 
@@ -878,8 +977,11 @@ git show --stat HEAD
 
 ```bash
 mkdir -p bundles/ramble/panel/static/leaflet
-# Vendor Leaflet 1.9.4 (js+css+marker images) into static/leaflet/. Pin the version; no CDN at runtime.
+# Vendor Leaflet 1.9.4 (leaflet.js + leaflet.css + images/marker-*.png, layers*.png) into static/leaflet/.
+# Include Leaflet's LICENSE (BSD-2) and a VERSION file ("1.9.4 — https://unpkg.com/leaflet@1.9.4/dist/") beside them.
+# Pin the version; no CDN at runtime. (CI's check-vendored-payloads only guards bundles/<id>/payload/ — static/ is unguarded, hence the VERSION note.)
 ```
+The client posts `POST /api/ramble/area` on Leaflet `moveend` (debounced) and re-fetches `/api/ramble/marks?cells=…`; the map draws locked marks as teasers (no popup text) and calls `POST /api/ramble/unlock` with the browser's geolocation when the user taps one.
 Implement `routes.js` (path-scoped auth, JSON body, the four API routes) and `ramble.js` (panel handler rendering a `<div id="ramble-map">`, a compose form, the settings grid, and the pet mount; `static/ramble.js` initializes Leaflet from the vendored files, loads `/api/ramble/marks`, drops markers, and opens the `/dashboard/streams/ramble-nearby` EventSource).
 
 - [ ] **Step 4: Run, expect PASS**; then smoke-boot the gateway: `node servers/gateway/index.js --no-auth` and confirm no mount error, ctrl-C.
@@ -904,7 +1006,7 @@ git show --stat HEAD
 - Consumes: `bus` (`event-bus.js`); the existing `openAuthedStream`/`sseTurbo` helpers in `streams.js`.
 - Produces: a channel that, on `bus.emit("ramble:nearby", payload)`, pushes an SSE frame to authed clients; unsubscribes on `res` close/error (the notifications-channel pattern).
 
-- [ ] **Step 1: Write the failing test** — assert the router registers `/dashboard/streams/ramble-nearby` and that emitting `ramble:nearby` invokes the registered `bus` handler (spy on `bus.on`). Keep it to handler wiring (SSE socket I/O is covered by existing stream tests).
+- [ ] **Step 1: Write the failing test** — the bus handler is registered **per request inside the route** (not at module load — review round 3, D9), so a bare spy on `bus.on` sees nothing. Model the existing stream tests: find a route test that drives a streams route with a fake authed `req`/`res` (grep `tests/*stream*.test.js` for `openAuthedStream`), invoke the `ramble-nearby` handler that way, then `bus.emit("ramble:nearby", { geohash: "9v6" })` and assert the fake `res` received a frame containing `9v6`, and that `res.emit("close")` removes the listener (`bus.listenerCount("ramble:nearby")` back to its prior value). Keep it to handler wiring (SSE socket I/O is covered by existing stream tests).
 
 - [ ] **Step 2: Run, expect FAIL** — `node scripts/run-suite.mjs tests/ramble-stream.test.js`
 
@@ -966,7 +1068,8 @@ git show --stat HEAD
 ## Self-review notes (coverage against the spec)
 
 - Spec §2 privacy grid + identity levels → Tasks 5, 11. Spec §3 geo channel → Tasks 3, 6, 10 (BLE/LAN/sensing are phase 2). Spec §4 data model + lifetimes + locked reveal + actions → Tasks 2, 4, 6 (react/reply/report UI lands with the panel in Task 12/phase 2 hardening). Spec §5 Nostr transport + sync + media → Tasks 8, 9, 10 (media server is phase 3; photo marks degrade to text/link in phase 1). Spec §6 pet + character module → Task 14 (the `feed(event)` interface is the character-module seam; AI-voice/peer layers are phase 4). Spec §8 bundle architecture, app-root, path-scoped mounts, no-Funnel, ports → Tasks 1, 12, 13 + Global Constraints. Spec §10 testing → every task's TDD cycle + the integration gate.
-- **Deferred within phase 1 (explicit):** photo content (needs the phase-3 media server) — `content_kind='photo'` is stored but phase-1 compose offers text/sticker/link only; reply/report moderation UI is a thin follow-up on Task 12; geohash neighbor-cell expansion (`geohashNeighborsPrefix`) returns the single cell in phase 1 (Task 3 note).
+- **Deferred within phase 1 (explicit):** photo content (needs the phase-3 media server) — `content_kind='photo'` is stored but phase-1 compose offers text/sticker/link only; reply/react UI is a thin follow-up on Task 12 (block/hide IS in phase 1 — Tasks 6/7/12); geohash neighbor-cell expansion (`geohashNeighborsPrefix`) returns the single cell in phase 1 (Task 3 note).
+- **Phase 1b (its own plan, after this ships):** contacts/group Nostr delivery — per-contact gift-wrap fan-out, a group-key primitive (not pairwise NIP-44), the inbound `#p` subscription + decrypt path, `ramble_group_create/join` + invite flow, `ramble_groups` sync handler. In phase 1 contacts/group marks exist locally and on the user's own instances only.
 
 ---
 
@@ -991,4 +1094,19 @@ git show --stat HEAD
 
 Follow-up adversarial review confirmed all three criticals resolved with no invented APIs and no regressions (`_applyDashboardSetting`/`_applyMessage` verified real at `instance-sync.js:1861`/dispatch `1761–1835`; `applyRemoteOp` correctly framed as a to-be-added wrapper; no dangling `lock.js`/`sealLocked`/`ramble-lock` refs; `unlockMark` signature consistent at every call site; milestones consistent). **Verdict: execution-ready.** Two minor notes folded in inline:
 - **Task 11 breaks Task 10's transport test** (the grid gate blocks the ungated test's publish) — Task 11 now seeds an enabling grid and includes `tests/ramble-transport.test.js` in its commit.
-- **`applyRemoteOp` cannot call the instance methods** (they write `lamport_ts`/`updated_at`, absent from ramble tables) — Task 8 now specifies module-level `applyRamble*` functions both paths delegate to, and documents last-delivered-wins as the phase-1 conflict model.
+- **`applyRemoteOp` cannot call the instance methods** (they write `lamport_ts`/`updated_at`, absent from ramble tables) — Task 8 now specifies module-level `applyRamble*` functions both paths delegate to, and documents last-delivered-wins as the phase-1 conflict model. *(Superseded by round 3: the tables now carry `lamport_ts`, so the handlers do real LWW.)*
+
+### Review round 3 (2026-09-06, Fable, direct code-verified review) — REVISE → fixed inline
+
+Rounds 1–2 verified the line numbers they were pointed at but never traced the path an MCP-authored mark actually takes through the stdio outbox, nor the Nostr filter semantics. Five confirmed defects and nine specification holes, all folded in above:
+
+**Critical (code-verified):**
+1. **C1 — MCP-authored marks never replicated.** `sync-emit.js` ~:230 row-stamps `UPDATE <table> SET lamport_ts=? WHERE id=?` inside one atomic batch; ramble tables had no `lamport_ts`, so the batch threw and `emitOrQueue` returned `null` (warn only). The gateway path tolerates the missing column, so panel writes would sync and MCP writes would not — silently; Task 8's apply-only test could never see it. Fix: `lamport_ts INTEGER DEFAULT 0` on the three synced tables (Task 2), an outbox-door test (Task 8), real LWW in the handlers.
+2. **C2 — double publish across the user's own instances.** `EXCLUDED_COLUMNS` strips `publish_state`/`origin`, so a replicated row landed as `pending`/`local` and the peer's drain re-published it. Fix: `applyRambleMark` stamps `origin='sync'`/`publish_state='synced'` (Task 8, tested).
+3. **C3 — the nearby subscription matched nothing.** Nostr tag filters are exact-match; one `g` tag at precision 7 vs a subscription at precision 5 never intersects. Fix: `g` tags at every prefix length (NIP-52), filter at the configured precision (Task 9/10, tested).
+4. **C4 — pubkey format mismatch.** `deriveBotIdentity().secp256k1Pubkey` is 66-hex compressed; `event.pubkey` is 64-hex x-only (`nostr.js:503` strips it). Own-echo skip and `ramble_blocks` would never match. Fix: `author` is always x-only; `real` carries `crowId` separately + a `crow` tag (Task 5/9, tested).
+5. **C5 — Task 1 failed `validateManifest`** (`description` is universal-required; the manifest used `notes`). Fixed.
+
+**Specification holes resolved:** D1 contacts/group delivery had no receive path and an unusable group-key primitive → phase-1 wire is **public-only**, phase 1b named; D2 custom `exp` tag → NIP-40 `expiration` + NIP-09 deletes; D3 caws leaked exact position → caws carry only the coarse geohash; D4 kind 30078 is NIP-78 → 30397/20397; D5 blocks were never consulted → `blockPersona`/`isBlocked`, `ramble_block` tool, filtered on receipt and in lists, `ramble_blocks` synced; D6 `NostrManager` has no generic subscribe → `relays` map + `makeResilientSub` + own health loop, and `active_area` now has a writer (`POST /api/ramble/area`); D7 gateway queried tables only the stdio child created → init-if-missing at transport start; D8 Task 7 had no identity seam and groups had no spec → injectable identity/seed/_derive, groups moved to phase 1b; D9 Task 13's `bus.on` spy could not observe a per-request registration → fake req/res pattern.
+
+**Spec updated in the same commit:** §4 sync list, §5 wire conventions + public-only phase 1, §7 phase 1b, §11 open questions answered.

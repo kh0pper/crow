@@ -1,4 +1,6 @@
-# Handoff 2026-09-06 — Ramble (proximity + shared-AR extension): spec APPROVED, phase-1 plan written & plan-reviewed (round 2 = APPROVE, execution-ready); NEXT = Kevin's build-or-defer call → then models arc plan 2
+# Handoff 2026-09-06 — Ramble (proximity + shared-AR extension): spec APPROVED, phase-1 plan written & plan-reviewed ×3 (round 3 = REVISE, fixed inline → BUILD approved by Kevin); NEXT = build phase 1 → then models arc plan 2
+
+> **Round 3 (2026-09-06 evening, Fable, direct code-verified review — supersedes "execution-ready" below).** Kevin asked for a fresh review before building. Five code-verified criticals the first two rounds missed, all fixed in the plan + spec: **C1** MCP-authored marks never queued for sync (the stdio outbox row-stamp needs a `lamport_ts` column — `sync-emit.js` ~:230 — every synced ramble table now has one); **C2** replicated rows were re-published by the peer's drain (apply handler now stamps `origin='sync'`); **C3** the `#g` subscription never matched (tag filters are exact-match → `g` tags at every prefix); **C4** compressed vs x-only pubkeys broke own-echo + blocks (`author` is x-only everywhere); **C5** the Task 1 manifest failed `validateManifest` (`description` required). Scope cuts: **phase-1 wire is public-only** (contacts/group Nostr delivery + groups = **phase 1b**); blocks are now real (tool + receipt filter + synced); NIP-40 expiry, NIP-09 deletes, coarse-only caws, kinds 30397/20397. Kevin then said **build**. See the plan's `## Review` → "Review round 3".
 
 ## TL;DR for the next session
 
