@@ -28,3 +28,12 @@ test("saltedLanId is deterministic and hides the bssid", () => {
   assert.equal(id, saltedLanId("aa:bb:cc:dd:ee:ff", "s1"));
   assert.notEqual(id, "aa:bb:cc:dd:ee:ff");
 });
+
+test("withinRange fails closed on malformed anchors", () => {
+  assert.equal(withinRange(null, { lat: 30, lon: -97 }), false);
+  assert.equal(withinRange(undefined, { lat: 30, lon: -97 }), false);
+  assert.equal(withinRange({}, { lat: 30, lon: -97 }), false);
+  assert.equal(withinRange({ anchor_kind: "invalid" }, { lat: 30, lon: -97 }), false);
+  assert.equal(withinRange({ anchor_kind: "beacon", anchor_ref: "" }, { ref: "abc" }), false);
+  assert.equal(withinRange({ anchor_kind: "lan", anchor_ref: "abc" }, { ref: undefined }), false);
+});
