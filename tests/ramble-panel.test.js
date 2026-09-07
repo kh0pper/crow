@@ -1026,6 +1026,75 @@ test("the router registers no unpathed router.use(middleware) layer", () => {
     "every router.use() in panel/routes.js must carry a path prefix");
 });
 
+// ----------------------------------------------------------------- phase 4
+
+test("GET /api/ramble/around: marks and nests within the radius with distance_m; teasers at the cell centre; inputs bounded", async () => {
+  // 100 m north (open, just me), 100 m east (public, locked -> a teaser), 900 m north (out of range).
+  const near = await req("/api/ramble/marks", { method: "POST", body: { kind: "mark", lat: 30.460898, lon: LON, text: "near north", visibility: "private" } });
+  assert.equal(near.status, 201);
+  const locked = await req("/api/ramble/marks", { method: "POST", body: { kind: "mark", lat: LAT, lon: -98.078958, text: "locked east", visibility: "public", reveal: "locked" } });
+  assert.equal(locked.status, 201);
+  const lockedId = (await locked.json()).mark.mark_id;
+  const far = await req("/api/ramble/marks", { method: "POST", body: { kind: "mark", lat: 30.4681, lon: LON, text: "far north", visibility: "private" } });
+  assert.equal(far.status, 201);
+  // Every cell has a nest at rate 1, so one is within ~110 m; restored below.
+  const db = createDbClient();
+  await db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('nest.rate', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [] });
+  try {
+    const res = await req(`/api/ramble/around?lat=${LAT}&lon=${LON}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.here, { lat: LAT, lon: LON });
+    assert.equal(body.radius_m, 500);
+    assert.equal(typeof body.week, "string");
+    const texts = body.marks.map((m) => m.content_text);
+    assert.ok(texts.includes("near north"));
+    assert.ok(!texts.includes("far north"), "900 m is out of the default radius");
+    const n = body.marks.find((m) => m.content_text === "near north");
+    assert.ok(Math.abs(n.distance_m - 100) <= 3, `distance ${n.distance_m}`);
+    assert.deepEqual([n.lat, n.lon], [30.460898, LON], "lat/lon exactly as stored");
+    const t = body.marks.find((m) => m.mark_id === lockedId);
+    assert.ok(t, "the locked mark is listed");
+    assert.equal(t.content_text, undefined, "still a teaser");
+    assert.equal(t.lat, undefined);
+    assert.equal(typeof t.approx_lat, "number");
+    assert.equal(typeof t.approx_lon, "number");
+    assert.ok(t.approx_m > 90 && t.approx_m < 115, "the 7-char cell's half-diagonal");
+    assert.ok(t.distance_m <= 250);
+    for (let i = 1; i < body.marks.length; i++) assert.ok(body.marks[i].distance_m >= body.marks[i - 1].distance_m, "nearest first");
+    assert.ok(body.nests.length >= 1);
+    for (const nest of body.nests) { assert.ok(nest.distance_m <= 500); assert.equal(typeof nest.seed, "number"); }
+    const wide = await (await req(`/api/ramble/around?lat=${LAT}&lon=${LON}&radius_m=1000`)).json();
+    assert.equal(wide.radius_m, 1000);
+    assert.ok(wide.marks.map((m) => m.content_text).includes("far north"));
+    // A full-precision double as String() prints it (up to 17 decimals) is a fine query.
+    assert.equal((await req("/api/ramble/around?lat=30.460000000000000853&lon=-98.08")).status, 400, "18 decimals is too many");
+    assert.equal((await req("/api/ramble/around?lat=30.46000000000000085&lon=-98.079999999999998")).status, 200);
+  } finally {
+    await db.execute({ sql: "DELETE FROM ramble_settings WHERE key = 'nest.rate'", args: [] });
+    try { db.close?.(); } catch { /* scratch */ }
+  }
+  for (const q of ["lat=91&lon=0", "lat=0&lon=181", "lon=0", "lat=0", "lat=abc&lon=0", `lat=${LAT}&lon=${LON}&radius_m=5000`, `lat=${LAT}&lon=${LON}&radius_m=10`, `lat=${LAT}&lon=${LON}&radius_m=abc`, `lat=${LAT}&lon=${LON}&radius_m=1.5`]) {
+    const r = await req("/api/ramble/around?" + q);
+    assert.equal(r.status, 400, q);
+    assert.equal(typeof (await r.json()).error, "string");
+  }
+});
+
+test("GET /api/ramble/around names a contact's remote mark like the marks list does, and is behind dashboardAuth", async () => {
+  const db = createDbClient();
+  await db.execute({
+    sql: `INSERT INTO ramble_marks (mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, visibility, reveal, content_text, content_kind, created_at, publish_state, origin)
+          VALUES ('around-pal', ?, 'real', 'mark', 'geo', '9v6m21h', ?, ?, 'contacts', 'open', 'from pal', 'none', ?, 'remote', 'remote')`,
+    args: [PK, LAT, LON, Date.now()],
+  });
+  try { db.close?.(); } catch { /* scratch */ }
+  const body = await (await req(`/api/ramble/around?lat=${LAT}&lon=${LON}`)).json();
+  const pal = body.marks.find((m) => m.mark_id === "around-pal");
+  assert.equal(pal?.contact_name, "Pal");
+  assert.equal((await realFetch(BASE + `/api/ramble/around?lat=${LAT}&lon=${LON}`)).status, 401);
+});
+
 // ------------------------------------------------------------- docs parity
 
 test("docs: the Spanish Ramble guide mirrors the English heading structure", () => {
