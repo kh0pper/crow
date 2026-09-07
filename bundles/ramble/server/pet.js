@@ -80,12 +80,17 @@ function clampEnergy(v) {
   return Math.max(0, Math.min(100, v));
 }
 
+/**
+ * The singleton pet row, created if absent. `INSERT ... ON CONFLICT DO
+ * NOTHING` rather than SELECT-then-INSERT: the read-then-write pair is not
+ * atomic, so two overlapping feeds on a fresh instance both saw "no row",
+ * both INSERTed, and the loser threw SQLITE_CONSTRAINT. One statement
+ * decides it, and the SELECT after it always finds the row.
+ */
 async function ensureRow(db) {
+  await db.execute({ sql: "INSERT INTO ramble_pet (owner) VALUES ('self') ON CONFLICT(owner) DO NOTHING", args: [] });
   const result = await db.execute({ sql: "SELECT * FROM ramble_pet WHERE owner = 'self'", args: [] });
-  if (result.rows.length > 0) return result.rows[0];
-  await db.execute({ sql: "INSERT INTO ramble_pet (owner) VALUES ('self')", args: [] });
-  const reread = await db.execute({ sql: "SELECT * FROM ramble_pet WHERE owner = 'self'", args: [] });
-  return reread.rows[0];
+  return result.rows[0];
 }
 
 /**
@@ -138,10 +143,14 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
 
 /**
  * Same shape as `feed()`'s return value, built from an already-loaded row
- * (no query, no emit) — used by `doChore`'s no-op-repeat branch so the
- * caller sees a consistent `pet` shape whether or not a feed happened.
+ * (no query, no emit) — used by `doChore`'s no-op-repeat branch and by
+ * feed.js's not-credited branch so the caller sees a consistent `pet` shape
+ * whether or not a feed happened. Exported for that second caller: returning
+ * the raw db row instead leaks `lamport_ts`/`chores_json` into a response
+ * that otherwise never carries them. Returns null for a null row.
  */
-function petFromRow(row) {
+export function petFromRow(row) {
+  if (!row) return null;
   return {
     owner: "self",
     mood: row.mood,

@@ -80,6 +80,21 @@ export function isoWeek(ms) {
   return `${date.getUTCFullYear()}-W${String(weekNo).padStart(2, "0")}`;
 }
 
+/**
+ * Anti-abuse ceiling on `meet_crow`: warmth is keyed per (persona, ISO week),
+ * and a persona is just an x-only pubkey anyone can mint, so an attacker
+ * broadcasting a flood of fresh pubkeys could otherwise force hatch after
+ * hatch. At most this many `meet_crow` credits count per LOCAL DAY; meetings
+ * over the cap are a pure no-op (no warmth, no ledger row).
+ */
+export const MEET_CROW_DAILY_CAP = 5;
+
+/** Midnight local time (process timezone) of the day containing `ms`. */
+function startOfLocalDay(ms) {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
 /** Local calendar day ("2026-09-07") using local-time getters (process timezone). */
 export function localDay(ms) {
   const d = new Date(ms);
@@ -154,10 +169,15 @@ async function getPetRow(db) {
   return rows[0] ?? null;
 }
 
+/**
+ * The singleton pet row, created if absent. `INSERT ... ON CONFLICT DO
+ * NOTHING` rather than SELECT-then-INSERT: the read-then-write pair is not
+ * atomic, so two overlapping feeds on a fresh instance both saw "no row",
+ * both INSERTed, and the loser threw SQLITE_CONSTRAINT (a 500 out of
+ * POST /api/ramble/egg/checkin). One statement decides it.
+ */
 async function ensurePetRow(db) {
-  const existing = await getPetRow(db);
-  if (existing) return existing;
-  await db.execute({ sql: "INSERT INTO ramble_pet (owner) VALUES ('self')", args: [] });
+  await db.execute({ sql: "INSERT INTO ramble_pet (owner) VALUES ('self') ON CONFLICT(owner) DO NOTHING", args: [] });
   return getPetRow(db);
 }
 
@@ -221,6 +241,17 @@ export async function creditWarmth(db, event, { now, emit } = {}) {
   const key = creditKey(event, { now });
   if (key && (key.skip || key.invalid)) return notCredited();
 
+  // Over the daily meet_crow ceiling this is a pure read, same as any other
+  // not-credited path: no egg minted, no ledger row, nothing emitted — so a
+  // flood of spoofed personas leaves no trace and cannot force a hatch.
+  if (event.type === "meet_crow") {
+    const { rows } = await db.execute({
+      sql: "SELECT count(*) AS n FROM ramble_credits WHERE kind = 'meet_crow' AND credited_at >= ?",
+      args: [startOfLocalDay(now)],
+    });
+    if (Number(rows[0]?.n ?? 0) >= MEET_CROW_DAILY_CAP) return notCredited();
+  }
+
   const egg = await ensureIncubatingEgg(db, { now, emit });
 
   if (key) {
@@ -254,11 +285,22 @@ export async function checkin(db, { now, emit } = {}) {
   return creditWarmth(db, { type: "checkin" }, { now, emit });
 }
 
-/** { egg_id, species, seed } for the active hatched bird, or null if none has hatched yet. */
+/**
+ * { egg_id, species, seed } for the active hatched bird, or null if none has
+ * hatched yet. The `status = 'hatched'` filter is load-bearing, not belt-and-
+ * braces: `active_egg_id` replicates via instance sync independently of the
+ * egg row it names, so a peer's pointer can arrive (or outlive a convergence
+ * demotion) while this instance still holds that egg as `incubating` — and a
+ * row with NULL species/seed is not a bird. Every caller (mark authoring,
+ * GET /api/ramble/pet) must get null rather than a half-built bird.
+ */
 export async function activeBird(db) {
   const pet = await getPetRow(db);
   if (!pet || pet.active_egg_id == null) return null;
-  const { rows } = await db.execute({ sql: "SELECT egg_id, species, seed FROM ramble_eggs WHERE egg_id = ?", args: [pet.active_egg_id] });
+  const { rows } = await db.execute({
+    sql: "SELECT egg_id, species, seed FROM ramble_eggs WHERE egg_id = ? AND status = 'hatched'",
+    args: [pet.active_egg_id],
+  });
   return rows[0] ?? null;
 }
 

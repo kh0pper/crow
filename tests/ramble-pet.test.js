@@ -217,3 +217,15 @@ test("pet writes emit when a hook is given", async () => {
   await feed(db, { type: "visit_place" }, { emit: async (t, op, row) => seen.push([t, op, row.owner]) });
   assert.deepEqual(seen[0], ["ramble_pet", "update", "self"]);
 });
+
+test("ensureRow is atomic: concurrent feeds on a fresh db never throw UNIQUE", async () => {
+  const fresh = createClient({ url: "file::memory:" });
+  await initRambleTables(fresh);
+  await assert.doesNotReject(Promise.all([
+    feed(fresh, { type: "unlock_mark" }, { now: 1000 }),
+    feed(fresh, { type: "unlock_mark" }, { now: 1000 }),
+    doChore(fresh, "preen", { now: 1000 }),
+  ]));
+  const { rows } = await fresh.execute("SELECT count(*) AS n FROM ramble_pet");
+  assert.equal(rows[0].n, 1);
+});
