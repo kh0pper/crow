@@ -147,3 +147,87 @@ async function insertClaimedEgg(db, eggId, cell, week, now, emit) {
   await safeEmit(emit, "ramble_eggs", "insert", egg);
   return egg;
 }
+
+async function getPetRow(db) {
+  await db.execute({ sql: "INSERT INTO ramble_pet (owner) VALUES ('self') ON CONFLICT(owner) DO NOTHING", args: [] });
+  const { rows } = await db.execute({ sql: "SELECT * FROM ramble_pet WHERE owner = 'self'", args: [] });
+  return rows[0];
+}
+
+/**
+ * Make `eggId` the incubating egg. The previous incubating egg goes to the
+ * shelf marked 'user' (the user chose to park it; sync must not draft it
+ * back). One batch, so no reader ever sees two or zero incubating eggs.
+ * Emits the shelved row first, then the new incubating row — the peer's
+ * apply of a user shelve skips re-promotion precisely because the successor
+ * is the next op in the drain (Task 1).
+ */
+export async function incubateEgg(db, eggId, { now = Date.now(), emit } = {}) {
+  const target = await getEgg(db, eggId);
+  if (!target) return { ok: false, reason: "not-found" };
+  if (target.status === "incubating") return { ok: true, already: true, egg: target, shelved: null, hatched: null };
+  if (target.status !== "shelf") return { ok: false, reason: "not-an-egg" };
+
+  const { rows: current } = await db.execute({ sql: "SELECT egg_id FROM ramble_eggs WHERE status = 'incubating'", args: [] });
+  await db.batch([
+    { sql: "UPDATE ramble_eggs SET status = 'shelf', shelf_origin = 'user' WHERE status = 'incubating'", args: [] },
+    { sql: "UPDATE ramble_eggs SET status = 'incubating', shelf_origin = NULL WHERE egg_id = ? AND status = 'shelf'", args: [eggId] },
+  ]);
+
+  let shelved = null;
+  for (const row of current) {
+    // eslint-disable-next-line no-await-in-loop
+    const s = await getEgg(db, row.egg_id);
+    if (s && s.egg_id !== eggId) { shelved = shelved ?? s; await safeEmit(emit, "ramble_eggs", "update", s); }
+  }
+  const egg = await getEgg(db, eggId);
+  await safeEmit(emit, "ramble_eggs", "update", egg);
+
+  const hatched = await hatchIfReady(db, { now, emit });
+  return { ok: true, already: false, egg: hatched ? hatched : egg, shelved, hatched };
+}
+
+/** Make a hatched egg the active bird (map, header, wire). */
+export async function activateBird(db, eggId, { emit } = {}) {
+  const egg = await getEgg(db, eggId);
+  if (!egg) return { ok: false, reason: "not-found" };
+  if (egg.status !== "hatched" || egg.species == null || egg.seed == null) return { ok: false, reason: "not-a-bird" };
+  await getPetRow(db);
+  await db.execute({ sql: "UPDATE ramble_pet SET active_egg_id = ? WHERE owner = 'self'", args: [eggId] });
+  await safeEmit(emit, "ramble_pet", "update", await getPetRow(db));
+  return { ok: true, bird: { egg_id: egg.egg_id, species: egg.species, seed: egg.seed } };
+}
+
+/** The flock screen's data: hatched birds, unhatched eggs, and the species score. */
+export async function flockState(db, { now = Date.now() } = {}) {
+  await ensureIncubatingEgg(db, { now });
+  const weights = await readWarmthWeights(db);
+  const { shelfCap } = await readFlockSettings(db);
+  const pet = await getPetRow(db);
+  const { rows } = await db.execute({ sql: "SELECT * FROM ramble_eggs ORDER BY created_at ASC, egg_id ASC", args: [] });
+
+  const birds = rows
+    .filter((r) => r.status === "hatched" && r.species != null && r.seed != null)
+    .sort((x, y) => Number(x.hatched_at) - Number(y.hatched_at))
+    .map((r) => ({ egg_id: r.egg_id, species: r.species, seed: r.seed, hatched_at: r.hatched_at, active: r.egg_id === pet.active_egg_id }));
+
+  const pct = (w) => Math.max(0, Math.min(100, Math.round((Number(w) / weights.hatch_at) * 100)));
+  const eggs = rows
+    .filter((r) => r.status === "incubating" || r.status === "shelf")
+    .sort((x, y) => (x.status === y.status ? 0 : x.status === "incubating" ? -1 : 1))
+    .map((r) => ({
+      egg_id: r.egg_id, status: r.status, warmth: r.warmth, percent: pct(r.warmth),
+      found_cell: r.found_cell ?? null, found_week: r.found_week ?? null, created_at: r.created_at,
+      shelf_origin: r.shelf_origin ?? null,
+    }));
+
+  return {
+    birds,
+    eggs,
+    shelf_count: eggs.filter((e) => e.status === "shelf" && e.shelf_origin === "user").length,
+    shelf_cap: shelfCap,
+    species_found: new Set(birds.map((b) => b.species)).size,
+    species_total: ROSTER.length,
+    species: ROSTER,
+  };
+}
