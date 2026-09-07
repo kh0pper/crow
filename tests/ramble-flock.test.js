@@ -174,3 +174,23 @@ test("flockState: birds with the active one marked, eggs incubating-first, speci
   assert.deepEqual([s.shelf_count, s.shelf_cap, s.species_found, s.species_total, s.species.length], [1, SHELF_CAP_DEFAULT, 2, 8, 8]);
   for (const e of s.eggs) assert.ok(!("lamport_ts" in e) && !("species" in e), "eggs never expose seed/species or sync metadata");
 });
+
+test("incubateEgg is all-or-nothing under a concurrent swap of the same egg", async () => {
+  const d = await freshDb();
+  const first = await ensureIncubatingEgg(d, { now: T0 });
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('s2','shelf','user',10,5)");
+  const results = await Promise.all([incubateEgg(d, "s2", { now: T0 }), incubateEgg(d, "s2", { now: T0 })]);
+  assert.ok(results.every((r) => r.ok === true), JSON.stringify(results));
+  assert.equal(results.filter((r) => r.already === false).length, 1, "exactly one call performed the swap");
+  const rows = await d.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs ORDER BY egg_id");
+  assert.equal(rows.rows.filter((r) => r.status === "incubating").length, 1, "never zero or two incubating eggs");
+  assert.deepEqual(rows.rows.find((r) => r.egg_id === "s2"), { egg_id: "s2", status: "incubating", shelf_origin: null });
+  assert.deepEqual(rows.rows.find((r) => r.egg_id === first.egg_id), { egg_id: first.egg_id, status: "shelf", shelf_origin: "user" });
+  // And a target that is no longer an egg at write time changes nothing.
+  await d.execute({
+    sql: "UPDATE ramble_eggs SET status='hatched', species='crow', seed=1, hatched_at=9 WHERE egg_id=?",
+    args: [first.egg_id],
+  });
+  assert.deepEqual(await incubateEgg(d, first.egg_id, { now: T0 }), { ok: false, reason: "not-an-egg" });
+  assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
+});

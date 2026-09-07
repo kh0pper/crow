@@ -157,10 +157,12 @@ async function getPetRow(db) {
 /**
  * Make `eggId` the incubating egg. The previous incubating egg goes to the
  * shelf marked 'user' (the user chose to park it; sync must not draft it
- * back). One batch, so no reader ever sees two or zero incubating eggs.
- * Emits the shelved row first, then the new incubating row — the peer's
- * apply of a user shelve skips re-promotion precisely because the successor
- * is the next op in the drain (Task 1).
+ * back). One conditional statement, so the swap is all-or-nothing: if the
+ * target is no longer on the shelf when the write runs, nothing changes and
+ * the caller gets the egg's real state. Emits the shelved row first, then
+ * the new incubating row — the peer's apply of a user shelve skips
+ * re-promotion precisely because the successor is the next op in the drain
+ * (Task 1).
  */
 export async function incubateEgg(db, eggId, { now = Date.now(), emit } = {}) {
   const target = await getEgg(db, eggId);
@@ -169,10 +171,21 @@ export async function incubateEgg(db, eggId, { now = Date.now(), emit } = {}) {
   if (target.status !== "shelf") return { ok: false, reason: "not-an-egg" };
 
   const { rows: current } = await db.execute({ sql: "SELECT egg_id FROM ramble_eggs WHERE status = 'incubating'", args: [] });
-  await db.batch([
-    { sql: "UPDATE ramble_eggs SET status = 'shelf', shelf_origin = 'user' WHERE status = 'incubating'", args: [] },
-    { sql: "UPDATE ramble_eggs SET status = 'incubating', shelf_origin = NULL WHERE egg_id = ? AND status = 'shelf'", args: [eggId] },
-  ]);
+  const { rowsAffected } = await db.execute({
+    sql: `UPDATE ramble_eggs
+             SET status = CASE WHEN egg_id = ? THEN 'incubating' ELSE 'shelf' END,
+                 shelf_origin = CASE WHEN egg_id = ? THEN NULL ELSE 'user' END
+           WHERE (status = 'incubating' OR egg_id = ?)
+             AND EXISTS (SELECT 1 FROM ramble_eggs WHERE egg_id = ? AND status = 'shelf')`,
+    args: [eggId, eggId, eggId, eggId],
+  });
+  if (rowsAffected === 0) {
+    // The target moved between our read and the write (a concurrent swap or
+    // hatch). Nothing was changed; answer for what it is NOW.
+    const now_ = await getEgg(db, eggId);
+    if (now_ && now_.status === "incubating") return { ok: true, already: true, egg: now_, shelved: null, hatched: null };
+    return { ok: false, reason: "not-an-egg" };
+  }
 
   let shelved = null;
   for (const row of current) {
