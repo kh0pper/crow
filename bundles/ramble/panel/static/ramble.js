@@ -4,32 +4,40 @@
  * NO TEMPLATE LITERALS anywhere in this file -- panel scripts are handled by
  * tooling that treats backticks as its own delimiter; string concatenation is
  * the house style here. Remote content is written with textContent only, never
- * innerHTML: marks arrive from other people's personas.
+ * innerHTML: marks arrive from other people's personas. The one innerHTML path
+ * is RambleBird.mountBird, which writes markup this page's own engine
+ * generated from a (species, seed) pair -- never anybody's text.
  *
  * CSRF is handled for us -- the dashboard layout wraps window.fetch and adds
  * X-Crow-Csrf to every state-changing same-origin request.
+ *
+ * Sections, in order: net, views, map, marks, perch, compose, grid, egg, pet,
+ * hatch, stream, startup.
  */
 (function () {
   "use strict";
 
-  var mapEl = document.getElementById("ramble-map");
-  if (!mapEl || typeof L === "undefined") return;
+  var root = document.getElementById("ramble");
+  if (!root) return;
 
-  var DEFAULT_CENTER = [20, 0];
-  var DEFAULT_ZOOM = 3;
-  var LOCATED_ZOOM = 15;
+  var Bird = window.RambleBird || null;
 
-  var statusEl = document.getElementById("ramble-map-status");
-  var composeStatusEl = document.getElementById("rb-compose-status");
-  var gridStatusEl = document.getElementById("rb-grid-status");
-  var marksListEl = document.getElementById("ramble-marks");
-  var petCrowEl = document.getElementById("ramble-pet-crow");
-  var petLineEl = document.getElementById("ramble-pet-line");
+  var REDUCED = false;
+  try {
+    REDUCED = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  } catch (e) { REDUCED = false; }
 
-  var currentCells = [];
-  var markerLayer = null;
+  /* Kept in step with the .rb-hatch keyframes in ramble.css: 3 x 0.5s of
+   * wobble then a 0.55s crack. Under reduced motion there is no animation to
+   * wait for, so the reveal is immediate. */
+  var HATCH_MS = REDUCED ? 0 : 2050;
+  var RING_C = 678.6; /* 2 * PI * r, r = 108 in both ring SVGs */
+  var MAX_NEARBY = 8;
 
+  function $(id) { return document.getElementById(id); }
   function setText(el, text) { if (el) el.textContent = text; }
+
+  /* ------------------------------------------------------------------ net */
 
   function jsonFetch(url, options) {
     var opts = options || {};
@@ -47,53 +55,86 @@
     });
   }
 
+  /* ---------------------------------------------------------------- views */
+
+  function showView(name) {
+    /* Any navigation ends the hatch moment. hatchLock freezes the egg card so
+     * the reveal is not repainted out from under the reader; leaving it set
+     * when they walk away (Go outside, the perch, My bird) froze the egg view
+     * for the rest of the session. */
+    if (root.getAttribute("data-view") !== name) clearHatch();
+    root.setAttribute("data-view", name);
+    try { window.scrollTo(0, 0); } catch (e) { /* not fatal */ }
+    /* Leaflet measures its container once; a container that was display:none
+     * when the map was built comes back with a zero size until it is told. */
+    if (name === "world" && map) { setTimeout(function () { map.invalidateSize(); }, 0); }
+    if (name === "egg") refreshEgg();
+    if (name === "pet") refreshPet();
+  }
+
   /* ------------------------------------------------------------------ map */
 
-  L.Icon.Default.imagePath = "/ramble/static/leaflet/images/";
+  var mapEl = $("rb-map");
+  var map = null;
+  var markerLayer = null;
+  var currentCells = [];
+  var lastFix = null;      /* the most recent REAL geolocation fix */
+  var lastMarks = [];
 
-  /* Tiles come from our OWN origin: the dashboard CSP is
-   * img-src 'self' data: blob:, so a third-party tile host would be blocked.
-   * /ramble/tiles proxies whatever ramble_settings.tile_url points at, which
-   * also keeps the viewer's browser from ever talking to the tile host. */
-  var map = L.map(mapEl).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
-  L.tileLayer("/ramble/tiles/{z}/{x}/{y}.png", {
-    attribution: mapEl.getAttribute("data-tile-attribution") || "",
-    maxZoom: 19,
-  }).addTo(map);
-  markerLayer = L.layerGroup().addTo(map);
+  if (mapEl && typeof L !== "undefined") {
+    L.Icon.Default.imagePath = "/ramble/static/leaflet/images/";
 
-  /* The Android shell wraps the WebView in a SwipeRefreshLayout for
-   * pull-to-refresh; a northward drag on the map (which never itself
-   * scrolls) would otherwise be read as "pull to refresh the page".
-   * Suspend it for the duration of any touch on the map so Leaflet's own
-   * pan/zoom gestures win. window.Crow is only injected inside the Android
-   * app, and this must never let a native-bridge hiccup break the map. */
-  mapEl.addEventListener("touchstart", function () {
-    try {
-      if (window.Crow && typeof Crow.setPullToRefresh === "function") Crow.setPullToRefresh(false);
-    } catch (e) { /* not fatal to the map */ }
-  });
-  mapEl.addEventListener("touchend", function () {
-    try {
-      if (window.Crow && typeof Crow.setPullToRefresh === "function") Crow.setPullToRefresh(true);
-    } catch (e) { /* not fatal to the map */ }
-  });
-  mapEl.addEventListener("touchcancel", function () {
-    try {
-      if (window.Crow && typeof Crow.setPullToRefresh === "function") Crow.setPullToRefresh(true);
-    } catch (e) { /* not fatal to the map */ }
-  });
+    /* Tiles come from our OWN origin: the dashboard CSP is
+     * img-src 'self' data: blob:, so a third-party tile host would be blocked.
+     * /ramble/tiles proxies whatever ramble_settings.tile_url points at, which
+     * also keeps the viewer's browser from ever talking to the tile host. */
+    map = L.map(mapEl).setView([20, 0], 3);
+    L.tileLayer("/ramble/tiles/{z}/{x}/{y}.png", {
+      attribution: mapEl.getAttribute("data-tile-attribution") || "",
+      maxZoom: 19,
+    }).addTo(map);
+    markerLayer = L.layerGroup().addTo(map);
+
+    /* The Android shell wraps the WebView in a SwipeRefreshLayout for
+     * pull-to-refresh; a northward drag on the map (which never itself
+     * scrolls) would otherwise be read as "pull to refresh the page".
+     * Suspend it for the duration of any touch on the map so Leaflet's own
+     * pan/zoom gestures win. window.Crow is only injected inside the Android
+     * app, and this must never let a native-bridge hiccup break the map. */
+    mapEl.addEventListener("touchstart", function () {
+      try {
+        if (window.Crow && typeof Crow.setPullToRefresh === "function") Crow.setPullToRefresh(false);
+      } catch (e) { /* not fatal to the map */ }
+    });
+    mapEl.addEventListener("touchend", function () {
+      try {
+        if (window.Crow && typeof Crow.setPullToRefresh === "function") Crow.setPullToRefresh(true);
+      } catch (e) { /* not fatal to the map */ }
+    });
+    mapEl.addEventListener("touchcancel", function () {
+      try {
+        if (window.Crow && typeof Crow.setPullToRefresh === "function") Crow.setPullToRefresh(true);
+      } catch (e) { /* not fatal to the map */ }
+    });
+
+    var areaTimer = null;
+    map.on("moveend", function () {
+      if (areaTimer) clearTimeout(areaTimer);
+      areaTimer = setTimeout(publishArea, 500);
+    });
+  }
 
   function here() {
     return new Promise(function (resolve, reject) {
       if (!navigator.geolocation) { reject(new Error("this browser has no geolocation")); return; }
       navigator.geolocation.getCurrentPosition(
         function (pos) {
-          resolve({
+          lastFix = {
             lat: pos.coords.latitude,
             lon: pos.coords.longitude,
             accuracy_m: pos.coords.accuracy,
-          });
+          };
+          resolve(lastFix);
         },
         function (err) { reject(new Error(err.message || "location unavailable")); },
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
@@ -101,30 +142,124 @@
     });
   }
 
+  /* The active area is the subscriber's only input: post it when the view
+   * settles, then redraw from whatever cells the server says that is. "here"
+   * is the REAL fix and the only thing the server will credit a visit for --
+   * panning the map must never farm warmth, so it is sent only when we have
+   * an actual position. */
+  function publishArea() {
+    if (!map) return Promise.resolve();
+    var c = map.getCenter();
+    var body = { lat: c.lat, lon: c.lng };
+    if (lastFix) body.here = { lat: lastFix.lat, lon: lastFix.lon };
+    return jsonFetch("/api/ramble/area", { method: "POST", body: body })
+      .then(function (out) {
+        currentCells = (out && out.cells) || [];
+        refreshPet();
+        return refreshMarks();
+      })
+      .catch(function () { /* the map still works without a subscription */ });
+  }
+
   /* ---------------------------------------------------------------- marks */
 
   function markLabel(mark) {
     var who = (mark.author || "anon").slice(0, 8);
-    var what = mark.kind === "caw" ? "caw" : "mark";
-    return what + " by " + who;
+    return (mark.kind === "caw" ? "caw by " : "mark by ") + who;
   }
 
   function isLocked(mark) {
     return mark.reveal === "locked" && typeof mark.content_text !== "string";
   }
 
+  function ago(ts) {
+    if (typeof ts !== "number") return "just now";
+    var mins = Math.max(0, Math.round((Date.now() - ts) / 60000));
+    if (mins < 1) return "just now";
+    if (mins < 60) return mins + " min ago";
+    var hrs = Math.round(mins / 60);
+    if (hrs < 24) return hrs + " h ago";
+    return Math.round(hrs / 24) + " d ago";
+  }
+
+  /* The unlock radius the server actually enforces (anchors.js withinRange:
+   * accuracy_m, defaulting to 75 m). We only ever know the CELL CENTRE, so a
+   * distance from it is an estimate -- hence the "~" and the 5 m rounding. */
+  var UNLOCK_M = 75;
+
+  function haversineMeters(a, b) {
+    var R = 6371000;
+    var toRad = function (deg) { return (deg * Math.PI) / 180; };
+    var dLat = toRad(b.lat - a.lat);
+    var dLon = toRad(b.lon - a.lon);
+    var s = Math.pow(Math.sin(dLat / 2), 2) +
+      Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.pow(Math.sin(dLon / 2), 2);
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+
+  /**
+   * How far the reader still has to walk. approx_m is NOT that number: it is
+   * the geohash cell's own error radius, a constant ~101 m for every
+   * precision-7 anchor, so printing it told every reader the same lie. A real
+   * distance needs a real fix; without one we say so rather than invent one.
+   */
+  function walkHint(mark) {
+    if (!lastFix || typeof mark.approx_lat !== "number" || typeof mark.approx_lon !== "number") {
+      return "get closer to read it";
+    }
+    var m = haversineMeters(
+      { lat: lastFix.lat, lon: lastFix.lon },
+      { lat: mark.approx_lat, lon: mark.approx_lon }
+    );
+    if (m <= UNLOCK_M) return "you're close enough — unlock";
+    return "walk ~" + (Math.round(m / 5) * 5) + " m to read it";
+  }
+
+  /** Non-public marks say who they are for; a public one needs no label. */
+  function audienceHint(mark) {
+    if (mark.visibility === "contacts") return "Contacts";
+    if (mark.visibility === "private") return "Just me";
+    return "";
+  }
+
+  /** A 40px portrait of the author's bird, drawn by the shared engine. */
+  function birdFor(mark) {
+    if (!Bird || !mark.bird_species || typeof mark.bird_seed !== "number") return null;
+    if (!Bird.isValidBird({ species: mark.bird_species, seed: mark.bird_seed })) return null;
+    try {
+      var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "rb-pop-bird");
+      Bird.mountBird(svg, Bird.rollGenome(mark.bird_seed, mark.bird_species), "happy");
+      return svg;
+    } catch (e) { return null; }
+  }
+
   function popupFor(mark) {
     var box = document.createElement("div");
-    var head = document.createElement("strong");
-    head.textContent = markLabel(mark);
+
+    var head = document.createElement("div");
+    head.className = "rb-pop-head";
+    var portrait = birdFor(mark);
+    if (portrait) head.appendChild(portrait);
+    var who = document.createElement("span");
+    who.textContent = markLabel(mark);
+    head.appendChild(who);
+    var aud = audienceHint(mark);
+    if (aud) {
+      var tag = document.createElement("span");
+      tag.className = "rb-aud";
+      tag.textContent = aud;
+      head.appendChild(tag);
+    }
     box.appendChild(head);
+
     var body = document.createElement("p");
-    body.style.margin = "0.35rem 0 0";
+    body.className = "rb-pop-body";
     if (isLocked(mark)) {
-      body.textContent = "Locked — the text only opens within about " +
-        Math.round(mark.approx_m || 0) + " m of the real spot.";
+      body.textContent = "Locked · " + walkHint(mark);
       var btn = document.createElement("button");
       btn.type = "button";
+      btn.className = "rb-pop-btn";
       btn.textContent = "Unlock here";
       btn.addEventListener("click", function () { unlock(mark, body, btn); });
       box.appendChild(body);
@@ -152,6 +287,7 @@
         bodyEl.textContent = "still too far away";
         btn.disabled = false;
       }
+      handleHatched(result && result.hatched);
       refreshPet();
     }).catch(function (err) {
       bodyEl.textContent = err.message;
@@ -160,9 +296,10 @@
   }
 
   function drawMarks(marks) {
-    markerLayer.clearLayers();
-    if (marksListEl) marksListEl.textContent = "";
+    lastMarks = marks;
+    if (markerLayer) markerLayer.clearLayers();
     marks.forEach(function (mark) {
+      if (!markerLayer) return;
       if (typeof mark.lat === "number" && typeof mark.lon === "number") {
         /* An open mark publishes its real anchor: a normal pin. */
         var marker = L.marker([mark.lat, mark.lon], { title: markLabel(mark) });
@@ -171,11 +308,12 @@
       } else if (typeof mark.approx_lat === "number" && typeof mark.approx_lon === "number") {
         /* A locked teaser has no anchor -- only the coarse cell the server
          * decoded for us. Draw it as a dashed circle at the cell centre so it
-         * reads as "somewhere in here", never as a precise point. */
-        var radius = Math.max(12, Math.min(60, (mark.approx_m || 0) / 40));
+         * reads as "somewhere in here", never as a precise point. A FIXED
+         * pixel radius: approx_m is the same constant for every precision-7
+         * cell, so scaling by it only ever produced one number. */
         var blob = L.circleMarker([mark.approx_lat, mark.approx_lon], {
-          radius: radius,
-          color: "#b45309",
+          radius: 14,
+          color: "#5b7cff",
           weight: 2,
           dashArray: "4 3",
           fillOpacity: 0.12,
@@ -183,60 +321,178 @@
         blob.bindPopup(popupFor(mark));
         blob.addTo(markerLayer);
       }
-      if (marksListEl) {
-        var li = document.createElement("li");
-        li.textContent = markLabel(mark) + " — " +
-          (isLocked(mark) ? "locked, go there to reveal" : (mark.content_text || "(no text)"));
-        marksListEl.appendChild(li);
-      }
     });
-    if (marksListEl && marks.length === 0) {
-      var empty = document.createElement("li");
-      empty.className = "rb-muted";
-      empty.textContent = "Nothing here yet.";
-      marksListEl.appendChild(empty);
-    }
+    drawNearby(marks);
+    paintPerchSay();
   }
 
+  /** The list under the map mirrors the pins, newest first, capped. */
+  function drawNearby(marks) {
+    var list = $("rb-nearby");
+    if (!list) return;
+    list.textContent = "";
+    /* The count is what is actually on screen (the list is capped), never the
+     * whole result set -- a header that says 40 above 8 rows is a bug. */
+    var shown = marks.slice(0, MAX_NEARBY);
+    setText($("rb-nearby-count"), shown.length ? "Nearby · " + shown.length : "Nearby");
+
+    if (marks.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "rb-step";
+      var emptyTxt = document.createElement("div");
+      emptyTxt.className = "rb-step-txt rb-muted";
+      emptyTxt.textContent = "Nothing here yet. Be the first.";
+      empty.appendChild(emptyTxt);
+      list.appendChild(empty);
+      return;
+    }
+
+    shown.forEach(function (mark) {
+      var row = document.createElement("div");
+      row.className = "rb-step";
+
+      var badge = document.createElement("span");
+      badge.className = "rb-step-n";
+      badge.textContent = isLocked(mark) ? "?" : (mark.kind === "caw" ? "C" : "M");
+      row.appendChild(badge);
+
+      var txt = document.createElement("div");
+      txt.className = "rb-step-txt";
+      var title = document.createElement("strong");
+      title.textContent = isLocked(mark) ? "A locked mark" : (mark.content_text || "(no text)");
+      var sub = document.createElement("span");
+      sub.className = "rb-muted rb-fine";
+      sub.textContent = isLocked(mark)
+        ? walkHint(mark)
+        : (markLabel(mark) + " · " + ago(mark.created_at));
+      txt.appendChild(title);
+      txt.appendChild(sub);
+
+      var aud = audienceHint(mark);
+      if (aud) {
+        var tag = document.createElement("span");
+        tag.className = "rb-aud";
+        tag.textContent = aud;
+        txt.appendChild(tag);
+      }
+
+      row.appendChild(txt);
+      list.appendChild(row);
+    });
+  }
+
+  /* NO "visibility" filter. The route's no-filter branch is the owner's
+   * overview: public + contacts + the user's OWN private rows, with the one
+   * exclusion of a private row that arrived off the Nostr wire. Pinning it to
+   * visibility=public hid Contacts and "Just me" marks from their own
+   * author, on their own map. */
   function refreshMarks() {
     if (currentCells.length === 0) return Promise.resolve();
-    return jsonFetch("/api/ramble/marks?visibility=public&cells=" +
+    return jsonFetch("/api/ramble/marks?cells=" +
       encodeURIComponent(currentCells.join(","))
     ).then(function (body) {
       drawMarks((body && body.marks) || []);
-    }).catch(function (err) { setText(statusEl, err.message); });
+    }).catch(function () { /* a failed refresh keeps the last pins */ });
   }
 
-  /* The active area is the subscriber's only input: post it when the view
-   * settles, then redraw from whatever cells the server says that is. */
-  function publishArea() {
-    var c = map.getCenter();
-    return jsonFetch("/api/ramble/area", { method: "POST", body: { lat: c.lat, lon: c.lng } })
-      .then(function (body) {
-        currentCells = (body && body.cells) || [];
-        setText(statusEl, "Listening to " + currentCells.join(", "));
-        refreshPet();
-        return refreshMarks();
-      })
-      .catch(function (err) { setText(statusEl, err.message); });
+  /* ---------------------------------------------------------------- perch */
+
+  var perchBird = $("rb-perch-bird");
+  var perchEggWrap = $("rb-perch-egg-wrap");
+  var perchEgg = $("rb-perch-egg");
+  var perchTarget = "egg";
+  var eggPercent = 0;
+  var eggSeedId = null;
+
+  function setRing(circle, percent) {
+    if (!circle) return;
+    var pct = Math.max(0, Math.min(100, Number(percent) || 0));
+    circle.setAttribute("stroke-dashoffset", String(RING_C * (1 - pct / 100)));
   }
 
-  var areaTimer = null;
-  map.on("moveend", function () {
-    if (areaTimer) clearTimeout(areaTimer);
-    areaTimer = setTimeout(publishArea, 500);
-  });
+  /** The egg id is a hex string; its first 8 chars are the drawing's seed. */
+  function seedFromEggId(eggId) {
+    var hex = String(eggId || "").replace(/[^0-9a-fA-F]/g, "").slice(0, 8);
+    if (!hex) return 0;
+    var n = parseInt(hex, 16);
+    return Number.isFinite(n) ? (n >>> 0) : 0;
+  }
+
+  function drawEggArt(el, eggId) {
+    if (!el || !Bird) return;
+    try { el.innerHTML = Bird.drawEgg(seedFromEggId(eggId)); } catch (e) { /* cosmetic */ }
+  }
+
+  function paintPerch(pet) {
+    var bird = pet && pet.bird;
+    var valid = !!(Bird && bird && Bird.isValidBird({ species: bird.species, seed: bird.seed }));
+    if (valid) {
+      perchTarget = "pet";
+      if (perchEggWrap) perchEggWrap.hidden = true;
+      if (perchBird) {
+        try { Bird.mountBird(perchBird, Bird.rollGenome(bird.seed, bird.species), pet.mood || "happy"); } catch (e) { /* cosmetic */ }
+        perchBird.hidden = false;
+      }
+    } else {
+      perchTarget = "egg";
+      if (perchBird) perchBird.hidden = true;
+      if (perchEggWrap) perchEggWrap.hidden = false;
+      drawEggArt(perchEgg, eggSeedId);
+      setRing($("rb-perch-ring"), (pet && pet.egg && pet.egg.percent) || eggPercent);
+    }
+    var open = $("rb-perch-open");
+    if (open) open.setAttribute("aria-label", valid ? "Open your bird" : "Open your egg");
+    paintPerchSay();
+  }
+
+  function paintPerchSay() {
+    var say = $("rb-perch-say");
+    if (!say) return;
+    if (perchTarget === "egg") {
+      say.textContent = "Your egg is " + Math.round(eggPercent) + "% warm.";
+      return;
+    }
+    if (lastMarks.length === 0) { say.textContent = "Quiet around here right now."; return; }
+    say.textContent = lastMarks.length === 1
+      ? "One thing waiting nearby."
+      : (lastMarks.length + " things waiting nearby.");
+  }
+
+  var perchOpen = $("rb-perch-open");
+  if (perchOpen) perchOpen.addEventListener("click", function () { showView(perchTarget); });
 
   /* -------------------------------------------------------------- compose */
 
+  var visibility = "public";
+  var reveal = "open";
+
+  function wireSeg(segId, attr, onPick) {
+    var seg = $(segId);
+    if (!seg) return;
+    var btns = Array.prototype.slice.call(seg.querySelectorAll("button"));
+    btns.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        btns.forEach(function (other) {
+          other.classList.remove("is-on");
+          other.setAttribute("aria-pressed", "false");
+        });
+        btn.classList.add("is-on");
+        btn.setAttribute("aria-pressed", "true");
+        onPick(btn.getAttribute(attr));
+      });
+    });
+  }
+
+  wireSeg("rb-seg-who", "data-visibility", function (v) { visibility = v || "public"; });
+  wireSeg("rb-seg-reveal", "data-reveal", function (v) { reveal = v || "open"; });
+
   function compose(kind) {
-    var textEl = document.getElementById("rb-text");
+    var textEl = $("rb-text");
+    var statusEl = $("rb-compose-status");
     var text = textEl ? textEl.value : "";
-    if (!text.trim()) { setText(composeStatusEl, "Write something first."); return; }
-    setText(composeStatusEl, "Finding you…");
+    if (!text.trim()) { setText(statusEl, "Write something first."); return; }
+    setText(statusEl, "Finding you…");
     here().then(function (pos) {
-      var visEl = document.getElementById("rb-visibility");
-      var revEl = document.getElementById("rb-reveal");
       var body = {
         kind: kind,
         lat: pos.lat,
@@ -245,27 +501,59 @@
         text: text,
       };
       if (kind === "mark") {
-        body.visibility = visEl ? visEl.value : "public";
-        body.reveal = revEl ? revEl.value : "locked";
+        body.visibility = visibility;
+        body.reveal = reveal;
       }
       return jsonFetch("/api/ramble/marks", { method: "POST", body: body });
-    }).then(function () {
+    }).then(function (out) {
       if (textEl) textEl.value = "";
-      setText(composeStatusEl, "Stored and queued — the transport decides what actually goes out.");
+      setText(statusEl, kind === "caw"
+        ? "Cawed. It fades in an hour."
+        : (visibility === "private"
+          ? "Kept for you alone. Nobody else will ever see it."
+          : "Left here. You're invisible until you flip Visible on."));
+      handleHatched(out && out.hatched);
+      refreshPet();
+      refreshEgg();
       return refreshMarks();
-    }).catch(function (err) { setText(composeStatusEl, err.message); });
+    }).catch(function (err) { setText(statusEl, err.message); });
   }
 
-  var leaveBtn = document.getElementById("rb-leave-mark");
+  var leaveBtn = $("rb-leave");
   if (leaveBtn) leaveBtn.addEventListener("click", function () { compose("mark"); });
-  var cawBtn = document.getElementById("rb-caw");
+  var cawBtn = $("rb-caw");
   if (cawBtn) cawBtn.addEventListener("click", function () { compose("caw"); });
+
+  var aroundChip = $("rb-chip-around");
+  if (aroundChip) {
+    aroundChip.addEventListener("click", function () {
+      here().then(function (pos) { if (map) map.setView([pos.lat, pos.lon], 15); }).catch(function () { /* stay put */ });
+    });
+  }
 
   /* ----------------------------------------------------------------- grid */
 
-  var masterEl = document.getElementById("rb-master");
-  var identityEl = document.getElementById("rb-identity");
+  var sheetEl = $("rb-grid-sheet");
+  var masterEl = $("rb-master");
+  var identityEl = $("rb-identity");
   var cellEls = Array.prototype.slice.call(document.querySelectorAll(".rb-grid-cell"));
+
+  function openSheet(open) {
+    if (!sheetEl) return;
+    sheetEl.hidden = !open;
+    if (open && masterEl) masterEl.focus();
+  }
+
+  var visibleChip = $("rb-chip-visible");
+  if (visibleChip) visibleChip.addEventListener("click", function () { openSheet(true); });
+  var closeBtn = $("rb-grid-close");
+  if (closeBtn) closeBtn.addEventListener("click", function () { openSheet(false); });
+  if (sheetEl) {
+    sheetEl.addEventListener("click", function (ev) { if (ev.target === sheetEl) openSheet(false); });
+  }
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && sheetEl && !sheetEl.hidden) openSheet(false);
+  });
 
   function paintGrid(grid) {
     if (!grid) return;
@@ -275,13 +563,15 @@
       var row = grid.cells && grid.cells[el.getAttribute("data-audience")];
       el.checked = !!(row && row[el.getAttribute("data-channel")]);
     });
+    if (visibleChip) visibleChip.classList.toggle("is-on", !!grid.master);
+    setText($("rb-chip-visible-label"), grid.master ? "Visible: on" : "Visible: off");
   }
 
   function postGrid(body) {
-    setText(gridStatusEl, "Saving…");
+    setText($("rb-grid-status"), "Saving…");
     jsonFetch("/api/ramble/grid", { method: "POST", body: body })
-      .then(function (grid) { paintGrid(grid); setText(gridStatusEl, "Saved."); })
-      .catch(function (err) { setText(gridStatusEl, err.message); });
+      .then(function (grid) { paintGrid(grid); setText($("rb-grid-status"), "Saved."); })
+      .catch(function (err) { setText($("rb-grid-status"), err.message); });
   }
 
   if (masterEl) masterEl.addEventListener("change", function () { postGrid({ master: masterEl.checked }); });
@@ -295,50 +585,245 @@
     });
   });
 
-  jsonFetch("/api/ramble/grid").then(paintGrid).catch(function (err) { setText(gridStatusEl, err.message); });
+  /* ------------------------------------------------------------------ egg */
+
+  var hatchLock = false; /* the reveal owns the egg card until it is dismissed */
+
+  function paintStep(stepId, done, label, line) {
+    var step = $(stepId);
+    if (!step) return;
+    step.classList.toggle("is-done", !!done);
+    setText($(stepId + "-n"), label);
+    if (line != null) setText($(stepId + "-line"), line);
+  }
+
+  function paintEgg(state) {
+    if (!state || hatchLock) return;
+    var egg = state.egg || {};
+    var list = state.checklist || {};
+
+    eggPercent = typeof egg.percent === "number" ? egg.percent : 0;
+    eggSeedId = egg.egg_id || null;
+
+    setRing($("rb-egg-ring"), eggPercent);
+    setText($("rb-egg-percent"), Math.round(eggPercent) + "%");
+    setText($("rb-egg-line"), "warmth " + (egg.warmth || 0) + " of " + (egg.hatch_at || 0) +
+      " · it warms every time you get somewhere new");
+
+    var art = $("rb-egg-art");
+    if (art) { art.hidden = false; drawEggArt(art, egg.egg_id); }
+    var birdEl = $("rb-hatch-bird");
+    if (birdEl) birdEl.hidden = true;
+
+    var places = list.new_places_week || 0;
+    paintStep("rb-step-places", places >= 3, Math.min(places, 3) + "/3", null);
+    paintStep("rb-step-mark", !!list.first_mark, list.first_mark ? "✓" : "·",
+      list.first_mark ? "done — your first one is out there" : "nothing left yet");
+    paintStep("rb-step-checkin", !!list.checked_in_today, list.checked_in_today ? "✓" : "·",
+      list.checked_in_today ? "checked in today" : "a tap a day keeps it warm");
+
+    paintPerchSay();
+  }
+
+  function refreshEgg() {
+    return jsonFetch("/api/ramble/egg").then(paintEgg).catch(function () { /* the egg card is cosmetic */ });
+  }
+
+  var checkinBtn = $("rb-checkin");
+  if (checkinBtn) {
+    checkinBtn.addEventListener("click", function () {
+      checkinBtn.disabled = true;
+      setText($("rb-egg-status"), "Checking in…");
+      jsonFetch("/api/ramble/egg/checkin", { method: "POST", body: {} })
+        .then(function (out) {
+          setText($("rb-egg-status"), (out && out.credited)
+            ? "Checked in. That is today's warmth."
+            : "Already checked in today — go somewhere instead.");
+          handleHatched(out && out.hatched);
+          refreshPet();
+          return refreshEgg();
+        })
+        .catch(function (err) { setText($("rb-egg-status"), err.message); })
+        .then(function () { checkinBtn.disabled = false; });
+    });
+  }
+
+  var outsideBtn = $("rb-go-outside");
+  if (outsideBtn) outsideBtn.addEventListener("click", function () { showView("world"); });
 
   /* ------------------------------------------------------------------ pet */
 
-  var CROW_MOOD_CLASSES = ["crow-happy", "crow-tired", "crow-alarmed"];
+  var MOOD_LINE = {
+    happy: "Perky. Whatever you have been doing, keep at it.",
+    tired: "A bit droopy. A walk and a chore would sort it out.",
+    alarmed: "Rattled and low. Three taps and some fresh air.",
+  };
 
   function paintPet(pet) {
     if (!pet) return;
-    if (petCrowEl) {
-      CROW_MOOD_CLASSES.forEach(function (cls) { petCrowEl.classList.remove(cls); });
-      var moodClass = "crow-" + (pet.mood || "happy");
-      if (CROW_MOOD_CLASSES.indexOf(moodClass) !== -1) petCrowEl.classList.add(moodClass);
+    paintPerch(pet);
+
+    var bird = pet.bird;
+    var valid = !!(Bird && bird && Bird.isValidBird({ species: bird.species, seed: bird.seed }));
+    var petBird = $("rb-pet-bird");
+    if (valid && petBird) {
+      var genome = null;
+      try { genome = Bird.rollGenome(bird.seed, bird.species); } catch (e) { genome = null; }
+      if (genome) {
+        try { Bird.mountBird(petBird, genome, pet.mood || "happy"); } catch (e) { /* cosmetic */ }
+        var species = Bird.SPECIES[bird.species];
+        setText($("rb-pet-name"), (species && species.name) || bird.species);
+        setText($("rb-pet-traits"), [genome.eye, genome.mark, genome.hat].join(" · "));
+      }
+    } else {
+      setText($("rb-pet-name"), "Still an egg");
+      setText($("rb-pet-traits"), "nothing has hatched yet");
     }
-    if (petLineEl) {
-      var energy = pet.energy != null ? pet.energy : "?";
-      var places = pet.places_week != null ? pet.places_week : 0;
-      var unlocks = pet.unlocks_week != null ? pet.unlocks_week : 0;
-      petLineEl.textContent = "energy " + energy +
-        " · " + places + " place" + (places === 1 ? "" : "s") +
-        ", " + unlocks + " unlock" + (unlocks === 1 ? "" : "s") + " this week";
-    }
+
+    var energy = typeof pet.energy === "number" ? pet.energy : 0;
+    var fill = $("rb-energy-fill");
+    if (fill) fill.style.width = Math.max(0, Math.min(100, energy)) + "%";
+    setText($("rb-energy-num"), String(energy));
+    setText($("rb-mood-line"), MOOD_LINE[pet.mood] || MOOD_LINE.happy);
+
+    var chores = pet.chores || {};
+    Array.prototype.slice.call(document.querySelectorAll(".rb-chore")).forEach(function (btn) {
+      var kind = btn.getAttribute("data-kind");
+      var done = !!chores[kind];
+      btn.classList.toggle("done", done);
+      btn.setAttribute("aria-pressed", done ? "true" : "false");
+    });
+
+    setText($("rb-stat-places"), String(pet.places_week || 0));
+    setText($("rb-stat-unlocks"), String(pet.unlocks_week || 0));
+    setText($("rb-stat-crows"), String(pet.crows_week || 0));
+
+    /* The successor egg, and the only route back to the egg view (and its
+     * daily check-in) once the perch belongs to a hatched bird. */
+    var nextPct = (pet.egg && typeof pet.egg.percent === "number") ? pet.egg.percent : eggPercent;
+    setRing($("rb-nextegg-ring"), nextPct);
+    setText($("rb-nextegg-percent"), Math.round(nextPct) + "%");
+    drawEggArt($("rb-nextegg-art"), eggSeedId);
+
+    /* "My bird" only exists once there is one. */
+    var myBird = $("rb-my-bird");
+    if (myBird) myBird.hidden = !valid;
   }
 
   function refreshPet() {
     return jsonFetch("/api/ramble/pet").then(paintPet).catch(function () { /* pet is cosmetic */ });
   }
 
-  refreshPet();
+  Array.prototype.slice.call(document.querySelectorAll(".rb-chore")).forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      jsonFetch("/api/ramble/pet/chore", { method: "POST", body: { kind: btn.getAttribute("data-kind") } })
+        .then(function (out) {
+          setText($("rb-pet-status"), (out && out.done) ? "Done for today." : "Already done today.");
+          return refreshPet();
+        })
+        .catch(function (err) { setText($("rb-pet-status"), err.message); })
+        .then(function () { btn.disabled = false; });
+    });
+  });
+
+  var backBtn = $("rb-back-world");
+  if (backBtn) backBtn.addEventListener("click", function () { showView("world"); });
+
+  var seeEggBtn = $("rb-see-egg");
+  if (seeEggBtn) seeEggBtn.addEventListener("click", function () { showView("egg"); });
+  var myBirdBtn = $("rb-my-bird");
+  if (myBirdBtn) myBirdBtn.addEventListener("click", function () { showView("pet"); });
+
+  /* ---------------------------------------------------------------- hatch */
+
+  var shownHatch = null;
+
+  /**
+   * The one hatch entry point: an SSE "ramble-hatched" frame and the "hatched"
+   * field on a check-in/unlock response both land here, and the egg id keeps a
+   * hatch from playing twice when both arrive.
+   */
+  function handleHatched(h) {
+    if (!h || !h.species || typeof h.seed !== "number") return;
+    var key = h.egg_id || (h.species + ":" + h.seed);
+    if (key === shownHatch) return;
+    shownHatch = key;
+    /* AFTER showView: showView() ends any hatch in progress, so locking first
+     * would immediately unlock again when the view actually changes. */
+    showView("egg");
+    hatchLock = true;
+    var stage = $("rb-egg-stage");
+    if (stage && !REDUCED) stage.classList.add("rb-hatch");
+
+    setTimeout(function () {
+      if (stage) stage.classList.remove("rb-hatch");
+      var art = $("rb-egg-art");
+      if (art) art.hidden = true;
+      var birdEl = $("rb-hatch-bird");
+      if (birdEl && Bird) {
+        try {
+          Bird.mountBird(birdEl, Bird.rollGenome(h.seed, h.species), "happy");
+          birdEl.hidden = false;
+        } catch (e) { /* cosmetic */ }
+      }
+      var species = Bird && Bird.SPECIES ? Bird.SPECIES[h.species] : null;
+      setText($("rb-hatch-name"), "It's a " + ((species && species.name) || h.species) + "!");
+      var revealCard = $("rb-hatch-reveal");
+      if (revealCard) revealCard.hidden = false;
+      refreshPet();
+    }, HATCH_MS);
+  }
+
+  /**
+   * End the hatch moment and put the egg card back the way it was: unlock the
+   * repaint, drop the animation class, hide the reveal and the hatched bird,
+   * bring the (now successor) egg art back. Called from showView on ANY view
+   * change, so no navigation can strand the egg view mid-reveal.
+   */
+  function clearHatch() {
+    if (!hatchLock) return;
+    hatchLock = false;
+    var stage = $("rb-egg-stage");
+    if (stage) stage.classList.remove("rb-hatch");
+    var revealCard = $("rb-hatch-reveal");
+    if (revealCard) revealCard.hidden = true;
+    var birdEl = $("rb-hatch-bird");
+    if (birdEl) birdEl.hidden = true;
+    var art = $("rb-egg-art");
+    if (art) art.hidden = false;
+    refreshEgg();
+  }
+
+  var meetBtn = $("rb-meet-bird");
+  if (meetBtn) meetBtn.addEventListener("click", function () { showView("pet"); });
 
   /* --------------------------------------------------- nearby live updates */
-  /* Task 13 adds the server side; until then a 404 must be silent. */
+
   try {
     var stream = new EventSource("/dashboard/streams/ramble-nearby");
     /* The server sends NAMED frames ("event: ramble-nearby"), and onmessage
        only ever fires for UNNAMED ones -- it must be addEventListener. */
     stream.addEventListener("ramble-nearby", function () { refreshMarks(); refreshPet(); });
+    stream.addEventListener("ramble-hatched", function (ev) {
+      var payload = null;
+      try { payload = JSON.parse(ev.data); } catch (e) { payload = null; }
+      refreshPet();
+      handleHatched(payload);
+    });
     stream.onerror = function () { /* quiet: the stream may not exist yet */ };
   } catch (err) { /* no EventSource, no live updates */ }
 
   /* --------------------------------------------------------------- startup */
 
-  here().then(function (pos) {
-    map.setView([pos.lat, pos.lon], LOCATED_ZOOM);
-  }).catch(function () {
-    setText(statusEl, "Location unavailable — pan the map to choose an area.");
-  }).then(publishArea);
+  jsonFetch("/api/ramble/grid").then(paintGrid).catch(function () { /* leave the chip at off */ });
+  refreshEgg().then(refreshPet);
+
+  if (map) {
+    here().then(function (pos) {
+      map.setView([pos.lat, pos.lon], 15);
+    }).catch(function () {
+      setText($("rb-perch-say"), "Pan the map to pick where you are listening.");
+    }).then(publishArea);
+  }
 })();

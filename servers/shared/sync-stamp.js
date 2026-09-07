@@ -191,6 +191,22 @@ export function stampSql(table, row, lamportTs) {
       args: [lamportTs, row.persona],
     };
   }
+  // Same story for the flock tables (Task 6): `ramble_eggs` is keyed on
+  // `egg_id` and `ramble_pet` on `owner` (always 'self'); NEITHER has an `id`
+  // column, so without these branches the generic shape below returns null and
+  // the source row is never stamped while its outbox entry carries the lamport.
+  if (table === "ramble_eggs" && row.egg_id !== undefined) {
+    return {
+      sql: `UPDATE ramble_eggs SET lamport_ts = ? WHERE egg_id = ?`,
+      args: [lamportTs, row.egg_id],
+    };
+  }
+  if (table === "ramble_pet" && row.owner !== undefined) {
+    return {
+      sql: `UPDATE ramble_pet SET lamport_ts = ? WHERE owner = ?`,
+      args: [lamportTs, row.owner],
+    };
+  }
   if (row.id !== undefined) {
     return {
       sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,

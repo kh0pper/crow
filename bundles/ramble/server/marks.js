@@ -21,7 +21,7 @@ async function safeEmit(emit, table, op, row) {
 function defaultTtlSeconds(kind, visibility) {
   if (kind === "caw") return 3600;
   if (visibility === "public") return 86400;
-  return null; // contacts/group marks are persistent by default
+  return null; // contacts/group/private marks are persistent by default
 }
 
 function defaultReveal(visibility) {
@@ -58,7 +58,7 @@ function anchorColumns(anchor) {
 
 export async function createMark(db, opts, { emit } = {}) {
   const {
-    author, author_level, kind, anchor, visibility, content, ttlSeconds,
+    author, author_level, kind, anchor, visibility, content, ttlSeconds, bird,
   } = opts;
   const reveal = opts.reveal ?? defaultReveal(visibility);
   const mark_id = randomUUID();
@@ -69,17 +69,21 @@ export async function createMark(db, opts, { emit } = {}) {
   const content_text = content?.content_text ?? null;
   const content_kind = content?.content_kind ?? "none";
   const content_ref = content?.content_ref ?? null;
+  // The author's currently-active bird, so your own pins show your bird too
+  // (createMark is the local-author path; insertRemoteMark is the wire path).
+  const bird_species = bird?.species ?? null;
+  const bird_seed = bird?.seed ?? null;
 
   await db.execute({
     sql: `INSERT INTO ramble_marks (
             mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, accuracy_m, anchor_ref,
             visibility, reveal, content_text, content_kind, content_ref,
-            created_at, expires_at, publish_state, origin
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'local')`,
+            created_at, expires_at, publish_state, origin, bird_species, bird_seed
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'local', ?, ?)`,
     args: [
       mark_id, author, author_level ?? null, kind, anchor_kind, geohash, lat, lon, accuracy_m, anchor_ref,
       visibility, reveal, content_text, content_kind, content_ref,
-      created_at, expires_at,
+      created_at, expires_at, bird_species, bird_seed,
     ],
   });
 
@@ -101,6 +105,22 @@ export async function listMarks(db, opts = {}) {
   if (visibility) {
     clauses.push("visibility = ?");
     args.push(visibility);
+    // A private mark is "just me" — but "me" spans every instance the user
+    // owns: origin='local' (authored here) and origin='sync' (replicated in
+    // from one of the user's OWN other instances via instance-sync,
+    // applyRambleMark) are both legitimately "mine". The only origin that
+    // must never carry a private row is 'remote' — that's the Nostr wire,
+    // and insertRemoteMark rejects visibility='private' before it can even
+    // reach the table; this clause is the belt to that suspenders.
+    if (visibility === "private") {
+      clauses.push("origin <> 'remote'");
+    }
+  } else {
+    // No visibility filter = the owner's overview across everything. Private
+    // rows must still only surface when they're the user's own (local or
+    // synced-from-own-instance) — never a private row that arrived off the
+    // Nostr wire, which should never exist but is guarded here regardless.
+    clauses.push("NOT (visibility = 'private' AND origin = 'remote')");
   }
   if (!includeExpired) {
     clauses.push("(expires_at IS NULL OR expires_at > ?)");
@@ -158,6 +178,11 @@ export async function expireMarks(db, now = Date.now(), { emit } = {}) {
 }
 
 export async function insertRemoteMark(db, row) {
+  // A private mark is "just me" — it can only ever be authored locally.
+  // Any row arriving over the wire claiming visibility='private' is either a
+  // bug or a spoof attempt; reject it outright, before dedup or blocklist
+  // checks even run.
+  if (row.visibility === "private") return { inserted: false, invalid: true };
   if (await isBlocked(db, row.author)) return { inserted: false, blocked: true };
 
   const existing = await db.execute({
@@ -191,12 +216,12 @@ export async function insertRemoteMark(db, row) {
     sql: `INSERT INTO ramble_marks (
             mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, accuracy_m, anchor_ref,
             visibility, reveal, content_text, content_kind, content_ref,
-            created_at, expires_at, nostr_event_id, publish_state, origin
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote', 'remote')`,
+            created_at, expires_at, nostr_event_id, publish_state, origin, bird_species, bird_seed
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote', 'remote', ?, ?)`,
     args: [
       mark_id, row.author, row.author_level ?? null, row.kind, anchor_kind, finalGeohash, lat, lon, accuracy_m, anchor_ref,
       row.visibility ?? "public", row.reveal ?? "open", row.content_text ?? null, row.content_kind ?? "none", row.content_ref ?? null,
-      created_at, expires_at, row.nostr_event_id ?? null,
+      created_at, expires_at, row.nostr_event_id ?? null, row.bird_species ?? null, row.bird_seed ?? null,
     ],
   });
 

@@ -4,6 +4,7 @@ import { createClient } from "@libsql/client";
 import { createHash } from "node:crypto";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createRambleServer } from "../bundles/ramble/server/server.js";
+import { WARMTH_DEFAULTS } from "../bundles/ramble/server/eggs.js";
 
 let db, h;
 before(async () => {
@@ -25,6 +26,21 @@ test("leave_mark then query_world returns it, attributed to the x-only world pse
   const m = payload.marks.find((m) => m.content_text === "hello");
   assert.ok(m);
   assert.match(m.author, /^[0-9a-f]{64}$/);
+});
+
+test("ramble_leave_mark with visibility:private succeeds and ramble_query_world({visibility:private}) returns it", async () => {
+  const lat = 51.5074, lon = -0.1278;
+  const r = await h.ramble_leave_mark({ lat, lon, text: "just me", visibility: "private" });
+  assert.ok(!r.isError);
+  const q = await h.ramble_query_world({ lat, lon, visibility: "private" });
+  const payload = JSON.parse(q.content[0].text);
+  const m = payload.marks.find((m) => m.content_text === "just me");
+  assert.ok(m);
+});
+
+test("ramble_leave_mark rejects an unknown visibility such as 'friends'", async () => {
+  const r = await h.ramble_leave_mark({ lat: 1, lon: 1, text: "nope", visibility: "friends" });
+  assert.ok(r.isError);
 });
 
 test("ramble_block hides that persona's marks; ramble_unblock restores them", async () => {
@@ -102,4 +118,47 @@ test("ramble_unlock on an in-range open mark feeds unlock_mark (unlocks_week inc
 
   const after = JSON.parse((await h.ramble_pet_state({})).content[0].text);
   assert.equal(after.unlocks_week, before.unlocks_week + 1, "a successful unlock must feed unlock_mark");
+});
+
+test("ramble_egg_state returns a numeric egg.percent between 0 and 100", async () => {
+  const r = await h.ramble_egg_state({});
+  assert.ok(!r.isError);
+  const payload = JSON.parse(r.content[0].text);
+  assert.equal(typeof payload.egg.percent, "number");
+  assert.ok(payload.egg.percent >= 0 && payload.egg.percent <= 100);
+});
+
+test("ramble_checkin credits once per local day; a second same-day call is not credited", async () => {
+  const first = JSON.parse((await h.ramble_checkin({})).content[0].text);
+  assert.equal(first.credited, true);
+  const second = JSON.parse((await h.ramble_checkin({})).content[0].text);
+  assert.equal(second.credited, false);
+});
+
+test("ramble_chore completes once per local day per kind; a second same-day call for the same kind is a no-op", async () => {
+  const first = JSON.parse((await h.ramble_chore({ kind: "feed" })).content[0].text);
+  assert.equal(first.done, true);
+  const second = JSON.parse((await h.ramble_chore({ kind: "feed" })).content[0].text);
+  assert.equal(second.done, false);
+});
+
+test("ramble_chore with an unknown kind returns isError", async () => {
+  const r = await h.ramble_chore({ kind: "nap" });
+  assert.ok(r.isError);
+});
+
+test("ramble_leave_mark feeds mark_left warmth into the egg (delta, not absolute)", async () => {
+  const before = JSON.parse((await h.ramble_egg_state({})).content[0].text);
+  const leave = await h.ramble_leave_mark({ lat: 10, lon: 10, text: "warmth-check", visibility: "public", reveal: "open" });
+  assert.ok(!leave.isError);
+  const after = JSON.parse((await h.ramble_egg_state({})).content[0].text);
+  assert.equal(after.egg.warmth - before.egg.warmth, WARMTH_DEFAULTS.mark_left, "mark_left should credit WARMTH_DEFAULTS.mark_left");
+});
+
+test("ramble_pet_state includes an egg.percent number and a bird key (null before any hatch)", async () => {
+  const r = await h.ramble_pet_state({});
+  assert.ok(!r.isError);
+  const state = JSON.parse(r.content[0].text);
+  assert.equal(typeof state.egg.percent, "number");
+  assert.equal(state.bird, null);
 });

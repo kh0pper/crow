@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve, normalize, dirname, sep } from "node:path";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -43,13 +44,33 @@ const BUNDLE_DIR = BUNDLE_DIR_CANDIDATES.find(looksLikeBundleDir) || BUNDLE_DIR_
 const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
 
 const STATIC_DIR = resolve(join(BUNDLE_DIR, "panel", "static"));
+const SERVER_DIR = resolve(join(BUNDLE_DIR, "server"));
+
+/**
+ * The bird genome engine is a CLASSIC script (dual Node/browser: it assigns
+ * `window.RambleBird` in a browser and `module.exports` under Node), so it
+ * carries the `.cjs` extension — the repo root's package.json is
+ * `type: "module"` and a `.js` file there would be parsed as ESM. That means
+ * `import()` cannot load it; `createRequire` can. Loaded lazily and cached so
+ * a missing/broken engine only fails the two bird routes, never module import.
+ */
+const requireBundleFile = createRequire(import.meta.url);
+let birdEngine = null;
+function loadBirdEngine() {
+  if (!birdEngine) birdEngine = requireBundleFile(join(SERVER_DIR, "bird-svg.cjs"));
+  return birdEngine;
+}
 
 /* ------------------------------------------------------------- validation */
 
 const CELL_RE = /^[0-9b-hjkmnp-z]{1,12}$/;
 const PERSONA_RE = /^[0-9a-f]{64}$/;
 const MARK_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
-const VISIBILITY_RE = /^(public|contacts|group:.{1,120})$/;
+// `private` ("Just me") — see the matching comment beside server.js's
+// VISIBILITY_RE: it never reaches a relay (transport drain only selects
+// visibility='public'), but it does still replicate to the author's own
+// other instances via instance-sync, which is the intended behavior.
+const VISIBILITY_RE = /^(public|contacts|private|group:.{1,120})$/;
 const REVEALS = new Set(["open", "locked"]);
 const KINDS = new Set(["mark", "caw"]);
 const MAX_CELLS = 32;
@@ -168,7 +189,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -177,15 +198,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/anchors.js"),
         bundleImport("server/app-root.js"),
         bundleImport("server/pet.js"),
+        bundleImport("server/eggs.js"),
+        bundleImport("server/feed.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
-      if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod) {
+      if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
+          !eggsMod || !feedMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -242,6 +266,50 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     try { bus.emit(event, payload); } catch (err) {
       console.warn(`[ramble routes] ${event} subscriber threw:`, err?.message ?? err);
     }
+  }
+
+  /**
+   * The single onHatch hook handed to every feedAll() below. A hatch is a
+   * live event for the panel (the /dashboard/streams/ramble-nearby channel
+   * turns it into an `event: ramble-hatched` frame), and the payload is the
+   * same allow-listed trio the stream re-whitelists — the rest of the egg row
+   * is never anyone's business. `poke` swallows a throwing subscriber, so a
+   * broken listener can never fail the request that hatched the egg.
+   */
+  function onHatch(egg) {
+    poke("ramble:hatched", {
+      egg_id: egg?.egg_id ?? null,
+      species: egg?.species ?? null,
+      seed: egg?.seed ?? null,
+    });
+  }
+
+  /**
+   * Best-effort activity feed. Everywhere except the check-in route the feed
+   * is a side effect of some other action (leaving a mark, unlocking one,
+   * arriving somewhere), so a warmth/pet failure must never fail the request
+   * it rode in on.
+   */
+  async function feedActivity(event) {
+    try {
+      return await mods.feedMod.feedAll(db, event, { now: Date.now(), emit, onHatch });
+    } catch (err) {
+      console.warn(`[ramble routes] feed ${event?.type} failed:`, err?.message ?? err);
+      return null;
+    }
+  }
+
+  /**
+   * The allow-listed hatch trio for a response body, or null. Every route that
+   * feeds activity reports it, because the panel client branches on
+   * `out.hatched` / `result.hatched` to run the hatch animation without
+   * waiting for the next poll. `null` covers both "nothing hatched" and "the
+   * best-effort feed was skipped or failed" — the request itself still
+   * succeeded, so the client simply has no hatch to show.
+   */
+  function hatchedPayload(fed) {
+    const egg = fed && fed.hatched;
+    return egg ? { egg_id: egg.egg_id, species: egg.species, seed: egg.seed } : null;
   }
 
   async function getSetting(key) {
@@ -348,6 +416,31 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   // --- static assets --------------------------------------------------------
   router.get("/ramble/static/leaflet/images/:file", (req, res) => sendStatic(res, ["leaflet", "images", req.params.file]));
   router.get("/ramble/static/leaflet/:file", (req, res) => sendStatic(res, ["leaflet", req.params.file]));
+
+  /**
+   * The bird engine, served to the browser under the static prefix but read
+   * from `server/` — it is the SAME file the server draws with, so the panel's
+   * eggs and birds can never drift from the ones rendered into a mark's pin.
+   *
+   * MUST stay above the `/ramble/static/:file` catch-all below: Express
+   * matches layers in registration order, and the catch-all only ever looks
+   * under panel/static (where no bird-svg.js exists) — it would answer 404.
+   * The file is `.cjs` on disk (see loadBirdEngine) and `.js` on the wire,
+   * because the browser only cares about the media type.
+   */
+  router.get("/ramble/static/bird-svg.js", (req, res) => {
+    // Same discipline as sendStatic: a resolved-prefix check, even though the
+    // path here is a constant, so the invariant survives a future edit.
+    const target = resolve(normalize(join(SERVER_DIR, "bird-svg.cjs")));
+    if (!target.startsWith(SERVER_DIR + sep)) return res.status(400).type("text/plain").send("Bad path");
+    if (!existsSync(target)) return res.status(404).type("text/plain").send("Not found");
+    res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+    // `private`, never `public`: this route sits behind dashboardAuth, so a
+    // shared cache must never hold the response.
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    return res.sendFile(target);
+  });
+
   router.get("/ramble/static/:file", (req, res) => sendStatic(res, [req.params.file]));
 
   // --- marks ----------------------------------------------------------------
@@ -407,11 +500,20 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       reveal,
       content: { content_text: text, content_kind: "none" },
       ttlSeconds,
+      // Your currently-active bird rides along on the row, so your own pins
+      // wear the same bird everyone else's do. Null until the first hatch.
+      bird: await mods.eggsMod.activeBird(db),
     }, { emit });
 
     // Queued, not published: the transport drain decides against the grid.
     poke("ramble:drain");
-    res.status(201).json({ mark });
+
+    // Awaited BEFORE the response so a client that immediately re-reads
+    // /api/ramble/egg sees the credit (and so a hatch has already gone out on
+    // the stream). Best-effort: warmth is never worth failing an author on.
+    const fed = await feedActivity({ type: "mark_left" });
+
+    res.status(201).json({ mark, hatched: hatchedPayload(fed) });
   }));
 
   router.delete("/api/ramble/marks/:mark_id", handle(async (req, res) => {
@@ -442,11 +544,12 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (!MARK_ID_RE.test(markId)) bad("invalid mark_id");
     const result = await mods.marksMod.unlockMark(db, markId, { lat: requireLat(b.lat), lon: requireLon(b.lon) });
     if (result.missing) return res.status(404).json({ error: "not found" });
+    let fed = null;
     if (result.unlocked === true) {
-      // Best-effort: a pet-feed failure must never fail an unlock response.
-      try { await mods.petMod.feed(db, { type: "unlock_mark" }); } catch { /* cosmetic */ }
+      // feedAll, not petMod.feed: an unlock warms the egg as well as the pet.
+      fed = await feedActivity({ type: "unlock_mark" });
     }
-    res.json(result);
+    res.json({ ...result, hatched: hatchedPayload(fed) });
   }));
 
   // --- privacy grid ---------------------------------------------------------
@@ -498,15 +601,16 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       cells = [mods.anchorsMod.encodeGeohash(requireLat(b.lat), requireLon(b.lon), defaultPrecision())];
     }
 
-    // Feed the pet a visit_place when the resolved area is a NEW geohash —
-    // "the user opens the map at a new geohash" (spec §11) — read the
-    // previous value BEFORE overwriting it so the comparison is meaningful.
-    const previousRaw = await getSetting("local.active_area");
-    let previousCells = [];
-    if (previousRaw) {
-      try { previousCells = JSON.parse(previousRaw); } catch { previousCells = []; }
+    // `here` is the user's REAL position from the browser's geolocation, and
+    // it is the ONLY thing that can credit a visit. The active area is
+    // whatever the viewport happens to cover, so crediting it (as this route
+    // used to, on any new geohash) let a pan farm warmth and `places_week`
+    // from an armchair. No `here` -> no visit credit, ever.
+    let here = null;
+    if (b.here != null) {
+      if (typeof b.here !== "object" || Array.isArray(b.here)) bad("here must be an object with lat and lon");
+      here = { lat: requireLat(b.here.lat), lon: requireLon(b.here.lon) };
     }
-    const isNewArea = JSON.stringify([...cells].sort()) !== JSON.stringify([...previousCells].sort());
 
     // Written directly, NOT through the grid's emitting writer: `local.`-prefixed
     // keys are per-instance machinery and never replicate (instance-sync filters
@@ -517,9 +621,12 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       args: [JSON.stringify(cells)],
     });
 
-    if (isNewArea) {
-      // Best-effort: a pet-feed failure must never fail an area update.
-      try { await mods.petMod.feed(db, { type: "visit_place" }); } catch { /* cosmetic */ }
+    if (here) {
+      // Geohash-7 (spec §2.1) — the credit key's period is the ISO week, so
+      // the same real place only ever counts once a week no matter how many
+      // times the panel posts its position.
+      const cell = mods.anchorsMod.encodeGeohash(here.lat, here.lon, 7);
+      await feedActivity({ type: "visit_place", cell });
     }
 
     poke("ramble:area");
@@ -539,7 +646,67 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   // --- pet --------------------------------------------------------------
   router.get("/api/ramble/pet", handle(async (req, res) => {
-    res.json(await mods.petMod.petState(db));
+    const now = Date.now();
+    // One read for the whole companion strip: mood/energy/chores, the bird
+    // that hatched (null until the first one does), and just the egg's
+    // progress percent — the panel's full egg card reads /api/ramble/egg.
+    const pet = await mods.petMod.petState(db, { now });
+    const bird = await mods.eggsMod.activeBird(db);
+    const egg = await mods.eggsMod.eggState(db, { now });
+    res.json({ ...pet, bird, egg: { percent: egg.egg.percent } });
+  }));
+
+  router.post("/api/ramble/pet/chore", handle(async (req, res) => {
+    const kind = (req.body || {}).kind;
+    // doChore throws a plain Error on an unknown kind, which handle() would
+    // turn into a 500 — validate here so a bad kind is the 400 it is.
+    if (!mods.petMod.CHORES.includes(kind)) bad(`kind must be one of: ${mods.petMod.CHORES.join(", ")}`);
+    res.json(await mods.petMod.doChore(db, kind, { now: Date.now(), emit }));
+  }));
+
+  // --- egg ----------------------------------------------------------------
+  //
+  // `eggState` and `creditWarmth` have NO internal `now` default (the db layer
+  // refuses an undefined argument), so every call from here passes one.
+  router.get("/api/ramble/egg", handle(async (req, res) => {
+    res.json(await mods.eggsMod.eggState(db, { now: Date.now() }));
+  }));
+
+  router.post("/api/ramble/egg/checkin", handle(async (req, res) => {
+    // Not best-effort, unlike every other feed in this file: the credit IS
+    // the request, so a failure has to surface rather than answer "credited".
+    const { credited, warmth, hatched } = await mods.feedMod.feedAll(
+      db, { type: "checkin" }, { now: Date.now(), emit, onHatch },
+    );
+    res.json({
+      credited,
+      warmth,
+      hatched: hatched ? { egg_id: hatched.egg_id, species: hatched.species, seed: hatched.seed } : null,
+    });
+  }));
+
+  // --- bird portraits -------------------------------------------------------
+  //
+  // Rendered server-side from the same engine the panel loads, so a bird is a
+  // plain <img src> the browser can cache — no client-side draw needed to show
+  // someone else's bird on a pin.
+  router.get("/api/ramble/bird/:species/:seed.svg", handle(async (req, res) => {
+    const bird = loadBirdEngine();
+    const species = req.params.species;
+    // A uint32 and nothing else: /^\d{1,10}$/ first so "1e9", "0x10", " 12"
+    // and other Number()-friendly spellings never reach rollGenome.
+    if (!/^\d{1,10}$/.test(req.params.seed)) bad("seed must be a uint32");
+    const seed = Number(req.params.seed);
+    if (!bird.isValidBird({ species, seed })) bad(`invalid bird: ${String(species).slice(0, 24)}/${seed}`);
+
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img">` +
+      `${bird.drawBird(bird.rollGenome(seed, species), req.query.mood)}</svg>`;
+    res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+    // `private`, never `public`: an authed route's body must not sit in a
+    // shared cache. A genome is a pure function of (species, seed), so a day
+    // in the browser's own cache is free.
+    res.setHeader("Cache-Control", "private, max-age=86400");
+    res.send(svg);
   }));
 
   // Body-parser failures (malformed JSON) surface here. Path-scoped, so it is

@@ -84,11 +84,17 @@ export const SYNCED_TABLES = [
   // persona block-list follow them across their instances. All three are
   // natural-key tables (mark_id / key / persona) — see the applyRamble*
   // handlers below; the generic id-keyed apply path can never match them.
-  // NOT ramble_groups (no phase-1 writer) and NOT ramble_pet (per-instance
-  // companion state, deliberately divergent).
+  // The flock tables join them (Task 6): `ramble_eggs` (keyed on egg_id) and
+  // `ramble_pet` (keyed on owner, always 'self') are the user's ONE companion
+  // and its egg — the same bird has to greet them on every instance, so they
+  // replicate rather than diverge per-device. NOT ramble_groups (no phase-1
+  // writer), NOT ramble_credits (the local no-double-count ledger) and NOT
+  // ramble_tombstones (one instance's outbound relay work item).
   "ramble_marks",
   "ramble_settings",
   "ramble_blocks",
+  "ramble_eggs",
+  "ramble_pet",
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
@@ -142,6 +148,11 @@ export const EXCLUDED_COLUMNS = {
   ramble_marks: ["id", "publish_state", "origin", "lamport_ts"],
   ramble_settings: ["lamport_ts"],
   ramble_blocks: ["lamport_ts"],
+  // Flock tables (Task 6): both are natural-key with no per-instance surrogate
+  // key to strip, so `lamport_ts` — envelope metadata, never row data — is the
+  // only exclusion. Everything else on the row IS the shared companion state.
+  ramble_eggs: ["lamport_ts"],
+  ramble_pet: ["lamport_ts"],
 };
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
@@ -319,6 +330,20 @@ export function shouldSyncRow(table, row) {
     if (!row) return false;
     return Boolean(row.persona);
   }
+  if (table === "ramble_eggs") {
+    // egg_id is the wire key — a row without it can be neither stamped,
+    // applied nor deleted on a peer (ramble_eggs has no `id` column at all).
+    if (!row) return false;
+    return Boolean(row.egg_id);
+  }
+  if (table === "ramble_pet") {
+    // The table is a singleton keyed on `owner`, and 'self' is the only owner
+    // the product ever writes. Anything else is either a future multi-pet
+    // schema or a malformed/hostile wire row — reject on BOTH sides (this
+    // function is the shared emit + apply choke point).
+    if (!row) return false;
+    return row.owner === "self";
+  }
   if (table === "ramble_settings") {
     if (!row || !row.key) return false;
     // Ruling R3: `local.`-prefixed keys are per-instance by construction
@@ -374,6 +399,10 @@ const RAMBLE_MARK_WIRE_COLUMNS = [
   "visibility", "reveal",
   "content_text", "content_kind", "content_ref", "thumb_enc", "locked_blob",
   "created_at", "expires_at", "nostr_event_id",
+  // D5: the bird a mark was left by is part of the mark, not of the instance
+  // that stored it — without these on the wire a replicated mark would render
+  // birdless on the user's other instances.
+  "bird_species", "bird_seed",
 ];
 
 /**
@@ -504,12 +533,275 @@ export async function applyRambleBlock(db, op, row, lamportTs) {
 }
 
 /**
- * Test/tooling seam over the three ramble natural-key handlers above. Does NOT
+ * Portable columns of `ramble_eggs`, in schema order. `lamport_ts` is envelope
+ * metadata (EXCLUDED_COLUMNS) and is written separately; there is no surrogate
+ * key on this table, so `egg_id` IS the wire key. As with marks, the INSERT
+ * column list is this list INTERSECTED with the keys the wire row carries, so a
+ * sparse row never binds `undefined` and an unknown key is ignored.
+ */
+const RAMBLE_EGG_WIRE_COLUMNS = [
+  "egg_id", "status", "warmth", "species", "seed",
+  "found_cell", "found_week", "from_crow_id", "created_at", "hatched_at",
+];
+
+/**
+ * Columns the ON CONFLICT branch may overwrite on an EXISTING local row.
+ * `egg_id` is the key. `created_at` is the egg's immutable birth time AND the
+ * deterministic convergence tiebreak below — letting a peer rewrite it could
+ * flip which of two eggs wins on one instance but not the other, which is
+ * exactly the divergence the tiebreak exists to prevent.
+ */
+const RAMBLE_EGG_UPDATE_COLUMNS = RAMBLE_EGG_WIRE_COLUMNS.filter(
+  (c) => c !== "egg_id" && c !== "created_at",
+);
+
+/**
+ * Does the INCOMING row's bird identity win over the local one?
+ *
+ * `(species, seed, hatched_at)` is ONE value, not three independent columns:
+ * two instances that were partitioned can each hatch the SAME `egg_id` and
+ * roll a different bird. A per-column `COALESCE(local, excluded)` is
+ * first-writer-wins *per instance*, so each side keeps its own roll forever
+ * and the user's bird differs on every Crow they own. This predicate is the
+ * single deterministic joint tiebreak both sides evaluate:
+ *
+ *   - a hatched side always beats an unhatched side (hatch stays one-way — an
+ *     incoming row with a NULL `hatched_at` can never un-roll a local bird);
+ *   - both hatched → the EARLIER `hatched_at` wins;
+ *   - equal `hatched_at` → the LOWER `seed` wins (a total order, so arrival
+ *     order cannot change the answer).
+ *
+ * Selecting all three columns from the same side keeps the triple coherent —
+ * an instance can never end up with one side's species and the other's seed.
+ *
+ * Note `excluded.<col>` for a column the wire row omitted is that column's
+ * DEFAULT (NULL here), so a sparse update carrying `species`/`seed` but no
+ * `hatched_at` reads as unhatched and leaves a local bird alone. Real hatch
+ * emits carry the full row, so that only ever protects.
+ */
+const RAMBLE_EGG_INCOMING_BIRD_WINS = `(
+  excluded.hatched_at IS NOT NULL AND (
+    ramble_eggs.hatched_at IS NULL
+    OR excluded.hatched_at < ramble_eggs.hatched_at
+    OR (excluded.hatched_at = ramble_eggs.hatched_at AND excluded.seed < ramble_eggs.seed)
+  )
+)`;
+
+/**
+ * The ON CONFLICT assignment for one egg column. Four of them are NOT plain
+ * `excluded.x` writes, because **hatching is one-way**: once this instance has
+ * seen the egg hatch, no peer update may un-hatch it or drop its hatch time —
+ * a later-lamport op that merely predates the hatch on the sender (or omits
+ * the fields entirely) would otherwise silently reset a bird the user already
+ * has. The CASE pins `status` at 'hatched' forever; the bird triple is settled
+ * as a unit by `RAMBLE_EGG_INCOMING_BIRD_WINS`.
+ */
+function rambleEggSetClause(col) {
+  switch (col) {
+    case "status":
+      return `status = CASE WHEN ramble_eggs.status = 'hatched' THEN 'hatched' ELSE excluded.status END`;
+    case "species":
+    case "seed":
+    case "hatched_at":
+      return `${col} = CASE WHEN ${RAMBLE_EGG_INCOMING_BIRD_WINS} THEN excluded.${col} ELSE ramble_eggs.${col} END`;
+    // `warmth` included: absolute last-writer-wins, NOT additive across
+    // instances — `ramble_credits` (the no-double-count ledger) is local-only,
+    // so warmth earned on two instances in the same window does not sum.
+    default:           return `${col} = excluded.${col}`;
+  }
+}
+
+/**
+ * Refill the incubating slot when an apply emptied it. `applyRambleEgg`'s
+ * convergence rule can shelve a peer's successor egg while the local original
+ * is still incubating; when that original's HATCHED row arrives afterwards the
+ * instance is left with zero incubating eggs, and `ensureIncubatingEgg` never
+ * self-heals (nothing tells it the shelved egg was a convergence loser).
+ *
+ * One self-guarding statement, so it can ride the apply's own batch: it is a
+ * no-op unless there is no incubating egg AND at least one shelf egg, and it
+ * promotes the OLDEST shelf egg (lowest `created_at`, ties by lowest `egg_id`
+ * — the same total order the convergence rule uses, so every instance
+ * promotes the same one).
+ *
+ * SAFE IN PHASE 1 ONLY because a 'shelf' egg is *always* a convergence loser
+ * here — there is no user-facing "shelve my egg" action yet. Phase 2 MUST
+ * record a shelf egg's origin (e.g. a `shelved_reason` column) before adding
+ * one, or this will silently re-incubate an egg the user deliberately parked.
+ */
+const RAMBLE_EGG_REPROMOTE_SQL = `
+  UPDATE ramble_eggs SET status = 'incubating'
+   WHERE egg_id = (
+           SELECT egg_id FROM ramble_eggs WHERE status = 'shelf'
+            ORDER BY created_at ASC, egg_id ASC LIMIT 1
+         )
+     AND NOT EXISTS (SELECT 1 FROM ramble_eggs WHERE status = 'incubating')`;
+
+/**
+ * Apply a `ramble_eggs` mutation, keyed on `egg_id`. Same LWW-on-the-envelope
+ * rule as `applyRambleMark`, plus two egg-specific invariants:
+ *
+ *   1. Hatch is one-way — see `rambleEggSetClause`.
+ *   2. **One incubating egg.** Two instances that were both offline each mint
+ *      their own incubating egg (`ensureIncubatingEgg`'s guard is a query
+ *      against the local table, not a cross-instance constraint), so a naive
+ *      apply leaves BOTH instances holding two. Resolve it with a rule that is
+ *      a pure function of the two rows, so both sides reach the same answer
+ *      with no extra round trip and nothing to emit: the OLDER `created_at`
+ *      survives as incubating, ties broken by the lexically lower `egg_id`
+ *      (total order, no clock ambiguity). The loser is shelved — `status =
+ *      'shelf'`, warmth untouched — never deleted, so the warmth the user
+ *      earned toward it is still on the shelf. The shelving UPDATE and the
+ *      upsert ride ONE `db.batch` so a peer can never observe zero (or two)
+ *      incubating eggs mid-apply.
+ *   3. **The slot is never left empty.** Every apply ends with
+ *      `RAMBLE_EGG_REPROMOTE_SQL` in the same batch, which re-promotes the
+ *      oldest shelved egg if (and only if) the apply just emptied the
+ *      incubating slot — see that constant for why phase 1 can assume a shelf
+ *      egg is always a convergence loser.
+ *
+ * An incoming row with no `created_at` (a sparse update) cannot be ranked, so
+ * it is treated as the newest — it loses, and the established local incubating
+ * egg is left alone.
+ *
+ * Applies NEVER emit: the convergence write is a deterministic re-derivation
+ * the peer performs for itself, not new local intent to replicate back.
+ *
+ * @param {object} db - libsql client
+ * @param {"insert"|"update"|"delete"} op
+ * @param {object} row - wire row (no lamport_ts)
+ * @param {number} lamportTs - incoming envelope Lamport timestamp
+ */
+export async function applyRambleEgg(db, op, row, lamportTs) {
+  if (!row || !row.egg_id) return;
+
+  const { rows: existing } = await db.execute({
+    sql: `SELECT lamport_ts, created_at, status FROM ramble_eggs WHERE egg_id = ?`,
+    args: [row.egg_id],
+  });
+  const localTs = Number(existing[0]?.lamport_ts) || 0;
+  if (lamportTs < localTs) return;
+
+  if (op === "delete") {
+    // Batched with the re-promotion: deleting the incubating egg empties the
+    // slot exactly the way the convergence rule can.
+    await db.batch([
+      { sql: `DELETE FROM ramble_eggs WHERE egg_id = ?`, args: [row.egg_id] },
+      { sql: RAMBLE_EGG_REPROMOTE_SQL, args: [] },
+    ]);
+    return;
+  }
+
+  // Effective status: the incoming one, unless the convergence rule below
+  // demotes this egg. Never mutate the caller's row.
+  let status = row.status;
+  const statements = [];
+
+  // The local row's OWN status gates this, not just the incoming one: a peer
+  // that was offline when this egg hatched keeps crediting warmth to it and
+  // emits `status:'incubating'` at an ever-higher lamport. Gating on the wire
+  // status alone would let that egg contest the incubating slot it already
+  // left, shelve the legitimate successor (the hatched egg is always OLDER, so
+  // it always wins the tiebreak) and then stay hatched via the CASE below —
+  // leaving the instance with ZERO incubating eggs, again every cycle, with the
+  // credited warmth silently discarded. A locally hatched egg never competes.
+  if (status === "incubating" && existing[0]?.status !== "hatched") {
+    const { rows: incubating } = await db.execute({
+      sql: `SELECT egg_id, created_at FROM ramble_eggs WHERE status = 'incubating' AND egg_id <> ? LIMIT 1`,
+      args: [row.egg_id],
+    });
+    const rival = incubating[0];
+    if (rival) {
+      // `created_at` is NOT NULL in the schema; the ?? chain only covers a
+      // sparse WIRE row (fall back to what we already stored for this egg,
+      // else rank it last so the established local egg keeps incubating).
+      const mine = Number(row.created_at ?? existing[0]?.created_at ?? Number.MAX_SAFE_INTEGER);
+      const theirs = Number(rival.created_at);
+      const incomingWins =
+        mine < theirs || (mine === theirs && String(row.egg_id) < String(rival.egg_id));
+      if (incomingWins) {
+        statements.push({
+          sql: `UPDATE ramble_eggs SET status = 'shelf' WHERE egg_id = ?`,
+          args: [rival.egg_id],
+        });
+      } else {
+        status = "shelf";
+      }
+    }
+  }
+
+  const cols = RAMBLE_EGG_WIRE_COLUMNS.filter((c) => row[c] !== undefined);
+  const values = cols.map((c) => (c === "status" ? status : row[c]) ?? null);
+  const setClauses = [
+    ...cols.filter((c) => RAMBLE_EGG_UPDATE_COLUMNS.includes(c)).map(rambleEggSetClause),
+    "lamport_ts = excluded.lamport_ts",
+  ];
+
+  statements.push({
+    sql: `INSERT INTO ramble_eggs (${cols.join(", ")}, lamport_ts)
+          VALUES (${cols.map(() => "?").join(", ")}, ?)
+          ON CONFLICT(egg_id) DO UPDATE SET ${setClauses.join(", ")}`,
+    args: [...values, lamportTs],
+  });
+
+  statements.push({ sql: RAMBLE_EGG_REPROMOTE_SQL, args: [] });
+
+  await db.batch(statements);
+}
+
+/** Portable columns of the singleton `ramble_pet` row, in schema order. */
+const RAMBLE_PET_WIRE_COLUMNS = [
+  "owner", "mood", "energy", "last_fed_at",
+  "places_week", "unlocks_week", "crows_week", "week_start",
+  "active_egg_id", "chores_json",
+];
+
+const RAMBLE_PET_UPDATE_COLUMNS = RAMBLE_PET_WIRE_COLUMNS.filter((c) => c !== "owner");
+
+/**
+ * Apply a `ramble_pet` mutation, keyed on `owner` (always 'self'). Same LWW
+ * rule as the handlers above. Only the columns the wire row actually carries
+ * are written, so a sparse row leaves the rest of the local pet alone rather
+ * than binding `undefined` / nulling real state.
+ *
+ * **Deletes are ignored.** No product path deletes the pet row — it is a
+ * singleton created on first write and updated forever after — so an incoming
+ * `delete` is either a peer bug or a hostile entry, and honouring it would
+ * silently reset the user's companion (mood, energy, weekly counters and the
+ * `active_egg_id` pointing at their hatched bird) on every instance.
+ */
+export async function applyRamblePet(db, op, row, lamportTs) {
+  if (!row || !row.owner) return;
+  if (op === "delete") return;
+
+  const { rows: existing } = await db.execute({
+    sql: `SELECT lamport_ts FROM ramble_pet WHERE owner = ?`,
+    args: [row.owner],
+  });
+  const localTs = Number(existing[0]?.lamport_ts) || 0;
+  if (lamportTs < localTs) return;
+
+  const cols = RAMBLE_PET_WIRE_COLUMNS.filter((c) => row[c] !== undefined);
+  const setClauses = [
+    ...cols.filter((c) => RAMBLE_PET_UPDATE_COLUMNS.includes(c)).map((c) => `${c} = excluded.${c}`),
+    "lamport_ts = excluded.lamport_ts",
+  ];
+
+  await db.execute({
+    sql: `INSERT INTO ramble_pet (${cols.join(", ")}, lamport_ts)
+          VALUES (${cols.map(() => "?").join(", ")}, ?)
+          ON CONFLICT(owner) DO UPDATE SET ${setClauses.join(", ")}`,
+    args: [...cols.map((c) => row[c] ?? null), lamportTs],
+  });
+}
+
+/**
+ * Test/tooling seam over the five ramble natural-key handlers above. Does NOT
  * fork their logic — it is a pure table→handler switch, so anything asserted
  * through here is the same code the live `_applyEntry` dispatch runs.
  *
  * @param {object} db
- * @param {"ramble_marks"|"ramble_settings"|"ramble_blocks"} table
+ * @param {"ramble_marks"|"ramble_settings"|"ramble_blocks"|"ramble_eggs"|"ramble_pet"} table
  * @param {"insert"|"update"|"delete"} op
  * @param {object} row
  * @param {number} [lamportTs]
@@ -519,6 +811,8 @@ export async function applyRemoteOp(db, table, op, row, lamportTs = 0) {
     case "ramble_marks":    return applyRambleMark(db, op, row, lamportTs);
     case "ramble_settings": return applyRambleSetting(db, op, row, lamportTs);
     case "ramble_blocks":   return applyRambleBlock(db, op, row, lamportTs);
+    case "ramble_eggs":     return applyRambleEgg(db, op, row, lamportTs);
+    case "ramble_pet":      return applyRamblePet(db, op, row, lamportTs);
     default:
       throw new Error(`applyRemoteOp: no natural-key handler for table "${table}"`);
   }
@@ -2065,6 +2359,24 @@ export class InstanceSyncManager {
         await applyRambleBlock(this.db, op, row, lamport_ts);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_blocks:`, err.message);
+      }
+      return;
+    }
+
+    if (table === "ramble_eggs") {
+      try {
+        await applyRambleEgg(this.db, op, row, lamport_ts);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on ramble_eggs:`, err.message);
+      }
+      return;
+    }
+
+    if (table === "ramble_pet") {
+      try {
+        await applyRamblePet(this.db, op, row, lamport_ts);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on ramble_pet:`, err.message);
       }
       return;
     }

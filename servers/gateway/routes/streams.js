@@ -195,9 +195,40 @@ export default function streamsRouter(dashboardAuth, { interactiveEngine = () =>
       }
     };
 
+    // The same connection also carries hatches. bundles/ramble/panel/routes.js
+    // passes an `onHatch` hook into every feedAll(), which emits
+    // `bus.emit("ramble:hatched", { egg_id, species, seed })` when a warmth
+    // credit tips the incubating egg over hatch_at. The panel needs to know a
+    // bird arrived without polling; a second SSE channel would just be a
+    // second connection for the same page.
+    //
+    // Allow-listed to exactly {egg_id, species, seed}: the emit site has the
+    // whole egg row in hand (status, warmth, created_at, hatched_at) and none
+    // of that is the client's business. `seed` stays a NUMBER (the client
+    // feeds it straight back to /api/ramble/bird/:species/:seed.svg), so it is
+    // coerced with Number + a finite check rather than String.
+    const hatchedHandler = (payload) => {
+      try {
+        const seed = payload?.seed == null ? NaN : Number(payload.seed);
+        const out = {
+          egg_id: payload?.egg_id != null ? String(payload.egg_id) : null,
+          species: payload?.species != null ? String(payload.species) : null,
+          seed: Number.isFinite(seed) ? seed : null,
+        };
+        sendRaw(`event: ramble-hatched\ndata: ${JSON.stringify(out)}\n\n`);
+      } catch {
+        // Subscriber isolation — same discipline as the nearby handler.
+      }
+    };
+
     bus.on("ramble:nearby", handler);
-    res.on("close", () => bus.off("ramble:nearby", handler));
-    res.on("error", () => bus.off("ramble:nearby", handler));
+    bus.on("ramble:hatched", hatchedHandler);
+    const unsubscribe = () => {
+      bus.off("ramble:nearby", handler);
+      bus.off("ramble:hatched", hatchedHandler);
+    };
+    res.on("close", unsubscribe);
+    res.on("error", unsubscribe);
   });
 
   // --- Glasses media state (C.5) ---
