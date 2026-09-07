@@ -19,8 +19,11 @@ import { SYNCED_TABLES, EXCLUDED_COLUMNS, applyRemoteOp, shouldSyncRow } from ".
 import { emitOrQueue, _setEligibilityForTest } from "../servers/shared/sync-emit.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createMark, blockPersona } from "../bundles/ramble/server/marks.js";
-import { ensureIncubatingEgg } from "../bundles/ramble/server/eggs.js";
+import { ensureIncubatingEgg, isoWeek } from "../bundles/ramble/server/eggs.js";
 import { feed } from "../bundles/ramble/server/pet.js";
+import { claimNest } from "../bundles/ramble/server/flock.js";
+import { nestFor, CELL7_LAT_STEP } from "../bundles/ramble/server/nests.js";
+import { encodeGeohash } from "../bundles/ramble/server/anchors.js";
 
 // getOrCreateLocalInstanceId() (called internally by emitOrQueue) reads
 // process.env.CROW_DATA_DIR directly — point it at a scratch dir for the
@@ -459,4 +462,24 @@ test("an explicit null origin on the wire means plain, even if this instance onc
   await applyRemoteOp(e, "ramble_eggs", "update", { egg_id: "Y", status: "incubating", warmth: 20, created_at: 1000 }, 9);
   got = await e.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs ORDER BY egg_id");
   assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status, r.shelf_origin]), [["Y", "shelf", "sync"], ["Z", "incubating", null]]);
+});
+
+test("outbox door: a claimed egg (no manager) is queued and stamped with its 'user' origin on the wire", async () => {
+  const week = isoWeek(1_800_000_000_000);
+  let cell = null;
+  for (let i = 0; i < 5000 && !cell; i++) {
+    const c = encodeGeohash(30.46 + i * CELL7_LAT_STEP, -98.08, 7);
+    if (nestFor(c, week)) cell = c;
+  }
+  const nest = nestFor(cell, week);
+  const r = await claimNest(a, { cell, week, here: { lat: nest.lat, lon: nest.lon }, now: 1_800_000_000_000,
+    emit: (t, op, row) => emitOrQueue(null, a, t, op, row) });
+  assert.equal(r.claimed, true);
+  const local = await a.execute({ sql: "SELECT lamport_ts FROM ramble_eggs WHERE egg_id=?", args: [r.egg.egg_id] });
+  assert.ok(Number(local.rows[0].lamport_ts) > 0, "claimed egg row was never stamped");
+  const queued = await a.execute({ sql: "SELECT row_json, lamport_ts FROM sync_outbox WHERE table_name='ramble_eggs' ORDER BY id DESC LIMIT 1", args: [] });
+  const wire = JSON.parse(queued.rows[0].row_json);
+  assert.equal(wire.egg_id, r.egg.egg_id);
+  assert.equal(wire.shelf_origin, "user", "the origin must travel so a peer never auto-promotes it");
+  assert.equal(Number(queued.rows[0].lamport_ts), Number(local.rows[0].lamport_ts));
 });
