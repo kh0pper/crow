@@ -9,12 +9,17 @@
  *
  * Claiming credits NO warmth and NO pet energy (deliberate: the egg is the
  * reward; spec §2.1's weight table has no claim row). Do not add feedAll here.
+ *
+ * Phase 3: received eggs (gifts/swaps) sit on the shelf as their own class
+ * and never count toward the claim cap; an egg named by an open trade is
+ * locked (trades.js).
  */
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { withinRange, haversineMeters } from "./anchors.js";
 import { isoWeek, startOfLocalDay, hatchIfReady, ensureIncubatingEgg, readWarmthWeights } from "./eggs.js";
 import { nestFor, cellsInBbox, nestsInCells, NEST_RATE_DEFAULT, CELL7_RE, WEEK_RE } from "./nests.js";
+import { isEggLocked, lockedEggIds } from "./trades.js";
 
 const require = createRequire(import.meta.url);
 const { ROSTER } = require("./bird-svg.cjs");
@@ -155,20 +160,23 @@ async function getPetRow(db) {
 }
 
 /**
- * Make `eggId` the incubating egg. The previous incubating egg goes to the
- * shelf marked 'user' (the user chose to park it; sync must not draft it
- * back). One conditional statement, so the swap is all-or-nothing: if the
- * target is no longer on the shelf when the write runs, nothing changes and
- * the caller gets the egg's real state. Emits the shelved row first, then
- * the new incubating row — the peer's apply of a user shelve skips
- * re-promotion precisely because the successor is the next op in the drain
- * (Task 1).
+ * Make `eggId` (a shelf or received egg) the incubating egg. The previous
+ * incubating egg goes to the shelf marked 'user' (the user chose to park it;
+ * sync must not draft it back). One conditional statement, so the swap is
+ * all-or-nothing: if the target is no longer on the shelf when the write
+ * runs, nothing changes and the caller gets the egg's real state. Emits the
+ * shelved row first, then the new incubating row — the peer's apply of a
+ * user shelve skips re-promotion precisely because the successor is the next
+ * op in the drain (Task 1).
  */
 export async function incubateEgg(db, eggId, { now = Date.now(), emit } = {}) {
   const target = await getEgg(db, eggId);
   if (!target) return { ok: false, reason: "not-found" };
   if (target.status === "incubating") return { ok: true, already: true, egg: target, shelved: null, hatched: null };
-  if (target.status !== "shelf") return { ok: false, reason: "not-an-egg" };
+  if (target.status !== "shelf" && target.status !== "received") return { ok: false, reason: "not-an-egg" };
+  // An egg named by an open swap is spoken for: it may not move until the
+  // trade closes (Task 3 lock rule).
+  if (await isEggLocked(db, eggId)) return { ok: false, reason: "in-trade" };
 
   const { rows: current } = await db.execute({ sql: "SELECT egg_id FROM ramble_eggs WHERE status = 'incubating'", args: [] });
   const { rowsAffected } = await db.execute({
@@ -176,7 +184,7 @@ export async function incubateEgg(db, eggId, { now = Date.now(), emit } = {}) {
              SET status = CASE WHEN egg_id = ? THEN 'incubating' ELSE 'shelf' END,
                  shelf_origin = CASE WHEN egg_id = ? THEN NULL ELSE 'user' END
            WHERE (status = 'incubating' OR egg_id = ?)
-             AND EXISTS (SELECT 1 FROM ramble_eggs WHERE egg_id = ? AND status = 'shelf')`,
+             AND EXISTS (SELECT 1 FROM ramble_eggs WHERE egg_id = ? AND status IN ('shelf', 'received'))`,
     args: [eggId, eggId, eggId, eggId],
   });
   if (rowsAffected === 0) {
@@ -217,6 +225,7 @@ export async function flockState(db, { now = Date.now() } = {}) {
   const weights = await readWarmthWeights(db);
   const { shelfCap } = await readFlockSettings(db);
   const pet = await getPetRow(db);
+  const locked = await lockedEggIds(db);
   const { rows } = await db.execute({ sql: "SELECT * FROM ramble_eggs ORDER BY created_at ASC, egg_id ASC", args: [] });
 
   const birds = rows
@@ -226,12 +235,15 @@ export async function flockState(db, { now = Date.now() } = {}) {
 
   const pct = (w) => Math.max(0, Math.min(100, Math.round((Number(w) / weights.hatch_at) * 100)));
   const eggs = rows
-    .filter((r) => r.status === "incubating" || r.status === "shelf")
-    .sort((x, y) => (x.status === y.status ? 0 : x.status === "incubating" ? -1 : 1))
+    .filter((r) => r.status === "incubating" || r.status === "shelf" || r.status === "received")
+    .sort((x, y) => (x.status === y.status ? 0 : x.status === "incubating" ? -1 : y.status === "incubating" ? 1 : 0))
     .map((r) => ({
       egg_id: r.egg_id, status: r.status, warmth: r.warmth, percent: pct(r.warmth),
       found_cell: r.found_cell ?? null, found_week: r.found_week ?? null, created_at: r.created_at,
       shelf_origin: r.shelf_origin ?? null,
+      // Phase 3: who gave it (received eggs), and whether an open swap has it spoken for.
+      from_crow_id: r.from_crow_id ?? null,
+      locked: locked.has(r.egg_id),
     }));
 
   return {
