@@ -27,7 +27,7 @@
  * offered again until the trade closes (flock.js asks isEggLocked).
  */
 import { randomUUID } from "node:crypto";
-import { insertRemoteMark } from "./marks.js";
+import { insertRemoteMark, getMark } from "./marks.js";
 import { xOnly } from "./persona.js";
 import { startOfLocalDay } from "./eggs.js";
 import {
@@ -41,6 +41,14 @@ export const GIFTABLE = new Set(["shelf", "received"]);
 /** Inbound ceilings per contact (review round 1, S2): past them an envelope is a silent no-op. */
 export const MAX_OPEN_PROPOSALS_PER_CONTACT = 20;
 export const MAX_GIFTS_PER_CONTACT_PER_DAY = 20;
+/**
+ * Retention ceiling for contacts marks per contact (phase 4, carried from
+ * phase 3): past it the OLDEST rows go. A per-day cap keyed on `created_at`
+ * would be the sender's clock to game (payloadToMark takes it from the
+ * payload); a retention count needs no clock. The block list stays the
+ * hard stop.
+ */
+export const MAX_CONTACT_MARKS_PER_CONTACT = 50;
 
 async function safeEmit(emit, table, op, row) {
   if (!emit) return;
@@ -323,6 +331,27 @@ export async function listTrades(db, { now = Date.now(), limit = 20 } = {}) {
   });
 }
 
+/* ----------------------------------------------------------- retention */
+
+/**
+ * Keep only the newest `max` contacts-delivered marks by `author` (their
+ * x-only pubkey). Remote rows never emit (they were never ours to sync), so
+ * this is a plain delete. Returns how many rows went.
+ */
+export async function pruneContactMarks(db, author, max = MAX_CONTACT_MARKS_PER_CONTACT) {
+  if (typeof author !== "string" || author.length === 0) return 0;
+  const keep = Number.isInteger(max) && max >= 0 ? max : MAX_CONTACT_MARKS_PER_CONTACT;
+  const { rowsAffected } = await db.execute({
+    sql: `DELETE FROM ramble_marks
+           WHERE author = ? AND origin = 'remote' AND visibility = 'contacts'
+             AND id NOT IN (SELECT id FROM ramble_marks
+                             WHERE author = ? AND origin = 'remote' AND visibility = 'contacts'
+                             ORDER BY created_at DESC, id DESC LIMIT ?)`,
+    args: [author, author, keep],
+  });
+  return Number(rowsAffected) || 0;
+}
+
 /* --------------------------------------------------------- inbound router */
 
 /**
@@ -338,7 +367,15 @@ export async function receiveEnvelope(db, { crowId, pubkey, payload, eventId = n
     const row = payloadToMark(payload.mark, { author, eventId });
     if (!row) return { kind: "mark", inserted: false };
     const r = await insertRemoteMark(db, row);
-    return { kind: "mark", inserted: !!r.inserted, row: r.row ?? null, geohash: row.geohash, mark_id: row.mark_id, markKind: row.kind };
+    // Phase 4: a contact who floods marks is bounded by retention, not by
+    // their own created_at. Only an actual insert can push the count over.
+    // insertRemoteMark dedups on (nostr_event_id OR mark_id), so an old mark
+    // re-sent under a NEW event id after its row was pruned is inserted and
+    // pruned again in the same call — `gone` says so, so the transport does
+    // not announce a mark that is not there.
+    const pruned = r.inserted ? await pruneContactMarks(db, author) : 0;
+    const gone = pruned > 0 && !(await getMark(db, row.mark_id));
+    return { kind: "mark", inserted: !!r.inserted, row: r.row ?? null, geohash: row.geohash, mark_id: row.mark_id, markKind: row.kind, pruned, gone };
   }
   if (payload.type === "ramble.egg") {
     const r = await receiveGift(db, payload.egg, { fromCrowId: crowId, now, emit });
