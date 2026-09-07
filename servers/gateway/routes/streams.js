@@ -163,6 +163,43 @@ export default function streamsRouter(dashboardAuth, { interactiveEngine = () =>
     res.on("error", () => { bus.off("messages:changed", handler); bus.off("messages:receipt", receiptHandler); });
   });
 
+  // --- Ramble live nearby (Ramble phase 1, Task 13) ---
+  //
+  // servers/gateway/boot/ramble-transport.js (Task 10) emits
+  // `bus.emit("ramble:nearby", { geohash, mark_id, kind })` whenever a NEW
+  // remote mark/caw is inserted from the relays. The panel client (Task 12,
+  // bundles/ramble/panel/static/ramble.js) opens a bare EventSource on this
+  // path and refreshes its marks on ANY message — it does not need the full
+  // row, just a nudge plus enough to log/filter by. Plain SSE (not a Turbo
+  // Stream frame): the payload is consumed by client-side JS, not swapped
+  // into the DOM directly.
+  //
+  // The payload is allow-listed to exactly {geohash, mark_id, kind}, each
+  // coerced to string-or-null, so a future field added to the emit site
+  // never leaks to the client without a deliberate change here.
+  router.get("/dashboard/streams/ramble-nearby", (req, res) => {
+    const stream = openAuthedStream(req, res);
+    if (!stream) return;
+    const { sendRaw } = stream;
+
+    const handler = (payload) => {
+      try {
+        const out = {
+          geohash: payload?.geohash != null ? String(payload.geohash) : null,
+          mark_id: payload?.mark_id != null ? String(payload.mark_id) : null,
+          kind: payload?.kind != null ? String(payload.kind) : null,
+        };
+        sendRaw(`event: ramble-nearby\ndata: ${JSON.stringify(out)}\n\n`);
+      } catch {
+        // Subscriber isolation — never let a write/render error kill sibling streams.
+      }
+    };
+
+    bus.on("ramble:nearby", handler);
+    res.on("close", () => bus.off("ramble:nearby", handler));
+    res.on("error", () => bus.off("ramble:nearby", handler));
+  });
+
   // --- Glasses media state (C.5) ---
   //
   // Emits JSON payloads over SSE (not Turbo Stream frames) because the
