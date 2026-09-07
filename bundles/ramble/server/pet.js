@@ -10,13 +10,14 @@
  * completion of the local day feeds the pet via this module's own `feed()`
  * (never `feed.js` — that would be a circular import); a repeat is a no-op.
  *
- * `ramble_pet` is not YET in instance-sync's SYNCED_TABLES — it will
- * replicate starting Task 6. Until that lands, each instance's pet reflects
- * only that instance's own activity, but the write paths already call an
- * optional `emit("ramble_pet", "update", row)` hook (feed, chore, and eggs.js's
- * hatch are the only writers, so those are the only emit call sites) so Task
- * 6 has nothing left to plumb through this module. `petState`'s decay-on-read
- * write never emits — a GET must never queue a sync op.
+ * `ramble_pet` IS in instance-sync's SYNCED_TABLES (servers/sharing/
+ * instance-sync.js), keyed on its natural key `owner` (always 'self'), with
+ * last-writer-wins conflict resolution on `lamport_ts`. The write paths call
+ * an optional `emit("ramble_pet", "update", row)` hook, and `feed`, `doChore`,
+ * and eggs.js's hatch path are the ONLY emit call sites — `petState`'s
+ * decay-on-read write never emits, because a GET must never queue a sync op.
+ * Energy can therefore drift between instances between syncs (each applies
+ * its own decay independently); last-writer-wins on the next sync settles it.
  */
 
 import { localDay } from "./eggs.js";
