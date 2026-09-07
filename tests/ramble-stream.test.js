@@ -285,3 +285,8 @@ test("ramble-nest-claimed frame carries exactly egg_id and cell", () => {
     fireClose();
   }
 });
+
+test("the panel client subscribes to the ramble-nest-claimed frame by name", () => {
+  const client = readFileSync(join(__repo, "bundles/ramble/panel/static/ramble.js"), "utf8");
+  assert.ok(client.includes('addEventListener("ramble-nest-claimed"'));
+});

@@ -139,6 +139,13 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.doesNotMatch(sent, /id="ramble-map"/);
   assert.doesNotMatch(sent, /id="ramble-pet"/);
   assert.doesNotMatch(sent, /id="ramble-marks"/);
+
+  // Phase 2: the flock view and both doors into it.
+  assert.match(sent, /data-for="flock"/);
+  assert.match(sent, /id="rb-flock-birds"/);
+  assert.match(sent, /id="rb-shelf"/);
+  assert.match(sent, /id="rb-my-flock"/);
+  assert.match(sent, /id="rb-egg-flock"/);
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -503,6 +510,24 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // client reads the chosen audience off the button's data-visibility. Pin the
   // attribute name on BOTH sides so a rename cannot silently split them.
   assert.ok(body.includes('"data-visibility"'), "client must read the data-visibility attribute");
+
+  // Phase 2 wiring: nests for the viewport, the claim, the flock, the swap,
+  // the activation, and the third named SSE frame.
+  assert.ok(body.includes('"/api/ramble/nests?bbox="'), "client must fetch nests by bbox");
+  assert.ok(body.includes('"/api/ramble/nests/claim"'));
+  assert.ok(body.includes('"/api/ramble/flock"'));
+  assert.ok(body.includes('"/incubate"'));
+  assert.ok(body.includes('"/activate"'));
+  assert.ok(body.includes('addEventListener("ramble-nest-claimed"'), "client must subscribe to ramble-nest-claimed");
+  // The only markup sinks are engine output from a NUMBER (drawEgg via
+  // drawEggArt, and the nest pin's divIcon html); every user- or peer-supplied
+  // string goes through textContent. Comments are stripped first so prose
+  // (the file header mentions innerHTML) never trips the count.
+  const code = body.replace(/\/\*[\s\S]*?\*\//g, "");
+  const sinks = code.match(/\.innerHTML\s*=|\bhtml:\s/g) || [];
+  assert.equal(sinks.length, 2, `expected exactly two engine-output markup sinks, found ${sinks.length}`);
+  assert.ok(code.includes("el.innerHTML = Bird.drawEgg("));
+  assert.ok(code.includes("html: nestEggHtml("));
 });
 
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
@@ -523,6 +548,10 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.match(body, /#ramble\s*\{/);
   assert.match(body, /--rb-accent:/);
   assert.match(body, /prefers-reduced-motion/);
+
+  // Views switch by CSS alone: without this selector showView("flock") sets
+  // the attribute and the section stays display:none.
+  assert.match(body, /\[data-view="flock"\]\s*\.rb-view\[data-for="flock"\]/);
 });
 
 test("GET /ramble/static/leaflet/leaflet.js serves the vendored copy", async () => {
