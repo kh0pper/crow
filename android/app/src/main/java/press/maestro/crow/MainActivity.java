@@ -99,6 +99,17 @@ public class MainActivity extends AppCompatActivity {
                 pendingNeedCamera = false;
             });
 
+    private Runnable pendingLocationCallback;
+
+    private final ActivityResultLauncher<String[]> locationPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), grantResults -> {
+                Runnable callback = pendingLocationCallback;
+                pendingLocationCallback = null;
+                if (callback != null) {
+                    runOnUiThread(callback);
+                }
+            });
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -247,6 +258,7 @@ public class MainActivity extends AppCompatActivity {
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
+        settings.setGeolocationEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setUserAgentString(settings.getUserAgentString() + " CrowAndroid/" + BuildConfig.VERSION_NAME);
 
@@ -277,6 +289,16 @@ public class MainActivity extends AppCompatActivity {
                 Intent intent = new Intent(MainActivity.this, PairingActivity.class);
                 startActivity(intent);
             });
+        }
+
+        /**
+         * Let a panel suspend pull-to-refresh while it handles its own vertical
+         * drag gestures (e.g. the Ramble map). Called from the panel's own
+         * touchstart/touchend handlers, not from the scroll-probe above.
+         */
+        @JavascriptInterface
+        public void setPullToRefresh(boolean enabled) {
+            runOnUiThread(() -> swipeRefresh.setEnabled(enabled));
         }
     }
 
@@ -328,6 +350,28 @@ public class MainActivity extends AppCompatActivity {
     public boolean hasCameraPermission() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
                 == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** Check if app has FINE or COARSE location permission (called by CrowWebChromeClient) */
+    public boolean hasLocationPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED
+                || ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /**
+     * Request FINE + COARSE location permission, invoking {@code onResult} on the UI
+     * thread once the user has answered (the result is not passed back directly —
+     * the caller re-checks {@link #hasLocationPermission()} itself, e.g. from
+     * {@code CrowWebChromeClient#onGeolocationPermissionsShowPrompt}).
+     */
+    public void requestLocationPermission(Runnable onResult) {
+        pendingLocationCallback = onResult;
+        locationPermissionLauncher.launch(new String[]{
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+        });
     }
 
     /** Request RECORD_AUDIO and grant WebView permission on callback */

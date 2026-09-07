@@ -109,6 +109,10 @@ test("panel handler renders the map mount and the client script tag", async () =
   assert.match(sent, /id="ramble-pet"/);
   assert.match(sent, /id="ramble-marks"/);
   assert.match(sent, /name="grid-public-geo"/);
+  // Android WebView pull-to-refresh guard (fix/android-geolocation-map-swipe):
+  // the map must opt out of the browser/WebView's own touch gestures so a
+  // northward drag pans Leaflet instead of triggering SwipeRefreshLayout.
+  assert.match(sent, /touch-action:\s*none/);
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -247,6 +251,11 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.match(res.headers.get("content-type") || "", /javascript/);
   const body = await res.text();
   assert.ok(body.length > 100, "client script looks empty");
+  // Android pull-to-refresh guard: the client must call the native bridge
+  // to suspend/restore SwipeRefreshLayout around a touch on the map (this
+  // is the client half of the fix/android-geolocation-map-swipe change).
+  assert.match(body, /Crow\.setPullToRefresh\(false\)/);
+  assert.match(body, /Crow\.setPullToRefresh\(true\)/);
 });
 
 test("GET /ramble/static/leaflet/leaflet.js serves the vendored copy", async () => {
