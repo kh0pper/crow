@@ -233,6 +233,7 @@ test("ramble-hatched coerces missing fields to null instead of throwing", () => 
 test("closing the stream unsubscribes BOTH the nearby and the hatched listener", () => {
   const priorNearby = bus.listenerCount("ramble:nearby");
   const priorHatched = bus.listenerCount("ramble:hatched");
+  const priorClaimed = bus.listenerCount("ramble:nest-claimed");
 
   const handler = getRambleNearbyHandler();
   const { res, chunks, fireClose } = fakeRes();
@@ -240,10 +241,12 @@ test("closing the stream unsubscribes BOTH the nearby and the hatched listener",
 
   assert.equal(bus.listenerCount("ramble:nearby"), priorNearby + 1);
   assert.equal(bus.listenerCount("ramble:hatched"), priorHatched + 1);
+  assert.equal(bus.listenerCount("ramble:nest-claimed"), priorClaimed + 1);
 
   fireClose();
   assert.equal(bus.listenerCount("ramble:nearby"), priorNearby);
   assert.equal(bus.listenerCount("ramble:hatched"), priorHatched, "a leaked hatched listener writes to a dead response");
+  assert.equal(bus.listenerCount("ramble:nest-claimed"), priorClaimed);
 
   const before = chunks.length;
   bus.emit("ramble:hatched", { egg_id: "e2", species: "crow", seed: 1 });
@@ -260,4 +263,25 @@ test("erroring the stream unsubscribes the hatched listener too", () => {
   assert.equal(bus.listenerCount("ramble:hatched"), priorHatched + 1);
   fireError();
   assert.equal(bus.listenerCount("ramble:hatched"), priorHatched);
+});
+
+// --------------------------------------------------- nest claimed (phase 2)
+
+test("ramble-nest-claimed frame carries exactly egg_id and cell", () => {
+  const handler = getRambleNearbyHandler();
+  const { res, chunks, fireClose } = fakeRes();
+  handler({ dashboardSession: "tok-n1" }, res);
+  try {
+    const before = chunks.length;
+    bus.emit("ramble:nest-claimed", { egg_id: "e9", cell: "9v6m21h", warmth: 0, found_week: "2026-W37" });
+    const emitted = chunks.slice(before).join("");
+    const match = emitted.match(/event: ramble-nest-claimed\ndata: (.+)\n\n/);
+    assert.ok(match, "frame must carry a data: JSON payload");
+    assert.deepEqual(JSON.parse(match[1]), { egg_id: "e9", cell: "9v6m21h" });
+    assert.doesNotThrow(() => bus.emit("ramble:nest-claimed", {}));
+    const sparse = chunks.slice(before).join("").match(/event: ramble-nest-claimed\ndata: (.+)\n\n/g);
+    assert.equal(sparse.length, 2);
+  } finally {
+    fireClose();
+  }
 });
