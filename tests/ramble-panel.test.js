@@ -163,9 +163,14 @@ test("POST /api/ramble/marks stores a mark that then lists in its cell", async (
             visibility: "public", reveal: "open" },
   });
   assert.equal(res.status, 201);
-  const { mark } = await res.json();
+  const body = await res.json();
+  const { mark } = body;
   assert.ok(mark?.mark_id, "no mark_id in the response");
   assert.equal(mark.publish_state, "pending");
+  // The client branches on `out.hatched` after authoring — the key must always
+  // be there (null when this mark did not tip the egg over the threshold).
+  assert.ok("hatched" in body, "POST /api/ramble/marks must report `hatched`");
+  assert.equal(body.hatched, null);
 
   const inserted = emitCalls.filter((c) => c.table === "ramble_marks" && c.op === "insert");
   assert.equal(inserted.length, 1, "authoring must emit exactly one ramble_marks insert");
@@ -620,6 +625,9 @@ test("a locked mark lists as an approximate cell-centre teaser, then unlocks in 
   })).json();
   assert.equal(unlocked.unlocked, true);
   assert.equal(unlocked.content.content_text, "under the third oak");
+  // Same contract as authoring: the client reads `result.hatched` here.
+  assert.ok("hatched" in unlocked, "POST /api/ramble/unlock must report `hatched`");
+  assert.equal(unlocked.hatched, null);
 
   const petAfter = await (await req("/api/ramble/pet")).json();
   assert.equal(petAfter.unlocks_week, petBefore.unlocks_week + 1, "a successful unlock must feed unlock_mark");

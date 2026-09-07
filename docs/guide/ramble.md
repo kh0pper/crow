@@ -81,9 +81,11 @@ Each event is idempotent per its own key, so repeating the same real-world actio
 - **Meeting a crow** credits once per (persona, ISO week) pair.
 - **Leaving a mark** and **unlocking a mark** have no repeat key — every one is credited.
 
+Meeting crows is additionally capped at **5 credits per local calendar day** (`MEET_CROW_DAILY_CAP` in `bundles/ramble/server/eggs.js`) — a persona is just a pubkey anyone can mint, so without that ceiling a flood of spoofed personas could force hatch after hatch; meetings past the cap credit nothing and leave no ledger row.
+
 When warmth reaches the hatch threshold, a species and a seed are rolled server-side (`crypto.randomInt`, never `Math.random`, so the roll can't be predicted or replayed); the bird's look is unique to that seed. A new egg starts incubating immediately.
 
-Your active bird rides on your **public** caws and marks — the wire JSON carries `bird: { species, seed }` so other people see it on your pins. Contacts and "Just me" marks never reach the wire (see below), so they never carry a bird.
+Your active bird rides on your **public** caws and marks — the wire JSON carries `bird: { species, seed }` so other people see it on your pins. Contacts and "Just me" marks never reach the Nostr wire (see below), so the bird is omitted from the **wire** only: those rows still store `bird_species` / `bird_seed` locally and replicate, bird and all, to your own linked instances.
 
 Once a bird has hatched, the Nest header crow becomes it: its face reflects the pet's energy (see Chores), while the "!" alert badge is unrelated and still means host health, not pet mood.
 

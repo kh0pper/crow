@@ -81,9 +81,11 @@ Cada evento es idempotente según su propia clave, así que repetir la misma acc
 - **Encontrarte con un Crow** acredita una vez por par (persona, semana ISO).
 - **Dejar una marca** y **desbloquear una marca** no tienen clave de repetición — cada una se acredita.
 
+Encontrarte con Crows tiene además un tope de **5 acreditaciones por día calendario local** (`MEET_CROW_DAILY_CAP` en `bundles/ramble/server/eggs.js`): una persona no es más que una clave pública que cualquiera puede generar, así que sin ese techo una avalancha de personas falsas podría forzar eclosión tras eclosión; los encuentros por encima del tope no acreditan nada ni dejan fila en el registro.
+
 Cuando el calor alcanza el umbral de eclosión, se sortean una especie y una semilla del lado del servidor (`crypto.randomInt`, nunca `Math.random`, para que la tirada no se pueda predecir ni repetir); el aspecto del pájaro es único para esa semilla. Un huevo nuevo empieza a incubar de inmediato.
 
-Tu pájaro activo viaja en tus caws y marcas **públicas** — el JSON del cable lleva `bird: { species, seed }`, así que otras personas lo ven en tus pines. Las marcas de contactos y "solo para mí" nunca llegan al cable (ver abajo), así que nunca llevan pájaro.
+Tu pájaro activo viaja en tus caws y marcas **públicas** — el JSON del cable lleva `bird: { species, seed }`, así que otras personas lo ven en tus pines. Las marcas de contactos y "solo para mí" nunca llegan al cable de Nostr (ver abajo), así que el pájaro se omite solo del **cable**: esas filas siguen guardando `bird_species` / `bird_seed` localmente y se replican, con pájaro incluido, a tus propias instancias enlazadas.
 
 Una vez que un pájaro ha eclosionado, el crow de la cabecera del Nest se convierte en él: su cara refleja la energía de la mascota (ver Tareas), mientras que la insignia de alerta "!" es independiente y sigue significando la salud del host, no el ánimo de la mascota.
 

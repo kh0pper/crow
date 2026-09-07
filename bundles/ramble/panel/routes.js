@@ -299,6 +299,19 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     }
   }
 
+  /**
+   * The allow-listed hatch trio for a response body, or null. Every route that
+   * feeds activity reports it, because the panel client branches on
+   * `out.hatched` / `result.hatched` to run the hatch animation without
+   * waiting for the next poll. `null` covers both "nothing hatched" and "the
+   * best-effort feed was skipped or failed" — the request itself still
+   * succeeded, so the client simply has no hatch to show.
+   */
+  function hatchedPayload(fed) {
+    const egg = fed && fed.hatched;
+    return egg ? { egg_id: egg.egg_id, species: egg.species, seed: egg.seed } : null;
+  }
+
   async function getSetting(key) {
     const { rows } = await db.execute({ sql: "SELECT value FROM ramble_settings WHERE key = ?", args: [key] });
     return rows[0]?.value ?? null;
@@ -498,9 +511,9 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     // Awaited BEFORE the response so a client that immediately re-reads
     // /api/ramble/egg sees the credit (and so a hatch has already gone out on
     // the stream). Best-effort: warmth is never worth failing an author on.
-    await feedActivity({ type: "mark_left" });
+    const fed = await feedActivity({ type: "mark_left" });
 
-    res.status(201).json({ mark });
+    res.status(201).json({ mark, hatched: hatchedPayload(fed) });
   }));
 
   router.delete("/api/ramble/marks/:mark_id", handle(async (req, res) => {
@@ -531,11 +544,12 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (!MARK_ID_RE.test(markId)) bad("invalid mark_id");
     const result = await mods.marksMod.unlockMark(db, markId, { lat: requireLat(b.lat), lon: requireLon(b.lon) });
     if (result.missing) return res.status(404).json({ error: "not found" });
+    let fed = null;
     if (result.unlocked === true) {
       // feedAll, not petMod.feed: an unlock warms the egg as well as the pet.
-      await feedActivity({ type: "unlock_mark" });
+      fed = await feedActivity({ type: "unlock_mark" });
     }
-    res.json(result);
+    res.json({ ...result, hatched: hatchedPayload(fed) });
   }));
 
   // --- privacy grid ---------------------------------------------------------
