@@ -1,1 +1,0 @@
-commonjs/bird-svg.js

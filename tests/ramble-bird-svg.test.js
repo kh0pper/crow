@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const Bird = require("../bundles/ramble/server/bird-svg.js");
+const Bird = require("../bundles/ramble/server/bird-svg.cjs");
 
 test("roster is the lab flock and species table is complete", () => {
   assert.deepEqual(Bird.ROSTER, ["crow","raven","grackle","magpie","mockingbird","hummingbird","penguin","blackswan"]);
@@ -51,6 +51,6 @@ test("parts are overridable by name (asset-pack seam)", () => {
 
 test("no ESM syntax (must load as a classic browser script)", async () => {
   const { readFileSync } = await import("node:fs");
-  const src = readFileSync(new URL("../bundles/ramble/server/bird-svg.js", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../bundles/ramble/server/bird-svg.cjs", import.meta.url), "utf8");
   assert.ok(!/^\s*(import|export)\s/m.test(src));
 });
