@@ -158,6 +158,7 @@ test("allowlist + exclusions for eggs/pet", () => {
   assert.ok(EXCLUDED_COLUMNS.ramble_eggs.includes("lamport_ts"));
   assert.ok(EXCLUDED_COLUMNS.ramble_pet.includes("lamport_ts"));
   assert.equal(shouldSyncRow("ramble_eggs", { warmth: 1 }), false);
+  assert.equal(shouldSyncRow("ramble_eggs", { egg_id: "x" }), true);
   assert.equal(shouldSyncRow("ramble_pet", { owner: "other" }), false);
   assert.equal(shouldSyncRow("ramble_pet", { owner: "self" }), true);
 });
@@ -200,6 +201,12 @@ test("two instances' incubating eggs converge deterministically (older wins, los
   got = await b.execute("SELECT egg_id, status FROM ramble_eggs WHERE egg_id IN ('peer-a','peer-b') ORDER BY egg_id");
   assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status]), [["peer-a", "incubating"], ["peer-b", "shelf"]]);
   assert.equal((await b.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
+  // Tie on created_at → the lexically lower egg_id wins ("aaa-tie" < "peer-a"),
+  // so the tiebreak is a total order and both sides reach the same answer.
+  await applyRemoteOp(b, "ramble_eggs", "insert", { egg_id: "aaa-tie", status: "incubating", warmth: 1, created_at: 1000 }, 6);
+  got = await b.execute("SELECT egg_id, status FROM ramble_eggs WHERE egg_id IN ('aaa-tie','peer-a') ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status]), [["aaa-tie", "incubating"], ["peer-a", "shelf"]]);
+  assert.equal((await b.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
 });
 
 test("a synced mark keeps its bird", async () => {
@@ -214,4 +221,21 @@ test("apply door: pet upserts by owner and ignores deletes", async () => {
   assert.equal(got.rows[0].energy, 31); assert.equal(got.rows[0].active_egg_id, "e1");
   await applyRemoteOp(b, "ramble_pet", "delete", { owner: "self" }, 3);
   assert.equal((await b.execute("SELECT 1 FROM ramble_pet WHERE owner='self'")).rows.length, 1);
+});
+
+test("a locally hatched egg never competes for the incubating slot", async () => {
+  // A hatches e1 and mints successor e2. Offline B credits warmth to the egg it
+  // still believes is incubating (e1) and emits it at a higher lamport. Gating
+  // convergence on the INCOMING status alone would shelve e2 (e1's created_at is
+  // older) while the hatch-one-way CASE keeps e1 hatched — leaving A with ZERO
+  // incubating eggs, every cycle, silently discarding the warmth.
+  const c = createClient({ url: "file::memory:" }); await initRambleTables(c);
+  await c.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, warmth, species, seed, created_at, hatched_at, lamport_ts) VALUES ('e1','hatched',100,'crow',7,1000,1500,4)", args: [] });
+  await c.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('e2','incubating',20,2000)", args: [] });
+
+  await applyRemoteOp(c, "ramble_eggs", "update", { egg_id: "e1", status: "incubating", warmth: 50, created_at: 1000 }, 9);
+
+  const got = await c.execute("SELECT egg_id, status FROM ramble_eggs ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status]), [["e1", "hatched"], ["e2", "incubating"]]);
+  assert.equal((await c.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
 });
