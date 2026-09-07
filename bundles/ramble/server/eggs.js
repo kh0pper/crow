@@ -48,7 +48,13 @@ async function readSetting(db, key) {
   }
 }
 
-/** Settings `warmth.<k>` override WARMTH_DEFAULTS, parsed as ints only (a non-numeric override is ignored). */
+/**
+ * Settings `warmth.<k>` override WARMTH_DEFAULTS, parsed as ints only (a
+ * non-numeric override is ignored, same as if unset). A negative override is
+ * also ignored for the event weights (a weight can't un-credit warmth), and
+ * `hatch_at` additionally requires >= 1 (a hatch threshold of 0 or below
+ * would hatch every fresh, zero-warmth egg on read).
+ */
 export async function readWarmthWeights(db) {
   const weights = { ...WARMTH_DEFAULTS };
   for (const key of Object.keys(WARMTH_DEFAULTS)) {
@@ -56,7 +62,9 @@ export async function readWarmthWeights(db) {
     const raw = await readSetting(db, `warmth.${key}`);
     if (raw == null) continue;
     const parsed = Number.parseInt(raw, 10);
-    if (Number.isFinite(parsed)) weights[key] = parsed;
+    if (!Number.isFinite(parsed)) continue;
+    const min = key === "hatch_at" ? 1 : 0;
+    if (parsed >= min) weights[key] = parsed;
   }
   return weights;
 }
@@ -83,20 +91,24 @@ export function localDay(ms) {
 
 /**
  * The credit ledger key for an event, or null (mark_left/unlock_mark: always
- * credited, no repeat key) or { skip: true } (chore/quiet_tick: pet-only,
- * never touches the ledger or the egg). Unknown types fall through to the
- * caller's not-credited handling in creditWarmth (no key is returned or
- * needed since creditWarmth checks the type again before crediting).
+ * credited, no repeat key), { skip: true } (chore/quiet_tick: pet-only,
+ * never touches the ledger or the egg), or { invalid: true } (a keyed type
+ * missing the field its key is built from — `visit_place` without `cell`,
+ * `meet_crow` without `persona` — which must NOT fall back to "always
+ * credited": that's the `null` sentinel's meaning, reserved for the
+ * genuinely unkeyed types). Unknown types fall through to the caller's
+ * not-credited handling in creditWarmth (no key is returned or needed since
+ * creditWarmth checks the type again before crediting).
  */
 export function creditKey(event, { now }) {
   switch (event?.type) {
     case "visit_place":
-      if (!event.cell) return null;
+      if (!event.cell) return { invalid: true };
       return { kind: "visit_place", key: `${event.cell}:${isoWeek(now)}` };
     case "checkin":
       return { kind: "checkin", key: localDay(now) };
     case "meet_crow":
-      if (!event.persona) return null;
+      if (!event.persona) return { invalid: true };
       return { kind: "meet_crow", key: `${event.persona}:${isoWeek(now)}` };
     case "mark_left":
     case "unlock_mark":
@@ -192,17 +204,22 @@ export async function hatchIfReady(db, { now, emit } = {}) {
  * first and is authoritative: rowsAffected === 0 means this (kind, key) was
  * already credited, so the call is a no-op that reports the egg's current
  * warmth. Only after a successful insert does the egg's warmth get bumped.
+ *
+ * The not-credited path (unknown type, `chore`/`quiet_tick`, or a keyed type
+ * missing its key field) is a PURE READ: it must never create an egg or
+ * emit, so a stream of malformed/pet-only events against a fresh instance
+ * leaves `ramble_eggs` untouched.
  */
 export async function creditWarmth(db, event, { now, emit } = {}) {
   const notCredited = async () => {
-    const egg = await ensureIncubatingEgg(db, { now, emit });
+    const egg = await getIncubatingEgg(db);
     return { credited: false, warmth: egg ? egg.warmth : 0, hatched: null };
   };
 
   if (!event || !KNOWN_TYPES.has(event.type)) return notCredited();
 
   const key = creditKey(event, { now });
-  if (key && key.skip) return notCredited();
+  if (key && (key.skip || key.invalid)) return notCredited();
 
   const egg = await ensureIncubatingEgg(db, { now, emit });
 
@@ -220,7 +237,7 @@ export async function creditWarmth(db, event, { now, emit } = {}) {
 
   const weights = await readWarmthWeights(db);
   const delta = weights[event.type] ?? 0;
-  const newWarmth = Math.min(weights.hatch_at, egg.warmth + delta);
+  const newWarmth = Math.max(0, Math.min(weights.hatch_at, egg.warmth + delta));
 
   await db.execute({ sql: "UPDATE ramble_eggs SET warmth = ? WHERE egg_id = ?", args: [newWarmth, egg.egg_id] });
   const { rows } = await db.execute({ sql: "SELECT * FROM ramble_eggs WHERE egg_id = ?", args: [egg.egg_id] });
@@ -248,7 +265,7 @@ export async function activeBird(db) {
 export async function eggState(db, { now } = {}) {
   const egg = await ensureIncubatingEgg(db, { now });
   const weights = await readWarmthWeights(db);
-  const percent = weights.hatch_at > 0 ? Math.min(100, Math.round((egg.warmth / weights.hatch_at) * 100)) : 0;
+  const percent = weights.hatch_at > 0 ? Math.max(0, Math.min(100, Math.round((egg.warmth / weights.hatch_at) * 100))) : 0;
 
   const week = isoWeek(now);
   const { rows: placeRows } = await db.execute({
