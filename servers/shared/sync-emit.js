@@ -15,7 +15,7 @@
 
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import { readSetting } from "../gateway/dashboard/settings/registry.js";
-import { SYNCED_TABLES, shouldSyncRow, shouldInitInstanceSync } from "../sharing/instance-sync.js";
+import { SYNCED_TABLES, EXCLUDED_COLUMNS, shouldSyncRow, shouldInitInstanceSync } from "../sharing/instance-sync.js";
 import {
   ensureSyncTables,
   seedCounterSql,
@@ -205,6 +205,18 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
 
     await enforceOutboxCap(db);
 
+    // Strip excluded columns before the row lands in row_json — parity with
+    // the live manager's emitChange (instance-sync.js), which strips the
+    // same set before broadcasting. Without this, a caller that emits a raw
+    // DB row (e.g. `SELECT * FROM ramble_trades` / ramble_pet's getPetRow)
+    // leaks lamport_ts — and any other excluded, per-instance column — into
+    // the queued wire payload (found by the ramble_trades outbox-door test;
+    // stampSql/shape-detection below still uses the ORIGINAL row, since no
+    // natural key column is ever excluded).
+    const excludedCols = EXCLUDED_COLUMNS[table] || [];
+    const wireRow = excludedCols.length ? { ...row } : row;
+    for (const col of excludedCols) delete wireRow[col];
+
     const preserveLamport = Number.isFinite(opts.lamportTs) ? Number(opts.lamportTs) : null;
 
     if (preserveLamport !== null) {
@@ -216,7 +228,7 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
         const stampStmt = stampSql(table, row, preserveLamport);
         if (stampStmt) statements.push(stampStmt);
       }
-      statements.push(outboxInsertLiteralSql(table, op, row, preserveLamport));
+      statements.push(outboxInsertLiteralSql(table, op, wireRow, preserveLamport));
 
       await db.batch(statements);
       return { queued: true, lamport: preserveLamport };
@@ -233,7 +245,7 @@ export async function emitOrQueue(syncManager, db, table, op, row, opts = {}) {
       const stampStmt = subselectStampSql(table, row, instanceId);
       if (stampStmt) statements.push(stampStmt);
     }
-    statements.push(outboxInsertSql(table, op, row, instanceId));
+    statements.push(outboxInsertSql(table, op, wireRow, instanceId));
 
     const results = await db.batch(statements);
     const lamport = Number(results[bumpIdx]?.rows?.[0]?.local_counter);

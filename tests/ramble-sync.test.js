@@ -483,3 +483,46 @@ test("outbox door: a claimed egg (no manager) is queued and stamped with its 'us
   assert.equal(wire.shelf_origin, "user", "the origin must travel so a peer never auto-promotes it");
   assert.equal(Number(queued.rows[0].lamport_ts), Number(local.rows[0].lamport_ts));
 });
+
+test("phase 3: allowlist + exclusions + gate for ramble_trades", () => {
+  assert.ok(SYNCED_TABLES.includes("ramble_trades"));
+  assert.deepEqual(EXCLUDED_COLUMNS.ramble_trades, ["lamport_ts"]);
+  assert.equal(shouldSyncRow("ramble_trades", null), false);
+  assert.equal(shouldSyncRow("ramble_trades", { counterpart: "crow:x" }), false, "keyless rows never sync");
+  assert.equal(shouldSyncRow("ramble_trades", { trade_id: "t1" }), true);
+});
+
+test("phase 3 outbox door: a trade write with no manager queues and is stamped by trade_id", async () => {
+  await a.execute({ sql: "INSERT INTO ramble_trades (trade_id, counterpart, role, my_egg_id, state, created_at, updated_at, expires_at) VALUES ('t-out','crow:peer','proposer','egg-1','proposed',10,10,999)", args: [] });
+  const { rows } = await a.execute("SELECT * FROM ramble_trades WHERE trade_id='t-out'");
+  const res = await emitOrQueue(null, a, "ramble_trades", "insert", rows[0]);
+  assert.ok(res && res.queued, "emitOrQueue returned null — missing stampSql branch or lamport_ts?");
+  const stamped = await a.execute("SELECT lamport_ts FROM ramble_trades WHERE trade_id='t-out'");
+  assert.ok(Number(stamped.rows[0].lamport_ts) > 0, "trade row was never stamped — missing stampSql branch?");
+  const queued = await a.execute("SELECT row_json, lamport_ts FROM sync_outbox WHERE table_name='ramble_trades' ORDER BY id DESC LIMIT 1");
+  const wire = JSON.parse(queued.rows[0].row_json);
+  assert.equal(wire.trade_id, "t-out");
+  assert.equal(wire.role, "proposer");
+  assert.equal(wire.state, "proposed");
+  assert.ok(!("lamport_ts" in wire), "lamport rides the envelope, never the row");
+  assert.equal(Number(queued.rows[0].lamport_ts), Number(stamped.rows[0].lamport_ts));
+});
+
+test("phase 3 apply door: trade insert, LWW by envelope lamport, update, delete by trade_id", async () => {
+  const row = { trade_id: "t-in", counterpart: "crow:peer", role: "acceptor", my_egg_id: null, their_egg_id: "egg-9", offer_json: '{"warmth":40}', state: "proposed", created_at: 5, updated_at: 5, expires_at: 99 };
+  await applyRemoteOp(b, "ramble_trades", "insert", row, 5);
+  await applyRemoteOp(b, "ramble_trades", "update", { ...row, state: "declined" }, 3); // stale
+  let got = await b.execute("SELECT state, role, their_egg_id FROM ramble_trades WHERE trade_id='t-in'");
+  assert.deepEqual([got.rows[0].state, got.rows[0].role, got.rows[0].their_egg_id], ["proposed", "acceptor", "egg-9"]);
+  await applyRemoteOp(b, "ramble_trades", "update", { ...row, state: "accepted", my_egg_id: "egg-2", updated_at: 7 }, 7);
+  await applyRemoteOp(b, "ramble_trades", "update", { ...row, state: "accepted", my_egg_id: "egg-2", updated_at: 7 }, 7); // idempotent re-delivery
+  got = await b.execute("SELECT state, my_egg_id, lamport_ts FROM ramble_trades WHERE trade_id='t-in'");
+  assert.deepEqual([got.rows[0].state, got.rows[0].my_egg_id, Number(got.rows[0].lamport_ts)], ["accepted", "egg-2", 7]);
+  // created_at is immutable on conflict
+  await applyRemoteOp(b, "ramble_trades", "update", { ...row, created_at: 1, state: "completed" }, 8);
+  got = await b.execute("SELECT created_at, state FROM ramble_trades WHERE trade_id='t-in'");
+  assert.deepEqual([got.rows[0].created_at, got.rows[0].state], [5, "completed"]);
+  await applyRemoteOp(b, "ramble_trades", "delete", { trade_id: "t-in" }, 9);
+  assert.equal((await b.execute("SELECT 1 FROM ramble_trades WHERE trade_id='t-in'")).rows.length, 0);
+  await assert.doesNotReject(applyRemoteOp(b, "ramble_trades", "update", { counterpart: "x" }, 10), "a keyless row is ignored, never thrown on");
+});

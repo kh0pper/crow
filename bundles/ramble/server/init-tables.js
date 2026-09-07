@@ -160,4 +160,45 @@ export async function initRambleTables(db) {
       claimed_at INTEGER NOT NULL,
       PRIMARY KEY (cell, week)
     );`);
+
+  // Phase 3: egg swaps. REPLICATED (the user's own instances show the same
+  // open offers) — natural key trade_id, lamport_ts for the envelope LWW
+  // (servers/sharing/instance-sync.js applyRambleTrade). `role` says which
+  // side of the swap this instance's user is; `offer_json` is the sanitized
+  // summary of the counterpart's egg as it arrived (display only; the egg
+  // itself is materialized from the completing envelope); `expires_at` is
+  // created_at + TRADE_TTL_MS, swept locally on the drain tick.
+  await initTable(db, "ramble_trades", `
+    CREATE TABLE IF NOT EXISTS ramble_trades (
+      trade_id TEXT PRIMARY KEY,
+      counterpart TEXT NOT NULL,
+      role TEXT NOT NULL,
+      my_egg_id TEXT,
+      their_egg_id TEXT,
+      offer_json TEXT,
+      state TEXT NOT NULL DEFAULT 'proposed',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      lamport_ts INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS ramble_trades_state ON ramble_trades(state);`);
+
+  // Phase 3: the contacts-delivery queue. LOCAL by design, exactly like
+  // ramble_tombstones: one row per (recipient, thing to send); the gateway
+  // transport turns each into one NIP-44 DM and deletes the row once a relay
+  // accepted it. No lamport_ts, never in SYNCED_TABLES — only the instance
+  // that authored a mark/gift/offer, or answered a swap step, delivers it (a
+  // replicated copy on the user's other Crow must not send it a second time).
+  await initTable(db, "ramble_outbox", `
+    CREATE TABLE IF NOT EXISTS ramble_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      to_crow_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      ref_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ramble_outbox_ref ON ramble_outbox(kind, ref_id);`);
 }
