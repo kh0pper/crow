@@ -18,8 +18,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import bus from "../servers/shared/event-bus.js";
 import streamsRouter from "../servers/gateway/routes/streams.js";
+
+const __repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // --- fake res: full openStream/openAuthedStream surface (mirrors
 // tests/messages-stream-events.test.js's fakeRes exactly) ---
@@ -60,6 +65,24 @@ function getRambleNearbyHandler() {
   assert.ok(layer, "route /dashboard/streams/ramble-nearby must be registered");
   return layer.route.stack[0].handle;
 }
+
+// Cross-seam guard. The route sends a NAMED frame ("event: ramble-nearby"),
+// and EventSource.onmessage fires ONLY for unnamed ("message") frames — so a
+// client wired with `stream.onmessage` never sees a single update while every
+// server-side test above passes. That defect shipped through 14 task reviews
+// precisely because no test looked at both sides at once. This one does: it
+// reads the client as text and pins it to the frame name the server emits.
+test("the panel client listens for the SERVER'S named frame, not onmessage", () => {
+  const client = readFileSync(join(__repo, "bundles/ramble/panel/static/ramble.js"), "utf8");
+  assert.ok(
+    client.includes('addEventListener("ramble-nearby"'),
+    "client must subscribe to the named ramble-nearby event"
+  );
+  assert.ok(
+    !client.includes("stream.onmessage"),
+    "onmessage never fires for a named SSE frame — the live map would silently never refresh"
+  );
+});
 
 test("ramble-nearby stream emits one SSE frame per ramble:nearby with only the allowed keys", () => {
   const handler = getRambleNearbyHandler();

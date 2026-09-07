@@ -52,7 +52,7 @@ const WORLD_AUTHOR = getPublicKey(fakeDerive(SEED, "ramble-world").secp256k1Priv
  * `state` is mutable mid-test: `accept` (does a relay take the event),
  * `throwErr` (publish rejects), `delayMs` (publish is slow — for re-entrancy).
  */
-async function makeHarness({ shouldPublish, autoStart = false } = {}) {
+async function makeHarness({ shouldPublish, autoStart = false, emit } = {}) {
   const db = createClient({ url: "file::memory:" });
   const bus = new EventEmitter();
   const published = [];
@@ -85,17 +85,19 @@ async function makeHarness({ shouldPublish, autoStart = false } = {}) {
     _derive: fakeDerive,
     shouldPublish,
     autoStart,
+    ...(emit ? { emit } : {}),
   });
   return { db, bus, published, closedSubs, state, transport, relay };
 }
 
 /** One pending public mark at the fixture coordinates. */
-function seedPublicMark(db, text = "hello wire") {
+function seedPublicMark(db, text = "hello wire", extra = {}) {
   return createMark(db, {
     author: WORLD_AUTHOR, author_level: "rotating", kind: "mark",
     anchor: { anchor_kind: "geo", lat: LAT, lon: LON, accuracy_m: 12 },
     visibility: "public", reveal: "open",
     content: { content_text: text, content_kind: "none" },
+    ...extra,
   });
 }
 
@@ -315,6 +317,32 @@ test("default gate (Task 11): with the grid at defaults, a pending public mark i
   assert.equal(row.publish_state, "pending");
 });
 
+test("R19: the drain tick sweeps expired marks BEFORE publishing, and the delete rides the sync emit hook", async () => {
+  const emitted = [];
+  const h = await makeHarness({ emit: (table, op, row) => { emitted.push([table, op, row]); } });
+  // Grid fully ON: if the sweep did not run first, this row WOULD be published.
+  await setMaster(h.db, true);
+  await setCell(h.db, "public", "geo", true);
+  const doomed = await seedPublicMark(h.db, "already stale", { ttlSeconds: -1 });
+  const live = await seedPublicMark(h.db, "still fresh");
+
+  const result = await h.transport.drainOnce();
+
+  assert.equal(result.expired, 1, "the tick must report the row it swept");
+  assert.equal(await getMark(h.db, doomed.mark_id), null, "the expired row must be gone from the table");
+  assert.ok(await getMark(h.db, live.mark_id), "a live row must survive the sweep");
+
+  const deletes = emitted.filter(([table, op]) => table === "ramble_marks" && op === "delete");
+  assert.equal(deletes.length, 1, "exactly one delete on the sync emit hook");
+  assert.equal(deletes[0][2].mark_id, doomed.mark_id, "the delete must carry the swept row");
+
+  // Nothing expired reached the wire; the live row still did.
+  assert.equal(result.published, 1);
+  assert.equal(h.published.length, 1);
+  const stale = h.published.find((e) => (e.content ?? "").includes("already stale"));
+  assert.equal(stale, undefined, "an expired mark must never be published");
+});
+
 test("re-entrancy: two concurrent drains publish the one pending mark exactly once", async () => {
   const h = await makeHarness();
   await setMaster(h.db, true);
@@ -410,5 +438,5 @@ test("stop(): clears the filter, closes every sub handle, and removes its bus li
   // Idempotent, and a post-stop drain is a no-op.
   transport.stop();
   const result = await transport.drainOnce();
-  assert.deepEqual(result, { published: 0, skipped: 0, failed: 0 });
+  assert.deepEqual(result, { published: 0, skipped: 0, failed: 0, expired: 0 });
 });

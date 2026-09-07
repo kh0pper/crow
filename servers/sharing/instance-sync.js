@@ -322,10 +322,12 @@ export function shouldSyncRow(table, row) {
   if (table === "ramble_settings") {
     if (!row || !row.key) return false;
     // Ruling R3: `local.`-prefixed keys are per-instance by construction
-    // (local.active_area is where THIS device is; local.tombstones is what
-    // THIS device has already dismissed). Replicating them would teleport one
-    // instance's location/dismissals onto every other. One gate, both
-    // directions — this function is the shared emit + apply choke point.
+    // (local.active_area is THIS device's current map view; local.session_id
+    // is THIS boot's rotating-caw session). Replicating them would teleport
+    // one instance's location onto every other, and would make two instances
+    // sign caws with one another's session key. One gate, both directions —
+    // this function is the shared emit + apply choke point. (Deletes are not
+    // a setting at all: they live in the `ramble_tombstones` table.)
     return !String(row.key).startsWith("local.");
   }
   if (table !== "dashboard_settings") return true;

@@ -23,6 +23,15 @@ test("withinRange respects accuracy for geo, exact for lan", () => {
   assert.equal(withinRange(lan, { ref: "xyz" }), false);
 });
 
+test("an explicit 0 m accuracy is honoured, not replaced by the 75 m default", () => {
+  // `|| 75` would treat 0 as "unset" and open a 75 m radius on an anchor whose
+  // author asked for an exact point.
+  const anchor = { anchor_kind: "geo", lat: 30.2672, lon: -97.7431, accuracy_m: 0 };
+  assert.equal(withinRange(anchor, { lat: 30.2672, lon: -97.7431 }), true, "the exact point is in range");
+  // ~1 m north (1e-5 deg latitude is ~1.11 m).
+  assert.equal(withinRange(anchor, { lat: 30.26721, lon: -97.7431 }), false, "1 m away must be out of range");
+});
+
 test("saltedLanId is deterministic and hides the bssid", () => {
   const id = saltedLanId("aa:bb:cc:dd:ee:ff", "s1");
   assert.equal(id, saltedLanId("aa:bb:cc:dd:ee:ff", "s1"));

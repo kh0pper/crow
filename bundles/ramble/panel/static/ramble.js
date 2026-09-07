@@ -306,7 +306,9 @@
   /* Task 13 adds the server side; until then a 404 must be silent. */
   try {
     var stream = new EventSource("/dashboard/streams/ramble-nearby");
-    stream.onmessage = function () { refreshMarks(); refreshPet(); };
+    /* The server sends NAMED frames ("event: ramble-nearby"), and onmessage
+       only ever fires for UNNAMED ones -- it must be addEventListener. */
+    stream.addEventListener("ramble-nearby", function () { refreshMarks(); refreshPet(); });
     stream.onerror = function () { /* quiet: the stream may not exist yet */ };
   } catch (err) { /* no EventSource, no live updates */ }
 
