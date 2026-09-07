@@ -9,7 +9,7 @@ Ramble es una extensión de proximidad: dejas **marcas** (notas ancladas a un lu
 La fase 1 es deliberadamente estrecha:
 
 - **Solo geo.** La rejilla de privacidad tiene canales `ble` y `lan`, pero solo `geo` está conectado.
-- **Solo el cable público.** Las marcas con visibilidad `contacts` o `groups` se guardan y se replican entre tus propias instancias de Crow, pero nunca se publican a los relays. La entrega a contactos/grupos es la fase 1b.
+- **Contactos y grupos viajan como DMs.** Las marcas con visibilidad `contacts` o `group:<uid>` se sellan para cada destinatario (NIP-44, un DM por contacto) y nunca tocan un relay público en claro — ver más abajo. Regalos e intercambios usan la misma puerta.
 - Las marcas públicas `locked` son una **puerta del cliente, no criptografía.** El contenido está en el relay en claro; el panel simplemente se niega a mostrarlo hasta que pruebes proximidad. No pongas un secreto en una.
 
 ## Privacidad
@@ -37,8 +37,8 @@ Valores de `publish_state`:
 
 | Valor | Significado |
 |---|---|
-| `pending` | Esperando un tick, o la rejilla está cerrada, o es una marca no pública (que nunca se publica en la fase 1). |
-| `published` | Al menos un relay aceptó el evento. |
+| `pending` | Esperando un tick de drenaje, o la puerta de la rejilla está cerrada, o (contactos/grupo) el DM de algún destinatario aún no ha sido aceptado por un relay. |
+| `published` | Al menos un relay aceptó el evento — o, para una marca de contactos/grupo, el DM de cada destinatario fue aceptado (una marca sin nadie a quien enviarla se marca publicada al instante). |
 | `synced` | Escrita por instance sync desde otro de tus propios Crows. |
 | `remote` | Recibida de un relay — la marca de otra persona. |
 | `failed` | Aparcada tras 20 intentos rechazados, para que una fila envenenada no ocupe un espacio del drenaje para siempre. |
@@ -115,6 +115,24 @@ Siempre incuba exactamente un huevo. Desde la pantalla **Bandada** puedes **incu
 
 Cada pájaro eclosionado se queda en tu bandada. La pantalla **Bandada** (`GET /api/ramble/flock`) los lista con el **activo** marcado — ese es el pájaro que aparece en tu mapa, en la cabecera del Nest y en tus caws públicos — y tocar otro pájaro lo activa (`POST /api/ramble/birds/:id/activate`). La puntuación es especies encontradas de 8 posibles; un segundo pájaro de una especie que ya tienes sigue siendo un pájaro, solo que no es una especie nueva.
 
+## Contactos y grupos
+
+Una marca para **Contactos** llega a cada contacto completo (no bloqueado, no bot, no una solicitud pendiente) como un DM NIP-44 individual, firmado con la clave de esta instancia — la misma puerta que usa cualquier DM de Crow. Una marca para un **Grupo** llega a los miembros de ese grupo de contactos (`group:<group_uid>`, los grupos del panel Contactos; el panel de Ramble solo muestra la audiencia Grupo cuando tienes alguno). La única etiqueta del DM es el destinatario; el texto, el lugar y el pájaro de la marca van cifrados. Nada de una marca para contactos o grupo llega a un relay en claro.
+
+La entrega se encola, no es inmediata: al escribir se crea una fila de `ramble_outbox` por destinatario y el transporte del gateway las envía en su tick de drenaje (cada 15 s, o al instante si escribes desde el panel). Una marca para contactos pasa por la rejilla de privacidad igual que una pública — la celda `contacts` (o `groups`) × `geo` y el interruptor maestro deben estar activados, o espera en la cola. La fila pasa a `published` cuando el DM de cada destinatario ha sido aceptado por un relay (o descartado porque ese contacto ya no existe). Quien la recibe la guarda como una marca de contactos persistente, con el nombre del contacto, y cuenta como haber conocido a su pájaro para el calor.
+
+La entrega a contactos es solo entre contactos en ambas direcciones: un DM de este tipo de alguien que no es contacto se descarta y nunca se convierte en una solicitud de mensaje. El pin de un desconocido en tu mapa ofrece **Compartir una invitación**, que abre el panel Contactos — primero haceos contactos, luego intercambiad.
+
+La cola es por instancia: solo el Crow desde el que escribiste envía una marca, un regalo o una oferta. Todos tus Crows comparten una misma identidad Nostr, así que cada uno recibe lo que un contacto envía y lo aplica; luego las filas coinciden mediante instance sync. Un paso de intercambio que un contacto responde se completa en cada uno de tus Crows, y cada uno envía la confirmación — el contacto simplemente ignora las copias.
+
+## Regalos e intercambios
+
+Cualquier huevo sin eclosionar de tu estante — recogido de un nido o recibido de alguien — se puede **regalar** a un contacto (`POST /api/ramble/eggs/:id/gift { crow_id }`, herramienta `ramble_gift_egg`). El huevo sale de tu estante como `gifted` y llega al suyo como `received`, aún sin eclosionar: el cable solo lleva `{ egg_id, warmth, found_cell, found_week }`, nunca una especie ni una semilla — quien lo haga eclosionar tira el pájaro. Un huevo recibido se muestra como "Un regalo · de <nombre>" y se puede incubar, regalar de nuevo u ofrecer en un intercambio. Los huevos recibidos no ocupan ninguna de las cinco plazas de recogida. Un regalo entregado dos veces se guarda una sola vez; un huevo que diste y te devuelven simplemente vuelve a tu estante.
+
+Un **intercambio** es una oferta de uno de tus huevos por uno de los suyos (`POST /api/ramble/trades { egg_id, crow_id }`, herramienta `ramble_propose_swap`). El contacto ve la oferta en su pantalla Bandada y responde con un huevo de su elección (**Aceptar**, `POST /api/ramble/trades/:id/accept { egg_id }`) o **Rechazar**; tú puedes **Retirar** una oferta sin respuesta. Los huevos cambian de manos solo cuando el intercambio se completa — en cada lado, de forma atómica — y un huevo nombrado por una oferta abierta queda bloqueado (no se puede incubar, regalar ni ofrecer de nuevo hasta que la oferta se cierre). Las ofertas caducan a los siete días en cada lado; una oferta caducada libera el huevo. Si tu respuesta llega cuando la oferta ya caducó en su lado, responden con un rechazo y tu huevo queda libre. Aceptar y rechazar son acciones del panel (no hay herramienta MCP para ellas).
+
+Todo esto es solo entre contactos, va cifrado y tiene límites: un contacto puede tener como máximo 20 ofertas abiertas contigo y darte como máximo 20 huevos al día; lo que pase de ahí se ignora. Una oferta, una respuesta o una finalización que nombre un huevo que todavía tienes se ignora. No hay mercado, ni registro de valor, ni escasez: si los dos lados discrepan justo en el momento en que una oferta caduca, el peor caso es un huevo duplicado, nunca uno perdido. Conocer a un contacto a través de una marca cuenta para el calor igual que conocer a un desconocido (por clave, por semana).
+
 ## Marcas solo para mí
 
 Las marcas con `visibility: "private"` son solo para ti: nunca salen de la instancia por Nostr, así que ningún relay ni contacto las ve jamás. A diferencia de las marcas públicas y de contactos, son **persistentes por defecto** (sin TTL) y **abiertas por defecto** (sin puerta de proximidad).
@@ -177,8 +195,10 @@ Cada peso de la tabla anterior es también un override de `ramble_settings`, le�
 | `ramble_flock` | Tu bandada: pájaros, el estante, el huevo incubando, especies encontradas. |
 | `ramble_nests` | Nidos cerca de una ubicación esta semana, los más cercanos primero, marcando tus recogidas. |
 | `ramble_claim_nest` | Recoger el nido en el que estás (o una celda indicada a menos de 75 m) para conseguir un huevo en el estante. |
+| `ramble_gift_egg` | Regalar un huevo sin eclosionar del estante a un contacto (encolado como un DM cifrado). |
+| `ramble_propose_swap` | Ofrecer un huevo del estante a un contacto a cambio de uno de los suyos; ellos eligen qué devolver. |
 
-Los grupos (`ramble_group_create` / `ramble_group_join`) no están en la fase 1.
+Las audiencias de grupo son los grupos de contactos del panel Contactos (`visibility: "group:<group_uid>"`); no hay herramientas de grupo propias de ramble. `ramble_leave_mark` informa `recipients` para una marca de contactos o grupo.
 
 Una eclosión disparada a través de estas herramientas nunca envía una actualización en vivo a un panel del dashboard abierto — corren sobre el proceso MCP stdio, no por la ruta de peticiones del panel, así que no hay nada que empuje un evento `ramble-hatched`. El panel igual recoge el pájaro nuevo en su siguiente actualización (tras cualquier acción).
 
@@ -198,3 +218,5 @@ El límite de una recogida por día y el tope del estante se comprueban por inst
 El tope solo limita las recogidas. Incubar un huevo que la capa de sincronización había dejado aparcado (`shelf_origin='sync'`) manda al estante el huevo que reemplaza sin que nada salga de él, así que el estante puede leer brevemente `6 de 5`; se estabiliza a medida que eclosionas huevos.
 
 Dos instancias pueden discrepar durante un ciclo de sincronización sobre qué huevo está incubando: si cambias de huevo en un Crow mientras el otro sigue acreditando calor al huevo anterior, el huevo más antiguo gana en ambos lados y tu cambio se deshace (de forma consistente). Vuelve a cambiar una vez que ambas estén sincronizadas.
+
+La entrega a contactos, los regalos y los intercambios necesitan todos los gateways en el código nuevo: un gateway con la fase 2 guarda un sobre de ramble como un mensaje de chat. Reinícialos todos antes de que nadie envíe. El transporte registra `dropping <kind> delivery to <crow_id>: not a deliverable contact` cuando un destinatario encolado fue borrado o bloqueado, y `gave up after 20 attempts` cuando ningún relay acepta un DM. Durante un reinicio escalonado, un gateway que sigue en la fase 2 descarta en silencio las operaciones de sincronización entrantes de `ramble_trades` (una tabla desconocida avanza su punto de control sin aplicarla); una fila de intercambio emitida en esa ventana llega a ese Crow solo cuando una operación posterior toca el mismo intercambio. Reinicia todos los gateways uno tras otro para que la ventana dure segundos.

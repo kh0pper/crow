@@ -237,13 +237,34 @@ export default function streamsRouter(dashboardAuth, { interactiveEngine = () =>
       }
     };
 
+    // Phase 3: gifts and swap steps. The transport (an inbound envelope) and
+    // bundles/ramble/panel/routes.js (a local gift/propose/accept/decline)
+    // both poke `ramble:trade` with { kind, trade_id, egg_id, state }; the
+    // panel refreshes its shelf and its swap list. Allow-listed to exactly
+    // those four strings — never the offer, never a crow id.
+    const tradeHandler = (payload) => {
+      try {
+        const out = {
+          kind: payload?.kind != null ? String(payload.kind) : null,
+          trade_id: payload?.trade_id != null ? String(payload.trade_id) : null,
+          egg_id: payload?.egg_id != null ? String(payload.egg_id) : null,
+          state: payload?.state != null ? String(payload.state) : null,
+        };
+        sendRaw(`event: ramble-trade\ndata: ${JSON.stringify(out)}\n\n`);
+      } catch {
+        // Subscriber isolation.
+      }
+    };
+
     bus.on("ramble:nearby", handler);
     bus.on("ramble:hatched", hatchedHandler);
     bus.on("ramble:nest-claimed", claimedHandler);
+    bus.on("ramble:trade", tradeHandler);
     const unsubscribe = () => {
       bus.off("ramble:nearby", handler);
       bus.off("ramble:hatched", hatchedHandler);
       bus.off("ramble:nest-claimed", claimedHandler);
+      bus.off("ramble:trade", tradeHandler);
     };
     res.on("close", unsubscribe);
     res.on("error", unsubscribe);

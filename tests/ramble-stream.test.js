@@ -290,3 +290,29 @@ test("the panel client subscribes to the ramble-nest-claimed frame by name", () 
   const client = readFileSync(join(__repo, "bundles/ramble/panel/static/ramble.js"), "utf8");
   assert.ok(client.includes('addEventListener("ramble-nest-claimed"'));
 });
+
+// ---------------------------------------------------- trades (phase 3)
+
+test("ramble-trade frame carries exactly kind, trade_id, egg_id, state; unsubscribes on close", () => {
+  const prior = bus.listenerCount("ramble:trade");
+  const handler = getRambleNearbyHandler();
+  const { res, chunks, fireClose } = fakeRes();
+  handler({ dashboardSession: "tok-t1" }, res);
+  assert.equal(bus.listenerCount("ramble:trade"), prior + 1);
+  const before = chunks.length;
+  bus.emit("ramble:trade", { kind: "trade", trade_id: "t1", egg_id: "e1", state: "completed", offer_json: "nope" });
+  const match = chunks.slice(before).join("").match(/event: ramble-trade\ndata: (.+)\n\n/);
+  assert.ok(match, "frame must carry a data: JSON payload");
+  assert.deepEqual(JSON.parse(match[1]), { kind: "trade", trade_id: "t1", egg_id: "e1", state: "completed" });
+  assert.doesNotThrow(() => bus.emit("ramble:trade", {}));
+  const sparse = chunks.slice(before).join("").match(/event: ramble-trade\ndata: (.+)\n\n/g);
+  assert.equal(sparse.length, 2);
+  assert.deepEqual(JSON.parse(sparse[1].match(/data: (.+)\n\n/)[1]), { kind: null, trade_id: null, egg_id: null, state: null });
+  fireClose();
+  assert.equal(bus.listenerCount("ramble:trade"), prior);
+});
+
+test("the panel client subscribes to the ramble-trade frame by name", () => {
+  const client = readFileSync(join(__repo, "bundles/ramble/panel/static/ramble.js"), "utf8");
+  assert.ok(client.includes('addEventListener("ramble-trade"'));
+});

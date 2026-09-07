@@ -10,6 +10,7 @@ import {
   incubateEgg, activateBird, flockState,
   SHELF_CAP_DEFAULT, CLAIM_RANGE_M, CLAIMS_PER_DAY,
 } from "../bundles/ramble/server/flock.js";
+import { giftEgg, proposeSwap } from "../bundles/ramble/server/trades.js";
 
 const T0 = Date.UTC(2026, 8, 7, 12); // 2026-09-07 12:00Z
 const WEEK = isoWeek(T0);
@@ -193,4 +194,31 @@ test("incubateEgg is all-or-nothing under a concurrent swap of the same egg", as
   });
   assert.deepEqual(await incubateEgg(d, first.egg_id, { now: T0 }), { ok: false, reason: "not-an-egg" });
   assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
+});
+
+test("phase 3: incubateEgg admits a received egg (origin cleared), refuses a locked one and a gifted one; flockState lists received + locked", async () => {
+  const d = await freshDb();
+  const first = await ensureIncubatingEgg(d, { now: T0 });
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, from_crow_id, created_at) VALUES ('rx','received','user',35,'crow:friend',7)");
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('sw','shelf','user',5,8), ('gone','gifted','user',5,9)");
+  const p = await proposeSwap(d, { eggId: "sw", toCrowId: "crow:friend", now: T0 });
+  assert.equal(p.ok, true);
+  assert.deepEqual(await incubateEgg(d, "sw", { now: T0 }), { ok: false, reason: "in-trade" });
+  assert.deepEqual(await incubateEgg(d, "gone", { now: T0 }), { ok: false, reason: "not-an-egg" });
+
+  const s = await flockState(d, { now: T0 });
+  const rx = s.eggs.find((e) => e.egg_id === "rx");
+  assert.deepEqual([rx.status, rx.from_crow_id, rx.locked, rx.percent], ["received", "crow:friend", false, 35]);
+  assert.equal(s.eggs.find((e) => e.egg_id === "sw").locked, true);
+  assert.ok(!s.eggs.find((e) => e.egg_id === "gone"), "gifted eggs are not on the shelf");
+  assert.equal(s.eggs[0].status, "incubating");
+  assert.equal(s.shelf_count, 1, "received eggs do not use a claim spot");
+
+  const r = await incubateEgg(d, "rx", { now: T0 });
+  assert.equal(r.ok, true); assert.equal(r.egg.status, "incubating"); assert.equal(r.egg.shelf_origin, null);
+  assert.equal(r.egg.from_crow_id, "crow:friend", "provenance survives incubation");
+  assert.deepEqual([r.shelved.egg_id, r.shelved.status, r.shelved.shelf_origin], [first.egg_id, "shelf", "user"]);
+  assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
+  // giftEgg from flock.js's neighbour still sees the same lock.
+  assert.deepEqual(await giftEgg(d, { eggId: "sw", toCrowId: "crow:x", now: T0 }), { ok: false, reason: "in-trade" });
 });

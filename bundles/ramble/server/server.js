@@ -2,10 +2,14 @@
  * Ramble MCP server. Milestone 1 (M1) tools — local core, no network/UI:
  *   ramble_leave_mark, ramble_caw, ramble_query_world, ramble_unlock,
  *   ramble_pet_state, ramble_block, ramble_unblock, ramble_egg_state,
- *   ramble_checkin, ramble_chore, ramble_flock, ramble_nests, ramble_claim_nest.
+ *   ramble_checkin, ramble_chore, ramble_flock, ramble_nests, ramble_claim_nest,
+ *   ramble_gift_egg, ramble_propose_swap.
  *
- * Groups are NOT in phase 1 (review round 3, D8) — ramble_group_create/
- * ramble_group_join move to phase 1b with the contacts/group delivery path.
+ * Phase 3: contacts/group marks, gifts and swaps are queued into
+ * `ramble_outbox` here and SENT by the gateway transport on its next tick
+ * (this stdio process has no relay socket and no bus, so there is no
+ * immediate poke — up to 15 s). Group audiences are the core contact groups
+ * (`group:<group_uid>`); the phase-1 `ramble_groups` table is unused.
  *
  * Identity seam (review round 3, D8): options.identity/seed/_derive are
  * injectable (tests inject all three so no identity files are generated).
@@ -25,6 +29,8 @@ import { petState, doChore } from "./pet.js";
 import { eggState, activeBird, isoWeek } from "./eggs.js";
 import { feedAll } from "./feed.js";
 import { flockState, listNests, claimNest } from "./flock.js";
+import { resolveContact, resolveAudience, enqueueMark, CROW_ID_RE, ID_RE } from "./delivery.js";
+import { giftEgg, proposeSwap } from "./trades.js";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const errorText = (t) => ({ content: [{ type: "text", text: t }], isError: true });
@@ -147,6 +153,12 @@ export function createRambleServer(db, options = {}) {
     async ({ lat, lon, accuracy_m, text: markText, visibility = "public", reveal, content_kind = "none", content_ref, ttl_seconds }) => {
       try {
         checkVisibility(visibility);
+        // Phase 3: an audience that cannot be resolved is refused BEFORE a row exists.
+        if (visibility.startsWith("group:")) {
+          let a = null;
+          try { a = await resolveAudience(db, visibility); } catch { a = null; }
+          if (!a || !a.ok) return errorText(`unknown group: ${visibility.slice(6)}`);
+        }
         const persona = await personaFor("mark");
         const emit = await getEmit();
         const bird = await activeBird(db);
@@ -165,6 +177,11 @@ export function createRambleServer(db, options = {}) {
           },
           { emit },
         );
+        let recipients;
+        if (visibility === "contacts" || visibility.startsWith("group:")) {
+          try { recipients = (await enqueueMark(db, row, { bird, now: Date.now() })).recipients; }
+          catch (err) { console.warn("[ramble] enqueueMark failed:", err?.message ?? err); recipients = 0; }
+        }
         // Best-effort: a pet/egg-feed failure must never fail a mark.
         try { await feedAll(db, { type: "mark_left" }, { emit }); } catch { /* cosmetic */ }
         return text(JSON.stringify({
@@ -174,6 +191,7 @@ export function createRambleServer(db, options = {}) {
           author: row.author,
           author_level: row.author_level,
           publish_state: row.publish_state,
+          ...(recipients === undefined ? {} : { recipients }),
         }));
       } catch (err) {
         return errorText(err.message);
@@ -372,6 +390,44 @@ export function createRambleServer(db, options = {}) {
           cell: cell ?? encodeGeohash(lat, lon, 7), week: isoWeek(now), here: { lat, lon }, now, emit,
         });
         return text(JSON.stringify(result));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    },
+  );
+
+  register(
+    "ramble_gift_egg",
+    "Gift an unhatched egg from your shelf to a contact (by crow_id). The egg leaves your shelf and arrives on theirs still unhatched — whoever hatches it rolls the bird. Contacts only; sent on the gateway's next tick.",
+    { egg_id: z.string().regex(ID_RE), crow_id: z.string().regex(CROW_ID_RE) },
+    async ({ egg_id, crow_id }) => {
+      try {
+        let contact = null;
+        try { contact = await resolveContact(db, crow_id); } catch { contact = null; }
+        if (!contact) return errorText(`unknown contact: ${crow_id}`);
+        const emit = await getEmit();
+        const out = await giftEgg(db, { eggId: egg_id, toCrowId: contact.crow_id, now: Date.now(), emit });
+        if (!out.ok) return errorText(out.reason);
+        return text(JSON.stringify({ gifted: true, egg_id, to: contact.crow_id, queued: true }));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    },
+  );
+
+  register(
+    "ramble_propose_swap",
+    "Offer one of your unhatched shelf eggs to a contact in exchange for one of theirs; they pick which egg to give back. The offer lapses after seven days. Accept or decline incoming offers from the Ramble panel.",
+    { egg_id: z.string().regex(ID_RE), crow_id: z.string().regex(CROW_ID_RE) },
+    async ({ egg_id, crow_id }) => {
+      try {
+        let contact = null;
+        try { contact = await resolveContact(db, crow_id); } catch { contact = null; }
+        if (!contact) return errorText(`unknown contact: ${crow_id}`);
+        const emit = await getEmit();
+        const out = await proposeSwap(db, { eggId: egg_id, toCrowId: contact.crow_id, now: Date.now(), emit });
+        if (!out.ok) return errorText(out.reason);
+        return text(JSON.stringify({ proposed: true, trade_id: out.trade.trade_id, egg_id, to: contact.crow_id, expires_at: out.trade.expires_at, queued: true }));
       } catch (err) {
         return errorText(err.message);
       }

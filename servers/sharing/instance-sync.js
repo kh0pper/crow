@@ -95,6 +95,10 @@ export const SYNCED_TABLES = [
   "ramble_blocks",
   "ramble_eggs",
   "ramble_pet",
+  // Phase 3: swaps follow the user too — an offer made on one Crow is visible
+  // (and answerable) on their others. NOT ramble_outbox: the delivery queue is
+  // one instance's outbound work item, like ramble_tombstones.
+  "ramble_trades",
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
@@ -153,6 +157,8 @@ export const EXCLUDED_COLUMNS = {
   // only exclusion. Everything else on the row IS the shared companion state.
   ramble_eggs: ["lamport_ts"],
   ramble_pet: ["lamport_ts"],
+  // Phase 3: natural-key (trade_id), no surrogate key; lamport is envelope metadata.
+  ramble_trades: ["lamport_ts"],
 };
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
@@ -343,6 +349,12 @@ export function shouldSyncRow(table, row) {
     // function is the shared emit + apply choke point).
     if (!row) return false;
     return row.owner === "self";
+  }
+  if (table === "ramble_trades") {
+    // trade_id is the wire key — a row without it can be neither stamped,
+    // applied nor deleted on a peer.
+    if (!row) return false;
+    return Boolean(row.trade_id);
   }
   if (table === "ramble_settings") {
     if (!row || !row.key) return false;
@@ -817,13 +829,59 @@ export async function applyRamblePet(db, op, row, lamportTs) {
   });
 }
 
+/** Portable columns of `ramble_trades`, in schema order. `lamport_ts` is envelope metadata. */
+const RAMBLE_TRADE_WIRE_COLUMNS = [
+  "trade_id", "counterpart", "role", "my_egg_id", "their_egg_id", "offer_json",
+  "state", "created_at", "updated_at", "expires_at",
+];
+
+/** `trade_id` is the key; `created_at` is the immutable birth time (and the expiry base). */
+const RAMBLE_TRADE_UPDATE_COLUMNS = RAMBLE_TRADE_WIRE_COLUMNS.filter((c) => c !== "trade_id" && c !== "created_at");
+
 /**
- * Test/tooling seam over the five ramble natural-key handlers above. Does NOT
+ * Apply a `ramble_trades` mutation, keyed on `trade_id`. Same LWW-on-the-
+ * envelope rule as `applyRambleMark`; deletes are honoured (no product path
+ * deletes a trade today, but a future prune on the authoring side must be
+ * able to reach the peer). Only the columns the wire row carries are
+ * written, so a sparse row never binds `undefined`. Applies never emit and
+ * never touch ramble_eggs: the egg movements of a completed swap ride the
+ * wire as their own ramble_eggs ops from the instance that completed it.
+ */
+export async function applyRambleTrade(db, op, row, lamportTs) {
+  if (!row || !row.trade_id) return;
+
+  const { rows: existing } = await db.execute({
+    sql: `SELECT lamport_ts FROM ramble_trades WHERE trade_id = ?`,
+    args: [row.trade_id],
+  });
+  const localTs = Number(existing[0]?.lamport_ts) || 0;
+  if (lamportTs < localTs) return;
+
+  if (op === "delete") {
+    await db.execute({ sql: `DELETE FROM ramble_trades WHERE trade_id = ?`, args: [row.trade_id] });
+    return;
+  }
+
+  const cols = RAMBLE_TRADE_WIRE_COLUMNS.filter((c) => row[c] !== undefined);
+  const setClauses = [
+    ...cols.filter((c) => RAMBLE_TRADE_UPDATE_COLUMNS.includes(c)).map((c) => `${c} = excluded.${c}`),
+    "lamport_ts = excluded.lamport_ts",
+  ];
+  await db.execute({
+    sql: `INSERT INTO ramble_trades (${cols.join(", ")}, lamport_ts)
+          VALUES (${cols.map(() => "?").join(", ")}, ?)
+          ON CONFLICT(trade_id) DO UPDATE SET ${setClauses.join(", ")}`,
+    args: [...cols.map((c) => row[c] ?? null), lamportTs],
+  });
+}
+
+/**
+ * Test/tooling seam over the six ramble natural-key handlers above. Does NOT
  * fork their logic — it is a pure table→handler switch, so anything asserted
  * through here is the same code the live `_applyEntry` dispatch runs.
  *
  * @param {object} db
- * @param {"ramble_marks"|"ramble_settings"|"ramble_blocks"|"ramble_eggs"|"ramble_pet"} table
+ * @param {"ramble_marks"|"ramble_settings"|"ramble_blocks"|"ramble_eggs"|"ramble_pet"|"ramble_trades"} table
  * @param {"insert"|"update"|"delete"} op
  * @param {object} row
  * @param {number} [lamportTs]
@@ -835,6 +893,7 @@ export async function applyRemoteOp(db, table, op, row, lamportTs = 0) {
     case "ramble_blocks":   return applyRambleBlock(db, op, row, lamportTs);
     case "ramble_eggs":     return applyRambleEgg(db, op, row, lamportTs);
     case "ramble_pet":      return applyRamblePet(db, op, row, lamportTs);
+    case "ramble_trades":   return applyRambleTrade(db, op, row, lamportTs);
     default:
       throw new Error(`applyRemoteOp: no natural-key handler for table "${table}"`);
   }
@@ -2399,6 +2458,15 @@ export class InstanceSyncManager {
         await applyRamblePet(this.db, op, row, lamport_ts);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_pet:`, err.message);
+      }
+      return;
+    }
+
+    if (table === "ramble_trades") {
+      try {
+        await applyRambleTrade(this.db, op, row, lamport_ts);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on ramble_trades:`, err.message);
       }
       return;
     }
