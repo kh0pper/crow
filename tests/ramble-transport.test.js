@@ -641,6 +641,23 @@ test("phase 3: an inbound ramble.mark envelope lands as a persistent contacts ma
   assert.equal(trades.length, 0);
 });
 
+test("phase 4: a re-sent mark that is pruned on arrival credits meet_crow but pokes no ramble:nearby", async () => {
+  const h = await makeHarness();
+  const nearby = [];
+  h.bus.on("ramble:nearby", (p) => nearby.push(p));
+  const mk = (i) => ({ mark_id: "flood-" + i, kind: "mark", anchor_kind: "geo", geohash: FULL_GEOHASH, lat: LAT, lon: LON, reveal: "open", content_text: "n" + i, content_kind: "none", created_at: 1700000000000 + i * 1000 });
+  for (let i = 0; i < 50; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    await h.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, payload: { type: "ramble.mark", v: 1, mark: mk(i) }, eventId: "fl-" + i });
+  }
+  assert.equal(nearby.length, 50);
+  await h.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, payload: { type: "ramble.mark", v: 1, mark: mk(-5) }, eventId: "fl-old" });
+  assert.equal(nearby.length, 50, "an old mark pruned on arrival is not announced");
+  assert.equal(await getMark(h.db, "flood--5"), null);
+  const { rows } = await h.db.execute({ sql: "SELECT count(*) AS n FROM ramble_marks WHERE author = ?", args: [PK] });
+  assert.equal(Number(rows[0].n), 50);
+});
+
 test("phase 3: an inbound gift lands as received and pokes ramble:trade; an accepted swap completes and its reply drains immediately", async () => {
   const h = await makeHarness();
   await seedContacts(h.db);
