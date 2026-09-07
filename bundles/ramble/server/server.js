@@ -50,21 +50,9 @@ export function createRambleServer(db, options = {}) {
         if (!seed) seed = mod.loadInstanceSeed(resolveDataDir());
         if (!_derive) _derive = mod.deriveBotIdentity;
       }
-      // R11: the gateway transport mints the per-boot session id and records
-      // it at ramble_settings key `local.session_id` (a `local.`-prefixed key,
-      // so instance sync never carries it). Reuse it so this stdio process and
-      // the gateway derive the SAME rotating-caw key instead of minting two
-      // personas per boot. Fall back to our own id when it isn't there (the
-      // bundle running without a gateway, or tests).
-      let sessionId = null;
-      try {
-        const { rows } = await db.execute({
-          sql: "SELECT value FROM ramble_settings WHERE key = 'local.session_id'",
-          args: [],
-        });
-        sessionId = rows[0]?.value ?? null;
-      } catch { /* table not there yet — mint our own */ }
-      return { identity, seed, _derive, sessionId: sessionId || randomUUID() };
+      // The memoized sessionId is only the FALLBACK for when no gateway has
+      // written one — see storedSessionId()/personaFor() below.
+      return { identity, seed, _derive, sessionId: randomUUID() };
     })().catch((err) => { identityPromise = null; throw err; });
     return identityPromise;
   }
@@ -88,10 +76,38 @@ export function createRambleServer(db, options = {}) {
     return result.rows[0]?.value ?? "rotating";
   }
 
+  /**
+   * R11: the gateway transport mints the per-boot session id and records it at
+   * `ramble_settings` key `local.session_id` (a `local.`-prefixed key, so
+   * instance sync never carries it). Reading it makes this stdio process and
+   * the gateway derive the SAME rotating-caw key instead of two personas.
+   * Returns null when there is no gateway (bundle standalone, or tests).
+   */
+  async function storedSessionId() {
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT value FROM ramble_settings WHERE key = 'local.session_id'",
+        args: [],
+      });
+      return rows[0]?.value ?? null;
+    } catch {
+      return null; // table not there yet
+    }
+  }
+
   async function personaFor(kind) {
     const { identity, seed, _derive, sessionId } = await getIdentityState();
     const level = await getPublicIdentityLevel();
-    return resolvePersona(identity, seed, { level, kind, sessionId, _derive });
+    // The session id is the ONLY input that changes under this long-lived
+    // stdio process: a gateway restart mints a new one. Memoizing it would pin
+    // caws to a session key the gateway has already rotated away from, so read
+    // it fresh per call — but only where it is actually used (rotating caws).
+    // identity/seed/_derive stay memoized.
+    let effectiveSessionId = sessionId;
+    if (kind === "caw" && level === "rotating") {
+      effectiveSessionId = (await storedSessionId()) || sessionId;
+    }
+    return resolvePersona(identity, seed, { level, kind, sessionId: effectiveSessionId, _derive });
   }
 
   function checkVisibility(visibility) {

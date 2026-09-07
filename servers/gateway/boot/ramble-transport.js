@@ -16,7 +16,7 @@
  *   only flips to `published` when at least one relay ACCEPTED it — an
  *   all-relays-down moment leaves it pending for the next tick rather than
  *   silently dropping the mark. Owner-deletes of already-published marks ride
- *   along as NIP-09 kind-5 events read from `ramble_settings.local.tombstones`.
+ *   along as NIP-09 kind-5 events read from the `ramble_tombstones` table.
  *
  *   subscribe — `NostrManager` has NO generic subscribe API (D6), so this owns
  *   its own `makeResilientSub` handle per relay plus the periodic
@@ -24,12 +24,23 @@
  *   `onEvent` drops our own echoes (x-only pubkey compare), maps the event back
  *   to a row, and inserts it idempotently.
  *
+ * `publish_state` values this module writes: `published` (a relay took it) and
+ * `failed` (R15 — the row was attempted MAX_PUBLISH_ATTEMPTS times and never
+ * got through; it leaves the pending set so one poison pill cannot occupy a
+ * drain slot forever). `failed` is terminal here — nothing in this module ever
+ * moves a row back to `pending`; an operator or a later task does.
+ *
+ * A row with no geohash can never be mapped to an event (`markToEvent` throws),
+ * so the drain SQL excludes `geohash IS NULL` outright rather than burning
+ * twenty attempts on it.
+ *
  * Phase-1 wire is public-only (D1): `contacts`/`group:` marks stay `pending`
  * forever here — they are still valid local (and instance-synced) rows.
  *
  * `local.`-prefixed settings keys are excluded from instance sync by
- * `shouldSyncRow`, which is exactly what we want for the per-boot session id,
- * the active area, and the tombstone queue.
+ * `shouldSyncRow`, which is exactly what we want for the per-boot session id
+ * and the active area; `ramble_tombstones` is kept off the wire by simply not
+ * being in instance-sync's SYNCED_TABLES allowlist.
  *
  * Nothing in here may throw out of a timer callback or out of `onEvent`; a relay
  * outage must never take the gateway down.
@@ -43,6 +54,8 @@ import { makeResilientSub } from "../../sharing/resilient-subscribe.js";
 import { deriveBotIdentity } from "../../sharing/identity.js";
 
 const DRAIN_BATCH = 50;
+/** Consecutive failed publish attempts after which a row is parked as `failed` (R15). */
+const MAX_PUBLISH_ATTEMPTS = 20;
 
 /** Publish precision for caw geohashes; env-overridable, clamped to 1..12. */
 function defaultPrecision() {
@@ -128,15 +141,49 @@ export async function startRambleTransport({
 
   const retries = new Map(); // mark_id -> consecutive failed publish attempts
   let draining = false;
+  // Set by stop(). Every async section re-checks it after an await so a
+  // teardown that races an in-flight drain or subscribe wins.
+  let stopped = false;
+
+  /**
+   * Count one failed attempt for a row and, at MAX_PUBLISH_ATTEMPTS, park it as
+   * `failed` so it leaves the pending set (R15). Without this the counter was
+   * write-only and a permanently unpublishable row would occupy a drain slot
+   * on every tick forever.
+   */
+  async function noteFailure(mark_id, reason) {
+    const attempts = (retries.get(mark_id) ?? 0) + 1;
+    // Log the cause once, on the first failure — a row that fails on every
+    // tick for twenty ticks must not print twenty identical lines.
+    if (attempts === 1) console.warn(`[ramble] publish failed for mark ${mark_id}: ${reason} (will retry)`);
+    if (attempts < MAX_PUBLISH_ATTEMPTS) {
+      retries.set(mark_id, attempts);
+      return;
+    }
+    retries.delete(mark_id);
+    try {
+      await db.execute({
+        sql: "UPDATE ramble_marks SET publish_state='failed' WHERE mark_id=?",
+        args: [mark_id],
+      });
+      // Once, at the moment of giving up — not on every attempt.
+      console.warn(`[ramble] mark ${mark_id} gave up after ${MAX_PUBLISH_ATTEMPTS} publish attempts (publish_state=failed)`);
+    } catch (err) {
+      console.warn(`[ramble] could not park mark ${mark_id} as failed:`, err?.message ?? err);
+    }
+  }
 
   async function drainMarks() {
     let publishedCount = 0;
     let skipped = 0;
     let failed = 0;
 
+    // `geohash IS NULL` rows can never be mapped to an event — exclude them at
+    // the source rather than retrying them twenty times (R15).
     const { rows } = await db.execute({
       sql: `SELECT * FROM ramble_marks
             WHERE publish_state = 'pending' AND origin = 'local' AND visibility = 'public'
+              AND geohash IS NOT NULL
             ORDER BY id LIMIT ?`,
       args: [DRAIN_BATCH],
     });
@@ -163,7 +210,8 @@ export async function startRambleTransport({
         if (!accepted || accepted.length === 0) {
           // No relay took it. Leave the row pending so the next tick retries
           // rather than marking a mark published that nobody has.
-          retries.set(row.mark_id, (retries.get(row.mark_id) ?? 0) + 1);
+          // eslint-disable-next-line no-await-in-loop
+          await noteFailure(row.mark_id, "no relay accepted the event");
           failed++;
           continue;
         }
@@ -188,7 +236,8 @@ export async function startRambleTransport({
         publishedCount++;
       } catch (err) {
         if (err?.name === "RambleNotPublic") { skipped++; continue; }
-        console.warn(`[ramble] publish failed for mark ${row.mark_id}:`, err?.message ?? err);
+        // eslint-disable-next-line no-await-in-loop
+        await noteFailure(row.mark_id, err?.message ?? String(err));
         failed++;
       }
     }
@@ -196,28 +245,23 @@ export async function startRambleTransport({
   }
 
   /**
-   * NIP-09 deletes for already-published public marks. Task 12 appends
-   * `{ nostr_event_id, kind, author_level }` entries on owner-delete; a kind-5
-   * event only leaves the queue once a relay accepted it. Expiry needs no
-   * deletion event — relays honor NIP-40 `expiration`.
+   * NIP-09 deletes for already-published public marks. Task 12 INSERTs a
+   * `ramble_tombstones` row on owner-delete; the row is DELETEd here only once
+   * a relay accepted the kind-5 event, so a relay outage retries next tick.
+   * A table rather than a JSON list in `ramble_settings` because two writers
+   * (the drain and the authoring path) read-modify-writing one blob lose each
+   * other's entries (R14). Expiry needs no deletion event — relays honor
+   * NIP-40 `expiration`.
    */
   async function drainTombstones() {
-    const raw = await getSetting("local.tombstones");
-    if (!raw) return;
-    let list;
-    try {
-      list = JSON.parse(raw);
-    } catch {
-      console.warn("[ramble] local.tombstones is not valid JSON — clearing");
-      await setSetting("local.tombstones", "[]");
-      return;
-    }
-    if (!Array.isArray(list) || list.length === 0) return;
+    const { rows } = await db.execute({
+      sql: "SELECT * FROM ramble_tombstones ORDER BY created_at LIMIT ?",
+      args: [DRAIN_BATCH],
+    });
+    if (rows.length === 0) return;
 
     const level = await publicIdentityLevel();
-    const remaining = [];
-    for (const entry of list) {
-      if (!entry?.nostr_event_id) continue; // malformed → drop
+    for (const entry of rows) {
       try {
         const persona = resolvePersona(identity, seed, {
           level: entry.author_level ?? level,
@@ -233,17 +277,21 @@ export async function startRambleTransport({
         }, persona.secp256k1Priv);
         // eslint-disable-next-line no-await-in-loop
         const accepted = await nostrManager.publishRendezvousEvent(event);
-        if (!accepted || accepted.length === 0) remaining.push(entry);
+        if (accepted && accepted.length > 0) {
+          // eslint-disable-next-line no-await-in-loop
+          await db.execute({
+            sql: "DELETE FROM ramble_tombstones WHERE nostr_event_id = ?",
+            args: [entry.nostr_event_id],
+          });
+        }
       } catch (err) {
         console.warn(`[ramble] tombstone publish failed for ${entry.nostr_event_id}:`, err?.message ?? err);
-        remaining.push(entry);
       }
     }
-    if (remaining.length !== list.length) await setSetting("local.tombstones", JSON.stringify(remaining));
   }
 
   async function drainOnce() {
-    if (draining) return { published: 0, skipped: 0, failed: 0 };
+    if (stopped || draining) return { published: 0, skipped: 0, failed: 0 };
     draining = true;
     try {
       const result = await drainMarks();
@@ -304,9 +352,10 @@ export async function startRambleTransport({
 
   async function doResubscribe() {
     closeSubs();
+    if (stopped) { filter = null; return; }
     const cells = await activeCells();
-    if (cells.length === 0) { filter = null; return; }
-    filter = { kinds: [MARK_KIND, CAW_KIND], "#g": cells };
+    if (stopped || cells.length === 0) { filter = null; return; }
+    const nextFilter = { kinds: [MARK_KIND, CAW_KIND], "#g": cells };
 
     try {
       if (nostrManager.relays.size === 0) await nostrManager.connectRelays();
@@ -314,13 +363,23 @@ export async function startRambleTransport({
       // A relay outage must not throw out of startup — the health loop retries.
       console.warn("[ramble] relay connect failed:", err?.message ?? err);
     }
+    // Build into a local list: stop() may have fired while we awaited the relay
+    // dial, and handles adopted after teardown would never be closed.
+    const built = [];
     for (const relay of nostrManager.relays.values()) {
       try {
-        subs.push(makeResilientSub(relay, filter, onEvent));
+        built.push(makeResilientSub(relay, nextFilter, onEvent));
       } catch (err) {
         console.warn("[ramble] subscribe failed:", err?.message ?? err);
       }
     }
+    if (stopped) {
+      for (const sub of built) { try { sub.close(); } catch { /* already gone */ } }
+      filter = null;
+      return;
+    }
+    subs = built;
+    filter = nextFilter;
   }
 
   // Serialize resubscribes: two overlapping runs would close each other's
@@ -332,7 +391,11 @@ export async function startRambleTransport({
     return chain;
   }
 
-  await resubscribe();
+  // Fire-and-forget: the first subscribe may dial relays, and awaiting it here
+  // would put a network round-trip in front of the gateway's listen(). The
+  // chain is ordered, so a later resubscribe() still runs after this one, and
+  // `stopped` makes a stop() that beats it to the punch a no-op.
+  void resubscribe();
 
   // ------------------------------------------------------------------ wiring
 
@@ -361,6 +424,7 @@ export async function startRambleTransport({
   }
 
   function stop() {
+    stopped = true;
     if (drainTimer) { clearInterval(drainTimer); drainTimer = null; }
     if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
     bus.off("ramble:drain", onDrainRequested);
