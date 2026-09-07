@@ -71,6 +71,10 @@ import { deriveBotIdentity } from "../../sharing/identity.js";
 const DRAIN_BATCH = 50;
 /** Consecutive failed publish attempts after which a row is parked as `failed` (R15). */
 const MAX_PUBLISH_ATTEMPTS = 20;
+// A tick pages past gate-skipped mark rows so an open audience behind a
+// closed one still goes out; bounded so a huge closed backlog cannot make
+// one tick unbounded.
+const MAX_DELIVERY_PAGES = 4;
 
 /** Publish precision for caw geohashes; env-overridable, clamped to 1..12. */
 function defaultPrecision() {
@@ -95,7 +99,7 @@ export async function startRambleTransport({
   autoStart = true,
 } = {}) {
   const load = (file) => import(pathToFileURL(join(bundleDir, file)).href);
-  const [{ initRambleTables }, { insertRemoteMark, expireMarks }, nostrMap, { resolvePersona }, { makePublishGate }, { activeBird }, { feedAll }, delivery, trades] = await Promise.all([
+  const [{ initRambleTables }, { insertRemoteMark, expireMarks }, nostrMap, { resolvePersona, xOnly }, { makePublishGate }, { activeBird }, { feedAll }, delivery, trades] = await Promise.all([
     load("init-tables.js"),
     load("marks.js"),
     load("nostr-map.js"),
@@ -333,9 +337,6 @@ export async function startRambleTransport({
       if (!warnedNoSendControl) { warnedNoSendControl = true; console.warn("[ramble] nostrManager has no sendControl; contacts delivery disabled"); }
       return 0;
     }
-    // Gifts/trades first, marks after (pendingDeliveries orders them — C1), so
-    // gated mark rows can never fill the batch and starve a swap reply.
-    const rows = await pendingDeliveries(db, DRAIN_BATCH);
     // The grid is read once per visibility per tick, not once per row (the
     // gate re-reads ~11 settings rows each call).
     const gateCache = new Map();
@@ -344,47 +345,62 @@ export async function startRambleTransport({
       return gateCache.get(visibility);
     };
     let delivered = 0;
-    for (const d of rows) {
+    const seen = [];
+    for (let page = 0; page < MAX_DELIVERY_PAGES; page++) {
       if (stopped) break;
-      try {
-        if (d.kind === "mark") {
+      // Gifts/trades first, marks after (pendingDeliveries orders them —
+      // C1), so gated mark rows can never fill the batch and starve a swap
+      // reply. `excludeIds` skips past rows already looked at THIS tick so a
+      // batch of gate-skipped `contacts` marks cannot also crowd out a
+      // `group:` mark row (a different, currently-open audience) behind them.
+      // eslint-disable-next-line no-await-in-loop
+      const rows = await pendingDeliveries(db, DRAIN_BATCH, { excludeIds: seen });
+      if (rows.length === 0) break;
+      let skippedGated = 0;
+      for (const d of rows) {
+        if (stopped) break;
+        seen.push(d.id);
+        try {
+          if (d.kind === "mark") {
+            // eslint-disable-next-line no-await-in-loop
+            const { rows: m } = await db.execute({ sql: "SELECT visibility FROM ramble_marks WHERE mark_id = ?", args: [d.ref_id] });
+            // eslint-disable-next-line no-await-in-loop
+            if (!m[0]) { await deleteDelivery(db, d.id); await settleMark(d.ref_id); continue; }
+            // eslint-disable-next-line no-await-in-loop
+            if (!(await allowed(m[0].visibility))) { skippedGated++; continue; }
+          }
           // eslint-disable-next-line no-await-in-loop
-          const { rows: m } = await db.execute({ sql: "SELECT visibility FROM ramble_marks WHERE mark_id = ?", args: [d.ref_id] });
+          const contact = await resolveContact(db, d.to_crow_id);
+          if (!contact) {
+            console.warn(`[ramble] dropping ${d.kind} delivery to ${d.to_crow_id}: not a deliverable contact`);
+            // eslint-disable-next-line no-await-in-loop
+            await deleteDelivery(db, d.id);
+            // eslint-disable-next-line no-await-in-loop
+            if (d.kind === "mark") await settleMark(d.ref_id);
+            continue;
+          }
           // eslint-disable-next-line no-await-in-loop
-          if (!m[0]) { await deleteDelivery(db, d.id); await settleMark(d.ref_id); continue; }
-          // eslint-disable-next-line no-await-in-loop
-          if (!(await allowed(m[0].visibility))) continue;
-        }
-        // eslint-disable-next-line no-await-in-loop
-        const contact = await resolveContact(db, d.to_crow_id);
-        if (!contact) {
-          console.warn(`[ramble] dropping ${d.kind} delivery to ${d.to_crow_id}: not a deliverable contact`);
+          const out = await nostrManager.sendControl(contact, d.payload_json);
+          if (!out || !Array.isArray(out.relays) || out.relays.length === 0) {
+            // eslint-disable-next-line no-await-in-loop
+            const { parked } = await noteDeliveryFailure(db, d, MAX_DELIVERY_ATTEMPTS);
+            if (parked) console.warn(`[ramble] ${d.kind} delivery to ${d.to_crow_id} gave up after ${MAX_DELIVERY_ATTEMPTS} attempts`);
+            // eslint-disable-next-line no-await-in-loop
+            if (parked && d.kind === "mark") await settleMark(d.ref_id);
+            continue;
+          }
           // eslint-disable-next-line no-await-in-loop
           await deleteDelivery(db, d.id);
+          delivered++;
           // eslint-disable-next-line no-await-in-loop
           if (d.kind === "mark") await settleMark(d.ref_id);
-          continue;
-        }
-        // eslint-disable-next-line no-await-in-loop
-        const out = await nostrManager.sendControl(contact, d.payload_json);
-        if (!out || !Array.isArray(out.relays) || out.relays.length === 0) {
+        } catch (err) {
+          console.warn(`[ramble] ${d.kind} delivery to ${d.to_crow_id} failed:`, err?.message ?? err);
           // eslint-disable-next-line no-await-in-loop
-          const { parked } = await noteDeliveryFailure(db, d, MAX_DELIVERY_ATTEMPTS);
-          if (parked) console.warn(`[ramble] ${d.kind} delivery to ${d.to_crow_id} gave up after ${MAX_DELIVERY_ATTEMPTS} attempts`);
-          // eslint-disable-next-line no-await-in-loop
-          if (parked && d.kind === "mark") await settleMark(d.ref_id);
-          continue;
+          await noteDeliveryFailure(db, d, MAX_DELIVERY_ATTEMPTS).catch(() => {});
         }
-        // eslint-disable-next-line no-await-in-loop
-        await deleteDelivery(db, d.id);
-        delivered++;
-        // eslint-disable-next-line no-await-in-loop
-        if (d.kind === "mark") await settleMark(d.ref_id);
-      } catch (err) {
-        console.warn(`[ramble] ${d.kind} delivery to ${d.to_crow_id} failed:`, err?.message ?? err);
-        // eslint-disable-next-line no-await-in-loop
-        await noteDeliveryFailure(db, d, MAX_DELIVERY_ATTEMPTS).catch(() => {});
       }
+      if (skippedGated === 0 || rows.length < DRAIN_BATCH) break;
     }
     return delivered;
   }
@@ -508,7 +524,7 @@ export async function startRambleTransport({
           console.warn("[ramble] ramble:nearby subscriber threw:", emitErr?.message ?? emitErr);
         }
         try {
-          await feedAll(db, { type: "meet_crow", persona: String(msg.pubkey).length === 66 ? String(msg.pubkey).slice(2) : msg.pubkey }, {
+          await feedAll(db, { type: "meet_crow", persona: xOnly(String(msg.pubkey)) }, {
             emit,
             onHatch: (egg) => {
               try { bus.emit("ramble:hatched", { egg_id: egg.egg_id, species: egg.species, seed: egg.seed }); }

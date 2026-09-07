@@ -273,11 +273,20 @@ export async function enqueueMark(db, row, { bird = null, now = Date.now() } = {
  * can sit queued while the privacy grid is closed; without this ordering
  * fifty gated mark rows would fill every batch and starve the trades behind
  * them (review round 1, C1).
+ *
+ * `excludeIds` lets a caller page past rows it has already looked at this
+ * tick (e.g. a batch of gate-skipped mark rows) without re-fetching them —
+ * the fix for the one-level-down defect where 50+ gate-skipped `contacts`
+ * mark rows refill every batch and a `group:` mark row behind them (a
+ * DIFFERENT, currently-open audience) is never reached.
  */
-export async function pendingDeliveries(db, limit = 50) {
+export async function pendingDeliveries(db, limit = 50, { excludeIds = [] } = {}) {
+  const exclude = excludeIds.length > 0
+    ? ` WHERE id NOT IN (${excludeIds.map(() => "?").join(", ")})`
+    : "";
   const { rows } = await db.execute({
-    sql: "SELECT * FROM ramble_outbox ORDER BY CASE WHEN kind = 'mark' THEN 1 ELSE 0 END, id LIMIT ?",
-    args: [limit],
+    sql: `SELECT * FROM ramble_outbox${exclude} ORDER BY CASE WHEN kind = 'mark' THEN 1 ELSE 0 END, id LIMIT ?`,
+    args: [...excludeIds, limit],
   });
   return rows;
 }
