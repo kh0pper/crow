@@ -1,0 +1,18 @@
+{
+  "id": "ramble",
+  "name": "Ramble",
+  "version": "0.1.0",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "social",
+  "tags": ["proximity", "map", "ar", "social", "geo"],
+  "icon": "🐦",
+  "description": "Proximity broadcasts (caws) + a shared/private map of discoverable marks, with a crow pet. Phase 1: geo channel, map, Nostr, pet.",
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CROW_APP_ROOT", "CROW_DATA_DIR", "CROW_HOME"] },
+  "panel": "panel/ramble.js",
+  "panelRoutes": "panel/routes.js",
+  "requires": { "min_ram_mb": 128, "min_disk_mb": 100 },
+  "env_vars": [
+    { "name": "RAMBLE_DEFAULT_GEOHASH_PRECISION", "description": "Geohash precision for public marks (5 ≈ 4.9km cell)", "required": false }
+  ]
+}

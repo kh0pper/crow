@@ -212,6 +212,59 @@ export async function mountFeatureRoutes(app, deps) {
     }
   }
 
+  // --- Start the Ramble Nostr transport (drain + area subscriber) ---
+  // Core code (servers/gateway/boot/ramble-transport.js), started only when the
+  // ramble bundle is installed, because it reuses the ONE live NostrManager the
+  // gateway already owns — a bundle-side transport would have to build a second
+  // manager and a second set of relay sockets. Every failure is a warning: no
+  // relay, no identity and no missing bundle may block gateway boot.
+  try {
+    const { existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { pathToFileURL } = await import("node:url");
+    const { homedir } = await import("node:os");
+    const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+    const installed = join(crowHome, "bundles", "ramble", "server");
+    // C3: re-anchored — boot/ is one level deeper, need ../../bundles
+    const repo = join(__featureGatewayDir, "../../bundles/ramble/server");
+    const bundleDir = existsSync(installed) ? installed : repo;
+    if (existsSync(bundleDir)) {
+      const { getManagersOrNull, getInstanceSyncManager } = await import("../../sharing/managers.js");
+      const mgrs = getManagersOrNull();
+      if (mgrs?.nostrManager) {
+        const { loadInstanceSeed } = await import("../../sharing/identity.js");
+        const { instanceSeedDir } = await import("../../../scripts/pi-bots/instance-paths.mjs");
+        const { default: bus } = await import("../../shared/event-bus.js");
+        const { emitOrQueue } = await import("../../shared/sync-emit.js");
+        const seed = loadInstanceSeed(instanceSeedDir());
+        const { startRambleTransport } = await import(
+          pathToFileURL(join(__gatewayDir, "ramble-transport.js")).href
+        );
+        // Same sync-emit hook the panel routes build (bundles/ramble/panel/
+        // routes.js): the transport's TTL sweep deletes rows, and a peer must
+        // learn about those deletes the same way it learns about inserts.
+        const emit = (table, op, row) =>
+          emitOrQueue(getInstanceSyncManager(), mgrs.db, table, op, row).catch(() => {});
+        app.locals.rambleTransport = await startRambleTransport({
+          db: mgrs.db,
+          nostrManager: mgrs.nostrManager,
+          identity: mgrs.identity,
+          seed,
+          bus,
+          bundleDir,
+          emit,
+        });
+        console.log("[ramble] transport started");
+      } else {
+        // The bundle is installed but there is no wire: without this line the
+        // gateway boots silently and Ramble simply never publishes.
+        console.warn("[ramble] transport not started: no nostrManager (sharing disabled or boot order)");
+      }
+    }
+  } catch (err) {
+    console.warn("[ramble] transport not started:", err?.message ?? err);
+  }
+
   // --- Mount AI Chat Routes ---
   try {
     const { default: chatRouter } = await import("../routes/chat.js");
