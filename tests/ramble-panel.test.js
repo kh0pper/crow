@@ -170,6 +170,14 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.match(sent, /id="rb-shelf"/);
   assert.match(sent, /id="rb-my-flock"/);
   assert.match(sent, /id="rb-egg-flock"/);
+
+  // Phase 3 surfaces: the group audience, the swaps card, the picker sheet.
+  assert.match(sent, /data-visibility="group"/);
+  assert.match(sent, /id="rb-group"/);
+  assert.match(sent, /id="rb-trades"/);
+  assert.match(sent, /id="rb-pick-sheet"/);
+  assert.match(sent, /id="rb-pick-list"/);
+  assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(sent), "no emoji in the panel markup — icons are inline SVG");
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -547,6 +555,17 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // drawEggArt, and the nest pin's divIcon html); every user- or peer-supplied
   // string goes through textContent. Comments are stripped first so prose
   // (the file header mentions innerHTML) never trips the count.
+  // Phase 3 wiring: contacts, gift, swaps, the fourth named SSE frame, the
+  // invite hand-off for strangers — and still no emoji, still textContent only.
+  assert.ok(body.includes('"/api/ramble/contacts"'), "client must load contacts for the pickers");
+  assert.ok(body.includes('"/gift"'));
+  assert.ok(body.includes('"/api/ramble/trades"'));
+  assert.ok(body.includes('"/accept"'));
+  assert.ok(body.includes('"/decline"'));
+  assert.ok(body.includes('addEventListener("ramble-trade"'), "client must subscribe to ramble-trade");
+  assert.ok(body.includes('"/dashboard/contacts"'), "share-an-invite hands off to the Contacts panel");
+  assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(body), "no emoji in the client script");
+
   const code = body.replace(/\/\*[\s\S]*?\*\//g, "");
   const sinks = code.match(/\.innerHTML\s*=|\bhtml:\s/g) || [];
   assert.equal(sinks.length, 2, `expected exactly two engine-output markup sinks, found ${sinks.length}`);
