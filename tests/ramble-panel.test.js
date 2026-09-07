@@ -599,6 +599,8 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes("nestPopup(anchor.source)") && body.includes("popupFor(anchor.source)"), "a label tap opens the pin's own popup");
   assert.ok(body.includes('"ramble.ar.limits"'));
   assert.ok(body.includes("getTracks().forEach"), "the camera stream is stopped on close");
+  assert.ok(body.includes("if (!arOpen || document.hidden)"), "a stream that resolves after the tab hid is stopped, not adopted");
+  assert.ok(body.includes("if (arOpen) return;"), "startAr is idempotent");
   assert.ok(body.includes('"visibilitychange"'));
   assert.ok(body.includes("AR_HEADING_STALE_MS"), "a stale compass falls back to the ring");
   assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body), "camera frames never leave the device");

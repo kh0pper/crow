@@ -2121,6 +2121,8 @@ In `tests/ramble-panel.test.js`, inside `"GET /ramble/static/ramble.js serves th
   assert.ok(body.includes("nestPopup(anchor.source)") && body.includes("popupFor(anchor.source)"), "a label tap opens the pin's own popup");
   assert.ok(body.includes('"ramble.ar.limits"'));
   assert.ok(body.includes("getTracks().forEach"), "the camera stream is stopped on close");
+  assert.ok(body.includes("if (!arOpen || document.hidden)"), "a stream that resolves after the tab hid is stopped, not adopted");
+  assert.ok(body.includes("if (arOpen) return;"), "startAr is idempotent");
   assert.ok(body.includes('"visibilitychange"'));
   assert.ok(body.includes("AR_HEADING_STALE_MS"), "a stale compass falls back to the ring");
   assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body), "camera frames never leave the device");
@@ -2252,7 +2254,7 @@ In `bundles/ramble/panel/static/ramble.js`:
     /* toFixed(6) is ~0.1 m: enough for a label, and never a 400 from a long double. */
     return jsonFetch("/api/ramble/around?lat=" + encodeURIComponent(arPose.lat.toFixed(6)) + "&lon=" + encodeURIComponent(arPose.lon.toFixed(6)))
       .then(function (out) { arAnchors = toArAnchors(out); scheduleArRender(); })
-      .catch(function () { /* keep the last anchors; the pose still moves them */ });
+      .catch(function () { arFetchAt = null; /* keep the last anchors; the pose still moves them */ });
   }
 
   function maybeRefreshAround() {
@@ -2312,7 +2314,8 @@ In `bundles/ramble/panel/static/ramble.js`:
     }
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
       .then(function (stream) {
-        if (!arOpen) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+        if (!arOpen || document.hidden) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+        if (arStream) { arStream.getTracks().forEach(function (t) { t.stop(); }); }
         arStream = stream;
         video.srcObject = stream;
         var p = video.play();
@@ -2321,7 +2324,7 @@ In `bundles/ramble/panel/static/ramble.js`:
         scheduleArRender();
       })
       .catch(function () {
-        if (restart === true && arOpen) { setTimeout(function () { if (arOpen && !arStream) startArCamera(false); }, 1500); return; }
+        if (restart === true && arOpen) { setTimeout(function () { if (arOpen && !arStream && !document.hidden) startArCamera(false); }, 1500); return; }
         arCamera = false;
         scheduleArRender();
       });
@@ -2397,6 +2400,7 @@ In `bundles/ramble/panel/static/ramble.js`:
    */
   function startAr() {
     if (!Ar || !arRoot) return;
+    if (arOpen) return;
     arOpen = true;
     arRoot.hidden = false;
     if (!arSession) arSession = Ar.mountAr(arElements(), { engine: Bird, onTap: onArTap });
