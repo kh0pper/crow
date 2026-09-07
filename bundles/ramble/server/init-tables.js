@@ -60,6 +60,21 @@ export async function initRambleTables(db) {
       lamport_ts INTEGER DEFAULT 0
     );`);
 
+  // Pending NIP-09 deletes for already-published public marks. A TABLE, not a
+  // `ramble_settings` JSON list: the gateway drain and the authoring path would
+  // otherwise read-modify-write the same JSON blob and lose each other's
+  // entries (R14). Deliberately has NO lamport_ts and is absent from
+  // instance-sync's SYNCED_TABLES — a tombstone is one instance's outbound
+  // work item, not shared state. Rows are deleted once a relay accepts.
+  await initTable(db, "ramble_tombstones", `
+    CREATE TABLE IF NOT EXISTS ramble_tombstones (
+      nostr_event_id TEXT PRIMARY KEY,
+      mark_id TEXT,
+      kind TEXT NOT NULL,
+      author_level TEXT,
+      created_at INTEGER NOT NULL
+    );`);
+
   await initTable(db, "ramble_groups", `
     CREATE TABLE IF NOT EXISTS ramble_groups (
       group_id TEXT PRIMARY KEY,

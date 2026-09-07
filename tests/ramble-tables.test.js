@@ -15,7 +15,7 @@ test("all ramble tables + fts exist", async () => {
     "SELECT name FROM sqlite_master WHERE type IN ('table') ORDER BY name",
   );
   const names = rows.map((r) => r.name);
-  for (const t of ["ramble_marks", "ramble_pet", "ramble_settings", "ramble_groups", "ramble_blocks", "ramble_marks_fts"]) {
+  for (const t of ["ramble_marks", "ramble_pet", "ramble_settings", "ramble_groups", "ramble_blocks", "ramble_tombstones", "ramble_marks_fts"]) {
     assert.ok(names.includes(t), `missing ${t}`);
   }
 });
