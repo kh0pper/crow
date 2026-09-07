@@ -86,8 +86,9 @@ derived from energy as in phase 1. Nothing else happens.
 ### 2.4 Nests and claiming (D9)
 - `nestFor(cell7, isoWeek)`: `h = sha256("ramble-nest-v1:" + cell7 + ":" + isoWeek)`; a nest
   exists when `h[0..4] mod NEST_RATE == 0` (default 24 → ~1 nest per 24 cells); its point is
-  the cell centre offset by `(h[4..8], h[8..12]) mod cell extent`. Public salt, no server, same
-  answer on every device.
+  the cell's south-west corner plus `h[4..8] / 2^32` of the cell height north and
+  `h[8..12] / 2^32` of the cell width east (always inside the cell); its egg-art seed is
+  `h[12..16]`. Public salt, no server, same answer on every device.
 - Claim: within `withinRange` (75 m) of the nest point → `POST /api/ramble/nests/claim` →
   one egg on the shelf (`status='shelf'`, `found_cell`, `found_week`). Limits: 1 claim per
   local day; shelf cap 5 (claim refused with a friendly reason). Claims are per user
