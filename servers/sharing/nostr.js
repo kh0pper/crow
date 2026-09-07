@@ -542,6 +542,28 @@ export class NostrManager {
               } catch { /* an unreadable check must not break delivery */ }
             }
 
+            // Ramble (phase 3): a `{ "type": "ramble.*" }` envelope is a
+            // contacts-delivered mark, a gifted egg or a swap step — never a
+            // chat message. Hand it to the ramble transport over the bus
+            // (servers/gateway/boot/ramble-transport.js listens; with no
+            // bundle installed nothing does and it is simply dropped) and
+            // stop: no messages row, no notification, no unread bump, no
+            // delivery receipt, no onMessage. Sits AFTER the block check on
+            // purpose — a blocked contact's envelope vanishes like their DMs.
+            if (decrypted.startsWith("{")) {
+              let envelope = null;
+              try { envelope = JSON.parse(decrypted); } catch { envelope = null; }
+              if (envelope && typeof envelope.type === "string" && envelope.type.startsWith("ramble.")) {
+                try {
+                  bus.emit("ramble:envelope", {
+                    crowId, contactId, pubkey: contactPubkey, payload: envelope,
+                    eventId: event.id, createdAt: event.created_at,
+                  });
+                } catch { /* a subscriber's throw must never break the subscription */ }
+                return;
+              }
+            }
+
             if (contactId && this.db) {
               try {
                 const result = await this.db.execute({
@@ -685,6 +707,7 @@ export class NostrManager {
    * Routes message types:
    *   - invite_accepted → onInviteAccepted(payload)
    *   - crow_social (with subtype) → onSocialMessage(subtype, payload, senderPubkey)
+   *   - ramble.* → consumed (contact-only; see subscribeToContact)
    *   - ANYTHING ELSE (plaintext, malformed JSON, subtype-less crow_social,
    *     unknown type) → onMessageRequest(senderPubkey, decrypted, event)
    *
@@ -735,6 +758,12 @@ export class NostrManager {
                 } else if (payload.type === "crow_social" && payload.subtype && onSocialMessage) {
                   handled = true;
                   await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey);
+                } else if (typeof payload.type === "string" && payload.type.startsWith("ramble.")) {
+                  // Ramble envelopes are contact-only: the per-contact
+                  // subscription (subscribeToContact) is their only door. On
+                  // this catch-all path they are consumed silently so a
+                  // stranger's envelope can never surface as a message request.
+                  handled = true;
                 }
               } catch {
                 // Malformed JSON (starts with "{" but JSON.parse threw) OR a
