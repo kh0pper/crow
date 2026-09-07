@@ -542,6 +542,7 @@ export async function applyRambleBlock(db, op, row, lamportTs) {
 const RAMBLE_EGG_WIRE_COLUMNS = [
   "egg_id", "status", "warmth", "species", "seed",
   "found_cell", "found_week", "from_crow_id", "created_at", "hatched_at",
+  "shelf_origin",
 ];
 
 /**
@@ -604,6 +605,8 @@ function rambleEggSetClause(col) {
     case "seed":
     case "hatched_at":
       return `${col} = CASE WHEN ${RAMBLE_EGG_INCOMING_BIRD_WINS} THEN excluded.${col} ELSE ramble_eggs.${col} END`;
+    case "shelf_origin":
+      return `shelf_origin = CASE WHEN ramble_eggs.status = 'hatched' THEN ramble_eggs.shelf_origin ELSE excluded.shelf_origin END`;
     // `warmth` included: absolute last-writer-wins, NOT additive across
     // instances — `ramble_credits` (the no-double-count ledger) is local-only,
     // so warmth earned on two instances in the same window does not sum.
@@ -612,27 +615,20 @@ function rambleEggSetClause(col) {
 }
 
 /**
- * Refill the incubating slot when an apply emptied it. `applyRambleEgg`'s
- * convergence rule can shelve a peer's successor egg while the local original
- * is still incubating; when that original's HATCHED row arrives afterwards the
- * instance is left with zero incubating eggs, and `ensureIncubatingEgg` never
- * self-heals (nothing tells it the shelved egg was a convergence loser).
- *
- * One self-guarding statement, so it can ride the apply's own batch: it is a
- * no-op unless there is no incubating egg AND at least one shelf egg, and it
- * promotes the OLDEST shelf egg (lowest `created_at`, ties by lowest `egg_id`
- * — the same total order the convergence rule uses, so every instance
- * promotes the same one).
- *
- * SAFE IN PHASE 1 ONLY because a 'shelf' egg is *always* a convergence loser
- * here — there is no user-facing "shelve my egg" action yet. Phase 2 MUST
- * record a shelf egg's origin (e.g. a `shelved_reason` column) before adding
- * one, or this will silently re-incubate an egg the user deliberately parked.
+ * Refill the incubating slot when an apply emptied it — but ONLY with an egg
+ * the sync layer itself shelved. `shelf_origin = 'sync'` marks a convergence
+ * loser; `'user'` marks an egg the user parked deliberately (claimed from a
+ * nest, or swapped out by "incubate"), which must never be drafted back in.
+ * The promoted egg KEEPS its 'sync' mark ("the sync layer put this in the
+ * slot"): in `applyRambleEgg`'s convergence rule a 'sync' incubating egg ranks
+ * below any NULL-origin one (a fresh successor, or the user's own choice), so
+ * a promotion can never out-rank the egg that is really meant to be there once
+ * it arrives. Oldest `created_at` first, ties by lowest `egg_id`.
  */
 const RAMBLE_EGG_REPROMOTE_SQL = `
   UPDATE ramble_eggs SET status = 'incubating'
    WHERE egg_id = (
-           SELECT egg_id FROM ramble_eggs WHERE status = 'shelf'
+           SELECT egg_id FROM ramble_eggs WHERE status = 'shelf' AND shelf_origin = 'sync'
             ORDER BY created_at ASC, egg_id ASC LIMIT 1
          )
      AND NOT EXISTS (SELECT 1 FROM ramble_eggs WHERE status = 'incubating')`;
@@ -649,16 +645,17 @@ const RAMBLE_EGG_REPROMOTE_SQL = `
  *      a pure function of the two rows, so both sides reach the same answer
  *      with no extra round trip and nothing to emit: the OLDER `created_at`
  *      survives as incubating, ties broken by the lexically lower `egg_id`
- *      (total order, no clock ambiguity). The loser is shelved — `status =
- *      'shelf'`, warmth untouched — never deleted, so the warmth the user
- *      earned toward it is still on the shelf. The shelving UPDATE and the
- *      upsert ride ONE `db.batch` so a peer can never observe zero (or two)
- *      incubating eggs mid-apply.
+ *      — class first: a `'sync'`-origin incubating egg loses to a NULL-origin
+ *      one; age decides only between equals (total order, no clock
+ *      ambiguity). The loser is shelved — `status = 'shelf'`, warmth
+ *      untouched — never deleted, so the warmth the user earned toward it is
+ *      still on the shelf. The shelving UPDATE and the upsert ride ONE
+ *      `db.batch` so a peer can never observe zero (or two) incubating eggs
+ *      mid-apply.
  *   3. **The slot is never left empty.** Every apply ends with
- *      `RAMBLE_EGG_REPROMOTE_SQL` in the same batch, which re-promotes the
- *      oldest shelved egg if (and only if) the apply just emptied the
- *      incubating slot — see that constant for why phase 1 can assume a shelf
- *      egg is always a convergence loser.
+ *      `RAMBLE_EGG_REPROMOTE_SQL` in the same batch (unless the op applied is
+ *      a user shelve), re-promoting the oldest `shelf_origin = 'sync'` shelf
+ *      egg (never a `'user'` one), keeping its mark — see that constant.
  *
  * An incoming row with no `created_at` (a sparse update) cannot be ranked, so
  * it is treated as the newest — it loses, and the established local incubating
@@ -676,7 +673,7 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
   if (!row || !row.egg_id) return;
 
   const { rows: existing } = await db.execute({
-    sql: `SELECT lamport_ts, created_at, status FROM ramble_eggs WHERE egg_id = ?`,
+    sql: `SELECT lamport_ts, created_at, status, shelf_origin FROM ramble_eggs WHERE egg_id = ?`,
     args: [row.egg_id],
   });
   const localTs = Number(existing[0]?.lamport_ts) || 0;
@@ -692,9 +689,14 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
     return;
   }
 
-  // Effective status: the incoming one, unless the convergence rule below
-  // demotes this egg. Never mutate the caller's row.
-  let status = row.status;
+  // Effective wire row: a copy, so a convergence demotion can rewrite status
+  // AND shelf_origin without mutating the caller's object.
+  const wire = { ...row };
+  // A phase-1 peer's shelf row carries no shelf_origin at all. Phase 1 only
+  // ever shelved convergence losers, so it means 'sync' (same reasoning as the
+  // init-tables backfill) — otherwise it would sit as NULL, never re-promotable,
+  // until this instance's next boot.
+  if (wire.status === "shelf" && wire.shelf_origin === undefined) wire.shelf_origin = "sync";
   const statements = [];
 
   // The local row's OWN status gates this, not just the incoming one: a peer
@@ -705,33 +707,42 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
   // it always wins the tiebreak) and then stay hatched via the CASE below —
   // leaving the instance with ZERO incubating eggs, again every cycle, with the
   // credited warmth silently discarded. A locally hatched egg never competes.
-  if (status === "incubating" && existing[0]?.status !== "hatched") {
+  if (wire.status === "incubating" && existing[0]?.status !== "hatched") {
     const { rows: incubating } = await db.execute({
-      sql: `SELECT egg_id, created_at FROM ramble_eggs WHERE status = 'incubating' AND egg_id <> ? LIMIT 1`,
-      args: [row.egg_id],
+      sql: `SELECT egg_id, created_at, shelf_origin FROM ramble_eggs WHERE status = 'incubating' AND egg_id <> ? LIMIT 1`,
+      args: [wire.egg_id],
     });
     const rival = incubating[0];
     if (rival) {
-      // `created_at` is NOT NULL in the schema; the ?? chain only covers a
-      // sparse WIRE row (fall back to what we already stored for this egg,
-      // else rank it last so the established local egg keeps incubating).
-      const mine = Number(row.created_at ?? existing[0]?.created_at ?? Number.MAX_SAFE_INTEGER);
+      // Class first: an egg the sync layer promoted ('sync') loses to any
+      // plain egg (NULL: a fresh successor, or the user's incubate choice),
+      // whatever their ages. Only between equals does age decide. Both sides
+      // evaluate the same two rows (shelf_origin rides the wire), so this is
+      // still a pure function of the pair. A wire row that omits shelf_origin
+      // (a phase-1 peer during a rolling restart) falls back to what THIS
+      // instance already knows about the egg — a loser it shelved as 'sync'
+      // must not come back as a plain egg and out-rank the real one by age.
+      const mineSync = (wire.shelf_origin ?? existing[0]?.shelf_origin ?? null) === "sync";
+      const theirsSync = rival.shelf_origin === "sync";
+      const mine = Number(wire.created_at ?? existing[0]?.created_at ?? Number.MAX_SAFE_INTEGER);
       const theirs = Number(rival.created_at);
-      const incomingWins =
-        mine < theirs || (mine === theirs && String(row.egg_id) < String(rival.egg_id));
+      const incomingWins = mineSync !== theirsSync
+        ? theirsSync
+        : (mine < theirs || (mine === theirs && String(wire.egg_id) < String(rival.egg_id)));
       if (incomingWins) {
         statements.push({
-          sql: `UPDATE ramble_eggs SET status = 'shelf' WHERE egg_id = ?`,
+          sql: `UPDATE ramble_eggs SET status = 'shelf', shelf_origin = 'sync' WHERE egg_id = ?`,
           args: [rival.egg_id],
         });
       } else {
-        status = "shelf";
+        wire.status = "shelf";
+        wire.shelf_origin = "sync";
       }
     }
   }
 
-  const cols = RAMBLE_EGG_WIRE_COLUMNS.filter((c) => row[c] !== undefined);
-  const values = cols.map((c) => (c === "status" ? status : row[c]) ?? null);
+  const cols = RAMBLE_EGG_WIRE_COLUMNS.filter((c) => wire[c] !== undefined);
+  const values = cols.map((c) => wire[c] ?? null);
   const setClauses = [
     ...cols.filter((c) => RAMBLE_EGG_UPDATE_COLUMNS.includes(c)).map(rambleEggSetClause),
     "lamport_ts = excluded.lamport_ts",
@@ -744,7 +755,12 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
     args: [...values, lamportTs],
   });
 
-  statements.push({ sql: RAMBLE_EGG_REPROMOTE_SQL, args: [] });
+  // A peer's USER shelve is half of an "incubate" swap: the replacement egg's
+  // own row follows in the same drain. Re-promoting here would draft an old
+  // convergence loser into the slot, which then out-ranks the user's real
+  // choice by created_at on both sides. Every other apply may refill the slot.
+  const isUserShelve = wire.status === "shelf" && wire.shelf_origin === "user";
+  if (!isUserShelve) statements.push({ sql: RAMBLE_EGG_REPROMOTE_SQL, args: [] });
 
   await db.batch(statements);
 }

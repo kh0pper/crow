@@ -333,3 +333,110 @@ test("a shelved convergence loser is re-promoted when the incubating slot emptie
   assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status]), [["ea", "hatched"], ["ec", "incubating"]]);
   assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
 });
+
+// ------------------------------------------ Phase 2 Task 1: shelf origin marker
+
+test("shelf_origin rides the wire and a convergence loser is marked 'sync' on both sides", async () => {
+  const d = await freshDb();
+  await applyRemoteOp(d, "ramble_eggs", "insert", { egg_id: "u1", status: "shelf", shelf_origin: "user", warmth: 0, created_at: 100 }, 1);
+  assert.equal((await d.execute("SELECT shelf_origin FROM ramble_eggs WHERE egg_id='u1'")).rows[0].shelf_origin, "user");
+
+  // Local incubating egg loses to an older peer egg -> it is shelved AND marked 'sync'.
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('local-z','incubating',30,2000)");
+  await applyRemoteOp(d, "ramble_eggs", "insert", { egg_id: "peer-a", status: "incubating", warmth: 10, created_at: 1000 }, 4);
+  let got = await d.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs WHERE egg_id IN ('local-z','peer-a') ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status, r.shelf_origin]), [["local-z", "shelf", "sync"], ["peer-a", "incubating", null]]);
+
+  // An incoming newer egg loses -> stored as shelf + 'sync' even though the wire row said incubating.
+  await applyRemoteOp(d, "ramble_eggs", "insert", { egg_id: "peer-b", status: "incubating", warmth: 5, created_at: 5000 }, 5);
+  got = await d.execute("SELECT status, shelf_origin FROM ramble_eggs WHERE egg_id='peer-b'");
+  assert.deepEqual([got.rows[0].status, got.rows[0].shelf_origin], ["shelf", "sync"]);
+});
+
+test("re-promotion picks only a 'sync' egg and clears its origin; a user-shelved egg never moves", async () => {
+  const d = await freshDb();
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('user-old','shelf',9,500,'user')");
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('loser','shelf',3,700,'sync')");
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('x','incubating',60,1000)");
+  // x hatches on a peer: the slot empties. The OLDEST shelf egg is the user's
+  // (500) — it must be skipped; the convergence loser (700) is promoted.
+  await applyRemoteOp(d, "ramble_eggs", "update",
+    { egg_id: "x", status: "hatched", warmth: 100, species: "crow", seed: 7, created_at: 1000, hatched_at: 1500 }, 6);
+  const got = await d.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs ORDER BY egg_id");
+  // The promoted egg KEEPS its 'sync' mark: the sync layer put it in the slot,
+  // and that class ranks below any NULL-origin egg in the convergence rule.
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status, r.shelf_origin]),
+    [["loser", "incubating", "sync"], ["user-old", "shelf", "user"], ["x", "hatched", null]]);
+});
+
+test("class rule: a NULL-origin incubating egg beats a sync-promoted one regardless of age, on both sides", async () => {
+  // Round-1 C1 scenario. A and B share X (incubating) and an ancient loser L.
+  // X hatches on A; A mints successor N. B applies X-hatched -> promotes L.
+  // N then arrives at B: without the class rule L (older) would win and the
+  // fleet would diverge; with it N wins on B. Symmetrically, when B's
+  // promoted L reaches A, A keeps N. Same for a user's later incubate choice Y.
+  const A = await freshDb(); const B = await freshDb();
+  for (const d of [A, B]) {
+    await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('L','shelf',3,100,'sync')");
+    await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('X','incubating',90,1000)");
+  }
+  const xHatched = { egg_id: "X", status: "hatched", warmth: 100, species: "crow", seed: 7, created_at: 1000, hatched_at: 1500 };
+  const nRow = { egg_id: "N", status: "incubating", warmth: 0, created_at: 1500, shelf_origin: null };
+  // A hatched locally (stand-in) and minted N.
+  await A.execute("UPDATE ramble_eggs SET status='hatched', species='crow', seed=7, hatched_at=1500 WHERE egg_id='X'");
+  await A.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('N','incubating',0,1500)");
+  // B applies the hatch: L is promoted and marked 'sync'.
+  await applyRemoteOp(B, "ramble_eggs", "update", xHatched, 5);
+  let b = await B.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs WHERE status='incubating'");
+  assert.deepEqual(b.rows.map((r) => [r.egg_id, r.shelf_origin]), [["L", "sync"]]);
+  // N arrives at B: NULL beats 'sync' even though L is older.
+  await applyRemoteOp(B, "ramble_eggs", "insert", nRow, 6);
+  b = await B.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs ORDER BY egg_id");
+  assert.deepEqual(b.rows.map((r) => [r.egg_id, r.status, r.shelf_origin]), [["L", "shelf", "sync"], ["N", "incubating", null], ["X", "hatched", null]]);
+  // B's promoted L (from before N arrived) reaches A: A keeps N.
+  await applyRemoteOp(A, "ramble_eggs", "update", { egg_id: "L", status: "incubating", warmth: 3, created_at: 100, shelf_origin: "sync" }, 6);
+  const a = await A.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs ORDER BY egg_id");
+  assert.deepEqual(a.rows.map((r) => [r.egg_id, r.status, r.shelf_origin]), [["L", "shelf", "sync"], ["N", "incubating", null], ["X", "hatched", null]]);
+  // A PHASE-1 peer (rolling restart) emits L incubating with NO shelf_origin
+  // key at all: the class rule must fall back to the 'sync' this instance
+  // already holds for L, so N still wins (round 2, N1).
+  await applyRemoteOp(A, "ramble_eggs", "update", { egg_id: "L", status: "incubating", warmth: 4, created_at: 100 }, 7);
+  assert.deepEqual((await A.execute("SELECT egg_id FROM ramble_eggs WHERE status='incubating'")).rows.map((r) => r.egg_id), ["N"]);
+  // ...and a phase-1 peer's shelf row with no key lands as 'sync' (re-promotable), never NULL.
+  await applyRemoteOp(A, "ramble_eggs", "insert", { egg_id: "P1", status: "shelf", warmth: 1, created_at: 50 }, 8);
+  assert.equal((await A.execute("SELECT shelf_origin FROM ramble_eggs WHERE egg_id='P1'")).rows[0].shelf_origin, "sync");
+  // Two NULL-origin eggs still settle by the phase-1 order (older wins).
+  await applyRemoteOp(A, "ramble_eggs", "insert", { egg_id: "Z", status: "incubating", warmth: 0, created_at: 3000, shelf_origin: null }, 7);
+  assert.deepEqual((await A.execute("SELECT egg_id FROM ramble_eggs WHERE status='incubating'")).rows.map((r) => r.egg_id), ["N"]);
+  // ...and two 'sync' eggs too.
+  const C = await freshDb();
+  await C.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('s-new','incubating',0,2000,'sync')");
+  await applyRemoteOp(C, "ramble_eggs", "insert", { egg_id: "s-old", status: "incubating", warmth: 0, created_at: 1000, shelf_origin: "sync" }, 1);
+  assert.deepEqual((await C.execute("SELECT egg_id FROM ramble_eggs WHERE status='incubating'")).rows.map((r) => r.egg_id), ["s-old"]);
+});
+
+test("with no 'sync' egg on the shelf the slot simply stays empty (a user egg is not drafted)", async () => {
+  const d = await freshDb();
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('mine','shelf',9,500,'user')");
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('x','incubating',60,1000)");
+  await applyRemoteOp(d, "ramble_eggs", "delete", { egg_id: "x" }, 6);
+  assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 0);
+  assert.equal((await d.execute("SELECT status FROM ramble_eggs WHERE egg_id='mine'")).rows[0].status, "shelf");
+});
+
+test("a peer's user-shelve does not trigger re-promotion (the user's replacement egg is on its way)", async () => {
+  // A's user incubates X and thereby shelves Y ('user'). B still has Y
+  // incubating and an ancient convergence loser L on its shelf. If Y's shelve
+  // re-promoted L, L (older than X) would then beat X on B AND, once L's next
+  // warmth emit reached A, on A too — overriding the user's explicit choice.
+  const d = await freshDb();
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('L','shelf',3,100,'sync')");
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('Y','incubating',40,1000)");
+  await applyRemoteOp(d, "ramble_eggs", "update", { egg_id: "Y", status: "shelf", shelf_origin: "user", warmth: 40, created_at: 1000 }, 7);
+  let got = await d.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status, r.shelf_origin]), [["L", "shelf", "sync"], ["Y", "shelf", "user"]]);
+  // Then X arrives with no rival and takes the slot.
+  await applyRemoteOp(d, "ramble_eggs", "update", { egg_id: "X", status: "incubating", shelf_origin: null, warmth: 0, created_at: 3000, found_cell: "9v6m21h" }, 8);
+  got = await d.execute("SELECT egg_id, status FROM ramble_eggs WHERE status='incubating'");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status]), [["X", "incubating"]]);
+});
