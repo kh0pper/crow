@@ -168,7 +168,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -176,15 +176,16 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/persona.js"),
         bundleImport("server/anchors.js"),
         bundleImport("server/app-root.js"),
+        bundleImport("server/pet.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
-      if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod) {
+      if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -441,6 +442,10 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (!MARK_ID_RE.test(markId)) bad("invalid mark_id");
     const result = await mods.marksMod.unlockMark(db, markId, { lat: requireLat(b.lat), lon: requireLon(b.lon) });
     if (result.missing) return res.status(404).json({ error: "not found" });
+    if (result.unlocked === true) {
+      // Best-effort: a pet-feed failure must never fail an unlock response.
+      try { await mods.petMod.feed(db, { type: "unlock_mark" }); } catch { /* cosmetic */ }
+    }
     res.json(result);
   }));
 
@@ -492,6 +497,17 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     } else {
       cells = [mods.anchorsMod.encodeGeohash(requireLat(b.lat), requireLon(b.lon), defaultPrecision())];
     }
+
+    // Feed the pet a visit_place when the resolved area is a NEW geohash —
+    // "the user opens the map at a new geohash" (spec §11) — read the
+    // previous value BEFORE overwriting it so the comparison is meaningful.
+    const previousRaw = await getSetting("local.active_area");
+    let previousCells = [];
+    if (previousRaw) {
+      try { previousCells = JSON.parse(previousRaw); } catch { previousCells = []; }
+    }
+    const isNewArea = JSON.stringify([...cells].sort()) !== JSON.stringify([...previousCells].sort());
+
     // Written directly, NOT through the grid's emitting writer: `local.`-prefixed
     // keys are per-instance machinery and never replicate (instance-sync filters
     // them anyway — emitting would just be noise).
@@ -500,6 +516,12 @@ export default function rambleRouter(dashboardAuth, options = {}) {
             ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
       args: [JSON.stringify(cells)],
     });
+
+    if (isNewArea) {
+      // Best-effort: a pet-feed failure must never fail an area update.
+      try { await mods.petMod.feed(db, { type: "visit_place" }); } catch { /* cosmetic */ }
+    }
+
     poke("ramble:area");
     res.json({ cells });
   }));
@@ -515,9 +537,9 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     res.json(await mods.marksMod.blockPersona(db, b.persona, reason, { emit }));
   }));
 
-  // --- pet (Task 14 replaces this stub) -------------------------------------
+  // --- pet --------------------------------------------------------------
   router.get("/api/ramble/pet", handle(async (req, res) => {
-    res.json({ mood: "happy", energy: 60 });
+    res.json(await mods.petMod.petState(db));
   }));
 
   // Body-parser failures (malformed JSON) surface here. Path-scoped, so it is

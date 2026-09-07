@@ -53,6 +53,18 @@ export async function initRambleTables(db) {
       crows_week INTEGER NOT NULL DEFAULT 0
     );`);
 
+  // week_start (Task 14): added via a guarded ALTER TABLE rather than the
+  // CREATE above so a host that already created ramble_pet before this
+  // column existed still gets it, idempotently, with no SCHEMA_GENERATION
+  // bump (ramble_pet is per-instance, not synced).
+  {
+    const info = await db.execute({ sql: "PRAGMA table_info(ramble_pet)", args: [] });
+    const hasWeekStart = info.rows.some((r) => r.name === "week_start");
+    if (!hasWeekStart) {
+      await initTable(db, "ramble_pet.week_start", "ALTER TABLE ramble_pet ADD COLUMN week_start INTEGER;");
+    }
+  }
+
   await initTable(db, "ramble_settings", `
     CREATE TABLE IF NOT EXISTS ramble_settings (
       key TEXT PRIMARY KEY,

@@ -83,8 +83,50 @@ export default {
         .rb-muted { color:var(--crow-text-muted); font-size:0.85rem; }
         #ramble-marks { list-style:none; padding:0; margin:0.5rem 0 0; }
         #ramble-marks li { padding:0.4rem 0; border-bottom:1px solid var(--crow-border); font-size:0.9rem; }
-        #ramble-pet { font-size:1.6rem; }
+        #ramble-pet { display:flex; align-items:center; gap:0.75rem; }
         #ramble-pet .rb-pet-line { font-size:0.85rem; color:var(--crow-text-muted); }
+
+        /* ─── Ramble pet crow (panel-scoped copy of the header Tamagotchi,
+             servers/gateway/dashboard/shared/notifications.js — SVG markup +
+             mood CSS, sans onclick/thought-bubble/exclaim; keyframe names
+             prefixed rb- so nothing collides with the header crow). ─── */
+        #ramble-pet .rb-crow { display:block; overflow:visible; }
+
+        @keyframes rb-crow-bounce-happy {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-3px); }
+        }
+        @keyframes rb-crow-bounce-tired {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-2px); }
+        }
+        @keyframes rb-crow-blink {
+          0%, 92%, 100% { opacity: 1; }
+          95% { opacity: 0; }
+        }
+        @keyframes rb-crow-flap {
+          0%, 100% { transform: rotateZ(0deg); }
+          50% { transform: rotateZ(-20deg); }
+        }
+        @keyframes rb-crow-droop {
+          0%, 100% { transform: rotateZ(5deg); }
+          50% { transform: rotateZ(10deg); }
+        }
+
+        #ramble-pet .crow-happy .crow-body-group { animation: rb-crow-bounce-happy 2s ease-in-out infinite; }
+        #ramble-pet .crow-happy .crow-eye { animation: rb-crow-blink 4s step-end infinite; }
+        #ramble-pet .crow-happy .crow-wing { animation: none; }
+        #ramble-pet .crow-happy .crow-beak { fill: #d9a521; }
+
+        #ramble-pet .crow-tired .crow-body-group { animation: rb-crow-bounce-tired 3s ease-in-out infinite; }
+        #ramble-pet .crow-tired .crow-eye { animation: rb-crow-blink 6s step-end infinite; }
+        #ramble-pet .crow-tired .crow-wing { animation: rb-crow-droop 3s ease-in-out infinite; }
+        #ramble-pet .crow-tired .crow-beak { fill: #c8c864; }
+
+        #ramble-pet .crow-alarmed .crow-body-group { animation: rb-crow-bounce-happy 1s ease-in-out infinite; }
+        #ramble-pet .crow-alarmed .crow-eye { animation: rb-crow-blink 2s step-end infinite; }
+        #ramble-pet .crow-alarmed .crow-wing { animation: rb-crow-flap 0.3s ease-in-out infinite; }
+        #ramble-pet .crow-alarmed .crow-beak { fill: #c8c864; }
       </style>
       <link rel="stylesheet" href="/ramble/static/leaflet/leaflet.css">
 
@@ -134,7 +176,25 @@ export default {
 
       <div class="rb-card">
         <h3 style="margin-top:0">Your crow</h3>
-        <div id="ramble-pet"><span class="rb-pet-line">loading&hellip;</span></div>
+        <div id="ramble-pet">
+          <svg class="rb-crow crow-happy" id="ramble-pet-crow" viewBox="0 0 48 56" width="42" height="49">
+            <g class="crow-body-group">
+              <g class="crow-feet">
+                <line x1="19" y1="42" x2="17" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
+                <line x1="19" y1="42" x2="21" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
+                <line x1="29" y1="42" x2="27" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
+                <line x1="29" y1="42" x2="31" y2="48" stroke="#0e6b62" stroke-width="1.5" stroke-linecap="round"/>
+              </g>
+              <ellipse class="crow-body" cx="24" cy="34" rx="12" ry="10" fill="#0e6b62"/>
+              <ellipse class="crow-wing" cx="14" cy="33" rx="6" ry="8" fill="#4fbdb0" opacity="0.5" transform-origin="14 33"/>
+              <circle class="crow-head" cx="24" cy="18" r="9" fill="#0e6b62"/>
+              <circle class="crow-eye" cx="28" cy="16" r="3" fill="#d9a521"/>
+              <circle class="crow-pupil" cx="29" cy="16" r="1.5" fill="#22303a"/>
+              <polygon class="crow-beak" points="33,18 40,20 33,22" fill="#d9a521"/>
+            </g>
+          </svg>
+          <div class="rb-pet-line" id="ramble-pet-line">loading&hellip;</div>
+        </div>
       </div>
 
       <div class="rb-card">

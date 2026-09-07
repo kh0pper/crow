@@ -23,7 +23,8 @@
   var composeStatusEl = document.getElementById("rb-compose-status");
   var gridStatusEl = document.getElementById("rb-grid-status");
   var marksListEl = document.getElementById("ramble-marks");
-  var petEl = document.getElementById("ramble-pet");
+  var petCrowEl = document.getElementById("ramble-pet-crow");
+  var petLineEl = document.getElementById("ramble-pet-line");
 
   var currentCells = [];
   var markerLayer = null;
@@ -129,6 +130,7 @@
         bodyEl.textContent = "still too far away";
         btn.disabled = false;
       }
+      refreshPet();
     }).catch(function (err) {
       bodyEl.textContent = err.message;
       btn.disabled = false;
@@ -191,6 +193,7 @@
       .then(function (body) {
         currentCells = (body && body.cells) || [];
         setText(statusEl, "Listening to " + currentCells.join(", "));
+        refreshPet();
         return refreshMarks();
       })
       .catch(function (err) { setText(statusEl, err.message); });
@@ -274,23 +277,36 @@
 
   /* ------------------------------------------------------------------ pet */
 
-  jsonFetch("/api/ramble/pet").then(function (pet) {
-    if (!petEl || !pet) return;
-    petEl.textContent = "";
-    var face = document.createElement("div");
-    face.textContent = "🐦";
-    var line = document.createElement("div");
-    line.className = "rb-pet-line";
-    line.textContent = (pet.mood || "?") + " · energy " + (pet.energy != null ? pet.energy : "?");
-    petEl.appendChild(face);
-    petEl.appendChild(line);
-  }).catch(function () { /* pet is cosmetic */ });
+  var CROW_MOOD_CLASSES = ["crow-happy", "crow-tired", "crow-alarmed"];
+
+  function paintPet(pet) {
+    if (!pet) return;
+    if (petCrowEl) {
+      CROW_MOOD_CLASSES.forEach(function (cls) { petCrowEl.classList.remove(cls); });
+      var moodClass = "crow-" + (pet.mood || "happy");
+      if (CROW_MOOD_CLASSES.indexOf(moodClass) !== -1) petCrowEl.classList.add(moodClass);
+    }
+    if (petLineEl) {
+      var energy = pet.energy != null ? pet.energy : "?";
+      var places = pet.places_week != null ? pet.places_week : 0;
+      var unlocks = pet.unlocks_week != null ? pet.unlocks_week : 0;
+      petLineEl.textContent = "energy " + energy +
+        " · " + places + " place" + (places === 1 ? "" : "s") +
+        ", " + unlocks + " unlock" + (unlocks === 1 ? "" : "s") + " this week";
+    }
+  }
+
+  function refreshPet() {
+    return jsonFetch("/api/ramble/pet").then(paintPet).catch(function () { /* pet is cosmetic */ });
+  }
+
+  refreshPet();
 
   /* --------------------------------------------------- nearby live updates */
   /* Task 13 adds the server side; until then a 404 must be silent. */
   try {
     var stream = new EventSource("/dashboard/streams/ramble-nearby");
-    stream.onmessage = function () { refreshMarks(); };
+    stream.onmessage = function () { refreshMarks(); refreshPet(); };
     stream.onerror = function () { /* quiet: the stream may not exist yet */ };
   } catch (err) { /* no EventSource, no live updates */ }
 

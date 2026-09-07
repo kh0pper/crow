@@ -209,12 +209,34 @@ test("POST /api/ramble/grid rejects an unknown audience or channel", async () =>
 
 // ------------------------------------------------------------------- the pet
 
-test("GET /api/ramble/pet returns the phase-1 stub", async () => {
+test("GET /api/ramble/pet returns the real pet state shape", async () => {
   const res = await req("/api/ramble/pet");
   assert.equal(res.status, 200);
   const body = await res.json();
-  assert.equal(body.mood, "happy");
-  assert.equal(body.energy, 60);
+  assert.equal(typeof body.mood, "string");
+  assert.ok(["happy", "tired", "alarmed"].includes(body.mood));
+  assert.equal(typeof body.energy, "number");
+  assert.ok(body.energy >= 0 && body.energy <= 100);
+  assert.equal(typeof body.places_week, "number");
+  assert.equal(typeof body.unlocks_week, "number");
+  assert.equal(typeof body.crows_week, "number");
+});
+
+test("posting a NEW active-area cell feeds the pet a visit_place; the SAME cell again does not", async () => {
+  const before = await (await req("/api/ramble/pet")).json();
+
+  // A location whose precision-5 cell nobody has posted yet in this test run.
+  const NEW_LAT = 51.5074, NEW_LON = -0.1278;
+  const first = await req("/api/ramble/area", { method: "POST", body: { lat: NEW_LAT, lon: NEW_LON } });
+  assert.equal(first.status, 200);
+  const afterFirst = await (await req("/api/ramble/pet")).json();
+  assert.equal(afterFirst.places_week, before.places_week + 1, "a new cell must feed visit_place");
+
+  // Same cell again: no new visit_place.
+  const second = await req("/api/ramble/area", { method: "POST", body: { lat: NEW_LAT, lon: NEW_LON } });
+  assert.equal(second.status, 200);
+  const afterSecond = await (await req("/api/ramble/pet")).json();
+  assert.equal(afterSecond.places_week, afterFirst.places_week, "the same cell again must not feed visit_place");
 });
 
 // ------------------------------------------------------------------- statics
@@ -319,12 +341,17 @@ test("a locked mark lists as an approximate cell-centre teaser, then unlocks in 
   assert.ok(Math.abs(teaser.approx_lat - LAT) < 0.01);
   assert.ok(Math.abs(teaser.approx_lon - LON) < 0.01);
 
+  const petBefore = await (await req("/api/ramble/pet")).json();
+
   const unlocked = await (await req("/api/ramble/unlock", {
     method: "POST",
     body: { mark_id: created.mark.mark_id, lat: LAT, lon: LON },
   })).json();
   assert.equal(unlocked.unlocked, true);
   assert.equal(unlocked.content.content_text, "under the third oak");
+
+  const petAfter = await (await req("/api/ramble/pet")).json();
+  assert.equal(petAfter.unlocks_week, petBefore.unlocks_week + 1, "a successful unlock must feed unlock_mark");
 });
 
 // ------------------------------------------------------------- tile proxy

@@ -20,6 +20,7 @@ import { resolvePersona } from "./persona.js";
 import { createMark, listMarks, unlockMark, blockPersona, unblockPersona } from "./marks.js";
 import { encodeGeohash } from "./anchors.js";
 import { getGrid } from "./grid.js";
+import { feed, petState } from "./pet.js";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const errorText = (t) => ({ content: [{ type: "text", text: t }], isError: true });
@@ -241,6 +242,10 @@ export function createRambleServer(db, options = {}) {
     async ({ mark_id, lat, lon }) => {
       try {
         const result = await unlockMark(db, mark_id, { lat, lon });
+        if (result.unlocked === true) {
+          // Best-effort: a pet-feed failure must never fail an unlock.
+          try { await feed(db, { type: "unlock_mark" }); } catch { /* cosmetic */ }
+        }
         return text(JSON.stringify(result));
       } catch (err) {
         return errorText(err.message);
@@ -250,23 +255,11 @@ export function createRambleServer(db, options = {}) {
 
   register(
     "ramble_pet_state",
-    "Get the Ramble companion pet's current state (mood, energy, weekly activity counters). Task 14 replaces this stub with full pet.js logic.",
+    "Get the Ramble companion pet's current state (mood, energy, weekly activity counters).",
     {},
     async () => {
       try {
-        let result = await db.execute({ sql: "SELECT * FROM ramble_pet WHERE owner = 'self'", args: [] });
-        if (result.rows.length === 0) {
-          await db.execute({ sql: "INSERT INTO ramble_pet (owner) VALUES ('self')", args: [] });
-          result = await db.execute({ sql: "SELECT * FROM ramble_pet WHERE owner = 'self'", args: [] });
-        }
-        const row = result.rows[0];
-        return text(JSON.stringify({
-          mood: row.mood,
-          energy: row.energy,
-          places_week: row.places_week,
-          unlocks_week: row.unlocks_week,
-          crows_week: row.crows_week,
-        }));
+        return text(JSON.stringify(await petState(db)));
       } catch (err) {
         return errorText(err.message);
       }
