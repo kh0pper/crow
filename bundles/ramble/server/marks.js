@@ -58,7 +58,7 @@ function anchorColumns(anchor) {
 
 export async function createMark(db, opts, { emit } = {}) {
   const {
-    author, author_level, kind, anchor, visibility, content, ttlSeconds,
+    author, author_level, kind, anchor, visibility, content, ttlSeconds, bird,
   } = opts;
   const reveal = opts.reveal ?? defaultReveal(visibility);
   const mark_id = randomUUID();
@@ -69,17 +69,21 @@ export async function createMark(db, opts, { emit } = {}) {
   const content_text = content?.content_text ?? null;
   const content_kind = content?.content_kind ?? "none";
   const content_ref = content?.content_ref ?? null;
+  // The author's currently-active bird, so your own pins show your bird too
+  // (createMark is the local-author path; insertRemoteMark is the wire path).
+  const bird_species = bird?.species ?? null;
+  const bird_seed = bird?.seed ?? null;
 
   await db.execute({
     sql: `INSERT INTO ramble_marks (
             mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, accuracy_m, anchor_ref,
             visibility, reveal, content_text, content_kind, content_ref,
-            created_at, expires_at, publish_state, origin
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'local')`,
+            created_at, expires_at, publish_state, origin, bird_species, bird_seed
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'local', ?, ?)`,
     args: [
       mark_id, author, author_level ?? null, kind, anchor_kind, geohash, lat, lon, accuracy_m, anchor_ref,
       visibility, reveal, content_text, content_kind, content_ref,
-      created_at, expires_at,
+      created_at, expires_at, bird_species, bird_seed,
     ],
   });
 
@@ -191,12 +195,12 @@ export async function insertRemoteMark(db, row) {
     sql: `INSERT INTO ramble_marks (
             mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, accuracy_m, anchor_ref,
             visibility, reveal, content_text, content_kind, content_ref,
-            created_at, expires_at, nostr_event_id, publish_state, origin
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote', 'remote')`,
+            created_at, expires_at, nostr_event_id, publish_state, origin, bird_species, bird_seed
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote', 'remote', ?, ?)`,
     args: [
       mark_id, row.author, row.author_level ?? null, row.kind, anchor_kind, finalGeohash, lat, lon, accuracy_m, anchor_ref,
       row.visibility ?? "public", row.reveal ?? "open", row.content_text ?? null, row.content_kind ?? "none", row.content_ref ?? null,
-      created_at, expires_at, row.nostr_event_id ?? null,
+      created_at, expires_at, row.nostr_event_id ?? null, row.bird_species ?? null, row.bird_seed ?? null,
     ],
   });
 
