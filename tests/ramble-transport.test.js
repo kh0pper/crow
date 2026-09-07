@@ -25,6 +25,8 @@ import { MARK_KIND, CAW_KIND } from "../bundles/ramble/server/nostr-map.js";
 import { setMaster, setCell } from "../bundles/ramble/server/grid.js";
 import { isoWeek } from "../bundles/ramble/server/eggs.js";
 import { startRambleTransport } from "../servers/gateway/boot/ramble-transport.js";
+import { enqueueMark, pendingDeliveries } from "../bundles/ramble/server/delivery.js";
+import { giftEgg, proposeSwap } from "../bundles/ramble/server/trades.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const BUNDLE_DIR = join(__dir, "../bundles/ramble/server");
@@ -57,6 +59,7 @@ async function makeHarness({ shouldPublish, autoStart = false, emit } = {}) {
   const db = createClient({ url: "file::memory:" });
   const bus = new EventEmitter();
   const published = [];
+  const sent = [];
   const closedSubs = [];
   const state = { accept: true, throwErr: null, delayMs: 0 };
 
@@ -78,6 +81,12 @@ async function makeHarness({ shouldPublish, autoStart = false, emit } = {}) {
       published.push(event);
       return state.accept ? ["wss://fake"] : [];
     },
+    sendControl: async (contact, content) => {
+      if (state.delayMs) await new Promise((r) => setTimeout(r, state.delayMs));
+      if (state.throwErr) throw new Error(state.throwErr);
+      sent.push({ contact, content: JSON.parse(content) });
+      return { eventId: "ctl-" + sent.length, relays: state.accept ? ["wss://fake"] : [] };
+    },
   };
 
   const transport = await startRambleTransport({
@@ -88,7 +97,15 @@ async function makeHarness({ shouldPublish, autoStart = false, emit } = {}) {
     autoStart,
     ...(emit ? { emit } : {}),
   });
-  return { db, bus, published, closedSubs, state, transport, relay };
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, crow_id TEXT NOT NULL UNIQUE, display_name TEXT,
+      secp256k1_pubkey TEXT NOT NULL DEFAULT '', is_blocked INTEGER DEFAULT 0, request_status TEXT, is_bot INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS contact_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_uid TEXT, room_uid TEXT);
+    CREATE TABLE IF NOT EXISTS contact_group_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, contact_id INTEGER NOT NULL);`);
+  return { db, bus, published, sent, closedSubs, state, transport, relay };
 }
 
 /** One pending public mark at the fixture coordinates. */
@@ -208,7 +225,7 @@ test("drain publishes the pending public mark and the pending tombstone, and lea
   assert.equal(publishedRow.author, markEvent.pubkey);
 
   const contactsRow = await getMark(H.db, contactsMarkId);
-  assert.equal(contactsRow.publish_state, "pending", "non-public marks never reach the wire in phase 1");
+  assert.equal(contactsRow.publish_state, "pending", "a bare createMark (no enqueueMark) queues nothing, so the row stays pending");
   assert.equal(contactsRow.nostr_event_id, null);
 
   assert.equal(await tombstoneCount(H.db), 0, "an accepted tombstone row is deleted");
@@ -439,7 +456,7 @@ test("stop(): clears the filter, closes every sub handle, and removes its bus li
   // Idempotent, and a post-stop drain is a no-op.
   transport.stop();
   const result = await transport.drainOnce();
-  assert.deepEqual(result, { published: 0, skipped: 0, failed: 0, expired: 0 });
+  assert.deepEqual(result, { published: 0, skipped: 0, failed: 0, expired: 0, delivered: 0 });
 });
 
 // ---------------------------------------------------------------------------
@@ -506,4 +523,196 @@ test("Task 7: onEvent credits ramble_credits with one meet_crow row per (pubkey,
     args: [key],
   });
   assert.equal(after2.length, 1, "still exactly one meet_crow credit row for the same persona+week");
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3 — contacts delivery (outbox drain), gifts/swaps, inbound envelopes.
+// ---------------------------------------------------------------------------
+
+const PK = "cd".repeat(32);
+async function seedContacts(db) {
+  await db.executeMultiple(`
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey) VALUES ('crow:one', 'One', '02${PK}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey) VALUES ('crow:two', 'Two', '02${PK}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, is_blocked) VALUES ('crow:blocked', 'Blk', '02${PK}', 1);
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, request_status) VALUES ('req:${PK}', NULL, '${PK}', 'pending');`);
+}
+function seedContactsMark(db, text = "for my contacts") {
+  return createMark(db, {
+    author: WORLD_AUTHOR, author_level: "rotating", kind: "mark",
+    anchor: { anchor_kind: "geo", lat: LAT, lon: LON, accuracy_m: 5 },
+    visibility: "contacts", reveal: "open", content: { content_text: text, content_kind: "none" },
+  });
+}
+
+test("phase 3: a contacts mark fans out one DM per full contact, then flips to published", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  await setMaster(h.db, true);
+  await setCell(h.db, "contacts", "geo", true);
+  const row = await seedContactsMark(h.db);
+  assert.deepEqual(await enqueueMark(h.db, row, { bird: null }), { ok: true, recipients: 2 });
+  const result = await h.transport.drainOnce();
+  assert.equal(result.delivered, 2);
+  assert.equal(result.published, 0, "nothing went to the public relays");
+  assert.equal(h.published.length, 0);
+  assert.deepEqual(h.sent.map((s) => s.contact.crow_id).sort(), ["crow:one", "crow:two"]);
+  assert.equal(h.sent[0].contact.secp256k1_pubkey, "02" + PK);
+  assert.equal(h.sent[0].content.type, "ramble.mark");
+  assert.equal(h.sent[0].content.mark.mark_id, row.mark_id);
+  assert.equal(h.sent[0].content.mark.content_text, "for my contacts");
+  assert.equal((await getMark(h.db, row.mark_id)).publish_state, "published");
+  assert.equal((await pendingDeliveries(h.db, 50)).length, 0);
+});
+
+test("phase 3: the grid gates contacts marks (they wait, queued); gifts are never gated", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  const row = await seedContactsMark(h.db);
+  await enqueueMark(h.db, row, { bird: null });
+  await h.db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('g1','shelf','user',9,1)", args: [] });
+  assert.equal((await giftEgg(h.db, { eggId: "g1", toCrowId: "crow:one", now: Date.now() })).ok, true);
+  let result = await h.transport.drainOnce();
+  assert.equal(result.delivered, 1, "only the gift went");
+  assert.equal(h.sent[0].content.type, "ramble.egg");
+  assert.equal((await pendingDeliveries(h.db, 50)).length, 2, "the two mark rows are still queued");
+  assert.equal((await getMark(h.db, row.mark_id)).publish_state, "pending");
+  await setMaster(h.db, true);
+  await setCell(h.db, "contacts", "geo", true);
+  result = await h.transport.drainOnce();
+  assert.equal(result.delivered, 2);
+  assert.equal((await getMark(h.db, row.mark_id)).publish_state, "published");
+});
+
+test("phase 3: a relay refusal retries and parks at MAX attempts; a vanished recipient or deleted mark drops the row", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  await setMaster(h.db, true);
+  await setCell(h.db, "contacts", "geo", true);
+  const row = await seedContactsMark(h.db);
+  await enqueueMark(h.db, row, { bird: null });
+  h.state.accept = false;
+  let result = await h.transport.drainOnce();
+  assert.equal(result.delivered, 0);
+  let rows = await pendingDeliveries(h.db, 50);
+  assert.deepEqual(rows.map((r) => r.attempts), [1, 1]);
+  await h.db.execute({ sql: "UPDATE ramble_outbox SET attempts = 19 WHERE to_crow_id = 'crow:two'", args: [] });
+  await h.transport.drainOnce();
+  rows = await pendingDeliveries(h.db, 50);
+  assert.deepEqual(rows.map((r) => [r.to_crow_id, r.attempts]), [["crow:one", 2]], "twenty refusals park the delivery");
+  h.state.accept = true;
+  await h.db.execute({ sql: "DELETE FROM contacts WHERE crow_id = 'crow:one'", args: [] });
+  await h.transport.drainOnce();
+  assert.equal((await pendingDeliveries(h.db, 50)).length, 0, "no contact, no delivery");
+  assert.equal((await getMark(h.db, row.mark_id)).publish_state, "published", "every row left the queue");
+  // A mark deleted before the drain never goes out.
+  const doomed = await seedContactsMark(h.db, "doomed");
+  await enqueueMark(h.db, doomed, { bird: null });
+  await h.db.execute({ sql: "DELETE FROM ramble_marks WHERE mark_id = ?", args: [doomed.mark_id] });
+  const before = h.sent.length;
+  await h.transport.drainOnce();
+  assert.equal(h.sent.length, before);
+  assert.equal((await pendingDeliveries(h.db, 50)).length, 0);
+});
+
+test("phase 3: an inbound ramble.mark envelope lands as a persistent contacts mark, pokes ramble:nearby and credits meet_crow", async () => {
+  const h = await makeHarness();
+  const nearby = []; const trades = [];
+  h.bus.on("ramble:nearby", (p) => nearby.push(p));
+  h.bus.on("ramble:trade", (p) => trades.push(p));
+  const mark = { mark_id: "friend-mark", kind: "mark", anchor_kind: "geo", geohash: FULL_GEOHASH, lat: LAT, lon: LON, reveal: "open", content_text: "from a friend", content_kind: "none", created_at: Date.now(), bird: { species: "magpie", seed: 8 } };
+  // Through the bus, exactly as NostrManager delivers it (the listener is
+  // async and not awaited by emit, so poll for the row).
+  h.bus.emit("ramble:envelope", { crowId: "crow:one", contactId: 1, pubkey: PK, payload: { type: "ramble.mark", v: 1, mark }, eventId: "ev-m" });
+  for (let i = 0; i < 200 && !(await getMark(h.db, "friend-mark")); i++) await new Promise((r) => setTimeout(r, 10));
+  const stored = await getMark(h.db, "friend-mark");
+  assert.ok(stored, "the mark was stored via the bus listener");
+  // A second copy (re-delivery), awaited directly: a no-op.
+  await h.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, payload: { type: "ramble.mark", v: 1, mark }, eventId: "ev-m2" });
+  assert.deepEqual([stored.visibility, stored.expires_at, stored.origin, stored.author, stored.bird_species], ["contacts", null, "remote", PK, "magpie"]);
+  assert.equal(nearby.length, 1);
+  assert.deepEqual(nearby[0], { geohash: FULL_GEOHASH, mark_id: "friend-mark", kind: "mark" });
+  const creditKey = `${PK}:${isoWeek(Date.now())}`;
+  const credits = async () => (await h.db.execute({ sql: "SELECT * FROM ramble_credits WHERE kind = 'meet_crow' AND key = ?", args: [creditKey] })).rows.length;
+  for (let i = 0; i < 200 && (await credits()) === 0; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(await credits(), 1);
+  assert.equal(trades.length, 0);
+});
+
+test("phase 3: an inbound gift lands as received and pokes ramble:trade; an accepted swap completes and its reply drains immediately", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  const trades = [];
+  h.bus.on("ramble:trade", (p) => trades.push(p));
+  await h.transport.onEnvelope({ crowId: "crow:one", pubkey: PK, payload: { type: "ramble.egg", v: 1, egg: { egg_id: "gift-in", warmth: 12, found_cell: null, found_week: null } } });
+  const { rows } = await h.db.execute({ sql: "SELECT status, shelf_origin, from_crow_id FROM ramble_eggs WHERE egg_id = 'gift-in'", args: [] });
+  assert.deepEqual(rows[0], { status: "received", shelf_origin: "user", from_crow_id: "crow:one" });
+  assert.deepEqual(trades, [{ kind: "gift", trade_id: null, egg_id: "gift-in", state: "received" }]);
+
+  await h.db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('mine','shelf','user',3,1)", args: [] });
+  const p = await proposeSwap(h.db, { eggId: "mine", toCrowId: "crow:one", now: Date.now() });
+  await h.transport.drainOnce(); // the proposal goes out
+  assert.equal(h.sent.at(-1).content.trade.state, "proposed");
+  await h.transport.onEnvelope({ crowId: "crow:one", pubkey: PK, payload: { type: "ramble.trade", v: 1, trade: { trade_id: p.trade.trade_id, state: "accepted", my_egg_id: "theirs", want_egg_id: "mine" }, egg: { egg_id: "theirs", warmth: 40, found_cell: null, found_week: null } } });
+  assert.deepEqual(trades.at(-1), { kind: "trade", trade_id: p.trade.trade_id, egg_id: "theirs", state: "completed" });
+  assert.ok(await new Promise((r) => setTimeout(() => r(h.sent.at(-1).content.trade.state === "completed"), 50)), "the completion reply drained without waiting for a tick");
+  assert.equal((await h.db.execute("SELECT status FROM ramble_eggs WHERE egg_id='mine'")).rows[0].status, "gifted");
+  assert.equal((await h.db.execute("SELECT status FROM ramble_eggs WHERE egg_id='theirs'")).rows[0].status, "received");
+});
+
+test("phase 3 S3: a reply queued while a drain is in flight goes out right after it, not a tick later", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  await h.db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('slow','shelf','user',3,1)", args: [] });
+  const p = await proposeSwap(h.db, { eggId: "slow", toCrowId: "crow:one", now: Date.now() });
+  h.state.delayMs = 120;
+  const inFlight = h.transport.drainOnce(); // sends the proposal, slowly
+  await new Promise((r) => setTimeout(r, 20));
+  await h.transport.onEnvelope({ crowId: "crow:one", pubkey: PK, eventId: "acc-1", payload: { type: "ramble.trade", v: 1, trade: { trade_id: p.trade.trade_id, state: "accepted", my_egg_id: "theirs-2", want_egg_id: "slow" }, egg: { egg_id: "theirs-2", warmth: 4, found_cell: null, found_week: null } } });
+  await inFlight;
+  h.state.delayMs = 0;
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(h.sent.map((x) => x.content.trade.state), ["proposed", "completed"], "the completion rode the redrain, with no manual second drain");
+});
+
+test("phase 3 C1: sixty gated mark rows do not starve a gift behind them", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  // Grid closed for contacts: every mark row is skipped but stays queued.
+  for (let i = 0; i < 30; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    const row = await seedContactsMark(h.db, "gated " + i);
+    // eslint-disable-next-line no-await-in-loop
+    await enqueueMark(h.db, row, { bird: null });
+  }
+  assert.equal((await pendingDeliveries(h.db, 100)).length, 60);
+  await h.db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('late-gift','shelf','user',1,1)", args: [] });
+  assert.equal((await giftEgg(h.db, { eggId: "late-gift", toCrowId: "crow:one", now: Date.now() })).ok, true);
+  const result = await h.transport.drainOnce();
+  assert.equal(result.delivered, 1);
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].content.type, "ramble.egg");
+});
+
+test("phase 3 C5: the same envelope arriving from several relays is applied once", async () => {
+  const h = await makeHarness();
+  const trades = [];
+  h.bus.on("ramble:trade", (p) => trades.push(p));
+  const msg = { crowId: "crow:one", pubkey: PK, payload: { type: "ramble.egg", v: 1, egg: { egg_id: "dup-gift", warmth: 1, found_cell: null, found_week: null } }, eventId: "same-event" };
+  await Promise.all([h.transport.onEnvelope(msg), h.transport.onEnvelope({ ...msg }), h.transport.onEnvelope({ ...msg })]);
+  assert.equal(trades.length, 1, "one ramble:trade for three copies of one DM");
+  // A different event id with the same egg is still idempotent at the row level.
+  await h.transport.onEnvelope({ ...msg, eventId: "other-event" });
+  assert.equal(trades.length, 1);
+  assert.equal((await h.db.execute("SELECT count(*) AS n FROM ramble_eggs WHERE egg_id='dup-gift'")).rows[0].n, 1);
+});
+
+test("phase 3: stop() detaches the envelope listener; a malformed envelope never throws", async () => {
+  const h = await makeHarness();
+  const before = h.bus.listenerCount("ramble:envelope");
+  assert.ok(before >= 1);
+  await assert.doesNotReject(h.transport.onEnvelope({ crowId: "crow:one", pubkey: PK, payload: "junk" }));
+  await assert.doesNotReject(h.transport.onEnvelope(null));
+  h.transport.stop();
+  assert.equal(h.bus.listenerCount("ramble:envelope"), before - 1);
 });
