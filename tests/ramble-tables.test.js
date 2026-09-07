@@ -66,3 +66,12 @@ test("phase 2: ramble_eggs.shelf_origin exists and legacy NULL shelf rows backfi
   const got = await db.execute("SELECT egg_id, shelf_origin FROM ramble_eggs WHERE egg_id IN ('legacy','mine') ORDER BY egg_id");
   assert.deepEqual(got.rows.map((r) => [r.egg_id, r.shelf_origin]), [["legacy", "sync"], ["mine", "user"]]);
 });
+
+test("phase 2: ramble_nest_claims exists, is keyed on (cell, week) and is NOT a synced table", async () => {
+  const { SYNCED_TABLES } = await import("../servers/sharing/instance-sync.js");
+  assert.ok(!SYNCED_TABLES.includes("ramble_nest_claims"), "claims are per instance (spec §5)");
+  const cols = (await db.execute("PRAGMA table_info(ramble_nest_claims)")).rows.map((r) => r.name);
+  for (const c of ["cell", "week", "egg_id", "claimed_at"]) assert.ok(cols.includes(c), `ramble_nest_claims.${c}`);
+  await db.execute({ sql: "INSERT INTO ramble_nest_claims (cell, week, egg_id, claimed_at) VALUES ('9v6m21h','2026-W37','e1',1)", args: [] });
+  await assert.rejects(db.execute({ sql: "INSERT INTO ramble_nest_claims (cell, week, egg_id, claimed_at) VALUES ('9v6m21h','2026-W37','e2',2)", args: [] }));
+});

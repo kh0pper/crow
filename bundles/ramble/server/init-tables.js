@@ -147,4 +147,17 @@ export async function initRambleTables(db) {
       credited_at INTEGER NOT NULL,
       PRIMARY KEY (kind, key)
     );`);
+
+  // Phase 2: which nests THIS instance's user has already claimed. Local by
+  // design (spec §5): a claim is not shared state, the egg it produced is
+  // (ramble_eggs replicates). PK (cell, week) makes a double-tap idempotent;
+  // claimed_at drives the one-claim-per-local-day limit.
+  await initTable(db, "ramble_nest_claims", `
+    CREATE TABLE IF NOT EXISTS ramble_nest_claims (
+      cell TEXT NOT NULL,
+      week TEXT NOT NULL,
+      egg_id TEXT NOT NULL,
+      claimed_at INTEGER NOT NULL,
+      PRIMARY KEY (cell, week)
+    );`);
 }
