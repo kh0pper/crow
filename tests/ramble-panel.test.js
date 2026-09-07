@@ -18,7 +18,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -870,4 +870,13 @@ test("the router registers no unpathed router.use(middleware) layer", () => {
     (l.slash === true || l.regexp?.fast_slash === true));
   assert.deepEqual(unscoped.map((l) => l.name), [],
     "every router.use() in panel/routes.js must carry a path prefix");
+});
+
+// ------------------------------------------------------------- docs parity
+
+test("docs: the Spanish Ramble guide mirrors the English heading structure", () => {
+  const levels = (p) => readFileSync(join(REPO_ROOT, p), "utf8").split("\n")
+    .filter((l) => /^#{2,3} /.test(l)).map((l) => l.split(" ")[0]);
+  assert.deepEqual(levels("docs/es/guide/ramble.md"), levels("docs/guide/ramble.md"),
+    "en/es Ramble guides must have the same number, order and level of ##/### headings");
 });

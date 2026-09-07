@@ -4887,7 +4887,7 @@
     {
       "id": "ramble",
       "name": "Ramble",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "type": "mcp-server",
       "author": "Crow",
       "category": "social",
@@ -4899,7 +4899,7 @@
         "geo"
       ],
       "icon": "🐦",
-      "description": "Proximity broadcasts (caws) + a shared/private map of discoverable marks, with a crow pet. Phase 1: geo channel, map, Nostr, pet.",
+      "description": "Proximity broadcasts (caws) + a shared/private map of discoverable marks, with a bird companion: eggs, nests, an egg shelf and a flock.",
       "server": {
         "command": "node",
         "args": [

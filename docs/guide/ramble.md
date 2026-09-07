@@ -103,6 +103,18 @@ Three chores — **feed**, **preen**, **play** — are yours to do once each per
 
 `POST /api/ramble/pet/chore { kind: "feed" | "preen" | "play" }` completes one. A repeat for a kind already done today is a no-op (`done: false`); either way the response carries the pet's current state.
 
+## Nests and the egg shelf
+
+Nests are spawn points in the world. Each ISO week, every geohash-7 cell (about 150 m square) either has a nest or not, decided by a public formula — `sha256("ramble-nest-v1:" + cell + ":" + week)`, a nest when the first 32 bits mod `nest.rate` (default 24) is 0 — so everyone sees the same nests with no server involved and nothing about people is revealed. The map shows them as egg pins once you zoom in (zoom 14 or closer), fetched from `GET /api/ramble/nests?bbox=south,west,north,east`.
+
+Walk within **75 m** of a nest and tap **Take the egg** (`POST /api/ramble/nests/claim`): a new egg lands on your **shelf** (unhatched, warmth 0, marked with the cell and week it was found in). Limits: **one claim per local day** and a **shelf cap of 5** (`shelf.cap`); both refusals come back as a friendly reason, not an error. Claiming the same nest twice returns the same egg. A claim credits **no** warmth and feeds **no** energy — the egg is the reward. Claims are recorded per instance (`ramble_nest_claims`) and never replicate; the egg itself does.
+
+Exactly one egg incubates at a time. From the **Flock** screen you can **incubate** any shelf egg (`POST /api/ramble/eggs/:id/incubate`); the one it replaces goes to the shelf keeping its warmth. Instance sync distinguishes an egg *you* parked (`shelf_origin = 'user'`) from one the sync layer shelved while reconciling two instances (`'sync'`): only the latter is ever pulled back into the incubating slot automatically.
+
+## Your flock
+
+Every hatched bird stays in your flock. The Flock screen (`GET /api/ramble/flock`) lists them with the **active** one tagged — that is the bird on your map, in the Nest header and on your public caws — and tapping another bird activates it (`POST /api/ramble/birds/:id/activate`). The score is species found out of the 8 kinds; a second bird of a kind you already have is still a bird, just not a new kind.
+
 ## Just me marks
 
 `visibility: "private"` marks are for you alone: they never leave the instance over Nostr, so no relay or contact ever sees them. Unlike public and contacts marks, they're **persistent by default** (no TTL) and **open by default** (no proximity gate).
@@ -141,6 +153,13 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 | `warmth.checkin` | 8 |
 | `warmth.hatch_at` | 100 |
 
+### Nests and shelf
+
+| Key | Default | Effect |
+|---|---|---|
+| `nest.rate` | 24 | About one nest per this many geohash-7 cells per week (integer ≥ 1). Replicates with your settings, so your own instances agree; it is an operator knob, and a changed rate no longer matches other people's nests. |
+| `shelf.cap` | 5 | How many unhatched eggs the shelf holds (integer ≥ 0; 0 turns claiming off). |
+
 ## MCP tools
 
 | Tool | Purpose |
@@ -155,6 +174,9 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 | `ramble_chore` | Complete a daily chore (`feed`, `preen`, or `play`) for the companion pet. |
 | `ramble_block` | Block a persona by x-only pubkey and purge its stored marks. |
 | `ramble_unblock` | Remove a persona from the block list. |
+| `ramble_flock` | Your flock: birds, the shelf, the incubating egg, species found. |
+| `ramble_nests` | Nests near a location this week, nearest first, with your claims marked. |
+| `ramble_claim_nest` | Claim the nest you are standing at (or a named cell within 75 m) for a shelf egg. |
 
 Groups (`ramble_group_create` / `ramble_group_join`) are not in phase 1.
 
@@ -170,3 +192,9 @@ The transport lives in core (`servers/gateway/boot/ramble-transport.js`), not in
 ```
 
 The second line means the bundle is installed but nothing will ever be published or received — check that sharing/Nostr is enabled on that instance. No Ramble failure can block gateway boot; every problem is a warning.
+
+The one-claim-per-day limit and the shelf cap are checked per instance (claims do not replicate), so a user with two Crows can claim once per day on each.
+
+The cap only gates claims. Incubating an egg the sync layer had parked (`shelf_origin='sync'`) moves the egg it replaces to your own shelf without anything leaving, so the shelf can briefly read `6 of 5`; it settles as you hatch.
+
+Two instances can disagree for one sync cycle about which egg incubates: if you swap eggs on one Crow while the other is still crediting warmth to the old egg, the older egg wins on both sides and your swap is undone (consistently). Swap again once both are in sync.
