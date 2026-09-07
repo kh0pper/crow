@@ -65,7 +65,7 @@ export default {
         .rb-card { background:var(--crow-bg-surface); border:1px solid var(--crow-border);
           border-radius:8px; padding:0.9rem 1rem; margin-bottom:1rem; }
         #ramble-map { height:420px; width:100%; border-radius:8px; border:1px solid var(--crow-border);
-          background:var(--crow-bg); }
+          background:var(--crow-bg); touch-action: none; overscroll-behavior: contain; }
         .rb-compose { display:flex; flex-direction:column; gap:0.5rem; }
         .rb-compose textarea { width:100%; min-height:4.5rem; padding:0.45rem 0.6rem; border-radius:6px;
           border:1px solid var(--crow-border); background:var(--crow-bg); color:var(--crow-text);
