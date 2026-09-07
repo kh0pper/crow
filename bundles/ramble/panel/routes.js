@@ -66,6 +66,7 @@ function loadBirdEngine() {
 const CELL_RE = /^[0-9b-hjkmnp-z]{1,12}$/;
 const PERSONA_RE = /^[0-9a-f]{64}$/;
 const MARK_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
+const EGG_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
 // `private` ("Just me") — see the matching comment beside server.js's
 // VISIBILITY_RE: it never reaches a relay (transport drain only selects
 // visibility='public'), but it does still replicate to the author's own
@@ -189,7 +190,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -200,16 +201,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/pet.js"),
         bundleImport("server/eggs.js"),
         bundleImport("server/feed.js"),
+        bundleImport("server/flock.js"),
+        bundleImport("server/nests.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
       if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
-          !eggsMod || !feedMod) {
+          !eggsMod || !feedMod || !flockMod || !nestsMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -707,6 +710,56 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     // in the browser's own cache is free.
     res.setHeader("Cache-Control", "private, max-age=86400");
     res.send(svg);
+  }));
+
+  // --- nests --------------------------------------------------------------
+  //
+  // Nests are a pure function of (cell, week) under a public salt; the server
+  // computes them for the viewport so the client needs no geohash code. The
+  // viewport is a bbox, not a cell list (spec §2.4 says "for the visible
+  // cells" — this is the same intent without a client-side geohash encoder).
+  router.get("/api/ramble/nests", handle(async (req, res) => {
+    const raw = req.query?.bbox;
+    if (typeof raw !== "string") bad("bbox=south,west,north,east is required");
+    const parts = raw.split(",").map((s) => Number(s.trim()));
+    if (parts.length !== 4 || !parts.every(Number.isFinite)) bad("bbox must be four numbers: south,west,north,east");
+    const bbox = { south: requireLat(parts[0]), west: requireLon(parts[1]), north: requireLat(parts[2]), east: requireLon(parts[3]) };
+    if (bbox.south > bbox.north || bbox.west > bbox.east) bad("bbox must have south <= north and west <= east");
+    const out = await mods.flockMod.listNests(db, bbox, { now: Date.now() });
+    if (!out) bad("bbox too large — zoom in");
+    res.json(out);
+  }));
+
+  router.post("/api/ramble/nests/claim", handle(async (req, res) => {
+    const b = req.body || {};
+    if (typeof b.cell !== "string" || !mods.nestsMod.CELL7_RE.test(b.cell)) bad("cell must be a 7-character geohash");
+    if (typeof b.week !== "string" || !mods.nestsMod.WEEK_RE.test(b.week)) bad("week must look like 2026-W37");
+    const here = { lat: requireLat(b.lat), lon: requireLon(b.lon) };
+    const result = await mods.flockMod.claimNest(db, { cell: b.cell, week: b.week, here, now: Date.now(), emit });
+    if (result.claimed && !result.already) {
+      poke("ramble:nest-claimed", { egg_id: result.egg?.egg_id ?? null, cell: b.cell });
+    }
+    res.json(result);
+  }));
+
+  // --- flock ----------------------------------------------------------------
+  router.get("/api/ramble/flock", handle(async (req, res) => {
+    res.json(await mods.flockMod.flockState(db, { now: Date.now() }));
+  }));
+
+  router.post("/api/ramble/eggs/:id/incubate", handle(async (req, res) => {
+    if (!EGG_ID_RE.test(req.params.id)) bad("invalid egg id");
+    const out = await mods.flockMod.incubateEgg(db, req.params.id, { now: Date.now(), emit });
+    if (!out.ok) return res.status(out.reason === "not-found" ? 404 : 409).json({ error: out.reason });
+    if (out.hatched) onHatch(out.hatched);
+    res.json({ egg: out.egg, shelved: out.shelved, already: out.already, hatched: hatchedPayload(out) });
+  }));
+
+  router.post("/api/ramble/birds/:id/activate", handle(async (req, res) => {
+    if (!EGG_ID_RE.test(req.params.id)) bad("invalid egg id");
+    const out = await mods.flockMod.activateBird(db, req.params.id, { emit });
+    if (!out.ok) return res.status(out.reason === "not-found" ? 404 : 409).json({ error: out.reason });
+    res.json({ bird: out.bird });
   }));
 
   // Body-parser failures (malformed JSON) surface here. Path-scoped, so it is

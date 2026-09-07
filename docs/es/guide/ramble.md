@@ -103,6 +103,18 @@ Tres tareas — **alimentar** (`feed`), **acicalar** (`preen`), **jugar** (`play
 
 `POST /api/ramble/pet/chore { kind: "feed" | "preen" | "play" }` completa una. Repetir un tipo ya hecho hoy es un no-op (`done: false`); en ambos casos la respuesta trae el estado actual de la mascota.
 
+## Nidos y el estante de huevos
+
+Los nidos son puntos de aparición en el mundo. Cada semana ISO, cada celda geohash-7 (unos 150 m de lado) tiene un nido o no, decidido por una fórmula pública — `sha256("ramble-nest-v1:" + celda + ":" + semana)`, hay nido cuando los primeros 32 bits mod `nest.rate` (24 por defecto) dan 0 — así que todo el mundo ve los mismos nidos sin ninguna intervención del servidor y sin que se revele nada sobre las personas. El mapa los muestra como pines de huevo en cuanto haces zoom (nivel 15 o más cerca), obtenidos de `GET /api/ramble/nests?bbox=south,west,north,east`.
+
+Camina hasta quedar a menos de **75 m** de un nido y toca **Tomar el huevo** (`POST /api/ramble/nests/claim`): un huevo nuevo llega a tu **estante** (sin eclosionar, calor 0, marcado con la celda y la semana en que se encontró). Límites: **una recogida por día local** y un **tope de estante de 5** (`shelf.cap`); ambos rechazos vuelven como una razón amistosa, no como un error. Recoger el mismo nido dos veces devuelve el mismo huevo. Recoger un huevo no acredita **nada** de calor ni alimenta **nada** de energía — el huevo mismo es la recompensa. Las recogidas se registran por instancia (`ramble_nest_claims`) y nunca se replican; el huevo sí.
+
+Siempre incuba exactamente un huevo. Desde la pantalla **Bandada** puedes **incubar** cualquier huevo del estante (`POST /api/ramble/eggs/:id/incubate`); el que reemplaza pasa al estante conservando su calor. Instance sync distingue un huevo que *tú* aparcaste (`shelf_origin = 'user'`) de uno que la capa de sincronización dejó en el estante al reconciliar dos instancias (`'sync'`): solo este último se recupera automáticamente a la ranura de incubación.
+
+## Tu bandada
+
+Cada pájaro eclosionado se queda en tu bandada. La pantalla **Bandada** (`GET /api/ramble/flock`) los lista con el **activo** marcado — ese es el pájaro que aparece en tu mapa, en la cabecera del Nest y en tus caws públicos — y tocar otro pájaro lo activa (`POST /api/ramble/birds/:id/activate`). La puntuación es especies encontradas de 8 posibles; un segundo pájaro de una especie que ya tienes sigue siendo un pájaro, solo que no es una especie nueva.
+
 ## Marcas solo para mí
 
 Las marcas con `visibility: "private"` son solo para ti: nunca salen de la instancia por Nostr, así que ningún relay ni contacto las ve jamás. A diferencia de las marcas públicas y de contactos, son **persistentes por defecto** (sin TTL) y **abiertas por defecto** (sin puerta de proximidad).
@@ -141,6 +153,13 @@ Cada peso de la tabla anterior es también un override de `ramble_settings`, le�
 | `warmth.checkin` | 8 |
 | `warmth.hatch_at` | 100 |
 
+### Nidos y estante
+
+| Clave | Por defecto | Efecto |
+|---|---|---|
+| `nest.rate` | 24 | Aproximadamente un nido cada este número de celdas geohash-7 por semana (entero ≥ 1). Se replica con tus ajustes, así que tus propias instancias concuerdan; es un ajuste de operador, y una tasa distinta ya no coincide con los nidos de otras personas. |
+| `shelf.cap` | 5 | Cuántos huevos sin eclosionar caben en el estante (entero ≥ 0; 0 desactiva la recogida). |
+
 ## Herramientas MCP
 
 | Herramienta | Propósito |
@@ -155,6 +174,9 @@ Cada peso de la tabla anterior es también un override de `ramble_settings`, le�
 | `ramble_chore` | Completar una tarea diaria (`feed`, `preen` o `play`) para la mascota compañera. |
 | `ramble_block` | Bloquear una persona por su pubkey x-only y purgar sus marcas guardadas. |
 | `ramble_unblock` | Quitar una persona de la lista de bloqueo. |
+| `ramble_flock` | Tu bandada: pájaros, el estante, el huevo incubando, especies encontradas. |
+| `ramble_nests` | Nidos cerca de una ubicación esta semana, los más cercanos primero, marcando tus recogidas. |
+| `ramble_claim_nest` | Recoger el nido en el que estás (o una celda indicada a menos de 75 m) para conseguir un huevo en el estante. |
 
 Los grupos (`ramble_group_create` / `ramble_group_join`) no están en la fase 1.
 
@@ -170,3 +192,9 @@ El transporte vive en el núcleo (`servers/gateway/boot/ramble-transport.js`), n
 ```
 
 La segunda significa que el bundle está instalado pero nunca se publicará ni se recibirá nada — verifica que sharing/Nostr esté habilitado en esa instancia. Ningún fallo de Ramble puede bloquear el arranque del gateway; todo problema es una advertencia.
+
+El límite de una recogida por día y el tope del estante se comprueban por instancia (las recogidas no se replican), así que un usuario con dos Crows puede recoger un huevo por día en cada una.
+
+El tope solo limita las recogidas. Incubar un huevo que la capa de sincronización había dejado aparcado (`shelf_origin='sync'`) manda al estante el huevo que reemplaza sin que nada salga de él, así que el estante puede leer brevemente `6 de 5`; se estabiliza a medida que eclosionas huevos.
+
+Dos instancias pueden discrepar durante un ciclo de sincronización sobre qué huevo está incubando: si cambias de huevo en un Crow mientras el otro sigue acreditando calor al huevo anterior, el huevo más antiguo gana en ambos lados y tu cambio se deshace (de forma consistente). Vuelve a cambiar una vez que ambas estén sincronizadas.

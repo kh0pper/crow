@@ -41,6 +41,8 @@ const ICONS = {
   preen: '<path d="M6 20c2-6 6-10 12-14"/><path d="M8 14l-3-1M11 10 8 8M14 7l-2-3"/>',
   play: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/>',
   back: '<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>',
+  nest: '<path d="M4 14c0 3 4 6 8 6s8-3 8-6"/><path d="M3 14h18"/><path d="M8 14c0-4 2-7 4-8 2 1 4 4 4 8"/>',
+  flock: '<circle cx="7" cy="9" r="3"/><circle cx="17" cy="9" r="3"/><path d="M4 19c1-3 3-4 3-4s2 1 3 4M14 19c1-3 3-4 3-4s2 1 3 4"/>',
 };
 
 function esc(value) {
@@ -218,6 +220,7 @@ export default {
           <div class="rb-row rb-actions">
             <button class="rb-btn rb-grow" id="rb-go-outside" type="button">${icon("pin")}Go outside</button>
             <button class="rb-btn rb-btn-ghost" id="rb-checkin" type="button">Check in</button>
+            <button class="rb-btn rb-btn-ghost" id="rb-egg-flock" type="button">${icon("flock")}Flock</button>
             <!-- Only once something has hatched: before that there is no bird
                  to go and see, and this is the only way back to the pet. -->
             <button class="rb-btn rb-btn-ghost" id="rb-my-bird" type="button" hidden>My bird</button>
@@ -284,7 +287,31 @@ export default {
             </div>
           </section>
 
+          <button class="rb-btn" id="rb-my-flock" type="button">${icon("flock")}My flock</button>
           <button class="rb-btn rb-btn-ghost" id="rb-back-world" type="button">${icon("back")}Back to the world</button>
+        </section>
+
+        <!-- ─────────────────────────────────────────────────────── the flock -->
+        <section class="rb-view" data-for="flock">
+          <section class="rb-card">
+            <p class="rb-eyebrow">Your flock</p>
+            <h3 class="rb-h" id="rb-flock-kinds">8 kinds, 0 found</h3>
+            <p class="rb-muted rb-fine">Tap a bird to take it out with you. The one with the tag is on your map, your header and your caws.</p>
+            <div class="rb-flock-grid" id="rb-flock-birds"></div>
+            <p class="rb-muted rb-fine" id="rb-flock-empty">Nothing has hatched yet. Your first bird is warming up on the egg screen.</p>
+          </section>
+
+          <section class="rb-card">
+            <p class="rb-eyebrow">Egg shelf</p>
+            <p class="rb-muted rb-fine" id="rb-shelf-count">Nests appear on the map as eggs. Walk up to one to take it.</p>
+            <div class="rb-steps" id="rb-shelf"></div>
+            <p class="rb-muted rb-fine" id="rb-flock-status"></p>
+          </section>
+
+          <div class="rb-row rb-actions">
+            <button class="rb-btn rb-btn-ghost rb-grow" id="rb-flock-bird-btn" type="button">My bird</button>
+            <button class="rb-btn rb-btn-ghost" id="rb-flock-back" type="button">${icon("back")}Back to the world</button>
+          </div>
         </section>
 
         <!-- ─────────────────────────────────────── the privacy grid, on demand -->

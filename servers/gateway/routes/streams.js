@@ -221,11 +221,29 @@ export default function streamsRouter(dashboardAuth, { interactiveEngine = () =>
       }
     };
 
+    // A nest claim is the third live event on this connection (phase 2).
+    // bundles/ramble/panel/routes.js pokes `ramble:nest-claimed` with
+    // { egg_id, cell } on a NEW claim only; the panel refreshes its shelf and
+    // its nest pins. Allow-listed to exactly those two strings.
+    const claimedHandler = (payload) => {
+      try {
+        const out = {
+          egg_id: payload?.egg_id != null ? String(payload.egg_id) : null,
+          cell: payload?.cell != null ? String(payload.cell) : null,
+        };
+        sendRaw(`event: ramble-nest-claimed\ndata: ${JSON.stringify(out)}\n\n`);
+      } catch {
+        // Subscriber isolation.
+      }
+    };
+
     bus.on("ramble:nearby", handler);
     bus.on("ramble:hatched", hatchedHandler);
+    bus.on("ramble:nest-claimed", claimedHandler);
     const unsubscribe = () => {
       bus.off("ramble:nearby", handler);
       bus.off("ramble:hatched", hatchedHandler);
+      bus.off("ramble:nest-claimed", claimedHandler);
     };
     res.on("close", unsubscribe);
     res.on("error", unsubscribe);

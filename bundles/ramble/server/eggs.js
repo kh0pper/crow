@@ -90,7 +90,7 @@ export function isoWeek(ms) {
 export const MEET_CROW_DAILY_CAP = 5;
 
 /** Midnight local time (process timezone) of the day containing `ms`. */
-function startOfLocalDay(ms) {
+export function startOfLocalDay(ms) {
   const d = new Date(ms);
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
