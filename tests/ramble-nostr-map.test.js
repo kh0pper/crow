@@ -292,3 +292,67 @@ test("eventToMark: fields marked origin/publish_state/visibility for wire-receiv
   assert.equal(row.nostr_event_id, "evt-fields");
   assert.equal(row.created_at, Math.floor(NOW / 1000) * 1000);
 });
+
+test("eventToMark: non-numeric expiration tag yields expires_at null (never NaN)", () => {
+  const event = {
+    id: "evt-exp-bad",
+    pubkey: "pk1",
+    kind: MARK_KIND,
+    created_at: Math.floor(NOW / 1000),
+    tags: [["g", "9v6m2"], ["d", "mark-x"], ["expiration", "not-a-number"]],
+    content: JSON.stringify({ v: 1, text: "hi" }),
+  };
+  const row = eventToMark(event);
+  assert.equal(row.expires_at, null);
+  assert.equal(Number.isNaN(row.expires_at), false); // must fail closed to null, never NaN
+});
+
+test("eventToMark: empty-string expiration tag yields expires_at null", () => {
+  const event = {
+    id: "evt-exp-empty",
+    pubkey: "pk1",
+    kind: MARK_KIND,
+    created_at: Math.floor(NOW / 1000),
+    tags: [["g", "9v6m2"], ["d", "mark-x"], ["expiration", ""]],
+    content: JSON.stringify({ v: 1, text: "hi" }),
+  };
+  const row = eventToMark(event);
+  assert.equal(row.expires_at, null);
+});
+
+test("caw geohash shorter than precision: no padding, no longer g tags, no coordinates", () => {
+  const row = { ...cawRow, geohash: "9v6" };
+  const event = markToEvent(row, { precision: 5 });
+  const gs = gTags(event);
+  assert.deepEqual(gs, ["9", "9v", "9v6"]);
+
+  const content = JSON.parse(event.content);
+  assert.equal("lat" in content, false);
+  assert.equal("lon" in content, false);
+});
+
+test("eventToMark: MARK_KIND event with no d tag falls back to event.id for mark_id", () => {
+  const event = {
+    id: "evt-no-d",
+    pubkey: "pk1",
+    kind: MARK_KIND,
+    created_at: Math.floor(NOW / 1000),
+    tags: [["g", "9v6m2"]],
+    content: JSON.stringify({ v: 1, text: "hi" }),
+  };
+  const row = eventToMark(event);
+  assert.equal(row.mark_id, "evt-no-d");
+});
+
+test("markToEvent: precision clamps to 1..12 for caws", () => {
+  const wideRow = { ...cawRow, geohash: "9v6m2ab9v6m2ab" }; // 14 chars, exceeds clamp ceiling
+  const lowPrecision = markToEvent(wideRow, { precision: 0 });
+  const lowGs = gTags(lowPrecision);
+  assert.equal(lowGs.length, 1);
+  assert.equal(lowGs[lowGs.length - 1].length, 1);
+
+  const highPrecision = markToEvent(wideRow, { precision: 99 });
+  const highGs = gTags(highPrecision);
+  assert.equal(highGs.length, 12);
+  assert.equal(highGs[highGs.length - 1].length, 12);
+});
