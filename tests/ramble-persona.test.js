@@ -14,18 +14,23 @@ test("rotating caw rotates per session; rotating mark is the stable pseudonym; r
   const cawA = resolvePersona(realId, "seed", { level: "rotating", kind: "caw", sessionId: "s1", _derive: fakeDerive });
   const cawB = resolvePersona(realId, "seed", { level: "rotating", kind: "caw", sessionId: "s2", _derive: fakeDerive });
   assert.notEqual(cawA.author, cawB.author); // presence rotates
+  assert.deepEqual(cawA.secp256k1Priv, fakeDerive("seed", "ramble-session:s1").secp256k1Priv);
   const markA = resolvePersona(realId, "seed", { level: "rotating", kind: "mark", sessionId: "s1", _derive: fakeDerive });
   const markB = resolvePersona(realId, "seed", { level: "rotating", kind: "mark", sessionId: "s2", _derive: fakeDerive });
   assert.equal(markA.author, markB.author); // placed marks stay attributable across sessions
   assert.equal(markA.author, compressed("seed" + "ramble-world").slice(2));
   assert.equal(markA.crowId, null);
+  assert.equal(markA.author_level, "rotating");
+  assert.deepEqual(markA.secp256k1Priv, fakeDerive("seed", "ramble-world").secp256k1Priv);
   const p1 = resolvePersona(realId, "seed", { level: "pseudonym", kind: "caw", _derive: fakeDerive });
   const p2 = resolvePersona(realId, "seed", { level: "pseudonym", kind: "mark", _derive: fakeDerive });
   assert.equal(p1.author, p2.author);
+  assert.equal(p1.author_level, "pseudonym");
   const r = resolvePersona(realId, "seed", { level: "real", kind: "mark", _derive: fakeDerive });
   assert.equal(r.author, compressed("real").slice(2)); // x-only, NOT the crow_id
   assert.equal(r.crowId, "crow_ABC");
   assert.equal(r.author_level, "real");
+  assert.equal(r.secp256k1Priv, realId.secp256k1Priv);
 });
 
 test("author is always x-only 64-hex (matches event.pubkey)", () => {
