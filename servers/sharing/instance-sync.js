@@ -556,27 +556,86 @@ const RAMBLE_EGG_UPDATE_COLUMNS = RAMBLE_EGG_WIRE_COLUMNS.filter(
 );
 
 /**
+ * Does the INCOMING row's bird identity win over the local one?
+ *
+ * `(species, seed, hatched_at)` is ONE value, not three independent columns:
+ * two instances that were partitioned can each hatch the SAME `egg_id` and
+ * roll a different bird. A per-column `COALESCE(local, excluded)` is
+ * first-writer-wins *per instance*, so each side keeps its own roll forever
+ * and the user's bird differs on every Crow they own. This predicate is the
+ * single deterministic joint tiebreak both sides evaluate:
+ *
+ *   - a hatched side always beats an unhatched side (hatch stays one-way — an
+ *     incoming row with a NULL `hatched_at` can never un-roll a local bird);
+ *   - both hatched → the EARLIER `hatched_at` wins;
+ *   - equal `hatched_at` → the LOWER `seed` wins (a total order, so arrival
+ *     order cannot change the answer).
+ *
+ * Selecting all three columns from the same side keeps the triple coherent —
+ * an instance can never end up with one side's species and the other's seed.
+ *
+ * Note `excluded.<col>` for a column the wire row omitted is that column's
+ * DEFAULT (NULL here), so a sparse update carrying `species`/`seed` but no
+ * `hatched_at` reads as unhatched and leaves a local bird alone. Real hatch
+ * emits carry the full row, so that only ever protects.
+ */
+const RAMBLE_EGG_INCOMING_BIRD_WINS = `(
+  excluded.hatched_at IS NOT NULL AND (
+    ramble_eggs.hatched_at IS NULL
+    OR excluded.hatched_at < ramble_eggs.hatched_at
+    OR (excluded.hatched_at = ramble_eggs.hatched_at AND excluded.seed < ramble_eggs.seed)
+  )
+)`;
+
+/**
  * The ON CONFLICT assignment for one egg column. Four of them are NOT plain
  * `excluded.x` writes, because **hatching is one-way**: once this instance has
- * seen the egg hatch, no peer update may un-hatch it, re-roll its bird, or drop
- * its hatch time — a later-lamport op that merely predates the hatch on the
- * sender (or omits the fields entirely) would otherwise silently reset a bird
- * the user already has. The COALESCEs keep the first non-null bird identity;
- * the CASE pins `status` at 'hatched' forever.
+ * seen the egg hatch, no peer update may un-hatch it or drop its hatch time —
+ * a later-lamport op that merely predates the hatch on the sender (or omits
+ * the fields entirely) would otherwise silently reset a bird the user already
+ * has. The CASE pins `status` at 'hatched' forever; the bird triple is settled
+ * as a unit by `RAMBLE_EGG_INCOMING_BIRD_WINS`.
  */
 function rambleEggSetClause(col) {
   switch (col) {
     case "status":
       return `status = CASE WHEN ramble_eggs.status = 'hatched' THEN 'hatched' ELSE excluded.status END`;
-    case "species":    return `species = COALESCE(ramble_eggs.species, excluded.species)`;
-    case "seed":       return `seed = COALESCE(ramble_eggs.seed, excluded.seed)`;
-    case "hatched_at": return `hatched_at = COALESCE(ramble_eggs.hatched_at, excluded.hatched_at)`;
+    case "species":
+    case "seed":
+    case "hatched_at":
+      return `${col} = CASE WHEN ${RAMBLE_EGG_INCOMING_BIRD_WINS} THEN excluded.${col} ELSE ramble_eggs.${col} END`;
     // `warmth` included: absolute last-writer-wins, NOT additive across
     // instances — `ramble_credits` (the no-double-count ledger) is local-only,
     // so warmth earned on two instances in the same window does not sum.
     default:           return `${col} = excluded.${col}`;
   }
 }
+
+/**
+ * Refill the incubating slot when an apply emptied it. `applyRambleEgg`'s
+ * convergence rule can shelve a peer's successor egg while the local original
+ * is still incubating; when that original's HATCHED row arrives afterwards the
+ * instance is left with zero incubating eggs, and `ensureIncubatingEgg` never
+ * self-heals (nothing tells it the shelved egg was a convergence loser).
+ *
+ * One self-guarding statement, so it can ride the apply's own batch: it is a
+ * no-op unless there is no incubating egg AND at least one shelf egg, and it
+ * promotes the OLDEST shelf egg (lowest `created_at`, ties by lowest `egg_id`
+ * — the same total order the convergence rule uses, so every instance
+ * promotes the same one).
+ *
+ * SAFE IN PHASE 1 ONLY because a 'shelf' egg is *always* a convergence loser
+ * here — there is no user-facing "shelve my egg" action yet. Phase 2 MUST
+ * record a shelf egg's origin (e.g. a `shelved_reason` column) before adding
+ * one, or this will silently re-incubate an egg the user deliberately parked.
+ */
+const RAMBLE_EGG_REPROMOTE_SQL = `
+  UPDATE ramble_eggs SET status = 'incubating'
+   WHERE egg_id = (
+           SELECT egg_id FROM ramble_eggs WHERE status = 'shelf'
+            ORDER BY created_at ASC, egg_id ASC LIMIT 1
+         )
+     AND NOT EXISTS (SELECT 1 FROM ramble_eggs WHERE status = 'incubating')`;
 
 /**
  * Apply a `ramble_eggs` mutation, keyed on `egg_id`. Same LWW-on-the-envelope
@@ -595,6 +654,11 @@ function rambleEggSetClause(col) {
  *      earned toward it is still on the shelf. The shelving UPDATE and the
  *      upsert ride ONE `db.batch` so a peer can never observe zero (or two)
  *      incubating eggs mid-apply.
+ *   3. **The slot is never left empty.** Every apply ends with
+ *      `RAMBLE_EGG_REPROMOTE_SQL` in the same batch, which re-promotes the
+ *      oldest shelved egg if (and only if) the apply just emptied the
+ *      incubating slot — see that constant for why phase 1 can assume a shelf
+ *      egg is always a convergence loser.
  *
  * An incoming row with no `created_at` (a sparse update) cannot be ranked, so
  * it is treated as the newest — it loses, and the established local incubating
@@ -619,7 +683,12 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
   if (lamportTs < localTs) return;
 
   if (op === "delete") {
-    await db.execute({ sql: `DELETE FROM ramble_eggs WHERE egg_id = ?`, args: [row.egg_id] });
+    // Batched with the re-promotion: deleting the incubating egg empties the
+    // slot exactly the way the convergence rule can.
+    await db.batch([
+      { sql: `DELETE FROM ramble_eggs WHERE egg_id = ?`, args: [row.egg_id] },
+      { sql: RAMBLE_EGG_REPROMOTE_SQL, args: [] },
+    ]);
     return;
   }
 
@@ -675,8 +744,9 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
     args: [...values, lamportTs],
   });
 
-  if (statements.length === 1) await db.execute(statements[0]);
-  else await db.batch(statements);
+  statements.push({ sql: RAMBLE_EGG_REPROMOTE_SQL, args: [] });
+
+  await db.batch(statements);
 }
 
 /** Portable columns of the singleton `ramble_pet` row, in schema order. */
