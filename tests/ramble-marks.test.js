@@ -51,3 +51,14 @@ test("blocked personas are dropped on receipt and hidden in lists", async () => 
   assert.equal(again.inserted, false);
   assert.equal(again.blocked, true);
 });
+
+test("insertRemoteMark accepts a sparse caw with no lat/lon", async () => {
+  const result = await insertRemoteMark(db, {
+    mark_id: "caw1", author: "pk2", kind: "caw", anchor_kind: "geo", geohash: "9v6m2",
+    visibility: "public", reveal: "open", content_text: "here",
+    created_at: Date.now(), expires_at: Date.now() + 3600000, nostr_event_id: "evcaw",
+  });
+  assert.equal(result.inserted, true);
+  assert.equal(result.row.geohash, "9v6m2");
+  assert.equal(result.row.lat, null);
+});

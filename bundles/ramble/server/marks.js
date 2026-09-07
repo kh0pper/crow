@@ -31,11 +31,17 @@ function defaultReveal(visibility) {
 function anchorColumns(anchor) {
   const anchor_kind = anchor.anchor_kind;
   if (anchor_kind === "geo") {
+    const lat = anchor.lat ?? null;
+    const lon = anchor.lon ?? null;
+    // Sparse geo rows (every caw on the wire: coarse geohash only, no exact
+    // coordinates) must not be re-derived from undefined lat/lon -- the
+    // caller (insertRemoteMark) falls back to the incoming geohash instead.
+    const geohash = lat != null && lon != null ? encodeGeohash(lat, lon, 7) : null;
     return {
       anchor_kind,
-      geohash: encodeGeohash(anchor.lat, anchor.lon, 7),
-      lat: anchor.lat,
-      lon: anchor.lon,
+      geohash,
+      lat,
+      lon,
       accuracy_m: anchor.accuracy_m ?? null,
       anchor_ref: null,
     };
