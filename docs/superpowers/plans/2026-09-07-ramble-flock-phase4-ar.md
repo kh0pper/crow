@@ -274,10 +274,29 @@ test("aroundPoint: this week's nests within the radius, nearest first; the radiu
 
 test("aroundPoint: works at high latitude (the cover grows with 1/cos) and refuses the pole rather than scanning the table", async () => {
   const db = await freshDb();
+  await mark(db, { lat: 85.0009, lon: 10 }, "arctic north");
   const far = await aroundPoint(db, { lat: 85, lon: 10, now: T0 });
-  assert.deepEqual(far.marks, []);
+  assert.deepEqual(far.marks.map((m) => m.content_text), ["arctic north"], "the fine cover overflowed; the coarse pass still answers");
   assert.equal(far.radius_m, AROUND_RADIUS_DEFAULT);
   await assert.rejects(aroundPoint(db, { lat: 89.9, lon: 10, now: T0 }), (err) => err.code === "too-wide");
+  await assert.rejects(aroundPoint(db, { lat: 90, lon: 0, now: T0 }), (err) => err.code === "too-wide");
+});
+
+test("aroundPoint: a nearby mark is never starved by newer marks elsewhere in the same coarse cell (the fine cover answers first)", async () => {
+  const db = await freshDb();
+  const near = await mark(db, NORTH_100, "near north");
+  // 600 newer marks 3 km north: same 5-char cell (9v6m2 spans 30.454..30.498), out of range.
+  const stmts = [];
+  for (let i = 0; i < 600; i++) {
+    stmts.push({
+      sql: `INSERT INTO ramble_marks (mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, accuracy_m, visibility, reveal, content_text, content_kind, created_at, publish_state, origin)
+            VALUES (?, ?, 'rotating', 'mark', 'geo', ?, ?, ?, 5, 'public', 'open', ?, 'none', ?, 'published', 'remote')`,
+      args: ["crowd-" + i, PK, "9v6m3", 30.487, -98.08, "crowd " + i, T0 + 1000 + i],
+    });
+  }
+  await db.batch(stmts);
+  const out = await aroundPoint(db, { ...HERE, now: T0 });
+  assert.deepEqual(out.marks.map((m) => m.mark_id), [near.mark_id]);
 });
 ```
 
@@ -316,12 +335,22 @@ export const AROUND_RADIUS_DEFAULT = 500;
 export const AROUND_RADIUS_MIN = 50;
 export const AROUND_RADIUS_MAX = 1000;
 /**
- * Marks are stored at geohash-7 and wire caws at their 5-char publish cell,
- * and `listMarks` matches by prefix — so a 5-char cover reaches both in one
- * query (a 2 km box is at most 2x2 cells of ~4.9 km).
+ * Two covers, because `listMarks` matches by geohash PREFIX and the rows come
+ * in two grains: marks with an exact anchor are stored at geohash-7, wire
+ * caws only at their 5-char publish cell.
+ *   fine   — the precision-7 cells the circle touches (~72 for 500 m): every
+ *            exact-anchor row in range, and nothing outside the box, so the
+ *            query's LIMIT can never starve a nearby mark;
+ *   coarse — the precision-5 cells (1–4): only rows whose OWN geohash is that
+ *            coarse are taken from this pass (the caws); everything finer was
+ *            already answered by the fine pass.
+ * Past ~84° latitude the fine cover overflows MAX_FINE_CELLS and the coarse
+ * pass alone answers (bounded by LIST_LIMIT — accepted, nobody rambles there);
+ * when even the coarse cover overflows the call is refused (`too-wide`).
  */
+const FINE_PRECISION = 7;
+const MAX_FINE_CELLS = 512;
 const COVER_PRECISION = 5;
-/** 64 five-char cells is ~39 km square: enough for any latitude below ~89.5°; past that the cover is refused (never a silent full-table scan). */
 const MAX_COVER_CELLS = 64;
 const LIST_LIMIT = 500;
 const M_PER_DEG_LAT = 111320;
@@ -329,7 +358,9 @@ const M_PER_DEG_LAT = 111320;
 /** A bbox that contains the circle of `radiusM` around `here` (clamped, never wrapped). */
 export function bboxAround(here, radiusM) {
   const dLat = radiusM / M_PER_DEG_LAT;
-  const cosLat = Math.max(0.01, Math.cos((here.lat * Math.PI) / 180));
+  // The floor only stops a division by zero AT the pole; a larger floor would
+  // make the box too NARROW near it and silently miss marks east/west.
+  const cosLat = Math.max(1e-6, Math.cos((here.lat * Math.PI) / 180));
   const dLon = radiusM / (M_PER_DEG_LAT * cosLat);
   return {
     south: Math.max(-90, here.lat - dLat),
@@ -355,21 +386,34 @@ export async function aroundPoint(db, { lat, lon, radiusM = AROUND_RADIUS_DEFAUL
   const here = { lat, lon };
   const radius = Math.min(AROUND_RADIUS_MAX, Math.max(AROUND_RADIUS_MIN, Number(radiusM) || AROUND_RADIUS_DEFAULT));
   const bbox = bboxAround(here, radius);
-  const cells = cellsCoveringBbox(bbox, COVER_PRECISION, { max: MAX_COVER_CELLS });
-  if (!cells) {
+  const coarseCells = cellsCoveringBbox(bbox, COVER_PRECISION, { max: MAX_COVER_CELLS });
+  if (!coarseCells) {
     // An empty `cells` would make listMarks drop the cell filter and scan the
     // newest 500 rows of the whole table — a wrong answer, not a slow one.
     const err = new Error("too far north or south for the AR view");
     err.code = "too-wide";
     throw err;
   }
+  const fineCells = cellsCoveringBbox(bbox, FINE_PRECISION, { max: MAX_FINE_CELLS });
+  const seen = new Set();
   const marks = [];
-  for (const row of await listMarks(db, { cells, limit: LIST_LIMIT })) {
+  const consider = (row) => {
+    if (seen.has(row.mark_id)) return;
     const at = locate(row);
-    if (!at) continue;
+    if (!at) return;
     const d = haversineMeters(here, at);
-    if (d > radius + at.err_m) continue;
+    if (d > radius + at.err_m) return;
+    seen.add(row.mark_id);
     marks.push({ ...row, distance_m: Math.round(d) });
+  };
+  if (fineCells) {
+    for (const row of await listMarks(db, { cells: fineCells, limit: LIST_LIMIT })) consider(row);
+  }
+  for (const row of await listMarks(db, { cells: coarseCells, limit: LIST_LIMIT })) {
+    // With a fine pass, only the coarse rows are new here; without one (high
+    // latitude) everything is.
+    if (fineCells && (typeof row.geohash !== "string" || row.geohash.length > COVER_PRECISION)) continue;
+    consider(row);
   }
   marks.sort((a, b) => a.distance_m - b.distance_m);
   const nestsOut = await listNests(db, bbox, { now, from: here });
@@ -381,7 +425,7 @@ export async function aroundPoint(db, { lat, lon, radiusM = AROUND_RADIUS_DEFAUL
 - [ ] **Step 8: Run the around test to verify it passes**
 
 Run: `node scripts/run-suite.mjs tests/ramble-around.test.js`
-Expected: PASS (6 tests). If "caw-far" leaks in: `9v6m8` is the cell two rows north of `9v6m2` (centre ~30.52, 6.8 km away) and must fail `d > radius + err_m` (500 + ~3400 < 6600).
+Expected: PASS (7 tests). If "caw-far" leaks in: `9v6m8` is the cell two rows north of `9v6m2` (centre ~30.52, 6.8 km away) and must fail `d > radius + err_m` (500 + ~3400 < 6600).
 
 - [ ] **Step 9: Commit**
 
@@ -530,7 +574,7 @@ In `servers/gateway/boot/ramble-transport.js`, `onEnvelope`, change the mark bra
         }
 ```
 
-(and the matching closing brace stays where the old `try` block ended). Append to `tests/ramble-transport.test.js`, after the phase-3 inbound-mark test:
+(the block above already carries the one extra `}` that closes `if (!result.gone)`; the `try { await feedAll(… meet_crow …) }` block that follows is unchanged). Append to `tests/ramble-transport.test.js`, after the phase-3 inbound-mark test:
 
 ```js
 test("phase 4: a re-sent mark that is pruned on arrival credits meet_crow but pokes no ramble:nearby", async () => {
@@ -578,7 +622,7 @@ git show --stat HEAD
 
 - [ ] **Step 1: Refactor the harness (no behaviour change)**
 
-In `tests/ramble-transport.test.js`, replace the body of `makeHarness` from `const db = createClient(...)` through the `const transport = await startRambleTransport({...})` call so the relay/manager stub lives in its own factory. The new shape (the `relay`, `nostrManager`, `state` objects are the current ones, moved verbatim):
+In `tests/ramble-transport.test.js`, replace the WHOLE `makeHarness` (its JSDoc through its closing `}`) with the two functions below, so the relay/manager stub lives in its own factory. The `relay`, `nostrManager` and `state` objects are the current ones, moved verbatim; the `db.executeMultiple` core-table DDL and the returned fields are unchanged:
 
 ```js
 /** The scriptable relay/publisher stub, on its own so two transports can share one (Task 3, phase 4). */
@@ -1003,7 +1047,7 @@ test("classic script: no ESM syntax, zero backticks, zero markup sinks, no emoji
   assert.deepEqual(code.match(/\.innerHTML\s*=|\bhtml:\s|insertAdjacentHTML|outerHTML/g) || [], [], "zero markup sinks");
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(SRC), "no emoji");
   assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(SRC), "camera frames never leave the device");
-  for (const k of ["renderAr", "mountAr", "layoutAnchor", "bearingDeg", "distanceM", "relativeBearing", "compassPoint", "headingFromEvent", "smoothHeading"]) assert.equal(typeof Ar[k], "function", k);
+  for (const k of ["renderAr", "mountAr", "layoutAnchor", "bearingDeg", "distanceM", "relativeBearing", "compassPoint", "headingFromEvent", "smoothHeading", "noticeSeen", "markNoticeSeen"]) assert.equal(typeof Ar[k], "function", k);
   assert.deepEqual([Ar.FOV_DEG, Ar.RANGE_M, Ar.COARSE_M, Ar.PARK_MAX], [70, 500, 150, 6]);
 });
 
@@ -1032,6 +1076,18 @@ test("headingFromEvent: webkitCompassHeading wins; alpha only from an absolute e
   const s = Ar.smoothHeading(359, 1, 0.5);
   assert.ok(s === 0 || s > 359.9, `359 -> 1 halfway is 0, got ${s}`);
   assert.equal(Ar.smoothHeading(0, 40, 0.25), 10);
+});
+
+test("the first-open notice gate: unseen until marked; a missing or throwing storage means the notice shows, never a crash", () => {
+  const store = new Map();
+  const storage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, v) };
+  assert.equal(Ar.noticeSeen(() => storage, "ramble.ar.limits"), false);
+  assert.equal(Ar.markNoticeSeen(() => storage, "ramble.ar.limits"), true);
+  assert.equal(Ar.noticeSeen(() => storage, "ramble.ar.limits"), true);
+  const boom = () => { throw new Error("SecurityError"); };
+  assert.equal(Ar.noticeSeen(boom, "ramble.ar.limits"), false);
+  assert.equal(Ar.markNoticeSeen(boom, "ramble.ar.limits"), false);
+  assert.equal(Ar.noticeSeen(() => null, "ramble.ar.limits"), false);
 });
 
 test("layout: heading 0 puts north centre-screen, east parked right, south parked left; heading 350 shifts north right of centre", () => {
@@ -1190,8 +1246,16 @@ test("mountAr paints labels with textContent, routes taps by id, mounts the bird
   assert.equal(els.bird.hidden, true); assert.equal(els.egg.hidden, false);
   assert.equal(els.labels.children.length, 0);
   assert.equal(els.list.children.length, 2);
+  assert.notEqual(els.list.children, rowsBefore, "the mode flip repaints the list (its key includes the mode)");
   els.list.children[0].click();
   assert.deepEqual(taps, ["e", "n"]);
+  // A coarse anchor in radar mode joins the list as a row; in AR mode it only sits in the coarse strip.
+  session.render({ anchors: anchors.concat([anchor("caw", HERE, { kind: "caw", approx_m: 3400, title: "A caw" })]), pose: pose(null), bird: null });
+  assert.equal(els.list.children.length, 3);
+  assert.equal(els.coarse.children.length, 1);
+  session.render({ anchors: anchors.concat([anchor("caw", HERE, { kind: "caw", approx_m: 3400, title: "A caw" })]), pose: pose(0), bird: null });
+  assert.equal(els.list.children.length, 2);
+  assert.equal(els.coarse.children.length, 1);
   session.destroy();
   assert.equal(els.labels.children.length, 0);
 });
@@ -1460,7 +1524,7 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
       return btn;
     }
 
-    /* Everything about a label that can change between frames. `order` is the
+    /* Everything about a label that can change between frames. order is the
      * paint order (far first), applied as z-index since DOM order now persists. */
     function placeLabel(btn, item, order) {
       btn.setAttribute("data-kind", item.kind);
@@ -1512,17 +1576,21 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
       }
       /* Rows ARE tappable: repaint only when what they say changes (distances
        * move in 5 m steps, so this is a few times a minute on foot, not 60 Hz). */
-      var key = frame.radar.list.map(function (i) { return i.id + "|" + i.sub; }).join(";") + "#" +
-        frame.coarse.map(function (i) { return i.id + "|" + i.sub; }).join(";");
+      var coarseRows = frame.coarse.map(function (item) { return { id: item.id, kind: item.kind, title: item.title, sub: item.sub, locked: false }; });
+      var key = frame.mode + "#" + frame.radar.list.map(function (i) { return i.id + "|" + i.title + "|" + i.sub; }).join(";") + "#" +
+        coarseRows.map(function (i) { return i.id + "|" + i.title + "|" + i.sub; }).join(";");
       if (key === listKey) return;
       listKey = key;
       if (e.list) {
         clear(e.list);
         frame.radar.list.forEach(function (item) { e.list.appendChild(rowEl(item)); });
+        /* In radar mode the list is the whole inventory, coarse rows included
+         * (the separate coarse strip is hidden there — it would collide). */
+        if (frame.mode === "radar") coarseRows.forEach(function (item) { e.list.appendChild(rowEl(item)); });
       }
       if (e.coarse) {
         clear(e.coarse);
-        frame.coarse.forEach(function (item) { e.coarse.appendChild(rowEl({ id: item.id, kind: item.kind, title: item.title, sub: item.sub, locked: false })); });
+        coarseRows.forEach(function (item) { e.coarse.appendChild(rowEl(item)); });
       }
     }
 
@@ -1607,11 +1675,24 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
     return { render: render, destroy: destroy, anchor: function (id) { return byId[id] || null; } };
   }
 
+  /* ------------------------------------------------------------ first open */
+
+  /* The limits notice gates the first open; the memory of it lives in web
+   * storage, which can be absent or throwing (private mode, a blocked site).
+   * getStorage is a function so even touching localStorage is inside the try. */
+  function noticeSeen(getStorage, key) {
+    try { return getStorage().getItem(key) === "1"; } catch (e) { return false; }
+  }
+  function markNoticeSeen(getStorage, key) {
+    try { getStorage().setItem(key, "1"); return true; } catch (e) { return false; }
+  }
+
   return {
     FOV_DEG: FOV_DEG, RANGE_M: RANGE_M, COARSE_M: COARSE_M, PARK_MAX: PARK_MAX,
     distanceM: distanceM, bearingDeg: bearingDeg, relativeBearing: relativeBearing, compassPoint: compassPoint,
     headingFromEvent: headingFromEvent, smoothHeading: smoothHeading,
     layoutAnchor: layoutAnchor, renderAr: renderAr, mountAr: mountAr,
+    noticeSeen: noticeSeen, markNoticeSeen: markNoticeSeen,
   };
 });
 ```
@@ -1619,7 +1700,7 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
 - [ ] **Step 4: Run the AR test to verify it passes**
 
 Run: `node scripts/run-suite.mjs tests/ramble-ar.test.js`
-Expected: PASS (8 tests). Numeric expectations worth re-deriving if one fails: `NORTH_500` is 0.00449° north (t = 1.0 within rounding: `distance_m` 499–500 → `y` 0.34, `scale` 0.5 within 0.01); the nine right-side anchors are 0.00025° east apart (~24 m each, so `r1` is 25 m after rounding to 5); in the no-heading radar test the "e" dot uses `bearing` 90 → `x = 0.5 + 0.42·r`, `y = 0.5`.
+Expected: PASS (9 tests). Numeric expectations worth re-deriving if one fails: `NORTH_500` is 0.00449° north (t = 1.0 within rounding: `distance_m` 499–500 → `y` 0.34, `scale` 0.5 within 0.01); the nine right-side anchors are 0.00025° east apart (~24 m each, so `r1` is 25 m after rounding to 5); in the no-heading radar test the "e" dot uses `bearing` 90 → `x = 0.5 + 0.42·r`, `y = 0.5`.
 
 - [ ] **Step 5: Commit**
 
@@ -1895,6 +1976,7 @@ Append to `bundles/ramble/panel/static/ramble.css`:
 #ramble .rb-ar[data-mode="ar"] .rb-ar-radar { left: 12px; bottom: 20px; }
 #ramble .rb-ar[data-mode="ar"] .rb-ar-list { display: none; }
 #ramble .rb-ar[data-mode="radar"] .rb-ar-labels,
+#ramble .rb-ar[data-mode="radar"] .rb-ar-coarse,
 #ramble .rb-ar[data-mode="radar"] .rb-ar-more { display: none; }
 #ramble .rb-ar[data-mode="radar"] .rb-ar-radar {
   left: 0;
@@ -1950,7 +2032,6 @@ Append to `bundles/ramble/panel/static/ramble.css`:
 }
 #ramble .rb-ar-limits { margin: 0 0 12px; padding-left: 20px; display: grid; gap: 8px; }
 
-#ramble .rb-ar-sheet { z-index: 1200; }
 #ramble .rb-ar-sheet .rb-pop-head { font: 800 15px var(--rb-font-display); display: flex; align-items: center; gap: 8px; }
 #ramble .rb-ar-sheet .rb-pop-bird { width: 40px; height: 40px; }
 #ramble .rb-ar-sheet .rb-pop-body { margin: 6px 0 0; }
@@ -1991,7 +2072,7 @@ git show --stat HEAD
 ## Task 7: Client wiring — devices, anchors, taps, live refresh, teardown
 
 **Files:**
-- Modify: `bundles/ramble/panel/static/ramble.js` (header comment; `paintPet` stores `lastPet`; a new `ar` section before `/* ---- hatch ---- */`; two SSE listeners; nothing else moves)
+- Modify: `bundles/ramble/panel/static/ramble.js` (header comment; `paintPet` stores `lastPet` and nudges the AR render; a new `ar` section AFTER the hatch section — between `if (meetBtn) …` and `/* ---- nearby live updates */`; two SSE listeners; nothing else moves)
 - Test: `tests/ramble-panel.test.js` (the `GET /ramble/static/ramble.js` test gains phase-4 assertions; a new test serves `ramble-ar.js`)
 
 **Interfaces:**
@@ -2062,7 +2143,7 @@ In `bundles/ramble/panel/static/ramble.js`:
  * nothing reads its frames, nothing uploads.
 ```
 
-(b) In `paintPet`, right after `if (!pet) return;` add `lastPet = pet;` and declare `var lastPet = null;` at the top of the pet section (next to `MOOD_LINE`).
+(b) In `paintPet`, right after `if (!pet) return;` add `lastPet = pet;`, and at the END of `paintPet` add `if (arOpen) scheduleArRender();` (both are hoisted: `arOpen` is a `var` in the AR section below, `scheduleArRender` a function declaration — so the bird appears in AR the moment the pet loads, not a heartbeat later). Declare `var lastPet = null;` at the top of the pet section (next to `MOOD_LINE`).
 
 (c) Insert the AR section between the hatch section (after `if (meetBtn) …`) and `/* ---- nearby live updates */`:
 
@@ -2201,7 +2282,8 @@ In `bundles/ramble/panel/static/ramble.js`:
     return Promise.resolve("granted");
   }
 
-  function startArCamera() {
+  /** `restart` = a return from a hidden tab: a camera that worked a second ago gets one retry before the view gives up on it. */
+  function startArCamera(restart) {
     var video = $("rb-ar-video");
     if (!video || !navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
       arCamera = false;
@@ -2218,7 +2300,11 @@ In `bundles/ramble/panel/static/ramble.js`:
         arCamera = true;
         scheduleArRender();
       })
-      .catch(function () { arCamera = false; scheduleArRender(); });
+      .catch(function () {
+        if (restart === true && arOpen) { setTimeout(function () { if (arOpen && !arStream) startArCamera(false); }, 1500); return; }
+        arCamera = false;
+        scheduleArRender();
+      });
   }
 
   function stopArCamera() {
@@ -2322,12 +2408,9 @@ In `bundles/ramble/panel/static/ramble.js`:
     if (arRoot) arRoot.hidden = true;
   }
 
-  function arNoticeSeen() {
-    try { return window.localStorage.getItem(AR_NOTICE_KEY) === "1"; } catch (e) { return false; }
-  }
-  function markArNoticeSeen() {
-    try { window.localStorage.setItem(AR_NOTICE_KEY, "1"); } catch (e) { /* private mode: it shows again next time */ }
-  }
+  function arStorage() { return window.localStorage; }
+  function arNoticeSeen() { return Ar.noticeSeen(arStorage, AR_NOTICE_KEY); }
+  function markArNoticeSeen() { Ar.markNoticeSeen(arStorage, AR_NOTICE_KEY); }
 
   /** The chip. First time: the notice, and NOTHING starts until "Got it". After that: the devices, from the click itself. */
   function openAr() {
@@ -2370,7 +2453,7 @@ In `bundles/ramble/panel/static/ramble.js`:
   document.addEventListener("visibilitychange", function () {
     if (!arOpen) return;
     if (document.hidden) { stopArCamera(); return; }
-    startArCamera();
+    startArCamera(true);
   });
 ```
 
@@ -2529,7 +2612,7 @@ node scripts/check-port-allocation.js
 npm run build-registry -- --check
 ```
 
-Expected: `pass` = total, `fail 0` (baseline on main is 4159; phase 4 adds tests in ramble-anchors (2), ramble-around (5), ramble-trades (1), ramble-transport (1), ramble-ar (8), ramble-panel (3)); ports and registry checks clean. Record the exact pass/fail count in the PR body.
+Expected: `pass` = total, `fail 0` (baseline on main is 4159; phase 4 adds 24 tests — ramble-anchors 2, ramble-around 7, ramble-trades 1, ramble-transport 2, ramble-ar 9, ramble-panel 3 — so expect 4183); ports and registry checks clean. Record the exact pass/fail count in the PR body.
 
 - [ ] **Step 6: Commit docs + spec + bump + registry + plan**
 
@@ -2565,7 +2648,7 @@ EOF
 python3 /tmp/claude-1000/-home-kh0pp-crow/a4059502-d556-46f5-b8b0-182af2b95e0d/scratchpad/checks.py "$(git -C /home/kh0pp/crow-wt-flock4 rev-parse HEAD)"
 ```
 
-Merge (`mcp__github__merge_pull_request`, merge method `merge`) ONLY when `suite`, `static-checks` and `audit` all read `completed success`. An empty list on a current sha is WRONG — wait and re-poll.
+Merge (`mcp__github__merge_pull_request`, merge method `merge`) ONLY when `suite`, `static-checks` and `audit` all read `completed success`. An empty list on a current sha is WRONG — wait and re-poll (the poll is unauthenticated: 60 requests per hour per IP, so poll every couple of minutes, never in a tight loop; a 403 means the budget is spent).
 
 - [ ] **Step 8: Deploy all three gateways back-to-back, verify**
 
@@ -2605,3 +2688,8 @@ Create `docs/superpowers/handoffs/2026-09-07-ramble-flock-phase4-shipped-pr<N>.m
 Five criticals, all folded in above: **C1** the renderer's header comments carried six backticks, failing its own zero-backtick assertions → plain words. **C2** `assert/strict`'s `deepEqual` compares prototypes, and values built inside `vm.runInNewContext` carry the sandbox realm's — six assertions with a vm-built left operand failed on structure-equal values → a `plain()` JSON round-trip on every such operand, with the reason recorded in the test header. **C3** `mountAr.render` rebuilt every label `<button>` on every orientation event (~60 Hz), so a button pressed was gone by `touchend` and the tap never fired ("dead buttons") → label nodes persist by anchor id and are re-placed in place (z-index carries the far-first paint order), the tappable radar/coarse rows repaint only when their text changes, and the client ignores sub-0.5° wobbles; the mountAr test now asserts the same element object across frames and its removal when the anchor leaves. **C4** the client sent `String(double)` for lat/lon and the route capped decimals at 12, so a normal Android fix could 400 silently → client sends `toFixed(6)`, route accepts up to 17 decimals, both pinned by tests. **C5** Task 4's `/marks` edit re-declared `const marks` (a SyntaxError that would have taken the whole panel test file down) → the replacement is now stated line-precisely.
 Suggestions applied: **S1** the anchors test's real import line; **S2** `MAX_COVER_CELLS` 64 and a `too-wide` error (→ 400) instead of a silent full-table scan when the cover overflows, with a high-latitude test; **S4** a heading older than 5 s is dropped (1 s heartbeat while open) and a `PERMISSION_DENIED` from `watchPosition` clears the fix; **S5** the video's visibility keys on a `data-camera` attribute, not on the reason; **S6** the dead `data-ar` attribute removed; **S7** the smoke split into a desktop radar-path smoke (scratch gateway, `timeout`-capped) and the phone checklist on the deployed HTTPS instance; **S8** `receiveEnvelope` reports `gone` when the row it inserted was pruned in the same call (a re-sent old mark under a new event id) and the transport skips the `ramble:nearby` poke for it (credit unchanged), with trades + transport tests; **S9** a coarse-only frame says "Something is around here, but I can't tell which way." rather than "Nothing within 500 m"; **S10** docs say "when you close a tapped label"; **S11** the §6 amendment records the navigation-line deviation, the hidden-tab behaviour and the audience; **S12** CSS selector pins for the edge arrow, the dashed teaser, the camera-off video and the radar layout, plus `data-side` assertions in the mountAr test. **S3** (the notice gate has only string-level coverage) is accepted as smoke-only: the gate is three lines of `openAr` and the phone checklist's first item; no pure helper was extracted.
 Rulings: **Q1** `camera` stays an optional fourth field of `renderAr` (a 3-field call behaves exactly as spec §6 says; the mode/reason decision lives in one place); recorded in the §6 amendment. **Q2** the camera prompt is issued synchronously in the click, then the motion prompt, never after an awaited promise. **Q3** a hidden tab stops the camera only; the view stays open and the camera restarts on return. **Q4** `/around` lists what the map lists (public, contacts, the user's own private) — intentional, behind `dashboardAuth`, pinned by the route test's private "near north" mark and stated in the guides.
+
+### Round 2 (2026-09-07, fresh adversarial subagent; the plan's new files and tests were EXECUTED in a scratch mirror — ar 8/8 after N1, around 5/6, anchors 11/11, trades 11/11, transport 32/32 incl. the two-transport test on its first run) — REVISE → fixed inline
+Round-1 fixes re-verified HOLDING: C2, C3 (same element across frames, `data-side` flips, removal, list not rebuilt, z-index), C4, C5, S4, S5, S6, S8 (both halves executed; the transport edit compiles), S9, S12. Two did not hold and one new defect: **N1** (C1 reopened) the round-1 painter edit's own comment carried two backticks → plain words. **N2** `bboxAround`'s `cosLat` floor of 0.01 capped the box's east–west half-width at ~0.45°, so the `too-wide` refusal was unreachable at radius 500 AND the box was too narrow near the pole (silently missing marks) → floor `1e-6`; lat 85 answers, 89.9 and 90 refuse. **N3** a precision-5 cover (~10 km × 8 km) with `LIMIT 500` applied before the distance filter meant an instance holding >500 marks in its home cell could get an empty AR view while the map still showed pins → two covers: a precision-7 fine cover (≤ 512 cells, ~72 for 500 m) answers exact-anchor rows and can never be starved, the precision-5 cover contributes only rows whose own geohash is coarse (wire caws); above ~84° the fine cover overflows and the coarse pass alone answers (accepted, bounded); a 600-far-marks starvation test pins it.
+Suggestions applied: **S1** Task 7's Files bullet now says AFTER hatch; **S2** the transport-edit parenthetical says what the shown block already contains; **S3** "replace the whole `makeHarness`"; **S4** the suite delta is 24 tests → 4183; **S5** `listKey` includes the title (and the mode); **S6** the redundant sheet z-index dropped; **S7** in radar mode coarse rows join the list and the coarse strip is hidden (no collision on short viewports), tested; **S8** `paintPet` nudges the AR render so the bird is not a heartbeat late; **S9** a camera restart after a hidden tab retries once before the view gives up on it; **S10** the check-runs poll's rate limit noted; **S11** (rAF detachment) recorded as a non-issue.
+Rulings: **Q1** `radius_m` stays as API surface (validated, documented, tested; the client sends none today). **Q2** answered by N3. **Q3** `listNests` at high latitude stays under its own `MAX_NEST_CELLS = 8192` cap — no extra cap; it computes hashes, it does not query. **Q4** the notice gate's storage half moved into the renderer as `noticeSeen`/`markNoticeSeen(getStorage, key)` with a unit test (missing/throwing storage → the notice shows); the three-line `openAr` branch stays smoke-only.
