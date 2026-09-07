@@ -1390,7 +1390,7 @@
     /* toFixed(6) is ~0.1 m: enough for a label, and never a 400 from a long double. */
     return jsonFetch("/api/ramble/around?lat=" + encodeURIComponent(arPose.lat.toFixed(6)) + "&lon=" + encodeURIComponent(arPose.lon.toFixed(6)))
       .then(function (out) { arAnchors = toArAnchors(out); scheduleArRender(); })
-      .catch(function () { /* keep the last anchors; the pose still moves them */ });
+      .catch(function () { arFetchAt = null; /* keep the last anchors; the pose still moves them */ });
   }
 
   function maybeRefreshAround() {
@@ -1450,7 +1450,8 @@
     }
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
       .then(function (stream) {
-        if (!arOpen) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+        if (!arOpen || document.hidden) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+        if (arStream) { arStream.getTracks().forEach(function (t) { t.stop(); }); }
         arStream = stream;
         video.srcObject = stream;
         var p = video.play();
@@ -1459,7 +1460,7 @@
         scheduleArRender();
       })
       .catch(function () {
-        if (restart === true && arOpen) { setTimeout(function () { if (arOpen && !arStream) startArCamera(false); }, 1500); return; }
+        if (restart === true && arOpen) { setTimeout(function () { if (arOpen && !arStream && !document.hidden) startArCamera(false); }, 1500); return; }
         arCamera = false;
         scheduleArRender();
       });
@@ -1535,6 +1536,7 @@
    */
   function startAr() {
     if (!Ar || !arRoot) return;
+    if (arOpen) return;
     arOpen = true;
     arRoot.hidden = false;
     if (!arSession) arSession = Ar.mountAr(arElements(), { engine: Bird, onTap: onArTap });
