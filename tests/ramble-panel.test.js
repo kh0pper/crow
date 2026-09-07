@@ -603,6 +603,7 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes("if (arOpen) return;"), "startAr is idempotent");
   assert.ok(body.includes('"visibilitychange"'));
   assert.ok(body.includes("AR_HEADING_STALE_MS"), "a stale compass falls back to the ring");
+  assert.ok(body.includes("setInterval(arHeartbeat, 1000)"), "the heartbeat retries a failed around fetch");
   assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body), "camera frames never leave the device");
 
   const code = body.replace(/\/\*[\s\S]*?\*\//g, "");

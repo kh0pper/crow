@@ -213,7 +213,9 @@ bookkeeping is not needed for these tables). `stampSql` gains by-key branches fo
   map lists (public, contacts, own private). The renderer is a classic script (`window.RambleAr`)
   tested in Node under `vm` with a synthetic pose; label buttons persist across frames (a button
   rebuilt under a finger never gets its tap); the client owns the devices and routes label taps to
-  the map pins' own popup builders.
+  the map pins' own popup builders. `/around` lists every row under its 5-char cover whatever its
+  stored precision (a 6-char caw from a peer at a non-default publish precision included); rows at
+  precision ≤ 4 cannot match the cover and are not listed in AR (the map still shows them).
 
 ---
 
