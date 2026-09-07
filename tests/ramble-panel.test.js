@@ -582,6 +582,27 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes('"/dashboard/contacts"'), "share-an-invite hands off to the Contacts panel");
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(body), "no emoji in the client script");
 
+  // Phase 4 wiring: the around fetch, the three device doors (camera,
+  // watchPosition, absolute orientation with the iOS fallback and prompt),
+  // the renderer mount, the SAME popup builders behind a tapped label, the
+  // live-event refreshes, teardown on close and on a hidden tab — and no
+  // capture API anywhere (camera frames never leave the device).
+  assert.ok(body.includes('"/api/ramble/around?lat=" + encodeURIComponent(arPose.lat.toFixed(6))'), "client must fetch anchors around the fix, at a bounded precision");
+  assert.ok(body.includes('facingMode: "environment"'));
+  assert.ok(body.includes("navigator.mediaDevices.getUserMedia("));
+  assert.ok(body.includes("navigator.geolocation.watchPosition("));
+  assert.ok(body.includes("navigator.geolocation.clearWatch("));
+  assert.ok(body.includes('"deviceorientationabsolute"'));
+  assert.ok(body.includes("DeviceOrientationEvent.requestPermission"));
+  assert.ok(body.includes("Ar.headingFromEvent(") && body.includes("Ar.smoothHeading("));
+  assert.ok(body.includes("Ar.mountAr("));
+  assert.ok(body.includes("nestPopup(anchor.source)") && body.includes("popupFor(anchor.source)"), "a label tap opens the pin's own popup");
+  assert.ok(body.includes('"ramble.ar.limits"'));
+  assert.ok(body.includes("getTracks().forEach"), "the camera stream is stopped on close");
+  assert.ok(body.includes('"visibilitychange"'));
+  assert.ok(body.includes("AR_HEADING_STALE_MS"), "a stale compass falls back to the ring");
+  assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body), "camera frames never leave the device");
+
   const code = body.replace(/\/\*[\s\S]*?\*\//g, "");
   const sinks = code.match(/\.innerHTML\s*=|\bhtml:\s/g) || [];
   assert.equal(sinks.length, 2, `expected exactly two engine-output markup sinks, found ${sinks.length}`);
@@ -618,6 +639,22 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.match(body, /\.rb-ar-label\[data-locked="true"\]/);
   assert.match(body, /\.rb-ar\[data-camera="off"\] \.rb-ar-video/);
   assert.match(body, /\.rb-ar\[data-mode="radar"\] \.rb-ar-radar/);
+});
+
+test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {
+  const res = await req("/ramble/static/ramble-ar.js");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /javascript/);
+  const body = await res.text();
+  assert.ok(body.length > 100);
+  assert.equal(body.split("`").length - 1, 0, "zero backticks");
+  assert.ok(!/^\s*(import|export)\s/m.test(body), "a classic script");
+  const code = body.replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.deepEqual(code.match(/\.innerHTML\s*=|\bhtml:\s|insertAdjacentHTML|outerHTML/g) || [], [], "zero markup sinks");
+  assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(body), "no emoji");
+  assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body));
+  assert.ok(body.includes("window.RambleAr = api"));
+  assert.equal((await realFetch(BASE + "/ramble/static/ramble-ar.js")).status, 401);
 });
 
 test("GET /ramble/static/leaflet/leaflet.js serves the vendored copy", async () => {

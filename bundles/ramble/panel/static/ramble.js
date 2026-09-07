@@ -12,7 +12,14 @@
  * X-Crow-Csrf to every state-changing same-origin request.
  *
  * Sections, in order: net, views, map, marks, perch, compose, grid, egg, pet,
- * flock, contacts, trades, nests, hatch, stream, startup.
+ * flock, contacts, trades, nests, hatch, ar, stream, startup.
+ *
+ * Phase 4: the AR view. This file owns the DEVICES (camera, GPS watch,
+ * orientation) and the adapter from server rows to the renderer's anchors;
+ * static/ramble-ar.js owns the maths and the painting. A tapped label opens
+ * the same popup its map pin would (popupFor / nestPopup) inside #rb-ar-sheet,
+ * so every AR action is a pin action. The camera stream is a background:
+ * nothing reads its frames, nothing uploads.
  */
 (function () {
   "use strict";
@@ -806,8 +813,11 @@
     alarmed: "Rattled and low. Three taps and some fresh air.",
   };
 
+  var lastPet = null;
+
   function paintPet(pet) {
     if (!pet) return;
+    lastPet = pet;
     paintPerch(pet);
 
     var bird = pet.bird;
@@ -855,6 +865,8 @@
     /* "My bird" only exists once there is one. */
     var myBird = $("rb-my-bird");
     if (myBird) myBird.hidden = !valid;
+
+    if (arOpen) scheduleArRender();
   }
 
   function refreshPet() {
@@ -1294,20 +1306,328 @@
   var meetBtn = $("rb-meet-bird");
   if (meetBtn) meetBtn.addEventListener("click", function () { showView("pet"); });
 
+  /* ------------------------------------------------------------------- ar */
+
+  var Ar = window.RambleAr || null;
+  var arRoot = $("rb-ar");
+  var arSheet = $("rb-ar-sheet");
+  var arSession = null;        /* the painter, mounted once */
+  var arOpen = false;          /* devices are live */
+  var arPose = { lat: null, lon: null, accuracy_m: null, heading: null };
+  var arCamera = true;
+  var arAnchors = [];
+  var arStream = null;
+  var arWatch = null;
+  var arHeadingEvent = null;   /* which orientation event we listen to */
+  var arFetchAt = null;        /* { lat, lon, t } of the last around fetch */
+  var arRaf = null;
+  var arTick = null;           /* 1 s heartbeat while open: staleness shows even with no events */
+  var arHeadingAt = 0;         /* when the last usable heading arrived */
+  var AR_REFETCH_M = 50;
+  var AR_REFETCH_MS = 60000;
+  var AR_HEADING_STALE_MS = 5000;
+  var AR_MIN_TURN_DEG = 0.5;   /* orientation events below this do not repaint */
+  var AR_NOTICE_KEY = "ramble.ar.limits";
+
+  function arTitle(mark) {
+    if (isLocked(mark)) return "A locked mark";
+    if (mark.kind === "caw") return "A caw" + (mark.contact_name ? " from " + mark.contact_name : "");
+    var t = String(mark.content_text || "(no text)").trim();
+    return t.length > 40 ? t.slice(0, 39) + "…" : t;
+  }
+
+  /** Server rows -> the renderer's anchors. lat/lon/accuracy exactly as stored; a locked teaser rides its cell centre with the cell's error radius. */
+  function toArAnchors(out) {
+    var list = [];
+    ((out && out.marks) || []).forEach(function (mark) {
+      var exact = typeof mark.lat === "number" && typeof mark.lon === "number";
+      var lat = exact ? mark.lat : mark.approx_lat;
+      var lon = exact ? mark.lon : mark.approx_lon;
+      if (typeof lat !== "number" || typeof lon !== "number") return;
+      list.push({
+        id: "m:" + mark.mark_id,
+        kind: mark.kind === "caw" ? "caw" : "mark",
+        lat: lat,
+        lon: lon,
+        accuracy_m: typeof mark.accuracy_m === "number" ? mark.accuracy_m : null,
+        approx_m: exact ? 0 : (typeof mark.approx_m === "number" ? mark.approx_m : 0),
+        locked: isLocked(mark),
+        title: arTitle(mark),
+        source: mark,
+      });
+    });
+    ((out && out.nests) || []).forEach(function (nest) {
+      list.push({
+        id: "n:" + nest.cell, kind: "nest", lat: nest.lat, lon: nest.lon, accuracy_m: null, approx_m: 0, locked: false,
+        title: nest.claimed ? "A nest (yours)" : "A nest", source: nest,
+      });
+    });
+    return list;
+  }
+
+  function arBirdState() {
+    var bird = lastPet && lastPet.bird;
+    if (!bird) return null;
+    return { species: bird.species, seed: bird.seed, mood: lastPet.mood || "happy" };
+  }
+
+  function scheduleArRender() {
+    if (!arOpen || !arSession || arRaf) return;
+    var raf = window.requestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
+    arRaf = raf(function () {
+      arRaf = null;
+      if (!arOpen || !arSession) return;
+      /* A compass that stopped reporting (screen lock, sensor hiccup) must not
+       * keep placing labels with confidence: a stale heading falls back to the ring. */
+      if (arPose.heading != null && Date.now() - arHeadingAt > AR_HEADING_STALE_MS) arPose.heading = null;
+      arSession.render({ anchors: arAnchors, pose: arPose, bird: arBirdState(), camera: arCamera });
+    });
+  }
+
+  function refreshAround() {
+    if (!arOpen || typeof arPose.lat !== "number" || typeof arPose.lon !== "number") return Promise.resolve();
+    arFetchAt = { lat: arPose.lat, lon: arPose.lon, t: Date.now() };
+    /* toFixed(6) is ~0.1 m: enough for a label, and never a 400 from a long double. */
+    return jsonFetch("/api/ramble/around?lat=" + encodeURIComponent(arPose.lat.toFixed(6)) + "&lon=" + encodeURIComponent(arPose.lon.toFixed(6)))
+      .then(function (out) { arAnchors = toArAnchors(out); scheduleArRender(); })
+      .catch(function () { /* keep the last anchors; the pose still moves them */ });
+  }
+
+  function maybeRefreshAround() {
+    if (!arFetchAt) { refreshAround(); return; }
+    var moved = haversineMeters({ lat: arFetchAt.lat, lon: arFetchAt.lon }, { lat: arPose.lat, lon: arPose.lon });
+    if (moved >= AR_REFETCH_M || Date.now() - arFetchAt.t >= AR_REFETCH_MS) refreshAround();
+  }
+
+  function screenAngle() {
+    try {
+      if (window.screen && window.screen.orientation && typeof window.screen.orientation.angle === "number") return window.screen.orientation.angle;
+      if (typeof window.orientation === "number") return window.orientation;
+    } catch (e) { /* not fatal */ }
+    return 0;
+  }
+
+  function onArOrientation(ev) {
+    var h = Ar.headingFromEvent(ev, screenAngle());
+    if (h == null) return;
+    arHeadingAt = Date.now();
+    var next = Ar.smoothHeading(arPose.heading, h, 0.3);
+    /* Orientation fires at up to 60 Hz; a sub-degree wobble is not a repaint. */
+    if (arPose.heading != null && Math.abs(Ar.relativeBearing(next, arPose.heading)) < AR_MIN_TURN_DEG) return;
+    arPose.heading = next;
+    scheduleArRender();
+  }
+
+  function startArHeading() {
+    /* Absolute orientation where the platform has it; iOS reports webkitCompassHeading on the plain event. */
+    arHeadingEvent = ("ondeviceorientationabsolute" in window) ? "deviceorientationabsolute" : "deviceorientation";
+    window.addEventListener(arHeadingEvent, onArOrientation);
+  }
+
+  function stopArHeading() {
+    if (!arHeadingEvent) return;
+    window.removeEventListener(arHeadingEvent, onArOrientation);
+    arHeadingEvent = null;
+  }
+
+  /** iOS 13+: orientation events need a permission granted from a user gesture. Resolves either way — a refusal is the radar strip. */
+  function requestArMotion() {
+    try {
+      if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === "function") {
+        return DeviceOrientationEvent.requestPermission().catch(function () { return "denied"; });
+      }
+    } catch (e) { /* fall through */ }
+    return Promise.resolve("granted");
+  }
+
+  /** restart = a return from a hidden tab: a camera that worked a second ago gets one retry before the view gives up on it. */
+  function startArCamera(restart) {
+    var video = $("rb-ar-video");
+    if (!video || !navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+      arCamera = false;
+      scheduleArRender();
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false })
+      .then(function (stream) {
+        if (!arOpen) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+        arStream = stream;
+        video.srcObject = stream;
+        var p = video.play();
+        if (p && typeof p.catch === "function") p.catch(function () { /* autoplay policy: the frame still paints */ });
+        arCamera = true;
+        scheduleArRender();
+      })
+      .catch(function () {
+        if (restart === true && arOpen) { setTimeout(function () { if (arOpen && !arStream) startArCamera(false); }, 1500); return; }
+        arCamera = false;
+        scheduleArRender();
+      });
+  }
+
+  function stopArCamera() {
+    var video = $("rb-ar-video");
+    if (arStream) { arStream.getTracks().forEach(function (t) { t.stop(); }); arStream = null; }
+    if (video) { try { video.srcObject = null; } catch (e) { /* not fatal */ } }
+  }
+
+  function startArGps() {
+    if (lastFix) {
+      arPose.lat = lastFix.lat; arPose.lon = lastFix.lon; arPose.accuracy_m = lastFix.accuracy_m;
+      refreshAround();
+      scheduleArRender();
+    }
+    if (!navigator.geolocation) return;
+    arWatch = navigator.geolocation.watchPosition(function (pos) {
+      lastFix = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy_m: pos.coords.accuracy };
+      arPose.lat = lastFix.lat; arPose.lon = lastFix.lon; arPose.accuracy_m = lastFix.accuracy_m;
+      maybeRefreshAround();
+      scheduleArRender();
+    }, function (err) {
+      /* Permission pulled mid-session (code 1): the old fix is a lie now — back to "Waiting for a fix…". A timeout keeps the last fix. */
+      if (err && err.code === 1) { arPose.lat = null; arPose.lon = null; arAnchors = []; }
+      scheduleArRender();
+    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 });
+  }
+
+  function stopArGps() {
+    if (arWatch == null || !navigator.geolocation) { arWatch = null; return; }
+    try { navigator.geolocation.clearWatch(arWatch); } catch (e) { /* gone */ }
+    arWatch = null;
+  }
+
+  function arElements() {
+    return {
+      root: arRoot, labels: $("rb-ar-labels"), radar: $("rb-ar-ring"), list: $("rb-ar-list"), coarse: $("rb-ar-coarse"),
+      bird: $("rb-ar-bird"), egg: $("rb-ar-egg"), say: $("rb-ar-say"), more: $("rb-ar-more"), mode: $("rb-ar-mode-label"),
+    };
+  }
+
+  /** A label tap = the pin's own popup, in a sheet. */
+  function onArTap(id) {
+    var anchor = arSession && arSession.anchor(id);
+    if (!anchor || !anchor.source) return;
+    openArSheet(anchor.kind === "nest" ? nestPopup(anchor.source) : popupFor(anchor.source));
+  }
+
+  function openArSheet(node) {
+    var body = $("rb-ar-sheet-body");
+    if (!arSheet || !body) return;
+    body.textContent = "";
+    body.appendChild(node);
+    arSheet.hidden = false;
+  }
+
+  function closeArSheet() {
+    if (!arSheet || arSheet.hidden) return;
+    arSheet.hidden = true;
+    var body = $("rb-ar-sheet-body");
+    if (body) body.textContent = "";
+    /* An unlock or a claim may have changed what is around. */
+    refreshAround();
+  }
+
+  /**
+   * Devices start HERE, synchronously inside the user's click: getUserMedia and
+   * DeviceOrientationEvent.requestPermission both want transient activation, so
+   * the camera prompt is issued first and the motion prompt right after it in
+   * the same handler (Q2) — never after an awaited promise.
+   */
+  function startAr() {
+    if (!Ar || !arRoot) return;
+    arOpen = true;
+    arRoot.hidden = false;
+    if (!arSession) arSession = Ar.mountAr(arElements(), { engine: Bird, onTap: onArTap });
+    drawEggArt($("rb-ar-egg"), eggSeedId);
+    arPose = { lat: null, lon: null, accuracy_m: null, heading: null };
+    arHeadingAt = 0;
+    arCamera = true;
+    arAnchors = [];
+    arFetchAt = null;
+    scheduleArRender();
+    startArCamera();
+    requestArMotion().then(function () { if (arOpen) startArHeading(); });
+    startArGps();
+    if (!arTick) arTick = setInterval(scheduleArRender, 1000);
+    refreshPet();
+  }
+
+  function closeAr() {
+    arOpen = false;
+    closeArSheet();
+    stopArCamera();
+    stopArGps();
+    stopArHeading();
+    if (arTick) { clearInterval(arTick); arTick = null; }
+    if (arRaf) { try { (window.cancelAnimationFrame || clearTimeout)(arRaf); } catch (e) { /* not fatal */ } arRaf = null; }
+    if (arSession) arSession.destroy();
+    var notice = $("rb-ar-notice");
+    if (notice) notice.hidden = true;
+    if (arRoot) arRoot.hidden = true;
+  }
+
+  function arStorage() { return window.localStorage; }
+  function arNoticeSeen() { return Ar.noticeSeen(arStorage, AR_NOTICE_KEY); }
+  function markArNoticeSeen() { Ar.markNoticeSeen(arStorage, AR_NOTICE_KEY); }
+
+  /** The chip. First time: the notice, and NOTHING starts until "Got it". After that: the devices, from the click itself. */
+  function openAr() {
+    if (!Ar || !arRoot) return;
+    var notice = $("rb-ar-notice");
+    if (!arNoticeSeen() && notice) {
+      notice.hidden = false;
+      arRoot.hidden = false;
+      return;
+    }
+    startAr();
+  }
+
+  var arChip = $("rb-chip-ar");
+  if (arChip) {
+    if (!Ar) arChip.hidden = true;
+    /* openAr runs synchronously in the click so the device prompts keep the gesture. */
+    arChip.addEventListener("click", function () { if (!arOpen) openAr(); });
+  }
+  var arClose = $("rb-ar-close");
+  if (arClose) arClose.addEventListener("click", closeAr);
+  var arGotIt = $("rb-ar-gotit");
+  if (arGotIt) {
+    arGotIt.addEventListener("click", function () {
+      markArNoticeSeen();
+      var notice = $("rb-ar-notice");
+      if (notice) notice.hidden = true;
+      startAr();
+    });
+  }
+  var arSheetClose = $("rb-ar-sheet-close");
+  if (arSheetClose) arSheetClose.addEventListener("click", closeArSheet);
+  if (arSheet) arSheet.addEventListener("click", function (ev) { if (ev.target === arSheet) closeArSheet(); });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape") return;
+    if (arSheet && !arSheet.hidden) { closeArSheet(); return; }
+    if (arRoot && !arRoot.hidden) closeAr();
+  });
+  /* A backgrounded tab must not keep the camera; coming back restarts it in place (Q3 — the view stays open). */
+  document.addEventListener("visibilitychange", function () {
+    if (!arOpen) return;
+    if (document.hidden) { stopArCamera(); return; }
+    startArCamera(true);
+  });
+
   /* --------------------------------------------------- nearby live updates */
 
   try {
     var stream = new EventSource("/dashboard/streams/ramble-nearby");
     /* The server sends NAMED frames ("event: ramble-nearby"), and onmessage
        only ever fires for UNNAMED ones -- it must be addEventListener. */
-    stream.addEventListener("ramble-nearby", function () { refreshMarks(); refreshPet(); });
+    stream.addEventListener("ramble-nearby", function () { refreshMarks(); refreshPet(); if (arOpen) refreshAround(); });
     stream.addEventListener("ramble-hatched", function (ev) {
       var payload = null;
       try { payload = JSON.parse(ev.data); } catch (e) { payload = null; }
       refreshPet();
       handleHatched(payload);
     });
-    stream.addEventListener("ramble-nest-claimed", function () { refreshNests(); refreshFlock(); });
+    stream.addEventListener("ramble-nest-claimed", function () { refreshNests(); refreshFlock(); if (arOpen) refreshAround(); });
     stream.addEventListener("ramble-trade", function () { refreshFlock(); refreshTrades(); });
     stream.onerror = function () { /* quiet: the stream may not exist yet */ };
   } catch (err) { /* no EventSource, no live updates */ }
