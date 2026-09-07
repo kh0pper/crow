@@ -222,3 +222,49 @@ test("ramble_nests lists deterministic nests nearest-first; ramble_claim_nest cl
   assert.equal(eggAfter.egg.warmth, eggBefore.egg.warmth);
   assert.equal(petAfter.energy, petBefore.energy);
 });
+
+test("phase 3 tools: gift and propose_swap validate the contact and the egg, queue one DM each; leave_mark reports recipients", async () => {
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, crow_id TEXT NOT NULL UNIQUE, display_name TEXT,
+      secp256k1_pubkey TEXT NOT NULL DEFAULT '', is_blocked INTEGER DEFAULT 0, request_status TEXT, is_bot INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS contact_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_uid TEXT, room_uid TEXT);
+    CREATE TABLE IF NOT EXISTS contact_group_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, contact_id INTEGER NOT NULL);
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey) VALUES ('crow:pal', 'Pal', '02${"ab".repeat(32)}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, is_blocked) VALUES ('crow:blk', 'Blk', '02${"ab".repeat(32)}', 1);
+    INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('t-gift','shelf','user',3,1), ('t-swap','received','user',8,2);`);
+
+  let r = await h.ramble_gift_egg({ egg_id: "t-gift", crow_id: "crow:blk" });
+  assert.ok(r.isError); assert.match(r.content[0].text, /unknown contact/);
+  r = await h.ramble_gift_egg({ egg_id: "nope", crow_id: "crow:pal" });
+  assert.ok(r.isError); assert.match(r.content[0].text, /not-found/);
+  r = await h.ramble_gift_egg({ egg_id: "t-gift", crow_id: "crow:pal" });
+  assert.ok(!r.isError, r.content[0].text);
+  assert.deepEqual(JSON.parse(r.content[0].text), { gifted: true, egg_id: "t-gift", to: "crow:pal", queued: true });
+  assert.equal((await db.execute("SELECT status FROM ramble_eggs WHERE egg_id='t-gift'")).rows[0].status, "gifted");
+  r = await h.ramble_gift_egg({ egg_id: "t-gift", crow_id: "crow:pal" });
+  assert.ok(r.isError, "already gone");
+
+  r = await h.ramble_propose_swap({ egg_id: "t-swap", crow_id: "crow:pal" });
+  assert.ok(!r.isError, r.content[0].text);
+  const out = JSON.parse(r.content[0].text);
+  assert.equal(out.proposed, true); assert.equal(out.egg_id, "t-swap"); assert.equal(out.to, "crow:pal");
+  assert.match(out.trade_id, /^[0-9a-f-]{36}$/);
+  assert.ok(Number(out.expires_at) > Date.now());
+  r = await h.ramble_propose_swap({ egg_id: "t-swap", crow_id: "crow:pal" });
+  assert.ok(r.isError); assert.match(r.content[0].text, /in-trade/);
+
+  const { rows } = await db.execute("SELECT kind, to_crow_id FROM ramble_outbox ORDER BY id");
+  assert.deepEqual(rows.map((x) => [x.kind, x.to_crow_id]), [["egg", "crow:pal"], ["trade", "crow:pal"]]);
+
+  r = await h.ramble_leave_mark({ lat: 30.2, lon: -97.7, text: "for contacts", visibility: "contacts" });
+  assert.ok(!r.isError);
+  assert.equal(JSON.parse(r.content[0].text).recipients, 1);
+  r = await h.ramble_leave_mark({ lat: 30.2, lon: -97.7, text: "for a ghost group", visibility: "group:nope" });
+  assert.ok(r.isError); assert.match(r.content[0].text, /unknown group/);
+  assert.equal((await db.execute("SELECT count(*) AS n FROM ramble_marks WHERE visibility='group:nope'")).rows[0].n, 0);
+  r = await h.ramble_leave_mark({ lat: 30.2, lon: -97.7, text: "public", visibility: "public" });
+  assert.equal(JSON.parse(r.content[0].text).recipients, undefined, "public marks do not report recipients");
+});
