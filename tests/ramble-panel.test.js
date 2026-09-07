@@ -18,7 +18,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import express from "express";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -139,6 +139,13 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.doesNotMatch(sent, /id="ramble-map"/);
   assert.doesNotMatch(sent, /id="ramble-pet"/);
   assert.doesNotMatch(sent, /id="ramble-marks"/);
+
+  // Phase 2: the flock view and both doors into it.
+  assert.match(sent, /data-for="flock"/);
+  assert.match(sent, /id="rb-flock-birds"/);
+  assert.match(sent, /id="rb-shelf"/);
+  assert.match(sent, /id="rb-my-flock"/);
+  assert.match(sent, /id="rb-egg-flock"/);
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -503,6 +510,24 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // client reads the chosen audience off the button's data-visibility. Pin the
   // attribute name on BOTH sides so a rename cannot silently split them.
   assert.ok(body.includes('"data-visibility"'), "client must read the data-visibility attribute");
+
+  // Phase 2 wiring: nests for the viewport, the claim, the flock, the swap,
+  // the activation, and the third named SSE frame.
+  assert.ok(body.includes('"/api/ramble/nests?bbox="'), "client must fetch nests by bbox");
+  assert.ok(body.includes('"/api/ramble/nests/claim"'));
+  assert.ok(body.includes('"/api/ramble/flock"'));
+  assert.ok(body.includes('"/incubate"'));
+  assert.ok(body.includes('"/activate"'));
+  assert.ok(body.includes('addEventListener("ramble-nest-claimed"'), "client must subscribe to ramble-nest-claimed");
+  // The only markup sinks are engine output from a NUMBER (drawEgg via
+  // drawEggArt, and the nest pin's divIcon html); every user- or peer-supplied
+  // string goes through textContent. Comments are stripped first so prose
+  // (the file header mentions innerHTML) never trips the count.
+  const code = body.replace(/\/\*[\s\S]*?\*\//g, "");
+  const sinks = code.match(/\.innerHTML\s*=|\bhtml:\s/g) || [];
+  assert.equal(sinks.length, 2, `expected exactly two engine-output markup sinks, found ${sinks.length}`);
+  assert.ok(code.includes("el.innerHTML = Bird.drawEgg("));
+  assert.ok(code.includes("html: nestEggHtml("));
 });
 
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
@@ -523,6 +548,10 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.match(body, /#ramble\s*\{/);
   assert.match(body, /--rb-accent:/);
   assert.match(body, /prefers-reduced-motion/);
+
+  // Views switch by CSS alone: without this selector showView("flock") sets
+  // the attribute and the section stays display:none.
+  assert.match(body, /\[data-view="flock"\]\s*\.rb-view\[data-for="flock"\]/);
 });
 
 test("GET /ramble/static/leaflet/leaflet.js serves the vendored copy", async () => {
@@ -633,6 +662,124 @@ test("a locked mark lists as an approximate cell-centre teaser, then unlocks in 
   assert.equal(petAfter.unlocks_week, petBefore.unlocks_week + 1, "a successful unlock must feed unlock_mark");
 });
 
+// ------------------------------------------------------ nests, flock, shelf (phase 2)
+
+let claimedNest = null;   // set by the claim test, read by the flock/incubate tests
+let claimedEggId = null;
+
+test("GET /api/ramble/nests lists deterministic nests for a viewport and 400s a bad or too-wide bbox", async () => {
+  const bbox = `${LAT - 0.01},${LON - 0.01},${LAT + 0.01},${LON + 0.01}`;
+  const res = await req(`/api/ramble/nests?bbox=${bbox}`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.match(body.week, /^\d{4}-W\d{2}$/);
+  assert.ok(body.nests.length > 0, "a ~2 km box at rate 24 must hold nests");
+  assert.deepEqual(Object.keys(body.nests[0]).sort(), ["cell", "claimed", "lat", "lon", "seed", "week"]);
+  const again = await (await req(`/api/ramble/nests?bbox=${bbox}`)).json();
+  assert.deepEqual(again, body);
+  claimedNest = body.nests[0];
+
+  assert.equal((await req("/api/ramble/nests?bbox=1,2,3")).status, 400);
+  assert.equal((await req("/api/ramble/nests?bbox=a,b,c,d")).status, 400);
+  assert.equal((await req("/api/ramble/nests?bbox=91,0,92,1")).status, 400);
+  assert.equal((await req("/api/ramble/nests?bbox=30,-99,31,-98")).status, 400, "too wide must be refused, not computed");
+  assert.equal((await req("/api/ramble/nests")).status, 400);
+});
+
+test("POST /api/ramble/nests/claim: too far is a friendly refusal; in range claims once; the claim emits the egg", async () => {
+  assert.ok(claimedNest, "the nests test must run first");
+  const far = await req("/api/ramble/nests/claim", { method: "POST",
+    body: { cell: claimedNest.cell, week: claimedNest.week, lat: claimedNest.lat + 0.01, lon: claimedNest.lon } });
+  assert.equal(far.status, 200);
+  assert.deepEqual(await far.json(), { claimed: false, reason: "too-far" });
+
+  const insertsBefore = emitCalls.filter((c) => c.table === "ramble_eggs" && c.op === "insert").length;
+  const ok = await req("/api/ramble/nests/claim", { method: "POST",
+    body: { cell: claimedNest.cell, week: claimedNest.week, lat: claimedNest.lat, lon: claimedNest.lon } });
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.equal(body.claimed, true); assert.equal(body.already, false);
+  assert.equal(body.egg.status, "shelf"); assert.equal(body.egg.shelf_origin, "user"); assert.equal(body.egg.found_cell, claimedNest.cell);
+  claimedEggId = body.egg.egg_id;
+  const inserts = emitCalls.filter((c) => c.table === "ramble_eggs" && c.op === "insert");
+  assert.equal(inserts.length, insertsBefore + 1, "a claim must emit exactly one ramble_eggs insert");
+  assert.equal(inserts[inserts.length - 1].row.shelf_origin, "user");
+
+  const twice = await (await req("/api/ramble/nests/claim", { method: "POST",
+    body: { cell: claimedNest.cell, week: claimedNest.week, lat: claimedNest.lat, lon: claimedNest.lon } })).json();
+  assert.equal(twice.already, true); assert.equal(twice.egg.egg_id, claimedEggId);
+
+  // Validation: a non-7 cell, a malformed week, a bad lat.
+  assert.equal((await req("/api/ramble/nests/claim", { method: "POST", body: { cell: "9v6m2", week: claimedNest.week, lat: LAT, lon: LON } })).status, 400);
+  assert.equal((await req("/api/ramble/nests/claim", { method: "POST", body: { cell: claimedNest.cell, week: "w37", lat: LAT, lon: LON } })).status, 400);
+  assert.equal((await req("/api/ramble/nests/claim", { method: "POST", body: { cell: claimedNest.cell, week: claimedNest.week, lat: 200, lon: LON } })).status, 400);
+
+  const listed = await (await req(`/api/ramble/nests?bbox=${claimedNest.lat - 0.001},${claimedNest.lon - 0.001},${claimedNest.lat + 0.001},${claimedNest.lon + 0.001}`)).json();
+  assert.equal(listed.nests.find((n) => n.cell === claimedNest.cell)?.claimed, true);
+});
+
+test("GET /api/ramble/flock shows the shelf egg; incubate swaps it in and shelves the old egg as 'user'", async () => {
+  const flock = await (await req("/api/ramble/flock")).json();
+  assert.equal(flock.species_total, 8);
+  assert.equal(flock.shelf_cap, 5);
+  const shelfEgg = flock.eggs.find((e) => e.egg_id === claimedEggId);
+  assert.ok(shelfEgg && shelfEgg.status === "shelf" && shelfEgg.shelf_origin === "user");
+  const oldIncubating = flock.eggs.find((e) => e.status === "incubating");
+  assert.ok(oldIncubating);
+
+  const res = await req(`/api/ramble/eggs/${claimedEggId}/incubate`, { method: "POST", body: {} });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.egg.egg_id, claimedEggId); assert.equal(body.egg.status, "incubating");
+  assert.equal(body.shelved.egg_id, oldIncubating.egg_id); assert.equal(body.shelved.shelf_origin, "user");
+  assert.ok("hatched" in body); assert.equal(body.hatched, null);
+
+  const after = await (await req("/api/ramble/flock")).json();
+  assert.equal(after.eggs[0].egg_id, claimedEggId);
+  assert.equal(after.eggs.find((e) => e.egg_id === oldIncubating.egg_id).status, "shelf");
+  assert.equal((await (await req("/api/ramble/egg")).json()).egg.egg_id, claimedEggId, "the egg view follows the swap");
+
+  assert.equal((await req("/api/ramble/eggs/does-not-exist/incubate", { method: "POST", body: {} })).status, 404);
+  assert.equal((await req("/api/ramble/eggs/%2e%2e%2fx/incubate", { method: "POST", body: {} })).status, 400);
+});
+
+test("POST /api/ramble/birds/:id/activate 409s an unhatched egg and 404s an unknown id", async () => {
+  assert.equal((await req(`/api/ramble/birds/${claimedEggId}/activate`, { method: "POST", body: {} })).status, 409);
+  assert.equal((await req("/api/ramble/birds/nope/activate", { method: "POST", body: {} })).status, 404);
+  assert.equal((await req(`/api/ramble/eggs/${claimedEggId}/incubate`, { method: "POST", body: {} })).status, 200, "incubating the incubating egg is a no-op 200");
+});
+
+test("POST /api/ramble/birds/:id/activate 200s a hatched bird, emits the pet, and the pet/flock follow", async () => {
+  // A bird planted directly (deterministic, whatever the cumulative warmth in
+  // this file has or has not hatched by now).
+  const db = createDbClient();
+  try {
+    await db.execute({
+      sql: `INSERT INTO ramble_eggs (egg_id, status, warmth, species, seed, created_at, hatched_at)
+            VALUES ('panel-bird','hatched',100,'magpie',4242,1,2) ON CONFLICT(egg_id) DO NOTHING`,
+      args: [],
+    });
+  } finally { db.close(); }
+  const petUpdatesBefore = emitCalls.filter((c) => c.table === "ramble_pet" && c.op === "update").length;
+  const res = await req("/api/ramble/birds/panel-bird/activate", { method: "POST", body: {} });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { bird: { egg_id: "panel-bird", species: "magpie", seed: 4242 } });
+  assert.equal(emitCalls.filter((c) => c.table === "ramble_pet" && c.op === "update").length, petUpdatesBefore + 1, "activation must emit the pet row");
+  const pet = await (await req("/api/ramble/pet")).json();
+  assert.deepEqual(pet.bird, { egg_id: "panel-bird", species: "magpie", seed: 4242 });
+  const flock = await (await req("/api/ramble/flock")).json();
+  assert.equal(flock.birds.find((b) => b.egg_id === "panel-bird")?.active, true);
+  assert.equal(flock.birds.filter((b) => b.active).length, 1, "exactly one active bird");
+});
+
+test("nests, claim, flock, incubate and activate are behind dashboardAuth", async () => {
+  assert.equal((await realFetch(BASE + "/api/ramble/nests?bbox=0,0,0.001,0.001")).status, 401);
+  assert.equal((await realFetch(BASE + "/api/ramble/flock")).status, 401);
+  assert.equal((await realFetch(BASE + "/api/ramble/nests/claim", { method: "POST" })).status, 401);
+  assert.equal((await realFetch(BASE + "/api/ramble/eggs/x/incubate", { method: "POST" })).status, 401);
+  assert.equal((await realFetch(BASE + "/api/ramble/birds/x/activate", { method: "POST" })).status, 401);
+});
+
 // ------------------------------------------------------------- tile proxy
 // R17: the dashboard CSP is img-src 'self' data: blob:, so map tiles must be
 // same-origin. Upstream is never contacted here -- global.fetch is stubbed.
@@ -723,4 +870,13 @@ test("the router registers no unpathed router.use(middleware) layer", () => {
     (l.slash === true || l.regexp?.fast_slash === true));
   assert.deepEqual(unscoped.map((l) => l.name), [],
     "every router.use() in panel/routes.js must carry a path prefix");
+});
+
+// ------------------------------------------------------------- docs parity
+
+test("docs: the Spanish Ramble guide mirrors the English heading structure", () => {
+  const levels = (p) => readFileSync(join(REPO_ROOT, p), "utf8").split("\n")
+    .filter((l) => /^#{2,3} /.test(l)).map((l) => l.split(" ")[0]);
+  assert.deepEqual(levels("docs/es/guide/ramble.md"), levels("docs/guide/ramble.md"),
+    "en/es Ramble guides must have the same number, order and level of ##/### headings");
 });

@@ -86,14 +86,15 @@ derived from energy as in phase 1. Nothing else happens.
 ### 2.4 Nests and claiming (D9)
 - `nestFor(cell7, isoWeek)`: `h = sha256("ramble-nest-v1:" + cell7 + ":" + isoWeek)`; a nest
   exists when `h[0..4] mod NEST_RATE == 0` (default 24 → ~1 nest per 24 cells); its point is
-  the cell centre offset by `(h[4..8], h[8..12]) mod cell extent`. Public salt, no server, same
-  answer on every device.
+  the cell's south-west corner plus `h[4..8] / 2^32` of the cell height north and
+  `h[8..12] / 2^32` of the cell width east (always inside the cell); its egg-art seed is
+  `h[12..16]`. Public salt, no server, same answer on every device.
 - Claim: within `withinRange` (75 m) of the nest point → `POST /api/ramble/nests/claim` →
   one egg on the shelf (`status='shelf'`, `found_cell`, `found_week`). Limits: 1 claim per
   local day; shelf cap 5 (claim refused with a friendly reason). Claims are per user
   (`ramble_nest_claims(cell, week)`), never global.
 - The client shows nests on the map (egg pin) and in AR; the server exposes
-  `GET /api/ramble/nests?cells=…` computing them for the visible cells.
+  `GET /api/ramble/nests?bbox=south,west,north,east` computing them for the visible viewport.
 
 ### 2.5 Incubation and the flock
 - Exactly one egg has `status='incubating'`. `POST /api/ramble/eggs/:id/incubate` swaps.
@@ -199,7 +200,7 @@ Panel routes (all under the existing path-scoped `dashboardAuth`):
 `GET /api/ramble/egg` (incubating egg + checklist), `POST /api/ramble/egg/checkin`,
 `POST /api/ramble/pet/chore { kind }`, `GET /api/ramble/pet` (extended: bird, active egg),
 `GET /api/ramble/flock`, `POST /api/ramble/eggs/:id/incubate`, `POST /api/ramble/birds/:id/activate`,
-`GET /api/ramble/nests?cells=`, `POST /api/ramble/nests/claim { cell, week, lat, lon }`,
+`GET /api/ramble/nests?bbox=south,west,north,east`, `POST /api/ramble/nests/claim { cell, week, lat, lon }`,
 `GET /api/ramble/bird/:species/:seed.svg` (server render for the header / previews),
 phase 3: `POST /api/ramble/eggs/:id/gift { crow_id }`, `POST /api/ramble/trades` /
 `/:id/accept` / `/:id/decline`. MCP tools mirror: `ramble_egg_state`, `ramble_checkin`,
@@ -209,7 +210,8 @@ on the SSE channel as named events.
 
 `feed(db, event)` fans out: warmth to the incubating egg (with the credits ledger), energy
 to the pet, counters as phase 1. All existing hooks (transport receive, unlock, area) and
-the new ones (mark left, check-in, chore, claim) call the one function.
+the new ones (mark left, check-in, chore) call the one function; a nest claim
+credits nothing — the egg is the reward.
 
 ---
 

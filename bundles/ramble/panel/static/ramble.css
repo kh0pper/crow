@@ -116,11 +116,12 @@
    "hidden" element stays visible. */
 #ramble [hidden] { display: none !important; }
 
-/* Three views, one state attribute. The world is home. */
+/* Four views, one state attribute. The world is home. */
 #ramble .rb-view { display: none; flex-direction: column; gap: 14px; }
 #ramble[data-view="world"] .rb-view[data-for="world"],
 #ramble[data-view="egg"] .rb-view[data-for="egg"],
-#ramble[data-view="pet"] .rb-view[data-for="pet"] { display: flex; }
+#ramble[data-view="pet"] .rb-view[data-for="pet"],
+#ramble[data-view="flock"] .rb-view[data-for="flock"] { display: flex; }
 
 #ramble .rb-row { display: flex; align-items: center; gap: 10px; }
 #ramble .rb-grow { flex: 1; }
@@ -592,3 +593,33 @@
   #ramble .rb-actions { flex-wrap: wrap; }
   #ramble .rb-actions .rb-btn { flex: 1 1 140px; }
 }
+
+/* ------------------------------------------------------------ nests (phase 2) */
+
+/* Leaflet divIcon wrapper: no box of its own, the egg art is the whole pin. */
+#ramble .rb-nest-pin { background: none; border: 0; }
+#ramble .rb-nest-pin svg { width: 30px; height: 38px; filter: drop-shadow(2px 2px 0 var(--rb-shadow-col)); }
+#ramble .rb-nest-pin.is-claimed svg { opacity: .45; filter: grayscale(1); }
+
+/* ------------------------------------------------------------ flock (phase 2) */
+
+#ramble .rb-flock-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+#ramble .rb-flock-bird {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  min-height: 110px; padding: 10px 6px;
+  border: var(--rb-line-w) solid var(--rb-line); border-radius: var(--rb-radius-sm);
+  background: var(--rb-surface-2); box-shadow: var(--rb-pop-sm); color: var(--rb-text);
+  font: 800 13px var(--rb-font-display); cursor: pointer;
+}
+#ramble .rb-flock-bird svg { width: 64px; height: 64px; }
+#ramble .rb-flock-bird.is-active { background: color-mix(in oklab, var(--rb-accent) 45%, var(--rb-surface-2)); }
+#ramble .rb-flock-bird:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--rb-shadow-col); }
+#ramble .rb-flock-bird:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+#ramble .rb-tag {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  border: 2px solid var(--rb-line); background: var(--rb-accent); color: var(--rb-accent-ink);
+  font: 800 11px var(--rb-font-display); line-height: 18px;
+}
+#ramble .rb-shelf-egg { width: 34px; height: 43px; flex: 0 0 auto; }
+#ramble .rb-step .rb-btn { margin-left: auto; }
+#ramble .rb-step.is-incubating { border-color: var(--rb-accent-2); }

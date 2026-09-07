@@ -4,7 +4,9 @@ import { createClient } from "@libsql/client";
 import { createHash } from "node:crypto";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createRambleServer } from "../bundles/ramble/server/server.js";
-import { WARMTH_DEFAULTS } from "../bundles/ramble/server/eggs.js";
+import { WARMTH_DEFAULTS, isoWeek } from "../bundles/ramble/server/eggs.js";
+import { encodeGeohash } from "../bundles/ramble/server/anchors.js";
+import { nestFor, CELL7_LAT_STEP } from "../bundles/ramble/server/nests.js";
 
 let db, h;
 before(async () => {
@@ -161,4 +163,62 @@ test("ramble_pet_state includes an egg.percent number and a bird key (null befor
   const state = JSON.parse(r.content[0].text);
   assert.equal(typeof state.egg.percent, "number");
   assert.equal(state.bird, null);
+});
+
+test("ramble_flock returns the roster shape", async () => {
+  const r = await h.ramble_flock({});
+  assert.ok(!r.isError);
+  const s = JSON.parse(r.content[0].text);
+  assert.ok(Array.isArray(s.birds) && Array.isArray(s.eggs));
+  assert.equal(s.species_total, 8);
+  assert.equal(s.eggs[0].status, "incubating");
+});
+
+test("ramble_nests lists deterministic nests nearest-first; ramble_claim_nest claims one, idempotently, then hits the daily limit", async () => {
+  // The tools use the real clock, so nests depend on THIS week. A fixed box
+  // is not a deterministic guarantee (2026-W06 has a single nest in a ±0.01°
+  // box at 30.46/-98.08): derive two nest points from the formula instead.
+  const week = isoWeek(Date.now());
+  const found = [];
+  for (let i = 0; i < 5000 && found.length < 2; i++) {
+    const n = nestFor(encodeGeohash(30.46 + i * CELL7_LAT_STEP, -98.08, 7), week);
+    if (n) found.push(n);
+  }
+  assert.equal(found.length, 2, "two nests within 5000 cells north of the start point");
+  const [nest, other] = found;
+
+  const one = JSON.parse((await h.ramble_nests({ lat: nest.lat, lon: nest.lon })).content[0].text);
+  const two = JSON.parse((await h.ramble_nests({ lat: nest.lat, lon: nest.lon })).content[0].text);
+  assert.deepEqual(one, two, "nests must be a pure function of place and week");
+  assert.equal(one.week, week);
+  assert.equal(one.nests[0].cell, nest.cell, "the nest we stand on is nearest");
+  assert.equal(one.nests[0].distance_m, 0);
+  assert.equal(one.nests[0].claimed, false);
+  for (let i = 1; i < one.nests.length; i++) assert.ok(one.nests[i].distance_m >= one.nests[i - 1].distance_m);
+
+  const eggBefore = JSON.parse((await h.ramble_egg_state({})).content[0].text);
+  const petBefore = JSON.parse((await h.ramble_pet_state({})).content[0].text);
+
+  const far = JSON.parse((await h.ramble_claim_nest({ lat: nest.lat + 0.01, lon: nest.lon, cell: nest.cell })).content[0].text);
+  assert.deepEqual(far, { claimed: false, reason: "too-far" });
+
+  const got = JSON.parse((await h.ramble_claim_nest({ lat: nest.lat, lon: nest.lon })).content[0].text);
+  assert.equal(got.claimed, true); assert.equal(got.already, false);
+  assert.equal(got.egg.status, "shelf"); assert.equal(got.egg.shelf_origin, "user"); assert.equal(got.egg.found_cell, nest.cell);
+  const again = JSON.parse((await h.ramble_claim_nest({ lat: nest.lat, lon: nest.lon, cell: nest.cell })).content[0].text);
+  assert.equal(again.already, true); assert.equal(again.egg.egg_id, got.egg.egg_id);
+
+  const listed = JSON.parse((await h.ramble_nests({ lat: nest.lat, lon: nest.lon })).content[0].text);
+  assert.equal(listed.nests[0].claimed, true);
+
+  const limit = JSON.parse((await h.ramble_claim_nest({ lat: other.lat, lon: other.lon })).content[0].text);
+  assert.deepEqual(limit, { claimed: false, reason: "daily-limit" });
+
+  const flock = JSON.parse((await h.ramble_flock({})).content[0].text);
+  assert.ok(flock.eggs.some((e) => e.egg_id === got.egg.egg_id && e.status === "shelf"));
+  // A claim is not activity: neither the incubating egg's warmth nor the pet moved.
+  const eggAfter = JSON.parse((await h.ramble_egg_state({})).content[0].text);
+  const petAfter = JSON.parse((await h.ramble_pet_state({})).content[0].text);
+  assert.equal(eggAfter.egg.warmth, eggBefore.egg.warmth);
+  assert.equal(petAfter.energy, petBefore.energy);
 });

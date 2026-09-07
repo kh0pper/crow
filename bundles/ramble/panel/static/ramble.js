@@ -12,7 +12,7 @@
  * X-Crow-Csrf to every state-changing same-origin request.
  *
  * Sections, in order: net, views, map, marks, perch, compose, grid, egg, pet,
- * hatch, stream, startup.
+ * flock, nests, hatch, stream, startup.
  */
 (function () {
   "use strict";
@@ -33,6 +33,8 @@
   var HATCH_MS = REDUCED ? 0 : 2050;
   var RING_C = 678.6; /* 2 * PI * r, r = 108 in both ring SVGs */
   var MAX_NEARBY = 8;
+  var MIN_NEST_ZOOM = 15;
+  var CLAIM_M = 75;
 
   function $(id) { return document.getElementById(id); }
   function setText(el, text) { if (el) el.textContent = text; }
@@ -68,8 +70,10 @@
     /* Leaflet measures its container once; a container that was display:none
      * when the map was built comes back with a zero size until it is told. */
     if (name === "world" && map) { setTimeout(function () { map.invalidateSize(); }, 0); }
+    if (name === "world") refreshNests();
     if (name === "egg") refreshEgg();
     if (name === "pet") refreshPet();
+    if (name === "flock") refreshFlock();
   }
 
   /* ------------------------------------------------------------------ map */
@@ -77,6 +81,7 @@
   var mapEl = $("rb-map");
   var map = null;
   var markerLayer = null;
+  var nestLayer = null;
   var currentCells = [];
   var lastFix = null;      /* the most recent REAL geolocation fix */
   var lastMarks = [];
@@ -94,6 +99,7 @@
       maxZoom: 19,
     }).addTo(map);
     markerLayer = L.layerGroup().addTo(map);
+    nestLayer = L.layerGroup().addTo(map);
 
     /* The Android shell wraps the WebView in a SwipeRefreshLayout for
      * pull-to-refresh; a northward drag on the map (which never itself
@@ -120,7 +126,7 @@
     var areaTimer = null;
     map.on("moveend", function () {
       if (areaTimer) clearTimeout(areaTimer);
-      areaTimer = setTimeout(publishArea, 500);
+      areaTimer = setTimeout(function () { publishArea(); refreshNests(); }, 500);
     });
   }
 
@@ -448,14 +454,19 @@
   function paintPerchSay() {
     var say = $("rb-perch-say");
     if (!say) return;
+    var line;
     if (perchTarget === "egg") {
-      say.textContent = "Your egg is " + Math.round(eggPercent) + "% warm.";
-      return;
+      line = "Your egg is " + Math.round(eggPercent) + "% warm.";
+    } else if (lastMarks.length === 0) {
+      line = "Quiet around here right now.";
+    } else {
+      line = lastMarks.length === 1 ? "One thing waiting nearby." : (lastMarks.length + " things waiting nearby.");
     }
-    if (lastMarks.length === 0) { say.textContent = "Quiet around here right now."; return; }
-    say.textContent = lastMarks.length === 1
-      ? "One thing waiting nearby."
-      : (lastMarks.length + " things waiting nearby.");
+    /* lastNests is declared in the nests section further down; this function
+     * only ever runs from fetch/stream callbacks, after the whole script has
+     * been evaluated, so the var is initialised by then. The guard is belt. */
+    if ((lastNests || []).length > 0) line += " There's a nest nearby.";
+    say.textContent = line;
   }
 
   var perchOpen = $("rb-perch-open");
@@ -735,6 +746,220 @@
   var myBirdBtn = $("rb-my-bird");
   if (myBirdBtn) myBirdBtn.addEventListener("click", function () { showView("pet"); });
 
+  /* ---------------------------------------------------------------- nests */
+
+  var lastNests = [];
+  var nestWeek = null;
+
+  /* Engine output from a numeric seed: the only markup sink besides drawEggArt. */
+  function nestEggHtml(seed) {
+    if (!Bird) return "<span></span>";
+    try { return '<svg viewBox="0 0 120 152" aria-hidden="true">' + Bird.drawEgg(seed >>> 0) + "</svg>"; }
+    catch (e) { return "<span></span>"; }
+  }
+
+  function nestWalkHint(nest) {
+    if (!lastFix) return "get closer to take it";
+    var m = haversineMeters({ lat: lastFix.lat, lon: lastFix.lon }, { lat: nest.lat, lon: nest.lon });
+    if (m <= CLAIM_M) return "you're close enough — take it";
+    return "walk ~" + (Math.round(m / 5) * 5) + " m to take it";
+  }
+
+  var CLAIM_REASON = {
+    "too-far": "Get closer first.",
+    "daily-limit": "One nest a day. Come back tomorrow.",
+    "shelf-full": "Your shelf is full. Hatch something first.",
+    "stale-week": "That nest is gone. The world re-rolls every week.",
+    "no-nest": "Nothing here."
+  };
+
+  function claimNest(nest, lineEl, btn) {
+    btn.disabled = true;
+    lineEl.textContent = "checking where you are…";
+    here().then(function (pos) {
+      return jsonFetch("/api/ramble/nests/claim", {
+        method: "POST",
+        body: { cell: nest.cell, week: nest.week, lat: pos.lat, lon: pos.lon }
+      });
+    }).then(function (out) {
+      if (out && out.claimed) {
+        lineEl.textContent = out.already ? "Already yours." : "You found an egg. It's on your shelf.";
+        btn.remove();
+        refreshNests();
+        return refreshFlock();
+      }
+      lineEl.textContent = CLAIM_REASON[out && out.reason] || "Couldn't take it.";
+      btn.disabled = false;
+    }).catch(function (err) {
+      lineEl.textContent = err.message;
+      btn.disabled = false;
+    });
+  }
+
+  function nestPopup(nest) {
+    var box = document.createElement("div");
+    var head = document.createElement("div");
+    head.className = "rb-pop-head";
+    var who = document.createElement("span");
+    who.textContent = "A nest";
+    head.appendChild(who);
+    box.appendChild(head);
+    var line = document.createElement("p");
+    line.className = "rb-pop-body";
+    box.appendChild(line);
+    if (nest.claimed) { line.textContent = "You already took this one."; return box; }
+    line.textContent = nestWalkHint(nest);
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "rb-pop-btn";
+    btn.textContent = "Take the egg";
+    btn.addEventListener("click", function () { claimNest(nest, line, btn); });
+    box.appendChild(btn);
+    return box;
+  }
+
+  function drawNests(list) {
+    lastNests = list;
+    if (!nestLayer) return;
+    nestLayer.clearLayers();
+    list.forEach(function (nest) {
+      var icon = L.divIcon({
+        className: "rb-nest-pin" + (nest.claimed ? " is-claimed" : ""),
+        html: nestEggHtml(nest.seed),
+        iconSize: [30, 38],
+        iconAnchor: [15, 36],
+        popupAnchor: [0, -30]
+      });
+      var marker = L.marker([nest.lat, nest.lon], { icon: icon, title: "A nest" });
+      /* Built on open, not at draw time, so the walk hint uses the CURRENT fix
+       * rather than the one we had when the pins were drawn. */
+      marker.bindPopup(function () { return nestPopup(nest); });
+      marker.addTo(nestLayer);
+    });
+    paintPerchSay();
+  }
+
+  /* Nests are computed server-side for the viewport; below MIN_NEST_ZOOM the
+   * cover is too wide (the route 400s it) and pins would be noise anyway.
+   * A hidden map (another view is showing) has no size and getBounds() is
+   * meaningless, so skip until the world view is back and moveend fires. */
+  function refreshNests() {
+    if (!map || !nestLayer) return Promise.resolve();
+    if (root.getAttribute("data-view") !== "world") return Promise.resolve();
+    if (map.getZoom() < MIN_NEST_ZOOM) { drawNests([]); return Promise.resolve(); }
+    var b = map.getBounds();
+    var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(",");
+    return jsonFetch("/api/ramble/nests?bbox=" + encodeURIComponent(bbox))
+      .then(function (out) { nestWeek = out && out.week; drawNests((out && out.nests) || []); })
+      .catch(function () { drawNests([]); });
+  }
+
+  /* ---------------------------------------------------------------- flock */
+
+  function birdTile(bird) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "rb-flock-bird" + (bird.active ? " is-active" : "");
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 200 200");
+    if (Bird && Bird.isValidBird({ species: bird.species, seed: bird.seed })) {
+      try { Bird.mountBird(svg, Bird.rollGenome(bird.seed, bird.species), "happy"); } catch (e) { /* cosmetic */ }
+    }
+    btn.appendChild(svg);
+    var name = document.createElement("span");
+    var sp = Bird && Bird.SPECIES ? Bird.SPECIES[bird.species] : null;
+    name.textContent = (sp && sp.name) || bird.species;
+    btn.appendChild(name);
+    if (bird.active) {
+      var tag = document.createElement("span");
+      tag.className = "rb-tag";
+      tag.textContent = "With you";
+      btn.appendChild(tag);
+    }
+    btn.setAttribute("aria-pressed", bird.active ? "true" : "false");
+    btn.addEventListener("click", function () {
+      if (bird.active) { showView("pet"); return; }
+      btn.disabled = true;
+      jsonFetch("/api/ramble/birds/" + encodeURIComponent(bird.egg_id) + "/activate", { method: "POST", body: {} })
+        .then(function () { setText($("rb-flock-status"), "It's with you now."); refreshPet(); return refreshFlock(); })
+        .catch(function (err) { setText($("rb-flock-status"), err.message); btn.disabled = false; });
+    });
+    return btn;
+  }
+
+  function eggRow(egg) {
+    var row = document.createElement("div");
+    row.className = "rb-step" + (egg.status === "incubating" ? " is-incubating" : "");
+    var art = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    art.setAttribute("class", "rb-shelf-egg");
+    art.setAttribute("viewBox", "0 0 120 152");
+    drawEggArt(art, egg.egg_id);
+    row.appendChild(art);
+    var txt = document.createElement("div");
+    txt.className = "rb-step-txt";
+    var title = document.createElement("strong");
+    title.textContent = (egg.status === "incubating" ? "Incubating" : "On the shelf") + " · " + Math.round(egg.percent || 0) + "%";
+    var sub = document.createElement("span");
+    sub.className = "rb-muted rb-fine";
+    sub.textContent = egg.found_cell
+      ? "found in a nest, " + egg.found_week
+      : (egg.shelf_origin === "sync" ? "came back from another of your Crows" : "your own egg");
+    txt.appendChild(title);
+    txt.appendChild(sub);
+    row.appendChild(txt);
+    if (egg.status === "shelf") {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "rb-btn rb-btn-ghost";
+      btn.textContent = "Incubate";
+      btn.addEventListener("click", function () {
+        btn.disabled = true;
+        jsonFetch("/api/ramble/eggs/" + encodeURIComponent(egg.egg_id) + "/incubate", { method: "POST", body: {} })
+          .then(function (out) {
+            setText($("rb-flock-status"), "Swapped. The other one keeps its warmth on the shelf.");
+            handleHatched(out && out.hatched);
+            refreshEgg();
+            refreshPet();
+            return refreshFlock();
+          })
+          .catch(function (err) { setText($("rb-flock-status"), err.message); btn.disabled = false; });
+      });
+      row.appendChild(btn);
+    }
+    return row;
+  }
+
+  function paintFlock(state) {
+    if (!state) return;
+    setText($("rb-flock-kinds"), state.species_total + " kinds, " + state.species_found + " found");
+    var grid = $("rb-flock-birds");
+    if (grid) {
+      grid.textContent = "";
+      (state.birds || []).forEach(function (b) { grid.appendChild(birdTile(b)); });
+    }
+    var empty = $("rb-flock-empty");
+    if (empty) empty.hidden = (state.birds || []).length > 0;
+    var shelf = $("rb-shelf");
+    if (shelf) {
+      shelf.textContent = "";
+      (state.eggs || []).forEach(function (e) { shelf.appendChild(eggRow(e)); });
+    }
+    setText($("rb-shelf-count"), state.shelf_count + " of " + state.shelf_cap + " shelf spots used. Nests appear on the map as eggs; walk up to one to take it.");
+  }
+
+  function refreshFlock() {
+    return jsonFetch("/api/ramble/flock").then(paintFlock).catch(function () { /* the flock is cosmetic */ });
+  }
+
+  var myFlockBtn = $("rb-my-flock");
+  if (myFlockBtn) myFlockBtn.addEventListener("click", function () { showView("flock"); });
+  var eggFlockBtn = $("rb-egg-flock");
+  if (eggFlockBtn) eggFlockBtn.addEventListener("click", function () { showView("flock"); });
+  var flockBirdBtn = $("rb-flock-bird-btn");
+  if (flockBirdBtn) flockBirdBtn.addEventListener("click", function () { showView("pet"); });
+  var flockBackBtn = $("rb-flock-back");
+  if (flockBackBtn) flockBackBtn.addEventListener("click", function () { showView("world"); });
+
   /* ---------------------------------------------------------------- hatch */
 
   var shownHatch = null;
@@ -811,6 +1036,7 @@
       refreshPet();
       handleHatched(payload);
     });
+    stream.addEventListener("ramble-nest-claimed", function () { refreshNests(); refreshFlock(); });
     stream.onerror = function () { /* quiet: the stream may not exist yet */ };
   } catch (err) { /* no EventSource, no live updates */ }
 
@@ -824,6 +1050,7 @@
       map.setView([pos.lat, pos.lon], 15);
     }).catch(function () {
       setText($("rb-perch-say"), "Pan the map to pick where you are listening.");
-    }).then(publishArea);
+    }).then(function () { publishArea(); refreshNests(); });
+    setInterval(refreshNests, 10 * 60e3);
   }
 })();

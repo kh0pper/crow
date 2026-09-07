@@ -128,11 +128,36 @@ export async function initRambleTables(db) {
     );
     CREATE INDEX IF NOT EXISTS ramble_eggs_status ON ramble_eggs(status);`);
 
+  // Phase 2: WHY an egg is on the shelf. 'sync' = a convergence loser (the
+  // sync layer may re-promote it when the incubating slot empties); 'user' =
+  // the user put it there (claimed from a nest, or swapped out by incubate)
+  // and it must NEVER be auto-promoted. Phase 1 only ever shelved convergence
+  // losers, so a NULL shelf row on disk is one of those: backfill it to 'sync'
+  // (idempotent, and a 'user' row is never NULL so it is never touched).
+  await ensureColumn(db, "ramble_eggs", "shelf_origin", "TEXT");
+  await db.execute({
+    sql: "UPDATE ramble_eggs SET shelf_origin = 'sync' WHERE status = 'shelf' AND shelf_origin IS NULL",
+    args: [],
+  });
+
   await initTable(db, "ramble_credits", `
     CREATE TABLE IF NOT EXISTS ramble_credits (
       kind TEXT NOT NULL,
       key TEXT NOT NULL,
       credited_at INTEGER NOT NULL,
       PRIMARY KEY (kind, key)
+    );`);
+
+  // Phase 2: which nests THIS instance's user has already claimed. Local by
+  // design (spec §5): a claim is not shared state, the egg it produced is
+  // (ramble_eggs replicates). PK (cell, week) makes a double-tap idempotent;
+  // claimed_at drives the one-claim-per-local-day limit.
+  await initTable(db, "ramble_nest_claims", `
+    CREATE TABLE IF NOT EXISTS ramble_nest_claims (
+      cell TEXT NOT NULL,
+      week TEXT NOT NULL,
+      egg_id TEXT NOT NULL,
+      claimed_at INTEGER NOT NULL,
+      PRIMARY KEY (cell, week)
     );`);
 }

@@ -53,3 +53,25 @@ test("credits primary key rejects a duplicate (kind,key)", async () => {
   await db.execute({ sql: "INSERT INTO ramble_credits (kind, key, credited_at) VALUES (?,?,?)", args: ["checkin", "2026-09-07", 1] });
   await assert.rejects(db.execute({ sql: "INSERT INTO ramble_credits (kind, key, credited_at) VALUES (?,?,?)", args: ["checkin", "2026-09-07", 2] }));
 });
+
+test("phase 2: ramble_eggs.shelf_origin exists and legacy NULL shelf rows backfill to 'sync'", async () => {
+  const cols = (await db.execute("PRAGMA table_info(ramble_eggs)")).rows.map((r) => r.name);
+  assert.ok(cols.includes("shelf_origin"), "ramble_eggs.shelf_origin");
+  // A phase-1 convergence loser on disk has no origin. Re-running init (every
+  // boot does) must mark it 'sync' so re-promotion can still pick it up, and
+  // must leave a user-shelved egg alone.
+  await db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('legacy','shelf',5,1)", args: [] });
+  await db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('mine','shelf',5,2,'user')", args: [] });
+  await initRambleTables(db);
+  const got = await db.execute("SELECT egg_id, shelf_origin FROM ramble_eggs WHERE egg_id IN ('legacy','mine') ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.shelf_origin]), [["legacy", "sync"], ["mine", "user"]]);
+});
+
+test("phase 2: ramble_nest_claims exists, is keyed on (cell, week) and is NOT a synced table", async () => {
+  const { SYNCED_TABLES } = await import("../servers/sharing/instance-sync.js");
+  assert.ok(!SYNCED_TABLES.includes("ramble_nest_claims"), "claims are per instance (spec §5)");
+  const cols = (await db.execute("PRAGMA table_info(ramble_nest_claims)")).rows.map((r) => r.name);
+  for (const c of ["cell", "week", "egg_id", "claimed_at"]) assert.ok(cols.includes(c), `ramble_nest_claims.${c}`);
+  await db.execute({ sql: "INSERT INTO ramble_nest_claims (cell, week, egg_id, claimed_at) VALUES ('9v6m21h','2026-W37','e1',1)", args: [] });
+  await assert.rejects(db.execute({ sql: "INSERT INTO ramble_nest_claims (cell, week, egg_id, claimed_at) VALUES ('9v6m21h','2026-W37','e2',2)", args: [] }));
+});
