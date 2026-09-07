@@ -177,6 +177,22 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.match(sent, /id="rb-trades"/);
   assert.match(sent, /id="rb-pick-sheet"/);
   assert.match(sent, /id="rb-pick-list"/);
+
+  // Phase 4: the AR chip on the map, the full-screen view with its video,
+  // labels layer, radar strip, perch, first-open notice and tap sheet, and
+  // the renderer script loaded BEFORE the client that mounts it.
+  assert.match(sent, /id="rb-chip-ar"/);
+  assert.match(sent, /id="rb-ar"[^>]*hidden/);
+  assert.match(sent, /<video id="rb-ar-video"[^>]*playsinline/);
+  assert.match(sent, /<video id="rb-ar-video"[^>]*muted/);
+  for (const id of ["rb-ar-close", "rb-ar-labels", "rb-ar-more", "rb-ar-coarse", "rb-ar-radar", "rb-ar-ring", "rb-ar-list", "rb-ar-say", "rb-ar-bird", "rb-ar-egg", "rb-ar-notice", "rb-ar-gotit", "rb-ar-sheet", "rb-ar-sheet-close", "rb-ar-sheet-body", "rb-ar-mode-label"]) {
+    assert.match(sent, new RegExp(`id="${id}"`), id);
+  }
+  assert.match(sent, /\/ramble\/static\/ramble-ar\.js/);
+  assert.ok(sent.indexOf("/ramble/static/ramble-ar.js") < sent.indexOf('/ramble/static/ramble.js"'), "the renderer loads before the client");
+  assert.ok(sent.indexOf("/ramble/static/bird-svg.js") < sent.indexOf("/ramble/static/ramble-ar.js"), "the engine loads before the renderer");
+  assert.match(sent, /motion access/, "the notice states the iOS prompt");
+  assert.match(sent, /stays on this phone/, "the notice states the camera never leaves the device");
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(sent), "no emoji in the panel markup — icons are inline SVG");
 });
 
@@ -595,6 +611,13 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   // Views switch by CSS alone: without this selector showView("flock") sets
   // the attribute and the section stays display:none.
   assert.match(body, /\[data-view="flock"\]\s*\.rb-view\[data-for="flock"\]/);
+
+  // Phase 4: the edge arrow on a parked label and the dashed locked teaser are
+  // CSS-only halves of two spec §6 requirements — pin the selectors.
+  assert.match(body, /\.rb-ar-label\[data-side\]::before/);
+  assert.match(body, /\.rb-ar-label\[data-locked="true"\]/);
+  assert.match(body, /\.rb-ar\[data-camera="off"\] \.rb-ar-video/);
+  assert.match(body, /\.rb-ar\[data-mode="radar"\] \.rb-ar-radar/);
 });
 
 test("GET /ramble/static/leaflet/leaflet.js serves the vendored copy", async () => {
