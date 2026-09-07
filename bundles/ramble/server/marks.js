@@ -105,6 +105,18 @@ export async function listMarks(db, opts = {}) {
   if (visibility) {
     clauses.push("visibility = ?");
     args.push(visibility);
+    // A private mark is "just me" — it must never surface as someone else's
+    // row (a remote origin can never legitimately carry visibility='private';
+    // insertRemoteMark rejects the insert before this can even matter, but
+    // this is the belt to that suspenders).
+    if (visibility === "private") {
+      clauses.push("origin = 'local'");
+    }
+  } else {
+    // No visibility filter = the owner's overview across everything. Private
+    // rows must still only surface when they're the local author's own —
+    // never someone else's private row that somehow landed here.
+    clauses.push("NOT (visibility = 'private' AND origin <> 'local')");
   }
   if (!includeExpired) {
     clauses.push("(expires_at IS NULL OR expires_at > ?)");
@@ -162,6 +174,11 @@ export async function expireMarks(db, now = Date.now(), { emit } = {}) {
 }
 
 export async function insertRemoteMark(db, row) {
+  // A private mark is "just me" — it can only ever be authored locally.
+  // Any row arriving over the wire claiming visibility='private' is either a
+  // bug or a spoof attempt; reject it outright, before dedup or blocklist
+  // checks even run.
+  if (row.visibility === "private") return { inserted: false, invalid: true };
   if (await isBlocked(db, row.author)) return { inserted: false, blocked: true };
 
   const existing = await db.execute({

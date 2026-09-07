@@ -152,6 +152,26 @@ test("POST /api/ramble/marks stores a mark that then lists in its cell", async (
   assert.equal(marks[0].mark_id, mark.mark_id);
 });
 
+test("POST /api/ramble/marks with visibility:private stores it, and it lists only under visibility=private", async () => {
+  const res = await req("/api/ramble/marks", {
+    method: "POST",
+    body: { kind: "mark", lat: LAT, lon: LON, text: "just me on the panel", visibility: "private" },
+  });
+  assert.equal(res.status, 201);
+  const { mark } = await res.json();
+  assert.ok(mark?.mark_id, "no mark_id in the response");
+
+  const privateListed = await req(`/api/ramble/marks?visibility=private&cells=${CELL}`);
+  assert.equal(privateListed.status, 200);
+  const { marks: privateMarks } = await privateListed.json();
+  assert.ok(privateMarks.some((m) => m.mark_id === mark.mark_id));
+
+  const publicListed = await req(`/api/ramble/marks?visibility=public&cells=${CELL}`);
+  assert.equal(publicListed.status, 200);
+  const { marks: publicMarks } = await publicListed.json();
+  assert.ok(!publicMarks.some((m) => m.mark_id === mark.mark_id));
+});
+
 test("POST /api/ramble/marks rejects an out-of-range latitude", async () => {
   const res = await req("/api/ramble/marks", {
     method: "POST",
