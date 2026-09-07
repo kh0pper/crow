@@ -64,3 +64,38 @@ test("week and day keys", () => {
   assert.match(isoWeek(T0), /^\d{4}-W\d{2}$/);
   assert.match(localDay(T0), /^\d{4}-\d{2}-\d{2}$/);
 });
+
+test("visit_place without cell never credits (not treated as always-credited)", async () => {
+  const before = await eggState(db, { now: T0 });
+  for (let i = 0; i < 3; i++) {
+    const r = await creditWarmth(db, { type: "visit_place" }, { now: T0 });
+    assert.equal(r.credited, false);
+    assert.equal(r.warmth, before.egg.warmth);
+  }
+  const after = await eggState(db, { now: T0 });
+  assert.equal(after.egg.warmth, before.egg.warmth);
+});
+
+test("meet_crow without persona never credits (not treated as always-credited)", async () => {
+  const before = await eggState(db, { now: T0 });
+  for (let i = 0; i < 3; i++) {
+    const r = await creditWarmth(db, { type: "meet_crow" }, { now: T0 });
+    assert.equal(r.credited, false);
+    assert.equal(r.warmth, before.egg.warmth);
+  }
+  const after = await eggState(db, { now: T0 });
+  assert.equal(after.egg.warmth, before.egg.warmth);
+});
+
+test("chore on a fresh db is a pure read: no egg created, nothing emitted", async () => {
+  const freshDb = createClient({ url: "file::memory:" });
+  await initRambleTables(freshDb);
+  const emitted = [];
+  const r = await creditWarmth(freshDb, { type: "chore" }, { now: T0, emit: async (...args) => emitted.push(args) });
+  assert.equal(r.credited, false);
+  assert.equal(r.warmth, 0);
+  assert.equal(r.hatched, null);
+  const { rows } = await freshDb.execute("SELECT count(*) AS n FROM ramble_eggs");
+  assert.equal(rows[0].n, 0);
+  assert.equal(emitted.length, 0);
+});
