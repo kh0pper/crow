@@ -1,0 +1,11 @@
+{
+  "name": "crow-nominatim",
+  "version": "1.0.0",
+  "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map vis",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}
