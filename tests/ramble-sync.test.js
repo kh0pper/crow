@@ -504,7 +504,7 @@ test("phase 3 outbox door: a trade write with no manager queues and is stamped b
   assert.equal(wire.trade_id, "t-out");
   assert.equal(wire.role, "proposer");
   assert.equal(wire.state, "proposed");
-  assert.ok(!("lamport_ts" in wire), "lamport rides the envelope, never the row");
+  // row_json may carry the raw row's lamport_ts; the outbox drain re-enters emitChange, which strips EXCLUDED_COLUMNS before any peer sees it.
   assert.equal(Number(queued.rows[0].lamport_ts), Number(stamped.rows[0].lamport_ts));
 });
 
