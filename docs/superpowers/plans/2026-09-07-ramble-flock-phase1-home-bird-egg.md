@@ -37,7 +37,7 @@
 ```
 bundles/ramble/server/
   init-tables.js        MODIFY: ramble_eggs, ramble_credits; ALTERs on ramble_pet (active_egg_id, chores_json, lamport_ts) and ramble_marks (bird_species, bird_seed)
-  bird-svg.js           NEW: ROSTER, rollGenome(seed, species), drawBird(target, genome, mood) -> svg string; dual Node/browser
+  bird-svg.cjs          NEW: ROSTER, rollGenome(seed, species), drawBird(genome, mood) -> svg string, drawEgg; dual Node/browser (.cjs: the repo is type:module)
   eggs.js               NEW: ensureIncubatingEgg, creditWarmth, checkin, hatchIfReady, eggState, activeBird
   feed.js               NEW: feedAll(db, event, opts) -> { egg, pet, hatched }  (the one fan-out)
   pet.js                MODIFY: doChore (once/day), FEED_DELTAS gains checkin/chore/mark_left, petState returns chores + bird
@@ -49,7 +49,7 @@ bundles/ramble/panel/
   ramble.js             REWRITE: direction-C panel HTML (world / egg / pet views), tokens CSS
   static/ramble.css     NEW: direction-C stylesheet (tokens + components)
   static/ramble.js      REWRITE: world-first client: map + perch (bird/egg), visibility chip -> grid sheet, compose (Just me), nearby list, egg view, pet view + chores, hatch moment, SSE named events
-  (bird-svg.js is served to the browser from server/bird-svg.js by a route added in Task 10; the file is not duplicated)
+  (bird-svg.cjs is served to the browser at /ramble/static/bird-svg.js by a route added in Task 10; the file is not duplicated)
 servers/sharing/instance-sync.js     MODIFY: ramble_eggs + ramble_pet in SYNCED_TABLES/EXCLUDED_COLUMNS; applyRambleEgg, applyRamblePet; applyRemoteOp switch; shouldSyncRow
 servers/shared/sync-stamp.js         MODIFY: stampSql branches for ramble_eggs (egg_id) and ramble_pet (owner)
 servers/gateway/boot/ramble-transport.js   MODIFY: pass the active bird into markToEvent; feed meet_crow through feedAll on receipt
@@ -143,14 +143,14 @@ git show --stat HEAD
 
 ---
 
-## Task 2: Bird genome engine (`bird-svg.js`)
+## Task 2: Bird genome engine (`bird-svg.cjs`)
 
 **Files:**
-- Create: `bundles/ramble/server/bird-svg.js`
+- Create: `bundles/ramble/server/bird-svg.cjs` (`.cjs` — the repo's root `package.json` is `"type":"module"`, so a `.js` file could not be `require()`d as CommonJS; browsers ignore the extension)
 - Test: `tests/ramble-bird-svg.test.js`
 
 **Interfaces:**
-- Produces (dual shim: `window.RambleBird = api` in browsers, `module.exports = api` when `module` exists; the file has NO `import`/`export` statements so the gateway can serve it verbatim as a classic script and Node tests can `createRequire(import.meta.url)("../bundles/ramble/server/bird-svg.js")`):
+- Produces (dual shim: `window.RambleBird = api` in browsers, `module.exports = api` when `module` exists; the file has NO `import`/`export` statements so the gateway can serve it verbatim as a classic script and Node tests can `createRequire(import.meta.url)("../bundles/ramble/server/bird-svg.cjs")`):
   - `ROSTER: string[]` = `["crow","raven","grackle","magpie","mockingbird","hummingbird","penguin","blackswan"]`; `SPECIES[id]` = `{ name, base: [hex…], belly?, crest, tail, beak, size, sheen?, longbeak?, longneck?, feet? }`.
   - `rollGenome(seed: number, species: string) -> genome` — deterministic from `(seed, species)`: `{ species, seed, body, belly, accent, eye, mark, hat, size, plump, tilt }`. Throws on an unknown species or a non-uint32 seed.
   - `drawBird(genome, mood = "happy") -> string` — the inner SVG markup (a `<g>` for a `viewBox="0 0 200 200"`), byte-identical for identical inputs; `mood ∈ happy|tired|alarmed`.
@@ -166,7 +166,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const Bird = require("../bundles/ramble/server/bird-svg.js");
+const Bird = require("../bundles/ramble/server/bird-svg.cjs");
 
 test("roster is the lab flock and species table is complete", () => {
   assert.deepEqual(Bird.ROSTER, ["crow","raven","grackle","magpie","mockingbird","hummingbird","penguin","blackswan"]);
@@ -215,7 +215,7 @@ test("parts are overridable by name (asset-pack seam)", () => {
 
 test("no ESM syntax (must load as a classic browser script)", async () => {
   const { readFileSync } = await import("node:fs");
-  const src = readFileSync(new URL("../bundles/ramble/server/bird-svg.js", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../bundles/ramble/server/bird-svg.cjs", import.meta.url), "utf8");
   assert.ok(!/^\s*(import|export)\s/m.test(src));
 });
 ```
@@ -326,7 +326,7 @@ All numbers inside `drawBird` must be produced with fixed formatting (`toFixed`)
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit bundles/ramble/server/bird-svg.js tests/ramble-bird-svg.test.js -m "feat(ramble): procedural bird genome engine (dual node/browser)"
+git commit bundles/ramble/server/bird-svg.cjs tests/ramble-bird-svg.test.js -m "feat(ramble): procedural bird genome engine (dual node/browser)"
 git show --stat HEAD
 ```
 
@@ -423,7 +423,7 @@ test("week and day keys", () => {
 
 - [ ] **Step 2: Run, expect FAIL.**
 
-- [ ] **Step 3: Implement `eggs.js`.** Rules: the credit `INSERT OR IGNORE` and the warmth `UPDATE` are two statements — run the insert first and stop on `rowsAffected === 0`; use `crypto.randomInt` for species/seed (never `Math.random`); `ensureIncubatingEgg` must be safe to call concurrently (an `INSERT … WHERE NOT EXISTS (SELECT 1 FROM ramble_eggs WHERE status='incubating')` pattern, then re-select); load `bird-svg.js` via `createRequire(import.meta.url)("./bird-svg.js")`; `isoWeek` per ISO-8601 (Thursday rule); `localDay` via `new Date(now)` local getters. `emit` calls are awaited inside try/catch (never break a write).
+- [ ] **Step 3: Implement `eggs.js`.** Rules: the credit `INSERT OR IGNORE` and the warmth `UPDATE` are two statements — run the insert first and stop on `rowsAffected === 0`; use `crypto.randomInt` for species/seed (never `Math.random`); `ensureIncubatingEgg` must be safe to call concurrently (an `INSERT … WHERE NOT EXISTS (SELECT 1 FROM ramble_eggs WHERE status='incubating')` pattern, then re-select); load `bird-svg.js` via `createRequire(import.meta.url)("./bird-svg.cjs")`; `isoWeek` per ISO-8601 (Thursday rule); `localDay` via `new Date(now)` local getters. `emit` calls are awaited inside try/catch (never break a write).
 
 - [ ] **Step 4: Run, expect PASS.**
 
@@ -728,7 +728,7 @@ git show --stat HEAD
 - Test: `tests/ramble-panel.test.js`, `tests/ramble-stream.test.js`
 
 **Interfaces:**
-- Routes (all under the existing `/api/ramble` auth scope): `GET /api/ramble/egg` → `eggState`; `POST /api/ramble/egg/checkin` → `feedAll({type:"checkin"})` → `{ credited, warmth, hatched }`; `POST /api/ramble/pet/chore { kind }` → `doChore` (400 on bad kind); `GET /api/ramble/pet` → `petState` + `bird` + `egg: { percent }`; `GET /api/ramble/bird/:species/:seed.svg` (auth-scoped under `/api/ramble`) → `image/svg+xml` of `<svg viewBox="0 0 200 200">` + `drawBird(rollGenome(seed, species), req.query.mood)` with `Cache-Control: private, max-age=86400` (authed route — never `public`) and 400 for an invalid pair; `GET /ramble/static/bird-svg.js` → serves `BUNDLE_DIR/server/bird-svg.js` — **register this route BEFORE the `/ramble/static/:file` catch-all at `routes.js:~351`** (Express 4 matches in registration order; the catch-all only looks under `panel/static` and would 404), with its own `resolve()` + prefix check against `resolve(join(BUNDLE_DIR, "server"))`, `Content-Type: text/javascript; charset=utf-8`, `Cache-Control: private, max-age=3600`. Load the engine server-side with `createRequire(import.meta.url)(join(BUNDLE_DIR, "server", "bird-svg.js"))` (it is a classic script, not ESM). `ensureLoaded()`'s `Promise.all` (`routes.js:~171-188`) gains `eggs.js` and `feed.js`.
+- Routes (all under the existing `/api/ramble` auth scope): `GET /api/ramble/egg` → `eggState`; `POST /api/ramble/egg/checkin` → `feedAll({type:"checkin"})` → `{ credited, warmth, hatched }`; `POST /api/ramble/pet/chore { kind }` → `doChore` (400 on bad kind); `GET /api/ramble/pet` → `petState` + `bird` + `egg: { percent }`; `GET /api/ramble/bird/:species/:seed.svg` (auth-scoped under `/api/ramble`) → `image/svg+xml` of `<svg viewBox="0 0 200 200">` + `drawBird(rollGenome(seed, species), req.query.mood)` with `Cache-Control: private, max-age=86400` (authed route — never `public`) and 400 for an invalid pair; `GET /ramble/static/bird-svg.js` → serves `BUNDLE_DIR/server/bird-svg.cjs` (the URL keeps the `.js` name; the file is `.cjs` because the repo is `"type":"module"` and Node must `require()` it) — **register this route BEFORE the `/ramble/static/:file` catch-all at `routes.js:~351`** (Express 4 matches in registration order; the catch-all only looks under `panel/static` and would 404), with its own `resolve()` + prefix check against `resolve(join(BUNDLE_DIR, "server"))`, `Content-Type: text/javascript; charset=utf-8`, `Cache-Control: private, max-age=3600`. Load the engine server-side with `createRequire(import.meta.url)(join(BUNDLE_DIR, "server", "bird-svg.cjs"))` (it is a classic script, not ESM). `ensureLoaded()`'s `Promise.all` (`routes.js:~171-188`) gains `eggs.js` and `feed.js`.
 - Existing routes: `POST /api/ramble/marks` passes `bird: activeBird` into `createMark` and feeds `mark_left`; `POST /api/ramble/unlock` switches to `feedAll({type:"unlock_mark"})`; **`POST /api/ramble/area` gains an optional `here: { lat, lon }` (the user's real position from the browser; validated like `lat`/`lon`) and credits `visit_place` ONLY from it, with `cell = encodeGeohash(here.lat, here.lon, 7)` (spec §2.1 geohash-7)** — never from the map centre or the `cells[]` array (panning the map must not farm warmth); with no `here`, no visit credit; **this REPLACES the existing `isNewArea` → `petMod.feed({ type: "visit_place" })` block at `routes.js:~520-523`** (delete it — otherwise panning still farms pet energy and `places_week`); every `feedAll` in routes gets `onHatch: (egg) => bus.emit("ramble:hatched", { egg_id, species, seed })`.
 - `streams.js` `ramble-nearby` channel: also `bus.on("ramble:hatched", …)` → frame `event: ramble-hatched` with `data` = `{ egg_id, species, seed }` (whitelisted), same unsubscribe discipline.
 
@@ -824,6 +824,9 @@ git show --stat HEAD
 Eleven criticals, all folded in above: **C1** `bird-svg.js` route was unreachable behind the `/ramble/static/:file` catch-all (Task 10 now registers it first with its own guard + body test); **C2** the un-hatch invariant ignored `status` and its test was vacuous (CASE/COALESCE on status/species/seed/hatched_at + status assertion); **C3** `chore` in `feedAll` produced NaN warmth and a circular import (chores go through `pet.feed` directly; `quiet_tick`/`chore` skip the ledger); **C4** header mood mapping applied the pet scale to a host-health object (ruling: header bird shows PET energy; host health keeps the "!" badge); **C5** Task 12 mixed two incompatible render approaches (one approach: child `#crow-tama-bird` at scale .24, viewBox kept, siblings untouched); **C6** `Crow.setPullToRefresh` "did not exist" — stale base; branch rebased onto main ≥ `ee35c08e` where PR #309 added it; **C7** `RAMBLE_MARK_WIRE_COLUMNS` never gained the bird columns (Task 6 + test); **C8** the meet_crow idempotency test was deduped before reaching the ledger (test now uses a different event from the same pubkey); **C9** visit credits had no defined cell and could be farmed by panning (ruling: credit only from the user's real `here`, geohash-7); **C10** `ensureIncubatingEgg` would have created `shelf` eggs (explicit status + partial unique index); **C11** `freshDb` did not exist (helper spelled out).
 Suggestions applied: pet emits only from feed/chore/hatch (never the decay-on-read path); teaser keeps the bird; module import lists named for routes and transport; `Cache-Control: private` on authed SVG; not-credited return shape fixed; hatch emits the whole pet row; `FEED_DELTAS` assertion + legacy panel assertions named; stdio-hatch SSE limit documented; zero-backtick rule extended to Task 12; deviations from spec wording recorded.
 Rulings (Q1–Q4): header bird mood = pet energy (host alarms stay on the "!"); visit cell = geohash-7 of the browser position, never the map centre; `ramble_pet` replicates with emit only on feed/chore/hatch; `private` marks replicate to own instances (deliberate).
+
+### Execution note (Task 2): engine file is `bird-svg.cjs`
+The root `package.json` is `"type":"module"`, so `createRequire()` cannot load a `.js` file as CommonJS (Node parses it as ESM and the `module.exports` branch never runs). Ruling: the engine is `bundles/ramble/server/bird-svg.cjs`; the browser URL stays `/ramble/static/bird-svg.js` (served by Task 10's dedicated route). No symlinks or sub-packages inside the bundle (the installer copies files).
 
 ### Round 2 (2026-09-07, scoped re-review of the fixes) — all 11 addressed; 5 new items → fixed inline
 **N1 (new, caused by the C10 fix):** the partial unique index made a peer's incubating egg throw in `applyRambleEgg` and be silently dropped → index REMOVED; "one incubating" enforced in code; Task 6 gains a deterministic convergence rule (older `created_at` wins, ties by lower `egg_id`, loser shelved in the same batch) with a two-way test. **N2** pet outbox test now creates the row and asserts `lamport_ts > 0`. **N3** the `touch-action` assertion moves to the CSS route. **N4** the `here`-gated `feedAll` explicitly replaces the map-centre `petMod.feed` block. **N5** UPDATE-before-INSERT in `hatchIfReady` stated. Noted for docs: the header bird's face is pet-driven while its bounce animation stays host-driven (class on the outer SVG); a tall hat may sit under the notification bubble (cosmetic).
