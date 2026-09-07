@@ -633,3 +633,203 @@
 #ramble button.rb-step:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--rb-shadow-col); }
 #ramble button.rb-step:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
 #ramble .rb-pop-body a { color: var(--rb-accent-2); font-weight: 800; }
+
+/* ------------------------------------------------------------ AR (phase 4) */
+
+/* Full screen, above the page, below the sheets (1200) so a tapped label's
+   sheet lands on top of the view. The ground is the video; when there is no
+   camera the surface-2 paper shows through and the radar strip fills it. */
+#ramble .rb-ar {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  background: var(--rb-surface-2);
+  color: var(--rb-text);
+  overflow: hidden;
+  font-family: var(--rb-font-body);
+}
+#ramble .rb-ar-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+#ramble .rb-ar[data-camera="off"] .rb-ar-video { display: none; }
+
+#ramble .rb-ar-top {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 10px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+#ramble .rb-ar-modechip { pointer-events: none; }
+
+#ramble .rb-ar-labels { position: absolute; inset: 0; z-index: 2; }
+#ramble .rb-ar-label {
+  position: absolute;
+  transform-origin: 50% 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  max-width: 46vw;
+  padding: 8px 12px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 14px;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  box-shadow: var(--rb-pop-sm);
+  font: 700 13px/1.25 var(--rb-font-body);
+  text-align: left;
+  cursor: pointer;
+  min-height: var(--rb-tap);
+}
+#ramble .rb-ar-label strong {
+  font: 800 14px/1.2 var(--rb-font-display);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+#ramble .rb-ar-label span { color: var(--rb-muted); font-size: 12px; }
+#ramble .rb-ar-label[data-locked="true"] { border-style: dashed; background: color-mix(in oklab, var(--rb-surface) 80%, var(--rb-accent-2)); }
+#ramble .rb-ar-label[data-kind="nest"] { border-color: var(--rb-accent); }
+#ramble .rb-ar-label[data-kind="caw"] { border-radius: 18px 18px 4px 18px; }
+#ramble .rb-ar-label:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+/* Parked at an edge: an arrow points off-screen towards the anchor. */
+#ramble .rb-ar-label[data-side]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border: 7px solid transparent;
+  transform: translateY(-50%);
+}
+#ramble .rb-ar-label[data-side="left"] { align-items: flex-start; }
+#ramble .rb-ar-label[data-side="left"]::before { right: 100%; border-right-color: var(--rb-line); }
+#ramble .rb-ar-label[data-side="right"]::before { left: 100%; border-left-color: var(--rb-line); }
+
+#ramble .rb-ar-more {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 64px;
+  z-index: 2;
+  margin: 0;
+  text-align: center;
+  color: var(--rb-text);
+  text-shadow: 0 0 6px var(--rb-surface);
+}
+#ramble .rb-ar-more:empty { display: none; }
+
+/* Coarse anchors ("somewhere in this area") sit under the top bar. */
+#ramble .rb-ar-coarse {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 92px;
+  z-index: 2;
+  gap: 6px;
+}
+#ramble .rb-ar-coarse:empty { display: none; }
+#ramble .rb-ar-row { text-align: left; cursor: pointer; width: 100%; }
+#ramble .rb-ar-row:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+
+/* The radar strip. In AR mode it shrinks to the ring alone, bottom-left;
+   in radar mode it owns the lower half: ring + distance list. */
+#ramble .rb-ar-radar {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  gap: 12px;
+}
+#ramble .rb-ar-ringsvg {
+  width: 112px;
+  height: 112px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--rb-surface) 85%, transparent);
+  border: var(--rb-line-w) solid var(--rb-line);
+  box-shadow: var(--rb-pop-sm);
+}
+#ramble .rb-ar-ring-track { fill: none; stroke: var(--rb-muted); stroke-width: 1; stroke-dasharray: 2 2; }
+#ramble .rb-ar-ring-north { fill: var(--rb-accent-3); }
+#ramble .rb-ar-ring-me { fill: var(--rb-text); }
+#ramble .rb-ar-dot { fill: var(--rb-accent-2); stroke: var(--rb-line); stroke-width: .8; }
+#ramble .rb-ar-dot-nest { fill: var(--rb-accent); }
+#ramble .rb-ar-dot-caw { fill: var(--rb-accent-3); }
+#ramble .rb-ar-dot.is-locked { fill: var(--rb-surface); stroke-dasharray: 1.5 1; }
+#ramble .rb-ar[data-mode="ar"] .rb-ar-radar { left: 12px; bottom: 20px; }
+#ramble .rb-ar[data-mode="ar"] .rb-ar-list { display: none; }
+#ramble .rb-ar[data-mode="radar"] .rb-ar-labels,
+#ramble .rb-ar[data-mode="radar"] .rb-ar-coarse,
+#ramble .rb-ar[data-mode="radar"] .rb-ar-more { display: none; }
+#ramble .rb-ar[data-mode="radar"] .rb-ar-radar {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: 44%;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 14px 150px;
+  background: var(--rb-surface);
+  border-top: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius) var(--rb-radius) 0 0;
+  overflow-y: auto;
+}
+#ramble .rb-ar[data-mode="radar"] .rb-ar-ringsvg { width: 168px; height: 168px; }
+#ramble .rb-ar-list { width: 100%; }
+
+/* The perch: your bird (or egg) bottom centre, its line beside it. */
+#ramble .rb-ar-perch {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 16px;
+  z-index: 4;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+}
+#ramble .rb-ar-perch > * { pointer-events: auto; }
+#ramble .rb-ar-perch .rb-say { max-width: 200px; transform: rotate(-2deg); }
+#ramble .rb-ar-bird { width: 132px; height: 132px; display: block; filter: drop-shadow(3px 4px 0 var(--rb-shadow-col)); transform-origin: 50% 100%; }
+#ramble .rb-ar-egg { width: 52px; height: 66px; margin: 0 10px 6px; }
+@keyframes rb-ar-hop {
+  0% { transform: translateY(0) rotate(0); }
+  30% { transform: translateY(-16px) rotate(-6deg); }
+  60% { transform: translateY(0) rotate(3deg); }
+  100% { transform: translateY(0) rotate(0); }
+}
+#ramble .rb-ar-bird.rb-ar-react { animation: rb-ar-hop .9s cubic-bezier(.2, 1.2, .4, 1); }
+
+/* The first-open notice gates everything; it is the only thing on screen until "Got it". */
+#ramble .rb-ar-notice {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  max-height: 86vh;
+  overflow-y: auto;
+}
+#ramble .rb-ar-limits { margin: 0 0 12px; padding-left: 20px; display: grid; gap: 8px; }
+
+#ramble .rb-ar-sheet .rb-pop-head { font: 800 15px var(--rb-font-display); display: flex; align-items: center; gap: 8px; }
+#ramble .rb-ar-sheet .rb-pop-bird { width: 40px; height: 40px; }
+#ramble .rb-ar-sheet .rb-pop-body { margin: 6px 0 0; }
+#ramble .rb-ar-sheet .rb-pop-btn { margin-top: 10px; }
+
+@media (prefers-reduced-motion: reduce) {
+  #ramble .rb-ar-bird.rb-ar-react { animation: none; }
+}

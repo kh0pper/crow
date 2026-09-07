@@ -199,6 +199,23 @@ bookkeeping is not needed for these tables). `stampSql` gains by-key branches fo
 - Component contract: `renderAr({ anchors, pose, bird })` with no knowledge of the map; a
   future WebXR renderer implements the same contract and adds surface placement. Anchors
   keep lat/lon/accuracy exactly as stored today.
+- **Amendments (phase 4, as built).** `renderAr({ anchors, pose, bird, camera })`: `camera` is an
+  optional fourth field (default true) so the renderer, not the device code, decides the mode —
+  `"ar"` only with a fix AND a camera AND a heading, else `"radar"` with a reason. Positions are
+  viewport fractions (`y = 0.70 − 0.36·t`, `scale = 1 − 0.5·t`, `t = min(1, d/500)`), parked labels
+  stack at `x = 0.06/0.94` by distance rank, six per edge. An anchor whose error radius exceeds
+  150 m (a 5-char wire caw) gets no direction ("somewhere in this area"); a 7-char locked teaser
+  (~101 m) is a dashed directional label. Heading: `webkitCompassHeading`, else `360 − alpha +
+  screen angle` from an absolute event only, low-passed at 0.3, dropped after 5 s of silence. The
+  bird "speaks its context line" as a NAVIGATION line ("<title>, <n> m ahead."), not the perch's
+  mood line — in AR the useful thing to say is what is nearest. The camera stream is stopped while
+  the tab is hidden and restarted on return; the view stays open. Inbound `/around` lists what the
+  map lists (public, contacts, own private). The renderer is a classic script (`window.RambleAr`)
+  tested in Node under `vm` with a synthetic pose; label buttons persist across frames (a button
+  rebuilt under a finger never gets its tap); the client owns the devices and routes label taps to
+  the map pins' own popup builders. `/around` lists every row under its 5-char cover whatever its
+  stored precision (a 6-char caw from a peer at a non-default publish precision included); rows at
+  precision ≤ 4 cannot match the cover and are not listed in AR (the map still shows them).
 
 ---
 
@@ -210,6 +227,7 @@ Panel routes (all under the existing path-scoped `dashboardAuth`):
 `GET /api/ramble/flock`, `POST /api/ramble/eggs/:id/incubate`, `POST /api/ramble/birds/:id/activate`,
 `GET /api/ramble/nests?bbox=south,west,north,east`, `POST /api/ramble/nests/claim { cell, week, lat, lon }`,
 `GET /api/ramble/bird/:species/:seed.svg` (server render for the header / previews),
+phase 4: `GET /api/ramble/around?lat=&lon=&radius_m=` (marks as stored + `distance_m`, nests, nearest first; radius 50–1000, default 500; a read, credits nothing).
 phase 3: `POST /api/ramble/eggs/:id/gift { crow_id }`, `POST /api/ramble/trades` /
 `/:id/accept` / `/:id/decline`. MCP tools mirror: `ramble_egg_state`, `ramble_checkin`,
 `ramble_chore`, `ramble_flock`, `ramble_claim_nest`, `ramble_gift_egg`, `ramble_propose_swap`.
@@ -246,6 +264,7 @@ never emoji. Dark mode follows the Nest theme attribute.
 - Gifts/swaps are contact-only and encrypted; no market, no scarcity ledger, no value.
 - Camera frames never leave the device (AR is client-only rendering).
 - All new inputs bounded (zod `.max`, enums for species/status/kinds); seeds are server-minted.
+- Inbound contacts marks are bounded per contact by retention (newest 50; phase 4) — `created_at` is the sender's, so no per-day count.
 
 ---
 

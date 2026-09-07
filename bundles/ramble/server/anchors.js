@@ -85,3 +85,48 @@ export function geohashNeighborsPrefix(geohash, precision) {
 export function saltedLanId(bssid, salt) {
   return createHash("sha256").update(`${bssid}::${salt}`).digest("hex").slice(0, 32);
 }
+
+/** Cell height/width in degrees at `precision`: 5 bits per character, longitude takes the odd bit. */
+export function cellStepDegrees(precision) {
+  if (!Number.isInteger(precision) || precision < 1 || precision > 12) throw new Error("precision must be an integer 1..12");
+  const bits = precision * 5;
+  const lonBits = Math.ceil(bits / 2);
+  const latBits = Math.floor(bits / 2);
+  return { latStep: 180 / 2 ** latBits, lonStep: 360 / 2 ** lonBits };
+}
+
+/**
+ * Every geohash cell at `precision` that intersects `bbox`, or null when the
+ * cover would exceed `max` cells. The precision-general form of nests.js's
+ * `cellsInBbox` (which is this at precision 7): sample a lattice one cell
+ * apart — that hits every cell at least once — then keep a cell only if its
+ * own bounds actually touch the box. Clamps at the poles/antimeridian; it
+ * does not wrap across ±180.
+ */
+export function cellsCoveringBbox(bbox, precision, { max = 64 } = {}) {
+  const { south, west, north, east } = bbox || {};
+  if (![south, west, north, east].every((v) => typeof v === "number" && Number.isFinite(v))) {
+    throw new Error("bbox must be four finite numbers");
+  }
+  if (south > north || west > east) throw new Error("bbox must have south <= north and west <= east");
+  const { latStep, lonStep } = cellStepDegrees(precision);
+  const rows = Math.floor((north - south) / latStep) + 2;
+  const cols = Math.floor((east - west) / lonStep) + 2;
+  if (rows * cols > max) return null;
+  const seen = new Set();
+  const out = [];
+  for (let i = 0; i < rows; i++) {
+    const lat = Math.min(90, Math.max(-90, south + i * latStep));
+    for (let j = 0; j < cols; j++) {
+      const lon = Math.min(180, Math.max(-180, west + j * lonStep));
+      const cell = encodeGeohash(lat, lon, precision);
+      if (seen.has(cell)) continue;
+      seen.add(cell);
+      const d = decodeGeohash(cell);
+      if (d.lat + d.latErr < south || d.lat - d.latErr > north) continue;
+      if (d.lon + d.lonErr < west || d.lon - d.lonErr > east) continue;
+      out.push(cell);
+    }
+  }
+  return out;
+}
