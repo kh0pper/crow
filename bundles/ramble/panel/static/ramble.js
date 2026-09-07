@@ -33,7 +33,7 @@
   var HATCH_MS = REDUCED ? 0 : 2050;
   var RING_C = 678.6; /* 2 * PI * r, r = 108 in both ring SVGs */
   var MAX_NEARBY = 8;
-  var MIN_NEST_ZOOM = 14;
+  var MIN_NEST_ZOOM = 15;
   var CLAIM_M = 75;
 
   function $(id) { return document.getElementById(id); }
@@ -70,6 +70,7 @@
     /* Leaflet measures its container once; a container that was display:none
      * when the map was built comes back with a zero size until it is told. */
     if (name === "world" && map) { setTimeout(function () { map.invalidateSize(); }, 0); }
+    if (name === "world") refreshNests();
     if (name === "egg") refreshEgg();
     if (name === "pet") refreshPet();
     if (name === "flock") refreshFlock();

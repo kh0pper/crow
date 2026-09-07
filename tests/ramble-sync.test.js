@@ -356,7 +356,7 @@ test("shelf_origin rides the wire and a convergence loser is marked 'sync' on bo
   assert.deepEqual([got.rows[0].status, got.rows[0].shelf_origin], ["shelf", "sync"]);
 });
 
-test("re-promotion picks only a 'sync' egg and clears its origin; a user-shelved egg never moves", async () => {
+test("re-promotion picks only a 'sync' egg and KEEPS its mark; a user-shelved egg never moves", async () => {
   const d = await freshDb();
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('user-old','shelf',9,500,'user')");
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('loser','shelf',3,700,'sync')");
