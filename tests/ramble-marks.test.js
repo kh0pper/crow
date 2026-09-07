@@ -75,3 +75,36 @@ test("insertRemoteMark accepts a sparse caw with no lat/lon", async () => {
   assert.equal(result.row.geohash, "9v6m2");
   assert.equal(result.row.lat, null);
 });
+
+test("insertRemoteMark stores bird_species/bird_seed when given", async () => {
+  const result = await insertRemoteMark(db, {
+    mark_id: "bird-remote-1", author: "pk3", kind: "mark", anchor_kind: "geo", geohash: "9v6m2c",
+    lat: 30.2672, lon: -97.7431, visibility: "public", reveal: "open", content_text: "a bird left this",
+    created_at: Date.now(), nostr_event_id: "ev-bird-1",
+    bird_species: "crow", bird_seed: 5,
+  });
+  assert.equal(result.inserted, true);
+  assert.equal(result.row.bird_species, "crow");
+  assert.equal(result.row.bird_seed, 5);
+});
+
+test("createMark persists the author's active bird on the local row", async () => {
+  const m = await createMark(db, {
+    author: "pk1", author_level: "rotating", kind: "mark", visibility: "public", reveal: "open",
+    anchor: { anchor_kind: "geo", lat: 30.2672, lon: -97.7431, accuracy_m: 75 },
+    content: { content_text: "my own pin", content_kind: "none" },
+    bird: { species: "raven", seed: 9 },
+  });
+  assert.equal(m.bird_species, "raven");
+  assert.equal(m.bird_seed, 9);
+});
+
+test("createMark with no bird stores null bird_species/bird_seed", async () => {
+  const m = await createMark(db, {
+    author: "pk1", author_level: "rotating", kind: "mark", visibility: "public", reveal: "open",
+    anchor: { anchor_kind: "geo", lat: 30.2672, lon: -97.7431, accuracy_m: 75 },
+    content: { content_text: "no bird yet", content_kind: "none" },
+  });
+  assert.equal(m.bird_species, null);
+  assert.equal(m.bird_seed, null);
+});

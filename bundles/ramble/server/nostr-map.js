@@ -19,6 +19,11 @@
  * boundary, nowhere else.
  */
 
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { isValidBird } = require("./bird-svg.cjs");
+
 export const MARK_KIND = 30397;
 export const CAW_KIND = 20397;
 
@@ -69,7 +74,7 @@ function geohashPrefixTags(geohash) {
  * Tag order: g (shortest first), d (marks only), k, rv, expiration (if
  * set), crow (if crowId given).
  */
-export function markToEvent(row, { precision = 5, crowId = null } = {}) {
+export function markToEvent(row, { precision = 5, crowId = null, bird = null } = {}) {
   if (row.visibility !== "public") {
     throw new RambleNotPublic(`markToEvent: mark ${row.mark_id} is not public (visibility=${row.visibility})`);
   }
@@ -110,6 +115,13 @@ export function markToEvent(row, { precision = 5, crowId = null } = {}) {
     content.locked = row.reveal === "locked";
   }
 
+  // The author's currently-active bird rides on BOTH marks and caws (never
+  // coordinates, even on a caw -- only species/seed) so a viewer can render
+  // whose bird left a pin, or whose bird is nearby right now. A bird that
+  // fails isValidBird (unknown species, non-uint32 seed) is silently
+  // dropped rather than shipped malformed.
+  if (isValidBird(bird)) content.bird = { species: bird.species, seed: bird.seed };
+
   return { kind: isCaw ? CAW_KIND : MARK_KIND, created_at, tags, content: JSON.stringify(content) };
 }
 
@@ -139,6 +151,10 @@ export function eventToMark(event) {
 
   const isCaw = event.kind === CAW_KIND;
 
+  // A bad/malformed content.bird must never reject the event -- it just
+  // doesn't carry a bird (both fields null).
+  const validBird = isValidBird(content.bird) ? content.bird : null;
+
   return {
     mark_id: dTag ?? event.id,
     author: event.pubkey,
@@ -160,5 +176,7 @@ export function eventToMark(event) {
     origin: "remote",
     publish_state: "remote",
     crow_id: crowTag ?? null,
+    bird_species: validBird ? validBird.species : null,
+    bird_seed: validBird ? validBird.seed : null,
   };
 }
