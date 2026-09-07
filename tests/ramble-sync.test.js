@@ -19,6 +19,8 @@ import { SYNCED_TABLES, EXCLUDED_COLUMNS, applyRemoteOp, shouldSyncRow } from ".
 import { emitOrQueue, _setEligibilityForTest } from "../servers/shared/sync-emit.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createMark, blockPersona } from "../bundles/ramble/server/marks.js";
+import { ensureIncubatingEgg } from "../bundles/ramble/server/eggs.js";
+import { feed } from "../bundles/ramble/server/pet.js";
 
 // getOrCreateLocalInstanceId() (called internally by emitOrQueue) reads
 // process.env.CROW_DATA_DIR directly — point it at a scratch dir for the
@@ -147,4 +149,69 @@ test("shouldSyncRow gates: local.* settings and keyless rows never sync", async 
   assert.equal(res, null, "a local.* setting was queued instead of being dropped");
   const { rows } = await a.execute("SELECT 1 FROM sync_outbox WHERE table_name = 'ramble_settings'");
   assert.equal(rows.length, 0);
+});
+
+/* ------------------------------------------------ Task 6: eggs + pet replicate */
+
+test("allowlist + exclusions for eggs/pet", () => {
+  for (const t of ["ramble_eggs", "ramble_pet"]) assert.ok(SYNCED_TABLES.includes(t), t);
+  assert.ok(EXCLUDED_COLUMNS.ramble_eggs.includes("lamport_ts"));
+  assert.ok(EXCLUDED_COLUMNS.ramble_pet.includes("lamport_ts"));
+  assert.equal(shouldSyncRow("ramble_eggs", { warmth: 1 }), false);
+  assert.equal(shouldSyncRow("ramble_pet", { owner: "other" }), false);
+  assert.equal(shouldSyncRow("ramble_pet", { owner: "self" }), true);
+});
+
+test("outbox door: an egg write with no manager queues and is stamped", async () => {
+  const egg = await ensureIncubatingEgg(a, { now: 1000 });
+  const res = await emitOrQueue(null, a, "ramble_eggs", "insert", egg);
+  assert.ok(res && res.queued, "emitOrQueue returned null — missing stampSql branch or lamport_ts?");
+  const { rows } = await a.execute({ sql: "SELECT lamport_ts FROM ramble_eggs WHERE egg_id=?", args: [egg.egg_id] });
+  assert.ok(rows[0].lamport_ts > 0);
+  await feed(a, { type: "unlock_mark" }, { now: 1000 }); // creates the pet row
+  const pet = await a.execute("SELECT * FROM ramble_pet WHERE owner='self'");
+  const res2 = await emitOrQueue(null, a, "ramble_pet", "update", pet.rows[0]);
+  assert.ok(res2 && res2.queued);
+  const stamped = await a.execute("SELECT lamport_ts FROM ramble_pet WHERE owner='self'");
+  assert.ok(stamped.rows[0].lamport_ts > 0, "ramble_pet row was never stamped — missing stampSql branch?");
+});
+
+test("apply door: egg insert, LWW, hatch survives a stale update, delete", async () => {
+  const row = { egg_id: "e1", status: "incubating", warmth: 40, created_at: 1 };
+  await applyRemoteOp(b, "ramble_eggs", "insert", row, 5);
+  await applyRemoteOp(b, "ramble_eggs", "update", { ...row, warmth: 10 }, 3); // stale
+  let got = await b.execute({ sql: "SELECT warmth FROM ramble_eggs WHERE egg_id='e1'", args: [] });
+  assert.equal(got.rows[0].warmth, 40);
+  await applyRemoteOp(b, "ramble_eggs", "update", { ...row, status: "hatched", species: "crow", seed: 77, hatched_at: 9 }, 7);
+  await applyRemoteOp(b, "ramble_eggs", "update", { ...row, species: null, seed: null }, 8); // never un-hatch
+  got = await b.execute({ sql: "SELECT status, species, seed, hatched_at FROM ramble_eggs WHERE egg_id='e1'", args: [] });
+  assert.equal(got.rows[0].status, "hatched"); // the stale row said 'incubating' — hatch is one-way
+  assert.equal(got.rows[0].species, "crow"); assert.equal(got.rows[0].seed, 77); assert.equal(got.rows[0].hatched_at, 9);
+  await applyRemoteOp(b, "ramble_eggs", "delete", { egg_id: "e1" }, 9);
+  assert.equal((await b.execute("SELECT 1 FROM ramble_eggs WHERE egg_id='e1'")).rows.length, 0);
+});
+
+test("two instances' incubating eggs converge deterministically (older wins, loser shelved)", async () => {
+  await b.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('local-z','incubating',30,2000)", args: [] });
+  await applyRemoteOp(b, "ramble_eggs", "insert", { egg_id: "peer-a", status: "incubating", warmth: 10, created_at: 1000 }, 4); // older peer egg wins
+  let got = await b.execute("SELECT egg_id, status, warmth FROM ramble_eggs WHERE egg_id IN ('local-z','peer-a') ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status, r.warmth]), [["local-z", "shelf", 30], ["peer-a", "incubating", 10]]);
+  await applyRemoteOp(b, "ramble_eggs", "insert", { egg_id: "peer-b", status: "incubating", warmth: 5, created_at: 5000 }, 5); // newer peer egg loses
+  got = await b.execute("SELECT egg_id, status FROM ramble_eggs WHERE egg_id IN ('peer-a','peer-b') ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status]), [["peer-a", "incubating"], ["peer-b", "shelf"]]);
+  assert.equal((await b.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
+});
+
+test("a synced mark keeps its bird", async () => {
+  await applyRemoteOp(b, "ramble_marks", "insert", { mark_id: "mb", author: "pk", kind: "mark", anchor_kind: "geo", geohash: "9v6", visibility: "public", reveal: "open", content_text: "x", created_at: 1, bird_species: "raven", bird_seed: 9 }, 1);
+  const got = await b.execute({ sql: "SELECT bird_species, bird_seed FROM ramble_marks WHERE mark_id='mb'", args: [] });
+  assert.equal(got.rows[0].bird_species, "raven"); assert.equal(got.rows[0].bird_seed, 9);
+});
+
+test("apply door: pet upserts by owner and ignores deletes", async () => {
+  await applyRemoteOp(b, "ramble_pet", "update", { owner: "self", mood: "tired", energy: 31, active_egg_id: "e1", chores_json: "{}" }, 2);
+  let got = await b.execute("SELECT energy, active_egg_id FROM ramble_pet WHERE owner='self'");
+  assert.equal(got.rows[0].energy, 31); assert.equal(got.rows[0].active_egg_id, "e1");
+  await applyRemoteOp(b, "ramble_pet", "delete", { owner: "self" }, 3);
+  assert.equal((await b.execute("SELECT 1 FROM ramble_pet WHERE owner='self'")).rows.length, 1);
 });
