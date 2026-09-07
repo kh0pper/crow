@@ -61,13 +61,19 @@ after(async () => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+  globalThis.fetch = realFetch;
   try { rmSync(SCRATCH, { recursive: true, force: true }); } catch { /* best effort */ }
 });
+
+// Captured BEFORE any test stubs global.fetch: the tile-proxy tests replace
+// globalThis.fetch to keep the suite off the network, and the test client must
+// not be replaced along with the code under test.
+const realFetch = globalThis.fetch.bind(globalThis);
 
 function req(path, opts = {}) {
   const headers = { "x-test-auth": "1", ...(opts.headers || {}) };
   if (opts.body !== undefined) headers["content-type"] = "application/json";
-  return fetch(BASE + path, {
+  return realFetch(BASE + path, {
     method: opts.method || "GET",
     headers,
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
@@ -272,6 +278,65 @@ test("deleting an already-published public mark leaves a tombstone for the drain
     assert.equal(rows[0].kind, "mark");
   } finally {
     db.close();
+  }
+});
+
+// ------------------------------------------------------------- tile proxy
+// R17: the dashboard CSP is img-src 'self' data: blob:, so map tiles must be
+// same-origin. Upstream is never contacted here -- global.fetch is stubbed.
+
+const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+
+function stubFetch(impl) {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return impl(String(url), options);
+  };
+  return calls;
+}
+
+test("tile proxy rejects an out-of-range zoom and an out-of-range x", async () => {
+  const calls = stubFetch(async () => { throw new Error("upstream must not be called"); });
+  try {
+    assert.equal((await req("/ramble/tiles/20/0/0.png")).status, 400);
+    assert.equal((await req("/ramble/tiles/1/5/0.png")).status, 400);
+    assert.equal(calls.length, 0, "a rejected tile request still hit upstream");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("tile proxy serves upstream bytes same-origin and then from its LRU", async () => {
+  const calls = stubFetch(async () => new Response(PNG, {
+    status: 200, headers: { "content-type": "image/png" },
+  }));
+  try {
+    const first = await req("/ramble/tiles/1/0/0.png");
+    assert.equal(first.status, 200);
+    assert.equal(first.headers.get("content-type"), "image/png");
+    assert.match(first.headers.get("cache-control") || "", /max-age=86400/);
+    assert.equal(Buffer.from(await first.arrayBuffer()).equals(PNG), true);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /^https:\/\/tile\.openstreetmap\.org\/1\/0\/0\.png$/);
+
+    const second = await req("/ramble/tiles/1/0/0.png");
+    assert.equal(second.status, 200);
+    assert.equal(Buffer.from(await second.arrayBuffer()).equals(PNG), true);
+    assert.equal(calls.length, 1, "the second request should have come from the LRU");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("tile proxy answers 502 when upstream fails", async () => {
+  stubFetch(async () => new Response("nope", { status: 500 }));
+  try {
+    const res = await req("/ramble/tiles/2/1/1.png");
+    assert.equal(res.status, 502);
+    assert.equal((await res.text()).length, 0);
+  } finally {
+    globalThis.fetch = realFetch;
   }
 });
 

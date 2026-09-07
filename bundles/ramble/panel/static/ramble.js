@@ -50,8 +50,12 @@
 
   L.Icon.Default.imagePath = "/ramble/static/leaflet/images/";
 
+  /* Tiles come from our OWN origin: the dashboard CSP is
+   * img-src 'self' data: blob:, so a third-party tile host would be blocked.
+   * /ramble/tiles proxies whatever ramble_settings.tile_url points at, which
+   * also keeps the viewer's browser from ever talking to the tile host. */
   var map = L.map(mapEl).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
-  L.tileLayer(mapEl.getAttribute("data-tile-url") || "", {
+  L.tileLayer("/ramble/tiles/{z}/{x}/{y}.png", {
     attribution: mapEl.getAttribute("data-tile-attribution") || "",
     maxZoom: 19,
   }).addTo(map);

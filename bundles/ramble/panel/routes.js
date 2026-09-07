@@ -55,6 +55,36 @@ const KINDS = new Set(["mark", "caw"]);
 const MAX_CELLS = 32;
 const MAX_TTL_SECONDS = 31536000; // one year
 
+/* --------------------------------------------------------------- tile proxy */
+
+/**
+ * R17: the dashboard CSP is `img-src 'self' data: blob:`
+ * (servers/gateway/index.js:337-341), so a third-party tile host is blocked in
+ * the browser. Tiles are therefore proxied same-origin through this router,
+ * which also means the viewer's browser never talks to the tile host at all —
+ * a privacy improvement, not just a CSP workaround.
+ */
+const DEFAULT_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+const TILE_UA = "crow-ramble/0.1 (+https://github.com/kh0pper/crow)";
+const TILE_TIMEOUT_MS = 8000;
+const TILE_CACHE_MAX = 500;
+const MAX_TILE_ZOOM = 19;
+
+/**
+ * Expand a tile template. Only http(s) templates carrying all three
+ * placeholders are accepted — an operator-set `tile_url` must never turn this
+ * route into a fetcher for arbitrary schemes.
+ */
+function tileUpstreamUrl(template, z, x, y) {
+  if (typeof template !== "string" || !/^https?:\/\//i.test(template)) {
+    throw new Error("tile_url must be an http(s) template");
+  }
+  for (const token of ["{z}", "{x}", "{y}"]) {
+    if (!template.includes(token)) throw new Error(`tile_url is missing ${token}`);
+  }
+  return template.split("{z}").join(String(z)).split("{x}").join(String(x)).split("{y}").join(String(y));
+}
+
 class BadRequest extends Error {
   constructor(message) { super(message); this.name = "BadRequest"; }
 }
@@ -116,6 +146,9 @@ export default function rambleRouter(dashboardAuth) {
 
   /** Fallback session id for rotating caws when no gateway has written one. */
   const processSessionId = randomUUID();
+
+  /** Tiny insertion-ordered LRU for proxied tiles: key "z/x/y" -> {type, body}. */
+  const tileCache = new Map();
 
   let mods = null;
   let db = null;
@@ -222,8 +255,54 @@ export default function rambleRouter(dashboardAuth) {
   if (typeof dashboardAuth === "function") {
     router.use("/api/ramble", dashboardAuth);
     router.use("/ramble/static", dashboardAuth);
+    router.use("/ramble/tiles", dashboardAuth);
   }
   router.use("/api/ramble", express.json({ limit: "1mb" }));
+
+  // --- map tiles (same-origin proxy, R17) -----------------------------------
+  router.get("/ramble/tiles/:z/:x/:y.png", handle(async (req, res) => {
+    if (!/^\d{1,2}$/.test(req.params.z)) bad("z must be an integer");
+    const z = Number(req.params.z);
+    if (z < 0 || z > MAX_TILE_ZOOM) bad(`z must be between 0 and ${MAX_TILE_ZOOM}`);
+    const span = 2 ** z;
+    if (!/^\d{1,10}$/.test(req.params.x) || !/^\d{1,10}$/.test(req.params.y)) bad("x and y must be integers");
+    const x = Number(req.params.x);
+    const y = Number(req.params.y);
+    if (x < 0 || x >= span || y < 0 || y >= span) bad(`x and y must be between 0 and ${span - 1} at z=${z}`);
+
+    const key = `${z}/${x}/${y}`;
+    const cached = tileCache.get(key);
+    if (cached) {
+      res.setHeader("Content-Type", cached.type);
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      return res.send(cached.body);
+    }
+
+    // A malformed operator-set template is a server misconfiguration (500),
+    // not a bad request — let it propagate to handle()'s 500 branch.
+    const upstream = tileUpstreamUrl((await getSetting("tile_url")) || DEFAULT_TILE_URL, z, x, y);
+
+    let response;
+    try {
+      response = await fetch(upstream, {
+        headers: { "User-Agent": TILE_UA },
+        signal: AbortSignal.timeout(TILE_TIMEOUT_MS),
+      });
+    } catch (err) {
+      console.warn(`[ramble routes] tile ${key} fetch failed:`, err?.message ?? err);
+      return res.status(502).end();
+    }
+    if (!response.ok) return res.status(502).end();
+
+    const body = Buffer.from(await response.arrayBuffer());
+    const type = response.headers.get("content-type") || "image/png";
+    tileCache.set(key, { type, body });
+    while (tileCache.size > TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
+
+    res.setHeader("Content-Type", type);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.send(body);
+  }));
 
   // --- static assets --------------------------------------------------------
   router.get("/ramble/static/leaflet/images/:file", (req, res) => sendStatic(res, ["leaflet", "images", req.params.file]));
