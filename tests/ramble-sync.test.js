@@ -239,3 +239,97 @@ test("a locally hatched egg never competes for the incubating slot", async () =>
   assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status]), [["e1", "hatched"], ["e2", "incubating"]]);
   assert.equal((await c.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
 });
+
+// -------------------------------------------- C1: deterministic hatch tiebreak
+
+/** A fresh, isolated ramble db (each convergence case needs its own instance). */
+async function freshDb() {
+  const c = createClient({ url: "file::memory:" });
+  await initRambleTables(c);
+  return c;
+}
+
+/** The (species, seed, hatched_at) triple this instance ended up with. */
+async function birdTriple(db, eggId) {
+  const { rows } = await db.execute({
+    sql: "SELECT species, seed, hatched_at FROM ramble_eggs WHERE egg_id = ?", args: [eggId],
+  });
+  return [rows[0].species, Number(rows[0].seed), Number(rows[0].hatched_at)];
+}
+
+test("a hatch race on one egg converges to ONE bird on every instance, in any order", async () => {
+  // Two partitioned instances each hatch the same egg_id and roll a different
+  // bird. First-writer-wins-per-instance (COALESCE(local, excluded)) would let
+  // each keep its own roll forever; the joint tiebreak must pick the same
+  // triple as a unit no matter which row an instance saw first.
+  const A = { egg_id: "race-1", status: "hatched", warmth: 100, species: "raven", seed: 11, created_at: 1000, hatched_at: 1500 };
+  const B = { egg_id: "race-1", status: "hatched", warmth: 100, species: "magpie", seed: 22, created_at: 1000, hatched_at: 1600 };
+  const EARLIER = ["raven", 11, 1500];
+
+  // Each side hatched locally, then receives the other's row.
+  const da = await freshDb(); const dbb = await freshDb();
+  for (const [d, own] of [[da, A], [dbb, B]]) {
+    await d.execute({
+      sql: `INSERT INTO ramble_eggs (egg_id, status, warmth, species, seed, created_at, hatched_at, lamport_ts)
+            VALUES (?, 'hatched', 100, ?, ?, ?, ?, 3)`,
+      args: [own.egg_id, own.species, own.seed, own.created_at, own.hatched_at],
+    });
+  }
+  await applyRemoteOp(da, "ramble_eggs", "update", B, 9);
+  await applyRemoteOp(dbb, "ramble_eggs", "update", A, 9);
+  assert.deepEqual(await birdTriple(da, "race-1"), EARLIER, "instance A drifted off the joint winner");
+  assert.deepEqual(await birdTriple(dbb, "race-1"), EARLIER, "instance B drifted off the joint winner");
+
+  // A third instance receiving both rows, in either arrival order.
+  const c1 = await freshDb();
+  await applyRemoteOp(c1, "ramble_eggs", "update", B, 9);
+  await applyRemoteOp(c1, "ramble_eggs", "update", A, 10);
+  const c2 = await freshDb();
+  await applyRemoteOp(c2, "ramble_eggs", "update", A, 9);
+  await applyRemoteOp(c2, "ramble_eggs", "update", B, 10);
+  assert.deepEqual(await birdTriple(c1, "race-1"), EARLIER, "B-then-A arrival order diverged");
+  assert.deepEqual(await birdTriple(c2, "race-1"), EARLIER, "A-then-B arrival order diverged");
+});
+
+test("equal hatched_at breaks to the lower seed, and a hatched side always beats an unhatched one", async () => {
+  const E1 = { egg_id: "race-2", status: "hatched", warmth: 100, species: "grackle", seed: 5, created_at: 1000, hatched_at: 2000 };
+  const E2 = { egg_id: "race-2", status: "hatched", warmth: 100, species: "penguin", seed: 6, created_at: 1000, hatched_at: 2000 };
+  const LOWER_SEED = ["grackle", 5, 2000];
+
+  const d1 = await freshDb();
+  await applyRemoteOp(d1, "ramble_eggs", "update", E1, 9);
+  await applyRemoteOp(d1, "ramble_eggs", "update", E2, 10);
+  const d2 = await freshDb();
+  await applyRemoteOp(d2, "ramble_eggs", "update", E2, 9);
+  await applyRemoteOp(d2, "ramble_eggs", "update", E1, 10);
+  assert.deepEqual(await birdTriple(d1, "race-2"), LOWER_SEED);
+  assert.deepEqual(await birdTriple(d2, "race-2"), LOWER_SEED);
+
+  // An explicitly-unhatched row (all three fields null on the wire) at a HIGHER
+  // lamport must not un-roll the bird: hatch stays one-way.
+  await applyRemoteOp(d1, "ramble_eggs", "update",
+    { egg_id: "race-2", status: "incubating", warmth: 40, created_at: 1000, species: null, seed: null, hatched_at: null }, 11);
+  assert.deepEqual(await birdTriple(d1, "race-2"), LOWER_SEED);
+  const st = await d1.execute("SELECT status FROM ramble_eggs WHERE egg_id='race-2'");
+  assert.equal(st.rows[0].status, "hatched");
+});
+
+// ------------------------- I3: the incubating slot never stays empty after a batch
+
+test("a shelved convergence loser is re-promoted when the incubating slot empties", async () => {
+  const d = await freshDb();
+  // Local EA is incubating and older; the peer's successor EC arrives and loses.
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('ea','incubating',60,1000)");
+  await applyRemoteOp(d, "ramble_eggs", "insert", { egg_id: "ec", status: "incubating", warmth: 5, created_at: 3000 }, 4);
+  assert.equal((await d.execute("SELECT status FROM ramble_eggs WHERE egg_id='ec'")).rows[0].status, "shelf");
+  assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
+
+  // Now EA's own hatched row arrives. Without re-promotion this instance is
+  // left with ZERO incubating eggs and nothing that would ever refill the slot.
+  await applyRemoteOp(d, "ramble_eggs", "update",
+    { egg_id: "ea", status: "hatched", warmth: 100, species: "crow", seed: 7, created_at: 1000, hatched_at: 1500 }, 6);
+
+  const got = await d.execute("SELECT egg_id, status FROM ramble_eggs ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status]), [["ea", "hatched"], ["ec", "incubating"]]);
+  assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1);
+});
