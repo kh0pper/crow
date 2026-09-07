@@ -194,7 +194,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -209,16 +209,17 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/nests.js"),
         bundleImport("server/delivery.js"),
         bundleImport("server/trades.js"),
+        bundleImport("server/around.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
       if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
-          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod) {
+          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -268,6 +269,19 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     } catch {
       return mark; // an unparseable geohash simply stays unpinnable
     }
+  }
+
+  /**
+   * What a listed row looks like to the panel, for BOTH /marks and /around:
+   * a locked teaser gains its cell centre (withApproxAnchor) and a remote
+   * mark by a contact is named (phase 3); a stranger's stays anonymous.
+   */
+  async function annotateMarks(marks) {
+    const byPubkey = await contactsByPubkey();
+    return marks.map(withApproxAnchor).map((m) => {
+      const c = m.origin === "remote" ? byPubkey.get(String(m.author)) : null;
+      return c ? { ...m, contact_name: c.name } : m;
+    });
   }
 
   /** bus.emit is synchronous and re-throws subscriber errors — never let one break a request. */
@@ -502,15 +516,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       if (!VISIBILITY_RE.test(visibility)) bad(`invalid visibility: ${visibility}`);
     }
     const marks = await mods.marksMod.listMarks(db, { visibility, cells });
-    // Phase 3: a remote mark by a contact is named; a stranger's stays anonymous
-    // (that is where the panel offers "share an invite").
-    const byPubkey = await contactsByPubkey();
-    res.json({
-      marks: marks.map(withApproxAnchor).map((m) => {
-        const c = m.origin === "remote" ? byPubkey.get(String(m.author)) : null;
-        return c ? { ...m, contact_name: c.name } : m;
-      }),
-    });
+    res.json({ marks: await annotateMarks(marks) });
   }));
 
   router.post("/api/ramble/marks", handle(async (req, res) => {
@@ -807,6 +813,36 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       poke("ramble:nest-claimed", { egg_id: result.egg?.egg_id ?? null, cell: b.cell });
     }
     res.json(result);
+  }));
+
+  // --- phase 4: everything around a point, for the AR view --------------------
+  //
+  // Rows as stored (teasers at their cell centre, exactly like /marks) plus a
+  // distance each, and this week's nests. A read: it credits nothing —
+  // visit_place stays on POST /api/ramble/area with `here`.
+  router.get("/api/ramble/around", handle(async (req, res) => {
+    const q = req.query || {};
+    // Up to 17 decimals: String(double) can print that many, and the client
+    // sends toFixed(6) anyway — a full-precision fix must never be a 400.
+    if (typeof q.lat !== "string" || !/^-?\d{1,3}(\.\d{1,17})?$/.test(q.lat)) bad("lat must be a decimal number");
+    if (typeof q.lon !== "string" || !/^-?\d{1,3}(\.\d{1,17})?$/.test(q.lon)) bad("lon must be a decimal number");
+    const lat = requireLat(Number(q.lat));
+    const lon = requireLon(Number(q.lon));
+    const { AROUND_RADIUS_DEFAULT, AROUND_RADIUS_MIN, AROUND_RADIUS_MAX } = mods.aroundMod;
+    let radiusM = AROUND_RADIUS_DEFAULT;
+    if (q.radius_m != null) {
+      if (typeof q.radius_m !== "string" || !/^\d{1,4}$/.test(q.radius_m)) bad("radius_m must be an integer number of metres");
+      radiusM = Number(q.radius_m);
+      if (radiusM < AROUND_RADIUS_MIN || radiusM > AROUND_RADIUS_MAX) bad(`radius_m must be between ${AROUND_RADIUS_MIN} and ${AROUND_RADIUS_MAX}`);
+    }
+    let out;
+    try {
+      out = await mods.aroundMod.aroundPoint(db, { lat, lon, radiusM, now: Date.now() });
+    } catch (err) {
+      if (err?.code === "too-wide") bad(err.message);
+      throw err;
+    }
+    res.json({ ...out, marks: await annotateMarks(out.marks) });
   }));
 
   // --- flock ----------------------------------------------------------------

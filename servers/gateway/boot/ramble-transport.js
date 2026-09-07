@@ -530,10 +530,12 @@ export async function startRambleTransport({
       const result = await phase3.receiveEnvelope(db, msg, { now: Date.now(), emit });
       if (!result) return;
       if (result.kind === "mark" && result.inserted) {
-        try {
-          bus.emit("ramble:nearby", { geohash: result.geohash, mark_id: result.mark_id, kind: result.markKind });
-        } catch (emitErr) {
-          console.warn("[ramble] ramble:nearby subscriber threw:", emitErr?.message ?? emitErr);
+        if (!result.gone) {
+          try {
+            bus.emit("ramble:nearby", { geohash: result.geohash, mark_id: result.mark_id, kind: result.markKind });
+          } catch (emitErr) {
+            console.warn("[ramble] ramble:nearby subscriber threw:", emitErr?.message ?? emitErr);
+          }
         }
         try {
           await feedAll(db, { type: "meet_crow", persona: xOnly(String(msg.pubkey)) }, {

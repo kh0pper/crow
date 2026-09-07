@@ -11,8 +11,9 @@ import { ensureIncubatingEgg } from "../bundles/ramble/server/eggs.js";
 import { pendingDeliveries, deleteDelivery } from "../bundles/ramble/server/delivery.js";
 import {
   TRADE_TTL_MS, giftEgg, receiveGift, proposeSwap, acceptSwap, declineSwap, receiveTrade, expireTrades,
-  listTrades, lockedEggIds, isEggLocked, receiveEnvelope,
+  listTrades, lockedEggIds, isEggLocked, receiveEnvelope, MAX_CONTACT_MARKS_PER_CONTACT, pruneContactMarks,
 } from "../bundles/ramble/server/trades.js";
+import { insertRemoteMark } from "../bundles/ramble/server/marks.js";
 
 const T0 = Date.UTC(2026, 8, 7, 12);
 const PK = "ab".repeat(32);
@@ -318,4 +319,41 @@ test("receiveEnvelope routes marks (as persistent contacts marks + meet payload)
   assert.equal(await receiveEnvelope(db, { crowId: "bad id", pubkey: PK, payload: { type: "ramble.egg", v: 1, egg: { egg_id: "x" } } }, { now: T0 }), null);
   assert.deepEqual(await receiveEnvelope(db, { crowId: "crow:F", pubkey: "nothex", payload: { type: "ramble.mark", v: 1, mark } }, { now: T0 }), { kind: "mark", inserted: false });
   assert.equal(await receiveEnvelope(db, { crowId: "crow:F", pubkey: PK, payload: { type: "ramble.unknown", v: 1 } }, { now: T0 }), null);
+});
+
+test("phase 4: a contact's marks are bounded by retention — the newest 50 stay, older ones go; other authors and public rows untouched", async () => {
+  const db = await freshDb();
+  const PK2 = "ac".repeat(32);
+  const envelope = (i, pk, tag) => ({
+    crowId: "crow:" + tag, pubkey: pk, eventId: tag + "-" + i,
+    payload: { type: "ramble.mark", v: 1, mark: { mark_id: tag + "-" + i, kind: i % 2 ? "caw" : "mark", anchor_kind: "geo", geohash: "9v6m21h", lat: 30.46, lon: -98.08, reveal: "open", content_text: "n" + i, content_kind: "none", created_at: T0 + i * 1000 } },
+  });
+  const count = async (pk) => Number((await db.execute({ sql: "SELECT count(*) AS n FROM ramble_marks WHERE author = ?", args: [pk] })).rows[0].n);
+  let last = null;
+  for (let i = 0; i < 55; i++) { last = await receiveEnvelope(db, envelope(i, PK, "F"), { now: T0 }); assert.equal(last.inserted, true); }
+  assert.equal(await count(PK), MAX_CONTACT_MARKS_PER_CONTACT);
+  assert.equal(last.pruned, 1, "the 51st and later deliveries each prune one");
+  const oldest = (await db.execute({ sql: "SELECT min(created_at) AS t FROM ramble_marks WHERE author = ?", args: [PK] })).rows[0].t;
+  assert.equal(Number(oldest), T0 + 5 * 1000, "the five oldest by created_at went");
+  // Another contact and a public row by the same key are not part of the count.
+  await receiveEnvelope(db, envelope(0, PK2, "G"), { now: T0 });
+  assert.equal(await count(PK2), 1);
+  await insertRemoteMark(db, { mark_id: "pub-F", author: PK, kind: "mark", anchor_kind: "geo", geohash: "9v6m21h", lat: 30.46, lon: -98.08, visibility: "public", reveal: "open", content_text: "public", created_at: T0, nostr_event_id: "pub-ev" });
+  const again = await receiveEnvelope(db, envelope(55, PK, "F"), { now: T0 });
+  assert.equal(again.pruned, 1);
+  assert.equal(await count(PK), MAX_CONTACT_MARKS_PER_CONTACT + 1, "50 contacts marks + the public one");
+  assert.equal((await db.execute("SELECT count(*) AS n FROM ramble_marks WHERE mark_id = 'pub-F'")).rows[0].n, 1);
+  // A re-delivery inserts nothing and prunes nothing.
+  const dup = await receiveEnvelope(db, envelope(55, PK, "F"), { now: T0 });
+  assert.deepEqual([dup.inserted, dup.pruned, dup.gone], [false, 0, false]);
+  // An OLD mark re-sent under a new event id (its row was pruned earlier) is
+  // inserted and immediately pruned again: it reports `gone` so the caller
+  // does not announce a mark that no longer exists.
+  const stale = await receiveEnvelope(db, envelope(-100, PK, "F"), { now: T0 });
+  assert.deepEqual([stale.inserted, stale.pruned, stale.gone], [true, 1, true]);
+  assert.equal(await count(PK), MAX_CONTACT_MARKS_PER_CONTACT + 1, "still 50 contacts marks + the public one");
+  assert.equal((await db.execute("SELECT count(*) AS n FROM ramble_marks WHERE mark_id = 'F--100'")).rows[0].n, 0);
+  // Direct call with a bad author is a no-op.
+  assert.equal(await pruneContactMarks(db, ""), 0);
+  assert.equal(await pruneContactMarks(db, PK2, 0), 1, "max 0 empties that contact");
 });

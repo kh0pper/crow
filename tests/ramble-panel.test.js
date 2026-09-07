@@ -177,6 +177,22 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.match(sent, /id="rb-trades"/);
   assert.match(sent, /id="rb-pick-sheet"/);
   assert.match(sent, /id="rb-pick-list"/);
+
+  // Phase 4: the AR chip on the map, the full-screen view with its video,
+  // labels layer, radar strip, perch, first-open notice and tap sheet, and
+  // the renderer script loaded BEFORE the client that mounts it.
+  assert.match(sent, /id="rb-chip-ar"/);
+  assert.match(sent, /id="rb-ar"[^>]*hidden/);
+  assert.match(sent, /<video id="rb-ar-video"[^>]*playsinline/);
+  assert.match(sent, /<video id="rb-ar-video"[^>]*muted/);
+  for (const id of ["rb-ar-close", "rb-ar-labels", "rb-ar-more", "rb-ar-coarse", "rb-ar-radar", "rb-ar-ring", "rb-ar-list", "rb-ar-say", "rb-ar-bird", "rb-ar-egg", "rb-ar-notice", "rb-ar-gotit", "rb-ar-sheet", "rb-ar-sheet-close", "rb-ar-sheet-body", "rb-ar-mode-label"]) {
+    assert.match(sent, new RegExp(`id="${id}"`), id);
+  }
+  assert.match(sent, /\/ramble\/static\/ramble-ar\.js/);
+  assert.ok(sent.indexOf("/ramble/static/ramble-ar.js") < sent.indexOf('/ramble/static/ramble.js"'), "the renderer loads before the client");
+  assert.ok(sent.indexOf("/ramble/static/bird-svg.js") < sent.indexOf("/ramble/static/ramble-ar.js"), "the engine loads before the renderer");
+  assert.match(sent, /motion access/, "the notice states the iOS prompt");
+  assert.match(sent, /stays on this phone/, "the notice states the camera never leaves the device");
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(sent), "no emoji in the panel markup — icons are inline SVG");
 });
 
@@ -566,6 +582,30 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes('"/dashboard/contacts"'), "share-an-invite hands off to the Contacts panel");
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(body), "no emoji in the client script");
 
+  // Phase 4 wiring: the around fetch, the three device doors (camera,
+  // watchPosition, absolute orientation with the iOS fallback and prompt),
+  // the renderer mount, the SAME popup builders behind a tapped label, the
+  // live-event refreshes, teardown on close and on a hidden tab — and no
+  // capture API anywhere (camera frames never leave the device).
+  assert.ok(body.includes('"/api/ramble/around?lat=" + encodeURIComponent(arPose.lat.toFixed(6))'), "client must fetch anchors around the fix, at a bounded precision");
+  assert.ok(body.includes('facingMode: "environment"'));
+  assert.ok(body.includes("navigator.mediaDevices.getUserMedia("));
+  assert.ok(body.includes("navigator.geolocation.watchPosition("));
+  assert.ok(body.includes("navigator.geolocation.clearWatch("));
+  assert.ok(body.includes('"deviceorientationabsolute"'));
+  assert.ok(body.includes("DeviceOrientationEvent.requestPermission"));
+  assert.ok(body.includes("Ar.headingFromEvent(") && body.includes("Ar.smoothHeading("));
+  assert.ok(body.includes("Ar.mountAr("));
+  assert.ok(body.includes("nestPopup(anchor.source)") && body.includes("popupFor(anchor.source)"), "a label tap opens the pin's own popup");
+  assert.ok(body.includes('"ramble.ar.limits"'));
+  assert.ok(body.includes("getTracks().forEach"), "the camera stream is stopped on close");
+  assert.ok(body.includes("if (!arOpen || document.hidden)"), "a stream that resolves after the tab hid is stopped, not adopted");
+  assert.ok(body.includes("if (arOpen) return;"), "startAr is idempotent");
+  assert.ok(body.includes('"visibilitychange"'));
+  assert.ok(body.includes("AR_HEADING_STALE_MS"), "a stale compass falls back to the ring");
+  assert.ok(body.includes("setInterval(arHeartbeat, 1000)"), "the heartbeat retries a failed around fetch");
+  assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body), "camera frames never leave the device");
+
   const code = body.replace(/\/\*[\s\S]*?\*\//g, "");
   const sinks = code.match(/\.innerHTML\s*=|\bhtml:\s/g) || [];
   assert.equal(sinks.length, 2, `expected exactly two engine-output markup sinks, found ${sinks.length}`);
@@ -595,6 +635,29 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   // Views switch by CSS alone: without this selector showView("flock") sets
   // the attribute and the section stays display:none.
   assert.match(body, /\[data-view="flock"\]\s*\.rb-view\[data-for="flock"\]/);
+
+  // Phase 4: the edge arrow on a parked label and the dashed locked teaser are
+  // CSS-only halves of two spec §6 requirements — pin the selectors.
+  assert.match(body, /\.rb-ar-label\[data-side\]::before/);
+  assert.match(body, /\.rb-ar-label\[data-locked="true"\]/);
+  assert.match(body, /\.rb-ar\[data-camera="off"\] \.rb-ar-video/);
+  assert.match(body, /\.rb-ar\[data-mode="radar"\] \.rb-ar-radar/);
+});
+
+test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {
+  const res = await req("/ramble/static/ramble-ar.js");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /javascript/);
+  const body = await res.text();
+  assert.ok(body.length > 100);
+  assert.equal(body.split("`").length - 1, 0, "zero backticks");
+  assert.ok(!/^\s*(import|export)\s/m.test(body), "a classic script");
+  const code = body.replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.deepEqual(code.match(/\.innerHTML\s*=|\bhtml:\s|insertAdjacentHTML|outerHTML/g) || [], [], "zero markup sinks");
+  assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(body), "no emoji");
+  assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body));
+  assert.ok(body.includes("window.RambleAr = api"));
+  assert.equal((await realFetch(BASE + "/ramble/static/ramble-ar.js")).status, 401);
 });
 
 test("GET /ramble/static/leaflet/leaflet.js serves the vendored copy", async () => {
@@ -1024,6 +1087,75 @@ test("the router registers no unpathed router.use(middleware) layer", () => {
     (l.slash === true || l.regexp?.fast_slash === true));
   assert.deepEqual(unscoped.map((l) => l.name), [],
     "every router.use() in panel/routes.js must carry a path prefix");
+});
+
+// ----------------------------------------------------------------- phase 4
+
+test("GET /api/ramble/around: marks and nests within the radius with distance_m; teasers at the cell centre; inputs bounded", async () => {
+  // 100 m north (open, just me), 100 m east (public, locked -> a teaser), 900 m north (out of range).
+  const near = await req("/api/ramble/marks", { method: "POST", body: { kind: "mark", lat: 30.460898, lon: LON, text: "near north", visibility: "private" } });
+  assert.equal(near.status, 201);
+  const locked = await req("/api/ramble/marks", { method: "POST", body: { kind: "mark", lat: LAT, lon: -98.078958, text: "locked east", visibility: "public", reveal: "locked" } });
+  assert.equal(locked.status, 201);
+  const lockedId = (await locked.json()).mark.mark_id;
+  const far = await req("/api/ramble/marks", { method: "POST", body: { kind: "mark", lat: 30.4681, lon: LON, text: "far north", visibility: "private" } });
+  assert.equal(far.status, 201);
+  // Every cell has a nest at rate 1, so one is within ~110 m; restored below.
+  const db = createDbClient();
+  await db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('nest.rate', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [] });
+  try {
+    const res = await req(`/api/ramble/around?lat=${LAT}&lon=${LON}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.here, { lat: LAT, lon: LON });
+    assert.equal(body.radius_m, 500);
+    assert.equal(typeof body.week, "string");
+    const texts = body.marks.map((m) => m.content_text);
+    assert.ok(texts.includes("near north"));
+    assert.ok(!texts.includes("far north"), "900 m is out of the default radius");
+    const n = body.marks.find((m) => m.content_text === "near north");
+    assert.ok(Math.abs(n.distance_m - 100) <= 3, `distance ${n.distance_m}`);
+    assert.deepEqual([n.lat, n.lon], [30.460898, LON], "lat/lon exactly as stored");
+    const t = body.marks.find((m) => m.mark_id === lockedId);
+    assert.ok(t, "the locked mark is listed");
+    assert.equal(t.content_text, undefined, "still a teaser");
+    assert.equal(t.lat, undefined);
+    assert.equal(typeof t.approx_lat, "number");
+    assert.equal(typeof t.approx_lon, "number");
+    assert.ok(t.approx_m > 90 && t.approx_m < 115, "the 7-char cell's half-diagonal");
+    assert.ok(t.distance_m <= 250);
+    for (let i = 1; i < body.marks.length; i++) assert.ok(body.marks[i].distance_m >= body.marks[i - 1].distance_m, "nearest first");
+    assert.ok(body.nests.length >= 1);
+    for (const nest of body.nests) { assert.ok(nest.distance_m <= 500); assert.equal(typeof nest.seed, "number"); }
+    const wide = await (await req(`/api/ramble/around?lat=${LAT}&lon=${LON}&radius_m=1000`)).json();
+    assert.equal(wide.radius_m, 1000);
+    assert.ok(wide.marks.map((m) => m.content_text).includes("far north"));
+    // A full-precision double as String() prints it (up to 17 decimals) is a fine query.
+    assert.equal((await req("/api/ramble/around?lat=30.460000000000000853&lon=-98.08")).status, 400, "18 decimals is too many");
+    assert.equal((await req("/api/ramble/around?lat=30.46000000000000085&lon=-98.079999999999998")).status, 200);
+  } finally {
+    await db.execute({ sql: "DELETE FROM ramble_settings WHERE key = 'nest.rate'", args: [] });
+    try { db.close?.(); } catch { /* scratch */ }
+  }
+  for (const q of ["lat=91&lon=0", "lat=0&lon=181", "lon=0", "lat=0", "lat=abc&lon=0", `lat=${LAT}&lon=${LON}&radius_m=5000`, `lat=${LAT}&lon=${LON}&radius_m=10`, `lat=${LAT}&lon=${LON}&radius_m=abc`, `lat=${LAT}&lon=${LON}&radius_m=1.5`]) {
+    const r = await req("/api/ramble/around?" + q);
+    assert.equal(r.status, 400, q);
+    assert.equal(typeof (await r.json()).error, "string");
+  }
+});
+
+test("GET /api/ramble/around names a contact's remote mark like the marks list does, and is behind dashboardAuth", async () => {
+  const db = createDbClient();
+  await db.execute({
+    sql: `INSERT INTO ramble_marks (mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, visibility, reveal, content_text, content_kind, created_at, publish_state, origin)
+          VALUES ('around-pal', ?, 'real', 'mark', 'geo', '9v6m21h', ?, ?, 'contacts', 'open', 'from pal', 'none', ?, 'remote', 'remote')`,
+    args: [PK, LAT, LON, Date.now()],
+  });
+  try { db.close?.(); } catch { /* scratch */ }
+  const body = await (await req(`/api/ramble/around?lat=${LAT}&lon=${LON}`)).json();
+  const pal = body.marks.find((m) => m.mark_id === "around-pal");
+  assert.equal(pal?.contact_name, "Pal");
+  assert.equal((await realFetch(BASE + `/api/ramble/around?lat=${LAT}&lon=${LON}`)).status, 401);
 });
 
 // ------------------------------------------------------------- docs parity

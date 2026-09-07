@@ -28,7 +28,7 @@ import { setMaster, setCell } from "../bundles/ramble/server/grid.js";
 import { isoWeek } from "../bundles/ramble/server/eggs.js";
 import { startRambleTransport } from "../servers/gateway/boot/ramble-transport.js";
 import { enqueueMark, pendingDeliveries } from "../bundles/ramble/server/delivery.js";
-import { giftEgg, proposeSwap } from "../bundles/ramble/server/trades.js";
+import { giftEgg, proposeSwap, acceptSwap } from "../bundles/ramble/server/trades.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const BUNDLE_DIR = join(__dir, "../bundles/ramble/server");
@@ -52,19 +52,12 @@ const identity = { crowId: "crow_T", ...fakeKey("real") };
 const SEED = "seed";
 const WORLD_AUTHOR = getPublicKey(fakeDerive(SEED, "ramble-world").secp256k1Priv);
 
-/**
- * A fresh db + bus + transport with a scriptable relay/publisher.
- * `state` is mutable mid-test: `accept` (does a relay take the event),
- * `throwErr` (publish rejects), `delayMs` (publish is slow — for re-entrancy).
- */
-async function makeHarness({ shouldPublish, autoStart = false, emit } = {}) {
-  const db = createClient({ url: "file::memory:" });
-  const bus = new EventEmitter();
+/** The scriptable relay/publisher stub, on its own so two transports can share one (Task 3, phase 4). */
+function makeManager() {
   const published = [];
   const sent = [];
   const closedSubs = [];
   const state = { accept: true, throwErr: null, delayMs: 0 };
-
   const relay = {
     connected: true,
     connect: async () => {},
@@ -90,9 +83,22 @@ async function makeHarness({ shouldPublish, autoStart = false, emit } = {}) {
       return { eventId: "ctl-" + sent.length, relays: state.accept ? ["wss://fake"] : [] };
     },
   };
+  return { nostrManager, published, sent, closedSubs, state, relay };
+}
 
+/**
+ * A fresh db + bus + transport with a scriptable relay/publisher.
+ * `state` is mutable mid-test: `accept` (does a relay take the event),
+ * `throwErr` (publish rejects), `delayMs` (publish is slow — for re-entrancy).
+ * `bus` / `manager` may be injected so two "instances" share one identity's
+ * inbound door and one outbound sink (phase 4, Task 3).
+ */
+async function makeHarness({ shouldPublish, autoStart = false, emit, bus: sharedBus, manager } = {}) {
+  const db = createClient({ url: "file::memory:" });
+  const bus = sharedBus ?? new EventEmitter();
+  const m = manager ?? makeManager();
   const transport = await startRambleTransport({
-    db, nostrManager, identity, seed: SEED, bus,
+    db, nostrManager: m.nostrManager, identity, seed: SEED, bus,
     bundleDir: BUNDLE_DIR,
     _derive: fakeDerive,
     shouldPublish,
@@ -107,7 +113,7 @@ async function makeHarness({ shouldPublish, autoStart = false, emit } = {}) {
       id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_uid TEXT, room_uid TEXT);
     CREATE TABLE IF NOT EXISTS contact_group_members (
       id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, contact_id INTEGER NOT NULL);`);
-  return { db, bus, published, sent, closedSubs, state, transport, relay };
+  return { db, bus, published: m.published, sent: m.sent, closedSubs: m.closedSubs, state: m.state, transport, relay: m.relay };
 }
 
 /** One pending public mark at the fixture coordinates. */
@@ -641,6 +647,23 @@ test("phase 3: an inbound ramble.mark envelope lands as a persistent contacts ma
   assert.equal(trades.length, 0);
 });
 
+test("phase 4: a re-sent mark that is pruned on arrival credits meet_crow but pokes no ramble:nearby", async () => {
+  const h = await makeHarness();
+  const nearby = [];
+  h.bus.on("ramble:nearby", (p) => nearby.push(p));
+  const mk = (i) => ({ mark_id: "flood-" + i, kind: "mark", anchor_kind: "geo", geohash: FULL_GEOHASH, lat: LAT, lon: LON, reveal: "open", content_text: "n" + i, content_kind: "none", created_at: 1700000000000 + i * 1000 });
+  for (let i = 0; i < 50; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    await h.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, payload: { type: "ramble.mark", v: 1, mark: mk(i) }, eventId: "fl-" + i });
+  }
+  assert.equal(nearby.length, 50);
+  await h.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, payload: { type: "ramble.mark", v: 1, mark: mk(-5) }, eventId: "fl-old" });
+  assert.equal(nearby.length, 50, "an old mark pruned on arrival is not announced");
+  assert.equal(await getMark(h.db, "flood--5"), null);
+  const { rows } = await h.db.execute({ sql: "SELECT count(*) AS n FROM ramble_marks WHERE author = ?", args: [PK] });
+  assert.equal(Number(rows[0].n), 50);
+});
+
 test("phase 3: an inbound gift lands as received and pokes ramble:trade; an accepted swap completes and its reply drains immediately", async () => {
   const h = await makeHarness();
   await seedContacts(h.db);
@@ -796,4 +819,78 @@ test("phase 3: a bundle copy without the phase-3 modules still runs the public d
   } finally {
     rmSync(stale, { recursive: true, force: true });
   }
+});
+
+/** Copy whole rows between two in-memory dbs — the test's stand-in for instance sync. */
+async function copyRows(from, to, table, cols) {
+  const { rows } = await from.execute({ sql: `SELECT ${cols.join(", ")} FROM ${table}`, args: [] });
+  for (const r of rows) {
+    // eslint-disable-next-line no-await-in-loop
+    await to.execute({ sql: `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`, args: cols.map((c) => r[c] ?? null) });
+  }
+}
+
+test("phase 4: two of a user's instances over one bus and identity both apply one 'accepted'; the counterpart applies the duplicate replies once", async () => {
+  // Round-2 Q1 (phase 3): all of a user's instances share one Nostr identity
+  // (servers/sharing/nostr.js:155), so ONE DM from a contact is decrypted by
+  // every instance's contact subscription. Modelled here as one bus emit two
+  // transports hear, and one sendControl sink both reply through.
+  const shared = makeManager();
+  const bus = new EventEmitter();
+  const A1 = await makeHarness({ bus, manager: shared });
+  const A2 = await makeHarness({ bus, manager: shared });
+  const B = await makeHarness();
+  for (const h of [A1, A2, B]) await seedContacts(h.db);
+  const now = Date.now();
+
+  await A1.db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('mine','shelf','user',3,?)", args: [now] });
+  const p = await proposeSwap(A1.db, { eggId: "mine", toCrowId: "crow:one", now });
+  assert.equal(p.ok, true);
+  // "Instance sync": A2 holds the same egg and trade rows; only the authoring instance holds outbox rows.
+  await copyRows(A1.db, A2.db, "ramble_eggs", ["egg_id", "status", "shelf_origin", "warmth", "found_cell", "found_week", "from_crow_id", "created_at"]);
+  await copyRows(A1.db, A2.db, "ramble_trades", ["trade_id", "counterpart", "role", "my_egg_id", "their_egg_id", "offer_json", "state", "created_at", "updated_at", "expires_at"]);
+
+  await A1.transport.drainOnce();
+  await A2.transport.drainOnce();
+  assert.equal(shared.sent.length, 1, "only the authoring instance sends the proposal");
+  assert.equal(shared.sent[0].content.trade.state, "proposed");
+
+  // B receives the proposal, answers with its own egg; its 'accepted' goes out once.
+  await B.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, eventId: "prop-1", payload: shared.sent[0].content });
+  await B.db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('theirs','shelf','user',8,?)", args: [now] });
+  assert.equal((await acceptSwap(B.db, { tradeId: p.trade.trade_id, eggId: "theirs", now })).ok, true);
+  await B.transport.drainOnce();
+  assert.equal(B.sent.length, 1);
+  const accepted = B.sent[0].content;
+  assert.equal(accepted.trade.state, "accepted");
+
+  // ONE DM reaches the user; both instances hear it, each completes and each replies.
+  const tradeEvents = [];
+  bus.on("ramble:trade", (e) => tradeEvents.push(e));
+  bus.emit("ramble:envelope", { crowId: "crow:one", contactId: 1, pubkey: PK, payload: accepted, eventId: "acc-1" });
+  for (let i = 0; i < 300 && shared.sent.length < 3; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(shared.sent.length, 3, "the proposal plus one 'completed' from EACH instance");
+  for (const h of [A1, A2]) {
+    const t = (await h.db.execute({ sql: "SELECT state, their_egg_id FROM ramble_trades WHERE trade_id = ?", args: [p.trade.trade_id] })).rows[0];
+    assert.deepEqual([t.state, t.their_egg_id], ["completed", "theirs"]);
+    const eggs = (await h.db.execute("SELECT egg_id, status FROM ramble_eggs ORDER BY egg_id")).rows.map((r) => [r.egg_id, r.status]);
+    assert.deepEqual(eggs, [["mine", "gifted"], ["theirs", "received"]], "one completed trade and one egg per instance");
+    assert.equal((await pendingDeliveries(h.db, 50)).length, 0, "each instance's reply drained");
+  }
+  assert.equal(tradeEvents.filter((e) => e.state === "completed").length, 2, "one ramble:trade per instance");
+
+  // B receives BOTH copies (two real DMs, two event ids); the second changes nothing.
+  const bEvents = [];
+  B.bus.on("ramble:trade", (e) => bEvents.push(e));
+  const replies = shared.sent.slice(1).map((s) => s.content);
+  assert.deepEqual(replies.map((r) => r.trade.state), ["completed", "completed"]);
+  await B.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, eventId: "done-1", payload: replies[0] });
+  await B.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, eventId: "done-2", payload: replies[1] });
+  assert.equal(bEvents.length, 1, "the duplicate completion is a no-op");
+  assert.equal((await B.db.execute({ sql: "SELECT state FROM ramble_trades WHERE trade_id = ?", args: [p.trade.trade_id] })).rows[0].state, "completed");
+  const bEggs = (await B.db.execute("SELECT egg_id, status FROM ramble_eggs ORDER BY egg_id")).rows.map((r) => [r.egg_id, r.status]);
+  assert.deepEqual(bEggs, [["mine", "received"], ["theirs", "gifted"]], "one egg per side on the counterpart, no duplicate rows");
+  assert.equal(B.sent.length, 1, "B never replies to a completion");
+
+  A1.transport.stop(); A2.transport.stop(); B.transport.stop();
 });
