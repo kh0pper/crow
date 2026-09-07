@@ -89,6 +89,7 @@ function receivedEggStatement(egg, fromCrowId, now) {
 /* ---------------------------------------------------------------- gifts */
 
 export async function giftEgg(db, { eggId, toCrowId, now = Date.now(), emit } = {}) {
+  if (typeof toCrowId !== "string" || !CROW_ID_RE.test(toCrowId)) return { ok: false, reason: "bad-recipient" };
   const egg = await getEgg(db, eggId);
   if (!egg) return { ok: false, reason: "not-found" };
   if (!GIFTABLE.has(egg.status)) return { ok: false, reason: "not-an-egg" };
@@ -127,6 +128,7 @@ export async function receiveGift(db, eggIn, { fromCrowId, now = Date.now(), emi
 /* ---------------------------------------------------------------- swaps */
 
 export async function proposeSwap(db, { eggId, toCrowId, now = Date.now(), emit } = {}) {
+  if (typeof toCrowId !== "string" || !CROW_ID_RE.test(toCrowId)) return { ok: false, reason: "bad-recipient" };
   const egg = await getEgg(db, eggId);
   if (!egg) return { ok: false, reason: "not-found" };
   if (!GIFTABLE.has(egg.status)) return { ok: false, reason: "not-an-egg" };

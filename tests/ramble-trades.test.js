@@ -36,6 +36,8 @@ test("giftEgg: shelf/received only, egg leaves as 'gifted', one queued ramble.eg
   const db = await freshDb();
   await shelf(db, "g1", 30);
   await ensureIncubatingEgg(db, { now: T0 });
+  assert.deepEqual(await giftEgg(db, { eggId: "g1", toCrowId: "bad id", now: T0 }), { ok: false, reason: "bad-recipient" });
+  assert.equal((await egg(db, "g1")).status, "shelf", "a bad recipient never touches the egg");
   const { calls, emit } = emitter();
   const r = await giftEgg(db, { eggId: "g1", toCrowId: "crow:friend", now: T0, emit });
   assert.equal(r.ok, true); assert.equal(r.egg.status, "gifted"); assert.equal(r.egg.shelf_origin, "user");
@@ -160,6 +162,8 @@ test("a full swap: propose (A) -> accept (B) -> complete (A) -> complete (B); eg
 test("decline: either side while proposed; the counterpart's egg unlocks; an accept after decline is refused", async () => {
   const A = await freshDb(); const B = await freshDb();
   await shelf(A, "a1"); await shelf(B, "b1");
+  assert.deepEqual(await proposeSwap(A, { eggId: "a1", toCrowId: "", now: T0 }), { ok: false, reason: "bad-recipient" });
+  assert.equal(await isEggLocked(A, "a1"), false, "a bad recipient never locks the egg");
   const p = await proposeSwap(A, { eggId: "a1", toCrowId: "crow:B", now: T0 });
   const d1 = await popDelivery(A);
   await receiveTrade(B, { trade_id: p.trade.trade_id, state: "proposed", my_egg_id: "a1", want_egg_id: null, egg: d1.payload.egg }, { fromCrowId: "crow:A", now: T0 });
@@ -178,6 +182,14 @@ test("decline: either side while proposed; the counterpart's egg unlocks; an acc
   assert.equal((await declineSwap(A, { tradeId: p2.trade.trade_id, now: T0 + 9 })).trade.state, "declined");
   assert.equal((await popDelivery(A)).payload.trade.state, "declined");
   assert.deepEqual(await declineSwap(A, { tradeId: "ghost", now: T0 }), { ok: false, reason: "not-found" });
+  // The RECEIVING side honours a decline even after having accepted (Q2 asymmetry).
+  const C = await freshDb();
+  await shelf(C, "x", 12);
+  await C.execute({ sql: "INSERT INTO ramble_trades (trade_id, counterpart, role, my_egg_id, their_egg_id, offer_json, state, created_at, updated_at, expires_at) VALUES ('t-dec-acc','crow:Z','acceptor','x','y','{}','accepted',?,?,?)", args: [T0, T0, T0 + 999] });
+  assert.equal(await isEggLocked(C, "x"), true);
+  const rr = await receiveTrade(C, { trade_id: "t-dec-acc", state: "declined", my_egg_id: null, want_egg_id: null, egg: null }, { fromCrowId: "crow:Z", now: T0 + 10 });
+  assert.deepEqual([rr.changed, rr.state], [true, "declined"]);
+  assert.equal(await isEggLocked(C, "x"), false);
 });
 
 test("an 'accepted' that arrives after the offer lapsed (expired or egg gone) is answered with 'declined', not completed", async () => {
