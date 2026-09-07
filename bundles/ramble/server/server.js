@@ -1,7 +1,8 @@
 /**
  * Ramble MCP server. Milestone 1 (M1) tools — local core, no network/UI:
  *   ramble_leave_mark, ramble_caw, ramble_query_world, ramble_unlock,
- *   ramble_pet_state, ramble_block, ramble_unblock.
+ *   ramble_pet_state, ramble_block, ramble_unblock, ramble_egg_state,
+ *   ramble_checkin, ramble_chore.
  *
  * Groups are NOT in phase 1 (review round 3, D8) — ramble_group_create/
  * ramble_group_join move to phase 1b with the contacts/group delivery path.
@@ -20,7 +21,9 @@ import { resolvePersona } from "./persona.js";
 import { createMark, listMarks, unlockMark, blockPersona, unblockPersona } from "./marks.js";
 import { encodeGeohash } from "./anchors.js";
 import { getGrid } from "./grid.js";
-import { feed, petState } from "./pet.js";
+import { petState, doChore } from "./pet.js";
+import { eggState, activeBird } from "./eggs.js";
+import { feedAll } from "./feed.js";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const errorText = (t) => ({ content: [{ type: "text", text: t }], isError: true });
@@ -145,6 +148,7 @@ export function createRambleServer(db, options = {}) {
         checkVisibility(visibility);
         const persona = await personaFor("mark");
         const emit = await getEmit();
+        const bird = await activeBird(db);
         const row = await createMark(
           db,
           {
@@ -156,9 +160,12 @@ export function createRambleServer(db, options = {}) {
             reveal,
             content: { content_text: markText, content_kind, content_ref },
             ttlSeconds: ttl_seconds,
+            bird,
           },
           { emit },
         );
+        // Best-effort: a pet/egg-feed failure must never fail a mark.
+        try { await feedAll(db, { type: "mark_left" }, { emit }); } catch { /* cosmetic */ }
         return text(JSON.stringify({
           mark_id: row.mark_id,
           geohash: row.geohash,
@@ -250,8 +257,11 @@ export function createRambleServer(db, options = {}) {
       try {
         const result = await unlockMark(db, mark_id, { lat, lon });
         if (result.unlocked === true) {
-          // Best-effort: a pet-feed failure must never fail an unlock.
-          try { await feed(db, { type: "unlock_mark" }); } catch { /* cosmetic */ }
+          // Best-effort: a pet/egg-feed failure must never fail an unlock.
+          try {
+            const emit = await getEmit();
+            await feedAll(db, { type: "unlock_mark" }, { emit });
+          } catch { /* cosmetic */ }
         }
         return text(JSON.stringify(result));
       } catch (err) {
@@ -262,11 +272,53 @@ export function createRambleServer(db, options = {}) {
 
   register(
     "ramble_pet_state",
-    "Get the Ramble companion pet's current state (mood, energy, weekly activity counters).",
+    "Get the Ramble companion pet's current state (mood, energy, weekly activity counters, active bird, and egg progress).",
     {},
     async () => {
       try {
-        return text(JSON.stringify(await petState(db)));
+        const [state, bird, egg] = await Promise.all([petState(db), activeBird(db), eggState(db, { now: Date.now() })]);
+        return text(JSON.stringify({ ...state, bird, egg: { percent: egg.egg.percent } }));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    },
+  );
+
+  register(
+    "ramble_egg_state",
+    "Get the current incubating egg's warmth progress and checklist toward hatching.",
+    {},
+    async () => {
+      try {
+        return text(JSON.stringify(await eggState(db, { now: Date.now() })));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    },
+  );
+
+  register(
+    "ramble_checkin",
+    "Record today's check-in, crediting warmth toward the incubating egg (once per local day).",
+    {},
+    async () => {
+      try {
+        const emit = await getEmit();
+        return text(JSON.stringify(await feedAll(db, { type: "checkin" }, { emit })));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    },
+  );
+
+  register(
+    "ramble_chore",
+    "Complete a daily chore (feed, preen, or play) for the companion pet. Each kind completes once per local day.",
+    { kind: z.enum(["feed", "preen", "play"]) },
+    async ({ kind }) => {
+      try {
+        const emit = await getEmit();
+        return text(JSON.stringify(await doChore(db, kind, { emit })));
       } catch (err) {
         return errorText(err.message);
       }
