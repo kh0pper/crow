@@ -694,6 +694,33 @@ test("phase 3 C1: sixty gated mark rows do not starve a gift behind them", async
   assert.equal(h.sent[0].content.type, "ramble.egg");
 });
 
+test("phase 3: an open group audience behind a closed contacts backlog still goes out", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  await h.db.execute({ sql: "INSERT INTO contact_groups (name, group_uid) VALUES ('Walkers', 'grp-walk')", args: [] });
+  await h.db.execute({ sql: "INSERT INTO contact_group_members (group_id, contact_id) VALUES (1, 1)", args: [] });
+  await setMaster(h.db, true);
+  await setCell(h.db, "groups", "geo", true);
+  // contacts×geo left OFF: every contacts mark row below stays queued.
+  for (let i = 0; i < 30; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    const row = await seedContactsMark(h.db, "gated " + i);
+    // eslint-disable-next-line no-await-in-loop
+    await enqueueMark(h.db, row, { bird: null });
+  }
+  const groupMark = await createMark(h.db, {
+    author: WORLD_AUTHOR, author_level: "rotating", kind: "mark",
+    anchor: { anchor_kind: "geo", lat: LAT, lon: LON, accuracy_m: 5 },
+    visibility: "group:grp-walk", reveal: "open", content: { content_text: "walkers only", content_kind: "none" },
+  });
+  assert.deepEqual(await enqueueMark(h.db, groupMark, { bird: null }), { ok: true, recipients: 1 });
+  const result = await h.transport.drainOnce();
+  assert.equal(result.delivered, 1);
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].content.mark.content_text, "walkers only");
+  assert.equal((await pendingDeliveries(h.db, 100)).length, 60);
+});
+
 test("phase 3 C5: the same envelope arriving from several relays is applied once", async () => {
   const h = await makeHarness();
   const trades = [];
