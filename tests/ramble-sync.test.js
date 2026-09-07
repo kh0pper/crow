@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
-import { SYNCED_TABLES, EXCLUDED_COLUMNS, applyRemoteOp } from "../servers/sharing/instance-sync.js";
+import { SYNCED_TABLES, EXCLUDED_COLUMNS, applyRemoteOp, shouldSyncRow } from "../servers/sharing/instance-sync.js";
 import { emitOrQueue, _setEligibilityForTest } from "../servers/shared/sync-emit.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createMark, blockPersona } from "../bundles/ramble/server/marks.js";
@@ -56,7 +56,8 @@ test("outbox door: an MCP-process write (no manager) lands in sync_outbox", asyn
   });
   const res = await emitOrQueue(null, a, "ramble_marks", "insert", row);
   assert.ok(res && res.queued, "emitOrQueue returned null — the stamp batch failed (missing lamport_ts?)");
-  const { rows } = await a.execute("SELECT table_name, op FROM sync_outbox");
+  // Scoped to this table so the count can't be coupled to what later tests queue.
+  const { rows } = await a.execute("SELECT table_name, op FROM sync_outbox WHERE table_name = 'ramble_marks'");
   assert.equal(rows.length, 1);
   assert.equal(rows[0].table_name, "ramble_marks");
 });
@@ -70,6 +71,10 @@ test("apply door: insert lands on B as origin=sync, LWW by lamport, delete by ma
   assert.equal(got.rows[0].publish_state, "synced");
   assert.equal(got.rows[0].lamport_ts, 5);
   await applyRemoteOp(b, "ramble_marks", "update", { ...row, content_text: "stale" }, 3); // older → ignored
+  // Assert the skip HERE: without it, "stale" would land and then be masked by
+  // the "newer" write below, leaving the final assertion green either way.
+  got = await b.execute({ sql: "SELECT content_text FROM ramble_marks WHERE mark_id=?", args: ["m9"] });
+  assert.equal(got.rows[0].content_text, "hi", "an older mark op overwrote a newer local row");
   await applyRemoteOp(b, "ramble_marks", "update", { ...row, content_text: "newer" }, 7);
   got = await b.execute({ sql: "SELECT content_text FROM ramble_marks WHERE mark_id=?", args: ["m9"] });
   assert.equal(got.rows[0].content_text, "newer");
@@ -87,6 +92,19 @@ test("settings + blocks apply by natural key (idempotent, no UNIQUE throw)", asy
   await applyRemoteOp(b, "ramble_blocks", "insert", { persona: "b".repeat(64), reason: "x", created_at: 1 }, 1);
   await applyRemoteOp(b, "ramble_blocks", "delete", { persona: "b".repeat(64) }, 2);
   assert.equal((await b.execute("SELECT 1 FROM ramble_blocks")).rows.length, 0);
+
+  // LWW skip must hold for these two tables too, not just for marks: an op
+  // older than the local row's lamport is dropped, it does not overwrite.
+  await applyRemoteOp(b, "ramble_settings", "update", { key: "public_identity_level", value: "pseudonym" }, 1);
+  const afterStale = await b.execute({ sql: "SELECT value FROM ramble_settings WHERE key=?", args: ["public_identity_level"] });
+  assert.equal(afterStale.rows[0].value, "real", "an older settings op overwrote a newer local value");
+
+  const p = "d".repeat(64);
+  await applyRemoteOp(b, "ramble_blocks", "insert", { persona: p, reason: "a", created_at: 1 }, 5);
+  await applyRemoteOp(b, "ramble_blocks", "update", { persona: p, reason: "b", created_at: 1 }, 3); // older → ignored
+  const block = await b.execute({ sql: "SELECT reason, lamport_ts FROM ramble_blocks WHERE persona=?", args: [p] });
+  assert.equal(block.rows[0].reason, "a", "an older block op overwrote a newer local row");
+  assert.equal(Number(block.rows[0].lamport_ts), 5);
 });
 
 test("R9: an id-less natural-key table is lamport-stamped locally on emit", async () => {
@@ -107,4 +125,26 @@ test("R9: an id-less natural-key table is lamport-stamped locally on emit", asyn
   assert.equal(queued.rows.length, 1);
   // Same atomic batch → the row and its outbox entry must agree.
   assert.equal(Number(queued.rows[0].lamport_ts), Number(local.rows[0].lamport_ts));
+});
+
+test("shouldSyncRow gates: local.* settings and keyless rows never sync", async () => {
+  // Ruling R3 — per-instance settings stay on the device that wrote them.
+  assert.equal(shouldSyncRow("ramble_settings", { key: "local.active_area", value: "[]" }), false);
+  assert.equal(shouldSyncRow("ramble_settings", { key: "local.tombstones" }), false);
+  assert.equal(shouldSyncRow("ramble_settings", { key: "public_identity_level", value: "real" }), true);
+
+  // A row without its natural key can be neither stamped, applied nor deleted
+  // on a peer — rejected for all three tables, on emit AND on apply (this
+  // function is the shared choke point for both).
+  assert.equal(shouldSyncRow("ramble_marks", { author: "x" }), false);
+  assert.equal(shouldSyncRow("ramble_blocks", { reason: "x" }), false);
+  assert.equal(shouldSyncRow("ramble_settings", { value: "x" }), false);
+
+  // The emit side actually honours it: emitOrQueue's syncability-parity check
+  // must drop a local.* setting rather than queue it for the drain.
+  // (Runs after the outbox-door test, which is what creates sync_outbox on `a`.)
+  const res = await emitOrQueue(null, a, "ramble_settings", "update", { key: "local.active_area", value: "[]" });
+  assert.equal(res, null, "a local.* setting was queued instead of being dropped");
+  const { rows } = await a.execute("SELECT 1 FROM sync_outbox WHERE table_name = 'ramble_settings'");
+  assert.equal(rows.length, 0);
 });
