@@ -48,7 +48,7 @@ test("egg payload never carries species/seed and parses back bounded", () => {
   const p = eggPayload({ egg_id: "e1", warmth: 40.7, found_cell: "9v6m21h", found_week: "2026-W37", species: "crow", seed: 9 });
   assert.deepEqual(p, { egg_id: "e1", warmth: 40, found_cell: "9v6m21h", found_week: "2026-W37" });
   assert.deepEqual(parseEggPayload({ ...p, species: "crow", seed: 1 }), p);
-  assert.deepEqual(parseEggPayload({ egg_id: "e2", warmth: 5e9, found_cell: "bad", found_week: "W3" }), { egg_id: "e2", warmth: 0, found_cell: null, found_week: null }, "a non-integer warmth reads as 0; bad cell/week read as null");
+  assert.deepEqual(parseEggPayload({ egg_id: "e2", warmth: 40.5, found_cell: "bad", found_week: "W3" }), { egg_id: "e2", warmth: 0, found_cell: null, found_week: null }, "a non-integer warmth reads as 0; bad cell/week read as null");
   assert.deepEqual(parseEggPayload({ egg_id: "e3", warmth: MAX_WARMTH + 5 }), { egg_id: "e3", warmth: MAX_WARMTH, found_cell: null, found_week: null });
   assert.equal(parseEggPayload({ egg_id: "../x", warmth: 1 }), null);
   assert.equal(parseEggPayload(null), null);
