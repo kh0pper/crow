@@ -77,10 +77,12 @@ test("aroundPoint: a coarse wire caw (5-char cell) is kept because its cell coul
   const db = await freshDb();
   await insertRemoteMark(db, { mark_id: "caw-here", author: "cd".repeat(32), kind: "caw", anchor_kind: "geo", geohash: "9v6m2", visibility: "public", reveal: "open", content_text: "hello", created_at: T0, nostr_event_id: "e1" });
   await insertRemoteMark(db, { mark_id: "caw-far", author: "cd".repeat(32), kind: "caw", anchor_kind: "geo", geohash: "9v6m8", visibility: "public", reveal: "open", content_text: "far", created_at: T0, nostr_event_id: "e2" });
+  await insertRemoteMark(db, { mark_id: "caw-six", author: "cd".repeat(32), kind: "caw", anchor_kind: "geo", geohash: "9v6m21", visibility: "public", reveal: "open", content_text: "six", created_at: T0, nostr_event_id: "e3" });
   const out = await aroundPoint(db, { ...HERE, now: T0 });
   const ids = out.marks.map((m) => m.mark_id);
   assert.ok(ids.includes("caw-here"));
   assert.ok(!ids.includes("caw-far"));
+  assert.ok(ids.includes("caw-six"), "a caw stored at a 6-char publish precision is listed (the map shows it too)");
   const c = out.marks.find((m) => m.mark_id === "caw-here");
   assert.equal(c.lat, null, "no position was invented for it");
   assert.equal(typeof c.distance_m, "number");

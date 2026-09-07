@@ -32,7 +32,7 @@ export const AROUND_RADIUS_MAX = 1000;
  *   coarse — the precision-5 cells (1–4): only rows whose OWN geohash is that
  *            coarse are taken from this pass (the caws); everything finer was
  *            already answered by the fine pass.
- * Past ~84° latitude the fine cover overflows MAX_FINE_CELLS and the coarse
+ * Past ~84° latitude at the default radius (~67° at radius 1000) the fine cover overflows MAX_FINE_CELLS and the coarse
  * pass alone answers (bounded by LIST_LIMIT — accepted, nobody rambles there);
  * when even the coarse cover overflows the call is refused (`too-wide`).
  */
@@ -45,7 +45,9 @@ const MAX_COVER_CELLS = 64;
  * there is far beyond anything real, so its LIMIT can never hide a nearby
  * mark. The coarse pass covers ~10 km x 8 km and keeps the map's own
  * bound; a genuine 5-char caw older than that cell's 500 newest rows is
- * missed — it would only ever have been a direction-less row (accepted).
+ * missed — it would only ever have been a direction-less row (accepted). A caw
+ * published at precision <= 4 never matches the cover and is not listed
+ * (accepted; the map still shows it).
  */
 const FINE_LIST_LIMIT = 5000;
 const LIST_LIMIT = 500;
@@ -106,9 +108,13 @@ export async function aroundPoint(db, { lat, lon, radiusM = AROUND_RADIUS_DEFAUL
     for (const row of await listMarks(db, { cells: fineCells, limit: FINE_LIST_LIMIT })) consider(row);
   }
   for (const row of await listMarks(db, { cells: coarseCells, limit: LIST_LIMIT })) {
-    // With a fine pass, only the coarse rows are new here; without one (high
-    // latitude) everything is.
-    if (fineCells && (typeof row.geohash !== "string" || row.geohash.length > COVER_PRECISION)) continue;
+    // Every row under the 5-char cover is considered: the `seen` set makes the
+    // overlap with the fine pass a no-op, and a row stored at a NON-default
+    // publish precision (a peer at RAMBLE_DEFAULT_GEOHASH_PRECISION=6 stores a
+    // 6-char caw) matches neither a 7-char LIKE nor a length test — the map
+    // showed it, the AR view did not. Rows shorter than the cover (precision
+    // <= 4) still cannot match a 5-char prefix and stay a stated limitation.
+    if (typeof row.geohash !== "string") continue;
     consider(row);
   }
   marks.sort((a, b) => a.distance_m - b.distance_m);

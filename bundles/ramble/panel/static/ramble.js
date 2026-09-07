@@ -1528,6 +1528,13 @@
     refreshAround();
   }
 
+  /* Once a second while open: a failed around fetch (arFetchAt cleared) is
+   * retried as soon as there is a fix, not only on the next position event. */
+  function arHeartbeat() {
+    if (arOpen && !arFetchAt && typeof arPose.lat === "number") refreshAround();
+    scheduleArRender();
+  }
+
   /**
    * Devices start HERE, synchronously inside the user's click: getUserMedia and
    * DeviceOrientationEvent.requestPermission both want transient activation, so
@@ -1550,7 +1557,7 @@
     startArCamera();
     requestArMotion().then(function () { if (arOpen) startArHeading(); });
     startArGps();
-    if (!arTick) arTick = setInterval(scheduleArRender, 1000);
+    if (!arTick) arTick = setInterval(arHeartbeat, 1000);
     refreshPet();
   }
 
