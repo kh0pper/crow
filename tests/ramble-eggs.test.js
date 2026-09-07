@@ -2,7 +2,7 @@ import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
-import { ensureIncubatingEgg, creditWarmth, hatchIfReady, checkin, eggState, activeBird, isoWeek, localDay, WARMTH_DEFAULTS } from "../bundles/ramble/server/eggs.js";
+import { ensureIncubatingEgg, creditWarmth, hatchIfReady, checkin, eggState, activeBird, isoWeek, localDay, WARMTH_DEFAULTS, MEET_CROW_DAILY_CAP } from "../bundles/ramble/server/eggs.js";
 
 let db; const T0 = Date.UTC(2026, 8, 7, 12); // 2026-09-07 12:00Z
 before(async () => { db = createClient({ url: "file::memory:" }); await initRambleTables(db); });
@@ -98,4 +98,46 @@ test("chore on a fresh db is a pure read: no egg created, nothing emitted", asyn
   const { rows } = await freshDb.execute("SELECT count(*) AS n FROM ramble_eggs");
   assert.equal(rows[0].n, 0);
   assert.equal(emitted.length, 0);
+});
+
+test("meet_crow warmth is capped per local day (a spoofed-persona flood cannot force a hatch)", async () => {
+  const fresh = createClient({ url: "file::memory:" });
+  await initRambleTables(fresh);
+  // A high hatch threshold keeps every credit on ONE egg, so "warmth unchanged"
+  // is readable — a hatch would reset it to a fresh zero-warmth egg.
+  await fresh.execute("INSERT INTO ramble_settings (key, value) VALUES ('warmth.hatch_at', '1000')");
+  assert.equal(MEET_CROW_DAILY_CAP, 5);
+
+  const results = [];
+  for (let i = 0; i <= MEET_CROW_DAILY_CAP; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    results.push(await creditWarmth(fresh, { type: "meet_crow", persona: "spoof" + i }, { now: T0 }));
+  }
+  assert.deepEqual(results.map((r) => r.credited), [true, true, true, true, true, false]);
+
+  const overCap = results[MEET_CROW_DAILY_CAP];
+  assert.equal(overCap.warmth, results[MEET_CROW_DAILY_CAP - 1].warmth, "the 6th persona must not add warmth");
+  assert.equal(overCap.hatched, null);
+  const ledger = await fresh.execute("SELECT count(*) AS n FROM ramble_credits WHERE kind='meet_crow'");
+  assert.equal(ledger.rows[0].n, MEET_CROW_DAILY_CAP, "an over-cap meeting must not leave a ledger row either");
+
+  // The allowance is per LOCAL DAY, not per week: tomorrow credits again.
+  const tomorrow = await creditWarmth(fresh, { type: "meet_crow", persona: "spoof-next" }, { now: T0 + 86400e3 });
+  assert.equal(tomorrow.credited, true);
+});
+
+test("activeBird ignores a pet pointer at an egg that has not hatched", async () => {
+  const fresh = createClient({ url: "file::memory:" });
+  await initRambleTables(fresh);
+  const egg = await ensureIncubatingEgg(fresh, { now: T0 });
+  await fresh.execute({ sql: "INSERT INTO ramble_pet (owner, active_egg_id) VALUES ('self', ?)", args: [egg.egg_id] });
+  assert.equal(await activeBird(fresh), null, "an incubating egg is not a bird");
+
+  await fresh.execute({
+    sql: "UPDATE ramble_eggs SET status='hatched', species='crow', seed=3, hatched_at=? WHERE egg_id=?",
+    args: [T0, egg.egg_id],
+  });
+  const bird = await activeBird(fresh);
+  assert.equal(bird.species, "crow");
+  assert.equal(bird.seed, 3);
 });

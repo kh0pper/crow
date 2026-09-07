@@ -8,21 +8,26 @@
  */
 
 import { creditWarmth } from "./eggs.js";
-import { feed as petFeed } from "./pet.js";
+import { feed as petFeed, petFromRow } from "./pet.js";
 
 const KEYED_TYPES = new Set(["visit_place", "meet_crow", "checkin"]);
 const ACCEPTED_TYPES = new Set(["visit_place", "mark_left", "unlock_mark", "meet_crow", "checkin", "quiet_tick"]);
 
-async function readPetRow(db) {
+/**
+ * The pet as `petFeed()` would have returned it, without feeding — so both
+ * branches below hand the caller the SAME shape. Reading the raw row instead
+ * leaked `lamport_ts`/`chores_json` out of every not-credited response.
+ */
+async function readPet(db) {
   const { rows } = await db.execute({ sql: "SELECT * FROM ramble_pet WHERE owner = 'self'", args: [] });
-  return rows[0] ?? null;
+  return petFromRow(rows[0] ?? null);
 }
 
 export async function feedAll(db, event, { now = Date.now(), emit, onHatch } = {}) {
   if (!event || !ACCEPTED_TYPES.has(event.type)) {
     console.warn(`[ramble feed] unknown feedAll event type: ${event?.type}`);
     const { warmth } = await creditWarmth(db, event, { now, emit });
-    const pet = await readPetRow(db);
+    const pet = await readPet(db);
     return { credited: false, warmth, hatched: null, pet };
   }
 
@@ -39,7 +44,7 @@ export async function feedAll(db, event, { now = Date.now(), emit, onHatch } = {
   if (shouldFeedPet) {
     pet = await petFeed(db, event, { now, emit });
   } else {
-    pet = await readPetRow(db);
+    pet = await readPet(db);
   }
 
   return { credited, warmth, hatched, pet };
