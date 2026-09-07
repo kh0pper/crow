@@ -311,3 +311,8 @@ test("ramble-trade frame carries exactly kind, trade_id, egg_id, state; unsubscr
   fireClose();
   assert.equal(bus.listenerCount("ramble:trade"), prior);
 });
+
+test("the panel client subscribes to the ramble-trade frame by name", () => {
+  const client = readFileSync(join(__repo, "bundles/ramble/panel/static/ramble.js"), "utf8");
+  assert.ok(client.includes('addEventListener("ramble-trade"'));
+});
