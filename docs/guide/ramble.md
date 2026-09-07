@@ -105,7 +105,7 @@ Three chores — **feed**, **preen**, **play** — are yours to do once each per
 
 ## Nests and the egg shelf
 
-Nests are spawn points in the world. Each ISO week, every geohash-7 cell (about 150 m square) either has a nest or not, decided by a public formula — `sha256("ramble-nest-v1:" + cell + ":" + week)`, a nest when the first 32 bits mod `nest.rate` (default 24) is 0 — so everyone sees the same nests with no server involved and nothing about people is revealed. The map shows them as egg pins once you zoom in (zoom 14 or closer), fetched from `GET /api/ramble/nests?bbox=south,west,north,east`.
+Nests are spawn points in the world. Each ISO week, every geohash-7 cell (about 150 m square) either has a nest or not, decided by a public formula — `sha256("ramble-nest-v1:" + cell + ":" + week)`, a nest when the first 32 bits mod `nest.rate` (default 24) is 0 — so everyone sees the same nests with no server involved and nothing about people is revealed. The map shows them as egg pins once you zoom in (zoom 15 or closer), fetched from `GET /api/ramble/nests?bbox=south,west,north,east`.
 
 Walk within **75 m** of a nest and tap **Take the egg** (`POST /api/ramble/nests/claim`): a new egg lands on your **shelf** (unhatched, warmth 0, marked with the cell and week it was found in). Limits: **one claim per local day** and a **shelf cap of 5** (`shelf.cap`); both refusals come back as a friendly reason, not an error. Claiming the same nest twice returns the same egg. A claim credits **no** warmth and feeds **no** energy — the egg is the reward. Claims are recorded per instance (`ramble_nest_claims`) and never replicate; the egg itself does.
 
