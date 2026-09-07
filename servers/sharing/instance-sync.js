@@ -80,6 +80,15 @@ export const SYNCED_TABLES = [
   // instances. Multi-party ROOMS (room_uid NOT NULL) are gated OUT by
   // shouldSyncRow — they have their own Nostr fan-out.
   "contact_groups",
+  // Ramble (proximity marks) phase 1: the user's OWN marks, settings and
+  // persona block-list follow them across their instances. All three are
+  // natural-key tables (mark_id / key / persona) — see the applyRamble*
+  // handlers below; the generic id-keyed apply path can never match them.
+  // NOT ramble_groups (no phase-1 writer) and NOT ramble_pet (per-instance
+  // companion state, deliberately divergent).
+  "ramble_marks",
+  "ramble_settings",
+  "ramble_blocks",
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
@@ -122,6 +131,17 @@ export const EXCLUDED_COLUMNS = {
   // can still reject a malicious room-bearing entry; lamport_ts rides the row and
   // is dropped on apply. Membership rides the attached `members` wire-map.
   contact_groups: ["id", "created_at"],
+  // Ramble marks sync keyed on mark_id. `id` is the per-instance AUTOINCREMENT
+  // rowid (never portable, and the FTS shadow's content_rowid). `publish_state`
+  // and `origin` are the AUTHORING instance's own Nostr bookkeeping — a peer
+  // that receives a replicated mark must record it as origin='sync' /
+  // publish_state='synced' (see applyRambleMark) so its own publish drain,
+  // which selects origin='local', never re-publishes someone else's mark.
+  // lamport_ts is sync metadata carried in the entry envelope, not the row
+  // (prior art: providers/messages).
+  ramble_marks: ["id", "publish_state", "origin", "lamport_ts"],
+  ramble_settings: ["lamport_ts"],
+  ramble_blocks: ["lamport_ts"],
 };
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
@@ -289,6 +309,25 @@ export function shouldSyncRow(table, row) {
     // gpu_policy.local_only above — one gate covers emit AND apply).
     if (row && row.source === "starter") return false;
   }
+  if (table === "ramble_marks") {
+    // mark_id is the wire key (the AUTOINCREMENT id is stripped) — a row
+    // without it can be neither stamped, applied nor deleted on a peer.
+    if (!row) return false;
+    return Boolean(row.mark_id);
+  }
+  if (table === "ramble_blocks") {
+    if (!row) return false;
+    return Boolean(row.persona);
+  }
+  if (table === "ramble_settings") {
+    if (!row || !row.key) return false;
+    // Ruling R3: `local.`-prefixed keys are per-instance by construction
+    // (local.active_area is where THIS device is; local.tombstones is what
+    // THIS device has already dismissed). Replicating them would teleport one
+    // instance's location/dismissals onto every other. One gate, both
+    // directions — this function is the shared emit + apply choke point.
+    return !String(row.key).startsWith("local.");
+  }
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
   // dashboard_settings holds only the global scope; per-instance overrides live
@@ -314,6 +353,173 @@ export function shouldInitInstanceSync({ argv = [], env = {} } = {}) {
   if (env.CROW_DISABLE_INSTANCE_SYNC === "1") return false;
   if (Array.isArray(argv) && argv.includes("--no-auth")) return false;
   return true;
+}
+
+/* ------------------------------------------------- ramble natural-key apply */
+
+/**
+ * Columns of `ramble_marks` that may be written from a wire row, in schema
+ * order. Everything else on the table is per-instance: `id` (AUTOINCREMENT
+ * rowid), `publish_state`/`origin` (the authoring instance's Nostr
+ * bookkeeping) and `lamport_ts` (envelope metadata) — all in EXCLUDED_COLUMNS.
+ * The actual INSERT column list is this list INTERSECTED with the keys the
+ * wire row carries, so a sparse row never binds `undefined`, and an unknown
+ * key from a future/peer schema is ignored rather than crashing the apply.
+ */
+const RAMBLE_MARK_WIRE_COLUMNS = [
+  "mark_id", "author", "author_level", "kind",
+  "anchor_kind", "geohash", "lat", "lon", "accuracy_m", "anchor_ref",
+  "visibility", "reveal",
+  "content_text", "content_kind", "content_ref", "thumb_enc", "locked_blob",
+  "created_at", "expires_at", "nostr_event_id",
+];
+
+/**
+ * Columns the ON CONFLICT branch may overwrite on an EXISTING local row:
+ * everything portable except the key itself and `nostr_event_id`. The event id
+ * is the local row's own record of "this is the relay event I already saw/
+ * published"; a re-delivered wire row must not be able to rewrite it (the peer
+ * may have learned the same mark over Nostr first, with its own bookkeeping).
+ * `origin`/`publish_state` are absent from the wire entirely.
+ */
+const RAMBLE_MARK_UPDATE_COLUMNS = RAMBLE_MARK_WIRE_COLUMNS.filter(
+  (c) => c !== "mark_id" && c !== "nostr_event_id",
+);
+
+/**
+ * Apply a `ramble_marks` mutation, keyed on the stable `mark_id`.
+ *
+ * Last-writer-wins on the ENVELOPE lamport, exactly like
+ * `_applyDashboardSetting`: read the local row's lamport_ts, skip anything
+ * strictly older, write `lamport_ts = lamportTs`. A tie lets the incoming
+ * write through (idempotent re-delivery of the same row).
+ *
+ * Global constraint C2: a replicated mark lands as `origin='sync'` /
+ * `publish_state='synced'` so the receiving instance's publish drain (which
+ * selects `origin='local'`) never re-publishes another instance's mark to the
+ * relays. On conflict the existing row KEEPS its own origin/publish_state/
+ * nostr_event_id — the authoring instance owns its publish bookkeeping.
+ *
+ * Module-level (not a class method) so both the live `_applyEntry` dispatch
+ * and the exported `applyRemoteOp` seam run the identical code path.
+ *
+ * @param {object} db - libsql client
+ * @param {"insert"|"update"|"delete"} op
+ * @param {object} row - wire row (no id/origin/publish_state/lamport_ts)
+ * @param {number} lamportTs - incoming envelope Lamport timestamp
+ */
+export async function applyRambleMark(db, op, row, lamportTs) {
+  if (!row || !row.mark_id) return;
+
+  const { rows: existing } = await db.execute({
+    sql: `SELECT lamport_ts FROM ramble_marks WHERE mark_id = ?`,
+    args: [row.mark_id],
+  });
+  const localTs = Number(existing[0]?.lamport_ts) || 0;
+  if (lamportTs < localTs) return;
+
+  if (op === "delete") {
+    await db.execute({
+      sql: `DELETE FROM ramble_marks WHERE mark_id = ?`,
+      args: [row.mark_id],
+    });
+    return;
+  }
+
+  const cols = RAMBLE_MARK_WIRE_COLUMNS.filter((c) => row[c] !== undefined);
+  const updatable = cols.filter((c) => RAMBLE_MARK_UPDATE_COLUMNS.includes(c));
+  const setClauses = [
+    ...updatable.map((c) => `${c} = excluded.${c}`),
+    "lamport_ts = excluded.lamport_ts",
+  ];
+
+  await db.execute({
+    sql: `INSERT INTO ramble_marks (${cols.join(", ")}, origin, publish_state, lamport_ts)
+          VALUES (${cols.map(() => "?").join(", ")}, 'sync', 'synced', ?)
+          ON CONFLICT(mark_id) DO UPDATE SET ${setClauses.join(", ")}`,
+    args: [...cols.map((c) => row[c] ?? null), lamportTs],
+  });
+}
+
+/**
+ * Apply a `ramble_settings` mutation, keyed on `key`. Same LWW rule as
+ * `applyRambleMark`. `local.`-prefixed keys never reach here — shouldSyncRow
+ * drops them on both the emit and the apply side.
+ */
+export async function applyRambleSetting(db, op, row, lamportTs) {
+  if (!row || !row.key) return;
+
+  const { rows: existing } = await db.execute({
+    sql: `SELECT lamport_ts FROM ramble_settings WHERE key = ?`,
+    args: [row.key],
+  });
+  const localTs = Number(existing[0]?.lamport_ts) || 0;
+  if (lamportTs < localTs) return;
+
+  if (op === "delete") {
+    await db.execute({ sql: `DELETE FROM ramble_settings WHERE key = ?`, args: [row.key] });
+    return;
+  }
+
+  await db.execute({
+    sql: `INSERT INTO ramble_settings (key, value, lamport_ts) VALUES (?, ?, ?)
+          ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value, lamport_ts = excluded.lamport_ts`,
+    args: [row.key, row.value ?? null, lamportTs],
+  });
+}
+
+/**
+ * Apply a `ramble_blocks` mutation, keyed on `persona`. Same LWW rule. A
+ * block is a user-level judgement about a persona ("I never want to see this
+ * author"), so it follows the user across their instances; `unblockPersona`
+ * emits `delete` with `{ persona }` alone, which is why the key check comes
+ * before any column binding. `created_at` is NOT NULL — a wire row that omits
+ * it gets local receipt time rather than failing the whole apply.
+ */
+export async function applyRambleBlock(db, op, row, lamportTs) {
+  if (!row || !row.persona) return;
+
+  const { rows: existing } = await db.execute({
+    sql: `SELECT lamport_ts FROM ramble_blocks WHERE persona = ?`,
+    args: [row.persona],
+  });
+  const localTs = Number(existing[0]?.lamport_ts) || 0;
+  if (lamportTs < localTs) return;
+
+  if (op === "delete") {
+    await db.execute({ sql: `DELETE FROM ramble_blocks WHERE persona = ?`, args: [row.persona] });
+    return;
+  }
+
+  await db.execute({
+    sql: `INSERT INTO ramble_blocks (persona, reason, created_at, lamport_ts) VALUES (?, ?, ?, ?)
+          ON CONFLICT(persona) DO UPDATE SET
+            reason = excluded.reason, created_at = excluded.created_at,
+            lamport_ts = excluded.lamport_ts`,
+    args: [row.persona, row.reason ?? null, row.created_at ?? Date.now(), lamportTs],
+  });
+}
+
+/**
+ * Test/tooling seam over the three ramble natural-key handlers above. Does NOT
+ * fork their logic — it is a pure table→handler switch, so anything asserted
+ * through here is the same code the live `_applyEntry` dispatch runs.
+ *
+ * @param {object} db
+ * @param {"ramble_marks"|"ramble_settings"|"ramble_blocks"} table
+ * @param {"insert"|"update"|"delete"} op
+ * @param {object} row
+ * @param {number} [lamportTs]
+ */
+export async function applyRemoteOp(db, table, op, row, lamportTs = 0) {
+  switch (table) {
+    case "ramble_marks":    return applyRambleMark(db, op, row, lamportTs);
+    case "ramble_settings": return applyRambleSetting(db, op, row, lamportTs);
+    case "ramble_blocks":   return applyRambleBlock(db, op, row, lamportTs);
+    default:
+      throw new Error(`applyRemoteOp: no natural-key handler for table "${table}"`);
+  }
 }
 
 export class InstanceSyncManager {
@@ -1824,6 +2030,39 @@ export class InstanceSyncManager {
         await this._applyGroup(op, row, lamport_ts, instance_id);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on contact_groups:`, err.message);
+      }
+      return;
+    }
+
+    // Ramble tables are natural-key (mark_id / key / persona); ramble_marks
+    // additionally strips its AUTOINCREMENT id from the wire, so the generic
+    // id-keyed path below can never match an update nor no-op-safely delete.
+    // Route ALL ops through the module-level handlers, mirroring _applyGroup.
+    // shouldSyncRow already dropped keyless rows and `local.`-prefixed
+    // settings above (before the signature verify).
+    if (table === "ramble_marks") {
+      try {
+        await applyRambleMark(this.db, op, row, lamport_ts);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on ramble_marks:`, err.message);
+      }
+      return;
+    }
+
+    if (table === "ramble_settings") {
+      try {
+        await applyRambleSetting(this.db, op, row, lamport_ts);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on ramble_settings:`, err.message);
+      }
+      return;
+    }
+
+    if (table === "ramble_blocks") {
+      try {
+        await applyRambleBlock(this.db, op, row, lamport_ts);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on ramble_blocks:`, err.message);
       }
       return;
     }
