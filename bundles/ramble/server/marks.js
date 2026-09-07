@@ -21,7 +21,7 @@ async function safeEmit(emit, table, op, row) {
 function defaultTtlSeconds(kind, visibility) {
   if (kind === "caw") return 3600;
   if (visibility === "public") return 86400;
-  return null; // contacts/group marks are persistent by default
+  return null; // contacts/group/private marks are persistent by default
 }
 
 function defaultReveal(visibility) {
@@ -105,18 +105,22 @@ export async function listMarks(db, opts = {}) {
   if (visibility) {
     clauses.push("visibility = ?");
     args.push(visibility);
-    // A private mark is "just me" — it must never surface as someone else's
-    // row (a remote origin can never legitimately carry visibility='private';
-    // insertRemoteMark rejects the insert before this can even matter, but
-    // this is the belt to that suspenders).
+    // A private mark is "just me" — but "me" spans every instance the user
+    // owns: origin='local' (authored here) and origin='sync' (replicated in
+    // from one of the user's OWN other instances via instance-sync,
+    // applyRambleMark) are both legitimately "mine". The only origin that
+    // must never carry a private row is 'remote' — that's the Nostr wire,
+    // and insertRemoteMark rejects visibility='private' before it can even
+    // reach the table; this clause is the belt to that suspenders.
     if (visibility === "private") {
-      clauses.push("origin = 'local'");
+      clauses.push("origin <> 'remote'");
     }
   } else {
     // No visibility filter = the owner's overview across everything. Private
-    // rows must still only surface when they're the local author's own —
-    // never someone else's private row that somehow landed here.
-    clauses.push("NOT (visibility = 'private' AND origin <> 'local')");
+    // rows must still only surface when they're the user's own (local or
+    // synced-from-own-instance) — never a private row that arrived off the
+    // Nostr wire, which should never exist but is guarded here regardless.
+    clauses.push("NOT (visibility = 'private' AND origin = 'remote')");
   }
   if (!includeExpired) {
     clauses.push("(expires_at IS NULL OR expires_at > ?)");
