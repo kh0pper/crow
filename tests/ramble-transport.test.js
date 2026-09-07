@@ -18,6 +18,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, cpSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createClient } from "@libsql/client";
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { createMark, getMark } from "../bundles/ramble/server/marks.js";
@@ -742,4 +744,56 @@ test("phase 3: stop() detaches the envelope listener; a malformed envelope never
   await assert.doesNotReject(h.transport.onEnvelope(null));
   h.transport.stop();
   assert.equal(h.bus.listenerCount("ramble:envelope"), before - 1);
+});
+
+test("phase 3: a delivery that parks by THROWING still settles its mark", async () => {
+  const h = await makeHarness();
+  await seedContacts(h.db);
+  await setMaster(h.db, true);
+  await setCell(h.db, "contacts", "geo", true);
+  const row = await seedContactsMark(h.db);
+  await enqueueMark(h.db, row, { bird: null });
+  h.state.throwErr = "boom";
+  await h.db.execute({ sql: "UPDATE ramble_outbox SET attempts = 19", args: [] });
+  await h.transport.drainOnce();
+  assert.equal((await pendingDeliveries(h.db, 50)).length, 0);
+  assert.equal((await getMark(h.db, row.mark_id)).publish_state, "published");
+});
+
+test("phase 3: a bundle copy without the phase-3 modules still runs the public drain (contacts delivery disabled)", async () => {
+  const stale = mkdtempSync(join(tmpdir(), "ramble-stale-"));
+  cpSync(BUNDLE_DIR, stale, { recursive: true });
+  rmSync(join(stale, "delivery.js"));
+  rmSync(join(stale, "trades.js"));
+  try {
+    const closed = [];
+    const relay = {
+      connected: true,
+      connect: async () => {},
+      subscribe: () => { const handle = { close: () => closed.push(handle) }; return handle; },
+    };
+    const db = createClient({ url: "file::memory:" });
+    const transport = await startRambleTransport({
+      db,
+      nostrManager: {
+        relays: new Map([["wss://fake", relay]]),
+        connectRelays: async () => [],
+        publishRendezvousEvent: async () => ["wss://fake"],
+      },
+      identity, seed: SEED, bus: new EventEmitter(), bundleDir: stale, _derive: fakeDerive, autoStart: false,
+    });
+    await setMaster(db, true);
+    await setCell(db, "public", "geo", true);
+    await seedPublicMark(db, "still public on a stale bundle");
+
+    const result = await transport.drainOnce();
+    assert.equal(result.published, 1, "the public drain still runs without the phase-3 modules");
+    assert.equal(result.delivered, 0, "contacts delivery is disabled");
+
+    await assert.doesNotReject(transport.onEnvelope({ crowId: "crow:one", pubkey: PK, payload: { type: "ramble.egg", v: 1, egg: { egg_id: "x", warmth: 1 } }, eventId: "s-1" }));
+
+    transport.stop();
+  } finally {
+    rmSync(stale, { recursive: true, force: true });
+  }
 });

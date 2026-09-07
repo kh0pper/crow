@@ -548,6 +548,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     }
 
     const persona = await personaFor(kind);
+    const bird = await mods.eggsMod.activeBird(db);
     const mark = await mods.marksMod.createMark(db, {
       author: persona.author,
       author_level: persona.author_level,
@@ -559,7 +560,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       ttlSeconds,
       // Your currently-active bird rides along on the row, so your own pins
       // wear the same bird everyone else's do. Null until the first hatch.
-      bird: await mods.eggsMod.activeBird(db),
+      bird,
     }, { emit });
 
     // Phase 3: contacts/group marks ride the outbox as one DM per recipient.
@@ -567,7 +568,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     let recipients = 0;
     if (visibility === "contacts" || visibility.startsWith("group:")) {
       try {
-        const q = await mods.deliveryMod.enqueueMark(db, mark, { bird: await mods.eggsMod.activeBird(db), now: Date.now() });
+        const q = await mods.deliveryMod.enqueueMark(db, mark, { bird, now: Date.now() });
         recipients = q.ok ? q.recipients : 0;
       } catch (err) {
         console.warn("[ramble routes] enqueueMark failed:", err?.message ?? err);
