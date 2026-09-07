@@ -1,7 +1,7 @@
 {
   "name": "crow-ramble",
-  "version": "0.3.0",
-  "description": "Ramble MCP server — proximity marks, caws, privacy grid, egg and bird companion",
+  "version": "0.4.0",
+  "description": "Ramble MCP server — proximity marks, caws, privacy grid, egg and bird companion, gifts and swaps",
   "type": "module",
   "main": "server/index.js",
   "dependencies": {

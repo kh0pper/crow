@@ -101,6 +101,8 @@ derived from energy as in phase 1. Nothing else happens.
 - `ramble_pet.active_egg_id` names the active bird; `POST /api/ramble/birds/:id/activate`.
 - Flock screen: hatched birds (tap → pet screen for that bird, or activate), the shelf, and
   "8 kinds, N found".
+- Received eggs (`status='received'`, `shelf_origin='user'`, `from_crow_id`) sit on the
+  shelf as their own class and do not count toward the nest-claim cap.
 
 ---
 
@@ -144,7 +146,10 @@ derived from energy as in phase 1. Nothing else happens.
 - **Gifts / swaps (phase 3).** `{ type: "ramble.egg", v: 1, egg: { egg_id, warmth,
   found_cell, found_week } }` (never species/seed — unhatched) and
   `{ type: "ramble.trade", v: 1, trade: { trade_id, state, my_egg_id, want_egg_id } }`.
-  Idempotent by `egg_id` / `trade_id`.
+  Idempotent by `egg_id` / `trade_id`. The trade envelope may carry `egg` (the sender's
+  offered egg summary) so accept and complete are one DM each. Eggs change hands only at
+  completion, in one batch per side. Decline is legal from either side only while
+  `proposed`; the receiving side honours a `declined` from `proposed` or `accepted`.
 - `local.session_id`, own-echo, blocks, expiration, tombstones: unchanged from phase 1.
 
 ---
@@ -163,9 +168,12 @@ New / changed tables (bundle-owned, `CREATE TABLE IF NOT EXISTS` + guarded `ALTE
 - `ramble_credits (kind TEXT, key TEXT, credited_at INTEGER, PRIMARY KEY (kind, key))` —
   idempotency ledger for warmth/energy credits (cell+week, day, persona+week). Local.
 - `ramble_nest_claims (cell TEXT, week TEXT, egg_id TEXT, PRIMARY KEY (cell, week))` — local.
-- `ramble_trades (trade_id TEXT PK, counterpart TEXT, my_egg_id, their_egg_id, state TEXT
-  proposed|accepted|completed|expired|declined, created_at, updated_at, lamport_ts)` —
-  replicated (phase 3).
+- `ramble_trades (trade_id TEXT PK, counterpart TEXT, role TEXT proposer|acceptor,
+  my_egg_id, their_egg_id, offer_json TEXT, state TEXT
+  proposed|accepted|completed|expired|declined, created_at, updated_at, expires_at,
+  lamport_ts)` — replicated (phase 3).
+- `ramble_outbox (id, to_crow_id, kind mark|egg|trade, ref_id, payload_json, attempts,
+  created_at)` — the local contacts-delivery queue (never synced).
 - `ramble_marks` gains `bird_species TEXT, bird_seed INTEGER` (wire columns; excluded from
   nothing; nullable).
 - Settings (in `ramble_settings`, replicated): `warmth.<event>` weights, `nest.rate`,
