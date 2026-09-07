@@ -1556,7 +1556,7 @@ test("ramble-nest-claimed frame carries exactly egg_id and cell", () => {
 
 Register `bus.on("ramble:nest-claimed", claimedHandler);` with the other two and add `bus.off("ramble:nest-claimed", claimedHandler);` inside `unsubscribe`.
 
-- [ ] **Step 6: Run** — `node scripts/run-suite.mjs tests/ramble-panel.test.js tests/ramble-stream.test.js` → all PASS. Also `node servers/gateway/index.js --no-auth` boots and prints `[panel] ramble routes mounted` (ctrl-C).
+- [ ] **Step 6: Run** — `node scripts/run-suite.mjs tests/ramble-panel.test.js tests/ramble-stream.test.js` → all PASS. Do NOT boot a gateway from the worktree (it would open the live `crow.db` beside the running primary); the loopback router tests and the STRICT_PANEL_MOUNT test cover mounting, and the real boot check is grackle's journal at deploy (Task 8 Step 7).
 
 - [ ] **Step 7: Commit**
 
