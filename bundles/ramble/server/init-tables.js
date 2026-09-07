@@ -3,6 +3,13 @@ async function initTable(db, label, sql) {
   catch (err) { console.error(`[ramble init] ${label}:`, err.message); throw err; }
 }
 
+async function ensureColumn(db, table, column, ddl) {
+  const info = await db.execute({ sql: `PRAGMA table_info(${table})`, args: [] });
+  if (!info.rows.some((r) => r.name === column)) {
+    await initTable(db, `${table}.${column}`, `ALTER TABLE ${table} ADD COLUMN ${column} ${ddl};`);
+  }
+}
+
 export async function initRambleTables(db) {
   await initTable(db, "ramble_marks", `
     CREATE TABLE IF NOT EXISTS ramble_marks (
@@ -42,6 +49,9 @@ export async function initRambleTables(db) {
       INSERT INTO ramble_marks_fts(rowid, content_text, mark_id) VALUES (new.id, new.content_text, new.mark_id);
     END;`);
 
+  await ensureColumn(db, "ramble_marks", "bird_species", "TEXT");
+  await ensureColumn(db, "ramble_marks", "bird_seed", "INTEGER");
+
   await initTable(db, "ramble_pet", `
     CREATE TABLE IF NOT EXISTS ramble_pet (
       owner TEXT PRIMARY KEY DEFAULT 'self',
@@ -57,13 +67,10 @@ export async function initRambleTables(db) {
   // CREATE above so a host that already created ramble_pet before this
   // column existed still gets it, idempotently, with no SCHEMA_GENERATION
   // bump (ramble_pet is per-instance, not synced).
-  {
-    const info = await db.execute({ sql: "PRAGMA table_info(ramble_pet)", args: [] });
-    const hasWeekStart = info.rows.some((r) => r.name === "week_start");
-    if (!hasWeekStart) {
-      await initTable(db, "ramble_pet.week_start", "ALTER TABLE ramble_pet ADD COLUMN week_start INTEGER;");
-    }
-  }
+  await ensureColumn(db, "ramble_pet", "week_start", "INTEGER");
+  await ensureColumn(db, "ramble_pet", "active_egg_id", "TEXT");
+  await ensureColumn(db, "ramble_pet", "chores_json", "TEXT");
+  await ensureColumn(db, "ramble_pet", "lamport_ts", "INTEGER DEFAULT 0");
 
   await initTable(db, "ramble_settings", `
     CREATE TABLE IF NOT EXISTS ramble_settings (
@@ -102,5 +109,29 @@ export async function initRambleTables(db) {
       reason TEXT,
       created_at INTEGER NOT NULL,
       lamport_ts INTEGER DEFAULT 0
+    );`);
+
+  await initTable(db, "ramble_eggs", `
+    CREATE TABLE IF NOT EXISTS ramble_eggs (
+      egg_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'shelf',
+      warmth INTEGER NOT NULL DEFAULT 0,
+      species TEXT,
+      seed INTEGER,
+      found_cell TEXT,
+      found_week TEXT,
+      from_crow_id TEXT,
+      created_at INTEGER NOT NULL,
+      hatched_at INTEGER,
+      lamport_ts INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS ramble_eggs_status ON ramble_eggs(status);`);
+
+  await initTable(db, "ramble_credits", `
+    CREATE TABLE IF NOT EXISTS ramble_credits (
+      kind TEXT NOT NULL,
+      key TEXT NOT NULL,
+      credited_at INTEGER NOT NULL,
+      PRIMARY KEY (kind, key)
     );`);
 }
