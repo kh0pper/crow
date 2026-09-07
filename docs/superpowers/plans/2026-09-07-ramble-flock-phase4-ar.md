@@ -2282,7 +2282,7 @@ In `bundles/ramble/panel/static/ramble.js`:
     return Promise.resolve("granted");
   }
 
-  /** `restart` = a return from a hidden tab: a camera that worked a second ago gets one retry before the view gives up on it. */
+  /** restart = a return from a hidden tab: a camera that worked a second ago gets one retry before the view gives up on it. */
   function startArCamera(restart) {
     var video = $("rb-ar-video");
     if (!video || !navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
