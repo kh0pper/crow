@@ -571,6 +571,9 @@ function rambleEggSetClause(col) {
     case "species":    return `species = COALESCE(ramble_eggs.species, excluded.species)`;
     case "seed":       return `seed = COALESCE(ramble_eggs.seed, excluded.seed)`;
     case "hatched_at": return `hatched_at = COALESCE(ramble_eggs.hatched_at, excluded.hatched_at)`;
+    // `warmth` included: absolute last-writer-wins, NOT additive across
+    // instances — `ramble_credits` (the no-double-count ledger) is local-only,
+    // so warmth earned on two instances in the same window does not sum.
     default:           return `${col} = excluded.${col}`;
   }
 }
@@ -609,7 +612,7 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
   if (!row || !row.egg_id) return;
 
   const { rows: existing } = await db.execute({
-    sql: `SELECT lamport_ts, created_at FROM ramble_eggs WHERE egg_id = ?`,
+    sql: `SELECT lamport_ts, created_at, status FROM ramble_eggs WHERE egg_id = ?`,
     args: [row.egg_id],
   });
   const localTs = Number(existing[0]?.lamport_ts) || 0;
@@ -625,7 +628,15 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
   let status = row.status;
   const statements = [];
 
-  if (status === "incubating") {
+  // The local row's OWN status gates this, not just the incoming one: a peer
+  // that was offline when this egg hatched keeps crediting warmth to it and
+  // emits `status:'incubating'` at an ever-higher lamport. Gating on the wire
+  // status alone would let that egg contest the incubating slot it already
+  // left, shelve the legitimate successor (the hatched egg is always OLDER, so
+  // it always wins the tiebreak) and then stay hatched via the CASE below —
+  // leaving the instance with ZERO incubating eggs, again every cycle, with the
+  // credited warmth silently discarded. A locally hatched egg never competes.
+  if (status === "incubating" && existing[0]?.status !== "hatched") {
     const { rows: incubating } = await db.execute({
       sql: `SELECT egg_id, created_at FROM ramble_eggs WHERE status = 'incubating' AND egg_id <> ? LIMIT 1`,
       args: [row.egg_id],
