@@ -19,6 +19,7 @@ import { resolveDataDir } from "./db.js";
 import { resolvePersona } from "./persona.js";
 import { createMark, listMarks, unlockMark, blockPersona, unblockPersona } from "./marks.js";
 import { encodeGeohash } from "./anchors.js";
+import { getGrid } from "./grid.js";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const errorText = (t) => ({ content: [{ type: "text", text: t }], isError: true });
@@ -69,11 +70,7 @@ export function createRambleServer(db, options = {}) {
   }
 
   async function getPublicIdentityLevel() {
-    const result = await db.execute({
-      sql: "SELECT value FROM ramble_settings WHERE key = 'public_identity_level'",
-      args: [],
-    });
-    return result.rows[0]?.value ?? "rotating";
+    return (await getGrid(db)).identityLevel;
   }
 
   /**
