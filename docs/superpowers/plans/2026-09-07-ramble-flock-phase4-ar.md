@@ -21,10 +21,10 @@ Phase-1/2/3 constraints still bind (copied, with the phase-4 deltas marked **[P4
 - **Warmth weights, `nest.rate`, `shelf.cap` are settings** read live. **[P4]** No new setting. `AROUND_RADIUS_DEFAULT = 500`, `AROUND_RADIUS_MIN = 50`, `AROUND_RADIUS_MAX = 1000` (metres) and `MAX_CONTACT_MARKS_PER_CONTACT = 50` are exported constants.
 - **Shelf origin rulings (phase 2, unchanged):** only `shelf_origin = 'sync'` shelf eggs re-promote; NULL-origin beats `'sync'` in convergence; an explicit `null` on the wire means plain; a peer's user-shelve never triggers re-promotion; a hatched row never takes an origin. Received eggs are `status='received', shelf_origin='user'`, their own shelf class, off the claim cap. Gifts and trades are never grid-gated. All of a user's instances share one Nostr identity (`servers/sharing/nostr.js:155`), so every instance receives and applies every contact envelope and swap replies are duplicated-but-idempotent. **[P4]** Task 3 is the executable proof of that last ruling (two `startRambleTransport` instances over one injected bus + one manager stub).
 - **Inbound ceilings:** `MAX_OPEN_PROPOSALS_PER_CONTACT = 20`, `MAX_GIFTS_PER_CONTACT_PER_DAY = 20` (phase 3). **[P4]** Contacts marks gain a RETENTION cap, not a per-day cap: `pruneContactMarks(db, author)` keeps the newest `MAX_CONTACT_MARKS_PER_CONTACT = 50` rows per contact (`author` = the contact's x-only pubkey, `origin='remote' AND visibility='contacts'`, newest by `created_at DESC, id DESC`). Ruling: `payloadToMark` takes `created_at` from the payload, so any per-local-day count keyed on it is the sender's clock to game; a retention count needs no clock. Remote rows never emit, so the prune is a plain DELETE. The block list stays the hard stop.
-- **Anchors keep lat/lon/accuracy exactly as stored today.** **[P4]** `aroundPoint` returns `listMarks` rows unchanged (teasers via `reveal.js` strip lat/lon from locked marks; the route decodes the cell centre into `approx_lat/approx_lon/approx_m` exactly as `GET /api/ramble/marks` does, through the SAME `withApproxAnchor`) plus a `distance_m` per row. Nests come from `listNests(db, bbox, { from })` unchanged. A row with no exact anchor is located at its geohash cell centre and kept when the cell could hold a point inside the radius (distance to centre ≤ radius + the cell's half-diagonal); the client shows a 7-char teaser as a dashed directional label (`approx_m ≈ 101 m ≤ COARSE_M = 150`) and anything coarser (a 5-char wire caw, `approx_m ≈ 3.4 km`) as "somewhere in this area" with NO direction — never an invented position.
+- **Anchors keep lat/lon/accuracy exactly as stored today.** **[P4]** `aroundPoint` returns `listMarks` rows unchanged (teasers via `reveal.js` strip lat/lon from locked marks; the route decodes the cell centre into `approx_lat/approx_lon/approx_m` exactly as `GET /api/ramble/marks` does, through the SAME `withApproxAnchor`) plus a `distance_m` per row. Nests come from `listNests(db, bbox, { from })` unchanged. A row with no exact anchor is located at its geohash cell centre and kept when the cell could hold a point inside the radius (distance to centre ≤ radius + the cell's half-diagonal); the client shows a 7-char teaser as a dashed directional label (`approx_m ≈ 101 m ≤ COARSE_M = 150`) and anything coarser (a 5-char wire caw, `approx_m ≈ 3.2 km`) as "somewhere in this area" with NO direction — never an invented position.
 - **AR contract (spec §6, exact):** `renderAr({ anchors, pose, bird, camera })` → frame. `anchors[i] = { id, kind: "mark"|"caw"|"nest", lat, lon, accuracy_m, approx_m, locked, title }`; `pose = { lat, lon, accuracy_m, heading }` (`heading` in degrees clockwise from true north, or `null`); `bird = { species, seed, mood } | null`; `camera` optional boolean (default `true`; `false` after `getUserMedia` failed). `mode = "ar"` only when there is a fix AND a camera AND a heading; otherwise `"radar"` with `reason ∈ "no-fix" | "no-camera" | "no-heading"` — never a blank screen. Visible = `|bearing − heading| ≤ FOV_DEG/2 = 35°`; horizontal position `x = 0.5 + rel/FOV_DEG` (viewport fraction); others parked at `x = 0.06` (left) / `0.94` (right) stacked by distance rank, `PARK_MAX = 6` per side; vertical `y = 0.70 − 0.36·t` and `scale = 1 − 0.5·t` with `t = min(1, distance/RANGE_M)`, `RANGE_M = 500`. The frame is viewport-independent so Node tests need no DOM. The DOM painter `mountAr(els, { engine, onTap })` builds labels with `createElement` + `textContent`, draws the bird ONLY through `engine.mountBird` (the existing `RambleBird.mountBird` on an `<svg>`), and reacts (`rb-ar-react` class for 900 ms) when a label enters the visible set. A future WebXR renderer consumes the same state object.
-- **Camera frames never leave the device (spec §9):** the `<video>` is a background and nothing else. Neither `static/ramble.js` nor `static/ramble-ar.js` may contain `toDataURL`, `toBlob`, `captureStream`, `ImageCapture`, `MediaRecorder`, `drawImage` or `getContext(` — `tests/ramble-panel.test.js` and `tests/ramble-ar.test.js` grep for all seven. The stream's tracks are stopped on close and when the tab is hidden.
-- **Pose sources (spec §6, exact):** GPS via `navigator.geolocation.watchPosition` (high accuracy); heading via the `deviceorientationabsolute` event where the window has `ondeviceorientationabsolute`, else `deviceorientation` (iOS reports `webkitCompassHeading` there); `headingFromEvent(ev, screenAngle)` = `webkitCompassHeading` when present, else `360 − alpha + screenAngle` ONLY for an absolute event (`ev.absolute === true` or `ev.type === "deviceorientationabsolute"`), else `null`; smoothed with `smoothHeading(prev, next, 0.3)` across the 359→1 wrap. iOS 13+ `DeviceOrientationEvent.requestPermission()` is called from the user gesture that opens the view (the AR chip, or "Got it" on the notice); a refusal is the radar strip.
+- **Camera frames never leave the device (spec §9):** the `<video>` is a background and nothing else. Neither `static/ramble.js` nor `static/ramble-ar.js` may contain `toDataURL`, `toBlob`, `captureStream`, `ImageCapture`, `MediaRecorder`, `drawImage` or `getContext(` — `tests/ramble-panel.test.js` and `tests/ramble-ar.test.js` grep for all seven. The stream's tracks are stopped on close and while the tab is hidden (the view stays open and the camera restarts when the tab returns — ruling Q3).
+- **Pose sources (spec §6, exact):** GPS via `navigator.geolocation.watchPosition` (high accuracy); heading via the `deviceorientationabsolute` event where the window has `ondeviceorientationabsolute`, else `deviceorientation` (iOS reports `webkitCompassHeading` there); `headingFromEvent(ev, screenAngle)` = `webkitCompassHeading` when present, else `360 − alpha + screenAngle` ONLY for an absolute event (`ev.absolute === true` or `ev.type === "deviceorientationabsolute"`), else `null`; smoothed with `smoothHeading(prev, next, 0.3)` across the 359→1 wrap. `getUserMedia` and iOS 13+ `DeviceOrientationEvent.requestPermission()` are BOTH called synchronously inside the user gesture that opens the view (the AR chip, or "Got it" on the notice), camera first, never after an awaited promise (ruling Q2); a refusal of either is the radar strip. A heading older than 5 s is dropped (`AR_HEADING_STALE_MS`) so a silent compass falls back to the ring; a `watchPosition` permission error clears the fix.
 - **Limits stated in-UI on first open:** a notice card (`#rb-ar-notice`) gates the first open — nothing starts (no camera, no motion prompt) until "Got it" — and is remembered per browser under localStorage key `ramble.ar.limits` (`"1"`), read and written inside `try/catch`; storage failure means the notice shows every time, never a crash. Copy (exact, Task 6): direction and distance only, nothing sticks to surfaces; compass may be off by tens of degrees, hold the phone upright; iPhone asks once for motion access, a refusal means the radar strip; no camera or no compass means the radar strip; the camera picture stays on the phone.
 - **Panel rules:** `router.use("/api/ramble", dashboardAuth)` path-scoped (never unpathed); client scripts `static/ramble.js` AND `static/ramble-ar.js` contain ZERO backticks; remote/user text is written with `textContent` only; the only `innerHTML`/`html:` sinks in `static/ramble.js` stay EXACTLY the two engine sinks (`el.innerHTML = Bird.drawEgg(` and `html: nestEggHtml(`) — the AR egg is drawn by the existing `drawEggArt` (the same sink, no new one) and the AR bird by `RambleBird.mountBird`; `static/ramble-ar.js` has ZERO sinks; never `express.static`; nothing under `PUBLIC_FUNNEL_PREFIXES`; every input bounded (regex/`.max`, enums); icons are inline SVG, never emoji; the AR script is a classic script (no `import`/`export`) so it runs under `vm.runInNewContext` in tests and as a plain `<script>` in the browser. **[P4]** No dead buttons: the map's AR chip opens the view; every AR label tap opens the SAME popup builder as its pin (`popupFor(mark)` → Unlock here / read text / share an invite; `nestPopup(nest)` → Take the egg), each of which posts to a real route.
 - **Visual direction C tokens** only; reuse `rb-card`, `rb-step`, `rb-btn`, `rb-btn-ghost`, `rb-chip`, `rb-icon-btn`, `rb-sheet`, `rb-say`, `rb-eyebrow`, `rb-tag` — no new colours; the AR surfaces take the same tokens (`--rb-surface`, `--rb-line`, `--rb-accent-2`, `--rb-pop-sm`). Reduced motion disables the bird's reaction hop.
@@ -72,7 +72,7 @@ Phase-1/2/3 constraints still bind (copied, with the phase-4 deltas marked **[P4
 
 - [ ] **Step 1: Write the failing anchors test (cell cover)**
 
-Append to `tests/ramble-anchors.test.js` (its imports are `{ encodeGeohash, decodeGeohash, haversineMeters, withinRange, saltedLanId, geohashNeighborsPrefix }` from `../bundles/ramble/server/anchors.js` — extend that import with `cellStepDegrees, cellsCoveringBbox`, and add `import { cellsInBbox, CELL7_LAT_STEP, CELL7_LON_STEP } from "../bundles/ramble/server/nests.js";`):
+Append to `tests/ramble-anchors.test.js` (its import is `{ encodeGeohash, decodeGeohash, haversineMeters, withinRange, saltedLanId }` from `../bundles/ramble/server/anchors.js` — extend that import with `cellStepDegrees, cellsCoveringBbox`, and add `import { cellsInBbox, CELL7_LAT_STEP, CELL7_LON_STEP } from "../bundles/ramble/server/nests.js";`):
 
 ```js
 test("cellStepDegrees: 5 bits per char, longitude takes the odd bit (precision 7 matches nests.js)", () => {
@@ -271,6 +271,14 @@ test("aroundPoint: this week's nests within the radius, nearest first; the radiu
   const tight = await aroundPoint(db, { ...HERE, radiusM: 1, now: T0 });
   assert.equal(tight.radius_m, AROUND_RADIUS_MIN);
 });
+
+test("aroundPoint: works at high latitude (the cover grows with 1/cos) and refuses the pole rather than scanning the table", async () => {
+  const db = await freshDb();
+  const far = await aroundPoint(db, { lat: 85, lon: 10, now: T0 });
+  assert.deepEqual(far.marks, []);
+  assert.equal(far.radius_m, AROUND_RADIUS_DEFAULT);
+  await assert.rejects(aroundPoint(db, { lat: 89.9, lon: 10, now: T0 }), (err) => err.code === "too-wide");
+});
 ```
 
 - [ ] **Step 6: Run it to verify it fails**
@@ -313,7 +321,8 @@ export const AROUND_RADIUS_MAX = 1000;
  * query (a 2 km box is at most 2x2 cells of ~4.9 km).
  */
 const COVER_PRECISION = 5;
-const MAX_COVER_CELLS = 16;
+/** 64 five-char cells is ~39 km square: enough for any latitude below ~89.5°; past that the cover is refused (never a silent full-table scan). */
+const MAX_COVER_CELLS = 64;
 const LIST_LIMIT = 500;
 const M_PER_DEG_LAT = 111320;
 
@@ -346,7 +355,14 @@ export async function aroundPoint(db, { lat, lon, radiusM = AROUND_RADIUS_DEFAUL
   const here = { lat, lon };
   const radius = Math.min(AROUND_RADIUS_MAX, Math.max(AROUND_RADIUS_MIN, Number(radiusM) || AROUND_RADIUS_DEFAULT));
   const bbox = bboxAround(here, radius);
-  const cells = cellsCoveringBbox(bbox, COVER_PRECISION, { max: MAX_COVER_CELLS }) ?? [];
+  const cells = cellsCoveringBbox(bbox, COVER_PRECISION, { max: MAX_COVER_CELLS });
+  if (!cells) {
+    // An empty `cells` would make listMarks drop the cell filter and scan the
+    // newest 500 rows of the whole table — a wrong answer, not a slow one.
+    const err = new Error("too far north or south for the AR view");
+    err.code = "too-wide";
+    throw err;
+  }
   const marks = [];
   for (const row of await listMarks(db, { cells, limit: LIST_LIMIT })) {
     const at = locate(row);
@@ -365,7 +381,7 @@ export async function aroundPoint(db, { lat, lon, radiusM = AROUND_RADIUS_DEFAUL
 - [ ] **Step 8: Run the around test to verify it passes**
 
 Run: `node scripts/run-suite.mjs tests/ramble-around.test.js`
-Expected: PASS (5 tests). If "caw-far" leaks in: `9v6m8` is the cell two rows north of `9v6m2` (centre ~30.52, 6.6 km away) and must fail `d > radius + err_m` (500 + ~3400 < 6600).
+Expected: PASS (6 tests). If "caw-far" leaks in: `9v6m8` is the cell two rows north of `9v6m2` (centre ~30.52, 6.8 km away) and must fail `d > radius + err_m` (500 + ~3400 < 6600).
 
 - [ ] **Step 9: Commit**
 
@@ -381,12 +397,13 @@ git show --stat HEAD
 ## Task 2: Retention cap on inbound contacts marks per contact (phase-3 carry item a)
 
 **Files:**
-- Modify: `bundles/ramble/server/trades.js` (constants block after `MAX_GIFTS_PER_CONTACT_PER_DAY`; a new `pruneContactMarks` before `/* ---- inbound router */`; `receiveEnvelope`'s `ramble.mark` branch)
-- Test: `tests/ramble-trades.test.js` (append)
+- Modify: `bundles/ramble/server/trades.js` (constants block after `MAX_GIFTS_PER_CONTACT_PER_DAY`; a new `pruneContactMarks` before `/* ---- inbound router */`; `receiveEnvelope`'s `ramble.mark` branch; the marks.js import gains `getMark`)
+- Modify: `servers/gateway/boot/ramble-transport.js` (`onEnvelope`: no `ramble:nearby` for a `gone` mark)
+- Test: `tests/ramble-trades.test.js` (append), `tests/ramble-transport.test.js` (append)
 
 **Interfaces:**
-- Consumes: `insertRemoteMark(db, row) → { inserted, row }` (marks.js); `xOnly(pubkey)` (persona.js).
-- Produces: `MAX_CONTACT_MARKS_PER_CONTACT = 50`; `pruneContactMarks(db, author, max = MAX_CONTACT_MARKS_PER_CONTACT) → number` (rows deleted); `receiveEnvelope` mark result gains `pruned: number`.
+- Consumes: `insertRemoteMark(db, row) → { inserted, row }`, `getMark(db, mark_id)` (marks.js); `xOnly(pubkey)` (persona.js).
+- Produces: `MAX_CONTACT_MARKS_PER_CONTACT = 50`; `pruneContactMarks(db, author, max = MAX_CONTACT_MARKS_PER_CONTACT) → number` (rows deleted); `receiveEnvelope` mark result gains `pruned: number` and `gone: boolean` (the row it just inserted was itself pruned — an old re-delivered mark); the transport skips the `ramble:nearby` poke when `gone` (the meet_crow credit still happens: they did meet).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -417,7 +434,14 @@ test("phase 4: a contact's marks are bounded by retention — the newest 50 stay
   assert.equal((await db.execute("SELECT count(*) AS n FROM ramble_marks WHERE mark_id = 'pub-F'")).rows[0].n, 1);
   // A re-delivery inserts nothing and prunes nothing.
   const dup = await receiveEnvelope(db, envelope(55, PK, "F"), { now: T0 });
-  assert.deepEqual([dup.inserted, dup.pruned], [false, 0]);
+  assert.deepEqual([dup.inserted, dup.pruned, dup.gone], [false, 0, false]);
+  // An OLD mark re-sent under a new event id (its row was pruned earlier) is
+  // inserted and immediately pruned again: it reports `gone` so the caller
+  // does not announce a mark that no longer exists.
+  const stale = await receiveEnvelope(db, envelope(-100, PK, "F"), { now: T0 });
+  assert.deepEqual([stale.inserted, stale.pruned, stale.gone], [true, 1, true]);
+  assert.equal(await count(PK), MAX_CONTACT_MARKS_PER_CONTACT + 1, "still 50 contacts marks + the public one");
+  assert.equal((await db.execute("SELECT count(*) AS n FROM ramble_marks WHERE mark_id = 'F--100'")).rows[0].n, 0);
   // Direct call with a bad author is a no-op.
   assert.equal(await pruneContactMarks(db, ""), 0);
   assert.equal(await pruneContactMarks(db, PK2, 0), 1, "max 0 empties that contact");
@@ -469,6 +493,8 @@ export async function pruneContactMarks(db, author, max = MAX_CONTACT_MARKS_PER_
 }
 ```
 
+Change the marks.js import at the top of trades.js to `import { insertRemoteMark, getMark } from "./marks.js";`.
+
 In `receiveEnvelope`, replace the `ramble.mark` branch's last two lines:
 
 ```js
@@ -482,21 +508,60 @@ with:
     const r = await insertRemoteMark(db, row);
     // Phase 4: a contact who floods marks is bounded by retention, not by
     // their own created_at. Only an actual insert can push the count over.
+    // insertRemoteMark dedups on (nostr_event_id OR mark_id), so an old mark
+    // re-sent under a NEW event id after its row was pruned is inserted and
+    // pruned again in the same call — `gone` says so, so the transport does
+    // not announce a mark that is not there.
     const pruned = r.inserted ? await pruneContactMarks(db, author) : 0;
-    return { kind: "mark", inserted: !!r.inserted, row: r.row ?? null, geohash: row.geohash, mark_id: row.mark_id, markKind: row.kind, pruned };
+    const gone = pruned > 0 && !(await getMark(db, row.mark_id));
+    return { kind: "mark", inserted: !!r.inserted, row: r.row ?? null, geohash: row.geohash, mark_id: row.mark_id, markKind: row.kind, pruned, gone };
+```
+
+In `servers/gateway/boot/ramble-transport.js`, `onEnvelope`, change the mark branch's first inner `try` so the nearby poke is skipped for a gone row (the credit block below it is unchanged — meeting the contact still counts):
+
+```js
+      if (result.kind === "mark" && result.inserted) {
+        if (!result.gone) {
+          try {
+            bus.emit("ramble:nearby", { geohash: result.geohash, mark_id: result.mark_id, kind: result.markKind });
+          } catch (emitErr) {
+            console.warn("[ramble] ramble:nearby subscriber threw:", emitErr?.message ?? emitErr);
+          }
+        }
+```
+
+(and the matching closing brace stays where the old `try` block ended). Append to `tests/ramble-transport.test.js`, after the phase-3 inbound-mark test:
+
+```js
+test("phase 4: a re-sent mark that is pruned on arrival credits meet_crow but pokes no ramble:nearby", async () => {
+  const h = await makeHarness();
+  const nearby = [];
+  h.bus.on("ramble:nearby", (p) => nearby.push(p));
+  const mk = (i) => ({ mark_id: "flood-" + i, kind: "mark", anchor_kind: "geo", geohash: FULL_GEOHASH, lat: LAT, lon: LON, reveal: "open", content_text: "n" + i, content_kind: "none", created_at: 1700000000000 + i * 1000 });
+  for (let i = 0; i < 50; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    await h.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, payload: { type: "ramble.mark", v: 1, mark: mk(i) }, eventId: "fl-" + i });
+  }
+  assert.equal(nearby.length, 50);
+  await h.transport.onEnvelope({ crowId: "crow:one", contactId: 1, pubkey: PK, payload: { type: "ramble.mark", v: 1, mark: mk(-5) }, eventId: "fl-old" });
+  assert.equal(nearby.length, 50, "an old mark pruned on arrival is not announced");
+  assert.equal(await getMark(h.db, "flood--5"), null);
+  const { rows } = await h.db.execute({ sql: "SELECT count(*) AS n FROM ramble_marks WHERE author = ?", args: [PK] });
+  assert.equal(Number(rows[0].n), 50);
+});
 ```
 
 Update the module header's list of caps (the sentence "Inbound ceilings per contact (review round 1, S2)") is a comment on the constants — leave it; the new constant carries its own comment.
 
-- [ ] **Step 4: Run the trades tests to verify they pass**
+- [ ] **Step 4: Run the trades and transport tests to verify they pass**
 
-Run: `node scripts/run-suite.mjs tests/ramble-trades.test.js`
-Expected: PASS (the existing `receiveEnvelope` routing test still passes — it asserts specific fields, not the whole object, so the extra `pruned` key is fine). Also run `node scripts/run-suite.mjs tests/ramble-transport.test.js` — the transport ignores unknown result keys; expected PASS.
+Run: `node scripts/run-suite.mjs tests/ramble-trades.test.js tests/ramble-transport.test.js`
+Expected: PASS (the existing `receiveEnvelope` routing test asserts specific fields, not the whole object, so the extra `pruned`/`gone` keys are fine; the `payloadToMark → null` early return `{ kind: "mark", inserted: false }` is untouched and its whole-object `deepEqual` still holds).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit bundles/ramble/server/trades.js tests/ramble-trades.test.js -m "ramble trades: keep the newest 50 contacts marks per contact"
+git commit bundles/ramble/server/trades.js servers/gateway/boot/ramble-transport.js tests/ramble-trades.test.js tests/ramble-transport.test.js -m "ramble trades: keep the newest 50 contacts marks per contact; no nearby poke for a mark pruned on arrival"
 git show --stat HEAD
 ```
 
@@ -733,6 +798,9 @@ test("GET /api/ramble/around: marks and nests within the radius with distance_m;
     const wide = await (await req(`/api/ramble/around?lat=${LAT}&lon=${LON}&radius_m=1000`)).json();
     assert.equal(wide.radius_m, 1000);
     assert.ok(wide.marks.map((m) => m.content_text).includes("far north"));
+    // A full-precision double as String() prints it (up to 17 decimals) is a fine query.
+    assert.equal((await req("/api/ramble/around?lat=30.460000000000000853&lon=-98.08")).status, 400, "18 decimals is too many");
+    assert.equal((await req("/api/ramble/around?lat=30.46000000000000085&lon=-98.079999999999998")).status, 200);
   } finally {
     await db.execute({ sql: "DELETE FROM ramble_settings WHERE key = 'nest.rate'", args: [] });
     try { db.close?.(); } catch { /* scratch */ }
@@ -818,10 +886,9 @@ and the guard + `mods` object:
   }
 ```
 
-(c) In `GET /api/ramble/marks` replace the `const byPubkey = ...; res.json({ marks: marks.map(withApproxAnchor).map(...) })` block with:
+(c) In `GET /api/ramble/marks` the line `const marks = await mods.marksMod.listMarks(db, { visibility, cells });` STAYS. Delete everything after it up to and including the `});` that closes `res.json(` — i.e. the comment `// Phase 3: a remote mark by a contact is named…`, the `const byPubkey = await contactsByPubkey();` line and the whole `res.json({ marks: marks.map(withApproxAnchor).map((m) => { … }) });` statement — and put this single line in their place (a second `const marks` would be a SyntaxError):
 
 ```js
-    const marks = await mods.marksMod.listMarks(db, { visibility, cells });
     res.json({ marks: await annotateMarks(marks) });
 ```
 
@@ -835,8 +902,10 @@ and the guard + `mods` object:
   // visit_place stays on POST /api/ramble/area with `here`.
   router.get("/api/ramble/around", handle(async (req, res) => {
     const q = req.query || {};
-    if (typeof q.lat !== "string" || !/^-?\d{1,3}(\.\d{1,12})?$/.test(q.lat)) bad("lat must be a decimal number");
-    if (typeof q.lon !== "string" || !/^-?\d{1,3}(\.\d{1,12})?$/.test(q.lon)) bad("lon must be a decimal number");
+    // Up to 17 decimals: String(double) can print that many, and the client
+    // sends toFixed(6) anyway — a full-precision fix must never be a 400.
+    if (typeof q.lat !== "string" || !/^-?\d{1,3}(\.\d{1,17})?$/.test(q.lat)) bad("lat must be a decimal number");
+    if (typeof q.lon !== "string" || !/^-?\d{1,3}(\.\d{1,17})?$/.test(q.lon)) bad("lon must be a decimal number");
     const lat = requireLat(Number(q.lat));
     const lon = requireLon(Number(q.lon));
     const { AROUND_RADIUS_DEFAULT, AROUND_RADIUS_MIN, AROUND_RADIUS_MAX } = mods.aroundMod;
@@ -846,7 +915,13 @@ and the guard + `mods` object:
       radiusM = Number(q.radius_m);
       if (radiusM < AROUND_RADIUS_MIN || radiusM > AROUND_RADIUS_MAX) bad(`radius_m must be between ${AROUND_RADIUS_MIN} and ${AROUND_RADIUS_MAX}`);
     }
-    const out = await mods.aroundMod.aroundPoint(db, { lat, lon, radiusM, now: Date.now() });
+    let out;
+    try {
+      out = await mods.aroundMod.aroundPoint(db, { lat, lon, radiusM, now: Date.now() });
+    } catch (err) {
+      if (err?.code === "too-wide") bad(err.message);
+      throw err;
+    }
     res.json({ ...out, marks: await annotateMarks(out.marks) });
   }));
 ```
@@ -905,6 +980,13 @@ function load(extra = {}) {
   return { Ar: sandbox.window.RambleAr, sandbox };
 }
 const { Ar } = load();
+/**
+ * Objects and arrays built INSIDE the vm carry that realm's prototypes, and
+ * assert/strict's deepEqual is deepStrictEqual (it compares prototypes), so a
+ * vm-built value on the LEFT of deepEqual fails with "same structure but not
+ * reference-equal". Round-trip through JSON before comparing structure.
+ */
+const plain = (v) => JSON.parse(JSON.stringify(v));
 
 const HERE = { lat: 30.46, lon: -98.08 };
 const NORTH_100 = { lat: 30.460898, lon: -98.08 };
@@ -987,10 +1069,10 @@ test("renderAr in ar mode: labels for in-range anchors, far first; parked overfl
   const anchors = [anchor("n", NORTH_100), anchor("e", EAST_100), anchor("s", SOUTH_100), anchor("far", { lat: 30.4681, lon: -98.08 }), anchor("caw", HERE, { kind: "caw", approx_m: 3400, title: "A caw" })];
   const f = Ar.renderAr({ anchors, pose: pose(0), bird: null });
   assert.equal(f.mode, "ar"); assert.equal(f.reason, null);
-  assert.deepEqual(f.visible, ["n"]);
-  assert.deepEqual(f.labels.map((l) => l.id).sort(), ["e", "n", "s"], "in range and not coarse");
-  assert.deepEqual(f.coarse, [{ id: "caw", kind: "caw", title: "A caw", sub: "somewhere in this area" }]);
-  assert.deepEqual(f.parked, { left: 0, right: 0 });
+  assert.deepEqual(plain(f.visible), ["n"]);
+  assert.deepEqual(plain(f.labels.map((l) => l.id).sort()), ["e", "n", "s"], "in range and not coarse");
+  assert.deepEqual(plain(f.coarse), [{ id: "caw", kind: "caw", title: "A caw", sub: "somewhere in this area" }]);
+  assert.deepEqual(plain(f.parked), { left: 0, right: 0 });
   assert.equal(f.radar.dots.length, 3);
   assert.equal(f.radar.list.length, 3);
   assert.equal(f.say, "n, 100 m ahead.");
@@ -1000,22 +1082,22 @@ test("renderAr in ar mode: labels for in-range anchors, far first; parked overfl
   const g = Ar.renderAr({ anchors: many, pose: pose(0), bird: null });
   const parked = g.labels.filter((l) => l.side === "right");
   assert.equal(parked.length, 6);
-  assert.deepEqual(g.parked, { left: 0, right: 3 });
+  assert.deepEqual(plain(g.parked), { left: 0, right: 3 });
   const ys = parked.slice().sort((a, b) => a.distance_m - b.distance_m).map((l) => l.y);
   for (let i = 1; i < ys.length; i++) assert.ok(ys[i] > ys[i - 1], "parked labels stack down the edge by distance");
-  assert.deepEqual(g.labels.map((l) => l.distance_m), g.labels.map((l) => l.distance_m).slice().sort((a, b) => b - a), "far first so near paints on top");
+  assert.deepEqual(plain(g.labels.map((l) => l.distance_m)), plain(g.labels.map((l) => l.distance_m).slice().sort((a, b) => b - a)), "far first so near paints on top");
   assert.equal(g.say, "r1, 25 m to your right.");
 });
 
 test("renderAr radar fallback: no heading, no camera, no fix — never blank; north-up dots; the list carries distance and compass point", () => {
   const anchors = [anchor("n", NORTH_100), anchor("e", EAST_100, { locked: true })];
   const noHeading = Ar.renderAr({ anchors, pose: pose(null), bird: null });
-  assert.deepEqual([noHeading.mode, noHeading.reason, noHeading.labels.length, noHeading.visible.length], ["radar", "no-heading", 0, 0]);
+  assert.deepEqual([noHeading.mode, noHeading.reason, noHeading.labels.length, noHeading.visible.length], ["radar", "no-heading", 0, 0]); // host-built array on the left: fine
   const dn = noHeading.radar.dots.find((d) => d.id === "n");
   assert.ok(Math.abs(dn.x - 0.5) < 0.01 && dn.y < 0.5, "north-up: the north anchor sits above centre");
   const de = noHeading.radar.dots.find((d) => d.id === "e");
   assert.ok(de.x > 0.5 && Math.abs(de.y - 0.5) < 0.01 && de.locked === true);
-  assert.deepEqual(noHeading.radar.list.map((r) => r.sub), ["100 m · N", "~100 m · E · locked"]);
+  assert.deepEqual(plain(noHeading.radar.list.map((r) => r.sub)), ["100 m · N", "~100 m · E · locked"]);
   assert.equal(noHeading.say, "n, 100 m N. Follow the ring.");
   const noCamera = Ar.renderAr({ anchors, pose: pose(0), bird: null, camera: false });
   assert.deepEqual([noCamera.mode, noCamera.reason, noCamera.labels.length], ["radar", "no-camera", 0]);
@@ -1025,20 +1107,25 @@ test("renderAr radar fallback: no heading, no camera, no fix — never blank; no
   assert.deepEqual([noFix.mode, noFix.reason, noFix.radar.dots.length, noFix.say], ["radar", "no-fix", 0, "Waiting for a fix…"]);
   const empty = Ar.renderAr({ anchors: [], pose: pose(0), bird: null });
   assert.equal(empty.say, "Nothing within 500 m. Walk a bit.");
+  const onlyCoarse = Ar.renderAr({ anchors: [anchor("caw", HERE, { kind: "caw", approx_m: 3400, title: "A caw" })], pose: pose(0), bird: null });
+  assert.equal(onlyCoarse.say, "Something is around here, but I can't tell which way.");
+  assert.equal(onlyCoarse.coarse.length, 1);
   assert.equal(Ar.renderAr(null).mode, "radar");
 });
 
-/** The least DOM that mountAr touches: createElement/NS, textContent, attributes, style, listeners, classList, hidden. */
+/** The least DOM that mountAr touches: createElement/NS, textContent, attributes, style, listeners, classList, hidden, parentNode/removeChild. */
 function fakeDocument() {
   const make = (tag) => {
     const el = { tag, children: [], attrs: {}, style: {}, hidden: false, listeners: {}, classes: new Set(), _text: "" };
     el.setAttribute = (k, v) => { el.attrs[k] = String(v); };
     el.getAttribute = (k) => (k in el.attrs ? el.attrs[k] : null);
-    el.appendChild = (c) => { el.children.push(c); return c; };
+    el.removeAttribute = (k) => { delete el.attrs[k]; };
+    el.appendChild = (c) => { el.children.push(c); c.parentNode = el; return c; };
+    el.removeChild = (c) => { el.children = el.children.filter((x) => x !== c); c.parentNode = null; return c; };
     el.addEventListener = (t, fn) => { (el.listeners[t] = el.listeners[t] || []).push(fn); };
     el.click = () => { for (const fn of el.listeners.click || []) fn(); };
     el.classList = { add: (c) => el.classes.add(c), remove: (c) => el.classes.delete(c), contains: (c) => el.classes.has(c) };
-    Object.defineProperty(el, "textContent", { get: () => el._text, set: (v) => { el._text = String(v); if (v === "") el.children = []; } });
+    Object.defineProperty(el, "textContent", { get: () => el._text, set: (v) => { el._text = String(v); if (v === "") { el.children.forEach((c) => { c.parentNode = null; }); el.children = []; } } });
     return el;
   };
   return { createElement: make, createElementNS: (_ns, tag) => make(tag) };
@@ -1056,29 +1143,46 @@ test("mountAr paints labels with textContent, routes taps by id, mounts the bird
   const f1 = session.render({ anchors, pose: pose(90), bird: { species: "crow", seed: 7, mood: "happy" } });
   assert.equal(f1.mode, "ar");
   assert.equal(els.root.getAttribute("data-mode"), "ar");
+  assert.equal(els.root.getAttribute("data-camera"), "on");
   assert.equal(els.mode.textContent, "AR");
   assert.equal(els.labels.children.length, 2);
   const east = els.labels.children.find((c) => c.getAttribute("data-id") === "e");
   assert.equal(east.getAttribute("data-locked"), "true");
+  assert.equal(east.getAttribute("data-side"), null, "in view: no edge arrow");
   assert.equal(east.children[0].textContent, "A locked mark");
   assert.equal(east.children[1].textContent, "~100 m · locked");
   assert.match(east.style.left, /%$/);
+  const north = els.labels.children.find((c) => c.getAttribute("data-id") === "n");
+  assert.equal(north.getAttribute("data-side"), "left", "facing east, north is parked on the left edge with its arrow");
+  assert.ok(Number(east.style.zIndex) > Number(north.style.zIndex), "the nearer label paints on top");
   east.click();
   assert.deepEqual(taps, ["e"]);
   assert.equal(session.anchor("e").title, "A locked mark");
   assert.equal(session.anchor("nope"), null);
-  assert.deepEqual(mounted, [["svg", { seed: 7, species: "crow" }, "happy"]]);
+  assert.deepEqual(plain(mounted), [["svg", { seed: 7, species: "crow" }, "happy"]]);
   assert.equal(els.bird.hidden, false); assert.equal(els.egg.hidden, true);
   assert.ok(els.bird.classes.has("rb-ar-react"), "east entered view on the first frame");
   assert.equal(els.radar.children.length, 2);
   assert.equal(els.say.textContent, "A locked mark, 100 m ahead.");
-  // Same bird, same pose: no re-mount, no new reaction; turning to face north makes "n" enter.
+  // Same bird, same pose: no re-mount, no new reaction, and the SAME button
+  // objects (a label rebuilt under the finger never gets its click — C3).
   els.bird.classes.delete("rb-ar-react");
   session.render({ anchors, pose: pose(90), bird: { species: "crow", seed: 7, mood: "happy" } });
   assert.equal(mounted.length, 1);
   assert.ok(!els.bird.classes.has("rb-ar-react"));
+  assert.equal(els.labels.children.find((c) => c.getAttribute("data-id") === "e"), east, "the label element persists across frames");
+  assert.equal(els.labels.children.length, 2);
+  const rowsBefore = els.list.children;
   session.render({ anchors, pose: pose(0), bird: { species: "crow", seed: 7, mood: "happy" } });
   assert.ok(els.bird.classes.has("rb-ar-react"));
+  assert.equal(els.labels.children.find((c) => c.getAttribute("data-id") === "n"), north, "still the same element after turning");
+  assert.equal(north.getAttribute("data-side"), null, "now in view: the arrow is gone");
+  assert.equal(east.getAttribute("data-side"), "right");
+  assert.equal(els.list.children, rowsBefore, "the radar list is not rebuilt while its text is unchanged");
+  // An anchor that leaves the set takes its button with it.
+  session.render({ anchors: [anchors[0]], pose: pose(0), bird: { species: "crow", seed: 7, mood: "happy" } });
+  assert.equal(els.labels.children.length, 1);
+  assert.equal(east.parentNode, null);
   // No bird: the egg shows; no heading: radar mode label and rows.
   const f2 = session.render({ anchors, pose: pose(null), bird: null });
   assert.equal(f2.mode, "radar");
@@ -1104,7 +1208,7 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
 
 ```js
 /* Ramble AR — the overlay renderer (spec §6). Plain classic script, dual
- * Node/browser: `window.RambleAr` in a browser, `module.exports` under a
+ * Node/browser: window.RambleAr in a browser, module.exports under a
  * CommonJS loader, and it runs unchanged inside vm.runInNewContext (the
  * tests). NO ESM syntax, NO template literals (backticks), NO innerHTML:
  * every label is built with createElement + textContent, and the only markup
@@ -1241,8 +1345,9 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
     return { id: item.id, kind: item.kind, locked: item.locked, x: 0.5 + 0.42 * r * Math.sin(a), y: 0.5 - 0.42 * r * Math.cos(a) };
   }
 
-  function sayFor(mode, reason, items, visibleItems) {
+  function sayFor(mode, reason, items, visibleItems, coarseCount) {
     if (reason === "no-fix") return "Waiting for a fix…";
+    if (items.length === 0 && coarseCount > 0) return "Something is around here, but I can't tell which way.";
     if (items.length === 0) return "Nothing within " + RANGE_M + " m. Walk a bit.";
     if (visibleItems.length > 0) return visibleItems[0].title + ", " + roundM(visibleItems[0].distance_m) + " m ahead.";
     var n = items[0];
@@ -1250,7 +1355,7 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
     return n.title + ", " + roundM(n.distance_m) + " m " + directionWord(n.rel) + ".";
   }
 
-  /* The contract. `camera` defaults to true; pass false once getUserMedia failed. */
+  /* The contract. camera defaults to true; pass false once getUserMedia failed. */
   function renderAr(state) {
     var s = state || {};
     var anchors = Array.isArray(s.anchors) ? s.anchors : [];
@@ -1307,7 +1412,7 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
         }),
       },
       visible: visible.map(function (it) { return it.id; }),
-      say: sayFor(mode, reason, items, visible),
+      say: sayFor(mode, reason, items, visible, coarse.length),
       bird: s.bird || null,
     };
   }
@@ -1325,34 +1430,48 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
     var prevVisible = {};
     var birdKey = null;
     var reactTimer = null;
+    /* Label <button>s persist across frames, keyed by anchor id (C3): a frame
+     * arrives on every orientation event, and a button rebuilt under the
+     * finger never receives its click. Positions are UPDATED in place. */
+    var nodes = {};
+    /* The radar list and the coarse rows repaint only when their text changes. */
+    var listKey = null;
 
     function clear(el) { if (el) el.textContent = ""; }
     function pct(v) { return (v * 100).toFixed(2) + "%"; }
+    function remove(el) { if (el && el.parentNode) el.parentNode.removeChild(el); }
     function badgeFor(item) {
       if (item.kind === "nest") return "N";
       if (item.kind === "caw") return "C";
       return item.locked ? "?" : "M";
     }
 
-    function labelEl(item) {
+    /* Built once per anchor id; the click closes over the id, which never changes. */
+    function labelEl(id) {
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "rb-ar-label";
-      btn.setAttribute("data-id", item.id);
+      btn.setAttribute("data-id", id);
+      var strong = document.createElement("strong");
+      var sub = document.createElement("span");
+      btn.appendChild(strong);
+      btn.appendChild(sub);
+      btn.addEventListener("click", function () { if (typeof o.onTap === "function") o.onTap(id); });
+      return btn;
+    }
+
+    /* Everything about a label that can change between frames. `order` is the
+     * paint order (far first), applied as z-index since DOM order now persists. */
+    function placeLabel(btn, item, order) {
       btn.setAttribute("data-kind", item.kind);
-      if (item.locked) btn.setAttribute("data-locked", "true");
-      if (item.side) btn.setAttribute("data-side", item.side);
+      if (item.locked) btn.setAttribute("data-locked", "true"); else btn.removeAttribute("data-locked");
+      if (item.side) btn.setAttribute("data-side", item.side); else btn.removeAttribute("data-side");
       btn.style.left = pct(item.x);
       btn.style.top = pct(item.y);
       btn.style.transform = "translate(-50%, -50%) scale(" + item.scale.toFixed(3) + ")";
-      var strong = document.createElement("strong");
-      strong.textContent = item.title;
-      var sub = document.createElement("span");
-      sub.textContent = item.sub;
-      btn.appendChild(strong);
-      btn.appendChild(sub);
-      btn.addEventListener("click", function () { if (typeof o.onTap === "function") o.onTap(item.id); });
-      return btn;
+      btn.style.zIndex = String(10 + order);
+      if (btn.children[0].textContent !== item.title) btn.children[0].textContent = item.title;
+      if (btn.children[1].textContent !== item.sub) btn.children[1].textContent = item.sub;
     }
 
     function rowEl(item) {
@@ -1380,6 +1499,7 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
 
     function paintRadar(frame) {
       if (e.radar) {
+        /* Dots are not tappable, so rebuilding them each frame is fine. */
         clear(e.radar);
         frame.radar.dots.forEach(function (dot) {
           var c = document.createElementNS(SVG_NS, "circle");
@@ -1390,6 +1510,12 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
           e.radar.appendChild(c);
         });
       }
+      /* Rows ARE tappable: repaint only when what they say changes (distances
+       * move in 5 m steps, so this is a few times a minute on foot, not 60 Hz). */
+      var key = frame.radar.list.map(function (i) { return i.id + "|" + i.sub; }).join(";") + "#" +
+        frame.coarse.map(function (i) { return i.id + "|" + i.sub; }).join(";");
+      if (key === listKey) return;
+      listKey = key;
       if (e.list) {
         clear(e.list);
         frame.radar.list.forEach(function (item) { e.list.appendChild(rowEl(item)); });
@@ -1432,11 +1558,24 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
       if (e.root) {
         e.root.setAttribute("data-mode", frame.mode);
         e.root.setAttribute("data-reason", frame.reason || "");
+        /* The video's visibility is the camera's state, not the mode's reason:
+         * no fix + no camera reports "no-fix" and must still hide the black video. */
+        e.root.setAttribute("data-camera", state && state.camera === false ? "off" : "on");
       }
       if (e.mode) e.mode.textContent = modeLabel(frame);
       if (e.labels) {
-        clear(e.labels);
-        frame.labels.forEach(function (item) { e.labels.appendChild(labelEl(item)); });
+        var keep = {};
+        frame.labels.forEach(function (item, order) {
+          var btn = nodes[item.id];
+          if (!btn) { btn = labelEl(item.id); nodes[item.id] = btn; e.labels.appendChild(btn); }
+          placeLabel(btn, item, order);
+          keep[item.id] = true;
+        });
+        Object.keys(nodes).forEach(function (id) {
+          if (keep[id]) return;
+          remove(nodes[id]);
+          delete nodes[id];
+        });
       }
       if (e.more) {
         var more = [];
@@ -1460,6 +1599,8 @@ Create `bundles/ramble/panel/static/ramble-ar.js` (ONE classic script; no backti
       prevVisible = {};
       birdKey = null;
       byId = {};
+      nodes = {};
+      listKey = null;
       [e.labels, e.radar, e.list, e.coarse].forEach(clear);
     }
 
@@ -1548,7 +1689,7 @@ In `bundles/ramble/panel/ramble.js`:
              labels into #rb-ar-labels and dots into #rb-ar-ring; data-mode flips
              between "ar" and "radar" (never blank: no camera or no compass shows
              the ring + list). The camera picture is a background only. -->
-        <div class="rb-ar" id="rb-ar" data-mode="radar" data-reason="no-fix" hidden>
+        <div class="rb-ar" id="rb-ar" data-mode="radar" data-reason="no-fix" data-camera="on" hidden>
           <video id="rb-ar-video" class="rb-ar-video" autoplay muted playsinline aria-hidden="true"></video>
 
           <div class="rb-ar-top">
@@ -1641,7 +1782,7 @@ Append to `bundles/ramble/panel/static/ramble.css`:
   object-fit: cover;
   background: #000;
 }
-#ramble .rb-ar[data-reason="no-camera"] .rb-ar-video { display: none; }
+#ramble .rb-ar[data-camera="off"] .rb-ar-video { display: none; }
 
 #ramble .rb-ar-top {
   position: absolute;
@@ -1820,10 +1961,23 @@ Append to `bundles/ramble/panel/static/ramble.css`:
 }
 ```
 
-- [ ] **Step 4: Run the panel tests**
+- [ ] **Step 4: Pin the two CSS-only §6 behaviours, then run the panel tests**
+
+In `tests/ramble-panel.test.js`, inside `"GET /ramble/static/ramble.css serves the panel stylesheet"`, after the existing assertions add:
+
+```js
+  // Phase 4: the edge arrow on a parked label and the dashed locked teaser are
+  // CSS-only halves of two spec §6 requirements — pin the selectors.
+  assert.match(body, /\.rb-ar-label\[data-side\]::before/);
+  assert.match(body, /\.rb-ar-label\[data-locked="true"\]/);
+  assert.match(body, /\.rb-ar\[data-camera="off"\] \.rb-ar-video/);
+  assert.match(body, /\.rb-ar\[data-mode="radar"\] \.rb-ar-radar/);
+```
+
+(If that test reads the body into a differently named variable, use that name.)
 
 Run: `node scripts/run-suite.mjs tests/ramble-panel.test.js`
-Expected: PASS (the shell test with its phase-4 lines; the CSS test only checks the content type).
+Expected: PASS (the shell test with its phase-4 lines; the CSS test with the four selector pins).
 
 - [ ] **Step 5: Commit**
 
@@ -1854,7 +2008,7 @@ In `tests/ramble-panel.test.js`, inside `"GET /ramble/static/ramble.js serves th
   // the renderer mount, the SAME popup builders behind a tapped label, the
   // live-event refreshes, teardown on close and on a hidden tab — and no
   // capture API anywhere (camera frames never leave the device).
-  assert.ok(body.includes('"/api/ramble/around?lat="'), "client must fetch anchors around the fix");
+  assert.ok(body.includes('"/api/ramble/around?lat=" + encodeURIComponent(arPose.lat.toFixed(6))'), "client must fetch anchors around the fix, at a bounded precision");
   assert.ok(body.includes('facingMode: "environment"'));
   assert.ok(body.includes("navigator.mediaDevices.getUserMedia("));
   assert.ok(body.includes("navigator.geolocation.watchPosition("));
@@ -1867,6 +2021,7 @@ In `tests/ramble-panel.test.js`, inside `"GET /ramble/static/ramble.js serves th
   assert.ok(body.includes('"ramble.ar.limits"'));
   assert.ok(body.includes("getTracks().forEach"), "the camera stream is stopped on close");
   assert.ok(body.includes('"visibilitychange"'));
+  assert.ok(body.includes("AR_HEADING_STALE_MS"), "a stale compass falls back to the ring");
   assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body), "camera frames never leave the device");
 ```
 
@@ -1927,8 +2082,12 @@ In `bundles/ramble/panel/static/ramble.js`:
   var arHeadingEvent = null;   /* which orientation event we listen to */
   var arFetchAt = null;        /* { lat, lon, t } of the last around fetch */
   var arRaf = null;
+  var arTick = null;           /* 1 s heartbeat while open: staleness shows even with no events */
+  var arHeadingAt = 0;         /* when the last usable heading arrived */
   var AR_REFETCH_M = 50;
   var AR_REFETCH_MS = 60000;
+  var AR_HEADING_STALE_MS = 5000;
+  var AR_MIN_TURN_DEG = 0.5;   /* orientation events below this do not repaint */
   var AR_NOTICE_KEY = "ramble.ar.limits";
 
   function arTitle(mark) {
@@ -1979,6 +2138,9 @@ In `bundles/ramble/panel/static/ramble.js`:
     arRaf = raf(function () {
       arRaf = null;
       if (!arOpen || !arSession) return;
+      /* A compass that stopped reporting (screen lock, sensor hiccup) must not
+       * keep placing labels with confidence: a stale heading falls back to the ring. */
+      if (arPose.heading != null && Date.now() - arHeadingAt > AR_HEADING_STALE_MS) arPose.heading = null;
       arSession.render({ anchors: arAnchors, pose: arPose, bird: arBirdState(), camera: arCamera });
     });
   }
@@ -1986,7 +2148,8 @@ In `bundles/ramble/panel/static/ramble.js`:
   function refreshAround() {
     if (!arOpen || typeof arPose.lat !== "number" || typeof arPose.lon !== "number") return Promise.resolve();
     arFetchAt = { lat: arPose.lat, lon: arPose.lon, t: Date.now() };
-    return jsonFetch("/api/ramble/around?lat=" + encodeURIComponent(arPose.lat) + "&lon=" + encodeURIComponent(arPose.lon))
+    /* toFixed(6) is ~0.1 m: enough for a label, and never a 400 from a long double. */
+    return jsonFetch("/api/ramble/around?lat=" + encodeURIComponent(arPose.lat.toFixed(6)) + "&lon=" + encodeURIComponent(arPose.lon.toFixed(6)))
       .then(function (out) { arAnchors = toArAnchors(out); scheduleArRender(); })
       .catch(function () { /* keep the last anchors; the pose still moves them */ });
   }
@@ -2008,7 +2171,11 @@ In `bundles/ramble/panel/static/ramble.js`:
   function onArOrientation(ev) {
     var h = Ar.headingFromEvent(ev, screenAngle());
     if (h == null) return;
-    arPose.heading = Ar.smoothHeading(arPose.heading, h, 0.3);
+    arHeadingAt = Date.now();
+    var next = Ar.smoothHeading(arPose.heading, h, 0.3);
+    /* Orientation fires at up to 60 Hz; a sub-degree wobble is not a repaint. */
+    if (arPose.heading != null && Math.abs(Ar.relativeBearing(next, arPose.heading)) < AR_MIN_TURN_DEG) return;
+    arPose.heading = next;
     scheduleArRender();
   }
 
@@ -2072,7 +2239,11 @@ In `bundles/ramble/panel/static/ramble.js`:
       arPose.lat = lastFix.lat; arPose.lon = lastFix.lon; arPose.accuracy_m = lastFix.accuracy_m;
       maybeRefreshAround();
       scheduleArRender();
-    }, function () { scheduleArRender(); }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 });
+    }, function (err) {
+      /* Permission pulled mid-session (code 1): the old fix is a lie now — back to "Waiting for a fix…". A timeout keeps the last fix. */
+      if (err && err.code === 1) { arPose.lat = null; arPose.lon = null; arAnchors = []; }
+      scheduleArRender();
+    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 });
   }
 
   function stopArGps() {
@@ -2112,21 +2283,28 @@ In `bundles/ramble/panel/static/ramble.js`:
     refreshAround();
   }
 
+  /**
+   * Devices start HERE, synchronously inside the user's click: getUserMedia and
+   * DeviceOrientationEvent.requestPermission both want transient activation, so
+   * the camera prompt is issued first and the motion prompt right after it in
+   * the same handler (Q2) — never after an awaited promise.
+   */
   function startAr() {
     if (!Ar || !arRoot) return;
     arOpen = true;
     arRoot.hidden = false;
-    root.setAttribute("data-ar", "on");
     if (!arSession) arSession = Ar.mountAr(arElements(), { engine: Bird, onTap: onArTap });
     drawEggArt($("rb-ar-egg"), eggSeedId);
     arPose = { lat: null, lon: null, accuracy_m: null, heading: null };
+    arHeadingAt = 0;
     arCamera = true;
     arAnchors = [];
     arFetchAt = null;
     scheduleArRender();
-    startArHeading();
     startArCamera();
+    requestArMotion().then(function () { if (arOpen) startArHeading(); });
     startArGps();
+    if (!arTick) arTick = setInterval(scheduleArRender, 1000);
     refreshPet();
   }
 
@@ -2136,12 +2314,12 @@ In `bundles/ramble/panel/static/ramble.js`:
     stopArCamera();
     stopArGps();
     stopArHeading();
+    if (arTick) { clearInterval(arTick); arTick = null; }
     if (arRaf) { try { (window.cancelAnimationFrame || clearTimeout)(arRaf); } catch (e) { /* not fatal */ } arRaf = null; }
     if (arSession) arSession.destroy();
     var notice = $("rb-ar-notice");
     if (notice) notice.hidden = true;
     if (arRoot) arRoot.hidden = true;
-    root.removeAttribute("data-ar");
   }
 
   function arNoticeSeen() {
@@ -2151,22 +2329,22 @@ In `bundles/ramble/panel/static/ramble.js`:
     try { window.localStorage.setItem(AR_NOTICE_KEY, "1"); } catch (e) { /* private mode: it shows again next time */ }
   }
 
-  /** The chip. First time: the notice, and NOTHING starts until "Got it". After that: the motion prompt (iOS) then the devices. */
+  /** The chip. First time: the notice, and NOTHING starts until "Got it". After that: the devices, from the click itself. */
   function openAr() {
     if (!Ar || !arRoot) return;
     var notice = $("rb-ar-notice");
     if (!arNoticeSeen() && notice) {
       notice.hidden = false;
       arRoot.hidden = false;
-      root.setAttribute("data-ar", "on");
       return;
     }
-    requestArMotion().then(startAr);
+    startAr();
   }
 
   var arChip = $("rb-chip-ar");
   if (arChip) {
     if (!Ar) arChip.hidden = true;
+    /* openAr runs synchronously in the click so the device prompts keep the gesture. */
     arChip.addEventListener("click", function () { if (!arOpen) openAr(); });
   }
   var arClose = $("rb-ar-close");
@@ -2177,7 +2355,7 @@ In `bundles/ramble/panel/static/ramble.js`:
       markArNoticeSeen();
       var notice = $("rb-ar-notice");
       if (notice) notice.hidden = true;
-      requestArMotion().then(startAr);
+      startAr();
     });
   }
   var arSheetClose = $("rb-ar-sheet-close");
@@ -2188,8 +2366,12 @@ In `bundles/ramble/panel/static/ramble.js`:
     if (arSheet && !arSheet.hidden) { closeArSheet(); return; }
     if (arRoot && !arRoot.hidden) closeAr();
   });
-  /* A backgrounded tab must not keep the camera. Coming back reopens from the chip. */
-  document.addEventListener("visibilitychange", function () { if (document.hidden && arOpen) closeAr(); });
+  /* A backgrounded tab must not keep the camera; coming back restarts it in place (Q3 — the view stays open). */
+  document.addEventListener("visibilitychange", function () {
+    if (!arOpen) return;
+    if (document.hidden) { stopArCamera(); return; }
+    startArCamera();
+  });
 ```
 
 (d) In the SSE block, extend two listeners:
@@ -2207,19 +2389,23 @@ Expected: PASS. In particular the `ramble.js` test's sink count is still EXACTLY
 
 Also run: `node scripts/run-suite.mjs tests/ramble-ar.test.js tests/ramble-around.test.js` — Expected: PASS (unchanged).
 
-- [ ] **Step 4: Manual smoke in a real browser (REQUIRED — the suite cannot open a camera)**
+- [ ] **Step 4: Browser smoke — what the suite cannot exercise**
 
-Serve the panel from the worktree with a scratch data dir (never the live one):
+The suite proves the maths, the painter and the wiring strings; it cannot open a camera or a compass. Two smokes, each with a clear scope:
+
+(a) **Desktop, radar path only, before the PR.** A scratch gateway (never the live data dir), reachable as `http://localhost` — a secure context for `localhost` only, so the camera prompt appears on desktop Chrome but there is no compass: the view must land in "Radar · no compass" with the ring and the list, and a label/row tap must open the sheet.
 
 ```bash
 cd /home/kh0pp/crow-wt-flock4
 export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH
 export CROW_DATA_DIR=/tmp/claude-1000/-home-kh0pp-crow/a4059502-d556-46f5-b8b0-182af2b95e0d/scratchpad/ar-smoke
 mkdir -p "$CROW_DATA_DIR" && node scripts/init-db.js
-CROW_GATEWAY_PORT=3097 node servers/gateway/index.js --no-auth
+CROW_GATEWAY_PORT=3097 timeout 900 node servers/gateway/index.js --no-auth
 ```
 
-The ramble panel needs the bundle installed under `$CROW_DATA_DIR`'s crow home; if `/dashboard/ramble` is 404 on the scratch instance, stop and use the DEPLOYED instance after merge for the phone smoke instead (Task 8, Step 8) — do not point a scratch gateway at `~/.crow`. Checklist on a phone over HTTPS (Tailscale Serve): (1) chip → notice → Got it → camera prompt → labels move with the phone; (2) turn 180° → labels park with arrows; (3) deny the camera → "Radar · no camera", ring + list, never blank; (4) tap a locked label → sheet with "Unlock here"; tap a nest label → "Take the egg"; (5) close → the camera indicator goes off. Record the outcome in the PR body.
+(`timeout 900` caps it; run it in the background with `run_in_background` and stop it when done.) If `/dashboard/ramble` is 404 on the scratch instance because the bundle is not installed there, skip (a) and say so in the PR body — do NOT point a scratch gateway at `~/.crow`.
+
+(b) **Phone, full checklist, on the DEPLOYED instance over HTTPS after merge** (Task 8, Step 8; a raw-IP `http://` URL is not a secure context and can only ever show the radar strip): (1) chip → notice → Got it → camera prompt then (iPhone) motion prompt → labels move with the phone; (2) turn 180° → labels park with arrows; (3) deny the camera → "Radar · no camera", ring + list, never blank; (4) tap a locked label → sheet with "Unlock here"; tap a nest label → "Take the egg"; (5) switch apps and back → the camera restarts, the view is still open; (6) close → the camera indicator goes off. Record both outcomes in the PR body (and the handoff).
 
 - [ ] **Step 5: Commit**
 
@@ -2252,9 +2438,9 @@ A contact's marks are bounded by retention: you keep the newest 50 from each con
 
 Tap **Look around** on the map to open the AR view: the rear camera fills the screen and every mark, caw and nest within about 500 m gets a label placed by direction and distance. Labels within 35° of where you face sit on the picture, nearer ones lower and larger; the rest park at the left or right edge with an arrow, stacked by distance. Locked marks are dashed labels with a walking distance measured to their cell centre (they carry no exact position, same as on the map). Tapping any label opens the same actions as its map pin — unlock, take the egg, read the text, share an invite. Your active bird sits at the bottom, hops when a label comes into view, and says what is nearest. A caw that only carries its coarse publish cell is listed as "somewhere in this area" and never given a direction.
 
-Position comes from `watchPosition`; heading from `deviceorientationabsolute` (Safari reports `webkitCompassHeading` on the plain event, and iOS asks once for motion access from the button tap). No fix, no camera or no compass falls back to the **radar strip** — a bearing ring (north up, or heading up when there is a compass) and a distance list — so the screen is never blank; the first open explains the limits (compass accuracy, the iOS prompt, no surface placement, the camera stays on the phone). The camera picture never leaves the device: the view is client-side rendering with no capture, canvas or upload, and the stream stops when you close the view or switch away from the tab.
+Position comes from `watchPosition`; heading from `deviceorientationabsolute` (Safari reports `webkitCompassHeading` on the plain event, and iOS asks once for motion access from the button tap). No fix, no camera or no compass falls back to the **radar strip** — a bearing ring (north up, or heading up when there is a compass) and a distance list — so the screen is never blank; the first open explains the limits (compass accuracy, the iOS prompt, no surface placement, the camera stays on the phone). The camera picture never leaves the device: the view is client-side rendering with no capture, canvas or upload, and the stream stops when you close the view or switch away from the tab (it restarts when you come back).
 
-The panel fetches `GET /api/ramble/around?lat=&lon=&radius_m=` (radius 50–1000 m, default 500): marks as stored (a locked mark as its cell-centre teaser, a contact's mark named), each with `distance_m`, plus this week's nests, nearest first. It refreshes after you move 50 m, once a minute, after any tap action, and on every live event. It is a read and credits nothing. The view needs a secure context: open the Nest over its HTTPS Tailscale Serve address, not a raw-IP `http://` URL, or the browser refuses the camera and the compass and you get the radar strip.
+The panel fetches `GET /api/ramble/around?lat=&lon=&radius_m=` (radius 50–1000 m, default 500): marks as stored (a locked mark as its cell-centre teaser, a contact's mark named), each with `distance_m`, plus this week's nests, nearest first. The panel lists what the map lists (public, contacts and your own "Just me" marks). It refreshes after you move 50 m, once a minute, when you close a tapped label, and on every live event. It is a read and credits nothing. The view needs a secure context: open the Nest over its HTTPS Tailscale Serve address, not a raw-IP `http://` URL, or the browser refuses the camera and the compass and you get the radar strip.
 ```
 
 (c) In `## Operating notes` append a paragraph:
@@ -2280,9 +2466,9 @@ Las marcas de un contacto están acotadas por retención: conservas las 50 más 
 
 Toca **Mirar alrededor** en el mapa para abrir la vista AR: la cámara trasera llena la pantalla y cada marca, caw y nido a menos de unos 500 m recibe una etiqueta colocada por dirección y distancia. Las etiquetas a menos de 35° de hacia donde miras se posan sobre la imagen, las más cercanas más abajo y más grandes; el resto se aparca en el borde izquierdo o derecho con una flecha, apiladas por distancia. Las marcas bloqueadas son etiquetas discontinuas con una distancia a pie medida hasta el centro de su celda (no llevan posición exacta, igual que en el mapa). Tocar cualquier etiqueta abre las mismas acciones que su pin del mapa — desbloquear, tomar el huevo, leer el texto, compartir una invitación. Tu pájaro activo se posa abajo, salta cuando una etiqueta entra en vista y dice qué es lo más cercano. Un caw que solo lleva su celda de publicación gruesa se lista como "en algún lugar por aquí" y nunca recibe una dirección.
 
-La posición viene de `watchPosition`; el rumbo de `deviceorientationabsolute` (Safari informa `webkitCompassHeading` en el evento normal, y iOS pide una vez acceso al movimiento desde el toque del botón). Sin posición, sin cámara o sin brújula se recurre a la **franja de radar** — un anillo de rumbos (norte arriba, o rumbo arriba cuando hay brújula) y una lista de distancias — así que la pantalla nunca queda en blanco; la primera apertura explica los límites (precisión de la brújula, el aviso de iOS, sin anclaje a superficies, la cámara se queda en el teléfono). La imagen de la cámara nunca sale del dispositivo: la vista se dibuja en el cliente sin captura, canvas ni subida, y el flujo se detiene al cerrar la vista o cambiar de pestaña.
+La posición viene de `watchPosition`; el rumbo de `deviceorientationabsolute` (Safari informa `webkitCompassHeading` en el evento normal, y iOS pide una vez acceso al movimiento desde el toque del botón). Sin posición, sin cámara o sin brújula se recurre a la **franja de radar** — un anillo de rumbos (norte arriba, o rumbo arriba cuando hay brújula) y una lista de distancias — así que la pantalla nunca queda en blanco; la primera apertura explica los límites (precisión de la brújula, el aviso de iOS, sin anclaje a superficies, la cámara se queda en el teléfono). La imagen de la cámara nunca sale del dispositivo: la vista se dibuja en el cliente sin captura, canvas ni subida, y el flujo se detiene al cerrar la vista o cambiar de pestaña (se reanuda al volver).
 
-El panel consulta `GET /api/ramble/around?lat=&lon=&radius_m=` (radio 50–1000 m, 500 por defecto): marcas tal como están guardadas (una marca bloqueada como su adelanto en el centro de la celda, la marca de un contacto con su nombre), cada una con `distance_m`, más los nidos de esta semana, los más cercanos primero. Se actualiza tras moverte 50 m, una vez por minuto, después de cualquier acción tocada y con cada evento en vivo. Es una lectura y no acredita nada. La vista necesita un contexto seguro: abre el Nest por su dirección HTTPS de Tailscale Serve, no por una URL `http://` con IP, o el navegador rechaza la cámara y la brújula y obtienes la franja de radar.
+El panel consulta `GET /api/ramble/around?lat=&lon=&radius_m=` (radio 50–1000 m, 500 por defecto): marcas tal como están guardadas (una marca bloqueada como su adelanto en el centro de la celda, la marca de un contacto con su nombre), cada una con `distance_m`, más los nidos de esta semana, los más cercanos primero. El panel lista lo mismo que el mapa (marcas públicas, de contactos y tus propias marcas "solo para mí"). Se actualiza tras moverte 50 m, una vez por minuto, al cerrar una etiqueta tocada y con cada evento en vivo. Es una lectura y no acredita nada. La vista necesita un contexto seguro: abre el Nest por su dirección HTTPS de Tailscale Serve, no por una URL `http://` con IP, o el navegador rechaza la cámara y la brújula y obtienes la franja de radar.
 ```
 
 (c) In `## Notas de operación` append:
@@ -2307,9 +2493,14 @@ In `docs/superpowers/specs/2026-09-07-ramble-flock-design.md`:
   stack at `x = 0.06/0.94` by distance rank, six per edge. An anchor whose error radius exceeds
   150 m (a 5-char wire caw) gets no direction ("somewhere in this area"); a 7-char locked teaser
   (~101 m) is a dashed directional label. Heading: `webkitCompassHeading`, else `360 − alpha +
-  screen angle` from an absolute event only, low-passed at 0.3. The renderer is a classic script
-  (`window.RambleAr`) tested in Node under `vm` with a synthetic pose; the client owns the devices
-  and routes label taps to the map pins' own popup builders.
+  screen angle` from an absolute event only, low-passed at 0.3, dropped after 5 s of silence. The
+  bird "speaks its context line" as a NAVIGATION line ("<title>, <n> m ahead."), not the perch's
+  mood line — in AR the useful thing to say is what is nearest. The camera stream is stopped while
+  the tab is hidden and restarted on return; the view stays open. Inbound `/around` lists what the
+  map lists (public, contacts, own private). The renderer is a classic script (`window.RambleAr`)
+  tested in Node under `vm` with a synthetic pose; label buttons persist across frames (a button
+  rebuilt under a finger never gets its tap); the client owns the devices and routes label taps to
+  the map pins' own popup builders.
 ```
 
 (b) In §7's route list add after the nests routes: `` phase 4: `GET /api/ramble/around?lat=&lon=&radius_m=` (marks as stored + `distance_m`, nests, nearest first; radius 50–1000, default 500; a read, credits nothing). ``
@@ -2410,4 +2601,7 @@ Create `docs/superpowers/handoffs/2026-09-07-ramble-flock-phase4-shipped-pr<N>.m
 
 ## Review
 
-Recorded below after each gate (round 1, round 2, scoped check), before execution.
+### Round 1 (2026-09-07, adversarial staff-engineer subagent, code-traced; the plan's own tests were executed against the plan's own code) — REVISE → fixed inline
+Five criticals, all folded in above: **C1** the renderer's header comments carried six backticks, failing its own zero-backtick assertions → plain words. **C2** `assert/strict`'s `deepEqual` compares prototypes, and values built inside `vm.runInNewContext` carry the sandbox realm's — six assertions with a vm-built left operand failed on structure-equal values → a `plain()` JSON round-trip on every such operand, with the reason recorded in the test header. **C3** `mountAr.render` rebuilt every label `<button>` on every orientation event (~60 Hz), so a button pressed was gone by `touchend` and the tap never fired ("dead buttons") → label nodes persist by anchor id and are re-placed in place (z-index carries the far-first paint order), the tappable radar/coarse rows repaint only when their text changes, and the client ignores sub-0.5° wobbles; the mountAr test now asserts the same element object across frames and its removal when the anchor leaves. **C4** the client sent `String(double)` for lat/lon and the route capped decimals at 12, so a normal Android fix could 400 silently → client sends `toFixed(6)`, route accepts up to 17 decimals, both pinned by tests. **C5** Task 4's `/marks` edit re-declared `const marks` (a SyntaxError that would have taken the whole panel test file down) → the replacement is now stated line-precisely.
+Suggestions applied: **S1** the anchors test's real import line; **S2** `MAX_COVER_CELLS` 64 and a `too-wide` error (→ 400) instead of a silent full-table scan when the cover overflows, with a high-latitude test; **S4** a heading older than 5 s is dropped (1 s heartbeat while open) and a `PERMISSION_DENIED` from `watchPosition` clears the fix; **S5** the video's visibility keys on a `data-camera` attribute, not on the reason; **S6** the dead `data-ar` attribute removed; **S7** the smoke split into a desktop radar-path smoke (scratch gateway, `timeout`-capped) and the phone checklist on the deployed HTTPS instance; **S8** `receiveEnvelope` reports `gone` when the row it inserted was pruned in the same call (a re-sent old mark under a new event id) and the transport skips the `ramble:nearby` poke for it (credit unchanged), with trades + transport tests; **S9** a coarse-only frame says "Something is around here, but I can't tell which way." rather than "Nothing within 500 m"; **S10** docs say "when you close a tapped label"; **S11** the §6 amendment records the navigation-line deviation, the hidden-tab behaviour and the audience; **S12** CSS selector pins for the edge arrow, the dashed teaser, the camera-off video and the radar layout, plus `data-side` assertions in the mountAr test. **S3** (the notice gate has only string-level coverage) is accepted as smoke-only: the gate is three lines of `openAr` and the phone checklist's first item; no pure helper was extracted.
+Rulings: **Q1** `camera` stays an optional fourth field of `renderAr` (a 3-field call behaves exactly as spec §6 says; the mode/reason decision lives in one place); recorded in the §6 amendment. **Q2** the camera prompt is issued synchronously in the click, then the motion prompt, never after an awaited promise. **Q3** a hidden tab stops the camera only; the view stays open and the camera restarts on return. **Q4** `/around` lists what the map lists (public, contacts, the user's own private) — intentional, behind `dashboardAuth`, pinned by the route test's private "near north" mark and stated in the guides.
