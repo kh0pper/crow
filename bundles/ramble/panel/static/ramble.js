@@ -86,6 +86,10 @@
     return what + " by " + who;
   }
 
+  function isLocked(mark) {
+    return mark.reveal === "locked" && typeof mark.content_text !== "string";
+  }
+
   function popupFor(mark) {
     var box = document.createElement("div");
     var head = document.createElement("strong");
@@ -93,11 +97,12 @@
     box.appendChild(head);
     var body = document.createElement("p");
     body.style.margin = "0.35rem 0 0";
-    if (mark.reveal === "locked" && typeof mark.content_text !== "string") {
-      body.textContent = "locked — go there to reveal";
+    if (isLocked(mark)) {
+      body.textContent = "Locked — the text only opens within about " +
+        Math.round(mark.approx_m || 0) + " m of the real spot.";
       var btn = document.createElement("button");
       btn.type = "button";
-      btn.textContent = "I’m here — unlock";
+      btn.textContent = "Unlock here";
       btn.addEventListener("click", function () { unlock(mark, body, btn); });
       box.appendChild(body);
       box.appendChild(btn);
@@ -135,19 +140,29 @@
     if (marksListEl) marksListEl.textContent = "";
     marks.forEach(function (mark) {
       if (typeof mark.lat === "number" && typeof mark.lon === "number") {
-        var marker = L.marker([mark.lat, mark.lon], {
-          opacity: mark.reveal === "locked" ? 0.55 : 1,
-          title: markLabel(mark),
-        });
+        /* An open mark publishes its real anchor: a normal pin. */
+        var marker = L.marker([mark.lat, mark.lon], { title: markLabel(mark) });
         marker.bindPopup(popupFor(mark));
         marker.addTo(markerLayer);
+      } else if (typeof mark.approx_lat === "number" && typeof mark.approx_lon === "number") {
+        /* A locked teaser has no anchor -- only the coarse cell the server
+         * decoded for us. Draw it as a dashed circle at the cell centre so it
+         * reads as "somewhere in here", never as a precise point. */
+        var radius = Math.max(12, Math.min(60, (mark.approx_m || 0) / 40));
+        var blob = L.circleMarker([mark.approx_lat, mark.approx_lon], {
+          radius: radius,
+          color: "#b45309",
+          weight: 2,
+          dashArray: "4 3",
+          fillOpacity: 0.12,
+        });
+        blob.bindPopup(popupFor(mark));
+        blob.addTo(markerLayer);
       }
       if (marksListEl) {
         var li = document.createElement("li");
         li.textContent = markLabel(mark) + " — " +
-          (mark.reveal === "locked" && typeof mark.content_text !== "string"
-            ? "locked, go there to reveal"
-            : (mark.content_text || "(no text)"));
+          (isLocked(mark) ? "locked, go there to reveal" : (mark.content_text || "(no text)"));
         marksListEl.appendChild(li);
       }
     });

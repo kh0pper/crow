@@ -82,7 +82,13 @@ function tileUpstreamUrl(template, z, x, y) {
   for (const token of ["{z}", "{x}", "{y}"]) {
     if (!template.includes(token)) throw new Error(`tile_url is missing ${token}`);
   }
-  return template.split("{z}").join(String(z)).split("{x}").join(String(x)).split("{y}").join(String(y));
+  // `{s}` is OSM's subdomain placeholder. We proxy server-side, so there is no
+  // browser-parallelism reason to rotate: pin it to "a".
+  return template
+    .split("{s}").join("a")
+    .split("{z}").join(String(z))
+    .split("{x}").join(String(x))
+    .split("{y}").join(String(y));
 }
 
 class BadRequest extends Error {
@@ -141,8 +147,13 @@ function sendStatic(res, relParts) {
 
 /* --------------------------------------------------------------- the router */
 
-export default function rambleRouter(dashboardAuth) {
+export default function rambleRouter(dashboardAuth, options = {}) {
   const router = Router();
+
+  // Test-only seam: an injected `emit` makes the sync contract observable
+  // without a core schema in the scratch db. Production passes nothing and gets
+  // the real emitOrQueue hook built in ensureLoaded().
+  const injectedEmit = typeof options.emit === "function" ? options.emit : null;
 
   /** Fallback session id for rotating caws when no gateway has written one. */
   const processSessionId = randomUUID();
@@ -179,6 +190,7 @@ export default function rambleRouter(dashboardAuth) {
       db = mods.dbMod.createDbClient();
       await mods.initMod.initRambleTables(db);
     }
+    if (!emit && injectedEmit) emit = injectedEmit;
     if (!emit) {
       // Same emit hook shape as everywhere else in the bundle. In the gateway
       // process the manager is live and emitOrQueue passes through; elsewhere
@@ -199,6 +211,29 @@ export default function rambleRouter(dashboardAuth) {
       catch { bus = { emit() {} }; }
     }
     return true;
+  }
+
+  /**
+   * R18: a locked teaser carries no lat/lon (reveal.js strips them), only its
+   * coarse geohash — so the map would have nothing to pin. Give it the cell
+   * CENTRE plus an honest error radius (the cell's half-diagonal in metres).
+   * This adds no precision the teaser did not already publish: the cell is
+   * already on the row, and on the wire.
+   */
+  function withApproxAnchor(mark) {
+    if (typeof mark.lat === "number" && typeof mark.lon === "number") return mark;
+    if (!mark.geohash) return mark;
+    try {
+      const { lat, lon, latErr, lonErr } = mods.anchorsMod.decodeGeohash(mark.geohash);
+      return {
+        ...mark,
+        approx_lat: lat,
+        approx_lon: lon,
+        approx_m: mods.anchorsMod.haversineMeters({ lat, lon }, { lat: lat + latErr, lon: lon + lonErr }),
+      };
+    } catch {
+      return mark; // an unparseable geohash simply stays unpinnable
+    }
   }
 
   /** bus.emit is synchronous and re-throws subscriber errors — never let one break a request. */
@@ -270,17 +305,18 @@ export default function rambleRouter(dashboardAuth) {
     const y = Number(req.params.y);
     if (x < 0 || x >= span || y < 0 || y >= span) bad(`x and y must be between 0 and ${span - 1} at z=${z}`);
 
-    const key = `${z}/${x}/${y}`;
-    const cached = tileCache.get(key);
+    // A malformed operator-set template is a server misconfiguration (500),
+    // not a bad request — let it propagate to handle()'s 500 branch. Resolved
+    // BEFORE the cache lookup so the resolved URL can BE the cache key: a
+    // changed `tile_url` must never be answered with the old host's tiles.
+    const upstream = tileUpstreamUrl((await getSetting("tile_url")) || DEFAULT_TILE_URL, z, x, y);
+
+    const cached = tileCache.get(upstream);
     if (cached) {
       res.setHeader("Content-Type", cached.type);
       res.setHeader("Cache-Control", "public, max-age=86400");
       return res.send(cached.body);
     }
-
-    // A malformed operator-set template is a server misconfiguration (500),
-    // not a bad request — let it propagate to handle()'s 500 branch.
-    const upstream = tileUpstreamUrl((await getSetting("tile_url")) || DEFAULT_TILE_URL, z, x, y);
 
     let response;
     try {
@@ -289,14 +325,18 @@ export default function rambleRouter(dashboardAuth) {
         signal: AbortSignal.timeout(TILE_TIMEOUT_MS),
       });
     } catch (err) {
-      console.warn(`[ramble routes] tile ${key} fetch failed:`, err?.message ?? err);
+      console.warn(`[ramble routes] tile ${z}/${x}/${y} fetch failed:`, err?.message ?? err);
       return res.status(502).end();
     }
     if (!response.ok) return res.status(502).end();
 
-    const body = Buffer.from(await response.arrayBuffer());
+    // A tile host that answers with HTML (a rate-limit or block page, a captive
+    // portal) must not be cached or echoed into an <img> — only images pass.
     const type = response.headers.get("content-type") || "image/png";
-    tileCache.set(key, { type, body });
+    if (!/^image\//i.test(type)) return res.status(502).end();
+
+    const body = Buffer.from(await response.arrayBuffer());
+    tileCache.set(upstream, { type, body });
     while (tileCache.size > TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
 
     res.setHeader("Content-Type", type);
@@ -325,7 +365,7 @@ export default function rambleRouter(dashboardAuth) {
       if (!VISIBILITY_RE.test(visibility)) bad(`invalid visibility: ${visibility}`);
     }
     const marks = await mods.marksMod.listMarks(db, { visibility, cells });
-    res.json({ marks });
+    res.json({ marks: marks.map(withApproxAnchor) });
   }));
 
   router.post("/api/ramble/marks", handle(async (req, res) => {

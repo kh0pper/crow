@@ -12,7 +12,6 @@
  * the bundle's server modules or the db are unavailable.
  */
 
-const OSM_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_ATTRIBUTION = "&copy; OpenStreetMap contributors";
 
 const AUDIENCES = ["public", "contacts", "groups"];
@@ -37,21 +36,19 @@ export default {
 
   async handler(req, res, { db, layout }) {
     // Spec §11: OpenStreetMap public tiles are the phase-1 default, with the
-    // tile URL configurable in settings. Read-only here; absent table, absent
-    // key or a dead db all fall back to the default.
-    let tileUrl = OSM_TILE_URL;
+    // tile URL configurable in settings. The URL itself is NOT rendered here:
+    // the dashboard CSP is img-src 'self', so the client always draws from the
+    // same-origin proxy (/ramble/tiles) and the proxy is what reads
+    // `ramble_settings.tile_url`. Only the attribution is a page concern.
     let tileAttribution = OSM_ATTRIBUTION;
     if (db) {
       try {
         const { rows } = await db.execute({
-          sql: "SELECT key, value FROM ramble_settings WHERE key IN ('tile_url', 'tile_attribution')",
+          sql: "SELECT value FROM ramble_settings WHERE key = 'tile_attribution'",
           args: [],
         });
-        for (const row of rows) {
-          if (row.key === "tile_url" && row.value) tileUrl = String(row.value);
-          if (row.key === "tile_attribution" && row.value) tileAttribution = String(row.value);
-        }
-      } catch { /* defaults */ }
+        if (rows[0]?.value) tileAttribution = String(rows[0].value);
+      } catch { /* default */ }
     }
 
     const gridRows = AUDIENCES.map((audience) => {
@@ -92,9 +89,7 @@ export default {
       <link rel="stylesheet" href="/ramble/static/leaflet/leaflet.css">
 
       <div class="rb-card">
-        <div id="ramble-map"
-             data-tile-url="${esc(tileUrl)}"
-             data-tile-attribution="${esc(tileAttribution)}"></div>
+        <div id="ramble-map" data-tile-attribution="${esc(tileAttribution)}"></div>
         <p class="rb-muted" id="ramble-map-status">Move the map to pick the area you listen to.</p>
       </div>
 

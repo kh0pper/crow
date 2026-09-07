@@ -46,8 +46,12 @@ const LAT = 30.46;
 const LON = -98.08;
 const CELL = "9v6m2";
 
-const routerInstance = rambleRouter((req, res, next) =>
-  req.headers["x-test-auth"] ? next() : res.status(401).end());
+/** Every sync emit the router makes, in order: the contract is observable. */
+const emitCalls = [];
+const routerInstance = rambleRouter(
+  (req, res, next) => (req.headers["x-test-auth"] ? next() : res.status(401).end()),
+  { emit: (table, op, row) => { emitCalls.push({ table, op, row }); } },
+);
 
 const app = express();
 app.use(routerInstance);
@@ -132,6 +136,10 @@ test("POST /api/ramble/marks stores a mark that then lists in its cell", async (
   const { mark } = await res.json();
   assert.ok(mark?.mark_id, "no mark_id in the response");
   assert.equal(mark.publish_state, "pending");
+
+  const inserted = emitCalls.filter((c) => c.table === "ramble_marks" && c.op === "insert");
+  assert.equal(inserted.length, 1, "authoring must emit exactly one ramble_marks insert");
+  assert.equal(inserted[0].row.mark_id, mark.mark_id);
 
   const listed = await req(`/api/ramble/marks?visibility=public&cells=${CELL}`);
   assert.equal(listed.status, 200);
@@ -242,8 +250,13 @@ test("DELETE /api/ramble/marks/:id removes a local mark and 404s an unknown one"
     body: { kind: "mark", lat: LAT, lon: LON, text: "delete me", visibility: "public", reveal: "open" },
   })).json();
 
+  const deletesBefore = emitCalls.filter((c) => c.op === "delete").length;
   const gone = await req(`/api/ramble/marks/${created.mark.mark_id}`, { method: "DELETE" });
   assert.equal(gone.status, 204);
+
+  const deletes = emitCalls.filter((c) => c.table === "ramble_marks" && c.op === "delete");
+  assert.equal(deletes.length, deletesBefore + 1, "owner delete must emit a ramble_marks delete");
+  assert.equal(deletes[deletes.length - 1].row.mark_id, created.mark.mark_id);
 
   const again = await req(`/api/ramble/marks/${created.mark.mark_id}`, { method: "DELETE" });
   assert.equal(again.status, 404);
@@ -279,6 +292,39 @@ test("deleting an already-published public mark leaves a tombstone for the drain
   } finally {
     db.close();
   }
+});
+
+// ------------------------------------------------------- locked teasers (R18)
+
+test("a locked mark lists as an approximate cell-centre teaser, then unlocks in range", async () => {
+  // No `reveal` in the body -> public marks default to `locked`.
+  const created = await (await req("/api/ramble/marks", {
+    method: "POST",
+    body: { kind: "mark", lat: LAT, lon: LON, text: "under the third oak", visibility: "public" },
+  })).json();
+  assert.equal(created.mark.reveal, "locked");
+
+  const { marks } = await (await req(`/api/ramble/marks?visibility=public&cells=${CELL}`)).json();
+  const teaser = marks.find((m) => m.mark_id === created.mark.mark_id);
+  assert.ok(teaser, "the locked mark did not list");
+
+  // The teaser must give the map something to pin WITHOUT leaking the anchor.
+  assert.equal(teaser.lat, undefined);
+  assert.equal(teaser.lon, undefined);
+  assert.equal(teaser.content_text, undefined);
+  assert.equal(typeof teaser.approx_lat, "number");
+  assert.equal(typeof teaser.approx_lon, "number");
+  assert.ok(teaser.approx_m > 0, `approx_m was ${teaser.approx_m}`);
+  // Cell centre, not the real point: a 7-char cell is a few hundred metres.
+  assert.ok(Math.abs(teaser.approx_lat - LAT) < 0.01);
+  assert.ok(Math.abs(teaser.approx_lon - LON) < 0.01);
+
+  const unlocked = await (await req("/api/ramble/unlock", {
+    method: "POST",
+    body: { mark_id: created.mark.mark_id, lat: LAT, lon: LON },
+  })).json();
+  assert.equal(unlocked.unlocked, true);
+  assert.equal(unlocked.content.content_text, "under the third oak");
 });
 
 // ------------------------------------------------------------- tile proxy
@@ -327,6 +373,25 @@ test("tile proxy serves upstream bytes same-origin and then from its LRU", async
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("tile proxy refuses a non-image upstream response", async () => {
+  stubFetch(async () => new Response("<html>rate limited</html>", {
+    status: 200, headers: { "content-type": "text/html; charset=utf-8" },
+  }));
+  try {
+    const res = await req("/ramble/tiles/3/1/2.png");
+    assert.equal(res.status, 502);
+    // Never cached: a second request must fail the same way, not serve HTML.
+    assert.equal((await req("/ramble/tiles/3/1/2.png")).status, 502);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("tiles and static assets are behind dashboardAuth", async () => {
+  assert.equal((await realFetch(BASE + "/ramble/tiles/1/0/0.png")).status, 401);
+  assert.equal((await realFetch(BASE + "/ramble/static/ramble.js")).status, 401);
 });
 
 test("tile proxy answers 502 when upstream fails", async () => {

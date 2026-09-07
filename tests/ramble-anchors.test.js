@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { encodeGeohash, haversineMeters, withinRange, saltedLanId } from "../bundles/ramble/server/anchors.js";
+import { encodeGeohash, decodeGeohash, haversineMeters, withinRange, saltedLanId } from "../bundles/ramble/server/anchors.js";
 
 test("geohash is stable + prefix-consistent", () => {
   const g = encodeGeohash(30.2672, -97.7431, 7); // Austin
@@ -36,4 +36,30 @@ test("withinRange fails closed on malformed anchors", () => {
   assert.equal(withinRange({ anchor_kind: "invalid" }, { lat: 30, lon: -97 }), false);
   assert.equal(withinRange({ anchor_kind: "beacon", anchor_ref: "" }, { ref: "abc" }), false);
   assert.equal(withinRange({ anchor_kind: "lan", anchor_ref: "abc" }, { ref: undefined }), false);
+});
+
+test("decodeGeohash returns the cell centre, close to the encoded point", () => {
+  const g = encodeGeohash(30.2672, -97.7431, 7); // Austin
+  const { lat, lon, latErr, lonErr } = decodeGeohash(g);
+  assert.ok(Math.abs(lat - 30.2672) < 0.001, `lat off by ${Math.abs(lat - 30.2672)}`);
+  assert.ok(Math.abs(lon - -97.7431) < 0.001, `lon off by ${Math.abs(lon - -97.7431)}`);
+  // The true point must lie inside the decoded cell.
+  assert.ok(Math.abs(lat - 30.2672) <= latErr);
+  assert.ok(Math.abs(lon - -97.7431) <= lonErr);
+});
+
+test("decodeGeohash reports the cell half-size (a 5-char cell is ~0.022 deg tall)", () => {
+  const { latErr, lonErr } = decodeGeohash(encodeGeohash(30.2672, -97.7431, 5));
+  assert.ok(Math.abs(latErr - 0.022) < 0.001, `latErr ${latErr}`);
+  assert.ok(Math.abs(lonErr - 0.022) < 0.001, `lonErr ${lonErr}`);
+  // Coarser cells are strictly larger than finer ones.
+  assert.ok(decodeGeohash(encodeGeohash(30.2672, -97.7431, 7)).latErr < latErr);
+});
+
+test("decodeGeohash rejects junk instead of guessing", () => {
+  assert.throws(() => decodeGeohash(""), /non-empty/);
+  assert.throws(() => decodeGeohash(null), /non-empty/);
+  assert.throws(() => decodeGeohash("9v6a!"), /invalid geohash character/);
+  // 'a', 'i', 'l', 'o' are not in the geohash base32 alphabet.
+  assert.throws(() => decodeGeohash("9v6i2"), /invalid geohash character/);
 });

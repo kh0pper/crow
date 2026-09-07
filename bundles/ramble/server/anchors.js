@@ -18,6 +18,42 @@ export function encodeGeohash(lat, lon, precision = 7) {
   return geohash;
 }
 
+/**
+ * Inverse of `encodeGeohash`: the CENTRE of the cell a geohash names, plus the
+ * cell's half-height/half-width in degrees.
+ *
+ * R18: a locked mark's teaser deliberately carries no lat/lon (reveal.js's
+ * allowlist), only its coarse `geohash` -- so the map has nothing to pin unless
+ * it can turn that cell back into a point. This gives it the cell centre and an
+ * honest error radius; it never recovers the real anchor.
+ */
+export function decodeGeohash(geohash) {
+  if (typeof geohash !== "string" || geohash.length === 0) throw new Error("geohash must be a non-empty string");
+  let evenBit = true;
+  let latMin = -90, latMax = 90, lonMin = -180, lonMax = 180;
+  for (const ch of geohash.toLowerCase()) {
+    const idx = BASE32.indexOf(ch);
+    if (idx === -1) throw new Error(`invalid geohash character: ${ch}`);
+    for (let n = 4; n >= 0; n--) {
+      const bit = (idx >> n) & 1;
+      if (evenBit) {
+        const mid = (lonMin + lonMax) / 2;
+        if (bit === 1) lonMin = mid; else lonMax = mid;
+      } else {
+        const mid = (latMin + latMax) / 2;
+        if (bit === 1) latMin = mid; else latMax = mid;
+      }
+      evenBit = !evenBit;
+    }
+  }
+  return {
+    lat: (latMin + latMax) / 2,
+    lon: (lonMin + lonMax) / 2,
+    latErr: (latMax - latMin) / 2,
+    lonErr: (lonMax - lonMin) / 2,
+  };
+}
+
 export function haversineMeters(a, b) {
   const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
