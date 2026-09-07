@@ -47,6 +47,17 @@ function truncateText(text) {
   return typeof text === "string" ? text.slice(0, MAX_TEXT_LEN) : null;
 }
 
+// A non-numeric or non-positive `expiration` tag (malformed input, or an
+// empty string which Number() turns into 0) must never surface as NaN --
+// NaN silently poisons `expires_at` and throws downstream on the libsql
+// cross-process path ("Only finite numbers..."). Fail closed to null.
+function parseExpirationMs(expirationTag) {
+  if (expirationTag == null) return null;
+  const n = Number(expirationTag);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n * 1000;
+}
+
 function geohashPrefixTags(geohash) {
   const tags = [];
   for (let n = 1; n <= geohash.length; n++) tags.push(["g", geohash.slice(0, n)]);
@@ -144,7 +155,7 @@ export function eventToMark(event) {
     content_kind: content.content_kind ?? "none",
     content_ref: content.content_ref ?? null,
     created_at: event.created_at * 1000,
-    expires_at: expirationTag != null ? Number(expirationTag) * 1000 : null,
+    expires_at: parseExpirationMs(expirationTag),
     nostr_event_id: event.id,
     origin: "remote",
     publish_state: "remote",
