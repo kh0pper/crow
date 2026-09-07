@@ -193,12 +193,8 @@ export async function declineSwap(db, { tradeId, now = Date.now(), emit } = {}) 
   return { ok: true, trade: updated };
 }
 
-async function setState(db, tradeId, state, now, extra = {}) {
-  const sets = ["state = ?", "updated_at = ?"];
-  const args = [state, now];
-  for (const [k, v] of Object.entries(extra)) { sets.push(`${k} = ?`); args.push(v); }
-  args.push(tradeId);
-  await db.execute({ sql: `UPDATE ramble_trades SET ${sets.join(", ")} WHERE trade_id = ?`, args });
+async function setState(db, tradeId, state, now) {
+  await db.execute({ sql: "UPDATE ramble_trades SET state = ?, updated_at = ? WHERE trade_id = ?", args: [state, now, tradeId] });
 }
 
 /**

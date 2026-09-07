@@ -99,7 +99,7 @@ export async function startRambleTransport({
   autoStart = true,
 } = {}) {
   const load = (file) => import(pathToFileURL(join(bundleDir, file)).href);
-  const [{ initRambleTables }, { insertRemoteMark, expireMarks }, nostrMap, { resolvePersona, xOnly }, { makePublishGate }, { activeBird }, { feedAll }, delivery, trades] = await Promise.all([
+  const [{ initRambleTables }, { insertRemoteMark, expireMarks }, nostrMap, { resolvePersona, xOnly }, { makePublishGate }, { activeBird }, { feedAll }] = await Promise.all([
     load("init-tables.js"),
     load("marks.js"),
     load("nostr-map.js"),
@@ -107,12 +107,20 @@ export async function startRambleTransport({
     load("grid.js"),
     load("eggs.js"),
     load("feed.js"),
-    load("delivery.js"),
-    load("trades.js"),
   ]);
   const { MARK_KIND, CAW_KIND, markToEvent, eventToMark } = nostrMap;
-  const { resolveContact, pendingDeliveries, deleteDelivery, noteDeliveryFailure, remainingDeliveries, MAX_DELIVERY_ATTEMPTS } = delivery;
-  const { expireTrades, receiveEnvelope } = trades;
+
+  // Phase 3 modules are loaded in their own guarded step: an installed bundle
+  // copy that predates 0.4.0 (the refresh happens at boot, but a gateway
+  // restarted before it) must degrade to "no contacts delivery", never to
+  // "no ramble" — the public drain, the TTL sweep and the tombstones stay up.
+  let phase3 = null;
+  try {
+    const [delivery, trades] = await Promise.all([load("delivery.js"), load("trades.js")]);
+    phase3 = { ...delivery, expireTrades: trades.expireTrades, receiveEnvelope: trades.receiveEnvelope };
+  } catch (err) {
+    console.warn(`[ramble] contacts delivery DISABLED: bundle copy predates 0.4.0 (${err?.message ?? err}) — restart this gateway after the bundle refresh`);
+  }
 
   const prec = precision ?? defaultPrecision();
   // Default gate is the privacy grid (Task 11): a row is publishable only
@@ -333,6 +341,7 @@ export async function startRambleTransport({
    */
   let warnedNoSendControl = false;
   async function drainDeliveries() {
+    if (!phase3) return 0;
     if (typeof nostrManager.sendControl !== "function") {
       if (!warnedNoSendControl) { warnedNoSendControl = true; console.warn("[ramble] nostrManager has no sendControl; contacts delivery disabled"); }
       return 0;
@@ -354,7 +363,7 @@ export async function startRambleTransport({
       // batch of gate-skipped `contacts` marks cannot also crowd out a
       // `group:` mark row (a different, currently-open audience) behind them.
       // eslint-disable-next-line no-await-in-loop
-      const rows = await pendingDeliveries(db, DRAIN_BATCH, { excludeIds: seen });
+      const rows = await phase3.pendingDeliveries(db, DRAIN_BATCH, { excludeIds: seen });
       if (rows.length === 0) break;
       let skippedGated = 0;
       for (const d of rows) {
@@ -365,16 +374,16 @@ export async function startRambleTransport({
             // eslint-disable-next-line no-await-in-loop
             const { rows: m } = await db.execute({ sql: "SELECT visibility FROM ramble_marks WHERE mark_id = ?", args: [d.ref_id] });
             // eslint-disable-next-line no-await-in-loop
-            if (!m[0]) { await deleteDelivery(db, d.id); await settleMark(d.ref_id); continue; }
+            if (!m[0]) { await phase3.deleteDelivery(db, d.id); await settleMark(d.ref_id); continue; }
             // eslint-disable-next-line no-await-in-loop
             if (!(await allowed(m[0].visibility))) { skippedGated++; continue; }
           }
           // eslint-disable-next-line no-await-in-loop
-          const contact = await resolveContact(db, d.to_crow_id);
+          const contact = await phase3.resolveContact(db, d.to_crow_id);
           if (!contact) {
             console.warn(`[ramble] dropping ${d.kind} delivery to ${d.to_crow_id}: not a deliverable contact`);
             // eslint-disable-next-line no-await-in-loop
-            await deleteDelivery(db, d.id);
+            await phase3.deleteDelivery(db, d.id);
             // eslint-disable-next-line no-await-in-loop
             if (d.kind === "mark") await settleMark(d.ref_id);
             continue;
@@ -383,21 +392,23 @@ export async function startRambleTransport({
           const out = await nostrManager.sendControl(contact, d.payload_json);
           if (!out || !Array.isArray(out.relays) || out.relays.length === 0) {
             // eslint-disable-next-line no-await-in-loop
-            const { parked } = await noteDeliveryFailure(db, d, MAX_DELIVERY_ATTEMPTS);
-            if (parked) console.warn(`[ramble] ${d.kind} delivery to ${d.to_crow_id} gave up after ${MAX_DELIVERY_ATTEMPTS} attempts`);
+            const { parked } = await phase3.noteDeliveryFailure(db, d, phase3.MAX_DELIVERY_ATTEMPTS);
+            if (parked) console.warn(`[ramble] ${d.kind} delivery to ${d.to_crow_id} gave up after ${phase3.MAX_DELIVERY_ATTEMPTS} attempts`);
             // eslint-disable-next-line no-await-in-loop
             if (parked && d.kind === "mark") await settleMark(d.ref_id);
             continue;
           }
           // eslint-disable-next-line no-await-in-loop
-          await deleteDelivery(db, d.id);
+          await phase3.deleteDelivery(db, d.id);
           delivered++;
           // eslint-disable-next-line no-await-in-loop
           if (d.kind === "mark") await settleMark(d.ref_id);
         } catch (err) {
           console.warn(`[ramble] ${d.kind} delivery to ${d.to_crow_id} failed:`, err?.message ?? err);
           // eslint-disable-next-line no-await-in-loop
-          await noteDeliveryFailure(db, d, MAX_DELIVERY_ATTEMPTS).catch(() => {});
+          const r = await phase3.noteDeliveryFailure(db, d, phase3.MAX_DELIVERY_ATTEMPTS).catch(() => null);
+          // eslint-disable-next-line no-await-in-loop
+          if (r?.parked && d.kind === "mark") await settleMark(d.ref_id).catch(() => {});
         }
       }
       if (skippedGated === 0 || rows.length < DRAIN_BATCH) break;
@@ -407,7 +418,7 @@ export async function startRambleTransport({
 
   /** A contacts mark is 'published' once no outbox row for it remains. */
   async function settleMark(markId) {
-    if ((await remainingDeliveries(db, "mark", markId)) > 0) return;
+    if ((await phase3.remainingDeliveries(db, "mark", markId)) > 0) return;
     await db.execute({
       sql: "UPDATE ramble_marks SET publish_state = 'published' WHERE mark_id = ? AND publish_state = 'pending'",
       args: [markId],
@@ -433,7 +444,7 @@ export async function startRambleTransport({
       await drainTombstones();
       // Phase 3: lapsed swap offers unlock their eggs on both sides by local
       // clock, then the contacts wire goes out.
-      await expireTrades(db, Date.now(), { emit });
+      if (phase3) await phase3.expireTrades(db, Date.now(), { emit });
       delivered = await drainDeliveries();
       return { ...result, expired, delivered };
     } catch (err) {
@@ -509,13 +520,14 @@ export async function startRambleTransport({
   async function onEnvelope(msg) {
     try {
       if (stopped || !msg || typeof msg !== "object" || !msg.payload) return;
+      if (!phase3) return;
       if (msg.eventId != null) {
         const key = String(msg.eventId);
         if (seenEnvelopes.has(key)) return;
         seenEnvelopes.add(key);
         if (seenEnvelopes.size > SEEN_ENVELOPES_MAX) seenEnvelopes.delete(seenEnvelopes.values().next().value);
       }
-      const result = await receiveEnvelope(db, msg, { now: Date.now(), emit });
+      const result = await phase3.receiveEnvelope(db, msg, { now: Date.now(), emit });
       if (!result) return;
       if (result.kind === "mark" && result.inserted) {
         try {
