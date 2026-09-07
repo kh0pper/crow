@@ -75,3 +75,31 @@ test("concurrent FIRST-call ramble_caw invocations resolve a single shared sessi
   // promise-memoization race) would produce two different authors here.
   assert.equal(pa.author, pb.author);
 });
+
+test("ramble_pet_state returns the pet's current state", async () => {
+  const r = await h.ramble_pet_state({});
+  assert.ok(!r.isError);
+  const state = JSON.parse(r.content[0].text);
+  assert.ok(["happy", "tired", "alarmed"].includes(state.mood));
+  assert.equal(typeof state.energy, "number");
+  assert.equal(typeof state.places_week, "number");
+  assert.equal(typeof state.unlocks_week, "number");
+  assert.equal(typeof state.crows_week, "number");
+});
+
+test("ramble_unlock on an in-range open mark feeds unlock_mark (unlocks_week increments)", async () => {
+  const lat = 35.0, lon = -80.0;
+  const leave = await h.ramble_leave_mark({ lat, lon, text: "open note", visibility: "public", reveal: "open" });
+  assert.ok(!leave.isError);
+  const leavePayload = JSON.parse(leave.content[0].text);
+
+  const before = JSON.parse((await h.ramble_pet_state({})).content[0].text);
+
+  const unlockRes = await h.ramble_unlock({ mark_id: leavePayload.mark_id, lat, lon });
+  assert.ok(!unlockRes.isError);
+  const unlocked = JSON.parse(unlockRes.content[0].text);
+  assert.equal(unlocked.unlocked, true);
+
+  const after = JSON.parse((await h.ramble_pet_state({})).content[0].text);
+  assert.equal(after.unlocks_week, before.unlocks_week + 1, "a successful unlock must feed unlock_mark");
+});
