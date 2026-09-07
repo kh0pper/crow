@@ -1,0 +1,413 @@
+/**
+ * Ramble — panel companion routes (`/api/ramble/*` + `/ramble/static/*`).
+ *
+ * COPIED ALONE to `$CROW_HOME/panels/ramble-routes.js` at install
+ * (servers/gateway/routes/bundles.js), so it must never carry a relative
+ * `../server/*` import — every bundle module is resolved through BUNDLE_DIR
+ * below and imported by absolute file URL.
+ *
+ * STRICT_PANEL_MOUNT: this router is mounted at the app root, so EVERY
+ * middleware here is path-scoped. An unpathed `router.use(mw)` would run for
+ * every request that reaches this router, including traffic destined for
+ * panels mounted after it (servers/gateway/index.js:642-670 refuses to mount
+ * such a router under STRICT_PANEL_MOUNT=1).
+ *
+ * Egress: this file NEVER publishes. Authoring writes a `pending` row via
+ * `createMark` and pokes `bus.emit("ramble:drain")`; the gateway transport
+ * (servers/gateway/boot/ramble-transport.js) is the single egress and decides
+ * — against the privacy grid — whether anything reaches a relay at all. A 201
+ * from POST /api/ramble/marks therefore means "stored locally and queued",
+ * never "published".
+ */
+import { Router } from "express";
+import express from "express";
+import { randomUUID } from "node:crypto";
+import { join, resolve, normalize, dirname, sep } from "node:path";
+import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/** A real bundle dir always carries manifest.json (install + refresh copy it). */
+function looksLikeBundleDir(p) { return !!p && existsSync(join(p, "manifest.json")); }
+
+const BUNDLE_DIR_CANDIDATES = [
+  join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "ramble"),
+  process.env.CROW_APP_ROOT ? join(process.env.CROW_APP_ROOT, "bundles", "ramble") : null,
+  resolve(__dirname, ".."),
+].filter(Boolean);
+
+const BUNDLE_DIR = BUNDLE_DIR_CANDIDATES.find(looksLikeBundleDir) || BUNDLE_DIR_CANDIDATES[0];
+
+const bundleImport = (rel) => import(pathToFileURL(join(BUNDLE_DIR, rel)).href);
+
+const STATIC_DIR = resolve(join(BUNDLE_DIR, "panel", "static"));
+
+/* ------------------------------------------------------------- validation */
+
+const CELL_RE = /^[0-9b-hjkmnp-z]{1,12}$/;
+const PERSONA_RE = /^[0-9a-f]{64}$/;
+const MARK_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
+const VISIBILITY_RE = /^(public|contacts|group:.{1,120})$/;
+const REVEALS = new Set(["open", "locked"]);
+const KINDS = new Set(["mark", "caw"]);
+const MAX_CELLS = 32;
+const MAX_TTL_SECONDS = 31536000; // one year
+
+class BadRequest extends Error {
+  constructor(message) { super(message); this.name = "BadRequest"; }
+}
+function bad(message) { throw new BadRequest(message); }
+
+function requireLat(v) {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < -90 || v > 90) bad("lat must be a number between -90 and 90");
+  return v;
+}
+function requireLon(v) {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < -180 || v > 180) bad("lon must be a number between -180 and 180");
+  return v;
+}
+function requireText(v, max, label) {
+  if (typeof v !== "string") bad(`${label} must be a string`);
+  if (v.length > max) bad(`${label} must be at most ${max} characters`);
+  return v;
+}
+function requireCell(v) {
+  if (typeof v !== "string" || !CELL_RE.test(v)) bad(`invalid geohash cell: ${String(v).slice(0, 24)}`);
+  return v;
+}
+function defaultPrecision() {
+  const p = Number(process.env.RAMBLE_DEFAULT_GEOHASH_PRECISION);
+  return Number.isInteger(p) && p >= 1 && p <= 12 ? p : 5;
+}
+
+/* ------------------------------------------------------------ static files */
+
+const CONTENT_TYPES = {
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+};
+
+/**
+ * Serve one allow-listed file from panel/static. Never express.static: the
+ * segments arrive URL-DECODED in req.params, so `..%2f..%2f` reaches us as a
+ * real traversal and only the resolved-prefix check below stops it.
+ */
+function sendStatic(res, relParts) {
+  const target = resolve(normalize(join(STATIC_DIR, ...relParts)));
+  if (target !== STATIC_DIR && !target.startsWith(STATIC_DIR + sep)) {
+    return res.status(400).type("text/plain").send("Bad path");
+  }
+  const ext = target.slice(target.lastIndexOf("."));
+  const type = CONTENT_TYPES[ext];
+  if (!type) return res.status(404).type("text/plain").send("Not found");
+  if (!existsSync(target)) return res.status(404).type("text/plain").send("Not found");
+  res.setHeader("Content-Type", type);
+  return res.sendFile(target);
+}
+
+/* --------------------------------------------------------------- the router */
+
+export default function rambleRouter(dashboardAuth) {
+  const router = Router();
+
+  /** Fallback session id for rotating caws when no gateway has written one. */
+  const processSessionId = randomUUID();
+
+  let mods = null;
+  let db = null;
+  let emit = null;
+  let bus = null;
+
+  async function ensureLoaded(res) {
+    if (!mods) {
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod] = await Promise.all([
+        bundleImport("server/db.js"),
+        bundleImport("server/init-tables.js"),
+        bundleImport("server/marks.js"),
+        bundleImport("server/grid.js"),
+        bundleImport("server/persona.js"),
+        bundleImport("server/anchors.js"),
+        bundleImport("server/app-root.js"),
+      ]).catch((err) => {
+        console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
+        return [];
+      });
+      if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod) {
+        res.status(500).json({ error: "ramble bundle modules not available" });
+        return false;
+      }
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appImport: appRootMod.appImport };
+    }
+    if (!db) {
+      db = mods.dbMod.createDbClient();
+      await mods.initMod.initRambleTables(db);
+    }
+    if (!emit) {
+      // Same emit hook shape as everywhere else in the bundle. In the gateway
+      // process the manager is live and emitOrQueue passes through; elsewhere
+      // it durably queues. Never allowed to fail a request.
+      try {
+        const [{ emitOrQueue }, { getInstanceSyncManager }] = await Promise.all([
+          mods.appImport("servers/shared/sync-emit.js"),
+          mods.appImport("servers/sharing/managers.js"),
+        ]);
+        emit = (table, op, row) => emitOrQueue(getInstanceSyncManager(), db, table, op, row).catch(() => {});
+      } catch (err) {
+        console.warn(`[ramble routes] sync emit unavailable: ${err.message}`);
+        emit = () => {};
+      }
+    }
+    if (!bus) {
+      try { bus = (await mods.appImport("servers/shared/event-bus.js")).default; }
+      catch { bus = { emit() {} }; }
+    }
+    return true;
+  }
+
+  /** bus.emit is synchronous and re-throws subscriber errors — never let one break a request. */
+  function poke(event, payload) {
+    try { bus.emit(event, payload); } catch (err) {
+      console.warn(`[ramble routes] ${event} subscriber threw:`, err?.message ?? err);
+    }
+  }
+
+  async function getSetting(key) {
+    const { rows } = await db.execute({ sql: "SELECT value FROM ramble_settings WHERE key = ?", args: [key] });
+    return rows[0]?.value ?? null;
+  }
+
+  /**
+   * The authoring persona (Task 7 seam, same call the MCP server makes).
+   * `getManagersOrNull()` is null outside a booted gateway, so fall back to
+   * the on-disk identity rather than refusing to author.
+   */
+  async function personaFor(kind) {
+    const [managersMod, identityMod] = await Promise.all([
+      mods.appImport("servers/sharing/managers.js"),
+      mods.appImport("servers/sharing/identity.js"),
+    ]);
+    const identity = managersMod.getManagersOrNull()?.identity || identityMod.loadOrCreateIdentity();
+    const seed = identityMod.loadInstanceSeed(mods.dbMod.resolveDataDir());
+    const level = (await mods.gridMod.getGrid(db)).identityLevel;
+    let sessionId = processSessionId;
+    if (kind === "caw" && level === "rotating") {
+      // R11: the transport mints the per-boot id, so both processes sign a
+      // rotating caw with the SAME key. Read fresh — a gateway restart rotates it.
+      sessionId = (await getSetting("local.session_id")) || processSessionId;
+    }
+    return mods.personaMod.resolvePersona(identity, seed, {
+      level, kind, sessionId, _derive: identityMod.deriveBotIdentity,
+    });
+  }
+
+  /** Wrap a handler: ensureLoaded + BadRequest -> 400 + anything else -> 500 (message only). */
+  function handle(fn) {
+    return async (req, res) => {
+      try {
+        if (!(await ensureLoaded(res))) return;
+        await fn(req, res);
+      } catch (err) {
+        if (err instanceof BadRequest) return res.status(400).json({ error: err.message });
+        console.warn("[ramble routes] request failed:", err?.stack ?? err);
+        res.status(500).json({ error: err?.message ?? "internal error" });
+      }
+    };
+  }
+
+  // --- path-scoped middleware (STRICT_PANEL_MOUNT) ---------------------------
+  if (typeof dashboardAuth === "function") {
+    router.use("/api/ramble", dashboardAuth);
+    router.use("/ramble/static", dashboardAuth);
+  }
+  router.use("/api/ramble", express.json({ limit: "1mb" }));
+
+  // --- static assets --------------------------------------------------------
+  router.get("/ramble/static/leaflet/images/:file", (req, res) => sendStatic(res, ["leaflet", "images", req.params.file]));
+  router.get("/ramble/static/leaflet/:file", (req, res) => sendStatic(res, ["leaflet", req.params.file]));
+  router.get("/ramble/static/:file", (req, res) => sendStatic(res, [req.params.file]));
+
+  // --- marks ----------------------------------------------------------------
+  router.get("/api/ramble/marks", handle(async (req, res) => {
+    const q = req.query || {};
+    let cells;
+    if (q.cells != null) {
+      if (typeof q.cells !== "string") bad("cells must be a comma-separated string");
+      cells = q.cells.split(",").map((c) => c.trim()).filter(Boolean).map(requireCell);
+      if (cells.length > MAX_CELLS) bad(`at most ${MAX_CELLS} cells`);
+      if (cells.length === 0) cells = undefined;
+    }
+    let visibility;
+    if (q.visibility != null) {
+      visibility = requireText(q.visibility, 128, "visibility");
+      if (!VISIBILITY_RE.test(visibility)) bad(`invalid visibility: ${visibility}`);
+    }
+    const marks = await mods.marksMod.listMarks(db, { visibility, cells });
+    res.json({ marks });
+  }));
+
+  router.post("/api/ramble/marks", handle(async (req, res) => {
+    const b = req.body || {};
+    const kind = b.kind ?? "mark";
+    if (!KINDS.has(kind)) bad(`kind must be one of: ${[...KINDS].join(", ")}`);
+    const lat = requireLat(b.lat);
+    const lon = requireLon(b.lon);
+    const text = requireText(b.text ?? "", 2000, "text");
+    let accuracy_m = null;
+    if (b.accuracy_m != null) {
+      if (typeof b.accuracy_m !== "number" || !Number.isFinite(b.accuracy_m) ||
+          b.accuracy_m < 0 || b.accuracy_m > 100000) bad("accuracy_m must be a number between 0 and 100000");
+      accuracy_m = b.accuracy_m;
+    }
+    // A caw is presence: always public, always open (same rule as the MCP tool).
+    let visibility = kind === "caw" ? "public" : (b.visibility ?? "public");
+    if (typeof visibility !== "string" || visibility.length > 128 || !VISIBILITY_RE.test(visibility)) {
+      bad(`invalid visibility: ${String(visibility).slice(0, 32)}`);
+    }
+    let reveal = kind === "caw" ? "open" : b.reveal;
+    if (reveal != null && !REVEALS.has(reveal)) bad(`reveal must be one of: ${[...REVEALS].join(", ")}`);
+    let ttlSeconds;
+    if (b.ttl_seconds != null) {
+      if (!Number.isInteger(b.ttl_seconds) || b.ttl_seconds < 0 || b.ttl_seconds > MAX_TTL_SECONDS) {
+        bad(`ttl_seconds must be an integer between 0 and ${MAX_TTL_SECONDS}`);
+      }
+      ttlSeconds = b.ttl_seconds;
+    }
+
+    const persona = await personaFor(kind);
+    const mark = await mods.marksMod.createMark(db, {
+      author: persona.author,
+      author_level: persona.author_level,
+      kind,
+      anchor: { anchor_kind: "geo", lat, lon, accuracy_m },
+      visibility,
+      reveal,
+      content: { content_text: text, content_kind: "none" },
+      ttlSeconds,
+    }, { emit });
+
+    // Queued, not published: the transport drain decides against the grid.
+    poke("ramble:drain");
+    res.status(201).json({ mark });
+  }));
+
+  router.delete("/api/ramble/marks/:mark_id", handle(async (req, res) => {
+    const markId = req.params.mark_id;
+    if (!MARK_ID_RE.test(markId)) bad("invalid mark_id");
+    const row = await mods.marksMod.getMark(db, markId);
+    // Only your own marks are deletable — remote rows are someone else's.
+    if (!row || row.origin !== "local") return res.status(404).json({ error: "not found" });
+
+    if (row.publish_state === "published" && row.visibility === "public" && row.nostr_event_id) {
+      // R14: a TABLE, not a settings blob — the drain and this path would
+      // otherwise read-modify-write one JSON list and lose each other's rows.
+      await db.execute({
+        sql: `INSERT INTO ramble_tombstones (nostr_event_id, mark_id, kind, author_level, created_at)
+              VALUES (?, ?, ?, ?, ?) ON CONFLICT(nostr_event_id) DO NOTHING`,
+        args: [row.nostr_event_id, row.mark_id, row.kind, row.author_level ?? null, Date.now()],
+      });
+    }
+    await db.execute({ sql: "DELETE FROM ramble_marks WHERE mark_id = ?", args: [markId] });
+    await emit("ramble_marks", "delete", row);
+    poke("ramble:drain");
+    res.status(204).end();
+  }));
+
+  router.post("/api/ramble/unlock", handle(async (req, res) => {
+    const b = req.body || {};
+    const markId = typeof b.mark_id === "string" ? b.mark_id : "";
+    if (!MARK_ID_RE.test(markId)) bad("invalid mark_id");
+    const result = await mods.marksMod.unlockMark(db, markId, { lat: requireLat(b.lat), lon: requireLon(b.lon) });
+    if (result.missing) return res.status(404).json({ error: "not found" });
+    res.json(result);
+  }));
+
+  // --- privacy grid ---------------------------------------------------------
+  router.get("/api/ramble/grid", handle(async (req, res) => {
+    res.json(await mods.gridMod.getGrid(db));
+  }));
+
+  router.post("/api/ramble/grid", handle(async (req, res) => {
+    const b = req.body || {};
+    const { AUDIENCES, CHANNELS, IDENTITY_LEVELS } = mods.gridMod;
+
+    if (b.master != null && typeof b.master !== "boolean") bad("master must be a boolean");
+    if (b.identityLevel != null && !IDENTITY_LEVELS.includes(b.identityLevel)) {
+      bad(`identityLevel must be one of: ${IDENTITY_LEVELS.join(", ")}`);
+    }
+    if (b.cells != null) {
+      if (typeof b.cells !== "object" || Array.isArray(b.cells)) bad("cells must be an object");
+      for (const [audience, channels] of Object.entries(b.cells)) {
+        if (!AUDIENCES.includes(audience)) bad(`unknown audience: ${audience}`);
+        if (typeof channels !== "object" || channels == null || Array.isArray(channels)) bad(`cells.${audience} must be an object`);
+        for (const [channel, on] of Object.entries(channels)) {
+          if (!CHANNELS.includes(channel)) bad(`unknown channel: ${channel}`);
+          if (typeof on !== "boolean") bad(`cells.${audience}.${channel} must be a boolean`);
+        }
+      }
+    }
+
+    // Validated in full above, so a partial application can't happen here.
+    if (b.master != null) await mods.gridMod.setMaster(db, b.master, { emit });
+    for (const [audience, channels] of Object.entries(b.cells || {})) {
+      for (const [channel, on] of Object.entries(channels)) {
+        // eslint-disable-next-line no-await-in-loop
+        await mods.gridMod.setCell(db, audience, channel, on, { emit });
+      }
+    }
+    if (b.identityLevel != null) await mods.gridMod.setIdentityLevel(db, b.identityLevel, { emit });
+
+    res.json(await mods.gridMod.getGrid(db));
+  }));
+
+  // --- active area (the subscriber's only input, D6) ------------------------
+  router.post("/api/ramble/area", handle(async (req, res) => {
+    const b = req.body || {};
+    let cells;
+    if (Array.isArray(b.cells)) {
+      if (b.cells.length === 0 || b.cells.length > MAX_CELLS) bad(`cells must hold 1..${MAX_CELLS} entries`);
+      cells = b.cells.map(requireCell);
+    } else {
+      cells = [mods.anchorsMod.encodeGeohash(requireLat(b.lat), requireLon(b.lon), defaultPrecision())];
+    }
+    // Written directly, NOT through the grid's emitting writer: `local.`-prefixed
+    // keys are per-instance machinery and never replicate (instance-sync filters
+    // them anyway — emitting would just be noise).
+    await db.execute({
+      sql: `INSERT INTO ramble_settings (key, value) VALUES ('local.active_area', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [JSON.stringify(cells)],
+    });
+    poke("ramble:area");
+    res.json({ cells });
+  }));
+
+  // --- blocks ---------------------------------------------------------------
+  router.post("/api/ramble/block", handle(async (req, res) => {
+    const b = req.body || {};
+    if (typeof b.persona !== "string" || !PERSONA_RE.test(b.persona)) {
+      bad("persona must be a 64-character hex x-only pubkey");
+    }
+    let reason = null;
+    if (b.reason != null) reason = requireText(b.reason, 64, "reason");
+    res.json(await mods.marksMod.blockPersona(db, b.persona, reason, { emit }));
+  }));
+
+  // --- pet (Task 14 replaces this stub) -------------------------------------
+  router.get("/api/ramble/pet", handle(async (req, res) => {
+    res.json({ mood: "happy", energy: 60 });
+  }));
+
+  // Body-parser failures (malformed JSON) surface here. Path-scoped, so it is
+  // not an unpathed layer; last so it also catches route-thrown errors.
+  // eslint-disable-next-line no-unused-vars
+  router.use("/api/ramble", (err, req, res, next) => {
+    const status = Number.isInteger(err?.status) && err.status >= 400 && err.status < 500 ? err.status : 400;
+    res.status(status).json({ error: "invalid request body" });
+  });
+
+  return router;
+}
