@@ -2,7 +2,7 @@
  * Ramble MCP server. Milestone 1 (M1) tools — local core, no network/UI:
  *   ramble_leave_mark, ramble_caw, ramble_query_world, ramble_unlock,
  *   ramble_pet_state, ramble_block, ramble_unblock, ramble_egg_state,
- *   ramble_checkin, ramble_chore.
+ *   ramble_checkin, ramble_chore, ramble_flock, ramble_nests, ramble_claim_nest.
  *
  * Groups are NOT in phase 1 (review round 3, D8) — ramble_group_create/
  * ramble_group_join move to phase 1b with the contacts/group delivery path.
@@ -22,8 +22,9 @@ import { createMark, listMarks, unlockMark, blockPersona, unblockPersona } from 
 import { encodeGeohash } from "./anchors.js";
 import { getGrid } from "./grid.js";
 import { petState, doChore } from "./pet.js";
-import { eggState, activeBird } from "./eggs.js";
+import { eggState, activeBird, isoWeek } from "./eggs.js";
 import { feedAll } from "./feed.js";
+import { flockState, listNests, claimNest } from "./flock.js";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const errorText = (t) => ({ content: [{ type: "text", text: t }], isError: true });
@@ -319,6 +320,58 @@ export function createRambleServer(db, options = {}) {
       try {
         const emit = await getEmit();
         return text(JSON.stringify(await doChore(db, kind, { emit })));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    },
+  );
+
+  register(
+    "ramble_flock",
+    "Your flock: hatched birds (the active one marked), the egg shelf and the incubating egg, and how many of the 8 species you have found.",
+    {},
+    async () => {
+      try { return text(JSON.stringify(await flockState(db, { now: Date.now() }))); }
+      catch (err) { return errorText(err.message); }
+    },
+  );
+
+  register(
+    "ramble_nests",
+    "Nests near a location this week (about a 4 km box), nearest first, with whether you already claimed each. Nests are deterministic: everyone sees the same ones.",
+    {
+      lat: z.number().min(-90).max(90),
+      lon: z.number().min(-180).max(180),
+    },
+    async ({ lat, lon }) => {
+      try {
+        // ±0.02° (~900 cells, ~37 nests expected; no week through 2040 has
+        // fewer than 3 at the test point) — a ±0.01° box can be nearly empty.
+        const bbox = { south: Math.max(-90, lat - 0.02), west: Math.max(-180, lon - 0.02), north: Math.min(90, lat + 0.02), east: Math.min(180, lon + 0.02) };
+        const out = await listNests(db, bbox, { now: Date.now(), from: { lat, lon } });
+        return text(JSON.stringify(out ?? { week: isoWeek(Date.now()), nests: [] }));
+      } catch (err) {
+        return errorText(err.message);
+      }
+    },
+  );
+
+  register(
+    "ramble_claim_nest",
+    "Claim the nest at your location (or at an explicit 7-character geohash cell you are within 75 m of) for an egg on your shelf. One claim per day; shelf holds 5. Claiming credits no warmth.",
+    {
+      lat: z.number().min(-90).max(90),
+      lon: z.number().min(-180).max(180),
+      cell: z.string().regex(/^[0-9b-hjkmnp-z]{7}$/).optional(),
+    },
+    async ({ lat, lon, cell }) => {
+      try {
+        const emit = await getEmit();
+        const now = Date.now();
+        const result = await claimNest(db, {
+          cell: cell ?? encodeGeohash(lat, lon, 7), week: isoWeek(now), here: { lat, lon }, now, emit,
+        });
+        return text(JSON.stringify(result));
       } catch (err) {
         return errorText(err.message);
       }
