@@ -150,7 +150,7 @@ git show --stat HEAD
 - Test: `tests/ramble-bird-svg.test.js`
 
 **Interfaces:**
-- Produces (dual shim: `window.RambleBird = api` in browsers, `module.exports = api` when `module` exists; the file has NO `import`/`export` statements so the gateway can serve it verbatim as a classic script and Node tests can `createRequire(import.meta.url)("../bundles/ramble/server/bird-svg.js")`):
+- Produces (dual shim: `window.RambleBird = api` in browsers, `module.exports = api` when `module` exists; the file has NO `import`/`export` statements so the gateway can serve it verbatim as a classic script and Node tests can `createRequire(import.meta.url)("../bundles/ramble/server/bird-svg.cjs")`):
   - `ROSTER: string[]` = `["crow","raven","grackle","magpie","mockingbird","hummingbird","penguin","blackswan"]`; `SPECIES[id]` = `{ name, base: [hex…], belly?, crest, tail, beak, size, sheen?, longbeak?, longneck?, feet? }`.
   - `rollGenome(seed: number, species: string) -> genome` — deterministic from `(seed, species)`: `{ species, seed, body, belly, accent, eye, mark, hat, size, plump, tilt }`. Throws on an unknown species or a non-uint32 seed.
   - `drawBird(genome, mood = "happy") -> string` — the inner SVG markup (a `<g>` for a `viewBox="0 0 200 200"`), byte-identical for identical inputs; `mood ∈ happy|tired|alarmed`.
