@@ -94,10 +94,15 @@
   display: block;
   max-width: 560px;
   margin: 0 auto;
+  padding: 2px;
   font-family: var(--rb-font-body);
   font-weight: 600;
   font-size: 15px;
   line-height: 1.45;
+  /* The panel paints its own ground: the Nest's content-body is a --crow-*
+     surface, and direction C's warm paper (or its night blue) is half the
+     look. Never inherit the shell's background here. */
+  background: var(--rb-bg);
   color: var(--rb-text);
 }
 
@@ -388,6 +393,21 @@
 #ramble .rb-step-txt { min-width: 0; }
 #ramble .rb-step-txt strong { display: block; }
 
+/* Audience tag — only ever drawn for a non-public mark, so "no tag" reads as
+   "everyone" without a label competing with the mark's own text. */
+#ramble .rb-aud {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 8px;
+  border: 2px solid var(--rb-line);
+  border-radius: 999px;
+  background: var(--rb-accent-3);
+  color: #24273a;
+  font: 800 11px/1.6 var(--rb-font-display);
+  letter-spacing: .04em;
+}
+#ramble .rb-pop-head .rb-aud { margin-top: 0; }
+
 /* --------------------------------------------------------------- egg / ring */
 
 #ramble .rb-ring { position: relative; width: 236px; height: 236px; margin: 6px auto 0; display: grid; place-items: center; }
@@ -402,6 +422,11 @@
   transform-origin: 50% 90%;
 }
 #ramble .rb-hatch-bird { width: 160px; height: 160px; filter: drop-shadow(3px 4px 0 var(--rb-shadow-col)); }
+
+/* The compact successor-egg dial on the pet screen. */
+#ramble .rb-ring-mini { width: 66px; height: 66px; margin: 0; flex: 0 0 auto; }
+#ramble .rb-ring-mini .rb-eggart { width: 30px; height: 38px; filter: none; }
+#ramble #rb-pet-nextegg .rb-big { margin: 0; }
 #ramble .rb-ring .rb-hatch-bird { position: absolute; }
 
 @keyframes rb-wobble {

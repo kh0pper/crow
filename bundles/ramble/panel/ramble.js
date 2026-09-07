@@ -218,6 +218,9 @@ export default {
           <div class="rb-row rb-actions">
             <button class="rb-btn rb-grow" id="rb-go-outside" type="button">${icon("pin")}Go outside</button>
             <button class="rb-btn rb-btn-ghost" id="rb-checkin" type="button">Check in</button>
+            <!-- Only once something has hatched: before that there is no bird
+                 to go and see, and this is the only way back to the pet. -->
+            <button class="rb-btn rb-btn-ghost" id="rb-my-bird" type="button" hidden>My bird</button>
           </div>
           <p class="rb-muted rb-fine" id="rb-egg-status"></p>
         </section>
@@ -259,6 +262,25 @@ export default {
               <div><strong id="rb-stat-places">0</strong><span class="rb-muted">places</span></div>
               <div><strong id="rb-stat-unlocks">0</strong><span class="rb-muted">unlocked</span></div>
               <div><strong id="rb-stat-crows">0</strong><span class="rb-muted">crows met</span></div>
+            </div>
+          </section>
+
+          <!-- The successor egg is minted the moment one hatches, and the perch
+               swaps to the bird for good — so without this the egg view (and
+               its daily check-in) would be unreachable after the first hatch. -->
+          <section class="rb-card" id="rb-pet-nextegg">
+            <p class="rb-eyebrow">Next egg</p>
+            <div class="rb-row">
+              <span class="rb-ring rb-ring-mini">
+                <svg class="rb-ring-track" viewBox="0 0 240 240" aria-hidden="true">
+                  <circle class="rb-ring-trk" cx="120" cy="120" r="108" stroke-width="30" fill="none"/>
+                  <circle id="rb-nextegg-ring" class="rb-ring-prg" cx="120" cy="120" r="108" stroke-width="30" fill="none"
+                          stroke-linecap="round" stroke-dasharray="678.6" stroke-dashoffset="678.6"/>
+                </svg>
+                <svg id="rb-nextegg-art" class="rb-eggart" viewBox="0 0 120 152" role="img" aria-label="Your next egg"></svg>
+              </span>
+              <strong class="rb-big rb-grow" id="rb-nextegg-percent">&mdash;</strong>
+              <button class="rb-btn rb-btn-ghost" id="rb-see-egg" type="button">See egg</button>
             </div>
           </section>
 

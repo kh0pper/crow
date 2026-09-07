@@ -58,6 +58,11 @@
   /* ---------------------------------------------------------------- views */
 
   function showView(name) {
+    /* Any navigation ends the hatch moment. hatchLock freezes the egg card so
+     * the reveal is not repainted out from under the reader; leaving it set
+     * when they walk away (Go outside, the perch, My bird) froze the egg view
+     * for the rest of the session. */
+    if (root.getAttribute("data-view") !== name) clearHatch();
     root.setAttribute("data-view", name);
     try { window.scrollTo(0, 0); } catch (e) { /* not fatal */ }
     /* Leaflet measures its container once; a container that was display:none
@@ -177,6 +182,46 @@
     return Math.round(hrs / 24) + " d ago";
   }
 
+  /* The unlock radius the server actually enforces (anchors.js withinRange:
+   * accuracy_m, defaulting to 75 m). We only ever know the CELL CENTRE, so a
+   * distance from it is an estimate -- hence the "~" and the 5 m rounding. */
+  var UNLOCK_M = 75;
+
+  function haversineMeters(a, b) {
+    var R = 6371000;
+    var toRad = function (deg) { return (deg * Math.PI) / 180; };
+    var dLat = toRad(b.lat - a.lat);
+    var dLon = toRad(b.lon - a.lon);
+    var s = Math.pow(Math.sin(dLat / 2), 2) +
+      Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.pow(Math.sin(dLon / 2), 2);
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+
+  /**
+   * How far the reader still has to walk. approx_m is NOT that number: it is
+   * the geohash cell's own error radius, a constant ~101 m for every
+   * precision-7 anchor, so printing it told every reader the same lie. A real
+   * distance needs a real fix; without one we say so rather than invent one.
+   */
+  function walkHint(mark) {
+    if (!lastFix || typeof mark.approx_lat !== "number" || typeof mark.approx_lon !== "number") {
+      return "get closer to read it";
+    }
+    var m = haversineMeters(
+      { lat: lastFix.lat, lon: lastFix.lon },
+      { lat: mark.approx_lat, lon: mark.approx_lon }
+    );
+    if (m <= UNLOCK_M) return "you're close enough — unlock";
+    return "walk ~" + (Math.round(m / 5) * 5) + " m to read it";
+  }
+
+  /** Non-public marks say who they are for; a public one needs no label. */
+  function audienceHint(mark) {
+    if (mark.visibility === "contacts") return "Contacts";
+    if (mark.visibility === "private") return "Just me";
+    return "";
+  }
+
   /** A 40px portrait of the author's bird, drawn by the shared engine. */
   function birdFor(mark) {
     if (!Bird || !mark.bird_species || typeof mark.bird_seed !== "number") return null;
@@ -199,12 +244,19 @@
     var who = document.createElement("span");
     who.textContent = markLabel(mark);
     head.appendChild(who);
+    var aud = audienceHint(mark);
+    if (aud) {
+      var tag = document.createElement("span");
+      tag.className = "rb-aud";
+      tag.textContent = aud;
+      head.appendChild(tag);
+    }
     box.appendChild(head);
 
     var body = document.createElement("p");
     body.className = "rb-pop-body";
     if (isLocked(mark)) {
-      body.textContent = "Locked · walk " + Math.round(mark.approx_m || 0) + " m to read it.";
+      body.textContent = "Locked · " + walkHint(mark);
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "rb-pop-btn";
@@ -256,10 +308,11 @@
       } else if (typeof mark.approx_lat === "number" && typeof mark.approx_lon === "number") {
         /* A locked teaser has no anchor -- only the coarse cell the server
          * decoded for us. Draw it as a dashed circle at the cell centre so it
-         * reads as "somewhere in here", never as a precise point. */
-        var radius = Math.max(12, Math.min(60, (mark.approx_m || 0) / 40));
+         * reads as "somewhere in here", never as a precise point. A FIXED
+         * pixel radius: approx_m is the same constant for every precision-7
+         * cell, so scaling by it only ever produced one number. */
         var blob = L.circleMarker([mark.approx_lat, mark.approx_lon], {
-          radius: radius,
+          radius: 14,
           color: "#5b7cff",
           weight: 2,
           dashArray: "4 3",
@@ -278,7 +331,10 @@
     var list = $("rb-nearby");
     if (!list) return;
     list.textContent = "";
-    setText($("rb-nearby-count"), marks.length ? "Nearby · " + marks.length : "Nearby");
+    /* The count is what is actually on screen (the list is capped), never the
+     * whole result set -- a header that says 40 above 8 rows is a bug. */
+    var shown = marks.slice(0, MAX_NEARBY);
+    setText($("rb-nearby-count"), shown.length ? "Nearby · " + shown.length : "Nearby");
 
     if (marks.length === 0) {
       var empty = document.createElement("div");
@@ -291,7 +347,7 @@
       return;
     }
 
-    marks.slice(0, MAX_NEARBY).forEach(function (mark) {
+    shown.forEach(function (mark) {
       var row = document.createElement("div");
       row.className = "rb-step";
 
@@ -307,18 +363,32 @@
       var sub = document.createElement("span");
       sub.className = "rb-muted rb-fine";
       sub.textContent = isLocked(mark)
-        ? ("walk " + Math.round(mark.approx_m || 0) + " m to read it")
+        ? walkHint(mark)
         : (markLabel(mark) + " · " + ago(mark.created_at));
       txt.appendChild(title);
       txt.appendChild(sub);
+
+      var aud = audienceHint(mark);
+      if (aud) {
+        var tag = document.createElement("span");
+        tag.className = "rb-aud";
+        tag.textContent = aud;
+        txt.appendChild(tag);
+      }
+
       row.appendChild(txt);
       list.appendChild(row);
     });
   }
 
+  /* NO "visibility" filter. The route's no-filter branch is the owner's
+   * overview: public + contacts + the user's OWN private rows, with the one
+   * exclusion of a private row that arrived off the Nostr wire. Pinning it to
+   * visibility=public hid Contacts and "Just me" marks from their own
+   * author, on their own map. */
   function refreshMarks() {
     if (currentCells.length === 0) return Promise.resolve();
-    return jsonFetch("/api/ramble/marks?visibility=public&cells=" +
+    return jsonFetch("/api/ramble/marks?cells=" +
       encodeURIComponent(currentCells.join(","))
     ).then(function (body) {
       drawMarks((body && body.marks) || []);
@@ -627,6 +697,17 @@
     setText($("rb-stat-places"), String(pet.places_week || 0));
     setText($("rb-stat-unlocks"), String(pet.unlocks_week || 0));
     setText($("rb-stat-crows"), String(pet.crows_week || 0));
+
+    /* The successor egg, and the only route back to the egg view (and its
+     * daily check-in) once the perch belongs to a hatched bird. */
+    var nextPct = (pet.egg && typeof pet.egg.percent === "number") ? pet.egg.percent : eggPercent;
+    setRing($("rb-nextegg-ring"), nextPct);
+    setText($("rb-nextegg-percent"), Math.round(nextPct) + "%");
+    drawEggArt($("rb-nextegg-art"), eggSeedId);
+
+    /* "My bird" only exists once there is one. */
+    var myBird = $("rb-my-bird");
+    if (myBird) myBird.hidden = !valid;
   }
 
   function refreshPet() {
@@ -649,6 +730,11 @@
   var backBtn = $("rb-back-world");
   if (backBtn) backBtn.addEventListener("click", function () { showView("world"); });
 
+  var seeEggBtn = $("rb-see-egg");
+  if (seeEggBtn) seeEggBtn.addEventListener("click", function () { showView("egg"); });
+  var myBirdBtn = $("rb-my-bird");
+  if (myBirdBtn) myBirdBtn.addEventListener("click", function () { showView("pet"); });
+
   /* ---------------------------------------------------------------- hatch */
 
   var shownHatch = null;
@@ -663,9 +749,10 @@
     var key = h.egg_id || (h.species + ":" + h.seed);
     if (key === shownHatch) return;
     shownHatch = key;
-    hatchLock = true;
-
+    /* AFTER showView: showView() ends any hatch in progress, so locking first
+     * would immediately unlock again when the view actually changes. */
     showView("egg");
+    hatchLock = true;
     var stage = $("rb-egg-stage");
     if (stage && !REDUCED) stage.classList.add("rb-hatch");
 
@@ -688,16 +775,28 @@
     }, HATCH_MS);
   }
 
-  var meetBtn = $("rb-meet-bird");
-  if (meetBtn) {
-    meetBtn.addEventListener("click", function () {
-      hatchLock = false;
-      var revealCard = $("rb-hatch-reveal");
-      if (revealCard) revealCard.hidden = true;
-      refreshEgg();
-      showView("pet");
-    });
+  /**
+   * End the hatch moment and put the egg card back the way it was: unlock the
+   * repaint, drop the animation class, hide the reveal and the hatched bird,
+   * bring the (now successor) egg art back. Called from showView on ANY view
+   * change, so no navigation can strand the egg view mid-reveal.
+   */
+  function clearHatch() {
+    if (!hatchLock) return;
+    hatchLock = false;
+    var stage = $("rb-egg-stage");
+    if (stage) stage.classList.remove("rb-hatch");
+    var revealCard = $("rb-hatch-reveal");
+    if (revealCard) revealCard.hidden = true;
+    var birdEl = $("rb-hatch-bird");
+    if (birdEl) birdEl.hidden = true;
+    var art = $("rb-egg-art");
+    if (art) art.hidden = false;
+    refreshEgg();
   }
+
+  var meetBtn = $("rb-meet-bird");
+  if (meetBtn) meetBtn.addEventListener("click", function () { showView("pet"); });
 
   /* --------------------------------------------------- nearby live updates */
 

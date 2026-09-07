@@ -119,6 +119,12 @@ test("panel handler renders the world-first shell, its three views and every ass
   // The "Just me" segment is a real audience, not a hidden default.
   assert.match(sent, /data-visibility="private"/);
 
+  // Both directions of the egg <-> pet loop. Without them the egg view (and
+  // its daily check-in) is unreachable once the perch belongs to a hatched
+  // bird, because the successor egg is minted the moment one hatches.
+  assert.match(sent, /id="rb-pet-nextegg"/);
+  assert.match(sent, /id="rb-my-bird"/);
+
   // Assets: the stylesheet is now a file (was an inline <style>), and the
   // bird engine is loaded in the browser so pins/perch/pet can draw genomes.
   assert.match(sent, /\/ramble\/static\/ramble\.css/);
@@ -483,6 +489,11 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // (servers/gateway/routes/streams.js). onmessage never fires for either.
   assert.ok(body.includes('addEventListener("ramble-nearby"'), "client must subscribe to ramble-nearby");
   assert.ok(body.includes('addEventListener("ramble-hatched"'), "client must subscribe to ramble-hatched");
+
+  // The Who segment is markup in ramble.js (panel) and behaviour here: the
+  // client reads the chosen audience off the button's data-visibility. Pin the
+  // attribute name on BOTH sides so a rename cannot silently split them.
+  assert.ok(body.includes('"data-visibility"'), "client must read the data-visibility attribute");
 });
 
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
