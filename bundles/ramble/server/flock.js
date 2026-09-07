@@ -184,8 +184,9 @@ export async function incubateEgg(db, eggId, { now = Date.now(), emit } = {}) {
              SET status = CASE WHEN egg_id = ? THEN 'incubating' ELSE 'shelf' END,
                  shelf_origin = CASE WHEN egg_id = ? THEN NULL ELSE 'user' END
            WHERE (status = 'incubating' OR egg_id = ?)
-             AND EXISTS (SELECT 1 FROM ramble_eggs WHERE egg_id = ? AND status IN ('shelf', 'received'))`,
-    args: [eggId, eggId, eggId, eggId],
+             AND EXISTS (SELECT 1 FROM ramble_eggs WHERE egg_id = ? AND status IN ('shelf', 'received'))
+             AND NOT EXISTS (SELECT 1 FROM ramble_trades WHERE my_egg_id = ? AND state IN ('proposed', 'accepted'))`,
+    args: [eggId, eggId, eggId, eggId, eggId],
   });
   if (rowsAffected === 0) {
     // The target moved between our read and the write (a concurrent swap or
