@@ -440,3 +440,23 @@ test("a peer's user-shelve does not trigger re-promotion (the user's replacement
   got = await d.execute("SELECT egg_id, status FROM ramble_eggs WHERE status='incubating'");
   assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status]), [["X", "incubating"]]);
 });
+
+test("an explicit null origin on the wire means plain, even if this instance once marked the egg 'sync'", async () => {
+  // B demoted Y earlier (shelf/'sync'); B then minted Z (NULL). The user on A
+  // now incubates Y and A emits it with shelf_origin: null explicitly. On B,
+  // Y must rank as a plain egg: NULL vs NULL, older wins -> Y incubates.
+  const d = await freshDb();
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('Y','shelf',20,1000,'sync')");
+  await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('Z','incubating',0,3000)");
+  await applyRemoteOp(d, "ramble_eggs", "update", { egg_id: "Y", status: "incubating", warmth: 20, created_at: 1000, shelf_origin: null }, 9);
+  let got = await d.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status, r.shelf_origin]), [["Y", "incubating", null], ["Z", "shelf", "sync"]]);
+  // Whereas a MISSING key (phase-1 peer) still falls back to the local mark:
+  // reset and replay without the key -> Y reads as 'sync' and loses to Z.
+  const e = await freshDb();
+  await e.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('Y','shelf',20,1000,'sync')");
+  await e.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('Z','incubating',0,3000)");
+  await applyRemoteOp(e, "ramble_eggs", "update", { egg_id: "Y", status: "incubating", warmth: 20, created_at: 1000 }, 9);
+  got = await e.execute("SELECT egg_id, status, shelf_origin FROM ramble_eggs ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.status, r.shelf_origin]), [["Y", "shelf", "sync"], ["Z", "incubating", null]]);
+});

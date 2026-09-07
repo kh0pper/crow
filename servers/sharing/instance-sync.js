@@ -718,11 +718,17 @@ export async function applyRambleEgg(db, op, row, lamportTs) {
       // plain egg (NULL: a fresh successor, or the user's incubate choice),
       // whatever their ages. Only between equals does age decide. Both sides
       // evaluate the same two rows (shelf_origin rides the wire), so this is
-      // still a pure function of the pair. A wire row that omits shelf_origin
-      // (a phase-1 peer during a rolling restart) falls back to what THIS
-      // instance already knows about the egg — a loser it shelved as 'sync'
-      // must not come back as a plain egg and out-rank the real one by age.
-      const mineSync = (wire.shelf_origin ?? existing[0]?.shelf_origin ?? null) === "sync";
+      // still a pure function of the pair. A MISSING key (a phase-1 peer
+      // during a rolling restart) falls back to what THIS instance already
+      // knows about the egg — a loser it shelved as 'sync' must not come back
+      // as a plain egg and out-rank the real one by age. An EXPLICIT null on
+      // the wire means "plain" and must NOT be collapsed into a stale local
+      // 'sync' mark — a later full-row emit (e.g. the user's own incubate
+      // choice) always carries `shelf_origin: null` deliberately.
+      const wireOrigin = wire.shelf_origin !== undefined
+        ? wire.shelf_origin
+        : (existing[0]?.shelf_origin ?? null);
+      const mineSync = wireOrigin === "sync";
       const theirsSync = rival.shelf_origin === "sync";
       const mine = Number(wire.created_at ?? existing[0]?.created_at ?? Number.MAX_SAFE_INTEGER);
       const theirs = Number(rival.created_at);
