@@ -1,0 +1,569 @@
+/* Ramble panel — visual direction C ("sticker pop, softened").
+ *
+ * Served from /ramble/static/ramble.css behind dashboardAuth (the panel's
+ * companion routes.js allow-lists .css through sendStatic). Every rule is
+ * scoped under #ramble so nothing here can leak into the rest of the Crow's
+ * Nest, and every colour comes from the --rb-* token block below — the panel
+ * deliberately does NOT inherit the Nest's --crow-* palette, because Ramble is
+ * a place you look at, not a console you read.
+ *
+ * Dark mode is a second token set, authored on purpose, not an inversion. It
+ * is bound twice: to prefers-color-scheme (what the Nest actually honours
+ * today) and to an explicit [data-theme] on an ancestor, so an app shell that
+ * pins a theme wins over the OS.
+ */
+
+/* ------------------------------------------------------------------ tokens */
+
+#ramble {
+  --rb-font-display: "Baloo 2", "Nunito", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --rb-font-body: "Nunito", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --rb-bg: #f7f5ef;
+  --rb-surface: #fffdf8;
+  --rb-surface-2: #efeae0;
+  --rb-text: #24273a;
+  --rb-muted: #6a6e85;
+  --rb-line: #2a2d3e;
+  --rb-accent: #f7c948;
+  --rb-accent-ink: #24273a;
+  --rb-accent-2: #5b7cff;
+  --rb-accent-2-ink: #ffffff;
+  --rb-accent-3: #ff7a9c;
+  --rb-shadow-col: #2a2d3e;
+
+  --rb-radius: 20px;
+  --rb-radius-sm: 13px;
+  --rb-line-w: 2.5px;
+  --rb-pop: 4px 4px 0 var(--rb-shadow-col);
+  --rb-pop-sm: 3px 3px 0 var(--rb-shadow-col);
+  --rb-tap: 44px;
+}
+
+@media (prefers-color-scheme: dark) {
+  #ramble {
+    --rb-bg: #151827;
+    --rb-surface: #1e2236;
+    --rb-surface-2: #272c45;
+    --rb-text: #f1f0f8;
+    --rb-muted: #aeb2cc;
+    --rb-line: #c9cbe0;
+    --rb-accent: #ffd166;
+    --rb-accent-ink: #1a1d2e;
+    --rb-accent-2: #8c9bff;
+    --rb-accent-2-ink: #0f111c;
+    --rb-accent-3: #ff8fb0;
+    --rb-shadow-col: #4a5080;
+  }
+}
+
+/* An explicitly pinned theme beats the OS preference in both directions. */
+[data-theme="dark"] #ramble {
+  --rb-bg: #151827;
+  --rb-surface: #1e2236;
+  --rb-surface-2: #272c45;
+  --rb-text: #f1f0f8;
+  --rb-muted: #aeb2cc;
+  --rb-line: #c9cbe0;
+  --rb-accent: #ffd166;
+  --rb-accent-ink: #1a1d2e;
+  --rb-accent-2: #8c9bff;
+  --rb-accent-2-ink: #0f111c;
+  --rb-accent-3: #ff8fb0;
+  --rb-shadow-col: #4a5080;
+}
+
+[data-theme="light"] #ramble {
+  --rb-bg: #f7f5ef;
+  --rb-surface: #fffdf8;
+  --rb-surface-2: #efeae0;
+  --rb-text: #24273a;
+  --rb-muted: #6a6e85;
+  --rb-line: #2a2d3e;
+  --rb-accent: #f7c948;
+  --rb-accent-ink: #24273a;
+  --rb-accent-2: #5b7cff;
+  --rb-accent-2-ink: #ffffff;
+  --rb-accent-3: #ff7a9c;
+  --rb-shadow-col: #2a2d3e;
+}
+
+/* ------------------------------------------------------------------- shell */
+
+#ramble {
+  display: block;
+  max-width: 560px;
+  margin: 0 auto;
+  font-family: var(--rb-font-body);
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--rb-text);
+}
+
+#ramble *,
+#ramble *::before,
+#ramble *::after { box-sizing: border-box; }
+
+/* Several rules below set an explicit `display` on elements the client hides
+   with `el.hidden = true` (the perch bird, the egg art, the hatch reveal).
+   Without this the UA's own [hidden] rule loses on specificity and the
+   "hidden" element stays visible. */
+#ramble [hidden] { display: none !important; }
+
+/* Three views, one state attribute. The world is home. */
+#ramble .rb-view { display: none; flex-direction: column; gap: 14px; }
+#ramble[data-view="world"] .rb-view[data-for="world"],
+#ramble[data-view="egg"] .rb-view[data-for="egg"],
+#ramble[data-view="pet"] .rb-view[data-for="pet"] { display: flex; }
+
+#ramble .rb-row { display: flex; align-items: center; gap: 10px; }
+#ramble .rb-grow { flex: 1; }
+#ramble .rb-actions { gap: 10px; }
+#ramble .rb-center { text-align: center; }
+#ramble .rb-label { width: 66px; font-weight: 800; color: var(--rb-muted); flex: 0 0 auto; }
+
+#ramble .rb-eyebrow {
+  margin: 0 0 6px;
+  font: 800 11px/1 var(--rb-font-display);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--rb-muted);
+}
+#ramble .rb-h { margin: 0 0 6px; font: 800 21px/1.15 var(--rb-font-display); color: var(--rb-text); }
+#ramble p { margin: 0; }
+#ramble .rb-muted { color: var(--rb-muted); }
+#ramble .rb-fine { font-size: 13px; }
+#ramble .rb-big { font: 800 30px/1 var(--rb-font-display); margin: 10px 0 4px; }
+#ramble strong { font-weight: 800; }
+
+/* --------------------------------------------------------------- surfaces */
+
+#ramble .rb-card {
+  background: var(--rb-surface);
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius);
+  box-shadow: var(--rb-pop);
+  padding: 15px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---------------------------------------------------------------- controls */
+
+#ramble .rb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--rb-tap);
+  padding: 0 18px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 999px;
+  background: var(--rb-accent);
+  color: var(--rb-accent-ink);
+  font: 800 16px var(--rb-font-display);
+  box-shadow: var(--rb-pop);
+  cursor: pointer;
+  transition: transform .08s ease, box-shadow .08s ease;
+}
+#ramble .rb-btn.rb-btn-ghost { background: var(--rb-surface-2); color: var(--rb-text); box-shadow: var(--rb-pop-sm); }
+#ramble .rb-btn:active { transform: translate(3px, 3px); box-shadow: 0 0 0 var(--rb-shadow-col); }
+#ramble .rb-btn[disabled] { opacity: .45; cursor: default; }
+#ramble .rb-btn:focus-visible,
+#ramble .rb-chip:focus-visible,
+#ramble .rb-chore:focus-visible,
+#ramble .rb-seg button:focus-visible,
+#ramble .rb-icon-btn:focus-visible,
+#ramble .rb-perch-btn:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+
+#ramble .rb-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--rb-tap);
+  min-height: var(--rb-tap);
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 999px;
+  background: var(--rb-surface-2);
+  color: var(--rb-text);
+  cursor: pointer;
+}
+
+#ramble .rb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: var(--rb-tap);
+  padding: 0 14px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 999px;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  font: 800 14px var(--rb-font-display);
+  box-shadow: var(--rb-pop-sm);
+  cursor: pointer;
+}
+#ramble .rb-chip.is-on { background: var(--rb-accent-2); color: var(--rb-accent-2-ink); }
+
+#ramble .rb-seg {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 5px;
+  padding: 4px;
+  background: var(--rb-surface-2);
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 999px;
+  box-shadow: var(--rb-pop-sm);
+  flex: 1;
+}
+#ramble .rb-seg button {
+  border: 0;
+  background: transparent;
+  min-height: 44px;
+  border-radius: 999px;
+  font: 800 14px var(--rb-font-display);
+  color: var(--rb-muted);
+  cursor: pointer;
+  padding: 0 6px;
+}
+#ramble .rb-seg button.is-on { background: var(--rb-surface); color: var(--rb-text); box-shadow: 2px 2px 0 var(--rb-shadow-col); }
+
+#ramble textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius-sm);
+  padding: 12px 14px;
+  font: 600 16px/1.4 var(--rb-font-body);
+  color: var(--rb-text);
+  background: var(--rb-surface);
+}
+#ramble select {
+  min-height: var(--rb-tap);
+  padding: 0 12px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius-sm);
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  font: 700 15px var(--rb-font-body);
+}
+#ramble svg.rb-i { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
+
+/* -------------------------------------------------------------------- map */
+
+#ramble .rb-map {
+  position: relative;
+  height: 56vh;
+  min-height: 340px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius);
+  box-shadow: var(--rb-pop);
+  overflow: hidden;
+  background: var(--rb-surface-2);
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+#ramble #rb-map {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+  overscroll-behavior: contain;
+  background: var(--rb-surface-2);
+}
+#ramble .rb-mapbar {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  z-index: 500;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#ramble .rb-perch {
+  position: absolute;
+  right: 10px;
+  bottom: 22px;
+  z-index: 500;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+#ramble .rb-perch > * { pointer-events: auto; }
+#ramble .rb-say {
+  max-width: 180px;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 16px 16px 4px 16px;
+  box-shadow: var(--rb-pop-sm);
+  padding: 8px 11px;
+  font-weight: 700;
+  font-size: 13px;
+  transform: rotate(-2deg);
+}
+#ramble .rb-perch-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  min-width: var(--rb-tap);
+  min-height: var(--rb-tap);
+  display: block;
+}
+#ramble .rb-perch .rb-bird { width: 92px; height: 92px; display: block; filter: drop-shadow(3px 4px 0 var(--rb-shadow-col)); }
+#ramble .rb-perch .rb-ring { width: 76px; height: 76px; }
+#ramble .rb-perch .rb-eggart { width: 42px; height: 54px; }
+
+/* Leaflet's own chrome, dressed in the panel's palette. */
+#ramble .leaflet-container { font-family: var(--rb-font-body); background: var(--rb-surface-2); }
+#ramble .leaflet-control-attribution {
+  background: var(--rb-surface);
+  color: var(--rb-muted);
+  font-size: 10px;
+  border-top: 1px solid var(--rb-line);
+}
+#ramble .leaflet-control-attribution a { color: var(--rb-muted); }
+#ramble .leaflet-bar a {
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  border-bottom-color: var(--rb-line);
+}
+#ramble .leaflet-popup-content-wrapper,
+#ramble .leaflet-popup-tip {
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  border: var(--rb-line-w) solid var(--rb-line);
+  box-shadow: var(--rb-pop-sm);
+}
+#ramble .leaflet-popup-content-wrapper { border-radius: var(--rb-radius-sm); }
+#ramble .leaflet-popup-content { margin: 11px 13px; font-weight: 600; }
+#ramble .rb-pop-head { display: flex; align-items: center; gap: 8px; font: 800 15px var(--rb-font-display); }
+#ramble .rb-pop-bird { width: 40px; height: 40px; flex: 0 0 auto; }
+#ramble .rb-pop-body { margin: 6px 0 0; }
+#ramble .rb-pop-btn {
+  margin-top: 9px;
+  min-height: var(--rb-tap);
+  padding: 0 14px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: 999px;
+  background: var(--rb-accent);
+  color: var(--rb-accent-ink);
+  font: 800 14px var(--rb-font-display);
+  box-shadow: var(--rb-pop-sm);
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------ steps / list */
+
+#ramble .rb-steps { display: flex; flex-direction: column; gap: 9px; }
+#ramble .rb-step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 13px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius-sm);
+  background: var(--rb-surface-2);
+  box-shadow: var(--rb-pop-sm);
+  text-align: left;
+}
+#ramble .rb-step-n {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font: 800 13px var(--rb-font-display);
+  background: var(--rb-surface);
+  border: 2px solid var(--rb-line);
+}
+#ramble .rb-step.is-done .rb-step-n { background: var(--rb-accent); color: var(--rb-accent-ink); }
+#ramble .rb-step-txt { min-width: 0; }
+#ramble .rb-step-txt strong { display: block; }
+
+/* --------------------------------------------------------------- egg / ring */
+
+#ramble .rb-ring { position: relative; width: 236px; height: 236px; margin: 6px auto 0; display: grid; place-items: center; }
+#ramble .rb-ring-track { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+#ramble .rb-ring-trk { stroke: var(--rb-surface-2); }
+#ramble .rb-ring-prg { stroke: var(--rb-accent-2); transition: stroke-dashoffset .6s ease; }
+#ramble .rb-eggart {
+  width: 126px;
+  height: 156px;
+  filter: drop-shadow(3px 4px 0 var(--rb-shadow-col));
+  animation: rb-wobble 3.2s ease-in-out infinite;
+  transform-origin: 50% 90%;
+}
+#ramble .rb-hatch-bird { width: 160px; height: 160px; filter: drop-shadow(3px 4px 0 var(--rb-shadow-col)); }
+#ramble .rb-ring .rb-hatch-bird { position: absolute; }
+
+@keyframes rb-wobble {
+  0%, 100% { transform: rotate(0); }
+  30% { transform: rotate(-4deg); }
+  60% { transform: rotate(3deg); }
+}
+@keyframes rb-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+#ramble .rb-bob { animation: rb-bob 2.4s ease-in-out infinite; transform-origin: 50% 100%; }
+
+/* -------------------------------------------------------- the hatch moment */
+/*
+ * Three beats: the egg wobbles hard three times, a crack shudder, then the
+ * bird scales in. The client waits RB_HATCH_MS (kept in step with the numbers
+ * here) before swapping the art, and skips straight to the reveal under
+ * prefers-reduced-motion.
+ */
+@keyframes rb-hatch-wobble {
+  0%, 100% { transform: rotate(0) translateX(0); }
+  20% { transform: rotate(-9deg) translateX(-3px); }
+  50% { transform: rotate(8deg) translateX(3px); }
+  80% { transform: rotate(-5deg) translateX(-2px); }
+}
+@keyframes rb-hatch-crack {
+  0% { transform: scale(1); opacity: 1; }
+  35% { transform: scale(1.1) rotate(3deg); }
+  70% { transform: scale(.94) rotate(-4deg); opacity: 1; }
+  100% { transform: scale(.5) rotate(10deg); opacity: 0; }
+}
+@keyframes rb-hatch-reveal {
+  0% { transform: scale(.35) translateY(14px); opacity: 0; }
+  60% { transform: scale(1.12) translateY(-4px); opacity: 1; }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
+}
+/* 3 x 0.5s of wobble, then a 0.55s crack that ends at 2.05s — RB_HATCH_MS in
+   the client is that same 2050, so the bird swaps in exactly as the egg goes. */
+#ramble .rb-hatch .rb-eggart {
+  animation: rb-hatch-wobble .5s ease-in-out 3, rb-hatch-crack .55s ease-in 1.5s 1 forwards;
+}
+#ramble .rb-hatch .rb-hatch-bird { animation: rb-hatch-reveal .55s cubic-bezier(.2, 1.4, .4, 1) backwards; }
+
+/* --------------------------------------------------------------------- pet */
+
+#ramble .rb-stage {
+  position: relative;
+  min-height: 280px;
+  padding: 18px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius);
+  box-shadow: var(--rb-pop);
+  overflow: hidden;
+  background: repeating-linear-gradient(-45deg, var(--rb-surface-2) 0 16px, var(--rb-bg) 16px 32px);
+}
+#ramble .rb-stage-name { position: absolute; left: 16px; top: 14px; text-align: left; }
+#ramble .rb-stage .rb-bird { width: 196px; height: 196px; filter: drop-shadow(4px 5px 0 var(--rb-shadow-col)); }
+
+#ramble .rb-meter { display: flex; align-items: center; gap: 11px; }
+#ramble .rb-meter-label { flex: 0 0 auto; width: 64px; font: 800 15px var(--rb-font-display); }
+#ramble .rb-meter-bar {
+  flex: 1;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--rb-surface-2);
+  border: 2px solid var(--rb-line);
+  overflow: hidden;
+}
+#ramble .rb-meter-bar i { display: block; height: 100%; width: 0; background: var(--rb-accent-2); transition: width .4s ease; }
+
+#ramble .rb-chores { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+#ramble .rb-chore {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 86px;
+  padding: 12px 6px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius-sm);
+  background: var(--rb-surface-2);
+  box-shadow: var(--rb-pop-sm);
+  color: var(--rb-text);
+  font: 800 14px var(--rb-font-display);
+  cursor: pointer;
+}
+#ramble .rb-chore svg.rb-i { width: 26px; height: 26px; }
+#ramble .rb-chore.done { background: color-mix(in oklab, var(--rb-accent) 45%, var(--rb-surface-2)); }
+#ramble .rb-chore:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--rb-shadow-col); }
+
+#ramble .rb-stats { display: flex; gap: 20px; }
+#ramble .rb-stats div { display: flex; flex-direction: column; }
+#ramble .rb-stats strong { font: 800 24px/1.1 var(--rb-font-display); }
+#ramble .rb-stats span { font-size: 13px; }
+
+/* ------------------------------------------------------------- grid sheet */
+
+#ramble .rb-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(20, 22, 36, .5);
+  padding: 0;
+}
+#ramble .rb-sheet[hidden] { display: none; }
+#ramble .rb-sheet-panel {
+  width: 100%;
+  max-width: 560px;
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--rb-surface);
+  color: var(--rb-text);
+  border: var(--rb-line-w) solid var(--rb-line);
+  border-radius: var(--rb-radius) var(--rb-radius) 0 0;
+  padding: 16px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  animation: rb-sheet-up .22s ease-out;
+}
+@keyframes rb-sheet-up { from { transform: translateY(26px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+#ramble .rb-sheet-head { display: flex; align-items: center; gap: 10px; }
+#ramble .rb-sheet-head .rb-h { margin: 0; flex: 1; }
+
+#ramble .rb-switch { display: flex; align-items: center; gap: 10px; min-height: var(--rb-tap); font-weight: 800; cursor: pointer; }
+#ramble .rb-switch input,
+#ramble .rb-grid input { width: 26px; height: 26px; accent-color: var(--rb-accent-2); cursor: pointer; }
+
+#ramble .rb-grid { border-collapse: collapse; width: 100%; }
+#ramble .rb-grid th,
+#ramble .rb-grid td { padding: 8px 6px; text-align: center; border-bottom: 2px solid var(--rb-surface-2); }
+#ramble .rb-grid thead th { font: 800 12px var(--rb-font-display); text-transform: uppercase; letter-spacing: .1em; color: var(--rb-muted); }
+#ramble .rb-grid th[scope="row"] { text-align: left; font: 800 14px var(--rb-font-display); }
+#ramble .rb-grid td label { display: flex; align-items: center; justify-content: center; min-height: var(--rb-tap); }
+
+/* ---------------------------------------------------------- reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+  #ramble .rb-eggart,
+  #ramble .rb-bob,
+  #ramble .rb-sheet-panel,
+  #ramble .rb-hatch .rb-eggart,
+  #ramble .rb-hatch .rb-hatch-bird { animation: none; }
+  #ramble .rb-btn,
+  #ramble .rb-ring-prg,
+  #ramble .rb-meter-bar i { transition: none; }
+}
+
+/* ------------------------------------------------------------- narrow phones */
+
+@media (max-width: 420px) {
+  #ramble .rb-map { height: 50vh; min-height: 300px; }
+  #ramble .rb-ring { width: 200px; height: 200px; }
+  #ramble .rb-eggart { width: 106px; height: 132px; }
+  #ramble .rb-actions { flex-wrap: wrap; }
+  #ramble .rb-actions .rb-btn { flex: 1 1 140px; }
+}

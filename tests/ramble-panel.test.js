@@ -94,7 +94,7 @@ test("panel handler object has the registry-required shape", () => {
   assert.equal(typeof panel.handler, "function");
 });
 
-test("panel handler renders the map mount and the client script tag", async () => {
+test("panel handler renders the world-first shell, its three views and every asset", async () => {
   let sent = null;
   const res = { send: (html) => { sent = html; } };
   await panel.handler({ query: {} }, res, {
@@ -103,16 +103,36 @@ test("panel handler renders the map mount and the client script tag", async () =
     appRoot: REPO_ROOT,
   });
   assert.ok(sent, "handler sent nothing");
-  assert.match(sent, /id="ramble-map"/);
+
+  // The whole panel is one element with a `data-view` state; the world is home.
+  assert.match(sent, /id="ramble"/);
+  assert.match(sent, /data-view="world"/);
+
+  // Direction-C surfaces: the perch on the map, the compose card, the grid
+  // sheet (no longer an always-open card), and both other views.
+  assert.match(sent, /rb-perch/);
+  assert.match(sent, /rb-compose/);
+  assert.match(sent, /rb-grid-sheet/);
+  assert.match(sent, /data-for="egg"/);
+  assert.match(sent, /data-for="pet"/);
+
+  // The "Just me" segment is a real audience, not a hidden default.
+  assert.match(sent, /data-visibility="private"/);
+
+  // Assets: the stylesheet is now a file (was an inline <style>), and the
+  // bird engine is loaded in the browser so pins/perch/pet can draw genomes.
+  assert.match(sent, /\/ramble\/static\/ramble\.css/);
+  assert.match(sent, /\/ramble\/static\/bird-svg\.js/);
   assert.match(sent, /\/ramble\/static\/ramble\.js/);
   assert.match(sent, /\/ramble\/static\/leaflet\/leaflet\.css/);
-  assert.match(sent, /id="ramble-pet"/);
-  assert.match(sent, /id="ramble-marks"/);
+
+  // Grid checkbox names are the wire contract with POST /api/ramble/grid.
   assert.match(sent, /name="grid-public-geo"/);
-  // Android WebView pull-to-refresh guard (fix/android-geolocation-map-swipe):
-  // the map must opt out of the browser/WebView's own touch gestures so a
-  // northward drag pans Leaflet instead of triggering SwipeRefreshLayout.
-  assert.match(sent, /touch-action:\s*none/);
+
+  // The legacy ids are GONE — anything still selecting them is broken.
+  assert.doesNotMatch(sent, /id="ramble-map"/);
+  assert.doesNotMatch(sent, /id="ramble-pet"/);
+  assert.doesNotMatch(sent, /id="ramble-marks"/);
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -453,6 +473,36 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // is the client half of the fix/android-geolocation-map-swipe change).
   assert.match(body, /Crow\.setPullToRefresh\(false\)/);
   assert.match(body, /Crow\.setPullToRefresh\(true\)/);
+
+  // House rule for panel client scripts: NO template literals. The panel
+  // tooling treats a backtick as its own delimiter, so one here silently
+  // truncates the whole script in the browser.
+  assert.equal(body.split("`").length - 1, 0, "the client script must contain zero backticks");
+
+  // Both named SSE frames the gateway sends on the one connection
+  // (servers/gateway/routes/streams.js). onmessage never fires for either.
+  assert.ok(body.includes('addEventListener("ramble-nearby"'), "client must subscribe to ramble-nearby");
+  assert.ok(body.includes('addEventListener("ramble-hatched"'), "client must subscribe to ramble-hatched");
+});
+
+test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
+  const res = await req("/ramble/static/ramble.css");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /text\/css/);
+  const body = await res.text();
+  assert.ok(body.length > 100, "stylesheet looks empty");
+
+  // Android WebView pull-to-refresh guard (fix/android-geolocation-map-swipe):
+  // the map must opt out of the browser/WebView's own touch gestures so a
+  // northward drag pans Leaflet instead of triggering SwipeRefreshLayout.
+  // The declaration moved out of the panel's inline <style> into this file.
+  assert.match(body, /touch-action:\s*none/);
+
+  // Direction-C tokens are declared on the panel root, and dark mode is a
+  // deliberate second token set rather than an inversion filter.
+  assert.match(body, /#ramble\s*\{/);
+  assert.match(body, /--rb-accent:/);
+  assert.match(body, /prefers-reduced-motion/);
 });
 
 test("GET /ramble/static/leaflet/leaflet.js serves the vendored copy", async () => {
