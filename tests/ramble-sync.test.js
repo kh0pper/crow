@@ -18,7 +18,7 @@ import { createClient } from "@libsql/client";
 import { SYNCED_TABLES, EXCLUDED_COLUMNS, applyRemoteOp } from "../servers/sharing/instance-sync.js";
 import { emitOrQueue, _setEligibilityForTest } from "../servers/shared/sync-emit.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
-import { createMark } from "../bundles/ramble/server/marks.js";
+import { createMark, blockPersona } from "../bundles/ramble/server/marks.js";
 
 // getOrCreateLocalInstanceId() (called internally by emitOrQueue) reads
 // process.env.CROW_DATA_DIR directly — point it at a scratch dir for the
@@ -87,4 +87,24 @@ test("settings + blocks apply by natural key (idempotent, no UNIQUE throw)", asy
   await applyRemoteOp(b, "ramble_blocks", "insert", { persona: "b".repeat(64), reason: "x", created_at: 1 }, 1);
   await applyRemoteOp(b, "ramble_blocks", "delete", { persona: "b".repeat(64) }, 2);
   assert.equal((await b.execute("SELECT 1 FROM ramble_blocks")).rows.length, 0);
+});
+
+test("R9: an id-less natural-key table is lamport-stamped locally on emit", async () => {
+  // ramble_blocks has no `id` column — without stampSql's by-persona branch the
+  // outbox row would carry the lamport while the source row kept 0, making the
+  // apply side's LWW one-sided (a remote op would always beat a newer local edit).
+  const persona = "c".repeat(64);
+  await blockPersona(a, persona, "x", { emit: (t, op, r) => emitOrQueue(null, a, t, op, r) });
+
+  const local = await a.execute({
+    sql: "SELECT lamport_ts FROM ramble_blocks WHERE persona = ?", args: [persona],
+  });
+  assert.ok(Number(local.rows[0].lamport_ts) > 0, "local ramble_blocks row was never stamped");
+
+  const queued = await a.execute({
+    sql: "SELECT lamport_ts FROM sync_outbox WHERE table_name = ?", args: ["ramble_blocks"],
+  });
+  assert.equal(queued.rows.length, 1);
+  // Same atomic batch → the row and its outbox entry must agree.
+  assert.equal(Number(queued.rows[0].lamport_ts), Number(local.rows[0].lamport_ts));
 });
