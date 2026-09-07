@@ -22,6 +22,7 @@ import { createClient } from "@libsql/client";
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { createMark, getMark } from "../bundles/ramble/server/marks.js";
 import { MARK_KIND, CAW_KIND } from "../bundles/ramble/server/nostr-map.js";
+import { setMaster, setCell } from "../bundles/ramble/server/grid.js";
 import { startRambleTransport } from "../servers/gateway/boot/ramble-transport.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -119,6 +120,12 @@ let H, nearby, publicMarkId, contactsMarkId;
 
 before(async () => {
   H = await makeHarness();
+  // Task 11: the drain's default gate is now the privacy grid, which starts
+  // fully off (master false, every cell false). Enable exactly the
+  // (public, geo) cell so this harness's existing publish assertions —
+  // written under Task 10's always-true stub gate — still hold.
+  await setMaster(H.db, true);
+  await setCell(H.db, "public", "geo", true);
   nearby = [];
   H.bus.on("ramble:nearby", (p) => nearby.push(p));
 });
@@ -261,6 +268,8 @@ test("own-echo: an event signed by one of our own personas is dropped (C4)", asy
 
 test("no relay accepted → the mark stays pending and the tombstone row survives; a later accepting drain clears both", async () => {
   const h = await makeHarness();
+  await setMaster(h.db, true);
+  await setCell(h.db, "public", "geo", true);
   h.state.accept = false;
   const mark = await seedPublicMark(h.db, "nobody took it");
   await seedTombstone(h.db, "ab".repeat(32));
@@ -294,8 +303,22 @@ test("shouldPublish gate: a row the gate rejects is never published and stays pe
   assert.equal(row.publish_state, "pending");
 });
 
+test("default gate (Task 11): with the grid at defaults, a pending public mark is skipped, not published", async () => {
+  const h = await makeHarness(); // no shouldPublish override -- exercises the real makePublishGate(db) default
+  const mark = await seedPublicMark(h.db, "grid says no");
+
+  const result = await h.transport.drainOnce();
+  assert.equal(result.published, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(h.published.length, 0, "the default grid gate must run before signing/publishing");
+  const row = await getMark(h.db, mark.mark_id);
+  assert.equal(row.publish_state, "pending");
+});
+
 test("re-entrancy: two concurrent drains publish the one pending mark exactly once", async () => {
   const h = await makeHarness();
+  await setMaster(h.db, true);
+  await setCell(h.db, "public", "geo", true);
   h.state.delayMs = 25;
   await seedPublicMark(h.db, "publish me once");
 
@@ -323,6 +346,8 @@ test("poison pill: a pending public mark with no geohash is excluded by the drai
 
 test("poison pill: a mark whose publish keeps throwing is parked as failed after 20 attempts", async () => {
   const h = await makeHarness();
+  await setMaster(h.db, true);
+  await setCell(h.db, "public", "geo", true);
   h.state.throwErr = "relay exploded";
   const mark = await seedPublicMark(h.db, "cursed");
 

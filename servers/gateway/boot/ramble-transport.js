@@ -79,18 +79,20 @@ export async function startRambleTransport({
   autoStart = true,
 } = {}) {
   const load = (file) => import(pathToFileURL(join(bundleDir, file)).href);
-  const [{ initRambleTables }, { insertRemoteMark }, nostrMap, { resolvePersona }] = await Promise.all([
+  const [{ initRambleTables }, { insertRemoteMark }, nostrMap, { resolvePersona }, { makePublishGate }] = await Promise.all([
     load("init-tables.js"),
     load("marks.js"),
     load("nostr-map.js"),
     load("persona.js"),
+    load("grid.js"),
   ]);
   const { MARK_KIND, CAW_KIND, markToEvent, eventToMark } = nostrMap;
 
   const prec = precision ?? defaultPrecision();
-  // Task 11 swaps in the privacy-grid gate (emitAllowed); until then every
-  // public row is publishable.
-  const gate = shouldPublish ?? (async () => true);
+  // Default gate is the privacy grid (Task 11): a row is publishable only
+  // when the master "I'm visible" switch AND its (audience, geo) cell are
+  // both on. An explicit `shouldPublish` (tests, or a future caller) wins.
+  const gate = shouldPublish ?? makePublishGate(db);
 
   // --- Startup: tables (D7 — the gateway must not depend on the stdio child) ---
   const existing = await db.execute({
