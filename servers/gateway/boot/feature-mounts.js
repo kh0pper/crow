@@ -212,6 +212,48 @@ export async function mountFeatureRoutes(app, deps) {
     }
   }
 
+  // --- Start the Ramble Nostr transport (drain + area subscriber) ---
+  // Core code (servers/gateway/boot/ramble-transport.js), started only when the
+  // ramble bundle is installed, because it reuses the ONE live NostrManager the
+  // gateway already owns — a bundle-side transport would have to build a second
+  // manager and a second set of relay sockets. Every failure is a warning: no
+  // relay, no identity and no missing bundle may block gateway boot.
+  try {
+    const { existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { pathToFileURL } = await import("node:url");
+    const { homedir } = await import("node:os");
+    const crowHome = process.env.CROW_HOME || join(homedir(), ".crow");
+    const installed = join(crowHome, "bundles", "ramble", "server");
+    // C3: re-anchored — boot/ is one level deeper, need ../../bundles
+    const repo = join(__featureGatewayDir, "../../bundles/ramble/server");
+    const bundleDir = existsSync(installed) ? installed : repo;
+    if (existsSync(bundleDir)) {
+      const { getManagersOrNull } = await import("../../sharing/managers.js");
+      const mgrs = getManagersOrNull();
+      if (mgrs?.nostrManager) {
+        const { loadInstanceSeed } = await import("../../sharing/identity.js");
+        const { instanceSeedDir } = await import("../../../scripts/pi-bots/instance-paths.mjs");
+        const { default: bus } = await import("../../shared/event-bus.js");
+        const seed = loadInstanceSeed(instanceSeedDir());
+        const { startRambleTransport } = await import(
+          pathToFileURL(join(__gatewayDir, "ramble-transport.js")).href
+        );
+        app.locals.rambleTransport = await startRambleTransport({
+          db: mgrs.db,
+          nostrManager: mgrs.nostrManager,
+          identity: mgrs.identity,
+          seed,
+          bus,
+          bundleDir,
+        });
+        console.log("[ramble] transport started");
+      }
+    }
+  } catch (err) {
+    console.warn("[ramble] transport not started:", err.message);
+  }
+
   // --- Mount AI Chat Routes ---
   try {
     const { default: chatRouter } = await import("../routes/chat.js");

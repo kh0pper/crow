@@ -50,7 +50,21 @@ export function createRambleServer(db, options = {}) {
         if (!seed) seed = mod.loadInstanceSeed(resolveDataDir());
         if (!_derive) _derive = mod.deriveBotIdentity;
       }
-      return { identity, seed, _derive, sessionId: randomUUID() };
+      // R11: the gateway transport mints the per-boot session id and records
+      // it at ramble_settings key `local.session_id` (a `local.`-prefixed key,
+      // so instance sync never carries it). Reuse it so this stdio process and
+      // the gateway derive the SAME rotating-caw key instead of minting two
+      // personas per boot. Fall back to our own id when it isn't there (the
+      // bundle running without a gateway, or tests).
+      let sessionId = null;
+      try {
+        const { rows } = await db.execute({
+          sql: "SELECT value FROM ramble_settings WHERE key = 'local.session_id'",
+          args: [],
+        });
+        sessionId = rows[0]?.value ?? null;
+      } catch { /* table not there yet — mint our own */ }
+      return { identity, seed, _derive, sessionId: sessionId || randomUUID() };
     })().catch((err) => { identityPromise = null; throw err; });
     return identityPromise;
   }
