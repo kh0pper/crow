@@ -3,6 +3,7 @@ package press.maestro.crow;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.net.Uri;
+import android.webkit.GeolocationPermissions;
 import android.webkit.JsResult;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -63,6 +64,21 @@ public class CrowWebChromeClient extends WebChromeClient {
                 } else {
                     activity.requestAudioPermissionForWebView(request);
                 }
+            }
+        });
+    }
+
+    @Override
+    public void onGeolocationPermissionsShowPrompt(final String origin,
+                                                    final GeolocationPermissions.Callback callback) {
+        // No `retain` (third arg false): if the permission is later revoked in
+        // system settings, the WebView re-prompts instead of replaying a stale grant.
+        activity.runOnUiThread(() -> {
+            if (activity.hasLocationPermission()) {
+                callback.invoke(origin, true, false);
+            } else {
+                activity.requestLocationPermission(() ->
+                        callback.invoke(origin, activity.hasLocationPermission(), false));
             }
         });
     }

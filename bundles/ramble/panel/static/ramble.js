@@ -62,6 +62,28 @@
   }).addTo(map);
   markerLayer = L.layerGroup().addTo(map);
 
+  /* The Android shell wraps the WebView in a SwipeRefreshLayout for
+   * pull-to-refresh; a northward drag on the map (which never itself
+   * scrolls) would otherwise be read as "pull to refresh the page".
+   * Suspend it for the duration of any touch on the map so Leaflet's own
+   * pan/zoom gestures win. window.Crow is only injected inside the Android
+   * app, and this must never let a native-bridge hiccup break the map. */
+  mapEl.addEventListener("touchstart", function () {
+    try {
+      if (window.Crow && typeof Crow.setPullToRefresh === "function") Crow.setPullToRefresh(false);
+    } catch (e) { /* not fatal to the map */ }
+  });
+  mapEl.addEventListener("touchend", function () {
+    try {
+      if (window.Crow && typeof Crow.setPullToRefresh === "function") Crow.setPullToRefresh(true);
+    } catch (e) { /* not fatal to the map */ }
+  });
+  mapEl.addEventListener("touchcancel", function () {
+    try {
+      if (window.Crow && typeof Crow.setPullToRefresh === "function") Crow.setPullToRefresh(true);
+    } catch (e) { /* not fatal to the map */ }
+  });
+
   function here() {
     return new Promise(function (resolve, reject) {
       if (!navigator.geolocation) { reject(new Error("this browser has no geolocation")); return; }
