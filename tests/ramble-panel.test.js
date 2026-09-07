@@ -347,11 +347,14 @@ test("GET /api/ramble/egg returns the egg progress and the checklist", async () 
   assert.equal(typeof body.checklist.checked_in_today, "boolean");
 });
 
-// The tests above leave the egg partway to the default hatch_at of 100, and
-// the ones below add more warmth still. Raise the threshold so a mid-test
-// hatch (which resets warmth to a fresh egg's zero) can't make the exact
-// before/after warmth assertions below non-monotonic. It also proves the
-// `warmth.*` settings override actually reaches the route.
+// Proves the `warmth.*` settings override actually reaches the route. The
+// override is set and read inside this test only, then removed in the
+// `finally` before the next test runs: the tests below add more warmth to
+// the same egg and assert exact before/after deltas (e.g. "posting a mark
+// credits mark_left warmth"), which stay valid only while the default
+// hatch_at (100) is in effect — a lingering override would just push the
+// hatch further out, not make those deltas wrong, but restoring here keeps
+// this test's effect from leaking into ones that don't expect it.
 test("a warmth.hatch_at settings override reaches the egg route", async () => {
   const db = createDbClient();
   try {
@@ -360,11 +363,12 @@ test("a warmth.hatch_at settings override reaches the egg route", async () => {
             ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
       args: [],
     });
+    const { egg } = await (await req("/api/ramble/egg")).json();
+    assert.equal(egg.hatch_at, 100000);
   } finally {
+    await db.execute({ sql: "DELETE FROM ramble_settings WHERE key = 'warmth.hatch_at'", args: [] });
     db.close();
   }
-  const { egg } = await (await req("/api/ramble/egg")).json();
-  assert.equal(egg.hatch_at, 100000);
 });
 
 test("POST /api/ramble/egg/checkin credits warmth once per local day", async () => {

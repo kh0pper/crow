@@ -63,10 +63,11 @@ export async function initRambleTables(db) {
       crows_week INTEGER NOT NULL DEFAULT 0
     );`);
 
-  // week_start (Task 14): added via a guarded ALTER TABLE rather than the
-  // CREATE above so a host that already created ramble_pet before this
-  // column existed still gets it, idempotently, with no SCHEMA_GENERATION
-  // bump (ramble_pet is per-instance, not synced).
+  // week_start: added via a guarded ALTER TABLE rather than the CREATE above
+  // so a host that already created ramble_pet before this column existed
+  // still gets it, idempotently, with no SCHEMA_GENERATION bump (ramble_pet
+  // replicates via instance sync; new columns must stay in EXCLUDED_COLUMNS-safe
+  // shape — see servers/sharing/instance-sync.js).
   await ensureColumn(db, "ramble_pet", "week_start", "INTEGER");
   await ensureColumn(db, "ramble_pet", "active_egg_id", "TEXT");
   await ensureColumn(db, "ramble_pet", "chores_json", "TEXT");
