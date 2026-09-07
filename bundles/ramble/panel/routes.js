@@ -49,7 +49,11 @@ const STATIC_DIR = resolve(join(BUNDLE_DIR, "panel", "static"));
 const CELL_RE = /^[0-9b-hjkmnp-z]{1,12}$/;
 const PERSONA_RE = /^[0-9a-f]{64}$/;
 const MARK_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
-const VISIBILITY_RE = /^(public|contacts|group:.{1,120})$/;
+// `private` ("Just me") — see the matching comment beside server.js's
+// VISIBILITY_RE: it never reaches a relay (transport drain only selects
+// visibility='public'), but it does still replicate to the author's own
+// other instances via instance-sync, which is the intended behavior.
+const VISIBILITY_RE = /^(public|contacts|private|group:.{1,120})$/;
 const REVEALS = new Set(["open", "locked"]);
 const KINDS = new Set(["mark", "caw"]);
 const MAX_CELLS = 32;

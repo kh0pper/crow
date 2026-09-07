@@ -25,7 +25,14 @@ import { feed, petState } from "./pet.js";
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const errorText = (t) => ({ content: [{ type: "text", text: t }], isError: true });
 
-const VISIBILITY_RE = /^(public|contacts|group:.+)$/;
+// `private` ("Just me") is a real audience, not network-facing: the
+// transport drain only ever selects visibility='public' rows and
+// markToEvent() throws RambleNotPublic for anything else, so a private mark
+// can never reach a relay. shouldSyncRow('ramble_marks') is deliberately
+// left unchanged — private marks DO still replicate to the author's own
+// other instances via the instance-sync outbox; that's the point of "just
+// me" (me, everywhere), not "just this device".
+const VISIBILITY_RE = /^(public|contacts|private|group:.+)$/;
 
 export function createRambleServer(db, options = {}) {
   const server = new McpServer(

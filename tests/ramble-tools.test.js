@@ -27,6 +27,21 @@ test("leave_mark then query_world returns it, attributed to the x-only world pse
   assert.match(m.author, /^[0-9a-f]{64}$/);
 });
 
+test("ramble_leave_mark with visibility:private succeeds and ramble_query_world({visibility:private}) returns it", async () => {
+  const lat = 51.5074, lon = -0.1278;
+  const r = await h.ramble_leave_mark({ lat, lon, text: "just me", visibility: "private" });
+  assert.ok(!r.isError);
+  const q = await h.ramble_query_world({ lat, lon, visibility: "private" });
+  const payload = JSON.parse(q.content[0].text);
+  const m = payload.marks.find((m) => m.content_text === "just me");
+  assert.ok(m);
+});
+
+test("ramble_leave_mark rejects an unknown visibility such as 'friends'", async () => {
+  const r = await h.ramble_leave_mark({ lat: 1, lon: 1, text: "nope", visibility: "friends" });
+  assert.ok(r.isError);
+});
+
 test("ramble_block hides that persona's marks; ramble_unblock restores them", async () => {
   const lat = 40.7128, lon = -74.006;
   const leave = await h.ramble_leave_mark({ lat, lon, text: "block-me", visibility: "public", reveal: "open" });
