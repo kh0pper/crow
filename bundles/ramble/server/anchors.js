@@ -69,7 +69,7 @@ export function withinRange(anchor, here) {
 
   if (anchor.anchor_kind === "geo") {
     if (here == null || here.lat == null) return false;
-    return haversineMeters({ lat: anchor.lat, lon: anchor.lon }, here) <= (anchor.accuracy_m || 75);
+    return haversineMeters({ lat: anchor.lat, lon: anchor.lon }, here) <= (anchor.accuracy_m ?? 75);
   }
 
   // For ref kinds (lan, beacon, fingerprint, visual): exact match on anchor_ref

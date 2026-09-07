@@ -71,6 +71,7 @@ export async function startRambleTransport({
   seed,
   bus,
   bundleDir,
+  emit = () => {},
   intervalMs = 15000,
   healthMs = 30000,
   precision,
@@ -79,7 +80,7 @@ export async function startRambleTransport({
   autoStart = true,
 } = {}) {
   const load = (file) => import(pathToFileURL(join(bundleDir, file)).href);
-  const [{ initRambleTables }, { insertRemoteMark }, nostrMap, { resolvePersona }, { makePublishGate }] = await Promise.all([
+  const [{ initRambleTables }, { insertRemoteMark, expireMarks }, nostrMap, { resolvePersona }, { makePublishGate }] = await Promise.all([
     load("init-tables.js"),
     load("marks.js"),
     load("nostr-map.js"),
@@ -95,11 +96,10 @@ export async function startRambleTransport({
   const gate = shouldPublish ?? makePublishGate(db);
 
   // --- Startup: tables (D7 — the gateway must not depend on the stdio child) ---
-  const existing = await db.execute({
-    sql: "SELECT name FROM sqlite_master WHERE type='table' AND name='ramble_marks' LIMIT 1",
-    args: [],
-  });
-  if (existing.rows.length === 0) await initRambleTables(db);
+  // Unconditional: `initRambleTables` is idempotent (every statement is
+  // IF NOT EXISTS), and a `ramble_marks`-only probe would skip creating a
+  // table added to the schema after that first one existed.
+  await initRambleTables(db);
 
   async function getSetting(key) {
     const { rows } = await db.execute({ sql: "SELECT value FROM ramble_settings WHERE key = ?", args: [key] });
@@ -293,15 +293,21 @@ export async function startRambleTransport({
   }
 
   async function drainOnce() {
-    if (stopped || draining) return { published: 0, skipped: 0, failed: 0 };
+    if (stopped || draining) return { published: 0, skipped: 0, failed: 0, expired: 0 };
     draining = true;
+    let expired = 0;
     try {
+      // R19: the TTL sweep has no scheduler of its own — it rides this tick.
+      // It runs BEFORE the publish pass so an already-expired row is swept
+      // rather than put on the wire, and its deletes ride the sync emit hook
+      // so peers drop the row too.
+      expired = await expireMarks(db, Date.now(), { emit });
       const result = await drainMarks();
       await drainTombstones();
-      return result;
+      return { ...result, expired };
     } catch (err) {
       console.warn("[ramble] drain failed:", err?.message ?? err);
-      return { published: 0, skipped: 0, failed: 0 };
+      return { published: 0, skipped: 0, failed: 0, expired };
     } finally {
       draining = false;
     }

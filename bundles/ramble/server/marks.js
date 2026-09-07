@@ -125,6 +125,13 @@ export async function listMarks(db, opts = {}) {
 export async function unlockMark(db, mark_id, here) {
   const row = await getMark(db, mark_id);
   if (!row) return { unlocked: false, content: null, missing: true };
+  // The sweep (expireMarks) runs on the drain tick, so a row can still be in
+  // the table for up to one tick past its TTL. `listMarks` already filters
+  // those out; unlock must agree, or an expired mark would still hand over
+  // its content to anyone standing in range.
+  if (row.expires_at != null && row.expires_at <= Date.now()) {
+    return { unlocked: false, content: null, expired: true };
+  }
   return revealContent(row, here);
 }
 

@@ -42,6 +42,19 @@ test("expired marks are swept", async () => {
   assert.ok(swept >= 1);
 });
 
+test("an expired open mark cannot be unlocked (the sweep may be up to a tick away)", async () => {
+  const m = await createMark(db, {
+    author: "pk1", author_level: "rotating", kind: "mark", visibility: "public", reveal: "open", ttlSeconds: -1,
+    anchor: { anchor_kind: "geo", lat: 30.2672, lon: -97.7431, accuracy_m: 75 },
+    content: { content_text: "stale secret", content_kind: "none" },
+  });
+  const res = await unlockMark(db, m.mark_id, { lat: 30.2672, lon: -97.7431 });
+  assert.equal(res.unlocked, false);
+  assert.equal(res.expired, true);
+  assert.equal(res.content, null);
+  await expireMarks(db, Date.now());
+});
+
 test("blocked personas are dropped on receipt and hidden in lists", async () => {
   const remote = { mark_id: "r1", author: "badpk", kind: "mark", anchor_kind: "geo", geohash: "9v6m2a", lat: 30.2672, lon: -97.7431, visibility: "public", reveal: "open", content_text: "spam", created_at: Date.now(), nostr_event_id: "ev1" };
   assert.equal((await insertRemoteMark(db, remote)).inserted, true);

@@ -130,7 +130,7 @@ test("R9: an id-less natural-key table is lamport-stamped locally on emit", asyn
 test("shouldSyncRow gates: local.* settings and keyless rows never sync", async () => {
   // Ruling R3 — per-instance settings stay on the device that wrote them.
   assert.equal(shouldSyncRow("ramble_settings", { key: "local.active_area", value: "[]" }), false);
-  assert.equal(shouldSyncRow("ramble_settings", { key: "local.tombstones" }), false);
+  assert.equal(shouldSyncRow("ramble_settings", { key: "local.session_id" }), false);
   assert.equal(shouldSyncRow("ramble_settings", { key: "public_identity_level", value: "real" }), true);
 
   // A row without its natural key can be neither stamped, applied nor deleted

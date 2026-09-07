@@ -1,5 +1,5 @@
 /**
- * Reader — database client factory (bundle edition).
+ * Ramble — database client factory (bundle edition).
  *
  * Resolution order for the crow DB path:
  *   1. explicit dbPath argument
@@ -90,7 +90,7 @@ try {
   ({ createDbClient: _coreCreateDbClient } = await appImport("servers/db.js"));
 } catch (err) {
   console.warn(
-    `[reader db] core db client unavailable (${err.message}) — ` +
+    `[ramble db] core db client unavailable (${err.message}) — ` +
     "will fall back to @libsql/client (safe cross-process only)"
   );
 }
@@ -104,7 +104,7 @@ function tryCoreClient(filePath) {
   try { return _coreCreateDbClient(filePath); }
   catch (err) {
     _coreBroken = true;
-    console.warn(`[reader db] core db client failed (${err.message.split("\n")[0]}) -- ` +
+    console.warn(`[ramble db] core db client failed (${err.message.split("\n")[0]}) -- ` +
       "falling back to @libsql/client (safe cross-process only)");
     return null;
   }
@@ -115,7 +115,7 @@ async function libsqlClient(filePath, label) {
   const { createClient } = await import("@libsql/client");
   const client = createClient({ url: `file:${filePath}` });
   client.execute("PRAGMA busy_timeout = 10000").catch((err) =>
-    console.warn(`[reader db] ${label} busy_timeout:`, err.message)
+    console.warn(`[ramble db] ${label} busy_timeout:`, err.message)
   );
   return client;
 }
