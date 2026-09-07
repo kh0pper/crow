@@ -53,3 +53,16 @@ test("credits primary key rejects a duplicate (kind,key)", async () => {
   await db.execute({ sql: "INSERT INTO ramble_credits (kind, key, credited_at) VALUES (?,?,?)", args: ["checkin", "2026-09-07", 1] });
   await assert.rejects(db.execute({ sql: "INSERT INTO ramble_credits (kind, key, credited_at) VALUES (?,?,?)", args: ["checkin", "2026-09-07", 2] }));
 });
+
+test("phase 2: ramble_eggs.shelf_origin exists and legacy NULL shelf rows backfill to 'sync'", async () => {
+  const cols = (await db.execute("PRAGMA table_info(ramble_eggs)")).rows.map((r) => r.name);
+  assert.ok(cols.includes("shelf_origin"), "ramble_eggs.shelf_origin");
+  // A phase-1 convergence loser on disk has no origin. Re-running init (every
+  // boot does) must mark it 'sync' so re-promotion can still pick it up, and
+  // must leave a user-shelved egg alone.
+  await db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, warmth, created_at) VALUES ('legacy','shelf',5,1)", args: [] });
+  await db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, warmth, created_at, shelf_origin) VALUES ('mine','shelf',5,2,'user')", args: [] });
+  await initRambleTables(db);
+  const got = await db.execute("SELECT egg_id, shelf_origin FROM ramble_eggs WHERE egg_id IN ('legacy','mine') ORDER BY egg_id");
+  assert.deepEqual(got.rows.map((r) => [r.egg_id, r.shelf_origin]), [["legacy", "sync"], ["mine", "user"]]);
+});
