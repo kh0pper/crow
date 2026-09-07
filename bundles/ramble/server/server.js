@@ -33,29 +33,37 @@ export function createRambleServer(db, options = {}) {
 
   // Identity seam: resolved lazily (once) on first tool call so the factory
   // stays synchronous and tests that inject identity/seed/_derive never
-  // touch real identity files.
-  let identityState = null;
-  async function getIdentityState() {
-    if (identityState) return identityState;
-    let { identity, seed, _derive } = options;
-    if (!identity || !seed || !_derive) {
-      const mod = await appImport("servers/sharing/identity.js");
-      if (!identity) identity = mod.loadOrCreateIdentity();
-      if (!seed) seed = mod.loadInstanceSeed(resolveDataDir());
-      if (!_derive) _derive = mod.deriveBotIdentity;
-    }
-    identityState = { identity, seed, _derive, sessionId: randomUUID() };
-    return identityState;
+  // touch real identity files. Memoize the IN-FLIGHT PROMISE, not the
+  // resolved value: two concurrent first tool calls both read `identityState`
+  // before either write lands, so a value-memo lets both calls run the
+  // loader (and mint two different sessionIds). Promise-memoizing closes
+  // that race — the second caller awaits the first caller's in-flight
+  // promise instead of starting its own. Reset to null on rejection so a
+  // transient failure (e.g. identity file not yet written) can retry.
+  let identityPromise = null;
+  function getIdentityState() {
+    identityPromise ??= (async () => {
+      let { identity, seed, _derive } = options;
+      if (!identity || !seed || !_derive) {
+        const mod = await appImport("servers/sharing/identity.js");
+        if (!identity) identity = mod.loadOrCreateIdentity();
+        if (!seed) seed = mod.loadInstanceSeed(resolveDataDir());
+        if (!_derive) _derive = mod.deriveBotIdentity;
+      }
+      return { identity, seed, _derive, sessionId: randomUUID() };
+    })().catch((err) => { identityPromise = null; throw err; });
+    return identityPromise;
   }
 
-  // Sync emit seam: options.emit, else lazily built to queue via
-  // emitOrQueue (the stdio process has no live sync manager).
-  let emitFn = options.emit || null;
-  async function getEmit() {
-    if (emitFn) return emitFn;
-    const { emitOrQueue } = await appImport("servers/shared/sync-emit.js");
-    emitFn = (table, op, row) => emitOrQueue(null, db, table, op, row).catch(() => {});
-    return emitFn;
+  // Sync emit seam: options.emit, else lazily built (promise-memoized for
+  // the same reason as identity above) to queue via emitOrQueue (the stdio
+  // process has no live sync manager).
+  let emitPromise = options.emit ? Promise.resolve(options.emit) : null;
+  function getEmit() {
+    emitPromise ??= appImport("servers/shared/sync-emit.js")
+      .then(({ emitOrQueue }) => (table, op, row) => emitOrQueue(null, db, table, op, row).catch(() => {}))
+      .catch((err) => { emitPromise = null; throw err; });
+    return emitPromise;
   }
 
   async function getPublicIdentityLevel() {
@@ -183,7 +191,9 @@ export function createRambleServer(db, options = {}) {
     async ({ lat, lon, visibility = "public", precision }) => {
       try {
         checkVisibility(visibility);
-        const p = precision ?? (Number(process.env.RAMBLE_DEFAULT_GEOHASH_PRECISION) || 5);
+        const envPrecision = Number(process.env.RAMBLE_DEFAULT_GEOHASH_PRECISION);
+        const clampedEnvPrecision = Number.isInteger(envPrecision) && envPrecision >= 1 && envPrecision <= 12 ? envPrecision : 5;
+        const p = precision ?? clampedEnvPrecision;
         const cell = encodeGeohash(lat, lon, p);
         const marks = await listMarks(db, { visibility, geohashPrefix: cell });
         return text(JSON.stringify({ cell, marks }));
