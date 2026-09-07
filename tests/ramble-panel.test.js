@@ -246,21 +246,198 @@ test("GET /api/ramble/pet returns the real pet state shape", async () => {
   assert.equal(typeof body.crows_week, "number");
 });
 
-test("posting a NEW active-area cell feeds the pet a visit_place; the SAME cell again does not", async () => {
-  const before = await (await req("/api/ramble/pet")).json();
+// A visit is credited from the user's REAL position (`here`), never from the
+// map's active area: the area is whatever the viewport happens to cover, so
+// crediting it would let a pan farm warmth and `places_week` from an armchair.
+const HERE_LAT = 51.5074, HERE_LON = -0.1278; // a geohash-7 cell no other test touches
 
-  // A location whose precision-5 cell nobody has posted yet in this test run.
-  const NEW_LAT = 51.5074, NEW_LON = -0.1278;
-  const first = await req("/api/ramble/area", { method: "POST", body: { lat: NEW_LAT, lon: NEW_LON } });
+test("POST /api/ramble/area credits visit_place from `here` — once per cell per week", async () => {
+  const petBefore = await (await req("/api/ramble/pet")).json();
+  const eggBefore = await (await req("/api/ramble/egg")).json();
+
+  const first = await req("/api/ramble/area", {
+    method: "POST",
+    body: { lat: HERE_LAT, lon: HERE_LON, here: { lat: HERE_LAT, lon: HERE_LON } },
+  });
   assert.equal(first.status, 200);
-  const afterFirst = await (await req("/api/ramble/pet")).json();
-  assert.equal(afterFirst.places_week, before.places_week + 1, "a new cell must feed visit_place");
+  const petAfterFirst = await (await req("/api/ramble/pet")).json();
+  const eggAfterFirst = await (await req("/api/ramble/egg")).json();
+  assert.equal(petAfterFirst.places_week, petBefore.places_week + 1, "`here` must feed visit_place");
+  assert.ok(eggAfterFirst.egg.warmth > eggBefore.egg.warmth, "`here` must credit egg warmth");
 
-  // Same cell again: no new visit_place.
-  const second = await req("/api/ramble/area", { method: "POST", body: { lat: NEW_LAT, lon: NEW_LON } });
+  // The same real position again inside the same ISO week: the eggs ledger
+  // already holds that (cell, week) key, so neither pet nor egg moves.
+  const second = await req("/api/ramble/area", {
+    method: "POST",
+    body: { lat: HERE_LAT, lon: HERE_LON, here: { lat: HERE_LAT, lon: HERE_LON } },
+  });
   assert.equal(second.status, 200);
-  const afterSecond = await (await req("/api/ramble/pet")).json();
-  assert.equal(afterSecond.places_week, afterFirst.places_week, "the same cell again must not feed visit_place");
+  const petAfterSecond = await (await req("/api/ramble/pet")).json();
+  const eggAfterSecond = await (await req("/api/ramble/egg")).json();
+  assert.equal(petAfterSecond.places_week, petAfterFirst.places_week, "a repeat visit must not feed the pet again");
+  assert.equal(eggAfterSecond.egg.warmth, eggAfterFirst.egg.warmth, "a repeat visit must not credit warmth again");
+});
+
+test("POST /api/ramble/area without `here` credits nothing — panning must not farm warmth", async () => {
+  const petBefore = await (await req("/api/ramble/pet")).json();
+  const eggBefore = await (await req("/api/ramble/egg")).json();
+
+  // Cells only (the panel's pan path) — two cells nothing else in this file uses.
+  const cellsOnly = await req("/api/ramble/area", { method: "POST", body: { cells: ["u10hb", "gcpvj"] } });
+  assert.equal(cellsOnly.status, 200);
+
+  // And a lat/lon centre, which is the map CENTRE, not the user's position.
+  const centreOnly = await req("/api/ramble/area", { method: "POST", body: { lat: 48.8584, lon: 2.2945 } });
+  assert.equal(centreOnly.status, 200);
+
+  const petAfter = await (await req("/api/ramble/pet")).json();
+  const eggAfter = await (await req("/api/ramble/egg")).json();
+  assert.equal(petAfter.places_week, petBefore.places_week, "no `here` must mean no visit_place");
+  assert.equal(eggAfter.egg.warmth, eggBefore.egg.warmth, "no `here` must mean no warmth");
+});
+
+test("POST /api/ramble/area rejects a malformed `here`", async () => {
+  const outOfRange = await req("/api/ramble/area", {
+    method: "POST",
+    body: { lat: LAT, lon: LON, here: { lat: 999, lon: 0 } },
+  });
+  assert.equal(outOfRange.status, 400);
+  const notAnObject = await req("/api/ramble/area", { method: "POST", body: { lat: LAT, lon: LON, here: "somewhere" } });
+  assert.equal(notAnObject.status, 400);
+});
+
+// ------------------------------------------------------ eggs, chores, birds
+
+test("GET /api/ramble/egg returns the egg progress and the checklist", async () => {
+  const res = await req("/api/ramble/egg");
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(typeof body.egg.egg_id, "string");
+  assert.equal(typeof body.egg.warmth, "number");
+  assert.equal(body.egg.hatch_at, 100, "the default hatch threshold");
+  assert.ok(body.egg.percent >= 0 && body.egg.percent <= 100, `percent was ${body.egg.percent}`);
+  assert.equal(typeof body.checklist.new_places_week, "number");
+  assert.equal(typeof body.checklist.first_mark, "boolean");
+  assert.equal(typeof body.checklist.checked_in_today, "boolean");
+});
+
+// The tests above leave the egg partway to the default hatch_at of 100, and
+// the ones below add more warmth still. Raise the threshold so a mid-test
+// hatch (which resets warmth to a fresh egg's zero) can't make the exact
+// before/after warmth assertions below non-monotonic. It also proves the
+// `warmth.*` settings override actually reaches the route.
+test("a warmth.hatch_at settings override reaches the egg route", async () => {
+  const db = createDbClient();
+  try {
+    await db.execute({
+      sql: `INSERT INTO ramble_settings (key, value) VALUES ('warmth.hatch_at', '100000')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [],
+    });
+  } finally {
+    db.close();
+  }
+  const { egg } = await (await req("/api/ramble/egg")).json();
+  assert.equal(egg.hatch_at, 100000);
+});
+
+test("POST /api/ramble/egg/checkin credits warmth once per local day", async () => {
+  const first = await req("/api/ramble/egg/checkin", { method: "POST", body: {} });
+  assert.equal(first.status, 200);
+  const one = await first.json();
+  assert.equal(one.credited, true);
+  assert.equal(typeof one.warmth, "number");
+  assert.equal(one.hatched, null);
+
+  const second = await req("/api/ramble/egg/checkin", { method: "POST", body: {} });
+  assert.equal(second.status, 200);
+  const two = await second.json();
+  assert.equal(two.credited, false, "a second check-in the same day must not credit");
+  assert.equal(two.warmth, one.warmth, "and must not move warmth");
+
+  const { checklist } = await (await req("/api/ramble/egg")).json();
+  assert.equal(checklist.checked_in_today, true);
+});
+
+test("POST /api/ramble/pet/chore completes each kind once a day and 400s an unknown kind", async () => {
+  const first = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "preen" } });
+  assert.equal(first.status, 200);
+  const one = await first.json();
+  assert.equal(one.done, true);
+  assert.equal(one.chores.preen, true);
+  assert.equal(typeof one.pet.energy, "number");
+
+  const second = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "preen" } });
+  assert.equal(second.status, 200);
+  const two = await second.json();
+  assert.equal(two.done, false, "the same chore twice in a day is a no-op");
+  assert.equal(two.chores.preen, true);
+
+  const unknown = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "polish" } });
+  assert.equal(unknown.status, 400);
+  const missing = await req("/api/ramble/pet/chore", { method: "POST", body: {} });
+  assert.equal(missing.status, 400);
+});
+
+test("GET /api/ramble/pet carries the daily chores, the active bird slot and the egg percent", async () => {
+  const body = await (await req("/api/ramble/pet")).json();
+  assert.equal(typeof body.chores, "object");
+  assert.equal(typeof body.chores.day, "string");
+  assert.equal(body.chores.preen, true, "set by the chore test above");
+  assert.equal(body.chores.feed, false);
+  assert.ok("bird" in body, "the pet state must carry an active-bird slot (null until the first hatch)");
+  assert.ok(body.bird === null || typeof body.bird.species === "string");
+  assert.equal(typeof body.egg.percent, "number");
+});
+
+test("posting a mark credits mark_left warmth", async () => {
+  const before = await (await req("/api/ramble/egg")).json();
+  const created = await req("/api/ramble/marks", {
+    method: "POST",
+    body: { kind: "mark", lat: LAT, lon: LON, text: "warm this egg", visibility: "public" },
+  });
+  assert.equal(created.status, 201);
+  const after = await (await req("/api/ramble/egg")).json();
+  assert.equal(after.egg.warmth, before.egg.warmth + 15, "a mark must credit the default mark_left weight");
+});
+
+test("GET /api/ramble/bird/:species/:seed.svg renders a deterministic SVG document", async () => {
+  const res = await req("/api/ramble/bird/crow/12345.svg");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /image\/svg\+xml/);
+  const cc = res.headers.get("cache-control") || "";
+  assert.match(cc, /private/, "an authed bird must be cached privately");
+  assert.ok(!/public/.test(cc), "an authed route must never send a public cache directive");
+
+  const body = await res.text();
+  assert.match(body, /<svg[^>]*viewBox="0 0 200 200"/);
+  assert.ok(body.includes("<g"), "the drawn bird markup is missing");
+
+  const again = await (await req("/api/ramble/bird/crow/12345.svg")).text();
+  assert.equal(again, body, "the same species+seed must render identically");
+
+  // `mood` is plumbed through to drawBird: an alarmed bird is a different drawing.
+  const alarmed = await (await req("/api/ramble/bird/crow/12345.svg?mood=alarmed")).text();
+  assert.notEqual(alarmed, body);
+});
+
+test("GET /api/ramble/bird rejects an unknown species and an out-of-range seed", async () => {
+  assert.equal((await req("/api/ramble/bird/dodo/1.svg")).status, 400);
+  assert.equal((await req("/api/ramble/bird/crow/-1.svg")).status, 400);
+  assert.equal((await req("/api/ramble/bird/crow/4294967296.svg")).status, 400);
+  assert.equal((await req("/api/ramble/bird/crow/notanumber.svg")).status, 400);
+});
+
+test("GET /ramble/static/bird-svg.js serves the shared engine, not the panel/static catch-all", async () => {
+  const res = await req("/ramble/static/bird-svg.js");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /javascript/);
+  assert.match(res.headers.get("cache-control") || "", /private/);
+  const body = await res.text();
+  // There is no bird-svg.js under panel/static — only server/bird-svg.cjs
+  // defines RambleBird, so this token proves the dedicated route won the
+  // match against the /ramble/static/:file catch-all registered after it.
+  assert.ok(body.includes("RambleBird"), "must be served from server/bird-svg.cjs");
 });
 
 // ------------------------------------------------------------------- statics
