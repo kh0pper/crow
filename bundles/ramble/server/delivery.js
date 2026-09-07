@@ -57,17 +57,12 @@ export function eggPayload(egg) {
   };
 }
 
-const INT32_MAX = 2147483647;
-
 /** Inverse of eggPayload with bounds: null only when there is no usable egg_id. */
 export function parseEggPayload(egg) {
   if (!egg || typeof egg !== "object" || Array.isArray(egg)) return null;
   const egg_id = idOrNull(egg.egg_id);
   if (!egg_id) return null;
-  // A modest overshoot (still a sane 32-bit integer) clamps to MAX_WARMTH; a
-  // wildly out-of-range value off the wire is garbage, not "very warm" — reset to 0.
-  const warmth = Number.isInteger(egg.warmth) && Math.abs(egg.warmth) <= INT32_MAX
-    ? Math.max(0, Math.min(MAX_WARMTH, egg.warmth)) : 0;
+  const warmth = Number.isInteger(egg.warmth) ? Math.max(0, Math.min(MAX_WARMTH, egg.warmth)) : 0;
   const found_cell = typeof egg.found_cell === "string" && CELL7_RE.test(egg.found_cell) ? egg.found_cell : null;
   const found_week = typeof egg.found_week === "string" && WEEK_RE.test(egg.found_week) ? egg.found_week : null;
   return { egg_id, warmth, found_cell, found_week };
