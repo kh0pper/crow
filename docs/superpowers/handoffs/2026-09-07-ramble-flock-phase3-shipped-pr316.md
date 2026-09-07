@@ -1,0 +1,31 @@
+# Handoff — Ramble Flock phase 3 shipped (PR #316), phase 4 next (2026-09-07)
+
+**State:** phase 3 of the Flock design (contacts delivery + gifts + swaps) is merged to `main` (PR #316 @55090d1c) with ramble bundle `0.4.0` (15 tools). Full suite on the merge head: 4159 pass / 0 fail. Deployed: crow primary + r4 restarted 14:33:44 CDT and grackle 14:33:49 CDT (back-to-back, before anyone used the new wire); grackle's journal showed `[bundles] refreshed ramble 0.3.0 -> 0.4.0`, `[ramble] transport started`, `[panel] ramble routes mounted`, `addon ramble: connected, 15 tools discovered`; crow primary and r4 logged `[ramble] transport started`; `auto_update_last_result` on crow reads "Up to date" with `~/crow` on `main`.
+
+## What shipped (9 SDD tasks + one final fix wave)
+1. `ramble_trades` — the first new replicated table since phase 1 (all six sync touch points: `SYNCED_TABLES`, `EXCLUDED_COLUMNS`, `shouldSyncRow`, `applyRambleTrade` with LWW on the envelope lamport, `applyRemoteOp` seam, live dispatch, `stampSql` branch; outbox-door + apply-door tests). `ramble_outbox` — the LOCAL contacts-delivery queue (never synced).
+2. `bundles/ramble/server/delivery.js` — wire codecs (`ramble.mark` / `ramble.egg` / `ramble.trade`; an egg on the wire is exactly `{ egg_id, warmth, found_cell, found_week }`), audience resolution against the core `contacts` / `contact_groups` (plain groups only; the phase-1 `ramble_groups` shared key is dropped, table left unused), the outbox (egg/trade rows ordered before marks).
+3. `bundles/ramble/server/trades.js` — gifts, the swap state machine, egg locks, inbound caps (20 open proposals per contact, 20 gifts per contact per local day), the `stillOurs()` no-lost-egg guard, the inbound router `receiveEnvelope`. `incubateEgg` admits `received` eggs and refuses locked ones (`in-trade`, also inside the write guard).
+4. `NostrManager.subscribeToContact` emits `ramble:envelope` for any decrypted `ramble.*` DM (after the block check, before the chat store); `subscribeToIncoming` drops `ramble.*`.
+5. Transport: `drainDeliveries` through the existing `sendControl` (marks grid-gated per audience with the gate cached per tick, gifts/trades never gated; paged past gate-skipped rows, up to 4 pages; retry/park at 20; a mark flips to `published` when its last row leaves the queue, including the thrown-park path), `expireTrades` on the tick, `onEnvelope` with bounded event-id dedup and an immediate re-drain when a reply is queued. Phase-3 modules load in a guarded step: a stale 0.3.0 installed copy degrades to "contacts delivery DISABLED", never to "no ramble".
+6. Routes `GET /api/ramble/contacts`, `POST /api/ramble/eggs/:id/gift`, `GET/POST /api/ramble/trades`, `/:id/accept`, `/:id/decline`; contacts/group fan-out on `POST /api/ramble/marks` (`recipients`); `contact_name` on remote marks by a contact; SSE `ramble-trade`.
+7. Tools `ramble_gift_egg`, `ramble_propose_swap`; `ramble_leave_mark` reports `recipients` and refuses an unknown group before a row exists.
+8. Panel: Gift / Swap / Accept / Decline / Withdraw, picker sheet, "A gift · from <name>", Group audience (only when a plain group exists), "Share an invite" on a stranger's pin. Direction C; zero backticks; exactly two engine markup sinks; textContent only; no emoji.
+9. Docs en/es (parity kept), spec §2.5/§4/§5 amended, version bump, registry.
+
+## Rulings to carry (full list in the PR body and the plan's Global Constraints)
+- Received eggs are their own shelf class and do not use a nest-claim spot; a received egg incubated and later swapped out becomes `shelf/user` and then does count (inherent; same class as "6 of 5").
+- Trade envelope may carry `egg`; `ramble_trades` has `role`, `offer_json`, `expires_at`; the proposer's row goes `proposed|expired → declined` on a non-honourable `accepted` (one reply, then no-ops); the receiver honours `declined` from `proposed` or `accepted`.
+- Duplicate-egg outcomes at the exact moment an offer lapses are accepted (no scarcity); a lost egg never is (`stillOurs`).
+- All of a user's instances share one Nostr identity (`nostr.js:155`): every instance receives and applies every contact envelope; swap replies are duplicated-but-idempotent.
+- A contacts mark with nobody to send to settles `published`; a mark whose every recipient parked also reads `published` (design; a `failed` variant later).
+- Inbound contacts marks are bounded by the block list only (named ruling) — **carried to phase 4:** a per-contact cap or prune. Also carried: a two-transport multi-instance idempotency test.
+- During a rolling restart a phase-2 gateway silently drops `ramble_trades` sync ops (documented in Operating notes) — restart all gateways back-to-back.
+- Deferred minors (all triaged "defer" by the final review): CHECK enums on trades; `OPEN_STATES`/`OPEN_SQL`/`GIFTABLE` duplication; `listTrades.open` vs `isEggLocked` on an unswept expired row; `expireTrades` count on a mid-sweep transition; double `JSON.parse` in `subscribeToContact`; `meet_crow` block duplicated between `onEvent`/`onEnvelope`; no `deferred` count in the drain result; `ramble-transport.js` ~650 lines (extraction candidate); four mutating routes share a response shape; `contact_name` names bots too; unused `.rb-pick` class; `ramble:nearby` fires for a contact's mark regardless of distance; cross-instance `expired` can beat `completed` by lamport (display only).
+
+## Where things are
+- Spec: `docs/superpowers/specs/2026-09-07-ramble-flock-design.md`. Phase-3 plan (three review gates recorded): `docs/superpowers/plans/2026-09-07-ramble-flock-phase3-contacts-gifts-swaps.md`.
+- Worktree `crow-wt-flock3` can be removed once phase 4 starts from a fresh one; the git-ignored SDD workspace was deleted after the final review (every ruling is in the PR body and here).
+
+## Next
+Phase 4 = AR overlay (spec §6): `renderAr({ anchors, pose, bird })` over `getUserMedia`, heading + GPS labels for marks/caws/nests within ~500 m, radar-strip fallback, limits stated in-UI. Carry the two phase-3 items above into its plan. Models arc plan 2 stays queued behind the Ramble phases. Process as before: `superpowers:writing-plans` → adversarial review (two rounds + scoped check) → SDD in a fresh worktree from `main`.
