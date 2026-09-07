@@ -1299,7 +1299,7 @@ After the `ramble_chore` register block:
 
 Add the three names to the header comment's tool list.
 
-- [ ] **Step 4: Run** — `node scripts/run-suite.mjs tests/ramble-tools.test.js` → PASS. Then smoke: `node bundles/ramble/server/index.js` starts and exits clean on ctrl-C (or `timeout 3 node bundles/ramble/server/index.js; echo $?` shows no module error).
+- [ ] **Step 4: Run** — `node scripts/run-suite.mjs tests/ramble-tools.test.js` → PASS. Then smoke against a SCRATCH data dir only (the entry point runs `initRambleTables` on whatever db it resolves, and without `CROW_DATA_DIR` that is the LIVE `~/.crow/data/crow.db`): `D=$(mktemp -d); CROW_DATA_DIR=$D timeout 3 node bundles/ramble/server/index.js; echo $?; rm -rf $D` — 124 or 0 with no module-resolution error is a pass.
 
 - [ ] **Step 5: Commit**
 
@@ -1968,7 +1968,7 @@ grep -c '`' bundles/ramble/panel/static/ramble.js
 
 Expected: the only `innerHTML` is the existing `el.innerHTML = Bird.drawEgg(...)` in `drawEggArt`, and the only `html:` is `html: nestEggHtml(nest.seed)` (engine output from a number). Backtick count `0`. Every other write is `textContent`. No emoji anywhere (`grep -P '[\x{1F300}-\x{1FAFF}]' …` prints nothing).
 
-- [ ] **Step 7: Run** — `node scripts/run-suite.mjs tests/ramble-panel.test.js tests/ramble-stream.test.js` → PASS (including the client-string stream test added in Step 1). Then boot `node servers/gateway/index.js --no-auth`, open `/dashboard/ramble`, and check the browser console for a syntax error in `ramble.js` (a plain-script parse error kills the whole panel). Zoom to 15, confirm egg pins appear, open one, confirm the popup text; open the flock view from the pet screen. ctrl-C.
+- [ ] **Step 7: Run** — `node scripts/run-suite.mjs tests/ramble-panel.test.js tests/ramble-stream.test.js` → PASS (including the client-string stream test added in Step 1). Then parse-check the client script without a browser: `node -e "new Function(require('fs').readFileSync('bundles/ramble/panel/static/ramble.js','utf8'))"` must print nothing (a plain-script parse error kills the whole panel). The visual check (egg pins at zoom 15, the popup text, the flock view from the pet screen) happens on grackle after deploy (Task 8 Step 7) — never boot a gateway from the worktree against the live db.
 
 - [ ] **Step 8: Commit**
 
