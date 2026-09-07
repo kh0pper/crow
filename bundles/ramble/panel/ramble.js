@@ -12,6 +12,10 @@
  * card with Gift / Swap / Accept / Decline, and a picker sheet
  * (`#rb-pick-sheet`) for choosing a contact or an egg.
  *
+ * Phase 4: the map bar gains "Look around", which opens #rb-ar — a full-screen
+ * camera view painted by static/ramble-ar.js (labels by bearing and distance,
+ * a radar strip when the camera or compass is missing).
+ *
  * COPIED ALONE to `$CROW_HOME/panels/ramble.js` at install, so it carries no
  * relative `../server/*` import; anything it needs from the bundle is resolved
  * through BUNDLE_DIR at request time. Every HTTP surface it talks to lives in
@@ -47,6 +51,7 @@ const ICONS = {
   back: '<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>',
   nest: '<path d="M4 14c0 3 4 6 8 6s8-3 8-6"/><path d="M3 14h18"/><path d="M8 14c0-4 2-7 4-8 2 1 4 4 4 8"/>',
   flock: '<circle cx="7" cy="9" r="3"/><circle cx="17" cy="9" r="3"/><path d="M4 19c1-3 3-4 3-4s2 1 3 4M14 19c1-3 3-4 3-4s2 1 3 4"/>',
+  ar: '<path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/><circle cx="12" cy="12" r="3"/>',
 };
 
 function esc(value) {
@@ -117,6 +122,7 @@ export default {
             <div class="rb-mapbar">
               <button class="rb-chip is-on" id="rb-chip-around" type="button" aria-pressed="true">${icon("target")}<span>Around you</span></button>
               <button class="rb-chip" id="rb-chip-visible" type="button" aria-haspopup="dialog">${icon("eye")}<span id="rb-chip-visible-label">Visible: off</span></button>
+              <button class="rb-chip" id="rb-chip-ar" type="button" aria-haspopup="dialog">${icon("ar")}<span>Look around</span></button>
             </div>
 
             <div class="rb-perch">
@@ -368,10 +374,70 @@ export default {
             <div class="rb-steps" id="rb-pick-list"></div>
           </div>
         </div>
+
+        <!-- ───────────────────────────────────────── the AR view (phase 4, spec §6) -->
+        <!-- Full-screen over the rear camera. The renderer (ramble-ar.js) paints
+             labels into #rb-ar-labels and dots into #rb-ar-ring; data-mode flips
+             between "ar" and "radar" (never blank: no camera or no compass shows
+             the ring + list). The camera picture is a background only. -->
+        <div class="rb-ar" id="rb-ar" data-mode="radar" data-reason="no-fix" data-camera="on" hidden>
+          <video id="rb-ar-video" class="rb-ar-video" autoplay muted playsinline aria-hidden="true"></video>
+
+          <div class="rb-ar-top">
+            <span class="rb-chip is-on rb-ar-modechip"><span id="rb-ar-mode-label">Radar</span></span>
+            <button class="rb-icon-btn" id="rb-ar-close" type="button" aria-label="Close the AR view">${icon("close")}</button>
+          </div>
+
+          <div class="rb-ar-labels" id="rb-ar-labels" aria-live="polite"></div>
+          <p class="rb-ar-more rb-fine" id="rb-ar-more"></p>
+          <div class="rb-steps rb-ar-coarse" id="rb-ar-coarse"></div>
+
+          <section class="rb-ar-radar" id="rb-ar-radar" aria-label="Radar strip">
+            <svg class="rb-ar-ringsvg" viewBox="0 0 100 100" role="img" aria-label="Bearing ring">
+              <circle class="rb-ar-ring-track" cx="50" cy="50" r="42"/>
+              <circle class="rb-ar-ring-track" cx="50" cy="50" r="21"/>
+              <path class="rb-ar-ring-north" d="M50 3l3.5 7h-7z"/>
+              <circle class="rb-ar-ring-me" cx="50" cy="50" r="2.4"/>
+              <g id="rb-ar-ring"></g>
+            </svg>
+            <div class="rb-steps rb-ar-list" id="rb-ar-list"></div>
+          </section>
+
+          <div class="rb-ar-perch">
+            <div class="rb-say" id="rb-ar-say">Getting your bearings&hellip;</div>
+            <svg id="rb-ar-bird" class="rb-bird rb-ar-bird" viewBox="0 0 200 200" role="img" aria-label="Your bird" hidden></svg>
+            <svg id="rb-ar-egg" class="rb-eggart rb-ar-egg" viewBox="0 0 120 152" role="img" aria-label="Your egg"></svg>
+          </div>
+
+          <section class="rb-card rb-ar-notice" id="rb-ar-notice" hidden>
+            <p class="rb-eyebrow">Before you look around</p>
+            <h3 class="rb-h">What this can and can&rsquo;t do</h3>
+            <ul class="rb-fine rb-ar-limits">
+              <li>Labels float by <strong>direction and distance</strong> only. Nothing sticks to walls or the ground.</li>
+              <li>Direction comes from the phone&rsquo;s compass, which can be off by tens of degrees. Hold the phone upright; if labels drift, wave it in a figure eight.</li>
+              <li>On an iPhone, Safari asks once for <strong>motion access</strong>. Say no and you get the radar strip instead.</li>
+              <li>No camera or no compass means the <strong>radar strip</strong>: a bearing ring and a distance list. Never a blank screen.</li>
+              <li>The camera picture <strong>stays on this phone</strong>. Nothing from it is sent anywhere.</li>
+            </ul>
+            <button class="rb-btn" id="rb-ar-gotit" type="button">Got it</button>
+          </section>
+        </div>
+
+        <!-- A tapped AR label opens the SAME popup its map pin would, in a sheet. -->
+        <div class="rb-sheet rb-ar-sheet" id="rb-ar-sheet" hidden>
+          <div class="rb-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="rb-ar-sheet-title">
+            <div class="rb-sheet-head">
+              <h3 class="rb-h" id="rb-ar-sheet-title">Right there</h3>
+              <button class="rb-icon-btn" id="rb-ar-sheet-close" type="button" aria-label="Close">${icon("close")}</button>
+            </div>
+            <div id="rb-ar-sheet-body"></div>
+          </div>
+        </div>
       </div>
 
       <script src="/ramble/static/leaflet/leaflet.js"></script>
       <script src="/ramble/static/bird-svg.js"></script>
+      <script src="/ramble/static/ramble-ar.js"></script>
       <script src="/ramble/static/ramble.js"></script>
     `;
 
