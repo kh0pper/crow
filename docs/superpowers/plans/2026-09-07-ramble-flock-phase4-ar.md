@@ -40,7 +40,7 @@ Phase-1/2/3 constraints still bind (copied, with the phase-4 deltas marked **[P4
 
 **Create**
 - `bundles/ramble/server/around.js` — `bboxAround`, `locate`, `aroundPoint(db, { lat, lon, radiusM, now })`, the radius constants.
-- `bundles/ramble/panel/static/ramble-ar.js` — the AR renderer (pure `renderAr` + DOM `mountAr` + the pose helpers `bearingDeg`, `distanceM`, `relativeBearing`, `compassPoint`, `headingFromEvent`, `smoothHeading`, `layoutAnchor`).
+- `bundles/ramble/panel/static/ramble-ar.js` — the AR renderer (pure `renderAr` + DOM `mountAr` + the pose helpers `bearingDeg`, `distanceM`, `relativeBearing`, `compassPoint`, `headingFromEvent`, `smoothHeading`, `layoutAnchor` + the notice-gate storage helpers `noticeSeen`, `markNoticeSeen`).
 - `tests/ramble-around.test.js`, `tests/ramble-ar.test.js`.
 
 **Modify**
@@ -282,16 +282,22 @@ test("aroundPoint: works at high latitude (the cover grows with 1/cos) and refus
   await assert.rejects(aroundPoint(db, { lat: 90, lon: 0, now: T0 }), (err) => err.code === "too-wide");
 });
 
-test("aroundPoint: a nearby mark is never starved by newer marks elsewhere in the same coarse cell (the fine cover answers first)", async () => {
+test("aroundPoint: a nearby mark is never starved by 600 NEWER marks in the same cover (fine cell 662 m out, coarse cell 9v6m2)", async () => {
   const db = await freshDb();
   const near = await mark(db, NORTH_100, "near north");
-  // 600 newer marks 3 km north: same 5-char cell (9v6m2 spans 30.454..30.498), out of range.
+  // 600 marks NEWER than the one above (createMark stamps Date.now(), so a
+  // fixed T0 would be OLDER and the test would prove nothing), at
+  // 30.4642/-98.0751: 662 m away — out of range — but in cell 9v6m21z, which
+  // IS in the fine cover (the bbox corner), and in the coarse cell 9v6m2.
+  // Each carries its own 7-char geohash exactly as a stored exact-anchor row
+  // does. A single LIMIT 500 over either pass would drop "near north".
+  const newer = Date.now() + 1000;
   const stmts = [];
   for (let i = 0; i < 600; i++) {
     stmts.push({
       sql: `INSERT INTO ramble_marks (mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, accuracy_m, visibility, reveal, content_text, content_kind, created_at, publish_state, origin)
             VALUES (?, ?, 'rotating', 'mark', 'geo', ?, ?, ?, 5, 'public', 'open', ?, 'none', ?, 'published', 'remote')`,
-      args: ["crowd-" + i, PK, "9v6m3", 30.487, -98.08, "crowd " + i, T0 + 1000 + i],
+      args: ["crowd-" + i, PK, "9v6m21z", 30.4642, -98.0751, "crowd " + i, newer + i],
     });
   }
   await db.batch(stmts);
@@ -338,7 +344,7 @@ export const AROUND_RADIUS_MAX = 1000;
  * Two covers, because `listMarks` matches by geohash PREFIX and the rows come
  * in two grains: marks with an exact anchor are stored at geohash-7, wire
  * caws only at their 5-char publish cell.
- *   fine   — the precision-7 cells the circle touches (~72 for 500 m): every
+ *   fine   — the precision-7 cells the circle touches (~63 for 500 m): every
  *            exact-anchor row in range, and nothing outside the box, so the
  *            query's LIMIT can never starve a nearby mark;
  *   coarse — the precision-5 cells (1–4): only rows whose OWN geohash is that
@@ -352,6 +358,14 @@ const FINE_PRECISION = 7;
 const MAX_FINE_CELLS = 512;
 const COVER_PRECISION = 5;
 const MAX_COVER_CELLS = 64;
+/**
+ * The fine pass covers ~1 km square (an 8x9 lattice, ~63 cells): 5000 rows
+ * there is far beyond anything real, so its LIMIT can never hide a nearby
+ * mark. The coarse pass covers ~10 km x 8 km and keeps the map's own
+ * bound; a genuine 5-char caw older than that cell's 500 newest rows is
+ * missed — it would only ever have been a direction-less row (accepted).
+ */
+const FINE_LIST_LIMIT = 5000;
 const LIST_LIMIT = 500;
 const M_PER_DEG_LAT = 111320;
 
@@ -407,7 +421,7 @@ export async function aroundPoint(db, { lat, lon, radiusM = AROUND_RADIUS_DEFAUL
     marks.push({ ...row, distance_m: Math.round(d) });
   };
   if (fineCells) {
-    for (const row of await listMarks(db, { cells: fineCells, limit: LIST_LIMIT })) consider(row);
+    for (const row of await listMarks(db, { cells: fineCells, limit: FINE_LIST_LIMIT })) consider(row);
   }
   for (const row of await listMarks(db, { cells: coarseCells, limit: LIST_LIMIT })) {
     // With a fine pass, only the coarse rows are new here; without one (high
@@ -992,7 +1006,7 @@ git show --stat HEAD
 
 **Interfaces:**
 - Consumes: nothing from the bundle. Optional `engine` (the `RambleBird` API: `isValidBird`, `rollGenome`, `mountBird`) for the bird.
-- Produces (`window.RambleAr` / `module.exports`): `FOV_DEG = 70`, `RANGE_M = 500`, `COARSE_M = 150`, `PARK_MAX = 6`; `distanceM(a, b)`, `bearingDeg(a, b)`, `relativeBearing(bearing, heading)` → `[-180, 180)`, `compassPoint(bearing)` → one of `N NE E SE S SW W NW`, `headingFromEvent(ev, screenAngle)` → `number | null`, `smoothHeading(prev, next, k = 0.25)`, `layoutAnchor(anchor, pose)`, `renderAr({ anchors, pose, bird, camera })` → frame, `mountAr(els, { engine, onTap })` → `{ render(state) → frame, destroy(), anchor(id) }`.
+- Produces (`window.RambleAr` / `module.exports`): `FOV_DEG = 70`, `RANGE_M = 500`, `COARSE_M = 150`, `PARK_MAX = 6`; `distanceM(a, b)`, `bearingDeg(a, b)`, `relativeBearing(bearing, heading)` → `[-180, 180)`, `compassPoint(bearing)` → one of `N NE E SE S SW W NW`, `headingFromEvent(ev, screenAngle)` → `number | null`, `smoothHeading(prev, next, k = 0.25)`, `layoutAnchor(anchor, pose)`, `renderAr({ anchors, pose, bird, camera })` → frame, `mountAr(els, { engine, onTap })` → `{ render(state) → frame, destroy(), anchor(id) }`, `noticeSeen(getStorage, key)` → boolean, `markNoticeSeen(getStorage, key)` → boolean.
 - Frame: `{ mode: "ar"|"radar", reason: null|"no-fix"|"no-camera"|"no-heading", labels: [{ id, kind, title, sub, locked, x, y, scale, side, distance_m, bearing, rel, visible }] (far first), parked: { left, right } (overflow past PARK_MAX), coarse: [{ id, kind, title, sub }], radar: { dots: [{ id, kind, locked, x, y }], list: [{ id, kind, title, sub, distance_m }] }, visible: [id], say: string, bird }`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1249,6 +1263,12 @@ test("mountAr paints labels with textContent, routes taps by id, mounts the bird
   assert.notEqual(els.list.children, rowsBefore, "the mode flip repaints the list (its key includes the mode)");
   els.list.children[0].click();
   assert.deepEqual(taps, ["e", "n"]);
+  // A changed title (an unlock renames a row without moving it) repaints the list.
+  const renamed = anchors.map((a) => (a.id === "e" ? { ...a, title: "now read", locked: false } : a));
+  const rowsNamed = els.list.children;
+  session.render({ anchors: renamed, pose: pose(null), bird: null });
+  assert.notEqual(els.list.children, rowsNamed);
+  assert.equal(els.list.children.find((c) => c.getAttribute("data-id") === "e").children[1].children[0].textContent, "now read");
   // A coarse anchor in radar mode joins the list as a row; in AR mode it only sits in the coarse strip.
   session.render({ anchors: anchors.concat([anchor("caw", HERE, { kind: "caw", approx_m: 3400, title: "A caw" })]), pose: pose(null), bird: null });
   assert.equal(els.list.children.length, 3);
@@ -2076,7 +2096,7 @@ git show --stat HEAD
 - Test: `tests/ramble-panel.test.js` (the `GET /ramble/static/ramble.js` test gains phase-4 assertions; a new test serves `ramble-ar.js`)
 
 **Interfaces:**
-- Consumes: `window.RambleAr` (Task 5: `mountAr`, `headingFromEvent`, `smoothHeading`), `GET /api/ramble/around` (Task 4), the ids from Task 6, and the existing `popupFor(mark)`, `nestPopup(nest)`, `isLocked`, `drawEggArt`, `haversineMeters`, `jsonFetch`, `here`/`lastFix`, `Bird`, `eggSeedId`.
+- Consumes: `window.RambleAr` (Task 5: `mountAr`, `headingFromEvent`, `smoothHeading`, `relativeBearing`, `noticeSeen`, `markNoticeSeen`), `GET /api/ramble/around` (Task 4), the ids from Task 6, and the existing `popupFor(mark)`, `nestPopup(nest)`, `isLocked`, `drawEggArt`, `haversineMeters`, `jsonFetch`, `here`/`lastFix`, `Bird`, `eggSeedId`.
 - Produces: `lastPet` (set by `paintPet`); the section's functions are internal.
 
 - [ ] **Step 1: Extend the client-script tests**
@@ -2693,3 +2713,8 @@ Rulings: **Q1** `camera` stays an optional fourth field of `renderAr` (a 3-field
 Round-1 fixes re-verified HOLDING: C2, C3 (same element across frames, `data-side` flips, removal, list not rebuilt, z-index), C4, C5, S4, S5, S6, S8 (both halves executed; the transport edit compiles), S9, S12. Two did not hold and one new defect: **N1** (C1 reopened) the round-1 painter edit's own comment carried two backticks → plain words. **N2** `bboxAround`'s `cosLat` floor of 0.01 capped the box's east–west half-width at ~0.45°, so the `too-wide` refusal was unreachable at radius 500 AND the box was too narrow near the pole (silently missing marks) → floor `1e-6`; lat 85 answers, 89.9 and 90 refuse. **N3** a precision-5 cover (~10 km × 8 km) with `LIMIT 500` applied before the distance filter meant an instance holding >500 marks in its home cell could get an empty AR view while the map still showed pins → two covers: a precision-7 fine cover (≤ 512 cells, ~72 for 500 m) answers exact-anchor rows and can never be starved, the precision-5 cover contributes only rows whose own geohash is coarse (wire caws); above ~84° the fine cover overflows and the coarse pass alone answers (accepted, bounded); a 600-far-marks starvation test pins it.
 Suggestions applied: **S1** Task 7's Files bullet now says AFTER hatch; **S2** the transport-edit parenthetical says what the shown block already contains; **S3** "replace the whole `makeHarness`"; **S4** the suite delta is 24 tests → 4183; **S5** `listKey` includes the title (and the mode); **S6** the redundant sheet z-index dropped; **S7** in radar mode coarse rows join the list and the coarse strip is hidden (no collision on short viewports), tested; **S8** `paintPet` nudges the AR render so the bird is not a heartbeat late; **S9** a camera restart after a hidden tab retries once before the view gives up on it; **S10** the check-runs poll's rate limit noted; **S11** (rAF detachment) recorded as a non-issue.
 Rulings: **Q1** `radius_m` stays as API surface (validated, documented, tested; the client sends none today). **Q2** answered by N3. **Q3** `listNests` at high latitude stays under its own `MAX_NEST_CELLS = 8192` cap — no extra cap; it computes hashes, it does not query. **Q4** the notice gate's storage half moved into the renderer as `noticeSeen`/`markNoticeSeen(getStorage, key)` with a unit test (missing/throwing storage → the notice shows); the three-line `openAr` branch stays smoke-only.
+
+### Scoped check (2026-09-07, narrow re-review of the round-2 edits; every one executed in a scratch mirror — anchors 11/11, around 7/7, trades 11/11, transport 32/32, ar 9/9 — plus five mutation runs to prove the assertions bite) — REVISE → fixed inline
+All round-2 edits HOLD (N1 zero backticks in every block; N2 lat 85 answers through the coarse pass, 89.9 and 90 refuse; N3's two covers proven by mutation; S1–S10 and Q4 verified, incl. `paintPet`'s single early return, the camera-retry's non-looping, the `listKey` mode pin and the radar-mode coarse rows). One defect: **D1** the starvation test was a placebo — its crowd sat in the wrong cell (`9v6m3` is one column east of `9v6m2`) and was OLDER than the mark it was meant to starve (`createMark` stamps `Date.now()`), so it passed against the pre-N3 single-cover design. Fixed with the STRONGER fixture: 600 rows newer than the near mark, 662 m out, in cell `9v6m21z` — inside the fine cover — which would starve the near mark under a fine-pass `LIMIT 500`; the fine pass now uses `FINE_LIST_LIMIT = 5000` (a ~1 km square cannot hold that many rows) and the coarse pass keeps 500 with the residual (a 5-char caw older than its cell's 500 newest rows is missed — a direction-less row at most) written beside the constant. Cosmetic: the fine cover is ~63 cells, not 72; the interface prose now lists `noticeSeen`/`markNoticeSeen`/`relativeBearing` where they are produced and consumed; a title-change repaint assertion pins the `listKey` title component.
+
+**Status: plan complete, three review gates passed (round 1: 5 criticals; round 2: 3 criticals incl. one reopened; scoped check: 1 placebo test). Awaiting Kevin's approval before execution (superpowers:subagent-driven-development in `/home/kh0pp/crow-wt-flock4`).**
