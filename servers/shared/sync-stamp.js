@@ -174,6 +174,23 @@ export function stampSql(table, row, lamportTs) {
       args: [lamportTs, row.section_key, row.device_id ?? null, row.project_id ?? null],
     };
   }
+  // Ramble's two id-less natural-key tables (R9). Without these branches they
+  // fall through to the generic by-`id` shape, find no `id` column, return null
+  // and are never stamped — the outbox row would carry the lamport while the
+  // source row kept 0, making the apply side's last-writer-wins one-sided
+  // (an incoming remote op would beat a strictly newer local edit forever).
+  if (table === "ramble_settings" && row.key !== undefined) {
+    return {
+      sql: `UPDATE ramble_settings SET lamport_ts = ? WHERE key = ?`,
+      args: [lamportTs, row.key],
+    };
+  }
+  if (table === "ramble_blocks" && row.persona !== undefined) {
+    return {
+      sql: `UPDATE ramble_blocks SET lamport_ts = ? WHERE persona = ?`,
+      args: [lamportTs, row.persona],
+    };
+  }
   if (row.id !== undefined) {
     return {
       sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,

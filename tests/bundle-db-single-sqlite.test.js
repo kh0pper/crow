@@ -33,6 +33,7 @@ const FACTORY_FILES = [
   "bundles/media/server/db.js",
   "bundles/campaigns/server/db.js",
   "bundles/iptv/server/db.js",
+  "bundles/ramble/server/db.js",
 ];
 
 test("no static @libsql/client import in bundle db factories or in-gateway panel routes", () => {
@@ -54,7 +55,7 @@ test("knowledge-base panel routes have no @libsql fallback at all (gateway-resid
   );
 });
 
-for (const bundle of ["pm-workspace", "knowledge-base", "tax", "media", "campaigns", "iptv"]) {
+for (const bundle of ["pm-workspace", "knowledge-base", "tax", "media", "campaigns", "iptv", "ramble"]) {
   test(`${bundle} factory resolves the core client and round-trips in-repo`, async (t) => {
     const dir = mkdtempSync(join(tmpdir(), `crow-bundledb-${bundle}-`));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
