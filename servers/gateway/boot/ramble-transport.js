@@ -80,12 +80,14 @@ export async function startRambleTransport({
   autoStart = true,
 } = {}) {
   const load = (file) => import(pathToFileURL(join(bundleDir, file)).href);
-  const [{ initRambleTables }, { insertRemoteMark, expireMarks }, nostrMap, { resolvePersona }, { makePublishGate }] = await Promise.all([
+  const [{ initRambleTables }, { insertRemoteMark, expireMarks }, nostrMap, { resolvePersona }, { makePublishGate }, { activeBird }, { feedAll }] = await Promise.all([
     load("init-tables.js"),
     load("marks.js"),
     load("nostr-map.js"),
     load("persona.js"),
     load("grid.js"),
+    load("eggs.js"),
+    load("feed.js"),
   ]);
   const { MARK_KIND, CAW_KIND, markToEvent, eventToMark } = nostrMap;
 
@@ -192,6 +194,10 @@ export async function startRambleTransport({
     if (rows.length === 0) return { published: 0, skipped: 0, failed: 0 };
 
     const level = await publicIdentityLevel();
+    // Resolved ONCE per drain (not per row): the active bird can't change
+    // mid-tick, and every row published this tick should ride the same
+    // bird rather than each doing its own db round trip.
+    const bird = await activeBird(db);
 
     for (const row of rows) {
       try {
@@ -204,7 +210,7 @@ export async function startRambleTransport({
           sessionId,
           _derive,
         });
-        const template = markToEvent(row, { precision: prec, crowId: persona.crowId });
+        const template = markToEvent(row, { precision: prec, crowId: persona.crowId, bird });
         const event = finalizeEvent(template, persona.secp256k1Priv);
         // eslint-disable-next-line no-await-in-loop
         const accepted = await nostrManager.publishRendezvousEvent(event);
@@ -340,6 +346,24 @@ export async function startRambleTransport({
           });
         } catch (emitErr) {
           console.warn("[ramble] ramble:nearby subscriber threw:", emitErr?.message ?? emitErr);
+        }
+
+        // Meeting a nearby crow credits warmth toward the egg (best-effort:
+        // a feed/credit failure must never make an otherwise-successful
+        // receipt look like it failed).
+        try {
+          await feedAll(db, { type: "meet_crow", persona: event.pubkey }, {
+            emit,
+            onHatch: (egg) => {
+              try {
+                bus.emit("ramble:hatched", { egg_id: egg.egg_id, species: egg.species, seed: egg.seed });
+              } catch (hatchErr) {
+                console.warn("[ramble] ramble:hatched subscriber threw:", hatchErr?.message ?? hatchErr);
+              }
+            },
+          });
+        } catch (feedErr) {
+          console.warn("[ramble] meet_crow feed failed:", feedErr?.message ?? feedErr);
         }
       }
     } catch (err) {

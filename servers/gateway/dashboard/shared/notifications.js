@@ -869,6 +869,9 @@ export const tamagotchiCss = `
   .crow-happy .crow-body-group {
     animation: crow-bounce-happy 2s ease-in-out infinite;
   }
+  .crow-happy #crow-tama-bird {
+    animation: crow-bounce-happy 2s ease-in-out infinite;
+  }
   .crow-happy .crow-eye {
     animation: crow-blink 4s step-end infinite;
   }
@@ -883,6 +886,9 @@ export const tamagotchiCss = `
   .crow-tired .crow-body-group {
     animation: crow-bounce-tired 3s ease-in-out infinite;
   }
+  .crow-tired #crow-tama-bird {
+    animation: crow-bounce-tired 3s ease-in-out infinite;
+  }
   .crow-tired .crow-eye {
     animation: crow-blink 6s step-end infinite;
   }
@@ -895,6 +901,9 @@ export const tamagotchiCss = `
 
   /* ─ Alarmed mood ─ */
   .crow-alarmed .crow-body-group {
+    animation: crow-bounce-happy 1s ease-in-out infinite;
+  }
+  .crow-alarmed #crow-tama-bird {
     animation: crow-bounce-happy 1s ease-in-out infinite;
   }
   .crow-alarmed .crow-eye {
@@ -1107,6 +1116,96 @@ export function tamagotchiJs(lang) {
     }
   }
 
+  // ── ramble bird integration (Task 12: header crow draws your hatched bird) ──
+  // The header crow's animation mood (bounce/droop, driven by updateCrowMood
+  // above) stays tied to HOST health, unchanged. Once a bird is hatched, the
+  // bird's own drawn face is a SEPARATE concern driven by the pet's energy,
+  // fetched here on the same poll cadence. Any non-200/error/absent bird
+  // (login page, ramble not installed, static route 401) is silently a
+  // no-op — the classic crow stays exactly as it was.
+  var _rambleBirdSpecies = null;
+  var _rambleBirdSeed = null;
+  var _rambleBirdMood = null;
+  var _rambleBirdFailed = false;
+
+  function _rambleBirdLoadEngine(cb) {
+    if (window.RambleBird) { cb(); return; }
+    if (_rambleBirdFailed || window.__rambleBirdLoading) return;
+    window.__rambleBirdLoading = true;
+    var s = document.createElement('script');
+    s.src = '/ramble/static/bird-svg.js';
+    s.onload = function() {
+      window.__rambleBirdLoading = false;
+      if (window.RambleBird) { cb(); } else { _rambleBirdFailed = true; }
+    };
+    s.onerror = function() {
+      window.__rambleBirdLoading = false;
+      _rambleBirdFailed = true;
+    };
+    document.head.appendChild(s);
+  }
+
+  function _drawRambleBird(species, seed, mood) {
+    var svg = document.getElementById('crow-tama');
+    if (!svg) return;
+    var bodyGroup = svg.querySelector('.crow-body-group');
+    var bird = document.getElementById('crow-tama-bird');
+    var inner;
+    if (!bird) {
+      // Outer <g id="crow-tama-bird"> carries the mood CSS animation (see
+      // tamagotchiCss); the inner <g> carries the static placement
+      // transform. Splitting them keeps the CSS animation transform
+      // keyframes from fighting the placement's own transform attribute.
+      bird = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      bird.setAttribute('id', 'crow-tama-bird');
+      inner = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      inner.setAttribute('transform', 'translate(0 4) scale(0.24)');
+      bird.appendChild(inner);
+      if (bodyGroup && bodyGroup.nextSibling) {
+        svg.insertBefore(bird, bodyGroup.nextSibling);
+      } else if (bodyGroup) {
+        svg.appendChild(bird);
+      } else {
+        svg.insertBefore(bird, svg.firstChild);
+      }
+    } else {
+      inner = bird.firstChild;
+    }
+    if (!inner) return;
+    try {
+      inner.innerHTML = RambleBird.drawBird(RambleBird.rollGenome(seed, species), mood);
+    } catch (e) {
+      return;
+    }
+    // Only hide the classic crow once a bird has actually been drawn.
+    if (bodyGroup) bodyGroup.style.display='none';
+  }
+
+  async function refreshRambleBird() {
+    try {
+      var resp = await fetch('/api/ramble/pet', { credentials: 'same-origin' });
+      if (!resp.ok) return;
+      var data = await resp.json();
+      if (!data || !data.bird) return;
+
+      var species = data.bird.species;
+      var seed = data.bird.seed;
+      var energy = data.energy || 0;
+      var mood = energy >= 60 ? 'happy' : (energy >= 30 ? 'tired' : 'alarmed');
+
+      if (species === _rambleBirdSpecies && seed === _rambleBirdSeed && mood === _rambleBirdMood) return;
+
+      _rambleBirdLoadEngine(function() {
+        if (!window.RambleBird) return;
+        _drawRambleBird(species, seed, mood);
+        _rambleBirdSpecies = species;
+        _rambleBirdSeed = seed;
+        _rambleBirdMood = mood;
+      });
+    } catch (e) {}
+  }
+  // ── end ramble bird integration ──
+
   async function pollNotifications() {
     if (!_tabVisible) return;
     try {
@@ -1118,10 +1217,12 @@ export function tamagotchiJs(lang) {
       updateCrowBubble(data.count);
       updateCrowMood(data.health);
       updateCrowHealthBar(data.health);
+      refreshRambleBird();
     } catch(e) {}
   }
 
   pollNotifications();
+  refreshRambleBird();
   // 5-min fallback poll. Live updates come via the Turbo Stream at
   // /dashboard/streams/notifications; this interval is a safety net
   // for transient SSE drops and is intentionally slow.

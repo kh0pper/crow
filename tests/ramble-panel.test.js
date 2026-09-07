@@ -94,7 +94,7 @@ test("panel handler object has the registry-required shape", () => {
   assert.equal(typeof panel.handler, "function");
 });
 
-test("panel handler renders the map mount and the client script tag", async () => {
+test("panel handler renders the world-first shell, its three views and every asset", async () => {
   let sent = null;
   const res = { send: (html) => { sent = html; } };
   await panel.handler({ query: {} }, res, {
@@ -103,16 +103,42 @@ test("panel handler renders the map mount and the client script tag", async () =
     appRoot: REPO_ROOT,
   });
   assert.ok(sent, "handler sent nothing");
-  assert.match(sent, /id="ramble-map"/);
+
+  // The whole panel is one element with a `data-view` state; the world is home.
+  assert.match(sent, /id="ramble"/);
+  assert.match(sent, /data-view="world"/);
+
+  // Direction-C surfaces: the perch on the map, the compose card, the grid
+  // sheet (no longer an always-open card), and both other views.
+  assert.match(sent, /rb-perch/);
+  assert.match(sent, /rb-compose/);
+  assert.match(sent, /rb-grid-sheet/);
+  assert.match(sent, /data-for="egg"/);
+  assert.match(sent, /data-for="pet"/);
+
+  // The "Just me" segment is a real audience, not a hidden default.
+  assert.match(sent, /data-visibility="private"/);
+
+  // Both directions of the egg <-> pet loop. Without them the egg view (and
+  // its daily check-in) is unreachable once the perch belongs to a hatched
+  // bird, because the successor egg is minted the moment one hatches.
+  assert.match(sent, /id="rb-pet-nextegg"/);
+  assert.match(sent, /id="rb-my-bird"/);
+
+  // Assets: the stylesheet is now a file (was an inline <style>), and the
+  // bird engine is loaded in the browser so pins/perch/pet can draw genomes.
+  assert.match(sent, /\/ramble\/static\/ramble\.css/);
+  assert.match(sent, /\/ramble\/static\/bird-svg\.js/);
   assert.match(sent, /\/ramble\/static\/ramble\.js/);
   assert.match(sent, /\/ramble\/static\/leaflet\/leaflet\.css/);
-  assert.match(sent, /id="ramble-pet"/);
-  assert.match(sent, /id="ramble-marks"/);
+
+  // Grid checkbox names are the wire contract with POST /api/ramble/grid.
   assert.match(sent, /name="grid-public-geo"/);
-  // Android WebView pull-to-refresh guard (fix/android-geolocation-map-swipe):
-  // the map must opt out of the browser/WebView's own touch gestures so a
-  // northward drag pans Leaflet instead of triggering SwipeRefreshLayout.
-  assert.match(sent, /touch-action:\s*none/);
+
+  // The legacy ids are GONE — anything still selecting them is broken.
+  assert.doesNotMatch(sent, /id="ramble-map"/);
+  assert.doesNotMatch(sent, /id="ramble-pet"/);
+  assert.doesNotMatch(sent, /id="ramble-marks"/);
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -137,9 +163,14 @@ test("POST /api/ramble/marks stores a mark that then lists in its cell", async (
             visibility: "public", reveal: "open" },
   });
   assert.equal(res.status, 201);
-  const { mark } = await res.json();
+  const body = await res.json();
+  const { mark } = body;
   assert.ok(mark?.mark_id, "no mark_id in the response");
   assert.equal(mark.publish_state, "pending");
+  // The client branches on `out.hatched` after authoring — the key must always
+  // be there (null when this mark did not tip the egg over the threshold).
+  assert.ok("hatched" in body, "POST /api/ramble/marks must report `hatched`");
+  assert.equal(body.hatched, null);
 
   const inserted = emitCalls.filter((c) => c.table === "ramble_marks" && c.op === "insert");
   assert.equal(inserted.length, 1, "authoring must emit exactly one ramble_marks insert");
@@ -150,6 +181,26 @@ test("POST /api/ramble/marks stores a mark that then lists in its cell", async (
   const { marks } = await listed.json();
   assert.equal(marks.length, 1);
   assert.equal(marks[0].mark_id, mark.mark_id);
+});
+
+test("POST /api/ramble/marks with visibility:private stores it, and it lists only under visibility=private", async () => {
+  const res = await req("/api/ramble/marks", {
+    method: "POST",
+    body: { kind: "mark", lat: LAT, lon: LON, text: "just me on the panel", visibility: "private" },
+  });
+  assert.equal(res.status, 201);
+  const { mark } = await res.json();
+  assert.ok(mark?.mark_id, "no mark_id in the response");
+
+  const privateListed = await req(`/api/ramble/marks?visibility=private&cells=${CELL}`);
+  assert.equal(privateListed.status, 200);
+  const { marks: privateMarks } = await privateListed.json();
+  assert.ok(privateMarks.some((m) => m.mark_id === mark.mark_id));
+
+  const publicListed = await req(`/api/ramble/marks?visibility=public&cells=${CELL}`);
+  assert.equal(publicListed.status, 200);
+  const { marks: publicMarks } = await publicListed.json();
+  assert.ok(!publicMarks.some((m) => m.mark_id === mark.mark_id));
 });
 
 test("POST /api/ramble/marks rejects an out-of-range latitude", async () => {
@@ -226,21 +277,202 @@ test("GET /api/ramble/pet returns the real pet state shape", async () => {
   assert.equal(typeof body.crows_week, "number");
 });
 
-test("posting a NEW active-area cell feeds the pet a visit_place; the SAME cell again does not", async () => {
-  const before = await (await req("/api/ramble/pet")).json();
+// A visit is credited from the user's REAL position (`here`), never from the
+// map's active area: the area is whatever the viewport happens to cover, so
+// crediting it would let a pan farm warmth and `places_week` from an armchair.
+const HERE_LAT = 51.5074, HERE_LON = -0.1278; // a geohash-7 cell no other test touches
 
-  // A location whose precision-5 cell nobody has posted yet in this test run.
-  const NEW_LAT = 51.5074, NEW_LON = -0.1278;
-  const first = await req("/api/ramble/area", { method: "POST", body: { lat: NEW_LAT, lon: NEW_LON } });
+test("POST /api/ramble/area credits visit_place from `here` — once per cell per week", async () => {
+  const petBefore = await (await req("/api/ramble/pet")).json();
+  const eggBefore = await (await req("/api/ramble/egg")).json();
+
+  const first = await req("/api/ramble/area", {
+    method: "POST",
+    body: { lat: HERE_LAT, lon: HERE_LON, here: { lat: HERE_LAT, lon: HERE_LON } },
+  });
   assert.equal(first.status, 200);
-  const afterFirst = await (await req("/api/ramble/pet")).json();
-  assert.equal(afterFirst.places_week, before.places_week + 1, "a new cell must feed visit_place");
+  const petAfterFirst = await (await req("/api/ramble/pet")).json();
+  const eggAfterFirst = await (await req("/api/ramble/egg")).json();
+  assert.equal(petAfterFirst.places_week, petBefore.places_week + 1, "`here` must feed visit_place");
+  assert.ok(eggAfterFirst.egg.warmth > eggBefore.egg.warmth, "`here` must credit egg warmth");
 
-  // Same cell again: no new visit_place.
-  const second = await req("/api/ramble/area", { method: "POST", body: { lat: NEW_LAT, lon: NEW_LON } });
+  // The same real position again inside the same ISO week: the eggs ledger
+  // already holds that (cell, week) key, so neither pet nor egg moves.
+  const second = await req("/api/ramble/area", {
+    method: "POST",
+    body: { lat: HERE_LAT, lon: HERE_LON, here: { lat: HERE_LAT, lon: HERE_LON } },
+  });
   assert.equal(second.status, 200);
-  const afterSecond = await (await req("/api/ramble/pet")).json();
-  assert.equal(afterSecond.places_week, afterFirst.places_week, "the same cell again must not feed visit_place");
+  const petAfterSecond = await (await req("/api/ramble/pet")).json();
+  const eggAfterSecond = await (await req("/api/ramble/egg")).json();
+  assert.equal(petAfterSecond.places_week, petAfterFirst.places_week, "a repeat visit must not feed the pet again");
+  assert.equal(eggAfterSecond.egg.warmth, eggAfterFirst.egg.warmth, "a repeat visit must not credit warmth again");
+});
+
+test("POST /api/ramble/area without `here` credits nothing — panning must not farm warmth", async () => {
+  const petBefore = await (await req("/api/ramble/pet")).json();
+  const eggBefore = await (await req("/api/ramble/egg")).json();
+
+  // Cells only (the panel's pan path) — two cells nothing else in this file uses.
+  const cellsOnly = await req("/api/ramble/area", { method: "POST", body: { cells: ["u10hb", "gcpvj"] } });
+  assert.equal(cellsOnly.status, 200);
+
+  // And a lat/lon centre, which is the map CENTRE, not the user's position.
+  const centreOnly = await req("/api/ramble/area", { method: "POST", body: { lat: 48.8584, lon: 2.2945 } });
+  assert.equal(centreOnly.status, 200);
+
+  const petAfter = await (await req("/api/ramble/pet")).json();
+  const eggAfter = await (await req("/api/ramble/egg")).json();
+  assert.equal(petAfter.places_week, petBefore.places_week, "no `here` must mean no visit_place");
+  assert.equal(eggAfter.egg.warmth, eggBefore.egg.warmth, "no `here` must mean no warmth");
+});
+
+test("POST /api/ramble/area rejects a malformed `here`", async () => {
+  const outOfRange = await req("/api/ramble/area", {
+    method: "POST",
+    body: { lat: LAT, lon: LON, here: { lat: 999, lon: 0 } },
+  });
+  assert.equal(outOfRange.status, 400);
+  const notAnObject = await req("/api/ramble/area", { method: "POST", body: { lat: LAT, lon: LON, here: "somewhere" } });
+  assert.equal(notAnObject.status, 400);
+});
+
+// ------------------------------------------------------ eggs, chores, birds
+
+test("GET /api/ramble/egg returns the egg progress and the checklist", async () => {
+  const res = await req("/api/ramble/egg");
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(typeof body.egg.egg_id, "string");
+  assert.equal(typeof body.egg.warmth, "number");
+  assert.equal(body.egg.hatch_at, 100, "the default hatch threshold");
+  assert.ok(body.egg.percent >= 0 && body.egg.percent <= 100, `percent was ${body.egg.percent}`);
+  assert.equal(typeof body.checklist.new_places_week, "number");
+  assert.equal(typeof body.checklist.first_mark, "boolean");
+  assert.equal(typeof body.checklist.checked_in_today, "boolean");
+});
+
+// Proves the `warmth.*` settings override actually reaches the route. The
+// override is set and read inside this test only, then removed in the
+// `finally` before the next test runs: the tests below add more warmth to
+// the same egg and assert exact before/after deltas (e.g. "posting a mark
+// credits mark_left warmth"), which stay valid only while the default
+// hatch_at (100) is in effect — a lingering override would just push the
+// hatch further out, not make those deltas wrong, but restoring here keeps
+// this test's effect from leaking into ones that don't expect it.
+test("a warmth.hatch_at settings override reaches the egg route", async () => {
+  const db = createDbClient();
+  try {
+    await db.execute({
+      sql: `INSERT INTO ramble_settings (key, value) VALUES ('warmth.hatch_at', '100000')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [],
+    });
+    const { egg } = await (await req("/api/ramble/egg")).json();
+    assert.equal(egg.hatch_at, 100000);
+  } finally {
+    await db.execute({ sql: "DELETE FROM ramble_settings WHERE key = 'warmth.hatch_at'", args: [] });
+    db.close();
+  }
+});
+
+test("POST /api/ramble/egg/checkin credits warmth once per local day", async () => {
+  const first = await req("/api/ramble/egg/checkin", { method: "POST", body: {} });
+  assert.equal(first.status, 200);
+  const one = await first.json();
+  assert.equal(one.credited, true);
+  assert.equal(typeof one.warmth, "number");
+  assert.equal(one.hatched, null);
+
+  const second = await req("/api/ramble/egg/checkin", { method: "POST", body: {} });
+  assert.equal(second.status, 200);
+  const two = await second.json();
+  assert.equal(two.credited, false, "a second check-in the same day must not credit");
+  assert.equal(two.warmth, one.warmth, "and must not move warmth");
+
+  const { checklist } = await (await req("/api/ramble/egg")).json();
+  assert.equal(checklist.checked_in_today, true);
+});
+
+test("POST /api/ramble/pet/chore completes each kind once a day and 400s an unknown kind", async () => {
+  const first = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "preen" } });
+  assert.equal(first.status, 200);
+  const one = await first.json();
+  assert.equal(one.done, true);
+  assert.equal(one.chores.preen, true);
+  assert.equal(typeof one.pet.energy, "number");
+
+  const second = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "preen" } });
+  assert.equal(second.status, 200);
+  const two = await second.json();
+  assert.equal(two.done, false, "the same chore twice in a day is a no-op");
+  assert.equal(two.chores.preen, true);
+
+  const unknown = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "polish" } });
+  assert.equal(unknown.status, 400);
+  const missing = await req("/api/ramble/pet/chore", { method: "POST", body: {} });
+  assert.equal(missing.status, 400);
+});
+
+test("GET /api/ramble/pet carries the daily chores, the active bird slot and the egg percent", async () => {
+  const body = await (await req("/api/ramble/pet")).json();
+  assert.equal(typeof body.chores, "object");
+  assert.equal(typeof body.chores.day, "string");
+  assert.equal(body.chores.preen, true, "set by the chore test above");
+  assert.equal(body.chores.feed, false);
+  assert.ok("bird" in body, "the pet state must carry an active-bird slot (null until the first hatch)");
+  assert.ok(body.bird === null || typeof body.bird.species === "string");
+  assert.equal(typeof body.egg.percent, "number");
+});
+
+test("posting a mark credits mark_left warmth", async () => {
+  const before = await (await req("/api/ramble/egg")).json();
+  const created = await req("/api/ramble/marks", {
+    method: "POST",
+    body: { kind: "mark", lat: LAT, lon: LON, text: "warm this egg", visibility: "public" },
+  });
+  assert.equal(created.status, 201);
+  const after = await (await req("/api/ramble/egg")).json();
+  assert.equal(after.egg.warmth, before.egg.warmth + 15, "a mark must credit the default mark_left weight");
+});
+
+test("GET /api/ramble/bird/:species/:seed.svg renders a deterministic SVG document", async () => {
+  const res = await req("/api/ramble/bird/crow/12345.svg");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /image\/svg\+xml/);
+  const cc = res.headers.get("cache-control") || "";
+  assert.match(cc, /private/, "an authed bird must be cached privately");
+  assert.ok(!/public/.test(cc), "an authed route must never send a public cache directive");
+
+  const body = await res.text();
+  assert.match(body, /<svg[^>]*viewBox="0 0 200 200"/);
+  assert.ok(body.includes("<g"), "the drawn bird markup is missing");
+
+  const again = await (await req("/api/ramble/bird/crow/12345.svg")).text();
+  assert.equal(again, body, "the same species+seed must render identically");
+
+  // `mood` is plumbed through to drawBird: an alarmed bird is a different drawing.
+  const alarmed = await (await req("/api/ramble/bird/crow/12345.svg?mood=alarmed")).text();
+  assert.notEqual(alarmed, body);
+});
+
+test("GET /api/ramble/bird rejects an unknown species and an out-of-range seed", async () => {
+  assert.equal((await req("/api/ramble/bird/dodo/1.svg")).status, 400);
+  assert.equal((await req("/api/ramble/bird/crow/-1.svg")).status, 400);
+  assert.equal((await req("/api/ramble/bird/crow/4294967296.svg")).status, 400);
+  assert.equal((await req("/api/ramble/bird/crow/notanumber.svg")).status, 400);
+});
+
+test("GET /ramble/static/bird-svg.js serves the shared engine, not the panel/static catch-all", async () => {
+  const res = await req("/ramble/static/bird-svg.js");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /javascript/);
+  assert.match(res.headers.get("cache-control") || "", /private/);
+  const body = await res.text();
+  // There is no bird-svg.js under panel/static — only server/bird-svg.cjs
+  // defines RambleBird, so this token proves the dedicated route won the
+  // match against the /ramble/static/:file catch-all registered after it.
+  assert.ok(body.includes("RambleBird"), "must be served from server/bird-svg.cjs");
 });
 
 // ------------------------------------------------------------------- statics
@@ -256,6 +488,41 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // is the client half of the fix/android-geolocation-map-swipe change).
   assert.match(body, /Crow\.setPullToRefresh\(false\)/);
   assert.match(body, /Crow\.setPullToRefresh\(true\)/);
+
+  // House rule for panel client scripts: NO template literals. The panel
+  // tooling treats a backtick as its own delimiter, so one here silently
+  // truncates the whole script in the browser.
+  assert.equal(body.split("`").length - 1, 0, "the client script must contain zero backticks");
+
+  // Both named SSE frames the gateway sends on the one connection
+  // (servers/gateway/routes/streams.js). onmessage never fires for either.
+  assert.ok(body.includes('addEventListener("ramble-nearby"'), "client must subscribe to ramble-nearby");
+  assert.ok(body.includes('addEventListener("ramble-hatched"'), "client must subscribe to ramble-hatched");
+
+  // The Who segment is markup in ramble.js (panel) and behaviour here: the
+  // client reads the chosen audience off the button's data-visibility. Pin the
+  // attribute name on BOTH sides so a rename cannot silently split them.
+  assert.ok(body.includes('"data-visibility"'), "client must read the data-visibility attribute");
+});
+
+test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
+  const res = await req("/ramble/static/ramble.css");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /text\/css/);
+  const body = await res.text();
+  assert.ok(body.length > 100, "stylesheet looks empty");
+
+  // Android WebView pull-to-refresh guard (fix/android-geolocation-map-swipe):
+  // the map must opt out of the browser/WebView's own touch gestures so a
+  // northward drag pans Leaflet instead of triggering SwipeRefreshLayout.
+  // The declaration moved out of the panel's inline <style> into this file.
+  assert.match(body, /touch-action:\s*none/);
+
+  // Direction-C tokens are declared on the panel root, and dark mode is a
+  // deliberate second token set rather than an inversion filter.
+  assert.match(body, /#ramble\s*\{/);
+  assert.match(body, /--rb-accent:/);
+  assert.match(body, /prefers-reduced-motion/);
 });
 
 test("GET /ramble/static/leaflet/leaflet.js serves the vendored copy", async () => {
@@ -358,6 +625,9 @@ test("a locked mark lists as an approximate cell-centre teaser, then unlocks in 
   })).json();
   assert.equal(unlocked.unlocked, true);
   assert.equal(unlocked.content.content_text, "under the third oak");
+  // Same contract as authoring: the client reads `result.hatched` here.
+  assert.ok("hatched" in unlocked, "POST /api/ramble/unlock must report `hatched`");
+  assert.equal(unlocked.hatched, null);
 
   const petAfter = await (await req("/api/ramble/pet")).json();
   assert.equal(petAfter.unlocks_week, petBefore.unlocks_week + 1, "a successful unlock must feed unlock_mark");

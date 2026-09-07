@@ -356,3 +356,22 @@ test("markToEvent: precision clamps to 1..12 for caws", () => {
   assert.equal(highGs.length, 12);
   assert.equal(highGs[highGs.length - 1].length, 12);
 });
+
+test("bird rides on public content when valid, is dropped when not", () => {
+  const row = { mark_id: "m", kind: "mark", visibility: "public", geohash: "9v6m21h", lat: 30.46, lon: -98.08, reveal: "open", content_text: "hi", created_at: 1e12 };
+  const ev = markToEvent(row, { bird: { species: "magpie", seed: 12 } });
+  assert.deepEqual(JSON.parse(ev.content).bird, { species: "magpie", seed: 12 });
+  assert.equal(JSON.parse(markToEvent(row, { bird: { species: "dodo", seed: 12 } }).content).bird, undefined);
+  const back = eventToMark({ ...ev, id: "x".repeat(64), pubkey: "a".repeat(64), created_at: 1e9 });
+  assert.equal(back.bird_species, "magpie"); assert.equal(back.bird_seed, 12);
+  const bad = eventToMark({ ...ev, id: "y".repeat(64), pubkey: "a".repeat(64), created_at: 1e9, content: JSON.stringify({ v: 1, text: "t", bird: { species: "crow", seed: -5 } }) });
+  assert.equal(bad.bird_species, null); assert.equal(bad.bird_seed, null);
+});
+
+test("caws also carry a valid bird, but never coordinates", () => {
+  const event = markToEvent(cawRow, { precision: 5, bird: { species: "crow", seed: 3 } });
+  const content = JSON.parse(event.content);
+  assert.deepEqual(content.bird, { species: "crow", seed: 3 });
+  assert.equal("lat" in content, false);
+  assert.equal("lon" in content, false);
+});

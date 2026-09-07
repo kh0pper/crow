@@ -23,6 +23,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure
 import { createMark, getMark } from "../bundles/ramble/server/marks.js";
 import { MARK_KIND, CAW_KIND } from "../bundles/ramble/server/nostr-map.js";
 import { setMaster, setCell } from "../bundles/ramble/server/grid.js";
+import { isoWeek } from "../bundles/ramble/server/eggs.js";
 import { startRambleTransport } from "../servers/gateway/boot/ramble-transport.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -439,4 +440,70 @@ test("stop(): clears the filter, closes every sub handle, and removes its bus li
   transport.stop();
   const result = await transport.drainOnce();
   assert.deepEqual(result, { published: 0, skipped: 0, failed: 0, expired: 0 });
+});
+
+// ---------------------------------------------------------------------------
+// Task 7 — the active bird rides on the public wire, and receipt credits
+// meet_crow warmth.
+// ---------------------------------------------------------------------------
+
+test("Task 7: an active hatched bird rides in the published event's content", async () => {
+  const h = await makeHarness();
+  await setMaster(h.db, true);
+  await setCell(h.db, "public", "geo", true);
+
+  const eggId = "egg-active-1";
+  const now = Date.now();
+  await h.db.execute({
+    sql: `INSERT INTO ramble_eggs (egg_id, status, warmth, species, seed, created_at, hatched_at)
+          VALUES (?, 'hatched', 100, 'crow', 5, ?, ?)`,
+    args: [eggId, now, now],
+  });
+  await h.db.execute({
+    sql: "INSERT INTO ramble_pet (owner, active_egg_id) VALUES ('self', ?)",
+    args: [eggId],
+  });
+
+  await seedPublicMark(h.db, "with a bird");
+  const result = await h.transport.drainOnce();
+  assert.equal(result.published, 1, "the mark still publishes");
+
+  const event = h.published.find((e) => e.kind === MARK_KIND);
+  assert.ok(event, "the mark event was published");
+  const content = JSON.parse(event.content);
+  assert.deepEqual(content.bird, { species: "crow", seed: 5 });
+});
+
+test("Task 7: onEvent credits ramble_credits with one meet_crow row per (pubkey, isoWeek), deduped across different marks", async () => {
+  const h = await makeHarness();
+  const strangerPriv = generateSecretKey();
+  const strangerPub = getPublicKey(strangerPriv);
+
+  const makeEvent = (dTag) => finalizeEvent({
+    kind: MARK_KIND,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["g", CELL], ["d", dTag], ["k", "geo"], ["rv", "open"]],
+    content: JSON.stringify({ v: 1, text: "hi", content_kind: "none" }),
+  }, strangerPriv);
+
+  await h.transport.onEvent(makeEvent("meet-crow-mark-1"));
+
+  const week = isoWeek(Date.now());
+  const key = `${strangerPub}:${week}`;
+  const { rows: after1 } = await h.db.execute({
+    sql: "SELECT * FROM ramble_credits WHERE kind = 'meet_crow' AND key = ?",
+    args: [key],
+  });
+  assert.equal(after1.length, 1, "exactly one meet_crow credit row after the first receipt");
+
+  // A second, DIFFERENT event (new id via a new d tag) from the same pubkey,
+  // same week -- must NOT add a second credit row (a byte-identical replay
+  // would be deduped before feedAll even runs and would prove nothing).
+  await h.transport.onEvent(makeEvent("meet-crow-mark-2"));
+
+  const { rows: after2 } = await h.db.execute({
+    sql: "SELECT * FROM ramble_credits WHERE kind = 'meet_crow' AND key = ?",
+    args: [key],
+  });
+  assert.equal(after2.length, 1, "still exactly one meet_crow credit row for the same persona+week");
 });

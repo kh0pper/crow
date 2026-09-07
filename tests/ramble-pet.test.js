@@ -11,13 +11,19 @@ import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
-import { feed, petState, moodFor, FEED_DELTAS } from "../bundles/ramble/server/pet.js";
+import { feed, petState, moodFor, FEED_DELTAS, doChore } from "../bundles/ramble/server/pet.js";
 
 let db;
 before(async () => {
   db = createClient({ url: "file::memory:" });
   await initRambleTables(db);
 });
+
+async function freshDb() {
+  const d = createClient({ url: "file::memory:" });
+  await initRambleTables(d);
+  return d;
+}
 
 test("moodFor thresholds", () => {
   assert.equal(moodFor(100), "happy");
@@ -183,5 +189,43 @@ test("FEED_DELTAS matches the spec's mapping", () => {
     unlock_mark: 10,
     meet_crow: 20,
     quiet_tick: -10,
+    checkin: 5,
+    chore: 8,
+    mark_left: 0,
   });
+});
+
+test("chores: once per day each, +8 energy, day rollover resets", async () => {
+  const db = await freshDb(); // ADD this helper at the top of the file: async function freshDb() { const d = createClient({ url: "file::memory:" }); await initRambleTables(d); return d; }
+  const T0 = Date.UTC(2026, 8, 7, 12);
+  const a = await doChore(db, "feed", { now: T0 });
+  assert.equal(a.done, true); assert.equal(a.chores.feed, true); assert.equal(a.chores.preen, false);
+  const before = a.pet.energy;
+  const b = await doChore(db, "feed", { now: T0 + 60e3 });
+  assert.equal(b.done, false); assert.equal(b.pet.energy, before);
+  const c = await doChore(db, "preen", { now: T0 });
+  assert.equal(c.pet.energy, Math.min(100, before + 8));
+  const d = await doChore(db, "feed", { now: T0 + 86400e3 });
+  assert.equal(d.done, true); assert.equal(d.chores.preen, false); // new day
+  await assert.rejects(doChore(db, "nap", { now: T0 }));
+  const s = await petState(db, { now: T0 + 86400e3 });
+  assert.deepEqual(Object.keys(s.chores).sort(), ["day","feed","play","preen"]);
+});
+
+test("pet writes emit when a hook is given", async () => {
+  const db = await freshDb(); const seen = []; // same helper
+  await feed(db, { type: "visit_place" }, { emit: async (t, op, row) => seen.push([t, op, row.owner]) });
+  assert.deepEqual(seen[0], ["ramble_pet", "update", "self"]);
+});
+
+test("ensureRow is atomic: concurrent feeds on a fresh db never throw UNIQUE", async () => {
+  const fresh = createClient({ url: "file::memory:" });
+  await initRambleTables(fresh);
+  await assert.doesNotReject(Promise.all([
+    feed(fresh, { type: "unlock_mark" }, { now: 1000 }),
+    feed(fresh, { type: "unlock_mark" }, { now: 1000 }),
+    doChore(fresh, "preen", { now: 1000 }),
+  ]));
+  const { rows } = await fresh.execute("SELECT count(*) AS n FROM ramble_pet");
+  assert.equal(rows[0].n, 1);
 });
