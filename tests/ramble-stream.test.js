@@ -176,3 +176,88 @@ test("ramble-nearby stream: a throwing write does not propagate (subscriber isol
     fireClose();
   }
 });
+
+// --------------------------------------------------------- hatched (Task 10)
+//
+// The SAME route also carries `ramble:hatched`, emitted by the panel routes'
+// `onHatch` hook whenever a warmth credit tips the incubating egg over
+// `hatch_at`. The panel needs to know a bird arrived without polling, and the
+// payload is allow-listed to exactly {egg_id, species, seed} — the full egg
+// row (status, warmth, timestamps) never reaches the client.
+
+test("ramble-hatched frame carries exactly egg_id, species and seed", () => {
+  const handler = getRambleNearbyHandler();
+  const { res, chunks, fireClose } = fakeRes();
+  handler({ dashboardSession: "tok-h1" }, res);
+
+  try {
+    const before = chunks.length;
+    bus.emit("ramble:hatched", { egg_id: "e1", species: "grackle", seed: 42, warmth: 100, status: "hatched" });
+
+    const emitted = chunks.slice(before).join("");
+    const frames = emitted.split("\n\n").filter((f) => f.includes("event: ramble-hatched"));
+    assert.equal(frames.length, 1, "expected exactly one ramble-hatched frame");
+
+    const match = emitted.match(/event: ramble-hatched\ndata: (.+)\n\n/);
+    assert.ok(match, "frame must carry a data: JSON payload");
+    const payload = JSON.parse(match[1]);
+    assert.deepEqual(Object.keys(payload).sort(), ["egg_id", "seed", "species"]);
+    assert.equal(payload.egg_id, "e1");
+    assert.equal(payload.species, "grackle");
+    assert.equal(payload.seed, 42);
+    assert.ok(!("warmth" in payload), "must not echo arbitrary egg-row fields");
+    assert.ok(!("status" in payload), "must not echo arbitrary egg-row fields");
+  } finally {
+    fireClose();
+  }
+});
+
+test("ramble-hatched coerces missing fields to null instead of throwing", () => {
+  const handler = getRambleNearbyHandler();
+  const { res, chunks, fireClose } = fakeRes();
+  handler({ dashboardSession: "tok-h2" }, res);
+
+  try {
+    const before = chunks.length;
+    assert.doesNotThrow(() => bus.emit("ramble:hatched", {}));
+
+    const emitted = chunks.slice(before).join("");
+    const match = emitted.match(/event: ramble-hatched\ndata: (.+)\n\n/);
+    assert.ok(match, "frame must still be sent for a sparse payload");
+    assert.deepEqual(JSON.parse(match[1]), { egg_id: null, species: null, seed: null });
+  } finally {
+    fireClose();
+  }
+});
+
+test("closing the stream unsubscribes BOTH the nearby and the hatched listener", () => {
+  const priorNearby = bus.listenerCount("ramble:nearby");
+  const priorHatched = bus.listenerCount("ramble:hatched");
+
+  const handler = getRambleNearbyHandler();
+  const { res, chunks, fireClose } = fakeRes();
+  handler({ dashboardSession: "tok-h3" }, res);
+
+  assert.equal(bus.listenerCount("ramble:nearby"), priorNearby + 1);
+  assert.equal(bus.listenerCount("ramble:hatched"), priorHatched + 1);
+
+  fireClose();
+  assert.equal(bus.listenerCount("ramble:nearby"), priorNearby);
+  assert.equal(bus.listenerCount("ramble:hatched"), priorHatched, "a leaked hatched listener writes to a dead response");
+
+  const before = chunks.length;
+  bus.emit("ramble:hatched", { egg_id: "e2", species: "crow", seed: 1 });
+  assert.equal(chunks.length, before, "no frame should be written after close");
+});
+
+test("erroring the stream unsubscribes the hatched listener too", () => {
+  const priorHatched = bus.listenerCount("ramble:hatched");
+
+  const handler = getRambleNearbyHandler();
+  const { res, fireError } = fakeRes();
+  handler({ dashboardSession: "tok-h4" }, res);
+
+  assert.equal(bus.listenerCount("ramble:hatched"), priorHatched + 1);
+  fireError();
+  assert.equal(bus.listenerCount("ramble:hatched"), priorHatched);
+});
