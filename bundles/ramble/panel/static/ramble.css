@@ -623,3 +623,13 @@
 #ramble .rb-shelf-egg { width: 34px; height: 43px; flex: 0 0 auto; }
 #ramble .rb-step .rb-btn { margin-left: auto; }
 #ramble .rb-step.is-incubating { border-color: var(--rb-accent-2); }
+
+/* Phase 3: row actions, muted tags, pickable rows. */
+#ramble .rb-acts { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+#ramble .rb-step .rb-acts .rb-btn { margin-left: 0; }
+#ramble .rb-btn.rb-btn-sm { padding: 6px 10px; font-size: 13px; }
+#ramble .rb-tag.rb-tag-muted { margin-left: auto; background: var(--rb-surface); color: var(--rb-text); }
+#ramble button.rb-step { width: 100%; cursor: pointer; font: inherit; color: inherit; }
+#ramble button.rb-step:active { transform: translate(2px, 2px); box-shadow: 0 0 0 var(--rb-shadow-col); }
+#ramble button.rb-step:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+#ramble .rb-pop-body a { color: var(--rb-accent-2); font-weight: 800; }

@@ -75,3 +75,19 @@ test("phase 2: ramble_nest_claims exists, is keyed on (cell, week) and is NOT a 
   await db.execute({ sql: "INSERT INTO ramble_nest_claims (cell, week, egg_id, claimed_at) VALUES ('9v6m21h','2026-W37','e1',1)", args: [] });
   await assert.rejects(db.execute({ sql: "INSERT INTO ramble_nest_claims (cell, week, egg_id, claimed_at) VALUES ('9v6m21h','2026-W37','e2',2)", args: [] }));
 });
+
+test("phase 3: ramble_trades is a replicated natural-key table; ramble_outbox is local", async () => {
+  const cols = async (t) => (await db.execute(`PRAGMA table_info(${t})`)).rows.map((r) => r.name);
+  const trades = await cols("ramble_trades");
+  for (const c of ["trade_id", "counterpart", "role", "my_egg_id", "their_egg_id", "offer_json", "state", "created_at", "updated_at", "expires_at", "lamport_ts"]) {
+    assert.ok(trades.includes(c), `ramble_trades.${c}`);
+  }
+  const outbox = await cols("ramble_outbox");
+  for (const c of ["id", "to_crow_id", "kind", "ref_id", "payload_json", "attempts", "created_at"]) assert.ok(outbox.includes(c), `ramble_outbox.${c}`);
+  assert.ok(!outbox.includes("lamport_ts"), "ramble_outbox never replicates, so it carries no lamport");
+  const { SYNCED_TABLES } = await import("../servers/sharing/instance-sync.js");
+  assert.ok(SYNCED_TABLES.includes("ramble_trades"), "trades follow the user across their instances (spec §5)");
+  assert.ok(!SYNCED_TABLES.includes("ramble_outbox"), "the delivery queue is one instance's outbound work");
+  await db.execute({ sql: "INSERT INTO ramble_trades (trade_id, counterpart, role, state, created_at, updated_at, expires_at) VALUES ('t1','crow:x','proposer','proposed',1,1,2)", args: [] });
+  await assert.rejects(db.execute({ sql: "INSERT INTO ramble_trades (trade_id, counterpart, role, state, created_at, updated_at, expires_at) VALUES ('t1','crow:y','acceptor','proposed',1,1,2)", args: [] }));
+});

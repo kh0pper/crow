@@ -17,7 +17,9 @@
  * (servers/gateway/boot/ramble-transport.js) is the single egress and decides
  * — against the privacy grid — whether anything reaches a relay at all. A 201
  * from POST /api/ramble/marks therefore means "stored locally and queued",
- * never "published".
+ * never "published". Phase 3: contacts/group marks, gifts and swaps are
+ * queued into `ramble_outbox` here and sent by the transport's
+ * `drainDeliveries`; a 200/201 means queued.
  */
 import { Router } from "express";
 import express from "express";
@@ -67,6 +69,8 @@ const CELL_RE = /^[0-9b-hjkmnp-z]{1,12}$/;
 const PERSONA_RE = /^[0-9a-f]{64}$/;
 const MARK_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
 const EGG_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
+const CROW_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
+const TRADE_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
 // `private` ("Just me") — see the matching comment beside server.js's
 // VISIBILITY_RE: it never reaches a relay (transport drain only selects
 // visibility='public'), but it does still replicate to the author's own
@@ -190,7 +194,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -203,16 +207,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/feed.js"),
         bundleImport("server/flock.js"),
         bundleImport("server/nests.js"),
+        bundleImport("server/delivery.js"),
+        bundleImport("server/trades.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
       if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
-          !eggsMod || !feedMod || !flockMod || !nestsMod) {
+          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -318,6 +324,40 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   async function getSetting(key) {
     const { rows } = await db.execute({ sql: "SELECT value FROM ramble_settings WHERE key = ?", args: [key] });
     return rows[0]?.value ?? null;
+  }
+
+  /** A deliverable contact by crow_id, or null — also null when the core tables are unreadable. */
+  async function contactOrNull(crowId) {
+    try { return await mods.deliveryMod.resolveContact(db, crowId); }
+    catch (err) { console.warn("[ramble routes] contact lookup failed:", err?.message ?? err); return null; }
+  }
+
+  /** x-only pubkey -> { crow_id, name } for every unblocked full contact — bots included on purpose, naming a bot's mark is harmless (round-2 Q2). Tolerant: empty map without the core tables. */
+  async function contactsByPubkey() {
+    const map = new Map();
+    try {
+      // ORDER BY id + first-wins: two contact rows can share a key (a bot
+      // hosted beside its owner); the older row names the mark, deterministically.
+      const { rows } = await db.execute({ sql: "SELECT crow_id, display_name, secp256k1_pubkey FROM contacts WHERE is_blocked = 0 AND request_status IS NULL ORDER BY id", args: [] });
+      for (const r of rows) {
+        const pk = String(r.secp256k1_pubkey || "");
+        const key = pk.length === 66 ? pk.slice(2) : pk;
+        if (key && !map.has(key)) map.set(key, { crow_id: r.crow_id, name: r.display_name || r.crow_id });
+      }
+    } catch { /* no core tables: nobody is a contact */ }
+    return map;
+  }
+
+  async function contactNames() {
+    try {
+      const { contacts } = await mods.deliveryMod.listAudiences(db);
+      return new Map(contacts.map((c) => [c.crow_id, c.display_name || c.crow_id]));
+    } catch { return new Map(); }
+  }
+
+  function tradeStatus(out) {
+    if (out.reason === "not-found") return 404;
+    return 409;
   }
 
   /**
@@ -462,7 +502,15 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       if (!VISIBILITY_RE.test(visibility)) bad(`invalid visibility: ${visibility}`);
     }
     const marks = await mods.marksMod.listMarks(db, { visibility, cells });
-    res.json({ marks: marks.map(withApproxAnchor) });
+    // Phase 3: a remote mark by a contact is named; a stranger's stays anonymous
+    // (that is where the panel offers "share an invite").
+    const byPubkey = await contactsByPubkey();
+    res.json({
+      marks: marks.map(withApproxAnchor).map((m) => {
+        const c = m.origin === "remote" ? byPubkey.get(String(m.author)) : null;
+        return c ? { ...m, contact_name: c.name } : m;
+      }),
+    });
   }));
 
   router.post("/api/ramble/marks", handle(async (req, res) => {
@@ -483,6 +531,12 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (typeof visibility !== "string" || visibility.length > 128 || !VISIBILITY_RE.test(visibility)) {
       bad(`invalid visibility: ${String(visibility).slice(0, 32)}`);
     }
+    // Phase 3: a group audience must exist before a row is written for it.
+    if (visibility.startsWith("group:")) {
+      let a = null;
+      try { a = await mods.deliveryMod.resolveAudience(db, visibility); } catch { a = null; }
+      if (!a || !a.ok) bad("unknown group");
+    }
     let reveal = kind === "caw" ? "open" : b.reveal;
     if (reveal != null && !REVEALS.has(reveal)) bad(`reveal must be one of: ${[...REVEALS].join(", ")}`);
     let ttlSeconds;
@@ -494,6 +548,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     }
 
     const persona = await personaFor(kind);
+    const bird = await mods.eggsMod.activeBird(db);
     const mark = await mods.marksMod.createMark(db, {
       author: persona.author,
       author_level: persona.author_level,
@@ -505,8 +560,20 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       ttlSeconds,
       // Your currently-active bird rides along on the row, so your own pins
       // wear the same bird everyone else's do. Null until the first hatch.
-      bird: await mods.eggsMod.activeBird(db),
+      bird,
     }, { emit });
+
+    // Phase 3: contacts/group marks ride the outbox as one DM per recipient.
+    // The row already exists; a queue failure must not fail the author.
+    let recipients = 0;
+    if (visibility === "contacts" || visibility.startsWith("group:")) {
+      try {
+        const q = await mods.deliveryMod.enqueueMark(db, mark, { bird, now: Date.now() });
+        recipients = q.ok ? q.recipients : 0;
+      } catch (err) {
+        console.warn("[ramble routes] enqueueMark failed:", err?.message ?? err);
+      }
+    }
 
     // Queued, not published: the transport drain decides against the grid.
     poke("ramble:drain");
@@ -516,7 +583,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     // the stream). Best-effort: warmth is never worth failing an author on.
     const fed = await feedActivity({ type: "mark_left" });
 
-    res.status(201).json({ mark, hatched: hatchedPayload(fed) });
+    res.status(201).json({ mark, hatched: hatchedPayload(fed), recipients });
   }));
 
   router.delete("/api/ramble/marks/:mark_id", handle(async (req, res) => {
@@ -760,6 +827,68 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     const out = await mods.flockMod.activateBird(db, req.params.id, { emit });
     if (!out.ok) return res.status(out.reason === "not-found" ? 404 : 409).json({ error: out.reason });
     res.json({ bird: out.bird });
+  }));
+
+  // --- phase 3: contacts wire -------------------------------------------------
+  router.get("/api/ramble/contacts", handle(async (req, res) => {
+    try { res.json(await mods.deliveryMod.listAudiences(db)); }
+    catch (err) {
+      console.warn("[ramble routes] audiences unavailable:", err?.message ?? err);
+      res.json({ contacts: [], groups: [] });
+    }
+  }));
+
+  router.post("/api/ramble/eggs/:id/gift", handle(async (req, res) => {
+    if (!EGG_ID_RE.test(req.params.id)) bad("invalid egg id");
+    const b = req.body || {};
+    if (typeof b.crow_id !== "string" || !CROW_ID_RE.test(b.crow_id)) bad("crow_id is required");
+    const contact = await contactOrNull(b.crow_id);
+    if (!contact) bad("unknown contact");
+    const out = await mods.tradesMod.giftEgg(db, { eggId: req.params.id, toCrowId: contact.crow_id, now: Date.now(), emit });
+    if (!out.ok) return res.status(tradeStatus(out)).json({ error: out.reason });
+    poke("ramble:drain");
+    poke("ramble:trade", { kind: "gift", trade_id: null, egg_id: out.egg.egg_id, state: "gifted" });
+    res.json({ egg: out.egg, to: contact.crow_id });
+  }));
+
+  router.get("/api/ramble/trades", handle(async (req, res) => {
+    const names = await contactNames();
+    const trades = (await mods.tradesMod.listTrades(db, { now: Date.now(), limit: 20 }))
+      .map((t) => ({ ...t, counterpart_name: names.get(t.counterpart) || t.counterpart }));
+    res.json({ trades });
+  }));
+
+  router.post("/api/ramble/trades", handle(async (req, res) => {
+    const b = req.body || {};
+    if (typeof b.egg_id !== "string" || !EGG_ID_RE.test(b.egg_id)) bad("egg_id is required");
+    if (typeof b.crow_id !== "string" || !CROW_ID_RE.test(b.crow_id)) bad("crow_id is required");
+    const contact = await contactOrNull(b.crow_id);
+    if (!contact) bad("unknown contact");
+    const out = await mods.tradesMod.proposeSwap(db, { eggId: b.egg_id, toCrowId: contact.crow_id, now: Date.now(), emit });
+    if (!out.ok) return res.status(tradeStatus(out)).json({ error: out.reason });
+    poke("ramble:drain");
+    poke("ramble:trade", { kind: "trade", trade_id: out.trade.trade_id, egg_id: b.egg_id, state: "proposed" });
+    res.status(201).json({ trade: out.trade });
+  }));
+
+  router.post("/api/ramble/trades/:id/accept", handle(async (req, res) => {
+    if (!TRADE_ID_RE.test(req.params.id)) bad("invalid trade id");
+    const b = req.body || {};
+    if (typeof b.egg_id !== "string" || !EGG_ID_RE.test(b.egg_id)) bad("egg_id is required");
+    const out = await mods.tradesMod.acceptSwap(db, { tradeId: req.params.id, eggId: b.egg_id, now: Date.now(), emit });
+    if (!out.ok) return res.status(tradeStatus(out)).json({ error: out.reason });
+    poke("ramble:drain");
+    poke("ramble:trade", { kind: "trade", trade_id: out.trade.trade_id, egg_id: b.egg_id, state: "accepted" });
+    res.json({ trade: out.trade });
+  }));
+
+  router.post("/api/ramble/trades/:id/decline", handle(async (req, res) => {
+    if (!TRADE_ID_RE.test(req.params.id)) bad("invalid trade id");
+    const out = await mods.tradesMod.declineSwap(db, { tradeId: req.params.id, now: Date.now(), emit });
+    if (!out.ok) return res.status(tradeStatus(out)).json({ error: out.reason });
+    poke("ramble:drain");
+    poke("ramble:trade", { kind: "trade", trade_id: out.trade.trade_id, egg_id: out.trade.my_egg_id ?? null, state: "declined" });
+    res.json({ trade: out.trade });
   }));
 
   // Body-parser failures (malformed JSON) surface here. Path-scoped, so it is

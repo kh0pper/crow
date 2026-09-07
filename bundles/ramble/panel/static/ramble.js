@@ -12,7 +12,7 @@
  * X-Crow-Csrf to every state-changing same-origin request.
  *
  * Sections, in order: net, views, map, marks, perch, compose, grid, egg, pet,
- * flock, nests, hatch, stream, startup.
+ * flock, contacts, trades, nests, hatch, stream, startup.
  */
 (function () {
   "use strict";
@@ -57,6 +57,25 @@
     });
   }
 
+  /* ------------------------------------------------------------- contacts */
+
+  var contactsCache = { contacts: [], groups: [] };
+
+  function refreshContacts() {
+    return jsonFetch("/api/ramble/contacts").then(function (out) {
+      if (out && Array.isArray(out.contacts)) contactsCache = out;
+      paintGroupChoice();
+    }).catch(function () { /* no contacts, no pickers */ });
+  }
+
+  function nameFor(crowId) {
+    var list = contactsCache.contacts || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].crow_id === crowId) return list[i].display_name || crowId;
+    }
+    return crowId || "someone";
+  }
+
   /* ---------------------------------------------------------------- views */
 
   function showView(name) {
@@ -73,7 +92,7 @@
     if (name === "world") refreshNests();
     if (name === "egg") refreshEgg();
     if (name === "pet") refreshPet();
-    if (name === "flock") refreshFlock();
+    if (name === "flock") { refreshContacts().then(refreshFlock); refreshTrades(); }
   }
 
   /* ------------------------------------------------------------------ map */
@@ -170,8 +189,24 @@
   /* ---------------------------------------------------------------- marks */
 
   function markLabel(mark) {
+    if (mark.contact_name) return (mark.kind === "caw" ? "caw by " : "mark by ") + mark.contact_name;
     var who = (mark.author || "anon").slice(0, 8);
     return (mark.kind === "caw" ? "caw by " : "mark by ") + who;
+  }
+
+  /** A stranger's bird on your map: the way to trade with them is to become contacts first. */
+  function inviteLine(mark) {
+    if (mark.origin !== "remote" || mark.contact_name) return null;
+    var p = document.createElement("p");
+    p.className = "rb-pop-body rb-fine";
+    p.textContent = "Not a contact yet. ";
+    var a = document.createElement("a");
+    a.href = "/dashboard/contacts";
+    a.textContent = "Share an invite";
+    a.setAttribute("data-turbo", "true");
+    p.appendChild(a);
+    p.appendChild(document.createTextNode(" to gift or swap eggs."));
+    return p;
   }
 
   function isLocked(mark) {
@@ -224,6 +259,7 @@
   /** Non-public marks say who they are for; a public one needs no label. */
   function audienceHint(mark) {
     if (mark.visibility === "contacts") return "Contacts";
+    if (typeof mark.visibility === "string" && mark.visibility.indexOf("group:") === 0) return "Group";
     if (mark.visibility === "private") return "Just me";
     return "";
   }
@@ -270,10 +306,12 @@
       btn.addEventListener("click", function () { unlock(mark, body, btn); });
       box.appendChild(body);
       box.appendChild(btn);
+      var invLocked = inviteLine(mark); if (invLocked) box.appendChild(invLocked);
       return box;
     }
     body.textContent = mark.content_text || "(no text)";
     box.appendChild(body);
+    var inv = inviteLine(mark); if (inv) box.appendChild(inv);
     return box;
   }
 
@@ -474,7 +512,6 @@
 
   /* -------------------------------------------------------------- compose */
 
-  var visibility = "public";
   var reveal = "open";
 
   function wireSeg(segId, attr, onPick) {
@@ -494,14 +531,50 @@
     });
   }
 
-  wireSeg("rb-seg-who", "data-visibility", function (v) { visibility = v || "public"; });
+  var whoChoice = "public";
+  wireSeg("rb-seg-who", "data-visibility", function (v) {
+    whoChoice = v || "public";
+    var row = $("rb-group-row");
+    if (row) row.hidden = whoChoice !== "group";
+  });
   wireSeg("rb-seg-reveal", "data-reveal", function (v) { reveal = v || "open"; });
+
+  /** The visibility string the route wants: a group becomes "group:<uid>"; null = nothing chosen yet. */
+  function composeVisibility() {
+    if (whoChoice !== "group") return whoChoice;
+    var sel = $("rb-group");
+    return sel && sel.value ? "group:" + sel.value : null;
+  }
+
+  /** The Group segment only exists once there is a group to pick; losing the last group falls back to Everyone. */
+  function paintGroupChoice() {
+    var btn = $("rb-who-group");
+    var sel = $("rb-group");
+    var groups = contactsCache.groups || [];
+    if (btn) btn.hidden = groups.length === 0;
+    if (groups.length === 0 && whoChoice === "group") {
+      var everyone = document.querySelector('#rb-seg-who button[data-visibility="public"]');
+      if (everyone) everyone.click();
+    }
+    if (!sel) return;
+    var keep = sel.value;
+    sel.textContent = "";
+    groups.forEach(function (g) {
+      var opt = document.createElement("option");
+      opt.value = g.group_uid;
+      opt.textContent = g.name + " (" + g.member_count + ")";
+      sel.appendChild(opt);
+    });
+    if (keep) sel.value = keep;
+  }
 
   function compose(kind) {
     var textEl = $("rb-text");
     var statusEl = $("rb-compose-status");
     var text = textEl ? textEl.value : "";
     if (!text.trim()) { setText(statusEl, "Write something first."); return; }
+    var visibility = kind === "mark" ? composeVisibility() : "public";
+    if (!visibility) { setText(statusEl, "Pick a group first."); return; }
     setText(statusEl, "Finding you…");
     here().then(function (pos) {
       var body = {
@@ -522,7 +595,9 @@
         ? "Cawed. It fades in an hour."
         : (visibility === "private"
           ? "Kept for you alone. Nobody else will ever see it."
-          : "Left here. You're invisible until you flip Visible on."));
+          : (visibility === "public"
+            ? "Left here. You're invisible until you flip Visible on."
+            : ((out && out.recipients) ? "Sealed for " + out.recipients + (out.recipients === 1 ? " contact." : " contacts.") + " It goes out once Visible is on for contacts." : "Nobody to send it to yet. Add a contact first."))));
       handleHatched(out && out.hatched);
       refreshPet();
       refreshEgg();
@@ -595,6 +670,67 @@
       postGrid({ cells: cells });
     });
   });
+
+  /* --------------------------------------------------------------- picker */
+
+  var pickSheet = $("rb-pick-sheet");
+  var pickOnChoose = null;
+
+  function closePicker() {
+    if (pickSheet) pickSheet.hidden = true;
+    pickOnChoose = null;
+  }
+
+  /** items: [{ label, sub, value }] -> onPick(value). Everything is text. */
+  function openPicker(title, items, onPick) {
+    var list = $("rb-pick-list");
+    if (!pickSheet || !list) return;
+    setText($("rb-pick-title"), title);
+    list.textContent = "";
+    if (items.length === 0) {
+      var none = document.createElement("div");
+      none.className = "rb-step";
+      var t = document.createElement("div");
+      t.className = "rb-step-txt rb-muted";
+      t.textContent = "Nothing to pick from.";
+      none.appendChild(t);
+      list.appendChild(none);
+    }
+    items.forEach(function (item) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "rb-step rb-pick";
+      var txt = document.createElement("div");
+      txt.className = "rb-step-txt";
+      var strong = document.createElement("strong");
+      strong.textContent = item.label;
+      txt.appendChild(strong);
+      if (item.sub) {
+        var sub = document.createElement("span");
+        sub.className = "rb-muted rb-fine";
+        sub.textContent = item.sub;
+        txt.appendChild(sub);
+      }
+      btn.appendChild(txt);
+      btn.addEventListener("click", function () { var cb = pickOnChoose; closePicker(); if (cb) cb(item.value); });
+      list.appendChild(btn);
+    });
+    pickOnChoose = onPick;
+    pickSheet.hidden = false;
+  }
+
+  var pickCancel = $("rb-pick-cancel");
+  if (pickCancel) pickCancel.addEventListener("click", closePicker);
+  if (pickSheet) pickSheet.addEventListener("click", function (ev) { if (ev.target === pickSheet) closePicker(); });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && pickSheet && !pickSheet.hidden) closePicker();
+  });
+
+  function contactItems() {
+    return (contactsCache.contacts || []).map(function (c) {
+      return { label: c.display_name || c.crow_id, sub: c.crow_id, value: c.crow_id };
+    });
+  }
 
   /* ------------------------------------------------------------------ egg */
 
@@ -887,6 +1023,60 @@
     return btn;
   }
 
+  function eggSub(egg) {
+    if (egg.status === "received") return "from " + nameFor(egg.from_crow_id);
+    if (egg.found_cell) return "found in a nest, " + egg.found_week;
+    if (egg.shelf_origin === "sync") return "came back from another of your Crows";
+    return "your own egg";
+  }
+
+  function eggTitle(egg) {
+    var what = egg.status === "incubating" ? "Incubating" : (egg.status === "received" ? "A gift" : "On the shelf");
+    return what + " · " + Math.round(egg.percent || 0) + "%";
+  }
+
+  function shelfAction(egg, label, onClick) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "rb-btn rb-btn-ghost rb-btn-sm";
+    btn.textContent = label;
+    btn.addEventListener("click", function () { onClick(btn); });
+    return btn;
+  }
+
+  function flockStatus(msg) { setText($("rb-flock-status"), msg); }
+
+  function incubate(egg, btn) {
+    btn.disabled = true;
+    jsonFetch("/api/ramble/eggs/" + encodeURIComponent(egg.egg_id) + "/incubate", { method: "POST", body: {} })
+      .then(function (out) {
+        flockStatus("Swapped. The other one keeps its warmth on the shelf.");
+        handleHatched(out && out.hatched);
+        refreshEgg();
+        refreshPet();
+        return refreshFlock();
+      })
+      .catch(function (err) { flockStatus(err.message); btn.disabled = false; });
+  }
+
+  function giftEgg(egg, btn) {
+    openPicker("Give this egg to", contactItems(), function (crowId) {
+      btn.disabled = true;
+      jsonFetch("/api/ramble/eggs/" + encodeURIComponent(egg.egg_id) + "/gift", { method: "POST", body: { crow_id: crowId } })
+        .then(function () { flockStatus("Sent to " + nameFor(crowId) + ". It leaves with the next relay tick."); return refreshFlock(); })
+        .catch(function (err) { flockStatus(err.message); btn.disabled = false; });
+    });
+  }
+
+  function proposeSwap(egg, btn) {
+    openPicker("Offer this egg to", contactItems(), function (crowId) {
+      btn.disabled = true;
+      jsonFetch("/api/ramble/trades", { method: "POST", body: { egg_id: egg.egg_id, crow_id: crowId } })
+        .then(function () { flockStatus("Offered to " + nameFor(crowId) + ". They pick what to give back."); refreshTrades(); return refreshFlock(); })
+        .catch(function (err) { flockStatus(err.message); btn.disabled = false; });
+    });
+  }
+
   function eggRow(egg) {
     var row = document.createElement("div");
     row.className = "rb-step" + (egg.status === "incubating" ? " is-incubating" : "");
@@ -898,39 +1088,33 @@
     var txt = document.createElement("div");
     txt.className = "rb-step-txt";
     var title = document.createElement("strong");
-    title.textContent = (egg.status === "incubating" ? "Incubating" : "On the shelf") + " · " + Math.round(egg.percent || 0) + "%";
+    title.textContent = eggTitle(egg);
     var sub = document.createElement("span");
     sub.className = "rb-muted rb-fine";
-    sub.textContent = egg.found_cell
-      ? "found in a nest, " + egg.found_week
-      : (egg.shelf_origin === "sync" ? "came back from another of your Crows" : "your own egg");
+    sub.textContent = eggSub(egg);
     txt.appendChild(title);
     txt.appendChild(sub);
     row.appendChild(txt);
-    if (egg.status === "shelf") {
-      var btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "rb-btn rb-btn-ghost";
-      btn.textContent = "Incubate";
-      btn.addEventListener("click", function () {
-        btn.disabled = true;
-        jsonFetch("/api/ramble/eggs/" + encodeURIComponent(egg.egg_id) + "/incubate", { method: "POST", body: {} })
-          .then(function (out) {
-            setText($("rb-flock-status"), "Swapped. The other one keeps its warmth on the shelf.");
-            handleHatched(out && out.hatched);
-            refreshEgg();
-            refreshPet();
-            return refreshFlock();
-          })
-          .catch(function (err) { setText($("rb-flock-status"), err.message); btn.disabled = false; });
-      });
-      row.appendChild(btn);
+    if (egg.status === "incubating") return row;
+    if (egg.locked) {
+      var tag = document.createElement("span");
+      tag.className = "rb-tag rb-tag-muted";
+      tag.textContent = "In a swap";
+      row.appendChild(tag);
+      return row;
     }
+    var acts = document.createElement("div");
+    acts.className = "rb-acts";
+    acts.appendChild(shelfAction(egg, "Incubate", function (b) { incubate(egg, b); }));
+    acts.appendChild(shelfAction(egg, "Gift", function (b) { giftEgg(egg, b); }));
+    acts.appendChild(shelfAction(egg, "Swap", function (b) { proposeSwap(egg, b); }));
+    row.appendChild(acts);
     return row;
   }
 
   function paintFlock(state) {
     if (!state) return;
+    lastFlock = state;
     setText($("rb-flock-kinds"), state.species_total + " kinds, " + state.species_found + " found");
     var grid = $("rb-flock-birds");
     if (grid) {
@@ -944,11 +1128,98 @@
       shelf.textContent = "";
       (state.eggs || []).forEach(function (e) { shelf.appendChild(eggRow(e)); });
     }
-    setText($("rb-shelf-count"), state.shelf_count + " of " + state.shelf_cap + " shelf spots used. Nests appear on the map as eggs; walk up to one to take it.");
+    setText($("rb-shelf-count"), state.shelf_count + " of " + state.shelf_cap + " shelf spots used. Nests appear on the map as eggs; walk up to one to take it. Eggs you are given land here too.");
   }
 
   function refreshFlock() {
     return jsonFetch("/api/ramble/flock").then(paintFlock).catch(function () { /* the flock is cosmetic */ });
+  }
+
+  /* --------------------------------------------------------------- trades */
+
+  var lastFlock = null;
+
+  function giftableEggs() {
+    var eggs = (lastFlock && lastFlock.eggs) || [];
+    return eggs.filter(function (e) { return (e.status === "shelf" || e.status === "received") && !e.locked; })
+      .map(function (e) { return { label: eggTitle(e), sub: eggSub(e), value: e.egg_id }; });
+  }
+
+  function tradeLine(t) {
+    var who = t.counterpart_name || t.counterpart;
+    var offer = t.offer ? (t.offer.warmth + "% warm" + (t.offer.found_week ? ", found " + t.offer.found_week : "")) : null;
+    if (t.state === "proposed" && t.role === "acceptor") return who + " offers an egg" + (offer ? " (" + offer + ")" : "") + ". Pick one of yours to swap.";
+    if (t.state === "proposed") return "Waiting for " + who + " to answer.";
+    if (t.state === "accepted") return "You answered. Waiting for " + who + " to finish.";
+    if (t.state === "completed") return "Swapped with " + who + ".";
+    if (t.state === "declined") return "Declined with " + who + ".";
+    if (t.state === "expired") return "The offer with " + who + " lapsed.";
+    return who;
+  }
+
+  function acceptTrade(t, btn) {
+    openPicker("Give back which egg?", giftableEggs(), function (eggId) {
+      btn.disabled = true;
+      jsonFetch("/api/ramble/trades/" + encodeURIComponent(t.trade_id) + "/accept", { method: "POST", body: { egg_id: eggId } })
+        .then(function () { setText($("rb-trade-status"), "Answered. The swap finishes when they confirm."); refreshFlock(); return refreshTrades(); })
+        .catch(function (err) { setText($("rb-trade-status"), err.message); btn.disabled = false; });
+    });
+  }
+
+  function declineTrade(t, btn) {
+    btn.disabled = true;
+    jsonFetch("/api/ramble/trades/" + encodeURIComponent(t.trade_id) + "/decline", { method: "POST", body: {} })
+      .then(function () { setText($("rb-trade-status"), t.role === "proposer" ? "Offer withdrawn." : "Declined."); refreshFlock(); return refreshTrades(); })
+      .catch(function (err) { setText($("rb-trade-status"), err.message); btn.disabled = false; });
+  }
+
+  function tradeRow(t) {
+    var row = document.createElement("div");
+    row.className = "rb-step" + (t.open ? "" : " rb-muted");
+    var badge = document.createElement("span");
+    badge.className = "rb-step-n";
+    badge.textContent = t.open ? "?" : "·";
+    row.appendChild(badge);
+    var txt = document.createElement("div");
+    txt.className = "rb-step-txt";
+    var strong = document.createElement("strong");
+    strong.textContent = tradeLine(t);
+    var sub = document.createElement("span");
+    sub.className = "rb-muted rb-fine";
+    sub.textContent = ago(Number(t.updated_at));
+    txt.appendChild(strong);
+    txt.appendChild(sub);
+    row.appendChild(txt);
+    if (t.open && t.state === "proposed") {
+      var acts = document.createElement("div");
+      acts.className = "rb-acts";
+      if (t.role === "acceptor") acts.appendChild(shelfAction(t, "Accept", function (b) { acceptTrade(t, b); }));
+      acts.appendChild(shelfAction(t, t.role === "proposer" ? "Withdraw" : "Decline", function (b) { declineTrade(t, b); }));
+      row.appendChild(acts);
+    }
+    return row;
+  }
+
+  function paintTrades(out) {
+    var list = $("rb-trades");
+    if (!list) return;
+    list.textContent = "";
+    var trades = (out && out.trades) || [];
+    if (trades.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "rb-step";
+      var t = document.createElement("div");
+      t.className = "rb-step-txt rb-muted";
+      t.textContent = "No swaps yet. Use Swap on a shelf egg to offer one.";
+      empty.appendChild(t);
+      list.appendChild(empty);
+      return;
+    }
+    trades.forEach(function (t) { list.appendChild(tradeRow(t)); });
+  }
+
+  function refreshTrades() {
+    return jsonFetch("/api/ramble/trades").then(paintTrades).catch(function () { /* cosmetic */ });
   }
 
   var myFlockBtn = $("rb-my-flock");
@@ -1037,12 +1308,14 @@
       handleHatched(payload);
     });
     stream.addEventListener("ramble-nest-claimed", function () { refreshNests(); refreshFlock(); });
+    stream.addEventListener("ramble-trade", function () { refreshFlock(); refreshTrades(); });
     stream.onerror = function () { /* quiet: the stream may not exist yet */ };
   } catch (err) { /* no EventSource, no live updates */ }
 
   /* --------------------------------------------------------------- startup */
 
   jsonFetch("/api/ramble/grid").then(paintGrid).catch(function () { /* leave the chip at off */ });
+  refreshContacts();
   refreshEgg().then(refreshPet);
 
   if (map) {

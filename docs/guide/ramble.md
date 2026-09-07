@@ -9,7 +9,7 @@ Ramble is a proximity extension: you leave **marks** (notes pinned to a place) a
 Phase 1 is deliberately narrow:
 
 - **Geo only.** The privacy grid has `ble` and `lan` channels, but only `geo` is wired.
-- **Public wire only.** Marks with visibility `contacts` or `groups` are stored and replicate across your own Crow instances, but they are never published to relays. Contacts/group delivery is phase 1b.
+- **Contacts and groups travel as DMs.** Marks with visibility `contacts` or `group:<uid>` are sealed for each recipient (NIP-44, one DM per contact) and never touch a public relay in the clear — see below. Gifts and swaps use the same door.
 - Public `locked` marks are a **client-side teaser gate, not cryptography.** The content is on the relay in the clear; the panel simply declines to show it until you prove proximity. Do not put a secret in one.
 
 ## Privacy
@@ -37,8 +37,8 @@ Authoring is local and synchronous; the wire is not. A new mark is stored with `
 
 | Value | Meaning |
 |---|---|
-| `pending` | Waiting for a drain tick, or the grid gate is closed, or it is a non-public mark (which never publishes in phase 1). |
-| `published` | At least one relay accepted the event. |
+| `pending` | Waiting for a drain tick, or the grid gate is closed, or (contacts/group) at least one recipient's DM has not been accepted by a relay yet. |
+| `published` | At least one relay accepted the event — or, for a contacts/group mark, every recipient's DM was accepted (a mark with nobody to send to is published at once). |
 | `synced` | Written by instance sync from another of your own Crows. |
 | `remote` | Received from a relay — someone else's mark. |
 | `failed` | Parked after 20 rejected attempts, so one poison row cannot occupy a drain slot forever. |
@@ -115,6 +115,24 @@ Exactly one egg incubates at a time. From the **Flock** screen you can **incubat
 
 Every hatched bird stays in your flock. The Flock screen (`GET /api/ramble/flock`) lists them with the **active** one tagged — that is the bird on your map, in the Nest header and on your public caws — and tapping another bird activates it (`POST /api/ramble/birds/:id/activate`). The score is species found out of the 8 kinds; a second bird of a kind you already have is still a bird, just not a new kind.
 
+## Contacts and groups
+
+A mark for **Contacts** goes to every full contact (unblocked, not a bot, not a pending request) as one NIP-44 DM each, signed by this instance's key — the same door every Crow DM uses. A mark for a **Group** goes to the members of that contact group (`group:<group_uid>`, the groups from the Contacts panel; the Ramble panel only shows the Group audience when you have one). The DM's only tag is the recipient; the mark's text, place and bird are ciphertext. Nothing about a contacts or group mark reaches a relay in the clear.
+
+Delivery is queued, not immediate: authoring writes one `ramble_outbox` row per recipient, and the gateway transport sends them on its drain tick (every 15 s, or at once when you author from the panel). A contacts mark is gated by the privacy grid like a public one — the `contacts` (or `groups`) × `geo` cell and the master switch must be on, or it waits in the queue. The row flips to `published` once every recipient's DM has been accepted by a relay (or dropped because that contact is gone). A recipient stores it as a persistent contacts mark, named after the contact, and it counts as meeting their bird for warmth.
+
+Contacts delivery is contact-only in both directions: a DM of this kind from someone who is not a contact is discarded and never becomes a message request. A stranger's pin on your map offers **Share an invite**, which opens the Contacts panel — become contacts first, then trade.
+
+The queue is per instance: only the Crow you authored on sends a mark, a gift or an offer. All your Crows share one Nostr identity, so each of them receives what a contact sends and applies it; the rows then agree through instance sync. A swap step a contact answers is completed on each of your Crows, and each sends the confirmation — the contact simply ignores the copies.
+
+## Gifts and swaps
+
+Any unhatched egg on your shelf — claimed from a nest or received from someone — can be **gifted** to a contact (`POST /api/ramble/eggs/:id/gift { crow_id }`, tool `ramble_gift_egg`). The egg leaves your shelf as `gifted` and arrives on theirs as `received`, still unhatched: the wire carries only `{ egg_id, warmth, found_cell, found_week }`, never a species or seed — whoever hatches it rolls the bird. A received egg shows "A gift · from <name>" and can be incubated, gifted on, or offered in a swap. Received eggs do not use one of the five nest-claim spots. A gift delivered twice is stored once; an egg you gave away that comes back to you simply returns to your shelf.
+
+A **swap** is an offer of one of your eggs for one of theirs (`POST /api/ramble/trades { egg_id, crow_id }`, tool `ramble_propose_swap`). The contact sees the offer on their Flock screen and answers with an egg of their choice (**Accept**, `POST /api/ramble/trades/:id/accept { egg_id }`) or **Decline**; you can **Withdraw** an unanswered offer. Eggs change hands only when the swap completes — on each side, atomically — and an egg named by an open offer is locked (it cannot be incubated, gifted or offered again until the offer closes). Offers lapse after seven days on each side; a lapsed offer releases the egg. If your answer arrives after the offer lapsed on their side, they reply with a decline and your egg is released. Accept and decline are panel actions (there is no MCP tool for them).
+
+Everything here is contact-only and encrypted, and bounded: a contact can have at most 20 open offers with you and give you at most 20 eggs a day; anything past that is ignored. An offer, an answer or a completion that names an egg you still hold is ignored. There is no market, no ledger of value and no scarcity: if the two sides disagree at the very moment an offer lapses, the worst case is a duplicated egg, never a lost one. Meeting a contact through a mark counts toward warmth the same way meeting a stranger does (per key, per week).
+
 ## Just me marks
 
 `visibility: "private"` marks are for you alone: they never leave the instance over Nostr, so no relay or contact ever sees them. Unlike public and contacts marks, they're **persistent by default** (no TTL) and **open by default** (no proximity gate).
@@ -177,8 +195,10 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 | `ramble_flock` | Your flock: birds, the shelf, the incubating egg, species found. |
 | `ramble_nests` | Nests near a location this week, nearest first, with your claims marked. |
 | `ramble_claim_nest` | Claim the nest you are standing at (or a named cell within 75 m) for a shelf egg. |
+| `ramble_gift_egg` | Gift an unhatched shelf egg to a contact (queued as one encrypted DM). |
+| `ramble_propose_swap` | Offer a shelf egg to a contact for one of theirs; they choose what to give back. |
 
-Groups (`ramble_group_create` / `ramble_group_join`) are not in phase 1.
+Group audiences are the contact groups from the Contacts panel (`visibility: "group:<group_uid>"`); there are no ramble-specific group tools. `ramble_leave_mark` reports `recipients` for a contacts or group mark.
 
 A hatch triggered through these tools never sends a live update to an open dashboard panel — they run over the stdio MCP process, not through the panel's request path, so there is nothing to push a `ramble-hatched` event through. The panel still picks up the new bird on its next refresh (after any action).
 
@@ -198,3 +218,5 @@ The one-claim-per-day limit and the shelf cap are checked per instance (claims d
 The cap only gates claims. Incubating an egg the sync layer had parked (`shelf_origin='sync'`) moves the egg it replaces to your own shelf without anything leaving, so the shelf can briefly read `6 of 5`; it settles as you hatch.
 
 Two instances can disagree for one sync cycle about which egg incubates: if you swap eggs on one Crow while the other is still crediting warmth to the old egg, the older egg wins on both sides and your swap is undone (consistently). Swap again once both are in sync.
+
+Contacts delivery, gifts and swaps need every gateway on the new code: a gateway running phase 2 stores a ramble envelope as a chat message. Restart all of them before anyone sends. The transport logs `dropping <kind> delivery to <crow_id>: not a deliverable contact` when a queued recipient was deleted or blocked, and `gave up after 20 attempts` when no relay accepts a DM. During a rolling restart, a gateway still on phase 2 silently drops incoming `ramble_trades` sync ops (an unknown table advances its checkpoint without applying); a swap row emitted in that window reaches that Crow only when a later op touches the same trade. Restart all gateways back-to-back to keep the window to seconds.

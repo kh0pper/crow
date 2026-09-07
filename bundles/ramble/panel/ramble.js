@@ -1,12 +1,16 @@
 /**
  * Crow's Nest Panel — Ramble.
  *
- * World-first: the map IS the home screen. Three views live in one element
- * and are switched by `data-view` on `#ramble` (world | egg | pet); the
+ * World-first: the map IS the home screen. Four views (world | egg | pet |
+ * flock) live in one element and are switched by `data-view` on `#ramble`; the
  * privacy grid moved out of the page flow into `#rb-grid-sheet`, reached from
  * the "Visible" chip on the map. Visual direction C — chunky display type,
  * 2.5px outlines, hard offset shadows, amber/indigo/pink — all of it in
  * `static/ramble.css`, which is why this file no longer carries a <style>.
+ *
+ * Phase 3: the compose card gains a Group audience, the flock view a Swaps
+ * card with Gift / Swap / Accept / Decline, and a picker sheet
+ * (`#rb-pick-sheet`) for choosing a contact or an egg.
  *
  * COPIED ALONE to `$CROW_HOME/panels/ramble.js` at install, so it carries no
  * relative `../server/*` import; anything it needs from the bundle is resolved
@@ -145,8 +149,13 @@ export default {
               <div class="rb-seg" id="rb-seg-who" role="group" aria-label="Who can see this">
                 <button type="button" class="is-on" data-visibility="public" aria-pressed="true">Everyone</button>
                 <button type="button" data-visibility="contacts" aria-pressed="false">Contacts</button>
+                <button type="button" data-visibility="group" aria-pressed="false" id="rb-who-group" hidden>Group</button>
                 <button type="button" data-visibility="private" aria-pressed="false">Just me</button>
               </div>
+            </div>
+            <div class="rb-row" id="rb-group-row" hidden>
+              <label class="rb-label" for="rb-group">Group</label>
+              <select id="rb-group" aria-label="Which group"></select>
             </div>
 
             <div class="rb-row">
@@ -308,6 +317,13 @@ export default {
             <p class="rb-muted rb-fine" id="rb-flock-status"></p>
           </section>
 
+          <section class="rb-card">
+            <p class="rb-eyebrow">Swaps</p>
+            <p class="rb-muted rb-fine">Offer a shelf egg to a contact; they answer with one of theirs. Nobody knows what is inside until it hatches. Offers lapse after a week.</p>
+            <div class="rb-steps" id="rb-trades"></div>
+            <p class="rb-muted rb-fine" id="rb-trade-status"></p>
+          </section>
+
           <div class="rb-row rb-actions">
             <button class="rb-btn rb-btn-ghost rb-grow" id="rb-flock-bird-btn" type="button">My bird</button>
             <button class="rb-btn rb-btn-ghost" id="rb-flock-back" type="button">${icon("back")}Back to the world</button>
@@ -339,6 +355,17 @@ export default {
               </select>
             </div>
             <p class="rb-muted rb-fine" id="rb-grid-status"></p>
+          </div>
+        </div>
+
+        <!-- ─────────────────────────────────── pick a contact or an egg, on demand -->
+        <div class="rb-sheet" id="rb-pick-sheet" hidden>
+          <div class="rb-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="rb-pick-title">
+            <div class="rb-sheet-head">
+              <h3 class="rb-h" id="rb-pick-title">Pick one</h3>
+              <button class="rb-icon-btn" id="rb-pick-cancel" type="button" aria-label="Close">${icon("close")}</button>
+            </div>
+            <div class="rb-steps" id="rb-pick-list"></div>
           </div>
         </div>
       </div>

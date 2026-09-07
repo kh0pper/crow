@@ -207,6 +207,13 @@ export function stampSql(table, row, lamportTs) {
       args: [lamportTs, row.owner],
     };
   }
+  // Phase 3: swaps are keyed on trade_id (no `id` column) — same story.
+  if (table === "ramble_trades" && row.trade_id !== undefined) {
+    return {
+      sql: `UPDATE ramble_trades SET lamport_ts = ? WHERE trade_id = ?`,
+      args: [lamportTs, row.trade_id],
+    };
+  }
   if (row.id !== undefined) {
     return {
       sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,
