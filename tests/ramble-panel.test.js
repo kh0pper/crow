@@ -59,6 +59,30 @@ const server = app.listen(0);
 await once(server, "listening");
 const BASE = `http://127.0.0.1:${server.address().port}`;
 
+// Phase 3: the routes read the CORE contact tables. The scratch db never ran
+// init-db.js, so plant the exact columns ramble reads (never in production).
+const PK = "ef".repeat(32);        // crow:pal's key (x-only); every seeded contact gets a DISTINCT key
+const PK_BUDDY = "ee".repeat(32);
+const PK_BLOCKED = "ed".repeat(32);
+{
+  const db = createDbClient();
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, crow_id TEXT NOT NULL UNIQUE, display_name TEXT,
+      secp256k1_pubkey TEXT NOT NULL DEFAULT '', is_blocked INTEGER DEFAULT 0, request_status TEXT, is_bot INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS contact_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_uid TEXT, room_uid TEXT);
+    CREATE TABLE IF NOT EXISTS contact_group_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, contact_id INTEGER NOT NULL);
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey) VALUES ('crow:pal', 'Pal', '02${PK}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey) VALUES ('crow:buddy', 'Buddy', '02${PK_BUDDY}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, is_blocked) VALUES ('crow:blocked', 'Blocked', '02${PK_BLOCKED}', 1);
+    INSERT INTO contact_groups (name, group_uid) VALUES ('Walkers', 'grp-walk');
+    INSERT INTO contact_groups (name, group_uid, room_uid) VALUES ('Room', 'grp-room', 'r1');
+    INSERT INTO contact_group_members (group_id, contact_id) VALUES (1, 1);`);
+  try { db.close?.(); } catch { /* scratch */ }
+}
+
 after(async () => {
   await new Promise((r) => server.close(r));
   for (const [k, v] of Object.entries(savedEnv)) {
@@ -770,6 +794,117 @@ test("POST /api/ramble/birds/:id/activate 200s a hatched bird, emits the pet, an
   const flock = await (await req("/api/ramble/flock")).json();
   assert.equal(flock.birds.find((b) => b.egg_id === "panel-bird")?.active, true);
   assert.equal(flock.birds.filter((b) => b.active).length, 1, "exactly one active bird");
+});
+
+// -------------------------------------------------------- phase 3: contacts wire
+
+test("GET /api/ramble/contacts lists full contacts and plain groups only", async () => {
+  const out = await (await req("/api/ramble/contacts")).json();
+  assert.deepEqual(out.contacts, [{ crow_id: "crow:buddy", display_name: "Buddy" }, { crow_id: "crow:pal", display_name: "Pal" }]);
+  assert.deepEqual(out.groups, [{ group_uid: "grp-walk", name: "Walkers", member_count: 1 }]);
+});
+
+test("POST /api/ramble/marks: contacts fans out to every contact, group:<uid> to its members, an unknown group is a 400", async () => {
+  const body = { kind: "mark", lat: LAT, lon: LON, text: "for you two", visibility: "contacts", reveal: "open" };
+  let res = await req("/api/ramble/marks", { method: "POST", body });
+  assert.equal(res.status, 201);
+  let out = await res.json();
+  assert.equal(out.recipients, 2);
+  assert.equal(out.mark.publish_state, "pending", "queued, not published — the transport sends");
+  const db = createDbClient();
+  const { rows } = await db.execute({ sql: "SELECT to_crow_id, kind FROM ramble_outbox WHERE ref_id = ? ORDER BY to_crow_id", args: [out.mark.mark_id] });
+  assert.deepEqual(rows.map((r) => [r.to_crow_id, r.kind]), [["crow:buddy", "mark"], ["crow:pal", "mark"]]);
+  res = await req("/api/ramble/marks", { method: "POST", body: { ...body, visibility: "group:grp-walk" } });
+  assert.equal(res.status, 201); assert.equal((await res.json()).recipients, 1);
+  res = await req("/api/ramble/marks", { method: "POST", body: { ...body, visibility: "group:grp-room" } });
+  assert.equal(res.status, 400, "a room is not a group");
+  assert.equal((await res.json()).error, "unknown group");
+  assert.equal((await req("/api/ramble/marks", { method: "POST", body: { ...body, visibility: "group:nope" } })).status, 400);
+  assert.equal((await db.execute("SELECT count(*) AS n FROM ramble_marks WHERE visibility='group:nope'")).rows[0].n, 0, "no row for a refused group");
+  res = await req("/api/ramble/marks", { method: "POST", body: { ...body, visibility: "public" } });
+  assert.equal((await res.json()).recipients, 0, "public marks take the relay path, not the outbox");
+});
+
+test("GET /api/ramble/marks names a remote mark by a contact; a stranger's stays anonymous", async () => {
+  const db = createDbClient();
+  await db.execute({
+    sql: `INSERT INTO ramble_marks (mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, visibility, reveal, content_text, created_at, origin, publish_state)
+          VALUES ('by-pal', ?, 'real', 'mark', 'geo', '9v6m21h', ?, ?, 'contacts', 'open', 'hi', ?, 'remote', 'remote'),
+                 ('by-stranger', ?, NULL, 'mark', 'geo', '9v6m21h', ?, ?, 'public', 'open', 'yo', ?, 'remote', 'remote')`,
+    args: [PK, LAT, LON, Date.now(), "99".repeat(32), LAT, LON, Date.now()],
+  });
+  const { marks } = await (await req(`/api/ramble/marks?cells=${CELL}`)).json();
+  assert.equal(marks.find((m) => m.mark_id === "by-pal").contact_name, "Pal");
+  assert.equal(marks.find((m) => m.mark_id === "by-stranger").contact_name, undefined);
+});
+
+test("POST /api/ramble/eggs/:id/gift: unknown contact 400, unknown egg 404, incubating egg 409, shelf egg goes 'gifted' and queues one DM", async () => {
+  const db = createDbClient();
+  await db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('gift-me','shelf','user',7,1) ON CONFLICT(egg_id) DO NOTHING", args: [] });
+  assert.equal((await req("/api/ramble/eggs/gift-me/gift", { method: "POST", body: { crow_id: "crow:nobody" } })).status, 400);
+  assert.equal((await req("/api/ramble/eggs/gift-me/gift", { method: "POST", body: { crow_id: "crow:blocked" } })).status, 400);
+  assert.equal((await req("/api/ramble/eggs/gift-me/gift", { method: "POST", body: {} })).status, 400);
+  assert.equal((await req("/api/ramble/eggs/nope/gift", { method: "POST", body: { crow_id: "crow:pal" } })).status, 404);
+  const inc = (await (await req("/api/ramble/egg")).json()).egg.egg_id;
+  const r409 = await req(`/api/ramble/eggs/${inc}/gift`, { method: "POST", body: { crow_id: "crow:pal" } });
+  assert.equal(r409.status, 409); assert.equal((await r409.json()).error, "not-an-egg");
+  const before = emitCalls.length;
+  const res = await req("/api/ramble/eggs/gift-me/gift", { method: "POST", body: { crow_id: "crow:pal" } });
+  assert.equal(res.status, 200);
+  const out = await res.json();
+  assert.deepEqual([out.egg.egg_id, out.egg.status, out.to], ["gift-me", "gifted", "crow:pal"]);
+  assert.ok(emitCalls.slice(before).some((c) => c.table === "ramble_eggs" && c.op === "update" && c.row.egg_id === "gift-me" && c.row.status === "gifted"));
+  const { rows } = await db.execute({ sql: "SELECT to_crow_id, kind, payload_json FROM ramble_outbox WHERE ref_id = 'gift-me'", args: [] });
+  assert.equal(rows.length, 1); assert.equal(rows[0].kind, "egg");
+  const payload = JSON.parse(rows[0].payload_json);
+  assert.deepEqual(Object.keys(payload.egg).sort(), ["egg_id", "found_cell", "found_week", "warmth"]);
+  const flock = await (await req("/api/ramble/flock")).json();
+  assert.ok(!flock.eggs.find((e) => e.egg_id === "gift-me"), "a gifted egg is off the shelf");
+});
+
+test("swaps over the routes: propose 201, list, accept refuses on the proposer side, decline 200; a planted incoming offer accepts with a shelf egg", async () => {
+  const db = createDbClient();
+  await db.execute({ sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('offer-me','shelf','user',9,1), ('answer-with','received','user',4,2) ON CONFLICT(egg_id) DO NOTHING", args: [] });
+  assert.equal((await req("/api/ramble/trades", { method: "POST", body: { egg_id: "offer-me", crow_id: "crow:nobody" } })).status, 400);
+  assert.equal((await req("/api/ramble/trades", { method: "POST", body: { egg_id: "nope", crow_id: "crow:pal" } })).status, 404);
+  let res = await req("/api/ramble/trades", { method: "POST", body: { egg_id: "offer-me", crow_id: "crow:pal" } });
+  assert.equal(res.status, 201);
+  const { trade } = await res.json();
+  assert.deepEqual([trade.role, trade.state, trade.my_egg_id, trade.counterpart], ["proposer", "proposed", "offer-me", "crow:pal"]);
+  res = await req("/api/ramble/trades", { method: "POST", body: { egg_id: "offer-me", crow_id: "crow:buddy" } });
+  assert.equal(res.status, 409); assert.equal((await res.json()).error, "in-trade");
+  assert.equal((await req("/api/ramble/eggs/offer-me/incubate", { method: "POST", body: {} })).status, 409, "a locked egg cannot be incubated");
+  assert.equal((await req("/api/ramble/eggs/offer-me/gift", { method: "POST", body: { crow_id: "crow:buddy" } })).status, 409);
+  const list = await (await req("/api/ramble/trades")).json();
+  const mine = list.trades.find((t) => t.trade_id === trade.trade_id);
+  assert.deepEqual([mine.open, mine.counterpart_name, mine.offer], [true, "Pal", null]);
+  assert.equal((await (await req("/api/ramble/flock")).json()).eggs.find((e) => e.egg_id === "offer-me").locked, true);
+  res = await req(`/api/ramble/trades/${trade.trade_id}/accept`, { method: "POST", body: { egg_id: "answer-with" } });
+  assert.equal(res.status, 409); assert.equal((await res.json()).error, "not-open");
+  assert.equal((await req("/api/ramble/trades/ghost/decline", { method: "POST", body: {} })).status, 404);
+  res = await req(`/api/ramble/trades/${trade.trade_id}/decline`, { method: "POST", body: {} });
+  assert.equal(res.status, 200); assert.equal((await res.json()).trade.state, "declined");
+  assert.equal((await (await req("/api/ramble/flock")).json()).eggs.find((e) => e.egg_id === "offer-me").locked, false);
+
+  await db.execute({ sql: "INSERT INTO ramble_trades (trade_id, counterpart, role, my_egg_id, their_egg_id, offer_json, state, created_at, updated_at, expires_at) VALUES ('in-1','crow:buddy','acceptor',NULL,'their-egg','{\"egg_id\":\"their-egg\",\"warmth\":50,\"found_cell\":null,\"found_week\":null}','proposed',1,1,?)", args: [Date.now() + 1e9] });
+  const incoming = (await (await req("/api/ramble/trades")).json()).trades.find((t) => t.trade_id === "in-1");
+  assert.deepEqual([incoming.counterpart_name, incoming.offer.warmth, incoming.open], ["Buddy", 50, true]);
+  assert.equal((await req("/api/ramble/trades/in-1/accept", { method: "POST", body: { egg_id: "nope" } })).status, 409);
+  assert.equal((await req("/api/ramble/trades/in-1/accept", { method: "POST", body: {} })).status, 400);
+  res = await req("/api/ramble/trades/in-1/accept", { method: "POST", body: { egg_id: "answer-with" } });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).trade.state, "accepted");
+  const { rows } = await db.execute({ sql: "SELECT to_crow_id, payload_json FROM ramble_outbox WHERE ref_id = 'in-1'", args: [] });
+  assert.equal(rows[0].to_crow_id, "crow:buddy");
+  assert.equal(JSON.parse(rows[0].payload_json).trade.state, "accepted");
+  assert.equal(JSON.parse(rows[0].payload_json).egg.egg_id, "answer-with");
+});
+
+test("contacts, gift and trade routes are behind dashboardAuth", async () => {
+  for (const [method, path] of [["GET", "/api/ramble/contacts"], ["GET", "/api/ramble/trades"], ["POST", "/api/ramble/trades"], ["POST", "/api/ramble/eggs/x/gift"], ["POST", "/api/ramble/trades/x/accept"], ["POST", "/api/ramble/trades/x/decline"]]) {
+    const res = await realFetch(BASE + path, { method, headers: method === "POST" ? { "content-type": "application/json" } : {}, body: method === "POST" ? "{}" : undefined });
+    assert.equal(res.status, 401, `${method} ${path}`);
+  }
 });
 
 test("nests, claim, flock, incubate and activate are behind dashboardAuth", async () => {
