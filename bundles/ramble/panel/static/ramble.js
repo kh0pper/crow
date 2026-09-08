@@ -108,6 +108,8 @@
   var map = null;
   var markerLayer = null;
   var nestLayer = null;
+  var hereLayer = null, hereDot = null, hereRing = null;
+  var following = false, mapWatch = null, lastPanAt = null;
   var currentCells = [];
   var lastFix = null;      /* the most recent REAL geolocation fix */
   var lastMarks = [];
@@ -126,6 +128,14 @@
     }).addTo(map);
     markerLayer = L.layerGroup().addTo(map);
     nestLayer = L.layerGroup().addTo(map);
+
+    /* Its own pane, above Leaflet's marker pane (600) and below popups (700):
+     * the dot is the user's reference and must never hide under a pin. It ties
+     * the tooltip pane (650), which Ramble never uses (pins carry a title). */
+    map.createPane("rb-here");
+    map.getPane("rb-here").style.zIndex = 650;
+    hereLayer = L.layerGroup().addTo(map);
+    map.on("dragstart", function () { setFollowing(false); });
 
     /* The Android shell wraps the WebView in a SwipeRefreshLayout for
      * pull-to-refresh; a northward drag on the map (which never itself
@@ -155,6 +165,70 @@
       areaTimer = setTimeout(function () { publishArea(); refreshNests(); }, 500);
     });
   }
+
+  /* ------------------------------------------------------------ you are here */
+
+  function paintHere(fix) {
+    if (!map || !hereLayer || !fix || typeof fix.lat !== "number" || typeof fix.lon !== "number") return;
+    var ll = [fix.lat, fix.lon];
+    var r = Math.max(5, Math.min(200, Number(fix.accuracy_m) || 20));
+    if (!hereDot) {
+      hereRing = L.circle(ll, { pane: "rb-here", radius: r, className: "rb-here-ring", stroke: false, fillOpacity: 0.12, interactive: false }).addTo(hereLayer);
+      hereDot = L.circleMarker(ll, { pane: "rb-here", radius: 8, className: "rb-here-dot", weight: 3, fillOpacity: 1, interactive: false }).addTo(hereLayer);
+    } else {
+      hereRing.setLatLng(ll);
+      hereRing.setRadius(r);
+      hereDot.setLatLng(ll);
+    }
+    if (!following) return;
+    /* A pan fires moveend, which posts the area and refetches nests: pan only
+     * when the dot has actually moved AND left the middle of the view. */
+    var moved = !lastPanAt || haversineMeters(lastPanAt, fix) > 10;
+    var inside = map.getBounds().pad(-0.3).contains(ll);
+    if (moved && !inside) {
+      lastPanAt = { lat: fix.lat, lon: fix.lon };
+      map.panTo(ll, { animate: true });
+    }
+  }
+
+  function setFollowing(on) {
+    following = !!on;
+    var chip = $("rb-chip-around");
+    if (!chip) return;
+    chip.classList.toggle("is-on", following);
+    chip.setAttribute("aria-pressed", following ? "true" : "false");
+  }
+
+  /* One watch for the whole page: the dot, every walk hint (lastFix) and, when
+   * the AR view is open, its pose. */
+  function startMapWatch() {
+    if (mapWatch != null || !map || !navigator.geolocation) return;
+    mapWatch = navigator.geolocation.watchPosition(function (pos) {
+      lastFix = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy_m: pos.coords.accuracy };
+      paintHere(lastFix);
+      if (arOpen) {
+        arPose.lat = lastFix.lat; arPose.lon = lastFix.lon; arPose.accuracy_m = lastFix.accuracy_m;
+        maybeRefreshAround();
+        scheduleArRender();
+      }
+    }, function (err) {
+      /* No fix: no dot; the map still works by hand. Permission pulled
+       * mid-session (code 1) while the AR view is open: its old fix is a lie
+       * now — back to "Waiting for a fix…" (the AR view's own watch used to do this). */
+      if (err && err.code === 1 && arOpen) { arPose.lat = null; arPose.lon = null; arAnchors = []; scheduleArRender(); }
+    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+  }
+
+  function stopMapWatch() {
+    if (mapWatch == null || !navigator.geolocation) { mapWatch = null; return; }
+    try { navigator.geolocation.clearWatch(mapWatch); } catch (e) { /* gone */ }
+    mapWatch = null;
+  }
+  /* The watch runs only while the page is shown: a hidden tab or a bfcache
+   * park stops it (battery), coming back restarts it — startMapWatch is idempotent. */
+  window.addEventListener("pagehide", stopMapWatch);
+  window.addEventListener("pageshow", function () { startMapWatch(); });
+  document.addEventListener("visibilitychange", function () { if (document.hidden) stopMapWatch(); else startMapWatch(); });
 
   function here() {
     return new Promise(function (resolve, reject) {
@@ -469,10 +543,13 @@
     return Number.isFinite(n) ? (n >>> 0) : 0;
   }
 
-  function drawEggArt(el, eggId) {
+  /* The ONE egg sink: engine output from a NUMBER. drawEggArt derives that
+   * number from an egg id; nests carry theirs. */
+  function drawEggSeed(el, seed) {
     if (!el || !Bird) return;
-    try { el.innerHTML = Bird.drawEgg(seedFromEggId(eggId)); } catch (e) { /* cosmetic */ }
+    try { el.innerHTML = Bird.drawEgg(seed >>> 0); } catch (e) { /* cosmetic */ }
   }
+  function drawEggArt(el, eggId) { drawEggSeed(el, seedFromEggId(eggId)); }
 
   function paintPerch(pet) {
     var bird = pet && pet.bird;
@@ -620,7 +697,12 @@
   var aroundChip = $("rb-chip-around");
   if (aroundChip) {
     aroundChip.addEventListener("click", function () {
-      here().then(function (pos) { if (map) map.setView([pos.lat, pos.lon], 15); }).catch(function () { /* stay put */ });
+      setFollowing(!following);
+      if (!following) return;
+      here().then(function (pos) {
+        paintHere(pos);
+        if (map) map.setView([pos.lat, pos.lon], Math.max(map.getZoom(), 15));
+      }).catch(function () { /* stay put */ });
     });
   }
 
@@ -897,6 +979,7 @@
   /* ---------------------------------------------------------------- nests */
 
   var lastNests = [];
+  var nestMarkers = {};
   var nestWeek = null;
 
   /* Engine output from a numeric seed: the only markup sink besides drawEggArt. */
@@ -904,6 +987,23 @@
     if (!Bird) return "<span></span>";
     try { return '<svg viewBox="0 0 120 152" aria-hidden="true">' + Bird.drawEgg(seed >>> 0) + "</svg>"; }
     catch (e) { return "<span></span>"; }
+  }
+
+  var nestArtCache = {};
+  /* The egg the AR label shows when a nest is within reach: drawn by the one
+   * egg sink from the nest's own seed, cached per cell so the painter keeps a
+   * stable element; the claimed look is refreshed on every call. */
+  function nestArt(nest) {
+    var svg = nestArtCache[nest.cell];
+    if (!svg) {
+      svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 120 152");
+      svg.setAttribute("aria-hidden", "true");
+      drawEggSeed(svg, nest.seed);
+      nestArtCache[nest.cell] = svg;
+    }
+    svg.setAttribute("class", "rb-ar-egg-art" + (nest.claimed ? " is-claimed" : ""));
+    return svg;
   }
 
   function nestWalkHint(nest) {
@@ -921,8 +1021,28 @@
     "no-nest": "Nothing here."
   };
 
+  /* The collect effect on everything showing this nest: the AR label/row
+   * (busy is sticky until clear; collect is timed) and the map pin. The pin's
+   * animation targets its inner svg — the icon's own transform is its map
+   * position. */
+  function collectFx(cell, phase) {
+    var name = phase === "done" ? "collect" : (phase === "start" ? "busy" : "clear");
+    if (arOpen && arSession) arSession.fx("n:" + cell, name);
+    var m = nestMarkers[cell];
+    var el = m && typeof m.getElement === "function" ? m.getElement() : null;
+    if (!el) return;
+    el.classList.remove("rb-nest-busy");
+    if (name === "busy") el.classList.add("rb-nest-busy");
+    if (name === "collect") {
+      el.classList.add("rb-nest-collect");
+      setTimeout(function () { el.classList.remove("rb-nest-collect"); }, 900);
+    }
+  }
+
   function claimNest(nest, lineEl, btn) {
     btn.disabled = true;
+    btn.classList.add("is-busy");
+    collectFx(nest.cell, "start");
     lineEl.textContent = "checking where you are…";
     here().then(function (pos) {
       return jsonFetch("/api/ramble/nests/claim", {
@@ -930,15 +1050,25 @@
         body: { cell: nest.cell, week: nest.week, lat: pos.lat, lon: pos.lon }
       });
     }).then(function (out) {
+      btn.classList.remove("is-busy");
       if (out && out.claimed) {
         lineEl.textContent = out.already ? "Already yours." : "You found an egg. It's on your shelf.";
         btn.remove();
-        refreshNests();
+        if (out.already) { collectFx(nest.cell, "clear"); refreshNests(); return refreshFlock(); }
+        collectFx(nest.cell, "done");
+        /* The fly-away plays on the AR label, not behind the sheet (the
+         * "on your shelf" line is lost there — accepted: the bird's line and
+         * the shelf say it); the pin's pop finishes before the layer is rebuilt. */
+        closeArSheet();
+        setTimeout(refreshNests, 900);
         return refreshFlock();
       }
+      collectFx(nest.cell, "clear");
       lineEl.textContent = CLAIM_REASON[out && out.reason] || "Couldn't take it.";
       btn.disabled = false;
     }).catch(function (err) {
+      btn.classList.remove("is-busy");
+      collectFx(nest.cell, "clear");
       lineEl.textContent = err.message;
       btn.disabled = false;
     });
@@ -970,6 +1100,7 @@
     lastNests = list;
     if (!nestLayer) return;
     nestLayer.clearLayers();
+    nestMarkers = {};
     list.forEach(function (nest) {
       var icon = L.divIcon({
         className: "rb-nest-pin" + (nest.claimed ? " is-claimed" : ""),
@@ -983,6 +1114,7 @@
        * rather than the one we had when the pins were drawn. */
       marker.bindPopup(function () { return nestPopup(nest); });
       marker.addTo(nestLayer);
+      nestMarkers[nest.cell] = marker;
     });
     paintPerchSay();
   }
@@ -1352,6 +1484,7 @@
         accuracy_m: typeof mark.accuracy_m === "number" ? mark.accuracy_m : null,
         approx_m: exact ? 0 : (typeof mark.approx_m === "number" ? mark.approx_m : 0),
         locked: isLocked(mark),
+        reach_m: isLocked(mark) ? UNLOCK_M : null,
         title: arTitle(mark),
         source: mark,
       });
@@ -1359,6 +1492,7 @@
     ((out && out.nests) || []).forEach(function (nest) {
       list.push({
         id: "n:" + nest.cell, kind: "nest", lat: nest.lat, lon: nest.lon, accuracy_m: null, approx_m: 0, locked: false,
+        reach_m: CLAIM_M, art: nestArt(nest),
         title: nest.claimed ? "A nest (yours)" : "A nest", source: nest,
       });
     });
@@ -1478,6 +1612,7 @@
       refreshAround();
       scheduleArRender();
     }
+    if (mapWatch != null) return; /* the map's watch feeds arPose while the view is open */
     if (!navigator.geolocation) return;
     arWatch = navigator.geolocation.watchPosition(function (pos) {
       lastFix = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy_m: pos.coords.accuracy };
@@ -1570,6 +1705,7 @@
     if (arTick) { clearInterval(arTick); arTick = null; }
     if (arRaf) { try { (window.cancelAnimationFrame || clearTimeout)(arRaf); } catch (e) { /* not fatal */ } arRaf = null; }
     if (arSession) arSession.destroy();
+    nestArtCache = {};
     var notice = $("rb-ar-notice");
     if (notice) notice.hidden = true;
     if (arRoot) arRoot.hidden = true;
@@ -1648,8 +1784,13 @@
   refreshEgg().then(refreshPet);
 
   if (map) {
+    startMapWatch();
+    /* The markup ships the chip lit; nothing follows until the first fix says so. */
+    setFollowing(false);
     here().then(function (pos) {
       map.setView([pos.lat, pos.lon], 15);
+      paintHere(pos);
+      setFollowing(true);
     }).catch(function () {
       setText($("rb-perch-say"), "Pan the map to pick where you are listening.");
     }).then(function () { publishArea(); refreshNests(); });

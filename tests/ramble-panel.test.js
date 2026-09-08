@@ -606,6 +606,23 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes("setInterval(arHeartbeat, 1000)"), "the heartbeat retries a failed around fetch");
   assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body), "camera frames never leave the device");
 
+  // Phase 5: one map-level watch drives the you-are-here dot (own pane) with
+  // follow mode; nests carry reach + egg art into AR; the collect effect runs
+  // at press, success and clear; the nest layer waits for the pin's pop.
+  assert.ok(body.includes('className: "rb-here-dot"') && body.includes('className: "rb-here-ring"'));
+  assert.ok(body.includes('map.createPane("rb-here")') && body.includes('getPane("rb-here").style.zIndex = 650'));
+  assert.ok(body.includes("function startMapWatch(") && body.includes("function paintHere(") && body.includes("function setFollowing("));
+  assert.ok(body.includes('map.on("dragstart"'), "a user drag ends follow mode");
+  assert.ok(body.includes("getBounds().pad(-0.3)"), "follow pans only when the dot leaves the middle of the view");
+  assert.ok(body.includes("reach_m: CLAIM_M") && body.includes("UNLOCK_M : null"));
+  assert.ok(body.includes("function drawEggSeed(") && body.includes("art: nestArt(nest)"));
+  assert.ok(body.includes('collectFx(nest.cell, "start")') && body.includes('collectFx(nest.cell, "done")') && body.includes('collectFx(nest.cell, "clear")'));
+  assert.ok(body.includes('arSession.fx("n:" + cell'));
+  assert.ok(body.includes("setTimeout(refreshNests, 900)"), "the pin's pop finishes before the layer is rebuilt");
+  assert.ok(body.includes("if (mapWatch != null)"), "the AR view reuses the map watch");
+  assert.ok(body.includes('window.addEventListener("pageshow"'), "the watch restarts after a bfcache park");
+  assert.ok(body.includes("err.code === 1 && arOpen"), "a revoked permission still resets the AR pose");
+
   const code = body.replace(/\/\*[\s\S]*?\*\//g, "");
   const sinks = code.match(/\.innerHTML\s*=|\bhtml:\s/g) || [];
   assert.equal(sinks.length, 2, `expected exactly two engine-output markup sinks, found ${sinks.length}`);
@@ -642,6 +659,13 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.match(body, /\.rb-ar-label\[data-locked="true"\]/);
   assert.match(body, /\.rb-ar\[data-camera="off"\] \.rb-ar-video/);
   assert.match(body, /\.rb-ar\[data-mode="radar"\] \.rb-ar-radar/);
+
+  // Phase 5: near-nest AR labels, the here dot, the collect fx.
+  assert.match(body, /\.rb-ar-label\[data-kind="nest"\]\[data-near="true"\]/);
+  assert.match(body, /\.rb-ar-label:not\(\[data-side\]\)\.rb-ar-fx-collect \.rb-ar-egg-art/);
+  assert.match(body, /\.rb-here-dot/);
+  assert.match(body, /\.rb-nest-pin\.rb-nest-collect svg/);
+  assert.match(body, /\.rb-ar-egg-art \{[^}]*order: -1/);
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {
