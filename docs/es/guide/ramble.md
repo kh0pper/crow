@@ -29,6 +29,8 @@ El **nivel de identidad pública** decide qué clave firma lo que publicas:
 | `pseudonym` | Marcas y caws usan el seudónimo estable — identidad consistente, sin vínculo con tu id real de Crow. |
 | `real` | La clave propia de tu instancia y su `crow_id`. Todo lo que publiques es atribuible a este Crow. |
 
+**Nombre en el mundo.** En la hoja Visible puedes fijar un nombre en el mundo (hasta 24 caracteres) que los desconocidos ven en tus marcas y caws públicos en lugar de una clave — pero solo mientras tu nivel de Nombre sea `pseudonym` o `real`; en `rotating` no sale nada más que la clave corta. No está verificado, así que el nombre de un desconocido se muestra siempre con los cuatro primeros caracteres de su clave ("Kevin · f665"). Los contactos nunca lo ven: ven el nombre que guardaron para ti. Tus propias marcas dicen "your mark".
+
 ## Cómo funciona la publicación
 
 La autoría es local y síncrona; el cable no. Una marca nueva se guarda con `publish_state = 'pending'`, y el transporte del gateway la publica en el siguiente tick de drenaje (cada 15 s, o de inmediato si se creó dentro del mismo proceso).

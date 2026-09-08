@@ -159,6 +159,9 @@ test("panel handler renders the world-first shell, its three views and every ass
   // Grid checkbox names are the wire contract with POST /api/ramble/grid.
   assert.match(sent, /name="grid-public-geo"/);
 
+  // The Visible sheet's World name field: bounded to 24 characters client-side.
+  assert.match(sent, /id="rb-world-name"[^>]*maxlength="24"/);
+
   // The legacy ids are GONE — anything still selecting them is broken.
   assert.doesNotMatch(sent, /id="ramble-map"/);
   assert.doesNotMatch(sent, /id="ramble-pet"/);
@@ -315,6 +318,24 @@ test("POST /api/ramble/grid rejects an unknown audience or channel", async () =>
   assert.equal(bad.status, 400);
   const badChannel = await req("/api/ramble/grid", { method: "POST", body: { cells: { public: { carrier_pigeon: true } } } });
   assert.equal(badChannel.status, 400);
+});
+
+test("POST /api/ramble/grid stores a sanitized worldName, clears a rejected one, and bounds the input", async () => {
+  let res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "  Kevin\u202E  " } });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).worldName, "Kevin");
+  assert.equal((await (await req("/api/ramble/grid")).json()).worldName, "Kevin");
+  res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "f665c26b" } });
+  assert.equal((await res.json()).worldName, null, "a key look-alike clears the name");
+  await req("/api/ramble/grid", { method: "POST", body: { worldName: "Kevin" } });
+  res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "" } });
+  assert.equal((await res.json()).worldName, null, "an empty string clears");
+  res = await req("/api/ramble/grid", { method: "POST", body: { worldName: null, master: true } });
+  assert.equal(res.status, 200, "null means not-sent, not clear");
+  res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "x".repeat(129) } });
+  assert.equal(res.status, 400);
+  res = await req("/api/ramble/grid", { method: "POST", body: { worldName: 7 } });
+  assert.equal(res.status, 400);
 });
 
 // ------------------------------------------------------------------- the pet
@@ -543,6 +564,7 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // is the client half of the fix/android-geolocation-map-swipe change).
   assert.match(body, /Crow\.setPullToRefresh\(false\)/);
   assert.match(body, /Crow\.setPullToRefresh\(true\)/);
+  assert.ok(body.includes('postGrid({ worldName: worldNameEl.value })'));
 
   // House rule for panel client scripts: NO template literals. The panel
   // tooling treats a backtick as its own delimiter, so one here silently

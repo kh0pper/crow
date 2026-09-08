@@ -717,6 +717,7 @@
   var sheetEl = $("rb-grid-sheet");
   var masterEl = $("rb-master");
   var identityEl = $("rb-identity");
+  var worldNameEl = $("rb-world-name");
   var cellEls = Array.prototype.slice.call(document.querySelectorAll(".rb-grid-cell"));
 
   function openSheet(open) {
@@ -740,6 +741,7 @@
     if (!grid) return;
     if (masterEl) masterEl.checked = !!grid.master;
     if (identityEl && grid.identityLevel) identityEl.value = grid.identityLevel;
+    if (worldNameEl && worldNameEl !== document.activeElement) worldNameEl.value = grid.worldName || "";
     cellEls.forEach(function (el) {
       var row = grid.cells && grid.cells[el.getAttribute("data-audience")];
       el.checked = !!(row && row[el.getAttribute("data-channel")]);
@@ -757,6 +759,7 @@
 
   if (masterEl) masterEl.addEventListener("change", function () { postGrid({ master: masterEl.checked }); });
   if (identityEl) identityEl.addEventListener("change", function () { postGrid({ identityLevel: identityEl.value }); });
+  if (worldNameEl) worldNameEl.addEventListener("change", function () { worldNameEl.blur(); postGrid({ worldName: worldNameEl.value }); });
   cellEls.forEach(function (el) {
     el.addEventListener("change", function () {
       var cells = {};

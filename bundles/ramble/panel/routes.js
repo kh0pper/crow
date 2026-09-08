@@ -625,6 +625,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (b.identityLevel != null && !IDENTITY_LEVELS.includes(b.identityLevel)) {
       bad(`identityLevel must be one of: ${IDENTITY_LEVELS.join(", ")}`);
     }
+    if (b.worldName != null && (typeof b.worldName !== "string" || b.worldName.length > 128)) bad("worldName must be a string of at most 128 characters");
     if (b.cells != null) {
       if (typeof b.cells !== "object" || Array.isArray(b.cells)) bad("cells must be an object");
       for (const [audience, channels] of Object.entries(b.cells)) {
@@ -646,6 +647,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       }
     }
     if (b.identityLevel != null) await mods.gridMod.setIdentityLevel(db, b.identityLevel, { emit });
+    if (b.worldName != null) await mods.gridMod.setWorldName(db, b.worldName, { emit });
 
     res.json(await mods.gridMod.getGrid(db));
   }));
