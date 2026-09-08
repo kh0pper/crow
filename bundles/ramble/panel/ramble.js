@@ -127,17 +127,6 @@ export default {
 
             <div class="rb-perch">
               <div class="rb-say" id="rb-perch-say">Getting your bearings&hellip;</div>
-              <button class="rb-perch-btn" id="rb-perch-open" type="button" aria-label="Open your bird">
-                <svg id="rb-perch-bird" class="rb-bird rb-bob" viewBox="0 0 200 200" role="img" aria-label="Your bird" hidden></svg>
-                <span class="rb-ring" id="rb-perch-egg-wrap">
-                  <svg class="rb-ring-track" viewBox="0 0 240 240" aria-hidden="true">
-                    <circle class="rb-ring-trk" cx="120" cy="120" r="108" stroke-width="18" fill="none"/>
-                    <circle id="rb-perch-ring" class="rb-ring-prg" cx="120" cy="120" r="108" stroke-width="18" fill="none"
-                            stroke-linecap="round" stroke-dasharray="678.6" stroke-dashoffset="678.6"/>
-                  </svg>
-                  <svg id="rb-perch-egg" class="rb-eggart" viewBox="0 0 120 152" role="img" aria-label="Your egg"></svg>
-                </span>
-              </button>
             </div>
           </div>
 

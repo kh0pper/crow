@@ -87,6 +87,15 @@
     return '<path d="M60 8 C 92 8 108 60 108 92 C 108 126 86 144 60 144 C 34 144 12 126 12 92 C 12 60 28 8 60 8 z" fill="' + shell + '" stroke="#e6d9c8" stroke-width="3"/>' + dots + '<ellipse cx="44" cy="40" rx="10" ry="16" fill="#fff" opacity=".55"/>';
   }
   function mountBird(el, g, mood) { el.setAttribute("viewBox", "0 0 200 200"); el.innerHTML = drawBird(g, mood); }
+  /* The egg is not carried, it IS the walker: legs beneath the same shell,
+   * reusing the bird's own foot shape and its wrapping group (foot is a
+   * stroke path and draws nothing without it). drawEgg's path bottoms at
+   * y=144 and a foot is 16 tall, so this needs the taller viewBox. */
+  function drawWalkingEgg(seed) {
+    var eggFeet = '<g stroke="#c98a3a" stroke-width="4" stroke-linecap="round" fill="none"><path transform="' + at(38, 144) + '" d="' + PARTS.foot + '"/><path transform="' + at(82, 144) + '" d="' + PARTS.foot + '"/></g>';
+    return drawEgg(seed) + eggFeet;
+  }
+  function mountWalkingEgg(el, seed) { el.setAttribute("viewBox", "0 0 120 168"); el.innerHTML = drawWalkingEgg(seed); }
   function isValidBird(x) { return !!x && typeof x === "object" && ROSTER.indexOf(x.species) >= 0 && isUint32(x.seed); }
-  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, drawBird: drawBird, drawEgg: drawEgg, mountBird: mountBird, isValidBird: isValidBird };
+  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, drawBird: drawBird, drawEgg: drawEgg, drawWalkingEgg: drawWalkingEgg, mountBird: mountBird, mountWalkingEgg: mountWalkingEgg, isValidBird: isValidBird };
 });
