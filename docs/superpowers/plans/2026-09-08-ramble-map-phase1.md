@@ -1632,7 +1632,12 @@ Add a fix-driven trigger inside the `watchPosition` callback, independent of bot
 with `var lastPostedFix = null;` beside the other fix state. Assert it in the served-script test:
 
 ```js
-  assert.ok(body.includes("lastPostedFix"), "walking posts the area even when the map is not following");
+  // Pin the MECHANISM, not the identifier: this is the phase's load-bearing
+  // guard, and `includes("lastPostedFix")` would pass on a variable that is
+  // declared and never used.
+  assert.ok(body.includes("haversineMeters(lastPostedFix, lastFix) > 75"),
+    "walking posts the area on distance, so it works with the map not following");
+  assert.ok(body.includes("lastPostedFix = {"), "and the anchor advances when it posts");
 ```
 
 `refreshMarks` is **not** called on a map move. The `moveend` handler calls `publishArea(); refreshNests();`, and `publishArea` then chains `refreshMarks`. Add `refreshZones();` to that same `moveend` handler beside `refreshNests();`.
@@ -1701,7 +1706,7 @@ Append to the served-script test:
 ```js
   // The location marker IS the pet (operator request, 2026-09-08): it walks
   // the map with you and opens the egg or pet view when tapped.
-  assert.ok(body.includes("function hereIcon()"));
+  assert.ok(body.includes("function hereIcon("));
   assert.ok(body.includes("function paintHereArt()"));
   assert.ok(body.includes("function hereArt()"));
   assert.ok(body.includes('hereDot.on("click"'), "the marker itself opens the view — the retired button also matched showView(perchTarget)");
@@ -1784,6 +1789,13 @@ Delete the now-dead `.rb-perch-btn`, `.rb-perch .rb-bird`, `.rb-perch .rb-ring` 
     if (!hereDot) return;
     var art = hereArt();
     if (art) hereDot.setIcon(hereIcon(art));
+    /* The retired perch was a button with an aria-label that tracked its
+     * state; a divIcon is a focusable div with neither. Restore both. */
+    var el = hereDot.getElement();
+    if (el) {
+      el.setAttribute("role", "button");
+      el.setAttribute("aria-label", perchTarget === "pet" ? "Open your bird" : "Open your egg");
+    }
   }
 ```
 
@@ -1797,7 +1809,9 @@ In `paintHere`, swap the dot's construction and add the tap:
         /* The retired button carried an accessible name; a divIcon has none,
          * and the marker shows an egg as often as a bird. */
         /* title carries the accessible name; divIcon ignores alt, which
-         * Leaflet only applies when it builds an img icon. */
+         * Leaflet only applies when it builds an img icon. The retired button
+         * was a real button with a state-aware label, so paintHereArt sets
+         * role and aria-label to keep that. */
         title: "You",
       }).addTo(hereLayer);
       hereDot.on("click", function () { showView(perchTarget); });
@@ -1814,11 +1828,39 @@ Then call `paintHereArt()` at the end of `paintPerch`, so the marker follows the
 
 Operator request, and it follows from the premise: you are not carrying an egg, you ARE one — an egg that wandered off from its nest — so the marker's egg needs legs, and both the egg and the bird should walk when you do.
 
-**The legs.** `Bird.drawEgg(seed)` draws a bare egg. The engine already has the leg shape the bird uses (`PARTS.foot`, a stroke path), so this is reusing an existing part rather than inventing art. In `bundles/ramble/server/bird-svg.cjs`, add a `drawWalkingEgg(seed)` beside `drawEgg` that returns the same egg with two `foot` paths beneath it, and export it alongside the others. Use it only for the location marker; the egg screen and the nest pins keep the plain `drawEgg`, because those are eggs you are looking at rather than eggs that are you.
+**The legs.** `Bird.drawEgg(seed)` draws a bare egg. The engine already has the leg shape the bird uses, so this reuses an existing part rather than inventing art.
 
-⚠ This is a NEW export on the bundle's engine. That is fine — the no-new-export rule from the profile-avatar work constrains what CORE may rely on, and core only ever loads `rollGenome` and `drawBird`. Nothing outside the bundle touches this.
+⚠ `PARTS.foot` is a **stroke** path (`M0 0 v16 m-8 0 h16`) and renders nothing on its own. Copy the wrapper `drawBird`'s `feetSvg` already puts around it — a `<g>` carrying `stroke`, `stroke-width="4"`, `stroke-linecap="round"` and `fill="none"` — or the legs will be invisible.
 
-**The waddle.** The movement detector you just added in Step 5 of Task 6 already knows when the user is walking, so reuse it rather than adding a second one. When a fix arrives more than a few metres from the last, add a class to the marker and set a timer to remove it after a couple of seconds of stillness:
+In `bundles/ramble/server/bird-svg.cjs` add **two** exports beside their `drawEgg` / `mountBird` counterparts:
+
+- `drawWalkingEgg(seed)` — the same egg with two feet beneath it. `drawEgg`'s path bottoms at y=144 and a foot is 16 tall, so the art now needs a `0 0 120 168` viewBox.
+- `mountWalkingEgg(el, seed)` — sets that viewBox and writes the markup, exactly as `mountBird` does for a bird.
+
+**Why two, and why the second one matters.** The panel client is held to exactly two markup sinks, and a test also pins the literal text of one of them: `assert.ok(code.includes("el.innerHTML = Bird.drawEgg("))`. Adding a flag to `drawEggSeed` keeps the sink COUNT at two but changes that literal and breaks the assertion — this was measured during review by applying the edit to a copy of the file. Routing through `mountWalkingEgg` puts the write inside the engine instead, so `static/ramble.js` keeps both its count and its literal untouched. `drawWalkingEggSeed(el, seed)` in the client is then a two-line wrapper that calls `Bird.mountWalkingEgg` and adds no sink at all.
+
+Use the walking egg only for the location marker. The egg screen and the nest pins keep the plain `drawEgg` — those are eggs you are looking at, not eggs that are you.
+
+Add three lines to `tests/ramble-bird-svg.test.js` matching what every other export there already has: that `drawWalkingEgg(5) === drawWalkingEgg(5)` is deterministic, that it differs from `drawEgg(5)`, and that it throws on a negative seed.
+
+⚠ These are NEW exports on the bundle's engine. That is fine, and it was verified: the no-new-export rule from the profile-avatar work constrains what CORE may rely on, and core duck-types only `rollGenome` and `drawBird` (`servers/sharing/profile-avatar.js:56`); the dashboard's notification code uses only those two as well. No test asserts the engine's export surface is exhaustive.
+
+**The waddle needs its OWN state.** Do NOT reuse C1's `lastPostedFix`: that only advances when a post fires, every 75 m, so standing still 40 m from the last post point makes every incoming fix read as "moved 40 m" and the egg waddles permanently while stationary. The two detectors need different anchors and different thresholds — the post is a 75 m ratchet, the waddle is a per-fix comparison.
+
+Add `var lastWalkFix = null;` and `var walkStopTimer = null;` beside the other fix state, and capture the comparison **before** `lastFix` is overwritten at the top of the `watchPosition` callback, since that assignment destroys the previous fix:
+
+```js
+      /* Captured BEFORE lastFix is reassigned. 10 m clears typical
+       * high-accuracy GPS jitter (3-15 m) so a stationary user does not
+       * waddle on the spot; C1's post is a separate 75 m ratchet. */
+      var moved = lastWalkFix ? haversineMeters(lastWalkFix, { lat: pos.coords.latitude, lon: pos.coords.longitude }) : Infinity;
+      if (moved > 10) {
+        lastWalkFix = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+        markWalking();
+      }
+```
+
+Then the class toggle itself:
 
 ```js
   /* Shared with the area-post trigger: one notion of "moving" for both. */
@@ -1835,12 +1877,13 @@ Operator request, and it follows from the premise: you are not carrying an egg, 
   }
 ```
 
-with `var walkStopTimer = null;` beside the other marker state, and a call to `markWalking()` in the `watchPosition` callback whenever the fix moved at all — a lower threshold than the 75 m post, since a waddle should start as soon as you set off.
+One cosmetic wrinkle worth knowing rather than fixing: a 75 m post chains through to `paintHereArt`, whose `setIcon` rebuilds the icon element and drops the class. The next fix re-adds it, so the waddle blinks once every 75 m. Not worth guarding.
 
 Assertions for the served script:
 
 ```js
   assert.ok(body.includes("function markWalking()"));
+  assert.ok(body.includes('setAttribute("role", "button")'), "the marker keeps the accessible role the retired button had");
   assert.ok(body.includes('classList.add("is-walking")'), "the marker waddles while you move");
 ```
 
@@ -2153,3 +2196,17 @@ Also folded from round 2's suggestions: `annotateMarks` was still doing the unbo
 Also folded: the File structure's signatures were still pre-round-1; the unlock flash used the `rb-here` pane and would have painted over the pet marker, now the `rb-fog` pane inside the non-clearing layer; the `.rb-say` radius change is scoped at the point it is first written rather than corrected two steps later; `alt` is inert on a divIcon; the reduced-motion block is named rather than left ambiguous; and two rulings are now explicit — that a fix unlocks only the one cell containing it, and that keeping seed-harvest state in the ledger rather than on the cell row is a deliberate deviation from spec §6.2 in favour of §6.1.
 
 **Added by the operator during this revision:** the marker's egg gets legs and both egg and bird waddle while you walk, following from the reframing that you ARE the egg rather than its keeper. It reuses the engine's existing foot shape and the movement detector C1 introduced, so one hook serves both the unlock trigger and the animation.
+
+### Scoped verification — 2026-09-08, opus, after round 3
+
+**Verdict: NOT READY, by three mechanical edits — all of them inside work added DURING the round-3 revision and therefore never reviewed.** Round 3's three fixes and all of its folded suggestions verified REAL against source, and the reviewer ran the affected suite green at base (54/54). No fourth full round was warranted.
+
+The three, all in Task 7's walking-egg work:
+
+- **The two movement detectors did not cohere, and the plan's own claim that "one hook serves both" was false.** C1's `lastPostedFix` only advances when a post fires, every 75 m, so a shared anchor means every fix taken while standing 40 m from the last post point reads as "moved 40 m" — the egg would waddle permanently while stationary. The plan also contradicted itself on the threshold, and "whenever the fix moved at all" is inside typical GPS jitter, which is the same permanent waddle by another route. Fixed with its own anchor, its own 10 m threshold, and the comparison captured before `lastFix` is overwritten. The false framing is removed from the plan and from round 3's note.
+- **The walking egg's render route broke an unnamed existing assertion** — the exact failure rounds 2 and 3 each condemned. A test pins the literal text `el.innerHTML = Bird.drawEgg(`, and adding a flag to `drawEggSeed` keeps the sink count at two while changing that literal. The reviewer measured it by applying the edit to a copy. Fixed by adding `mountWalkingEgg` to the engine so the write lives outside the counted file, which preserves both the count and the literal; the client wrapper adds no sink. The plan also now supplies the stroke wrapper the foot path needs, without which the legs render as nothing, and a unit test for the new export matching what every other engine export already has.
+- **C1's guard assertion was near-vacuous.** `body.includes("lastPostedFix")` passes on a variable that is declared and never used — for the load-bearing defect of three rounds. Replaced with assertions on the distance comparison and the anchor advance.
+
+Also fixed: an assertion for `function hereIcon()` that could never pass against the implemented `hereIcon(art)`, and an accessibility regression where the retired perch button's state-aware label was not carried onto the marker.
+
+**Cleared by this pass, with evidence:** the new engine exports are safe (core duck-types only `rollGenome` and `drawBird`, and no test asserts the export surface is exhaustive); Leaflet's divIcon genuinely accepts an Element and appends rather than assigns; the default white div-icon background never applies because Leaflet replaces the class; the waddle animates the SVG child rather than the icon div, matching the file's own rule; `hereDot` has no consumers outside `paintHere`; and the `0 0 120 168` viewBox is right for a 144-tall egg plus a 16-tall foot.
