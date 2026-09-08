@@ -192,6 +192,21 @@ test("the panel handler renders a 400 inside the dashboard layout, not as a bare
   } finally { cleanup(); }
 });
 
+test("the panel handler renders a rejected CONTACT edit's 400 with a Back link to the contact's own page, not My Profile (fix round, item 5)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    const id = Number((await db.execute("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:ed', 'Ed', '', '')")).lastInsertRowid);
+    const { default: panel } = await import("../servers/gateway/dashboard/panels/contacts.js");
+    const res = { code: 200, body: null, status(c) { this.code = c; return this; }, send(b) { this.body = b; return this; }, redirectAfterPost() { throw new Error("unexpected redirect"); } };
+    await panel.handler({ method: "POST", body: { action: "edit_contact", contact_id: String(id), avatar_url: "javascript:alert(1)" }, query: {} }, res, {
+      db, lang: "en", layout: ({ title, content }) => "<html><title>" + title + "</title>" + content + "</html>",
+    });
+    assert.equal(res.code, 400);
+    assert.ok(res.body.includes(`href="/dashboard/contacts?view=contact&amp;contact=${id}"`), "back to the contact, not the profile");
+    assert.ok(!res.body.includes('href="/dashboard/contacts?view=profile"'));
+  } finally { cleanup(); }
+});
+
 test("save_profile with avatar_source=bird renders the active bird into the picture and broadcasts; with no bird the source falls back to picture", async () => {
   const { db, cleanup } = freshDb();
   try {

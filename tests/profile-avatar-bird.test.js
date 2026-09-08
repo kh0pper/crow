@@ -22,6 +22,7 @@ import {
 import { validateAvatar, AVATAR_MAX_BYTES } from "../servers/sharing/avatar.js";
 import { setSettingsSyncManager } from "../servers/gateway/dashboard/settings/registry.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
+import { PROFILE_BROADCAST_PENDING_KEY, readBroadcastPending } from "../servers/sharing/peer-profile.js";
 
 const REPO_ENGINE = join(import.meta.dirname, "..", "bundles", "ramble", "server", "bird-svg.cjs");
 
@@ -135,6 +136,36 @@ test("refreshBirdAvatar: no-op for source picture; falls back to picture with no
     assert.equal(sent.length, 2);
 
     assert.equal((await refreshBirdAvatar({ execute: async () => { throw new Error("boom"); } }, managers)).changed, false, "never throws");
+  } finally { cleanup(); }
+});
+
+test("refreshBirdAvatar: source picture with a pending fan-out re-sends and clears the flag; with nothing pending it stays a true no-op (fix round, item 3)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    const sent = [];
+    const managers = mgrsWith(db, sent);
+
+    // Nothing has armed the flag on a fresh db — source-picture stays a pure no-op.
+    assert.equal(await readBroadcastPending(db), false, "fresh db: nothing pending");
+    assert.deepEqual(await refreshBirdAvatar(db, managers), { changed: false, reason: "source-picture" });
+    assert.equal(sent.length, 0, "no resend when nothing was pending");
+
+    // Arm the flag the same way a save made offline would: a picture-source
+    // profile is not currently reflected, but the pending flag has no other
+    // consumer besides the profile save handler, so plant it directly.
+    await putSetting(db, PROFILE_BROADCAST_PENDING_KEY, "1");
+    assert.equal(await readBroadcastPending(db), true);
+
+    const r = await refreshBirdAvatar(db, managers);
+    assert.deepEqual(r, { changed: false, reason: "resend", sent: { sent: 1, failed: 0, skipped: 0 } }, "the picture source self-heals a stranded fan-out too");
+    assert.equal(sent.length, 1);
+    assert.equal(await readBroadcastPending(db), false, "the resend cleared the flag");
+
+    // A second refresh with nothing pending is quiet again.
+    const r2 = await refreshBirdAvatar(db, managers);
+    assert.deepEqual(r2, { changed: false, reason: "source-picture" });
+    assert.equal(sent.length, 1, "no extra resend once the flag is clear");
   } finally { cleanup(); }
 });
 
