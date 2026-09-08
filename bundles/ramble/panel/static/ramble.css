@@ -847,6 +847,10 @@
 #ramble .rb-here-pet.is-walking > * { animation: rb-waddle .7s ease-in-out infinite; transform-origin: 50% 90%; }
 #ramble .rb-here-pet .rb-here-bird { width: 46px; height: 46px; filter: drop-shadow(2px 3px 0 var(--rb-shadow-col)); }
 #ramble .rb-here-pet .rb-here-egg { width: 30px; height: 38px; filter: drop-shadow(2px 3px 0 var(--rb-shadow-col)); }
+/* Bird engine failed to load: hereArt() returns null and hereIcon falls back
+   to this className. A pseudo-element, so the .is-walking > * waddle rule
+   above does not match it — a plain dot has no legs to waddle on. */
+#ramble .rb-here-pet.rb-here-plain::before { content: ""; width: 18px; height: 18px; border-radius: 50%; background: var(--rb-accent-2); box-shadow: 0 0 0 3px var(--rb-surface); }
 
 /* --------------------------------------------------------------- map zones */
 /* Unlocked ground is punched out of the mask: a clear map is what walking

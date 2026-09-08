@@ -197,6 +197,10 @@
   function hereIcon(art) {
     var opts = { className: "rb-here-pet", iconSize: [46, 46], iconAnchor: [23, 23] };
     if (art) opts.html = art;   /* an Element, never a string */
+    /* No art means the bird engine did not load. Without a fallback the marker
+     * is an empty invisible div and the player loses their own position, which
+     * the retired circleMarker never did. Paint the old plain dot instead. */
+    else opts.className = "rb-here-pet rb-here-plain";
     return L.divIcon(opts);
   }
 
@@ -231,6 +235,16 @@
     if (el) {
       el.setAttribute("role", "button");
       el.setAttribute("aria-label", perchTarget === "pet" ? "Open your bird" : "Open your egg");
+      /* keyboard:true only gives Leaflet's tabIndex + role; its one keypress
+       * handler is popup-only (_onKeyPress -> _openPopup) and hereDot binds no
+       * popup. A role="button" div gets no synthesized click from Enter/Space,
+       * so wire it by hand. Property assignment, not addEventListener: this runs
+       * on every re-skin and must not stack duplicate handlers. */
+      el.onkeydown = function (ev) {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        ev.preventDefault();
+        showView(perchTarget);
+      };
     }
   }
 
@@ -264,6 +278,7 @@
         title: "You",
       }).addTo(hereLayer);
       hereDot.on("click", function () { showView(perchTarget); });
+      paintHereArt();
     } else {
       hereRing.setLatLng(ll);
       hereRing.setRadius(r);
