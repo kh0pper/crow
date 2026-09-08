@@ -37,17 +37,27 @@ export function birdEngineCandidates() {
 }
 
 let _engine; // undefined = not tried yet; null = unavailable
-export function loadBirdEngine({ candidates = birdEngineCandidates(), fresh = false } = {}) {
-  if (_engine !== undefined && !fresh) return _engine;
-  _engine = null;
-  for (const p of candidates) {
+export function loadBirdEngine({ candidates, fresh = false } = {}) {
+  // Fix round 1, Finding 4: a probe called with EXPLICIT candidates (a test
+  // deliberately pointing at a nonexistent path) must never write the
+  // module-level cache — only a call using the real default candidate list
+  // is allowed to warm or poison it. Before this fix, a failing explicit
+  // probe left `_engine` null for every later DEFAULT caller (e.g. a bare
+  // `renderBirdAvatar(bird)`), so a bird would silently stop rendering until
+  // something happened to re-warm the cache.
+  const usingDefaults = candidates === undefined;
+  if (usingDefaults && _engine !== undefined && !fresh) return _engine;
+  const list = usingDefaults ? birdEngineCandidates() : candidates;
+  let found = null;
+  for (const p of list) {
     try {
       if (!existsSync(p)) continue;
       const mod = require(p);
-      if (typeof mod?.rollGenome === "function" && typeof mod?.drawBird === "function") { _engine = mod; break; }
+      if (typeof mod?.rollGenome === "function" && typeof mod?.drawBird === "function") { found = mod; break; }
     } catch { /* try the next candidate */ }
   }
-  return _engine;
+  if (usingDefaults) _engine = found;
+  return found;
 }
 
 /** The active, hatched bird, or null (no Ramble tables, no pet, nothing hatched). Never throws. */
@@ -94,22 +104,23 @@ async function readProfilePictureSettings(db) {
 
 /**
  * Bird -> picture refresh. Source `picture`: nothing. Source `bird` with no
- * bird (Ramble gone, nothing hatched, no engine): the source falls back to
- * `picture`, the last stored image stays. Otherwise: re-render; if the
- * portrait differs from what is stored, store it and broadcast ONCE; if it is
- * the same but the last fan-out was incomplete (pending flag), re-send.
- * Never throws.
+ * bird (Ramble gone, nothing hatched, no engine): a no-op — the last stored
+ * image stays AND `profile_avatar_source` is left untouched (Fix round 1,
+ * Finding 1, CRITICAL: `profile_avatar_source` is a REPLICATED setting, and
+ * this refresh runs unconditionally at boot on every instance, including a
+ * Ramble-less or not-yet-hatched one — an unconditional write here would
+ * revert the user's bird choice fleet-wide on every such boot. The
+ * fallback-to-picture write belongs to the user-present save path, which is
+ * unaffected by this change). Otherwise: re-render; if the portrait differs
+ * from what is stored, store it and broadcast ONCE; if it is the same but
+ * the last fan-out was incomplete (pending flag), re-send. Never throws.
  */
 export async function refreshBirdAvatar(db, managers) {
   try {
     const { avatar, source } = await readProfilePictureSettings(db);
     if (source !== "bird") return { changed: false, reason: "source-picture" };
     const uri = await renderActiveBirdAvatar(db);
-    if (!uri) {
-      await upsertSetting(db, "profile_avatar_source", "picture");
-      await deleteLocalSetting(db, "profile_avatar_source");
-      return { changed: true, reason: "no-bird" };
-    }
+    if (!uri) return { changed: false, reason: "no-bird" };
     if (uri === avatar) {
       // R2-S3: the picture is right, but did the last fan-out reach everyone?
       if (!(await readBroadcastPending(db))) return { changed: false, reason: "same" };
@@ -117,7 +128,13 @@ export async function refreshBirdAvatar(db, managers) {
       return { changed: false, reason: "resend", sent };
     }
     await upsertSetting(db, "profile_avatar_url", uri);
-    await deleteLocalSetting(db, "profile_avatar_url");
+    // Fix round 1, Finding 3: a stale local override for this key is
+    // cosmetic; losing the broadcast between "picture stored" and "fan-out
+    // sent" is not. deleteLocalSetting touches the filesystem (instance id)
+    // and can hit a busy database — never let that skip the broadcast below.
+    try { await deleteLocalSetting(db, "profile_avatar_url"); } catch (err) {
+      try { console.warn("[sharing] bird avatar: deleteLocalSetting(profile_avatar_url) failed (non-fatal):", err?.message); } catch {}
+    }
     const sent = await broadcastProfile(db, managers?.nostrManager);
     return { changed: true, reason: "rendered", sent };
   } catch (err) {
@@ -131,7 +148,16 @@ let _hooksInstalled = false;
 export function installBirdAvatarHooks(managers, { emitter = bus } = {}) {
   if (_hooksInstalled) return false;
   _hooksInstalled = true;
-  const run = () => { refreshBirdAvatar(managers?.db, managers).catch(() => {}); };
+  // Fix round 1, Finding 2: two triggers landing in the same tick (two
+  // transports each emitting a hatch, an activation racing the boot
+  // repaint) must not both read the pre-write picture and both broadcast —
+  // and must not let one run's success clear the pending flag while
+  // another's fan-out is still failing. A promise chain serializes: the
+  // second refreshBirdAvatar call does not start until the first's full
+  // read-render-write-broadcast has finished, so it re-reads the
+  // already-updated picture and takes the no-op/resend branch instead.
+  let inflight = Promise.resolve();
+  const run = () => { inflight = inflight.then(() => refreshBirdAvatar(managers?.db, managers)).catch(() => {}); };
   emitter.on("ramble:hatched", run);
   emitter.on("ramble:bird-activated", run);
   // R1-Q2: the bird may have changed while this gateway was down (or in the
@@ -139,4 +165,4 @@ export function installBirdAvatarHooks(managers, { emitter = bus } = {}) {
   run();
   return true;
 }
-export function __resetBirdAvatarHooksForTest() { _hooksInstalled = false; }
+export function __resetBirdAvatarHooksForTest() { _hooksInstalled = false; _engine = undefined; }

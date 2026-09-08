@@ -730,13 +730,18 @@ export async function initSharingRuntime(managers, helpers) {
   // (same runtime-guard shape as shared_items.mode above). Guarded inside.
   await ensurePeerProfileColumns(db);
 
-  // 2026-09-08 §5: with the bird as profile picture, a hatch or an activation
-  // (bus events from the Ramble routes / transport) repaints and re-sends it.
-  installBirdAvatarHooks(managers);
-
   // R8: the Nostr receive path must never depend on Hyperswarm coming up.
   // Fire-and-forget (never rejects); failures are health-visible + retried.
   startNostrReceive(managers);
+
+  // 2026-09-08 §5: with the bird as profile picture, a hatch or an activation
+  // (bus events from the Ramble routes / transport) repaints and re-sends it.
+  // Fix round 1, Finding 5: ordered AFTER startNostrReceive so the initial
+  // repaint's broadcast attempt has the best chance of a live relay set
+  // (managers.nostrManager itself is constructed synchronously before this
+  // function runs — verified sendControl/connectRelays do not depend on
+  // wireNostrReceive having completed — so this reorder loses nothing).
+  installBirdAvatarHooks(managers);
 
   // Start peer manager and join DHT topics for existing contacts
   peerManager.start().then(async () => {
