@@ -102,3 +102,52 @@ export function classifyBbox(bbox, unlocked, { depth = FRONTIER_DEPTH_DEFAULT, m
   }
   return out;
 }
+
+/**
+ * Fog the PUBLIC overlay (spec 2026-09-08 §2.1, D4, D5).
+ *
+ * Only a stranger's PUBLIC mark is gated, and public means `visibility ===
+ * "public"` — not `origin`, which is "remote" for a contact's mark too. The
+ * user's own rows (origin local or sync) and anything delivered by a contact
+ * or a group (visibility "contacts") pass through whole in every zone:
+ * contacts are geographically spread, and making a friend's mark depend on
+ * visiting their neighbourhood would be absurd.
+ *
+ * A frontier row is rebuilt from scratch rather than deleted from, so a field
+ * added upstream later cannot silently start leaking through a beacon.
+ */
+const BEACON_KINDS = new Set(["mark", "caw", "nest"]);
+
+export function gateForZones(rows, { unlocked, depth = FRONTIER_DEPTH_DEFAULT, encode } = {}) {
+  if (!Array.isArray(rows) || typeof encode !== "function") return [];
+  const set = unlocked instanceof Set ? unlocked : new Set(unlocked || []);
+  const out = [];
+  for (const row of rows) {
+    // ⚠ `origin` does NOT separate public from contact content: a
+    // contact-delivered mark is also origin "remote" (delivery.js:136,144).
+    // Only `visibility` does. `contact_name` is not a safe fallback either —
+    // it comes from contactsByPubkey, which filters to unblocked FULL
+    // contacts, so a pending, blocked or deleted contact's mark would be
+    // misread as public and fogged off the user's own map (against D4).
+    const isPublic = row && row.origin === "remote" && row.visibility === "public";
+    if (!isPublic) { if (row) out.push(row); continue; }
+
+    const lat = Number(row.lat ?? row.approx_lat);
+    const lon = Number(row.lon ?? row.approx_lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+    let cell;
+    try { cell = encode(lat, lon, 7); } catch { continue; }
+    const zone = classifyCell(cell, set, depth);
+    if (zone === "unlocked") { out.push(row); continue; }
+    if (zone !== "frontier") continue;
+
+    out.push({
+      beacon: true,
+      kind: BEACON_KINDS.has(row.kind) ? row.kind : "mark",
+      lat,
+      lon,
+    });
+  }
+  return out;
+}
