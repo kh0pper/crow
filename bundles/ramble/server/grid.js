@@ -35,7 +35,7 @@ export function sanitizeWorldName(value) {
   if (typeof value !== "string") return null;
   let s = value
     .replace(/[\x00-\x1F\x7F\x80-\x9F]/g, "")
-    .replace(/[‪-‮⁦-⁩]/g, "")
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
     .replace(/·/g, " "); // the label's own separator: "Kev · f665" could fake a key tail
   s = s.replace(/\s+/g, " ").trim();
   if (/^(crow|req):/i.test(s)) return null;
