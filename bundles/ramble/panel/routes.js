@@ -767,7 +767,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     const pet = await mods.petMod.petState(db, { now });
     const bird = await mods.eggsMod.activeBird(db);
     const egg = await mods.eggsMod.eggState(db, { now });
-    res.json({ ...pet, bird, egg: { percent: egg.egg.percent } });
+    res.json({ ...pet, bird, egg: { percent: egg.egg.percent }, seed: await mods.walletMod.seedBalance(db) });
   }));
 
   router.post("/api/ramble/pet/chore", handle(async (req, res) => {

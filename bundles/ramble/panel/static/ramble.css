@@ -571,7 +571,9 @@
   #ramble .rb-bob,
   #ramble .rb-sheet-panel,
   #ramble .rb-hatch .rb-eggart,
-  #ramble .rb-hatch .rb-hatch-bird { animation: none; }
+  #ramble .rb-hatch .rb-hatch-bird,
+  #ramble .rb-unlock-flash,
+  #ramble .rb-here-pet.is-walking > * { animation: none; }
   #ramble .rb-btn,
   #ramble .rb-ring-prg,
   #ramble .rb-meter-bar i { transition: none; }
@@ -860,6 +862,21 @@
 #ramble .rb-frontier-cell { fill: var(--rb-line); fill-opacity: 0.3; }
 #ramble .rb-beacon { stroke: var(--rb-line); fill: var(--rb-accent-2); opacity: 0.7; }
 #ramble .rb-beacon-nest { fill: var(--rb-accent); }
+
+/* ------------------------------------------------------- the unlock moment */
+@keyframes rb-unlock {
+  0% { fill-opacity: 0; }
+  35% { fill-opacity: 0.75; }
+  100% { fill-opacity: 0; }
+}
+#ramble .rb-unlock-flash { fill: var(--rb-accent-2); animation: rb-unlock .9s ease-out; }
+#ramble .rb-seed {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 11px; border-radius: 999px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  background: var(--rb-surface); color: var(--rb-text);
+  font: 800 13px var(--rb-font-display);
+}
 
 /* ---------------------------------------------- phase 5: near labels + art */
 

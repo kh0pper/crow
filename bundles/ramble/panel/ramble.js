@@ -123,6 +123,7 @@ export default {
               <button class="rb-chip is-on" id="rb-chip-around" type="button" aria-pressed="true">${icon("target")}<span>Around you</span></button>
               <button class="rb-chip" id="rb-chip-visible" type="button" aria-haspopup="dialog">${icon("eye")}<span id="rb-chip-visible-label">Visible: off</span></button>
               <button class="rb-chip" id="rb-chip-ar" type="button" aria-haspopup="dialog">${icon("ar")}<span>Look around</span></button>
+              <span class="rb-seed" title="Bird seed"><strong id="rb-seed-count">0</strong><span>seed</span></span>
             </div>
 
             <div class="rb-perch">

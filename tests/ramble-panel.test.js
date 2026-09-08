@@ -271,6 +271,8 @@ test("panel handler renders the world-first shell, its three views and every ass
   // corner button is retired, but its status strip stays.
   assert.ok(!sent.includes('id="rb-perch-open"'), "the corner perch button is retired");
   assert.ok(sent.includes('id="rb-perch-say"'), "the status strip stays");
+
+  assert.ok(sent.includes('id="rb-seed-count"'), "the map bar carries the seed counter");
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -762,6 +764,12 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // 400 on every settle and leave stale rectangles pinned to ground you left.
   assert.ok(body.includes("MIN_ZONE_ZOOM"), "zones are not fetched below a zoom floor");
 
+  // Task 8: the unlock moment and the seed counter.
+  assert.ok(body.includes("function celebrateUnlock("), "a first unlock is celebrated once");
+  assert.ok(body.includes("rb-unlock-flash"), "the flash is a rectangle in the fog pane, not an inset shadow the tiles would hide");
+  assert.ok(body.includes("function paintSeed("), "the seed counter is painted from the area response");
+  assert.ok(body.includes("out.unlocked"), "the celebration is driven by the server saying it was the first time");
+
   // Pin the MECHANISM, not the identifier: this is the phase's load-bearing
   // guard, and `includes("lastPostedFix")` would pass on a variable that is
   // declared and never used.
@@ -838,6 +846,9 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.ok(body.includes("@keyframes rb-waddle"));
   assert.ok(body.includes("#ramble .rb-here-pet.is-walking"));
   assert.ok(body.includes("#ramble .rb-here-pet.rb-here-plain::before {"), "the engine-less fallback dot has a rule");
+
+  assert.ok(body.includes("@keyframes rb-unlock"), "the unlock has an animation");
+  assert.ok(body.includes("#ramble .rb-seed {"), "the seed counter has a rule");
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {
