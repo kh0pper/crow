@@ -248,7 +248,8 @@
   color: var(--rb-text);
   background: var(--rb-surface);
 }
-#ramble select {
+#ramble select,
+#ramble .rb-sheet input[type="text"] {
   min-height: var(--rb-tap);
   padding: 0 12px;
   border: var(--rb-line-w) solid var(--rb-line);
@@ -257,6 +258,7 @@
   color: var(--rb-text);
   font: 700 15px var(--rb-font-body);
 }
+#ramble .rb-sheet input[type="text"] { flex: 1; min-width: 0; }
 #ramble svg.rb-i { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
 
 /* -------------------------------------------------------------------- map */

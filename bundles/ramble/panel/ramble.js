@@ -360,6 +360,11 @@ export default {
                 <option value="real">real</option>
               </select>
             </div>
+            <div class="rb-row">
+              <label class="rb-label" for="rb-world-name">World name</label>
+              <input id="rb-world-name" type="text" maxlength="24" autocomplete="nickname" placeholder="how strangers see you">
+            </div>
+            <p class="rb-muted rb-fine">Strangers see your world name on your marks when Name is pseudonym or real, next to a short key so two people with one name stay apart. Contacts always see your Crow name.</p>
             <p class="rb-muted rb-fine" id="rb-grid-status"></p>
           </div>
         </div>
