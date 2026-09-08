@@ -51,6 +51,7 @@ export async function initRambleTables(db) {
 
   await ensureColumn(db, "ramble_marks", "bird_species", "TEXT");
   await ensureColumn(db, "ramble_marks", "bird_seed", "INTEGER");
+  await ensureColumn(db, "ramble_marks", "author_name", "TEXT");
 
   await initTable(db, "ramble_pet", `
     CREATE TABLE IF NOT EXISTS ramble_pet (
