@@ -14,7 +14,7 @@
 
 - **DB access** through the bundle's `createDbClient()` / `appImport("servers/db.js")` only; async libsql-shaped client. Test files may use `@libsql/client` in-memory; bundle server files never import it.
 - **No `SCHEMA_GENERATION` bump; no new table.** The one new column is `ramble_marks.author_name TEXT` via `ensureColumn` in `bundles/ramble/server/init-tables.js`. `ramble_marks` is already replicated: the column joins `RAMBLE_MARK_WIRE_COLUMNS` in `servers/sharing/instance-sync.js` (and therefore `RAMBLE_MARK_UPDATE_COLUMNS`); the apply door is tested with the column. The setting `world.name` is a plain `ramble_settings` row (not `local.`-prefixed → replicates; `EXCLUDED_COLUMNS.ramble_settings` unchanged).
-- **World name rules (spec §2.1, exact):** `sanitizeWorldName(value)`: non-string → `null`; strip C0/DEL/C1 controls and bidi overrides/isolates; collapse whitespace, trim; reject `/^(crow|req):/i` → `null`; cap at `WORLD_NAME_MAX = 24` code points (truncate); reject a value that is only hex of 4+ chars `/^[0-9a-f]{4,}$/i` → `null`; empty → `null`. Applied on save AND on every read from the wire.
+- **World name rules (spec §2.1, exact):** `sanitizeWorldName(value)`: non-string → `null`; strip C0/DEL/C1 controls and bidi overrides/isolates; collapse whitespace, trim; reject `/^(crow|req):/i` → `null`; cap at `WORLD_NAME_MAX = 24` code points (truncate); reject a value that is only hex of 4+ chars `/^[0-9a-f]{4,}$/i` → `null`; empty → `null`. Applied on save AND on every read from the wire, and again at the store (`insertRemoteMark`) as defense in depth; instance sync carries the column trusted (same-owner instances; own rows never carry a name, so a synced `author_name` is never displayed).
 - **Wire (spec §2.2, exact):** `markToEvent(row, { precision, crowId, bird, name })` adds `content.name` only when `sanitizeWorldName(name)` is non-null; the TRANSPORT passes `name` only when `(row.author_level ?? level) ∈ { pseudonym, real }` (`level` = the instance's `public_identity_level`), so a `rotating` row never carries one (D1; note: at `rotating` only CAWS rotate their key — marks already use the stable world key — the decision stands: the level decides). `eventToMark` sets `author_name: sanitizeWorldName(content.name)`. Contacts/group marks (`markPayload` / `payloadToMark`) never carry or read a name.
 - **Labels (spec §3.1, exact, in this order):** own (`origin` ∈ `local`, `sync`) → `your mark` / `your caw`; contact (`contact_name`) → `mark by <contact name>`; stranger with `author_name` → `mark by <author_name> · <key4>`; else → `mark by <key8>`. `key4`/`key8` = the first 4/8 characters of `author`, `anon` when missing. AR caw title: `Your caw` / `A caw from <contact name>` / `A caw from <author_name> · <key4>` / `A caw`.
 - **Teasers:** `reveal.js`'s allowlist gains `author_name` (a locked stranger's mark still shows who left it, as `author` already does).
@@ -73,6 +73,7 @@ test("sanitizeWorldName: controls and bidi stripped, whitespace collapsed, crow:
   assert.equal(sanitizeWorldName("f665c26b"), null, "a key look-alike");
   assert.equal(sanitizeWorldName("DEADBEEF1234"), null);
   assert.equal(sanitizeWorldName("Kev1"), "Kev1", "hex-ish but not all hex");
+  assert.equal(sanitizeWorldName("Kev · f665"), "Kev f665", "the label separator cannot be faked");
   assert.equal(sanitizeWorldName("abc"), "abc", "3 hex chars is a word, not a tail");
   assert.equal(sanitizeWorldName("x".repeat(40)), "x".repeat(24));
   assert.equal(sanitizeWorldName("🐦".repeat(30)), "🐦".repeat(24), "code points, not UTF-16 units");
@@ -120,7 +121,8 @@ export function sanitizeWorldName(value) {
   if (typeof value !== "string") return null;
   let s = value
     .replace(/[\x00-\x1F\x7F\x80-\x9F]/g, "")
-    .replace(/[‪-‮⁦-⁩]/g, "");
+    .replace(/[‪-‮⁦-⁩]/g, "")
+    .replace(/·/g, " "); // the label's own separator: "Kev · f665" could fake a key tail
   s = s.replace(/\s+/g, " ").trim();
   if (/^(crow|req):/i.test(s)) return null;
   const points = Array.from(s);
@@ -173,7 +175,7 @@ test("world name: rides in content only when given and clean; eventToMark reads 
   assert.equal(JSON.parse(markToEvent(row, { name: "f665c26b" }).content).name, undefined, "a key look-alike is dropped");
   assert.equal(JSON.parse(markToEvent(row, { name: "crow:x" }).content).name, undefined);
   const ev = { id: "e".repeat(64), pubkey: "a".repeat(64), kind: MARK_KIND, created_at: 1, tags: [["g", "9v6m2"], ["d", "m1"]], content: JSON.stringify({ v: 1, text: "hi", name: "  Bad Name " }) };
-  assert.equal(eventToMark(ev).author_name, "BadName");
+  assert.equal(eventToMark(ev).author_name, "Bad Name", "collapsed, not squeezed");
   ev.content = JSON.stringify({ v: 1, text: "hi", name: "deadbeef" });
   assert.equal(eventToMark(ev).author_name, null);
   ev.content = JSON.stringify({ v: 1, text: "hi" });
@@ -192,17 +194,17 @@ test("insertRemoteMark stores author_name and a locked teaser keeps it", async (
   const result = await insertRemoteMark(db, {
     mark_id: "named-remote-1", author: "pk9", kind: "mark", anchor_kind: "geo", geohash: "9v6m2c",
     lat: 30.2672, lon: -97.7431, visibility: "public", reveal: "locked", content_text: "named",
-    created_at: Date.now(), nostr_event_id: "ev-named-1", author_name: "Kevin",
+    created_at: Date.now(), nostr_event_id: "ev-named-1", author_name: "  Kevin‮ ",
   });
   assert.equal(result.inserted, true);
-  assert.equal(result.row.author_name, "Kevin");
+  assert.equal(result.row.author_name, "Kevin", "sanitized at the store too");
   const listed = (await listMarks(db, { visibility: "public" })).find((r) => r.mark_id === "named-remote-1");
   assert.equal(listed.author_name, "Kevin", "the teaser allowlist carries the name");
   assert.equal(listed.content_text, undefined, "still a teaser");
 });
 ```
 
-`tests/ramble-sync.test.js` — append (`b` is the file's peer db; `applyRemoteOp` is imported):
+`tests/ramble-sync.test.js` — append (`b` is the file's peer db; `applyRemoteOp` is imported). Only the apply door is tested: own rows never carry a name, so an outbox-door assertion would be vacuous (Review ruling R1-3).
 
 ```js
 test("author_name rides the apply door (wire column) and is updatable by LWW", async () => {
@@ -244,7 +246,19 @@ test("world name rides only pseudonym/real rows: a rotating row never carries it
 (`makeHarness`, `seedPublicMark(db, text, extra)` — `extra` spreads over `author_level` — `setMaster`, `setCell`, `h.published`, `h.transport.drainOnce()` are the file's existing fixtures; the harness's default gate is the real `makePublishGate`, hence the master + public/geo cell.)
 ```
 
-- [ ] **Step 2: Run** the four files → the new tests FAIL.
+`tests/ramble-delivery.test.js` — append (reuse the `row` and `PK` fixtures of its `markPayload`/`payloadToMark` bird test; import nothing new):
+
+```js
+test("contacts marks never carry a world name in either direction", () => {
+  const payload = markPayload({ ...row, author_name: "Kevin" });
+  assert.equal(payload.author_name, undefined);
+  assert.equal(payload.name, undefined);
+  const back = payloadToMark({ ...payload, author_name: "Kevin", name: "Kevin" }, { author: PK, eventId: "evt-n" });
+  assert.equal(back.author_name, undefined, "a contact is named from the contacts table, never from the payload");
+});
+```
+
+- [ ] **Step 2: Run** the five files → the new tests FAIL.
 
 - [ ] **Step 3: Implement**
 
@@ -260,13 +274,21 @@ test("world name rides only pseudonym/real rows: a rotating row never carries it
 
 In `eventToMark`'s returned object add `author_name: sanitizeWorldName(content.name),` after `bird_seed`.
 
-`bundles/ramble/server/marks.js` `insertRemoteMark`: add `author_name` as the last INSERT column with `row.author_name ?? null` as the last arg (the VALUES list gains one `?`). Nothing for `createMark` (own rows carry no name; their label is "your mark").
+`bundles/ramble/server/marks.js`: `import { sanitizeWorldName } from "./grid.js";` (grid.js imports nothing from marks.js — no cycle). `insertRemoteMark`: add `author_name` as the last INSERT column with `sanitizeWorldName(row.author_name)` as the last arg (the VALUES list gains one `?`); if the function builds `result.row` from its own args rather than a re-read, use the same sanitized value there. Nothing for `createMark` (own rows carry no name; their label is "your mark").
 
 `bundles/ramble/server/reveal.js`: add `"author_name"` to `allowed` after `"bird_seed"`.
 
 `servers/sharing/instance-sync.js`: append `"author_name",` to `RAMBLE_MARK_WIRE_COLUMNS` with the comment `// 2026-09-08: the world name a stranger's mark was left under.`
 
-`servers/gateway/boot/ramble-transport.js`: the grid load destructures `{ makePublishGate }` — make it `{ makePublishGate, sanitizeWorldName }`. In `drainMarks`, after `const bird = await activeBird(db);` add `const worldName = sanitizeWorldName(await getSetting("world.name"));` and inside the row loop change the `markToEvent(...)` call to:
+`servers/gateway/boot/ramble-transport.js`: core consumes NO new bundle export (an installed copy older than 0.7.0 must keep draining — the phase-3 guarded-load lesson). In `drainMarks`, after `const bird = await activeBird(db);` add:
+
+```js
+    // Raw on purpose: markToEvent sanitizes (an installed bundle older than
+    // 0.7.0 ignores the option, so a stale copy keeps draining unchanged).
+    const worldName = await getSetting("world.name");
+```
+
+and inside the row loop change the `markToEvent(...)` call to:
 
 ```js
         const rowLevel = row.author_level ?? level;
@@ -274,8 +296,8 @@ In `eventToMark`'s returned object add `author_name: sanitizeWorldName(content.n
         const template = markToEvent(row, { precision: prec, crowId: persona.crowId, bird, name });
 ```
 
-- [ ] **Step 4: Run** `node scripts/run-suite.mjs tests/ramble-nostr-map.test.js tests/ramble-marks.test.js tests/ramble-sync.test.js tests/ramble-transport.test.js` → PASS.
-- [ ] **Step 5: Commit** — `git commit bundles/ramble/server/nostr-map.js bundles/ramble/server/marks.js bundles/ramble/server/reveal.js servers/sharing/instance-sync.js servers/gateway/boot/ramble-transport.js tests/ramble-nostr-map.test.js tests/ramble-marks.test.js tests/ramble-sync.test.js tests/ramble-transport.test.js -m "ramble wire: the world name rides pseudonym/real rows as content.name; author_name stored, teased and synced"`
+- [ ] **Step 4: Run** `node scripts/run-suite.mjs tests/ramble-nostr-map.test.js tests/ramble-marks.test.js tests/ramble-sync.test.js tests/ramble-transport.test.js tests/ramble-delivery.test.js` → PASS.
+- [ ] **Step 5: Commit** — `git commit bundles/ramble/server/nostr-map.js bundles/ramble/server/marks.js bundles/ramble/server/reveal.js servers/sharing/instance-sync.js servers/gateway/boot/ramble-transport.js tests/ramble-nostr-map.test.js tests/ramble-marks.test.js tests/ramble-sync.test.js tests/ramble-transport.test.js tests/ramble-delivery.test.js -m "ramble wire: the world name rides pseudonym/real rows as content.name; author_name stored, teased and synced"`
 
 ---
 
@@ -465,6 +487,11 @@ test("POST /api/ramble/grid stores a sanitized worldName, clears a rejected one,
   assert.equal((await (await req("/api/ramble/grid")).json()).worldName, "Kevin");
   res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "f665c26b" } });
   assert.equal((await res.json()).worldName, null, "a key look-alike clears the name");
+  await req("/api/ramble/grid", { method: "POST", body: { worldName: "Kevin" } });
+  res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "" } });
+  assert.equal((await res.json()).worldName, null, "an empty string clears");
+  res = await req("/api/ramble/grid", { method: "POST", body: { worldName: null, master: true } });
+  assert.equal(res.status, 200, "null means not-sent, not clear");
   res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "x".repeat(129) } });
   assert.equal(res.status, 400);
   res = await req("/api/ramble/grid", { method: "POST", body: { worldName: 7 } });
@@ -506,7 +533,7 @@ Docs — `docs/guide/ramble.md`, in `## Privacy` append a paragraph:
 
 Bump: `sed -i 's/"version": "0.6.0"/"version": "0.7.0"/' bundles/ramble/manifest.json bundles/ramble/package.json && npm run build-registry`.
 
-- [ ] **Step 4: Run** `tests/ramble-panel.test.js` → PASS (parity included). Then the FULL suite in the foreground (`node scripts/run-suite.mjs 2>&1 | tail -12`, expect pass = total, fail 0: 4186 + 8 new = 4194 — tables +0 (an assertion), grid +2, nostr-map +1, marks +1, sync +1, transport +1, labels +2, tools +1, panel +1 = 4196; report the actual), `node scripts/check-port-allocation.js`, `npm run build-registry -- --check`.
+- [ ] **Step 4: Run** `tests/ramble-panel.test.js` → PASS (parity included). Then the FULL suite in the foreground (`node scripts/run-suite.mjs 2>&1 | tail -12`, expect pass = total, fail 0: 4186 + 11 new = 4197 — grid +2, nostr-map +1, marks +1, sync +1, transport +1, delivery +1, labels +2, tools +1, panel +1; report the actual), `node scripts/check-port-allocation.js`, `npm run build-registry -- --check`.
 - [ ] **Step 5: Commit** — `git commit bundles/ramble/panel/ramble.js bundles/ramble/panel/routes.js bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ramble.css docs/guide/ramble.md docs/es/guide/ramble.md bundles/ramble/manifest.json bundles/ramble/package.json registry/add-ons.json tests/ramble-panel.test.js -m "ramble 0.7.0: the World name field; docs en/es; registry"`
 - [ ] **Step 6 (controller):** push, PR, check-runs, merge, CROW-SCHEDULE.md, three-gateway restart (grackle: `refreshed ramble 0.6.0 -> 0.7.0`), Kevin sets a world name and leaves a pseudonym-level mark from grackle; a second instance (crow's transport receives the public event) stores `author_name` — verify with a read-only SELECT on crow's live db.
 
@@ -516,4 +543,15 @@ Bump: `sed -i 's/"version": "0.6.0"/"version": "0.7.0"/' bundles/ramble/manifest
 - Type consistency: `markToEvent`'s `name` option ↔ the transport call; `author_name` on rows ↔ `labelFor`/`markLabel`/`RAMBLE_MARK_WIRE_COLUMNS`/`insertRemoteMark`/teaser; `getGrid().worldName` ↔ the route response ↔ `paintGrid`; `contactsByPubkey` in delivery.js ↔ routes.js and server.js.
 
 ## Review
-Recorded below after each gate (round 1, round 2, scoped check), before execution.
+
+### Round 1 — 2026-09-08, opus, code-traced (implemented the plan verbatim in a scratch mirror; full suite 4196/0 after C1)
+**Verdict: REVISE.** Folded:
+- **C1** nostr-map test expected `"BadName"` for `"  Bad Name "`; the sanitizer collapses whitespace → `"Bad Name"`. Fixed.
+- **C2** the drain destructured a NEW export (`sanitizeWorldName`) from the INSTALLED bundle's grid.js unguarded; booted against the real 0.6.0 copy the whole drain (marks, tombstones, trade expiry, contacts delivery) died with `sanitizeWorldName is not a function`. **Ruling R1-1:** core consumes no new bundle export at all — the transport passes the raw setting and `markToEvent` sanitizes; a stale copy ignores the unknown option. No guard, no stale-bundle test needed for this class (nothing new is imported).
+- **S1** unsanitized ingress at `insertRemoteMark` → sanitize there too (defense in depth; the marks test now feeds a dirty name). **Ruling R1-2:** the instance-sync apply door stays a trusted same-owner path (no bundle import from core); a synced `author_name` lands on a row labelled "your mark" and is never displayed.
+- **S2** both sync doors: **Ruling R1-3:** apply door only; own rows never carry a name, an outbox assertion would be vacuous.
+- **S3** contacts marks: explicit `markPayload`/`payloadToMark` test added (delivery test).
+- **S4** `·` in a name could fake a key tail (`Kevin · f665 · <real4>`): **Ruling R1-4:** the sanitizer replaces U+00B7 with a space (a third Ramble rule beyond the spec's two; recorded here as a spec amendment).
+- **S5** `maxlength="24"` counts UTF-16 units, the sanitizer code points: **Ruling R1-5:** keep 24 — an emoji-heavy name is merely shorter in the field; the server cap is the contract.
+- **S6** suite arithmetic corrected (4186 → 4197 with the delivery test).
+- **Q1** `worldName: null` = not sent; `""` clears (route test pins both). **Q2** the wire column is forward-looking per spec §6 (harmless today). **Q3** D1 stands (marks use the stable key already; the level decides). **Q4** yes, r4 is one of the three gateways.
