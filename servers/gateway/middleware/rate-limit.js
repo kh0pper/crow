@@ -116,3 +116,24 @@ export function fixedWindowLimit({
   middleware._buckets = buckets; // test introspection only
   return middleware;
 }
+
+/**
+ * Paths the GENERAL per-IP limiter in servers/gateway/index.js never counts.
+ * Everything here already sits behind its own gate (the dashboard session,
+ * the glasses device binding, the in-process LLM router), so the limiter
+ * adds no protection there — only the failure mode where a legitimate
+ * session burns the bucket. `/ramble/` (proxied map tiles: ~50 per view, and
+ * the panel's static assets) and `/api/ramble/` (the panel's data calls) were
+ * added 2026-09-07 after one phone walk 429'd the egg check-in and then the
+ * page's own scripts on reload.
+ */
+export const GENERAL_LIMITER_SKIP_PREFIXES = Object.freeze([
+  "/dashboard", "/api/meta-glasses/", "/llm", "/ramble/", "/api/ramble/",
+]);
+
+/** express-rate-limit `skip` predicate for the general limiter; `extraPrefixes` = GATEWAY_RATE_LIMIT_SKIP_PREFIXES. */
+export function generalLimiterSkip(req, extraPrefixes = []) {
+  const path = String(req?.path ?? "");
+  return GENERAL_LIMITER_SKIP_PREFIXES.some((p) => path.startsWith(p))
+    || extraPrefixes.some((p) => path.startsWith(p));
+}
