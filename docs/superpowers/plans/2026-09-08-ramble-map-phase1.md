@@ -25,6 +25,8 @@
 - **Replication is EXPLICIT and outbound is not free.** Adding a table to the synced list enables the INBOUND apply only. Nothing replicates outward unless a writer calls `safeEmit(emit, table, op, row)` — that is how every existing Ramble writer works (`eggs.js:35` defines the helper; `marks.js`, `flock.js` and `trades.js` all thread `{ now, emit }`). A plan that registers a table and forgets the emit ships a table that syncs one way and a test that passes green while the feature is broken. Both new writers take `{ now, emit }` and emit after a successful insert.
 - **A natural-key table needs FIVE registrations, not four:** the synced-table list, `EXCLUDED_COLUMNS`, `shouldSyncRow`, the two apply dispatch sites in `servers/sharing/instance-sync.js`, AND a branch in `stampSql()` in `servers/shared/sync-stamp.js`. Every id-less Ramble table already has one there (`ramble_settings`, `ramble_blocks`, `ramble_eggs`, `ramble_pet`, `ramble_trades`); without it the local row is never stamped while remote rows are, and nothing catches it.
 - **The public/contact discriminator is `visibility`, NOT `origin`.** A contact-delivered mark also lands `origin: "remote"` (`delivery.js:136,144`); only `visibility` separates `'public'` from `'contacts'`, and a group mark is `'contacts'` too. Gating on `origin` alone would fog a friend's mark, contradicting D4. `contact_name` is NOT a safe fallback either: it comes from `contactsByPubkey`, which filters to unblocked full contacts, so a pending, blocked or deleted contact's mark would be misclassified as public.
+- **Ruling on the unlock radius.** Spec §1 defines unlocked as a cell entered "within `CLAIM_RANGE_M`, 75 m". This plan unlocks exactly the ONE cell containing the fix, not every cell within 75 m of it. A cell is ~153 m across, so the fix is always inside the cell it unlocks; unlocking neighbours because the user stood near an edge would hand out ground they never crossed.
+- **Deviation from spec §6.2, recorded.** The spec puts "seed harvest state" on the unlocked-cell row. This plan keeps it in `ramble_wallet` keyed `cell:window` instead, because §6.1's ledger rule governs: a per-cell harvest column would be a mutable balance-like field and would not replicate correctly. `ramble_cells` therefore holds only the cell and its first-unlocked time.
 - **An unlock is permanent and undeletable, so it must be earned by a real fix.** Refuse to unlock when the position fix's accuracy is worse than `unlock.max.accuracy.m` (default 100). Without this a single 2 km wifi fix permanently unlocks a cell the user never entered, and nothing can take it back.
 - **Fog really obscures (spec §2.1, D4).** Fogged ground is not merely content-free, it is visually masked. A dim band around walked ground is not fog of war and is not what the spec describes.
 - **Phase 1 is PANEL-ONLY, deliberately.** The MCP tool surface (`bundles/ramble/server/server.js` `listMarks`/`listNests`) is NOT gated in this phase. State it in the PR so a reviewer does not read it as an oversight.
@@ -41,9 +43,9 @@
 ## File structure
 
 **Create**
-- `bundles/ramble/server/zones.js` — pure cell-classification. `neighborhood(cell, depth)`, `classifyCell(cell, unlockedSet, depth)`, `classifyBbox(bbox, unlockedSet, depth, max)`. Imports only `nests.js` and `anchors.js`.
+- `bundles/ramble/server/zones.js` — cell classification. `neighborhood(cell, depth)`, `classifyCell(cell, unlockedSet, depth)`, `cellBox(cell)`, `classifyBbox(bbox, unlockedSet, { depth, max })`, plus `frontierDepth(db)` (reads a setting) and `gateForZones(rows, { unlocked, depth, encode })`. Imports only `nests.js` and `anchors.js`.
 - `bundles/ramble/server/wallet.js` — the currency ledger. `SEED_KIND`, `recordSeedPickup`, `seedBalance`, `readWalletSettings`, `harvestWindow`.
-- `bundles/ramble/server/cells.js` — `recordUnlock(db, cell, now)`, `unlockedCells(db)`, `unlockedSetForBbox(db, bbox)`.
+- `bundles/ramble/server/cells.js` — `recordUnlock(db, cell, { now, emit, accuracyM })`, `unlockedCells(db)`, `unlockedCellsNear(db, bbox, depth)`, `UNLOCK_MAX_ACCURACY_M_DEFAULT`.
 - Tests: `tests/ramble-zones.test.js`, `tests/ramble-cells.test.js`, `tests/ramble-wallet.test.js`, `tests/ramble-map-gating.test.js`, `tests/ramble-cells-sync.test.js`.
 
 **Modify**
@@ -1158,9 +1160,16 @@ node scripts/run-suite.mjs tests/ramble-map-gating.test.js tests/ramble-panel.te
 
 2. **`tests/ramble-panel.test.js`, the claim test's trailing `listed.nests.find(...)?.claimed === true`** — same cause. Fix it the same way and more faithfully: before claiming, post `/api/ramble/area` with `here` at the nest's position. That is what a real player does — you walk to the nest, which unlocks the cell, and then you claim it. One added line, and the test becomes closer to the product.
 
-If a third test fails that this plan did not predict, fix it by unlocking the relevant ground rather than by relaxing the assertion, and say in your report which test and why.
+**Two MORE existing tests break, and walking to the nest does not save them.** The geometry was measured during review: the first deterministic nest in the fixture bbox is `9v6jpzr`, **1251 m** from the fixture's `LAT/LON` — far outside a depth-3 frontier of roughly 460 m — and `LAT/LON`'s own cell `9v6m21h` holds no nest at the default rate. So Step 5's walk unlocks the nest's ground and leaves the marks fixture's ground in fog.
 
-Expected after those two fixes: PASS.
+3. **"GET /api/ramble/marks names a remote mark by a contact; a stranger's stays anonymous."** It inserts `by-stranger` with `visibility: 'public'`, `origin: 'remote'` at `LAT/LON`, then reads `marks.find((m) => m.mark_id === "by-stranger").contact_name`. That mark is now fogged, so `find` returns undefined and the test dies with a bare **TypeError** rather than a readable failure. Fix: post `/area` with `here: { lat: LAT, lon: LON, accuracy_m: 5 }` in that test's setup.
+4. **"GET /api/ramble/around: marks and nests within the radius with distance_m…"** sets `nest.rate = 1` and asserts `body.nests.length >= 1` plus a numeric `seed` per nest. With `/around`'s nests gated and nothing unlocked at `LAT/LON`, every nest is fog and the array is empty. Same fix: unlock `LAT/LON` first.
+
+⚠ That makes **four** added `visit_place` credits across this task, each worth +20 warmth against a `hatch_at` of 100, in a file that already churns hatches and later asserts an incubating egg exists. Extend the warmth remedy to cover all four, not just the two in Step 5 — the file's own trick is to raise `warmth.hatch_at` temporarily, or set `warmth.visit_place = 0` around the added posts.
+
+If a fifth test fails that this plan did not predict, fix it by unlocking the relevant ground rather than by relaxing the assertion, and say in your report which test and why.
+
+Expected after those four fixes: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -1605,6 +1614,27 @@ and add:
 
 - [ ] **Step 5: Hook the refresh**
 
+**⚠ First, a defect this phase would otherwise ship broken.** Unlocking hangs off `POST /api/ramble/area`, and that route is called from exactly two places: the debounced `moveend` handler and the boot chain. But `map.on("dragstart", …)` sets `following = false`, so after a single manual pan the map stops moving on its own, `moveend` never fires again, and **no cell unlocks and no seed is harvested for the rest of the session however far the user walks.** `watchPosition` updates `lastFix` and repaints the dot on every fix but never posts. Even with follow left on, the map only pans when the dot leaves a padded viewport — roughly 300 m at the boot zoom — so a walked route would unlock a sparse sample rather than a trail, against spec §2.1. No test in this plan would catch it, because every test posts `/area` explicitly.
+
+Add a fix-driven trigger inside the `watchPosition` callback, independent of both `following` and `moveend`. The client has no geohash encoder, so make it distance-based using `haversineMeters`, which the file already uses:
+
+```js
+      /* The map only posts on moveend, and one manual pan turns following off
+       * forever, so without this a walk unlocks nothing. Distance-driven and
+       * independent of the map: 75 m is the unlock radius, so this cannot skip
+       * a cell the user actually crossed. */
+      if (!lastPostedFix || haversineMeters(lastPostedFix, lastFix) > 75) {
+        lastPostedFix = { lat: lastFix.lat, lon: lastFix.lon };
+        publishArea();
+      }
+```
+
+with `var lastPostedFix = null;` beside the other fix state. Assert it in the served-script test:
+
+```js
+  assert.ok(body.includes("lastPostedFix"), "walking posts the area even when the map is not following");
+```
+
 `refreshMarks` is **not** called on a map move. The `moveend` handler calls `publishArea(); refreshNests();`, and `publishArea` then chains `refreshMarks`. Add `refreshZones();` to that same `moveend` handler beside `refreshNests();`.
 
 At boot there is likewise no bare `refreshMarks()` — the chain ends `.then(function () { publishArea(); refreshNests(); })`. Add `refreshZones();` there too. And the file has a `setInterval(refreshNests, 10 * 60e3)`; give zones the same companion, since another instance's walking can unlock ground under you.
@@ -1647,12 +1677,14 @@ git commit bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ram
 ## Task 7: your pet IS the location marker
 
 **Files:**
-- Modify: `bundles/ramble/panel/static/ramble.js`, `bundles/ramble/panel/static/ramble.css`, `bundles/ramble/panel/ramble.js`
+- Modify: `bundles/ramble/panel/static/ramble.js`, `bundles/ramble/panel/static/ramble.css`, `bundles/ramble/panel/ramble.js`, `bundles/ramble/server/bird-svg.cjs`
 - Test: `tests/ramble-panel.test.js` (append)
 
 **Interfaces:**
 - Consumes: `paintHere(fix)` and `paintPerch(pet)`, both existing; `Bird.mountBird` / `Bird.drawEgg` from the shared engine.
-- Produces: client `hereIcon()`, `paintHereArt()`; the corner perch button is retired and `perchTarget`'s click moves onto the map marker.
+- Produces: client `hereIcon(art)`, `hereArt()`, `paintHereArt()`, `markWalking()`, `drawWalkingEggSeed(el, seed)`; the engine export `drawWalkingEgg(seed)`; the corner perch button is retired and `perchTarget`'s click moves onto the map marker.
+
+⚠ `drawWalkingEggSeed` is the third and final use of the engine's markup, so it must go through the SAME existing sink as `drawEggSeed` rather than adding one. Extend `drawEggSeed` with a flag, or have `drawWalkingEggSeed` delegate to it — do not write a second `el.innerHTML =`. Verify the count is still 2 in Step 6.
 
 **Why.** Operator request: the dot showing your position should BE your egg or bird, so it walks the map with you. It makes seed pickup legible — the thing collecting the seed is visibly the thing standing there — and it replaces a corner button with a presence. Tapping it opens the egg or pet view exactly as the corner perch does now, so the state machine already exists (`perchTarget`, set by `paintPerch`).
 
@@ -1660,7 +1692,7 @@ git commit bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ram
 
 `static/ramble.js` is held to exactly two markup sinks, and passing a STRING to `L.divIcon({ html })` would add a third — the enforcing test's regex is `/\.innerHTML\s*=|\bhtml:\s/g`. But Leaflet's `DivIcon` also accepts an **Element**, which it appends rather than assigning (confirmed in the vendored build: `options.html instanceof Element` takes a different branch). So build the `<svg>` with `document.createElementNS`, hand it to `Bird.mountBird` — which lives in the drawing engine, not this file — and pass the element. Exactly the pattern `birdFor` already uses at `static/ramble.js:362`.
 
-⚠ The same file allows **zero backticks**, in comments included. That rule is NOT enforced by any test, so nothing will catch a slip; an earlier draft of this very task put two backticks into a comment. Write the comments with plain words.
+⚠ The same file allows **zero backticks**, in comments included, and that rule **is** test-enforced — `tests/ramble-panel.test.js` asserts the served script splits on a backtick into exactly one piece. Earlier drafts of this plan slipped backticks into comments twice, in this task and in Task 8. Write the comments with plain words.
 
 - [ ] **Step 1: Write the failing assertions**
 
@@ -1705,7 +1737,9 @@ In `bundles/ramble/panel/ramble.js`, inside `<div class="rb-perch">`, delete the
 In `bundles/ramble/panel/static/ramble.css`, the `.rb-say` bubble has a squared-off bottom-right corner that used to point at the bird beside it. With the bird gone from the corner, round it:
 
 ```css
-#ramble .rb-say { border-radius: 16px; }   /* was 16px 16px 4px 16px — no bird to point at */
+/* Scoped to the map corner: the AR sheet's own .rb-ar-perch .rb-say still sits
+   beside a bird and keeps its tail. */
+#ramble .rb-perch .rb-say { border-radius: 16px; }   /* was 16px 16px 4px 16px — no bird to point at */
 ```
 
 Delete the now-dead `.rb-perch-btn`, `.rb-perch .rb-bird`, `.rb-perch .rb-ring` and `.rb-perch .rb-eggart` rules.
@@ -1736,9 +1770,10 @@ Delete the now-dead `.rb-perch-btn`, `.rb-perch .rb-bird`, `.rb-perch .rb-ring` 
         svg.setAttribute("class", "rb-here-bird");
         Bird.mountBird(svg, Bird.rollGenome(lastPet.bird.seed, lastPet.bird.species), (lastPet && lastPet.mood) || "happy");
       } else {
+        /* The WALKING egg — legs and all. You are not carrying it, you are it. */
         svg.setAttribute("class", "rb-here-egg");
-        svg.setAttribute("viewBox", "0 0 120 152");
-        drawEggSeed(svg, seedFromEggId(eggSeedId));
+        svg.setAttribute("viewBox", "0 0 120 168");
+        drawWalkingEggSeed(svg, seedFromEggId(eggSeedId));
       }
     } catch (e) { return null; }
     return svg;
@@ -1761,7 +1796,9 @@ In `paintHere`, swap the dot's construction and add the tap:
         pane: "rb-here", icon: hereIcon(hereArt()), keyboard: true,
         /* The retired button carried an accessible name; a divIcon has none,
          * and the marker shows an egg as often as a bird. */
-        title: "You", alt: "You, and your egg or bird",
+        /* title carries the accessible name; divIcon ignores alt, which
+         * Leaflet only applies when it builds an img icon. */
+        title: "You",
       }).addTo(hereLayer);
       hereDot.on("click", function () { showView(perchTarget); });
     } else {
@@ -1773,10 +1810,61 @@ In `paintHere`, swap the dot's construction and add the tap:
 
 Then call `paintHereArt()` at the end of `paintPerch`, so the marker follows the same egg-or-bird decision the corner button used to make. `paintPerch` keeps setting `perchTarget` and `paintPerchSay`; only its DOM writes to the retired elements are removed — guard or delete them, since `perchBird` and `perchEggWrap` no longer exist.
 
+- [ ] **Step 4b: Legs on the egg, and a waddle when you move**
+
+Operator request, and it follows from the premise: you are not carrying an egg, you ARE one — an egg that wandered off from its nest — so the marker's egg needs legs, and both the egg and the bird should walk when you do.
+
+**The legs.** `Bird.drawEgg(seed)` draws a bare egg. The engine already has the leg shape the bird uses (`PARTS.foot`, a stroke path), so this is reusing an existing part rather than inventing art. In `bundles/ramble/server/bird-svg.cjs`, add a `drawWalkingEgg(seed)` beside `drawEgg` that returns the same egg with two `foot` paths beneath it, and export it alongside the others. Use it only for the location marker; the egg screen and the nest pins keep the plain `drawEgg`, because those are eggs you are looking at rather than eggs that are you.
+
+⚠ This is a NEW export on the bundle's engine. That is fine — the no-new-export rule from the profile-avatar work constrains what CORE may rely on, and core only ever loads `rollGenome` and `drawBird`. Nothing outside the bundle touches this.
+
+**The waddle.** The movement detector you just added in Step 5 of Task 6 already knows when the user is walking, so reuse it rather than adding a second one. When a fix arrives more than a few metres from the last, add a class to the marker and set a timer to remove it after a couple of seconds of stillness:
+
+```js
+  /* Shared with the area-post trigger: one notion of "moving" for both. */
+  function markWalking() {
+    if (!hereDot) return;
+    var el = hereDot.getElement();
+    if (!el) return;
+    el.classList.add("is-walking");
+    if (walkStopTimer) clearTimeout(walkStopTimer);
+    walkStopTimer = setTimeout(function () {
+      var e = hereDot && hereDot.getElement();
+      if (e) e.classList.remove("is-walking");
+    }, 2200);
+  }
+```
+
+with `var walkStopTimer = null;` beside the other marker state, and a call to `markWalking()` in the `watchPosition` callback whenever the fix moved at all — a lower threshold than the 75 m post, since a waddle should start as soon as you set off.
+
+Assertions for the served script:
+
+```js
+  assert.ok(body.includes("function markWalking()"));
+  assert.ok(body.includes('classList.add("is-walking")'), "the marker waddles while you move");
+```
+
+and for the stylesheet:
+
+```js
+  assert.ok(body.includes("@keyframes rb-waddle"));
+  assert.ok(body.includes("#ramble .rb-here-pet.is-walking"));
+```
+
 - [ ] **Step 5: Style it**
 
 ```css
 #ramble .rb-here-pet { display: grid; place-items: center; cursor: pointer; }
+/* A waddle, not a bob: a small rock about the feet, so an egg on legs and a
+   bird read the same way when they walk. Matches the panel's existing motion
+   vocabulary (see rb-bob). */
+@keyframes rb-waddle {
+  0%, 100% { transform: rotate(-4deg) translateY(0); }
+  25% { transform: rotate(0deg) translateY(-2px); }
+  50% { transform: rotate(4deg) translateY(0); }
+  75% { transform: rotate(0deg) translateY(-2px); }
+}
+#ramble .rb-here-pet.is-walking > * { animation: rb-waddle .7s ease-in-out infinite; transform-origin: 50% 90%; }
 #ramble .rb-here-pet .rb-here-bird { width: 46px; height: 46px; filter: drop-shadow(2px 3px 0 var(--rb-shadow-col)); }
 #ramble .rb-here-pet .rb-here-egg { width: 30px; height: 38px; filter: drop-shadow(2px 3px 0 var(--rb-shadow-col)); }
 ```
@@ -1806,7 +1894,7 @@ If the sink count reads 3, the divIcon was given an `html` option — remove it 
 - [ ] **Step 7: Commit**
 
 ```bash
-git commit bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ramble.css bundles/ramble/panel/ramble.js tests/ramble-panel.test.js -m "ramble: your pet is the location marker — it walks the map with you"
+git commit bundles/ramble/server/bird-svg.cjs bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ramble.css bundles/ramble/panel/ramble.js tests/ramble-panel.test.js -m "ramble: you are the marker — a walking egg, then a bird, waddling as you move"
 ```
 
 ---
@@ -1879,9 +1967,9 @@ and in the client's `paintPet`, alongside the other painting:
 In `bundles/ramble/panel/static/ramble.js`, in the `.then(function (out) { ... })` of the `/api/ramble/area` post, after `currentCells = ...`:
 
 ```js
-        /* Only when the server actually reported it: `seed` rides ONLY on a
-         * post that carried a fix, so treating its absence as zero would blank
-         * a real balance on every fix-less post and at boot without geo. */
+        /* Only when the server actually reported it: the seed key rides ONLY
+         * on a post that carried a fix, so treating its absence as zero would
+         * blank a real balance on every fix-less post and at boot without geo. */
         if (out && typeof out.seed === "number") paintSeed(out.seed);
         if (out && out.unlocked) celebrateUnlock(out.unlocked);
 ```
@@ -1907,8 +1995,11 @@ And add:
      * finished. */
     var bounds = cellBounds(box);
     if (bounds && hereLayer) {
+      /* Pane and layer are independent: the rb-fog PANE (350) keeps the flash
+       * under the pet marker instead of painting over it, while hereLayer is
+       * the group drawZones never clears. */
       var flash = L.rectangle(bounds, {
-        pane: "rb-here", className: "rb-unlock-flash", stroke: false, interactive: false,
+        pane: "rb-fog", className: "rb-unlock-flash", stroke: false, interactive: false,
       }).addTo(hereLayer);
       setTimeout(function () { if (hereLayer) hereLayer.removeLayer(flash); }, 900);
     }
@@ -1943,7 +2034,7 @@ In `bundles/ramble/panel/static/ramble.css`, beside the other keyframes:
 }
 ```
 
-Add `#ramble .rb-unlock-flash` to the existing `@media (prefers-reduced-motion: reduce)` block's `animation: none;` list — with the animation off it simply does not appear, which is the right reduced-motion behaviour.
+Add `#ramble .rb-unlock-flash` and `#ramble .rb-here-pet.is-walking > *` to the FIRST `@media (prefers-reduced-motion: reduce)` block — the one listing `.rb-eggart`, `.rb-bob` and the hatch animations; the file has three such blocks — with the animation off it simply does not appear, which is the right reduced-motion behaviour.
 
 - [ ] **Step 6: Docs, both languages**
 
@@ -2050,3 +2141,15 @@ Also folded from the suggestions: the classifier was computed backwards, costing
 - **C12** the `stampSql` snippet bound `lamport` where the parameter is `lamportTs` — two lines that would have thrown. Fixed, with a note that the lamport must be the first placeholder because `subselectStampSql` rewrites it.
 
 Also folded from round 2's suggestions: `annotateMarks` was still doing the unbounded read that round 1's C10 was supposed to have removed, and now derives a bound from the marks' own coordinates; `lastMarks` kept counting beacons in the status strip; the two beacon filters are genuinely separate code paths and the plan said one; the added `/area` post in the nests test perturbs the warmth budget and needs the file's own hatch-threshold trick; `nestsInCells` needs the rate passed or it may compute a different nest than the route returns; `claimedNest` is now assigned explicitly rather than relying on list order; `zones.js`'s "pure" header corrected now that two exports take a database or an encoder; the boot and interval hooks named precisely; the divIcon now takes an Element, which is simpler and still sink-free; the marker gained an accessible name the retired button had; and the beacon's exact position is now a stated ruling rather than an inference.
+
+### Round 3 — 2026-09-08, opus, adversarial, source-verified
+
+**Verdict: REVISE**, three defects, one of them the most consequential of all three rounds. Round 3 confirmed eleven of round 2's twelve fixes as genuinely implemented rather than merely described. All three are folded in.
+
+- **C1 — walking would have unlocked nothing.** Unlocking hangs off `POST /api/ramble/area`, which is called from exactly two places: a debounced `moveend` handler and the boot chain. But a single manual pan sets `following = false`, after which the map never moves itself, `moveend` never fires, and the position watch — which updates the dot on every fix — never posts. So after one pan, no cell unlocks and no seed is harvested for the rest of the session however far the user walks. Even with follow left on, the map only pans when the dot leaves a padded viewport, so a walked route would unlock a sparse sample rather than a trail. **No test in the plan would have caught it, because every test posts `/area` explicitly.** This would have shipped a phase whose entire premise silently did not work. Fixed with a distance-driven post inside the position watch, independent of the map. Verified against source before folding.
+- **C2 — two further existing tests break, and Step 5's walk does not save them.** The reviewer measured the geometry: the nest the plan tells the implementer to walk to is 1251 m from the marks fixture's coordinates, far outside a depth-3 frontier, so unlocking it leaves that fixture in fog. One of the two dies with a bare TypeError rather than a readable assertion. Both now named with their fixes, and the warmth-budget remedy extended to cover all four added position posts.
+- **C3 — a backtick in Task 8's snippet**, introduced by round 2's own fix, in a file that forbids them — and Task 7's claim that the rule is not test-enforced was false: it is. Both corrected.
+
+Also folded: the File structure's signatures were still pre-round-1; the unlock flash used the `rb-here` pane and would have painted over the pet marker, now the `rb-fog` pane inside the non-clearing layer; the `.rb-say` radius change is scoped at the point it is first written rather than corrected two steps later; `alt` is inert on a divIcon; the reduced-motion block is named rather than left ambiguous; and two rulings are now explicit — that a fix unlocks only the one cell containing it, and that keeping seed-harvest state in the ledger rather than on the cell row is a deliberate deviation from spec §6.2 in favour of §6.1.
+
+**Added by the operator during this revision:** the marker's egg gets legs and both egg and bird waddle while you walk, following from the reframing that you ARE the egg rather than its keeper. It reuses the engine's existing foot shape and the movement detector C1 introduced, so one hook serves both the unlock trigger and the animation.
