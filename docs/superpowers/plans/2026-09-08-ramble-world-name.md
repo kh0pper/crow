@@ -67,7 +67,7 @@ Append to `tests/ramble-grid.test.js` (its import from `../bundles/ramble/server
 ```js
 test("sanitizeWorldName: controls and bidi stripped, whitespace collapsed, crow:/req: rejected, hex-only rejected, capped at 24 code points, empty is null", () => {
   assert.equal(sanitizeWorldName("Kevin"), "Kevin");
-  assert.equal(sanitizeWorldName("  Kevin‮   H  "), "Kevin H");
+  assert.equal(sanitizeWorldName("  Kevin\u202E   H\u0000 "), "Kevin H");
   assert.equal(sanitizeWorldName("crow:kevin"), null);
   assert.equal(sanitizeWorldName("REQ:x"), null);
   assert.equal(sanitizeWorldName("f665c26b"), null, "a key look-alike");
@@ -76,6 +76,7 @@ test("sanitizeWorldName: controls and bidi stripped, whitespace collapsed, crow:
   assert.equal(sanitizeWorldName("Kev · f665"), "Kev f665", "the label separator cannot be faked");
   assert.equal(sanitizeWorldName("abc"), "abc", "3 hex chars is a word, not a tail");
   assert.equal(sanitizeWorldName("x".repeat(40)), "x".repeat(24));
+  assert.equal(sanitizeWorldName("x".repeat(23) + " yz"), "x".repeat(23), "a cut that lands on a space is re-trimmed");
   assert.equal(sanitizeWorldName("🐦".repeat(30)), "🐦".repeat(24), "code points, not UTF-16 units");
   assert.equal(sanitizeWorldName(""), null);
   assert.equal(sanitizeWorldName("   "), null);
@@ -121,12 +122,12 @@ export function sanitizeWorldName(value) {
   if (typeof value !== "string") return null;
   let s = value
     .replace(/[\x00-\x1F\x7F\x80-\x9F]/g, "")
-    .replace(/[‪-‮⁦-⁩]/g, "")
-    .replace(/·/g, " "); // the label's own separator: "Kev · f665" could fake a key tail
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
+    .replace(/\u00B7/g, " "); // the label's own separator: "Kev · f665" could fake a key tail
   s = s.replace(/\s+/g, " ").trim();
   if (/^(crow|req):/i.test(s)) return null;
   const points = Array.from(s);
-  if (points.length > WORLD_NAME_MAX) s = points.slice(0, WORLD_NAME_MAX).join("");
+  if (points.length > WORLD_NAME_MAX) s = points.slice(0, WORLD_NAME_MAX).join("").trim();
   if (/^[0-9a-f]{4,}$/i.test(s)) return null;
   return s.length > 0 ? s : null;
 }
@@ -169,7 +170,7 @@ export async function setWorldName(db, name, { emit } = {}) {
 ```js
 test("world name: rides in content only when given and clean; eventToMark reads it through the sanitizer", () => {
   const row = { ...openMarkRow, author_level: "pseudonym" };
-  const withName = JSON.parse(markToEvent(row, { name: "  Kevin‮ " }).content);
+  const withName = JSON.parse(markToEvent(row, { name: "  Kevin\u202E " }).content);
   assert.equal(withName.name, "Kevin");
   assert.equal(JSON.parse(markToEvent(row, {}).content).name, undefined, "no name given, none sent");
   assert.equal(JSON.parse(markToEvent(row, { name: "f665c26b" }).content).name, undefined, "a key look-alike is dropped");
@@ -194,7 +195,7 @@ test("insertRemoteMark stores author_name and a locked teaser keeps it", async (
   const result = await insertRemoteMark(db, {
     mark_id: "named-remote-1", author: "pk9", kind: "mark", anchor_kind: "geo", geohash: "9v6m2c",
     lat: 30.2672, lon: -97.7431, visibility: "public", reveal: "locked", content_text: "named",
-    created_at: Date.now(), nostr_event_id: "ev-named-1", author_name: "  Kevin‮ ",
+    created_at: Date.now(), nostr_event_id: "ev-named-1", author_name: "  Kevin\u202E ",
   });
   assert.equal(result.inserted, true);
   assert.equal(result.row.author_name, "Kevin", "sanitized at the store too");
@@ -218,7 +219,7 @@ test("author_name rides the apply door (wire column) and is updatable by LWW", a
 });
 ```
 
-`tests/ramble-transport.test.js` — append (uses `makeHarness`, `seedPublicMark`, `setMaster`, `setCell`; add `import { eventToMark } from "../bundles/ramble/server/nostr-map.js";` if not imported — `MARK_KIND, CAW_KIND` are):
+`tests/ramble-transport.test.js` — append; FIRST change the existing import `import { MARK_KIND, CAW_KIND } from "../bundles/ramble/server/nostr-map.js";` to `import { MARK_KIND, CAW_KIND, eventToMark } from "../bundles/ramble/server/nostr-map.js";` (one import line, not a second one):
 
 ```js
 test("world name rides only pseudonym/real rows: a rotating row never carries it; eventToMark round-trips it", async () => {
@@ -246,10 +247,16 @@ test("world name rides only pseudonym/real rows: a rotating row never carries it
 (`makeHarness`, `seedPublicMark(db, text, extra)` — `extra` spreads over `author_level` — `setMaster`, `setCell`, `h.published`, `h.transport.drainOnce()` are the file's existing fixtures; the harness's default gate is the real `makePublishGate`, hence the master + public/geo cell.)
 ```
 
-`tests/ramble-delivery.test.js` — append (reuse the `row` and `PK` fixtures of its `markPayload`/`payloadToMark` bird test; import nothing new):
+`tests/ramble-delivery.test.js` — append (`PK`, `db`, `createMark`, `markPayload`, `payloadToMark` are file-scope in that test; the other tests' `row` variables are test-local, so build your own):
 
 ```js
-test("contacts marks never carry a world name in either direction", () => {
+test("contacts marks never carry a world name in either direction", async () => {
+  const row = await createMark(db, {
+    author: "c".repeat(64), author_level: "pseudonym", kind: "mark",
+    anchor: { anchor_kind: "geo", lat: 30.46, lon: -98.08, accuracy_m: 12 },
+    visibility: "contacts", reveal: "open",
+    content: { content_text: "for my people", content_kind: "none" },
+  });
   const payload = markPayload({ ...row, author_name: "Kevin" });
   assert.equal(payload.author_name, undefined);
   assert.equal(payload.name, undefined);
@@ -426,7 +433,7 @@ export async function contactsByPubkey(db) {
 
 `bundles/ramble/panel/routes.js`: delete the router-local zero-arg `contactsByPubkey()` function (body identical to the one above) and replace its one use in `annotateMarks` with `const byPubkey = await mods.deliveryMod.contactsByPubkey(db);`.
 
-`bundles/ramble/server/server.js`: import `{ labelFor } from "./labels.js"` and `contactsByPubkey` from `./delivery.js` (extend the existing delivery import). In `ramble_query_world` replace `const marks = await listMarks(db, { visibility, geohashPrefix: cell });` with:
+`bundles/ramble/server/server.js`: import `{ labelFor } from "./labels.js"` and `contactsByPubkey` from `./delivery.js` (extend the existing delivery import). Extend the tool description `"List nearby marks and caws within the geohash cell containing the given location."` with ` Each row carries a label ("your mark", "mark by <contact>", "mark by <world name> · <key4>", or "mark by <key8>").`. In `ramble_query_world` replace `const marks = await listMarks(db, { visibility, geohashPrefix: cell });` with:
 
 ```js
         const rows = await listMarks(db, { visibility, geohashPrefix: cell });
@@ -481,7 +488,7 @@ In the panel shell test add `assert.match(sent, /id="rb-world-name"[^>]*maxlengt
 
 ```js
 test("POST /api/ramble/grid stores a sanitized worldName, clears a rejected one, and bounds the input", async () => {
-  let res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "  Kevin‮  " } });
+  let res = await req("/api/ramble/grid", { method: "POST", body: { worldName: "  Kevin\u202E  " } });
   assert.equal(res.status, 200);
   assert.equal((await res.json()).worldName, "Kevin");
   assert.equal((await (await req("/api/ramble/grid")).json()).worldName, "Kevin");
@@ -515,7 +522,7 @@ test("POST /api/ramble/grid stores a sanitized worldName, clears a rejected one,
 
 `bundles/ramble/panel/routes.js` `POST /api/ramble/grid`: in the validation block add `if (b.worldName != null && (typeof b.worldName !== "string" || b.worldName.length > 128)) bad("worldName must be a string of at most 128 characters");` and after the identity-level write add `if (b.worldName != null) await mods.gridMod.setWorldName(db, b.worldName, { emit });` (the response is `getGrid`, which now carries `worldName`).
 
-`bundles/ramble/panel/static/ramble.js`: beside `var identityEl = $("rb-identity");` add `var worldNameEl = $("rb-world-name");`; in `paintGrid` add `if (worldNameEl && worldNameEl !== document.activeElement) worldNameEl.value = grid.worldName || "";`; beside the identity `change` listener add `if (worldNameEl) worldNameEl.addEventListener("change", function () { postGrid({ worldName: worldNameEl.value }); });`.
+`bundles/ramble/panel/static/ramble.js`: beside `var identityEl = $("rb-identity");` add `var worldNameEl = $("rb-world-name");`; in `paintGrid` add `if (worldNameEl && worldNameEl !== document.activeElement) worldNameEl.value = grid.worldName || "";`; beside the identity `change` listener add `if (worldNameEl) worldNameEl.addEventListener("change", function () { worldNameEl.blur(); postGrid({ worldName: worldNameEl.value }); });` (the blur closes the phone keyboard and lets the saved, sanitized value repaint the field — `paintGrid` skips a focused field so an SSE repaint never clobbers typing).
 
 `bundles/ramble/panel/static/ramble.css`: the existing `#ramble select { … }` rule becomes `#ramble select,\n#ramble .rb-sheet input[type="text"] { … }` (same declarations), plus one new rule `#ramble .rb-sheet input[type="text"] { flex: 1; min-width: 0; }`.
 
@@ -535,7 +542,7 @@ Bump: `sed -i 's/"version": "0.6.0"/"version": "0.7.0"/' bundles/ramble/manifest
 
 - [ ] **Step 4: Run** `tests/ramble-panel.test.js` → PASS (parity included). Then the FULL suite in the foreground (`node scripts/run-suite.mjs 2>&1 | tail -12`, expect pass = total, fail 0: 4186 + 11 new = 4197 — grid +2, nostr-map +1, marks +1, sync +1, transport +1, delivery +1, labels +2, tools +1, panel +1; report the actual), `node scripts/check-port-allocation.js`, `npm run build-registry -- --check`.
 - [ ] **Step 5: Commit** — `git commit bundles/ramble/panel/ramble.js bundles/ramble/panel/routes.js bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ramble.css docs/guide/ramble.md docs/es/guide/ramble.md bundles/ramble/manifest.json bundles/ramble/package.json registry/add-ons.json tests/ramble-panel.test.js -m "ramble 0.7.0: the World name field; docs en/es; registry"`
-- [ ] **Step 6 (controller):** push, PR, check-runs, merge, CROW-SCHEDULE.md, three-gateway restart (grackle: `refreshed ramble 0.6.0 -> 0.7.0`), Kevin sets a world name and leaves a pseudonym-level mark from grackle; a second instance (crow's transport receives the public event) stores `author_name` — verify with a read-only SELECT on crow's live db.
+- [ ] **Step 6 (controller):** push, PR, check-runs, merge, CROW-SCHEDULE.md, three-gateway restart. Cross-version note: a new core beside an UNREFRESHED 0.6.0 bundle copy has no `author_name` column, so a synced row carrying one fails to apply until the copy refreshes — on grackle confirm the journal's `refreshed ramble 0.6.0 -> 0.7.0` line comes before `[ramble] transport started`, then `PRAGMA table_info(ramble_marks)` on grackle's live db shows `author_name` (read-only); crow primary and r4 load the server from the repo tree and add the column on boot. Kevin sets a world name and leaves a pseudonym-level mark from grackle; a second instance (crow's transport receives the public event) stores `author_name` — verify with a read-only SELECT on crow's live db.
 
 ## Self-review notes
 - D1: the level decides (transport, per row from `author_level ?? level`); `rotating` never carries a name (transport test). D2: key4 tail on named strangers (labels test, client pin). D3: own marks (labels test, tools assertion, client pin).
@@ -555,3 +562,15 @@ Bump: `sed -i 's/"version": "0.6.0"/"version": "0.7.0"/' bundles/ramble/manifest
 - **S5** `maxlength="24"` counts UTF-16 units, the sanitizer code points: **Ruling R1-5:** keep 24 — an emoji-heavy name is merely shorter in the field; the server cap is the contract.
 - **S6** suite arithmetic corrected (4186 → 4197 with the delivery test).
 - **Q1** `worldName: null` = not sent; `""` clears (route test pins both). **Q2** the wire column is forward-looking per spec §6 (harmless today). **Q3** D1 stands (marks use the stable key already; the level decides). **Q4** yes, r4 is one of the three gateways.
+
+### Round 2 — 2026-09-08, opus, code-traced (fresh mirror; full suite 4197/0; stale-0.6.0-bundle probe PASSED: published 1, no `name`)
+**Verdict: APPROVE with two test-fixture edits.** Folded:
+- **C1** the delivery test reused a `row` that is test-local in that file → the new test builds its own row with `createMark`.
+- **C2** `eventToMark` was not imported in the transport test → the existing import line is extended (stated definitely).
+- **S1** the Nearby list appends `· <ago>` after the label: **Ruling R2-1:** keep — the sanitizer strips U+00B7 from names, so the tail always sits immediately after the name and the trailing ` · 3 min ago` is ours; no faking is possible.
+- **S2** Enter kept the field focused so the sanitized value never repainted → the change handler blurs first.
+- **S3** no save on Turbo-navigate-away before blur: **Ruling R2-2:** accepted; `change` fires on blur, matching the Name select's behaviour.
+- **S4** cross-version skew (new core + unrefreshed copy lacks the column) → restart-order + PRAGMA verification note in Step 6; same class as `bird_species`, covered by the manifest bump.
+- **S5** truncation re-trimmed; bidi characters in the plan's source are `\u` escapes now.
+- **S6** the tool description mentions `label`. **S7** the moved `contactsByPubkey` keeps its ORDER BY provenance comment (already in the plan's code).
+- Verified by the reviewer: `origin = "sync"` rows are provably the owner's own (no emit path replicates remote/contact marks); `markLabel`/`arTitle` are the only "by" builders; all client sinks are `textContent`; `labels.js` ships with the bundle (manifest lists no server files individually).
