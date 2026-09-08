@@ -363,12 +363,26 @@
     } catch (e) { return null; }
   }
 
+  /* A contact's profile picture on their pin (spec 2026-09-08 §5): the server
+   * already bounded it to an inline data: image, and this checks again; a
+   * stranger has none and keeps the bird. createElement + a src assignment —
+   * not a markup sink. */
+  function contactPortrait(mark) {
+    var src = mark.contact_avatar;
+    if (typeof src !== "string" || src.indexOf("data:image/") !== 0) return null;
+    var img = document.createElement("img");
+    img.className = "rb-pop-avatar";
+    img.alt = "";
+    img.src = src;
+    return img;
+  }
+
   function popupFor(mark) {
     var box = document.createElement("div");
 
     var head = document.createElement("div");
     head.className = "rb-pop-head";
-    var portrait = birdFor(mark);
+    var portrait = contactPortrait(mark) || birdFor(mark);
     if (portrait) head.appendChild(portrait);
     var who = document.createElement("span");
     who.textContent = markLabel(mark);

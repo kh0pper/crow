@@ -353,6 +353,7 @@
 #ramble .leaflet-popup-content { margin: 11px 13px; font-weight: 600; }
 #ramble .rb-pop-head { display: flex; align-items: center; gap: 8px; font: 800 15px var(--rb-font-display); }
 #ramble .rb-pop-bird { width: 40px; height: 40px; flex: 0 0 auto; }
+#ramble .rb-pop-avatar { width: 24px; height: 24px; flex: 0 0 auto; border-radius: 50%; object-fit: cover; border: var(--rb-line-w) solid var(--rb-line); }
 #ramble .rb-pop-body { margin: 6px 0 0; }
 #ramble .rb-pop-btn {
   margin-top: 9px;
@@ -829,6 +830,7 @@
 
 #ramble .rb-ar-sheet .rb-pop-head { font: 800 15px var(--rb-font-display); display: flex; align-items: center; gap: 8px; }
 #ramble .rb-ar-sheet .rb-pop-bird { width: 40px; height: 40px; }
+#ramble .rb-ar-sheet .rb-pop-avatar { width: 24px; height: 24px; }
 #ramble .rb-ar-sheet .rb-pop-body { margin: 6px 0 0; }
 #ramble .rb-ar-sheet .rb-pop-btn { margin-top: 10px; }
 
