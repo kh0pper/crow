@@ -264,6 +264,37 @@ export default {
           </section>
 
           <section class="rb-card">
+            <p class="rb-eyebrow">What your bird runs on</p>
+            <div class="rb-steps">
+              <div class="rb-step">
+                <span class="rb-step-n">+20</span>
+                <div class="rb-step-txt"><strong>Meet another crow</strong><span class="rb-muted rb-fine">run into someone else out rambling</span></div>
+              </div>
+              <div class="rb-step">
+                <span class="rb-step-n">+15</span>
+                <div class="rb-step-txt"><strong>Somewhere new</strong><span class="rb-muted rb-fine">an area you haven&rsquo;t been this week</span></div>
+              </div>
+              <div class="rb-step">
+                <span class="rb-step-n">+10</span>
+                <div class="rb-step-txt"><strong>Unlock a mark</strong><span class="rb-muted rb-fine">open something someone left behind</span></div>
+              </div>
+              <div class="rb-step">
+                <span class="rb-step-n">+8</span>
+                <div class="rb-step-txt"><strong>A chore below</strong><span class="rb-muted rb-fine">feed, preen or play, once a day each</span></div>
+              </div>
+              <div class="rb-step">
+                <span class="rb-step-n">+5</span>
+                <div class="rb-step-txt"><strong>Check in</strong><span class="rb-muted rb-fine">a daily tap on the egg screen</span></div>
+              </div>
+              <div class="rb-step">
+                <span class="rb-step-n">&minus;10</span>
+                <div class="rb-step-txt"><strong>A quiet stretch</strong><span class="rb-muted rb-fine">nothing at all for a while and it droops</span></div>
+              </div>
+            </div>
+            <p class="rb-muted rb-fine">Getting out is worth more than tapping.</p>
+          </section>
+
+          <section class="rb-card">
             <p class="rb-eyebrow">Today</p>
             <div class="rb-chores">
               <button class="rb-chore" data-kind="feed" type="button">${icon("feed")}Feed</button>

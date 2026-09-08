@@ -165,6 +165,14 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.match(sent, /id="rb-world-name"[^>]*maxlength="24"/);
   assert.ok(sent.includes("Contacts see the name they saved for you, or your Crow name."));
 
+  // The pet page must name what actually feeds the bird, not just the three
+  // chore buttons: walking is worth more than tapping and the page hid that.
+  assert.ok(sent.includes("What your bird runs on"), "the energy-sources card is on the pet page");
+  for (const src of ["Meet another crow", "Somewhere new", "Unlock a mark", "A chore below", "Check in", "A quiet stretch"]) {
+    assert.ok(sent.includes(src), `pet page names the energy source: ${src}`);
+  }
+  assert.ok(sent.includes("Getting out is worth more than tapping."), "the page says walking beats tapping");
+
   // The legacy ids are GONE — anything still selecting them is broken.
   assert.doesNotMatch(sent, /id="ramble-map"/);
   assert.doesNotMatch(sent, /id="ramble-pet"/);
