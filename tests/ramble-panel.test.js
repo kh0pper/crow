@@ -266,6 +266,11 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.match(sent, /motion access/, "the notice states the iOS prompt");
   assert.match(sent, /stays on this phone/, "the notice states the camera never leaves the device");
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(sent), "no emoji in the panel markup — icons are inline SVG");
+
+  // The location marker is the pet now (operator request, 2026-09-08): the
+  // corner button is retired, but its status strip stays.
+  assert.ok(!sent.includes('id="rb-perch-open"'), "the corner perch button is retired");
+  assert.ok(sent.includes('id="rb-perch-say"'), "the status strip stays");
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -705,7 +710,7 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // Phase 5: one map-level watch drives the you-are-here dot (own pane) with
   // follow mode; nests carry reach + egg art into AR; the collect effect runs
   // at press, success and clear; the nest layer waits for the pin's pop.
-  assert.ok(body.includes('className: "rb-here-dot"') && body.includes('className: "rb-here-ring"'));
+  assert.ok(body.includes('className: "rb-here-ring"'));
   assert.ok(body.includes('map.createPane("rb-here")') && body.includes('getPane("rb-here").style.zIndex = 650'));
   assert.ok(body.includes("function startMapWatch(") && body.includes("function paintHere(") && body.includes("function setFollowing("));
   assert.ok(body.includes('map.on("dragstart"'), "a user drag ends follow mode");
@@ -763,6 +768,19 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes("haversineMeters(lastPostedFix, lastFix) > 75"),
     "walking posts the area on distance, so it works with the map not following");
   assert.ok(body.includes("lastPostedFix = {"), "and the anchor advances when it posts");
+
+  // The location marker IS the pet (operator request, 2026-09-08): it walks
+  // the map with you and opens the egg or pet view when tapped.
+  assert.ok(body.includes("function hereIcon("));
+  assert.ok(body.includes("function paintHereArt()"));
+  assert.ok(body.includes("function hereArt()"));
+  assert.ok(body.includes('hereDot.on("click"'), "the marker itself opens the view — the retired button also matched showView(perchTarget)");
+  assert.ok(body.includes('createElementNS("http://www.w3.org/2000/svg", "svg")'), "the art is built without a markup sink");
+  assert.ok(body.includes("showView(perchTarget)"), "tapping the marker still opens egg or pet");
+  assert.ok(!body.includes('L.circleMarker(ll, { pane: "rb-here"'), "the plain blue dot is gone");
+  assert.ok(body.includes("function markWalking()"));
+  assert.ok(body.includes('setAttribute("role", "button")'), "the marker keeps the accessible role the retired button had");
+  assert.ok(body.includes('classList.add("is-walking")'), "the marker waddles while you move");
 });
 
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
@@ -798,7 +816,6 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   // Phase 5: near-nest AR labels, the here dot, the collect fx.
   assert.match(body, /\.rb-ar-label\[data-kind="nest"\]\[data-near="true"\]/);
   assert.match(body, /\.rb-ar-label:not\(\[data-side\]\)\.rb-ar-fx-collect \.rb-ar-egg-art/);
-  assert.match(body, /\.rb-here-dot/);
   assert.match(body, /\.rb-nest-pin\.rb-nest-collect svg/);
   assert.match(body, /\.rb-ar-egg-art \{[^}]*order: -1/);
   assert.match(body, /prefers-reduced-motion[\s\S]*\.rb-nest-pin\.rb-nest-busy \{ box-shadow/);
@@ -807,6 +824,10 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.ok(body.includes("#ramble .rb-fog {"), "the fog mask has a rule");
   assert.ok(body.includes("#ramble .rb-frontier-cell {"), "the frontier is dimmed, not hidden");
   assert.ok(body.includes("#ramble .rb-beacon {"), "beacons have a rule");
+
+  assert.ok(body.includes("#ramble .rb-here-pet {"), "the pet marker has a rule");
+  assert.ok(body.includes("@keyframes rb-waddle"));
+  assert.ok(body.includes("#ramble .rb-here-pet.is-walking"));
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {

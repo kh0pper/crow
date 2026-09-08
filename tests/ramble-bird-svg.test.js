@@ -41,6 +41,12 @@ test("drawEgg is deterministic per seed", () => {
   assert.throws(() => Bird.drawEgg(-1));
 });
 
+test("drawWalkingEgg is deterministic per seed and differs from drawEgg", () => {
+  assert.equal(Bird.drawWalkingEgg(5), Bird.drawWalkingEgg(5));
+  assert.notEqual(Bird.drawWalkingEgg(5), Bird.drawEgg(5));
+  assert.throws(() => Bird.drawWalkingEgg(-1));
+});
+
 test("parts are overridable by name (asset-pack seam)", () => {
   const g = Bird.rollGenome(42, "penguin");
   const before = Bird.drawBird(g);

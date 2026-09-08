@@ -123,6 +123,8 @@
   var currentCells = [];
   var lastFix = null;      /* the most recent REAL geolocation fix */
   var lastPostedFix = null;
+  var lastWalkFix = null;
+  var walkStopTimer = null;
   var lastMarks = [];
 
   if (mapEl && typeof L !== "undefined") {
@@ -188,13 +190,80 @@
 
   /* ------------------------------------------------------------ you are here */
 
+  /* Leaflet's divIcon html option is a markup sink and this file is held to
+   * exactly two, so we never pass a string. It also accepts an ELEMENT, which
+   * Leaflet appends rather than assigning — no sink, and no getElement()
+   * timing to worry about. Note: no backticks anywhere in this file. */
+  function hereIcon(art) {
+    var opts = { className: "rb-here-pet", iconSize: [46, 46], iconAnchor: [23, 23] };
+    if (art) opts.html = art;   /* an Element, never a string */
+    return L.divIcon(opts);
+  }
+
+  /* Fill the marker with whatever the perch would have shown: the bird once
+   * one has hatched, otherwise the egg. Built with createElementNS and handed
+   * to the shared engine, which is where the markup actually happens. */
+  function hereArt() {
+    if (!Bird) return null;
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    try {
+      if (perchTarget === "pet" && lastPet && lastPet.bird) {
+        svg.setAttribute("class", "rb-here-bird");
+        Bird.mountBird(svg, Bird.rollGenome(lastPet.bird.seed, lastPet.bird.species), (lastPet && lastPet.mood) || "happy");
+      } else {
+        /* The WALKING egg — legs and all. You are not carrying it, you are it. */
+        svg.setAttribute("class", "rb-here-egg");
+        svg.setAttribute("viewBox", "0 0 120 168");
+        drawWalkingEggSeed(svg, seedFromEggId(eggSeedId));
+      }
+    } catch (e) { return null; }
+    return svg;
+  }
+
+  /* Re-skin the marker in place when the egg hatches or the mood changes. */
+  function paintHereArt() {
+    if (!hereDot) return;
+    var art = hereArt();
+    if (art) hereDot.setIcon(hereIcon(art));
+    /* The retired perch was a button with an aria-label that tracked its
+     * state; a divIcon is a focusable div with neither. Restore both. */
+    var el = hereDot.getElement();
+    if (el) {
+      el.setAttribute("role", "button");
+      el.setAttribute("aria-label", perchTarget === "pet" ? "Open your bird" : "Open your egg");
+    }
+  }
+
+  /* Shared with the area-post trigger: one notion of "moving" for both. */
+  function markWalking() {
+    if (!hereDot) return;
+    var el = hereDot.getElement();
+    if (!el) return;
+    el.classList.add("is-walking");
+    if (walkStopTimer) clearTimeout(walkStopTimer);
+    walkStopTimer = setTimeout(function () {
+      var e = hereDot && hereDot.getElement();
+      if (e) e.classList.remove("is-walking");
+    }, 2200);
+  }
+
   function paintHere(fix) {
     if (!map || !hereLayer || !fix || typeof fix.lat !== "number" || typeof fix.lon !== "number") return;
     var ll = [fix.lat, fix.lon];
     var r = Math.max(5, Math.min(200, Number(fix.accuracy_m) || 20));
     if (!hereDot) {
       hereRing = L.circle(ll, { pane: "rb-here", radius: r, className: "rb-here-ring", stroke: false, fillOpacity: 0.12, interactive: false }).addTo(hereLayer);
-      hereDot = L.circleMarker(ll, { pane: "rb-here", radius: 8, className: "rb-here-dot", weight: 3, fillOpacity: 1, interactive: false }).addTo(hereLayer);
+      hereDot = L.marker(ll, {
+        pane: "rb-here", icon: hereIcon(hereArt()), keyboard: true,
+        /* The retired button carried an accessible name; a divIcon has none,
+         * and the marker shows an egg as often as a bird. */
+        /* title carries the accessible name; divIcon ignores alt, which
+         * Leaflet only applies when it builds an img icon. The retired button
+         * was a real button with a state-aware label, so paintHereArt sets
+         * role and aria-label to keep that. */
+        title: "You",
+      }).addTo(hereLayer);
+      hereDot.on("click", function () { showView(perchTarget); });
     } else {
       hereRing.setLatLng(ll);
       hereRing.setRadius(r);
@@ -224,6 +293,14 @@
   function startMapWatch() {
     if (mapWatch != null || !map || !navigator.geolocation) return;
     mapWatch = navigator.geolocation.watchPosition(function (pos) {
+      /* Captured BEFORE lastFix is reassigned. 10 m clears typical
+       * high-accuracy GPS jitter (3-15 m) so a stationary user does not
+       * waddle on the spot; C1's post is a separate 75 m ratchet. */
+      var moved = lastWalkFix ? haversineMeters(lastWalkFix, { lat: pos.coords.latitude, lon: pos.coords.longitude }) : Infinity;
+      if (moved > 10) {
+        lastWalkFix = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+        markWalking();
+      }
       lastFix = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy_m: pos.coords.accuracy };
       paintHere(lastFix);
       /* The map only posts on moveend, and one manual pan turns following off
@@ -584,9 +661,6 @@
 
   /* ---------------------------------------------------------------- perch */
 
-  var perchBird = $("rb-perch-bird");
-  var perchEggWrap = $("rb-perch-egg-wrap");
-  var perchEgg = $("rb-perch-egg");
   var perchTarget = "egg";
   var eggPercent = 0;
   var eggSeedId = null;
@@ -613,26 +687,20 @@
   }
   function drawEggArt(el, eggId) { drawEggSeed(el, seedFromEggId(eggId)); }
 
+  /* The WALKING egg, for the location marker only: legs and all, because you
+   * are not carrying it, you are it. The write happens inside the engine's
+   * own mountWalkingEgg, so this file's sink count does not move. */
+  function drawWalkingEggSeed(el, seed) {
+    if (!el || !Bird) return;
+    try { Bird.mountWalkingEgg(el, seed >>> 0); } catch (e) { /* cosmetic */ }
+  }
+
   function paintPerch(pet) {
     var bird = pet && pet.bird;
     var valid = !!(Bird && bird && Bird.isValidBird({ species: bird.species, seed: bird.seed }));
-    if (valid) {
-      perchTarget = "pet";
-      if (perchEggWrap) setHidden(perchEggWrap, true);
-      if (perchBird) {
-        try { Bird.mountBird(perchBird, Bird.rollGenome(bird.seed, bird.species), pet.mood || "happy"); } catch (e) { /* cosmetic */ }
-        setHidden(perchBird, false);
-      }
-    } else {
-      perchTarget = "egg";
-      if (perchBird) setHidden(perchBird, true);
-      if (perchEggWrap) setHidden(perchEggWrap, false);
-      drawEggArt(perchEgg, eggSeedId);
-      setRing($("rb-perch-ring"), (pet && pet.egg && pet.egg.percent) || eggPercent);
-    }
-    var open = $("rb-perch-open");
-    if (open) open.setAttribute("aria-label", valid ? "Open your bird" : "Open your egg");
+    perchTarget = valid ? "pet" : "egg";
     paintPerchSay();
+    paintHereArt();
   }
 
   function paintPerchSay() {
@@ -652,9 +720,6 @@
     if ((lastNests || []).length > 0) line += " There's a nest nearby.";
     say.textContent = line;
   }
-
-  var perchOpen = $("rb-perch-open");
-  if (perchOpen) perchOpen.addEventListener("click", function () { showView(perchTarget); });
 
   /* -------------------------------------------------------------- compose */
 
