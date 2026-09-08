@@ -52,6 +52,11 @@ const { bboxAround } = await import("../bundles/ramble/server/around.js");
  * against a hatch_at of 100 — this file already churns hatches and later
  * asserts an incubating egg exists, so the credit is suppressed around the
  * walk rather than left to accumulate.
+ *
+ * ⚠ An unlock is permanent (spec §2.1): once a test calls this, that cell
+ * stays unlocked for every test that runs afterward in this file. A fog
+ * assertion added later against this same ground will silently see it as
+ * already-walked, not fogged.
  */
 async function walkTo(lat, lon) {
   const db = createDbClient();
@@ -76,6 +81,9 @@ async function walkTo(lat, lon) {
  * the whole circle to be real ground, exactly like a player who has actually
  * explored the area, so every nest /around returns is unlocked rather than
  * a preview. Same cells `aroundPoint` itself covers, so nothing is missed.
+ *
+ * ⚠ Same permanence caveat as walkTo: every cell it touches stays unlocked
+ * for the rest of the file's tests.
  */
 async function unlockRadius(lat, lon, radiusM) {
   const db = createDbClient();
@@ -1075,11 +1083,6 @@ test("POST /api/ramble/marks: contacts fans out to every contact, group:<uid> to
 });
 
 test("GET /api/ramble/marks names a remote mark by a contact; a stranger's stays anonymous", async () => {
-  // Fog gates the public overlay: walking to the nest (a different, distant
-  // cell) does not unlock this fixture's own LAT/LON ground, so the stranger's
-  // public mark here would otherwise fog off and `.find(...)` would return
-  // undefined.
-  await walkTo(LAT, LON);
   const db = createDbClient();
   await db.execute({
     sql: `INSERT INTO ramble_marks (mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, visibility, reveal, content_text, created_at, origin, publish_state)
@@ -1087,6 +1090,22 @@ test("GET /api/ramble/marks names a remote mark by a contact; a stranger's stays
                  ('by-stranger', ?, NULL, 'mark', 'geo', '9v6m21h', ?, ?, 'public', 'open', 'yo', ?, 'remote', 'remote')`,
     args: [PK, LAT, LON, Date.now(), "99".repeat(32), LAT, LON, Date.now()],
   });
+
+  // Regression guard for the gate itself (spec 2026-09-08 §2.1): before any
+  // ground here is unlocked, the stranger's PUBLIC mark must be fogged off
+  // entirely while the contact's mark survives untouched. If `annotateMarks`
+  // ever stopped calling `gateForZones`, this is the assertion that would
+  // fail — the four tests below only add unlocked ground, so none of them
+  // would notice a removed gate.
+  const beforeWalk = (await (await req(`/api/ramble/marks?cells=${CELL}`)).json()).marks;
+  assert.ok(!beforeWalk.some((m) => m.mark_id === "by-stranger"), "a stranger's public mark is absent in fog");
+  assert.ok(beforeWalk.some((m) => m.mark_id === "by-pal"), "a contact's mark is never gated");
+
+  // Fog gates the public overlay: walking to the nest (a different, distant
+  // cell) does not unlock this fixture's own LAT/LON ground, so the stranger's
+  // public mark here would otherwise fog off and `.find(...)` would return
+  // undefined.
+  await walkTo(LAT, LON);
   const { marks } = await (await req(`/api/ramble/marks?cells=${CELL}`)).json();
   assert.equal(marks.find((m) => m.mark_id === "by-pal").contact_name, "Pal");
   assert.equal(marks.find((m) => m.mark_id === "by-stranger").contact_name, undefined);
@@ -1311,6 +1330,12 @@ test("GET /api/ramble/around: marks and nests within the radius with distance_m;
     const wide = await (await req(`/api/ramble/around?lat=${LAT}&lon=${LON}&radius_m=1000`)).json();
     assert.equal(wide.radius_m, 1000);
     assert.ok(wide.marks.map((m) => m.content_text).includes("far north"));
+    // Regression guard for the under-gating half: unlockRadius(LAT, LON, 500)
+    // above unlocks only the 500 m disc, so this wider 1000 m call reaches
+    // ground past it, where a nest.rate=1 nest still exists but is not
+    // unlocked. If gating were ever removed from /around, every nest here
+    // would come back whole and this would fail.
+    assert.ok(wide.nests.some((n) => n.beacon === true), "ground past the unlocked disc must still produce a beacon");
     // A full-precision double as String() prints it (up to 17 decimals) is a fine query.
     assert.equal((await req("/api/ramble/around?lat=30.460000000000000853&lon=-98.08")).status, 400, "18 decimals is too many");
     assert.equal((await req("/api/ramble/around?lat=30.46000000000000085&lon=-98.079999999999998")).status, 200);
