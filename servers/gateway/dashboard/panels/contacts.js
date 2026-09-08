@@ -12,7 +12,7 @@ import { renderContactList, renderContactProfile, renderDeleteConfirm, renderGro
 import { contactsClientJs } from "./contacts/client.js";
 import { getContacts, getContact, getContactActivity, getGroups, getMyProfile } from "./contacts/data-queries.js";
 import { handleContactAction } from "./contacts/api-handlers.js";
-import { section } from "../shared/components.js";
+import { section, escapeHtml } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { buildInviteShare, parseShortCodeResult } from "../shared/peer-invite-ui.js";
 import { csrfInput } from "../shared/csrf.js";
@@ -30,6 +30,10 @@ export default {
     let peerAdd = {};
     if (req.method === "POST") {
       const result = await handleContactAction(req, db);
+      if (result?.status) {
+        const content = `<div class="contacts-empty"><p>${escapeHtml(result.text)}</p><p><a href="/dashboard/contacts?view=profile" class="btn btn-sm btn-secondary">${t("common.back", lang)}</a></p></div>`;
+        return res.status(result.status).send(layout({ title: t("nav.contacts", lang), content }));
+      }
       if (result?.redirect) return res.redirectAfterPost(result.redirect);
       if (result?.download) {
         res.setHeader("Content-Type", "text/vcard; charset=utf-8");
@@ -89,7 +93,10 @@ export default {
     } else if (view === "profile") {
       // --- My Profile ---
       const profile = await getMyProfile(db);
-      bodyHtml = renderMyProfile(profile, lang);
+      // 2026-09-08 §5: the bird option needs a hatched bird AND a drawable engine.
+      const { readActiveBird, loadBirdEngine } = await import("../../../sharing/profile-avatar.js");
+      const birdAvailable = !!(await readActiveBird(db)) && !!loadBirdEngine();
+      bodyHtml = renderMyProfile(profile, lang, { birdAvailable });
     } else if (view === "bots") {
       // --- Browse Crow Bots Directory ---
       const { getBotDirectory } = await import("./messages/data-queries.js");

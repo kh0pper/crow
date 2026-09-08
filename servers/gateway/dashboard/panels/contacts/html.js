@@ -9,6 +9,8 @@ import { escapeHtml, badge, formField } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { renderInviteShare, renderPeerInviteForms, renderShortCodeShare, renderShortCodeForms } from "../../shared/peer-invite-ui.js";
 import { computeSafetyNumber } from "../../../../sharing/identity.js";
+import { contactName, contactAvatar } from "../../../../sharing/contact-display.js";
+import { validateAvatar, AVATAR_MAX_BYTES } from "../../../../sharing/avatar.js";
 
 /** Color palette for contact avatars (deterministic by contact ID) */
 const AVATAR_COLORS = [
@@ -30,11 +32,13 @@ function initials(name) {
 function avatarHtml(contact, size = "small") {
   const cls = size === "large" ? "profile-avatar-large" : "contact-avatar";
   const color = avatarColor(contact.id);
-
-  if (contact.avatar_url) {
-    return `<div class="${cls}" style="background:${color}"><img src="${escapeHtml(contact.avatar_url)}" alt="" loading="lazy"></div>`;
+  // 2026-09-08 §4.5: the picture the user set, else the one the peer sent —
+  // inline data: images only (contactAvatar validates), always via <img src>.
+  const pic = contactAvatar(contact);
+  if (pic) {
+    return `<div class="${cls}" style="background:${color}"><img src="${escapeHtml(pic)}" alt="" loading="lazy"></div>`;
   }
-  const name = contact.display_name || contact.name || "";
+  const name = contactName(contact) || contact.name || "";
   return `<div class="${cls}" style="background:${color}">${escapeHtml(initials(name))}</div>`;
 }
 
@@ -164,11 +168,11 @@ export function renderContactList(contacts, groups, filters, lang, peerAdd = {})
         ? (c.email || c.phone || t("contacts.manual", lang))
         : (c.crow_id ? c.crow_id.substring(0, 20) + "..." : "");
 
-      return `<a href="/dashboard/contacts?view=contact&contact=${c.id}" class="contact-card" data-name="${escapeHtml((c.display_name || "").toLowerCase())}" data-type="${escapeHtml(c.contact_type || "crow")}">
+      return `<a href="/dashboard/contacts?view=contact&contact=${c.id}" class="contact-card" data-name="${escapeHtml((contactName(c) || "").toLowerCase())}" data-type="${escapeHtml(c.contact_type || "crow")}">
         <div class="contact-card-header">
           ${avatarHtml(c)}
           <div class="contact-card-info">
-            <div class="contact-card-name">${escapeHtml(c.display_name || "Unknown")}${c.verified ? ` <span class="verified-badge" title="${t("contacts.verifiedBadgeTitle", lang)}">✓</span>` : ""}</div>
+            <div class="contact-card-name">${escapeHtml(contactName(c) || "Unknown")}${c.verified ? ` <span class="verified-badge" title="${t("contacts.verifiedBadgeTitle", lang)}">✓</span>` : ""}</div>
             <div class="contact-card-meta">${escapeHtml(meta)}</div>
           </div>
           ${typeBadge(c, lang)}
@@ -202,7 +206,7 @@ export function renderContactProfile(contact, activities, groups, allGroups, lan
   const header = `<div class="contact-profile-header">
     ${avatarHtml(contact, "large")}
     <div class="profile-info">
-      <h2>${escapeHtml(contact.display_name || "Unknown")}</h2>
+      <h2>${escapeHtml(contactName(contact) || "Unknown")}</h2>
       <span class="type-badge">${escapeHtml(contact.contact_type === "manual" ? t("contacts.manual", lang) : t("contacts.crow", lang))}</span>
     </div>
   </div>`;
@@ -211,6 +215,11 @@ export function renderContactProfile(contact, activities, groups, allGroups, lan
   const details = [];
   if (contact.crow_id && contact.contact_type !== "manual") {
     details.push({ label: "Crow ID", value: contact.crow_id.substring(0, 32) + "..." });
+  }
+  // 2026-09-08 §4.5: when the user typed their own name for this contact, the
+  // name the peer chose is still worth a glance.
+  if (contact.peer_display_name && contact.peer_display_name !== contactName(contact)) {
+    details.push({ label: t("contacts.peerName", lang), value: contact.peer_display_name });
   }
   if (contact.email) details.push({ label: t("contacts.fieldEmail", lang), value: contact.email });
   if (contact.phone) details.push({ label: t("contacts.fieldPhone", lang), value: contact.phone });
@@ -311,7 +320,7 @@ export function renderContactProfile(contact, activities, groups, allGroups, lan
       ${formField(t("contacts.fieldName", lang), "display_name", { value: contact.display_name || "" })}
       ${formField(t("contacts.fieldEmail", lang), "email", { type: "email", value: contact.email || "" })}
       ${formField(t("contacts.fieldPhone", lang), "phone", { value: contact.phone || "" })}
-      ${formField(t("contacts.fieldAvatar", lang), "avatar_url", { value: contact.avatar_url || "", placeholder: "https://..." })}
+      ${formField(t("contacts.fieldAvatar", lang), "avatar_url", { value: contact.avatar_url || "", placeholder: "data:image/... or https://..." })}
       ${formField(t("contacts.fieldNotes", lang), "notes", { type: "textarea", value: contact.notes || "", rows: 3 })}
       <button type="submit" class="btn btn-primary" style="margin-top:0.5rem">${t("common.save", lang)}</button>
     </form>
@@ -365,7 +374,7 @@ export function renderDeleteConfirm(contact, preview, lang, csrf = "") {
   const header = `<div class="contact-profile-header">
     ${avatarHtml(contact, "large")}
     <div class="profile-info">
-      <h2>${escapeHtml(contact.display_name || "Unknown")}</h2>
+      <h2>${escapeHtml(contactName(contact) || "Unknown")}</h2>
       <span class="type-badge">${escapeHtml(contact.contact_type === "manual" ? t("contacts.manual", lang) : t("contacts.crow", lang))}</span>
     </div>
   </div>`;
@@ -446,7 +455,7 @@ export function renderGroupManager(groups, contacts, lang) {
       .slice(0, 8);
 
     const memberAvatars = memberIds.map((c) =>
-      `<a href="/dashboard/contacts?view=contact&contact=${c.id}" title="${escapeHtml(c.display_name || "")}" style="text-decoration:none">${avatarHtml(c)}</a>`
+      `<a href="/dashboard/contacts?view=contact&contact=${c.id}" title="${escapeHtml(contactName(c) || "")}" style="text-decoration:none">${avatarHtml(c)}</a>`
     ).join("");
 
     return `<div class="group-item">
@@ -475,15 +484,17 @@ export function renderGroupManager(groups, contacts, lang) {
 // My Profile
 // ──────────────────────────────────────────────
 
-export function renderMyProfile(profile, lang) {
+export function renderMyProfile(profile, lang, { birdAvailable = false } = {}) {
   const name = profile.display_name || "";
-  const avatarUrl = profile.avatar_url || "";
+  // 2026-09-08 §4.1: only an inline picture renders (a legacy URL cannot pass the dashboard CSP).
+  const avatar = validateAvatar(profile.avatar_url);
+  const source = profile.avatar_source === "bird" ? "bird" : "picture";
   const bio = profile.bio || "";
 
   const preview = `<div class="my-profile-preview">
-    <div class="profile-avatar-large" style="background:var(--crow-accent)">
-      ${avatarUrl
-        ? `<img src="${escapeHtml(avatarUrl)}" alt="" loading="lazy">`
+    <div class="profile-avatar-large" id="profileAvatarPreview" style="background:var(--crow-accent)">
+      ${avatar
+        ? `<img src="${escapeHtml(avatar)}" alt="">`
         : `<span style="font-size:1.5rem;font-weight:700">${escapeHtml(initials(name || "Me"))}</span>`}
     </div>
     <div>
@@ -492,10 +503,32 @@ export function renderMyProfile(profile, lang) {
     </div>
   </div>`;
 
-  const form = `<form method="POST" class="my-profile-form">
+  const labelStyle = "display:block;font-size:var(--crow-text-sm);color:var(--crow-text-muted);margin-bottom:var(--crow-space-1);text-transform:uppercase;letter-spacing:0.05em";
+  // The browser shrinks the chosen file to a 128 px data: URI into the hidden
+  // `avatar` field (client.js readProfilePicture); "" means untouched.
+  const pictureField = `<div style="margin-bottom:var(--crow-space-4)">
+    <label for="profilePictureInput" style="${labelStyle}">${escapeHtml(t("contacts.fieldPicture", lang))}</label>
+    <input type="file" id="profilePictureInput" accept="image/png,image/jpeg,image/webp,image/gif" data-max="${AVATAR_MAX_BYTES}" data-too-big="${escapeHtml(t("contacts.pictureTooBig", lang))}" data-bad-image="${escapeHtml(t("contacts.pictureUnreadable", lang))}" onchange="readProfilePicture(this)">
+    <input type="hidden" name="avatar" id="profileAvatarData" value="">
+    <p class="my-profile-hint">${escapeHtml(t("contacts.pictureHint", lang))}</p>
+    <p class="my-profile-msg" id="profilePictureMsg" role="status"></p>
+    ${avatar ? `<label class="my-profile-check"><input type="checkbox" name="avatar_clear" value="1"> ${escapeHtml(t("contacts.removePicture", lang))}</label>` : ""}
+  </div>`;
+
+  // Offered only when a bird has hatched AND the engine can draw it (the panel
+  // handler decides). The field is OMITTED otherwise, so a save from a Crow
+  // without Ramble never flips a bird source chosen on another instance.
+  const sourceField = birdAvailable ? `<fieldset class="my-profile-source">
+    <legend>${escapeHtml(t("contacts.pictureSource", lang))}</legend>
+    <label><input type="radio" name="avatar_source" value="picture"${source === "picture" ? " checked" : ""}> ${escapeHtml(t("contacts.sourcePicture", lang))}</label>
+    <label><input type="radio" name="avatar_source" value="bird"${source === "bird" ? " checked" : ""}> ${escapeHtml(t("contacts.sourceBird", lang))}</label>
+  </fieldset>` : "";
+
+  const form = `<form method="POST" class="my-profile-form" id="myProfileForm">
     <input type="hidden" name="action" value="save_profile">
     ${formField(t("contacts.profileName", lang), "display_name", { value: name, placeholder: t("contacts.profileNamePlaceholder", lang) })}
-    ${formField(t("contacts.fieldAvatar", lang), "avatar_url", { value: avatarUrl, placeholder: "https://..." })}
+    ${pictureField}
+    ${sourceField}
     ${formField(t("contacts.profileBio", lang), "bio", { type: "textarea", value: bio, rows: 3, placeholder: t("contacts.profileBioPlaceholder", lang) })}
     <button type="submit" class="btn btn-primary" style="margin-top:0.5rem">${t("common.save", lang)}</button>
   </form>`;
