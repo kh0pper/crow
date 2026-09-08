@@ -201,7 +201,7 @@ Replace `labelEl`'s click line with:
 ```
 Add, before `function rowEl(item)`:
 ```js
-    /* Add a class for `ms`, restarting the timer on a repeat. The timer lives
+    /* Add a class for ms milliseconds, restarting the timer on a repeat. The timer lives
      * on the element so a label and a row with the same id never share one. */
     function flash(el, cls, ms) {
       el.classList.add(cls);
