@@ -669,6 +669,13 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.equal(sinks.length, 2, `expected exactly two engine-output markup sinks, found ${sinks.length}`);
   assert.ok(code.includes("el.innerHTML = Bird.drawEgg("));
   assert.ok(code.includes("html: nestEggHtml("));
+
+  // hidden is an HTMLElement property, not an SVGElement one: `el.hidden = x`
+  // on an <svg> sets a dead expando while the CSS attribute selector for it
+  // keeps matching the content attribute. setHidden toggles the attribute
+  // itself everywhere in this file, so no direct assignment survives.
+  assert.ok(body.includes("function setHidden(el, on)"), "the attribute-toggling helper is defined");
+  assert.deepEqual(body.match(/\.hidden\s*=(?!=)/g) || [], [], "no .hidden = assignment remains anywhere in the file");
 });
 
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
@@ -724,6 +731,16 @@ test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero ba
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(body), "no emoji");
   assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body));
   assert.ok(body.includes("window.RambleAr = api"));
+
+  // hidden is an HTMLElement property, not an SVGElement one: setHidden
+  // toggles the attribute directly so the bird/egg <svg> pair can actually
+  // show and hide, and paintBird's own react() reads the attribute back
+  // instead of the dead expando it used to write.
+  assert.ok(body.includes("function setHidden(el, on)"), "the attribute-toggling helper is defined");
+  assert.deepEqual(body.match(/\.hidden\s*=(?!=)/g) || [], [], "no .hidden = assignment remains anywhere in the file");
+  assert.ok(!body.includes(".bird.hidden") && !body.includes(".egg.hidden"), "no remaining .hidden property read either");
+  assert.ok(body.includes('e.bird.hasAttribute("hidden")'), "the read site tests the attribute, not the property");
+
   assert.equal((await realFetch(BASE + "/ramble/static/ramble-ar.js")).status, 401);
 });
 
