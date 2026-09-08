@@ -18,8 +18,8 @@
 - **Peer vs local (D5, exact):** a peer's name/picture is written ONLY to `peer_display_name` / `peer_avatar`. `display_name` keeps today's handshake behaviour (written only over a placeholder — `null`, `""`, `crow:…`, `req:…` — by `upsertFullContact` / `handleHandshakeComplete`); a profile message never touches `display_name` or `avatar_url`. `applyPeerProfile` semantics: a field that is `undefined` is left alone (the handshake may omit either); a string is sanitized/validated; `null` or a rejected value clears.
 - **Display rule (spec §4.5 + the placeholder rule):** `contactName(row, { fallback })` = `display_name` unless it is a placeholder → `peer_display_name` → `fallback` (default `row.crow_id`) → `null`. `contactAvatar(row)` = the first of `avatar_url`, `peer_avatar` that `validateAvatar` accepts, else `null` (a legacy `https:` avatar_url cannot render under the dashboard CSP anyway). Scope of the rule in THIS plan: the Contacts panel (list, profile header, delete interstitial, group members, My profile preview), the Messages conversation list (`getUnifiedList` peer rows), `crow_list_contacts`, and Ramble's `contactsByPubkey` (mirrored inline — a bundle server file cannot import core statically). Other `display_name || crow_id` sites (notification titles, room/bot admin text, share inbox) are out of scope and listed as a follow-up.
 - **Envelope (spec §4.3, normalized to the dispatcher's shape):** `{ "type": "crow_social", "version": 1, "subtype": "profile", "payload": { "v": 1, "display_name": <string|null>, "avatar": <data URI|null> } }` — `subscribeToIncoming` hands `payload.payload` to `onSocialMessage(subtype, payload, senderPubkey)`; the spec's flat `{ subtype, v, display_name, avatar }` is that inner payload. `PROFILE_SUBTYPE = "profile"`.
-- **Receiver rule:** resolve `senderPubkey` with `findContactByPubkey`; apply ONLY when the row is FULL (`request_status` null/undefined) and unblocked; a stranger, a `req:` pending row and a blocked contact are dropped silently. Never throws (receive path).
-- **Broadcast rule:** at most ONE `broadcastProfile` per profile save (the handler compares `getMyProfile` before/after on `display_name`, `avatar_url`, `avatar_source`), plus one per bird refresh that actually changed the stored picture. Recipients: rows with `request_status` null, `is_blocked = 0`, `is_bot` falsy, `origin !== "local-bot"`, `contact_type !== "manual"`, `secp256k1_pubkey` matching `/^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/` — filtered in JS over `SELECT *` (tolerant of a db missing `is_bot`/`origin`). Each `sendControl` guarded; best effort, no retry queue.
+- **Receiver rule (Review R2 ruling R2-1):** resolve `senderPubkey` with `findContactByPubkey`; apply ONLY when the row is ESTABLISHED — `isEstablishedContact(row)` = `request_status` null/undefined OR `"accepted"` (a message request the user explicitly accepted is a user-approved contact: it follows the user, syncs, and is listed) — AND unblocked; a stranger, a `req:` pending row and a blocked contact are dropped silently. The SAME predicate gates every writer of `peer_*` and, in `handleHandshakeComplete`, the pre-existing placeholder `display_name` write too (R2-S1). Never throws (receive path).
+- **Broadcast rule:** at most ONE `broadcastProfile` per profile save (the handler compares `getMyProfile` before/after on `display_name`, `avatar_url`, `avatar_source`), plus one per bird refresh that actually changed the stored picture. Recipients: established rows (`request_status IS NULL OR = 'accepted'`), `is_blocked = 0`, `is_bot` falsy, `origin !== "local-bot"`, `contact_type !== "manual"`, `secp256k1_pubkey` matching `/^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/` — filtered in JS over `SELECT *` (tolerant of a db missing `is_bot`/`origin`). Each `sendControl` guarded; best effort, no retry queue — BUT lossy is not acceptable (R2-S3): `broadcastProfile` records `__profile_broadcast_pending` (`"1"` before the fan-out, `"0"` only after a fan-out with zero failures and nothing skipped; a raw `dashboard_settings` row, never synced, like the heal flag) and both the profile save and the bird refresh re-broadcast an UNCHANGED profile while that flag is `"1"`. The save handler never awaits the fan-out (R2-S4: 50 contacts × 4 relays blocked the response ~10 s): it returns `{ redirect, broadcast }` where `broadcast` is the fan-out promise (tests await it).
 - **Settings:** new global key `profile_avatar_source` ∈ `picture` | `bird` (default `picture`), added to `SYNC_ALLOWLIST` and `PROFILE_SYNC_KEYS` (now four). `profile_avatar_url` keeps its key and now holds a `data:` URI. Writes go through `upsertSetting` + `deleteLocalSetting` (Cluster B D2), reads are global-direct (D6).
 - **Bird (spec §5):** core reads the active bird by raw SQL (`ramble_pet.active_egg_id` → `ramble_eggs` hatched row; any error → no bird) and loads the engine from the installed copy `$CROW_HOME/bundles/ramble/server/bird-svg.cjs` (default `~/.crow`) then the repo `bundles/ramble/server/bird-svg.cjs`, using ONLY `rollGenome` and `drawBird` (exports since 0.2.0 — no NEW bundle export, R1-1; `typeof` guarded). Portrait = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">` + `drawBird(rollGenome(seed, species), "happy")` + `</svg>` → `data:image/svg+xml;base64,…` (≈ 3–4 KB). Refresh triggers: the in-process bus events `ramble:hatched` (existing, poked by the panel routes and the transport) and `ramble:bird-activated` (new poke in `POST /api/ramble/birds/:id/activate`). A hatch inside the stdio Ramble MCP process does not refresh (no bus across processes) — the next gateway-side hatch/activation/save does; documented in the plan's Q list. No bird / no engine while the source is `bird` → the source falls back to `picture`, the stored picture stays.
 - **Panel rules:** Contacts `client.js` inner script: ZERO backticks, ZERO `${`, `textContent` only, no `innerHTML`/`insertAdjacentHTML`/`outerHTML`, a `src` assignment is not a markup sink. `bundles/ramble/panel/static/ramble.js`: ZERO backticks, EXACTLY two engine markup sinks (unchanged), no emoji. Every form input bounded (`avatar` ≤ cap, `avatar_source` enum, `avatar_clear` = `"1"`). Direction C tokens only in ramble.css.
@@ -62,7 +62,7 @@
 - Modify: `scripts/init-db.js` (after the `contacts.verified` line, ~1854)
 
 **Interfaces:**
-- Produces: `AVATAR_MAX_BYTES = 32768`; `AVATAR_RE`; `validateAvatar(value) → string | null`; `isPlaceholderName(name) → boolean`; `contactName(row, { fallback } = {}) → string | null`; `contactAvatar(row) → string | null`; columns `contacts.peer_display_name TEXT`, `contacts.peer_avatar TEXT` on a fresh init-db.
+- Produces: `AVATAR_MAX_BYTES = 32768`; `AVATAR_RE`; `validateAvatar(value) → string | null`; `avatarFieldValue(value) → string | null` (the contact editor's `avatar_url` field: `""`, a valid inline avatar, or an `http(s)://` URL of ≤ 2048 characters pass; anything else is `null`); `isPlaceholderName(name) → boolean`; `contactName(row, { fallback } = {}) → string | null`; `contactAvatar(row) → string | null`; columns `contacts.peer_display_name TEXT`, `contacts.peer_avatar TEXT` on a fresh init-db.
 
 - [ ] **Step 1: Failing tests**
 
@@ -71,7 +71,7 @@ Create `tests/avatar-validate.test.js`:
 ```js
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { validateAvatar, AVATAR_MAX_BYTES, AVATAR_RE } from "../servers/sharing/avatar.js";
+import { validateAvatar, avatarFieldValue, AVATAR_MAX_BYTES, AVATAR_RE } from "../servers/sharing/avatar.js";
 
 const PREFIX = "data:image/png;base64,";
 
@@ -103,6 +103,20 @@ test("validateAvatar: the cap is inclusive and counts the whole string", () => {
   assert.equal(AVATAR_MAX_BYTES, 32768);
   assert.ok(AVATAR_RE instanceof RegExp);
   assert.equal(AVATAR_RE.test("data:image/svg+xml;base64,PHN2Zz4="), true);
+});
+
+test("avatarFieldValue (the contact editor's avatar_url): empty, an inline avatar, or a short http(s) URL; junk and oversize are null", () => {
+  assert.equal(avatarFieldValue(""), "");
+  assert.equal(avatarFieldValue("   "), "", "whitespace is empty");
+  assert.equal(avatarFieldValue(PREFIX + "AAAA"), PREFIX + "AAAA");
+  assert.equal(avatarFieldValue("https://example.com/me.png"), "https://example.com/me.png", "a legacy URL is kept (it cannot render, but it is the user's)");
+  assert.equal(avatarFieldValue("http://example.com/me.png"), "http://example.com/me.png");
+  assert.equal(avatarFieldValue("https://example.com/" + "a".repeat(2048)), null, "over 2048 characters");
+  assert.equal(avatarFieldValue("javascript:alert(1)"), null);
+  assert.equal(avatarFieldValue("data:text/html;base64,PHNjcmlwdD4="), null);
+  assert.equal(avatarFieldValue(PREFIX + "A".repeat(AVATAR_MAX_BYTES)), null, "an oversize inline picture is refused, not stored");
+  assert.equal(avatarFieldValue(null), null);
+  assert.equal(avatarFieldValue(7), null);
 });
 ```
 
@@ -225,6 +239,24 @@ export function validateAvatar(value) {
   if (value.length > AVATAR_MAX_BYTES) return null;
   return AVATAR_RE.test(value) ? value : null;
 }
+
+/**
+ * The contact editor's `avatar_url` field (a LOCAL override the user types;
+ * Review R2-S5): "" clears; a valid inline avatar renders; a short http(s)
+ * URL is kept for the user's own reference (the dashboard CSP never renders
+ * it, contactAvatar skips it). Anything else — an oversize inline image, a
+ * javascript: or data:text URL — is null (the editor answers 400, the sync
+ * apply stores NULL). Bounded so a pasted multi-MB value never rides the
+ * contacts wire.
+ */
+const URL_FIELD_RE = /^https?:\/\/[^\s]{1,2040}$/;
+export function avatarFieldValue(value) {
+  if (typeof value !== "string") return null;
+  const v = value.trim();
+  if (v === "") return "";
+  if (validateAvatar(v)) return v;
+  return URL_FIELD_RE.test(v) ? v : null;
+}
 ```
 
 Create `servers/sharing/contact-display.js`:
@@ -333,7 +365,7 @@ import { createClient } from "@libsql/client";
 
 import {
   PROFILE_SUBTYPE, ensurePeerProfileColumns, readLocalProfile, buildProfileMessage,
-  applyPeerProfile, handleProfileMessage, profileRecipients, broadcastProfile,
+  applyPeerProfile, handleProfileMessage, profileRecipients, broadcastProfile, readBroadcastPending, isEstablishedContact,
 } from "../servers/sharing/peer-profile.js";
 import { __setEmitSinkForTest } from "../servers/sharing/contact-sync.js";
 import { wireNostrReceive } from "../servers/sharing/boot.js";
@@ -361,6 +393,15 @@ async function seed(db, { crowId, secp, name = crowId, extra = {} }) {
   return Number(res.lastInsertRowid);
 }
 const rowOf = async (db, id) => (await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [id] })).rows[0];
+
+test("isEstablishedContact: NULL/undefined/'accepted' are established; 'pending' and anything else are not", () => {
+  assert.equal(isEstablishedContact({ request_status: null }), true);
+  assert.equal(isEstablishedContact({}), true);
+  assert.equal(isEstablishedContact({ request_status: "accepted" }), true);
+  assert.equal(isEstablishedContact({ request_status: "pending" }), false);
+  assert.equal(isEstablishedContact({ request_status: "weird" }), false);
+  assert.equal(isEstablishedContact(null), true, "a missing row reads as NULL status (callers resolve the row first)");
+});
 
 test("buildProfileMessage: the crow_social envelope with subtype profile; sanitized name, validated picture, nulls propagate", () => {
   const env = JSON.parse(buildProfileMessage({ displayName: "  Kevin\u202e ", avatar: PNG }));
@@ -438,7 +479,12 @@ test("handleProfileMessage: accepted from a FULL unblocked contact; dropped from
     assert.equal(Number((await db.execute("SELECT COUNT(*) AS n FROM contacts")).rows[0].n), 3, "a stranger's profile creates no row");
 
     r = await handleProfileMessage(db, payload, xonly("2"));
-    assert.deepEqual([r.applied, r.reason], [false, "not-full"]);
+    assert.deepEqual([r.applied, r.reason], [false, "not-established"]);
+
+    const accepted = await seed(db, { crowId: "crow:acc", secp: pk("7"), name: "crow:acc", extra: { request_status: "accepted" } });
+    r = await handleProfileMessage(db, payload, xonly("7"));
+    assert.deepEqual([r.applied, r.changed, r.contactId], [true, true, accepted], "an ACCEPTED request is an established contact (R2-1)");
+    assert.equal((await rowOf(db, accepted)).peer_display_name, "Kevin");
 
     r = await handleProfileMessage(db, payload, xonly("3"));
     assert.deepEqual([r.applied, r.reason], [false, "blocked"]);
@@ -504,20 +550,25 @@ test("profileRecipients + broadcastProfile: every full unblocked human keyed con
     await seed(db, { crowId: "manual:x", secp: "", name: "Manual", extra: { contact_type: "manual" } });
     await seed(db, { crowId: "crow:badkey", secp: "not-hex", name: "Bad" });
 
-    assert.deepEqual((await profileRecipients(db)).map((r) => r.crow_id), ["crow:full", "crow:full2"]);
+    assert.deepEqual((await profileRecipients(db)).map((r) => r.crow_id), ["crow:full", "crow:full2", "crow:accepted"], "accepted requests are established contacts (R2-1)");
 
     const sent = [];
     const nostrManager = { sendControl: async (contact, content) => { sent.push({ contact, content }); return { eventId: "e", relays: ["r"] }; } };
-    assert.deepEqual(await broadcastProfile(db, nostrManager), { sent: 2, failed: 0, skipped: 0 });
-    assert.deepEqual(sent.map((s) => s.contact.secp256k1_pubkey), [pk("a"), xonly("b")]);
+    assert.deepEqual(await broadcastProfile(db, nostrManager), { sent: 3, failed: 0, skipped: 0 });
+    assert.deepEqual(sent.map((s) => s.contact.secp256k1_pubkey), [pk("a"), xonly("b"), pk("e")]);
     const env = JSON.parse(sent[0].content);
     assert.equal(env.subtype, "profile");
     assert.deepEqual(env.payload, { v: 1, display_name: "Kevin", avatar: PNG });
+    assert.equal(await readBroadcastPending(db), false, "a clean fan-out clears the pending flag");
 
     let n = 0;
     const flaky = { sendControl: async () => { if (n++ === 0) throw new Error("relay down"); return { eventId: "e", relays: ["r"] }; } };
-    assert.deepEqual(await broadcastProfile(db, flaky), { sent: 1, failed: 1, skipped: 0 }, "a failure is counted and the loop continues");
+    assert.deepEqual(await broadcastProfile(db, flaky), { sent: 2, failed: 1, skipped: 0 }, "a failure is counted and the loop continues");
+    assert.equal(await readBroadcastPending(db), true, "a failed fan-out leaves the flag pending (R2-S3)");
+    assert.deepEqual(await broadcastProfile(db, nostrManager), { sent: 3, failed: 0, skipped: 0 });
+    assert.equal(await readBroadcastPending(db), false);
     assert.deepEqual(await broadcastProfile(db, null), { sent: 0, failed: 0, skipped: 1 });
+    assert.equal(await readBroadcastPending(db), true, "no manager = nothing went out = pending");
     assert.deepEqual(await broadcastProfile(db, {}), { sent: 0, failed: 0, skipped: 1 }, "no sendControl = no wire");
   } finally { cleanup(); }
 });
@@ -530,6 +581,15 @@ test("ensurePeerProfileColumns adds the two columns to a contacts table that lac
   const names = (await db.execute("PRAGMA table_info(contacts)")).rows.map((r) => r.name);
   assert.deepEqual(names.filter((n) => n.startsWith("peer_")), ["peer_display_name", "peer_avatar"]);
   await ensurePeerProfileColumns({ execute: async () => { throw new Error("no such table"); } }); // never throws
+  // R2-Q1: the verify block fires when ALTER fails but PRAGMA answers (a VIEW named contacts).
+  const viewDb = createClient({ url: "file::memory:" });
+  await viewDb.execute("CREATE TABLE base (id INTEGER PRIMARY KEY, crow_id TEXT)");
+  await viewDb.execute("CREATE VIEW contacts AS SELECT * FROM base");
+  const errors = [];
+  const origError = console.error;
+  console.error = (...a) => errors.push(a.join(" "));
+  try { await ensurePeerProfileColumns(viewDb); } finally { console.error = origError; }
+  assert.ok(errors.some((e) => e.includes("contacts.peer_* columns MISSING")), "the loud line fires");
 });
 ```
 
@@ -633,11 +693,27 @@ test("handshake_complete peer fields are dropped for a blocked contact and for a
     r = await peerOf(db, req);
     assert.equal(r.peer_avatar, null, "an unpaired request row never stores 32 KB");
     assert.equal(r.peer_display_name, null);
+    assert.equal(r.display_name, null, "and cannot name itself either (R2-S1)");
+    // R2-S1: a BLOCKED contact whose stored name is a placeholder stays a placeholder.
+    const BLK2 = "02" + "b".repeat(64);
+    await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, is_blocked) VALUES ('crow:blkph', ?, ?, 'crow:blkph', 1)", args: ["d".repeat(64), BLK2] });
+    await handleHandshakeComplete(db, [], BLK2.slice(-64), "I Renamed Myself", PNG_AV);
+    r = await peerOf(db, "crow:blkph");
+    assert.equal(r.display_name, "crow:blkph");
+    assert.equal(r.peer_display_name, null);
+    // R2-1: an ACCEPTED message request is an established contact — both writes land.
+    const ACC = "02" + "a".repeat(64);
+    await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, request_status) VALUES ('crow:accepted1', '', ?, 'crow:accepted1', 'accepted')", args: [ACC] });
+    await handleHandshakeComplete(db, [], ACC.slice(-64), "Accepted Pal", PNG_AV);
+    r = await peerOf(db, "crow:accepted1");
+    assert.equal(r.display_name, "Accepted Pal");
+    assert.equal(r.peer_display_name, "Accepted Pal");
+    assert.equal(r.peer_avatar, PNG_AV);
   } finally { cleanup(); }
 });
 ```
 
-- [ ] **Step 2: Run** `node scripts/run-suite.mjs tests/peer-profile.test.js tests/handshake-display-name.test.js` → the new tests FAIL.
+- [ ] **Step 2: Run** `node scripts/run-suite.mjs tests/peer-profile.test.js tests/handshake-display-name.test.js` → the new tests FAIL, EXCEPT the R1-C1 gate test, which is green here because nothing writes `peer_*` yet (a regression pin, not a gate — R2-Q2).
 
 - [ ] **Step 3: Implement**
 
@@ -668,7 +744,37 @@ import { validateAvatar } from "./avatar.js";
 import { emitContactChange } from "./contact-sync.js";
 
 export const PROFILE_SUBTYPE = "profile";
+/** A raw dashboard_settings row (NOT in the sync allowlist, never emitted — the profile-heal flag precedent): "1" = the last fan-out did not fully succeed, resend on the next chance. */
+export const PROFILE_BROADCAST_PENDING_KEY = "__profile_broadcast_pending";
 const HEX_KEY = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/;
+
+/**
+ * Review R2 ruling R2-1: an ESTABLISHED contact is a full row (request_status
+ * NULL) OR a message request the user explicitly accepted ('accepted' — it
+ * follows the user, syncs, and is listed in Messages). 'pending' is a
+ * stranger's unanswered request. Every writer of peer_* and every recipient
+ * list uses this one predicate.
+ */
+export function isEstablishedContact(row) {
+  const st = row?.request_status;
+  return st === null || st === undefined || st === "accepted";
+}
+
+export async function readBroadcastPending(db) {
+  try {
+    const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [PROFILE_BROADCAST_PENDING_KEY] });
+    return rows?.[0]?.value === "1";
+  } catch { return false; }
+}
+
+async function writeBroadcastPending(db, pending) {
+  try {
+    await db.execute({
+      sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+      args: [PROFILE_BROADCAST_PENDING_KEY, pending ? "1" : "0"],
+    });
+  } catch { /* the flag is an optimization; a write failure means one extra resend */ }
+}
 
 /** Runtime guard for existing hosts (init-db only re-runs on a generation bump — the shared_items.mode precedent). Never throws. */
 export async function ensurePeerProfileColumns(db) {
@@ -752,7 +858,7 @@ export async function handleProfileMessage(db, payload, senderPubkey) {
     if (!db || !senderPubkey || !payload || typeof payload !== "object" || Array.isArray(payload)) return { applied: false, reason: "bad-input" };
     const contact = await findContactByPubkey(db, senderPubkey);
     if (!contact) return { applied: false, reason: "stranger" };
-    if (contact.request_status !== null && contact.request_status !== undefined) return { applied: false, reason: "not-full" };
+    if (!isEstablishedContact(contact)) return { applied: false, reason: "not-established" };
     if (Number(contact.is_blocked) === 1) return { applied: false, reason: "blocked" };
     const has = (k) => Object.prototype.hasOwnProperty.call(payload, k);
     const r = await applyPeerProfile(db, contact.id, {
@@ -767,13 +873,14 @@ export async function handleProfileMessage(db, payload, senderPubkey) {
 }
 
 /**
- * Who gets a profile message: full, unblocked, human, keyed contacts. Filtered
- * in JS over SELECT * so a db that predates is_bot/origin still answers.
+ * Who gets a profile message: established, unblocked, human, keyed contacts.
+ * Filtered in JS over SELECT * so a db that predates is_bot/origin still answers.
  */
 export async function profileRecipients(db) {
   try {
-    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE request_status IS NULL AND is_blocked = 0 ORDER BY id", args: [] });
+    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE (request_status IS NULL OR request_status = 'accepted') AND is_blocked = 0 ORDER BY id", args: [] });
     return (rows || []).filter((r) =>
+      isEstablishedContact(r) &&
       !Number(r.is_bot || 0) &&
       r.origin !== "local-bot" &&
       r.contact_type !== "manual" &&
@@ -781,10 +888,17 @@ export async function profileRecipients(db) {
   } catch { return []; }
 }
 
-/** One NIP-44 control DM per recipient, best effort. Returns counts. */
+/**
+ * One NIP-44 control DM per recipient, best effort. Returns counts. Records
+ * the pending flag: "1" before the fan-out, "0" only after a fan-out with no
+ * failure and nothing skipped — so a save made offline is re-sent by the next
+ * save or bird refresh even when the profile did not change (R2-S3).
+ */
 export async function broadcastProfile(db, nostrManager) {
   const out = { sent: 0, failed: 0, skipped: 0 };
-  if (!db || !nostrManager || typeof nostrManager.sendControl !== "function") { out.skipped = 1; return out; }
+  if (!db) { out.skipped = 1; return out; }
+  await writeBroadcastPending(db, true);
+  if (!nostrManager || typeof nostrManager.sendControl !== "function") { out.skipped = 1; return out; }
   const content = buildProfileMessage(await readLocalProfile(db));
   for (const c of await profileRecipients(db)) {
     try {
@@ -795,6 +909,7 @@ export async function broadcastProfile(db, nostrManager) {
       try { console.warn(`[sharing] profile to ${c.crow_id} failed:`, err?.message); } catch {}
     }
   }
+  if (out.failed === 0 && out.skipped === 0) await writeBroadcastPending(db, false);
   return out;
 }
 ```
@@ -823,8 +938,8 @@ export function buildHandshakeComplete(eventIds, displayName, avatar) {
 ```
 
 `servers/sharing/boot.js`:
-1. Imports: add `import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns } from "./peer-profile.js";`. DELETE the `readLocalDisplayName` function and its doc comment (lines 31–49; `ackHandshake` was its only caller). `sanitizeDisplayName` stays imported (still used by `handleInviteAccepted` and `handleHandshakeComplete`).
-2. `ackHandshake`: replace the two lines `const selfName = await readLocalDisplayName(db);` / `await nostrManager.sendControl({ secp256k1_pubkey: senderPubkey }, buildHandshakeComplete([event.id], selfName));` with
+1. Imports: add `import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact } from "./peer-profile.js";`. DELETE the `readLocalDisplayName` function and its doc comment (lines 31–49; `ackHandshake` was its only caller). `sanitizeDisplayName` stays imported (still used by `handleInviteAccepted` and `handleHandshakeComplete`).
+2. `ackHandshake`: replace the old F-CONTACT-2 comment (the two `// F-CONTACT-2 (design §D5): carry the inviter's OWN display name …` / `// acceptor can show a name instead of a raw crowId. Omitted when unset.` lines) AND the two code lines `const selfName = await readLocalDisplayName(db);` / `await nostrManager.sendControl({ secp256k1_pubkey: senderPubkey }, buildHandshakeComplete([event.id], selfName));` with (R2-Q10: no stranded duplicate comment)
 
 ```js
     // F-CONTACT-2 + 2026-09-08 §4.2: carry the inviter's OWN name and picture
@@ -844,13 +959,33 @@ export function buildHandshakeComplete(eventIds, displayName, avatar) {
 4. `handleHandshakeComplete(db, eventIds, senderPubkey, displayName, avatar)`: after the existing placeholder `if (name && isPlaceholderName(contact.display_name)) { … }` block (still inside the outer try) add
 
 ```js
-    // 2026-09-08 §4.2 / §7 (Review R1-C1): the peer fields are CONTACT-ONLY —
-    // the same gate as the profile message (peer-profile.js). This handler is
-    // reached from the broad incoming subscription, so a blocked contact or an
-    // unpaired `req:` row could otherwise write 32 KB here with one envelope.
-    if ((contact.request_status === null || contact.request_status === undefined) && Number(contact.is_blocked) !== 1) {
+    // 2026-09-08 §4.2 / §7 (Review R1-C1 + R2-S1): the peer fields are
+    // CONTACT-ONLY — the same gate as the profile message (peer-profile.js).
+    // This handler is reached from the broad incoming subscription, so a
+    // blocked contact or an unpaired `req:` row could otherwise write 32 KB
+    // here with one envelope — or, through the older name write above, rename
+    // itself. `established` therefore guards BOTH writes (see step 4b).
+    if (established) {
       try { await applyPeerProfile(db, contact.id, { displayName, avatar }); }
       catch (err) { try { console.warn("[sharing] handshake_complete peer profile failed:", err?.message); } catch {} }
+    }
+```
+   4b. And hoist the gate ABOVE the existing placeholder name write, so that block becomes:
+
+```js
+    const established = isEstablishedContact(contact) && Number(contact.is_blocked) !== 1;
+    // F-CONTACT-2 (design §D5): apply the inviter's optional display name to the
+    // AUTHENTICATED sender's contact — sanitized, and ONLY over a placeholder
+    // stored name (never overwrite a name the user typed). The contact is
+    // resolved from senderPubkey, never from a payload-claimed identity.
+    // R2-S1: and only for an established, unblocked contact — a blocked party
+    // must not rename itself either.
+    const name = sanitizeDisplayName(displayName);
+    if (established && name && isPlaceholderName(contact.display_name)) {
+      await db.execute({
+        sql: "UPDATE contacts SET display_name = ? WHERE id = ?",
+        args: [name, contact.id],
+      });
     }
 ```
 5. The dispatcher in `wireNostrReceive`: the `HANDSHAKE_COMPLETE_SUBTYPE` branch passes `payload.avatar`, and the profile branch follows it:
@@ -992,6 +1127,14 @@ test("apply door: insert + update copy the peer fields; a hostile name is saniti
   row = await byCrow(db, "crow:pw-ins");
   assert.equal(row.peer_display_name, "Bad Name", "bidi override stripped");
   assert.equal(row.peer_avatar, null, "over the cap is NULL");
+  assert.equal(row.avatar_url, "https://example.com/local.png", "a legacy URL in the LOCAL field survives apply (R2-S5)");
+
+  await mgr._applyEntry(REMOTE_ID, signedEntry("contacts", "update", {
+    crow_id: "crow:pw-ins", ed25519_pubkey: "e", secp256k1_pubkey: secp(902), display_name: "Typed",
+    avatar_url: "data:image/png;base64," + "A".repeat(40000),
+  }, 53));
+  row = await byCrow(db, "crow:pw-ins");
+  assert.equal(row.avatar_url, null, "an oversize inline value in the local field is NULL at apply (R2-S5)");
 });
 
 test("apply door: an entry WITHOUT the peer keys (an older sender) leaves the stored peer fields alone", async () => {
@@ -1015,7 +1158,7 @@ test("apply door: an entry WITHOUT the peer keys (an older sender) leaves the st
 
 - [ ] **Step 3: Implement**
 
-`servers/sharing/instance-sync.js`: add `import { validateAvatar } from "./avatar.js";` beside the `sanitizeDisplayName` import, and directly after the `if (Object.prototype.hasOwnProperty.call(filtered, "display_name")) { … }` block in `_applyContact`:
+`servers/sharing/instance-sync.js`: add `import { validateAvatar, avatarFieldValue } from "./avatar.js";` beside the `sanitizeDisplayName` import, and directly after the `if (Object.prototype.hasOwnProperty.call(filtered, "display_name")) { … }` block in `_applyContact`:
 
 ```js
     // 2026-09-08 (§4.4 / D5): the peer-reported fields ride the same trusted
@@ -1028,6 +1171,11 @@ test("apply door: an entry WITHOUT the peer keys (an older sender) leaves the st
     }
     if (Object.prototype.hasOwnProperty.call(filtered, "peer_avatar")) {
       filtered.peer_avatar = validateAvatar(filtered.peer_avatar);
+    }
+    // R2-S5: the LOCAL avatar_url now renders too; the same bound the editor
+    // applies (an old-value URL is kept; junk/oversize becomes NULL).
+    if (Object.prototype.hasOwnProperty.call(filtered, "avatar_url")) {
+      filtered.avatar_url = avatarFieldValue(filtered.avatar_url);
     }
 ```
 
@@ -1202,10 +1350,32 @@ test("refreshBirdAvatar: no-op for source picture; falls back to picture with no
   } finally { cleanup(); }
 });
 
+test("refreshBirdAvatar: a fan-out that failed (relays down) is re-sent by the next refresh even though the picture is unchanged (R2-S3)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 21 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const down = { db, nostrManager: { sendControl: async () => { throw new Error("relay down"); } } };
+    let r = await refreshBirdAvatar(db, down);
+    assert.equal(r.reason, "rendered");
+    assert.deepEqual(r.sent, { sent: 0, failed: 1, skipped: 0 });
+    const sent = [];
+    r = await refreshBirdAvatar(db, mgrsWith(db, sent));
+    assert.equal(r.reason, "resend", "same picture, but the peers never got it");
+    assert.deepEqual(r.sent, { sent: 1, failed: 0, skipped: 0 });
+    assert.equal(sent.length, 1);
+    r = await refreshBirdAvatar(db, mgrsWith(db, sent));
+    assert.deepEqual(r, { changed: false, reason: "same" }, "delivered once, quiet afterwards");
+    assert.equal(sent.length, 1);
+  } finally { cleanup(); }
+});
+
 test("installBirdAvatarHooks: a hatch or an activation on the bus refreshes; installs once", async () => {
   __resetBirdAvatarHooksForTest();
   const { db, cleanup } = freshDb();
   try {
+    await seedContact(db); // the sent.length assertions need a recipient (R2-C1)
     await plantBird(db, { eggId: "b1", species: "penguin", seed: 11 });
     await putSetting(db, "profile_avatar_source", "bird");
     const sent = [];
@@ -1278,7 +1448,7 @@ import { homedir } from "node:os";
 import bus from "../shared/event-bus.js";
 import { validateAvatar } from "./avatar.js";
 import { upsertSetting, deleteLocalSetting } from "../gateway/dashboard/settings/registry.js";
-import { broadcastProfile } from "./peer-profile.js";
+import { broadcastProfile, readBroadcastPending } from "./peer-profile.js";
 
 const require = createRequire(import.meta.url);
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -1352,7 +1522,8 @@ async function readProfilePictureSettings(db) {
  * Bird -> picture refresh. Source `picture`: nothing. Source `bird` with no
  * bird (Ramble gone, nothing hatched, no engine): the source falls back to
  * `picture`, the last stored image stays. Otherwise: re-render; if the
- * portrait differs from what is stored, store it and broadcast ONCE.
+ * portrait differs from what is stored, store it and broadcast ONCE; if it is
+ * the same but the last fan-out was incomplete (pending flag), re-send.
  * Never throws.
  */
 export async function refreshBirdAvatar(db, managers) {
@@ -1365,7 +1536,12 @@ export async function refreshBirdAvatar(db, managers) {
       await deleteLocalSetting(db, "profile_avatar_source");
       return { changed: true, reason: "no-bird" };
     }
-    if (uri === avatar) return { changed: false, reason: "same" };
+    if (uri === avatar) {
+      // R2-S3: the picture is right, but did the last fan-out reach everyone?
+      if (!(await readBroadcastPending(db))) return { changed: false, reason: "same" };
+      const sent = await broadcastProfile(db, managers?.nostrManager);
+      return { changed: false, reason: "resend", sent };
+    }
     await upsertSetting(db, "profile_avatar_url", uri);
     await deleteLocalSetting(db, "profile_avatar_url");
     const sent = await broadcastProfile(db, managers?.nostrManager);
@@ -1517,7 +1693,11 @@ function freshDb() {
     },
   };
 }
-const save = (db, body, managers) => handleContactAction({ body: { action: "save_profile", ...body } }, db, { managers });
+const save = async (db, body, managers) => {
+  const out = await handleContactAction({ body: { action: "save_profile", ...body } }, db, { managers });
+  if (out?.broadcast) await out.broadcast; // the fan-out is fire-and-forget in production (R2-S4)
+  return out;
+};
 const seedPal = (db) => db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:pal', 'Pal', ?, ?)", args: ["d".repeat(64), "02" + "a".repeat(64)] });
 const spyMgrs = (db, sent) => ({ db, nostrManager: { sendControl: async (c, content) => { sent.push(JSON.parse(content)); return { eventId: "e", relays: ["r"] }; } } });
 
@@ -1559,6 +1739,31 @@ test("save_profile: a valid data URI is stored globally; junk is a 400; clear em
     const o = await db.execute("SELECT COUNT(*) AS c FROM dashboard_settings_overrides WHERE key LIKE 'profile_%'");
     assert.equal(Number(o.rows[0].c), 0, "no stranded overrides (D2)");
     assert.equal((await save(db, { display_name: "Kevin" }, null)).redirect, "/dashboard/contacts?view=profile", "no managers: saves, no broadcast, no throw");
+  } finally { cleanup(); }
+});
+
+test("save_profile: the response does not wait for the fan-out, and a fan-out that failed is re-sent by the next save even when nothing changed (R2-S3/S4)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedPal(db);
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const slow = { db, nostrManager: { sendControl: async () => { await gate; return { eventId: "e", relays: ["r"] }; } } };
+    const out = await handleContactAction({ body: { action: "save_profile", display_name: "Kevin", avatar: PNG } }, db, { managers: slow });
+    assert.equal(out.redirect, "/dashboard/contacts?view=profile", "redirect returned while the relay is still hanging");
+    assert.ok(out.broadcast instanceof Promise);
+    release();
+    assert.deepEqual(await out.broadcast, { sent: 1, failed: 0, skipped: 0 });
+
+    const down = { db, nostrManager: { sendControl: async () => { throw new Error("relay down"); } } };
+    assert.deepEqual(await (await handleContactAction({ body: { action: "save_profile", display_name: "Kevin2" } }, db, { managers: down })).broadcast, { sent: 0, failed: 1, skipped: 0 });
+    const sent = [];
+    const up = spyMgrs(db, sent);
+    await save(db, { display_name: "Kevin2" }, up); // unchanged profile
+    assert.equal(sent.length, 1, "re-sent because the last fan-out was pending");
+    assert.deepEqual(sent[0].payload, { v: 1, display_name: "Kevin2", avatar: PNG });
+    await save(db, { display_name: "Kevin2" }, up);
+    assert.equal(sent.length, 1, "delivered once, quiet afterwards");
   } finally { cleanup(); }
 });
 
@@ -1606,6 +1811,24 @@ test("save_profile with avatar_source=bird renders the active bird into the pict
     assert.equal(p.avatar_source, "picture");
     assert.equal(p.avatar_url, renderBirdAvatar({ species: "hummingbird", seed: 77 }), "back to picture keeps the last stored image");
     assert.equal(sent.length, 3, "the source change alone is a change");
+  } finally { cleanup(); }
+});
+
+test("edit_contact bounds avatar_url: an inline avatar or a short URL is stored, junk and oversize are a 400 (R2-S5)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    const id = Number((await db.execute("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:ed', 'Ed', '', '')")).lastInsertRowid);
+    const edit = (avatar_url) => handleContactAction({ body: { action: "edit_contact", contact_id: String(id), avatar_url } }, db, { managers: null });
+    const stored = async () => (await db.execute({ sql: "SELECT avatar_url FROM contacts WHERE id = ?", args: [id] })).rows[0].avatar_url;
+    assert.ok((await edit(PNG)).redirect);
+    assert.equal(await stored(), PNG);
+    assert.ok((await edit("https://example.com/me.png")).redirect);
+    assert.equal(await stored(), "https://example.com/me.png");
+    assert.equal((await edit("javascript:alert(1)")).status, 400);
+    assert.equal((await edit("data:image/png;base64," + "A".repeat(40000))).status, 400);
+    assert.equal(await stored(), "https://example.com/me.png", "a refused edit changes nothing");
+    assert.ok((await edit("")).redirect);
+    assert.equal(await stored(), "");
   } finally { cleanup(); }
 });
 
@@ -1737,7 +1960,8 @@ function avatarHtml(contact, size = "small") {
 ```
 5. `renderDeleteConfirm`: `<h2>${escapeHtml(contactName(contact) || "Unknown")}</h2>`.
 6. `renderGroupManager`: `title="${escapeHtml(contactName(c) || "")}"`.
-7. `renderMyProfile` becomes:
+7. The contact editor's `avatar_url` field keeps its name and label but its placeholder becomes `data:image/... or https://...` (R2-S5): `${formField(t("contacts.fieldAvatar", lang), "avatar_url", { value: contact.avatar_url || "", placeholder: "data:image/... or https://..." })}`.
+8. `renderMyProfile` becomes:
 
 ```js
 export function renderMyProfile(profile, lang, { birdAvailable = false } = {}) {
@@ -1880,7 +2104,20 @@ export function renderMyProfile(profile, lang, { birdAvailable = false } = {}) {
 ```
 
 `servers/gateway/dashboard/panels/contacts/api-handlers.js`:
-1. Imports: `import { getContacts, getMyProfile } from "./data-queries.js";`; add `import { validateAvatar, AVATAR_MAX_BYTES } from "../../../../sharing/avatar.js";`, `import { broadcastProfile } from "../../../../sharing/peer-profile.js";`, `import { renderActiveBirdAvatar } from "../../../../sharing/profile-avatar.js";`.
+1. Imports: `import { getContacts, getMyProfile } from "./data-queries.js";`; add `import { validateAvatar, avatarFieldValue, AVATAR_MAX_BYTES } from "../../../../sharing/avatar.js";`, `import { broadcastProfile, readBroadcastPending } from "../../../../sharing/peer-profile.js";`, `import { renderActiveBirdAvatar } from "../../../../sharing/profile-avatar.js";`.
+1b. `edit_contact` (R2-S5): the `avatar_url` sub-block becomes
+
+```js
+    if (req.body.avatar_url !== undefined) {
+      // A LOCAL override the user types. Bounded (avatarFieldValue): "", an inline
+      // avatar, or a short http(s) URL; anything else is refused — this field now
+      // renders (contactAvatar) and rides the contacts sync wire.
+      const v = avatarFieldValue(req.body.avatar_url);
+      if (v === null) return { status: 400, text: `avatar_url must be empty, a data:image/... URI of at most ${AVATAR_MAX_BYTES} characters, or an http(s) URL` };
+      fields.push("avatar_url = ?");
+      args.push(v);
+    }
+```
 2. The `save_profile` branch becomes (the `display_name` and `bio` sub-blocks are unchanged; the old `avatar_url` sub-block is REMOVED — a raw URL must never reach the setting again):
 
 ```js
@@ -1935,11 +2172,15 @@ export function renderMyProfile(profile, lang, { birdAvailable = false } = {}) {
     }
     const after = await getMyProfile(db);
     const changed = ["display_name", "avatar_url", "avatar_source"].some((k) => (before[k] ?? "") !== (after[k] ?? ""));
-    if (changed) {
-      try { await broadcastProfile(db, managers?.nostrManager); }
-      catch (err) { console.warn("[contacts] profile broadcast failed:", err.message); }
+    // R2-S3/S4: one fan-out per changed save (or per save while the last
+    // fan-out is still pending) — NOT awaited: 50 contacts × 4 relays would
+    // hold the response for ~10 s. The promise is returned so tests can await it.
+    let broadcast = Promise.resolve(null);
+    if (changed || (await readBroadcastPending(db))) {
+      broadcast = broadcastProfile(db, managers?.nostrManager)
+        .catch((err) => { console.warn("[contacts] profile broadcast failed:", err.message); return null; });
     }
-    return { redirect: "/dashboard/contacts?view=profile" };
+    return { redirect: "/dashboard/contacts?view=profile", broadcast };
   }
 ```
 
@@ -2054,6 +2295,7 @@ test("the Ramble mirror of the display rule cannot drift from core (R1-S5): same
   const src = readFileSync(new URL("../bundles/ramble/server/delivery.js", import.meta.url), "utf8");
   assert.ok(src.includes("const AVATAR_MAX = " + AVATAR_MAX_BYTES + ";"), "the cap is mirrored verbatim");
   assert.ok(src.includes(AVATAR_RE.source), "the regex is mirrored verbatim");
+  assert.equal(AVATAR_RE.flags, "", "the mirror is a flagless literal; a flag on core's regex would drift (R2-F4)");
   const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE is_blocked = 0 AND request_status IS NULL", args: [] });
   const m = await contactsByPubkey(db);
   let checked = 0;
@@ -2177,16 +2419,16 @@ and in `popupFor` the line `var portrait = birdFor(mark);` becomes `var portrait
 
 Bump: `sed -i 's/"version": "0.7.0"/"version": "0.8.0"/' bundles/ramble/manifest.json bundles/ramble/package.json && npm run build-registry`.
 
-- [ ] **Step 4: Run** `node scripts/run-suite.mjs tests/ramble-delivery.test.js tests/ramble-panel.test.js tests/ramble-tools.test.js tests/ramble-labels.test.js` → PASS (sinks still 2, backticks 0 in `static/ramble.js`; the docs heading-parity test still green). Then the FULL suite in the foreground (`node scripts/run-suite.mjs 2>&1 | tail -12`; expect pass = total, fail 0: Plan A's 4197 + 38 new = 4235 — avatar 2, contact-display 3, peer-columns 1, peer-profile 7, handshake +6, peer-wire 3, bird 5, form 6, peer-display 3, delivery +2 — report the actual; Review round 1 measured 4232 before the three folded tests), `node scripts/check-port-allocation.js`, `npm run build-registry -- --check`.
+- [ ] **Step 4: Run** `node scripts/run-suite.mjs tests/ramble-delivery.test.js tests/ramble-panel.test.js tests/ramble-tools.test.js tests/ramble-labels.test.js` → PASS (sinks still 2, backticks 0 in `static/ramble.js`; the docs heading-parity test still green). Then the FULL suite in the foreground (`node scripts/run-suite.mjs 2>&1 | tail -12`; expect pass = total, fail 0: Plan A's 4197 + 43 new = 4240 — avatar 3, contact-display 3, peer-columns 1, peer-profile 8, handshake +6, peer-wire 3, bird 6, form 8, peer-display 3, delivery +2 — report the actual; Review round 2 measured 4235 before the five tests folded from it), `node scripts/check-port-allocation.js`, `npm run build-registry -- --check`.
 - [ ] **Step 5: Commit** — `git commit bundles/ramble/server/delivery.js bundles/ramble/panel/routes.js bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ramble.css bundles/ramble/panel/ramble.js docs/guide/ramble.md docs/es/guide/ramble.md bundles/ramble/manifest.json bundles/ramble/package.json registry/add-ons.json tests/ramble-delivery.test.js tests/ramble-panel.test.js -m "ramble 0.8.0: a contact's profile picture on their pin; the sheet says Crow name; docs en/es; registry"`
 - [ ] **Step 6 (controller):** the Task 1 Step 6 dry-run result is in hand; push, PR, check-runs, merge, `CROW-SCHEDULE.md`, three-gateway restart, the journal lines (only grackle has an INSTALLED bundle copy, so only grackle's journal shows `refreshed ramble 0.7.0 -> 0.8.0`; crow primary and r4 run the repo copy and show `[ramble] transport started` / routes mounted / 15 tools only — Review R1-M), then read-only verification: `PRAGMA table_info(contacts)` on each live db shows the two peer columns (grackle: `grackle "sqlite3 ~/.crow/data/crow.db 'PRAGMA table_info(contacts)' | grep peer_"`). Cross-version note: an UNREFRESHED 0.7.0 bundle copy beside the new core still names contacts (its `contactsByPubkey` reads `display_name`; `contact_avatar` simply absent) and the new core's `loadBirdEngine` works against it (0.2.0-era exports) — no ordering hazard; the refreshed 0.8.0 copy beside an OLD core (impossible on the three lab gateways: the copy refreshes at the same boot) would only lack `contact_avatar` on pins. Live acceptance (Kevin, later): on grackle set a picture in Contacts → My Profile, confirm the crow primary's contact row for grackle's identity gains `peer_avatar` (read-only SELECT on `~/.crow/data/crow.db`) and grackle's mark pin on crow shows it; switch the source to the bird and confirm the swap.
 
 ## Self-review notes
 - **Spec coverage.** §4.1 storage/form/validation: Tasks 1, 3, 5. §4.2 handshake both ways + peer fields + placeholder rule kept: Task 2. §4.3 profile message, `sendControl` per full contact, receiver contact-only, sync emit: Task 2. §4.4 columns, dry-run, both sync doors, `EXCLUDED_COLUMNS` unchanged: Tasks 1, 3. §4.5 display rule + Ramble `contact_avatar` + the 24 px `createElement` img: Tasks 1, 5, 6. §4.6 docs: Task 5 (contacts) + Task 6 (the Ramble sentence). §5 bird source, `activateBird` + first-hatch refresh, fallback to picture: Task 4 (+ Task 5 for the save). §6 `save_profile` accepts `avatar` + `avatar_source`; `GET …/profile` "plus avatar_source" = `getMyProfile` (Task 3). §7 bounds: every input bounded (Tasks 1, 5). §8 Plan B test list: validator (Task 1), handshake both ways incl. a bad one (Task 2), profile round-trip through the real ladder from a contact / a stranger / a blocked contact (Task 2), columns through both doors (Task 3), deterministic SVG under the cap (Task 4), the form with the source switch only with a bird (Task 5), Ramble `contact_avatar` (Task 6), the dry-run (Task 1 Step 6), docs parity (Tasks 5, 6).
-- **Deviations from the spec text, recorded for approval:** (a) the bird option is decided SERVER-SIDE (`readActiveBird` + `loadBirdEngine` in the panel handler) instead of the client asking `GET /api/ramble/pet` — same information, no client fetch, testable; (b) `display_name || peer_display_name || crow_id` is applied with the existing placeholder rule (a `crow:`/`req:` display_name counts as empty), otherwise a contact created before their name arrived would never show the peer name; (c) the display rule's scope is the Contacts panel, the Messages list, `crow_list_contacts` and Ramble — the remaining `display_name || crow_id` sites (notification titles, rooms/bots admin text, share inbox, MCP tool text elsewhere) are a follow-up, not silently widened; (d) the profile envelope uses the dispatcher's existing `{ type, version, subtype, payload }` shape; (e) the bird refresh listens on the in-process bus (`ramble:hatched` already exists; `ramble:bird-activated` is new) instead of the bundle importing a core hook — no new cross-import in either direction; a hatch in the stdio MCP process does not refresh until the next gateway-side event; (f) `contactAvatar` skips a legacy `https:` `avatar_url` in favour of the peer's inline picture (a URL cannot render under the dashboard CSP anyway); (g) spec §6 names a `GET /dashboard/contacts/profile` route "unchanged in shape plus avatar_source" — no such route exists in the codebase (the reader is `getMyProfile`, which gains the key; nothing is added); (h) `profile_avatar_source` syncs as a user-level key but only a Ramble-bearing instance renders the radios or runs the refresh hooks — on a Ramble-less sibling a `bird` source is invisible and frozen until a Ramble instance saves again (Review R1-Q3).
+- **Deviations from the spec text, recorded for approval:** (a) the bird option is decided SERVER-SIDE (`readActiveBird` + `loadBirdEngine` in the panel handler) instead of the client asking `GET /api/ramble/pet` — same information, no client fetch, testable; (b) `display_name || peer_display_name || crow_id` is applied with the existing placeholder rule (a `crow:`/`req:` display_name counts as empty), otherwise a contact created before their name arrived would never show the peer name; (c) the display rule's scope is the Contacts panel, the Messages list, `crow_list_contacts` and Ramble — the remaining `display_name || crow_id` sites (notification titles, rooms/bots admin text, share inbox, MCP tool text elsewhere) are a follow-up, not silently widened; (d) the profile envelope uses the dispatcher's existing `{ type, version, subtype, payload }` shape; (e) the bird refresh listens on the in-process bus (`ramble:hatched` already exists; `ramble:bird-activated` is new) instead of the bundle importing a core hook — no new cross-import in either direction; a hatch in the stdio MCP process does not refresh until the next gateway-side event; (f) `contactAvatar` skips a legacy `https:` `avatar_url` in favour of the peer's inline picture (a URL cannot render under the dashboard CSP anyway); (g) spec §6 names a `GET /dashboard/contacts/profile` route "unchanged in shape plus avatar_source" — no such route exists in the codebase (the reader is `getMyProfile`, which gains the key; nothing is added); (h) `profile_avatar_source` syncs as a user-level key but only a Ramble-bearing instance renders the radios or runs the refresh hooks — on a Ramble-less sibling a `bird` source is invisible and frozen until a Ramble instance saves again (Review R1-Q3); (i) **ruling R2-1:** `request_status = 'accepted'` rows (message requests the user accepted) are ESTABLISHED contacts for this feature — they receive the broadcast, their profile message lands, and the handshake writes their peer fields (the spec's "FULL" reads as "established"); (j) the Ramble contacts PICKER (`listAudiences`, `/api/ramble/contacts`) still shows raw `display_name` while the pin shows the display rule — on the follow-up list with (c) (R2-Q7).
 - **Placeholder scan:** none (every step carries code; every test is written out).
 - **Type consistency:** `applyPeerProfile(db, contactId, { displayName, avatar })` ↔ boot.js call sites ↔ `handleProfileMessage`; `buildHandshakeComplete(ids, name, avatar)` ↔ `ackHandshake`; `handleHandshakeComplete(db, ids, pk, displayName, avatar)` ↔ the dispatcher; `contactsByPubkey` value shape `{ crow_id, name, avatar }` ↔ `annotateMarks` ↔ `server.js` (reads `c.name` only — unchanged); `getMyProfile().avatar_source` ↔ `renderMyProfile` ↔ `save_profile` before/after; `renderBirdAvatar` ↔ `renderActiveBirdAvatar` ↔ the form test's expected URI; `{ status, text }` ↔ `contacts.js`.
-- **Sizes on the wire (measured in Review round 1):** a 128 px JPEG at 0.82 is ~4–10 KB → ~6–14 KB as base64; the bird SVG ~1.6–4 KB; the 32768-char cap is the ceiling. At the cap a profile DM is 32 875 B of plaintext, which NIP-44 v2 pads to 40 960 B (its power-of-two chunking) → a serialized event of ~55.1 KB, 10.4 KB under strfry's default 64 KiB `maxEventSize`; it goes once per full contact per changed save/bird refresh, to every configured relay (20 contacts × 4 relays ≈ 4.3 MB at the cap). The retry-queue row for an `invite_accepted` and a contacts sync-conflict row (local + wire JSON) grow the same way. The cap is the spec's number (Kevin restated it); halving it to 16 384 would halve the padded bucket and still fit any 128 px JPEG — recorded as Q4, not changed here.
+- **Sizes on the wire (measured in Review round 1):** a 128 px JPEG at 0.82 is ~4–10 KB → ~6–14 KB as base64; the bird SVG ~1.6–4 KB; the 32768-char cap is the ceiling. At the cap a profile DM is 32 875 B of plaintext, which NIP-44 v2 pads to 40 960 B (its power-of-two chunking) → a serialized event of ~55.1 KB, 10.4 KB under strfry's default 64 KiB `maxEventSize`; it goes once per full contact per changed save/bird refresh, to every configured relay (20 contacts × 4 relays ≈ 4.3 MB at the cap). The retry-queue row for an `invite_accepted` and a contacts sync-conflict row (local + wire JSON) grow the same way. The cap is the spec's number (Kevin restated it); halving it to 16 384 would halve the padded bucket and still fit any 128 px JPEG — recorded as Q4, not changed here. Instance-sync side (R1-E / R2-Q4): every contacts mutation (a block, a note edit, a verified toggle) now re-ships the full row incl. up to 32 KB of `peer_avatar` per outbox row / feed entry, and `invite_accepted` emits twice per pairing (the upsert, then the peer fields) — contact-scale volumes, accepted.
 - **Open questions for Kevin (do not block the build):** Q1 stdio-MCP hatches not refreshing the bird avatar until the next gateway-side event or gateway boot (the hook now repaints once at install) — acceptable? Q2 the follow-up list in (c) — a separate small PR after Plan B, or fold into models plan 2's tail? Q3 the contact editor keeps its `Avatar URL` text field with an `https://...` placeholder (a local override; a URL cannot render, an inline data URI pasted there does, and the raw value is stored unbounded as today) — leave as is, or turn it into the same file input in the follow-up? Q4 keep `AVATAR_MAX_BYTES` at the spec's 32768, or lower it to 16384 (halves the NIP-44 padded bucket; a 128 px JPEG never needs more)? Q5 `bio` is stored uncapped today; with the 100 kb urlencoded body limit a crafted POST (a max-size all-`+` avatar plus a long bio) would hit an unhandled 413 — cap `bio` (e.g. 2000 chars) in the follow-up?
 
 ## Review
@@ -2202,3 +2444,15 @@ Bump: `sed -i 's/"version": "0.7.0"/"version": "0.8.0"/' bundles/ramble/manifest
 - **Q2** the bird hook only subscribed, so a bird that changed while the gateway was down stayed stale. Fixed: one idempotent `refreshBirdAvatar` at install; the hook test covers install, hatch, activation, and three broadcasts.
 - **Q1** (contact editor's dead `Avatar URL` field), **Q3** (a `bird` source is frozen on a Ramble-less sibling), the uncapped `bio` vs the 100 kb body limit, and the spec's non-existent `GET /dashboard/contacts/profile` route are recorded in the deviations / Kevin's Q list, not changed.
 - Traces verified by the reviewer: no import cycle (boot.js and the stdio sharing entrypoint load; the only cycle-closing edge stays contact-sync's lazy managers import); `crow_social` has exactly one door (`subscribeToIncoming`, deduped per relay by `seenEventIds`); `upsertFullContact` returns `{ contactId }` on all four outcomes; `_applyContact`'s whitelist drops peer fields on an un-migrated instance as claimed and its column cache is warmed only after sharing init; the CSP allows `data:` and `blob:` for the preview and the inline `onchange`; i18n parity passes; `SELECT c.*, c.id as contact_id … GROUP BY c.id` is legal SQLite with no alias collision; `contact_avatar` is only ever set for a resolved contact; `bird-svg.cjs` has exported `rollGenome`/`drawBird` since its first commit (a synthetic stale installed copy rendered fine — R1-1 of Plan A satisfied); only grackle has an installed bundle copy (the refresh journal line appears there alone).
+
+### Round 2 — 2026-09-08, opus, code-traced (fresh mirror @761ca556; full suite 4235/0 after one forced fix; check-ports OK; build-registry in sync; import smoke ok)
+**Verdict: REVISE.** Folded:
+- **C1** the R1-Q2 hook test asserted broadcasts on a db with no contacts (`0 !== 1`) — Task 4 Step 4 failed as written. Fixed: the test seeds a recipient.
+- **S1** the R1-C1 gate covered `peer_*` but not the older placeholder `display_name` write three lines above it — a blocked contact could still rename itself (proved). Fixed: one `established` predicate hoisted over both writes; the test seeds a blocked placeholder row and asserts it stays.
+- **S2** `request_status = 'accepted'` (a message request the user explicitly accepted — established, synced, listed in Messages) was excluded from the whole feature in both directions. **Ruling R2-1:** established = NULL or `'accepted'`; one exported predicate `isEstablishedContact` used by the receiver, the recipient list and the handshake gate; tests cover the accepted case at each.
+- **S3** a fan-out that failed (relays down at boot, an offline save) was permanently lost — "the next change resends everything" was false because an unchanged profile short-circuits. Fixed: `broadcastProfile` keeps a raw, unsynced `__profile_broadcast_pending` flag (`"1"` before, `"0"` only after a clean fan-out); the save and the bird refresh re-send an unchanged profile while it is pending (`reason: "resend"`); tests drive relays-down → relays-up for both paths.
+- **S4** `save_profile` awaited the sequential contact × relay fan-out (~10 s at 50 contacts, measured). Fixed: the fan-out is not awaited; the handler returns `{ redirect, broadcast }` and tests await `out.broadcast`; a hanging-relay test proves the redirect returns first.
+- **S5** the contact editor's `avatar_url` became a render path while still stored raw and unbounded (and unvalidated at sync apply). Fixed: `avatarFieldValue` (empty, inline avatar, or an http(s) URL ≤ 2048 chars) in the editor (400 otherwise) and at `_applyContact`; the placeholder now says `data:image/... or https://...`.
+- **Q1** the R1-S3 verify block was untested → a VIEW-named-`contacts` case pins the `console.error`. **Q2** the R1-C1 test is green at Task 2 Step 2 (nothing writes `peer_*` yet) → relabelled. **Q10** the stranded duplicate comment in `ackHandshake` → the edit replaces the old comment too; the drift guard also pins `AVATAR_RE.flags`.
+- **Q3/Q4/Q7** recorded: a double-submit double-broadcasts the final state (safe, best effort); the receive-path emit is the same class the handshake already does, plus a bigger row; the Ramble contacts picker still shows raw `display_name` (follow-up list).
+- Verified by the reviewer: the real `layout({ title, content })` shape and `t("common.back")`; the 400 test drives the real panel handler; the `req:`-with-NULL-name seed is legal against init-db's DDL; the mirror's constants match core byte-for-byte (regex literals keep `\/`); no unhandled rejection from the boot repaint; every new render sink escapes or validates (`data-*` attrs, the "Their name" row, `data-name`/`title`, the Messages list, Ramble's prefix-checked `img.src`); `getMyProfile` is never deep-equalled; `peer_*` has exactly one UPDATE site reached through three gated callers plus the same-owner sync door.
