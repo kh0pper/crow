@@ -269,10 +269,16 @@
 
   /* ---------------------------------------------------------------- marks */
 
+  /* The one label rule (spec 2026-09-08 §3.1), mirrored from server/labels.js:
+   * yours, then a contact's saved name, then a stranger's world name with a
+   * key tail (unverified, so the tail keeps two Kevins apart), then the key. */
   function markLabel(mark) {
-    if (mark.contact_name) return (mark.kind === "caw" ? "caw by " : "mark by ") + mark.contact_name;
-    var who = (mark.author || "anon").slice(0, 8);
-    return (mark.kind === "caw" ? "caw by " : "mark by ") + who;
+    var noun = mark.kind === "caw" ? "caw" : "mark";
+    if (mark.origin === "local" || mark.origin === "sync") return "your " + noun;
+    if (mark.contact_name) return noun + " by " + mark.contact_name;
+    var who = mark.author || "anon";
+    if (mark.author_name) return noun + " by " + mark.author_name + " · " + who.slice(0, 4);
+    return noun + " by " + who.slice(0, 8);
   }
 
   /** A stranger's bird on your map: the way to trade with them is to become contacts first. */
@@ -1474,7 +1480,12 @@
 
   function arTitle(mark) {
     if (isLocked(mark)) return "A locked mark";
-    if (mark.kind === "caw") return "A caw" + (mark.contact_name ? " from " + mark.contact_name : "");
+    if (mark.kind === "caw") {
+      if (mark.origin === "local" || mark.origin === "sync") return "Your caw";
+      if (mark.contact_name) return "A caw from " + mark.contact_name;
+      if (mark.author_name) return "A caw from " + mark.author_name + " · " + (mark.author || "anon").slice(0, 4);
+      return "A caw";
+    }
     var t = String(mark.content_text || "(no text)").trim();
     return t.length > 40 ? t.slice(0, 39) + "…" : t;
   }
