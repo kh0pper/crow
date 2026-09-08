@@ -58,6 +58,7 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import express from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
+import { generalLimiterSkip } from "./middleware/rate-limit.js";
 import cors from "cors";
 import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 import { rejectFunneledMiddleware } from "./funnel.js";
@@ -404,8 +405,9 @@ if (!noAuth) {
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many requests, please try again later" },
-    skip: (req) => req.path.startsWith("/dashboard") || req.path.startsWith("/api/meta-glasses/") || req.path.startsWith("/llm")
-      || rateLimitSkipPrefixes.some((p) => req.path.startsWith(p)),
+    // The exempt list (dashboard, glasses, llm, the Ramble map + API) lives
+    // in middleware/rate-limit.js so a test can pin it.
+    skip: (req) => generalLimiterSkip(req, rateLimitSkipPrefixes),
   }));
 }
 
