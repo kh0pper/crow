@@ -213,7 +213,7 @@ test("makePublishGate: false under the default grid, true once enabled", async (
 
 test("sanitizeWorldName: controls and bidi stripped, whitespace collapsed, crow:/req: rejected, hex-only rejected, capped at 24 code points, empty is null", () => {
   assert.equal(sanitizeWorldName("Kevin"), "Kevin");
-  assert.equal(sanitizeWorldName("  Kevin‮   H  "), "Kevin H");
+  assert.equal(sanitizeWorldName("  Kevin\u202E   H\u0000 "), "Kevin H");
   assert.equal(sanitizeWorldName("crow:kevin"), null);
   assert.equal(sanitizeWorldName("REQ:x"), null);
   assert.equal(sanitizeWorldName("f665c26b"), null, "a key look-alike");
