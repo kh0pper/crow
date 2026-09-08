@@ -143,7 +143,7 @@ Toca **Mirar alrededor** en el mapa para abrir la vista AR: la cámara trasera l
 
 La posición viene de `watchPosition`; el rumbo de `deviceorientationabsolute` (Safari informa `webkitCompassHeading` en el evento normal, y iOS pide una vez acceso al movimiento desde el toque del botón). Sin posición, sin cámara o sin brújula se recurre a la **franja de radar** — un anillo de rumbos (norte arriba, o rumbo arriba cuando hay brújula) y una lista de distancias — así que la pantalla nunca queda en blanco; la primera apertura explica los límites (precisión de la brújula, el aviso de iOS, sin anclaje a superficies, la cámara se queda en el teléfono). La imagen de la cámara nunca sale del dispositivo: la vista se dibuja en el cliente sin captura, canvas ni subida, y el flujo se detiene al cerrar la vista o cambiar de pestaña (se reanuda al volver).
 
-El panel consulta `GET /api/ramble/around?lat=&lon=&radius_m=` (radio 50–1000 m, 500 por defecto): marcas tal como están guardadas (una marca bloqueada como su adelanto en el centro de la celda, la marca de un contacto con su nombre), cada una con `distance_m`, más los nidos de esta semana, los más cercanos primero. El panel lista lo mismo que el mapa (marcas públicas, de contactos y tus propias marcas "solo para mí"). Se actualiza tras moverte 50 m, una vez por minuto, al cerrar una etiqueta tocada y con cada evento en vivo. Es una lectura y no acredita nada. La vista necesita un contexto seguro: abre el Nest por su dirección HTTPS de Tailscale Serve, no por una URL `http://` con IP, o el navegador rechaza la cámara y la brújula y obtienes la franja de radar.
+El panel consulta `GET /api/ramble/around?lat=&lon=&radius_m=` (radio 50–1000 m, 500 por defecto): marcas tal como están guardadas (una marca bloqueada como su adelanto en el centro de la celda, la marca de un contacto con su nombre, el nombre en el mundo de un desconocido con la cola de su clave), cada una con `distance_m`, más los nidos de esta semana, los más cercanos primero. El panel lista lo mismo que el mapa (marcas públicas, de contactos y tus propias marcas "solo para mí"). Se actualiza tras moverte 50 m, una vez por minuto, al cerrar una etiqueta tocada y con cada evento en vivo. Es una lectura y no acredita nada. La vista necesita un contexto seguro: abre el Nest por su dirección HTTPS de Tailscale Serve, no por una URL `http://` con IP, o el navegador rechaza la cámara y la brújula y obtienes la franja de radar.
 
 ## Marcas solo para mí
 
@@ -196,7 +196,7 @@ Cada peso de la tabla anterior es también un override de `ramble_settings`, le�
 |---|---|
 | `ramble_leave_mark` | Dejar una marca en una ubicación. |
 | `ramble_caw` | Emitir un marcador de presencia público y efímero. |
-| `ramble_query_world` | Listar marcas y caws cercanos en la celda que contiene una ubicación. |
+| `ramble_query_world` | Listar marcas y caws cercanos en la celda que contiene una ubicación; cada fila lleva un `label` ("your mark", "mark by <contacto>", "mark by <nombre en el mundo> · <clave4>" o "mark by <clave8>"). |
 | `ramble_unlock` | Desbloquear una marca bloqueada probando proximidad a su ancla. |
 | `ramble_pet_state` | Ánimo, energía, contadores semanales, pájaro activo y progreso del huevo de la mascota compañera. |
 | `ramble_egg_state` | El progreso de calor del huevo incubando y la lista de comprobación hacia la eclosión. |
