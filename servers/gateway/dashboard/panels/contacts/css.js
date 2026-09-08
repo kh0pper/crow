@@ -345,6 +345,13 @@ export function contactsCss() {
     border-radius: 8px;
   }
 
+  .my-profile-hint { font-size: 0.8rem; color: var(--crow-text-muted); margin: 0.35rem 0 0; }
+  .my-profile-msg { font-size: 0.8rem; color: var(--crow-error); min-height: 1em; margin: 0.25rem 0 0; }
+  .my-profile-check { display: block; font-size: 0.85rem; color: var(--crow-text-secondary); margin-top: 0.5rem; }
+  .my-profile-source { display: flex; gap: 1rem; flex-wrap: wrap; border: 1px solid var(--crow-border); border-radius: 8px; padding: 0.5rem 0.75rem; margin: 0 0 var(--crow-space-4); font-size: 0.85rem; color: var(--crow-text-primary); }
+  .my-profile-source legend { font-size: var(--crow-text-sm); color: var(--crow-text-muted); text-transform: uppercase; letter-spacing: 0.05em; padding: 0 0.25rem; }
+  #profilePictureInput { font-size: 0.85rem; color: var(--crow-text-secondary); }
+
   /* === Import Modal === */
   .import-modal-backdrop {
     display: none;
