@@ -265,7 +265,7 @@
     if (!map) return Promise.resolve();
     var c = map.getCenter();
     var body = { lat: c.lat, lon: c.lng };
-    if (lastFix) body.here = { lat: lastFix.lat, lon: lastFix.lon };
+    if (lastFix) body.here = { lat: lastFix.lat, lon: lastFix.lon, accuracy_m: lastFix.accuracy_m };
     return jsonFetch("/api/ramble/area", { method: "POST", body: body })
       .then(function (out) {
         currentCells = (out && out.cells) || [];
