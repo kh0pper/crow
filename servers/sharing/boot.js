@@ -27,26 +27,8 @@ import { setReceiveWired } from "./receive-health.js";
 import { wasProcessed, recordProcessedEvent } from "./processed-events.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
-
-/**
- * Read the local user's own display name (dashboard_settings.profile_display_name),
- * sanitized (design §D5). Returns null when unset, empty, rejected, or on any DB
- * error — the caller then omits the field entirely (no placeholder). Never throws.
- * Reads the GLOBAL scope on purpose (Cluster B design D6): profile identity is
- * user-level; per-instance overrides of profile_* keys are intentionally inert.
- */
-async function readLocalDisplayName(db) {
-  try {
-    if (!db) return null;
-    const { rows } = await db.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key = 'profile_display_name'",
-      args: [],
-    });
-    return sanitizeDisplayName(rows?.[0]?.value);
-  } catch {
-    return null;
-  }
-}
+import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact } from "./peer-profile.js";
+import { installBirdAvatarHooks } from "./profile-avatar.js";
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -160,10 +142,10 @@ export async function handleIncomingRequest(db, managers, { senderPubkey, conten
 async function ackHandshake(nostrManager, senderPubkey, event, db) {
   try {
     if (!nostrManager || !event || !event.id) return;
-    // F-CONTACT-2 (design §D5): carry the inviter's OWN display name so the
-    // acceptor can show a name instead of a raw crowId. Omitted when unset.
-    const selfName = await readLocalDisplayName(db);
-    await nostrManager.sendControl({ secp256k1_pubkey: senderPubkey }, buildHandshakeComplete([event.id], selfName));
+    // F-CONTACT-2 + 2026-09-08 §4.2: carry the inviter's OWN name and picture
+    // so the acceptor shows both. Omitted when unset.
+    const self = await readLocalProfile(db);
+    await nostrManager.sendControl({ secp256k1_pubkey: senderPubkey }, buildHandshakeComplete([event.id], self.displayName, self.avatar));
   } catch { /* ack is best-effort */ }
 }
 
@@ -237,7 +219,7 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
       }
     }
 
-    await upsertFullContact(db, managers, {
+    const { contactId } = await upsertFullContact(db, managers, {
       crowId: payload.crowId,
       ed25519Pub: payload.ed25519Pub,
       secp256k1Pub: payload.secp256k1Pub,
@@ -246,6 +228,16 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
       // crowId (byte-identical to the no-name case).
       displayName: sanitizeDisplayName(payload.displayName),
     });
+    // 2026-09-08 §4.2 (D5): the acceptor's self-reported name/picture land in
+    // the peer fields (display_name above keeps today's placeholder rule).
+    // Guarded on its own: a peer-field failure must not stop the ack below.
+    // R2-1/R2-S1 note: this writer carries no `established` gate of its own —
+    // it is safe here ONLY because (1) the F-BLOCK-1 D4d check ~50 lines
+    // above already returned early for a blocked sender, and (2)
+    // upsertFullContact just promoted this row to request_status = NULL. A
+    // future edit to either of those must not silently open this path.
+    try { await applyPeerProfile(db, contactId, { displayName: payload.displayName, avatar: payload.avatar }); }
+    catch (err) { try { console.warn("[sharing] invite_accepted peer profile failed:", err?.message); } catch {} }
     // D4: record the handled event.id AFTER a successful upsert so a stale
     // ~60h retry of this same event cannot re-create a since-deleted contact.
     if (event?.id) await recordProcessedEvent(db, event.id, "invite_accepted");
@@ -301,23 +293,36 @@ export async function handleDeliveryReceipt(db, eventIds, senderPubkey) {
  * forged ack can't purge another contact's retries. Mirrors handleDeliveryReceipt.
  * Never throws (receive path).
  */
-export async function handleHandshakeComplete(db, eventIds, senderPubkey, displayName) {
+export async function handleHandshakeComplete(db, eventIds, senderPubkey, displayName, avatar) {
   try {
     const ids = (Array.isArray(eventIds) ? eventIds : []).filter((x) => typeof x === "string" && x);
     if (!db) return;
     const contact = await findContactByPubkey(db, senderPubkey);
     if (!contact) return;
     if (ids.length > 0) await markDelivered(db, ids, contact.id);
+    const established = isEstablishedContact(contact) && Number(contact.is_blocked) !== 1;
     // F-CONTACT-2 (design §D5): apply the inviter's optional display name to the
     // AUTHENTICATED sender's contact — sanitized, and ONLY over a placeholder
     // stored name (never overwrite a name the user typed). The contact is
     // resolved from senderPubkey, never from a payload-claimed identity.
+    // R2-S1: and only for an established, unblocked contact — a blocked party
+    // must not rename itself either.
     const name = sanitizeDisplayName(displayName);
-    if (name && isPlaceholderName(contact.display_name)) {
+    if (established && name && isPlaceholderName(contact.display_name)) {
       await db.execute({
         sql: "UPDATE contacts SET display_name = ? WHERE id = ?",
         args: [name, contact.id],
       });
+    }
+    // 2026-09-08 §4.2 / §7 (Review R1-C1 + R2-S1): the peer fields are
+    // CONTACT-ONLY — the same gate as the profile message (peer-profile.js).
+    // This handler is reached from the broad incoming subscription, so a
+    // blocked contact or an unpaired `req:` row could otherwise write 32 KB
+    // here with one envelope — or, through the older name write above, rename
+    // itself. `established` therefore guards BOTH writes (see step 4b).
+    if (established) {
+      try { await applyPeerProfile(db, contact.id, { displayName, avatar }); }
+      catch (err) { try { console.warn("[sharing] handshake_complete peer profile failed:", err?.message); } catch {} }
     }
   } catch (err) {
     try { console.warn("[sharing] handshake_complete handling failed:", err.message); } catch {}
@@ -597,7 +602,11 @@ export async function wireNostrReceive(managers) {
     } else if (subtype === DELIVERY_RECEIPT_SUBTYPE) {
       await handleDeliveryReceipt(db, payload.event_ids, senderPubkey);
     } else if (subtype === HANDSHAKE_COMPLETE_SUBTYPE) {
-      await handleHandshakeComplete(db, payload.event_ids, senderPubkey, payload.displayName);
+      await handleHandshakeComplete(db, payload.event_ids, senderPubkey, payload.displayName, payload.avatar);
+    } else if (subtype === PROFILE_SUBTYPE) {
+      // 2026-09-08 §4.3: a contact's profile changed. Contact-only inside;
+      // this is the ONLY door — subscribeToContact drops every crow_social.
+      await handleProfileMessage(db, payload, senderPubkey);
     } else if (subtype === "room_message" || subtype === "room_join") {
       const { handleInboundRoomEnvelope } = await import("./room-inbound.js");
       await handleInboundRoomEnvelope({ db, nostrManager, identity, subtype, payload, senderPubkey, log: (m) => console.log("[rooms]", m) });
@@ -717,9 +726,22 @@ export async function initSharingRuntime(managers, helpers) {
     console.warn("[sharing] ensureColumn shared_items.mode:", err.message);
   }
 
+  // 2026-09-08 §4.4: the peer-profile contact columns, additive and un-bumped
+  // (same runtime-guard shape as shared_items.mode above). Guarded inside.
+  await ensurePeerProfileColumns(db);
+
   // R8: the Nostr receive path must never depend on Hyperswarm coming up.
   // Fire-and-forget (never rejects); failures are health-visible + retried.
   startNostrReceive(managers);
+
+  // 2026-09-08 §5: with the bird as profile picture, a hatch or an activation
+  // (bus events from the Ramble routes / transport) repaints and re-sends it.
+  // Fix round 1, Finding 5: ordered AFTER startNostrReceive so the initial
+  // repaint's broadcast attempt has the best chance of a live relay set
+  // (managers.nostrManager itself is constructed synchronously before this
+  // function runs — verified sendControl/connectRelays do not depend on
+  // wireNostrReceive having completed — so this reorder loses nothing).
+  installBirdAvatarHooks(managers);
 
   // Start peer manager and join DHT topics for existing contacts
   peerManager.start().then(async () => {

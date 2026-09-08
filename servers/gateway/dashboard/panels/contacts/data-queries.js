@@ -125,7 +125,7 @@ export async function getGroups(db) {
  * Get own profile from dashboard_settings.
  */
 export async function getMyProfile(db) {
-  const keys = ["profile_display_name", "profile_avatar_url", "profile_bio"];
+  const keys = ["profile_display_name", "profile_avatar_url", "profile_bio", "profile_avatar_source"];
   const profile = {};
   try {
     // Reads the GLOBAL scope on purpose (Cluster B design D6): profile identity
@@ -134,12 +134,15 @@ export async function getMyProfile(db) {
     // to readSetting, and do not wire a scope toggle for these keys (the scope
     // route would report "local" while behavior stays global).
     const { rows } = await db.execute(
-      `SELECT key, value FROM dashboard_settings WHERE key IN ('profile_display_name', 'profile_avatar_url', 'profile_bio')`
+      `SELECT key, value FROM dashboard_settings WHERE key IN ('profile_display_name', 'profile_avatar_url', 'profile_bio', 'profile_avatar_source')`
     );
     for (const row of rows) {
       const short = row.key.replace("profile_", "");
       profile[short] = row.value;
     }
   } catch {}
+  // 2026-09-08 §4.1: the picture source is an enum with a default; anything
+  // else (unset, a synced junk value) reads as `picture`.
+  profile.avatar_source = profile.avatar_source === "bird" ? "bird" : "picture";
   return profile;
 }

@@ -24,10 +24,10 @@ function freshDb() {
 }
 
 test("profile keys are sync-allowlisted (F-SETTINGS-1 root fix)", () => {
-  for (const k of ["profile_display_name", "profile_avatar_url", "profile_bio"]) {
+  for (const k of ["profile_display_name", "profile_avatar_url", "profile_bio", "profile_avatar_source"]) {
     assert.equal(isSyncable(k), true, `${k} must be syncable`);
   }
-  assert.deepEqual(PROFILE_SYNC_KEYS, ["profile_display_name", "profile_avatar_url", "profile_bio"]);
+  assert.deepEqual(PROFILE_SYNC_KEYS, ["profile_display_name", "profile_avatar_url", "profile_bio", "profile_avatar_source"]);
 });
 
 test("explicit-entry posture: an unrelated profile_ key is NOT syncable", () => {

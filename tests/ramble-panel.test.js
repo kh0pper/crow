@@ -40,6 +40,7 @@ delete process.env.CROW_DB_PATH;
 const { default: rambleRouter } = await import("../bundles/ramble/panel/routes.js");
 const { default: panel } = await import("../bundles/ramble/panel/ramble.js");
 const { createDbClient } = await import("../bundles/ramble/server/db.js");
+const { default: bus } = await import("../servers/shared/event-bus.js");
 
 // 30.46 / -98.08 -> geohash7 "9v6m21h" -> precision-5 cell "9v6m2".
 const LAT = 30.46;
@@ -69,12 +70,13 @@ const PK_BLOCKED = "ed".repeat(32);
   await db.executeMultiple(`
     CREATE TABLE IF NOT EXISTS contacts (
       id INTEGER PRIMARY KEY AUTOINCREMENT, crow_id TEXT NOT NULL UNIQUE, display_name TEXT,
-      secp256k1_pubkey TEXT NOT NULL DEFAULT '', is_blocked INTEGER DEFAULT 0, request_status TEXT, is_bot INTEGER DEFAULT 0);
+      secp256k1_pubkey TEXT NOT NULL DEFAULT '', is_blocked INTEGER DEFAULT 0, request_status TEXT, is_bot INTEGER DEFAULT 0,
+      avatar_url TEXT, peer_display_name TEXT, peer_avatar TEXT);
     CREATE TABLE IF NOT EXISTS contact_groups (
       id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_uid TEXT, room_uid TEXT);
     CREATE TABLE IF NOT EXISTS contact_group_members (
       id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, contact_id INTEGER NOT NULL);
-    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey) VALUES ('crow:pal', 'Pal', '02${PK}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, peer_avatar) VALUES ('crow:pal', 'Pal', '02${PK}', 'data:image/png;base64,${"A".repeat(32)}');
     INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey) VALUES ('crow:buddy', 'Buddy', '02${PK_BUDDY}');
     INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, is_blocked) VALUES ('crow:blocked', 'Blocked', '02${PK_BLOCKED}', 1);
     INSERT INTO contact_groups (name, group_uid) VALUES ('Walkers', 'grp-walk');
@@ -161,6 +163,7 @@ test("panel handler renders the world-first shell, its three views and every ass
 
   // The Visible sheet's World name field: bounded to 24 characters client-side.
   assert.match(sent, /id="rb-world-name"[^>]*maxlength="24"/);
+  assert.ok(sent.includes("Contacts see the name they saved for you, or your Crow name."));
 
   // The legacy ids are GONE — anything still selecting them is broken.
   assert.doesNotMatch(sent, /id="ramble-map"/);
@@ -652,11 +655,26 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes('window.addEventListener("pageshow"'), "the watch restarts after a bfcache park");
   assert.ok(body.includes("err.code === 1 && arOpen"), "a revoked permission still resets the AR pose");
 
+  // A contact's profile picture on their pin (spec 2026-09-08 §4.5/§5): an <img>
+  // via createElement, accepted only as an inline data: image; the bird stays
+  // for strangers. A src assignment is not a markup sink (count unchanged).
+  assert.ok(body.includes('function contactPortrait(mark)'));
+  assert.ok(body.includes('src.indexOf("data:image/") !== 0'));
+  assert.ok(body.includes('img.className = "rb-pop-avatar"'));
+  assert.ok(body.includes('var portrait = contactPortrait(mark) || birdFor(mark);'));
+
   const code = body.replace(/\/\*[\s\S]*?\*\//g, "");
   const sinks = code.match(/\.innerHTML\s*=|\bhtml:\s/g) || [];
   assert.equal(sinks.length, 2, `expected exactly two engine-output markup sinks, found ${sinks.length}`);
   assert.ok(code.includes("el.innerHTML = Bird.drawEgg("));
   assert.ok(code.includes("html: nestEggHtml("));
+
+  // hidden is an HTMLElement property, not an SVGElement one: `el.hidden = x`
+  // on an <svg> sets a dead expando while the CSS attribute selector for it
+  // keeps matching the content attribute. setHidden toggles the attribute
+  // itself everywhere in this file, so no direct assignment survives.
+  assert.ok(body.includes("function setHidden(el, on)"), "the attribute-toggling helper is defined");
+  assert.deepEqual(body.match(/\.hidden\s*=(?!=)/g) || [], [], "no .hidden = assignment remains anywhere in the file");
 });
 
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
@@ -696,6 +714,7 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.match(body, /\.rb-nest-pin\.rb-nest-collect svg/);
   assert.match(body, /\.rb-ar-egg-art \{[^}]*order: -1/);
   assert.match(body, /prefers-reduced-motion[\s\S]*\.rb-nest-pin\.rb-nest-busy \{ box-shadow/);
+  assert.ok(body.includes("#ramble .rb-pop-avatar {"), "a contact's picture on the pin has its rule");
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {
@@ -711,6 +730,16 @@ test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero ba
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(body), "no emoji");
   assert.ok(!/toDataURL|toBlob|captureStream|ImageCapture|MediaRecorder|drawImage|getContext\(/.test(body));
   assert.ok(body.includes("window.RambleAr = api"));
+
+  // hidden is an HTMLElement property, not an SVGElement one: setHidden
+  // toggles the attribute directly so the bird/egg <svg> pair can actually
+  // show and hide, and paintBird's own react() reads the attribute back
+  // instead of the dead expando it used to write.
+  assert.ok(body.includes("function setHidden(el, on)"), "the attribute-toggling helper is defined");
+  assert.deepEqual(body.match(/\.hidden\s*=(?!=)/g) || [], [], "no .hidden = assignment remains anywhere in the file");
+  assert.ok(!body.includes(".bird.hidden") && !body.includes(".egg.hidden"), "no remaining .hidden property read either");
+  assert.ok(body.includes('e.bird.hasAttribute("hidden")'), "the read site tests the attribute, not the property");
+
   assert.equal((await realFetch(BASE + "/ramble/static/ramble-ar.js")).status, 401);
 });
 
@@ -921,9 +950,14 @@ test("POST /api/ramble/birds/:id/activate 200s a hatched bird, emits the pet, an
     });
   } finally { db.close(); }
   const petUpdatesBefore = emitCalls.filter((c) => c.table === "ramble_pet" && c.op === "update").length;
+  const activated = [];
+  const onActivated = (p) => activated.push(p);
+  bus.on("ramble:bird-activated", onActivated);
   const res = await req("/api/ramble/birds/panel-bird/activate", { method: "POST", body: {} });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { bird: { egg_id: "panel-bird", species: "magpie", seed: 4242 } });
+  bus.off("ramble:bird-activated", onActivated);
+  assert.deepEqual(activated, [{ egg_id: "panel-bird" }], "activation pokes the bus so core can repaint a bird avatar (spec §5)");
   assert.equal(emitCalls.filter((c) => c.table === "ramble_pet" && c.op === "update").length, petUpdatesBefore + 1, "activation must emit the pet row");
   const pet = await (await req("/api/ramble/pet")).json();
   assert.deepEqual(pet.bird, { egg_id: "panel-bird", species: "magpie", seed: 4242 });
@@ -972,6 +1006,8 @@ test("GET /api/ramble/marks names a remote mark by a contact; a stranger's stays
   const { marks } = await (await req(`/api/ramble/marks?cells=${CELL}`)).json();
   assert.equal(marks.find((m) => m.mark_id === "by-pal").contact_name, "Pal");
   assert.equal(marks.find((m) => m.mark_id === "by-stranger").contact_name, undefined);
+  assert.equal(marks.find((m) => m.mark_id === "by-pal").contact_avatar, "data:image/png;base64," + "A".repeat(32), "a contact's picture rides beside the name");
+  assert.equal(marks.find((m) => m.mark_id === "by-stranger").contact_avatar, undefined);
 });
 
 test("POST /api/ramble/eggs/:id/gift: unknown contact 400, unknown egg 404, incubating egg 409, shelf egg goes 'gifted' and queues one DM", async () => {
@@ -1209,6 +1245,7 @@ test("GET /api/ramble/around names a contact's remote mark like the marks list d
   const body = await (await req(`/api/ramble/around?lat=${LAT}&lon=${LON}`)).json();
   const pal = body.marks.find((m) => m.mark_id === "around-pal");
   assert.equal(pal?.contact_name, "Pal");
+  assert.equal(pal?.contact_avatar, "data:image/png;base64," + "A".repeat(32));
   assert.equal((await realFetch(BASE + `/api/ramble/around?lat=${LAT}&lon=${LON}`)).status, 401);
 });
 

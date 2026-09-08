@@ -24,6 +24,7 @@ import { normalizePubkey } from "./pubkey-util.js";
 import { readTombstone, writeTombstone, clearTombstone } from "./contact-delete.js";
 import { groupTombstoneStatement, isGroupTombstoned } from "./group-delete.js";
 import { sanitizeDisplayName } from "./display-name.js";
+import { validateAvatar, avatarFieldValue } from "./avatar.js";
 import bus from "../shared/event-bus.js";
 import { mintLamport, advanceCounter, stampSql } from "../shared/sync-stamp.js";
 
@@ -2755,6 +2756,23 @@ export class InstanceSyncManager {
     // a null result is legal (a NULL display_name is a placeholder).
     if (Object.prototype.hasOwnProperty.call(filtered, "display_name")) {
       filtered.display_name = sanitizeDisplayName(filtered.display_name);
+    }
+
+    // 2026-09-08 (§4.4 / D5): the peer-reported fields ride the same trusted
+    // same-owner wire, but they were REMOTE-controlled at their origin and an
+    // older instance may not have validated them. Same idempotent rule as
+    // display_name: clean once, here, so a redelivery never mismatches the
+    // stored row and spams the conflict log. Only when the key is present.
+    if (Object.prototype.hasOwnProperty.call(filtered, "peer_display_name")) {
+      filtered.peer_display_name = sanitizeDisplayName(filtered.peer_display_name);
+    }
+    if (Object.prototype.hasOwnProperty.call(filtered, "peer_avatar")) {
+      filtered.peer_avatar = validateAvatar(filtered.peer_avatar);
+    }
+    // R2-S5: the LOCAL avatar_url now renders too; the same bound the editor
+    // applies (an old-value URL is kept; junk/oversize becomes NULL).
+    if (Object.prototype.hasOwnProperty.call(filtered, "avatar_url")) {
+      filtered.avatar_url = avatarFieldValue(filtered.avatar_url);
     }
 
     const { rows: localRows } = await this.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] });

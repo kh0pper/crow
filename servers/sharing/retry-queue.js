@@ -43,14 +43,17 @@ export const HANDSHAKE_COMPLETE_SUBTYPE = "handshake_complete";
  * acceptor clears the exact retry row (markDelivered, contact-bound). Mirrors
  * buildDeliveryReceipt — a lost ack self-heals on the acceptor's next retry /
  * the inviter's next restart (the "replayed" re-ack). */
-export function buildHandshakeComplete(eventIds, displayName) {
+export function buildHandshakeComplete(eventIds, displayName, avatar) {
   const ids = (Array.isArray(eventIds) ? eventIds : [])
     .filter((x) => typeof x === "string" && x.length > 0);
   // F-CONTACT-2 (design §D5): the inviter's own display name is additive and
   // optional — include the key ONLY for a non-null string, so an old peer sees
   // exactly today's envelope and a new peer treats a missing field as today.
+  // 2026-09-08 §4.2: the inviter's picture rides the same way (the caller
+  // passes it already validated; a missing/empty one is simply absent).
   const payload = { event_ids: ids };
   if (typeof displayName === "string" && displayName) payload.displayName = displayName;
+  if (typeof avatar === "string" && avatar) payload.avatar = avatar;
   return JSON.stringify({
     type: "crow_social",
     version: 1,

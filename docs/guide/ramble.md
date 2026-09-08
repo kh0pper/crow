@@ -29,7 +29,7 @@ The **public identity level** picks which key signs what you publish:
 | `pseudonym` | Both marks and caws use the stable world pseudonym — consistent identity, no link to your real Crow id. |
 | `real` | Your instance's own key and `crow_id`. Anything you publish is attributable to this Crow. |
 
-**World name.** In the Visible sheet you can set a world name (up to 24 characters) that strangers see on your public marks and caws instead of a bare key — but only while your Name level is `pseudonym` or `real`; at `rotating` nothing but the short key goes out. It is unverified, so a stranger's name is always shown with the first four characters of their key ("Kevin · f665"). Contacts never see it: they see the name they saved for you. Your own marks read "your mark".
+**World name.** In the Visible sheet you can set a world name (up to 24 characters) that strangers see on your public marks and caws instead of a bare key — but only while your Name level is `pseudonym` or `real`; at `rotating` nothing but the short key goes out. It is unverified, so a stranger's name is always shown with the first four characters of their key ("Kevin · f665"). Contacts never see it: they see your Crow name, or the name they saved for you. Your own marks read "your mark".
 
 ## How publishing works
 

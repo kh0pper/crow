@@ -234,3 +234,138 @@ test("crow_accept_invite sanitizes a hostile profile_display_name before it hits
     assert.equal(payload.displayName, "Evil", "bidi override stripped outbound");
   } finally { cleanup(); }
 });
+
+// --- Plan B (2026-09-08 §4.2): the avatar rides the handshake both ways -----
+
+const PNG_AV = "data:image/png;base64," + "Q".repeat(64);
+const peerOf = async (db, crowId) => (await db.execute({ sql: "SELECT display_name, peer_display_name, peer_avatar FROM contacts WHERE crow_id = ?", args: [crowId] })).rows[0];
+function ackingMgrs(acks) {
+  return { ...stubMgrs(), nostrManager: { subscribeToContact: async () => {}, sendControl: async (c, content) => { acks.push(JSON.parse(content)); return { eventId: "a", relays: [] }; } } };
+}
+
+test("buildHandshakeComplete(ids, name, avatar): the avatar key appears only for a non-empty string (old-peer wire compat)", () => {
+  assert.equal(JSON.parse(buildHandshakeComplete(["e1"], "Kevin", PNG_AV)).payload.avatar, PNG_AV);
+  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"], "Kevin")).payload));
+  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"], "Kevin", null)).payload));
+  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"], "Kevin", "")).payload));
+  assert.ok(!("avatar" in JSON.parse(buildHandshakeComplete(["e1"])).payload), "the one-arg form is byte-identical to before");
+});
+
+test("invite_accepted with displayName + avatar: peer fields stored; a bad avatar is ignored; the handshake still acks", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    const acks = [];
+    const mgrs = ackingMgrs(acks);
+    await handleInviteAccepted(db, mgrs, invitePayload({ displayName: "Dayane", avatar: PNG_AV }), PK, { id: "av-1" });
+    let row = await peerOf(db, "crow:realpeer9");
+    assert.equal(row.display_name, "Dayane", "a brand-new row still takes the handshake name (today's behaviour)");
+    assert.equal(row.peer_display_name, "Dayane");
+    assert.equal(row.peer_avatar, PNG_AV);
+    assert.equal(acks.length, 1, "acked");
+
+    const p2 = { type: "invite_accepted", crowId: "crow:host2", ed25519Pub: "d".repeat(64), secp256k1Pub: OTHER_PK, displayName: "Two", avatar: "https://example.com/not-inline.png" };
+    await handleInviteAccepted(db, mgrs, p2, OTHER_PK, { id: "av-2" });
+    row = await peerOf(db, "crow:host2");
+    assert.equal(row.peer_display_name, "Two");
+    assert.equal(row.peer_avatar, null, "a URL avatar is ignored — never fails the handshake");
+    assert.equal(acks.length, 2, "still acked");
+  } finally { cleanup(); }
+});
+
+test("handleHandshakeComplete stores the inviter's name + avatar in the peer fields; the typed-name rule is unchanged", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db, "crow:inv-typed", PK, "My Friend");
+    await handleHandshakeComplete(db, ["evt-1"], PK_XONLY, "Kevin", PNG_AV);
+    let row = await peerOf(db, "crow:inv-typed");
+    assert.equal(row.display_name, "My Friend", "never overwritten");
+    assert.equal(row.peer_display_name, "Kevin");
+    assert.equal(row.peer_avatar, PNG_AV);
+
+    const placeholder = await seedContact(db, "crow:inv-ph", OTHER_PK, "crow:inv-ph");
+    await handleHandshakeComplete(db, ["evt-2"], OTHER_PK.slice(-64), "Kevin");
+    assert.equal(await nameOf(db, placeholder), "Kevin", "the placeholder rule still applies");
+    row = await peerOf(db, "crow:inv-ph");
+    assert.equal(row.peer_display_name, "Kevin");
+    assert.equal(row.peer_avatar, null, "no avatar on the wire = left alone");
+  } finally { cleanup(); }
+});
+
+test("the inviter's ack carries its own avatar when profile_avatar_url holds a valid data URI", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Inviter', datetime('now')), ('profile_avatar_url', ?, datetime('now'))", args: [PNG_AV] });
+    const acks = [];
+    await handleInviteAccepted(db, ackingMgrs(acks), invitePayload(), PK, { id: "ack-av" });
+    assert.equal(acks.length, 1);
+    assert.equal(acks[0].subtype, HANDSHAKE_COMPLETE_SUBTYPE);
+    assert.equal(acks[0].payload.displayName, "Inviter");
+    assert.equal(acks[0].payload.avatar, PNG_AV);
+  } finally { cleanup(); }
+});
+
+test("crow_accept_invite includes a valid avatar in the acceptance and omits a legacy URL one", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_avatar_url', ?, datetime('now'))", args: [PNG_AV] });
+    let payload = await acceptWith({ db, profileName: "Dayane" });
+    assert.equal(payload.avatar, PNG_AV);
+    assert.equal(payload.displayName, "Dayane");
+    await db.execute({ sql: "UPDATE dashboard_settings SET value = 'https://example.com/me.png' WHERE key = 'profile_avatar_url'", args: [] });
+    payload = await acceptWith({ db, profileName: null }); // the name row from the first accept is still there
+    assert.ok(!("avatar" in payload), "a URL is not an avatar → key omitted");
+  } finally { cleanup(); }
+});
+
+test("handshake_complete peer fields are dropped for a blocked contact and for a pending request row (R1-C1)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, is_blocked) VALUES ('crow:blk', ?, ?, 'Blocked', 1)", args: ["d".repeat(64), PK] });
+    await handleHandshakeComplete(db, [], PK_XONLY, "Renamed", PNG_AV);
+    let r = await peerOf(db, "crow:blk");
+    assert.equal(r.peer_display_name, null, "a blocked contact cannot rename itself");
+    assert.equal(r.peer_avatar, null);
+    assert.equal(r.display_name, "Blocked");
+    const req = "req:" + "e".repeat(64);
+    await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, request_status) VALUES (?, ?, ?, NULL, 'pending')", args: [req, "d".repeat(64), OTHER_PK] });
+    await handleHandshakeComplete(db, [], OTHER_PK.slice(-64), "Stranger", PNG_AV);
+    r = await peerOf(db, req);
+    assert.equal(r.peer_avatar, null, "an unpaired request row never stores 32 KB");
+    assert.equal(r.peer_display_name, null);
+    assert.equal(r.display_name, null, "and cannot name itself either (R2-S1)");
+    // R2-S1: a BLOCKED contact whose stored name is a placeholder stays a placeholder.
+    const BLK2 = "02" + "b".repeat(64);
+    await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, is_blocked) VALUES ('crow:blkph', ?, ?, 'crow:blkph', 1)", args: ["d".repeat(64), BLK2] });
+    await handleHandshakeComplete(db, [], BLK2.slice(-64), "I Renamed Myself", PNG_AV);
+    r = await peerOf(db, "crow:blkph");
+    assert.equal(r.display_name, "crow:blkph");
+    assert.equal(r.peer_display_name, null);
+    // R2-1: an ACCEPTED message request is an established contact — both writes land.
+    const ACC = "02" + "a".repeat(64);
+    await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, request_status) VALUES ('crow:accepted1', '', ?, 'crow:accepted1', 'accepted')", args: [ACC] });
+    await handleHandshakeComplete(db, [], ACC.slice(-64), "Accepted Pal", PNG_AV);
+    r = await peerOf(db, "crow:accepted1");
+    assert.equal(r.display_name, "Accepted Pal");
+    assert.equal(r.peer_display_name, "Accepted Pal");
+    assert.equal(r.peer_avatar, PNG_AV);
+  } finally { cleanup(); }
+});
+
+test("invite_accepted from a BLOCKED sender leaves peer_* untouched (F-BLOCK-1 D4d gates applyPeerProfile too, R2 finding 3/4)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await db.execute({
+      sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, is_blocked) VALUES ('crow:blockedinv', ?, ?, 'Blocked', 1)",
+      args: ["d".repeat(64), PK],
+    });
+    const acks = [];
+    await handleInviteAccepted(db, ackingMgrs(acks), invitePayload({ displayName: "Sneaky", avatar: PNG_AV }), PK, { id: "blk-inv-1" });
+    assert.equal(acks.length, 0, "a blocked sender's invite_accepted is silently dropped — no ack");
+    const row = await peerOf(db, "crow:blockedinv");
+    assert.equal(row.display_name, "Blocked", "untouched");
+    assert.equal(row.peer_display_name, null, "the blocked-sender early return also blocks the peer-field writer");
+    assert.equal(row.peer_avatar, null);
+    const n = Number((await db.execute("SELECT COUNT(*) AS n FROM contacts")).rows[0].n);
+    assert.equal(n, 1, "no new contact row was upserted for the payload-claimed identity either");
+  } finally { cleanup(); }
+});
