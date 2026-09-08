@@ -779,8 +779,17 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes("showView(perchTarget)"), "tapping the marker still opens egg or pet");
   assert.ok(!body.includes('L.circleMarker(ll, { pane: "rb-here"'), "the plain blue dot is gone");
   assert.ok(body.includes("function markWalking()"));
+  assert.ok(
+    body.includes("haversineMeters(lastWalkFix, { lat: pos.coords.latitude, lon: pos.coords.longitude })"),
+    "the waddle has its OWN anchor — regressing it to lastPostedFix must fail here",
+  );
+  assert.ok(body.includes("if (moved > 10)"), "and its own 10 m threshold, not the 75 m area-post ratchet");
   assert.ok(body.includes('setAttribute("role", "button")'), "the marker keeps the accessible role the retired button had");
   assert.ok(body.includes('classList.add("is-walking")'), "the marker waddles while you move");
+
+  assert.ok(body.includes('if (ev.key !== "Enter" && ev.key !== " ") return;'), "Enter and Space activate the marker Leaflet only made focusable");
+  assert.ok(body.includes("el.onkeydown ="), "property assignment, so re-skinning cannot stack duplicate handlers");
+  assert.ok(body.includes('opts.className = "rb-here-pet rb-here-plain"'), "a plain dot survives the bird engine failing to load");
 });
 
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
@@ -828,6 +837,7 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.ok(body.includes("#ramble .rb-here-pet {"), "the pet marker has a rule");
   assert.ok(body.includes("@keyframes rb-waddle"));
   assert.ok(body.includes("#ramble .rb-here-pet.is-walking"));
+  assert.ok(body.includes("#ramble .rb-here-pet.rb-here-plain::before {"), "the engine-less fallback dot has a rule");
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {
