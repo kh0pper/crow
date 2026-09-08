@@ -109,8 +109,8 @@ test("refreshBirdAvatar: no-op for source picture; falls back to picture with no
 
     await putSetting(db, "profile_avatar_source", "bird");
     await putSetting(db, "profile_avatar_url", "data:image/png;base64," + "A".repeat(16));
-    assert.deepEqual(await refreshBirdAvatar(db, managers), { changed: true, reason: "no-bird" });
-    assert.equal(await setting(db, "profile_avatar_source"), "picture", "falls back");
+    assert.deepEqual(await refreshBirdAvatar(db, managers), { changed: false, reason: "no-bird" });
+    assert.equal(await setting(db, "profile_avatar_source"), "bird", "a background refresh never reverts the user's REPLICATED choice (fix round 1, Finding 1, CRITICAL)");
     assert.equal(await setting(db, "profile_avatar_url"), "data:image/png;base64," + "A".repeat(16), "the last stored image stays");
     assert.equal(sent.length, 0, "nothing to say");
 
@@ -135,6 +135,29 @@ test("refreshBirdAvatar: no-op for source picture; falls back to picture with no
     assert.equal(sent.length, 2);
 
     assert.equal((await refreshBirdAvatar({ execute: async () => { throw new Error("boom"); } }, managers)).changed, false, "never throws");
+  } finally { cleanup(); }
+});
+
+test("refreshBirdAvatar: no bird emits NO settings sync op for profile_avatar_source (fix round 1, Finding 1, CRITICAL — a REPLICATED setting must not flip on a per-instance boot repaint)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await putSetting(db, "profile_avatar_source", "bird");
+    // The same recording seam profile-sync-allowlist.test.js / profile-heal.test.js
+    // use to pin "did this write replicate": a manager whose emitChange
+    // records every dashboard_settings sync op this refresh causes.
+    const emitted = [];
+    setSettingsSyncManager({ feedsDisabled: false, emitChange: async (t, op, row) => { emitted.push({ t, op, row }); } });
+    let r;
+    try {
+      r = await refreshBirdAvatar(db, mgrsWith(db, []));
+    } finally {
+      setSettingsSyncManager(null);
+    }
+    assert.deepEqual(r, { changed: false, reason: "no-bird" });
+    assert.ok(
+      !emitted.some((e) => e.row?.key === "profile_avatar_source"),
+      "no sync op for profile_avatar_source: a background repaint on a Ramble-less/not-yet-hatched instance must never write, let alone replicate, this key"
+    );
   } finally { cleanup(); }
 });
 
@@ -186,5 +209,35 @@ test("installBirdAvatarHooks: a hatch or an activation on the bus refreshes; ins
     assert.equal(await setting(db, "profile_avatar_url"), third, "an activation repaints");
     assert.equal(sent.length, 3, "one broadcast per real change");
     assert.equal(emitter.listenerCount("ramble:hatched"), 1);
+  } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
+});
+
+test("installBirdAvatarHooks: two triggers landing in the same tick serialize — exactly one broadcast, no lost pending flag (fix round 1, Finding 2)", async () => {
+  __resetBirdAvatarHooksForTest();
+  const { db, cleanup } = freshDb();
+  try {
+    await seedContact(db);
+    await plantBird(db, { eggId: "b1", species: "crow", seed: 77 });
+    await putSetting(db, "profile_avatar_source", "bird");
+    const sent = [];
+    const emitter = new EventEmitter();
+    installBirdAvatarHooks(mgrsWith(db, sent), { emitter });
+    const first = renderBirdAvatar({ species: "crow", seed: 77 });
+    await settle(db, "profile_avatar_url", first);
+    assert.equal(sent.length, 1, "the install-time repaint");
+
+    await plantBird(db, { eggId: "b2", species: "magpie", seed: 78 });
+    // Two triggers fired back-to-back, synchronously, in the same tick —
+    // this is exactly the "two transports both emit the hatch" / "an
+    // activation racing the boot repaint" shape the finding calls out.
+    emitter.emit("ramble:hatched", { egg_id: "b2", species: "magpie", seed: 78 });
+    emitter.emit("ramble:bird-activated", { egg_id: "b2" });
+    const second = renderBirdAvatar({ species: "magpie", seed: 78 });
+    await settle(db, "profile_avatar_url", second);
+    // Give the second, chained (and now redundant) refresh time to finish
+    // draining before asserting the broadcast count.
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(await setting(db, "profile_avatar_url"), second);
+    assert.equal(sent.length, 2, "exactly one NEW broadcast for the two overlapping triggers, not two");
   } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
 });
