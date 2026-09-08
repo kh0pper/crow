@@ -3,11 +3,11 @@
  * CommonJS loader, and it runs unchanged inside vm.runInNewContext (the
  * tests). NO ESM syntax, NO template literals (backticks), NO innerHTML:
  * every label is built with createElement + textContent, and the only markup
- * this file ever mounts is the bird, through the engine's own mountBird.
+ * this file ever mounts is the bird; a caller-built art element is appended, never parsed.
  *
  * Contract: renderAr({ anchors, pose, bird, camera }) -> frame. It knows
  * nothing about maps, marks or nests. An anchor is
- *   { id, kind: "mark"|"caw"|"nest", lat, lon, accuracy_m, approx_m, locked, title }
+ *   { id, kind, lat, lon, accuracy_m, approx_m, locked, title, reach_m?, art? }
  * and the frame says where each label goes as FRACTIONS of the viewport, so
  * one frame paints any screen and the tests need no DOM. mountAr(els, opts)
  * is the DOM painter for that frame; a future WebXR painter consumes the
@@ -32,6 +32,9 @@
   var NEAR_SCALE = 1, FAR_SCALE = 0.5;
   var PARK_Y0 = 0.28, PARK_STEP = 0.07, PARK_SCALE = 0.7;
   var REACT_MS = 900;
+  var NEAR_BOOST = 1.25;       /* a label within its anchor's reach_m is drawn larger */
+  var TAP_MS = 350;            /* the press flash on any label */
+  var FX_MS = 900;             /* a timed effect (collect) */
   var POINTS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
   var SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -105,17 +108,23 @@
   }
 
   /* One anchor against one pose: distance, bearing, and (with a heading) its
-   * place on the screen, all as fractions 0..1 of the viewport. */
+   * place on the screen, all as fractions 0..1 of the viewport. reach_m (an
+   * optional per-anchor "close enough") makes it near; art says the caller
+   * supplied an element the painter should show. */
   function layoutAnchor(anchor, pose) {
     var d = distanceM(pose, anchor);
     var b = bearingDeg(pose, anchor);
     var t = clamp01(d / RANGE_M);
+    var near = isNum(anchor.reach_m) && d <= anchor.reach_m;
     var out = {
       id: anchor.id, kind: anchor.kind, title: anchor.title, locked: !!anchor.locked,
       distance_m: Math.round(d), bearing: Math.round(b), rel: null, visible: false, side: null,
       x: 0.5, y: NEAR_Y - (NEAR_Y - FAR_Y) * t, scale: NEAR_SCALE - (NEAR_SCALE - FAR_SCALE) * t,
-      sub: subFor(d, anchor.locked),
+      sub: near ? (anchor.locked ? "close enough · unlock" : (anchor.kind === "nest" ? "close enough · take it" : subFor(d, anchor.locked))) : subFor(d, anchor.locked),
+      near: near,
+      art: !!anchor.art,
     };
+    if (near) out.scale = out.scale * NEAR_BOOST;
     if (isNum(pose.heading)) {
       var rel = relativeBearing(b, pose.heading);
       out.rel = Math.round(rel * 10) / 10;
@@ -140,6 +149,10 @@
     if (reason === "no-fix") return "Waiting for a fix…";
     if (items.length === 0 && coarseCount > 0) return "Something is around here, but I can't tell which way.";
     if (items.length === 0) return "Nothing within " + RANGE_M + " m. Walk a bit.";
+    /* Reach beats sight: "right here" must not flip with the compass. Items are nearest-first. */
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].near) return items[i].title + ", right here — " + roundM(items[i].distance_m) + " m.";
+    }
     if (visibleItems.length > 0) return visibleItems[0].title + ", " + roundM(visibleItems[0].distance_m) + " m ahead.";
     var n = items[0];
     if (mode === "radar" || !isNum(n.rel)) return n.title + ", " + roundM(n.distance_m) + " m " + compassPoint(n.bearing) + ". Follow the ring.";
@@ -199,7 +212,7 @@
         dots: items.map(function (it) { return radarDot(it, mode === "ar" || isNum(pose.heading)); }),
         list: items.map(function (it) {
           return { id: it.id, kind: it.kind, title: it.title, distance_m: it.distance_m,
-            sub: (it.locked ? "~" : "") + roundM(it.distance_m) + " m · " + compassPoint(it.bearing) + (it.locked ? " · locked" : "") };
+            sub: it.near ? it.sub : ((it.locked ? "~" : "") + roundM(it.distance_m) + " m · " + compassPoint(it.bearing) + (it.locked ? " · locked" : "")) };
         }),
       },
       visible: visible.map(function (it) { return it.id; }),
@@ -227,6 +240,10 @@
     var nodes = {};
     /* The radar list and the coarse rows repaint only when their text changes. */
     var listKey = null;
+    /* Art elements mounted per anchor id (once), the radar rows by id (for fx),
+     * and per-element flash timers. */
+    var arts = {};
+    var rowNodes = {};
 
     function clear(el) { if (el) el.textContent = ""; }
     function pct(v) { return (v * 100).toFixed(2) + "%"; }
@@ -247,7 +264,10 @@
       var sub = document.createElement("span");
       btn.appendChild(strong);
       btn.appendChild(sub);
-      btn.addEventListener("click", function () { if (typeof o.onTap === "function") o.onTap(id); });
+      btn.addEventListener("click", function () {
+        flash(btn, "rb-ar-tapped", TAP_MS);
+        if (typeof o.onTap === "function") o.onTap(id);
+      });
       return btn;
     }
 
@@ -257,6 +277,7 @@
       btn.setAttribute("data-kind", item.kind);
       if (item.locked) btn.setAttribute("data-locked", "true"); else btn.removeAttribute("data-locked");
       if (item.side) btn.setAttribute("data-side", item.side); else btn.removeAttribute("data-side");
+      if (item.near) btn.setAttribute("data-near", "true"); else btn.removeAttribute("data-near");
       btn.style.left = pct(item.x);
       btn.style.top = pct(item.y);
       btn.style.transform = "translate(-50%, -50%) scale(" + item.scale.toFixed(3) + ")";
@@ -265,11 +286,32 @@
       if (btn.children[1].textContent !== item.sub) btn.children[1].textContent = item.sub;
     }
 
+    /* Add a class for ms milliseconds, restarting the timer on a repeat. The timer lives
+     * on the element so a label and a row with the same id never share one. */
+    function flash(el, cls, ms) {
+      el.classList.add(cls);
+      var timers = el.rbFxTimers || (el.rbFxTimers = {});
+      if (timers[cls]) clearTimeout(timers[cls]);
+      timers[cls] = setTimeout(function () { el.classList.remove(cls); delete timers[cls]; }, ms);
+    }
+
+    /* The caller's art element goes in once, as the LAST child: placeLabel
+     * addresses the title and sub by index (children[0]/[1]), and CSS order
+     * puts the art first on screen. */
+    function mountArt(btn, id) {
+      var a = byId[id] && byId[id].art;
+      if (!a || arts[id]) return;
+      btn.appendChild(a);
+      arts[id] = a;
+    }
+
     function rowEl(item) {
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "rb-step rb-ar-row";
       btn.setAttribute("data-id", item.id);
+      /* the coarse strip reuses rowEl, so a coarse id would overwrite a row's entry — coarse anchors never have an fx today */
+      rowNodes[item.id] = btn;
       var badge = document.createElement("span");
       badge.className = "rb-step-n";
       badge.textContent = badgeFor(item);
@@ -308,6 +350,7 @@
         coarseRows.map(function (i) { return i.id + "|" + i.title + "|" + i.sub; }).join(";");
       if (key === listKey) return;
       listKey = key;
+      rowNodes = {};
       if (e.list) {
         clear(e.list);
         frame.radar.list.forEach(function (item) { e.list.appendChild(rowEl(item)); });
@@ -363,6 +406,7 @@
         frame.labels.forEach(function (item, order) {
           var btn = nodes[item.id];
           if (!btn) { btn = labelEl(item.id); nodes[item.id] = btn; e.labels.appendChild(btn); }
+          mountArt(btn, item.id);
           placeLabel(btn, item, order);
           keep[item.id] = true;
         });
@@ -370,6 +414,7 @@
           if (keep[id]) return;
           remove(nodes[id]);
           delete nodes[id];
+          delete arts[id];
         });
       }
       if (e.more) {
@@ -389,17 +434,38 @@
       return frame;
     }
 
+    /* A named effect on everything showing this id: the AR label and the
+     * radar-list row. busy is sticky (until clear); collect is timed and hops
+     * the bird. Returns false when nothing shows the id. */
+    function fx(id, name) {
+      var targets = [];
+      if (nodes[id]) targets.push(nodes[id]);
+      if (rowNodes[id]) targets.push(rowNodes[id]);
+      if (targets.length === 0) return false;
+      targets.forEach(function (el) {
+        if (name === "clear") { el.classList.remove("rb-ar-fx-busy"); return; }
+        if (name === "busy") { el.classList.add("rb-ar-fx-busy"); return; }
+        el.classList.remove("rb-ar-fx-busy");
+        flash(el, "rb-ar-fx-" + name, FX_MS);
+      });
+      if (name === "collect") react();
+      return true;
+    }
+
     function destroy() {
+      [nodes, rowNodes].forEach(function (m) { Object.keys(m).forEach(function (id) { var t = m[id].rbFxTimers || {}; Object.keys(t).forEach(function (k) { clearTimeout(t[k]); }); }); });
       if (reactTimer) { clearTimeout(reactTimer); reactTimer = null; }
       prevVisible = {};
       birdKey = null;
       byId = {};
       nodes = {};
+      arts = {};
+      rowNodes = {};
       listKey = null;
       [e.labels, e.radar, e.list, e.coarse].forEach(clear);
     }
 
-    return { render: render, destroy: destroy, anchor: function (id) { return byId[id] || null; } };
+    return { render: render, destroy: destroy, anchor: function (id) { return byId[id] || null; }, fx: fx };
   }
 
   /* ------------------------------------------------------------ first open */
@@ -415,7 +481,7 @@
   }
 
   return {
-    FOV_DEG: FOV_DEG, RANGE_M: RANGE_M, COARSE_M: COARSE_M, PARK_MAX: PARK_MAX,
+    FOV_DEG: FOV_DEG, RANGE_M: RANGE_M, COARSE_M: COARSE_M, PARK_MAX: PARK_MAX, NEAR_BOOST: NEAR_BOOST, TAP_MS: TAP_MS, FX_MS: FX_MS,
     distanceM: distanceM, bearingDeg: bearingDeg, relativeBearing: relativeBearing, compassPoint: compassPoint,
     headingFromEvent: headingFromEvent, smoothHeading: smoothHeading,
     layoutAnchor: layoutAnchor, renderAr: renderAr, mountAr: mountAr,

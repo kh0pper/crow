@@ -114,7 +114,7 @@ derived from energy as in phase 1. Nothing else happens.
   sheet; pins: marks (bubbles), locked marks (dashed teasers + walk distance), caws (bird +
   bubble), nests (egg pin). Below: compose card ("Leave something for whoever comes next",
   one-line mark-vs-caw explainer, Who = Everyone / Contacts / Just me, Reveal = Open /
-  Locked) and a short Nearby list. Tap the bird → pet screen. AR button on the map.
+  Locked) and a short Nearby list. Tap the bird → pet screen. AR button on the map. A you-are-here dot + accuracy ring follows the user; the Around-you chip is a follow toggle that pans only when the dot leaves the middle of the view (phase 5).
 - **Egg (before first hatch).** The perch shows the egg with a progress ring; tapping opens
   the egg screen: ring + percent, the warmth checklist (new places this week, first mark,
   check-in today), "Go outside", "Check in". The hatch moment plays here or wherever the
@@ -216,6 +216,9 @@ bookkeeping is not needed for these tables). `stampSql` gains by-key branches fo
   the map pins' own popup builders. `/around` lists every row under its 5-char cover whatever its
   stored precision (a 6-char caw from a peer at a non-default publish precision included); rows at
   precision ≤ 4 cannot match the cover and are not listed in AR (the map still shows them).
+  Anchors may carry `reach_m` and `art`; a near nest label shows the art and turns gold,
+  "right here" beats "ahead" in the bird's line, and the tap/collect effects run on the
+  label, the radar row and the map pin (phase 5).
 
 ---
 

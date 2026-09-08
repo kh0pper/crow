@@ -4,7 +4,7 @@ title: Ramble
 
 # Ramble
 
-Ramble is a proximity extension: you leave **marks** (notes pinned to a place) and **caws** (short-lived presence pings), and you see the ones other people left near you. It ships as an installable bundle with an MCP server, a dashboard panel with a map, and a Nostr transport that runs inside the gateway.
+Ramble is a proximity extension: you leave **marks** (notes pinned to a place) and **caws** (short-lived presence pings), and you see the ones other people left near you. It ships as an installable bundle with an MCP server, a dashboard panel with a map, and a Nostr transport that runs inside the gateway. A blue dot with an accuracy ring follows you on the map; **Around you** toggles follow mode (dragging the map turns it off).
 
 Phase 1 is deliberately narrow:
 
@@ -137,7 +137,7 @@ Everything here is contact-only and encrypted, and bounded: a contact can have a
 
 ## The AR view
 
-Tap **Look around** on the map to open the AR view: the rear camera fills the screen and every mark, caw and nest within about 500 m gets a label placed by direction and distance. Labels within 35° of where you face sit on the picture, nearer ones lower and larger; the rest park at the left or right edge with an arrow, stacked by distance. Locked marks are dashed labels with a walking distance measured to their cell centre (they carry no exact position, same as on the map). Tapping any label opens the same actions as its map pin — unlock, take the egg, read the text, share an invite. Your active bird sits at the bottom, hops when a label comes into view, and says what is nearest. A caw that only carries its coarse publish cell is listed as "somewhere in this area" and never given a direction.
+Tap **Look around** on the map to open the AR view: the rear camera fills the screen and every mark, caw and nest within about 500 m gets a label placed by direction and distance. Labels within 35° of where you face sit on the picture, nearer ones lower and larger; the rest park at the left or right edge with an arrow, stacked by distance. Locked marks are dashed labels with a walking distance measured to their cell centre (they carry no exact position, same as on the map). Tapping any label opens the same actions as its map pin — unlock, take the egg, read the text, share an invite. Your active bird sits at the bottom, hops when a label comes into view, and says what is nearest. A caw that only carries its coarse publish cell is listed as "somewhere in this area" and never given a direction. Within 75 m of a nest its label turns gold and shows the egg itself; tap it for the sheet, press **Take the egg**, and the label, the pin and the button pulse while your position is checked, then the egg flies down toward your bird when it is yours (the map pin pops the same way).
 
 Position comes from `watchPosition`; heading from `deviceorientationabsolute` (Safari reports `webkitCompassHeading` on the plain event, and iOS asks once for motion access from the button tap). No fix, no camera or no compass falls back to the **radar strip** — a bearing ring (north up, or heading up when there is a compass) and a distance list — so the screen is never blank; the first open explains the limits (compass accuracy, the iOS prompt, no surface placement, the camera stays on the phone). The camera picture never leaves the device: the view is client-side rendering with no capture, canvas or upload, and the stream stops when you close the view or switch away from the tab (it restarts when you come back).
 

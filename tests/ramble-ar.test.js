@@ -263,3 +263,74 @@ test("mountAr paints labels with textContent, routes taps by id, mounts the bird
   session.destroy();
   assert.equal(els.labels.children.length, 0);
 });
+
+test("phase 5: reach_m marks a label near (boosted), a near nest wins the say line even when a farther mark is ahead, a near locked mark says unlock", () => {
+  const nest = anchor("n1", { lat: 30.460449, lon: -98.08 }, { kind: "nest", title: "A nest", reach_m: 75, art: {} });
+  const far = anchor("n2", { lat: 30.460898, lon: -98.08 }, { kind: "nest", title: "A nest", reach_m: 75 });
+  const noReach = anchor("m1", { lat: 30.460449, lon: -98.08 });
+  const lockedNear = anchor("l1", { lat: 30.460449, lon: -98.08 }, { locked: true, title: "A locked mark", reach_m: 75 });
+  const items = [nest, far, noReach, lockedNear].map((a) => Ar.layoutAnchor(a, pose(0)));
+  assert.deepEqual(items.map((i) => [i.near, i.art]), [[true, true], [false, false], [false, false], [true, false]]);
+  assert.ok(items[0].scale > items[2].scale, "a near label is boosted");
+  assert.equal(items[3].sub, "close enough · unlock");
+  assert.equal(items[0].sub, "close enough · take it", "a near nest says so in text too (screen readers see no gold)");
+  assert.equal(items[1].sub, "100 m");
+  // The nest is 50 m BEHIND (heading 180 puts north behind); a mark 100 m ahead is visible. "Right here" still wins.
+  const ahead = anchor("m2", { lat: 30.459102, lon: -98.08 }, { title: "ahead mark" });
+  const f = Ar.renderAr({ anchors: [nest, ahead], pose: pose(180), bird: null });
+  assert.deepEqual(plain(f.visible), ["m2"]);
+  assert.equal(f.say, "A nest, right here — 50 m.");
+  const g = Ar.renderAr({ anchors: [nest, ahead], pose: pose(null), bird: null });
+  assert.equal(g.say, "A nest, right here — 50 m.", "the same line in radar mode: reach, not sight");
+  assert.equal(plain(g.radar.list.map((r) => r.sub))[0], "close enough · take it", "the radar row carries the near cue for compass-less phones");
+  assert.deepEqual(plain(f.labels.map((l) => [l.id, l.near])).sort(), [["m2", false], ["n1", true]]);
+  assert.deepEqual([Ar.NEAR_BOOST, Ar.TAP_MS, Ar.FX_MS], [1.25, 350, 900]);
+});
+
+test("phase 5: the painter mounts art once (last child), toggles data-near, flashes a tap before onTap, and fx() reaches the label and the radar row", () => {
+  const document = fakeDocument();
+  const { Ar: A } = load({ document });
+  const els = { root: document.createElement("div"), labels: document.createElement("div"), radar: document.createElementNS("svg", "g"), list: document.createElement("div"), coarse: document.createElement("div"), bird: document.createElementNS("svg", "svg"), egg: document.createElementNS("svg", "svg"), say: document.createElement("div"), more: document.createElement("p"), mode: document.createElement("span") };
+  const art = document.createElementNS("svg", "svg");
+  const taps = [];
+  let tapHook = null;
+  const session = A.mountAr(els, { engine: null, onTap: (id) => { if (tapHook) tapHook(id); taps.push(id); } });
+  const near = anchor("n1", { lat: 30.460449, lon: -98.08 }, { kind: "nest", title: "A nest", reach_m: 75, art });
+  session.render({ anchors: [near], pose: pose(0), bird: null });
+  const label = els.labels.children.find((c) => c.getAttribute("data-id") === "n1");
+  assert.equal(label.getAttribute("data-near"), "true");
+  assert.equal(label.children.length, 3);
+  assert.equal(label.children[2], art, "the art is APPENDED (CSS order puts it first) so the painter's children[0]/[1] text updates never touch it");
+  assert.equal(label.children[0].textContent, "A nest");
+  assert.equal(label.children[1].textContent, "close enough · take it");
+  session.render({ anchors: [near], pose: pose(0), bird: null });
+  assert.equal(label.children.length, 3, "mounted once, not per frame");
+  assert.equal(art.textContent, "", "the art is never written to");
+  // Walk away: near clears, the art stays mounted.
+  session.render({ anchors: [{ ...near, lat: 30.460898 }], pose: pose(0), bird: null });
+  assert.equal(label.getAttribute("data-near"), null);
+  assert.equal(label.children[2], art);
+  // A tap flashes BEFORE onTap runs.
+  let flashedWhenTapped = false;
+  tapHook = () => { flashedWhenTapped = label.classes.has("rb-ar-tapped"); };
+  label.click();
+  assert.equal(flashedWhenTapped, true);
+  assert.deepEqual(taps, ["n1"]);
+  // busy is sticky until clear; collect is timed and clears busy.
+  assert.equal(session.fx("n1", "busy"), true);
+  assert.ok(label.classes.has("rb-ar-fx-busy"));
+  assert.equal(session.fx("n1", "clear"), true);
+  assert.ok(!label.classes.has("rb-ar-fx-busy"));
+  session.fx("n1", "busy");
+  assert.equal(session.fx("n1", "collect"), true);
+  assert.ok(label.classes.has("rb-ar-fx-collect") && !label.classes.has("rb-ar-fx-busy"));
+  assert.equal(session.fx("nope", "collect"), false);
+  // Radar mode: no labels, but the list row for the id takes the effect.
+  session.render({ anchors: [near], pose: pose(null), bird: null });
+  assert.equal(els.labels.children.length, 0);
+  const row = els.list.children.find((c) => c.getAttribute("data-id") === "n1");
+  assert.ok(row, "the radar row exists");
+  assert.equal(session.fx("n1", "collect"), true);
+  assert.ok(row.classes.has("rb-ar-fx-collect"));
+  session.destroy();
+});
