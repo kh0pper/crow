@@ -230,6 +230,11 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
     // 2026-09-08 §4.2 (D5): the acceptor's self-reported name/picture land in
     // the peer fields (display_name above keeps today's placeholder rule).
     // Guarded on its own: a peer-field failure must not stop the ack below.
+    // R2-1/R2-S1 note: this writer carries no `established` gate of its own —
+    // it is safe here ONLY because (1) the F-BLOCK-1 D4d check ~50 lines
+    // above already returned early for a blocked sender, and (2)
+    // upsertFullContact just promoted this row to request_status = NULL. A
+    // future edit to either of those must not silently open this path.
     try { await applyPeerProfile(db, contactId, { displayName: payload.displayName, avatar: payload.avatar }); }
     catch (err) { try { console.warn("[sharing] invite_accepted peer profile failed:", err?.message); } catch {} }
     // D4: record the handled event.id AFTER a successful upsert so a stale
