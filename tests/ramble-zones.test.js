@@ -70,16 +70,57 @@ test("classifyBbox: returns the unlocked and frontier cells inside a viewport, a
 });
 
 test("classifyBbox expands from the unlocked cells, so a wide viewport stays cheap", () => {
-  // The naive direction (ask every viewport cell for its neighbours) measured
-  // 61 ms of blocking work here; this asserts the shape that avoids it.
+  // The naive direction (ask every viewport cell for its neighbours) costs
+  // |viewport| x (2d+1)^2 and was measured at 61 ms for a 7921-cell viewport
+  // at depth 3 (see the comment in zones.js). The correct direction costs
+  // |unlocked near the viewport| x (2d+1)^2 -- one cell here, so ~48
+  // operations, which is microseconds. 30 ms leaves a wide margin on both
+  // sides (naive ~61 ms, correct <1 ms) without being flaky on a slow box.
+  // Do not loosen this bound to "fix" a slow CI -- that puts the naive
+  // direction back inside the pass window and the test stops catching it.
   const here = decodeGeohash(HOME);
-  const wide = { south: here.lat - 0.05, west: here.lon - 0.05, north: here.lat + 0.05, east: here.lon + 0.05 };
+  const NEAR_CEILING_SPAN = 0.12; // ~89 x 89 = 7921 cells, just under MAX_NEST_CELLS (8192)
+  const wide = {
+    south: here.lat - NEAR_CEILING_SPAN / 2,
+    west: here.lon - NEAR_CEILING_SPAN / 2,
+    north: here.lat + NEAR_CEILING_SPAN / 2,
+    east: here.lon + NEAR_CEILING_SPAN / 2,
+  };
   const started = Date.now();
   const out = classifyBbox(wide, new Set([HOME]), { depth: 3 });
+  const elapsed = Date.now() - started;
   assert.ok(out, "a wide-but-legal viewport is answerable");
   assert.equal(out.unlocked.length, 1);
   assert.equal(out.frontier.length, 48, "one unlocked cell yields exactly its 48-cell ring, whatever the viewport");
-  assert.ok(Date.now() - started < 250, "classification is bounded by unlocked ground, not viewport size");
+  assert.ok(elapsed < 30, `classification is bounded by unlocked ground, not viewport size (took ${elapsed} ms)`);
+
+  // The 48-cell ring is a property of the unlocked set, not of the viewport --
+  // assert that directly, since (unlike timing) it doesn't depend on the
+  // clock or the host's speed. A small viewport and a near-ceiling one must
+  // agree.
+  const small = { south: here.lat - 0.01, west: here.lon - 0.01, north: here.lat + 0.01, east: here.lon + 0.01 };
+  const smallOut = classifyBbox(small, new Set([HOME]), { depth: 3 });
+  assert.equal(smallOut.frontier.length, 48, "frontier size doesn't shrink for a small viewport");
+  assert.equal(out.frontier.length, 48, "frontier size doesn't grow for a near-ceiling viewport");
+});
+
+test("neighborhood handles the antimeridian and a pole without throwing or duplicating", () => {
+  // Antimeridian: candidates that fall past +180 must wrap to negative
+  // longitude, not produce junk or drop below 8.
+  const antimeridianCell = encodeGeohash(10, 179.999, 7);
+  const wrapped = neighborhood(antimeridianCell, 1);
+  assert.equal(wrapped.length, 8, "wrapping still yields all eight neighbours");
+  assert.equal(new Set(wrapped).size, wrapped.length, "no duplicates from the wrap");
+  for (const c of wrapped) assert.match(c, CELL7_RE, `${c} is a valid cell`);
+
+  // Near a pole: candidates past +90 latitude are skipped, not wrapped over
+  // the top, so the count drops below 8 -- but the exact count depends on
+  // how close to the pole the cell sits, so only bound it, don't hard-code it.
+  const poleCell = encodeGeohash(89.999, 0, 7);
+  const nearPole = neighborhood(poleCell, 1);
+  assert.ok(nearPole.length > 0 && nearPole.length < 8,
+    `near the pole some neighbours are skipped, not wrapped (got ${nearPole.length})`);
+  for (const c of nearPole) assert.match(c, CELL7_RE, `${c} is a valid cell`);
 });
 
 test("classifyBbox returns null rather than throwing on a malformed bbox", () => {
