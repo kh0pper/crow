@@ -210,6 +210,26 @@ export async function listAudiences(db) {
 }
 
 /**
+ * x-only pubkey -> { crow_id, name } for every unblocked full contact, bots
+ * included on purpose (naming a bot's mark is harmless). ORDER BY id +
+ * first-wins so two rows sharing a key name the older one deterministically.
+ * Tolerant: an empty map when the core table is unreadable (the stdio MCP
+ * process on a fresh db).
+ */
+export async function contactsByPubkey(db) {
+  const map = new Map();
+  try {
+    const { rows } = await db.execute({ sql: "SELECT crow_id, display_name, secp256k1_pubkey FROM contacts WHERE is_blocked = 0 AND request_status IS NULL ORDER BY id", args: [] });
+    for (const r of rows) {
+      const pk = String(r.secp256k1_pubkey || "");
+      const key = pk.length === 66 ? pk.slice(2) : pk;
+      if (key && !map.has(key)) map.set(key, { crow_id: r.crow_id, name: r.display_name || r.crow_id });
+    }
+  } catch { /* no core tables: nobody is a contact */ }
+  return map;
+}
+
+/**
  * Who a mark with this visibility goes to. `contacts` = every deliverable
  * contact; `group:<uid>` = the deliverable members of that PLAIN contact group
  * (rooms — room_uid NOT NULL — are not groups). Public/private marks never

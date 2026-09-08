@@ -28,6 +28,7 @@ test("leave_mark then query_world returns it, attributed to the x-only world pse
   const m = payload.marks.find((m) => m.content_text === "hello");
   assert.ok(m);
   assert.match(m.author, /^[0-9a-f]{64}$/);
+  assert.equal(m.label, "your mark");
 });
 
 test("ramble_leave_mark with visibility:private succeeds and ramble_query_world({visibility:private}) returns it", async () => {
@@ -267,4 +268,12 @@ test("phase 3 tools: gift and propose_swap validate the contact and the egg, que
   assert.equal((await db.execute("SELECT count(*) AS n FROM ramble_marks WHERE visibility='group:nope'")).rows[0].n, 0);
   r = await h.ramble_leave_mark({ lat: 30.2, lon: -97.7, text: "public", visibility: "public" });
   assert.equal(JSON.parse(r.content[0].text).recipients, undefined, "public marks do not report recipients");
+});
+
+test("ramble_query_world labels a named stranger's mark 'mark by <name> · key4'", async () => {
+  const { insertRemoteMark } = await import("../bundles/ramble/server/marks.js");
+  await insertRemoteMark(db, { mark_id: "named-tool", author: "f665c26b" + "1".repeat(56), kind: "mark", anchor_kind: "geo", geohash: encodeGeohash(30.2672, -97.7431, 7), lat: 30.2672, lon: -97.7431, visibility: "public", reveal: "open", content_text: "named", created_at: Date.now(), nostr_event_id: "ev-named-tool", author_name: "Kevin" });
+  const q = await h.ramble_query_world({ lat: 30.2672, lon: -97.7431, visibility: "public" });
+  const m = JSON.parse(q.content[0].text).marks.find((x) => x.mark_id === "named-tool");
+  assert.equal(m.label, "mark by Kevin · f665");
 });

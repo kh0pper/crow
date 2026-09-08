@@ -29,6 +29,8 @@ The **public identity level** picks which key signs what you publish:
 | `pseudonym` | Both marks and caws use the stable world pseudonym — consistent identity, no link to your real Crow id. |
 | `real` | Your instance's own key and `crow_id`. Anything you publish is attributable to this Crow. |
 
+**World name.** In the Visible sheet you can set a world name (up to 24 characters) that strangers see on your public marks and caws instead of a bare key — but only while your Name level is `pseudonym` or `real`; at `rotating` nothing but the short key goes out. It is unverified, so a stranger's name is always shown with the first four characters of their key ("Kevin · f665"). Contacts never see it: they see the name they saved for you. Your own marks read "your mark".
+
 ## How publishing works
 
 Authoring is local and synchronous; the wire is not. A new mark is stored with `publish_state = 'pending'`, and the gateway's transport publishes it on the next drain tick (every 15 s, or immediately when authored in-process).
@@ -141,7 +143,7 @@ Tap **Look around** on the map to open the AR view: the rear camera fills the sc
 
 Position comes from `watchPosition`; heading from `deviceorientationabsolute` (Safari reports `webkitCompassHeading` on the plain event, and iOS asks once for motion access from the button tap). No fix, no camera or no compass falls back to the **radar strip** — a bearing ring (north up, or heading up when there is a compass) and a distance list — so the screen is never blank; the first open explains the limits (compass accuracy, the iOS prompt, no surface placement, the camera stays on the phone). The camera picture never leaves the device: the view is client-side rendering with no capture, canvas or upload, and the stream stops when you close the view or switch away from the tab (it restarts when you come back).
 
-The panel fetches `GET /api/ramble/around?lat=&lon=&radius_m=` (radius 50–1000 m, default 500): marks as stored (a locked mark as its cell-centre teaser, a contact's mark named), each with `distance_m`, plus this week's nests, nearest first. The panel lists what the map lists (public, contacts and your own "Just me" marks). It refreshes after you move 50 m, once a minute, when you close a tapped label, and on every live event. It is a read and credits nothing. The view needs a secure context: open the Nest over its HTTPS Tailscale Serve address, not a raw-IP `http://` URL, or the browser refuses the camera and the compass and you get the radar strip.
+The panel fetches `GET /api/ramble/around?lat=&lon=&radius_m=` (radius 50–1000 m, default 500): marks as stored (a locked mark as its cell-centre teaser, a contact's mark named, a stranger's world name with its key tail), each with `distance_m`, plus this week's nests, nearest first. The panel lists what the map lists (public, contacts and your own "Just me" marks). It refreshes after you move 50 m, once a minute, when you close a tapped label, and on every live event. It is a read and credits nothing. The view needs a secure context: open the Nest over its HTTPS Tailscale Serve address, not a raw-IP `http://` URL, or the browser refuses the camera and the compass and you get the radar strip.
 
 ## Just me marks
 
@@ -194,7 +196,7 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 |---|---|
 | `ramble_leave_mark` | Leave a mark at a location. |
 | `ramble_caw` | Broadcast a short-lived public presence marker. |
-| `ramble_query_world` | List nearby marks and caws in the cell containing a location. |
+| `ramble_query_world` | List nearby marks and caws in the cell containing a location; each row carries a `label` ("your mark", "mark by <contact>", "mark by <world name> · <key4>", or "mark by <key8>"). |
 | `ramble_unlock` | Unlock a locked mark by proving proximity to its anchor. |
 | `ramble_pet_state` | The companion pet's mood, energy, weekly counters, active bird, and egg progress. |
 | `ramble_egg_state` | The incubating egg's warmth progress and hatch checklist. |

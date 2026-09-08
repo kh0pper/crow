@@ -229,6 +229,9 @@ export async function startRambleTransport({
     // mid-tick, and every row published this tick should ride the same
     // bird rather than each doing its own db round trip.
     const bird = await activeBird(db);
+    // Raw on purpose: markToEvent sanitizes (an installed bundle older than
+    // 0.7.0 ignores the option, so a stale copy keeps draining unchanged).
+    const worldName = await getSetting("world.name");
 
     for (const row of rows) {
       try {
@@ -241,7 +244,9 @@ export async function startRambleTransport({
           sessionId,
           _derive,
         });
-        const template = markToEvent(row, { precision: prec, crowId: persona.crowId, bird });
+        const rowLevel = row.author_level ?? level;
+        const name = rowLevel === "pseudonym" || rowLevel === "real" ? worldName : null;
+        const template = markToEvent(row, { precision: prec, crowId: persona.crowId, bird, name });
         const event = finalizeEvent(template, persona.secp256k1Priv);
         // eslint-disable-next-line no-await-in-loop
         const accepted = await nostrManager.publishRendezvousEvent(event);

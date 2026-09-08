@@ -16,6 +16,7 @@ import { createMark, insertRemoteMark } from "../bundles/ramble/server/marks.js"
 import {
   AUDIENCES, CHANNELS, IDENTITY_LEVELS,
   getGrid, setCell, setMaster, setIdentityLevel, emitAllowed, audienceOf, makePublishGate,
+  sanitizeWorldName, WORLD_NAME_MAX, setWorldName,
 } from "../bundles/ramble/server/grid.js";
 
 let db;
@@ -208,4 +209,38 @@ test("makePublishGate: false under the default grid, true once enabled", async (
 
   const contactsRow = { visibility: "contacts" };
   assert.equal(await gate(contactsRow), false, "contacts row is never gated true by the geo cell alone");
+});
+
+test("sanitizeWorldName: controls and bidi stripped, whitespace collapsed, crow:/req: rejected, hex-only rejected, capped at 24 code points, empty is null", () => {
+  assert.equal(sanitizeWorldName("Kevin"), "Kevin");
+  assert.equal(sanitizeWorldName("  Kevin\u202E   H\u0000 "), "Kevin H");
+  assert.equal(sanitizeWorldName("crow:kevin"), null);
+  assert.equal(sanitizeWorldName("REQ:x"), null);
+  assert.equal(sanitizeWorldName("f665c26b"), null, "a key look-alike");
+  assert.equal(sanitizeWorldName("DEADBEEF1234"), null);
+  assert.equal(sanitizeWorldName("Kev1"), "Kev1", "hex-ish but not all hex");
+  assert.equal(sanitizeWorldName("Kev · f665"), "Kev f665", "the label separator cannot be faked");
+  assert.equal(sanitizeWorldName("f6\u200B65c26b"), null, "a zero-width space cannot hide a key look-alike");
+  assert.equal(sanitizeWorldName("cro\u200Dw:kevin"), null, "a zero-width joiner cannot hide the crow: prefix");
+  assert.equal(sanitizeWorldName("Ke\uFEFFvin"), "Kevin", "a BOM is stripped");
+  assert.equal(sanitizeWorldName("abc"), "abc", "3 hex chars is a word, not a tail");
+  assert.equal(sanitizeWorldName("x".repeat(40)), "x".repeat(24));
+  assert.equal(sanitizeWorldName("x".repeat(23) + " yz"), "x".repeat(23), "a cut that lands on a space is re-trimmed");
+  assert.equal(sanitizeWorldName("🐦".repeat(30)), "🐦".repeat(24), "code points, not UTF-16 units");
+  assert.equal(sanitizeWorldName(""), null);
+  assert.equal(sanitizeWorldName("   "), null);
+  assert.equal(sanitizeWorldName(123), null);
+  assert.equal(sanitizeWorldName(null), null);
+  assert.equal(WORLD_NAME_MAX, 24);
+});
+
+test("world name: set/read through the grid; unset reads null; the setting replicates (not local.)", async () => {
+  assert.equal((await getGrid(db)).worldName, null);
+  const calls = [];
+  assert.equal(await setWorldName(db, "  Kevin  ", { emit: async (t, op, row) => calls.push([t, op, row.key, row.value]) }), "Kevin");
+  assert.equal((await getGrid(db)).worldName, "Kevin");
+  assert.deepEqual(calls, [["ramble_settings", "update", "world.name", "Kevin"]]);
+  assert.equal(await setWorldName(db, "crow:nope"), null);
+  assert.equal((await getGrid(db)).worldName, null, "a rejected name clears the setting");
+  assert.equal(await setWorldName(db, "f665c26b"), null);
 });

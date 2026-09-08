@@ -175,3 +175,17 @@ test("enqueueMark fans a contacts mark out to every full contact and refuses an 
   assert.deepEqual(await enqueueMark(db, lonely), { ok: true, recipients: 0 });
   assert.equal((await db.execute({ sql: "SELECT publish_state FROM ramble_marks WHERE mark_id = ?", args: [lonely.mark_id] })).rows[0].publish_state, "published");
 });
+
+test("contacts marks never carry a world name in either direction", async () => {
+  const row = await createMark(db, {
+    author: "c".repeat(64), author_level: "pseudonym", kind: "mark",
+    anchor: { anchor_kind: "geo", lat: 30.46, lon: -98.08, accuracy_m: 12 },
+    visibility: "contacts", reveal: "open",
+    content: { content_text: "for my people", content_kind: "none" },
+  });
+  const payload = markPayload({ ...row, author_name: "Kevin" });
+  assert.equal(payload.author_name, undefined);
+  assert.equal(payload.name, undefined);
+  const back = payloadToMark({ ...payload, author_name: "Kevin", name: "Kevin" }, { author: PK, eventId: "evt-n" });
+  assert.equal(back.author_name, undefined, "a contact is named from the contacts table, never from the payload");
+});

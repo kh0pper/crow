@@ -277,7 +277,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
    * mark by a contact is named (phase 3); a stranger's stays anonymous.
    */
   async function annotateMarks(marks) {
-    const byPubkey = await contactsByPubkey();
+    const byPubkey = await mods.deliveryMod.contactsByPubkey(db);
     return marks.map(withApproxAnchor).map((m) => {
       const c = m.origin === "remote" ? byPubkey.get(String(m.author)) : null;
       return c ? { ...m, contact_name: c.name } : m;
@@ -344,22 +344,6 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   async function contactOrNull(crowId) {
     try { return await mods.deliveryMod.resolveContact(db, crowId); }
     catch (err) { console.warn("[ramble routes] contact lookup failed:", err?.message ?? err); return null; }
-  }
-
-  /** x-only pubkey -> { crow_id, name } for every unblocked full contact — bots included on purpose, naming a bot's mark is harmless (round-2 Q2). Tolerant: empty map without the core tables. */
-  async function contactsByPubkey() {
-    const map = new Map();
-    try {
-      // ORDER BY id + first-wins: two contact rows can share a key (a bot
-      // hosted beside its owner); the older row names the mark, deterministically.
-      const { rows } = await db.execute({ sql: "SELECT crow_id, display_name, secp256k1_pubkey FROM contacts WHERE is_blocked = 0 AND request_status IS NULL ORDER BY id", args: [] });
-      for (const r of rows) {
-        const pk = String(r.secp256k1_pubkey || "");
-        const key = pk.length === 66 ? pk.slice(2) : pk;
-        if (key && !map.has(key)) map.set(key, { crow_id: r.crow_id, name: r.display_name || r.crow_id });
-      }
-    } catch { /* no core tables: nobody is a contact */ }
-    return map;
   }
 
   async function contactNames() {
@@ -641,6 +625,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (b.identityLevel != null && !IDENTITY_LEVELS.includes(b.identityLevel)) {
       bad(`identityLevel must be one of: ${IDENTITY_LEVELS.join(", ")}`);
     }
+    if (b.worldName != null && (typeof b.worldName !== "string" || b.worldName.length > 128)) bad("worldName must be a string of at most 128 characters");
     if (b.cells != null) {
       if (typeof b.cells !== "object" || Array.isArray(b.cells)) bad("cells must be an object");
       for (const [audience, channels] of Object.entries(b.cells)) {
@@ -662,6 +647,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       }
     }
     if (b.identityLevel != null) await mods.gridMod.setIdentityLevel(db, b.identityLevel, { emit });
+    if (b.worldName != null) await mods.gridMod.setWorldName(db, b.worldName, { emit });
 
     res.json(await mods.gridMod.getGrid(db));
   }));
