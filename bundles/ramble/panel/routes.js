@@ -194,7 +194,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -212,16 +212,17 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/around.js"),
         bundleImport("server/zones.js"),
         bundleImport("server/cells.js"),
+        bundleImport("server/wallet.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
       if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
-          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod || !zonesMod || !cellsMod) {
+          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod || !zonesMod || !cellsMod || !walletMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -711,6 +712,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     });
 
     let unlockedNow = null;
+    let seedPicked = 0;
     if (here) {
       // Geohash-7 (spec §2.1) — the credit key's period is the ISO week, so
       // the same real place only ever counts once a week no matter how many
@@ -724,10 +726,25 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       // The FOOTPRINT, not just the name: the panel flashes the exact square
       // the user just walked into, which is the whole point of the moment.
       if (out.unlocked) unlockedNow = mods.zonesMod.cellBox(out.cell);
+      // 2026-09-08 §2.3: bird seed grows in ground you have ALREADY unlocked,
+      // so a first arrival unlocks the cell and the next visit starts paying.
+      // Deliberate: standing still after an unlock earns nothing until you
+      // move and come back, which is what "routine sustains you" means.
+      if (!out.unlocked && out.cell) {
+        seedPicked = (await mods.walletMod.recordSeedPickup(db, cell, { now: Date.now(), emit })).amount;
+      }
     }
 
     poke("ramble:area");
-    res.json({ cells, ...(unlockedNow ? { unlocked: unlockedNow } : {}) });
+    // `seed` rides ONLY on a post that carried a fix. An area post without
+    // `here` keeps its historical response shape byte for byte, which is what
+    // the existing "writes local.active_area" test asserts with a deepEqual.
+    res.json({
+      cells,
+      ...(unlockedNow ? { unlocked: unlockedNow } : {}),
+      ...(seedPicked ? { seed_picked: seedPicked } : {}),
+      ...(here ? { seed: await mods.walletMod.seedBalance(db) } : {}),
+    });
   }));
 
   // --- blocks ---------------------------------------------------------------
