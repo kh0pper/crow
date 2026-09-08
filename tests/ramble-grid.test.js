@@ -220,6 +220,9 @@ test("sanitizeWorldName: controls and bidi stripped, whitespace collapsed, crow:
   assert.equal(sanitizeWorldName("DEADBEEF1234"), null);
   assert.equal(sanitizeWorldName("Kev1"), "Kev1", "hex-ish but not all hex");
   assert.equal(sanitizeWorldName("Kev · f665"), "Kev f665", "the label separator cannot be faked");
+  assert.equal(sanitizeWorldName("f6\u200B65c26b"), null, "a zero-width space cannot hide a key look-alike");
+  assert.equal(sanitizeWorldName("cro\u200Dw:kevin"), null, "a zero-width joiner cannot hide the crow: prefix");
+  assert.equal(sanitizeWorldName("Ke\uFEFFvin"), "Kevin", "a BOM is stripped");
   assert.equal(sanitizeWorldName("abc"), "abc", "3 hex chars is a word, not a tail");
   assert.equal(sanitizeWorldName("x".repeat(40)), "x".repeat(24));
   assert.equal(sanitizeWorldName("x".repeat(23) + " yz"), "x".repeat(23), "a cut that lands on a space is re-trimmed");

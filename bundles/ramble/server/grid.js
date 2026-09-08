@@ -36,7 +36,8 @@ export function sanitizeWorldName(value) {
   let s = value
     .replace(/[\x00-\x1F\x7F\x80-\x9F]/g, "")
     .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
-    .replace(/·/g, " "); // the label's own separator: "Kev · f665" could fake a key tail
+    .replace(/[\u00AD\u061C\u200B-\u200F\u2060-\u2064\uFEFF]/g, "") // zero-width: "f6<ZWSP>65c26b" must not slip past the hex rule
+    .replace(/\u00B7/g, " "); // the label's own separator: "Kev · f665" could fake a key tail
   s = s.replace(/\s+/g, " ").trim();
   if (/^(crow|req):/i.test(s)) return null;
   const points = Array.from(s);

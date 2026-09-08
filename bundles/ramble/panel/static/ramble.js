@@ -742,6 +742,7 @@
     if (masterEl) masterEl.checked = !!grid.master;
     if (identityEl && grid.identityLevel) identityEl.value = grid.identityLevel;
     if (worldNameEl && worldNameEl !== document.activeElement) worldNameEl.value = grid.worldName || "";
+    if (worldNameEl) worldNameEl.placeholder = grid.identityLevel === "rotating" ? "not sent while Name is rotating" : "how strangers see you";
     cellEls.forEach(function (el) {
       var row = grid.cells && grid.cells[el.getAttribute("data-audience")];
       el.checked = !!(row && row[el.getAttribute("data-channel")]);
