@@ -194,13 +194,21 @@ export async function broadcastProfile(db, nostrManager) {
   const content = buildProfileMessage(await readLocalProfile(db));
   for (const c of await profileRecipients(db)) {
     try {
-      await nostrManager.sendControl({ id: c.id, secp256k1_pubkey: c.secp256k1_pubkey }, content);
+      const res = await nostrManager.sendControl({ id: c.id, secp256k1_pubkey: c.secp256k1_pubkey }, content);
+      if (res && Array.isArray(res.relays) && res.relays.length === 0) {
+        out.failed++;
+        try { console.warn(`[sharing] profile to ${c.crow_id} reached zero relays`); } catch {}
+        continue;
+      }
       out.sent++;
     } catch (err) {
       out.failed++;
       try { console.warn(`[sharing] profile to ${c.crow_id} failed:`, err?.message); } catch {}
     }
   }
-  if (out.failed === 0 && out.skipped === 0) await writeBroadcastPending(db, false);
+  // `skipped` is only ever set on paths that return before this fan-out runs
+  // (no db, no nostrManager), so it is always 0 here — the flag clears only
+  // after a fan-out in which every recipient was genuinely delivered to.
+  if (out.failed === 0) await writeBroadcastPending(db, false);
   return out;
 }

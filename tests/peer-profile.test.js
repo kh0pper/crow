@@ -228,6 +228,24 @@ test("profileRecipients + broadcastProfile: every full unblocked human keyed con
   } finally { cleanup(); }
 });
 
+test("broadcastProfile: a zero-relay publish (every relay refused, e.g. a >64KB avatar over the default relay ceiling) is a failure, not a success — the pending flag stays set (fix round, item 1, CRITICAL)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await db.execute({ sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('profile_display_name', 'Kevin', datetime('now')), ('profile_avatar_url', ?, datetime('now'))", args: [PNG] });
+    await seed(db, { crowId: "crow:full", secp: pk("a"), name: "Full" });
+
+    const zeroRelays = { sendControl: async () => ({ eventId: "e", relays: [] }) };
+    const out = await broadcastProfile(db, zeroRelays);
+    assert.ok(out.failed > 0, "reaching zero relays counts as a failure");
+    assert.equal(out.sent, 0);
+    assert.equal(await readBroadcastPending(db), true, "the never-lost guarantee: a zero-relay publish must not clear the pending flag");
+
+    const nostrManager = { sendControl: async () => ({ eventId: "e", relays: ["r"] }) };
+    assert.deepEqual(await broadcastProfile(db, nostrManager), { sent: 1, failed: 0, skipped: 0 }, "a real publish still clears it");
+    assert.equal(await readBroadcastPending(db), false);
+  } finally { cleanup(); }
+});
+
 test("profileRecipients: a NULL is_blocked row is treated as unblocked (agrees with handleProfileMessage's receive-side check), an is_blocked=1 row is still excluded", async () => {
   const { db, cleanup } = freshDb();
   try {

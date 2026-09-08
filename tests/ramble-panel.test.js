@@ -163,8 +163,7 @@ test("panel handler renders the world-first shell, its three views and every ass
 
   // The Visible sheet's World name field: bounded to 24 characters client-side.
   assert.match(sent, /id="rb-world-name"[^>]*maxlength="24"/);
-  assert.ok(sent.includes("Contacts see your Crow name."));
-  assert.ok(!sent.includes("they saved for you"));
+  assert.ok(sent.includes("Contacts see the name they saved for you, or your Crow name."));
 
   // The legacy ids are GONE — anything still selecting them is broken.
   assert.doesNotMatch(sent, /id="ramble-map"/);

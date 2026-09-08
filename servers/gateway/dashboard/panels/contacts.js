@@ -34,7 +34,12 @@ export default {
     if (req.method === "POST") {
       const result = await handleContactAction(req, db);
       if (result?.status) {
-        const content = `<div class="contacts-empty"><p>${escapeHtml(result.text)}</p><p><a href="/dashboard/contacts?view=profile" class="btn btn-sm btn-secondary">${t("common.back", lang)}</a></p></div>`;
+        // The `back` link defaults to My Profile (the only caller when this
+        // shape was first introduced) but a rejected CONTACT edit must not
+        // dump the user on their own profile page — the handler sets `back`
+        // to something sensible (the contact's own page) for that case.
+        const back = result.back || "/dashboard/contacts?view=profile";
+        const content = `<div class="contacts-empty"><p>${escapeHtml(result.text)}</p><p><a href="${escapeHtml(back)}" class="btn btn-sm btn-secondary">${t("common.back", lang)}</a></p></div>`;
         return res.status(result.status).send(layout({ title: t("nav.contacts", lang), content }));
       }
       if (result?.redirect) return res.redirectAfterPost(result.redirect);

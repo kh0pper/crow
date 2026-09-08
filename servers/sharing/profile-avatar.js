@@ -118,7 +118,16 @@ async function readProfilePictureSettings(db) {
 export async function refreshBirdAvatar(db, managers) {
   try {
     const { avatar, source } = await readProfilePictureSettings(db);
-    if (source !== "bird") return { changed: false, reason: "source-picture" };
+    if (source !== "bird") {
+      // The picture source has no other consumer of the pending flag besides
+      // the profile save handler, so a fan-out left incomplete while the
+      // source was picture would otherwise sit unsent until the user next
+      // opens My Profile. Self-heal it here too, same as the bird path below.
+      if (await readBroadcastPending(db)) {
+        return { changed: false, reason: "resend", sent: await broadcastProfile(db, managers?.nostrManager) };
+      }
+      return { changed: false, reason: "source-picture" };
+    }
     const uri = await renderActiveBirdAvatar(db);
     if (!uri) return { changed: false, reason: "no-bird" };
     if (uri === avatar) {

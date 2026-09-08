@@ -260,7 +260,7 @@ export async function handleContactAction(req, db, {
       // avatar, or a short http(s) URL; anything else is refused — this field now
       // renders (contactAvatar) and rides the contacts sync wire.
       const v = avatarFieldValue(req.body.avatar_url);
-      if (v === null) return { status: 400, text: `avatar_url must be empty, a data:image/... URI of at most ${AVATAR_MAX_BYTES} characters, or an http(s) URL` };
+      if (v === null) return { status: 400, text: `avatar_url must be empty, a data:image/... URI of at most ${AVATAR_MAX_BYTES} characters, or an http(s) URL`, back: `/dashboard/contacts?view=contact&contact=${req.body.contact_id}` };
       fields.push("avatar_url = ?");
       args.push(v);
     }
