@@ -46,7 +46,10 @@ export async function recordUnlock(db, cell, { now = Date.now(), emit, accuracyM
     if (Number.isFinite(accuracyM) && accuracyM > (await maxAccuracy(db))) {
       return { unlocked: false, cell: null, reason: "inaccurate" };
     }
-    const at = Number(now) || Date.now();
+    // NOT `Number(now) || Date.now()` — that treats `now: 0` as falsy and
+    // silently substitutes the real clock, which breaks a replayed unlock at
+    // epoch 0.
+    const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
     const res = await db.execute({
       sql: `INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES (?, ?) ON CONFLICT(cell) DO NOTHING`,
       args: [cell, at],

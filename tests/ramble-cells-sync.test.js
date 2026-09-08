@@ -72,6 +72,12 @@ test("applyRambleWallet: a ledger row is written once and never mutated or delet
   assert.equal((await rowsOf(db, "SELECT * FROM ramble_wallet")).length, 1);
 });
 
+test("applyRambleWallet: a zero created_at is a timestamp, not a missing value", async () => {
+  const db = await freshDb();
+  await applyRambleWallet(db, "insert", { kind: "seed", key: "9vk79ed:0", delta: 1, created_at: 0 }, 10);
+  assert.equal(Number((await rowsOf(db, "SELECT * FROM ramble_wallet"))[0].created_at), 0, "created_at: 0 must not be replaced by the wall clock");
+});
+
 test("two instances converge on the union, in either arrival order", async () => {
   const a = await freshDb();
   const b = await freshDb();
