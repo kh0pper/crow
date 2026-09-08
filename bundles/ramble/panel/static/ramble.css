@@ -833,3 +833,58 @@
 @media (prefers-reduced-motion: reduce) {
   #ramble .rb-ar-bird.rb-ar-react { animation: none; }
 }
+
+/* ------------------------------------------------------- phase 5: here dot */
+
+#ramble .rb-here-dot { fill: var(--rb-accent-2); stroke: var(--rb-surface); }
+#ramble .rb-here-ring { fill: var(--rb-accent-2); }
+
+/* ---------------------------------------------- phase 5: near labels + art */
+
+/* The egg art is APPENDED last (the painter addresses title/sub by index) and
+   shown first by order; only a NEAR NEST that is in view shows it. */
+#ramble .rb-ar-label .rb-ar-egg-art { order: -1; width: 44px; height: 56px; margin: 0 0 4px; display: none; align-self: center; }
+#ramble .rb-ar-label[data-kind="nest"][data-near="true"] {
+  align-items: center;
+  text-align: center;
+  border-color: var(--rb-accent);
+  background: color-mix(in oklab, var(--rb-surface) 70%, var(--rb-accent));
+}
+#ramble .rb-ar-label[data-kind="nest"][data-near="true"]:not([data-side]) .rb-ar-egg-art { display: block; }
+#ramble .rb-ar-egg-art.is-claimed { opacity: .45; }
+
+/* ------------------------------------------------ phase 5: tap + collect fx */
+
+/* Never animate transform on a label or a Leaflet icon: transform is their position. */
+@keyframes rb-press { 0%, 100% { filter: brightness(1); box-shadow: var(--rb-pop-sm); } 50% { filter: brightness(1.15); box-shadow: 0 0 0 4px color-mix(in oklab, var(--rb-accent-2) 45%, transparent); } }
+@keyframes rb-busy { 0%, 100% { box-shadow: var(--rb-pop-sm); } 50% { box-shadow: 0 0 0 6px color-mix(in oklab, var(--rb-accent) 55%, transparent); } }
+@keyframes rb-collect { 0% { transform: scale(1); opacity: 1; } 35% { transform: scale(1.35) rotate(-8deg); opacity: 1; } 100% { transform: translateY(60vh) scale(.3); opacity: 0; } }
+@keyframes rb-nest-pop { 0% { transform: scale(1); opacity: 1; } 40% { transform: scale(1.4); opacity: 1; } 100% { transform: scale(0); opacity: 0; } }
+#ramble .rb-ar-label.rb-ar-tapped { animation: rb-press .35s ease-out; }
+#ramble .rb-ar-label.rb-ar-fx-busy,
+#ramble .rb-ar-row.rb-ar-fx-busy,
+#ramble .rb-pop-btn.is-busy { animation: rb-busy .9s ease-in-out infinite; }
+#ramble .rb-ar-label:not([data-side]).rb-ar-fx-collect .rb-ar-egg-art { display: block; animation: rb-collect .9s ease-in forwards; transform-origin: 50% 50%; }
+#ramble .rb-ar-row.rb-ar-fx-collect { animation: rb-press .9s ease-out; }
+#ramble .rb-nest-pin.rb-nest-busy { animation: rb-busy .9s ease-in-out infinite; }
+#ramble .rb-nest-pin.rb-nest-collect svg { animation: rb-nest-pop .9s ease-in forwards; transform-origin: 50% 100%; }
+
+/* Reduced motion: the SAME full selectors (a media query adds no specificity). */
+@media (prefers-reduced-motion: reduce) {
+  #ramble .rb-ar-label.rb-ar-tapped,
+  #ramble .rb-ar-label.rb-ar-fx-busy,
+  #ramble .rb-ar-row.rb-ar-fx-busy,
+  #ramble .rb-pop-btn.is-busy,
+  #ramble .rb-ar-label:not([data-side]).rb-ar-fx-collect .rb-ar-egg-art,
+  #ramble .rb-ar-row.rb-ar-fx-collect,
+  #ramble .rb-nest-pin.rb-nest-busy,
+  #ramble .rb-nest-pin.rb-nest-collect svg { animation: none; }
+
+  /* No motion, but the cue stays: a still ring while a claim is in flight. */
+  #ramble .rb-ar-label.rb-ar-fx-busy,
+  #ramble .rb-ar-row.rb-ar-fx-busy,
+  #ramble .rb-pop-btn.is-busy,
+  #ramble .rb-nest-pin.rb-nest-busy { box-shadow: 0 0 0 6px color-mix(in oklab, var(--rb-accent) 55%, transparent); }
+  #ramble .rb-ar-label.rb-ar-fx-collect,
+  #ramble .rb-ar-row.rb-ar-fx-collect { box-shadow: 0 0 0 6px color-mix(in oklab, var(--rb-accent-2) 55%, transparent); }
+}
