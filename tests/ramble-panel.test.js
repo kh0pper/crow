@@ -559,6 +559,11 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // attribute name on BOTH sides so a rename cannot silently split them.
   assert.ok(body.includes('"data-visibility"'), "client must read the data-visibility attribute");
 
+  // World name labels (spec 2026-09-08 §3.1): own marks say so; a named stranger gets a key tail.
+  assert.ok(body.includes('return "your " + noun;'), "own marks read your mark / your caw");
+  assert.ok(body.includes('" · " + who.slice(0, 4)'), "a named stranger carries a key4 tail");
+  assert.ok(body.includes('"Your caw"') && body.includes('"A caw from "'));
+
   // Phase 2 wiring: nests for the viewport, the claim, the flock, the swap,
   // the activation, and the third named SSE frame.
   assert.ok(body.includes('"/api/ramble/nests?bbox="'), "client must fetch nests by bbox");
