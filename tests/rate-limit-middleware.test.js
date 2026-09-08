@@ -104,3 +104,20 @@ test("pickTier: blog-embed tier selection and keys", () => {
   const mw = tieredRateLimit({ windowMs: 60_000, tiers, message: { error: "Too many requests" } });
   assert.equal(typeof mw, "function");
 });
+
+import { generalLimiterSkip, GENERAL_LIMITER_SKIP_PREFIXES } from "../servers/gateway/middleware/rate-limit.js";
+
+// The general per-IP limiter (servers/gateway/index.js, 200 req / 15 min) must
+// not count traffic that already sits behind the dashboard session: the Ramble
+// map pulls ~50 proxied tiles per view and 429'd a phone's check-in, then its
+// own scripts, on the first real walk (2026-09-07).
+test("generalLimiterSkip: dashboard, glasses, llm AND every Ramble surface are exempt; other API paths are not", () => {
+  const skip = (path, extra = []) => generalLimiterSkip({ path }, extra);
+  for (const p of ["/dashboard", "/dashboard/ramble", "/api/meta-glasses/x", "/llm/v1/chat",
+    "/ramble/tiles/15/7000/13000.png", "/ramble/static/ramble-ar.js", "/api/ramble/egg/checkin", "/api/ramble/around"]) {
+    assert.equal(skip(p), true, p);
+  }
+  for (const p of ["/api/chat", "/api/ramblex", "/rambler", "/mcp", "/"]) assert.equal(skip(p), false, p);
+  assert.equal(skip("/api/other", ["/api/other"]), true, "an operator prefix is honoured");
+  assert.ok(GENERAL_LIMITER_SKIP_PREFIXES.includes("/ramble/") && GENERAL_LIMITER_SKIP_PREFIXES.includes("/api/ramble/"));
+});
