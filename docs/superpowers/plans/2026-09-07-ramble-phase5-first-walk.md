@@ -460,6 +460,16 @@ In `toArAnchors`: the mark object gains `reach_m: isLocked(mark) ? UNLOCK_M : nu
 
 (f) Nest markers + the effect. Change `var lastNests = [];` to `var lastNests = [];\n  var nestMarkers = {};`. In `drawNests`, after `nestLayer.clearLayers();` add `nestMarkers = {};` and after `marker.addTo(nestLayer);` add `nestMarkers[nest.cell] = marker;`. Add before `function claimNest`:
 ```js
+  /* Until when the nest layer must NOT be rebuilt: a claimed pin is mid-pop
+   * (900 ms) and the claim's own SSE echo arrives at once. */
+  var nestPopUntil = 0;
+
+  /* Rebuild the nest layer now, or after a running pin pop ends. */
+  function refreshNestsAfterPop() {
+    var wait = nestPopUntil - Date.now();
+    if (wait > 0) setTimeout(refreshNests, wait); else refreshNests();
+  }
+
   /* The collect effect on everything showing this nest: the AR label/row
    * (busy is sticky until clear; collect is timed) and the map pin. The pin's
    * animation targets its inner svg — the icon's own transform is its map
@@ -473,6 +483,7 @@ In `toArAnchors`: the mark object gains `reach_m: isLocked(mark) ? UNLOCK_M : nu
     el.classList.remove("rb-nest-busy");
     if (name === "busy") el.classList.add("rb-nest-busy");
     if (name === "collect") {
+      nestPopUntil = Date.now() + 900;
       el.classList.add("rb-nest-collect");
       setTimeout(function () { el.classList.remove("rb-nest-collect"); }, 900);
     }
@@ -499,9 +510,10 @@ Replace `claimNest` with:
         collectFx(nest.cell, "done");
         /* The fly-away plays on the AR label, not behind the sheet (the
          * "on your shelf" line is lost there — accepted: the bird's line and
-         * the shelf say it); the pin's pop finishes before the layer is rebuilt. */
+         * the shelf say it); the layer is rebuilt only after the pin's pop
+         * (refreshNestsAfterPop; the SSE echo waits too). */
         closeArSheet();
-        setTimeout(refreshNests, 900);
+        refreshNestsAfterPop();
         return refreshFlock();
       }
       collectFx(nest.cell, "clear");
