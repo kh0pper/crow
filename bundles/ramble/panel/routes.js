@@ -280,7 +280,8 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     const byPubkey = await mods.deliveryMod.contactsByPubkey(db);
     return marks.map(withApproxAnchor).map((m) => {
       const c = m.origin === "remote" ? byPubkey.get(String(m.author)) : null;
-      return c ? { ...m, contact_name: c.name } : m;
+      // 2026-09-08 §4.5: a contact's pin carries their picture beside their name.
+      return c ? { ...m, contact_name: c.name, ...(c.avatar ? { contact_avatar: c.avatar } : {}) } : m;
     });
   }
 
