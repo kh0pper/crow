@@ -175,7 +175,7 @@ test("world name: rides in content only when given and clean; eventToMark reads 
   assert.equal(JSON.parse(markToEvent(row, {}).content).name, undefined, "no name given, none sent");
   assert.equal(JSON.parse(markToEvent(row, { name: "f665c26b" }).content).name, undefined, "a key look-alike is dropped");
   assert.equal(JSON.parse(markToEvent(row, { name: "crow:x" }).content).name, undefined);
-  const ev = { id: "e".repeat(64), pubkey: "a".repeat(64), kind: MARK_KIND, created_at: 1, tags: [["g", "9v6m2"], ["d", "m1"]], content: JSON.stringify({ v: 1, text: "hi", name: "  Bad Name " }) };
+  const ev = { id: "e".repeat(64), pubkey: "a".repeat(64), kind: MARK_KIND, created_at: 1, tags: [["g", "9v6m2"], ["d", "m1"]], content: JSON.stringify({ v: 1, text: "hi", name: "  Bad\u0000 Name " }) };
   assert.equal(eventToMark(ev).author_name, "Bad Name", "collapsed, not squeezed");
   ev.content = JSON.stringify({ v: 1, text: "hi", name: "deadbeef" });
   assert.equal(eventToMark(ev).author_name, null);
