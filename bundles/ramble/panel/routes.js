@@ -280,11 +280,26 @@ export default function rambleRouter(dashboardAuth, options = {}) {
    */
   async function annotateMarks(marks) {
     const byPubkey = await mods.deliveryMod.contactsByPubkey(db);
-    return marks.map(withApproxAnchor).map((m) => {
+    const named = marks.map(withApproxAnchor).map((m) => {
       const c = m.origin === "remote" ? byPubkey.get(String(m.author)) : null;
       // 2026-09-08 §4.5: a contact's pin carries their picture beside their name.
       return c ? { ...m, contact_name: c.name, ...(c.avatar ? { contact_avatar: c.avatar } : {}) } : m;
     });
+    // 2026-09-08 §2.1: fog the PUBLIC overlay. Runs AFTER contact naming, so a
+    // contact's mark is already marked as theirs and passes through untouched.
+    const depth = await mods.zonesMod.frontierDepth(db);
+    // Bounded like the other two gates. annotateMarks has no bbox, but the
+    // marks themselves give one: their own coordinates. An unbounded read here
+    // would undo the point of unlockedCellsNear on every /marks and /around.
+    const lats = named.map((m) => Number(m.lat ?? m.approx_lat)).filter(Number.isFinite);
+    const lons = named.map((m) => Number(m.lon ?? m.approx_lon)).filter(Number.isFinite);
+    const unlocked = lats.length
+      ? await mods.cellsMod.unlockedCellsNear(db, {
+          south: Math.min(...lats), north: Math.max(...lats),
+          west: Math.min(...lons), east: Math.max(...lons),
+        }, depth)
+      : new Set();
+    return mods.zonesMod.gateForZones(named, { unlocked, depth, encode: mods.anchorsMod.encodeGeohash });
   }
 
   /** bus.emit is synchronous and re-throws subscriber errors — never let one break a request. */
@@ -806,7 +821,25 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (bbox.south > bbox.north || bbox.west > bbox.east) bad("bbox must have south <= north and west <= east");
     const out = await mods.flockMod.listNests(db, bbox, { now: Date.now() });
     if (!out) bad("bbox too large — zoom in");
-    res.json(out);
+    // Nests are public terrain, so they fog like public marks: whole in
+    // unlocked ground, a typed beacon in the frontier, absent in fog. The
+    // synthetic `visibility: "public"` is what marks them as gateable — nests
+    // have no visibility column of their own.
+    const depth = await mods.zonesMod.frontierDepth(db);
+    const unlocked = await mods.cellsMod.unlockedCellsNear(db, bbox, depth);
+    const gated = mods.zonesMod.gateForZones(
+      (out.nests || []).map((n) => ({ ...n, kind: "nest", origin: "remote", visibility: "public" })),
+      { unlocked, depth, encode: mods.anchorsMod.encodeGeohash },
+    ).map((n) => {
+      // gateForZones passes an UNLOCKED row through untouched, so the three
+      // synthetic keys we added to make it gateable would ride out to the
+      // client and break the route's documented shape. A beacon is rebuilt
+      // from scratch and never carries them.
+      if (n.beacon) return n;
+      const { kind, origin, visibility, ...nest } = n;
+      return nest;
+    });
+    res.json({ ...out, nests: gated });
   }));
 
   // The map's fog (spec 2026-09-08 §2.1). Same bbox contract as /nests: the
@@ -866,7 +899,22 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       if (err?.code === "too-wide") bad(err.message);
       throw err;
     }
-    res.json({ ...out, marks: await annotateMarks(out.marks) });
+    // aroundPoint owns the real bbox; this is just a bound for the unlocked
+    // read, padded by the frontier depth inside unlockedCellsNear.
+    const degLat = radiusM / 111320;
+    const degLon = radiusM / (111320 * Math.max(0.01, Math.cos(lat * Math.PI / 180)));
+    const bbox = { south: lat - degLat, west: lon - degLon, north: lat + degLat, east: lon + degLon };
+    const depth = await mods.zonesMod.frontierDepth(db);
+    const unlocked = await mods.cellsMod.unlockedCellsNear(db, bbox, depth);
+    const gatedNests = mods.zonesMod.gateForZones(
+      (out.nests || []).map((n) => ({ ...n, kind: "nest", origin: "remote", visibility: "public" })),
+      { unlocked, depth, encode: mods.anchorsMod.encodeGeohash },
+    ).map((n) => {
+      if (n.beacon) return n;
+      const { kind, origin, visibility, ...nest } = n;
+      return nest;
+    });
+    res.json({ ...out, marks: await annotateMarks(out.marks), nests: gatedNests });
   }));
 
   // --- flock ----------------------------------------------------------------

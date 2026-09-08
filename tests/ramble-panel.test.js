@@ -41,6 +41,56 @@ const { default: rambleRouter } = await import("../bundles/ramble/panel/routes.j
 const { default: panel } = await import("../bundles/ramble/panel/ramble.js");
 const { createDbClient } = await import("../bundles/ramble/server/db.js");
 const { default: bus } = await import("../servers/shared/event-bus.js");
+const { isoWeek } = await import("../bundles/ramble/server/eggs.js");
+const { nestsInCells, cellsInBbox, NEST_RATE_DEFAULT } = await import("../bundles/ramble/server/nests.js");
+const { bboxAround } = await import("../bundles/ramble/server/around.js");
+
+/**
+ * Fog gates public terrain (spec 2026-09-08 §2.1), so a test that lists or
+ * claims a nest must first walk to ground that actually unlocks it. Each walk
+ * posts /api/ramble/area with `here`, which credits +20 visit_place warmth
+ * against a hatch_at of 100 — this file already churns hatches and later
+ * asserts an incubating egg exists, so the credit is suppressed around the
+ * walk rather than left to accumulate.
+ */
+async function walkTo(lat, lon) {
+  const db = createDbClient();
+  try {
+    await db.execute({
+      sql: `INSERT INTO ramble_settings (key, value) VALUES ('warmth.visit_place', '0')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [],
+    });
+    await req("/api/ramble/area", { method: "POST", body: { lat, lon, here: { lat, lon, accuracy_m: 5 } } });
+  } finally {
+    await db.execute({ sql: "DELETE FROM ramble_settings WHERE key = 'warmth.visit_place'", args: [] });
+    db.close();
+  }
+}
+
+/**
+ * Unlock EVERY cell inside `radiusM` of (lat, lon) — not just one point. A
+ * single walkTo() only unlocks the one cell stood in, so any other nest
+ * within the radius but past the depth-3 frontier reach (~460 m) is still
+ * only a beacon (no `distance_m`, no `seed`); the /around gating test needs
+ * the whole circle to be real ground, exactly like a player who has actually
+ * explored the area, so every nest /around returns is unlocked rather than
+ * a preview. Same cells `aroundPoint` itself covers, so nothing is missed.
+ */
+async function unlockRadius(lat, lon, radiusM) {
+  const db = createDbClient();
+  try {
+    const cells = cellsInBbox(bboxAround({ lat, lon }, radiusM));
+    const now = Date.now();
+    for (const cell of cells) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute({
+        sql: `INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES (?, ?) ON CONFLICT(cell) DO NOTHING`,
+        args: [cell, now],
+      });
+    }
+  } finally { db.close(); }
+}
 
 // 30.46 / -98.08 -> geohash7 "9v6m21h" -> precision-5 cell "9v6m2".
 const LAT = 30.46;
@@ -866,15 +916,33 @@ let claimedEggId = null;
 
 test("GET /api/ramble/nests lists deterministic nests for a viewport and 400s a bad or too-wide bbox", async () => {
   const bbox = `${LAT - 0.01},${LON - 0.01},${LAT + 0.01},${LON + 0.01}`;
+  // Fog gates public terrain (spec 2026-09-08 §2.1), so the viewport must
+  // contain ground we have actually stood in before a nest is anything but a
+  // beacon. Nests are deterministic, so we can walk straight to one.
+  const week = isoWeek(Date.now());
+  const target = nestsInCells(
+    cellsInBbox({ south: LAT - 0.01, west: LON - 0.01, north: LAT + 0.01, east: LON + 0.01 }),
+    week,
+    { rate: NEST_RATE_DEFAULT },
+  )[0];
+  assert.ok(target, "the fixture bbox must hold at least one deterministic nest");
+  await walkTo(target.lat, target.lon);
+
   const res = await req(`/api/ramble/nests?bbox=${bbox}`);
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.match(body.week, /^\d{4}-W\d{2}$/);
   assert.ok(body.nests.length > 0, "a ~2 km box at rate 24 must hold nests");
-  assert.deepEqual(Object.keys(body.nests[0]).sort(), ["cell", "claimed", "lat", "lon", "seed", "week"]);
+  const whole = body.nests.find((n) => n.cell === target.cell);
+  assert.ok(whole, "the nest we walked to is listed in full");
+  claimedNest = whole;   // explicit: do not rely on body.nests[0] still being the whole one
+  assert.deepEqual(Object.keys(whole).sort(), ["cell", "claimed", "lat", "lon", "seed", "week"]);
+  for (const n of body.nests) {
+    if (n.cell === target.cell) continue;
+    assert.deepEqual(Object.keys(n).sort(), ["beacon", "kind", "lat", "lon"], "the rest are beacons");
+  }
   const again = await (await req(`/api/ramble/nests?bbox=${bbox}`)).json();
   assert.deepEqual(again, body);
-  claimedNest = body.nests[0];
 
   assert.equal((await req("/api/ramble/nests?bbox=1,2,3")).status, 400);
   assert.equal((await req("/api/ramble/nests?bbox=a,b,c,d")).status, 400);
@@ -885,6 +953,9 @@ test("GET /api/ramble/nests lists deterministic nests for a viewport and 400s a 
 
 test("POST /api/ramble/nests/claim: too far is a friendly refusal; in range claims once; the claim emits the egg", async () => {
   assert.ok(claimedNest, "the nests test must run first");
+  // Fog gates public terrain: walk to the nest before claiming, exactly as a
+  // real player would — the walk unlocks the cell, then the claim follows.
+  await walkTo(claimedNest.lat, claimedNest.lon);
   const far = await req("/api/ramble/nests/claim", { method: "POST",
     body: { cell: claimedNest.cell, week: claimedNest.week, lat: claimedNest.lat + 0.01, lon: claimedNest.lon } });
   assert.equal(far.status, 200);
@@ -1004,6 +1075,11 @@ test("POST /api/ramble/marks: contacts fans out to every contact, group:<uid> to
 });
 
 test("GET /api/ramble/marks names a remote mark by a contact; a stranger's stays anonymous", async () => {
+  // Fog gates the public overlay: walking to the nest (a different, distant
+  // cell) does not unlock this fixture's own LAT/LON ground, so the stranger's
+  // public mark here would otherwise fog off and `.find(...)` would return
+  // undefined.
+  await walkTo(LAT, LON);
   const db = createDbClient();
   await db.execute({
     sql: `INSERT INTO ramble_marks (mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, visibility, reveal, content_text, created_at, origin, publish_state)
@@ -1202,6 +1278,13 @@ test("GET /api/ramble/around: marks and nests within the radius with distance_m;
   const db = createDbClient();
   await db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('nest.rate', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [] });
   try {
+    // Fog gates nests too (spec 2026-09-08 §2.1). With nothing unlocked at
+    // LAT/LON every nest here is fog and the array is empty; walking to just
+    // the one point (walkTo) is not enough either — a nest elsewhere in the
+    // 500 m radius but past the depth-3 frontier reach (~460 m) would still
+    // come back as a beacon missing `distance_m`/`seed`, breaking this test's
+    // per-nest assertions below. Unlock the whole radius the route reads.
+    await unlockRadius(LAT, LON, 500);
     const res = await req(`/api/ramble/around?lat=${LAT}&lon=${LON}`);
     assert.equal(res.status, 200);
     const body = await res.json();
