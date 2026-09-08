@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { encodeGeohash } from "./anchors.js";
 import { teaser, revealContent } from "./reveal.js";
 import { escapeLikePattern } from "./db.js";
+import { sanitizeWorldName } from "./grid.js";
 
 async function safeEmit(emit, table, op, row) {
   if (!emit) return;
@@ -216,12 +217,12 @@ export async function insertRemoteMark(db, row) {
     sql: `INSERT INTO ramble_marks (
             mark_id, author, author_level, kind, anchor_kind, geohash, lat, lon, accuracy_m, anchor_ref,
             visibility, reveal, content_text, content_kind, content_ref,
-            created_at, expires_at, nostr_event_id, publish_state, origin, bird_species, bird_seed
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote', 'remote', ?, ?)`,
+            created_at, expires_at, nostr_event_id, publish_state, origin, bird_species, bird_seed, author_name
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote', 'remote', ?, ?, ?)`,
     args: [
       mark_id, row.author, row.author_level ?? null, row.kind, anchor_kind, finalGeohash, lat, lon, accuracy_m, anchor_ref,
       row.visibility ?? "public", row.reveal ?? "open", row.content_text ?? null, row.content_kind ?? "none", row.content_ref ?? null,
-      created_at, expires_at, row.nostr_event_id ?? null, row.bird_species ?? null, row.bird_seed ?? null,
+      created_at, expires_at, row.nostr_event_id ?? null, row.bird_species ?? null, row.bird_seed ?? null, sanitizeWorldName(row.author_name),
     ],
   });
 

@@ -44,7 +44,7 @@ test("flock tables + columns exist (phase 1)", async () => {
   const pet = await cols("ramble_pet");
   for (const c of ["active_egg_id", "chores_json", "lamport_ts", "week_start"]) assert.ok(pet.includes(c), `ramble_pet.${c}`);
   const marks = await cols("ramble_marks");
-  for (const c of ["bird_species", "bird_seed"]) assert.ok(marks.includes(c), `ramble_marks.${c}`);
+  for (const c of ["bird_species", "bird_seed", "author_name"]) assert.ok(marks.includes(c), `ramble_marks.${c}`);
   const eggs = await cols("ramble_eggs");
   for (const c of ["egg_id", "status", "warmth", "species", "seed", "found_cell", "found_week", "from_crow_id", "created_at", "hatched_at", "lamport_ts"]) assert.ok(eggs.includes(c), `ramble_eggs.${c}`);
 });

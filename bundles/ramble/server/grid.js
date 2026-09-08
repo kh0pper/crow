@@ -21,6 +21,31 @@ export const AUDIENCES = ["public", "contacts", "groups"];
 export const CHANNELS = ["ble", "lan", "geo"];
 export const IDENTITY_LEVELS = ["rotating", "pseudonym", "real"];
 
+/** Spec 2026-09-08 §2.1: the name strangers see, capped short so a label stays one line. */
+export const WORLD_NAME_MAX = 24;
+
+/**
+ * The same seven steps as core's sanitizeDisplayName (kept in the bundle so
+ * the stdio MCP process needs no core import), then the two Ramble rules: a
+ * 24-code-point cap and no hex-only values (a name that looks like a key
+ * tail would defeat the "name · key4" disambiguation). Applied on save AND
+ * on every read from the wire.
+ */
+export function sanitizeWorldName(value) {
+  if (typeof value !== "string") return null;
+  let s = value
+    .replace(/[\x00-\x1F\x7F\x80-\x9F]/g, "")
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
+    .replace(/[\u00AD\u061C\u200B-\u200F\u2060-\u2064\uFEFF]/g, "") // zero-width: "f6<ZWSP>65c26b" must not slip past the hex rule
+    .replace(/\u00B7/g, " "); // the label's own separator: "Kev · f665" could fake a key tail
+  s = s.replace(/\s+/g, " ").trim();
+  if (/^(crow|req):/i.test(s)) return null;
+  const points = Array.from(s);
+  if (points.length > WORLD_NAME_MAX) s = points.slice(0, WORLD_NAME_MAX).join("").trim();
+  if (/^[0-9a-f]{4,}$/i.test(s)) return null;
+  return s.length > 0 ? s : null;
+}
+
 async function safeEmit(emit, table, op, row) {
   if (!emit) return;
   try { await emit(table, op, row); }
@@ -64,6 +89,7 @@ export async function getGrid(db) {
 
   const master = (await readSetting(db, "master")) === "1";
   const identityLevel = (await readSetting(db, "public_identity_level")) ?? "rotating";
+  const worldName = sanitizeWorldName(await readSetting(db, "world.name"));
 
   let activeArea = [];
   const rawArea = await readSetting(db, "local.active_area");
@@ -76,7 +102,7 @@ export async function getGrid(db) {
     }
   }
 
-  return { master, cells, identityLevel, activeArea };
+  return { master, cells, identityLevel, worldName, activeArea };
 }
 
 export async function setCell(db, audience, channel, on, { emit } = {}) {
@@ -116,6 +142,13 @@ export async function setMaster(db, on, { emit } = {}) {
 export async function setIdentityLevel(db, level, { emit } = {}) {
   if (!IDENTITY_LEVELS.includes(level)) throw new Error(`unknown identity level: ${level}`);
   await writeSetting(db, "public_identity_level", level, { emit });
+}
+
+/** Store the sanitized world name ("" when rejected/empty, so a bad value never lingers). Returns what was stored, or null. */
+export async function setWorldName(db, name, { emit } = {}) {
+  const clean = sanitizeWorldName(name);
+  await writeSetting(db, "world.name", clean ?? "", { emit });
+  return clean;
 }
 
 /** True only when the master switch AND the specific (audience, channel) cell are both on. */

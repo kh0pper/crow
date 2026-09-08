@@ -6,7 +6,7 @@ export function anchorOf(row) {
 export function teaser(row) {
   if (row.reveal === "open") return { ...row };
   // For locked (or any non-open value): return only safe fields
-  const allowed = ["mark_id", "author", "author_level", "kind", "anchor_kind", "geohash", "reveal", "visibility", "created_at", "expires_at", "content_kind", "origin", "publish_state", "bird_species", "bird_seed"];
+  const allowed = ["mark_id", "author", "author_level", "kind", "anchor_kind", "geohash", "reveal", "visibility", "created_at", "expires_at", "content_kind", "origin", "publish_state", "bird_species", "bird_seed", "author_name"];
   const safe = {};
   for (const field of allowed) {
     if (field in row) safe[field] = row[field];

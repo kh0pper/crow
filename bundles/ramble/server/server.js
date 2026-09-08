@@ -29,7 +29,8 @@ import { petState, doChore } from "./pet.js";
 import { eggState, activeBird, isoWeek } from "./eggs.js";
 import { feedAll } from "./feed.js";
 import { flockState, listNests, claimNest } from "./flock.js";
-import { resolveContact, resolveAudience, enqueueMark, CROW_ID_RE, ID_RE } from "./delivery.js";
+import { resolveContact, resolveAudience, enqueueMark, contactsByPubkey, CROW_ID_RE, ID_RE } from "./delivery.js";
+import { labelFor } from "./labels.js";
 import { giftEgg, proposeSwap } from "./trades.js";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
@@ -242,7 +243,7 @@ export function createRambleServer(db, options = {}) {
 
   register(
     "ramble_query_world",
-    "List nearby marks and caws within the geohash cell containing the given location.",
+    "List nearby marks and caws within the geohash cell containing the given location. Each row carries a label (\"your mark\", \"mark by <contact>\", \"mark by <world name> · <key4>\", or \"mark by <key8>\").",
     {
       lat: z.number().min(-90).max(90),
       lon: z.number().min(-180).max(180),
@@ -256,7 +257,12 @@ export function createRambleServer(db, options = {}) {
         const clampedEnvPrecision = Number.isInteger(envPrecision) && envPrecision >= 1 && envPrecision <= 12 ? envPrecision : 5;
         const p = precision ?? clampedEnvPrecision;
         const cell = encodeGeohash(lat, lon, p);
-        const marks = await listMarks(db, { visibility, geohashPrefix: cell });
+        const rows = await listMarks(db, { visibility, geohashPrefix: cell });
+        const byPubkey = await contactsByPubkey(db);
+        const marks = rows.map((m) => {
+          const c = m.origin === "remote" ? byPubkey.get(String(m.author)) : null;
+          return { ...m, label: labelFor(m, { contactName: c ? c.name : null }) };
+        });
         return text(JSON.stringify({ cell, marks }));
       } catch (err) {
         return errorText(err.message);
