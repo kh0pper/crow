@@ -15,10 +15,10 @@
 Phase-4 constraints still bind (copied where they matter, with the phase-5 deltas marked **[P5]**):
 
 - **No server change, no table, no route, no tool.** **[P5]** Every file touched is under `bundles/ramble/panel/`, `docs/`, `tests/`, plus the two manifests and the generated registry. `panel/routes.js` and `bundles/ramble/server/*` are untouched.
-- **AR contract (spec §6 + phase-4 amendment):** `renderAr({ anchors, pose, bird, camera })` → frame; the renderer knows nothing about maps, marks or nests. **[P5]** An anchor MAY carry `reach_m` (number, metres) and `art` (a DOM element, or null). `layoutAnchor` adds `near: reach_m is a finite number AND distance ≤ reach_m` and `art: !!anchor.art`; a near LOCKED anchor's `sub` reads `close enough · unlock`; a near label's scale is multiplied by `NEAR_BOOST = 1.25` (a parked label still takes `PARK_SCALE` afterwards — parking wins, deliberately). `sayFor`: the nearest `near` item wins over everything but "no fix" and "nothing around": `"<title>, right here — <n> m."` (ruling Q1: "right here" is about reach, not sight, and must not flip with the compass). The painter, per label: `data-near="true"` when near (else the attribute is removed); the anchor's `art` element APPENDED once (last child; CSS `order: -1` puts it first visually; the painter's index-based title/sub updates keep addressing `children[0]`/`children[1]`) and left in place across frames; a tap adds class `rb-ar-tapped` SYNCHRONOUSLY before `onTap(id)` and removes it after `TAP_MS = 350`. `mountAr` returns `fx(id, name)`: `busy` adds `rb-ar-fx-busy` (sticky), `clear` removes it, `collect` removes busy, adds `rb-ar-fx-collect` for `FX_MS = 900` and hops the bird; `fx` targets BOTH the label node and the radar-list row for that id (ruling Q4: a compass-less phone gets the effect on the row) and returns `true` when at least one exists. The renderer's own sink count stays ZERO: mounting a caller-built element is `appendChild`, never markup.
+- **AR contract (spec §6 + phase-4 amendment):** `renderAr({ anchors, pose, bird, camera })` → frame; the renderer knows nothing about maps, marks or nests. **[P5]** An anchor MAY carry `reach_m` (number, metres) and `art` (a DOM element, or null). `layoutAnchor` adds `near: reach_m is a finite number AND distance ≤ reach_m` and `art: !!anchor.art`; a near LOCKED anchor's `sub` reads `close enough · unlock` and a near NEST's `close enough · take it` (the text twin of the gold look); a near label's scale is multiplied by `NEAR_BOOST = 1.25` (a parked label still takes `PARK_SCALE` afterwards — parking wins, deliberately). `sayFor`: the nearest `near` item wins over everything but "no fix" and "nothing around": `"<title>, right here — <n> m."` (ruling Q1: "right here" is about reach, not sight, and must not flip with the compass). The painter, per label: `data-near="true"` when near (else the attribute is removed); the anchor's `art` element APPENDED once (last child; CSS `order: -1` puts it first visually; the painter's index-based title/sub updates keep addressing `children[0]`/`children[1]`) and left in place across frames; a tap adds class `rb-ar-tapped` SYNCHRONOUSLY before `onTap(id)` and removes it after `TAP_MS = 350`. `mountAr` returns `fx(id, name)`: `busy` adds `rb-ar-fx-busy` (sticky), `clear` removes it, `collect` removes busy, adds `rb-ar-fx-collect` for `FX_MS = 900` and hops the bird; `fx` targets BOTH the label node and the radar-list row for that id (ruling Q4: a compass-less phone gets the effect on the row) and returns `true` when at least one exists. The renderer's own sink count stays ZERO: mounting a caller-built element is `appendChild`, never markup.
 - **Near styling is for nests (ruling Q2):** the gold near look and the art show only on `[data-kind="nest"][data-near="true"]`, and the art only when the label is not parked (`:not([data-side])`) — "within field of sight" (ruling S2). A near locked mark gets only its `sub` change.
 - **Markup sinks:** `static/ramble.js` keeps EXACTLY two engine sinks. **[P5]** `drawEggArt(el, eggId)` becomes a wrapper over a new `drawEggSeed(el, seed)` which owns the single `el.innerHTML = Bird.drawEgg(` line; `nestEggHtml` (the `html:` divIcon sink) is unchanged. Zero backticks in both client scripts (comments included); no emoji; no capture API; `textContent` for any text; every new function in `static/ramble.js` is declared at the IIFE's top level (strict mode makes a function declared inside an `if` block block-scoped — round-1 C4).
-- **You-are-here (spec §3 "Map centred on you"):** ONE map-level `navigator.geolocation.watchPosition` (`enableHighAccuracy: true, maximumAge: 5000, timeout: 20000`), started at startup whenever the map exists; it updates `lastFix`, paints an `L.circleMarker` (`className: "rb-here-dot"`, radius 8) and an `L.circle` accuracy ring (`className: "rb-here-ring"`, radius = `accuracy_m` clamped 5..200 m) on a dedicated pane `rb-here` (zIndex 450, above the overlay pane's marks), and — while the AR view is open — feeds `arPose` too (the AR view starts its own watch only when the map watch does not exist). Follow mode: the "Around you" chip toggles `following` (`is-on`, `aria-pressed`); while following, a fix pans the map ONLY when the dot has moved > 10 m since the last pan AND sits outside the middle 40 % of the view (`map.getBounds().pad(-0.3)`), because a pan fires `moveend` → `publishArea` + `refreshNests` (round-1 C9); a user `dragstart` turns following off. First fix at startup: `setView(15)` as today, then following on. The watch is cleared on `pagehide`. Errors never throw; no fix means no dot.
+- **You-are-here (spec §3 "Map centred on you"):** ONE map-level `navigator.geolocation.watchPosition` (`enableHighAccuracy: true, maximumAge: 5000, timeout: 20000`), started at startup whenever the map exists; it updates `lastFix`, paints an `L.circleMarker` (`className: "rb-here-dot"`, radius 8) and an `L.circle` accuracy ring (`className: "rb-here-ring"`, radius = `accuracy_m` clamped 5..200 m) on a dedicated pane `rb-here` (zIndex 650: above Leaflet's marker pane at 600, so standing on a nest never hides your own dot; below popups at 700), and — while the AR view is open — feeds `arPose` too (the AR view starts its own watch only when the map watch does not exist). Follow mode: the "Around you" chip toggles `following` (`is-on`, `aria-pressed`); while following, a fix pans the map ONLY when the dot has moved > 10 m since the last pan AND sits outside the middle 40 % of the view (`map.getBounds().pad(-0.3)`), because a pan fires `moveend` → `publishArea` + `refreshNests` (round-1 C9); a user `dragstart` turns following off (following keeps working under the AR overlay: a walk still pans the map behind it and fetches — bounded by the same gate). First fix at startup: `setView(15)` as today, then following on. The watch is cleared on `pagehide` and while the document is hidden, and restarted on `pageshow`/visible (ruling Q3: battery — GPS runs only while the page is on screen). Errors never throw; no fix means no dot; a permission error (`code === 1`) while the AR view is open resets `arPose` exactly as the AR view's own watch did (the AR view no longer starts a watch when the map's exists).
 - **Collect animation (Kevin: "some kind of animation when the user touches the egg on the screen that lets the user know they have initiated the action"):** `claimNest(nest, lineEl, btn)` marks the sheet button `is-busy` and calls `collectFx(nest.cell, "start")` before `here()`; on `claimed && !already` it calls `collectFx(nest.cell, "done")`, closes the AR sheet (so the fly-away plays on the label, not behind the sheet — round-1 C10) and rebuilds the nest layer 900 ms later (so the pin's pop finishes — C10); on every other outcome it calls `collectFx(nest.cell, "clear")` and removes `is-busy`. `collectFx(cell, phase)`: `start` → `fx(id, "busy")` + `rb-nest-busy` on the pin; `done` → `fx(id, "collect")` + `rb-nest-collect` on the pin for 900 ms; `clear` → `fx(id, "clear")` + remove `rb-nest-busy`. CSS: `rb-ar-tapped` = a 350 ms press flash on `filter`/`box-shadow` (never on `transform`, which positions the label — round-1 S3); `rb-ar-fx-busy` / `rb-nest-busy` / `.rb-pop-btn.is-busy` = a repeating `box-shadow` pulse; `rb-ar-fx-collect` = the egg art scales up then flies down and fades (900 ms, on the art, whose transform is its own); `rb-nest-collect` animates the pin's inner `svg`, never the Leaflet icon (its inline transform is its map position — C6). The reduced-motion block repeats every full selector (a media query adds no specificity — C5).
 - **Visual direction C tokens only.**
 - **Bundle version bump is mandatory:** `bundles/ramble/manifest.json` AND `package.json` `0.5.0` → `0.6.0`; `npm run build-registry`. The docs en/es heading-parity test must stay green (no new headings — paragraph edits only, at named lines).
@@ -64,6 +64,7 @@ test("phase 5: reach_m marks a label near (boosted), a near nest wins the say li
   assert.deepEqual(items.map((i) => [i.near, i.art]), [[true, true], [false, false], [false, false], [true, false]]);
   assert.ok(items[0].scale > items[2].scale, "a near label is boosted");
   assert.equal(items[3].sub, "close enough · unlock");
+  assert.equal(items[0].sub, "close enough · take it", "a near nest says so in text too (screen readers see no gold)");
   assert.equal(items[1].sub, "100 m");
   // The nest is 50 m BEHIND (heading 180 puts north behind); a mark 100 m ahead is visible. "Right here" still wins.
   const ahead = anchor("m2", { lat: 30.459102, lon: -98.08 }, { title: "ahead mark" });
@@ -91,7 +92,7 @@ test("phase 5: the painter mounts art once (last child), toggles data-near, flas
   assert.equal(label.children.length, 3);
   assert.equal(label.children[2], art, "the art is APPENDED (CSS order puts it first) so the painter's children[0]/[1] text updates never touch it");
   assert.equal(label.children[0].textContent, "A nest");
-  assert.equal(label.children[1].textContent, "50 m");
+  assert.equal(label.children[1].textContent, "close enough · take it");
   session.render({ anchors: [near], pose: pose(0), bird: null });
   assert.equal(label.children.length, 3, "mounted once, not per frame");
   assert.equal(art.textContent, "", "the art is never written to");
@@ -131,7 +132,7 @@ test("phase 5: the painter mounts art once (last child), toggles data-near, flas
 
 In `bundles/ramble/panel/static/ramble-ar.js`:
 
-(a) Constants, after `var REACT_MS = 900;`:
+(a) Header comment: change "the only markup this file ever mounts is the bird" to "the only markup this file ever mounts is the bird; a caller-built art element is appended, never parsed" and extend the anchor shape line to `{ id, kind, lat, lon, accuracy_m, approx_m, locked, title, reach_m?, art? }`. Constants, after `var REACT_MS = 900;`:
 ```js
   var NEAR_BOOST = 1.25;       /* a label within its anchor's reach_m is drawn larger */
   var TAP_MS = 350;            /* the press flash on any label */
@@ -153,7 +154,7 @@ In `bundles/ramble/panel/static/ramble-ar.js`:
       id: anchor.id, kind: anchor.kind, title: anchor.title, locked: !!anchor.locked,
       distance_m: Math.round(d), bearing: Math.round(b), rel: null, visible: false, side: null,
       x: 0.5, y: NEAR_Y - (NEAR_Y - FAR_Y) * t, scale: NEAR_SCALE - (NEAR_SCALE - FAR_SCALE) * t,
-      sub: near && anchor.locked ? "close enough · unlock" : subFor(d, anchor.locked),
+      sub: near ? (anchor.locked ? "close enough · unlock" : (anchor.kind === "nest" ? "close enough · take it" : subFor(d, anchor.locked))) : subFor(d, anchor.locked),
       near: near,
       art: !!anchor.art,
     };
@@ -242,7 +243,7 @@ Add before `function destroy()`:
       return true;
     }
 ```
-In `destroy()` add `arts = {}; rowNodes = {};` and, before the clears, cancel the flash timers on every node: `Object.keys(nodes).forEach(function (id) { var t = nodes[id].rbFxTimers || {}; Object.keys(t).forEach(function (k) { clearTimeout(t[k]); }); });`. The return object gains `fx: fx`. The export object gains `NEAR_BOOST: NEAR_BOOST, TAP_MS: TAP_MS, FX_MS: FX_MS`.
+In `destroy()`, as its FIRST statements (before the existing `nodes = {};` — after it there would be nothing to cancel), cancel the flash timers on every label and row: `[nodes, rowNodes].forEach(function (m) { Object.keys(m).forEach(function (id) { var t = m[id].rbFxTimers || {}; Object.keys(t).forEach(function (k) { clearTimeout(t[k]); }); }); });` then add `arts = {}; rowNodes = {};` beside `nodes = {};`. Add a one-line comment above `rowNodes[item.id] = btn;` in `rowEl`: `/* the coarse strip reuses rowEl, so a coarse id would overwrite a row's entry — coarse anchors never have an fx today */`. The return object gains `fx: fx`. The export object gains `NEAR_BOOST: NEAR_BOOST, TAP_MS: TAP_MS, FX_MS: FX_MS`.
 
 - [ ] **Step 4: Run to verify they pass** — `node scripts/run-suite.mjs tests/ramble-ar.test.js` → 11 pass. Then `grep -c '\`' bundles/ramble/panel/static/ramble-ar.js` = 0 and `grep -cE '\.innerHTML\s*=|\bhtml:\s' bundles/ramble/panel/static/ramble-ar.js` = 0.
 
@@ -271,7 +272,7 @@ In `tests/ramble-panel.test.js`, inside the `GET /ramble/static/ramble.js` test,
   // follow mode; nests carry reach + egg art into AR; the collect effect runs
   // at press, success and clear; the nest layer waits for the pin's pop.
   assert.ok(body.includes('className: "rb-here-dot"') && body.includes('className: "rb-here-ring"'));
-  assert.ok(body.includes('map.createPane("rb-here")'));
+  assert.ok(body.includes('map.createPane("rb-here")') && body.includes('getPane("rb-here").style.zIndex = 650'));
   assert.ok(body.includes("function startMapWatch(") && body.includes("function paintHere(") && body.includes("function setFollowing("));
   assert.ok(body.includes('map.on("dragstart"'), "a user drag ends follow mode");
   assert.ok(body.includes("getBounds().pad(-0.3)"), "follow pans only when the dot leaves the middle of the view");
@@ -281,11 +282,13 @@ In `tests/ramble-panel.test.js`, inside the `GET /ramble/static/ramble.js` test,
   assert.ok(body.includes('arSession.fx("n:" + cell'));
   assert.ok(body.includes("setTimeout(refreshNests, 900)"), "the pin's pop finishes before the layer is rebuilt");
   assert.ok(body.includes("if (mapWatch != null)"), "the AR view reuses the map watch");
+  assert.ok(body.includes('window.addEventListener("pageshow"'), "the watch restarts after a bfcache park");
+  assert.ok(body.includes("err.code === 1 && arOpen"), "a revoked permission still resets the AR pose");
 ```
 In the `ramble.css` test add:
 ```js
   assert.match(body, /\.rb-ar-label\[data-kind="nest"\]\[data-near="true"\]/);
-  assert.match(body, /\.rb-ar-label\.rb-ar-fx-collect \.rb-ar-egg-art/);
+  assert.match(body, /\.rb-ar-label:not\(\[data-side\]\)\.rb-ar-fx-collect \.rb-ar-egg-art/);
   assert.match(body, /\.rb-here-dot/);
   assert.match(body, /\.rb-nest-pin\.rb-nest-collect svg/);
   assert.match(body, /\.rb-ar-egg-art \{[^}]*order: -1/);
@@ -313,9 +316,10 @@ Run `node scripts/run-suite.mjs tests/ramble-panel.test.js` — these fail, noth
 ```
 Inside the map block, after `nestLayer = L.layerGroup().addTo(map);` add:
 ```js
-    /* Its own pane so the dot paints above marks and nests. */
+    /* Its own pane, above Leaflet's marker pane (600) and below popups (700):
+     * the dot is the user's reference and must never hide under a pin. */
     map.createPane("rb-here");
-    map.getPane("rb-here").style.zIndex = 450;
+    map.getPane("rb-here").style.zIndex = 650;
     hereLayer = L.layerGroup().addTo(map);
     map.on("dragstart", function () { setFollowing(false); });
 ```
@@ -366,7 +370,12 @@ At IIFE level, immediately after the map block's closing `}` (before `function h
         maybeRefreshAround();
         scheduleArRender();
       }
-    }, function () { /* no fix: no dot; the map still works by hand */ }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+    }, function (err) {
+      /* No fix: no dot; the map still works by hand. Permission pulled
+       * mid-session (code 1) while the AR view is open: its old fix is a lie
+       * now — back to "Waiting for a fix…" (the AR view's own watch used to do this). */
+      if (err && err.code === 1 && arOpen) { arPose.lat = null; arPose.lon = null; arAnchors = []; scheduleArRender(); }
+    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
   }
 
   function stopMapWatch() {
@@ -374,7 +383,11 @@ At IIFE level, immediately after the map block's closing `}` (before `function h
     try { navigator.geolocation.clearWatch(mapWatch); } catch (e) { /* gone */ }
     mapWatch = null;
   }
+  /* The watch runs only while the page is shown: a hidden tab or a bfcache
+   * park stops it (battery), coming back restarts it — startMapWatch is idempotent. */
   window.addEventListener("pagehide", stopMapWatch);
+  window.addEventListener("pageshow", function () { startMapWatch(); });
+  document.addEventListener("visibilitychange", function () { if (document.hidden) stopMapWatch(); else startMapWatch(); });
 ```
 (`haversineMeters`, `maybeRefreshAround`, `scheduleArRender` are function declarations later in the file — hoisted; `arOpen`/`arPose`/`lastFix` are `var`s — hoisted, assigned before the first fix can arrive.)
 
@@ -396,6 +409,8 @@ Startup block becomes:
 ```js
   if (map) {
     startMapWatch();
+    /* The markup ships the chip lit; nothing follows until the first fix says so. */
+    setFollowing(false);
     here().then(function (pos) {
       map.setView([pos.lat, pos.lon], 15);
       paintHere(pos);
@@ -481,8 +496,9 @@ Replace `claimNest` with:
         btn.remove();
         if (out.already) { collectFx(nest.cell, "clear"); refreshNests(); return refreshFlock(); }
         collectFx(nest.cell, "done");
-        /* The fly-away plays on the AR label, not behind the sheet; the pin's
-         * pop finishes before the nest layer is rebuilt. */
+        /* The fly-away plays on the AR label, not behind the sheet (the
+         * "on your shelf" line is lost there — accepted: the bird's line and
+         * the shelf say it); the pin's pop finishes before the layer is rebuilt. */
         closeArSheet();
         setTimeout(refreshNests, 900);
         return refreshFlock();
@@ -532,7 +548,7 @@ Replace `claimNest` with:
 #ramble .rb-ar-label.rb-ar-fx-busy,
 #ramble .rb-ar-row.rb-ar-fx-busy,
 #ramble .rb-pop-btn.is-busy { animation: rb-busy .9s ease-in-out infinite; }
-#ramble .rb-ar-label.rb-ar-fx-collect .rb-ar-egg-art { display: block; animation: rb-collect .9s ease-in forwards; transform-origin: 50% 50%; }
+#ramble .rb-ar-label:not([data-side]).rb-ar-fx-collect .rb-ar-egg-art { display: block; animation: rb-collect .9s ease-in forwards; transform-origin: 50% 50%; }
 #ramble .rb-ar-row.rb-ar-fx-collect { animation: rb-press .9s ease-out; }
 #ramble .rb-nest-pin.rb-nest-busy { animation: rb-busy .9s ease-in-out infinite; }
 #ramble .rb-nest-pin.rb-nest-collect svg { animation: rb-nest-pop .9s ease-in forwards; transform-origin: 50% 100%; }
@@ -543,7 +559,7 @@ Replace `claimNest` with:
   #ramble .rb-ar-label.rb-ar-fx-busy,
   #ramble .rb-ar-row.rb-ar-fx-busy,
   #ramble .rb-pop-btn.is-busy,
-  #ramble .rb-ar-label.rb-ar-fx-collect .rb-ar-egg-art,
+  #ramble .rb-ar-label:not([data-side]).rb-ar-fx-collect .rb-ar-egg-art,
   #ramble .rb-ar-row.rb-ar-fx-collect,
   #ramble .rb-nest-pin.rb-nest-busy,
   #ramble .rb-nest-pin.rb-nest-collect svg { animation: none; }
@@ -561,7 +577,7 @@ git commit bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ram
 
 ## Task 3: Docs en/es, spec amendment, 0.6.0, registry, suite, PR, deploy
 
-- [ ] **Step 1: Docs (paragraph edits only; no new headings).** `docs/guide/ramble.md` line 7 (the intro paragraph beginning "Ramble is a proximity extension"): append the sentence ` A blue dot with an accuracy ring follows you on the map; **Around you** toggles follow mode (dragging the map turns it off).` `docs/es/guide/ramble.md` line 7 (the paragraph beginning "Ramble es una extensión de proximidad"): append ` Un punto azul con un anillo de precisión te sigue en el mapa; **Alrededor de ti** activa o desactiva el modo seguir (arrastrar el mapa lo desactiva).` In `## The AR view`, first paragraph, append: ` Within 75 m of a nest its label turns gold and shows the egg itself; tap it and the egg pulses while your position is checked, then flies down toward your bird when it is yours (the map pin pops the same way).` In `## La vista AR`, first paragraph, append: ` A menos de 75 m de un nido su etiqueta se vuelve dorada y muestra el huevo; tócala y el huevo late mientras se comprueba tu posición, y luego baja volando hacia tu pájaro cuando es tuyo (el pin del mapa hace lo mismo).` Run `node scripts/run-suite.mjs tests/ramble-panel.test.js` (parity).
+- [ ] **Step 1: Docs (paragraph edits only; no new headings).** `docs/guide/ramble.md` line 7 (the intro paragraph beginning "Ramble is a proximity extension"): append the sentence ` A blue dot with an accuracy ring follows you on the map; **Around you** toggles follow mode (dragging the map turns it off).` `docs/es/guide/ramble.md` line 7 (the paragraph beginning "Ramble es una extensión de proximidad"): append ` Un punto azul con un anillo de precisión te sigue en el mapa; **Alrededor de ti** activa o desactiva el modo seguir (arrastrar el mapa lo desactiva).` In `## The AR view`, first paragraph, append: ` Within 75 m of a nest its label turns gold and shows the egg itself; tap it for the sheet, press **Take the egg**, and the label, the pin and the button pulse while your position is checked, then the egg flies down toward your bird when it is yours (the map pin pops the same way).` In `## La vista AR`, first paragraph, append: ` A menos de 75 m de un nido su etiqueta se vuelve dorada y muestra el huevo; tócala para abrir la hoja, pulsa **Tomar el huevo**, y la etiqueta, el pin y el botón laten mientras se comprueba tu posición; luego el huevo baja volando hacia tu pájaro cuando es tuyo (el pin del mapa hace lo mismo).` Run `node scripts/run-suite.mjs tests/ramble-panel.test.js` (parity).
 - [ ] **Step 2: Spec.** §3 World bullet: append ` A you-are-here dot + accuracy ring follows the user; the Around-you chip is a follow toggle that pans only when the dot leaves the middle of the view (phase 5).` §6 amendments bullet: append ` Anchors may carry `reach_m` and `art`; a near nest label shows the art and turns gold, "right here" beats "ahead" in the bird's line, and the tap/collect effects run on the label, the radar row and the map pin (phase 5).`
 - [ ] **Step 3: Bump + registry.** `sed -i 's/"version": "0.5.0"/"version": "0.6.0"/' bundles/ramble/manifest.json bundles/ramble/package.json && npm run build-registry && git diff --stat registry/add-ons.json`.
 - [ ] **Step 4: Integration gate.** `node scripts/run-suite.mjs 2>&1 | tail -12` (expect pass = total, fail 0), `node scripts/check-port-allocation.js`, `npm run build-registry -- --check`.
@@ -581,3 +597,7 @@ git commit bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ram
 Ten criticals, all folded in: **C1** art inserted at `children[0]` was overwritten by the painter's index-based title/sub updates (the egg vanished on the next orientation event) → the art is APPENDED last and put first by CSS `order`; the test asserts `children[2] === art` and that the art's text is never written. **C2** the fake document lacked `insertBefore`/`style.setProperty` → neither is used now (append + a `filter`/`box-shadow` press flash, no `--rb-s`). **C3** the painter test mounted a second session on the same elements and clicked the first session's node → one session with a swappable `tapHook`. **C4** strict-mode block-scoped function declarations inside the map `if` made the whole you-are-here feature a swallowed `ReferenceError` → every function is IIFE-level with `if (!map) return`. **C5** reduced-motion overrides lost on specificity → the block repeats the full selectors. **C6** `rb-nest-pop` animated `transform` on the Leaflet icon (its map position) → the pin's inner `svg` animates instead. **C7** `"reach_m: UNLOCK_M"` could never match `isLocked(mark) ? UNLOCK_M : null` → the assertion pins `"UNLOCK_M : null"`. **C8** `collectFx(cell, "clear")` re-added busy and could not reach the sheet button → explicit `start|done|clear` mapping; `is-busy` handled in `claimNest`. **C9** follow mode panned on every fix (a 1 Hz `publishArea` + `refreshNests` loop) → pan only when moved > 10 m AND outside the middle 40 % of the view. **C10** the map pop was cut off by `refreshNests` and the AR fly-away played behind the sheet → the sheet closes on success and the layer rebuild waits 900 ms.
 Suggestions applied: **S1** `nestArt` refreshes the claimed class every call; **S2** art only when not parked; **S3** no transform animation on labels; **S4** parking beats the boost (stated); **S5** a `rb-here` pane at zIndex 450; **S6** one watch (the AR view reuses the map's); **S7** `aria-hidden` on the art; **S8** docs say "flies down toward your bird"; **S9** contradictions removed (`busy|clear|collect`; the chip markup is untouched); **S10** exact docs anchors (line 7 in both guides; the first paragraph of the AR section); **S11** CROW-SCHEDULE + GitHub-MCP notes re-copied; **S12** `nestMarkers = {}` placed after the layer clear.
 Rulings: **Q1** reach beats sight — the nearest near item owns the say line in every mode. **Q2** the gold near look and the art are for nests; a near locked mark only changes its sub to "close enough · unlock". **Q3** busy is sticky until `clear`; collect is the timed effect. **Q4** in radar mode the effect runs on the list row (fx targets both). **Q5** PR #320 exempts `/api/ramble/` so C9 was traffic, not a 429; bounded anyway.
+
+### Round 2 (2026-09-07, fresh adversarial subagent; the plan's Task 1 code + tests EXECUTED in a scratch mirror — 11/11, three mutations each failing the right test; Task 2 applied to a copy — node --check clean, 0 backticks, exactly 2 sinks, all 30 anchor strings unique, a vm runtime smoke with stubbed Leaflet/geolocation) — REVISE → fixed inline
+All ten round-1 fixes HOLD (C1 by mutation; C4 by a runtime smoke; C5 by a selector diff; C6 confirmed the divIcon holds an `<svg>`; C9 confirmed `LatLngBounds.pad`/`contains([lat, lon])` on Leaflet 1.9.4). New: **N1** the markup ships the "Around you" chip lit while `following` is false (reproduced: a failed first fix left a lit chip that did nothing on tap) → `setFollowing(false)` right after `startMapWatch()` at startup. **N4** the AR view's "permission revoked → Waiting for a fix…" handling lived in its own watch's error callback, which the shared map watch bypassed → the map watch's error callback resets `arPose` on `code === 1` while AR is open (pinned). **N5** the watch was cleared on `pagehide` and never restarted (a bfcache return froze the dot) → `pageshow` restarts it (pinned).
+Suggestions applied: **N2** the pane comment was false (Leaflet markers sit at 600) — and ruling **Q1**: the pane is now 650 so the user's dot never hides under a pin; **N3** ruling **Q2**: losing the sheet's "on your shelf" line in AR is accepted (the fly-away, the bird's line and the shelf say it) — commented; **N6** ruling **Q3**: the watch runs only while the document is visible (`visibilitychange` + `pagehide`/`pageshow`); **N7** the renderer header names the art mount and the two new anchor fields; **N8** both guides say the pulse starts on "Take the egg" and it is the label/pin/button that pulse; **N9** the collect fly-away is gated on `:not([data-side])` like the art; `destroy()` cancels timers on rows too and BEFORE the maps are reset; the coarse-strip `rowNodes` overwrite is commented; a near nest's sub reads "close enough · take it" so the gold state has a text twin; the under-overlay follow traffic is stated.
