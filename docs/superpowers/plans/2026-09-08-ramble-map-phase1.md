@@ -18,8 +18,9 @@
 - **Unlock radius (spec §2.1):** a cell unlocks only from a real position fix, never from a map pan. The existing rule in `POST /api/ramble/area` already enforces this: no `here`, no credit, ever. Unlocking hangs off the same `here`.
 - **Frontier depth (spec §6.4):** setting `frontier.depth`, default **3**, minimum 0. Read live, like `nest.rate` and `shelf.cap`.
 - **Seed settings (spec §6.4):** `seed.respawn.hours` default **24** (minimum 1), `seed.per.pickup` default **1** (minimum 0).
-- **Public overlay only (D4):** zone gating applies ONLY to public marks and caws and to nests. A contact's or a group's mark must be unaffected in every zone. In `ramble_marks` the discriminator is `origin`: `remote` rows arriving from the public relays are public; `local` and `sync` rows are the user's own; contact/group delivery is a separate path. Gate on the PUBLIC audience, never on all marks.
-- **Beacons are typed, never detailed (D5):** a frontier entry carries its kind and a position and nothing else. It must never carry `text`, `author`, `author_name`, `contact_name`, `contact_avatar`, `bird` or `mark_id`.
+- **Public overlay only (D4):** zone gating applies ONLY to marks and caws published publicly, and to nests. See the `visibility` rule below for what "public" means here — it is not `origin`.
+- **Ruling, narrowing D4:** a mark the user or a contact published with `visibility: "public"` IS gated like any other public mark, even though a contact sent it. D4 says "contact and group marks are unaffected"; that means marks delivered on the contacts channel (`visibility: "contacts"`, which is also what a group mark carries). Something published to the whole world is public terrain regardless of who published it, and treating it otherwise would mean the fog leaks a stranger's mark whenever they happen to be in your contact list.
+- **Beacons are typed, never detailed (D5):** a frontier entry carries its kind and a position and nothing else. **Ruling:** that position is the mark's exact coordinates, not a blurred one. D5 withholds content, not location, and the whole point of a beacon is to be somewhere you can walk to. An open public mark's position is already public on the relays. It must never carry `text`, `author`, `author_name`, `contact_name`, `contact_avatar`, `bird` or `mark_id`.
 - **Ledgers, not balances (spec §6.1):** every currency event is a row keyed by a natural idempotent key. Never store or update a running total.
 - **Replication is EXPLICIT and outbound is not free.** Adding a table to the synced list enables the INBOUND apply only. Nothing replicates outward unless a writer calls `safeEmit(emit, table, op, row)` — that is how every existing Ramble writer works (`eggs.js:35` defines the helper; `marks.js`, `flock.js` and `trades.js` all thread `{ now, emit }`). A plan that registers a table and forgets the emit ships a table that syncs one way and a test that passes green while the feature is broken. Both new writers take `{ now, emit }` and emit after a successful insert.
 - **A natural-key table needs FIVE registrations, not four:** the synced-table list, `EXCLUDED_COLUMNS`, `shouldSyncRow`, the two apply dispatch sites in `servers/sharing/instance-sync.js`, AND a branch in `stampSql()` in `servers/shared/sync-stamp.js`. Every id-less Ramble table already has one there (`ramble_settings`, `ramble_blocks`, `ramble_eggs`, `ramble_pet`, `ramble_trades`); without it the local row is never stamped while remote rows are, and nothing catches it.
@@ -294,14 +295,14 @@ export async function applyRambleWallet(db, op, row, lamportTs) {
   // local row would never be stamped while applyRambleCell/applyRambleWallet
   // write a real lamport to remote ones.
   if (table === "ramble_cells" && row.cell !== undefined) {
-    return { sql: `UPDATE ramble_cells SET lamport_ts = ? WHERE cell = ?`, args: [lamport, row.cell] };
+    return { sql: `UPDATE ramble_cells SET lamport_ts = ? WHERE cell = ?`, args: [lamportTs, row.cell] };
   }
   if (table === "ramble_wallet" && row.kind !== undefined && row.key !== undefined) {
-    return { sql: `UPDATE ramble_wallet SET lamport_ts = ? WHERE kind = ? AND key = ?`, args: [lamport, row.kind, row.key] };
+    return { sql: `UPDATE ramble_wallet SET lamport_ts = ? WHERE kind = ? AND key = ?`, args: [lamportTs, row.kind, row.key] };
   }
 ```
 
-Match the exact parameter names and return shape of the branches already in that function — read one before writing these.
+Match the exact parameter names and return shape of the branches already in that function — read one before writing these. The lamport must be the FIRST placeholder: `subselectStampSql` in `sync-emit.js` rewrites `stampSql`'s first `?` and would bind the wrong column otherwise.
 
 **Before you finish, grep for `applyRambleBlock`, `shouldSyncRow` and `stampSql` and confirm you have touched all five sites.** Missing the second dispatch chain means the table emits outbound but never applies inbound; missing `stampSql` means local rows stay at lamport 0 forever.
 
@@ -453,9 +454,11 @@ Expected: FAIL — `bundles/ramble/server/zones.js` does not exist.
  *              walks.
  *   fog      — everything else.
  *
- * Pure: no database, no clock, no I/O. Classification is always scoped to a
- * viewport, so cost is bounded by the bbox rather than by how much ground the
- * user has covered over the years.
+ * The classification functions are pure — no database, no clock, no I/O — and
+ * always scoped to a viewport, so cost is bounded by the bbox rather than by
+ * how much ground the user has covered over the years. Two exports are not
+ * pure and say so on the tin: `frontierDepth(db)` reads a setting, and
+ * `gateForZones` takes an encoder.
  */
 import { CELL7_RE, CELL7_LAT_STEP, CELL7_LON_STEP, cellsInBbox, MAX_NEST_CELLS } from "./nests.js";
 import { encodeGeohash, decodeGeohash } from "./anchors.js";
@@ -961,10 +964,19 @@ test("the user's own and a contact's marks are NEVER gated, in any zone", () => 
   assert.equal(mine.length, 2, "own marks survive fog");
   assert.ok(mine.every((m) => m.content_text === "secret words" && !m.beacon));
 
-  const contact = gate([mark(FAR, { contact_name: "Dayane" })]);
-  assert.equal(contact.length, 1, "a contact's mark survives fog");
+  // "A contact's mark" means one delivered on the contacts channel, i.e.
+  // visibility "contacts" — NOT merely a public mark that happens to come
+  // from someone in your contact list. See the D4 ruling in Global
+  // Constraints: a publicly published mark is public terrain whoever sent it,
+  // and `contact_name` cannot be the test because it excludes pending,
+  // blocked and deleted contacts.
+  const contact = gate([mark(FAR, { visibility: "contacts", contact_name: "Dayane" })]);
+  assert.equal(contact.length, 1, "a contacts-channel mark survives fog");
   assert.equal(contact[0].content_text, "secret words");
   assert.ok(!contact[0].beacon);
+
+  const publicFromAContact = gate([mark(FAR, { contact_name: "Dayane" })]);   // visibility stays "public"
+  assert.deepEqual(publicFromAContact, [], "a contact's PUBLIC mark is public terrain and fogs like any other");
 });
 
 test("with nothing unlocked, every public mark is fogged and nothing throws", () => {
@@ -1054,15 +1066,34 @@ In `bundles/ramble/panel/routes.js`, `annotateMarks` becomes:
     // 2026-09-08 §2.1: fog the PUBLIC overlay. Runs AFTER contact naming, so a
     // contact's mark is already marked as theirs and passes through untouched.
     const depth = await mods.zonesMod.frontierDepth(db);
-    return mods.zonesMod.gateForZones(named, {
-      unlocked: await mods.cellsMod.unlockedCells(db),
-      depth,
-      encode: mods.anchorsMod.encodeGeohash,
-    });
+    // Bounded like the other two gates. annotateMarks has no bbox, but the
+    // marks themselves give one: their own coordinates. An unbounded read here
+    // would undo the point of unlockedCellsNear on every /marks and /around.
+    const lats = named.map((m) => Number(m.lat ?? m.approx_lat)).filter(Number.isFinite);
+    const lons = named.map((m) => Number(m.lon ?? m.approx_lon)).filter(Number.isFinite);
+    const unlocked = lats.length
+      ? await mods.cellsMod.unlockedCellsNear(db, {
+          south: Math.min(...lats), north: Math.max(...lats),
+          west: Math.min(...lons), east: Math.max(...lons),
+        }, depth)
+      : new Set();
+    return mods.zonesMod.gateForZones(named, { unlocked, depth, encode: mods.anchorsMod.encodeGeohash });
   }
 ```
 
-**`/around` returns nests too, and they are a separate array.** `aroundPoint` (`around.js:123`) returns its own `nests`, which the route passes through raw — so without this the AR view would show every public nest in fog while the map fogged them. In the `/api/ramble/around` route, gate that array with the same helper before responding, using the identical three-line shape as the `/nests` route below.
+**`/around` returns nests too, and they are a separate array.** `aroundPoint` (`around.js:123`) returns its own `nests`, which the route passes through raw — so without this the AR view would show every public nest in fog while the map fogged them.
+
+⚠ `/around` has **no bbox in scope**: its inputs are `lat`, `lon` and `radiusM`, and the bbox is computed inside `aroundPoint`. So derive one in the route from the same three values before gating — a square around the point is sufficient, since `unlockedCellsNear` only needs a bound, not an exact match:
+
+```js
+    // aroundPoint owns the real bbox; this is just a bound for the unlocked
+    // read, padded by the frontier depth inside unlockedCellsNear.
+    const degLat = radiusM / 111320;
+    const degLon = radiusM / (111320 * Math.max(0.01, Math.cos(lat * Math.PI / 180)));
+    const bbox = { south: lat - degLat, west: lon - degLon, north: lat + degLat, east: lon + degLon };
+```
+
+Then gate both arrays — the marks through `annotateMarks` as usual, and the nests with the same shape as the `/nests` route below, including the synthetic-key strip.
 
 And in the `GET /api/ramble/nests` route, gate the nest list the same way, replacing `res.json(out);` with:
 
@@ -1076,7 +1107,15 @@ And in the `GET /api/ramble/nests` route, gate the nest list the same way, repla
     const gated = mods.zonesMod.gateForZones(
       (out.nests || []).map((n) => ({ ...n, kind: "nest", origin: "remote", visibility: "public" })),
       { unlocked, depth, encode: mods.anchorsMod.encodeGeohash },
-    );
+    ).map((n) => {
+      // gateForZones passes an UNLOCKED row through untouched, so the three
+      // synthetic keys we added to make it gateable would ride out to the
+      // client and break the route's documented shape. A beacon is rebuilt
+      // from scratch and never carries them.
+      if (n.beacon) return n;
+      const { kind, origin, visibility, ...nest } = n;
+      return nest;
+    });
     res.json({ ...out, nests: gated });
 ```
 
@@ -1093,17 +1132,23 @@ node scripts/run-suite.mjs tests/ramble-map-gating.test.js tests/ramble-panel.te
   // Fog gates public terrain (spec 2026-09-08 §2.1), so the viewport must
   // contain ground we have actually stood in before a nest is anything but a
   // beacon. Nests are deterministic, so we can walk straight to one.
-  const week = isoWeekOf(Date.now());              // the helper this file already uses
+  // `isoWeek` is exported from bundles/ramble/server/eggs.js; this test file
+  // does not import it yet, so add it to the imports at the top. (An earlier
+  // draft of this plan called it `isoWeekOf`, which does not exist anywhere.)
+  const week = isoWeek(Date.now());
   const target = nestsInCells(cellsInBbox({ south: LAT - 0.01, west: LON - 0.01, north: LAT + 0.01, east: LON + 0.01 }), week)[0];
   assert.ok(target, "the fixture bbox must hold at least one deterministic nest");
   await req("/api/ramble/area", { method: "POST", body: { lat: target.lat, lon: target.lon, here: { lat: target.lat, lon: target.lon, accuracy_m: 5 } } });
 ```
+
+   ⚠ Two things about that added `/area` post. It credits `visit_place`, worth **+20 warmth** against a `hatch_at` of 100, and this test file already accumulates warmth before the nests tests while later tests assert an incubating egg still exists. Use the file's own trick — it temporarily raises `warmth.hatch_at` elsewhere for exactly this reason — or set `warmth.visit_place = 0` around the added posts. And pass the rate through: `nestsInCells(cells, week, { rate })` where the fixture's rate matches what `listNests` reads from settings, or the computed nest may not be the one the route returns.
 
    Then assert the nest at that cell is whole, and that a nest elsewhere in the bbox is a beacon:
 
 ```js
   const whole = body.nests.find((n) => n.cell === target.cell);
   assert.ok(whole, "the nest we walked to is listed in full");
+  claimedNest = whole;   // explicit: do not rely on body.nests[0] still being the whole one
   assert.deepEqual(Object.keys(whole).sort(), ["cell", "claimed", "lat", "lon", "seed", "week"]);
   for (const n of body.nests) {
     if (n.cell === target.cell) continue;
@@ -1411,6 +1456,7 @@ In `tests/ramble-panel.test.js`, inside the existing `GET /ramble/static/ramble.
   assert.ok(body.includes("function drawBeacon("));
   assert.ok(body.includes('"/api/ramble/zones?bbox="'), "zones are fetched by bbox like nests");
   assert.ok(body.includes('map.createPane("rb-fog")'), "fog has its own pane");
+  assert.ok(body.includes("rb-fog\").style.zIndex = 350"), "the mask sits under the overlay pane so it cannot bury marks");
   assert.ok(body.includes("L.polygon("), "fog is a real mask, not a dim band");
   assert.ok(body.includes("fogHoles"), "the unlocked and frontier cells are punched out of it");
   assert.ok(body.includes("if (mark.beacon)"), "a beacon is drawn differently from a full mark");
@@ -1436,16 +1482,18 @@ Expected: FAIL on the new assertions.
 
 - [ ] **Step 3: Add the fog pane and the mask**
 
-Beside the other layer declarations (`var nestLayer = null;`), add `var zoneLayer = null;` and `var MIN_ZONE_ZOOM = 13;`.
+Beside the other layer declarations (`var nestLayer = null;`), add `var zoneLayer = null;` and `var MIN_ZONE_ZOOM = 15;`.
 
 Inside the `if (mapEl && typeof L !== "undefined")` block, after the `rb-here` pane is created:
 
 ```js
-    /* Fog sits BELOW Leaflet's marker pane (600) and above the tiles, so a pin
-     * is never buried by it. Unlocked ground is punched out of the mask
-     * entirely — a clear map is what walking buys you. */
+    /* 350: between Leaflet's tile pane (200) and its overlay pane (400).
+     * NOT 450 — markerLayer's locked-mark teasers are plain circleMarkers with
+     * no pane, so they render in the overlay pane at 400 and a 450 mask would
+     * bury them. Those include the user's OWN and their contacts' locked marks
+     * in fogged ground, which D4 says must be unaffected in every zone. */
     map.createPane("rb-fog");
-    map.getPane("rb-fog").style.zIndex = 450;
+    map.getPane("rb-fog").style.zIndex = 350;
     zoneLayer = L.layerGroup().addTo(map);
 ```
 
@@ -1462,6 +1510,10 @@ Then, next to `drawNests`:
      * panned away from. */
     var root = $("ramble");
     if (root && root.getAttribute("data-view") !== "world") return Promise.resolve();
+    /* 15, matching refreshNests, NOT 13: /zones inherits MAX_NEST_CELLS via
+     * cellsInBbox, and a 1100x700 map at zoom 13 covers ~10,700 cells, so the
+     * route would 400 on every settle — the very failure this guard exists to
+     * prevent. Measured during review. */
     if (map.getZoom() < MIN_ZONE_ZOOM) { zoneLayer.clearLayers(); return Promise.resolve(); }
     var b = map.getBounds();
     var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(",");
@@ -1543,20 +1595,19 @@ and add:
 **Three existing consumers cannot handle a beacon and must be taught to skip one.** A beacon has no `mark_id`, `cell`, `seed`, `content_text`, `origin` or `created_at`, so each of these would otherwise build something from `undefined`:
 
 1. **`drawNests`** does `html: nestEggHtml(nest.seed)` and keys `nestMarkers[nest.cell]`. Every nest beacon would collide on the single key `undefined` and its pin art would be built from `undefined`. Add `if (nest.beacon) { drawBeacon(nest); return; }` as the first line of its `forEach` callback.
-2. **`toArAnchors`** builds `id: "m:" + mark.mark_id`, giving every beacon the id `"m:undefined"`. Filter beacons out of the array it receives.
+2. **`toArAnchors` has TWO loops and both need it.** Its mark loop builds `id: "m:" + mark.mark_id`, giving every mark beacon the id `"m:undefined"`. Its **nest** loop builds `id: "n:" + nest.cell` and `art: nestArt(nest)`, which reaches `nestArtCache[undefined]` and `drawEggSeed(svg, undefined)` — and Task 4 gating `/around`'s nests is precisely what creates those nest beacons. Filter beacons out of BOTH arrays it receives.
 3. **`drawNearby`** renders a list row per mark; a beacon would show as an empty entry and inflate the "Nearby" count. Filter beacons out before the call.
 
-For 2 and 3 the cleanest shape is one filtered array reused by both:
+**These need TWO separate filters, not one.** `drawNearby` is fed from `drawMarks`'s array; `toArAnchors` is fed by `refreshAround()` from the `/around` response and never sees `drawMarks`'s list. So:
 
-```js
-    var full = marks.filter(function (m) { return !m.beacon; });
-```
-
-built where `drawMarks` already has the list, then passed to `drawNearby(full)` and to whatever feeds `toArAnchors`.
+- In `drawMarks`, build `var full = marks.filter(function (m) { return !m.beacon; });` and pass that to `drawNearby(full)`. Also set `lastMarks = full` rather than the raw array — otherwise `paintPerchSay`'s "N things waiting nearby" keeps counting beacons.
+- In `refreshAround`, filter both the marks and the nests before they reach `toArAnchors`.
 
 - [ ] **Step 5: Hook the refresh**
 
-`refreshMarks` is **not** called on a map move. The `moveend` handler calls `publishArea(); refreshNests();`, and `publishArea` then chains `refreshMarks`. Add `refreshZones();` to that same `moveend` handler beside `refreshNests();`, and call it once at boot beside the first `refreshMarks()`.
+`refreshMarks` is **not** called on a map move. The `moveend` handler calls `publishArea(); refreshNests();`, and `publishArea` then chains `refreshMarks`. Add `refreshZones();` to that same `moveend` handler beside `refreshNests();`.
+
+At boot there is likewise no bare `refreshMarks()` — the chain ends `.then(function () { publishArea(); refreshNests(); })`. Add `refreshZones();` there too. And the file has a `setInterval(refreshNests, 10 * 60e3)`; give zones the same companion, since another instance's walking can unlock ground under you.
 
 - [ ] **Step 6: Add the styles**
 
@@ -1605,7 +1656,11 @@ git commit bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ram
 
 **Why.** Operator request: the dot showing your position should BE your egg or bird, so it walks the map with you. It makes seed pickup legible — the thing collecting the seed is visibly the thing standing there — and it replaces a corner button with a presence. Tapping it opens the egg or pet view exactly as the corner perch does now, so the state machine already exists (`perchTarget`, set by `paintPerch`).
 
-**The constraint that shapes the implementation.** `static/ramble.js` is held to exactly two markup sinks and Leaflet's usual custom-marker route (`L.divIcon({ html })`) would add a third. Avoid it: create the div icon with **no** `html`, then after the marker is added, build an `<svg>` with `document.createElementNS` and hand it to `Bird.mountBird`, which lives in the drawing engine rather than in this file. That is exactly what `birdFor` already does at `static/ramble.js:362`, so the pattern is established and the sink count is unchanged.
+**Two constraints shape the implementation.**
+
+`static/ramble.js` is held to exactly two markup sinks, and passing a STRING to `L.divIcon({ html })` would add a third — the enforcing test's regex is `/\.innerHTML\s*=|\bhtml:\s/g`. But Leaflet's `DivIcon` also accepts an **Element**, which it appends rather than assigning (confirmed in the vendored build: `options.html instanceof Element` takes a different branch). So build the `<svg>` with `document.createElementNS`, hand it to `Bird.mountBird` — which lives in the drawing engine, not this file — and pass the element. Exactly the pattern `birdFor` already uses at `static/ramble.js:362`.
+
+⚠ The same file allows **zero backticks**, in comments included. That rule is NOT enforced by any test, so nothing will catch a slip; an earlier draft of this very task put two backticks into a comment. Write the comments with plain words.
 
 - [ ] **Step 1: Write the failing assertions**
 
@@ -1616,6 +1671,8 @@ Append to the served-script test:
   // the map with you and opens the egg or pet view when tapped.
   assert.ok(body.includes("function hereIcon()"));
   assert.ok(body.includes("function paintHereArt()"));
+  assert.ok(body.includes("function hereArt()"));
+  assert.ok(body.includes('hereDot.on("click"'), "the marker itself opens the view — the retired button also matched showView(perchTarget)");
   assert.ok(body.includes('createElementNS("http://www.w3.org/2000/svg", "svg")'), "the art is built without a markup sink");
   assert.ok(body.includes("showView(perchTarget)"), "tapping the marker still opens egg or pet");
   assert.ok(!body.includes('L.circleMarker(ll, { pane: "rb-here"'), "the plain blue dot is gone");
@@ -1658,20 +1715,21 @@ Delete the now-dead `.rb-perch-btn`, `.rb-perch .rb-bird`, `.rb-perch .rb-ring` 
 `paintHere` currently builds `hereRing` (an accuracy circle) and `hereDot` (a plain blue `circleMarker`). Keep the ring — it still communicates accuracy — and replace the dot with a marker carrying the pet's art:
 
 ```js
-  /* An EMPTY div icon: Leaflet's `html:` option is a markup sink and this file
-   * is held to exactly two. The art is appended afterwards instead. */
-  function hereIcon() {
-    return L.divIcon({ className: "rb-here-pet", iconSize: [46, 46], iconAnchor: [23, 23] });
+  /* Leaflet's divIcon html option is a markup sink and this file is held to
+   * exactly two, so we never pass a string. It also accepts an ELEMENT, which
+   * Leaflet appends rather than assigning — no sink, and no getElement()
+   * timing to worry about. Note: no backticks anywhere in this file. */
+  function hereIcon(art) {
+    var opts = { className: "rb-here-pet", iconSize: [46, 46], iconAnchor: [23, 23] };
+    if (art) opts.html = art;   /* an Element, never a string */
+    return L.divIcon(opts);
   }
 
   /* Fill the marker with whatever the perch would have shown: the bird once
    * one has hatched, otherwise the egg. Built with createElementNS and handed
    * to the shared engine, which is where the markup actually happens. */
-  function paintHereArt() {
-    if (!hereDot) return;
-    var host = hereDot.getElement();
-    if (!host || !Bird) return;
-    while (host.firstChild) host.removeChild(host.firstChild);
+  function hereArt() {
+    if (!Bird) return null;
     var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     try {
       if (perchTarget === "pet" && lastPet && lastPet.bird) {
@@ -1682,8 +1740,15 @@ Delete the now-dead `.rb-perch-btn`, `.rb-perch .rb-bird`, `.rb-perch .rb-ring` 
         svg.setAttribute("viewBox", "0 0 120 152");
         drawEggSeed(svg, seedFromEggId(eggSeedId));
       }
-    } catch (e) { return; }
-    host.appendChild(svg);
+    } catch (e) { return null; }
+    return svg;
+  }
+
+  /* Re-skin the marker in place when the egg hatches or the mood changes. */
+  function paintHereArt() {
+    if (!hereDot) return;
+    var art = hereArt();
+    if (art) hereDot.setIcon(hereIcon(art));
   }
 ```
 
@@ -1692,9 +1757,13 @@ In `paintHere`, swap the dot's construction and add the tap:
 ```js
     if (!hereDot) {
       hereRing = L.circle(ll, { pane: "rb-here", radius: r, className: "rb-here-ring", stroke: false, fillOpacity: 0.12, interactive: false }).addTo(hereLayer);
-      hereDot = L.marker(ll, { pane: "rb-here", icon: hereIcon(), title: "Your bird", keyboard: true }).addTo(hereLayer);
+      hereDot = L.marker(ll, {
+        pane: "rb-here", icon: hereIcon(hereArt()), keyboard: true,
+        /* The retired button carried an accessible name; a divIcon has none,
+         * and the marker shows an egg as often as a bird. */
+        title: "You", alt: "You, and your egg or bird",
+      }).addTo(hereLayer);
       hereDot.on("click", function () { showView(perchTarget); });
-      paintHereArt();
     } else {
       hereRing.setLatLng(ll);
       hereRing.setRadius(r);
@@ -1717,7 +1786,15 @@ Then call `paintHereArt()` at the end of `paintPerch`, so the marker follows the
 ```
 node scripts/run-suite.mjs tests/ramble-panel.test.js
 ```
-Expected: PASS. Re-check the invariants, since this task touches the client script most:
+
+**Two existing assertions break here and must be updated, not worked around.** Task 4 set the standard of naming these; this task must meet it:
+
+1. In the served-script test: `assert.ok(body.includes('className: "rb-here-dot"') && body.includes('className: "rb-here-ring"'))`. The dot is retired, so the first half is now false. Change it to assert the ring only, and add the pet-marker assertions from Step 1.
+2. In the stylesheet test: `assert.match(body, /\.rb-here-dot/)`. That rule is now dead CSS. Delete the rule from `ramble.css` and the assertion with it — leaving a rule nothing uses is exactly what round 1 condemned.
+
+Also delete these, now dead: `#ramble .rb-here-dot`, `#ramble .rb-perch-btn:focus-visible`, and the `.rb-perch` bird/ring/eggart rules. And **scope the `.rb-say` radius change to `.rb-perch .rb-say`** — the AR sheet has its own `.rb-ar-perch .rb-say` which still sits beside a bird and should keep its tail.
+
+Expected after those: PASS. Re-check the invariants, since this task touches the client script most:
 
 ```
 grep -c '`' bundles/ramble/panel/static/ramble.js                      # expect 0
@@ -1742,7 +1819,7 @@ git commit bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ram
 
 **Interfaces:**
 - Consumes: `unlocked` and `seed` from the `POST /api/ramble/area` response (Tasks 3 and 5).
-- Produces: client `celebrateUnlock(cell)` and `paintSeed(n)`; the element `rb-seed-count` in the map bar.
+- Produces: client `celebrateUnlock(box)` (a cell FOOTPRINT, not a name) and `paintSeed(n)`; the element `rb-seed-count` in the map bar; `seed` on the `GET /api/ramble/pet` response.
 
 - [ ] **Step 1: Write the failing assertions**
 
@@ -1783,12 +1860,29 @@ In `bundles/ramble/panel/ramble.js`, inside the `<div class="rb-mapbar">`, after
               <span class="rb-seed" title="Bird seed"><strong id="rb-seed-count">0</strong><span>seed</span></span>
 ```
 
+- [ ] **Step 3b: Give the balance a read path**
+
+Without one the counter can never initialise — it only ever learns a number from an area post that carried a fix, so a user who opens the panel indoors sees a stale or blank count forever. `GET /api/ramble/pet` is already fetched at boot and after every chore, so add the balance to it. In `bundles/ramble/panel/routes.js`, that route's response becomes:
+
+```js
+    res.json({ ...pet, bird, egg: { percent: egg.egg.percent }, seed: await mods.walletMod.seedBalance(db) });
+```
+
+and in the client's `paintPet`, alongside the other painting:
+
+```js
+    paintSeed(pet.seed);
+```
+
 - [ ] **Step 4: Celebrate the unlock and paint the counter**
 
 In `bundles/ramble/panel/static/ramble.js`, in the `.then(function (out) { ... })` of the `/api/ramble/area` post, after `currentCells = ...`:
 
 ```js
-        paintSeed(out && out.seed);
+        /* Only when the server actually reported it: `seed` rides ONLY on a
+         * post that carried a fix, so treating its absence as zero would blank
+         * a real balance on every fix-less post and at boot without geo. */
+        if (out && typeof out.seed === "number") paintSeed(out.seed);
         if (out && out.unlocked) celebrateUnlock(out.unlocked);
 ```
 
@@ -1807,20 +1901,25 @@ And add:
   function celebrateUnlock(box) {
     var say = $("rb-perch-say");
     if (say) say.textContent = "New ground.";
+    /* Its OWN layer, not zoneLayer: drawZones opens with clearLayers(), and
+     * the refreshZones below resolves in tens of milliseconds, so a flash
+     * parked in zoneLayer would be wiped long before its 900 ms animation
+     * finished. */
     var bounds = cellBounds(box);
-    if (bounds && zoneLayer) {
+    if (bounds && hereLayer) {
       var flash = L.rectangle(bounds, {
-        pane: "rb-fog", className: "rb-unlock-flash", stroke: false, interactive: false,
-      }).addTo(zoneLayer);
-      setTimeout(function () { if (zoneLayer) zoneLayer.removeLayer(flash); }, 900);
+        pane: "rb-here", className: "rb-unlock-flash", stroke: false, interactive: false,
+      }).addTo(hereLayer);
+      setTimeout(function () { if (hereLayer) hereLayer.removeLayer(flash); }, 900);
     }
     refreshZones();
     refreshMarks();
   }
 
   function paintSeed(n) {
+    if (typeof n !== "number") return;
     var el = $("rb-seed-count");
-    if (el) el.textContent = String(typeof n === "number" ? n : 0);
+    if (el) el.textContent = String(n);
   }
 ```
 
@@ -1879,7 +1978,7 @@ node scripts/run-suite.mjs 2>&1 | tail -12
 node scripts/check-port-allocation.js
 npm run build-registry -- --check
 ```
-Expected: the full suite green (report the actual numbers; it stood at 4249 before this plan), no port collisions, registry in sync.
+Expected: the full suite green, no port collisions, registry in sync. Report the ACTUAL numbers. The 4249 figure comes from before this plan was written; re-establish the baseline on a clean checkout before Task 1 so the deltas mean something rather than trusting a number from another day.
 
 - [ ] **Step 9: Commit**
 
@@ -1932,3 +2031,22 @@ Expected per database: **no schema delta at all** — `user_version` unchanged, 
 Also folded from the suggestions: the classifier was computed backwards, costing a measured 61 ms of event-loop-blocking work per map settle, now inverted to expand from the unlocked cells; an accuracy gate on unlocking, because the record is permanent and undeletable and a 2 km wifi fix would otherwise earn one; the leak assertion rebuilt from the real `ramble_marks` columns rather than an invented `text` field; the unlock flash moved off an inset shadow the tile pane would have hidden; `cellsInBbox` throwing on a malformed bbox now caught; the guide's settings table and replication section updated rather than a prose paragraph alone; and an explicit ruling that the MCP tool surface is deliberately not gated in phase 1.
 
 **Added by the operator during the revision:** Task 7, making the location marker the pet itself so it walks the map with you and opens the egg or pet view when tapped, with the corner perch button retired and its status strip kept.
+
+### Round 2 — 2026-09-08, opus, adversarial, source-verified
+
+**Verdict: REVISE.** Twelve critical issues. Round 2's job was to check whether round 1's fixes were real or merely described, and four of them were not fully real. All twelve are folded in above.
+
+- **C1** Task 4's own test contradicted Task 4's own implementation and would have failed: a `contact_name`-only mark is still `visibility: "public"`, so the gate drops it. Fixed, and the underlying question is now an explicit **ruling**: a mark published publicly is public terrain whoever sent it; D4 protects the contacts *channel*, not everyone in your contact list.
+- **C2** the `/nests` gate leaked the three synthetic keys it adds to make a nest gateable, breaking the route's shape and the plan's own new assertion. Fixed by stripping them on the way out.
+- **C3** Task 7 broke two existing assertions it did not name, after Task 4 had set the standard of naming them. Both now named with their fixes, along with the dead CSS to delete.
+- **C4** the new Task 7 put two backticks into a file that forbids them — in a comment, in the very block explaining the sink rule. Fixed, and the constraint now records that the backtick rule is NOT test-enforced, so nothing would have caught it.
+- **C5** `isoWeekOf` does not exist anywhere in the repo; the real export is `isoWeek`. Fixed, with the import named.
+- **C6** `/around` has no bbox in scope, so "use the identical shape" was not executable; and `toArAnchors` has two loops, only one of which was addressed, while Task 4 creates beacons for both. Both fixed.
+- **C7** `MIN_ZONE_ZOOM = 13` did not clear the route's own ceiling — measured at roughly 10,700 cells for a typical map at that zoom, so the 400 the guard existed to prevent would still fire on every settle. Raised to 15, matching `refreshNests`.
+- **C8** the fog pane at 450 would have buried the overlay pane at 400, where locked-mark teasers render — including the user's own and their contacts' marks in fogged ground, which D4 protects. Moved to 350, between the tile and overlay panes.
+- **C9** the unlock flash was parked in the layer that `drawZones` clears, and `celebrateUnlock` itself fires the refresh, so the 900 ms animation would have been wiped in tens of milliseconds. Moved to its own layer.
+- **C10** `paintSeed` treated a missing `seed` key as zero, and round 1 had deliberately made that key conditional — so every fix-less area post would have blanked a real balance. Guarded, and the balance gained a read path on `GET /api/ramble/pet`, without which the counter could never initialise.
+- **C11** the Global Constraints still carried the `origin` rule that C3 of round 1 replaced, so an implementer reading top-down met the wrong rule first. Deleted.
+- **C12** the `stampSql` snippet bound `lamport` where the parameter is `lamportTs` — two lines that would have thrown. Fixed, with a note that the lamport must be the first placeholder because `subselectStampSql` rewrites it.
+
+Also folded from round 2's suggestions: `annotateMarks` was still doing the unbounded read that round 1's C10 was supposed to have removed, and now derives a bound from the marks' own coordinates; `lastMarks` kept counting beacons in the status strip; the two beacon filters are genuinely separate code paths and the plan said one; the added `/area` post in the nests test perturbs the warmth budget and needs the file's own hatch-threshold trick; `nestsInCells` needs the rate passed or it may compute a different nest than the route returns; `claimedNest` is now assigned explicitly rather than relying on list order; `zones.js`'s "pure" header corrected now that two exports take a database or an encoder; the boot and interval hooks named precisely; the divIcon now takes an Element, which is simpler and still sink-free; the marker gained an accessible name the retired button had; and the beacon's exact position is now a stated ruling rather than an inference.
