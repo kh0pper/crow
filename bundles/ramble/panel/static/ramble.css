@@ -879,4 +879,12 @@
   #ramble .rb-ar-row.rb-ar-fx-collect,
   #ramble .rb-nest-pin.rb-nest-busy,
   #ramble .rb-nest-pin.rb-nest-collect svg { animation: none; }
+
+  /* No motion, but the cue stays: a still ring while a claim is in flight. */
+  #ramble .rb-ar-label.rb-ar-fx-busy,
+  #ramble .rb-ar-row.rb-ar-fx-busy,
+  #ramble .rb-pop-btn.is-busy,
+  #ramble .rb-nest-pin.rb-nest-busy { box-shadow: 0 0 0 6px color-mix(in oklab, var(--rb-accent) 55%, transparent); }
+  #ramble .rb-ar-label.rb-ar-fx-collect,
+  #ramble .rb-ar-row.rb-ar-fx-collect { box-shadow: 0 0 0 6px color-mix(in oklab, var(--rb-accent-2) 55%, transparent); }
 }

@@ -618,7 +618,9 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes("function drawEggSeed(") && body.includes("art: nestArt(nest)"));
   assert.ok(body.includes('collectFx(nest.cell, "start")') && body.includes('collectFx(nest.cell, "done")') && body.includes('collectFx(nest.cell, "clear")'));
   assert.ok(body.includes('arSession.fx("n:" + cell'));
-  assert.ok(body.includes("setTimeout(refreshNests, 900)"), "the pin's pop finishes before the layer is rebuilt");
+  assert.ok(body.includes("function refreshNestsAfterPop(") && body.includes("nestPopUntil = Date.now() + 900"), "the nest layer is rebuilt only after the pin's pop");
+  assert.ok(body.includes('addEventListener("ramble-nest-claimed", function () { refreshNestsAfterPop();'), "the claim's own SSE echo waits for the pop too");
+  assert.ok(!body.includes("setTimeout(refreshNests, 900)"));
   assert.ok(body.includes("if (mapWatch != null)"), "the AR view reuses the map watch");
   assert.ok(body.includes('window.addEventListener("pageshow"'), "the watch restarts after a bfcache park");
   assert.ok(body.includes("err.code === 1 && arOpen"), "a revoked permission still resets the AR pose");
@@ -666,6 +668,7 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.match(body, /\.rb-here-dot/);
   assert.match(body, /\.rb-nest-pin\.rb-nest-collect svg/);
   assert.match(body, /\.rb-ar-egg-art \{[^}]*order: -1/);
+  assert.match(body, /prefers-reduced-motion[\s\S]*\.rb-nest-pin\.rb-nest-busy \{ box-shadow/);
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {

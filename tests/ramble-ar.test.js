@@ -282,6 +282,7 @@ test("phase 5: reach_m marks a label near (boosted), a near nest wins the say li
   assert.equal(f.say, "A nest, right here — 50 m.");
   const g = Ar.renderAr({ anchors: [nest, ahead], pose: pose(null), bird: null });
   assert.equal(g.say, "A nest, right here — 50 m.", "the same line in radar mode: reach, not sight");
+  assert.equal(plain(g.radar.list.map((r) => r.sub))[0], "close enough · take it", "the radar row carries the near cue for compass-less phones");
   assert.deepEqual(plain(f.labels.map((l) => [l.id, l.near])).sort(), [["m2", false], ["n1", true]]);
   assert.deepEqual([Ar.NEAR_BOOST, Ar.TAP_MS, Ar.FX_MS], [1.25, 350, 900]);
 });

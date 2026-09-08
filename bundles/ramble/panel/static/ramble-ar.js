@@ -212,7 +212,7 @@
         dots: items.map(function (it) { return radarDot(it, mode === "ar" || isNum(pose.heading)); }),
         list: items.map(function (it) {
           return { id: it.id, kind: it.kind, title: it.title, distance_m: it.distance_m,
-            sub: (it.locked ? "~" : "") + roundM(it.distance_m) + " m · " + compassPoint(it.bearing) + (it.locked ? " · locked" : "") };
+            sub: it.near ? it.sub : ((it.locked ? "~" : "") + roundM(it.distance_m) + " m · " + compassPoint(it.bearing) + (it.locked ? " · locked" : "")) };
         }),
       },
       visible: visible.map(function (it) { return it.id; }),

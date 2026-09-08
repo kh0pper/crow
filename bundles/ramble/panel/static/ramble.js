@@ -980,6 +980,9 @@
 
   var lastNests = [];
   var nestMarkers = {};
+  /* Until when the nest layer must NOT be rebuilt: a claimed pin is mid-pop
+   * (900 ms) and the claim's own SSE echo arrives at once. */
+  var nestPopUntil = 0;
   var nestWeek = null;
 
   /* Engine output from a numeric seed: the only markup sink besides drawEggArt. */
@@ -1025,6 +1028,12 @@
    * (busy is sticky until clear; collect is timed) and the map pin. The pin's
    * animation targets its inner svg — the icon's own transform is its map
    * position. */
+  /* Rebuild the nest layer now, or after a running pin pop ends. */
+  function refreshNestsAfterPop() {
+    var wait = nestPopUntil - Date.now();
+    if (wait > 0) setTimeout(refreshNests, wait); else refreshNests();
+  }
+
   function collectFx(cell, phase) {
     var name = phase === "done" ? "collect" : (phase === "start" ? "busy" : "clear");
     if (arOpen && arSession) arSession.fx("n:" + cell, name);
@@ -1034,6 +1043,7 @@
     el.classList.remove("rb-nest-busy");
     if (name === "busy") el.classList.add("rb-nest-busy");
     if (name === "collect") {
+      nestPopUntil = Date.now() + 900;
       el.classList.add("rb-nest-collect");
       setTimeout(function () { el.classList.remove("rb-nest-collect"); }, 900);
     }
@@ -1058,9 +1068,10 @@
         collectFx(nest.cell, "done");
         /* The fly-away plays on the AR label, not behind the sheet (the
          * "on your shelf" line is lost there — accepted: the bird's line and
-         * the shelf say it); the pin's pop finishes before the layer is rebuilt. */
+         * the shelf say it); the layer is rebuilt only after the pin's pop
+         * (refreshNestsAfterPop; the SSE echo waits too). */
         closeArSheet();
-        setTimeout(refreshNests, 900);
+        refreshNestsAfterPop();
         return refreshFlock();
       }
       collectFx(nest.cell, "clear");
@@ -1772,7 +1783,7 @@
       refreshPet();
       handleHatched(payload);
     });
-    stream.addEventListener("ramble-nest-claimed", function () { refreshNests(); refreshFlock(); if (arOpen) refreshAround(); });
+    stream.addEventListener("ramble-nest-claimed", function () { refreshNestsAfterPop(); refreshFlock(); if (arOpen) refreshAround(); });
     stream.addEventListener("ramble-trade", function () { refreshFlock(); refreshTrades(); });
     stream.onerror = function () { /* quiet: the stream may not exist yet */ };
   } catch (err) { /* no EventSource, no live updates */ }
