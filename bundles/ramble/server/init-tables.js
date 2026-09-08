@@ -149,6 +149,33 @@ export async function initRambleTables(db) {
       PRIMARY KEY (kind, key)
     );`);
 
+  // Phase 1 of the reward economy (spec 2026-09-08 §2, §6.2): one row per cell
+  // the user has physically stood in. An unlock is an immutable, permanent
+  // fact, so this table is append-only — the sync handler keeps the EARLIEST
+  // first_unlocked_at and honours no deletes. ⚠ PRIVACY (spec §2.4): this is a
+  // precise record of everywhere the user has been. It replicates to their OWN
+  // instances and must never appear in any contact-facing payload.
+  await initTable(db, "ramble_cells", `
+    CREATE TABLE IF NOT EXISTS ramble_cells (
+      cell TEXT PRIMARY KEY,
+      first_unlocked_at INTEGER NOT NULL,
+      lamport_ts INTEGER DEFAULT 0
+    );`);
+
+  // The currency ledger (spec §6.1). Balances are NEVER stored as balances: two
+  // instances each writing a running total would lose increments to
+  // last-writer-wins, so every earn and spend is a row under a natural
+  // idempotent key and the total is derived. Append-only, like ramble_cells.
+  await initTable(db, "ramble_wallet", `
+    CREATE TABLE IF NOT EXISTS ramble_wallet (
+      kind TEXT NOT NULL,
+      key TEXT NOT NULL,
+      delta INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      lamport_ts INTEGER DEFAULT 0,
+      PRIMARY KEY (kind, key)
+    );`);
+
   // Phase 2: which nests THIS instance's user has already claimed. Local by
   // design (spec §5): a claim is not shared state, the egg it produced is
   // (ramble_eggs replicates). PK (cell, week) makes a double-tap idempotent;

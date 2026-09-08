@@ -214,6 +214,16 @@ export function stampSql(table, row, lamportTs) {
       args: [lamportTs, row.trade_id],
     };
   }
+  // Phase 1 of the reward economy: both new tables are id-less natural-key
+  // tables (`cell`, and the pair `kind`+`key`), so without these branches the
+  // local row would never be stamped while applyRambleCell/applyRambleWallet
+  // write a real lamport to remote ones.
+  if (table === "ramble_cells" && row.cell !== undefined) {
+    return { sql: `UPDATE ramble_cells SET lamport_ts = ? WHERE cell = ?`, args: [lamportTs, row.cell] };
+  }
+  if (table === "ramble_wallet" && row.kind !== undefined && row.key !== undefined) {
+    return { sql: `UPDATE ramble_wallet SET lamport_ts = ? WHERE kind = ? AND key = ?`, args: [lamportTs, row.kind, row.key] };
+  }
   if (row.id !== undefined) {
     return {
       sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,

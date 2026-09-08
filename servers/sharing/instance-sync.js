@@ -100,6 +100,11 @@ export const SYNCED_TABLES = [
   // (and answerable) on their others. NOT ramble_outbox: the delivery queue is
   // one instance's outbound work item, like ramble_tombstones.
   "ramble_trades",
+  // Phase 1 of the reward economy: the unlocked-cell map and the currency
+  // ledger follow the user, so the map built on a phone shows on their other
+  // machines. Both are append-only (see applyRambleCell / applyRambleWallet).
+  "ramble_cells",
+  "ramble_wallet",
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
@@ -160,6 +165,8 @@ export const EXCLUDED_COLUMNS = {
   ramble_pet: ["lamport_ts"],
   // Phase 3: natural-key (trade_id), no surrogate key; lamport is envelope metadata.
   ramble_trades: ["lamport_ts"],
+  ramble_cells: ["lamport_ts"],
+  ramble_wallet: ["lamport_ts"],
 };
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
@@ -357,6 +364,8 @@ export function shouldSyncRow(table, row) {
     if (!row) return false;
     return Boolean(row.trade_id);
   }
+  if (table === "ramble_cells") return typeof row?.cell === "string" && row.cell.length > 0;
+  if (table === "ramble_wallet") return typeof row?.kind === "string" && typeof row?.key === "string";
   if (table === "ramble_settings") {
     if (!row || !row.key) return false;
     // Ruling R3: `local.`-prefixed keys are per-instance by construction
@@ -543,6 +552,45 @@ export async function applyRambleBlock(db, op, row, lamportTs) {
             reason = excluded.reason, created_at = excluded.created_at,
             lamport_ts = excluded.lamport_ts`,
     args: [row.persona, row.reason ?? null, row.created_at ?? Date.now(), lamportTs],
+  });
+}
+
+/**
+ * Apply a `ramble_cells` mutation, keyed on `cell`. NOT last-writer-wins: an
+ * unlock is an immutable fact, so this is insert-if-absent and the EARLIEST
+ * first_unlocked_at wins — if two instances both recorded the visit, the
+ * earlier one is the truth. Deletes are ignored outright: unlocking a cell is
+ * permanent (spec 2026-09-08 §2.1), so no envelope may take it away.
+ */
+export async function applyRambleCell(db, op, row, lamportTs) {
+  if (!row || !row.cell) return;
+  if (op === "delete") return;
+  const at = Number(row.first_unlocked_at);
+  if (!Number.isFinite(at)) return;
+  await db.execute({
+    sql: `INSERT INTO ramble_cells (cell, first_unlocked_at, lamport_ts) VALUES (?, ?, ?)
+          ON CONFLICT(cell) DO UPDATE SET
+            first_unlocked_at = MIN(ramble_cells.first_unlocked_at, excluded.first_unlocked_at),
+            lamport_ts = MAX(ramble_cells.lamport_ts, excluded.lamport_ts)`,
+    args: [String(row.cell), at, lamportTs],
+  });
+}
+
+/**
+ * Apply a `ramble_wallet` mutation, keyed on (kind, key). A ledger row is an
+ * immutable fact under an idempotent key, so a replay must NOT rewrite it and
+ * a delete must not remove it — that is exactly what makes the derived balance
+ * converge no matter what order rows arrive in (spec 2026-09-08 §6.1).
+ */
+export async function applyRambleWallet(db, op, row, lamportTs) {
+  if (!row || !row.kind || !row.key) return;
+  if (op === "delete") return;
+  const delta = Number(row.delta);
+  if (!Number.isFinite(delta)) return;
+  await db.execute({
+    sql: `INSERT INTO ramble_wallet (kind, key, delta, created_at, lamport_ts) VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(kind, key) DO NOTHING`,
+    args: [String(row.kind), String(row.key), delta, Number(row.created_at) || Date.now(), lamportTs],
   });
 }
 
@@ -896,6 +944,8 @@ export async function applyRemoteOp(db, table, op, row, lamportTs = 0) {
     case "ramble_eggs":     return applyRambleEgg(db, op, row, lamportTs);
     case "ramble_pet":      return applyRamblePet(db, op, row, lamportTs);
     case "ramble_trades":   return applyRambleTrade(db, op, row, lamportTs);
+    case "ramble_cells":    return applyRambleCell(db, op, row, lamportTs);
+    case "ramble_wallet":   return applyRambleWallet(db, op, row, lamportTs);
     default:
       throw new Error(`applyRemoteOp: no natural-key handler for table "${table}"`);
   }
@@ -2469,6 +2519,24 @@ export class InstanceSyncManager {
         await applyRambleTrade(this.db, op, row, lamport_ts);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on ramble_trades:`, err.message);
+      }
+      return;
+    }
+
+    if (table === "ramble_cells") {
+      try {
+        await applyRambleCell(this.db, op, row, lamport_ts);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on ramble_cells:`, err.message);
+      }
+      return;
+    }
+
+    if (table === "ramble_wallet") {
+      try {
+        await applyRambleWallet(this.db, op, row, lamport_ts);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on ramble_wallet:`, err.message);
       }
       return;
     }
