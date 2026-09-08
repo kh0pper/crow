@@ -130,6 +130,29 @@ test("save_profile: a valid data URI is stored globally; junk is a 400; clear em
   } finally { cleanup(); }
 });
 
+test("save_profile: a mixed POST (a valid display_name and avatar alongside an invalid avatar_source) is a 400 that changes NOTHING (fix round 1, Finding 1)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await seedPal(db);
+    const sent = [];
+    const managers = spyMgrs(db, sent);
+    // Establish a known-good baseline first, so the mixed-invalid POST below
+    // has something to leave untouched.
+    await save(db, { display_name: "Kevin", avatar: PNG }, managers);
+    assert.equal(sent.length, 1);
+    const before = await getMyProfile(db);
+
+    const out = await save(db, { display_name: "Someone Else", avatar: "data:image/png;base64," + "B".repeat(64), avatar_source: "hat" }, managers);
+    assert.equal(out.status, 400);
+    assert.equal(out.text, "avatar_source must be picture or bird");
+    const after = await getMyProfile(db);
+    assert.equal(after.display_name, before.display_name, "display_name unchanged by a rejected save");
+    assert.equal(after.avatar_url, before.avatar_url, "avatar_url unchanged by a rejected save");
+    assert.equal(after.avatar_source, before.avatar_source, "avatar_source unchanged by a rejected save");
+    assert.equal(sent.length, 1, "no broadcast for a rejected save");
+  } finally { cleanup(); }
+});
+
 test("save_profile: the response does not wait for the fan-out, and a fan-out that failed is re-sent by the next save even when nothing changed (R2-S3/S4)", async () => {
   const { db, cleanup } = freshDb();
   try {
