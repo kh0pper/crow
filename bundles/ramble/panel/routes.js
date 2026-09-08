@@ -848,6 +848,9 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (!EGG_ID_RE.test(req.params.id)) bad("invalid egg id");
     const out = await mods.flockMod.activateBird(db, req.params.id, { emit });
     if (!out.ok) return res.status(out.reason === "not-found" ? 404 : 409).json({ error: out.reason });
+    // Spec 2026-09-08 §5: core listens (servers/sharing/profile-avatar.js) and
+    // repaints the profile picture when the bird is the avatar source.
+    poke("ramble:bird-activated", { egg_id: req.params.id });
     res.json({ bird: out.bird });
   }));
 

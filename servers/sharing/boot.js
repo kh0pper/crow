@@ -28,6 +28,7 @@ import { wasProcessed, recordProcessedEvent } from "./processed-events.js";
 import { sanitizeDisplayName } from "./display-name.js";
 import { emitOrQueue } from "../shared/sync-emit.js";
 import { PROFILE_SUBTYPE, handleProfileMessage, applyPeerProfile, readLocalProfile, ensurePeerProfileColumns, isEstablishedContact } from "./peer-profile.js";
+import { installBirdAvatarHooks } from "./profile-avatar.js";
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -728,6 +729,10 @@ export async function initSharingRuntime(managers, helpers) {
   // 2026-09-08 §4.4: the peer-profile contact columns, additive and un-bumped
   // (same runtime-guard shape as shared_items.mode above). Guarded inside.
   await ensurePeerProfileColumns(db);
+
+  // 2026-09-08 §5: with the bird as profile picture, a hatch or an activation
+  // (bus events from the Ramble routes / transport) repaints and re-sends it.
+  installBirdAvatarHooks(managers);
 
   // R8: the Nostr receive path must never depend on Hyperswarm coming up.
   // Fire-and-forget (never rejects); failures are health-visible + retried.

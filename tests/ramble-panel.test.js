@@ -40,6 +40,7 @@ delete process.env.CROW_DB_PATH;
 const { default: rambleRouter } = await import("../bundles/ramble/panel/routes.js");
 const { default: panel } = await import("../bundles/ramble/panel/ramble.js");
 const { createDbClient } = await import("../bundles/ramble/server/db.js");
+const { default: bus } = await import("../servers/shared/event-bus.js");
 
 // 30.46 / -98.08 -> geohash7 "9v6m21h" -> precision-5 cell "9v6m2".
 const LAT = 30.46;
@@ -921,9 +922,14 @@ test("POST /api/ramble/birds/:id/activate 200s a hatched bird, emits the pet, an
     });
   } finally { db.close(); }
   const petUpdatesBefore = emitCalls.filter((c) => c.table === "ramble_pet" && c.op === "update").length;
+  const activated = [];
+  const onActivated = (p) => activated.push(p);
+  bus.on("ramble:bird-activated", onActivated);
   const res = await req("/api/ramble/birds/panel-bird/activate", { method: "POST", body: {} });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { bird: { egg_id: "panel-bird", species: "magpie", seed: 4242 } });
+  bus.off("ramble:bird-activated", onActivated);
+  assert.deepEqual(activated, [{ egg_id: "panel-bird" }], "activation pokes the bus so core can repaint a bird avatar (spec §5)");
   assert.equal(emitCalls.filter((c) => c.table === "ramble_pet" && c.op === "update").length, petUpdatesBefore + 1, "activation must emit the pet row");
   const pet = await (await req("/api/ramble/pet")).json();
   assert.deepEqual(pet.bird, { egg_id: "panel-bird", species: "magpie", seed: 4242 });
