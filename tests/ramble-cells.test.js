@@ -32,6 +32,12 @@ test("recordUnlock: first visit unlocks and EMITS, later visits do neither, and 
   assert.equal(Number(rows[0].first_unlocked_at), 1000, "the first arrival is the one recorded");
 });
 
+test("recordUnlock: a zero timestamp is a timestamp, not a missing value", async () => {
+  const db = await freshDb();
+  await recordUnlock(db, "9vk79ed", { now: 0 });
+  assert.equal(Number((await db.execute("SELECT first_unlocked_at FROM ramble_cells")).rows[0].first_unlocked_at), 0, "now: 0 must not be replaced by the wall clock");
+});
+
 test("recordUnlock: a vague fix does NOT unlock, because an unlock can never be undone", async () => {
   const db = await freshDb();
   const r = await recordUnlock(db, "9vk79ed", { now: 1, accuracyM: 2000 });

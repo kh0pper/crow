@@ -587,10 +587,14 @@ export async function applyRambleWallet(db, op, row, lamportTs) {
   if (op === "delete") return;
   const delta = Number(row.delta);
   if (!Number.isFinite(delta)) return;
+  // NOT `Number(row.created_at) || Date.now()` — that treats a wire
+  // `created_at` of 0 as falsy and silently substitutes the real clock,
+  // which breaks a replayed pickup at epoch 0.
+  const createdAt = Number.isFinite(Number(row.created_at)) ? Number(row.created_at) : Date.now();
   await db.execute({
     sql: `INSERT INTO ramble_wallet (kind, key, delta, created_at, lamport_ts) VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(kind, key) DO NOTHING`,
-    args: [String(row.kind), String(row.key), delta, Number(row.created_at) || Date.now(), lamportTs],
+    args: [String(row.kind), String(row.key), delta, createdAt, lamportTs],
   });
 }
 
