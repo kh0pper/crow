@@ -574,3 +574,6 @@ Bump: `sed -i 's/"version": "0.6.0"/"version": "0.7.0"/' bundles/ramble/manifest
 - **S5** truncation re-trimmed; bidi characters in the plan's source are `\u` escapes now.
 - **S6** the tool description mentions `label`. **S7** the moved `contactsByPubkey` keeps its ORDER BY provenance comment (already in the plan's code).
 - Verified by the reviewer: `origin = "sync"` rows are provably the owner's own (no emit path replicates remote/contact marks); `markLabel`/`arTitle` are the only "by" builders; all client sinks are `textContent`; `labels.js` ships with the bundle (manifest lists no server files individually).
+
+### Scoped check — 2026-09-08, sonnet, fresh mirror, plan implemented verbatim
+**Verdict: PASS.** grid 18, tables 8, nostr-map 25, marks 13, sync 27, transport 33, delivery 7, labels 2, tools 17, panel 54 — all 0 fail; full suite 4197/4197/0; check-ports OK; `build-registry --check` in sync; backticks 0; sinks 2 (unchanged). All six round-2 folds re-verified. No deviations from the plan text were needed. Awaiting Kevin's approval to execute.
