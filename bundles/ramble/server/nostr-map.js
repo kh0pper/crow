@@ -20,6 +20,7 @@
  */
 
 import { createRequire } from "node:module";
+import { sanitizeWorldName } from "./grid.js";
 
 const require = createRequire(import.meta.url);
 const { isValidBird } = require("./bird-svg.cjs");
@@ -74,7 +75,7 @@ function geohashPrefixTags(geohash) {
  * Tag order: g (shortest first), d (marks only), k, rv, expiration (if
  * set), crow (if crowId given).
  */
-export function markToEvent(row, { precision = 5, crowId = null, bird = null } = {}) {
+export function markToEvent(row, { precision = 5, crowId = null, bird = null, name = null } = {}) {
   if (row.visibility !== "public") {
     throw new RambleNotPublic(`markToEvent: mark ${row.mark_id} is not public (visibility=${row.visibility})`);
   }
@@ -121,6 +122,12 @@ export function markToEvent(row, { precision = 5, crowId = null, bird = null } =
   // fails isValidBird (unknown species, non-uint32 seed) is silently
   // dropped rather than shipped malformed.
   if (isValidBird(bird)) content.bird = { species: bird.species, seed: bird.seed };
+
+  // The author's chosen world name (spec 2026-09-08 §2.2). The transport
+  // hands it over only for pseudonym/real rows — a rotating row never gets
+  // one — and it is sanitized again here so a bad setting cannot reach a relay.
+  const cleanName = sanitizeWorldName(name);
+  if (cleanName) content.name = cleanName;
 
   return { kind: isCaw ? CAW_KIND : MARK_KIND, created_at, tags, content: JSON.stringify(content) };
 }
@@ -178,5 +185,6 @@ export function eventToMark(event) {
     crow_id: crowTag ?? null,
     bird_species: validBird ? validBird.species : null,
     bird_seed: validBird ? validBird.seed : null,
+    author_name: sanitizeWorldName(content.name),
   };
 }

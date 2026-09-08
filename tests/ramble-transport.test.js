@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { createClient } from "@libsql/client";
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { createMark, getMark } from "../bundles/ramble/server/marks.js";
-import { MARK_KIND, CAW_KIND } from "../bundles/ramble/server/nostr-map.js";
+import { MARK_KIND, CAW_KIND, eventToMark } from "../bundles/ramble/server/nostr-map.js";
 import { setMaster, setCell } from "../bundles/ramble/server/grid.js";
 import { isoWeek } from "../bundles/ramble/server/eggs.js";
 import { startRambleTransport } from "../servers/gateway/boot/ramble-transport.js";
@@ -893,4 +893,26 @@ test("phase 4: two of a user's instances over one bus and identity both apply on
   assert.equal(B.sent.length, 1, "B never replies to a completion");
 
   A1.transport.stop(); A2.transport.stop(); B.transport.stop();
+});
+
+test("world name rides only pseudonym/real rows: a rotating row never carries it; eventToMark round-trips it", async () => {
+  const h = await makeHarness();
+  await setMaster(h.db, true);
+  await setCell(h.db, "public", "geo", true);
+  await h.db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('world.name', ?)", args: ["Kevin"] });
+  const rot = await seedPublicMark(h.db, "rotating row", { author_level: "rotating" });
+  const pseud = await seedPublicMark(h.db, "pseudonym row", { author_level: "pseudonym" });
+  const real = await seedPublicMark(h.db, "real row", { author_level: "real" });
+  await h.transport.drainOnce();
+  const byText = (t) => h.published.find((e) => JSON.parse(e.content).text === t);
+  assert.equal(JSON.parse(byText("rotating row").content).name, undefined);
+  assert.equal(JSON.parse(byText("pseudonym row").content).name, "Kevin");
+  assert.equal(JSON.parse(byText("real row").content).name, "Kevin");
+  assert.equal(eventToMark(byText("pseudonym row")).author_name, "Kevin");
+  // A row with no level of its own follows the instance level (createMark stores author_level ?? null).
+  await h.db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('public_identity_level', 'pseudonym') ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [] });
+  const bare = await seedPublicMark(h.db, "bare row", { author_level: null });
+  await h.transport.drainOnce();
+  assert.equal(JSON.parse(byText("bare row").content).name, "Kevin");
+  void rot; void pseud; void real; void bare;
 });

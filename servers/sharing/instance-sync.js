@@ -415,6 +415,7 @@ const RAMBLE_MARK_WIRE_COLUMNS = [
   // that stored it — without these on the wire a replicated mark would render
   // birdless on the user's other instances.
   "bird_species", "bird_seed",
+  "author_name", // 2026-09-08: the world name a stranger's mark was left under.
 ];
 
 /**
