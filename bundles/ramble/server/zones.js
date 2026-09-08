@@ -19,6 +19,15 @@ import { encodeGeohash, decodeGeohash } from "./anchors.js";
 
 export const FRONTIER_DEPTH_DEFAULT = 3;
 
+/** The live `frontier.depth` setting (spec §6.4), default 3, floor 0. */
+export async function frontierDepth(db) {
+  try {
+    const { rows } = await db.execute({ sql: "SELECT value FROM ramble_settings WHERE key = 'frontier.depth'", args: [] });
+    const n = parseInt(rows?.[0]?.value, 10);
+    return Number.isInteger(n) && n >= 0 ? n : FRONTIER_DEPTH_DEFAULT;
+  } catch { return FRONTIER_DEPTH_DEFAULT; }
+}
+
 /** The square ring of cells within `depth` of `cell`, centre excluded. [] for junk. */
 export function neighborhood(cell, depth = FRONTIER_DEPTH_DEFAULT) {
   const d = Number.isInteger(depth) && depth > 0 ? depth : 0;

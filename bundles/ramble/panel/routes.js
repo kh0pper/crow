@@ -194,7 +194,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -210,16 +210,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/delivery.js"),
         bundleImport("server/trades.js"),
         bundleImport("server/around.js"),
+        bundleImport("server/zones.js"),
+        bundleImport("server/cells.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
       if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
-          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod) {
+          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod || !zonesMod || !cellsMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -673,6 +675,15 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (b.here != null) {
       if (typeof b.here !== "object" || Array.isArray(b.here)) bad("here must be an object with lat and lon");
       here = { lat: requireLat(b.here.lat), lon: requireLon(b.here.lon) };
+      // 2026-09-08 §2.1: an unlock is permanent and undeletable, so a vague fix
+      // must not earn one. Optional — an older panel that omits it is trusted,
+      // exactly as today.
+      if (b.here.accuracy_m != null) {
+        if (typeof b.here.accuracy_m !== "number" || !Number.isFinite(b.here.accuracy_m) || b.here.accuracy_m < 0) {
+          bad("here.accuracy_m must be a non-negative number");
+        }
+        here.accuracy_m = b.here.accuracy_m;
+      }
     }
 
     // Written directly, NOT through the grid's emitting writer: `local.`-prefixed
@@ -684,16 +695,24 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       args: [JSON.stringify(cells)],
     });
 
+    let unlockedNow = null;
     if (here) {
       // Geohash-7 (spec §2.1) — the credit key's period is the ISO week, so
       // the same real place only ever counts once a week no matter how many
       // times the panel posts its position.
       const cell = mods.anchorsMod.encodeGeohash(here.lat, here.lon, 7);
       await feedActivity({ type: "visit_place", cell });
+      // 2026-09-08 §2.1: standing in a cell unlocks it, permanently. Reported
+      // back only on the FIRST unlock so the panel celebrates once, not on
+      // every position post. `emit` is what makes the row replicate.
+      const out = await mods.cellsMod.recordUnlock(db, cell, { now: Date.now(), emit, accuracyM: here.accuracy_m });
+      // The FOOTPRINT, not just the name: the panel flashes the exact square
+      // the user just walked into, which is the whole point of the moment.
+      if (out.unlocked) unlockedNow = mods.zonesMod.cellBox(out.cell);
     }
 
     poke("ramble:area");
-    res.json({ cells });
+    res.json({ cells, ...(unlockedNow ? { unlocked: unlockedNow } : {}) });
   }));
 
   // --- blocks ---------------------------------------------------------------
@@ -788,6 +807,24 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     const out = await mods.flockMod.listNests(db, bbox, { now: Date.now() });
     if (!out) bad("bbox too large — zoom in");
     res.json(out);
+  }));
+
+  // The map's fog (spec 2026-09-08 §2.1). Same bbox contract as /nests: the
+  // server owns all geohash maths so the client needs none. Fog is implicit —
+  // a cell in neither list is fogged. The unlocked set is read BBOX-SCOPED, so
+  // a user with years of walked ground pays for geography, not for history.
+  router.get("/api/ramble/zones", handle(async (req, res) => {
+    const raw = req.query?.bbox;
+    if (typeof raw !== "string") bad("bbox=south,west,north,east is required");
+    const parts = raw.split(",").map((s) => Number(s.trim()));
+    if (parts.length !== 4 || !parts.every(Number.isFinite)) bad("bbox must be four numbers: south,west,north,east");
+    const bbox = { south: requireLat(parts[0]), west: requireLon(parts[1]), north: requireLat(parts[2]), east: requireLon(parts[3]) };
+    if (bbox.south > bbox.north || bbox.west > bbox.east) bad("bbox must have south <= north and west <= east");
+    const depth = await mods.zonesMod.frontierDepth(db);
+    const unlocked = await mods.cellsMod.unlockedCellsNear(db, bbox, depth);
+    const out = mods.zonesMod.classifyBbox(bbox, unlocked, { depth });
+    if (!out) bad("bbox too large — zoom in");
+    res.json({ ...out, depth });
   }));
 
   router.post("/api/ramble/nests/claim", handle(async (req, res) => {
