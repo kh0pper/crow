@@ -228,6 +228,19 @@ test("profileRecipients + broadcastProfile: every full unblocked human keyed con
   } finally { cleanup(); }
 });
 
+test("profileRecipients: a NULL is_blocked row is treated as unblocked (agrees with handleProfileMessage's receive-side check), an is_blocked=1 row is still excluded", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    const nullBlocked = await seed(db, { crowId: "crow:nullblocked", secp: pk("9"), name: "NullBlocked", extra: { is_blocked: null } });
+    await seed(db, { crowId: "crow:blocked9", secp: pk("8"), name: "Blocked9", extra: { is_blocked: 1 } });
+    const row = await rowOf(db, nullBlocked);
+    assert.equal(row.is_blocked, null, "the seeded row really has a NULL is_blocked (not defaulted to 0)");
+    const recipients = (await profileRecipients(db)).map((r) => r.crow_id);
+    assert.ok(recipients.includes("crow:nullblocked"), "a NULL is_blocked row IS a recipient — SQL's `is_blocked = 0` would have wrongly excluded it");
+    assert.ok(!recipients.includes("crow:blocked9"), "an explicitly blocked row is still excluded");
+  } finally { cleanup(); }
+});
+
 test("ensurePeerProfileColumns adds the two columns to a contacts table that lacks them, and is idempotent", async () => {
   const db = createClient({ url: "file::memory:" });
   await db.execute("CREATE TABLE contacts (id INTEGER PRIMARY KEY, crow_id TEXT, display_name TEXT)");

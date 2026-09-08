@@ -51,7 +51,14 @@ async function writeBroadcastPending(db, pending) {
       sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
       args: [PROFILE_BROADCAST_PENDING_KEY, pending ? "1" : "0"],
     });
-  } catch { /* the flag is an optimization; a write failure means one extra resend */ }
+  } catch (err) {
+    // A failed write here (either direction) means the flag can UNDERSTATE
+    // reality: if the "1" write fails and the fan-out then partially fails,
+    // the later "0" write never runs either, so no row exists and
+    // readBroadcastPending falls back to false — one FEWER resend, not one
+    // extra, silently dropping the R2-S3 guarantee. Loud on purpose.
+    try { console.warn("[sharing] writeBroadcastPending failed:", err?.message); } catch {}
+  }
 }
 
 /** Runtime guard for existing hosts (init-db only re-runs on a generation bump — the shared_items.mode precedent). Never throws. */
@@ -152,13 +159,20 @@ export async function handleProfileMessage(db, payload, senderPubkey) {
 
 /**
  * Who gets a profile message: established, unblocked, human, keyed contacts.
- * Filtered in JS over SELECT * so a db that predates is_bot/origin still answers.
+ * Filtered in JS over a bare SELECT * — never in SQL — so (a) a db that
+ * predates is_bot/origin still answers, and (b) the established/blocked
+ * checks stay the SAME predicate as handleProfileMessage's receive gate.
+ * is_blocked is nullable (init-db: no NOT NULL), so the block check reads it
+ * as `Number(r.is_blocked || 0) !== 1` — identical to handleProfileMessage's
+ * `Number(contact.is_blocked) === 1` — so a NULL is_blocked row is treated as
+ * unblocked on BOTH the send and receive sides.
  */
 export async function profileRecipients(db) {
   try {
-    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE (request_status IS NULL OR request_status = 'accepted') AND is_blocked = 0 ORDER BY id", args: [] });
+    const { rows } = await db.execute({ sql: "SELECT * FROM contacts ORDER BY id", args: [] });
     return (rows || []).filter((r) =>
       isEstablishedContact(r) &&
+      Number(r.is_blocked || 0) !== 1 &&
       !Number(r.is_bot || 0) &&
       r.origin !== "local-bot" &&
       r.contact_type !== "manual" &&

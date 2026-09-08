@@ -350,3 +350,22 @@ test("handshake_complete peer fields are dropped for a blocked contact and for a
     assert.equal(r.peer_avatar, PNG_AV);
   } finally { cleanup(); }
 });
+
+test("invite_accepted from a BLOCKED sender leaves peer_* untouched (F-BLOCK-1 D4d gates applyPeerProfile too, R2 finding 3/4)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await db.execute({
+      sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, is_blocked) VALUES ('crow:blockedinv', ?, ?, 'Blocked', 1)",
+      args: ["d".repeat(64), PK],
+    });
+    const acks = [];
+    await handleInviteAccepted(db, ackingMgrs(acks), invitePayload({ displayName: "Sneaky", avatar: PNG_AV }), PK, { id: "blk-inv-1" });
+    assert.equal(acks.length, 0, "a blocked sender's invite_accepted is silently dropped — no ack");
+    const row = await peerOf(db, "crow:blockedinv");
+    assert.equal(row.display_name, "Blocked", "untouched");
+    assert.equal(row.peer_display_name, null, "the blocked-sender early return also blocks the peer-field writer");
+    assert.equal(row.peer_avatar, null);
+    const n = Number((await db.execute("SELECT COUNT(*) AS n FROM contacts")).rows[0].n);
+    assert.equal(n, 1, "no new contact row was upserted for the payload-claimed identity either");
+  } finally { cleanup(); }
+});
