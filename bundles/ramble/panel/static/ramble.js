@@ -381,10 +381,51 @@
     return jsonFetch("/api/ramble/area", { method: "POST", body: body })
       .then(function (out) {
         currentCells = (out && out.cells) || [];
+        /* Only when the server actually reported it: the seed key rides ONLY
+         * on a post that carried a fix, so treating its absence as zero would
+         * blank a real balance on every fix-less post and at boot without geo. */
+        if (out && typeof out.seed === "number") paintSeed(out.seed);
+        if (out && out.unlocked) celebrateUnlock(out.unlocked);
         refreshPet();
         return refreshMarks();
       })
       .catch(function () { /* the map still works without a subscription */ });
+  }
+
+  /* A first unlock is a moment: flash the exact square just earned, then
+   * repaint so the fog has actually retreated from it. The server tells us
+   * this was the first time, so it fires once per cell ever, not on every
+   * position post.
+   *
+   * NOT a box-shadow on the map container: an inset shadow paints beneath the
+   * container's children, and Leaflet's tile pane is opaque and covers it, so
+   * the flash would be invisible. A rectangle in the fog pane is on top of the
+   * tiles and is the thing the user actually wants to see light up. */
+  function celebrateUnlock(box) {
+    var say = $("rb-perch-say");
+    if (say) say.textContent = "New ground.";
+    /* Its OWN layer, not zoneLayer: drawZones opens with clearLayers(), and
+     * the refreshZones below resolves in tens of milliseconds, so a flash
+     * parked in zoneLayer would be wiped long before its 900 ms animation
+     * finished. */
+    var bounds = cellBounds(box);
+    if (bounds && hereLayer) {
+      /* Pane and layer are independent: the rb-fog PANE (350) keeps the flash
+       * under the pet marker instead of painting over it, while hereLayer is
+       * the group drawZones never clears. */
+      var flash = L.rectangle(bounds, {
+        pane: "rb-fog", className: "rb-unlock-flash", stroke: false, interactive: false,
+      }).addTo(hereLayer);
+      setTimeout(function () { if (hereLayer) hereLayer.removeLayer(flash); }, 900);
+    }
+    refreshZones();
+    refreshMarks();
+  }
+
+  function paintSeed(n) {
+    if (typeof n !== "number") return;
+    var el = $("rb-seed-count");
+    if (el) el.textContent = String(n);
   }
 
   /* ---------------------------------------------------------------- marks */
@@ -1047,6 +1088,7 @@
     if (!pet) return;
     lastPet = pet;
     paintPerch(pet);
+    paintSeed(pet.seed);
 
     var bird = pet.bird;
     var valid = !!(Bird && bird && Bird.isValidBird({ species: bird.species, seed: bird.seed }));
