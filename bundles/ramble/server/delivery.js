@@ -210,23 +210,43 @@ export async function listAudiences(db) {
 }
 
 /**
- * x-only pubkey -> { crow_id, name } for every unblocked full contact, bots
- * included on purpose (naming a bot's mark is harmless). ORDER BY id +
+ * x-only pubkey -> { crow_id, name, avatar } for every unblocked full contact,
+ * bots included on purpose (naming a bot's mark is harmless). ORDER BY id +
  * first-wins so two rows sharing a key name the older one deterministically.
+ * SELECT * on purpose: peer_display_name / peer_avatar / avatar_url arrived
+ * with core (2026-09-08) and a db that predates them must still name contacts.
  * Tolerant: an empty map when the core table is unreadable (the stdio MCP
  * process on a fresh db).
  */
 export async function contactsByPubkey(db) {
   const map = new Map();
   try {
-    const { rows } = await db.execute({ sql: "SELECT crow_id, display_name, secp256k1_pubkey FROM contacts WHERE is_blocked = 0 AND request_status IS NULL ORDER BY id", args: [] });
+    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE is_blocked = 0 AND request_status IS NULL ORDER BY id", args: [] });
     for (const r of rows) {
       const pk = String(r.secp256k1_pubkey || "");
       const key = pk.length === 66 ? pk.slice(2) : pk;
-      if (key && !map.has(key)) map.set(key, { crow_id: r.crow_id, name: r.display_name || r.crow_id });
+      if (key && !map.has(key)) map.set(key, { crow_id: r.crow_id, name: contactNameOf(r), avatar: contactAvatarOf(r) });
     }
   } catch { /* no core tables: nobody is a contact */ }
   return map;
+}
+
+/* Mirrors core's servers/sharing/contact-display.js (a bundle server file
+ * cannot import core statically): a typed name unless it is a placeholder,
+ * then the name the peer sent, then the id; the first INLINE picture, local
+ * first — never a URL (the panel's CSP could not show one anyway). */
+const AVATAR_MAX = 32768;
+function isPlaceholderName(name) {
+  return name == null || name === "" || String(name).startsWith("req:") || String(name).startsWith("crow:");
+}
+function isInlineImage(v) {
+  return typeof v === "string" && v.length <= AVATAR_MAX && /^data:image\/(png|jpeg|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(v);
+}
+function contactNameOf(r) {
+  return (!isPlaceholderName(r.display_name) ? r.display_name : null) || r.peer_display_name || r.crow_id;
+}
+function contactAvatarOf(r) {
+  return [r.avatar_url, r.peer_avatar].find(isInlineImage) || null;
 }
 
 /**

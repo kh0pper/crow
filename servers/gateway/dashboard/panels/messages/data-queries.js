@@ -7,6 +7,7 @@
 import { getPeerAdvertisedBots } from "../../advertised-bots-cache.js";
 import { getTrustedInstances } from "../nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
+import { contactName } from "../../../../sharing/contact-display.js";
 
 /**
  * Get a unified conversation list merging AI chats and peer contacts.
@@ -43,7 +44,7 @@ export async function getUnifiedConversationList(db) {
   // Peer contacts with message activity
   try {
     const { rows: peerRows } = await db.execute(`
-      SELECT c.id as contact_id, c.crow_id, c.display_name, c.last_seen, c.is_blocked, c.is_bot, c.verified,
+      SELECT c.*, c.id as contact_id,
              MAX(m.created_at) as last_msg_at,
              SUM(CASE WHEN m.is_read = 0 AND m.direction = 'received' THEN 1 ELSE 0 END) as unread
       FROM contacts c
@@ -61,7 +62,8 @@ export async function getUnifiedConversationList(db) {
         type: "peer",
         id: row.contact_id,
         crowId: row.crow_id,
-        displayName: row.display_name || (row.crow_id ? row.crow_id.substring(0, 16) + "..." : "Unknown"),
+        // 2026-09-08 §4.5: typed name, else the peer's own, else what showed before.
+        displayName: contactName(row, { fallback: row.display_name || (row.crow_id ? row.crow_id.substring(0, 16) + "..." : "Unknown") }),
         lastActivity: row.last_msg_at || row.last_seen || null,
         lastSeen: row.last_seen,
         isBot: !!Number(row.is_bot),

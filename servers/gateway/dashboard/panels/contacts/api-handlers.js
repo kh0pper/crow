@@ -7,7 +7,10 @@
 import { randomUUID } from "crypto";
 import { parseVCard, generateVCard, parseCsv } from "./vcard.js";
 import { upsertSetting, deleteLocalSetting } from "../../settings/registry.js";
-import { getContacts } from "./data-queries.js";
+import { getContacts, getMyProfile } from "./data-queries.js";
+import { validateAvatar, avatarFieldValue, AVATAR_MAX_BYTES } from "../../../../sharing/avatar.js";
+import { broadcastProfile, readBroadcastPending } from "../../../../sharing/peer-profile.js";
+import { renderActiveBirdAvatar } from "../../../../sharing/profile-avatar.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
 import { emitContactChange } from "../../../../sharing/contact-sync.js";
 import { deleteContactLocal, unwireContact } from "../../../../sharing/contact-delete.js";
@@ -253,8 +256,13 @@ export async function handleContactAction(req, db, {
       args.push(req.body.phone.trim());
     }
     if (req.body.avatar_url !== undefined) {
+      // A LOCAL override the user types. Bounded (avatarFieldValue): "", an inline
+      // avatar, or a short http(s) URL; anything else is refused — this field now
+      // renders (contactAvatar) and rides the contacts sync wire.
+      const v = avatarFieldValue(req.body.avatar_url);
+      if (v === null) return { status: 400, text: `avatar_url must be empty, a data:image/... URI of at most ${AVATAR_MAX_BYTES} characters, or an http(s) URL`, back: `/dashboard/contacts?view=contact&contact=${req.body.contact_id}` };
       fields.push("avatar_url = ?");
-      args.push(req.body.avatar_url.trim());
+      args.push(v);
     }
 
     if (fields.length > 0) {
@@ -395,6 +403,53 @@ export async function handleContactAction(req, db, {
     // sync-allowlisted, upsertSetting silently downgraded profile saves to
     // dashboard_settings_overrides rows that no reader consults. The global
     // row (which readers use and peers sync) must be effective from this save.
+    //
+    // 2026-09-08 §4.1/§4.3: the picture is an inline data: image (validated,
+    // capped), the source is picture|bird, and ONE profile broadcast goes out
+    // per save that changed the name, the picture or the source.
+    const before = await getMyProfile(db);
+
+    // --- Validation phase (fix round 1, Finding 1): every 400 is decided
+    // BEFORE the first write. The old interleaved order let a mixed-invalid
+    // POST (e.g. a valid display_name + a valid avatar + a junk
+    // avatar_source) persist the name and the picture and THEN answer 400 —
+    // the "a rejected save changes nothing" guarantee, broken. Worse: since
+    // the 400 returned before the changed/broadcast block ran, the change
+    // was never fanned out and readBroadcastPending was never armed, so
+    // peers kept the stale value with no retry path. Everything here is
+    // read-only (validation + a bird lookup); nothing is written yet.
+    const clearRequested = req.body.avatar_clear === "1";
+    let cleanAvatar = null;
+    if (!clearRequested && typeof req.body.avatar === "string" && req.body.avatar !== "") {
+      // "" = the hidden field was never filled = untouched.
+      cleanAvatar = validateAvatar(req.body.avatar);
+      if (!cleanAvatar) return { status: 400, text: `avatar must be a data:image/(png|jpeg|webp|svg+xml);base64 URI of at most ${AVATAR_MAX_BYTES} characters` };
+    }
+    const sourceProvided = req.body.avatar_source !== undefined;
+    if (sourceProvided && req.body.avatar_source !== "picture" && req.body.avatar_source !== "bird") {
+      return { status: 400, text: "avatar_source must be picture or bird" };
+    }
+    let effectiveSource;
+    let birdUri = null;
+    if (sourceProvided) {
+      if (req.body.avatar_source === "bird") {
+        birdUri = await renderActiveBirdAvatar(db);
+        effectiveSource = birdUri ? "bird" : "picture"; // no bird / no engine: silent fallback, the stored picture stays (spec §5)
+      } else {
+        effectiveSource = "picture";
+      }
+    }
+    // Precedence (unchanged from before the restructure): a successful bird
+    // render wins over everything else in the same POST; otherwise a clear
+    // wins over an uploaded picture; otherwise the uploaded picture; otherwise
+    // no change to profile_avatar_url at all.
+    let avatarToWrite;
+    if (birdUri) avatarToWrite = birdUri;
+    else if (clearRequested) avatarToWrite = "";
+    else if (cleanAvatar !== null) avatarToWrite = cleanAvatar;
+    else avatarToWrite = undefined;
+
+    // --- Write phase: only the validated locals from here on. ---
     if (req.body.display_name !== undefined) {
       // This value is SENT on every handshake and syncs to all of the user's
       // instances — cap + strip it at write (design §D5). sanitizeDisplayName
@@ -403,15 +458,29 @@ export async function handleContactAction(req, db, {
       await upsertSetting(db, "profile_display_name", sanitizeDisplayName(req.body.display_name) ?? "");
       await deleteLocalSetting(db, "profile_display_name");
     }
-    if (req.body.avatar_url !== undefined) {
-      await upsertSetting(db, "profile_avatar_url", req.body.avatar_url.trim());
+    if (avatarToWrite !== undefined) {
+      await upsertSetting(db, "profile_avatar_url", avatarToWrite);
       await deleteLocalSetting(db, "profile_avatar_url");
+    }
+    if (sourceProvided) {
+      await upsertSetting(db, "profile_avatar_source", effectiveSource);
+      await deleteLocalSetting(db, "profile_avatar_source");
     }
     if (req.body.bio !== undefined) {
       await upsertSetting(db, "profile_bio", req.body.bio.trim());
       await deleteLocalSetting(db, "profile_bio");
     }
-    return { redirect: "/dashboard/contacts?view=profile" };
+    const after = await getMyProfile(db);
+    const changed = ["display_name", "avatar_url", "avatar_source"].some((k) => (before[k] ?? "") !== (after[k] ?? ""));
+    // R2-S3/S4: one fan-out per changed save (or per save while the last
+    // fan-out is still pending) — NOT awaited: 50 contacts × 4 relays would
+    // hold the response for ~10 s. The promise is returned so tests can await it.
+    let broadcast = Promise.resolve(null);
+    if (changed || (await readBroadcastPending(db))) {
+      broadcast = broadcastProfile(db, managers?.nostrManager)
+        .catch((err) => { console.warn("[contacts] profile broadcast failed:", err.message); return null; });
+    }
+    return { redirect: "/dashboard/contacts?view=profile", broadcast };
   }
 
   // --- Export vCard ---

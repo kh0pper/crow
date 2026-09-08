@@ -43,7 +43,7 @@ Los contactos manuales se almacenan localmente y no requieren que la otra person
 
 Cada contacto tiene una página de perfil con:
 
-- **Nombre para mostrar** y avatar
+- **Nombre para mostrar** e imagen — los que tú fijaste, o si no, los que envió el par
 - **Datos de contacto** — correo, teléfono, notas
 - **Historial de actividad** — elementos compartidos, mensajes intercambiados (solo pares de Crow)
 - **Notas** — notas de texto libre que agregas sobre el contacto
@@ -75,15 +75,15 @@ Usa el filtro de grupo en el panel de Contactos para ver solo los contactos de u
 
 ## Tu perfil
 
-Tu propio perfil es lo que otros pares de Crow ven cuando se conectan contigo.
+Tu propio perfil es lo que otros pares de Crow ven cuando se conectan contigo: tu nombre para mostrar y tu imagen viajan en el intercambio de emparejamiento, y de nuevo a cada contacto cuando los cambias. Un contacto que escribió su propio nombre o imagen para ti conserva los suyos.
 
 ### Editar tu perfil
 
-Desde **Crow's Nest** > **Ajustes** > **Identidad**, puedes actualizar:
+Desde **Crow's Nest** > **Contactos** > **Mi perfil**, puedes actualizar:
 
 - **Nombre para mostrar** — el nombre que ven tus pares
-- **Avatar** — sube una imagen de perfil
-- **Bio** — una descripción breve visible para los contactos
+- **Imagen** — sube una imagen; tu navegador la reduce a un cuadrado de 128 px antes de guardarla, para que viaje en línea con el intercambio. Si Ramble está instalado y ha eclosionado un pájaro, puedes mostrar tu pájaro activo en su lugar.
+- **Bio** — una descripción breve
 
 O pídele a tu IA:
 

@@ -45,6 +45,14 @@
   function isNum(v) { return typeof v === "number" && isFinite(v); }
   function hasFix(pose) { return !!pose && isNum(pose.lat) && isNum(pose.lon); }
   function roundM(m) { return Math.max(5, Math.round(m / 5) * 5); }
+  /* "hidden" is an HTMLElement property; an <svg> (e.bird, e.egg) does not
+     have it, so assigning it directly would set a dead expando while the
+     CSS attribute selector for it keeps matching the content attribute.
+     Toggle the attribute itself instead, and read it back the same way. */
+  function setHidden(el, on) {
+    if (!el) return;
+    if (on) el.setAttribute("hidden", ""); else el.removeAttribute("hidden");
+  }
 
   /* ------------------------------------------------------------- geometry */
 
@@ -366,8 +374,8 @@
 
     function paintBird(bird) {
       var valid = !!(engine && bird && typeof engine.isValidBird === "function" && engine.isValidBird({ species: bird.species, seed: bird.seed }));
-      if (e.bird) e.bird.hidden = !valid;
-      if (e.egg) e.egg.hidden = valid;
+      if (e.bird) setHidden(e.bird, !valid);
+      if (e.egg) setHidden(e.egg, valid);
       if (!valid) { birdKey = null; return; }
       var key = bird.species + ":" + bird.seed + ":" + (bird.mood || "happy");
       if (key === birdKey) return;
@@ -376,7 +384,7 @@
     }
 
     function react() {
-      if (!e.bird || e.bird.hidden) return;
+      if (!e.bird || e.bird.hasAttribute("hidden")) return;
       e.bird.classList.add("rb-ar-react");
       if (reactTimer) clearTimeout(reactTimer);
       reactTimer = setTimeout(function () { e.bird.classList.remove("rb-ar-react"); reactTimer = null; }, REACT_MS);

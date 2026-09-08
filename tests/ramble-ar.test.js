@@ -173,6 +173,7 @@ function fakeDocument() {
     const el = { tag, children: [], attrs: {}, style: {}, hidden: false, listeners: {}, classes: new Set(), _text: "" };
     el.setAttribute = (k, v) => { el.attrs[k] = String(v); };
     el.getAttribute = (k) => (k in el.attrs ? el.attrs[k] : null);
+    el.hasAttribute = (k) => k in el.attrs;
     el.removeAttribute = (k) => { delete el.attrs[k]; };
     el.appendChild = (c) => { el.children.push(c); c.parentNode = el; return c; };
     el.removeChild = (c) => { el.children = el.children.filter((x) => x !== c); c.parentNode = null; return c; };
@@ -214,7 +215,7 @@ test("mountAr paints labels with textContent, routes taps by id, mounts the bird
   assert.equal(session.anchor("e").title, "A locked mark");
   assert.equal(session.anchor("nope"), null);
   assert.deepEqual(plain(mounted), [["svg", { seed: 7, species: "crow" }, "happy"]]);
-  assert.equal(els.bird.hidden, false); assert.equal(els.egg.hidden, true);
+  assert.equal(els.bird.hasAttribute("hidden"), false); assert.equal(els.egg.hasAttribute("hidden"), true);
   assert.ok(els.bird.classes.has("rb-ar-react"), "east entered view on the first frame");
   assert.equal(els.radar.children.length, 2);
   assert.equal(els.say.textContent, "A locked mark, 100 m ahead.");
@@ -241,7 +242,7 @@ test("mountAr paints labels with textContent, routes taps by id, mounts the bird
   const f2 = session.render({ anchors, pose: pose(null), bird: null });
   assert.equal(f2.mode, "radar");
   assert.equal(els.mode.textContent, "Radar · no compass");
-  assert.equal(els.bird.hidden, true); assert.equal(els.egg.hidden, false);
+  assert.equal(els.bird.hasAttribute("hidden"), true); assert.equal(els.egg.hasAttribute("hidden"), false);
   assert.equal(els.labels.children.length, 0);
   assert.equal(els.list.children.length, 2);
   assert.notEqual(els.list.children, rowsBefore, "the mode flip repaints the list (its key includes the mode)");

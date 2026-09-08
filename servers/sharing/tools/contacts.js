@@ -11,7 +11,8 @@ import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js
 import { generateInviteCode, parseInviteCode, computeSafetyNumber } from "../identity.js";
 import { upsertFullContact } from "../contact-promote.js";
 import { acceptBotInvite } from "../accept-bot-invite.js";
-import { sanitizeDisplayName } from "../display-name.js";
+import { readLocalProfile } from "../peer-profile.js";
+import { contactName } from "../contact-display.js";
 import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
 import {
   generateShortCode, formatShortCode, normalizeShortCode, deriveShortCodeKeys,
@@ -68,21 +69,16 @@ async function acceptInviteCore({ invite_code, display_name }, { db, identity, s
     // settings-read failure must not abort the acceptance, so it is guarded.
     // Reads the GLOBAL scope on purpose (Cluster B design D6): profile identity
     // is user-level; per-instance overrides of profile_* keys are intentionally inert.
-    let selfName = null;
-    try {
-      const { rows } = await db.execute({
-        sql: "SELECT value FROM dashboard_settings WHERE key = 'profile_display_name'",
-        args: [],
-      });
-      selfName = sanitizeDisplayName(rows?.[0]?.value);
-    } catch { selfName = null; }
+    // 2026-09-08 §4.2: the picture rides beside the name, validated, omitted when unset.
+    const self = await readLocalProfile(db);
     const acceptancePayload = JSON.stringify({
       type: "invite_accepted",
       crowId: identity.crowId,
       ed25519Pub: identity.ed25519Pubkey,
       secp256k1Pub: identity.secp256k1Pubkey,
       ...(peer.inviteId ? { inviteId: peer.inviteId } : {}),
-      ...(selfName ? { displayName: selfName } : {}),
+      ...(self.displayName ? { displayName: self.displayName } : {}),
+      ...(self.avatar ? { avatar: self.avatar } : {}),
     });
     await nostrManager.sendInviteAccepted(
       { id: contactId, secp256k1_pubkey: peer.secp256k1Pubkey },
@@ -419,7 +415,7 @@ export function registerContactsTools(server, ctx) {
         const online = peerManager.isConnected(c.crow_id);
         const status = c.is_blocked ? "blocked" : online ? "online" : "offline";
         return [
-          `${c.display_name || c.crow_id} (${c.crow_id})`,
+          `${contactName(c) || c.crow_id} (${c.crow_id})`,
           `  Status: ${status}`,
           `  Last seen: ${c.last_seen || "never"}`,
           `  Added: ${c.created_at}`,

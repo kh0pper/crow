@@ -45,6 +45,14 @@
 
   function $(id) { return document.getElementById(id); }
   function setText(el, text) { if (el) el.textContent = text; }
+  /* "hidden" is an HTMLElement property; an <svg> does not have it, so
+     assigning it directly on an element would set a dead expando while
+     "#ramble [hidden]" keeps matching the attribute. Toggle the
+     attribute itself instead. */
+  function setHidden(el, on) {
+    if (!el) return;
+    if (on) el.setAttribute("hidden", ""); else el.removeAttribute("hidden");
+  }
 
   /* ------------------------------------------------------------------ net */
 
@@ -363,12 +371,26 @@
     } catch (e) { return null; }
   }
 
+  /* A contact's profile picture on their pin (spec 2026-09-08 §5): the server
+   * already bounded it to an inline data: image, and this checks again; a
+   * stranger has none and keeps the bird. createElement + a src assignment —
+   * not a markup sink. */
+  function contactPortrait(mark) {
+    var src = mark.contact_avatar;
+    if (typeof src !== "string" || src.indexOf("data:image/") !== 0) return null;
+    var img = document.createElement("img");
+    img.className = "rb-pop-avatar";
+    img.alt = "";
+    img.src = src;
+    return img;
+  }
+
   function popupFor(mark) {
     var box = document.createElement("div");
 
     var head = document.createElement("div");
     head.className = "rb-pop-head";
-    var portrait = birdFor(mark);
+    var portrait = contactPortrait(mark) || birdFor(mark);
     if (portrait) head.appendChild(portrait);
     var who = document.createElement("span");
     who.textContent = markLabel(mark);
@@ -562,15 +584,15 @@
     var valid = !!(Bird && bird && Bird.isValidBird({ species: bird.species, seed: bird.seed }));
     if (valid) {
       perchTarget = "pet";
-      if (perchEggWrap) perchEggWrap.hidden = true;
+      if (perchEggWrap) setHidden(perchEggWrap, true);
       if (perchBird) {
         try { Bird.mountBird(perchBird, Bird.rollGenome(bird.seed, bird.species), pet.mood || "happy"); } catch (e) { /* cosmetic */ }
-        perchBird.hidden = false;
+        setHidden(perchBird, false);
       }
     } else {
       perchTarget = "egg";
-      if (perchBird) perchBird.hidden = true;
-      if (perchEggWrap) perchEggWrap.hidden = false;
+      if (perchBird) setHidden(perchBird, true);
+      if (perchEggWrap) setHidden(perchEggWrap, false);
       drawEggArt(perchEgg, eggSeedId);
       setRing($("rb-perch-ring"), (pet && pet.egg && pet.egg.percent) || eggPercent);
     }
@@ -625,7 +647,7 @@
   wireSeg("rb-seg-who", "data-visibility", function (v) {
     whoChoice = v || "public";
     var row = $("rb-group-row");
-    if (row) row.hidden = whoChoice !== "group";
+    if (row) setHidden(row, whoChoice !== "group");
   });
   wireSeg("rb-seg-reveal", "data-reveal", function (v) { reveal = v || "open"; });
 
@@ -641,7 +663,7 @@
     var btn = $("rb-who-group");
     var sel = $("rb-group");
     var groups = contactsCache.groups || [];
-    if (btn) btn.hidden = groups.length === 0;
+    if (btn) setHidden(btn, groups.length === 0);
     if (groups.length === 0 && whoChoice === "group") {
       var everyone = document.querySelector('#rb-seg-who button[data-visibility="public"]');
       if (everyone) everyone.click();
@@ -722,7 +744,7 @@
 
   function openSheet(open) {
     if (!sheetEl) return;
-    sheetEl.hidden = !open;
+    setHidden(sheetEl, !open);
     if (open && masterEl) masterEl.focus();
   }
 
@@ -776,7 +798,7 @@
   var pickOnChoose = null;
 
   function closePicker() {
-    if (pickSheet) pickSheet.hidden = true;
+    if (pickSheet) setHidden(pickSheet, true);
     pickOnChoose = null;
   }
 
@@ -815,7 +837,7 @@
       list.appendChild(btn);
     });
     pickOnChoose = onPick;
-    pickSheet.hidden = false;
+    setHidden(pickSheet, false);
   }
 
   var pickCancel = $("rb-pick-cancel");
@@ -857,9 +879,9 @@
       " · it warms every time you get somewhere new");
 
     var art = $("rb-egg-art");
-    if (art) { art.hidden = false; drawEggArt(art, egg.egg_id); }
+    if (art) { setHidden(art, false); drawEggArt(art, egg.egg_id); }
     var birdEl = $("rb-hatch-bird");
-    if (birdEl) birdEl.hidden = true;
+    if (birdEl) setHidden(birdEl, true);
 
     var places = list.new_places_week || 0;
     paintStep("rb-step-places", places >= 3, Math.min(places, 3) + "/3", null);
@@ -956,7 +978,7 @@
 
     /* "My bird" only exists once there is one. */
     var myBird = $("rb-my-bird");
-    if (myBird) myBird.hidden = !valid;
+    if (myBird) setHidden(myBird, !valid);
 
     if (arOpen) scheduleArRender();
   }
@@ -1287,7 +1309,7 @@
       (state.birds || []).forEach(function (b) { grid.appendChild(birdTile(b)); });
     }
     var empty = $("rb-flock-empty");
-    if (empty) empty.hidden = (state.birds || []).length > 0;
+    if (empty) setHidden(empty, (state.birds || []).length > 0);
     var shelf = $("rb-shelf");
     if (shelf) {
       shelf.textContent = "";
@@ -1420,18 +1442,18 @@
     setTimeout(function () {
       if (stage) stage.classList.remove("rb-hatch");
       var art = $("rb-egg-art");
-      if (art) art.hidden = true;
+      if (art) setHidden(art, true);
       var birdEl = $("rb-hatch-bird");
       if (birdEl && Bird) {
         try {
           Bird.mountBird(birdEl, Bird.rollGenome(h.seed, h.species), "happy");
-          birdEl.hidden = false;
+          setHidden(birdEl, false);
         } catch (e) { /* cosmetic */ }
       }
       var species = Bird && Bird.SPECIES ? Bird.SPECIES[h.species] : null;
       setText($("rb-hatch-name"), "It's a " + ((species && species.name) || h.species) + "!");
       var revealCard = $("rb-hatch-reveal");
-      if (revealCard) revealCard.hidden = false;
+      if (revealCard) setHidden(revealCard, false);
       refreshPet();
     }, HATCH_MS);
   }
@@ -1448,11 +1470,11 @@
     var stage = $("rb-egg-stage");
     if (stage) stage.classList.remove("rb-hatch");
     var revealCard = $("rb-hatch-reveal");
-    if (revealCard) revealCard.hidden = true;
+    if (revealCard) setHidden(revealCard, true);
     var birdEl = $("rb-hatch-bird");
-    if (birdEl) birdEl.hidden = true;
+    if (birdEl) setHidden(birdEl, true);
     var art = $("rb-egg-art");
-    if (art) art.hidden = false;
+    if (art) setHidden(art, false);
     refreshEgg();
   }
 
@@ -1677,12 +1699,12 @@
     if (!arSheet || !body) return;
     body.textContent = "";
     body.appendChild(node);
-    arSheet.hidden = false;
+    setHidden(arSheet, false);
   }
 
   function closeArSheet() {
     if (!arSheet || arSheet.hidden) return;
-    arSheet.hidden = true;
+    setHidden(arSheet, true);
     var body = $("rb-ar-sheet-body");
     if (body) body.textContent = "";
     /* An unlock or a claim may have changed what is around. */
@@ -1706,7 +1728,7 @@
     if (!Ar || !arRoot) return;
     if (arOpen) return;
     arOpen = true;
-    arRoot.hidden = false;
+    setHidden(arRoot, false);
     if (!arSession) arSession = Ar.mountAr(arElements(), { engine: Bird, onTap: onArTap });
     drawEggArt($("rb-ar-egg"), eggSeedId);
     arPose = { lat: null, lon: null, accuracy_m: null, heading: null };
@@ -1733,8 +1755,8 @@
     if (arSession) arSession.destroy();
     nestArtCache = {};
     var notice = $("rb-ar-notice");
-    if (notice) notice.hidden = true;
-    if (arRoot) arRoot.hidden = true;
+    if (notice) setHidden(notice, true);
+    if (arRoot) setHidden(arRoot, true);
   }
 
   function arStorage() { return window.localStorage; }
@@ -1746,8 +1768,8 @@
     if (!Ar || !arRoot) return;
     var notice = $("rb-ar-notice");
     if (!arNoticeSeen() && notice) {
-      notice.hidden = false;
-      arRoot.hidden = false;
+      setHidden(notice, false);
+      setHidden(arRoot, false);
       return;
     }
     startAr();
@@ -1755,7 +1777,7 @@
 
   var arChip = $("rb-chip-ar");
   if (arChip) {
-    if (!Ar) arChip.hidden = true;
+    if (!Ar) setHidden(arChip, true);
     /* openAr runs synchronously in the click so the device prompts keep the gesture. */
     arChip.addEventListener("click", function () { if (!arOpen) openAr(); });
   }
@@ -1766,7 +1788,7 @@
     arGotIt.addEventListener("click", function () {
       markArNoticeSeen();
       var notice = $("rb-ar-notice");
-      if (notice) notice.hidden = true;
+      if (notice) setHidden(notice, true);
       startAr();
     });
   }

@@ -1853,6 +1853,16 @@ await addColumnIfMissing("contacts", "request_status", "TEXT");
 // on any crow_id/secp key change (see upsertFullContact). SCHEMA_GENERATION 3->4.
 await addColumnIfMissing("contacts", "verified", "INTEGER DEFAULT 0");
 
+// 2026-09-08 (names+profile design §4.4 / D5): what a PEER told us about
+// themselves — their own profile name and inline picture — kept apart from the
+// name/picture the user typed (display_name / avatar_url), which win on screen
+// and are never overwritten by a peer message. Additive, NO SCHEMA_GENERATION
+// bump: existing hosts get these from the runtime guard in
+// servers/sharing/peer-profile.js (ensurePeerProfileColumns, called at sharing
+// init) — the shared_items.mode precedent.
+await addColumnIfMissing("contacts", "peer_display_name", "TEXT");
+await addColumnIfMissing("contacts", "peer_avatar", "TEXT");
+
 // --- Contact Groups ---
 await initTable("contact_groups table", `
   CREATE TABLE IF NOT EXISTS contact_groups (

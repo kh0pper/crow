@@ -43,7 +43,7 @@ Manual contacts are stored locally and do not require the other person to use Cr
 
 Each contact has a profile page with:
 
-- **Display name** and avatar
+- **Display name** and picture — the ones you set, otherwise the ones the peer sent
 - **Contact details** — email, phone, notes
 - **Activity history** — shared items, messages exchanged (Crow peers only)
 - **Notes** — free-form notes you add about the contact
@@ -75,15 +75,15 @@ Use the group filter in the Contacts panel to view only contacts in a specific g
 
 ## Your profile
 
-Your own profile is what other Crow peers see when they connect with you.
+Your own profile is what other Crow peers see when they connect with you: your display name and your picture travel in the pairing handshake, and again to every contact whenever you change them. A contact who typed their own name or picture for you keeps theirs.
 
 ### Editing your profile
 
-From **Crow's Nest** > **Settings** > **Identity**, you can update:
+From **Crow's Nest** > **Contacts** > **My Profile**, you can update:
 
 - **Display name** — the name shown to your peers
-- **Avatar** — upload a profile image
-- **Bio** — a short description visible to contacts
+- **Picture** — upload an image; your browser shrinks it to a 128 px square before it is stored, so it stays small enough to travel inline with the handshake. If Ramble is installed and a bird has hatched, you can show your active bird instead.
+- **Bio** — a short description
 
 Or ask your AI:
 

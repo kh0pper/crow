@@ -12,10 +12,13 @@ import { renderContactList, renderContactProfile, renderDeleteConfirm, renderGro
 import { contactsClientJs } from "./contacts/client.js";
 import { getContacts, getContact, getContactActivity, getGroups, getMyProfile } from "./contacts/data-queries.js";
 import { handleContactAction } from "./contacts/api-handlers.js";
-import { section } from "../shared/components.js";
+import { section, escapeHtml } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { buildInviteShare, parseShortCodeResult } from "../shared/peer-invite-ui.js";
 import { csrfInput } from "../shared/csrf.js";
+// Already loaded at panel-import time via api-handlers.js's static import — a
+// dynamic import here bought nothing and hid the dependency (fix round 1, Finding 2).
+import { readActiveBird, loadBirdEngine } from "../../../sharing/profile-avatar.js";
 
 export default {
   id: "contacts",
@@ -30,6 +33,15 @@ export default {
     let peerAdd = {};
     if (req.method === "POST") {
       const result = await handleContactAction(req, db);
+      if (result?.status) {
+        // The `back` link defaults to My Profile (the only caller when this
+        // shape was first introduced) but a rejected CONTACT edit must not
+        // dump the user on their own profile page — the handler sets `back`
+        // to something sensible (the contact's own page) for that case.
+        const back = result.back || "/dashboard/contacts?view=profile";
+        const content = `<div class="contacts-empty"><p>${escapeHtml(result.text)}</p><p><a href="${escapeHtml(back)}" class="btn btn-sm btn-secondary">${t("common.back", lang)}</a></p></div>`;
+        return res.status(result.status).send(layout({ title: t("nav.contacts", lang), content }));
+      }
       if (result?.redirect) return res.redirectAfterPost(result.redirect);
       if (result?.download) {
         res.setHeader("Content-Type", "text/vcard; charset=utf-8");
@@ -89,7 +101,9 @@ export default {
     } else if (view === "profile") {
       // --- My Profile ---
       const profile = await getMyProfile(db);
-      bodyHtml = renderMyProfile(profile, lang);
+      // 2026-09-08 §5: the bird option needs a hatched bird AND a drawable engine.
+      const birdAvailable = !!(await readActiveBird(db)) && !!loadBirdEngine();
+      bodyHtml = renderMyProfile(profile, lang, { birdAvailable });
     } else if (view === "bots") {
       // --- Browse Crow Bots Directory ---
       const { getBotDirectory } = await import("./messages/data-queries.js");

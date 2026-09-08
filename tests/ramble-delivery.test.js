@@ -5,6 +5,7 @@
  */
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createMark } from "../bundles/ramble/server/marks.js";
@@ -13,13 +14,16 @@ import {
   giftPayload, tradePayload, parseTradePayload,
   resolveContact, listAudiences, resolveAudience,
   enqueueDeliveries, enqueueMark, pendingDeliveries, deleteDelivery, noteDeliveryFailure, remainingDeliveries,
-  MAX_DELIVERY_ATTEMPTS, MAX_WARMTH,
+  MAX_DELIVERY_ATTEMPTS, MAX_WARMTH, contactsByPubkey,
 } from "../bundles/ramble/server/delivery.js";
+import { AVATAR_MAX_BYTES, AVATAR_RE } from "../servers/sharing/avatar.js";
+import { contactName, contactAvatar } from "../servers/sharing/contact-display.js";
 
 const CORE_DDL = `
   CREATE TABLE IF NOT EXISTS contacts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, crow_id TEXT NOT NULL UNIQUE, display_name TEXT,
-    secp256k1_pubkey TEXT NOT NULL DEFAULT '', is_blocked INTEGER DEFAULT 0, request_status TEXT, is_bot INTEGER DEFAULT 0);
+    secp256k1_pubkey TEXT NOT NULL DEFAULT '', is_blocked INTEGER DEFAULT 0, request_status TEXT, is_bot INTEGER DEFAULT 0,
+    avatar_url TEXT, peer_display_name TEXT, peer_avatar TEXT);
   CREATE TABLE IF NOT EXISTS contact_groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_uid TEXT, room_uid TEXT);
   CREATE TABLE IF NOT EXISTS contact_group_members (
@@ -188,4 +192,40 @@ test("contacts marks never carry a world name in either direction", async () => 
   assert.equal(payload.name, undefined);
   const back = payloadToMark({ ...payload, author_name: "Kevin", name: "Kevin" }, { author: PK, eventId: "evt-n" });
   assert.equal(back.author_name, undefined, "a contact is named from the contacts table, never from the payload");
+});
+
+test("contactsByPubkey: the display rule (typed name unless a placeholder, then the peer's, then the id) and an inline picture (local first, then the peer's; a URL never)", async () => {
+  const PNG = "data:image/png;base64," + "A".repeat(32);
+  const JPG = "data:image/jpeg;base64," + "B".repeat(32);
+  const k = (ch) => ch.repeat(64);
+  await db.executeMultiple(`
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, peer_display_name, peer_avatar) VALUES ('crow:ph', 'crow:ph', '02${k("1")}', 'Kevin', '${PNG}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, avatar_url, peer_display_name, peer_avatar) VALUES ('crow:typed', 'My Friend', '02${k("2")}', 'https://example.com/me.png', 'Kevin', '${JPG}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, avatar_url, peer_avatar) VALUES ('crow:localpic', 'Pic', '02${k("3")}', '${PNG}', '${JPG}');
+    INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey) VALUES ('crow:bare', 'crow:bare', '${k("4")}');`);
+  const m = await contactsByPubkey(db);
+  assert.deepEqual(m.get(k("1")), { crow_id: "crow:ph", name: "Kevin", avatar: PNG }, "a placeholder yields to the peer's name; the peer's picture shows");
+  assert.deepEqual(m.get(k("2")), { crow_id: "crow:typed", name: "My Friend", avatar: JPG }, "a typed name wins; a URL picture falls through to the peer's");
+  assert.deepEqual(m.get(k("3")), { crow_id: "crow:localpic", name: "Pic", avatar: PNG }, "a local inline picture beats the peer's");
+  assert.deepEqual(m.get(k("4")), { crow_id: "crow:bare", name: "crow:bare", avatar: null }, "nothing known: the id, no picture");
+  assert.equal(m.get(PK)?.avatar, null, "the file's earlier seeds carry no picture");
+});
+
+test("the Ramble mirror of the display rule cannot drift from core (R1-S5): same constants, same answers", async () => {
+  const src = readFileSync(new URL("../bundles/ramble/server/delivery.js", import.meta.url), "utf8");
+  assert.ok(src.includes("const AVATAR_MAX = " + AVATAR_MAX_BYTES + ";"), "the cap is mirrored verbatim");
+  assert.ok(src.includes(AVATAR_RE.source), "the regex is mirrored verbatim");
+  assert.equal(AVATAR_RE.flags, "", "the mirror is a flagless literal; a flag on core's regex would drift (R2-F4)");
+  const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE is_blocked = 0 AND request_status IS NULL", args: [] });
+  const m = await contactsByPubkey(db);
+  let checked = 0;
+  for (const r of rows) {
+    const key = String(r.secp256k1_pubkey || "").slice(-64);
+    const got = m.get(key);
+    if (!got || got.crow_id !== r.crow_id) continue; // a shared key names the older row
+    assert.equal(got.name, contactName(r), r.crow_id);
+    assert.equal(got.avatar, contactAvatar(r), r.crow_id);
+    checked++;
+  }
+  assert.ok(checked >= 4, "the round-trip covered the seeded rows");
 });
