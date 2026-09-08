@@ -175,3 +175,16 @@ test("a private mark synced in from the user's OWN other instance (origin='sync'
   assert.ok(noFilterList.find((r) => r.mark_id === "sync-private-1"), "synced-from-own-instance private mark must appear in the owner's overview");
   assert.ok(!noFilterList.find((r) => r.mark_id === "wire-private-1"), "a private mark tagged origin=remote must never appear in the owner's overview");
 });
+
+test("insertRemoteMark stores author_name and a locked teaser keeps it", async () => {
+  const result = await insertRemoteMark(db, {
+    mark_id: "named-remote-1", author: "pk9", kind: "mark", anchor_kind: "geo", geohash: "9v6m2c",
+    lat: 30.2672, lon: -97.7431, visibility: "public", reveal: "locked", content_text: "named",
+    created_at: Date.now(), nostr_event_id: "ev-named-1", author_name: "  Kevin\u202E ",
+  });
+  assert.equal(result.inserted, true);
+  assert.equal(result.row.author_name, "Kevin", "sanitized at the store too");
+  const listed = (await listMarks(db, { visibility: "public" })).find((r) => r.mark_id === "named-remote-1");
+  assert.equal(listed.author_name, "Kevin", "the teaser allowlist carries the name");
+  assert.equal(listed.content_text, undefined, "still a teaser");
+});
