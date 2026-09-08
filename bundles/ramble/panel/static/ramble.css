@@ -843,6 +843,15 @@
 #ramble .rb-here-dot { fill: var(--rb-accent-2); stroke: var(--rb-surface); }
 #ramble .rb-here-ring { fill: var(--rb-accent-2); }
 
+/* --------------------------------------------------------------- map zones */
+/* Unlocked ground is punched out of the mask: a clear map is what walking
+   buys you. The frontier is a hole too, then dimmed on top, so it reads as
+   previewed rather than owned. */
+#ramble .rb-fog { fill: var(--rb-surface-2); fill-opacity: 0.93; }
+#ramble .rb-frontier-cell { fill: var(--rb-line); fill-opacity: 0.3; }
+#ramble .rb-beacon { stroke: var(--rb-line); fill: var(--rb-accent-2); opacity: 0.7; }
+#ramble .rb-beacon-nest { fill: var(--rb-accent); }
+
 /* ---------------------------------------------- phase 5: near labels + art */
 
 /* The egg art is APPENDED last (the painter addresses title/sub by index) and

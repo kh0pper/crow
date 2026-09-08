@@ -741,6 +741,28 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // itself everywhere in this file, so no direct assignment survives.
   assert.ok(body.includes("function setHidden(el, on)"), "the attribute-toggling helper is defined");
   assert.deepEqual(body.match(/\.hidden\s*=(?!=)/g) || [], [], "no .hidden = assignment remains anywhere in the file");
+
+  // Phase 1 of the reward economy (spec 2026-09-08 §2.1): the map masks
+  // everywhere the user has not been. Leaflet layer calls are not markup sinks.
+  assert.ok(body.includes("function refreshZones()"));
+  assert.ok(body.includes("function drawZones("));
+  assert.ok(body.includes("function drawBeacon("));
+  assert.ok(body.includes('"/api/ramble/zones?bbox="'), "zones are fetched by bbox like nests");
+  assert.ok(body.includes('map.createPane("rb-fog")'), "fog has its own pane");
+  assert.ok(body.includes("rb-fog\").style.zIndex = 350"), "the mask sits under the overlay pane so it cannot bury marks");
+  assert.ok(body.includes("L.polygon("), "fog is a real mask, not a dim band");
+  assert.ok(body.includes("fogHoles"), "the unlocked and frontier cells are punched out of it");
+  assert.ok(body.includes("if (mark.beacon)"), "a beacon is drawn differently from a full mark");
+  // The guards refreshNests already has: a zones fetch at world zoom-out would
+  // 400 on every settle and leave stale rectangles pinned to ground you left.
+  assert.ok(body.includes("MIN_ZONE_ZOOM"), "zones are not fetched below a zoom floor");
+
+  // Pin the MECHANISM, not the identifier: this is the phase's load-bearing
+  // guard, and `includes("lastPostedFix")` would pass on a variable that is
+  // declared and never used.
+  assert.ok(body.includes("haversineMeters(lastPostedFix, lastFix) > 75"),
+    "walking posts the area on distance, so it works with the map not following");
+  assert.ok(body.includes("lastPostedFix = {"), "and the anchor advances when it posts");
 });
 
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
@@ -781,6 +803,10 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.match(body, /\.rb-ar-egg-art \{[^}]*order: -1/);
   assert.match(body, /prefers-reduced-motion[\s\S]*\.rb-nest-pin\.rb-nest-busy \{ box-shadow/);
   assert.ok(body.includes("#ramble .rb-pop-avatar {"), "a contact's picture on the pin has its rule");
+
+  assert.ok(body.includes("#ramble .rb-fog {"), "the fog mask has a rule");
+  assert.ok(body.includes("#ramble .rb-frontier-cell {"), "the frontier is dimmed, not hidden");
+  assert.ok(body.includes("#ramble .rb-beacon {"), "beacons have a rule");
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {
