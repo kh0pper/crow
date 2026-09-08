@@ -116,10 +116,13 @@
   var map = null;
   var markerLayer = null;
   var nestLayer = null;
+  var zoneLayer = null;
+  var MIN_ZONE_ZOOM = 15;
   var hereLayer = null, hereDot = null, hereRing = null;
   var following = false, mapWatch = null, lastPanAt = null;
   var currentCells = [];
   var lastFix = null;      /* the most recent REAL geolocation fix */
+  var lastPostedFix = null;
   var lastMarks = [];
 
   if (mapEl && typeof L !== "undefined") {
@@ -143,6 +146,15 @@
     map.createPane("rb-here");
     map.getPane("rb-here").style.zIndex = 650;
     hereLayer = L.layerGroup().addTo(map);
+
+    /* 350: between Leaflet's tile pane (200) and its overlay pane (400).
+     * NOT 450 — markerLayer's locked-mark teasers are plain circleMarkers with
+     * no pane, so they render in the overlay pane at 400 and a 450 mask would
+     * bury them. Those include the user's OWN and their contacts' locked marks
+     * in fogged ground, which D4 says must be unaffected in every zone. */
+    map.createPane("rb-fog");
+    map.getPane("rb-fog").style.zIndex = 350;
+    zoneLayer = L.layerGroup().addTo(map);
     map.on("dragstart", function () { setFollowing(false); });
 
     /* The Android shell wraps the WebView in a SwipeRefreshLayout for
@@ -170,7 +182,7 @@
     var areaTimer = null;
     map.on("moveend", function () {
       if (areaTimer) clearTimeout(areaTimer);
-      areaTimer = setTimeout(function () { publishArea(); refreshNests(); }, 500);
+      areaTimer = setTimeout(function () { publishArea(); refreshNests(); refreshZones(); }, 500);
     });
   }
 
@@ -214,6 +226,14 @@
     mapWatch = navigator.geolocation.watchPosition(function (pos) {
       lastFix = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy_m: pos.coords.accuracy };
       paintHere(lastFix);
+      /* The map only posts on moveend, and one manual pan turns following off
+       * forever, so without this a walk unlocks nothing. Distance-driven and
+       * independent of the map: 75 m is the unlock radius, so this cannot skip
+       * a cell the user actually crossed. */
+      if (!lastPostedFix || haversineMeters(lastPostedFix, lastFix) > 75) {
+        lastPostedFix = { lat: lastFix.lat, lon: lastFix.lon };
+        publishArea();
+      }
       if (arOpen) {
         arPose.lat = lastFix.lat; arPose.lon = lastFix.lon; arPose.accuracy_m = lastFix.accuracy_m;
         maybeRefreshAround();
@@ -449,10 +469,15 @@
   }
 
   function drawMarks(marks) {
-    lastMarks = marks;
+    /* drawNearby renders a list row per mark and paintPerchSay counts
+     * lastMarks: a beacon has no content_text, mark_id or created_at, so both
+     * must work from the full marks only, never the raw response. */
+    var full = marks.filter(function (m) { return !m.beacon; });
+    lastMarks = full;
     if (markerLayer) markerLayer.clearLayers();
     marks.forEach(function (mark) {
       if (!markerLayer) return;
+      if (mark.beacon) { drawBeacon(mark); return; }   /* forEach callback: return, never continue */
       if (typeof mark.lat === "number" && typeof mark.lon === "number") {
         /* An open mark publishes its real anchor: a normal pin. */
         var marker = L.marker([mark.lat, mark.lon], { title: markLabel(mark) });
@@ -475,8 +500,17 @@
         blob.addTo(markerLayer);
       }
     });
-    drawNearby(marks);
+    drawNearby(full);
     paintPerchSay();
+  }
+
+  /* A frontier beacon: something is there, but not what. The server already
+   * stripped every detail; this only says which kind it is. */
+  function drawBeacon(mark) {
+    var cls = mark.kind === "nest" ? "rb-beacon rb-beacon-nest" : "rb-beacon";
+    L.circleMarker([mark.lat, mark.lon], {
+      className: cls, radius: 7, weight: 2, fillOpacity: 0.5, interactive: false,
+    }).addTo(markerLayer);
   }
 
   /** The list under the map mirrors the pins, newest first, capped. */
@@ -1139,12 +1173,81 @@
     return box;
   }
 
+  /* The map's three zones (spec 2026-09-08 section 2.1). The server owns every
+   * geohash sum and sends footprints; the client punches them out of a mask. */
+  function refreshZones() {
+    if (!map || !zoneLayer) return Promise.resolve();
+    /* The same two guards refreshNests carries. Without the zoom floor the
+     * route 400s ("bbox too large") on every settle at low zoom, and the
+     * .catch below would leave the last mask pinned over ground the user has
+     * panned away from. */
+    var root = $("ramble");
+    if (root && root.getAttribute("data-view") !== "world") return Promise.resolve();
+    /* 15, matching refreshNests, NOT 13: /zones inherits MAX_NEST_CELLS via
+     * cellsInBbox, and a 1100x700 map at zoom 13 covers ~10,700 cells, so the
+     * route would 400 on every settle — the very failure this guard exists to
+     * prevent. Measured during review. */
+    if (map.getZoom() < MIN_ZONE_ZOOM) { zoneLayer.clearLayers(); return Promise.resolve(); }
+    var b = map.getBounds();
+    var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(",");
+    return jsonFetch("/api/ramble/zones?bbox=" + encodeURIComponent(bbox))
+      .then(drawZones)
+      .catch(function () { /* a failed fetch leaves the last mask up */ });
+  }
+
+  /* One polygon: the padded viewport as the outer ring, every unlocked and
+   * frontier cell as a hole. Leaflet fills even-odd, so the holes are clear
+   * and everything else is fogged. Frontier cells get a dim square on top so
+   * they read as previewed rather than owned. */
+  function drawZones(out) {
+    if (!out || !zoneLayer || !map) return;
+    zoneLayer.clearLayers();
+    var b = map.getBounds().pad(0.5);
+    var outer = [
+      [b.getSouth(), b.getWest()], [b.getSouth(), b.getEast()],
+      [b.getNorth(), b.getEast()], [b.getNorth(), b.getWest()]
+    ];
+    var fogHoles = [];
+    addHoles(fogHoles, out.unlocked);
+    addHoles(fogHoles, out.frontier);
+    L.polygon([outer].concat(fogHoles), {
+      pane: "rb-fog", className: "rb-fog", stroke: false, interactive: false
+    }).addTo(zoneLayer);
+    paintCells(out.frontier || [], "rb-frontier-cell");
+  }
+
+  function addHoles(holes, cells) {
+    for (var i = 0; i < (cells || []).length; i++) {
+      var c = cells[i];
+      if (!cellUsable(c)) continue;
+      holes.push([[c.south, c.west], [c.south, c.east], [c.north, c.east], [c.north, c.west]]);
+    }
+  }
+
+  /* One rectangle per cell. The footprint comes from the server's own list, so
+   * the client never needs a geohash encoder. */
+  function paintCells(cells, className) {
+    for (var i = 0; i < cells.length; i++) {
+      var box = cellBounds(cells[i]);
+      if (!box) continue;
+      L.rectangle(box, { pane: "rb-fog", className: className, stroke: false, interactive: false }).addTo(zoneLayer);
+    }
+  }
+
+  function cellUsable(c) {
+    return !!c && isFinite(c.south) && isFinite(c.west) && isFinite(c.north) && isFinite(c.east);
+  }
+  function cellBounds(c) {
+    return cellUsable(c) ? [[c.south, c.west], [c.north, c.east]] : null;
+  }
+
   function drawNests(list) {
     lastNests = list;
     if (!nestLayer) return;
     nestLayer.clearLayers();
     nestMarkers = {};
     list.forEach(function (nest) {
+      if (nest.beacon) { drawBeacon(nest); return; }
       var icon = L.divIcon({
         className: "rb-nest-pin" + (nest.claimed ? " is-claimed" : ""),
         html: nestEggHtml(nest.seed),
@@ -1571,7 +1674,18 @@
     arFetchAt = { lat: arPose.lat, lon: arPose.lon, t: Date.now() };
     /* toFixed(6) is ~0.1 m: enough for a label, and never a 400 from a long double. */
     return jsonFetch("/api/ramble/around?lat=" + encodeURIComponent(arPose.lat.toFixed(6)) + "&lon=" + encodeURIComponent(arPose.lon.toFixed(6)))
-      .then(function (out) { arAnchors = toArAnchors(out); scheduleArRender(); })
+      .then(function (out) {
+        /* toArAnchors's mark loop builds id: "m:" + mark.mark_id and its nest
+         * loop builds id: "n:" + nest.cell plus art: nestArt(nest) — a beacon
+         * has none of mark_id, cell or seed, so both arrays are filtered here,
+         * before toArAnchors ever sees a beacon. */
+        var filtered = {
+          marks: ((out && out.marks) || []).filter(function (m) { return !m.beacon; }),
+          nests: ((out && out.nests) || []).filter(function (n) { return !n.beacon; }),
+        };
+        arAnchors = toArAnchors(filtered);
+        scheduleArRender();
+      })
       .catch(function () { arFetchAt = null; /* keep the last anchors; the pose still moves them */ });
   }
 
@@ -1841,7 +1955,8 @@
       setFollowing(true);
     }).catch(function () {
       setText($("rb-perch-say"), "Pan the map to pick where you are listening.");
-    }).then(function () { publishArea(); refreshNests(); });
+    }).then(function () { publishArea(); refreshNests(); refreshZones(); });
     setInterval(refreshNests, 10 * 60e3);
+    setInterval(refreshZones, 10 * 60e3);
   }
 })();
