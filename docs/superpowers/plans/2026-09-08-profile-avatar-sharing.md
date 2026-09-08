@@ -617,6 +617,24 @@ test("crow_accept_invite includes a valid avatar in the acceptance and omits a l
     assert.ok(!("avatar" in payload), "a URL is not an avatar → key omitted");
   } finally { cleanup(); }
 });
+
+test("handshake_complete peer fields are dropped for a blocked contact and for a pending request row (R1-C1)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, is_blocked) VALUES ('crow:blk', ?, ?, 'Blocked', 1)", args: ["d".repeat(64), PK] });
+    await handleHandshakeComplete(db, [], PK_XONLY, "Renamed", PNG_AV);
+    let r = await peerOf(db, "crow:blk");
+    assert.equal(r.peer_display_name, null, "a blocked contact cannot rename itself");
+    assert.equal(r.peer_avatar, null);
+    assert.equal(r.display_name, "Blocked");
+    const req = "req:" + "e".repeat(64);
+    await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, request_status) VALUES (?, ?, ?, NULL, 'pending')", args: [req, "d".repeat(64), OTHER_PK] });
+    await handleHandshakeComplete(db, [], OTHER_PK.slice(-64), "Stranger", PNG_AV);
+    r = await peerOf(db, req);
+    assert.equal(r.peer_avatar, null, "an unpaired request row never stores 32 KB");
+    assert.equal(r.peer_display_name, null);
+  } finally { cleanup(); }
+});
 ```
 
 - [ ] **Step 2: Run** `node scripts/run-suite.mjs tests/peer-profile.test.js tests/handshake-display-name.test.js` → the new tests FAIL.
@@ -658,6 +676,16 @@ export async function ensurePeerProfileColumns(db) {
     try { await ensureColumn(db, "contacts", col, "TEXT"); }
     catch (err) { try { console.warn(`[sharing] ensureColumn contacts.${col}:`, err?.message); } catch {} }
   }
+  // R1-S3: on an existing host this guard is the ONLY path to the columns
+  // (no generation bump), and instance-sync caches the column list once per
+  // process — so a swallowed failure here must at least be loud.
+  try {
+    const { rows } = await db.execute({ sql: "PRAGMA table_info(contacts)", args: [] });
+    const have = new Set((rows || []).map((r) => r.name));
+    if (!have.has("peer_display_name") || !have.has("peer_avatar")) {
+      console.error("[sharing] contacts.peer_* columns MISSING after ensureColumn — peer profiles are disabled for this process; run `npm run init-db`");
+    }
+  } catch { /* an unreadable schema was already warned about above */ }
 }
 
 /**
@@ -816,9 +844,14 @@ export function buildHandshakeComplete(eventIds, displayName, avatar) {
 4. `handleHandshakeComplete(db, eventIds, senderPubkey, displayName, avatar)`: after the existing placeholder `if (name && isPlaceholderName(contact.display_name)) { … }` block (still inside the outer try) add
 
 ```js
-    // 2026-09-08 §4.2 (D5): the inviter's own name/picture into the peer fields.
-    try { await applyPeerProfile(db, contact.id, { displayName, avatar }); }
-    catch (err) { try { console.warn("[sharing] handshake_complete peer profile failed:", err?.message); } catch {} }
+    // 2026-09-08 §4.2 / §7 (Review R1-C1): the peer fields are CONTACT-ONLY —
+    // the same gate as the profile message (peer-profile.js). This handler is
+    // reached from the broad incoming subscription, so a blocked contact or an
+    // unpaired `req:` row could otherwise write 32 KB here with one envelope.
+    if ((contact.request_status === null || contact.request_status === undefined) && Number(contact.is_blocked) !== 1) {
+      try { await applyPeerProfile(db, contact.id, { displayName, avatar }); }
+      catch (err) { try { console.warn("[sharing] handshake_complete peer profile failed:", err?.message); } catch {} }
+    }
 ```
 5. The dispatcher in `wireNostrReceive`: the `HANDSHAKE_COMPLETE_SUBTYPE` branch passes `payload.avatar`, and the profile branch follows it:
 
@@ -978,7 +1011,7 @@ test("apply door: an entry WITHOUT the peer keys (an older sender) leaves the st
 
 `tests/profile-sync-allowlist.test.js`: in the first test, the loop list and the `assert.deepEqual(PROFILE_SYNC_KEYS, […])` both become `["profile_display_name", "profile_avatar_url", "profile_bio", "profile_avatar_source"]`.
 
-- [ ] **Step 2: Run** `node scripts/run-suite.mjs tests/contacts-peer-wire.test.js tests/profile-sync-allowlist.test.js` → FAIL (hostile peer values land raw; allowlist pin).
+- [ ] **Step 2: Run** `node scripts/run-suite.mjs tests/contacts-peer-wire.test.js tests/profile-sync-allowlist.test.js` → 2 FAIL: the apply-door sanitize/validate test (hostile peer values land raw) and the allowlist pin. The emit-door test and the "older sender" test ALREADY PASS here (the columns exist since Task 1 and `_applyContact`'s PRAGMA whitelist copies any live column) — they are regression pins for the wire contract, not gates for Task 3's code (Review R1-S4).
 
 - [ ] **Step 3: Implement**
 
@@ -1179,15 +1212,21 @@ test("installBirdAvatarHooks: a hatch or an activation on the bus refreshes; ins
     const emitter = new EventEmitter();
     assert.equal(installBirdAvatarHooks(mgrsWith(db, sent), { emitter }), true);
     assert.equal(installBirdAvatarHooks(mgrsWith(db, sent), { emitter }), false, "second install is a no-op");
-    emitter.emit("ramble:hatched", { egg_id: "b1", species: "penguin", seed: 11 });
     const first = renderBirdAvatar({ species: "penguin", seed: 11 });
     await settle(db, "profile_avatar_url", first);
-    assert.equal(await setting(db, "profile_avatar_url"), first);
+    assert.equal(await setting(db, "profile_avatar_url"), first, "installing repaints once (a bird that changed while we were down)");
+    assert.equal(sent.length, 1);
     await plantBird(db, { eggId: "b2", species: "grackle", seed: 12 });
-    emitter.emit("ramble:bird-activated", { egg_id: "b2" });
+    emitter.emit("ramble:hatched", { egg_id: "b2", species: "grackle", seed: 12 });
     const second = renderBirdAvatar({ species: "grackle", seed: 12 });
     await settle(db, "profile_avatar_url", second);
-    assert.equal(await setting(db, "profile_avatar_url"), second);
+    assert.equal(await setting(db, "profile_avatar_url"), second, "a hatch repaints");
+    await plantBird(db, { eggId: "b3", species: "magpie", seed: 13 });
+    emitter.emit("ramble:bird-activated", { egg_id: "b3" });
+    const third = renderBirdAvatar({ species: "magpie", seed: 13 });
+    await settle(db, "profile_avatar_url", third);
+    assert.equal(await setting(db, "profile_avatar_url"), third, "an activation repaints");
+    assert.equal(sent.length, 3, "one broadcast per real change");
     assert.equal(emitter.listenerCount("ramble:hatched"), 1);
   } finally { __resetBirdAvatarHooksForTest(); cleanup(); }
 });
@@ -1345,6 +1384,9 @@ export function installBirdAvatarHooks(managers, { emitter = bus } = {}) {
   const run = () => { refreshBirdAvatar(managers?.db, managers).catch(() => {}); };
   emitter.on("ramble:hatched", run);
   emitter.on("ramble:bird-activated", run);
+  // R1-Q2: the bird may have changed while this gateway was down (or in the
+  // stdio MCP process, which has no bus to us) — one idempotent repaint at boot.
+  run();
   return true;
 }
 export function __resetBirdAvatarHooksForTest() { _hooksInstalled = false; }
@@ -1517,6 +1559,20 @@ test("save_profile: a valid data URI is stored globally; junk is a 400; clear em
     const o = await db.execute("SELECT COUNT(*) AS c FROM dashboard_settings_overrides WHERE key LIKE 'profile_%'");
     assert.equal(Number(o.rows[0].c), 0, "no stranded overrides (D2)");
     assert.equal((await save(db, { display_name: "Kevin" }, null)).redirect, "/dashboard/contacts?view=profile", "no managers: saves, no broadcast, no throw");
+  } finally { cleanup(); }
+});
+
+test("the panel handler renders a 400 inside the dashboard layout, not as a bare string (R1-S2)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    const { default: panel } = await import("../servers/gateway/dashboard/panels/contacts.js");
+    const res = { code: 200, body: null, status(c) { this.code = c; return this; }, send(b) { this.body = b; return this; }, redirectAfterPost() { throw new Error("unexpected redirect"); } };
+    await panel.handler({ method: "POST", body: { action: "save_profile", avatar: "https://example.com/me.png" }, query: {} }, res, {
+      db, lang: "en", layout: ({ title, content }) => "<html><title>" + title + "</title>" + content + "</html>",
+    });
+    assert.equal(res.code, 400);
+    assert.ok(res.body.startsWith("<html>"), "wrapped by the layout");
+    assert.ok(res.body.includes("data:image/") && res.body.includes('href="/dashboard/contacts?view=profile"'));
   } finally { cleanup(); }
 });
 
@@ -1888,7 +1944,15 @@ export function renderMyProfile(profile, lang, { birdAvailable = false } = {}) {
 ```
 
 `servers/gateway/dashboard/panels/contacts.js`:
-- after `const result = await handleContactAction(req, db);` add `if (result?.status) return res.status(result.status).send(result.text);`
+- imports: `import { section, escapeHtml } from "../shared/components.js";`
+- after `const result = await handleContactAction(req, db);` add (R1-S2: Turbo Drive renders a non-redirect 4xx as page content, so the message must arrive inside the dashboard chrome, never as a bare string):
+
+```js
+      if (result?.status) {
+        const content = `<div class="contacts-empty"><p>${escapeHtml(result.text)}</p><p><a href="/dashboard/contacts?view=profile" class="btn btn-sm btn-secondary">${t("common.back", lang)}</a></p></div>`;
+        return res.status(result.status).send(layout({ title: t("nav.contacts", lang), content }));
+      }
+```
 - the `view === "profile"` branch becomes
 
 ```js
@@ -1985,9 +2049,27 @@ test("contactsByPubkey: the display rule (typed name unless a placeholder, then 
   assert.deepEqual(m.get(k("4")), { crow_id: "crow:bare", name: "crow:bare", avatar: null }, "nothing known: the id, no picture");
   assert.equal(m.get(PK)?.avatar, null, "the file's earlier seeds carry no picture");
 });
+
+test("the Ramble mirror of the display rule cannot drift from core (R1-S5): same constants, same answers", async () => {
+  const src = readFileSync(new URL("../bundles/ramble/server/delivery.js", import.meta.url), "utf8");
+  assert.ok(src.includes("const AVATAR_MAX = " + AVATAR_MAX_BYTES + ";"), "the cap is mirrored verbatim");
+  assert.ok(src.includes(AVATAR_RE.source), "the regex is mirrored verbatim");
+  const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE is_blocked = 0 AND request_status IS NULL", args: [] });
+  const m = await contactsByPubkey(db);
+  let checked = 0;
+  for (const r of rows) {
+    const key = String(r.secp256k1_pubkey || "").slice(-64);
+    const got = m.get(key);
+    if (!got || got.crow_id !== r.crow_id) continue; // a shared key names the older row
+    assert.equal(got.name, contactName(r), r.crow_id);
+    assert.equal(got.avatar, contactAvatar(r), r.crow_id);
+    checked++;
+  }
+  assert.ok(checked >= 4, "the round-trip covered the seeded rows");
+});
 ```
 
-(`db` and `PK` are file-scope; the earlier seeds share `02${PK}`, so `m.get(PK)` resolves to the first of them.)
+(`db` and `PK` are file-scope; the earlier seeds share `02${PK}`, so `m.get(PK)` resolves to the first of them. The drift test needs three more imports at the top of the file: `import { readFileSync } from "node:fs";`, `import { AVATAR_MAX_BYTES, AVATAR_RE } from "../servers/sharing/avatar.js";`, `import { contactName, contactAvatar } from "../servers/sharing/contact-display.js";`.)
 
 `tests/ramble-panel.test.js`:
 - the scratch `contacts` DDL gains `avatar_url TEXT, peer_display_name TEXT, peer_avatar TEXT`; the `crow:pal` INSERT becomes `INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, peer_avatar) VALUES ('crow:pal', 'Pal', '02${PK}', 'data:image/png;base64,${"A".repeat(32)}');`
@@ -2095,14 +2177,28 @@ and in `popupFor` the line `var portrait = birdFor(mark);` becomes `var portrait
 
 Bump: `sed -i 's/"version": "0.7.0"/"version": "0.8.0"/' bundles/ramble/manifest.json bundles/ramble/package.json && npm run build-registry`.
 
-- [ ] **Step 4: Run** `node scripts/run-suite.mjs tests/ramble-delivery.test.js tests/ramble-panel.test.js tests/ramble-tools.test.js tests/ramble-labels.test.js` → PASS (sinks still 2, backticks 0 in `static/ramble.js`; the docs heading-parity test still green). Then the FULL suite in the foreground (`node scripts/run-suite.mjs 2>&1 | tail -12`; expect pass = total, fail 0: Plan A's 4197 + ~35 new — avatar 2, contact-display 3, peer-columns 1, peer-profile 7, handshake +5, peer-wire 3, bird 5, form 5, peer-display 3, delivery +1 — report the actual), `node scripts/check-port-allocation.js`, `npm run build-registry -- --check`.
+- [ ] **Step 4: Run** `node scripts/run-suite.mjs tests/ramble-delivery.test.js tests/ramble-panel.test.js tests/ramble-tools.test.js tests/ramble-labels.test.js` → PASS (sinks still 2, backticks 0 in `static/ramble.js`; the docs heading-parity test still green). Then the FULL suite in the foreground (`node scripts/run-suite.mjs 2>&1 | tail -12`; expect pass = total, fail 0: Plan A's 4197 + 38 new = 4235 — avatar 2, contact-display 3, peer-columns 1, peer-profile 7, handshake +6, peer-wire 3, bird 5, form 6, peer-display 3, delivery +2 — report the actual; Review round 1 measured 4232 before the three folded tests), `node scripts/check-port-allocation.js`, `npm run build-registry -- --check`.
 - [ ] **Step 5: Commit** — `git commit bundles/ramble/server/delivery.js bundles/ramble/panel/routes.js bundles/ramble/panel/static/ramble.js bundles/ramble/panel/static/ramble.css bundles/ramble/panel/ramble.js docs/guide/ramble.md docs/es/guide/ramble.md bundles/ramble/manifest.json bundles/ramble/package.json registry/add-ons.json tests/ramble-delivery.test.js tests/ramble-panel.test.js -m "ramble 0.8.0: a contact's profile picture on their pin; the sheet says Crow name; docs en/es; registry"`
-- [ ] **Step 6 (controller):** the Task 1 Step 6 dry-run result is in hand; push, PR, check-runs, merge, `CROW-SCHEDULE.md`, three-gateway restart, the journal lines, then read-only verification: `PRAGMA table_info(contacts)` on each live db shows the two peer columns (grackle: `grackle "sqlite3 ~/.crow/data/crow.db 'PRAGMA table_info(contacts)' | grep peer_"`). Cross-version note: an UNREFRESHED 0.7.0 bundle copy beside the new core still names contacts (its `contactsByPubkey` reads `display_name`; `contact_avatar` simply absent) and the new core's `loadBirdEngine` works against it (0.2.0-era exports) — no ordering hazard; the refreshed 0.8.0 copy beside an OLD core (impossible on the three lab gateways: the copy refreshes at the same boot) would only lack `contact_avatar` on pins. Live acceptance (Kevin, later): on grackle set a picture in Contacts → My Profile, confirm the crow primary's contact row for grackle's identity gains `peer_avatar` (read-only SELECT on `~/.crow/data/crow.db`) and grackle's mark pin on crow shows it; switch the source to the bird and confirm the swap.
+- [ ] **Step 6 (controller):** the Task 1 Step 6 dry-run result is in hand; push, PR, check-runs, merge, `CROW-SCHEDULE.md`, three-gateway restart, the journal lines (only grackle has an INSTALLED bundle copy, so only grackle's journal shows `refreshed ramble 0.7.0 -> 0.8.0`; crow primary and r4 run the repo copy and show `[ramble] transport started` / routes mounted / 15 tools only — Review R1-M), then read-only verification: `PRAGMA table_info(contacts)` on each live db shows the two peer columns (grackle: `grackle "sqlite3 ~/.crow/data/crow.db 'PRAGMA table_info(contacts)' | grep peer_"`). Cross-version note: an UNREFRESHED 0.7.0 bundle copy beside the new core still names contacts (its `contactsByPubkey` reads `display_name`; `contact_avatar` simply absent) and the new core's `loadBirdEngine` works against it (0.2.0-era exports) — no ordering hazard; the refreshed 0.8.0 copy beside an OLD core (impossible on the three lab gateways: the copy refreshes at the same boot) would only lack `contact_avatar` on pins. Live acceptance (Kevin, later): on grackle set a picture in Contacts → My Profile, confirm the crow primary's contact row for grackle's identity gains `peer_avatar` (read-only SELECT on `~/.crow/data/crow.db`) and grackle's mark pin on crow shows it; switch the source to the bird and confirm the swap.
 
 ## Self-review notes
 - **Spec coverage.** §4.1 storage/form/validation: Tasks 1, 3, 5. §4.2 handshake both ways + peer fields + placeholder rule kept: Task 2. §4.3 profile message, `sendControl` per full contact, receiver contact-only, sync emit: Task 2. §4.4 columns, dry-run, both sync doors, `EXCLUDED_COLUMNS` unchanged: Tasks 1, 3. §4.5 display rule + Ramble `contact_avatar` + the 24 px `createElement` img: Tasks 1, 5, 6. §4.6 docs: Task 5 (contacts) + Task 6 (the Ramble sentence). §5 bird source, `activateBird` + first-hatch refresh, fallback to picture: Task 4 (+ Task 5 for the save). §6 `save_profile` accepts `avatar` + `avatar_source`; `GET …/profile` "plus avatar_source" = `getMyProfile` (Task 3). §7 bounds: every input bounded (Tasks 1, 5). §8 Plan B test list: validator (Task 1), handshake both ways incl. a bad one (Task 2), profile round-trip through the real ladder from a contact / a stranger / a blocked contact (Task 2), columns through both doors (Task 3), deterministic SVG under the cap (Task 4), the form with the source switch only with a bird (Task 5), Ramble `contact_avatar` (Task 6), the dry-run (Task 1 Step 6), docs parity (Tasks 5, 6).
-- **Deviations from the spec text, recorded for approval:** (a) the bird option is decided SERVER-SIDE (`readActiveBird` + `loadBirdEngine` in the panel handler) instead of the client asking `GET /api/ramble/pet` — same information, no client fetch, testable; (b) `display_name || peer_display_name || crow_id` is applied with the existing placeholder rule (a `crow:`/`req:` display_name counts as empty), otherwise a contact created before their name arrived would never show the peer name; (c) the display rule's scope is the Contacts panel, the Messages list, `crow_list_contacts` and Ramble — the remaining `display_name || crow_id` sites (notification titles, rooms/bots admin text, share inbox, MCP tool text elsewhere) are a follow-up, not silently widened; (d) the profile envelope uses the dispatcher's existing `{ type, version, subtype, payload }` shape; (e) the bird refresh listens on the in-process bus (`ramble:hatched` already exists; `ramble:bird-activated` is new) instead of the bundle importing a core hook — no new cross-import in either direction; a hatch in the stdio MCP process does not refresh until the next gateway-side event; (f) `contactAvatar` skips a legacy `https:` `avatar_url` in favour of the peer's inline picture (a URL cannot render under the dashboard CSP anyway).
+- **Deviations from the spec text, recorded for approval:** (a) the bird option is decided SERVER-SIDE (`readActiveBird` + `loadBirdEngine` in the panel handler) instead of the client asking `GET /api/ramble/pet` — same information, no client fetch, testable; (b) `display_name || peer_display_name || crow_id` is applied with the existing placeholder rule (a `crow:`/`req:` display_name counts as empty), otherwise a contact created before their name arrived would never show the peer name; (c) the display rule's scope is the Contacts panel, the Messages list, `crow_list_contacts` and Ramble — the remaining `display_name || crow_id` sites (notification titles, rooms/bots admin text, share inbox, MCP tool text elsewhere) are a follow-up, not silently widened; (d) the profile envelope uses the dispatcher's existing `{ type, version, subtype, payload }` shape; (e) the bird refresh listens on the in-process bus (`ramble:hatched` already exists; `ramble:bird-activated` is new) instead of the bundle importing a core hook — no new cross-import in either direction; a hatch in the stdio MCP process does not refresh until the next gateway-side event; (f) `contactAvatar` skips a legacy `https:` `avatar_url` in favour of the peer's inline picture (a URL cannot render under the dashboard CSP anyway); (g) spec §6 names a `GET /dashboard/contacts/profile` route "unchanged in shape plus avatar_source" — no such route exists in the codebase (the reader is `getMyProfile`, which gains the key; nothing is added); (h) `profile_avatar_source` syncs as a user-level key but only a Ramble-bearing instance renders the radios or runs the refresh hooks — on a Ramble-less sibling a `bird` source is invisible and frozen until a Ramble instance saves again (Review R1-Q3).
 - **Placeholder scan:** none (every step carries code; every test is written out).
 - **Type consistency:** `applyPeerProfile(db, contactId, { displayName, avatar })` ↔ boot.js call sites ↔ `handleProfileMessage`; `buildHandshakeComplete(ids, name, avatar)` ↔ `ackHandshake`; `handleHandshakeComplete(db, ids, pk, displayName, avatar)` ↔ the dispatcher; `contactsByPubkey` value shape `{ crow_id, name, avatar }` ↔ `annotateMarks` ↔ `server.js` (reads `c.name` only — unchanged); `getMyProfile().avatar_source` ↔ `renderMyProfile` ↔ `save_profile` before/after; `renderBirdAvatar` ↔ `renderActiveBirdAvatar` ↔ the form test's expected URI; `{ status, text }` ↔ `contacts.js`.
-- **Sizes on the wire (for the reviewers):** a 128 px JPEG at 0.82 is ~4–10 KB → ~6–14 KB as base64; the bird SVG ~3–4 KB; the 32768-char cap is the ceiling. A profile DM of ~33 KB plaintext is ~46 KB as a NIP-44 event (under the 64 KB event size most relays, incl. strfry's default, accept); the retry-queue row for an `invite_accepted` grows the same way.
-- **Open questions for Kevin (do not block the build):** Q1 stdio-MCP hatches not refreshing the bird avatar until the next gateway-side event — acceptable? Q2 the follow-up list in (c) — a separate small PR after Plan B, or fold into models plan 2's tail? Q3 the contact editor keeps its `Avatar URL` text field (a local override; a URL cannot render, an inline data URI pasted there does) — leave as is, or turn it into the same file input later?
+- **Sizes on the wire (measured in Review round 1):** a 128 px JPEG at 0.82 is ~4–10 KB → ~6–14 KB as base64; the bird SVG ~1.6–4 KB; the 32768-char cap is the ceiling. At the cap a profile DM is 32 875 B of plaintext, which NIP-44 v2 pads to 40 960 B (its power-of-two chunking) → a serialized event of ~55.1 KB, 10.4 KB under strfry's default 64 KiB `maxEventSize`; it goes once per full contact per changed save/bird refresh, to every configured relay (20 contacts × 4 relays ≈ 4.3 MB at the cap). The retry-queue row for an `invite_accepted` and a contacts sync-conflict row (local + wire JSON) grow the same way. The cap is the spec's number (Kevin restated it); halving it to 16 384 would halve the padded bucket and still fit any 128 px JPEG — recorded as Q4, not changed here.
+- **Open questions for Kevin (do not block the build):** Q1 stdio-MCP hatches not refreshing the bird avatar until the next gateway-side event or gateway boot (the hook now repaints once at install) — acceptable? Q2 the follow-up list in (c) — a separate small PR after Plan B, or fold into models plan 2's tail? Q3 the contact editor keeps its `Avatar URL` text field with an `https://...` placeholder (a local override; a URL cannot render, an inline data URI pasted there does, and the raw value is stored unbounded as today) — leave as is, or turn it into the same file input in the follow-up? Q4 keep `AVATAR_MAX_BYTES` at the spec's 32768, or lower it to 16384 (halves the NIP-44 padded bucket; a 128 px JPEG never needs more)? Q5 `bio` is stored uncapped today; with the 100 kb urlencoded body limit a crafted POST (a max-size all-`+` avatar plus a long bio) would hit an unhandled 413 — cap `bio` (e.g. 2000 chars) in the follow-up?
+
+## Review
+
+### Round 1 — 2026-09-08, opus, code-traced (implemented the plan verbatim in a scratch mirror; every named test passed first try; full suite 4232/0; check-ports OK; build-registry in sync)
+**Verdict: REVISE.** Folded:
+- **C1** `handleHandshakeComplete` wrote the peer fields with no blocked/pending gate — reached from the broad incoming subscription, a blocked contact could keep repainting its own picture and an unpaired `req:` row could store 32 KB per envelope (proved in the mirror). Fixed: the same full-and-unblocked gate as the profile receiver, plus a test seeding a blocked contact and a pending row. **Ruling R1-1 (Plan B):** every writer of `peer_*` is contact-only — full (`request_status` NULL) AND unblocked — no matter which door it came through.
+- **S1** the "~46 KB" wire estimate was wrong: NIP-44 v2 pads 32 875 B to 40 960 B → ~55.1 KB serialized, 10.4 KB under strfry's 64 KiB default. Note corrected; the cap stays at the spec's 32768 (Q4 for Kevin).
+- **S2** a `{ status: 400 }` was sent as a bare `text/html` string, which Turbo Drive renders as the whole page. Fixed: the panel wraps it in `layout()` with a Back link; a handler-level test pins it.
+- **S3** `ensurePeerProfileColumns` swallowed every error, and on an existing host it is the only path to the columns while instance-sync caches the column list once per process. Fixed: a PRAGMA verify after the adds logs a `console.error` naming the fix.
+- **S4** two of the three Task-3 "failing tests" already pass before Task 3's code (the columns exist since Task 1; the PRAGMA whitelist copies any live column). Step 2 relabelled: they are wire-contract pins, the sanitize/validate test is the gate.
+- **S5** the display rule and the avatar bound were mirrored by hand in `delivery.js` with no drift guard. Fixed: the delivery test pins the mirrored constants against core's and round-trips the seeded rows through `contactsByPubkey` vs `contactName`/`contactAvatar`.
+- **Q2** the bird hook only subscribed, so a bird that changed while the gateway was down stayed stale. Fixed: one idempotent `refreshBirdAvatar` at install; the hook test covers install, hatch, activation, and three broadcasts.
+- **Q1** (contact editor's dead `Avatar URL` field), **Q3** (a `bird` source is frozen on a Ramble-less sibling), the uncapped `bio` vs the 100 kb body limit, and the spec's non-existent `GET /dashboard/contacts/profile` route are recorded in the deviations / Kevin's Q list, not changed.
+- Traces verified by the reviewer: no import cycle (boot.js and the stdio sharing entrypoint load; the only cycle-closing edge stays contact-sync's lazy managers import); `crow_social` has exactly one door (`subscribeToIncoming`, deduped per relay by `seenEventIds`); `upsertFullContact` returns `{ contactId }` on all four outcomes; `_applyContact`'s whitelist drops peer fields on an un-migrated instance as claimed and its column cache is warmed only after sharing init; the CSP allows `data:` and `blob:` for the preview and the inline `onchange`; i18n parity passes; `SELECT c.*, c.id as contact_id … GROUP BY c.id` is legal SQLite with no alias collision; `contact_avatar` is only ever set for a resolved contact; `bird-svg.cjs` has exported `rollGenome`/`drawBird` since its first commit (a synthetic stale installed copy rendered fine — R1-1 of Plan A satisfied); only grackle has an installed bundle copy (the refresh journal line appears there alone).
