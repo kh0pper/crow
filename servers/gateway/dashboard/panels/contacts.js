@@ -16,6 +16,9 @@ import { section, escapeHtml } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { buildInviteShare, parseShortCodeResult } from "../shared/peer-invite-ui.js";
 import { csrfInput } from "../shared/csrf.js";
+// Already loaded at panel-import time via api-handlers.js's static import — a
+// dynamic import here bought nothing and hid the dependency (fix round 1, Finding 2).
+import { readActiveBird, loadBirdEngine } from "../../../sharing/profile-avatar.js";
 
 export default {
   id: "contacts",
@@ -94,7 +97,6 @@ export default {
       // --- My Profile ---
       const profile = await getMyProfile(db);
       // 2026-09-08 §5: the bird option needs a hatched bird AND a drawable engine.
-      const { readActiveBird, loadBirdEngine } = await import("../../../sharing/profile-avatar.js");
       const birdAvailable = !!(await readActiveBird(db)) && !!loadBirdEngine();
       bodyHtml = renderMyProfile(profile, lang, { birdAvailable });
     } else if (view === "bots") {

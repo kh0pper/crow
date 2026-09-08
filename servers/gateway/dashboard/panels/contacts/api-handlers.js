@@ -408,6 +408,48 @@ export async function handleContactAction(req, db, {
     // capped), the source is picture|bird, and ONE profile broadcast goes out
     // per save that changed the name, the picture or the source.
     const before = await getMyProfile(db);
+
+    // --- Validation phase (fix round 1, Finding 1): every 400 is decided
+    // BEFORE the first write. The old interleaved order let a mixed-invalid
+    // POST (e.g. a valid display_name + a valid avatar + a junk
+    // avatar_source) persist the name and the picture and THEN answer 400 —
+    // the "a rejected save changes nothing" guarantee, broken. Worse: since
+    // the 400 returned before the changed/broadcast block ran, the change
+    // was never fanned out and readBroadcastPending was never armed, so
+    // peers kept the stale value with no retry path. Everything here is
+    // read-only (validation + a bird lookup); nothing is written yet.
+    const clearRequested = req.body.avatar_clear === "1";
+    let cleanAvatar = null;
+    if (!clearRequested && typeof req.body.avatar === "string" && req.body.avatar !== "") {
+      // "" = the hidden field was never filled = untouched.
+      cleanAvatar = validateAvatar(req.body.avatar);
+      if (!cleanAvatar) return { status: 400, text: `avatar must be a data:image/(png|jpeg|webp|svg+xml);base64 URI of at most ${AVATAR_MAX_BYTES} characters` };
+    }
+    const sourceProvided = req.body.avatar_source !== undefined;
+    if (sourceProvided && req.body.avatar_source !== "picture" && req.body.avatar_source !== "bird") {
+      return { status: 400, text: "avatar_source must be picture or bird" };
+    }
+    let effectiveSource;
+    let birdUri = null;
+    if (sourceProvided) {
+      if (req.body.avatar_source === "bird") {
+        birdUri = await renderActiveBirdAvatar(db);
+        effectiveSource = birdUri ? "bird" : "picture"; // no bird / no engine: silent fallback, the stored picture stays (spec §5)
+      } else {
+        effectiveSource = "picture";
+      }
+    }
+    // Precedence (unchanged from before the restructure): a successful bird
+    // render wins over everything else in the same POST; otherwise a clear
+    // wins over an uploaded picture; otherwise the uploaded picture; otherwise
+    // no change to profile_avatar_url at all.
+    let avatarToWrite;
+    if (birdUri) avatarToWrite = birdUri;
+    else if (clearRequested) avatarToWrite = "";
+    else if (cleanAvatar !== null) avatarToWrite = cleanAvatar;
+    else avatarToWrite = undefined;
+
+    // --- Write phase: only the validated locals from here on. ---
     if (req.body.display_name !== undefined) {
       // This value is SENT on every handshake and syncs to all of the user's
       // instances — cap + strip it at write (design §D5). sanitizeDisplayName
@@ -416,29 +458,12 @@ export async function handleContactAction(req, db, {
       await upsertSetting(db, "profile_display_name", sanitizeDisplayName(req.body.display_name) ?? "");
       await deleteLocalSetting(db, "profile_display_name");
     }
-    if (req.body.avatar_clear === "1") {
-      await upsertSetting(db, "profile_avatar_url", "");
-      await deleteLocalSetting(db, "profile_avatar_url");
-    } else if (typeof req.body.avatar === "string" && req.body.avatar !== "") {
-      // "" = the hidden field was never filled = untouched.
-      const clean = validateAvatar(req.body.avatar);
-      if (!clean) return { status: 400, text: `avatar must be a data:image/(png|jpeg|webp|svg+xml);base64 URI of at most ${AVATAR_MAX_BYTES} characters` };
-      await upsertSetting(db, "profile_avatar_url", clean);
+    if (avatarToWrite !== undefined) {
+      await upsertSetting(db, "profile_avatar_url", avatarToWrite);
       await deleteLocalSetting(db, "profile_avatar_url");
     }
-    if (req.body.avatar_source !== undefined) {
-      if (req.body.avatar_source !== "picture" && req.body.avatar_source !== "bird") return { status: 400, text: "avatar_source must be picture or bird" };
-      let effective = req.body.avatar_source;
-      if (effective === "bird") {
-        const uri = await renderActiveBirdAvatar(db);
-        if (uri) {
-          await upsertSetting(db, "profile_avatar_url", uri);
-          await deleteLocalSetting(db, "profile_avatar_url");
-        } else {
-          effective = "picture"; // no bird / no engine: silent fallback, the stored picture stays (spec §5)
-        }
-      }
-      await upsertSetting(db, "profile_avatar_source", effective);
+    if (sourceProvided) {
+      await upsertSetting(db, "profile_avatar_source", effectiveSource);
       await deleteLocalSetting(db, "profile_avatar_source");
     }
     if (req.body.bio !== undefined) {
