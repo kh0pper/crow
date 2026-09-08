@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { createClient } from "@libsql/client";
 import { handleContactAction } from "../servers/gateway/dashboard/panels/contacts/api-handlers.js";
 import { getMyProfile } from "../servers/gateway/dashboard/panels/contacts/data-queries.js";
-import { setSettingsSyncManager } from "../servers/gateway/dashboard/settings/registry.js";
+import { setSettingsSyncManager, upsertSetting } from "../servers/gateway/dashboard/settings/registry.js";
 import { getOrCreateLocalInstanceId } from "../servers/gateway/instance-registry.js";
 
 function freshDb() {
@@ -53,6 +53,29 @@ test("save_profile writes global, clears the stranded override, and getMyProfile
     const profile = await getMyProfile(db);
     assert.equal(profile.display_name, "Kevin", "the profile page reader sees the save immediately");
     assert.equal(profile.bio, "Hello");
+  } finally {
+    setSettingsSyncManager(null);
+    if (prevDataDir === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = prevDataDir;
+    cleanup();
+  }
+});
+
+test("getMyProfile avatar_source: unset defaults to picture, a junk value still reads as picture, bird passes through", async () => {
+  const { dir, db, cleanup } = freshDb();
+  const prevDataDir = process.env.CROW_DATA_DIR;
+  process.env.CROW_DATA_DIR = dir;
+  setSettingsSyncManager(null); // emits are not this test's subject
+  try {
+    let profile = await getMyProfile(db);
+    assert.equal(profile.avatar_source, "picture", "unset key defaults to picture");
+
+    await upsertSetting(db, "profile_avatar_source", "xyz");
+    profile = await getMyProfile(db);
+    assert.equal(profile.avatar_source, "picture", "a junk value still reads as picture");
+
+    await upsertSetting(db, "profile_avatar_source", "bird");
+    profile = await getMyProfile(db);
+    assert.equal(profile.avatar_source, "bird", "bird passes through");
   } finally {
     setSettingsSyncManager(null);
     if (prevDataDir === undefined) delete process.env.CROW_DATA_DIR; else process.env.CROW_DATA_DIR = prevDataDir;
