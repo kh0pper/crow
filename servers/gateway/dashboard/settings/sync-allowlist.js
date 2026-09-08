@@ -29,8 +29,9 @@ export const SYNC_ALLOWLIST = {
   // sanitizeDisplayName at READ time. Any future reader of profile_* must
   // follow the same rule.
   profile_display_name:      "Own profile — display name (sent in pairing handshakes)",
-  profile_avatar_url:        "Own profile — avatar URL",
+  profile_avatar_url:        "Own profile — picture (an inline data: image since 2026-09-08)",
   profile_bio:               "Own profile — bio",
+  profile_avatar_source:     "Own profile — picture source (picture, or the Ramble bird)",
   // companion_wm_federation removed — the kiosk button's federation is
   // driven by real-time overview availability now, not a separate opt-in
   // flag. Rollback to local-only kiosk is CROW_UNIFIED_DASHBOARD=0.
@@ -95,12 +96,12 @@ export function checkSyncKeyDrift(sections) {
 }
 
 /**
- * The three own-profile keys (explicit list, deliberately NOT a "profile_*"
+ * The four own-profile keys (explicit list, deliberately NOT a "profile_*"
  * allowlist prefix — a future profile_ key must be consciously added).
  * Consumed by the save-path override clear, the one-shot heal, and the
  * re-emit empty-value guard.
  */
-export const PROFILE_SYNC_KEYS = ["profile_display_name", "profile_avatar_url", "profile_bio"];
+export const PROFILE_SYNC_KEYS = ["profile_display_name", "profile_avatar_url", "profile_bio", "profile_avatar_source"];
 
 /**
  * Instance-scope keys — per-install settings whose load-bearing readers
