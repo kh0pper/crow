@@ -441,6 +441,116 @@ export async function activeBird(db) {
   return rows[0] ?? null;
 }
 
+export const LAY_DAYS_DEFAULT = 14;
+export const LAYDAY_KIND = "layday";
+export const LAY_KIND = "lay";
+
+function intSetting(raw, fallback, min) {
+  if (raw == null) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= min ? n : fallback;
+}
+
+/** `lay.days` (>= 1, default 14), read live so balance is a config change. */
+export async function readLaySettings(db) {
+  return { layDays: intSetting(await readSetting(db, "lay.days"), LAY_DAYS_DEFAULT, 1) };
+}
+
+/**
+ * Does the user hold an egg ANYWHERE — the slot, the shelf, or a gift not yet
+ * dealt with? A hatched bird is not an egg: you are not warming it.
+ */
+export async function hasAnyEggAnywhere(db) {
+  const { rows } = await db.execute({
+    sql: `SELECT 1 FROM ramble_eggs WHERE status IN ('incubating', 'shelf', 'received') LIMIT 1`,
+    args: [],
+  });
+  return rows.length > 0;
+}
+
+/**
+ * Happy days banked since the last lay. The count RESETS without deleting a
+ * row: `lay` rows mark each laying, and only `layday` rows AFTER the most
+ * recent one count. The ledger stays append-only (spec §6.1).
+ *
+ * ⚠ ORDERED BY `key`, NEVER BY `created_at`. Both are tempting; only one
+ * converges. `applyRambleWallet` resolves a conflict with
+ * `created_at = MIN(local, incoming)` (instance-sync.js:620), so a sync apply
+ * can move a row's timestamp BACKWARDS — across the reset boundary, in either
+ * direction — and clock skew between the user's machines is enough to do it
+ * on its own. `key` is the local day (`YYYY-MM-DD`), it is half the primary
+ * key, it sorts lexically in true date order, and `applyRambleWallet` never
+ * rewrites it. Comparing keys therefore yields the same number on every
+ * instance from the same rows. It also excludes the lay-day itself, which is
+ * correct: the day you laid is spent.
+ */
+export async function layProgress(db) {
+  const { layDays } = await readLaySettings(db);
+  const { rows } = await db.execute({
+    sql: `SELECT count(*) AS n FROM ramble_wallet
+           WHERE kind = ?
+             AND key > COALESCE((SELECT MAX(key) FROM ramble_wallet WHERE kind = ?), '')`,
+    args: [LAYDAY_KIND, LAY_KIND],
+  });
+  return { days: Number(rows[0]?.n ?? 0), needed: layDays };
+}
+
+/**
+ * Count today toward laying, and lay if the threshold is reached (spec §4.3).
+ *
+ * Called from the pet's read and feed paths, so "ends the day happy" is really
+ * "was observed happy on this local day". The alternative — judging the last
+ * observation of the day — would punish opening the app after a good walk.
+ *
+ * Accrues ONLY while the user holds no egg anywhere. Were it always accruing,
+ * a player would run dry and lay at once, and the floor would become the main
+ * supply instead of a backstop.
+ *
+ * ⚠ delta is the literal 1. See applyRambleWallet's MAX(delta) rule.
+ *
+ * ⚠ Called ONLY from the write paths (`feed`, and `doChore` through it) —
+ * never from `petState`. `pet.js:18` records the invariant: "petState's
+ * decay-on-read write never emits, because a GET must never queue a sync op",
+ * and `petState` has no `emit` in scope to pass. A day is therefore earned by
+ * DOING something — a walk, a chore, a check-in — not by opening the app,
+ * which is also the truer reading of §4.3's "sustained care".
+ *
+ * ⚠ Laying REQUIRES real movement, and that is a design consequence, not an
+ * oversight. Decay is 10 per 6 h (-40/day); the most a player who never posts
+ * a location fix can earn is checkin 5 + 3 chores x 8 = 29/day. From the
+ * default 60 they bank three happy days and then fall below the 60 threshold
+ * for good. Do NOT write, in a comment or a doc, that chores and the check-in
+ * alone can reach `lay.days`. They cannot.
+ */
+export async function recordHappyDay(db, { now = Date.now(), mood, emit } = {}) {
+  if (mood !== "happy") return { recorded: false, laid: false };
+  if (await hasAnyEggAnywhere(db)) return { recorded: false, laid: false };
+
+  const key = localDay(now);
+  const { rowsAffected } = await db.execute({
+    sql: `INSERT OR IGNORE INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, 1, ?)`,
+    args: [LAYDAY_KIND, key, now],
+  });
+  if (rowsAffected === 0) return { recorded: false, laid: false };
+  await safeEmit(emit, "ramble_wallet", "insert", { kind: LAYDAY_KIND, key, delta: 1, created_at: now });
+
+  const { days, needed } = await layProgress(db);
+  if (days < needed) return { recorded: true, laid: false };
+
+  // ⚠ The mint is gated on the `lay` row being NEW. Without checking
+  // rowsAffected the dedup key just written would be decorative, and two
+  // overlapping calls would each mint an egg.
+  const { rowsAffected: laidNow } = await db.execute({
+    sql: `INSERT OR IGNORE INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, 1, ?)`,
+    args: [LAY_KIND, key, now],
+  });
+  if (laidNow === 0) return { recorded: true, laid: false };
+
+  await safeEmit(emit, "ramble_wallet", "insert", { kind: LAY_KIND, key, delta: 1, created_at: now });
+  await mintIncubatingEgg(db, { now, emit });
+  return { recorded: true, laid: true };
+}
+
 export async function eggState(db, { now } = {}) {
   const egg = await getIncubatingEgg(db);
   const weights = await readWarmthWeights(db);
