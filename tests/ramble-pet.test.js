@@ -229,3 +229,124 @@ test("ensureRow is atomic: concurrent feeds on a fresh db never throw UNIQUE", a
   const { rows } = await fresh.execute("SELECT count(*) AS n FROM ramble_pet");
   assert.equal(rows[0].n, 1);
 });
+
+/* --- Phase 2: heart containers raise the ceiling (spec §3, §4.3, D6). --- */
+
+import { maxEnergy } from "../bundles/ramble/server/hearts.js";
+
+const HEART_CELLS = ["9vk79ed", "9v6m2xt", "dr5regw", "gcpvj0d", "u33dc0e", "wecnrmd"];
+
+async function giveHearts(db, n) {
+  // Ledger rows directly: this file tests the PET, not the pickup path.
+  for (let i = 0; i < n; i++) {
+    await db.execute({
+      sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES ('heart', ?, 1, 0)",
+      args: [HEART_CELLS[i % HEART_CELLS.length] + ":pet" + i],
+    });
+  }
+}
+
+test("with no hearts the ceiling is still 100, exactly as before", async () => {
+  const db = await freshDb();
+  assert.equal(await maxEnergy(db), 100);
+  for (let i = 0; i < 12; i++) await feed(db, { type: "meet_crow" }, { now: 1000 });
+  const pet = await petState(db, { now: 1000 });
+  assert.equal(pet.energy, 100, "the old ceiling holds for a player with no hearts");
+  assert.equal(pet.energy_max, 100);
+});
+
+test("five hearts raise the ceiling to 150, and feed() fills to it", async () => {
+  const db = await freshDb();
+  await giveHearts(db, 5);
+  assert.equal(await maxEnergy(db), 150);
+  for (let i = 0; i < 12; i++) await feed(db, { type: "meet_crow" }, { now: 1000 });
+  const pet = await petState(db, { now: 1000 });
+  assert.equal(pet.energy, 150, "the bird fills the longer bar");
+  assert.equal(pet.energy_max, 150, "and the number drawn is the number clamped");
+});
+
+test("mood thresholds stay ABSOLUTE, so a longer bar buys real slack", async () => {
+  // Spec §4.3: hearts buy resilience. At max 150, energy 70 is still happy —
+  // a percentage threshold would have made it tired and hearts pointless.
+  const db = await freshDb();
+  await giveHearts(db, 5);
+  for (let i = 0; i < 12; i++) await feed(db, { type: "meet_crow" }, { now: 1000 });
+  const six = 6 * 60 * 60 * 1000;
+  // 150 -> 70 is eight decay intervals; a 100-max bird would be at 20 by now.
+  const pet = await petState(db, { now: 1000 + 8 * six });
+  assert.equal(pet.energy, 70);
+  assert.equal(pet.mood, "happy", "still happy at 70 because 60 is an absolute threshold");
+});
+
+test("decay still bottoms out at 0 whatever the ceiling is", async () => {
+  const db = await freshDb();
+  await giveHearts(db, 20);
+  await feed(db, { type: "meet_crow" }, { now: 1000 });
+  const year = 365 * 24 * 60 * 60 * 1000;
+  const pet = await petState(db, { now: 1000 + year });
+  assert.equal(pet.energy, 0);
+  assert.equal(pet.mood, "alarmed");
+});
+
+test("a ceiling that drops underneath a bird never destroys its energy — on ANY path", async () => {
+  // ⚠ This is the sync-window hazard, and it has to be tested on the paths that
+  // actually run in that window. instance-sync applies each incoming entry
+  // one at a time with no ordering guarantee between a pet row and the wallet
+  // rows that justify its energy, so an instance can apply a synced 150-energy
+  // bird while it still computes a ceiling of 100 from wallet rows it hasn't
+  // received yet — this module's `feed()` must never let a stale ceiling pull
+  // that energy DOWN, on ANY caller's ordering (2026-09-09: `POST
+  // /api/ramble/area` itself now feeds the pet AFTER the heart pickup runs,
+  // precisely so a heart's new ceiling is what a walk's energy lands against —
+  // but this unit test exercises `feed()` directly against a ceiling that has
+  // already collapsed, which is the scenario regardless of caller order). A
+  // test that only reads petState at a frozen `now` proves nothing: no decay
+  // interval elapses, so nothing is written at all.
+  const db = await freshDb();
+  await giveHearts(db, 5);
+  for (let i = 0; i < 12; i++) await feed(db, { type: "meet_crow" }, { now: 1000 });
+  assert.equal((await petState(db, { now: 1000 })).energy, 150);
+
+  const stored = async () => Number(
+    (await db.execute({ sql: "SELECT energy FROM ramble_pet WHERE owner = 'self'", args: [] })).rows[0].energy);
+
+  // The ceiling collapses underneath it — exactly what an un-synced wallet looks like.
+  await db.execute({
+    sql: "INSERT INTO ramble_settings (key, value) VALUES ('energy.max.per.heart', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    args: [],
+  });
+  assert.equal(await maxEnergy(db), 110);
+
+  // Path 1: a plain read writes nothing and reports the truth.
+  assert.equal((await petState(db, { now: 1000 })).energy, 150);
+  assert.equal(await stored(), 150, "a read never truncates");
+
+  // Path 2: FEEDING against a ceiling that has already collapsed — the shape
+  // a sync race leaves behind, whatever order the local caller used.
+  const fed = await feed(db, { type: "visit_place" }, { now: 1000 });
+  assert.equal(fed.energy, 150, "an addition stops at the ceiling but never pulls the bird DOWN to it");
+  assert.equal(await stored(), 150);
+
+  // Path 3: DECAY, which is the other write. It reduces by the elapsed
+  // intervals, not by snapping to the ceiling.
+  const six = 6 * 60 * 60 * 1000;
+  assert.equal((await petState(db, { now: 1000 + 2 * six })).energy, 130, "two intervals, 20 energy");
+  assert.equal(await stored(), 130);
+
+  // And when the ledger catches up, the bar is long again with nothing lost.
+  await db.execute({ sql: "UPDATE ramble_settings SET value = '10' WHERE key = 'energy.max.per.heart'", args: [] });
+  assert.equal(await maxEnergy(db), 150);
+  assert.equal((await petState(db, { now: 1000 + 2 * six })).energy, 130, "nothing was destroyed on the way");
+});
+
+test("every pet shape carries the same energy_max — feed, chore, and the no-op chore", async () => {
+  const db = await freshDb();
+  await giveHearts(db, 3);
+  const fed = await feed(db, { type: "checkin" }, { now: 1000 });
+  assert.equal(fed.energy_max, 130);
+  const chore = await doChore(db, "feed", { now: 1000 });
+  assert.equal(chore.pet.energy_max, 130);
+  const repeat = await doChore(db, "feed", { now: 1000 });
+  assert.equal(repeat.done, false);
+  assert.equal(repeat.pet.energy_max, 130, "the no-op branch must not report a different bar");
+});

@@ -231,6 +231,8 @@ test("panel handler renders the world-first shell, its three views and every ass
     assert.ok(sent.includes(src), `pet page names the energy source: ${src}`);
   }
   assert.ok(sent.includes("Getting out is worth more than tapping."), "the page says walking beats tapping");
+  assert.ok(sent.includes('id="rb-energy-max"'), "the bar's ceiling is on the page");
+  assert.ok(sent.includes('id="rb-heart-row"'), "and the containers that set it");
 
   // The legacy ids are GONE — anything still selecting them is broken.
   assert.doesNotMatch(sent, /id="ramble-map"/);
@@ -289,6 +291,9 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.ok(sent.includes('id="rb-perch-say"'), "the status strip stays");
 
   assert.ok(sent.includes('id="rb-seed-count"'), "the map bar carries the seed counter");
+  assert.ok(sent.includes('id="rb-heart-count"'), "the map bar carries the heart counter");
+  assert.ok(sent.indexOf('id="rb-heart-count"') > sent.indexOf('id="rb-seed-count"'),
+    "common currency first, rare currency second");
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -907,6 +912,20 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes('opts.className = "rb-here-pet rb-here-plain"'), "a plain dot survives the bird engine failing to load");
 });
 
+test("the map draws heart pips, counts them, and says something when one is taken", async () => {
+  const body = await (await req("/ramble/static/ramble.js")).text();
+  assert.ok(body.includes("function paintHeartPips("), "the map shows where a heart is waiting");
+  assert.ok(body.includes("function heartIcon()"), "pips carry the engine's heart art");
+  assert.ok(body.includes("Bird.mountHeart(svg)"), "drawn by the shared engine, like every other creature part");
+  assert.ok(body.includes("rb-heart-dot"), "and a plain dot survives the engine failing to load");
+  assert.ok(body.includes("paintHeartPips(out.hearts || [])"), "fed from the server's own list");
+  assert.ok(body.includes("out.heart_picked"), "the pickup is consumed from the area response");
+  assert.ok(body.includes("out.heart_source"), "and a regrown heart gets its own line, not the once-ever one's");
+  assert.ok(body.includes("grown here since you last came by"), "the wild heart's copy is actually there");
+  assert.ok(body.includes("function paintHearts("), "the counter is painted from the area response");
+  assert.equal(body.split("`").length - 1, 0, "the panel client must contain ZERO backticks");
+});
+
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   const res = await req("/ramble/static/ramble.css");
   assert.equal(res.status, 200);
@@ -971,6 +990,21 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
 
   assert.ok(body.includes("@keyframes rb-unlock"), "the unlock has an animation");
   assert.ok(body.includes("#ramble .rb-seed {"), "the seed counter has a rule");
+});
+
+test("heart pips, the fallback dot and the pop all have styles", async () => {
+  const css = await (await req("/ramble/static/ramble.css")).text();
+  assert.ok(css.includes("#ramble .rb-heart-pip {"));
+  assert.ok(css.includes("#ramble .rb-heart-dot {"));
+  assert.ok(css.includes("#ramble .rb-hearts {"), "the map-bar counter has a rule");
+  assert.ok(css.includes("#ramble .rb-heart-pop {"));
+  assert.ok(css.includes("@keyframes rb-heart-rise"));
+  // The heart pop joins the EXISTING comma-separated reduced-motion list, so
+  // match it as a member of that list rather than as its own rule.
+  assert.match(css, /prefers-reduced-motion[\s\S]*#ramble \.rb-heart-pop,[\s\S]*animation: none/,
+    "the pop respects reduced motion, like the seed pop already does");
+  assert.ok(css.includes("#ramble .rb-heart-pip > svg {"),
+    "the pip's svg is SIZED — without this it renders at the CSS default 300x150");
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {
@@ -1614,4 +1648,237 @@ test("GET /api/ramble/zones answers a world-sized bbox instead of refusing it", 
   assert.equal(res.status, 200, "a world bbox is answerable");
   const out = await res.json();
   assert.ok(Array.isArray(out.unlocked) && Array.isArray(out.frontier));
+});
+
+
+/* --- Phase 2: heart containers (spec §2.3, §3). --- */
+
+/**
+ * ⚠ THIS FILE SHARES ONE SCRATCH DATABASE ACROSS EVERY TEST, so heart counts
+ * accumulate as tests run and an unlock is permanent for every test after it.
+ * Assert DELTAS, never absolute totals — an absolute assertion here passes
+ * alone and fails in the suite, which is exactly the flake shape this repo has
+ * hunted before.
+ *
+ * rate 1 so every cell in these tests holds a heart: no test may depend on a
+ * cell that happens to hash lucky (the phase 1 lesson).
+ */
+async function withHeartSettings(pairs, fn) {
+  const db = createDbClient();
+  try {
+    for (const [k, v] of pairs) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute({
+        sql: `INSERT INTO ramble_settings (key, value) VALUES (?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        args: [k, v],
+      });
+    }
+    return await fn();
+  } finally {
+    for (const [k] of pairs) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute({ sql: "DELETE FROM ramble_settings WHERE key = ?", args: [k] });
+    }
+    db.close();
+  }
+}
+
+// `warmth.visit_place` is zeroed for the same reason walkTo() zeroes it: this
+// file churns hatches and later asserts an incubating egg exists, and three or
+// four +20 credits against a hatch_at of 100 is a hatch these tests did not ask
+// for.
+const HEARTS_ON = [
+  ["heart.rate", "1"], ["heart.wild.rate", "999999"],
+  ["unlock.max.accuracy.m", "100"], ["warmth.visit_place", "0"],
+];
+const jsonOf = async (path, opts) => (await req(path, opts)).json();
+
+test("POST /api/ramble/area grants a heart on a first unlock, and reports the new ceiling", async () => {
+  await withHeartSettings(HEARTS_ON, async () => {
+    const here = { lat: 30.2672, lon: -97.7431, accuracy_m: 20 };
+    const before = await jsonOf("/api/ramble/pet");
+
+    const first = await jsonOf("/api/ramble/area", { method: "POST", body: { cells: ["9v6m2xt"], here } });
+    assert.equal(first.heart_picked, 1, "the fogged cell had a heart in it");
+    assert.equal(first.hearts, before.hearts + 1);
+    assert.equal(first.energy_max, before.energy_max + 10, "the bar grew by energy.max.per.heart");
+
+    const again = await jsonOf("/api/ramble/area", { method: "POST", body: { cells: ["9v6m2xt"], here } });
+    // Holds only because HEARTS_ON silences the wild source at rate 999999 —
+    // otherwise the same cell could pay a second, regrown heart.
+    assert.equal(again.heart_picked, undefined, "a permanent heart is taken once, ever");
+    assert.equal(first.heart_source, "first", "and the source rides along, so the panel can say the right line");
+    assert.equal(again.hearts, first.hearts, "the count still rides on every fix");
+    assert.equal(again.energy_max, first.energy_max);
+  });
+});
+
+test("fix-wave 2026-09-09: the heart's new ceiling is what THIS WALK's energy lands against", async () => {
+  await withHeartSettings(HEARTS_ON, async () => {
+    // Moscow: fresh ground for this file, guaranteed to hold a heart at
+    // HEARTS_ON's rate 1.
+    const here = { lat: 55.7558, lon: 37.6173, accuracy_m: 20 };
+    const before = await jsonOf("/api/ramble/pet");
+
+    // Pin the bird at the OLD ceiling before the walk. Starting anywhere below
+    // it would clamp to the same number whether the heart's new ceiling was
+    // applied before or after the walk's +15 — only starting AT the ceiling
+    // makes the old (buggy) order and the fixed order produce different,
+    // observable results.
+    const db = createDbClient();
+    try {
+      await db.execute({ sql: "UPDATE ramble_pet SET energy = ? WHERE owner = 'self'", args: [before.energy_max] });
+    } finally {
+      db.close();
+    }
+
+    const out = await jsonOf("/api/ramble/area", { method: "POST", body: { ...here, here } });
+    assert.equal(out.heart_picked, 1, "this test proves nothing without a heart in fresh ground");
+    assert.equal(out.energy_max, before.energy_max + 10, "the ceiling rose by energy.max.per.heart");
+
+    const after = await jsonOf("/api/ramble/pet");
+    assert.equal(after.energy_max, before.energy_max + 10);
+    // The bug this fix closes: crediting the walk's +15 against the OLD
+    // ceiling and only raising the ceiling afterward left the bar reading
+    // `energy: 100, energy_max: 110` — visibly SHRUNK at the exact moment the
+    // heart was found. Fixed: the heart's new ceiling is in place before the
+    // walk's energy is credited, so a bird already at the old ceiling ends
+    // the walk at the NEW one, full — never below it.
+    assert.equal(after.energy, after.energy_max,
+      "a bird at the old ceiling must end this walk at the new ceiling, full — not below it");
+  });
+});
+
+test("a fix too vague to unlock is also too vague to pay a heart", async () => {
+  await withHeartSettings(HEARTS_ON, async () => {
+    const before = (await jsonOf("/api/ramble/pet")).hearts;
+    const res = await jsonOf("/api/ramble/area", {
+      method: "POST",
+      // `cells` is only the active-area list; the cell that matters is derived
+      // from `here` (Chicago -> dp3wjzt), which is fresh ground for this file.
+      body: { cells: ["dp3wjzt"], here: { lat: 41.8781, lon: -87.6298, accuracy_m: 2000 } },
+    });
+    assert.equal(res.unlocked, undefined, "no unlock");
+    assert.equal(res.heart_picked, undefined, "and therefore no heart");
+    assert.equal((await jsonOf("/api/ramble/pet")).hearts, before, "nothing was granted");
+  });
+});
+
+test("a vague fix cannot harvest a heart from ground unlocked LONG AGO", async () => {
+  // ⚠ The one the plan review caught. The in-ramble_cells check passes for an
+  // already-unlocked cell no matter how bad today's fix is, so this is the case
+  // the "fail closed" claim actually has to survive. Unlock the cell sharply
+  // while it holds no heart, then make it hold one, then arrive vaguely.
+  const here = { lat: 35.6762, lon: 139.6503 };   // Tokyo: fresh ground for this file
+  await withHeartSettings(
+    [["heart.rate", "999999"], ["heart.wild.rate", "999999"], ["unlock.max.accuracy.m", "100"], ["warmth.visit_place", "0"]],
+    async () => {
+      // ⚠ NO `cells: []` — routes.js rejects an empty array with a 400, and a
+      // 400 would make the assertions below pass vacuously against the buggy
+      // implementation. Omitting `cells` entirely is the supported form: the
+      // route falls back to lat/lon, exactly as walkTo() does.
+      const sharp = await jsonOf("/api/ramble/area", {
+        method: "POST", body: { ...here, here: { ...here, accuracy_m: 10 } },
+      });
+      assert.ok(sharp.unlocked, "precondition: the cell is unlocked, and held no heart");
+    },
+  );
+  await withHeartSettings(HEARTS_ON, async () => {
+    const before = (await jsonOf("/api/ramble/pet")).hearts;
+    const vague = await jsonOf("/api/ramble/area", {
+      method: "POST", body: { ...here, here: { ...here, accuracy_m: 2000 } },
+    });
+    assert.equal(vague.heart_picked, undefined,
+      "a 2 km fix must not collect the heart now waiting in already-unlocked ground");
+    assert.equal((await jsonOf("/api/ramble/pet")).hearts, before, "nothing was granted");
+  });
+});
+
+test("POST /api/ramble/area WITHOUT `here` keeps its exact historical shape", async () => {
+  const res = await jsonOf("/api/ramble/area", { method: "POST", body: { cells: ["9v6m2xt"] } });
+  assert.deepEqual(res, { cells: ["9v6m2xt"] },
+    "no fix, no currency: panning the map must not report a wallet");
+});
+
+test("GET /api/ramble/zones?pips=1 draws hearts only in unlocked ground", async () => {
+  // ⚠ A GENUINELY FRESH cell, and a length assertion BEFORE the loop. Two
+  // earlier drafts got this wrong: the first reused Austin, whose heart the
+  // previous test had already collected, so `hearts` was always [] and the loop
+  // never ran; the second reused London, which is HERE_LAT/HERE_LON's own cell
+  // (`gcpvj0d`) and is walked twice by the visit_place test — that draft passed
+  // only because heartFor("gcpvj0d", {rate: 3}) happens to miss, which is the
+  // lucky-hash dependency this plan bans.
+  //
+  // wecnrmd = 22.2233/114.2283, Hong Kong. No test in this file uses a latitude
+  // anywhere near it (they use 10.5, 30.46, 48.8584 and 51.5074).
+  await withHeartSettings(HEARTS_ON, async () => {
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('wecnrmd', 1) ON CONFLICT(cell) DO NOTHING",
+        args: [],
+      });
+    } finally { db.close(); }
+
+    const bbox = "22.21,114.21,22.24,114.25";
+    const withPips = await jsonOf("/api/ramble/zones?bbox=" + bbox + "&pips=1");
+    assert.ok(Array.isArray(withPips.hearts), "the field is always an array");
+    assert.ok(withPips.hearts.some((h) => h.cell === "wecnrmd"),
+      "there IS a heart to draw, or this test proves nothing");
+    for (const h of withPips.hearts) {
+      assert.ok(withPips.unlocked.some((b) =>
+        h.lat >= b.south && h.lat <= b.north && h.lon >= b.west && h.lon <= b.east),
+        "a heart pip only ever sits in unlocked ground");
+    }
+
+    const noPips = await jsonOf("/api/ramble/zones?bbox=" + bbox);
+    assert.deepEqual(noPips.hearts, [], "pips are a close-zoom detail; the client asks for them");
+  });
+});
+
+test("a heart in ground unlocked before this feature existed waits on the map, and pays when walked to", async () => {
+  // The K2 case, end to end: a row put straight into ramble_cells (exactly what
+  // phase 1's backfill left behind) still has its heart to walk back to.
+  await withHeartSettings(HEARTS_ON, async () => {
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('u33dc0e', 1) ON CONFLICT(cell) DO NOTHING",
+        args: [],
+      });
+    } finally { db.close(); }
+    // u33dc0e decodes to 52.5181, 13.4081 (Berlin); this bbox contains it.
+    const zones = await jsonOf("/api/ramble/zones?bbox=52.50,13.35,52.54,13.46&pips=1");
+    assert.equal(zones.hearts.filter((h) => h.cell === "u33dc0e").length, 1,
+      "a cell unlocked before this feature shipped still has its heart waiting");
+
+    // And walking there really does collect the pip the map just drew.
+    const before = (await jsonOf("/api/ramble/pet")).hearts;
+    const walked = await jsonOf("/api/ramble/area", {
+      method: "POST", body: { lat: 52.5181, lon: 13.4081, here: { lat: 52.5181, lon: 13.4081, accuracy_m: 15 } },
+    });
+    assert.equal(walked.heart_picked, 1, "the pip the map drew is the heart the walk grants");
+    assert.equal(walked.hearts, before + 1);
+    const after = await jsonOf("/api/ramble/zones?bbox=52.50,13.35,52.54,13.46&pips=1");
+    assert.equal(after.hearts.filter((h) => h.cell === "u33dc0e").length, 0, "and the pip is gone");
+  });
+});
+
+test("GET /api/ramble/pet carries the heart count and the ceiling", async () => {
+  const body = await jsonOf("/api/ramble/pet");
+  assert.equal(typeof body.hearts, "number");
+  assert.equal(typeof body.energy_max, "number");
+  assert.equal(body.energy_max, 100 + body.hearts * 10,
+    "the ceiling is derived from the count the same response reports");
+});
+
+test("the energy bar is drawn against the server's ceiling, not a hardcoded 100", async () => {
+  const body = await (await req("/ramble/static/ramble.js")).text();
+  assert.ok(body.includes("pet.energy_max"), "the painter reads the ceiling the server clamped with");
+  assert.ok(!body.includes('Math.min(100, energy)) + "%"'), "the old hardcoded-100 bar is gone");
+  assert.ok(body.includes("(energy / max) * 100"), "the bar is a fraction of the real ceiling");
+  assert.ok(body.includes("function paintHeartRow("), "the pet page shows the containers themselves");
+  assert.ok(body.includes("paintHearts(hearts)"),
+    "the map-bar counter is painted from the pet read too, not only from a position fix");
 });

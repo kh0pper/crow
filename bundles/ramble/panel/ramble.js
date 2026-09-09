@@ -124,6 +124,7 @@ export default {
               <button class="rb-chip" id="rb-chip-visible" type="button" aria-haspopup="dialog">${icon("eye")}<span id="rb-chip-visible-label">Visible: off</span></button>
               <button class="rb-chip" id="rb-chip-ar" type="button" aria-haspopup="dialog">${icon("ar")}<span>Look around</span></button>
               <span class="rb-seed" title="Bird seed"><strong id="rb-seed-count">0</strong><span>seed</span></span>
+              <span class="rb-hearts" title="Heart containers"><strong id="rb-heart-count">0</strong><span>hearts</span></span>
             </div>
 
             <div class="rb-perch">
@@ -249,8 +250,9 @@ export default {
             <div class="rb-meter">
               <strong class="rb-meter-label">Energy</strong>
               <span class="rb-meter-bar"><i id="rb-energy-fill"></i></span>
-              <strong id="rb-energy-num">&mdash;</strong>
+              <strong id="rb-energy-num">&mdash;</strong><span class="rb-meter-of">/ <span id="rb-energy-max">100</span></span>
             </div>
+            <p class="rb-hearts-line"><span id="rb-heart-row" class="rb-heart-row"></span><span class="rb-muted rb-fine" id="rb-heart-line"></span></p>
             <p class="rb-muted rb-fine" id="rb-mood-line">Checking on it&hellip;</p>
           </section>
 

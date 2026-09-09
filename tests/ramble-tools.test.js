@@ -104,6 +104,8 @@ test("ramble_pet_state returns the pet's current state", async () => {
   assert.equal(typeof state.places_week, "number");
   assert.equal(typeof state.unlocks_week, "number");
   assert.equal(typeof state.crows_week, "number");
+  assert.equal(typeof state.hearts, "number", "the tool reports the same wallet the panel does");
+  assert.equal(typeof state.energy_max, "number");
 });
 
 test("ramble_unlock on an in-range open mark feeds unlock_mark (unlocks_week increments)", async () => {
