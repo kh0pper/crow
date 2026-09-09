@@ -136,6 +136,9 @@
   var lastPostedFix = null;
   var lastWalkFix = null;
   var walkStopTimer = null;
+  var momentTimer = null;
+  var spokeMarks = null;
+  var spokeNests = 0;
   var lastMarks = [];
 
   if (mapEl && typeof L !== "undefined") {
@@ -244,18 +247,13 @@
      * state; a divIcon is a focusable div with neither. Restore both. */
     var el = hereDot.getElement();
     if (el) {
-      el.setAttribute("role", "button");
-      el.setAttribute("aria-label", perchTarget === "pet" ? "Open your bird" : "Open your egg");
-      /* keyboard:true only gives Leaflet's tabIndex + role; its one keypress
-       * handler is popup-only (_onKeyPress -> _openPopup) and hereDot binds no
-       * popup. A role="button" div gets no synthesized click from Enter/Space,
-       * so wire it by hand. Property assignment, not addEventListener: this runs
-       * on every re-skin and must not stack duplicate handlers. */
-      el.onkeydown = function (ev) {
-        if (ev.key !== "Enter" && ev.key !== " ") return;
-        ev.preventDefault();
-        showView(perchTarget);
-      };
+      /* NOT role="button" any more: tapping no longer navigates, it asks. The
+       * tooltip Leaflet opens on focus carries the answer, and Leaflet sets
+       * aria-describedby to point at it, so a screen reader hears the status
+       * on focus without us inventing anything. */
+      el.setAttribute("role", "img");
+      el.setAttribute("aria-label", perchTarget === "pet" ? "You, and your bird" : "You, and your egg");
+      el.onkeydown = null;
     }
   }
 
@@ -298,7 +296,10 @@
          * role and aria-label to keep that. */
         title: "You",
       }).addTo(hereLayer);
-      hereDot.on("click", function () { showView(perchTarget); });
+      /* No showView here any more. Tapping the bird asks it what is around
+       * (Leaflet opens the tooltip on click and on focus); the labelled strip
+       * button is the door, and it works with no fix and no pointer. */
+      bindPerchVoice();
       paintHereArt();
     } else {
       hereRing.setLatLng(ll);
@@ -426,8 +427,7 @@
    * the flash would be invisible. A rectangle in the fog pane is on top of the
    * tiles and is the thing the user actually wants to see light up. */
   function celebrateUnlock(box) {
-    var say = $("rb-perch-say");
-    if (say) say.textContent = "New ground.";
+    sayMoment("New ground.");
     /* Its OWN layer, not zoneLayer: drawZones opens with clearLayers(), and
      * the refreshZones below resolves in tens of milliseconds, so a flash
      * parked in zoneLayer would be wiped long before its 900 ms animation
@@ -440,7 +440,7 @@
       var flash = L.rectangle(bounds, {
         pane: "rb-fog", className: "rb-unlock-flash", stroke: false, interactive: false,
       }).addTo(hereLayer);
-      setTimeout(function () { if (hereLayer) hereLayer.removeLayer(flash); }, 900);
+      setTimeout(function () { if (hereLayer) hereLayer.removeLayer(flash); }, 1200);
     }
     refreshZones();
     refreshMarks();
@@ -640,7 +640,7 @@
   }
 
   function drawMarks(marks) {
-    /* drawNearby renders a list row per mark and paintPerchSay counts
+    /* drawNearby renders a list row per mark and statusLine counts
      * lastMarks: a beacon has no content_text, mark_id or created_at, so both
      * must work from the full marks only, never the raw response. */
     var full = marks.filter(function (m) { return !m.beacon; });
@@ -672,7 +672,7 @@
       }
     });
     drawNearby(full);
-    paintPerchSay();
+    notePerch();
   }
 
   /* A frontier beacon: something is there, but not what. The server already
@@ -793,14 +793,15 @@
     var bird = pet && pet.bird;
     var valid = !!(Bird && bird && Bird.isValidBird({ species: bird.species, seed: bird.seed }));
     perchTarget = valid ? "pet" : "egg";
-    paintPerchSay();
+    notePerch();
     paintHereArt();
     paintPerchGo();
   }
 
-  function paintPerchSay() {
-    var say = $("rb-perch-say");
-    if (!say) return;
+  /* What the bird would say if asked. Ambient status, no longer shown
+   * unprompted — the map was carrying this line permanently and it did not
+   * earn the space. */
+  function statusLine() {
     var line;
     if (perchTarget === "egg") {
       line = "Your egg is " + Math.round(eggPercent) + "% warm.";
@@ -813,7 +814,56 @@
      * only ever runs from fetch/stream callbacks, after the whole script has
      * been evaluated, so the var is initialised by then. The guard is belt. */
     if ((lastNests || []).length > 0) line += " There's a nest nearby.";
-    say.textContent = line;
+    return line;
+  }
+
+  /* The bird's voice is a Leaflet tooltip on the marker, not a box in the
+   * strip. That buys three things the box could not: a real tail that points
+   * at the bird, a position that tracks it, and — because Leaflet binds both
+   * click and focus/blur for a non-permanent tooltip — tap-to-ask and
+   * keyboard-to-ask for free. */
+  function bindPerchVoice() {
+    if (!hereDot || hereDot.getTooltip()) return;
+    hereDot.bindTooltip("", { direction: "top", offset: [0, -16], className: "rb-voice", opacity: 1 });
+    refreshPerchVoice();
+  }
+
+  /* Update the ambient line WITHOUT interrupting a moment that is on screen. */
+  function refreshPerchVoice() {
+    if (!hereDot || !hereDot.getTooltip() || momentTimer) return;
+    hereDot.setTooltipContent(statusLine());
+  }
+
+  /* A moment: say it out loud, hold it, then fall back to ambient and go
+   * quiet again. This is the only thing that opens the bubble on its own. */
+  function sayMoment(text) {
+    if (!text || !hereDot || !hereDot.getTooltip()) return;
+    hereDot.setTooltipContent(text);
+    hereDot.openTooltip();
+    if (momentTimer) clearTimeout(momentTimer);
+    momentTimer = setTimeout(function () {
+      momentTimer = null;
+      if (!hereDot || !hereDot.getTooltip()) return;
+      hereDot.closeTooltip();
+      refreshPerchVoice();
+    }, 4200);
+  }
+
+  /* Decide whether anything that just changed is worth speaking. Only
+   * ARRIVALS speak — a count going down, or staying put, is not news. */
+  function notePerch() {
+    var marks = lastMarks.length;
+    var nests = (lastNests || []).length;
+    var firstLook = spokeMarks === null;
+    if (!firstLook && nests > spokeNests && spokeNests === 0) {
+      sayMoment("There's a nest nearby.");
+    } else if (!firstLook && marks > spokeMarks) {
+      sayMoment(marks === 1 ? "One thing waiting nearby." : (marks + " things waiting nearby."));
+    } else {
+      refreshPerchVoice();
+    }
+    spokeMarks = marks;
+    spokeNests = nests;
   }
 
   /* -------------------------------------------------------------- compose */
@@ -1084,7 +1134,7 @@
     paintStep("rb-step-checkin", !!list.checked_in_today, list.checked_in_today ? "✓" : "·",
       list.checked_in_today ? "checked in today" : "a tap a day keeps it warm");
 
-    paintPerchSay();
+    notePerch();
   }
 
   function refreshEgg() {
@@ -1170,7 +1220,7 @@
     /* The successor egg, and the only route back to the egg view (and its
      * daily check-in) once the perch belongs to a hatched bird. */
     var nextPct = (pet.egg && typeof pet.egg.percent === "number") ? pet.egg.percent : eggPercent;
-    /* paintPerchSay renders the world view's warmth line from this, and the
+    /* statusLine renders the world view's warmth line from this, and the
      * ring that used to show live progress is gone, so this is now the only
      * thing keeping that line honest between egg-view visits. */
     if (pet.egg && typeof pet.egg.percent === "number") eggPercent = pet.egg.percent;
@@ -1368,8 +1418,54 @@
    * frontier cell as a hole. Leaflet fills even-odd, so the holes are clear
    * and everything else is fogged. Frontier cells get a dim square on top so
    * they read as previewed rather than owned. */
+  /* Cloudy edges. Leaflet draws the mask as an SVG path, so a filter reference
+   * on it works — but the filter itself has to exist somewhere in the document.
+   * Built with createElementNS: no markup sink, no backticks. Injected once.
+   *
+   * The old mask had hard geohash-grid edges, which read as a spreadsheet
+   * rather than as weather. Turbulence wobbles the boundary and the blur takes
+   * the corners off. Keep the scale modest — displacement is per-pixel work on a
+   * full-viewport path, and this runs on a phone. */
+  function ensureFogFilter() {
+    if (document.getElementById("rb-fog-clouds")) return;
+    var NS = "http://www.w3.org/2000/svg";
+    var host = document.createElementNS(NS, "svg");
+    host.setAttribute("width", "0");
+    host.setAttribute("height", "0");
+    host.setAttribute("aria-hidden", "true");
+    host.setAttribute("class", "rb-defs");
+    var filter = document.createElementNS(NS, "filter");
+    filter.setAttribute("id", "rb-fog-clouds");
+    filter.setAttribute("x", "-20%");
+    filter.setAttribute("y", "-20%");
+    filter.setAttribute("width", "140%");
+    filter.setAttribute("height", "140%");
+    var turb = document.createElementNS(NS, "feTurbulence");
+    turb.setAttribute("type", "fractalNoise");
+    turb.setAttribute("baseFrequency", "0.014");
+    turb.setAttribute("numOctaves", "3");
+    turb.setAttribute("seed", "11");
+    turb.setAttribute("result", "rb-noise");
+    var disp = document.createElementNS(NS, "feDisplacementMap");
+    disp.setAttribute("in", "SourceGraphic");
+    disp.setAttribute("in2", "rb-noise");
+    disp.setAttribute("scale", "18");
+    disp.setAttribute("xChannelSelector", "R");
+    disp.setAttribute("yChannelSelector", "G");
+    disp.setAttribute("result", "rb-wobbled");
+    var blur = document.createElementNS(NS, "feGaussianBlur");
+    blur.setAttribute("in", "rb-wobbled");
+    blur.setAttribute("stdDeviation", "4");
+    filter.appendChild(turb);
+    filter.appendChild(disp);
+    filter.appendChild(blur);
+    host.appendChild(filter);
+    document.body.appendChild(host);
+  }
+
   function drawZones(out) {
     if (!out || !zoneLayer || !map) return;
+    ensureFogFilter();
     zoneLayer.clearLayers();
     var b = map.getBounds().pad(0.5);
     var outer = [
@@ -1388,17 +1484,39 @@
     }
   }
 
-  /* A pip in every unlocked cell whose seed has regrown: the map says where
-   * walking pays, instead of the counter silently ticking up. Not interactive
-   * — you collect by walking there, not by tapping. */
+  /* A grain of seed in every unlocked cell whose seed has regrown: the map says
+   * where walking pays, instead of the counter silently ticking up. Not
+   * interactive — you collect by walking there, not by tapping.
+   *
+   * A real seed, not a dot: the first version used a plain circleMarker in the
+   * UI accent, which read as map chrome rather than as something to go and get.
+   * Each pip needs its OWN element — appending an Element MOVES it, so one
+   * shared node would leave a single seed hopping between cells. */
+  function seedIcon() {
+    if (!Bird || typeof Bird.mountSeed !== "function") return null;
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    try { Bird.mountSeed(svg); } catch (e) { return null; }
+    var opts = { className: "rb-seed-pip", iconSize: [18, 18], iconAnchor: [9, 9] };
+    opts.html = svg;   /* an Element: Leaflet appends, so this is no markup sink */
+    return L.divIcon(opts);
+  }
+
   function paintSeedPips(cells) {
     for (var i = 0; i < cells.length; i++) {
       var c = cells[i];
       if (!cellUsable(c)) continue;
-      L.circleMarker([(c.south + c.north) / 2, (c.west + c.east) / 2], {
-        pane: "rb-fog", className: "rb-seed-pip", radius: 4, weight: 0,
-        fillOpacity: 0.9, interactive: false
-      }).addTo(zoneLayer);
+      var ll = [(c.south + c.north) / 2, (c.west + c.east) / 2];
+      var icon = seedIcon();
+      if (icon) {
+        L.marker(ll, { pane: "rb-fog", icon: icon, interactive: false, keyboard: false }).addTo(zoneLayer);
+      } else {
+        /* The engine did not load. A dot is worse than a seed but far better
+         * than nothing, since it still says "walking here pays". */
+        L.circleMarker(ll, {
+          pane: "rb-fog", className: "rb-seed-dot", radius: 4, weight: 0,
+          fillOpacity: 0.9, interactive: false
+        }).addTo(zoneLayer);
+      }
     }
   }
 
@@ -1448,7 +1566,7 @@
       marker.addTo(nestLayer);
       nestMarkers[nest.cell] = marker;
     });
-    paintPerchSay();
+    notePerch();
   }
 
   /* Nests are computed server-side for the viewport; below MIN_NEST_ZOOM the
@@ -2140,7 +2258,11 @@
       paintHere(pos);
       setFollowing(true);
     }).catch(function () {
-      setText($("rb-perch-say"), "Pan the map to pick where you are listening.");
+      /* The ONLY thing the strip line still says. There is no marker without a
+       * fix, so the bird has no mouth to say it with — and this is a standing
+       * condition, not a moment, so it stays until a fix arrives. */
+      var say = $("rb-perch-say");
+      if (say) { setText(say, "Pan the map to pick where you are listening."); setHidden(say, false); }
     }).then(function () { publishArea(); refreshNests(); refreshZones(); });
     setInterval(refreshNests, 10 * 60e3);
     setInterval(refreshZones, 10 * 60e3);

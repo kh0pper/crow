@@ -60,3 +60,18 @@ test("no ESM syntax (must load as a classic browser script)", async () => {
   const src = readFileSync(new URL("../bundles/ramble/server/bird-svg.cjs", import.meta.url), "utf8");
   assert.ok(!/^\s*(import|export)\s/m.test(src));
 });
+
+test("drawSeed: a grain that reads as food, not as another UI dot", () => {
+  const svg = Bird.drawSeed();
+  assert.match(svg, /<ellipse/, "the husk");
+  assert.ok(svg.includes("#e8b256"), "warm against a blue-grey map, which is what makes it findable");
+  assert.ok(!svg.includes("var(--"), "the engine draws with literals — it has no stylesheet");
+  assert.ok(!/[`]/.test(svg), "no backtick can reach a panel script through the engine");
+
+  // mountSeed must set the viewBox itself, like every other mount* in here:
+  // callers hand it a bare <svg> and the art is meaningless without one.
+  const el = { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, set innerHTML(v) { this.html = v; } };
+  Bird.mountSeed(el);
+  assert.equal(el.attrs.viewBox, "0 0 24 24");
+  assert.equal(el.html, svg);
+});
