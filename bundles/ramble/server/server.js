@@ -304,8 +304,9 @@ export function createRambleServer(db, options = {}) {
       try {
         const [state, bird, egg] = await Promise.all([petState(db), activeBird(db), eggState(db, { now: Date.now() })]);
         // Task 2 (spec 2026-09-08 §4.1): no egg is a valid state — a read
-        // must not throw for it, so an absent egg reports 0%.
-        return text(JSON.stringify({ ...state, bird, hearts: await heartsBalance(db), egg: { percent: egg.egg ? egg.egg.percent : 0 } }));
+        // must not throw for it, so an absent egg is reported as `null`, not
+        // dereferenced.
+        return text(JSON.stringify({ ...state, bird, hearts: await heartsBalance(db), egg: egg.egg ?? null }));
       } catch (err) {
         return errorText(err.message);
       }

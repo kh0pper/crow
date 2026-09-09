@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import {
-  mintIncubatingEgg, getIncubatingEgg, eggState, creditWarmth, localDay,
+  mintIncubatingEgg, getIncubatingEgg, eggState, creditWarmth,
 } from "../bundles/ramble/server/eggs.js";
 import { feedAll } from "../bundles/ramble/server/feed.js";
 

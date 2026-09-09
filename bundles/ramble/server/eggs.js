@@ -144,13 +144,16 @@ export async function getIncubatingEgg(db) {
 }
 
 /**
- * Insert a fresh incubating egg. THE ONLY MINTING PRIMITIVE — as of phase 3
- * it is called from exactly two places, the starter grant and laying, and
- * both are deliberate acts. It was called `ensureIncubatingEgg` and was
- * invoked from four sites, two of them pure reads (`eggState` on every
- * GET /api/ramble/egg, `flockState` on every flock screen), so merely looking
- * at a screen recreated the egg. Read with `getIncubatingEgg` instead; the
- * name is "mint" so that a future caller has to mean it.
+ * Insert a fresh incubating egg. THE ONLY MINTING PRIMITIVE. As of the end of
+ * this phase the only callers are the starter grant and laying, both
+ * deliberate acts; until those land, `flock.js`'s `flockState` still calls it
+ * on every flock screen (Task 3 removes that call), and `hatchIfReady` calls
+ * it to mint the successor egg after a hatch. It was called
+ * `ensureIncubatingEgg` and was invoked from four sites, two of them pure
+ * reads (`eggState` on every GET /api/ramble/egg, `flockState` on every flock
+ * screen), so merely looking at a screen recreated the egg. Read with
+ * `getIncubatingEgg` instead; the name is "mint" so that a future caller has
+ * to mean it.
  *
  * The INSERT ... SELECT ... WHERE NOT EXISTS guard (rather than a unique
  * index) makes this race-free within one process on a single SQLite
