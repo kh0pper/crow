@@ -2,14 +2,14 @@ import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
-import { ensureIncubatingEgg, creditWarmth, hatchIfReady, checkin, eggState, activeBird, isoWeek, localDay, WARMTH_DEFAULTS, MEET_CROW_DAILY_CAP } from "../bundles/ramble/server/eggs.js";
+import { mintIncubatingEgg, creditWarmth, hatchIfReady, checkin, eggState, activeBird, isoWeek, localDay, WARMTH_DEFAULTS, MEET_CROW_DAILY_CAP } from "../bundles/ramble/server/eggs.js";
 
 let db; const T0 = Date.UTC(2026, 8, 7, 12); // 2026-09-07 12:00Z
 before(async () => { db = createClient({ url: "file::memory:" }); await initRambleTables(db); });
 
 test("a fresh instance gets exactly one incubating egg", async () => {
-  const a = await ensureIncubatingEgg(db, { now: T0 });
-  const b = await ensureIncubatingEgg(db, { now: T0 });
+  const a = await mintIncubatingEgg(db, { now: T0 });
+  const b = await mintIncubatingEgg(db, { now: T0 });
   assert.equal(a.egg_id, b.egg_id);
   const { rows } = await db.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'");
   assert.equal(rows[0].n, 1);
@@ -129,7 +129,7 @@ test("meet_crow warmth is capped per local day (a spoofed-persona flood cannot f
 test("activeBird ignores a pet pointer at an egg that has not hatched", async () => {
   const fresh = createClient({ url: "file::memory:" });
   await initRambleTables(fresh);
-  const egg = await ensureIncubatingEgg(fresh, { now: T0 });
+  const egg = await mintIncubatingEgg(fresh, { now: T0 });
   await fresh.execute({ sql: "INSERT INTO ramble_pet (owner, active_egg_id) VALUES ('self', ?)", args: [egg.egg_id] });
   assert.equal(await activeBird(fresh), null, "an incubating egg is not a bird");
 

@@ -813,7 +813,10 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     res.json({
       ...pet,
       bird,
-      egg: { percent: egg.egg.percent },
+      // Task 2 (spec 2026-09-08 §4.1): no egg is a valid state now — a read
+      // must not crash for it, so an absent egg shows as 0% rather than
+      // dereferencing a null.
+      egg: { percent: egg.egg ? egg.egg.percent : 0 },
       seed: await mods.walletMod.seedBalance(db),
       hearts: await mods.heartsMod.heartsBalance(db),
       energy_max_cap: (await mods.heartsMod.readHeartSettings(db)).cap,

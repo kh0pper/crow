@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { encodeGeohash } from "../bundles/ramble/server/anchors.js";
-import { isoWeek, ensureIncubatingEgg } from "../bundles/ramble/server/eggs.js";
+import { isoWeek, mintIncubatingEgg } from "../bundles/ramble/server/eggs.js";
 import { nestFor, CELL7_LAT_STEP } from "../bundles/ramble/server/nests.js";
 import {
   readFlockSettings, listNests, claimNest,
@@ -113,7 +113,7 @@ test("claimNest: one claim per local day, and the shelf cap refuses the sixth", 
   assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='shelf' AND shelf_origin='user'")).rows[0].n, SHELF_CAP_DEFAULT);
   // The cap counts USER shelf eggs only: neither the incubating egg nor a
   // convergence loser that landed on the shelf is one of the user's spots.
-  await ensureIncubatingEgg(d, { now: T0 });
+  await mintIncubatingEgg(d, { now: T0 });
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('loser','shelf','sync',0,1)");
   assert.deepEqual(await claimNest(d, { cell: cells[5], week: WEEK, here: at(cells[5]), now: day5 }), { claimed: false, reason: "shelf-full" });
   // A raised cap admits it (5 user eggs < 6) — and the refused attempts above
@@ -124,7 +124,7 @@ test("claimNest: one claim per local day, and the shelf cap refuses the sixth", 
 
 test("incubateEgg swaps the slot: old egg shelved as 'user', target incubating, emits shelved then incubating", async () => {
   const d = await freshDb();
-  const first = await ensureIncubatingEgg(d, { now: T0 });
+  const first = await mintIncubatingEgg(d, { now: T0 });
   await d.execute({ sql: "UPDATE ramble_eggs SET warmth = 40 WHERE egg_id = ?", args: [first.egg_id] });
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, found_cell, created_at) VALUES ('s1','shelf','user',10,'9v6m21h',5)");
   const emitted = [];
@@ -143,7 +143,7 @@ test("incubateEgg swaps the slot: old egg shelved as 'user', target incubating, 
 
 test("incubateEgg hatches a swapped-in egg that is already past the threshold", async () => {
   const d = await freshDb();
-  await ensureIncubatingEgg(d, { now: T0 });
+  await mintIncubatingEgg(d, { now: T0 });
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('hot','shelf','user',100,5)");
   const r = await incubateEgg(d, "hot", { now: T0 });
   assert.ok(r.hatched && r.hatched.egg_id === "hot" && typeof r.hatched.species === "string");
@@ -178,7 +178,7 @@ test("flockState: birds with the active one marked, eggs incubating-first, speci
 
 test("incubateEgg is all-or-nothing under a concurrent swap of the same egg", async () => {
   const d = await freshDb();
-  const first = await ensureIncubatingEgg(d, { now: T0 });
+  const first = await mintIncubatingEgg(d, { now: T0 });
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('s2','shelf','user',10,5)");
   const results = await Promise.all([incubateEgg(d, "s2", { now: T0 }), incubateEgg(d, "s2", { now: T0 })]);
   assert.ok(results.every((r) => r.ok === true), JSON.stringify(results));
@@ -198,7 +198,7 @@ test("incubateEgg is all-or-nothing under a concurrent swap of the same egg", as
 
 test("phase 3: incubateEgg admits a received egg (origin cleared), refuses a locked one and a gifted one; flockState lists received + locked", async () => {
   const d = await freshDb();
-  const first = await ensureIncubatingEgg(d, { now: T0 });
+  const first = await mintIncubatingEgg(d, { now: T0 });
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, from_crow_id, created_at) VALUES ('rx','received','user',35,'crow:friend',7)");
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('sw','shelf','user',5,8), ('gone','gifted','user',5,9)");
   const p = await proposeSwap(d, { eggId: "sw", toCrowId: "crow:friend", now: T0 });

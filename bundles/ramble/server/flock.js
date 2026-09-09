@@ -17,7 +17,7 @@
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { withinRange, haversineMeters } from "./anchors.js";
-import { isoWeek, startOfLocalDay, hatchIfReady, ensureIncubatingEgg, readWarmthWeights } from "./eggs.js";
+import { isoWeek, startOfLocalDay, hatchIfReady, mintIncubatingEgg, readWarmthWeights } from "./eggs.js";
 import { nestFor, cellsInBbox, nestsInCells, NEST_RATE_DEFAULT, CELL7_RE, WEEK_RE } from "./nests.js";
 import { isEggLocked, lockedEggIds } from "./egg-locks.js";
 
@@ -222,7 +222,7 @@ export async function activateBird(db, eggId, { emit } = {}) {
 
 /** The flock screen's data: hatched birds, unhatched eggs, and the species score. */
 export async function flockState(db, { now = Date.now() } = {}) {
-  await ensureIncubatingEgg(db, { now });
+  await mintIncubatingEgg(db, { now });
   const weights = await readWarmthWeights(db);
   const { shelfCap } = await readFlockSettings(db);
   const pet = await getPetRow(db);
