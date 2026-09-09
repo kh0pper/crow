@@ -23,15 +23,17 @@
 
 ## Global Constraints
 
-- **Base:** `origin/main` @`e089ad4d`. Worktree `/home/kh0pp/crow-wt-ramble-hearts`, branch `feat/ramble-hearts`, already created. **Never `git checkout` in `~/crow`** — a gateway checkout parked off `main` silently disables fleet auto-update. **Never `cp -a` a worktree** — its `.git` is a pointer file and the copy commits to the real branch.
+- **Base:** `origin/main` @`200cf834` (rebased after the plan review; the earlier `e089ad4d` baseline was stale). Worktree `/home/kh0pp/crow-wt-ramble-hearts`, branch `feat/ramble-hearts`, already created. **Never `git checkout` in `~/crow`** — a gateway checkout parked off `main` silently disables fleet auto-update. **Never `cp -a` a worktree** — its `.git` is a pointer file and the copy commits to the real branch.
 - **Node/test harness:** `export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH` before any node/npm command. Run tests ONLY as `node scripts/run-suite.mjs tests/<file>.test.js` from the worktree, in the FOREGROUND. **NEVER run bare `node --test`** — it writes to the LIVE production database. Never boot a gateway or MCP server without a scratch `CROW_DATA_DIR`.
-- **Suite baseline:** 4301 pass / 0 fail at `e089ad4d`. The suite must not regress.
+- **Suite baseline:** **4301 pass / 0 fail at `200cf834`**, measured in this worktree after the rebase. The suite must not regress.
 - **No schema change, no migration, no `SCHEMA_GENERATION` bump.** Hearts ride `ramble_wallet` (`kind`, `key`, `delta`, `created_at`, `lamport_ts`), which already exists on every host. `bundles/ramble/server/init-tables.js` and `scripts/init-db.js` are **not modified by this plan**. If a task finds itself editing either file, stop — the design has drifted.
 - **Ledgers, not balances (spec §6.1):** every heart is an append-only row under a natural idempotent key. Never store a heart count, and never store maximum energy — both are derived by reading the ledger.
 - **A heart row's `delta` is ALWAYS the integer `1`** — a count of containers, never an energy amount. Two reasons, both load-bearing: (a) `applyRambleWallet` in `servers/sharing/instance-sync.js` resolves conflicts with `MAX(delta)`, which is only convergent when the value cannot differ between instances for the same key — phase 1 shipped a bug here precisely because seed's `delta` is the live, mutable `seed.per.pickup`; a constant `1` cannot disagree. (b) Storing energy would freeze `energy.max.per.heart` into history, so retuning that setting would not retune the bar.
 - **⚠ Never write a NEGATIVE delta in this phase.** `applyRambleWallet`'s doc comment records why: `MAX(delta)` would resolve a `-10`/`-5` disagreement to `-5`, deducting less. There are no spends in phase 2. Phase 4 must key a spend by the purchase.
-- **The map and the payout MUST read the same rule.** A heart drawn on the map that a walk does not grant (or the reverse) is the exact defect phase 1 shipped in its seed layer and had to fix. `availableHearts()` (what the map draws) and `recordHeartPickup()` (what a walk grants) both call the single pure `heartCandidate()`, and Task 2 has an executable test that the two agree cell-for-cell.
-- **Fail closed on unlock.** A heart is only ever granted in a cell that is already in `ramble_cells`. `recordHeartPickup` checks that itself rather than trusting its caller, so a position fix refused by the `unlock.max.accuracy.m` gate can never pay a heart in ground the user did not enter.
+- **The map and the payout MUST read the same rule.** A heart drawn on the map that a walk does not grant (or the reverse) is the hazard 0.9.5 had to close when seed became sparse: before it, seed paid in every cell while the map drew pips in one in four. The gate `recordSeedPickup` carries today (`wallet.js`: "The SAME gate the map draws from. Without this the map would be a liar") is that fix. `availableHearts()` (what the map draws) and `recordHeartPickup()` (what a walk grants) therefore both go through the single pure `heartCandidates()`, and Task 2 has an executable test that the two agree cell-for-cell.
+  **⚠ But do not over-index on this one.** The three defects phase 1's whole-branch review actually caught were different in kind: a retired UI element that was carrying another affordance, a feature gating on accumulated state with no answer for existing users, and a non-convergent sync apply. Two of them are *an affordance added on one path and not its twin* — which is the failure this plan is most at risk of repeating, not a map/payout split.
+- **Fail closed on unlock, on BOTH halves.** A heart is only ever granted in a cell that is already in `ramble_cells` — `recordHeartPickup` checks that itself rather than trusting its caller. **That check alone is not sufficient**, because a cell unlocked months ago passes it no matter how vague today's fix is, and this phase deliberately leaves hearts sitting in exactly such cells. So the route must ALSO pass `recordUnlock`'s own `out.cell`, which `cells.js` sets to `null` when the fix is too vague. Both halves, or a 2 km wifi fix collects a retroactive heart from a cell the user is nowhere near.
+- **Every affordance must be added on BOTH paths.** The heart counter is fed by the area response *and* by `GET /api/ramble/pet`, because a player who denies geolocation never posts a fix — `paintPet` already calls `paintSeed(pet.seed)` for exactly this reason. Whenever this plan adds a painter, check whether its seed twin is called from two places.
 - **Mood thresholds stay ABSOLUTE at 60 and 30** (`moodFor` in `pet.js` is unchanged). This is the spec's own reading: §4.3 says "a larger maximum energy means more slack before dropping below happy". A percentage threshold would give a bigger bar no benefit at all and would make hearts cosmetic.
 - **Sparse features need explicit fixtures, not lucky hashes.** Phase 1's seed sparsity broke ledger tests written against values that happened to hash right. Every behavioural test in this plan sets `heart.rate = 1` (or `heart.wild.rate = 1`) so **every** cell holds a heart and the fixture is whatever you name. Rate itself is covered separately by one statistical test and one pinned regression vector.
 - **Replication is EXPLICIT.** `ramble_wallet` is already registered for inbound apply; nothing goes outward unless a writer calls `emit`. `recordHeartPickup` takes `{ now, emit }` and emits after a successful insert, exactly as `recordSeedPickup` does.
@@ -49,14 +51,16 @@ Two settings the spec does not list are added here. Both follow the precedent of
 1. **`heart.wild.rate` (default 40).** Spec §6.4 gives `heart.wild.days` (30) as "the minimum gap before a heart may reappear in already-unlocked ground" but gives wild hearts no rarity. Without a rate, **every** unlocked cell yields a wild heart every 30 days: a 300-cell map would pay 10 hearts a month, "rarely" would be false, and the map would be carpeted in hearts — the same complaint that forced seed to become sparse in 0.9.5. At 1-in-40 per 30-day window, 25 cells pay about 0.6 hearts a month and 300 cells about 7.5, which keeps §2.3's deliberate concession (grindable by a heavy walker) without making exploration pointless.
 2. **`energy.max.cap` (default 300).** The spec caps nothing. Uncapped, a long-lived map pushes maximum energy high enough that the -10-per-6h decay can never reach the 60 threshold, which makes mood permanent, hearts worthless past a point, and — critically — pre-breaks **phase 3**, whose laying floor is gated on "the bird ends the day happy". 300 is base 100 plus 20 hearts, which is exactly Zelda's 20-heart cap; D6 makes that mapping the frame of the whole currency design.
 
-Both are noted in the PR body so a reviewer reads them as decisions, not drift.
+Both are noted in the PR body so a reviewer reads them as decisions, not drift. The wild arithmetic above assumes **every** unlocked cell stays eligible for a wild heart, including cells whose permanent heart is long gone — which is true only because `heartCandidates` offers both sources rather than short-circuiting on the first (Task 1). If that ever regresses to an `a || b`, these numbers are overstated by a third as well as the mechanic being broken.
+
+**A third number left at the spec's value, with the reasoning recorded.** `heart.rate = 3` means roughly one cleared cell in three shows a pip on upgrade day — denser than seed's one in four, which is odd for the rarer currency, and Deviation 1 argues at length that carpeting is a real failure mode. Three things make it acceptable and it is deliberately not changed: pips only draw at `MIN_CELL_DETAIL_ZOOM` (15) and above, so density is bounded by a walkable viewport rather than by lifetime history; unlike seed, a heart is taken **permanently**, so the carpet clears as it is walked and never returns; and the density on upgrade day is precisely the "destinations, not a number that jumped" that K2 chose. For grackle's ~25 cells it is about 8 pips. **Say the density out loud in the PR** so it is a judgement on the record rather than something a player discovers.
 
 ---
 
 ## File structure
 
 **Create**
-- `bundles/ramble/server/hearts.js` — the whole heart mechanic: placement (`heartFor`, `wildHeartFor`, `heartCandidate`, `wildWindow`), settings (`readHeartSettings`), the ledger half (`availableHearts`, `recordHeartPickup`, `heartsBalance`), and the derived ceiling (`maxEnergy`). Imports only `nests.js` (for `CELL7_RE`) and `anchors.js` (for `decodeGeohash`) — never `pet.js`, which imports *this* module.
+- `bundles/ramble/server/hearts.js` — the whole heart mechanic: placement (`heartFor`, `wildHeartFor`, `heartCandidates`, `wildWindow`), settings (`readHeartSettings`), the ledger half (`availableHearts`, `recordHeartPickup`, `heartsBalance`), and the derived ceiling (`maxEnergy`). Imports only `nests.js` (for `CELL7_RE`) and `anchors.js` (for `decodeGeohash`) — never `pet.js`, which imports *this* module.
 - `tests/ramble-hearts.test.js` — placement and settings (pure).
 - `tests/ramble-hearts-ledger.test.js` — pickup, availability, the same-rule agreement test, and multi-instance convergence.
 
@@ -65,10 +69,11 @@ Both are noted in the PR body so a reviewer reads them as decisions, not drift.
 - `bundles/ramble/server/feed.js` — its `readPet` helper must carry the same `energy_max`.
 - `bundles/ramble/server/bird-svg.cjs` — `drawHeart()` / `mountHeart()`.
 - `bundles/ramble/panel/routes.js` — load `hearts.js` into `mods`; grant on a fix in `POST /api/ramble/area`; heart pips in `GET /api/ramble/zones`; `hearts` on `GET /api/ramble/pet`.
+- `bundles/ramble/server/server.js` — the MCP tool `ramble_pet_state` (around line 304) calls `petState` too. It will pick up `energy_max` for free from the spread; give it `hearts` as well, or the tool and the HTTP route disagree about the same pet.
 - `bundles/ramble/panel/static/ramble.js` — the heart-pip layer, the counter, the pickup moment, the scaled energy bar, the heart row.
 - `bundles/ramble/panel/static/ramble.css` — pip, fallback dot, pop, counter and heart-row rules.
 - `bundles/ramble/panel/ramble.js` — the heart chip in the map bar; the heart row on the pet card.
-- `tests/ramble-pet.test.js`, `tests/ramble-panel.test.js`, `tests/ramble-bird-svg.test.js` — extended in the task that changes the behaviour they cover.
+- `tests/ramble-pet.test.js`, `tests/ramble-panel.test.js`, `tests/ramble-bird-svg.test.js`, `tests/ramble-tools.test.js` — extended in the task that changes the behaviour they cover.
 - `bundles/ramble/manifest.json`, `bundles/ramble/package.json`, `registry/add-ons.json`.
 - `docs/guide/ramble.md`, `docs/es/guide/ramble.md`.
 
@@ -90,7 +95,7 @@ Both are noted in the PR body so a reviewer reads them as decisions, not drift.
   - `wildWindow(now, days) -> integer`
   - `heartFor(cell, { rate }) -> { cell, key, source: "first", lat, lon } | null`
   - `wildHeartFor(cell, window, { wildRate }) -> { cell, key, source: "wild", lat, lon } | null`
-  - `heartCandidate(cell, window, { rate, wildRate }) -> the same shape | null`
+  - `heartCandidates(cell, window, { rate, wildRate }) -> [candidate]` — **an array in priority order**, permanent heart first, wild second, either or both possibly absent
   - `readHeartSettings(db) -> { rate, wildDays, wildRate, energyBase, perHeart, cap }`
 
 **Why placement is a hash and not a table:** this copies `nestFor` and `seedFor` deliberately. The answer is identical on every one of the user's devices with nothing stored and nothing to sync, and it cannot be re-rolled by leaving a cell and coming back.
@@ -121,7 +126,7 @@ import {
   HEART_KIND, HEART_SALT, HEART_WILD_SALT,
   HEART_RATE_DEFAULT, HEART_WILD_DAYS_DEFAULT, HEART_WILD_RATE_DEFAULT,
   ENERGY_MAX_BASE_DEFAULT, ENERGY_MAX_PER_HEART_DEFAULT, ENERGY_MAX_CAP_DEFAULT,
-  wildWindow, heartFor, wildHeartFor, heartCandidate, readHeartSettings,
+  wildWindow, heartFor, wildHeartFor, heartCandidates, readHeartSettings,
 } from "../bundles/ramble/server/hearts.js";
 
 const CELL = "9vk79ed";
@@ -161,7 +166,11 @@ test("heartFor: deterministic, and junk is refused rather than thrown", () => {
   assert.equal(heartFor("not-a-cell", ALL), null);
   assert.equal(heartFor("", ALL), null);
   assert.equal(heartFor(null, ALL), null);
-  assert.equal(heartFor(CELL, { rate: 0 }), heartFor(CELL, {}), "a junk rate falls back to the default");
+  // deepEqual, NOT equal: at the default rate both sides may be objects, and
+  // `equal` would then compare identity and fail for a reason that has nothing
+  // to do with the fallback. This is the file's own lucky-hash warning applied
+  // to itself.
+  assert.deepEqual(heartFor(CELL, { rate: 0 }), heartFor(CELL, {}), "a junk rate falls back to the default");
 });
 
 test("heartFor at the default rate hits roughly one cell in three", () => {
@@ -206,21 +215,27 @@ test("wildWindow buckets by whole days and falls back on junk", () => {
   assert.equal(wildWindow(60 * day, "x"), wildWindow(60 * day, HEART_WILD_DAYS_DEFAULT));
 });
 
-test("heartCandidate prefers the permanent heart when both would hit", () => {
-  const both = heartCandidate(CELL, 610, ALL);
-  assert.equal(both.source, "first", "the once-ever heart outranks the regrowing one");
-  assert.deepEqual(both, heartFor(CELL, ALL));
+test("heartCandidates lists BOTH sources, permanent first — it never hides the wild one", () => {
+  // ⚠ This is the shape the plan review forced. An `a || b` candidate would
+  // short-circuit forever once the permanent heart was taken, so at the default
+  // rate one cell in three could never grow a wild heart again — while the code
+  // comment promised the opposite.
+  const both = heartCandidates(CELL, 610, ALL);
+  assert.equal(both.length, 2, "both sources hit at rate 1, and both are offered");
+  assert.equal(both[0].source, "first", "the once-ever heart is offered first");
+  assert.equal(both[1].source, "wild", "but the regrowing one is still there behind it");
+  assert.deepEqual(both[0], heartFor(CELL, ALL));
+  assert.deepEqual(both[1], wildHeartFor(CELL, 610, ALL));
 
-  // No first heart available: the wild one is the candidate. The huge rate is
-  // asserted to miss rather than assumed to, so a surprise hit reads as a
-  // precondition failure instead of a confusing candidate-source failure.
+  // The huge rates are asserted to miss rather than assumed to, so a surprise
+  // hit reads as a precondition failure instead of a confusing shape failure.
   assert.equal(heartFor(CELL, { rate: 999999 }), null, "precondition: no first heart at this rate");
-  const onlyWild = heartCandidate(CELL, 610, { rate: 999999, wildRate: 1 });
-  assert.equal(onlyWild.source, "wild");
+  const onlyWild = heartCandidates(CELL, 610, { rate: 999999, wildRate: 1 });
+  assert.deepEqual(onlyWild.map((c) => c.source), ["wild"]);
 
   assert.equal(wildHeartFor(CELL, 610, { wildRate: 999999 }), null, "precondition: no wild heart either");
-  assert.equal(heartCandidate(CELL, 610, { rate: 999999, wildRate: 999999 }), null);
-  assert.equal(heartCandidate("bad", 610, ALL), null);
+  assert.deepEqual(heartCandidates(CELL, 610, { rate: 999999, wildRate: 999999 }), []);
+  assert.deepEqual(heartCandidates("bad", 610, ALL), []);
 });
 
 test("readHeartSettings reads all six keys, and refuses junk", async () => {
@@ -291,7 +306,7 @@ Expected: FAIL — `Cannot find module .../bundles/ramble/server/hearts.js`.
  *     competitive power, only a longer buffer, and it lets someone who cannot
  *     range far still progress.
  *
- * ⚠ ONE RULE, TWO READERS. `heartCandidate` is the ONLY place that decides
+ * ⚠ ONE RULE, TWO READERS. `heartCandidates` is the ONLY place that decides
  * whether a cell holds a heart. The map (availableHearts) and the payout
  * (recordHeartPickup) both go through it. Phase 1 shipped a seed layer where
  * the map and the payout disagreed and had to fix it; this module exists in
@@ -360,15 +375,27 @@ export function wildHeartFor(cell, window, { wildRate = HEART_WILD_RATE_DEFAULT 
 }
 
 /**
- * THE ONE RULE. What heart, if any, this cell holds right now.
+ * THE ONE RULE. Every heart this cell could hold right now, in priority order.
  *
- * The permanent heart outranks the wild one when both would hit: it is the
- * rarer of the two and it disappears forever once taken, so handing it over
- * first is strictly better for the player. The wild heart will come round
- * again next window.
+ * The permanent heart is offered first when both hit: it is the rarer of the
+ * two and it disappears forever once taken, so handing it over first is
+ * strictly better for the player. The wild heart comes round again next window.
+ *
+ * ⚠ RETURNS BOTH, and deliberately. The obvious `heartFor(...) || wildHeartFor(...)`
+ * short-circuits: once a cell's permanent heart is in the ledger, that version
+ * keeps returning the taken spot and never consults the wild source, so at the
+ * default rate one cell in three would be sterile for wild hearts FOREVER —
+ * while this very comment promised it "comes round again". The callers, which
+ * are the only things that know what has been taken, pick the first candidate
+ * that is still there.
  */
-export function heartCandidate(cell, window, { rate = HEART_RATE_DEFAULT, wildRate = HEART_WILD_RATE_DEFAULT } = {}) {
-  return heartFor(cell, { rate }) || wildHeartFor(cell, window, { wildRate });
+export function heartCandidates(cell, window, { rate = HEART_RATE_DEFAULT, wildRate = HEART_WILD_RATE_DEFAULT } = {}) {
+  const out = [];
+  const first = heartFor(cell, { rate });
+  if (first) out.push(first);
+  const wild = wildHeartFor(cell, window, { wildRate });
+  if (wild) out.push(wild);
+  return out;
 }
 
 /** Live settings (spec §6.4 plus the two deviations). Junk or a negative falls back. */
@@ -412,35 +439,65 @@ export async function readHeartSettings(db) {
 node scripts/run-suite.mjs tests/ramble-hearts.test.js
 ```
 
-Expected: PASS, 8 tests.
+Expected: PASS, 8 tests. The statistical test was measured at `share = 0.3293` over 3000 cells while this plan was written, comfortably inside the band.
 
 - [ ] **Step 5: Pin the salt with a regression vector**
 
-The statistical test proves the *shape* of the distribution; it would not notice the salt changing. Pin the actual values once. Run exactly this, in the worktree:
+The statistical test proves the *shape* of the distribution; it would not notice the salt changing. Pin the actual values once.
+
+**⚠ The pin must contain confirmed HITS, and it must pin positions.** A vector of six cells that all miss reduces every assertion to `false === false`, and a `heartFor` that returned `null` unconditionally would sail through it — this plan's first draft shipped exactly that vector, and the review caught it. A pin that records only hit/miss also cannot see a placement change that keeps the pattern but moves every pip off its spot.
+
+Run this generator, which searches for real hits on each salt rather than hoping six named cells happen to have them:
 
 ```bash
+export PATH=/home/kh0pp/.nvm/versions/node/v22.23.1/bin:$PATH
 node --input-type=module -e '
 import { heartFor, wildHeartFor } from "./bundles/ramble/server/hearts.js";
-for (const c of ["9vk79ed", "9v6m2xt", "dr5regw", "gcpvj0d", "u33dc0e", "wecnrmd"]) {
-  const f = heartFor(c, {});
-  const w = wildHeartFor(c, 610, {});
-  console.log(c, f ? "FIRST" : "-", w ? "WILD" : "-");
-}'
+import { encodeGeohash } from "./bundles/ramble/server/anchors.js";
+const hits = [], misses = [], wildHits = [], wildMisses = [];
+for (let i = 0; i < 4000; i++) {
+  const cell = encodeGeohash(-60 + ((i * 7919) % 12000) / 100, -170 + ((i * 6271) % 34000) / 100, 7);
+  const f = heartFor(cell, {}), w = wildHeartFor(cell, 610, {});
+  if (f && hits.length < 3) hits.push([cell, f.lat, f.lon]);
+  if (!f && misses.length < 3) misses.push(cell);
+  if (w && wildHits.length < 2) wildHits.push([cell, w.lat, w.lon]);
+  if (!w && wildMisses.length < 2) wildMisses.push(cell);
+}
+console.log(JSON.stringify({ hits, misses, wildHits, wildMisses }, null, 2));'
 ```
 
-Paste the observed truth table into a new test in `tests/ramble-hearts.test.js` — whatever it says, unchanged. Do **not** pick cells to make it look tidy; this test's whole job is to fail if the salt or the hash arithmetic ever moves.
+Paste the observed values in, to six decimal places, and confirm before committing that `hits` and `wildHits` are **non-empty** — if either is, the generator found nothing and the pin is worthless:
 
 ```js
-test("pinned: the default-rate placement for six fixed cells never moves", () => {
+test("pinned: the default-rate placement never moves", () => {
   // Generated once from the salts in hearts.js. If this fails, someone changed
-  // a salt or the hash arithmetic, and every existing player's map moved.
-  const expected = {
-    // <PASTE: cell -> { first: true|false, wild: true|false } from the snippet above>
-  };
-  for (const [cell, want] of Object.entries(expected)) {
-    assert.equal(!!heartFor(cell, {}), want.first, cell + " first heart");
-    assert.equal(!!wildHeartFor(cell, 610, {}), want.wild, cell + " wild heart");
+  // a salt or the hash arithmetic, and every existing player's map moved
+  // underneath them. Hits AND misses, positions AND presence: a pin of misses
+  // alone passes against a heartFor() that returns null for everything.
+  const FIRST_HITS = [
+    // <PASTE `hits`: [cell, lat, lon] triples — MUST be non-empty>
+  ];
+  const FIRST_MISSES = [/* <PASTE `misses`: cell strings> */];
+  const WILD_HITS = [
+    // <PASTE `wildHits`: [cell, lat, lon] triples — MUST be non-empty>
+  ];
+  const WILD_MISSES = [/* <PASTE `wildMisses`: cell strings> */];
+
+  assert.ok(FIRST_HITS.length > 0 && WILD_HITS.length > 0, "a pin with no hits pins nothing");
+  for (const [cell, lat, lon] of FIRST_HITS) {
+    const spot = heartFor(cell, {});
+    assert.ok(spot, cell + " must still hold its permanent heart");
+    assert.equal(spot.lat.toFixed(6), lat.toFixed(6), cell + " heart moved in latitude");
+    assert.equal(spot.lon.toFixed(6), lon.toFixed(6), cell + " heart moved in longitude");
   }
+  for (const cell of FIRST_MISSES) assert.equal(heartFor(cell, {}), null, cell + " must still be empty");
+  for (const [cell, lat, lon] of WILD_HITS) {
+    const spot = wildHeartFor(cell, 610, {});
+    assert.ok(spot, cell + " must still hold its wild heart in window 610");
+    assert.equal(spot.lat.toFixed(6), lat.toFixed(6), cell + " wild heart moved in latitude");
+    assert.equal(spot.lon.toFixed(6), lon.toFixed(6), cell + " wild heart moved in longitude");
+  }
+  for (const cell of WILD_MISSES) assert.equal(wildHeartFor(cell, 610, {}), null, cell + " must still be empty");
 });
 ```
 
@@ -470,7 +527,7 @@ git show --stat HEAD
 - Create: `tests/ramble-hearts-ledger.test.js`
 
 **Interfaces:**
-- Consumes: everything Task 1 produced, plus `ramble_wallet` and `ramble_cells` (both already exist on every host), plus `applyRambleWallet` from `servers/sharing/instance-sync.js` for the convergence test.
+- Consumes: `heartCandidates`, `wildWindow`, `readHeartSettings`, `HEART_KIND`, `CELL7_RE` from Task 1, plus `ramble_wallet` and `ramble_cells` (both already exist on every host), plus `applyRambleWallet` from `servers/sharing/instance-sync.js` for the convergence test.
 - Produces, for Tasks 3-4:
   - `recordHeartPickup(db, cell, { now, emit }) -> { picked: boolean, amount: 0 | 1, source?: "first" | "wild" }`
   - `availableHearts(db, cells, { now }) -> [{ cell, key, source, lat, lon }]`
@@ -479,7 +536,7 @@ git show --stat HEAD
 
 **Three rules this task exists to enforce:**
 
-1. **Same rule, two readers.** `availableHearts` and `recordHeartPickup` both go through `heartCandidate`. Step 1's `same rule` test asserts they agree cell-for-cell over a fixture, before and after collection. This is the phase 1 defect made executable.
+1. **Same rule, two readers.** `availableHearts` and `recordHeartPickup` both go through `heartCandidates` **and both pick the first candidate that is not already taken**, so a cell whose permanent heart is gone still grows a wild one. Step 1's `same rule` test asserts the two agree cell-for-cell, before and after collection.
 2. **Fail closed on unlock.** `recordHeartPickup` verifies the cell is in `ramble_cells` itself. A fix that the `unlock.max.accuracy.m` gate refused must never pay a heart in ground the user did not enter, and the route is not trusted to check.
 3. **`delta` is the constant `1`.** Never `perHeart`, never a spend.
 
@@ -507,7 +564,7 @@ import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { applyRambleWallet } from "../servers/sharing/instance-sync.js";
 import {
-  HEART_KIND, heartCandidate, wildWindow,
+  HEART_KIND, heartCandidates, wildWindow,
   recordHeartPickup, availableHearts, heartsBalance, maxEnergy,
 } from "../bundles/ramble/server/hearts.js";
 
@@ -518,6 +575,8 @@ const NOW = 1_757_000_000_000;
 // what it looks like — no cell here was chosen for hashing lucky.
 const CELLS = ["9vk79ed", "9v6m2xt", "dr5regw", "gcpvj0d", "u33dc0e", "wecnrmd"];
 
+// `per` and `cap` are used by the energy tests below; `rate`/`wildRate` are
+// pinned per-test so no test depends on a cell that happens to hash lucky.
 async function freshDb({ rate = 1, wildRate = 999999, base, per, cap } = {}) {
   const db = createClient({ url: "file::memory:" });
   await initRambleTables(db);
@@ -593,7 +652,7 @@ test("a wild heart regrows: once per window, again in the next", async () => {
   const day = 24 * 3600 * 1000;
   // Asserted, not assumed: a surprise first heart at this rate would otherwise
   // fail below as a baffling "source" mismatch.
-  assert.equal(heartCandidate(CELLS[0], wildWindow(NOW, 30), { rate: 999999, wildRate: 999999 }), null,
+  assert.deepEqual(heartCandidates(CELLS[0], wildWindow(NOW, 30), { rate: 999999, wildRate: 999999 }), [],
     "precondition: neither source hits at these rates");
 
   const first = await recordHeartPickup(db, CELLS[0], { now: NOW });
@@ -618,7 +677,7 @@ test("THE SAME RULE: what the map draws is exactly what a walk would grant", asy
   const drawn = await availableHearts(db, CELLS, { now: NOW });
   assert.equal(drawn.length, CELLS.length, "rate 1: every unlocked cell in the fixture");
   for (const spot of drawn) {
-    assert.deepEqual(spot, heartCandidate(spot.cell, wildWindow(NOW, 30), { rate: 1, wildRate: 999999 }),
+    assert.deepEqual(spot, heartCandidates(spot.cell, wildWindow(NOW, 30), { rate: 1, wildRate: 999999 })[0],
       "the map draws the candidate itself, not a re-derived guess");
   }
 
@@ -677,6 +736,48 @@ test("seed rows are not hearts and hearts are not seed", async () => {
   assert.equal(await heartsBalance(db), 1, "the seed pile does not inflate the heart count");
 });
 
+test("a cell grows a WILD heart after its permanent one is taken", async () => {
+  // ⚠ The defect the plan review caught. An `a || b` candidate keeps returning
+  // the taken permanent heart and never reaches the wild source, so at the
+  // default rate one cell in three would be sterile forever. Both sources hit
+  // here (rate 1, wildRate 1), which is the only configuration that can tell
+  // the two implementations apart — every other test in this file silences one
+  // source to isolate the other, and that is exactly how this hid.
+  const db = await freshDb({ rate: 1, wildRate: 1 });
+  await unlock(db, [CELLS[0]]);
+
+  const first = await recordHeartPickup(db, CELLS[0], { now: NOW });
+  assert.deepEqual(first, { picked: true, amount: 1, source: "first" });
+
+  const wild = await recordHeartPickup(db, CELLS[0], { now: NOW });
+  assert.deepEqual(wild, { picked: true, amount: 1, source: "wild" },
+    "the wild heart in the same window is still there to take");
+
+  assert.deepEqual(await recordHeartPickup(db, CELLS[0], { now: NOW }), { picked: false, amount: 0 },
+    "and now the cell really is empty for this window");
+
+  const day = 24 * 3600 * 1000;
+  const nextWindow = await recordHeartPickup(db, CELLS[0], { now: NOW + 31 * day });
+  assert.deepEqual(nextWindow, { picked: true, amount: 1, source: "wild" },
+    "next window, the wild heart comes round again — as the doc comment promises");
+
+  // And the map agrees at every step, which is the whole point.
+  assert.deepEqual(await availableHearts(db, [CELLS[0]], { now: NOW }), []);
+  assert.equal((await availableHearts(db, [CELLS[0]], { now: NOW + 62 * day })).length, 1);
+});
+
+test("a heart row is worth ONE container even when a heart is worth 25 energy", async () => {
+  // The assertion that would actually fail if someone later stored energy in
+  // the row. Asserting that MAX(delta) of two identical 1s is 1 proves nothing.
+  const db = await freshDb({ rate: 1, per: 25 });
+  await unlock(db, [CELLS[0]]);
+  await recordHeartPickup(db, CELLS[0], { now: NOW });
+  const rows = await walletRows(db);
+  assert.equal(Number(rows[0].delta), 1, "delta is a COUNT; the energy per heart lives in a setting");
+  assert.equal(await heartsBalance(db), 1);
+  assert.equal(await maxEnergy(db), 125, "and the setting is what values it");
+});
+
 test("two instances converge on the same heart count whatever order rows arrive in", async () => {
   // Spec §8: anything that replicates needs a multi-instance test, not a
   // single-database one. delta is a constant 1, so MAX(delta) — which phase 1
@@ -730,6 +831,30 @@ async function takenKeys(db) {
 }
 
 /**
+ * Which of the ASKED cells are unlocked. Bounded by the question, not by the
+ * player's history: `SELECT cell FROM ramble_cells` would be a second
+ * unbounded full-table scan on every /zones request, and phase 1 already left
+ * one of those behind in unlockedCellsNear. The caller has usually filtered to
+ * unlocked ground already, but this stays fail-closed rather than trusting it.
+ */
+async function unlockedAmong(db, cells) {
+  const out = new Set();
+  // Chunked: a close-zoom viewport over a walked town can ask about more cells
+  // than SQLite will bind at once, which is the same limit harvestableCells
+  // avoids by matching on a key suffix instead.
+  for (let i = 0; i < cells.length; i += 400) {
+    const chunk = cells.slice(i, i + 400);
+    const marks = chunk.map(() => "?").join(",");
+    // eslint-disable-next-line no-await-in-loop
+    const { rows } = await db.execute({
+      sql: `SELECT cell FROM ramble_cells WHERE cell IN (${marks})`, args: chunk,
+    });
+    for (const r of rows || []) out.add(String(r.cell));
+  }
+  return out;
+}
+
+/**
  * Take the heart in this cell, if there is one and it is still there.
  *
  * ⚠ FAIL CLOSED. The cell must already be in ramble_cells. A position fix
@@ -751,18 +876,24 @@ export async function recordHeartPickup(db, cell, { now = Date.now(), emit } = {
     // NOT `Number(now) || Date.now()` — that treats `now: 0` as falsy and
     // silently substitutes the real clock (the phase 1 note on this still holds).
     const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
-    const spot = heartCandidate(cell, wildWindow(at, wildDays), { rate, wildRate });
-    if (!spot) return none;
-
-    const res = await db.execute({
-      sql: `INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, 1, ?)
-            ON CONFLICT(kind, key) DO NOTHING`,
-      args: [HEART_KIND, spot.key, at],
-    });
-    if (Number(res.rowsAffected) === 0) return none;
-    await safeEmit(emit, "ramble_wallet", "insert",
-      { kind: HEART_KIND, key: spot.key, delta: 1, created_at: at });
-    return { picked: true, amount: 1, source: spot.source };
+    // EVERY candidate, in priority order, not just the first: a cell whose
+    // permanent heart was collected long ago must still be able to pay out its
+    // wild one. The INSERT is the arbiter — whichever key is not yet in the
+    // ledger is the one that pays.
+    for (const spot of heartCandidates(cell, wildWindow(at, wildDays), { rate, wildRate })) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await db.execute({
+        sql: `INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, 1, ?)
+              ON CONFLICT(kind, key) DO NOTHING`,
+        args: [HEART_KIND, spot.key, at],
+      });
+      if (Number(res.rowsAffected) === 0) continue;
+      // eslint-disable-next-line no-await-in-loop
+      await safeEmit(emit, "ramble_wallet", "insert",
+        { kind: HEART_KIND, key: spot.key, delta: 1, created_at: at });
+      return { picked: true, amount: 1, source: spot.source };
+    }
+    return none;
   } catch (err) {
     try { console.warn("[ramble] heart pickup failed:", err?.message); } catch {}
     return none;
@@ -772,10 +903,10 @@ export async function recordHeartPickup(db, cell, { now = Date.now(), emit } = {
 /**
  * Which of these cells still hold a heart to walk to.
  *
- * ⚠ THE SAME RULE THE PAYOUT USES. This goes through heartCandidate, exactly
- * as recordHeartPickup does, and returns the candidate object itself rather
- * than a re-derived position — so the map cannot drift from the payout. A
- * heart shown but not granted is the defect phase 1 shipped in its seed layer.
+ * ⚠ THE SAME RULE THE PAYOUT USES. This goes through heartCandidates and takes
+ * the first untaken one, exactly as recordHeartPickup does, and returns the
+ * candidate object itself rather than a re-derived position — so the map cannot
+ * drift from the payout. That drift is the hazard 0.9.5 closed for seed.
  *
  * Cells the caller has not unlocked are dropped even when they are asked for:
  * a heart in fog would be a preview of ground you have not earned (K3).
@@ -787,14 +918,15 @@ export async function availableHearts(db, cells, { now = Date.now() } = {}) {
     const { rate, wildDays, wildRate } = await readHeartSettings(db);
     const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
     const window = wildWindow(at, wildDays);
-    const { rows } = await db.execute({ sql: "SELECT cell FROM ramble_cells", args: [] });
-    const unlocked = new Set((rows || []).map((r) => String(r.cell)));
+    const unlocked = await unlockedAmong(db, asked);
     const taken = await takenKeys(db);
     const out = [];
     for (const cell of asked) {
       if (!unlocked.has(cell)) continue;
-      const spot = heartCandidate(cell, window, { rate, wildRate });
-      if (spot && !taken.has(spot.key)) out.push(spot);
+      // The FIRST candidate still standing — the same choice recordHeartPickup
+      // makes when it walks the list and lets the INSERT arbitrate.
+      const spot = heartCandidates(cell, window, { rate, wildRate }).find((c) => !taken.has(c.key));
+      if (spot) out.push(spot);
     }
     return out;
   } catch (err) {
@@ -1139,14 +1271,14 @@ git show --stat HEAD
 **Interfaces:**
 - Consumes: `recordHeartPickup`, `availableHearts`, `heartsBalance`, `maxEnergy` from `hearts.js`.
 - Produces, for Tasks 6-7:
-  - `POST /api/ramble/area` with a fix gains `heart_picked: 1` (only when one was taken) and always-on `hearts` and `energy_max` (only when the post carried `here`).
+  - `POST /api/ramble/area` with a fix gains `heart_picked: 1` (only when one was taken) plus `hearts`, `energy_max` and `energy_max_cap` (all three only when the post carried `here`).
   - `GET /api/ramble/zones?pips=1` gains `hearts: [{ cell, key, source, lat, lon }]`.
-  - `GET /api/ramble/pet` gains `hearts`; `energy_max` already rides in from `petState`.
+  - `GET /api/ramble/pet` gains `hearts` and `energy_max_cap`; `energy_max` already rides in from `petState`.
 
 **Three things to get exactly right:**
 
 1. **A heart is attempted on EVERY fix, not only on a first unlock.** This is what K2 and K3 buy: a first unlock grants on the spot (the cell was fogged, so it is a surprise), and a cell unlocked months ago whose heart was never taken pays when the player walks back. Seed's `if (!out.unlocked)` guard is a seed rule — do not copy it.
-2. **Order matters.** `recordUnlock` runs first. `recordHeartPickup` fails closed on an un-unlocked cell, so an inaccurate fix that was refused an unlock is also refused a heart, automatically and without the route knowing the rule.
+2. **Pass `out.cell`, NOT `cell`.** This is the finding the plan review caught, and it is the difference between a working phase and a broken one. `recordHeartPickup`'s own fail-closed check (`is this cell in ramble_cells?`) protects *new* ground only — a cell unlocked months ago passes it however vague today's fix is, and this phase deliberately leaves hearts sitting in exactly those cells. `recordUnlock` returns `cell: null` when the fix is worse than `unlock.max.accuracy.m` (`cells.js`), so threading `out.cell` through is what actually refuses the payout. Pass the raw `cell` and a single 2 km wifi fix harvests a retroactive heart from a cell the player is nowhere near.
 3. **An area post with no `here` must keep its response byte for byte.** An existing test deep-equals it. Every new field rides inside the `here` branch.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1187,7 +1319,14 @@ async function withHeartSettings(pairs, fn) {
   }
 }
 
-const HEARTS_ON = [["heart.rate", "1"], ["heart.wild.rate", "999999"], ["unlock.max.accuracy.m", "100"]];
+// `warmth.visit_place` is zeroed for the same reason walkTo() zeroes it: this
+// file churns hatches and later asserts an incubating egg exists, and three or
+// four +20 credits against a hatch_at of 100 is a hatch these tests did not ask
+// for.
+const HEARTS_ON = [
+  ["heart.rate", "1"], ["heart.wild.rate", "999999"],
+  ["unlock.max.accuracy.m", "100"], ["warmth.visit_place", "0"],
+];
 const jsonOf = async (path, opts) => (await req(path, opts)).json();
 
 test("POST /api/ramble/area grants a heart on a first unlock, and reports the new ceiling", async () => {
@@ -1222,6 +1361,32 @@ test("a fix too vague to unlock is also too vague to pay a heart", async () => {
   });
 });
 
+test("a vague fix cannot harvest a heart from ground unlocked LONG AGO", async () => {
+  // ⚠ The one the plan review caught. The in-ramble_cells check passes for an
+  // already-unlocked cell no matter how bad today's fix is, so this is the case
+  // the "fail closed" claim actually has to survive. Unlock the cell sharply
+  // while it holds no heart, then make it hold one, then arrive vaguely.
+  const here = { lat: 35.6762, lon: 139.6503 };   // Tokyo: fresh ground for this file
+  await withHeartSettings(
+    [["heart.rate", "999999"], ["heart.wild.rate", "999999"], ["unlock.max.accuracy.m", "100"], ["warmth.visit_place", "0"]],
+    async () => {
+      const sharp = await jsonOf("/api/ramble/area", {
+        method: "POST", body: { cells: [], here: { ...here, accuracy_m: 10 } },
+      });
+      assert.ok(sharp.unlocked, "precondition: the cell is unlocked, and held no heart");
+    },
+  );
+  await withHeartSettings(HEARTS_ON, async () => {
+    const before = (await jsonOf("/api/ramble/pet")).hearts;
+    const vague = await jsonOf("/api/ramble/area", {
+      method: "POST", body: { cells: [], here: { ...here, accuracy_m: 2000 } },
+    });
+    assert.equal(vague.heart_picked, undefined,
+      "a 2 km fix must not collect the heart now waiting in already-unlocked ground");
+    assert.equal((await jsonOf("/api/ramble/pet")).hearts, before, "nothing was granted");
+  });
+});
+
 test("POST /api/ramble/area WITHOUT `here` keeps its exact historical shape", async () => {
   const res = await jsonOf("/api/ramble/area", { method: "POST", body: { cells: ["9v6m2xt"] } });
   assert.deepEqual(res, { cells: ["9v6m2xt"] },
@@ -1229,13 +1394,23 @@ test("POST /api/ramble/area WITHOUT `here` keeps its exact historical shape", as
 });
 
 test("GET /api/ramble/zones?pips=1 draws hearts only in unlocked ground", async () => {
+  // ⚠ A FRESH cell, and a length assertion BEFORE the loop. The first draft of
+  // this test reused Austin, whose only heart the previous test had already
+  // collected, so `hearts` was always [] and the per-pip loop never ran once —
+  // an implementation returning [] unconditionally passed it.
   await withHeartSettings(HEARTS_ON, async () => {
-    const here = { lat: 30.2672, lon: -97.7431, accuracy_m: 20 };
-    await jsonOf("/api/ramble/area", { method: "POST", body: { cells: ["9v6m2xt"], here } });
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('gcpvj0d', 1) ON CONFLICT(cell) DO NOTHING",
+        args: [],
+      });   // gcpvj0d = 51.5073/-0.1284, London: untouched by every other test here
+    } finally { db.close(); }
 
-    const bbox = "30.25,-97.76,30.29,-97.72";
+    const bbox = "51.49,-0.15,51.52,-0.11";
     const withPips = await jsonOf("/api/ramble/zones?bbox=" + bbox + "&pips=1");
     assert.ok(Array.isArray(withPips.hearts), "the field is always an array");
+    assert.ok(withPips.hearts.length >= 1, "there IS a heart to draw, or this test proves nothing");
     for (const h of withPips.hearts) {
       assert.ok(withPips.unlocked.some((b) =>
         h.lat >= b.south && h.lat <= b.north && h.lon >= b.west && h.lon <= b.east),
@@ -1247,7 +1422,7 @@ test("GET /api/ramble/zones?pips=1 draws hearts only in unlocked ground", async 
   });
 });
 
-test("a heart in ground unlocked before this feature existed waits on the map", async () => {
+test("a heart in ground unlocked before this feature existed waits on the map, and pays when walked to", async () => {
   // The K2 case, end to end: a row put straight into ramble_cells (exactly what
   // phase 1's backfill left behind) still has its heart to walk back to.
   await withHeartSettings(HEARTS_ON, async () => {
@@ -1262,6 +1437,16 @@ test("a heart in ground unlocked before this feature existed waits on the map", 
     const zones = await jsonOf("/api/ramble/zones?bbox=52.50,13.35,52.54,13.46&pips=1");
     assert.equal(zones.hearts.filter((h) => h.cell === "u33dc0e").length, 1,
       "a cell unlocked before this feature shipped still has its heart waiting");
+
+    // And walking there really does collect the pip the map just drew.
+    const before = (await jsonOf("/api/ramble/pet")).hearts;
+    const walked = await jsonOf("/api/ramble/area", {
+      method: "POST", body: { cells: [], here: { lat: 52.5181, lon: 13.4081, accuracy_m: 15 } },
+    });
+    assert.equal(walked.heart_picked, 1, "the pip the map drew is the heart the walk grants");
+    assert.equal(walked.hearts, before + 1);
+    const after = await jsonOf("/api/ramble/zones?bbox=52.50,13.35,52.54,13.46&pips=1");
+    assert.equal(after.hearts.filter((h) => h.cell === "u33dc0e").length, 0, "and the pip is gone");
   });
 });
 
@@ -1326,11 +1511,17 @@ Inside the existing `if (here) { ... }` block, after the seed branch:
       // unlock. A first unlock grants on the spot (the cell was fogged, so it
       // is a surprise); a cell unlocked long ago whose heart was never taken
       // pays when the player walks back to it, which is what makes the pips on
-      // their existing map real destinations. recordHeartPickup fails closed on
-      // a cell that is not in ramble_cells, so a fix too vague to unlock is
-      // refused a heart on exactly the same grounds, without this route
-      // restating the rule.
-      heartPicked = (await mods.heartsMod.recordHeartPickup(db, cell, { now: Date.now(), emit })).amount;
+      // their existing map real destinations.
+      //
+      // ⚠ `out.cell`, NOT `cell`. recordUnlock nulls its cell when the fix is
+      // vaguer than unlock.max.accuracy.m, and that is the ONLY thing standing
+      // between a 2 km wifi fix and the heart sitting in a cell unlocked months
+      // ago — recordHeartPickup's own in-ramble_cells check passes happily for
+      // ground that is already unlocked, which is most of the ground that still
+      // holds a heart.
+      if (out.cell) {
+        heartPicked = (await mods.heartsMod.recordHeartPickup(db, out.cell, { now: Date.now(), emit })).amount;
+      }
     }
 ```
 
@@ -1346,6 +1537,9 @@ and the response, keeping every new field inside the `here` branch:
       ...(here ? {
         hearts: await mods.heartsMod.heartsBalance(db),
         energy_max: await mods.heartsMod.maxEnergy(db),
+        // The ceiling's ceiling, so the panel can tell "the bar grew" from
+        // "the bar is as long as it goes" and say the right thing (Task 6).
+        energy_max_cap: (await mods.heartsMod.readHeartSettings(db)).cap,
       } : {}),
     });
 ```
@@ -1360,7 +1554,7 @@ In the `pips === "1"` branch, beside the existing seed read:
     if (req.query?.pips === "1") {
       seed = await mods.walletMod.harvestableCells(db, out.unlocked.map((b) => b.cell), { now: Date.now() });
       // The SAME rule the payout uses (hearts.js: availableHearts and
-      // recordHeartPickup both go through heartCandidate). A heart drawn here
+      // recordHeartPickup both go through heartCandidates). A heart drawn here
       // that a walk would not grant is the phase 1 seed defect all over again.
       hearts = await mods.heartsMod.availableHearts(db, out.unlocked.map((b) => b.cell), { now: Date.now() });
     }
@@ -1377,10 +1571,27 @@ and add `hearts` to the response object beside `seed`.
       egg: { percent: egg.egg.percent },
       seed: await mods.walletMod.seedBalance(db),
       hearts: await mods.heartsMod.heartsBalance(db),
+      energy_max_cap: (await mods.heartsMod.readHeartSettings(db)).cap,
     });
 ```
 
 `energy_max` needs nothing here — `petState` already returns it and the spread carries it.
+
+- [ ] **Step 6b: Keep the MCP tool agreeing with the route**
+
+`bundles/ramble/server/server.js` (around line 304) has a second `petState` caller: the `ramble_pet_state` tool. It picks up `energy_max` for free from its spread, but not `hearts`, so the tool and the HTTP route would describe the same pet differently. Import `heartsBalance` alongside the other server-side helpers and add it:
+
+```js
+        const [state, bird, egg] = await Promise.all([petState(db), activeBird(db), eggState(db, { now: Date.now() })]);
+        return text(JSON.stringify({ ...state, bird, hearts: await heartsBalance(db), egg: { percent: egg.egg.percent } }));
+```
+
+and assert it in `tests/ramble-tools.test.js` beside the existing `ramble_pet_state` coverage:
+
+```js
+  assert.equal(typeof state.hearts, "number", "the tool reports the same wallet the panel does");
+  assert.equal(typeof state.energy_max, "number");
+```
 
 - [ ] **Step 7: Run the route tests, then the map slice**
 
@@ -1394,7 +1605,7 @@ Expected: all PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git commit bundles/ramble/panel/routes.js tests/ramble-panel.test.js -m "ramble: a walk takes the heart, and the map says where the next one is"
+git commit bundles/ramble/panel/routes.js bundles/ramble/server/server.js tests/ramble-panel.test.js tests/ramble-tools.test.js -m "ramble: a walk takes the heart, and the map says where the next one is"
 git show --stat HEAD
 ```
 
@@ -1419,12 +1630,16 @@ Append to `tests/ramble-bird-svg.test.js`:
 
 ```js
 test("drawHeart returns inert SVG children in the seed's own idiom", () => {
-  const svg = engine.drawHeart();
+  const svg = Bird.drawHeart();
   assert.equal(typeof svg, "string");
   assert.ok(svg.length > 0);
   assert.ok(/<path|<ellipse|<circle/.test(svg), "it is actually drawn, not empty");
   assert.ok(!/<script|onload=|href=/i.test(svg), "engine output is inert");
-  assert.equal(engine.drawHeart(), svg, "deterministic: no randomness in the art");
+  // The two invariants the existing drawSeed test asserts, kept: the engine is
+  // also rendered server-side, where a CSS custom property resolves to nothing.
+  assert.ok(!svg.includes("var(--"), "no custom properties: this also renders outside the panel");
+  assert.equal(svg.indexOf("`"), -1, "no backticks");
+  assert.equal(Bird.drawHeart(), svg, "deterministic: no randomness in the art");
 });
 
 test("mountHeart sets the same 24-unit viewBox the seed pip uses", () => {
@@ -1433,14 +1648,14 @@ test("mountHeart sets the same 24-unit viewBox the seed pip uses", () => {
     setAttribute: (k, v) => calls.push([k, v]),
     set innerHTML(v) { calls.push(["innerHTML", v]); },
   };
-  engine.mountHeart(el);
+  Bird.mountHeart(el);
   assert.deepEqual(calls[0], ["viewBox", "0 0 24 24"], "same box as mountSeed, so the pips match in size");
   assert.equal(calls[1][0], "innerHTML");
-  assert.equal(calls[1][1], engine.drawHeart());
+  assert.equal(calls[1][1], Bird.drawHeart());
 });
 ```
 
-**Note for the implementer:** the file already imports the engine under some name (`engine`, `Bird`, or similar) and already tests `drawSeed`/`mountSeed` this way. Match whatever is there rather than introducing a second style.
+**Note for the implementer:** `tests/ramble-bird-svg.test.js` binds the engine as `Bird` — the names above are already correct. Mirror the file's existing `drawSeed`/`mountSeed` cases rather than introducing a second style.
 
 - [ ] **Step 2: Run and watch it fail**
 
@@ -1533,8 +1748,12 @@ test("heart pips, the fallback dot and the pop all have styles", async () => {
   assert.ok(css.includes("#ramble .rb-hearts {"), "the map-bar counter has a rule");
   assert.ok(css.includes("#ramble .rb-heart-pop {"));
   assert.ok(css.includes("@keyframes rb-heart-rise"));
-  assert.match(css, /prefers-reduced-motion[\s\S]*\.rb-heart-pop \{ animation: none/,
+  // The heart pop joins the EXISTING comma-separated reduced-motion list, so
+  // match it as a member of that list rather than as its own rule.
+  assert.match(css, /prefers-reduced-motion[\s\S]*#ramble \.rb-heart-pop,[\s\S]*animation: none/,
     "the pop respects reduced motion, like the seed pop already does");
+  assert.ok(css.includes("#ramble .rb-heart-pip > svg {"),
+    "the pip's svg is SIZED — without this it renders at the CSS default 300x150");
 });
 ```
 
@@ -1623,7 +1842,7 @@ Directly after `paintSeed`:
    * this does both: the number pops, and the bird speaks. sayMoment is the only
    * thing that opens the bubble on its own, and an arrival is exactly what it
    * is for. */
-  function celebrateHeart() {
+  function celebrateHeart(alsoUnlocked, atCap) {
     var chip = $("rb-heart-count");
     if (chip && chip.parentNode) {
       var pop = document.createElement("span");
@@ -1632,7 +1851,14 @@ Directly after `paintSeed`:
       chip.parentNode.appendChild(pop);
       setTimeout(function () { if (pop.parentNode) pop.parentNode.removeChild(pop); }, 1400);
     }
-    sayMoment("A heart container. Your bird can hold more now.");
+    /* ONE line, not two. celebrateUnlock has already said "New ground." on a
+     * first unlock, and sayMoment holds for 4200ms -- a second call overwrites
+     * the first, so the unlock moment would be erased every time a new cell
+     * also paid a heart, which is one arrival in three. When both happen, say
+     * the thing that covers both. */
+    if (atCap) sayMoment("Another heart container. Your bird is as strong as it gets.");
+    else if (alsoUnlocked) sayMoment("New ground, and a heart container in it.");
+    else sayMoment("A heart container. Your bird can hold more now.");
   }
 
   function paintHearts(n) {
@@ -1646,25 +1872,37 @@ and in the area-response handler, immediately after the two existing seed lines 
 
 ```js
         if (out && typeof out.hearts === "number") paintHearts(out.hearts);
-        if (out && out.heart_picked) { celebrateHeart(); if (!out.unlocked) refreshZones(); }
+        if (out && out.heart_picked) {
+          celebrateHeart(!!out.unlocked, out.energy_max === out.energy_max_cap);
+          if (!out.unlocked) refreshZones();
+        }
 ```
 
-**Why exactly that form.** Taking a heart removes a pip and the pip list comes from `/zones`, so the map does need a refresh — but marks are untouched by a heart, so do **not** call `refreshMarks` (phase 1 shipped a redundant double `refreshMarks` on the unlock path that three adversarial rounds missed; do not add a third). And when the pickup rode in on a *first unlock*, `celebrateUnlock` has already called `refreshZones`, so the `!out.unlocked` guard is what keeps it from firing twice. This mirrors the seed line directly above it, deliberately.
+**Why exactly that form.** Taking a heart removes a pip and the pip list comes from `/zones`, so the map does need a refresh — but marks are untouched by a heart, so do **not** call `refreshMarks` (phase 1 shipped a redundant double `refreshMarks` on the unlock path that three adversarial rounds missed; do not add a third). When the pickup rode in on a *first unlock*, `celebrateUnlock` has already called `refreshZones`, so the `!out.unlocked` guard keeps it from firing twice — and it has already spoken, which is why `celebrateHeart` takes the flag and says one combined line rather than silently overwriting "New ground."
+
+**This needs one more field from the server.** `energy_max_cap` is the ceiling's ceiling, so the panel can tell "the bar grew" from "the bar is as long as it goes". Add it beside `energy_max` in the `here` branch of `POST /api/ramble/area` and in `GET /api/ramble/pet` (Task 4), reading `(await mods.heartsMod.readHeartSettings(db)).cap`.
 
 - [ ] **Step 6: The styles**
 
 In `bundles/ramble/panel/static/ramble.css`, beside the seed rules:
 
-```css
-#ramble .rb-heart-pip { pointer-events: none; }
-#ramble .rb-heart-dot { fill: #d8556a; }
+**⚠ The pip needs TWO rules, not one.** `mountHeart` sets a `viewBox` but no `width`/`height`, and `L.divIcon`'s `iconSize` sizes the wrapper, not the child — an unsized inline `<svg>` falls back to the CSS default **300x150 px**. The seed pip is two rules for exactly this reason (`ramble.css:883-884`). Copy that shape:
 
+```css
+#ramble .rb-heart-pip { display: grid; place-items: center; }
+#ramble .rb-heart-pip > svg { width: 20px; height: 20px; filter: drop-shadow(1px 2px 0 var(--rb-shadow-col)); }
+#ramble .rb-heart-dot { fill: #d8556a; }
+```
+
+`#d8556a` is a literal rather than a token deliberately: the fallback dot exists to stand in for the engine's heart when the engine did not load, so it has to be the engine's own colour. (`--rb-accent-2`, which the seed dot uses, is the seed's ochre.)
+
+The map-bar counter is a **pill**, matching its neighbour — `.rb-seed` at `ramble.css:915` is `position: relative` (that is what anchors the `+N` pop), `display: inline-flex`, with a border and the display font. Read that rule and mirror it, changing only the accent:
+
+```css
 #ramble .rb-hearts {
-  display: inline-flex; align-items: baseline; gap: 0.3rem;
-  margin-left: 0.5rem; position: relative;
-  font-size: 0.82rem; color: var(--rb-muted);
+  position: relative;   /* anchors the +1 pop */
+  /* ... copy .rb-seed's display/padding/border/font shorthand verbatim ... */
 }
-#ramble .rb-hearts strong { font-size: 0.95rem; color: var(--rb-ink); }
 
 #ramble .rb-heart-pop {
   position: absolute; left: 50%; bottom: 100%;
@@ -1676,12 +1914,11 @@ In `bundles/ramble/panel/static/ramble.css`, beside the seed rules:
   from { opacity: 1; transform: translate(-50%, 0); }
   to   { opacity: 0; transform: translate(-50%, -1.6rem); }
 }
-@media (prefers-reduced-motion: reduce) {
-  #ramble .rb-heart-pop { animation: none; opacity: 1; }
-}
 ```
 
-**Note for the implementer:** match the existing seed rules' custom-property names (`--rb-muted`, `--rb-ink` or whatever this stylesheet actually uses) and fold the reduced-motion rule into the file's existing `prefers-reduced-motion` block rather than opening a second one, if there already is one.
+**There is no `--rb-ink` in this stylesheet** — the text token is `--rb-text`. Use the tokens `.rb-seed` actually uses.
+
+**Reduced motion goes in the EXISTING block**, not a new one. `ramble.css:585-596` is one comma-separated selector list ending `#ramble .rb-seed-pop { animation: none; }`; add `#ramble .rb-heart-pop,` to that list. Task 6 Step 1's regex is written to match that form — do not open a second `@media` block to satisfy it.
 
 - [ ] **Step 7: Run the tests**
 
@@ -1712,7 +1949,10 @@ git show --stat HEAD
 **Interfaces:**
 - Consumes: `energy_max` and `hearts` from `GET /api/ramble/pet`.
 
-**The bug this task exists to not ship:** the bar is currently `width = energy + "%"`, which silently assumes a maximum of 100. With hearts, an energy of 150 would paint a 150% bar and an energy of 70 out of 150 would look nearly full. **The bar must be drawn against the same `energy_max` the server clamps with** — this is phase 1's lesson on its third surface.
+**Two bugs this task exists to not ship:**
+
+1. The bar is currently `width = energy + "%"`, which silently assumes a maximum of 100. With hearts, an energy of 150 would paint a 150% bar and 70 out of 150 would look nearly full. **The bar must be drawn against the same `energy_max` the server clamps with.**
+2. **The map-bar heart counter must be painted from HERE too.** `paintPet` already calls `paintSeed(pet.seed)` — that is what keeps the seed counter honest at boot and for a player who denies geolocation, since the area response only carries a wallet when it carried a fix. Add `paintHearts` beside it or a player with three hearts sees the pet page say "3 heart containers" while the map bar reads `0 hearts`. This is phase 1's actual defect #1 in miniature: an affordance added on one path and not its twin.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1725,6 +1965,8 @@ test("the energy bar is drawn against the server's ceiling, not a hardcoded 100"
   assert.ok(!body.includes('Math.min(100, energy)) + "%"'), "the old hardcoded-100 bar is gone");
   assert.ok(body.includes("(energy / max) * 100"), "the bar is a fraction of the real ceiling");
   assert.ok(body.includes("function paintHeartRow("), "the pet page shows the containers themselves");
+  assert.ok(body.includes("paintHearts(hearts)"),
+    "the map-bar counter is painted from the pet read too, not only from a position fix");
 });
 ```
 
@@ -1773,7 +2015,13 @@ In `bundles/ramble/panel/static/ramble.js`, replace the three energy lines in th
     if (fill) fill.style.width = Math.max(0, Math.min(100, (energy / max) * 100)) + "%";
     setText($("rb-energy-num"), String(energy));
     setText($("rb-energy-max"), String(max));
-    paintHeartRow(typeof pet.hearts === "number" ? pet.hearts : 0);
+    var hearts = typeof pet.hearts === "number" ? pet.hearts : 0;
+    paintHeartRow(hearts, max, pet.energy_max_cap);
+    /* The map bar too, not only this page: the area response carries a wallet
+     * ONLY when it carried a position fix, so a player who denies geolocation
+     * would otherwise read 0 hearts on the map forever. paintSeed is called
+     * from here for exactly this reason. */
+    paintHearts(hearts);
     setText($("rb-mood-line"), MOOD_LINE[pet.mood] || MOOD_LINE.happy);
 ```
 
@@ -1785,7 +2033,7 @@ and add the heart row, near `paintHearts`:
    * still fits a phone; past that the sentence carries the count. */
   var HEART_ROW_MAX = 10;
 
-  function paintHeartRow(n) {
+  function paintHeartRow(n, max, cap) {
     var row = $("rb-heart-row");
     if (!row) return;
     while (row.firstChild) row.removeChild(row.firstChild);
@@ -1800,7 +2048,11 @@ and add the heart row, near `paintHearts`:
     }
     var line = $("rb-heart-line");
     if (!line) return;
-    if (n <= 0) setText(line, "No heart containers yet. Walk somewhere new.");
+    /* At the cap the bar cannot grow again, and saying nothing about that would
+     * leave the player collecting pips that change no number they can see. */
+    if (typeof cap === "number" && typeof max === "number" && n > 0 && max >= cap) {
+      setText(line, n + " heart containers. The bar is as long as it goes.");
+    } else if (n <= 0) setText(line, "No heart containers yet. Walk somewhere new.");
     else if (n === 1) setText(line, "One heart container.");
     else setText(line, n + " heart containers.");
   }
@@ -1915,7 +2167,7 @@ cd /home/kh0pp/crow-wt-ramble-hearts
 npm test 2>&1 | tail -25
 ```
 
-Expected: **4301 + the new tests**, 0 fail. A drop below 4301 means something was deleted, not fixed.
+Expected: **4301 + the new tests**, 0 fail (4301 is the measured baseline at `200cf834`). A drop below 4301 means something was deleted, not fixed.
 
 - [ ] **Confirm no schema change slipped in**
 
@@ -1992,3 +2244,27 @@ Say plainly: what shipped, what a player with 25 unlocked cells will see (a map 
 - D2's sad portrait to contacts, and any change to `servers/sharing/profile-avatar.js` (K4).
 - Gating the MCP tool surface. Phase 1 left `ramble_query_world` / `ramble_nests` ungated deliberately; hearts add nothing there and this is not the phase to change it.
 - Fixing phase 1's known follow-ups: `unlockedCellsNear`'s full-table read, the seed cooldown's global UTC bucket, the AR view filtering beacons out, spec §2.4's overclaim about surveying a city remotely. All are recorded in the phase 1 handoff and none is made worse by this phase.
+
+
+---
+
+## Review
+
+**Reviewer:** adversarial staff-engineer pass (Plan subagent), 2026-09-09, against the real code rather than the plan's description of it.
+
+**Verdict:** REVISE — six critical issues, all fixed in this document before execution. The reviewer independently confirmed the architecture is sound (`applyRambleWallet` at `servers/sharing/instance-sync.js:600-617` resolves with `MAX(delta)`, all five sync sites registered, `shouldSyncRow` has no `kind` allowlist, so `kind='heart'` with a constant `delta = 1` is safe), verified the scope discipline holds, and measured the statistical test at `share = 0.3293`.
+
+| # | Issue | Resolution |
+|---|---|---|
+| 1 | The route passed `cell`, not `out.cell`, so a 2 km wifi fix would collect a retroactive heart from any already-unlocked cell — `recordHeartPickup`'s in-`ramble_cells` check protects new ground only. The plan asserted the opposite twice. | Task 4 passes `out.cell` and explains why the fail-closed check alone is insufficient. New test unlocks sharply with no heart present, then makes the cell hold one, then arrives vaguely. |
+| 2 | `heartCandidate` was `heartFor(...) || wildHeartFor(...)`, which short-circuits forever once the permanent heart is taken — at the default rate, one cell in three could never grow a wild heart again, while the doc comment promised it would. | Replaced with `heartCandidates()` returning both sources in priority order; both readers take the first untaken one. New test at `rate: 1, wildRate: 1` — the only configuration that can tell the two implementations apart. |
+| 3 | `paintPet` was not calling `paintHearts`, so a player who denies geolocation would see the pet page and the map bar disagree. (Phase 1's real defect #1: an affordance added on one path only.) | Task 7 paints the counter from the pet read as well, mirroring the existing `paintSeed(pet.seed)`, with a source assertion. |
+| 4 | The pip CSS was one rule; `mountHeart` sets no width/height and `L.divIcon`'s `iconSize` sizes the wrapper, so the heart would render at the CSS default 300x150. | Two rules, copying `.rb-seed-pip` at `ramble.css:883-884`, plus a test that asserts the `> svg` rule exists. `--rb-ink` (which does not exist) corrected to the tokens `.rb-seed` uses. |
+| 5 | The `/zones` heart test reused a cell whose heart the previous test had collected, so `hearts` was always `[]`, the per-pip loop never ran, and an implementation returning `[]` unconditionally passed. | Uses a fresh cell (London, `gcpvj0d`) and asserts `hearts.length >= 1` before iterating; also walks there and asserts the pip is collected and disappears. |
+| 6 | The "pinned regression vector" was all misses — the reviewer ran the generator and got `- -` for all six cells — so every assertion reduced to `false === false`. | Generator rewritten to search for confirmed hits on each salt; the pin now records positions to six decimals as well as presence, and asserts the hit lists are non-empty. |
+
+**Suggestions adopted:** `Bird` (not `engine`) in the bird-svg test plus its two dropped invariants; the reduced-motion contradiction resolved in favour of the existing comma-separated block, with the test regex rewritten to match; `deepEqual` for the junk-rate fallback (the lucky-hash trap, in the file that warns about it); `availableHearts` no longer re-scans `ramble_cells` and instead asks only about the cells it was given, chunked against the bind limit; the convergence test replaced with one that would actually fail (`energy.max.per.heart = 25`, assert `delta` is still `1`); `energy.max.cap` given a designed UX rather than only a number; the double `sayMoment` on a first unlock that also pays a heart collapsed into one line; `bundles/ramble/server/server.js`'s `ramble_pet_state` added to the file list so the MCP tool and the HTTP route agree; `warmth.visit_place` suppression carried into the new panel tests; the branch rebased onto `200cf834` and the 4301 baseline re-measured there.
+
+**Correction accepted:** the plan had repeatedly attributed a shipped map/payout defect to phase 1. Phase 1's three blocking defects were a retired UI element carrying another affordance, fog blanking existing users, and a non-convergent sync apply; the map/payout gate was added during 0.9.5's seed-sparsity work, not after a shipped bug. The constraint still stands, but the plan now names the right lesson — and issues 1 and 3 above were both instances of phase 1's *actual* defect pattern, which is why the correction mattered.
+
+**Open questions answered:** a cell does grow a wild heart after its permanent one is taken (issue 2); the cap now has designed copy on both the moment and the pet page (issue 2 in the reviewer's list of questions); `heart.rate` stays at the spec's 3, with the density reasoning recorded above and flagged for the PR.
