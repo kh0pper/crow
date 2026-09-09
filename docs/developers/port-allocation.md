@@ -126,7 +126,7 @@ first cell as **crow** allocations. Keeping raven rows unparseable to it is corr
 **making the checker host-aware is follow-up work**, and until it lands, a raven port is only verified by looking
 at raven.
 
-### Production and reserved
+### Production and reserved (raven)
 
 | port | bind | what | status |
 |---|---|---|---|
@@ -137,33 +137,44 @@ at raven.
 
 ### Benchmark-transient, held only inside a window
 
-These are bound by `pi-lab/scripts/` and are absent from any compose file, so nothing would ever have caught them.
-They are listed because a registry that covers raven while omitting ports in regular use is worse than one that
-does not cover raven at all.
+Bound by `pi-lab/scripts/`, never by a compose file, so `check-port-allocation.js` cannot see any of them. Listed
+because a registry that covers a host while omitting ports in regular use is worse than one that omits the host.
 
 | port | bind | what |
 |---|---|---|
+| raven:8021 | 127.0.0.1 | **two-box master port**, the standard across R1 to R26 (25 `raven-*` scripts). Thursday's W0 binds it |
+| raven:8035 | 127.0.0.1 | R24 result-check server |
+| raven:8036 | 127.0.0.1 | R25 / R25b single-box stack runs. This is the Flash-Next config chosen for production, so 8030 and 8036 are the same shape on different ports |
+| raven:8037 | 127.0.0.1 | R23 knob-sanity (`KS_PORT`), moved here off 8031 when this section reserved that range |
 | raven:8098 | 0.0.0.0 | zoo arm endpoint, two-box master and single-box arms (`ZOO_PORT`) |
-| raven:8035 | 127.0.0.1 | R24 result-check server (`raven-r24-check-results.sh`) |
-| raven:50052 | 10.99.0.2 (USB4 link) | `ggml-rpc-server` when **raven** is the worker |
+| raven:8099 | 127.0.0.1 | Q4 MTP smoke |
+| raven:50052 | 10.99.0.2 (USB4) | `ggml-rpc-server` when **raven** is the worker |
 | raven:50053 | 127.0.0.1 | second `ggml-rpc-server`, for arms running two workers on raven's one GPU |
-| crow:50052 | 10.99.0.1 (USB4 link) | `ggml-rpc-server` when **crow** is the worker, which is the usual case |
-| crow:8020 | 127.0.0.1 | DeepSeek-V4-Flash windowed serve (`dsv4-window.sh`) |
-| crow:8021 | 127.0.0.1 | max-stack and indexer phase-0 probes (`PHASE0_PORT`) |
+| crow:8012, 8013 | 127.0.0.1 | GLM-5.2 IQ2 and IQ4 windows (`glm52-window.sh` and friends) |
+| crow:8020 | 127.0.0.1 | DeepSeek-V4-Flash windowed serve (`dsv4-window.sh`). The `crow-dsv4` provider row points here |
+| crow:8021 | 127.0.0.1 | phase-0 Vulkan probes, run as duties under `dsv4-window.sh` (`PHASE0_PORT`) |
+| crow:8022, 8024, 8025, 8026, 8027 | 127.0.0.1 | DSv4 Vulkan hyper-connection investigation duties (`dsv4-vk-hc-*`, `dsv4-ubatch-confirm`) |
+| crow:8023 | 127.0.0.1 | DSv4 top-k A/B and HC verify (`TOPK_PORT`, `HCV_PORT`) |
+| crow:8099 | 127.0.0.1 | GTT ladder duty under `dsv4-window --duty` |
 
-**50052 binds on both machines** depending on which one is the worker, which is the clearest illustration of why a
-bare port number is not an allocation here. `10.99.0.1` is crow and `10.99.0.2` is raven on the USB4 link.
+### Three ports bind on BOTH machines
 
-Verified free on raven 2026-09-09: 8030 through 8033, 8035 and 8098. Raven listens only on 22, 53, 631 and two
-ephemeral ports.
+`8021`, `8099` and `50052` each mean two different things depending on the box. 8021 and 8099 are the same number
+on the same loopback on two hosts, so nothing about the number distinguishes them; 50052 at least differs by bind
+address (`10.99.0.1` is crow, `10.99.0.2` is raven). This is the whole argument for the `raven:`/`crow:` prefix,
+and it is why the prefix is worth keeping even after the checker learns host-awareness. A bare number here is not
+an allocation, it is an ambiguity.
+
+Verified free on raven 2026-09-09: 8030 through 8033, 8035, 8036, 8037, 8098 and 8099. Raven listens only on 22,
+53, 631 and two ephemeral ports.
 
 ### Two gaps this section exposes, both worth closing
 
 1. **Crow's own model ports are largely unlisted.** 8003 (35b), 8006 (27b solo) and 8014 (27b 512k) are absent
    from the allocation table; only 8010 (27b copilot) is recorded. They bind the tailnet IP from `crow-addons/`
    composes, which the conventions above already flag as a separate registry, so nothing catches them.
-2. **Crow's benchmark ports are unlisted too.** 8020 and 8021 are bound by `pi-lab/scripts/` on crow and appear
-   nowhere in the table. 8020 matters most, because the `crow-dsv4` provider row points at it.
+2. **Crow's own benchmark ports were unlisted too**, and are now in the table above rather than the main one,
+   because they are script-bound and transient. There are eleven of them.
 3. **8098 is ambiguous across hosts.** The table allocates it to searxng on crow's loopback, while the two-box
    benchmark zoo arms conventionally use 8098 on raven. Both are correct today because they are different
    machines, and neither the table nor the checker can say so. This is precisely the class of silent
