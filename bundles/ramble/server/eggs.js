@@ -138,20 +138,26 @@ export function creditKey(event, { now }) {
 
 const KNOWN_TYPES = new Set(["visit_place", "checkin", "meet_crow", "mark_left", "unlock_mark"]);
 
-async function getIncubatingEgg(db) {
+export async function getIncubatingEgg(db) {
   const { rows } = await db.execute({ sql: "SELECT * FROM ramble_eggs WHERE status = 'incubating' LIMIT 1", args: [] });
   return rows[0] ?? null;
 }
 
 /**
- * Returns the current incubating egg, creating one if none exists. The
- * INSERT ... SELECT ... WHERE NOT EXISTS guard (rather than a unique index)
- * makes this race-free within one process on a single SQLite connection:
- * two overlapping calls each attempt the guarded insert, only one succeeds
- * to insert a row (the second sees the just-inserted row and its WHERE NOT
- * EXISTS fails), and both re-select the same egg.
+ * Insert a fresh incubating egg. THE ONLY MINTING PRIMITIVE — as of phase 3
+ * it is called from exactly two places, the starter grant and laying, and
+ * both are deliberate acts. It was called `ensureIncubatingEgg` and was
+ * invoked from four sites, two of them pure reads (`eggState` on every
+ * GET /api/ramble/egg, `flockState` on every flock screen), so merely looking
+ * at a screen recreated the egg. Read with `getIncubatingEgg` instead; the
+ * name is "mint" so that a future caller has to mean it.
+ *
+ * The INSERT ... SELECT ... WHERE NOT EXISTS guard (rather than a unique
+ * index) makes this race-free within one process on a single SQLite
+ * connection: two overlapping calls each attempt the guarded insert, only one
+ * succeeds, and both re-select the same egg.
  */
-export async function ensureIncubatingEgg(db, { now, emit } = {}) {
+export async function mintIncubatingEgg(db, { now, emit } = {}) {
   const eggId = crypto.randomUUID();
   await db.execute({
     sql: `INSERT INTO ramble_eggs (egg_id, status, warmth, created_at)
@@ -184,7 +190,7 @@ async function ensurePetRow(db) {
 /**
  * Hatches the incubating egg if its warmth has reached hatch_at. The UPDATE
  * that flips this egg to 'hatched' MUST run before the successor egg is
- * inserted: ensureIncubatingEgg's "one incubating egg" guard is a query
+ * inserted: mintIncubatingEgg's "one incubating egg" guard is a query
  * against the table's current contents, not a schema constraint, so the old
  * egg has to already be out of 'incubating' status before the next insert's
  * WHERE NOT EXISTS check runs.
@@ -213,7 +219,7 @@ export async function hatchIfReady(db, { now, emit } = {}) {
     await safeEmit(emit, "ramble_pet", "update", updatedPet);
   }
 
-  const nextEgg = await ensureIncubatingEgg(db, { now, emit });
+  const nextEgg = await mintIncubatingEgg(db, { now, emit });
   void nextEgg;
 
   return hatchedEgg;
@@ -252,7 +258,14 @@ export async function creditWarmth(db, event, { now, emit } = {}) {
     if (Number(rows[0]?.n ?? 0) >= MEET_CROW_DAILY_CAP) return notCredited();
   }
 
-  const egg = await ensureIncubatingEgg(db, { now, emit });
+  // ⚠ NOT a mint. With no egg the ledger row is STILL written and `credited`
+  // is still true, because `credited` means "this key was new" and
+  // feedAll's `shouldFeedPet` gate reads it: reporting not-credited here
+  // would stop new places, crows and check-ins from feeding the bird for as
+  // long as the player is eggless — and laying needs happy days while
+  // eggless. The warmth itself vanishes (spec D3) and the key is burned, so
+  // the same place cannot bank warmth for a later egg.
+  const egg = await getIncubatingEgg(db);
 
   if (key) {
     const { rowsAffected } = await db.execute({
@@ -261,9 +274,11 @@ export async function creditWarmth(db, event, { now, emit } = {}) {
     });
     if (rowsAffected === 0) {
       const current = await getIncubatingEgg(db);
-      return { credited: false, warmth: current ? current.warmth : egg.warmth, hatched: null };
+      return { credited: false, warmth: current ? current.warmth : 0, hatched: null };
     }
   }
+
+  if (!egg) return { credited: true, warmth: 0, hatched: null };
   // key === null (mark_left/unlock_mark): always credited, no ledger row.
 
   const weights = await readWarmthWeights(db);
@@ -305,9 +320,11 @@ export async function activeBird(db) {
 }
 
 export async function eggState(db, { now } = {}) {
-  const egg = await ensureIncubatingEgg(db, { now });
+  const egg = await getIncubatingEgg(db);
   const weights = await readWarmthWeights(db);
-  const percent = weights.hatch_at > 0 ? Math.max(0, Math.min(100, Math.round((egg.warmth / weights.hatch_at) * 100))) : 0;
+  const percent = egg && weights.hatch_at > 0
+    ? Math.max(0, Math.min(100, Math.round((egg.warmth / weights.hatch_at) * 100)))
+    : 0;
 
   const week = isoWeek(now);
   const { rows: placeRows } = await db.execute({
@@ -330,7 +347,9 @@ export async function eggState(db, { now } = {}) {
   const checkedInToday = (checkinRows[0]?.n ?? 0) > 0;
 
   return {
-    egg: { egg_id: egg.egg_id, warmth: egg.warmth, hatch_at: weights.hatch_at, percent },
+    egg: egg
+      ? { egg_id: egg.egg_id, warmth: egg.warmth, hatch_at: weights.hatch_at, percent }
+      : null,
     checklist: { new_places_week: newPlacesWeek, first_mark: firstMark, checked_in_today: checkedInToday },
   };
 }

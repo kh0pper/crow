@@ -19,7 +19,7 @@ import { SYNCED_TABLES, EXCLUDED_COLUMNS, applyRemoteOp, shouldSyncRow } from ".
 import { emitOrQueue, _setEligibilityForTest } from "../servers/shared/sync-emit.js";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createMark, blockPersona } from "../bundles/ramble/server/marks.js";
-import { ensureIncubatingEgg, isoWeek } from "../bundles/ramble/server/eggs.js";
+import { mintIncubatingEgg, isoWeek } from "../bundles/ramble/server/eggs.js";
 import { feed } from "../bundles/ramble/server/pet.js";
 import { claimNest } from "../bundles/ramble/server/flock.js";
 import { nestFor, CELL7_LAT_STEP } from "../bundles/ramble/server/nests.js";
@@ -167,7 +167,7 @@ test("allowlist + exclusions for eggs/pet", () => {
 });
 
 test("outbox door: an egg write with no manager queues and is stamped", async () => {
-  const egg = await ensureIncubatingEgg(a, { now: 1000 });
+  const egg = await mintIncubatingEgg(a, { now: 1000 });
   const res = await emitOrQueue(null, a, "ramble_eggs", "insert", egg);
   assert.ok(res && res.queued, "emitOrQueue returned null — missing stampSql branch or lamport_ts?");
   const { rows } = await a.execute({ sql: "SELECT lamport_ts FROM ramble_eggs WHERE egg_id=?", args: [egg.egg_id] });

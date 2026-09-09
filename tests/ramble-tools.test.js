@@ -4,7 +4,7 @@ import { createClient } from "@libsql/client";
 import { createHash } from "node:crypto";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { createRambleServer } from "../bundles/ramble/server/server.js";
-import { WARMTH_DEFAULTS, isoWeek } from "../bundles/ramble/server/eggs.js";
+import { WARMTH_DEFAULTS, isoWeek, mintIncubatingEgg } from "../bundles/ramble/server/eggs.js";
 import { encodeGeohash } from "../bundles/ramble/server/anchors.js";
 import { nestFor, CELL7_LAT_STEP } from "../bundles/ramble/server/nests.js";
 
@@ -12,6 +12,10 @@ let db, h;
 before(async () => {
   db = createClient({ url: "file::memory:" });
   await initRambleTables(db);
+  // Task 2 (spec 2026-09-08 §4.1): minting is deliberate now — these tests
+  // are about warmth accrual, not egg supply, so give them an explicit
+  // starter egg rather than weaken their assertions.
+  await mintIncubatingEgg(db, { now: Date.now() });
   const handlers = {};
   const compressed = (s) => "02" + createHash("sha256").update(s).digest("hex");
   const fakeDerive = (seed, botId) => ({ secp256k1Pubkey: compressed(seed + botId), secp256k1Priv: Buffer.from(botId) });

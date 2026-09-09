@@ -41,7 +41,8 @@ const { default: rambleRouter } = await import("../bundles/ramble/panel/routes.j
 const { default: panel } = await import("../bundles/ramble/panel/ramble.js");
 const { createDbClient } = await import("../bundles/ramble/server/db.js");
 const { default: bus } = await import("../servers/shared/event-bus.js");
-const { isoWeek } = await import("../bundles/ramble/server/eggs.js");
+const { isoWeek, mintIncubatingEgg } = await import("../bundles/ramble/server/eggs.js");
+const { initRambleTables } = await import("../bundles/ramble/server/init-tables.js");
 const { nestsInCells, cellsInBbox, NEST_RATE_DEFAULT } = await import("../bundles/ramble/server/nests.js");
 const { bboxAround } = await import("../bundles/ramble/server/around.js");
 
@@ -141,6 +142,20 @@ const PK_BLOCKED = "ed".repeat(32);
     INSERT INTO contact_groups (name, group_uid, room_uid) VALUES ('Room', 'grp-room', 'r1');
     INSERT INTO contact_group_members (group_id, contact_id) VALUES (1, 1);`);
   try { db.close?.(); } catch { /* scratch */ }
+}
+
+// Task 2 (spec 2026-09-08 §4.1): minting is deliberate now — a read no longer
+// creates an egg by being looked at. This suite's warmth-accrual tests are
+// about the DELTA an event credits, not about egg supply, so give them an
+// explicit starter egg here rather than weaken any of their assertions; the
+// file's own hatch churn (see the walkTo/unlockRadius comment above) keeps an
+// incubating egg in place for the rest of the run.
+{
+  const db = createDbClient();
+  try {
+    await initRambleTables(db);
+    await mintIncubatingEgg(db, { now: Date.now() });
+  } finally { db.close?.(); }
 }
 
 after(async () => {
