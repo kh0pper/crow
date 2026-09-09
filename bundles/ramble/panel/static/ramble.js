@@ -526,10 +526,13 @@
     for (var i = 0; i < shown; i++) {
       var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("class", "rb-heart-one");
+      var drew = false;
       if (Bird && typeof Bird.mountHeart === "function") {
-        try { Bird.mountHeart(svg); } catch (e) { /* cosmetic */ }
+        try { Bird.mountHeart(svg); drew = true; } catch (e) { /* cosmetic */ }
       }
-      row.appendChild(svg);
+      /* A failed mount must not leave an empty, invisible 16px gap in the row --
+       * only append the element when the engine actually drew into it. */
+      if (drew) row.appendChild(svg);
     }
     var line = $("rb-heart-line");
     if (!line) return;

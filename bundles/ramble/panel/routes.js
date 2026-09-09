@@ -722,7 +722,6 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       // the same real place only ever counts once a week no matter how many
       // times the panel posts its position.
       const cell = mods.anchorsMod.encodeGeohash(here.lat, here.lon, 7);
-      await feedActivity({ type: "visit_place", cell });
       // 2026-09-08 §2.1: standing in a cell unlocks it, permanently. Reported
       // back only on the FIRST unlock so the panel celebrates once, not on
       // every position post. `emit` is what makes the row replicate.
@@ -756,6 +755,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         // regrew, so the source has to survive the trip.
         heartSource = got.source || null;
       }
+      // 2026-09-09 fix-wave: feedActivity — which clamps the pet's energy
+      // against maxEnergy(db) — runs AFTER the heart pickup above, not before.
+      // maxEnergy is derived live from the hearts wallet (hearts.js), so
+      // crediting this walk's +15 against the OLD ceiling and only raising the
+      // ceiling afterward made the energy bar visibly SHRINK (100/100 ->
+      // 100/110) at the exact moment a heart was found. feedAll's warmth/hatch
+      // path (creditWarmth, onHatch) touches ramble_eggs/ramble_credits/
+      // ramble_pet only — nothing in it reads ramble_cells or ramble_wallet —
+      // so moving it after the unlock/seed/heart writes changes no other
+      // outcome: the same hatch still fires off the same event, and the
+      // response above never reads feedActivity's return value.
+      await feedActivity({ type: "visit_place", cell });
     }
 
     poke("ramble:area");

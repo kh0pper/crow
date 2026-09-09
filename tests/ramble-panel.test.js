@@ -1714,6 +1714,42 @@ test("POST /api/ramble/area grants a heart on a first unlock, and reports the ne
   });
 });
 
+test("fix-wave 2026-09-09: the heart's new ceiling is what THIS WALK's energy lands against", async () => {
+  await withHeartSettings(HEARTS_ON, async () => {
+    // Moscow: fresh ground for this file, guaranteed to hold a heart at
+    // HEARTS_ON's rate 1.
+    const here = { lat: 55.7558, lon: 37.6173, accuracy_m: 20 };
+    const before = await jsonOf("/api/ramble/pet");
+
+    // Pin the bird at the OLD ceiling before the walk. Starting anywhere below
+    // it would clamp to the same number whether the heart's new ceiling was
+    // applied before or after the walk's +15 — only starting AT the ceiling
+    // makes the old (buggy) order and the fixed order produce different,
+    // observable results.
+    const db = createDbClient();
+    try {
+      await db.execute({ sql: "UPDATE ramble_pet SET energy = ? WHERE owner = 'self'", args: [before.energy_max] });
+    } finally {
+      db.close();
+    }
+
+    const out = await jsonOf("/api/ramble/area", { method: "POST", body: { ...here, here } });
+    assert.equal(out.heart_picked, 1, "this test proves nothing without a heart in fresh ground");
+    assert.equal(out.energy_max, before.energy_max + 10, "the ceiling rose by energy.max.per.heart");
+
+    const after = await jsonOf("/api/ramble/pet");
+    assert.equal(after.energy_max, before.energy_max + 10);
+    // The bug this fix closes: crediting the walk's +15 against the OLD
+    // ceiling and only raising the ceiling afterward left the bar reading
+    // `energy: 100, energy_max: 110` — visibly SHRUNK at the exact moment the
+    // heart was found. Fixed: the heart's new ceiling is in place before the
+    // walk's energy is credited, so a bird already at the old ceiling ends
+    // the walk at the NEW one, full — never below it.
+    assert.equal(after.energy, after.energy_max,
+      "a bird at the old ceiling must end this walk at the new ceiling, full — not below it");
+  });
+});
+
 test("a fix too vague to unlock is also too vague to pay a heart", async () => {
   await withHeartSettings(HEARTS_ON, async () => {
     const before = (await jsonOf("/api/ramble/pet")).hearts;
