@@ -294,9 +294,14 @@ test("a ceiling that drops underneath a bird never destroys its energy — on AN
   // one at a time with no ordering guarantee between a pet row and the wallet
   // rows that justify its energy, so an instance can apply a synced 150-energy
   // bird while it still computes a ceiling of 100 from wallet rows it hasn't
-  // received yet — and `POST /api/ramble/area` feeds the pet (visit_place)
-  // BEFORE the heart pickup runs. A test that only reads petState at a frozen
-  // `now` proves nothing: no decay interval elapses, so nothing is written at all.
+  // received yet — this module's `feed()` must never let a stale ceiling pull
+  // that energy DOWN, on ANY caller's ordering (2026-09-09: `POST
+  // /api/ramble/area` itself now feeds the pet AFTER the heart pickup runs,
+  // precisely so a heart's new ceiling is what a walk's energy lands against —
+  // but this unit test exercises `feed()` directly against a ceiling that has
+  // already collapsed, which is the scenario regardless of caller order). A
+  // test that only reads petState at a frozen `now` proves nothing: no decay
+  // interval elapses, so nothing is written at all.
   const db = await freshDb();
   await giveHearts(db, 5);
   for (let i = 0; i < 12; i++) await feed(db, { type: "meet_crow" }, { now: 1000 });
@@ -316,7 +321,8 @@ test("a ceiling that drops underneath a bird never destroys its energy — on AN
   assert.equal((await petState(db, { now: 1000 })).energy, 150);
   assert.equal(await stored(), 150, "a read never truncates");
 
-  // Path 2: FEEDING, which is what an area post does before the hearts arrive.
+  // Path 2: FEEDING against a ceiling that has already collapsed — the shape
+  // a sync race leaves behind, whatever order the local caller used.
   const fed = await feed(db, { type: "visit_place" }, { now: 1000 });
   assert.equal(fed.energy, 150, "an addition stops at the ceiling but never pulls the bird DOWN to it");
   assert.equal(await stored(), 150);
