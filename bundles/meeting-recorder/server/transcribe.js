@@ -18,7 +18,12 @@ import { findSource, readMeta, sessionDir, writeMeta } from "./store.js";
 
 const WHISPER_URL = process.env.WHISPER_URL || "http://localhost:8004/v1/audio/transcriptions";
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "Systran/faster-whisper-large-v3";
-const SLICE_SECONDS = Number(process.env.WHISPER_SLICE_SECONDS || 600);
+// Node's fetch has no public knob for undici's 300 s headers timeout, and a slice that
+// takes longer than that to come back fails as "fetch failed" even though the endpoint
+// answered. Four minutes of audio transcribes well inside the limit on CPU, with room for
+// the machine to be busy. Raising this is how you reintroduce that failure.
+const SLICE_SECONDS = Number(process.env.WHISPER_SLICE_SECONDS || 240);
+const SLICE_ATTEMPTS = Number(process.env.WHISPER_SLICE_ATTEMPTS || 3);
 const EXPORT_DIR = process.env.MEETING_RECORDER_EXPORT_DIR || "";
 
 function run(cmd, args) {
@@ -46,13 +51,23 @@ async function durationSeconds(path) {
 }
 
 async function postSlice(path) {
-  const form = new FormData();
-  form.append("model", WHISPER_MODEL);
-  form.append("response_format", "verbose_json");
-  form.append("file", new Blob([readFileSync(path)], { type: "audio/wav" }), basename(path));
-  const res = await fetch(WHISPER_URL, { method: "POST", body: form });
-  if (!res.ok) throw new Error(`transcription endpoint returned ${res.status}`);
-  return res.json();
+  let last;
+  for (let attempt = 1; attempt <= SLICE_ATTEMPTS; attempt++) {
+    try {
+      const form = new FormData();
+      form.append("model", WHISPER_MODEL);
+      form.append("response_format", "verbose_json");
+      form.append("file", new Blob([readFileSync(path)], { type: "audio/wav" }), basename(path));
+      const res = await fetch(WHISPER_URL, { method: "POST", body: form });
+      if (!res.ok) throw new Error(`transcription endpoint returned ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      last = err;
+      if (attempt < SLICE_ATTEMPTS) await new Promise((r) => setTimeout(r, 5000 * attempt));
+    }
+  }
+  throw new Error(`slice ${basename(path)} failed after ${SLICE_ATTEMPTS} attempts: ` +
+    String(last && last.message ? last.message : last));
 }
 
 async function transcribeWav(wav, id, total) {
@@ -60,18 +75,29 @@ async function transcribeWav(wav, id, total) {
   const sliceDir = join(sessionDir(id), "slices");
   mkdirSync(sliceDir, { recursive: true });
   for (let start = 0; start < Math.max(total, 1); start += SLICE_SECONDS) {
-    const part = join(sliceDir, `part-${String(start / SLICE_SECONDS).padStart(3, "0")}.wav`);
-    await run("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y",
-      "-ss", String(start), "-t", String(SLICE_SECONDS), "-i", wav,
-      "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", part]);
-    if (!existsSync(part) || statSync(part).size < 2000) {
+    const stem = join(sliceDir, `part-${String(start / SLICE_SECONDS).padStart(3, "0")}`);
+    const part = `${stem}.wav`;
+    const cached = `${stem}.json`;
+    // A finished slice is kept on disk, so a re-run after a failure resumes rather than
+    // paying for the minutes already transcribed.
+    let result;
+    if (existsSync(cached)) {
+      result = JSON.parse(readFileSync(cached, "utf8"));
+    } else {
+      await run("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y",
+        "-ss", String(start), "-t", String(SLICE_SECONDS), "-i", wav,
+        "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", part]);
+      if (!existsSync(part) || statSync(part).size < 2000) {
+        rmSync(part, { force: true });
+        break;
+      }
+      writeMeta(id, {
+        progress: `transcribing minute ${Math.round(start / 60)} of ${Math.round(total / 60)}`,
+      });
+      result = await postSlice(part);
+      writeFileSync(cached, JSON.stringify(result));
       rmSync(part, { force: true });
-      break;
     }
-    writeMeta(id, {
-      progress: `transcribing minute ${Math.round(start / 60)} of ${Math.round(total / 60)}`,
-    });
-    const result = await postSlice(part);
     for (const seg of result.segments || []) {
       segments.push({
         start: Math.round((Number(seg.start || 0) + start) * 100) / 100,
@@ -82,7 +108,6 @@ async function transcribeWav(wav, id, total) {
     if (!(result.segments || []).length && result.text) {
       segments.push({ start, end: start, text: result.text.trim() });
     }
-    rmSync(part, { force: true });
   }
   rmSync(sliceDir, { recursive: true, force: true });
   return segments;
