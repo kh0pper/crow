@@ -1297,6 +1297,23 @@
 
   var lastPet = null;
 
+  /* Pure decision table for the Next-egg card's three states — an egg
+   * incubating, nothing anywhere, one waiting on the shelf — extracted so it
+   * is unit-testable without a DOM. A shelf egg waiting AND the empty line
+   * both showing at once was a real regression here (two contradictory
+   * lines on the one card that must never be hidden); paintPet is the only
+   * caller, and does nothing but apply what this returns. */
+  function nextEggVisibility(hasNext, waiting, hasLay) {
+    var isWaiting = !!waiting;
+    return {
+      art: !hasNext,
+      empty: hasNext || isWaiting,
+      waiting: hasNext || !isWaiting,
+      warm: hasNext || !isWaiting,
+      lay: hasNext || !hasLay || isWaiting,
+    };
+  }
+
   function paintPet(pet) {
     if (!pet) return;
     lastPet = pet;
@@ -1359,26 +1376,29 @@
     if (hasNext) { eggPercent = nextPct; eggSeedId = nextEgg.egg_id; }
     else { eggPercent = 0; eggSeedId = null; }
 
-    setRing($("rb-nextegg-ring"), nextPct);
-    setText($("rb-nextegg-percent"), hasNext ? Math.round(nextPct) + "%" : "—");
-    var nextArt = $("rb-nextegg-art");
-    if (nextArt) { setHidden(nextArt, !hasNext); if (hasNext) drawEggArt(nextArt, nextEgg.egg_id); }
-    setHidden($("rb-nextegg-empty"), hasNext);
-
     /* Nothing auto-promotes a shelf egg into an empty slot (see the server's
      * promoteFromShelf note), so offer it here rather than leaving the player
      * with no signal and no way back. It also means they are NOT eggless, so
-     * the lay line must not claim they are. */
+     * the lay line must not claim they are — and NOR may the empty line,
+     * which must not say "Nothing warming just now." while the waiting line
+     * says one is. */
     var waiting = pet.shelf_waiting || null;
-    setHidden($("rb-nextegg-waiting"), hasNext || !waiting);
-    setHidden($("rb-nextegg-warm"), hasNext || !waiting);
+    var lay = pet.lay || null;
+    var vis = nextEggVisibility(hasNext, waiting, !!lay);
+
+    setRing($("rb-nextegg-ring"), nextPct);
+    setText($("rb-nextegg-percent"), hasNext ? Math.round(nextPct) + "%" : "—");
+    var nextArt = $("rb-nextegg-art");
+    if (nextArt) { setHidden(nextArt, vis.art); if (hasNext) drawEggArt(nextArt, nextEgg.egg_id); }
+    setHidden($("rb-nextegg-empty"), vis.empty);
+    setHidden($("rb-nextegg-waiting"), vis.waiting);
+    setHidden($("rb-nextegg-warm"), vis.warm);
     lastWaitingEggId = waiting;
 
-    var lay = pet.lay || null;
     var layEl = $("rb-nextegg-lay");
     if (layEl) {
-      setHidden(layEl, hasNext || !lay || !!waiting);
-      if (!hasNext && lay && !waiting) {
+      setHidden(layEl, vis.lay);
+      if (!vis.lay) {
         setText(layEl, lay.days > 0
           ? "You've had " + lay.days + " good " + (lay.days === 1 ? "day" : "days") +
             " — keep it up and you'll manage one yourself."

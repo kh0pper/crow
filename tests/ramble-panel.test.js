@@ -186,6 +186,31 @@ function req(path, opts = {}) {
   });
 }
 
+/** AST-lite bracket-depth scan (no JS parser pulled in) — copied verbatim
+ * from tests/bird-drawer-core.test.js's own helper. */
+function matchBrace(src, braceStart) {
+  let depth = 0, end = -1;
+  for (let i = braceStart; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+  }
+  return end;
+}
+
+/** Extract a top-level `function NAME(...){...}` declaration's full source
+ * (signature through closing brace) from the client script, so its PURE
+ * logic can be unit-tested standalone without a DOM (there is no jsdom or vm
+ * sandbox harness for this file, unlike ramble-ar.js). */
+function extractFunction(src, name) {
+  const marker = "function " + name + "(";
+  const start = src.indexOf(marker);
+  if (start < 0) return null;
+  const braceStart = src.indexOf("{", start);
+  const end = matchBrace(src, braceStart);
+  if (end < 0) return null;
+  return src.slice(start, end + 1);
+}
+
 // --------------------------------------------------------------- panel shape
 
 test("panel handler object has the registry-required shape", () => {
@@ -971,6 +996,43 @@ test("a shelf egg waiting for an empty slot is offered, not hidden", () => {
   assert.ok(src.includes("lastWaitingEggId"), "wired to the shipped incubate endpoint");
   // The lay line must not claim you are eggless while an egg sits on the shelf.
   assert.ok(/setHidden\(\$\("rb-nextegg-lay"\)|!!waiting/.test(src));
+});
+
+// A source grep cannot catch a wrong boolean passed to setHidden — paintPet
+// itself has no DOM harness to run against, so the visibility DECISION is
+// pulled out as a pure function (nextEggVisibility) and exercised directly,
+// standalone, exactly like tests/bird-drawer-core.test.js does for its own
+// client-side pure helpers. This caught a real regression: the empty line
+// ("Nothing warming just now.") and the waiting line ("One's waiting on your
+// shelf.") both rendering at once on the one card that must never be hidden.
+test("nextEggVisibility: exactly the intended lines show in each of the three card states", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  const fnSrc = extractFunction(src, "nextEggVisibility");
+  assert.ok(fnSrc, "nextEggVisibility must be defined and extractable");
+  const nextEggVisibility = new Function(fnSrc + "\nreturn nextEggVisibility;")();
+
+  // An egg is incubating: only the ring/percent/art card; every eggless
+  // affordance is hidden.
+  assert.deepEqual(
+    nextEggVisibility(true, null, true),
+    { art: false, empty: true, waiting: true, warm: true, lay: true },
+    "incubating: art shows, nothing else does",
+  );
+
+  // Nothing anywhere: the empty line (and the lay line, if there is a count).
+  assert.deepEqual(
+    nextEggVisibility(false, null, true),
+    { art: true, empty: false, waiting: true, warm: true, lay: false },
+    "eggless with nothing waiting: only the empty line and the lay line",
+  );
+
+  // One waiting on the shelf: ONLY the waiting line and the Warm it button.
+  // The empty line must NOT also show — that was the regression.
+  assert.deepEqual(
+    nextEggVisibility(false, "egg-1", true),
+    { art: true, empty: true, waiting: false, warm: false, lay: true },
+    "a shelf egg waiting: the empty line and the lay line must both stay hidden",
+  );
 });
 
 test("the eggless copy is present and written from inside the premise", () => {
