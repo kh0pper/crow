@@ -290,11 +290,13 @@ test("decay still bottoms out at 0 whatever the ceiling is", async () => {
 
 test("a ceiling that drops underneath a bird never destroys its energy — on ANY path", async () => {
   // ⚠ This is the sync-window hazard, and it has to be tested on the paths that
-  // actually run in that window. sync applies ramble_pet BEFORE ramble_wallet,
-  // so an instance can see a 150-energy bird while it still computes a ceiling
-  // of 100 — and `POST /api/ramble/area` feeds the pet (visit_place) BEFORE the
-  // heart pickup runs. A test that only reads petState at a frozen `now` proves
-  // nothing: no decay interval elapses, so nothing is written at all.
+  // actually run in that window. instance-sync applies each incoming entry
+  // one at a time with no ordering guarantee between a pet row and the wallet
+  // rows that justify its energy, so an instance can apply a synced 150-energy
+  // bird while it still computes a ceiling of 100 from wallet rows it hasn't
+  // received yet — and `POST /api/ramble/area` feeds the pet (visit_place)
+  // BEFORE the heart pickup runs. A test that only reads petState at a frozen
+  // `now` proves nothing: no decay interval elapses, so nothing is written at all.
   const db = await freshDb();
   await giveHearts(db, 5);
   for (let i = 0; i < 12; i++) await feed(db, { type: "meet_crow" }, { now: 1000 });
