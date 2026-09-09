@@ -255,7 +255,18 @@ export default {
           </section>
 
           <section class="rb-card">
-            <p class="rb-eyebrow">What your bird runs on</p>
+            <p class="rb-eyebrow">Today</p>
+            <div class="rb-chores">
+              <button class="rb-chore" data-kind="feed" type="button">${icon("feed")}Feed</button>
+              <button class="rb-chore" data-kind="preen" type="button">${icon("preen")}Preen</button>
+              <button class="rb-chore" data-kind="play" type="button">${icon("play")}Play</button>
+            </div>
+            <p class="rb-muted rb-fine">Three taps a day. Miss a few and it gets droopy, never worse than that.</p>
+            <p class="rb-muted rb-fine" id="rb-pet-status"></p>
+          </section>
+
+          <details class="rb-card rb-fold" id="rb-runs-on" open>
+            <summary class="rb-eyebrow rb-fold-sum">What your bird runs on</summary>
             <div class="rb-steps">
               <div class="rb-step">
                 <span class="rb-step-n">+20</span>
@@ -271,7 +282,7 @@ export default {
               </div>
               <div class="rb-step">
                 <span class="rb-step-n">+8</span>
-                <div class="rb-step-txt"><strong>A chore below</strong><span class="rb-muted rb-fine">feed, preen or play, once a day each</span></div>
+                <div class="rb-step-txt"><strong>A daily chore</strong><span class="rb-muted rb-fine">feed, preen or play, once a day each</span></div>
               </div>
               <div class="rb-step">
                 <span class="rb-step-n">+5</span>
@@ -283,18 +294,7 @@ export default {
               </div>
             </div>
             <p class="rb-muted rb-fine">Getting out is worth more than tapping.</p>
-          </section>
-
-          <section class="rb-card">
-            <p class="rb-eyebrow">Today</p>
-            <div class="rb-chores">
-              <button class="rb-chore" data-kind="feed" type="button">${icon("feed")}Feed</button>
-              <button class="rb-chore" data-kind="preen" type="button">${icon("preen")}Preen</button>
-              <button class="rb-chore" data-kind="play" type="button">${icon("play")}Play</button>
-            </div>
-            <p class="rb-muted rb-fine">Three taps a day. Miss a few and it gets droopy, never worse than that.</p>
-            <p class="rb-muted rb-fine" id="rb-pet-status"></p>
-          </section>
+          </details>
 
           <section class="rb-card">
             <p class="rb-eyebrow">This week</p>

@@ -226,7 +226,8 @@ test("panel handler renders the world-first shell, its three views and every ass
   // The pet page must name what actually feeds the bird, not just the three
   // chore buttons: walking is worth more than tapping and the page hid that.
   assert.ok(sent.includes("What your bird runs on"), "the energy-sources card is on the pet page");
-  for (const src of ["Meet another crow", "Somewhere new", "Unlock a mark", "A chore below", "Check in", "A quiet stretch"]) {
+  // "A daily chore", not "A chore below": the chores moved ABOVE this panel.
+  for (const src of ["Meet another crow", "Somewhere new", "Unlock a mark", "A daily chore", "Check in", "A quiet stretch"]) {
     assert.ok(sent.includes(src), `pet page names the energy source: ${src}`);
   }
   assert.ok(sent.includes("Getting out is worth more than tapping."), "the page says walking beats tapping");
@@ -271,6 +272,20 @@ test("panel handler renders the world-first shell, its three views and every ass
   // corner button was retired, but the world view still needs a door that
   // does not depend on a GPS fix.
   assert.ok(sent.includes('id="rb-perch-open"'), "the world view keeps a door that does not need a GPS fix");
+
+  // The pet page puts the thing you ACT on above the thing you read once.
+  // Asserting the ORDER, not just presence: both cards existed before and the
+  // complaint was that the reference panel pushed the chores below the fold.
+  const chores = sent.indexOf('class="rb-chores"');
+  const runsOn = sent.indexOf('id="rb-runs-on"');
+  assert.ok(chores > -1 && runsOn > -1, "both the chores and the reference panel are on the pet page");
+  assert.ok(chores < runsOn, "the chore buttons come BEFORE what your bird runs on");
+  assert.ok(sent.includes('<details class="rb-card rb-fold" id="rb-runs-on" open>'),
+    "the reference panel folds, and ships open for a player who has not read it yet");
+  assert.ok(sent.includes('<summary class="rb-eyebrow rb-fold-sum">'), "with a real summary, so it toggles without script");
+  // The list used to point DOWN at the chores. They are above it now.
+  assert.ok(!sent.includes("A chore below"), "the copy must not still point below at chores that moved above it");
+  assert.ok(sent.includes("A daily chore"), "it names the chore without a direction");
   assert.ok(sent.includes('id="rb-perch-say"'), "the status strip stays");
 
   assert.ok(sent.includes('id="rb-seed-count"'), "the map bar carries the seed counter");
@@ -867,6 +882,10 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // The world view's GPS-independent door (FIX 1): the map marker is the
   // pretty way in, but it needs a real position fix to exist at all.
   assert.ok(body.includes("function paintPerchGo()"));
+  assert.ok(body.includes('window.localStorage.getItem("rb.runsOn")'), "the fold remembers whether you closed it");
+  assert.ok(body.includes('runsOn.addEventListener("toggle"'), "and records the change");
+  assert.match(body, /getItem\("rb\.runsOn"\)[\s\S]{0,80}catch/,
+    "storage can throw outright in private mode — a remembered preference must never break the panel");
   assert.ok(body.includes('perchOpenBtn.addEventListener("click"'), "the door is wired independently of the map marker");
 
   assert.ok(body.includes("eggPercent = pet.egg.percent"), "the world view's warmth line follows the pet refresh");
@@ -920,6 +939,9 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.ok(body.includes("#ramble .rb-here-pet.is-walking"));
   assert.ok(body.includes("#ramble .rb-here-pet.rb-here-plain::before {"), "the engine-less fallback dot has a rule");
 
+  assert.ok(body.includes("#ramble .rb-fold > summary {"), "the fold has its own summary rule");
+  assert.ok(body.includes("summary::-webkit-details-marker"), "and hides the OS triangle for a marker in the display font");
+  assert.ok(body.includes("#ramble .rb-fold > summary:focus-visible"), "and stays keyboard-visible");
   assert.ok(body.includes("#ramble .rb-seed-pip {"), "seed pips have a rule");
   assert.ok(body.includes("#ramble .rb-seed-dot {"), "and the engine-less fallback dot has its own");
   assert.ok(body.includes("filter: url(#rb-fog-clouds)"), "the mask actually references the cloud filter");
