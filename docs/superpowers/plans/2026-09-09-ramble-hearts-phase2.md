@@ -423,8 +423,7 @@ export async function readHeartSettings(db) {
       if (r.key === "heart.wild.rate" && n >= 1) out.wildRate = n;
       if (r.key === "energy.max.base" && n >= 1) out.energyBase = n;
       // >= 1, not >= 0: a zero would make every heart inert while the pet page
-      // still counted them, and (with the cap normalized up to the base below)
-      // would announce "the bar is as long as it goes" from the very first one.
+      // went on counting them.
       if (r.key === "energy.max.per.heart" && n >= 1) out.perHeart = n;
       if (r.key === "energy.max.cap" && n >= 1) out.cap = n;
     }
@@ -1078,31 +1077,47 @@ test("decay still bottoms out at 0 whatever the ceiling is", async () => {
   assert.equal(pet.mood, "alarmed");
 });
 
-test("lowering a setting clamps a bird that is already over the new ceiling, on read", async () => {
+test("a ceiling that drops underneath a bird never destroys its energy — on ANY path", async () => {
+  // ⚠ This is the sync-window hazard, and it has to be tested on the paths that
+  // actually run in that window. sync applies ramble_pet BEFORE ramble_wallet,
+  // so an instance can see a 150-energy bird while it still computes a ceiling
+  // of 100 — and `POST /api/ramble/area` feeds the pet (visit_place) BEFORE the
+  // heart pickup runs. A test that only reads petState at a frozen `now` proves
+  // nothing: no decay interval elapses, so nothing is written at all.
   const db = await freshDb();
   await giveHearts(db, 5);
   for (let i = 0; i < 12; i++) await feed(db, { type: "meet_crow" }, { now: 1000 });
   assert.equal((await petState(db, { now: 1000 })).energy, 150);
 
+  const stored = async () => Number(
+    (await db.execute({ sql: "SELECT energy FROM ramble_pet WHERE owner = 'self'", args: [] })).rows[0].energy);
+
+  // The ceiling collapses underneath it — exactly what an un-synced wallet looks like.
   await db.execute({
     sql: "INSERT INTO ramble_settings (key, value) VALUES ('energy.max.per.heart', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     args: [],
   });
-  const pet = await petState(db, { now: 1000 });
-  assert.equal(pet.energy_max, 110);
-  assert.equal(pet.energy, 110, "an over-ceiling bird READS as the new bar");
-  // ⚠ and is NOT written down. Sync applies ramble_pet before ramble_wallet, so
-  // a synced-in 150 would otherwise be truncated to 100 in the window before
-  // this instance's heart rows land — an unrecoverable loss. The stored value
-  // waits for the ledger; only decay writes.
-  const row = (await db.execute({ sql: "SELECT energy FROM ramble_pet WHERE owner = 'self'", args: [] })).rows[0];
-  assert.equal(Number(row.energy), 150, "the stored value survives a ceiling that dropped underneath it");
+  assert.equal(await maxEnergy(db), 110);
 
-  // Put the setting back and the energy is still there, not lost.
-  await db.execute({
-    sql: "UPDATE ramble_settings SET value = '10' WHERE key = 'energy.max.per.heart'", args: [],
-  });
-  assert.equal((await petState(db, { now: 1000 })).energy, 150, "nothing was destroyed on the way");
+  // Path 1: a plain read writes nothing and reports the truth.
+  assert.equal((await petState(db, { now: 1000 })).energy, 150);
+  assert.equal(await stored(), 150, "a read never truncates");
+
+  // Path 2: FEEDING, which is what an area post does before the hearts arrive.
+  const fed = await feed(db, { type: "visit_place" }, { now: 1000 });
+  assert.equal(fed.energy, 150, "an addition stops at the ceiling but never pulls the bird DOWN to it");
+  assert.equal(await stored(), 150);
+
+  // Path 3: DECAY, which is the other write. It reduces by the elapsed
+  // intervals, not by snapping to the ceiling.
+  const six = 6 * 60 * 60 * 1000;
+  assert.equal((await petState(db, { now: 1000 + 2 * six })).energy, 130, "two intervals, 20 energy");
+  assert.equal(await stored(), 130);
+
+  // And when the ledger catches up, the bar is long again with nothing lost.
+  await db.execute({ sql: "UPDATE ramble_settings SET value = '10' WHERE key = 'energy.max.per.heart'", args: [] });
+  assert.equal(await maxEnergy(db), 150);
+  assert.equal((await petState(db, { now: 1000 + 2 * six })).energy, 130, "nothing was destroyed on the way");
 });
 
 test("every pet shape carries the same energy_max — feed, chore, and the no-op chore", async () => {
@@ -1139,17 +1154,31 @@ Four edits, all inside `bundles/ramble/server/pet.js`:
 import { maxEnergy, ENERGY_MAX_BASE_DEFAULT } from "./hearts.js";
 ```
 
-2. Replace `clampEnergy`:
+2. Replace `clampEnergy`. **The ceiling stops additions; it never pulls down a value already above it.**
+
+That asymmetry is the whole fix, and it is not a nicety. `SYNCED_TABLES` in `servers/sharing/instance-sync.js` applies `ramble_settings` and `ramble_pet` **before** `ramble_wallet`, so during a pairing or backfill this instance can briefly compute a ceiling of 100 for a bird that legitimately sits at 150 on the instance that owns the heart rows. A symmetric clamp writes that 150 down to 100 — on the very next `/api/ramble/area` post, because `feedActivity({ type: "visit_place" })` runs before the heart pickup — and last-writer-wins then carries the loss *back* to the instance it came from. Nothing can restore it. Spec §7: nothing in this design destroys player progress.
+
+A guard on `petState` alone is not enough and was rejected for that reason: `feed`, `doChore` and `eggs.js`'s hatch path all persist energy too, and the area post is a far hotter path than a `/pet` poll. Putting the asymmetry in the one function every writer already goes through closes all of them at once.
 
 ```js
 /**
  * The ceiling is DERIVED from the heart ledger (spec §3, D6), so it is passed
- * in rather than read here — every caller has already fetched it once and a
+ * in rather than read here — every caller has already fetched it once, and a
  * second read would risk clamping against a different number than the one the
  * panel is about to draw.
+ *
+ * ⚠ ASYMMETRIC, DELIBERATELY. An addition stops at the ceiling, but the
+ * ceiling NEVER reduces a value that is already above it. Sync applies
+ * ramble_pet before ramble_wallet, so a bird that is legitimately at 150 can
+ * be seen by an instance that has not yet received the heart rows and computes
+ * a ceiling of 100. A symmetric clamp would write the 150 down, last-writer-
+ * wins would propagate the loss back, and no later arrival could undo it.
+ * Decay still brings an over-ceiling bird down normally — it just is not the
+ * ceiling that does it.
  */
-function clampEnergy(v, max) {
-  return Math.max(0, Math.min(Number.isFinite(max) ? max : ENERGY_MAX_BASE_DEFAULT, v));
+function clampEnergy(next, previous, max) {
+  const ceiling = Math.max(Number.isFinite(max) ? max : ENERGY_MAX_BASE_DEFAULT, previous || 0);
+  return Math.max(0, Math.min(ceiling, next));
 }
 ```
 
@@ -1158,7 +1187,7 @@ function clampEnergy(v, max) {
 ```js
   const delta = FEED_DELTAS[type];
   const max = await maxEnergy(db);
-  const energy = clampEnergy(row.energy + delta, max);
+  const energy = clampEnergy(row.energy + delta, row.energy, max);
   const mood = moodFor(energy);
 ```
 
@@ -1168,9 +1197,7 @@ and add `energy_max: max` to the object `feed()` returns:
   return { owner: "self", mood, energy, energy_max: max, places_week, unlocks_week, crows_week, week_start, last_fed_at };
 ```
 
-4. In `petState()`, clamp against the ceiling — including when the ceiling has *moved down* under a bird that is already over it, which a settings change can do.
-
-**⚠ Clamp the REPORTED value; persist only what decay changed.** `SYNCED_TABLES` in `servers/sharing/instance-sync.js` applies `ramble_settings` and `ramble_pet` **before** `ramble_wallet`. On a pairing or backfill, a synced pet row at energy 150 lands while this instance still has no heart rows, so `maxEnergy` reads 100 — and if the clamp were persisted, the panel's next poll would write 150 down to 100 permanently. The heart rows arrive moments later and restore the ceiling, but the energy is gone and nothing can bring it back. Persisting only the decay write keeps the stored value intact until the ledger catches up, and the read is clamped either way, so the player never sees an over-long bar:
+4. In `petState()`, apply decay and report the ceiling. With the asymmetry living in `clampEnergy`, this needs no special case of its own — decay reduces, which is always allowed, and the ceiling can no longer take anything away:
 
 ```js
 export async function petState(db, { now = Date.now() } = {}) {
@@ -1185,26 +1212,21 @@ export async function petState(db, { now = Date.now() } = {}) {
     const elapsed = now - last_fed_at;
     if (elapsed >= DECAY_INTERVAL_MS) {
       const intervals = Math.floor(elapsed / DECAY_INTERVAL_MS);
-      energy = energy - intervals * DECAY_PER_INTERVAL;
+      // `row.energy` as the floor argument, so an over-ceiling bird decays by
+      // exactly the intervals elapsed rather than snapping to the ceiling.
+      energy = clampEnergy(energy - intervals * DECAY_PER_INTERVAL, row.energy, max);
       last_fed_at = now;
       decayed = true;
     }
   }
-  // Clamped for the CALLER, including a bird sitting above a ceiling that just
-  // moved down. Deliberately NOT persisted on its own: sync applies ramble_pet
-  // before ramble_wallet, so a synced-in 150 would be written down to 100 in
-  // the window before this instance's heart rows arrive, and that loss is
-  // permanent. Only decay writes.
-  const energyOut = clampEnergy(energy, max);
-  const mood = moodFor(energyOut);
+  const mood = moodFor(energy);
 
   if (decayed) {
     await db.execute({
       sql: "UPDATE ramble_pet SET energy = ?, mood = ?, last_fed_at = ? WHERE owner = 'self'",
-      args: [energyOut, mood, last_fed_at],
+      args: [energy, mood, last_fed_at],
     });
   }
-  energy = energyOut;
 
   return {
     mood,
@@ -1220,7 +1242,7 @@ export async function petState(db, { now = Date.now() } = {}) {
 }
 ```
 
-5. `petFromRow` takes the ceiling as a second argument:
+5. `petFromRow` takes the ceiling as a second argument. It reports `energy` as stored, unclamped, for the same reason — it is a read: 
 
 ```js
 export function petFromRow(row, energyMax) {
@@ -1360,9 +1382,10 @@ test("POST /api/ramble/area grants a heart on a first unlock, and reports the ne
     assert.equal(first.energy_max, before.energy_max + 10, "the bar grew by energy.max.per.heart");
 
     const again = await jsonOf("/api/ramble/area", { method: "POST", body: { cells: ["9v6m2xt"], here } });
-    // Asserted, not assumed, exactly like the ledger tests: this only holds
-    // because the wild source is silenced at rate 999999.
+    // Holds only because HEARTS_ON silences the wild source at rate 999999 —
+    // otherwise the same cell could pay a second, regrown heart.
     assert.equal(again.heart_picked, undefined, "a permanent heart is taken once, ever");
+    assert.equal(first.heart_source, "first", "and the source rides along, so the panel can say the right line");
     assert.equal(again.hearts, first.hearts, "the count still rides on every fix");
     assert.equal(again.energy_max, first.energy_max);
   });
@@ -1775,6 +1798,8 @@ test("the map draws heart pips, counts them, and says something when one is take
   assert.ok(body.includes("rb-heart-dot"), "and a plain dot survives the engine failing to load");
   assert.ok(body.includes("paintHeartPips(out.hearts || [])"), "fed from the server's own list");
   assert.ok(body.includes("out.heart_picked"), "the pickup is consumed from the area response");
+  assert.ok(body.includes("out.heart_source"), "and a regrown heart gets its own line, not the once-ever one's");
+  assert.ok(body.includes("grown here since you last came by"), "the wild heart's copy is actually there");
   assert.ok(body.includes("function paintHearts("), "the counter is painted from the area response");
   assert.equal(body.split("`").length - 1, 0, "the panel client must contain ZERO backticks");
 });
@@ -1909,14 +1934,7 @@ Directly after `paintSeed`:
 
 and in the area-response handler. The existing lines are `static/ramble.js:419` (`paintSeed`), `:420` (`celebrateUnlock`) and `:423` (`seed_picked`) — **insert after line 423**, and rewrite that line as shown:
 
-```js
-        if (out && typeof out.hearts === "number") paintHearts(out.hearts);
-        if (out && out.heart_picked) {
-          celebrateHeart(!!out.unlocked, out.heart_source, out.energy_max === out.energy_max_cap);
-        }
-```
-
-and **restructure the seed line rather than adding a second guarded refresh**. The existing line at `static/ramble.js:423` is:
+**Restructure the seed line rather than adding a second guarded refresh.** The existing line at `static/ramble.js:423` is:
 
 ```js
         if (out && out.seed_picked) { celebrateSeed(out.seed_picked); if (!out.unlocked) refreshZones(); }
@@ -2339,8 +2357,24 @@ Re-run after the revision, as the process requires. **Verdict: REVISE** — five
 | 9 | `petState` persisting a downward clamp loses energy permanently on a sync backfill: `SYNCED_TABLES` applies `ramble_settings` and `ramble_pet` **before** `ramble_wallet`, so a synced-in pet at energy 150 gets written down to 100 in the window before this instance's heart rows arrive. | The clamp is applied to the **reported** value only; the stored value waits for the ledger, and only decay writes. The Task 3 test now asserts the stored 150 survives, and that restoring the setting restores the bar. |
 | 10 | `scripts/build-registry.js --check` does not exist — the script is `.mjs`. | Corrected. |
 
-**Suggestions adopted:** the seed and heart branches now share a single `refreshZones()` (walking into a cell holding both a regrown seed and a retroactive heart is the K2 upgrade-day case and would otherwise fetch `/zones` twice); `heart_source` threaded through the response so a regrown heart gets its own line instead of the once-ever heart's; `energy.max.per.heart` tightened to `>= 1`, since a zero makes every heart inert while the page still counts them; the two unasserted `wildRate: 999999` preconditions added, for consistency with the file's own rule; Task 6's insertion point given as a line number (`static/ramble.js:423`, with `celebrateUnlock` at `:420` sitting between the two seed lines).
+**Suggestions adopted:** the seed and heart branches now share a single `refreshZones()` (walking into a cell holding both a regrown seed and a retroactive heart is the K2 upgrade-day case and would otherwise fetch `/zones` twice); `heart_source` threaded through the response so a regrown heart gets its own line instead of the once-ever heart's; `energy.max.per.heart` tightened to `>= 1`, since a zero makes every heart inert while the page still counts them; the unasserted `wildRate: 999999` precondition added at the one site that lacked a real assertion, for consistency with the file's own rule; Task 6's insertion point given as a line number (`static/ramble.js:423`, with `celebrateUnlock` at `:420` sitting between the two seed lines).
 
 **Ruling recorded:** a cell holding both a permanent and a wild heart pays both on successive posts. It needs both sources to hit at once (~1 cell in 120 at the defaults), and suppressing it would need per-visit state this design does not have.
 
 **Confirmed by the reviewer, needing no change:** `servers/gateway/dashboard/shared/notifications.js` derives mood with hardcoded 60/30, which is consistent with `moodFor` staying absolute; `opts.html = svg` does not match the markup-sink detector, so `heartIcon` spends neither of the two; `CELL7_LAT_STEP === 2 * latErr` exactly, so a placed heart always falls inside its own `cellBox`; no heart, cell or balance reaches a contact-facing payload; the 400-cell chunk in `unlockedAmong` is well inside SQLite's 32766 bind limit.
+
+---
+
+### Third review (2026-09-09, scoped to the second round's fixes)
+
+Five of the eight round-3 changes verified clean against the code — the `cells`-less POST bodies (`routes.js` falls back to `encodeGeohash(requireLat(b.lat), requireLon(b.lon), defaultPrecision())`, which is what `walkTo` itself posts), `wecnrmd` genuinely untouched with a guaranteed hit at `rate: 1` rather than a lucky one, the shared `refreshZones()` (no path consumes a pip without refreshing, none refreshes twice, and `celebrateSeed` does not call `sayMoment` so there is no bubble collision), `celebrateHeart`'s argument order at both call sites, and `build-registry.mjs`.
+
+**One critical, and it invalidated the round-2 fix rather than refining it.** Guarding `petState` alone was incoherent: `feed`, `doChore` and `eggs.js`'s hatch path all persist energy too, and `POST /api/ramble/area` calls `feedActivity({ type: "visit_place" })` **before** the heart pickup — a far hotter path than a `/pet` poll. The reviewer also found the round-2 version still wrote the ceiling-clamped value on the decay branch, so it did not implement the invariant its own comment claimed.
+
+**Resolution — the asymmetry moved into `clampEnergy`, which every writer already goes through.** An addition stops at the ceiling; the ceiling never reduces a value already above it. Decay reduces normally, because decay is not the ceiling. One function, no new state, and the whole class of loss is closed on every path at once rather than one caller at a time.
+
+The round-2 test could not have detected either hole: it froze `now`, so no decay interval elapsed and nothing was written at all, and it never fed after lowering the ceiling. It now exercises all three paths — read, feed, decay — and asserts the stored value at each, then restores the setting and confirms nothing was destroyed on the way.
+
+**Also fixed:** a stale "two preconditions" claim in the second review's own record (only one real assertion was added; the other site got a comment attached to a pre-existing assertion); a false second clause in the `energy.max.per.heart >= 1` comment (at the defaults `atCap` is false when `perHeart` is 0, so the "as long as it goes" consequence needs `cap <= base` too); a superseded snippet left standing immediately above its own replacement, which an implementer could have applied and stopped; and `heart_source`, which was threaded but asserted nowhere — now covered in both the route test and the panel-source test, including the wild heart's copy.
+
+**⚠ For the Task 3 reviewer and the whole-branch review:** `clampEnergy`'s asymmetry is a redesign made after the last full plan review, not a patch that one vetted. Check it directly — every caller, and what each one persists.
