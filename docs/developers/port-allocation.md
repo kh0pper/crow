@@ -205,12 +205,34 @@ Four passes each found more, and the last two were humans reading their own tree
 4. Two people reading their own trees: four more ports, one wrong host attribution, and one live collision inside
    a range this section had just reserved.
 
-Two failure modes worth naming, because both happened here and neither is a missing grep. A scan **surfaced** a
-colliding port and its author read the hit as confirming their own reservation rather than as a conflict, which
-turns evidence into confirmation and is worse than missing it. And a categorical negative, "not one script on that
-host uses it", was asserted from a pattern that could not have matched the files in question. **Treat any scan of
-this kind as a lower bound.** If the checker grows host-awareness, its companion should read invocations and
-shell defaults as well as assignments.
+**Treat any scan of this kind as a lower bound.** If the checker grows host-awareness, its companion should read
+invocations and shell defaults as well as assignments.
+
+### The failure mode behind every mistake made here
+
+Building this section produced four errors, and not one was a missing grep:
+
+1. A trailing comment on a shell assignment line swallowed the assignments after it. `bash -n` passed; it would
+   have failed at first use under `set -u`.
+2. A categorical negative, "not one script on that host uses it", was asserted from a pattern that could not have
+   matched the files in question.
+3. A string replace reported success without applying, because its pattern did not match the file's line
+   wrapping. Every other edit in the same script worked, so the run looked clean.
+4. A grep confirming a correct edit returned zero, because the grep was single-line and the text wrapped across a
+   newline. Re-probing whitespace-flattened text found it.
+
+All four are one failure: **the check and the thing checked disagree about shape, and the check returns the
+reassuring answer.** The fourth is the most dangerous, because it makes a correct edit look failed, and the
+natural response is to apply it again.
+
+Three habits follow, and they are cheap. Assert the match count before substituting, so a no-op is loud rather
+than silent. Verify against text normalised the same way the edit was written, since a single-line probe cannot
+see a wrapped phrase. And never assert a categorical negative from a pattern-based scan; the honest form is "this
+pattern found none", which is a different claim.
+
+A related trap, from the same evening: a scan **surfaced** a colliding port and its author read the hit as
+confirming their own reservation rather than as a conflict. That turns evidence into confirmation, and it is worse
+than missing the port outright.
 
 ## Process for amending this file
 
