@@ -108,3 +108,24 @@ test("applyRambleWallet: two instances converge on the same delta and created_at
   assert.deepEqual(await read(a), await read(b), "order of arrival must not leave two instances with different balances");
   assert.deepEqual(await read(a), [[5, 1000]], "the disagreement resolves to the higher delta and the earlier timestamp");
 });
+
+test("applyRambleWallet: an identical replay leaves the row untouched", async () => {
+  const db = await freshDb();
+  const row = { kind: "seed", key: "9vk79ed:1", delta: 3, created_at: 500 };
+  for (let i = 0; i < 3; i += 1) await applyRambleWallet(db, "insert", row, 7);
+  const rows = await rowsOf(db, "SELECT * FROM ramble_wallet");
+  // MAX/MIN make this true algebraically, but a retried delivery inflating a
+  // BALANCE is the failure nobody would notice, so assert it rather than imply it.
+  assert.equal(rows.length, 1, "a retried delivery must never add a second ledger row");
+  assert.equal(Number(rows[0].delta), 3, "and must never inflate the amount");
+  assert.equal(Number(rows[0].created_at), 500, "nor move the timestamp");
+});
+
+test("applyRambleCell: an identical replay leaves the row untouched", async () => {
+  const db = await freshDb();
+  const row = { cell: "9vk79ed", first_unlocked_at: 500 };
+  for (let i = 0; i < 3; i += 1) await applyRambleCell(db, "insert", row, 7);
+  const rows = await rowsOf(db, "SELECT * FROM ramble_cells");
+  assert.equal(rows.length, 1, "a retried delivery must never duplicate an unlock");
+  assert.equal(Number(rows[0].first_unlocked_at), 500);
+});
