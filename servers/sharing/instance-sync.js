@@ -588,6 +588,14 @@ export async function applyRambleCell(db, op, row, lamportTs) {
  * arrival order AND any disagreement about `seed.per.pickup`. MAX on delta is
  * the deliberate choice — a disagreement resolves in the user's favour rather
  * than silently shrinking a balance they already saw.
+ *
+ * ⚠ PHASE 2, READ THIS BEFORE ADDING SPENDING. MAX is only generous in the
+ * right direction while every delta is an EARN. A spend written as a negative
+ * delta under a coarse key would resolve a -10/-5 disagreement to -5 — less
+ * deducted — letting someone with two Crows keep seed they already spent. So a
+ * spend row must be keyed uniquely by the PURCHASE, never by something as
+ * coarse as cell:window, so two instances can never compute two different
+ * amounts for one key. Do not make this conflict rule arbitrate money.
  */
 export async function applyRambleWallet(db, op, row, lamportTs) {
   if (!row || !row.kind || !row.key) return;

@@ -555,6 +555,15 @@ test("outbox door: a cell unlock with no manager queues and is stamped by cell",
   assert.ok(res && res.queued, "emitOrQueue returned null — missing stampSql branch or lamport_ts?");
   const stamped = await a.execute("SELECT lamport_ts FROM ramble_cells WHERE cell='9vk79ez'");
   assert.ok(Number(stamped.rows[0].lamport_ts) > 0, "ramble_cells row was never stamped — missing stampSql branch?");
+  // Read the outbox itself, not just emitOrQueue's return value: a queued call
+  // that succeeds while writing the wrong row is exactly the outbound break
+  // this repo has already been bitten by.
+  const queued = await a.execute("SELECT row_json, lamport_ts FROM sync_outbox WHERE table_name='ramble_cells' ORDER BY id DESC LIMIT 1");
+  assert.equal(queued.rows.length, 1, "nothing reached sync_outbox");
+  const wire = JSON.parse(queued.rows[0].row_json);
+  assert.equal(wire.cell, "9vk79ez", "the queued row must carry the key");
+  assert.equal(Number(wire.first_unlocked_at), 1000, "and the fact itself");
+  assert.equal(Number(queued.rows[0].lamport_ts), Number(stamped.rows[0].lamport_ts), "the outbox stamp must match the row's");
 });
 
 test("allowlist + exclusions + gate for ramble_wallet", () => {
@@ -575,4 +584,11 @@ test("outbox door: a wallet write with no manager queues and is stamped by kind+
   assert.ok(res && res.queued, "emitOrQueue returned null — missing stampSql branch or lamport_ts?");
   const stamped = await a.execute("SELECT lamport_ts FROM ramble_wallet WHERE kind='seed' AND key='9vk79ez:1'");
   assert.ok(Number(stamped.rows[0].lamport_ts) > 0, "ramble_wallet row was never stamped — missing stampSql branch?");
+  const queued = await a.execute("SELECT row_json, lamport_ts FROM sync_outbox WHERE table_name='ramble_wallet' ORDER BY id DESC LIMIT 1");
+  assert.equal(queued.rows.length, 1, "nothing reached sync_outbox");
+  const wire = JSON.parse(queued.rows[0].row_json);
+  assert.equal(wire.kind, "seed");
+  assert.equal(wire.key, "9vk79ez:1", "the queued row must carry the composite key");
+  assert.equal(Number(wire.delta), 1, "and the amount — a ledger row that syncs without its delta is worthless");
+  assert.equal(Number(queued.rows[0].lamport_ts), Number(stamped.rows[0].lamport_ts), "the outbox stamp must match the row's");
 });
