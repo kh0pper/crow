@@ -34,9 +34,13 @@ Per-box GTT is 124 GiB on both machines. Measured, from
   which is what leaves crow untouched.
 - **Flash-Next single-box has never wedged.** All three GPU wedges were DSv4 two-box at 86 to 91 GiB per box,
   confirmed against CROW-SCHEDULE's own incident rows, which name DSv4 and dspark and never Flash-Next or GLM.
-- **Crow prod is about 60.5 GiB of GTT today**, of which the vLLM 4b is 15.2 GiB by KFD accounting and the 35b is
-  roughly 43 GiB by subtraction. The Vulkan containers do not appear in ROCm accounting, so the 35b figure is
-  bounded rather than isolated. It is good enough for gating and should be measured properly when convenient.
+- **Crow prod is 61 to 62 GiB of GTT**, measured two ways. A live read gives 60.5 GiB; two independent window
+  teardowns gave MemAvailable swings of 64 and 61 GiB on evicting all four containers, with 17 MiB of GTT residue
+  left behind. Of that, the vLLM 4b is 15.2 GiB by KFD accounting, which puts **the 35b at roughly 43 GiB** by
+  subtraction. Cross-checked from the other direction: its weights are 27.16 GB plus a 0.9 GB mmproj, about
+  26.1 GiB, and at `-c 262144` another ~17 GiB of KV and compute buffers is plausible. The Vulkan containers do not
+  appear in ROCm accounting at all, so 43 GiB is a **bound rather than an isolated measurement**, and every gate in
+  this spec treats it as one.
 - **GLM and DSv4 cannot join the standard state.** Their weights exceed one box at every usable quant
   (GLM IQ4_XS 146 GiB, DSv4 IQ4_XS 128 GiB against 124 GiB MemTotal), so they are structurally two-box, and the
   second box is crow. A crow-side worker share of 46 to 56 GiB does not fit beside a 43 GiB 35b plus the rest of
@@ -49,6 +53,19 @@ free at 66 percent. Crow has 168 GB free at 91 percent and does **not** hold the
 needs downloading for this design.
 
 ## 3. What the standard state requires
+
+### 3.0 Ordering constraint: the two-host window lands FIRST
+
+**Flash-Next production must not go onto raven until `dsv4-window.sh` can evict and restore raven prod.** This is a
+hard ordering constraint rather than a preference.
+
+`dsv4-window.sh` evicts and restores crow prod only, and its `preflight` requires raven to be idle with under 2 GiB
+of GTT residue. The moment raven carries a production service, every two-box arm either fails pre-flight on "raven
+busy", which is the good outcome, or contends with a live production service, which is the bad one. Thursday's
+chain is safe only because raven is idle today.
+
+So the deployment order is: teach the window two hosts, then stand up Flash-Next on raven. Doing it the other way
+round breaks the two-box benchmark program on its next run.
 
 ### 3.1 Flash-Next as a production service on raven
 
@@ -72,7 +89,9 @@ number for this config was taken on the host. A native systemd unit keeps the me
 container from the trust chain. The existing benchmark arms already run exactly this way.
 
 Open items for the implementer:
-- **Port.** pi-lab reserved 8030 for FN single-box. Confirm nothing on raven claims it.
+- **Port 8030, confirmed free on raven** (2026-09-09: only 22, 53, 631 and two ephemeral ports listen there).
+  8031 through 8033 are free too. Closing this before the provider row exists matters, because a provider row
+  pointing at an occupied port is a subtler form of the `crow-dsv4` bug this spec retires.
 - **Provider row** pointing at `http://10.0.0.126:<port>/v1`. Note `providers` is in `SYNCED_TABLES`
   (`servers/sharing/instance-sync.js:68`), so the row replicates to every paired instance. That is desirable here
   and must be deliberate.
@@ -91,10 +110,21 @@ Open items for the implementer:
 `group` and `evicts` in `settings.localModels` are global strings and host-blind. `wouldEvict` compares group
 names and nothing else. So a raven entry that declared `evicts: ["standard"]` would stop crow's 35b for no reason.
 
+**Decision (crow-34, owner): the group convention lives in `settings.localModels`, not in the catalog.**
+`group`/`evicts` describe what else is running on a given box, which is instance topology rather than a property of
+a model. The same Flash-Next entry would need a different group on crow than on raven, so putting it in a curated
+file would bake one lab's host layout into content meant to describe models.
+
 Convention for this design:
 - raven's Flash-Next entry: its own group, `evicts: []`. It never evicts anything.
 - crow's existing `standard` group: unchanged, and must not name raven's group.
 - the heavy states: group `heavy`, evicting everything on both hosts. This is the only group that may cross hosts.
+
+**This convention is a workaround and should be recorded as one.** Encoding a *host* distinction inside a global,
+host-blind string works only while everyone remembers it, and this section is its own evidence: a raven entry that
+declared `evicts: ["standard"]` would silently stop crow's 35b. **The intended end state is a host-aware eviction
+relation**, after which the convention becomes unnecessary. Writing that down here is what stops every future
+multi-host entry from re-learning the trap the same way.
 
 ### 3.3 The harness can consume this, and cannot manage it
 
@@ -183,16 +213,38 @@ model displaces crow prod.
 ## 6. Catalog work, in shippable order
 
 `registry/model-catalog.json` v1 already carries `qwen3.8-flash-next`, `glm-5.3-flash` and `deepseek-v4-flash`.
-Their `launch` blocks carry only `ctx`, `ngl`, `flash_attn`, `no_mmap`, `parallel`, `jinja`. None of the validated
-tuning is expressible, there are no topology or rung variants, `min_vram_mb` is 0 on every heavy quant, and
-`min_runtime_version` says `b10068` while each entry's own notes admit the stock runtime will not load it.
+Their `launch` blocks carry only `ctx`, `ngl`, `flash_attn`, `no_mmap`, `jinja` (plus `parallel` on Flash-Next).
+None of the validated tuning is expressible and there are no topology or rung variants. On the memory fields, to be
+exact: `min_vram_mb` is **absent at the entry level** and **present-but-zero on every quant**, while `min_ram_mb`
+*is* populated and meaningful (115,068 MB for Flash-Next UD-Q4_K_XL, 157,911 for GLM UD-IQ4_XS). So the catalog
+already carries a RAM figure; what it lacks is measured peak GTT per host per config, which is what a gate needs.
+`min_runtime_version` says `b10068` on all three while each entry's own notes admit the stock runtime will not load
+them.
 
 crow-34's sequencing, adopted: land this in pieces rather than as one block.
 
-1. **`serving.class`** first. Independently shippable, needs no build, topology or window support, and protects the
-   box on day one by letting the orchestrator refuse a known-wedge shape without an explicit override. Classes:
+1. **`serving.class`** first. Independently deployable, needs no build, topology or window support, and protects
+   the box on day one by letting the orchestrator refuse a known-wedge shape without an explicit override. Classes:
    `resident` (single box, no RPC, safe behind a cap), `windowed` (operator present, two-box, evicts), and
    `wedge-risk` (above roughly 85 GiB per box, explicit override, never one-tap).
+
+   **Decision (crow-34, owner): `serving.class` is a catalog schema field on the model entry, and must NOT live in
+   `settings.localModels`.** The reason is the veto itself. A curated safety property held in per-instance settings
+   is one settings edit, or one bug in a settings writer, away from a `wedge-risk` shape being relabelled `resident`
+   locally, after which the orchestrator offers it as one tap. `registry/model-catalog.json` lives in git and gets
+   reviewed, which is exactly the property a veto needs. **Instance settings may narrow what a box will run, never
+   widen it.**
+
+   **Class is a property of a config, not of a model**, and the catalog has no variant concept yet. Flash-Next
+   single-box at 262k is `resident`; DSv4 two-box at 86 to 91 GiB per box is `wedge-risk`; those could be one entry.
+   So the entry-level field is defined as **a ceiling, not a description: the most dangerous supported shape for
+   that model.** DSv4 is `wedge-risk` outright and can never be one-tap however it is invoked, Flash-Next is
+   `resident`, GLM is `windowed`. Over-restrictive in principle, correct in every case that exists today, and it
+   preserves the veto on day one without waiting for step 4.
+
+   When `topology` lands in step 4, class moves onto the variant, with the entry-level value kept as an **enforced
+   ceiling: a variant may never declare itself safer than its model's class.** The ratchet is one-way by design
+   rather than by whoever implements step 4.
 2. **`gates`**, live state rather than a static floor: max GTT per host, required MemAvailable. The measured peaks
    per config are in the serving doc's memory table and belong here.
 3. **`build`**, naming the tree or PR set a config needs, since `min_runtime_version` against a stock release is
@@ -210,8 +262,15 @@ confirmation run first, for the Mesa reason in 3.1.
   Confirmed live on both the crow and R4 instances. Because `providers` syncs, this is a fleet decision and no
   session has touched it. Under this spec DSv4 is a window mode with no standing endpoint, so the row should be
   retired rather than repointed. Kevin's call.
-- **Priority of the two harness changes** (remote lifecycle in 3.3, the swap predicate in 3.4) against the catalog
-  work. Only the swap predicate affects the standard state. Kevin's call.
+- **Priority of the two harness changes** against the catalog work. Note that remote lifecycle (3.3) is *not*
+  needed for the standard state and should not be built speculatively. That leaves the two-host window (3.0) and the
+  swap predicate (3.4). pi-lab's read, which this spec endorses: **the two-host window first**, because it is the
+  hard prerequisite that makes a two-box arm safe once raven carries production, where the swap predicate is a
+  confirm dialog. Kevin's call.
+- **An isolated per-container GTT measurement**, offered by pi-lab and not yet taken. The window restore path
+  already brings containers back one at a time, so logging GTT between each restore would yield real per-container
+  figures instead of the 43 GiB bound this spec uses. It is a log-only change in a script that runs unattended with
+  a chain armed, so it is a five-minute job that wants a deliberate go rather than a quiet edit.
 - **524k as a curated rung.** Deferred. It has exactly one two-box run, no byte-identity check and no quality arm,
   where 262k and 1M each have several runs, a full corpus twice and 8/9 twice. It wants an identity check and one
   zoo arm before curation.
@@ -219,6 +278,8 @@ confirmation run first, for the Mesa reason in 3.1.
 ## 8. Scheduling
 
 Raven stops being single-tenant. It is master for every two-box arm, so a heavy state and any two-box benchmark
-work are mutually exclusive in time, and Flash-Next production must be evicted before either. pi-lab has added a
-standing note to CROW-SCHEDULE; it needs updating from "raven is single-tenant" to "raven runs Flash-Next
-production, which two-box arms must evict and restore."
+work are mutually exclusive in time, and Flash-Next production must be evicted before either.
+
+pi-lab has rewritten the CROW-SCHEDULE standing note accordingly: raven is a production host, the service is native
+systemd for the Mesa reason in 3.1, and three consequences follow. Raven is no longer free to borrow. The ordering
+constraint in 3.0 applies. And property 3 of the window contract, verified restore, now spans two hosts.
