@@ -130,6 +130,11 @@
    * the pip list. */
   var MIN_CELL_DETAIL_ZOOM = 15;
   var hereLayer = null, hereDot = null, hereRing = null;
+  /* The opening frame is a WALK, not a survey. At 15 the map showed about
+   * 1.5 km across a phone, which put most of the visible seed beyond any
+   * reasonable walk and out along roads with no footpath; 16 is about 730 m,
+   * which is the range Kevin marked as somewhere he would actually go. */
+  var WALK_ZOOM = 16;
   var following = false, mapWatch = null, lastPanAt = null;
   var currentCells = [];
   var lastFix = null;      /* the most recent REAL geolocation fix */
@@ -306,11 +311,17 @@
       hereDot.setLatLng(ll);
     }
     if (!following) return;
-    /* A pan fires moveend, which posts the area and refetches nests: pan only
-     * when the dot has actually moved AND left the middle of the view. */
-    var moved = !lastPanAt || haversineMeters(lastPanAt, fix) > 10;
-    var inside = map.getBounds().pad(-0.3).contains(ll);
-    if (moved && !inside) {
+    /* Following means the map scrolls under you and you stay in the middle of
+     * it. The first version only panned once you had drifted out of the middle
+     * 40% of the view, which reads as the map lurching every few hundred metres
+     * rather than travelling with you.
+     *
+     * 10 m is the same floor the waddle uses: it clears typical high-accuracy
+     * GPS jitter (3-15 m), so standing still does not creep the map. Frequent
+     * pans are cheap here — the moveend work is debounced 500 ms and coalesces,
+     * and the area post has its own independent 75 m ratchet in the watch, so
+     * a continuous walk still reports itself even while pans keep collapsing. */
+    if (!lastPanAt || haversineMeters(lastPanAt, fix) > 10) {
       lastPanAt = { lat: fix.lat, lon: fix.lon };
       map.panTo(ll, { animate: true });
     }
@@ -986,7 +997,7 @@
       if (!following) return;
       here().then(function (pos) {
         paintHere(pos);
-        if (map) map.setView([pos.lat, pos.lon], Math.max(map.getZoom(), 15));
+        if (map) map.setView([pos.lat, pos.lon], Math.max(map.getZoom(), WALK_ZOOM));
       }).catch(function () { /* stay put */ });
     });
   }
@@ -2279,7 +2290,7 @@
     /* The markup ships the chip lit; nothing follows until the first fix says so. */
     setFollowing(false);
     here().then(function (pos) {
-      map.setView([pos.lat, pos.lon], 15);
+      map.setView([pos.lat, pos.lon], WALK_ZOOM);
       paintHere(pos);
       setFollowing(true);
     }).catch(function () {
