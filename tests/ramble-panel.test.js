@@ -1050,6 +1050,34 @@ test("nextEggVisibility: exactly the intended lines show in each of the three ca
   );
 });
 
+// incubate() only re-enables the button it disabled from its OWN .catch —
+// the failure path. A successful warm leaves rb-nextegg-warm disabled and
+// then hidden; the bug is that nothing clears .disabled again before the
+// button can next become visible (a later gift, a claimed nest, or a lapsed
+// swap unlocking a shelf egg all repaint this card waiting with no incubate()
+// call in between). Slice-checked the same way nextEggVisibility is above,
+// anchored on the exact toggle line so the test can't pass against unrelated
+// disabled-handling elsewhere in paintPet.
+test("paintPet clears the Warm it button's disabled state whenever it repaints the card visible", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  const paintPetSrc = extractFunction(src, "paintPet");
+  assert.ok(paintPetSrc, "paintPet must be defined and extractable");
+
+  const warmAt = paintPetSrc.indexOf('rb-nextegg-warm"');
+  assert.ok(warmAt >= 0, "paintPet must reference rb-nextegg-warm");
+  const afterAt = paintPetSrc.indexOf("lastWaitingEggId = waiting;", warmAt);
+  assert.ok(afterAt > warmAt, "the waiting-egg id bookkeeping must follow the warm-button toggle");
+  const warmBlock = paintPetSrc.slice(warmAt, afterAt);
+
+  assert.ok(
+    warmBlock.includes("disabled = false"),
+    "paintPet must clear the Warm it button's disabled state itself, right where it toggles the " +
+      "button's visibility — incubate()'s own .catch only re-enables on FAILURE, so a successful " +
+      "warm leaves the button disabled, and the next paintPet that un-hides it (a gift, a claimed " +
+      "nest, or a lapsed swap freeing a shelf egg) shows a dead button with no message",
+  );
+});
+
 test("the eggless copy is present and written from inside the premise", () => {
   // ⚠ TWO FILES. Static copy lives in the server-rendered shell; only strings
   // the client BUILDS live in the client. An earlier draft asserted both

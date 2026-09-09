@@ -308,9 +308,9 @@ export default {
             </div>
           </section>
 
-          <!-- The successor egg is minted the moment one hatches, and the perch
-               swaps to the bird for good — so without this the egg view (and
-               its daily check-in) would be unreachable after the first hatch. -->
+          <!-- Once a bird hatches the perch swaps to it for good — this card
+               is the only route back to the egg view (and its daily
+               check-in), so it must never be hidden. -->
           <section class="rb-card" id="rb-pet-nextegg">
             <p class="rb-eyebrow">Next egg</p>
             <div class="rb-row">

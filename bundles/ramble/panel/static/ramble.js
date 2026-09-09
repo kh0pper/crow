@@ -1391,8 +1391,21 @@
     var nextArt = $("rb-nextegg-art");
     if (nextArt) { setHidden(nextArt, vis.art); if (hasNext) drawEggArt(nextArt, nextEgg.egg_id); }
     setHidden($("rb-nextegg-empty"), vis.empty);
-    setHidden($("rb-nextegg-waiting"), vis.waiting);
-    setHidden($("rb-nextegg-warm"), vis.warm);
+    var waitingEl = $("rb-nextegg-waiting");
+    setHidden(waitingEl, vis.waiting);
+    /* A failed warm attempt overwrites this line with err.message (see the
+     * rb-nextegg-warm click handler below); nothing else ever restores the
+     * static copy, so it stays an error for the life of the page. Restore it
+     * here, every time the card comes back to this state. */
+    if (waitingEl && !vis.waiting) setText(waitingEl, "One's waiting on your shelf.");
+    var warmEl = $("rb-nextegg-warm");
+    setHidden(warmEl, vis.warm);
+    /* incubate()'s own .catch only re-enables on FAILURE. A successful warm
+     * leaves this disabled, and a later gift / claimed nest / lapsed swap
+     * can repaint the card visible again with no incubate() call in
+     * between — clear it here, every time the card comes back visible, so
+     * the button is never shown dead. */
+    if (warmEl && !vis.warm) warmEl.disabled = false;
     lastWaitingEggId = waiting;
 
     var layEl = $("rb-nextegg-lay");
@@ -2140,8 +2153,9 @@
     return !!(p && !p.intro_seen && !p.granted);
   }
 
-  /* Both the button and a dismissal grant it, so skipping the words never
-   * costs the egg. */
+  /* There is no backdrop-click or close control — hidePrologue() only runs
+   * from the Go button below, whose own handler also marks the intro seen,
+   * so skipping the words never costs the egg. */
   function maybeIntro() {
     return jsonFetch("/api/ramble/prologue").then(function (p) {
       if (shouldShowIntro(p)) showPrologue("intro");
