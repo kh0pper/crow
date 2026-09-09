@@ -126,22 +126,45 @@ first cell as **crow** allocations. Keeping raven rows unparseable to it is corr
 **making the checker host-aware is follow-up work**, and until it lands, a raven port is only verified by looking
 at raven.
 
+### Production and reserved
+
 | port | bind | what | status |
 |---|---|---|---|
 | raven:8030 | 0.0.0.0 | Qwen3.8-Flash-Next @1M, production (native systemd, not a container) | planned |
 | raven:8031 | 0.0.0.0 | Flash-Next two-box master (window mode) | reserved |
 | raven:8032 | 0.0.0.0 | DeepSeek-V4-Flash two-box master (window mode) | reserved |
 | raven:8033 | 0.0.0.0 | GLM-5.3-Flash two-box master (window mode) | reserved |
-| crow:50052 | 10.99.0.1 (USB4 link) | `ggml-rpc-server` worker for every two-box arm | existing |
 
-Verified free on raven 2026-09-09: 8030 through 8033. Raven listens only on 22, 53, 631 and two ephemeral ports.
+### Benchmark-transient, held only inside a window
+
+These are bound by `pi-lab/scripts/` and are absent from any compose file, so nothing would ever have caught them.
+They are listed because a registry that covers raven while omitting ports in regular use is worse than one that
+does not cover raven at all.
+
+| port | bind | what |
+|---|---|---|
+| raven:8098 | 0.0.0.0 | zoo arm endpoint, two-box master and single-box arms (`ZOO_PORT`) |
+| raven:8035 | 127.0.0.1 | R24 result-check server (`raven-r24-check-results.sh`) |
+| raven:50052 | 10.99.0.2 (USB4 link) | `ggml-rpc-server` when **raven** is the worker |
+| raven:50053 | 127.0.0.1 | second `ggml-rpc-server`, for arms running two workers on raven's one GPU |
+| crow:50052 | 10.99.0.1 (USB4 link) | `ggml-rpc-server` when **crow** is the worker, which is the usual case |
+| crow:8020 | 127.0.0.1 | DeepSeek-V4-Flash windowed serve (`dsv4-window.sh`) |
+| crow:8021 | 127.0.0.1 | max-stack and indexer phase-0 probes (`PHASE0_PORT`) |
+
+**50052 binds on both machines** depending on which one is the worker, which is the clearest illustration of why a
+bare port number is not an allocation here. `10.99.0.1` is crow and `10.99.0.2` is raven on the USB4 link.
+
+Verified free on raven 2026-09-09: 8030 through 8033, 8035 and 8098. Raven listens only on 22, 53, 631 and two
+ephemeral ports.
 
 ### Two gaps this section exposes, both worth closing
 
 1. **Crow's own model ports are largely unlisted.** 8003 (35b), 8006 (27b solo) and 8014 (27b 512k) are absent
    from the allocation table; only 8010 (27b copilot) is recorded. They bind the tailnet IP from `crow-addons/`
    composes, which the conventions above already flag as a separate registry, so nothing catches them.
-2. **8098 is ambiguous across hosts.** The table allocates it to searxng on crow's loopback, while the two-box
+2. **Crow's benchmark ports are unlisted too.** 8020 and 8021 are bound by `pi-lab/scripts/` on crow and appear
+   nowhere in the table. 8020 matters most, because the `crow-dsv4` provider row points at it.
+3. **8098 is ambiguous across hosts.** The table allocates it to searxng on crow's loopback, while the two-box
    benchmark zoo arms conventionally use 8098 on raven. Both are correct today because they are different
    machines, and neither the table nor the checker can say so. This is precisely the class of silent
    double-allocation the conventions section warns about, one host further out.
