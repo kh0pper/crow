@@ -585,6 +585,29 @@ test("POST /api/ramble/egg/checkin credits warmth once per local day", async () 
   assert.equal(checklist.checked_in_today, true);
 });
 
+// Carried from Task 6's review: the `egg` boolean on the checkin response had
+// no coverage, and Task 7's confirmation copy branches on it (S2) — a
+// regression here would silently produce the wrong three-way message.
+test("POST /api/ramble/egg/checkin reports whether an egg is incubating, independent of the day's credit", async () => {
+  const gone = createDbClient();
+  try {
+    await gone.execute({ sql: "DELETE FROM ramble_eggs WHERE status = 'incubating'", args: [] });
+  } finally {
+    gone.close();
+  }
+  const eggless = await (await req("/api/ramble/egg/checkin", { method: "POST", body: {} })).json();
+  assert.equal(eggless.egg, false, "no incubating egg after the delete above");
+
+  const minted = createDbClient();
+  try {
+    await mintIncubatingEgg(minted, { now: Date.now() });
+  } finally {
+    minted.close();
+  }
+  const withEgg = await (await req("/api/ramble/egg/checkin", { method: "POST", body: {} })).json();
+  assert.equal(withEgg.egg, true, "an incubating egg exists after the mint above");
+});
+
 test("POST /api/ramble/pet/chore completes each kind once a day and 400s an unknown kind", async () => {
   const first = await req("/api/ramble/pet/chore", { method: "POST", body: { kind: "preen" } });
   assert.equal(first.status, 200);
@@ -926,8 +949,58 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
     "storage can throw outright in private mode — a remembered preference must never break the panel");
   assert.ok(body.includes('perchOpenBtn.addEventListener("click"'), "the door is wired independently of the map marker");
 
-  assert.ok(body.includes("eggPercent = pet.egg.percent"), "the world view's warmth line follows the pet refresh");
+  assert.ok(body.includes("eggPercent = nextPct"), "the world view's warmth line follows the pet refresh");
   assert.ok(body.includes('opts.className = "rb-here-pet rb-here-plain"'), "a plain dot survives the bird engine failing to load");
+});
+
+// -------------------------------------------------------------- eggless (Task 7)
+
+test("the Next egg card is never hidden — it is the only route to the check-in", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  assert.ok(!/setHidden\(\s*\$\("rb-pet-nextegg"\)/.test(src),
+    "hiding it would delete the daily check-in for an eggless player (phase 1's defect)");
+  assert.ok(src.includes("rb-nextegg-empty"), "it changes state instead");
+});
+
+test("a shelf egg waiting for an empty slot is offered, not hidden", () => {
+  const shell = readFileSync("bundles/ramble/panel/ramble.js", "utf8");
+  assert.ok(shell.includes("waiting on your shelf"));
+  assert.ok(shell.includes('id="rb-nextegg-warm"'), "and a one-tap way to act on it");
+
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  assert.ok(src.includes("lastWaitingEggId"), "wired to the shipped incubate endpoint");
+  // The lay line must not claim you are eggless while an egg sits on the shelf.
+  assert.ok(/setHidden\(\$\("rb-nextegg-lay"\)|!!waiting/.test(src));
+});
+
+test("the eggless copy is present and written from inside the premise", () => {
+  // ⚠ TWO FILES. Static copy lives in the server-rendered shell; only strings
+  // the client BUILDS live in the client. An earlier draft asserted both
+  // against the client, and asserted a "good days" literal the client never
+  // contains — it is concatenated around a pluralised day/days.
+  const shell = readFileSync("bundles/ramble/panel/ramble.js", "utf8");
+  assert.ok(shell.includes("Nothing warming just now."));
+  assert.ok(shell.includes("Nests hold them. So do friends."));
+
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  assert.ok(src.includes("No one on the way just now."));
+  assert.ok(src.includes("keep it up and you'll manage one yourself"), "K4: the soft count is named");
+  assert.ok(src.includes('" good "'), "pluralised around the count");
+});
+
+test("the AR renderer hides the egg when there is neither bird nor egg", () => {
+  // In the RENDERER, not startAr: ramble-ar.js repaints every frame and would
+  // otherwise un-hide the egg whenever there is no valid bird.
+  const src = readFileSync("bundles/ramble/panel/static/ramble-ar.js", "utf8");
+  assert.ok(/setHidden\(e\.egg,\s*valid\s*\|\|\s*!.*hasEgg/.test(src),
+    "seedFromEggId(null) is 0, so an unguarded frame shows an egg that does not exist");
+});
+
+test("the map marker does not draw a phantom egg for a player who has neither", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  const fn = src.slice(src.indexOf("function hereArt()"), src.indexOf("function paintHereArt()"));
+  assert.ok(/else if \(eggSeedId\)/.test(fn),
+    "hereArt must fall through to the plain dot when there is no bird and no egg");
 });
 
 test("the map draws heart pips, counts them, and says something when one is taken", async () => {
