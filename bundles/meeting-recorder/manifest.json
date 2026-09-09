@@ -1,0 +1,45 @@
+{
+  "id": "meeting-recorder",
+  "name": "Meeting Recorder",
+  "version": "1.0.0",
+  "description": "Record a meeting in the browser (shared tab audio plus microphone) and transcribe it locally with faster-whisper. Nothing leaves the machine.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "ai",
+  "tags": ["audio", "transcription", "whisper", "meetings", "notes"],
+  "icon": "mic",
+  "panel": {
+    "id": "meeting-recorder",
+    "name": "Meeting Recorder",
+    "icon": "mic",
+    "route": "/dashboard/meeting-recorder",
+    "navOrder": 17
+  },
+  "panelRoutes": "panel/routes.js",
+  "requires": {
+    "env": [],
+    "min_ram_mb": 64,
+    "min_disk_mb": 500
+  },
+  "env_vars": [
+    {
+      "name": "WHISPER_URL",
+      "description": "OpenAI-compatible transcription endpoint. Defaults to the faster-whisper-server bundle on loopback :8004.",
+      "required": false,
+      "default": "http://localhost:8004/v1/audio/transcriptions"
+    },
+    {
+      "name": "WHISPER_MODEL",
+      "description": "Model name passed to that endpoint.",
+      "required": false,
+      "default": "Systran/faster-whisper-large-v3"
+    },
+    {
+      "name": "MEETING_RECORDER_EXPORT_DIR",
+      "description": "Optional. A directory that also receives a dated markdown copy of every transcript, for grepping or for a git repo.",
+      "required": false,
+      "default": ""
+    }
+  ],
+  "notes": "Needs ffmpeg on the host and a transcription endpoint (the faster-whisper-server bundle is the intended pairing; it is CPU-only and loopback-bound). No port of its own: the capture page and its upload endpoints ride the gateway through the panel and panelRoutes, so recordings inherit the dashboard's session auth. A browser only hands over tab audio in a secure context, so reach the dashboard over HTTPS (Tailscale Serve, a reverse proxy, or localhost)."
+}
