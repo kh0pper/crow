@@ -2045,3 +2045,20 @@ test("the energy bar is drawn against the server's ceiling, not a hardcoded 100"
   assert.ok(body.includes("paintHearts(hearts)"),
     "the map-bar counter is painted from the pet read too, not only from a position fix");
 });
+
+test("both prologue beats are present, in the game's voice", () => {
+  const shell = readFileSync("bundles/ramble/panel/ramble.js", "utf8");
+  assert.ok(shell.includes("You are an egg."));
+  assert.ok(shell.includes("wandered off from your nest"));
+  assert.ok(shell.includes("Nobody knows what&rsquo;s inside you yet") ||
+            shell.includes("Nobody knows what's inside you yet"));
+  assert.ok(shell.includes("Nothing here is ever lost."),
+    "the no-fail-state promise lives in the game, not only in the docs");
+  assert.ok(shell.includes("rb-prologue"), "the overlay exists in the server-rendered shell");
+});
+
+test("the prologue is skippable and both beats dismiss", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  assert.ok(src.includes("/api/ramble/prologue/intro"));
+  assert.ok(src.includes("/api/ramble/prologue/hatch"));
+});

@@ -2056,6 +2056,7 @@
   /* ---------------------------------------------------------------- hatch */
 
   var shownHatch = null;
+  var lastHatched = null;          /* set by handleHatched, read by the beat */
 
   /**
    * The one hatch entry point: an SSE "ramble-hatched" frame and the "hatched"
@@ -2067,6 +2068,7 @@
     var key = h.egg_id || (h.species + ":" + h.seed);
     if (key === shownHatch) return;
     shownHatch = key;
+    lastHatched = h;
     /* AFTER showView: showView() ends any hatch in progress, so locking first
      * would immediately unlock again when the view actually changes. */
     showView("egg");
@@ -2114,7 +2116,63 @@
   }
 
   var meetBtn = $("rb-meet-bird");
-  if (meetBtn) meetBtn.addEventListener("click", function () { showView("pet"); });
+  if (meetBtn) meetBtn.addEventListener("click", function () {
+    showView("pet");
+    maybeHatchBeat(lastHatched);
+  });
+
+  /* ------------------------------------------------------------ prologue */
+
+  function showPrologue(which) {
+    var root = $("rb-prologue");
+    if (!root) return;
+    setHidden($("rb-prologue-intro"), which !== "intro");
+    setHidden($("rb-prologue-hatch"), which !== "hatch");
+    setHidden(root, false);
+  }
+
+  function hidePrologue() { setHidden($("rb-prologue"), true); }
+
+  /* Beat one is for a player who has never had an egg at all. Both the button
+   * and a dismissal grant it, so skipping the words never costs the egg. */
+  function maybeIntro() {
+    return jsonFetch("/api/ramble/prologue").then(function (p) {
+      if (p && !p.intro_seen && !p.granted) showPrologue("intro");
+    }).catch(function () { /* the prologue is never load-bearing */ });
+  }
+
+  var goBtn = $("rb-prologue-go");
+  if (goBtn) goBtn.addEventListener("click", function () {
+    hidePrologue();
+    jsonFetch("/api/ramble/prologue/intro", { method: "POST", body: {} })
+      .then(function () { refreshEgg(); refreshPet(); })
+      .catch(function () { /* the next load retries */ });
+  });
+
+  /* Beat two rides the existing hatch reveal: the bird is already on screen,
+   * so this names what just happened rather than interrupting it. */
+  function maybeHatchBeat(bird) {
+    jsonFetch("/api/ramble/prologue").then(function (p) {
+      if (!p || p.hatch_seen) return;
+      var lead = $("rb-prologue-hatch-lead");
+      if (lead && bird && bird.species) {
+        /* Same lookup as handleHatched's reveal line: species is a lowercase
+         * key ("blackswan"), never the display name ("Black swan"). */
+        var sp = Bird && Bird.SPECIES ? Bird.SPECIES[bird.species] : null;
+        setText(lead, "You're out. A " + ((sp && sp.name) || bird.species) +
+          " — the only one rolled quite like you.");
+      }
+      showPrologue("hatch");
+    }).catch(function () { /* cosmetic */ });
+  }
+
+  var seenBtn = $("rb-prologue-seen");
+  if (seenBtn) seenBtn.addEventListener("click", function () {
+    hidePrologue();
+    jsonFetch("/api/ramble/prologue/hatch", { method: "POST", body: {} })
+      .then(function () { showView("pet"); })
+      .catch(function () { /* the next load retries */ });
+  });
 
   /* ------------------------------------------------------------------- ar */
 
@@ -2476,6 +2534,7 @@
   jsonFetch("/api/ramble/grid").then(paintGrid).catch(function () { /* leave the chip at off */ });
   refreshContacts();
   refreshEgg().then(refreshPet);
+  maybeIntro();
 
   if (map) {
     startMapWatch();

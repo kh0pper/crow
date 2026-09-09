@@ -467,6 +467,29 @@ export default {
             <div id="rb-ar-sheet-body"></div>
           </div>
         </div>
+
+        <!-- ─────────────────────────────────────────────── the prologue -->
+        <!-- Ramble's first narrative content (spec §4.4). Written from inside
+             the premise: you ARE the egg. Skippable; both beats set a flag
+             that replicates, and a game-state wipe clears them so the
+             prologue genuinely replays. -->
+        <div class="rb-prologue" id="rb-prologue" hidden>
+          <div class="rb-prologue-card">
+            <div id="rb-prologue-intro" hidden>
+              <p class="rb-prologue-lead">You are an egg.</p>
+              <p>You wandered off from your nest. Nobody is coming to look for you &mdash; that&rsquo;s alright. It happens more than you&rsquo;d think.</p>
+              <p>Nobody knows what&rsquo;s inside you yet. Not even you.</p>
+              <p>Go somewhere. That&rsquo;s how eggs get warm.</p>
+              <button class="rb-btn" id="rb-prologue-go" type="button">Go</button>
+            </div>
+            <div id="rb-prologue-hatch" hidden>
+              <p class="rb-prologue-lead" id="rb-prologue-hatch-lead">You&rsquo;re out.</p>
+              <p>You live on what you do: new streets, new faces, the small daily things. Keep moving and you stay bright. Go still long enough and you droop.</p>
+              <p>That&rsquo;s all that happens. Nothing here is ever lost.</p>
+              <button class="rb-btn" id="rb-prologue-seen" type="button">Have a look at yourself</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <script src="/ramble/static/leaflet/leaflet.js"></script>
