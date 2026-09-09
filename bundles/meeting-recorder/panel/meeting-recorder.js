@@ -50,10 +50,10 @@ export default {
           .map((s) => {
             const state =
               s.state === "done"
-                ? `<span class="mr-ok">done</span>`
+                ? `<span class="mr-state-done">done</span>`
                 : s.state === "failed"
-                  ? `<span class="mr-bad">failed</span>`
-                  : `<span class="mr-run">${escapeHtml(s.state || "")}</span>`;
+                  ? `<span class="mr-state-failed">failed</span>`
+                  : `<span class="mr-state-running">${escapeHtml(s.state || "")}</span>`;
             const detail =
               s.state === "done"
                 ? `${s.word_count || 0} words`
@@ -64,81 +64,100 @@ export default {
               <td><code>${escapeHtml(s.id || "")}</code></td></tr>`;
           })
           .join("")
-      : `<tr><td colspan="6" class="mr-muted">Nothing recorded yet.</td></tr>`;
+      : `<tr><td colspan="6" class="mr-hint">Nothing recorded yet.</td></tr>`;
 
     const content = `
 <style>
-  .mr-card { background: var(--surface, #fff); border: 1px solid var(--border, #d5dee7);
-             border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
-  .mr-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  .mr-hint { color: var(--text-muted, #5a6b7b); font-size: 12.5px; margin: 4px 0 0; }
-  .mr-meterwrap { height: 12px; background: var(--border, #e2e8f0); border-radius: 6px;
-                  overflow: hidden; margin: 10px 0 4px; }
-  .mr-meter { height: 100%; width: 0%; background: var(--accent, #2b7ba8); transition: width .1s linear; }
-  .mr-big { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .mr-warn { border-left: 4px solid #b7791f; padding: 8px 11px; margin: 10px 0; font-size: 13.5px; }
-  .mr-good { border-left: 4px solid #1b7a4b; padding: 8px 11px; margin: 10px 0; font-size: 13.5px; }
+  /* Everything here leans on the dashboard's own tokens and .card/.btn classes.
+     Inventing names like --surface silently falls back to light-theme values,
+     which is how this panel first shipped looking like a white box in the dark
+     theme. The one rule that has to fight the base sheet is the checkbox: the
+     global "input { width:100% }" stretches it across the row otherwise. */
+  .mr-stack > * + * { margin-top: var(--crow-space-5); }
+  .mr-label { font-size: var(--crow-text-sm); color: var(--crow-text-muted);
+              text-transform: uppercase; letter-spacing: 0.05em;
+              margin-bottom: var(--crow-space-2); display: block; }
+  .mr-row { display: flex; gap: var(--crow-space-3); flex-wrap: wrap; align-items: center; }
+  .mr-hint { color: var(--crow-text-secondary); font-size: var(--crow-text-sm);
+             margin: var(--crow-space-1) 0 0; line-height: var(--crow-leading-normal); }
+  .mr-check { display: flex; gap: var(--crow-space-2); align-items: flex-start;
+              margin: var(--crow-space-3) 0; cursor: pointer; }
+  .mr-check input[type="checkbox"] {
+    width: auto; flex: 0 0 auto; margin: 0.2rem 0 0; padding: 0;
+    accent-color: var(--crow-accent);
+  }
+  .mr-check strong { color: var(--crow-text-primary); font-weight: 600; display: block; }
+  .mr-check .mr-hint { display: block; }
+  .mr-meterwrap { height: 10px; background: var(--crow-bg-elevated);
+                  border: 1px solid var(--crow-border); border-radius: var(--crow-radius-pill);
+                  overflow: hidden; margin: var(--crow-space-3) 0 var(--crow-space-1); }
+  .mr-meter { height: 100%; width: 0%; background: var(--crow-accent); transition: width .1s linear; }
+  .mr-big { font-size: var(--crow-text-3xl); font-weight: 600;
+            font-variant-numeric: tabular-nums; color: var(--crow-text-primary); }
+  .mr-note { border-left: 3px solid var(--crow-warning); background: var(--crow-bg-elevated);
+             padding: var(--crow-space-3) var(--crow-space-4); margin: var(--crow-space-3) 0;
+             border-radius: 0 var(--crow-radius-control) var(--crow-radius-control) 0;
+             font-size: var(--crow-text-sm); color: var(--crow-text-secondary); }
+  .mr-note-ok { border-left-color: var(--crow-success); }
   .mr-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
-            background: #ac1f2e; margin-right: 7px; animation: mrpulse 1.4s infinite; }
+            background: var(--crow-error); margin-right: var(--crow-space-2);
+            animation: mrpulse 1.4s infinite; }
   @keyframes mrpulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
-  .mr-ok { color: #1b7a4b; font-weight: 600; } .mr-bad { color: #ac1f2e; font-weight: 600; }
-  .mr-run { color: #b7791f; font-weight: 600; }
-  .mr-muted { color: var(--text-muted, #5a6b7b); }
-  .mr-card input[type=text], .mr-card textarea { width: 100%; padding: 8px 10px;
-    border: 1px solid var(--border, #d5dee7); border-radius: 6px; font: inherit; }
-  .mr-card textarea { min-height: 70px; }
-  .mr-checks label { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; font-size: 14px; }
+  .mr-state-done { color: var(--crow-success); }
+  .mr-state-failed { color: var(--crow-error); }
+  .mr-state-running { color: var(--crow-warning); }
+  .mr-file { margin-bottom: var(--crow-space-3); }
 </style>
 
-<div class="mr-warn" id="mr-insecure" hidden>
+<div class="mr-stack">
+<div class="mr-note" id="mr-insecure" hidden>
   This page is not in a secure context, so the browser will not hand over meeting audio.
   Reach the dashboard over HTTPS or on localhost, then reload.
 </div>
 
-<div class="mr-card" id="mr-setup">
-  <label for="mr-title"><b>What is this meeting</b></label>
+<div class="card" id="mr-setup">
+  <label class="mr-label" for="mr-title">What is this meeting</label>
   <input type="text" id="mr-title" placeholder="Untitled meeting">
-  <div class="mr-checks">
-    <label><input type="checkbox" id="mr-src-tab" checked>
-      <span><b>Meeting audio</b><br><span class="mr-hint">Pick the tab or window the meeting is
-      playing in and tick <i>Share tab audio</i> in the picker. On Windows, sharing a whole screen
-      also carries system sound.</span></span></label>
-    <label><input type="checkbox" id="mr-src-mic" checked>
-      <span><b>My microphone</b><br><span class="mr-hint">Catches what you say, including questions
-      you ask.</span></span></label>
-  </div>
-  <div class="mr-row" style="margin-top:12px">
+  <label class="mr-check"><input type="checkbox" id="mr-src-tab" checked>
+    <span><strong>Meeting audio</strong>
+    <span class="mr-hint">Pick the tab or window the meeting is playing in and tick
+    <i>Share tab audio</i> in the picker. On Windows, sharing a whole screen also carries
+    system sound.</span></span></label>
+  <label class="mr-check"><input type="checkbox" id="mr-src-mic" checked>
+    <span><strong>My microphone</strong>
+    <span class="mr-hint">Catches what you say, including questions you ask.</span></span></label>
+  <div class="mr-row" style="margin-top:var(--crow-space-4)">
     <button class="btn btn-primary" id="mr-start">Start recording</button>
   </div>
   <p class="mr-hint" id="mr-setup-msg"></p>
 </div>
 
-<div class="mr-card" id="mr-live" hidden>
+<div class="card" id="mr-live" hidden>
   <div class="mr-row" style="justify-content:space-between">
     <div><span class="mr-dot"></span><span class="mr-big" id="mr-elapsed">0:00</span></div>
     <button class="btn" id="mr-stop">Stop and transcribe</button>
   </div>
   <div class="mr-meterwrap"><div class="mr-meter" id="mr-meter"></div></div>
   <p class="mr-hint" id="mr-stat">starting…</p>
-  <div class="mr-warn" id="mr-silence" hidden>No sound has reached the recorder yet. If the meeting
-    audio is the part you need, stop, start again, and tick <b>Share tab audio</b>.</div>
-  <label for="mr-notes" style="margin-top:12px"><b>Notes while you listen</b></label>
+  <div class="mr-note" id="mr-silence" hidden>No sound has reached the recorder yet. If the meeting
+    audio is the part you need, stop, start again, and tick <strong>Share tab audio</strong>.</div>
+  <label class="mr-label" for="mr-notes" style="margin-top:var(--crow-space-4)">Notes while you listen</label>
   <textarea id="mr-notes" placeholder="Decisions, questions, anything worth flagging."></textarea>
 </div>
 
-<div class="mr-card" id="mr-done" hidden>
-  <div class="mr-good" id="mr-done-msg">Recording saved. Transcribing now.</div>
+<div class="card" id="mr-done" hidden>
+  <div class="mr-note mr-note-ok" id="mr-done-msg">Recording saved. Transcribing now.</div>
   <p class="mr-hint" id="mr-done-detail"></p>
   <div class="mr-row"><button class="btn" id="mr-again">Record another</button></div>
 </div>
 
-<div class="mr-card" id="mr-upload-card">
-  <label for="mr-file"><b>Or transcribe a recording you already have</b></label>
-  <p class="mr-hint" style="margin-bottom:8px">Any audio or video file. It takes the same path and
-    lands in the same place.</p>
-  <input type="file" id="mr-file" accept="audio/*,video/*">
-  <input type="text" id="mr-file-title" placeholder="What is this recording" style="margin-top:8px">
-  <div class="mr-row" style="margin-top:10px">
+<div class="card" id="mr-upload-card">
+  <label class="mr-label" for="mr-file">Or transcribe a recording you already have</label>
+  <p class="mr-hint" style="margin-bottom:var(--crow-space-3)">Any audio or video file. It takes
+    the same path and lands in the same place.</p>
+  <input class="mr-file" type="file" id="mr-file" accept="audio/*,video/*">
+  <input type="text" id="mr-file-title" placeholder="What is this recording">
+  <div class="mr-row" style="margin-top:var(--crow-space-3)">
     <button class="btn" id="mr-upload">Upload and transcribe</button>
   </div>
   <div class="mr-meterwrap" id="mr-up-wrap" hidden><div class="mr-meter" id="mr-up-bar"></div></div>
@@ -150,6 +169,7 @@ ${section(
   `<table class="data-table"><thead><tr><th>Meeting</th><th>Started</th><th>Length</th>
      <th>State</th><th></th><th>Session</th></tr></thead><tbody>${rows}</tbody></table>`
 )}
+</div>
 
 <script>
 (() => {
