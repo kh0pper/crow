@@ -180,6 +180,15 @@ Context caps: on the max-stack lineage, keep two-box context below 128k, because
 R24 W1b ran a 120k prompt two-box on `llama-hc-sop`, which carries `supports_op`, successfully. For qwen4exp above
 64k on the #28571 lineage it is untested, and Thursday's W0 tests exactly that.
 
+## 4.1 A note on how the constraints here are written
+
+Where this spec had a choice, it states arithmetic rather than a rule. "Evict raven production before an
+R25-lineage arm" is a rule someone forgets at 02:00. "92.6 GiB each on a 124 GiB box" is arithmetic anyone can
+redo from scratch and get the same answer. The second form survives the people who wrote it, and it fails loudly
+when the hardware changes underneath it, where a remembered rule just quietly stops being true.
+
+Prefer it wherever a later section adds a constraint.
+
 ## 5. The window contract, which is not negotiable
 
 Whatever wraps a heavy state must preserve these five properties. Each was written after an incident, and the
