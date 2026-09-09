@@ -113,7 +113,7 @@ Walk within **75 m** of a nest and tap **Take the egg** (`POST /api/ramble/nests
 
 Exactly one egg incubates at a time. From the **Flock** screen you can **incubate** any shelf egg (`POST /api/ramble/eggs/:id/incubate`); the one it replaces goes to the shelf keeping its warmth. Instance sync distinguishes an egg *you* parked (`shelf_origin = 'user'`) from one the sync layer shelved while reconciling two instances (`'sync'`): only the latter is ever pulled back into the incubating slot automatically.
 
-**The map unlocks as you walk.** Ground you have actually stood in stays unlocked for good: you can read the marks and caws left there and claim any nest. A few blocks further out is the frontier, where you can see that something is waiting without seeing what it is. Everything beyond that is fog until you go there. Only the public map works this way — a contact's mark always reaches you wherever you are. Walking ground you have already unlocked turns up **bird seed**, which regrows after a day. Seed appears in about one cleared cell in four, at a spot inside it, so a walk has a handful of places worth heading for rather than one in every square; you collect it by walking there, not by tapping. Zoom out to see the whole shape of the ground you have cleared.
+**The map unlocks as you walk.** Ground you have actually stood in stays unlocked for good: you can read the marks and caws left there and claim any nest. A few blocks further out is the frontier, where you can see that something is waiting without seeing what it is. Everything beyond that is fog until you go there. Only the public map works this way — a contact's mark always reaches you wherever you are. Walking ground you have already unlocked turns up **bird seed**, which regrows after a day. Seed appears in about one cleared cell in four, at a spot inside it, so a walk has a handful of places worth heading for rather than one in every square; you collect it by walking there, not by tapping. Zoom out to see the whole shape of the ground you have cleared. Now and then a new place also holds a **heart container**, which permanently lengthens your bird's energy bar — about one place in three the first time you enter it, and much more rarely in ground you have already cleared. Hearts are the only thing that raises the maximum; they buy your bird a longer stretch between walks before it droops, and nothing else. A heart you have not collected shows on the map wherever it is waiting, so places you cleared before hearts existed are worth walking again. You collect one by walking to it, the same way you collect seed.
 
 ## Your flock
 
@@ -195,6 +195,12 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 | `seed.rate` | 4 | About one cleared cell in this many carries seed (integer ≥ 1). Lower means denser. |
 | `seed.respawn.hours` | 24 | How long before bird seed regrows in a place. |
 | `seed.per.pickup` | 1 | How much seed a place gives. |
+| `heart.rate` | 3 | About one place in this many holds a heart container the first time you enter it (integer ≥ 1). |
+| `heart.wild.days` | 30 | How long before a heart may reappear in ground you have already cleared. |
+| `heart.wild.rate` | 40 | About one cleared place in this many holds that reappearing heart (integer ≥ 1). |
+| `energy.max.base` | 100 | The energy bar's length with no heart containers. |
+| `energy.max.per.heart` | 10 | How much each heart container lengthens it. |
+| `energy.max.cap` | 300 | The longest the bar can ever get, however many hearts you find. |
 | `unlock.max.accuracy.m` | 100 | How sharp your location has to be before a place counts as visited. |
 
 ## MCP tools
@@ -234,7 +240,7 @@ The second line means the bundle is installed but nothing will ever be published
 
 The one-claim-per-day limit and the shelf cap are checked per instance (claims do not replicate), so a user with two Crows can claim once per day on each.
 
-The map of places you have unlocked, and your seed balance, replicate to your own linked Crows, and they never go to a contact.
+The map of places you have unlocked, and your seed and heart balances, replicate to your own linked Crows, and they never go to a contact.
 
 The cap only gates claims. Incubating an egg the sync layer had parked (`shelf_origin='sync'`) moves the egg it replaces to your own shelf without anything leaving, so the shelf can briefly read `6 of 5`; it settles as you hatch.
 
