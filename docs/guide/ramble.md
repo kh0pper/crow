@@ -76,9 +76,11 @@ Eggs come from three places, and none of them is free:
   `lay.days` (default 14) you lay one yourself. Days need not be consecutive, and the count only
   runs while you are eggless, so this is a floor rather than a faucet.
 
-When the incubating slot empties, the oldest egg on your shelf is promoted into it automatically —
-so you are only ever eggless when you genuinely have none. **Warmth earned with no egg at all
-vanishes**; that is deliberate, and auto-promote is what keeps it rare.
+The shelf refills the incubating slot when an egg **hatches** — the oldest egg on your shelf moves
+in automatically. If an egg arrives while your slot is empty instead — a gift, a swap, or one freed
+when a lapsed swap unlocks it — it does **not** auto-promote: it waits on your shelf, and the pet
+page offers a one-tap **Warm it** to bring it in. **Warmth earned with an empty slot vanishes, even
+if you are holding eggs on your shelf** — so warm a waiting egg before you go walking.
 
 | Setting | Default | Governs |
 |---|---|---|
