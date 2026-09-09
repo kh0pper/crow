@@ -108,6 +108,19 @@
       + '</g>';
   }
   function mountSeed(el) { el.setAttribute("viewBox", "0 0 24 24"); el.innerHTML = drawSeed(); }
+  /* The rare counterpart to the seed. Same warm family and the same highlight
+   * placement so the two read as one set, but deeper and richer, because this
+   * is the thing you go out of your way for. Flat fills only: it renders at
+   * 18px on a map and inline in a sentence on the pet page. */
+  function drawHeart() {
+    return '<path d="M12 20.5 C5.4 15.9 2.8 12.6 2.8 9.2 C2.8 6.4 4.9 4.3 7.5 4.3'
+      + ' C9.4 4.3 11 5.3 12 6.9 C13 5.3 14.6 4.3 16.5 4.3 C19.1 4.3 21.2 6.4 21.2 9.2'
+      + ' C21.2 12.6 18.6 15.9 12 20.5 Z" fill="#d8556a" stroke="#8f2438" stroke-width="1.6"'
+      + ' stroke-linejoin="round"/>'
+      + '<ellipse cx="8.4" cy="8.6" rx="1.5" ry="2.2" fill="#fff2f4" opacity="0.55"'
+      + ' transform="rotate(-25 8.4 8.6)"/>';
+  }
+  function mountHeart(el) { el.setAttribute("viewBox", "0 0 24 24"); el.innerHTML = drawHeart(); }
   function isValidBird(x) { return !!x && typeof x === "object" && ROSTER.indexOf(x.species) >= 0 && isUint32(x.seed); }
-  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, drawBird: drawBird, drawEgg: drawEgg, drawWalkingEgg: drawWalkingEgg, drawSeed: drawSeed, mountBird: mountBird, mountWalkingEgg: mountWalkingEgg, mountSeed: mountSeed, isValidBird: isValidBird };
+  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, drawBird: drawBird, drawEgg: drawEgg, drawWalkingEgg: drawWalkingEgg, drawSeed: drawSeed, drawHeart: drawHeart, mountBird: mountBird, mountWalkingEgg: mountWalkingEgg, mountSeed: mountSeed, mountHeart: mountHeart, isValidBird: isValidBird };
 });

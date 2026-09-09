@@ -596,6 +596,13 @@ export async function applyRambleCell(db, op, row, lamportTs) {
  * spend row must be keyed uniquely by the PURCHASE, never by something as
  * coarse as cell:window, so two instances can never compute two different
  * amounts for one key. Do not make this conflict rule arbitrate money.
+ *
+ * `heart.wild.days` is a live, replicated setting, and changing it renumbers
+ * the wild heart key's windows (`cell:floor(now / days)`) — retuning 30 to 60
+ * re-buckets them, so a wild key already taken can fall outside the new
+ * window and that cell can pay a wild heart again. Both instances converge
+ * (the setting itself replicates), so this is a re-earn on retune, not a
+ * divergence — the same class as `seed.respawn.hours`.
  */
 export async function applyRambleWallet(db, op, row, lamportTs) {
   if (!row || !row.kind || !row.key) return;

@@ -420,7 +420,14 @@
         if (out && out.unlocked) celebrateUnlock(out.unlocked);
         /* A pickup is its own moment, and the pip it just consumed has to go —
          * an unlock repaints via celebrateUnlock, but a plain harvest does not. */
-        if (out && out.seed_picked) { celebrateSeed(out.seed_picked); if (!out.unlocked) refreshZones(); }
+        if (out && out.seed_picked) celebrateSeed(out.seed_picked);
+        if (out && typeof out.hearts === "number") paintHearts(out.hearts);
+        if (out && out.heart_picked) {
+          celebrateHeart(!!out.unlocked, out.heart_source, out.energy_max === out.energy_max_cap);
+        }
+        /* One /zones fetch however many pips were just consumed. celebrateUnlock
+         * already refreshed on a first unlock, which is what the guard is for. */
+        if (out && (out.seed_picked || out.heart_picked) && !out.unlocked) refreshZones();
         refreshPet();
         return refreshMarks();
       })
@@ -474,6 +481,68 @@
     if (typeof n !== "number") return;
     var el = $("rb-seed-count");
     if (el) el.textContent = String(n);
+  }
+
+  /* The heart moment. A heart is rare enough to be worth saying out loud, so
+   * this does both: the number pops, and the bird speaks. sayMoment is the only
+   * thing that opens the bubble on its own, and an arrival is exactly what it
+   * is for. */
+  function celebrateHeart(alsoUnlocked, source, atCap) {
+    var chip = $("rb-heart-count");
+    if (chip && chip.parentNode) {
+      var pop = document.createElement("span");
+      pop.className = "rb-heart-pop";
+      pop.textContent = "+1";
+      chip.parentNode.appendChild(pop);
+      setTimeout(function () { if (pop.parentNode) pop.parentNode.removeChild(pop); }, 1400);
+    }
+    /* ONE line, not two. celebrateUnlock has already said "New ground." on a
+     * first unlock, and sayMoment holds for 4200ms -- a second call overwrites
+     * the first, so the unlock moment would be erased every time a new cell
+     * also paid a heart, which is one arrival in three. When both happen, say
+     * the thing that covers both. */
+    if (atCap) sayMoment("Another heart container. Your bird is as strong as it gets.");
+    else if (alsoUnlocked) sayMoment("New ground, and a heart container in it.");
+    else if (source === "wild") sayMoment("A heart container, grown here since you last came by.");
+    else sayMoment("A heart container. Your bird can hold more now.");
+  }
+
+  function paintHearts(n) {
+    if (typeof n !== "number") return;
+    var el = $("rb-heart-count");
+    if (el) el.textContent = String(n);
+  }
+
+  /* The containers themselves, above the bar they lengthened -- the number
+   * alone never explained where the extra bar came from. Capped at a row that
+   * still fits a phone; past that the sentence carries the count. */
+  var HEART_ROW_MAX = 10;
+
+  function paintHeartRow(n, max, cap) {
+    var row = $("rb-heart-row");
+    if (!row) return;
+    while (row.firstChild) row.removeChild(row.firstChild);
+    var shown = Math.max(0, Math.min(HEART_ROW_MAX, n));
+    for (var i = 0; i < shown; i++) {
+      var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "rb-heart-one");
+      var drew = false;
+      if (Bird && typeof Bird.mountHeart === "function") {
+        try { Bird.mountHeart(svg); drew = true; } catch (e) { /* cosmetic */ }
+      }
+      /* A failed mount must not leave an empty, invisible 16px gap in the row --
+       * only append the element when the engine actually drew into it. */
+      if (drew) row.appendChild(svg);
+    }
+    var line = $("rb-heart-line");
+    if (!line) return;
+    /* At the cap the bar cannot grow again, and saying nothing about that would
+     * leave the player collecting pips that change no number they can see. */
+    if (typeof cap === "number" && typeof max === "number" && n > 0 && max >= cap) {
+      setText(line, n + " heart containers. The bar is as long as it goes.");
+    } else if (n <= 0) setText(line, "No heart containers yet. Walk somewhere new.");
+    else if (n === 1) setText(line, "One heart container.");
+    else setText(line, n + " heart containers.");
   }
 
   /* ---------------------------------------------------------------- marks */
@@ -1236,9 +1305,21 @@
     }
 
     var energy = typeof pet.energy === "number" ? pet.energy : 0;
+    /* Against the server's OWN ceiling. Drawing a percentage of a hardcoded 100
+     * would paint a 150-energy bird at 150% and a 70-of-150 bird as nearly
+     * full: the bar has to read the same number the server clamps with. */
+    var max = typeof pet.energy_max === "number" && pet.energy_max > 0 ? pet.energy_max : 100;
     var fill = $("rb-energy-fill");
-    if (fill) fill.style.width = Math.max(0, Math.min(100, energy)) + "%";
+    if (fill) fill.style.width = Math.max(0, Math.min(100, (energy / max) * 100)) + "%";
     setText($("rb-energy-num"), String(energy));
+    setText($("rb-energy-max"), String(max));
+    var hearts = typeof pet.hearts === "number" ? pet.hearts : 0;
+    paintHeartRow(hearts, max, pet.energy_max_cap);
+    /* The map bar too, not only this page: the area response carries a wallet
+     * ONLY when it carried a position fix, so a player who denies geolocation
+     * would otherwise read 0 hearts on the map forever. paintSeed is called
+     * from here for exactly this reason. */
+    paintHearts(hearts);
     setText($("rb-mood-line"), MOOD_LINE[pet.mood] || MOOD_LINE.happy);
 
     var chores = pet.chores || {};
@@ -1517,6 +1598,7 @@
     if (map.getZoom() >= MIN_CELL_DETAIL_ZOOM) {
       paintCells(out.frontier || [], "rb-frontier-cell");
       paintSeedPips(out.seed || []);
+      paintHeartPips(out.hearts || []);
     }
   }
 
@@ -1553,6 +1635,39 @@
         L.circleMarker(ll, {
           pane: "rb-fog", className: "rb-seed-dot", radius: 4, weight: 0,
           fillOpacity: 0.9, interactive: false
+        }).addTo(zoneLayer);
+      }
+    }
+  }
+
+  /* A heart container waiting in ground you have already unlocked: the rare
+   * counterpart to a seed pip, and the reason an existing player has somewhere
+   * to walk on the day this ships. Not interactive -- you collect it by walking
+   * there, exactly like seed.
+   *
+   * Each pip needs its OWN element: appending an Element MOVES it, so one
+   * shared node would leave a single heart hopping between cells. */
+  function heartIcon() {
+    if (!Bird || typeof Bird.mountHeart !== "function") return null;
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    try { Bird.mountHeart(svg); } catch (e) { return null; }
+    var opts = { className: "rb-heart-pip", iconSize: [22, 22], iconAnchor: [11, 11] };
+    opts.html = svg;   /* an Element: Leaflet appends, so this is no markup sink */
+    return L.divIcon(opts);
+  }
+
+  function paintHeartPips(spots) {
+    for (var i = 0; i < spots.length; i++) {
+      var c = spots[i];
+      if (!c || !isFinite(c.lat) || !isFinite(c.lon)) continue;
+      var ll = [c.lat, c.lon];
+      var icon = heartIcon();
+      if (icon) {
+        L.marker(ll, { pane: "rb-fog", icon: icon, interactive: false, keyboard: false }).addTo(zoneLayer);
+      } else {
+        L.circleMarker(ll, {
+          pane: "rb-fog", className: "rb-heart-dot", radius: 5, weight: 0,
+          fillOpacity: 0.95, interactive: false
         }).addTo(zoneLayer);
       }
     }

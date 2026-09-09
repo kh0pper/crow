@@ -113,7 +113,7 @@ Camina hasta quedar a menos de **75 m** de un nido y toca **Tomar el huevo** (`P
 
 Siempre incuba exactamente un huevo. Desde la pantalla **Bandada** puedes **incubar** cualquier huevo del estante (`POST /api/ramble/eggs/:id/incubate`); el que reemplaza pasa al estante conservando su calor. Instance sync distingue un huevo que *tú* aparcaste (`shelf_origin = 'user'`) de uno que la capa de sincronización dejó en el estante al reconciliar dos instancias (`'sync'`): solo este último se recupera automáticamente a la ranura de incubación.
 
-**El mapa se desbloquea al caminar.** El terreno donde realmente has estado queda desbloqueado para siempre: puedes leer las marcas y los caws que hay allí y recoger el huevo de cualquier nido. Unas manzanas más allá está la frontera, donde ves que algo te espera sin ver qué es. Todo lo demás es niebla hasta que vayas. Solo el mapa público funciona así: la marca de un contacto siempre te llega, estés donde estés. Caminar por terreno que ya desbloqueaste hace aparecer **alpiste**, que vuelve a crecer al cabo de un día. El alpiste aparece en aproximadamente una de cada cuatro celdas despejadas, en un punto dentro de ella, así que un paseo tiene unos pocos lugares a los que merece la pena ir en vez de uno en cada cuadro; lo recoges al pasar por allí, no al tocarlo. Aleja el mapa para ver la forma completa del terreno que has despejado.
+**El mapa se desbloquea al caminar.** El terreno donde realmente has estado queda desbloqueado para siempre: puedes leer las marcas y los caws que hay allí y recoger el huevo de cualquier nido. Unas manzanas más allá está la frontera, donde ves que algo te espera sin ver qué es. Todo lo demás es niebla hasta que vayas. Solo el mapa público funciona así: la marca de un contacto siempre te llega, estés donde estés. Caminar por terreno que ya desbloqueaste hace aparecer **alpiste**, que vuelve a crecer al cabo de un día. El alpiste aparece en aproximadamente una de cada cuatro celdas despejadas, en un punto dentro de ella, así que un paseo tiene unos pocos lugares a los que merece la pena ir en vez de uno en cada cuadro; lo recoges al pasar por allí, no al tocarlo. Aleja el mapa para ver la forma completa del terreno que has despejado. De vez en cuando un lugar nuevo también contiene un **contenedor de corazón**, que alarga de forma permanente la barra de energía de tu pájaro — aproximadamente uno de cada tres lugares la primera vez que entras en él, y con mucha menos frecuencia en terreno que ya has despejado. Los corazones son lo único que eleva el máximo; le dan a tu pájaro un margen más largo entre paseos antes de que decaiga, y nada más. Un corazón que no has recogido aparece en el mapa allí donde te espera, así que los lugares que despejaste antes de que existieran los corazones merecen la pena volver a caminarlos. Lo recoges caminando hasta él, igual que el alpiste.
 
 ## Tu bandada
 
@@ -195,6 +195,12 @@ Cada peso de la tabla anterior es también un override de `ramble_settings`, le�
 | `seed.rate` | 4 | Aproximadamente una de cada tantas celdas despejadas lleva alpiste (entero ≥ 1). Menos significa más denso. |
 | `seed.respawn.hours` | 24 | Cuánto tarda el alpiste en volver a aparecer en un lugar. |
 | `seed.per.pickup` | 1 | Cuánto alpiste da un lugar. |
+| `heart.rate` | 3 | Aproximadamente uno de cada tantos lugares contiene un contenedor de corazón la primera vez que entras en él (entero ≥ 1). |
+| `heart.wild.days` | 30 | Cuánto tarda un corazón en poder reaparecer en terreno que ya has despejado. |
+| `heart.wild.rate` | 40 | Aproximadamente uno de cada tantos lugares despejados contiene ese corazón que reaparece (entero ≥ 1). |
+| `energy.max.base` | 100 | La longitud de la barra de energía sin ningún contenedor de corazón. |
+| `energy.max.per.heart` | 10 | Cuánto alarga la barra cada contenedor de corazón. |
+| `energy.max.cap` | 300 | Lo máximo que puede llegar a medir la barra, por muchos corazones que encuentres. |
 | `unlock.max.accuracy.m` | 100 | Qué tan precisa debe ser tu ubicación para que un lugar cuente como visitado. |
 
 ## Herramientas MCP
@@ -234,7 +240,7 @@ La segunda significa que el bundle está instalado pero nunca se publicará ni s
 
 El límite de una recogida por día y el tope del estante se comprueban por instancia (las recogidas no se replican), así que un usuario con dos Crows puede recoger un huevo por día en cada una.
 
-El mapa de los lugares que has desbloqueado, y tu saldo de alpiste, se replican a tus propios Crows enlazados, y nunca llegan a un contacto.
+El mapa de los lugares que has desbloqueado, y tus saldos de alpiste y de corazones, se replican a tus propios Crows enlazados, y nunca llegan a un contacto.
 
 El tope solo limita las recogidas. Incubar un huevo que la capa de sincronización había dejado aparcado (`shelf_origin='sync'`) manda al estante el huevo que reemplaza sin que nada salga de él, así que el estante puede leer brevemente `6 de 5`; se estabiliza a medida que eclosionas huevos.
 

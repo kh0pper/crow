@@ -9,6 +9,7 @@
 
 import { creditWarmth } from "./eggs.js";
 import { feed as petFeed, petFromRow } from "./pet.js";
+import { maxEnergy } from "./hearts.js";
 
 const KEYED_TYPES = new Set(["visit_place", "meet_crow", "checkin"]);
 const ACCEPTED_TYPES = new Set(["visit_place", "mark_left", "unlock_mark", "meet_crow", "checkin", "quiet_tick"]);
@@ -20,7 +21,7 @@ const ACCEPTED_TYPES = new Set(["visit_place", "mark_left", "unlock_mark", "meet
  */
 async function readPet(db) {
   const { rows } = await db.execute({ sql: "SELECT * FROM ramble_pet WHERE owner = 'self'", args: [] });
-  return petFromRow(rows[0] ?? null);
+  return petFromRow(rows[0] ?? null, await maxEnergy(db));
 }
 
 export async function feedAll(db, event, { now = Date.now(), emit, onHatch } = {}) {
