@@ -509,6 +509,10 @@
   overflow: hidden;
 }
 #ramble .rb-meter-bar i { display: block; height: 100%; width: 0; background: var(--rb-accent-2); transition: width .4s ease; }
+#ramble .rb-meter-of { color: var(--rb-muted); font-size: 0.85rem; }
+#ramble .rb-hearts-line { display: flex; align-items: center; gap: 0.45rem; margin: 0.35rem 0 0; flex-wrap: wrap; }
+#ramble .rb-heart-row { display: inline-flex; gap: 0.15rem; }
+#ramble .rb-heart-one { width: 16px; height: 16px; display: block; }
 
 #ramble .rb-chores { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 #ramble .rb-chore {

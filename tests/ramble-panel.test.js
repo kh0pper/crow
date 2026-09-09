@@ -231,6 +231,8 @@ test("panel handler renders the world-first shell, its three views and every ass
     assert.ok(sent.includes(src), `pet page names the energy source: ${src}`);
   }
   assert.ok(sent.includes("Getting out is worth more than tapping."), "the page says walking beats tapping");
+  assert.ok(sent.includes('id="rb-energy-max"'), "the bar's ceiling is on the page");
+  assert.ok(sent.includes('id="rb-heart-row"'), "and the containers that set it");
 
   // The legacy ids are GONE — anything still selecting them is broken.
   assert.doesNotMatch(sent, /id="ramble-map"/);
@@ -1833,4 +1835,14 @@ test("GET /api/ramble/pet carries the heart count and the ceiling", async () => 
   assert.equal(typeof body.energy_max, "number");
   assert.equal(body.energy_max, 100 + body.hearts * 10,
     "the ceiling is derived from the count the same response reports");
+});
+
+test("the energy bar is drawn against the server's ceiling, not a hardcoded 100", async () => {
+  const body = await (await req("/ramble/static/ramble.js")).text();
+  assert.ok(body.includes("pet.energy_max"), "the painter reads the ceiling the server clamped with");
+  assert.ok(!body.includes('Math.min(100, energy)) + "%"'), "the old hardcoded-100 bar is gone");
+  assert.ok(body.includes("(energy / max) * 100"), "the bar is a fraction of the real ceiling");
+  assert.ok(body.includes("function paintHeartRow("), "the pet page shows the containers themselves");
+  assert.ok(body.includes("paintHearts(hearts)"),
+    "the map-bar counter is painted from the pet read too, not only from a position fix");
 });
