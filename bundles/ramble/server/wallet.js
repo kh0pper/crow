@@ -12,11 +12,15 @@
  * a familiar route pays, pacing one cell does not, because the key is the cell
  * AND the window.
  */
+import { createHash } from "node:crypto";
 import { CELL7_RE } from "./nests.js";
+import { decodeGeohash } from "./anchors.js";
 
 export const SEED_KIND = "seed";
+export const SEED_SALT = "ramble-seed-v1:";
 const RESPAWN_HOURS_DEFAULT = 24;
 const PER_PICKUP_DEFAULT = 1;
+const SEED_RATE_DEFAULT = 4;
 
 /** Which respawn window `now` falls in. Same cell, same window = already harvested. */
 export function harvestWindow(now, hours) {
@@ -24,18 +28,53 @@ export function harvestWindow(now, hours) {
   return Math.floor(Number(now) / (h * 3600 * 1000));
 }
 
+/**
+ * Does this cell hold seed in this window, and exactly where in it?
+ *
+ * Copies `nestFor`'s trick deliberately: a public hash of the cell and the
+ * window, so the answer is identical on every device with nothing stored and
+ * nothing to sync, and cannot be re-rolled by leaving and coming back.
+ *
+ * WHY IT IS SPARSE. The first version paid in EVERY unlocked cell, which
+ * carpeted the map — a player reported most of the visible seed sat beyond any
+ * walk, strung out along a freeway. One cell in `rate` keeps a walkable frame
+ * to a handful you can actually reach, and the density is a setting rather
+ * than a constant so it can be tuned without a deploy.
+ *
+ * The position is a hash-derived point INSIDE the cell, not its centre, so a
+ * row of seed along a street does not look like a pegboard.
+ */
+export function seedFor(cell, window, { rate = SEED_RATE_DEFAULT } = {}) {
+  if (typeof cell !== "string" || !CELL7_RE.test(cell)) return null;
+  if (!Number.isFinite(Number(window))) return null;
+  const r = Number.isInteger(rate) && rate >= 1 ? rate : SEED_RATE_DEFAULT;
+  const h = createHash("sha256").update(SEED_SALT + cell + ":" + String(window)).digest();
+  if (h.readUInt32BE(0) % r !== 0) return null;
+  let c;
+  try { c = decodeGeohash(cell); } catch { return null; }
+  if (!c || !Number.isFinite(c.lat) || !Number.isFinite(c.lon)) return null;
+  const fy = h.readUInt32BE(4) / 0x100000000;
+  const fx = h.readUInt32BE(8) / 0x100000000;
+  return {
+    cell,
+    lat: c.lat - c.latErr + fy * 2 * c.latErr,
+    lon: c.lon - c.lonErr + fx * 2 * c.lonErr,
+  };
+}
+
 /** Live settings (spec §6.4), each falling back on junk or a negative. */
 export async function readWalletSettings(db) {
-  const out = { respawnHours: RESPAWN_HOURS_DEFAULT, perPickup: PER_PICKUP_DEFAULT };
+  const out = { respawnHours: RESPAWN_HOURS_DEFAULT, perPickup: PER_PICKUP_DEFAULT, rate: SEED_RATE_DEFAULT };
   try {
     const { rows } = await db.execute({
-      sql: "SELECT key, value FROM ramble_settings WHERE key IN ('seed.respawn.hours', 'seed.per.pickup')",
+      sql: "SELECT key, value FROM ramble_settings WHERE key IN ('seed.respawn.hours', 'seed.per.pickup', 'seed.rate')",
       args: [],
     });
     for (const r of rows || []) {
       const n = parseInt(r.value, 10);
       if (r.key === "seed.respawn.hours" && Number.isInteger(n) && n >= 1) out.respawnHours = n;
       if (r.key === "seed.per.pickup" && Number.isInteger(n) && n >= 0) out.perPickup = n;
+      if (r.key === "seed.rate" && Number.isInteger(n) && n >= 1) out.rate = n;
     }
   } catch { /* defaults */ }
   return out;
@@ -57,12 +96,16 @@ export async function recordSeedPickup(db, cell, { now = Date.now(), emit } = {}
   const none = { picked: false, amount: 0 };
   if (!db || typeof cell !== "string" || !CELL7_RE.test(cell)) return none;
   try {
-    const { respawnHours, perPickup } = await readWalletSettings(db);
+    const { respawnHours, perPickup, rate } = await readWalletSettings(db);
     // NOT `Number(now) || Date.now()` — that treats `now: 0` as falsy and
     // silently substitutes the real clock, which breaks a replayed pickup at
     // epoch 0 (exercised directly by this file's own tests).
     const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
-    const key = `${cell}:${harvestWindow(at, respawnHours)}`;
+    const window = harvestWindow(at, respawnHours);
+    // The SAME gate the map draws from. Without this the map would be a liar:
+    // it would show seed in one cell in four while every cell quietly paid.
+    if (!seedFor(cell, window, { rate })) return none;
+    const key = `${cell}:${window}`;
     const res = await db.execute({
       sql: `INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, ?, ?)
             ON CONFLICT(kind, key) DO NOTHING`,
@@ -92,9 +135,10 @@ export async function harvestableCells(db, cells, { now = Date.now() } = {}) {
   const list = (Array.from(cells || [])).filter((c) => typeof c === "string" && CELL7_RE.test(c));
   if (!db || list.length === 0) return [];
   try {
-    const { respawnHours } = await readWalletSettings(db);
+    const { respawnHours, rate } = await readWalletSettings(db);
     const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
-    const suffix = ":" + harvestWindow(at, respawnHours);
+    const window = harvestWindow(at, respawnHours);
+    const suffix = ":" + window;
     const { rows } = await db.execute({
       sql: "SELECT key FROM ramble_wallet WHERE kind = ? AND key LIKE ?",
       args: [SEED_KIND, "%" + suffix],
@@ -104,7 +148,15 @@ export async function harvestableCells(db, cells, { now = Date.now() } = {}) {
       const key = String(r.key || "");
       if (key.endsWith(suffix)) taken.add(key.slice(0, -suffix.length));
     }
-    return list.filter((c) => !taken.has(c));
+    // Returns POINTS, not cells: the pip sits where the seed actually is,
+    // which is a hash-derived spot inside the cell rather than its centre.
+    const out = [];
+    for (const c of list) {
+      if (taken.has(c)) continue;
+      const at2 = seedFor(c, window, { rate });
+      if (at2) out.push(at2);
+    }
+    return out;
   } catch (err) {
     // A map that cannot say where seed is should still draw. Never throw here.
     try { console.warn("[ramble] harvestableCells failed:", err?.message); } catch {}

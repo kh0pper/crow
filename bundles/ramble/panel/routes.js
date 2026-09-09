@@ -885,10 +885,9 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     let seed = [];
     if (req.query?.pips === "1") {
       // Read the cell ids BEFORE coalescing: a merged run is not one cell.
-      const seedSet = new Set(
-        await mods.walletMod.harvestableCells(db, out.unlocked.map((b) => b.cell), { now: Date.now() }),
-      );
-      seed = out.unlocked.filter((b) => seedSet.has(b.cell));
+      // Points now, not cells: seed sits at a hash-derived spot inside its
+      // cell, so a row of it along a street does not look like a pegboard.
+      seed = await mods.walletMod.harvestableCells(db, out.unlocked.map((b) => b.cell), { now: Date.now() });
     }
     // Coalesce the AREA geometry. The mask only needs the shape, and a walked
     // town collapses from thousands of boxes to a few dozen — see coalesceBoxes.

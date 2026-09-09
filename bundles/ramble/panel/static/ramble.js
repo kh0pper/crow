@@ -1537,11 +1537,13 @@
     return L.divIcon(opts);
   }
 
-  function paintSeedPips(cells) {
-    for (var i = 0; i < cells.length; i++) {
-      var c = cells[i];
-      if (!cellUsable(c)) continue;
-      var ll = [(c.south + c.north) / 2, (c.west + c.east) / 2];
+  function paintSeedPips(spots) {
+    for (var i = 0; i < spots.length; i++) {
+      var c = spots[i];
+      /* A POINT inside the cell, not the cell's box — the server places it so a
+       * street's worth of seed does not line up like a pegboard. */
+      if (!c || !isFinite(c.lat) || !isFinite(c.lon)) continue;
+      var ll = [c.lat, c.lon];
       var icon = seedIcon();
       if (icon) {
         L.marker(ll, { pane: "rb-fog", icon: icon, interactive: false, keyboard: false }).addTo(zoneLayer);

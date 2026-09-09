@@ -113,7 +113,7 @@ Walk within **75 m** of a nest and tap **Take the egg** (`POST /api/ramble/nests
 
 Exactly one egg incubates at a time. From the **Flock** screen you can **incubate** any shelf egg (`POST /api/ramble/eggs/:id/incubate`); the one it replaces goes to the shelf keeping its warmth. Instance sync distinguishes an egg *you* parked (`shelf_origin = 'user'`) from one the sync layer shelved while reconciling two instances (`'sync'`): only the latter is ever pulled back into the incubating slot automatically.
 
-**The map unlocks as you walk.** Ground you have actually stood in stays unlocked for good: you can read the marks and caws left there and claim any nest. A few blocks further out is the frontier, where you can see that something is waiting without seeing what it is. Everything beyond that is fog until you go there. Only the public map works this way — a contact's mark always reaches you wherever you are. Walking ground you have already unlocked turns up **bird seed**, which regrows after a day. A small pip marks every cleared cell with seed waiting, so you can see where a walk pays; you collect it by walking there, not by tapping. Zoom out to see the whole shape of the ground you have cleared.
+**The map unlocks as you walk.** Ground you have actually stood in stays unlocked for good: you can read the marks and caws left there and claim any nest. A few blocks further out is the frontier, where you can see that something is waiting without seeing what it is. Everything beyond that is fog until you go there. Only the public map works this way — a contact's mark always reaches you wherever you are. Walking ground you have already unlocked turns up **bird seed**, which regrows after a day. Seed appears in about one cleared cell in four, at a spot inside it, so a walk has a handful of places worth heading for rather than one in every square; you collect it by walking there, not by tapping. Zoom out to see the whole shape of the ground you have cleared.
 
 ## Your flock
 
@@ -192,6 +192,7 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 | `nest.rate` | 24 | About one nest per this many geohash-7 cells per week (integer ≥ 1). Replicates with your settings, so your own instances agree; it is an operator knob, and a changed rate no longer matches other people's nests. |
 | `shelf.cap` | 5 | How many unhatched eggs the shelf holds (integer ≥ 0; 0 turns claiming off). |
 | `frontier.depth` | 3 | How many blocks ahead of your unlocked ground you can see. |
+| `seed.rate` | 4 | About one cleared cell in this many carries seed (integer ≥ 1). Lower means denser. |
 | `seed.respawn.hours` | 24 | How long before bird seed regrows in a place. |
 | `seed.per.pickup` | 1 | How much seed a place gives. |
 | `unlock.max.accuracy.m` | 100 | How sharp your location has to be before a place counts as visited. |
