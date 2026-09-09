@@ -85,7 +85,7 @@ A fixed constant id is also wrong: a contact could gift you *their* starter egg 
 1. **The starter-egg id is a random UUID gated on an empty egg table, not derived from the Crow identity.** See Finding 3 — the spec's mechanism is impossible because `crowId` is per-instance. Say this in the PR body so a reviewer reads it as a correction, not drift.
 2. **`creditWarmth` still writes its ledger row when there is no egg.** See Finding 1. The spec does not describe the interaction with `feedAll`'s `shouldFeedPet` gate at all; without this, laying is unreachable.
 3. **A two-instance fleet can lay two eggs from one lay, and that is accepted.** Both instances eggless, both observing the same happy days, both crossing the threshold before a sync: each writes the same `lay:<local day>` key locally (so `rowsAffected` is 1 on both) and each mints an egg with its own UUID. `applyRambleEgg` then shelves one, so the user ends with one incubating and one spare on the shelf. Making this impossible would need a deterministic egg id derived from the lay day — which reintroduces exactly the cross-user collision that rules a constant id out for the starter egg (a contact who laid on the same date could gift you a colliding row). **Ramble is installed on grackle only**, so this is currently unreachable; the graceful degradation is the existing convergence rule, and the cost of the alternative is a real collision for a hypothetical one. Revisit if a second instance ever installs the bundle.
-4. **Auto-promote runs ONLY on hatch — the read paths deliberately do not promote.** Spec §4.2 says "when the incubating slot empties" without saying who notices, and two drafts of this plan had the read paths notice. Both were wrong: a write during a GET races `applyRambleEgg`'s `isUserShelve` carve-out (`instance-sync.js:855-860`), and the attempted mitigation (marking such a promote `'sync'`) launders provenance that `flock.js:126`'s nest shelf cap, `flock.js:253`'s `shelf_count`, `RAMBLE_EGG_REPROMOTE_SQL` and `static/ramble.js:1776` all read. The read-path promote is therefore deleted, and the cases it was covering are handled on **write** paths instead: `hatchIfReady`, plus `receiveTrade`/`declineSwap`/`expireTrades` in `trades.js` (Task 3 Step 5b), which is what stops a swap-locked last egg from leaving the player eggless *and* unable to lay. One case remains uncovered by design — a slot emptied by `applyRambleEgg` while the user holds only `'user'` shelf eggs, unreachable on a one-instance fleet and recovered by a manual "incubate".
+4. **Auto-promote runs ONLY on hatch — the read paths deliberately do not promote.** Spec §4.2 says "when the incubating slot empties" without saying who notices, and two drafts of this plan had the read paths notice. Both were wrong: a write during a GET races `applyRambleEgg`'s `isUserShelve` carve-out (`instance-sync.js:855-860`), and the attempted mitigation (marking such a promote `'sync'`) launders provenance that `flock.js:126`'s nest shelf cap, `flock.js:253`'s `shelf_count`, `RAMBLE_EGG_REPROMOTE_SQL` and `static/ramble.js:1776` all read. The read-path promote is therefore deleted, and `hatchIfReady` is the only promoter. A draft also promoted from `trades.js`'s closing paths; that was reverted because promoting inside `expireTrades` strands an in-flight `completed` envelope and leaves the user holding **both** eggs — a free-egg race, in the phase built to remove the free egg. What remains uncovered is a gift or a freed swap egg landing while the slot is empty, and that is answered by an **affordance** rather than a promote: the Next-egg card says one is waiting and incubates it in a tap (Task 7). The player's real complaint was never "the slot is empty" — it was having no signal and no way back.
 
 ---
 
@@ -99,11 +99,11 @@ A fixed constant id is also wrong: a contact could gift you *their* starter egg 
 - `tests/ramble-prologue-routes.test.js` — the prologue routes, on their own virgin-db harness (Task 6).
 
 **Modify**
-- `bundles/ramble/server/trades.js` — import the three lock symbols from `egg-locks.js` and re-export `isEggLocked`/`lockedEggIds` so existing consumers are untouched (Task 1); call `promoteFromShelf` from `receiveTrade`/`declineSwap`/`expireTrades` (Task 3 Step 5b).
+- `bundles/ramble/server/trades.js` — import the three lock symbols from `egg-locks.js` and re-export `isEggLocked`/`lockedEggIds` so existing consumers are untouched. **Task 1 only** — no other task edits this file.
 - `bundles/ramble/server/eggs.js` — the bulk: rename, null tolerance, promote, laying, starter grant, prologue flags.
 - `bundles/ramble/server/flock.js` — drop the mint from `flockState`; import the locks from the leaf.
 - `bundles/ramble/server/pet.js` — call the lay-day recorder after mood is known.
-- `bundles/ramble/panel/static/ramble-ar.js` — the AR renderer must not draw a phantom egg (Task 7). **`bundles/ramble/server/feed.js` is NOT modified** — an early draft had `readPet` carry the egg summary; see Task 6 Step 4 for why that is wrong.
+- `bundles/ramble/panel/static/ramble-ar.js` — the AR renderer must not draw a phantom egg (Task 7); `tests/ramble-ar.test.js` extended alongside it. **`bundles/ramble/server/feed.js` is NOT modified** — an early draft had `readPet` carry the egg summary; see Task 6 Step 4 for why that is wrong.
 - `bundles/ramble/server/init-tables.js` — **comment only** (the `shelf_origin` comment says `'user'` must never be auto-promoted; that rule is the *sync layer's*, and phase 3 adds an app-level promote that deliberately does).
 - `bundles/ramble/panel/routes.js` — null-tolerant egg/pet/flock responses; the two prologue routes.
 - `bundles/ramble/server/server.js` — `ramble_egg_state` / `ramble_pet_state` MCP tools must agree with the HTTP routes.
@@ -185,7 +185,9 @@ In `bundles/ramble/server/trades.js`: delete the local `OPEN_SQL`, `lockedEggIds
 ```js
 import { OPEN_SQL, isEggLocked, lockedEggIds } from "./egg-locks.js";
 
-// Re-exported so existing importers (flock.js, panel/routes.js) need no change
+// Re-exported so its existing importers (flock.js:22 and
+// tests/ramble-trades.test.js:14 — NOT panel/routes.js, which never imported
+// them) need no change
 // and there is still one definition of "locked".
 export { isEggLocked, lockedEggIds };
 ```
@@ -244,7 +246,9 @@ git commit bundles/ramble/server/egg-locks.js bundles/ramble/server/trades.js bu
 | `tests/ramble-panel.test.js:609` | `after.egg.warmth === before.egg.warmth + 15` |
 | `tests/ramble-tools.test.js:132-133, 160, 167, 225` | `payload.egg.percent`, `after.egg.warmth - before.egg.warmth`, `state.egg.percent`, `eggAfter.egg.warmth` |
 
-Give each fixture an explicit egg with `mintIncubatingEgg` — these tests are about warmth accrual, not about egg supply, so an explicit fixture is the right repair rather than weakening the assertion. (`tests/ramble-panel.test.js:911` asserts the source literal `"eggPercent = pet.egg.percent"`, which Task 7's `paintPet` rewrite deletes — that one belongs to Task 7, and is listed there.)
+Give each fixture an explicit egg with `mintIncubatingEgg` — these tests are about warmth accrual, not about egg supply, so an explicit fixture is the right repair rather than weakening the assertion. Add `tests/ramble-panel.test.js:1347` to that list too: it dereferences `(await req("/api/ramble/egg")).json()).egg.egg_id` and so breaks here.
+
+Two that look like they belong here but do NOT: `tests/ramble-panel.test.js:911` asserts the source literal `"eggPercent = pet.egg.percent"`, which only Task 7's `paintPet` rewrite deletes; and the whole flock family (`tests/ramble-tools.test.js:177`, `tests/ramble-panel.test.js:1227/1228/1234/1239`) survives this task, because Task 2 only RENAMES `flock.js`'s mint — `flockState` keeps minting until Task 3 Step 5.
 
 **Interfaces:**
 - Produces: `mintIncubatingEgg(db, { now, emit }) -> Promise<row>` (renamed from `ensureIncubatingEgg`, body unchanged), `getIncubatingEgg(db) -> Promise<row|null>` (now exported).
@@ -489,9 +493,12 @@ node scripts/run-suite.mjs tests/ramble-eggs.test.js
 node scripts/run-suite.mjs tests/ramble-panel.test.js
 node scripts/run-suite.mjs tests/ramble-tools.test.js
 node scripts/run-suite.mjs tests/ramble-feed.test.js
+node scripts/run-suite.mjs tests/ramble-trades.test.js
+node scripts/run-suite.mjs tests/ramble-flock.test.js
+node scripts/run-suite.mjs tests/ramble-sync.test.js
 ```
 
-Expected: all PASS, after the fixtures in the table above have been given explicit eggs. `tests/ramble-eggs.test.js` has a test asserting two `mintIncubatingEgg` calls return the same egg — that still holds. **Do not move on with any of these red**; the suite must be green at the end of every task, not only at the end of the phase.
+Expected: all PASS, after the fixtures in the table above have been given explicit eggs. The last three are the `sed` targets — a rename this task commits but does not re-run would surface a task later, which is exactly the attribution mess this plan has already had to untangle twice. `tests/ramble-eggs.test.js` has a test asserting two `mintIncubatingEgg` calls return the same egg — that still holds. **Do not move on with any of these red**; the suite must be green at the end of every task, not only at the end of the phase.
 
 - [ ] **Step 8: Commit**
 
@@ -522,13 +529,16 @@ git commit bundles/ramble/server/eggs.js tests/ramble-eggs-supply.test.js tests/
 | `tests/ramble-eggs.test.js:82` | `before.egg.warmth` after a hatch | same |
 | `tests/ramble-flock.test.js:150` | *"a successor egg was minted"* | **NOT "the slot is empty"** — the shelf is not empty there. The test parks egg `E` as `'user'` via `incubateEgg`, then `hot` hatches and `promoteFromShelf` draws `E` straight back in, so the count stays 1. Assert `getIncubatingEgg(d).egg_id === E` and retitle to *"the parked egg is promoted back into the slot"*. |
 | `tests/ramble-flock.test.js:172` | *"the incubating egg is ensured and listed first"* | mint one explicitly as a fixture, then assert ordering |
-**`tests/ramble-tools.test.js:177` and `tests/ramble-panel.test.js:1227` are NOT in this table** — nothing mints from Task 2 onward, so they go red there, along with `ramble-panel.test.js:1228`, `:1234`, `:1239` and `:1347`. Repair them in Task 2 by minting one incubating egg in each harness's setup, which fixes the whole family at once.
+| `tests/ramble-tools.test.js:177` | `s.eggs[0].status === "incubating"` off the flock tool | mint a fixture |
+| `tests/ramble-panel.test.js:1227, 1228, 1234, 1239` | the flock family — the file header (`:53`) says it "churns hatches and later asserts an incubating egg exists" | give the fixture an explicit egg |
+
+**⚠ These belong HERE, in Task 3, not in Task 2.** A round-3 edit moved them to Task 2 reasoning that "nothing mints from Task 2 onward" — that is false, because Task 2 only RENAMES `flock.js`'s mint; `flockState` keeps minting until Task 3 Step 5 removes it, and every one of these assertions sits downstream of a `GET /api/ramble/flock` or `ramble_flock` call. `tests/ramble-panel.test.js:1347` is different — it dereferences `GET /api/ramble/egg`, so it really does break at Task 2 and is listed there.
 
 `tests/ramble-flock.test.js:174` and `tests/ramble-panel.test.js:1226/1234` were red in a draft where `flockState` promoted on read. It no longer does (see `promoteFromShelf`'s note), so they are unaffected — **verify that rather than assuming it**, since it is the kind of claim this plan has already got wrong twice.
 
 **Interfaces:**
-- Produces: `promoteFromShelf(db, { now, emit }) -> Promise<row|null>` — promotes the oldest non-locked `shelf`/`received` egg into the incubating slot, or returns null.
-- Consumed by: **`hatchIfReady` only.** No read path calls it — not `eggState`, not `flockState`, not `petState`, not any route.
+- Produces: `nextPromotable(db) -> Promise<{egg_id}|null>` (a pure read: the egg that would be promoted) and `promoteFromShelf(db, { now, emit }) -> Promise<row|null>` (which uses it and writes).
+- Consumed by: **`hatchIfReady` only** — one call site in the whole codebase. No read path calls it (not `eggState`, `flockState`, `petState` or any route), and neither does `trades.js`; see the docstring for why the trade paths use an affordance instead.
 
 **The ordering rule, which is the whole design:** both instances must pick the **same** egg with no round trip. The order is `created_at ASC, egg_id ASC` — a total order and a pure function of replicated rows, exactly the order `RAMBLE_EGG_REPROMOTE_SQL` already uses for the sync layer's own re-promote.
 
@@ -539,7 +549,7 @@ git commit bundles/ramble/server/eggs.js tests/ramble-eggs-supply.test.js tests/
 Append to `tests/ramble-eggs-supply.test.js`:
 
 ```js
-import { promoteFromShelf, hatchIfReady } from "../bundles/ramble/server/eggs.js";
+import { promoteFromShelf, nextPromotable, hatchIfReady } from "../bundles/ramble/server/eggs.js";
 import { flockState } from "../bundles/ramble/server/flock.js";
 
 async function shelveEgg(db, eggId, createdAt, { status = "shelf", origin = "user" } = {}) {
@@ -624,10 +634,10 @@ test("promoteFromShelf SKIPS an egg spoken for by an open swap", async () => {
 
 test("an EXPIRED but unswept trade still locks its egg — do not 'fix' the predicate", async () => {
   // expireTrades runs on the 15 s drain tick, so there is a window where a
-  // lapsed offer is still 'proposed' and its egg stays locked. Recovery is
-  // expireTrades itself, which calls promoteFromShelf (Task 3 Step 5b) — NOT
-  // a later read, which no longer promotes. Pinned here so nobody widens
-  // OPEN_SQL to "fix" the window.
+  // lapsed offer is still 'proposed' and its egg stays locked. Once it
+  // expires the egg is promotable again, but nothing auto-promotes it — the
+  // panel offers it instead (Task 7's "one's waiting on your shelf"). Pinned
+  // here so nobody widens OPEN_SQL to "fix" the window.
   const db = await freshDb();
   await shelveEgg(db, "only-one", T0);
   await db.execute({
@@ -637,6 +647,21 @@ test("an EXPIRED but unswept trade still locks its egg — do not 'fix' the pred
     args: [T0, T0, T0 - 1000],           // already past expires_at, not yet swept
   });
   assert.equal(await promoteFromShelf(db, { now: T0 + 5000 }), null);
+});
+
+test("nextPromotable answers the same question the promote acts on, and writes nothing", async () => {
+  const db = await freshDb();
+  assert.equal(await nextPromotable(db), null);
+  await shelveEgg(db, "younger", T0 + 5000);
+  await shelveEgg(db, "older", T0);
+
+  const peek = await nextPromotable(db);
+  assert.equal(peek.egg_id, "older");
+  assert.equal((await statusOf(db, "older")).status, "shelf", "a peek must not move it");
+
+  const promoted = await promoteFromShelf(db, { now: T0 + 9000 });
+  assert.equal(promoted.egg_id, peek.egg_id, "the card and the promote read ONE rule");
+  assert.equal(await nextPromotable(db), null, "the slot is full now");
 });
 
 test("promoteFromShelf is a NO-OP when the slot is full, and when there is nothing to promote", async () => {
@@ -753,29 +778,42 @@ Then:
  *      the 'user' mark exists to protect it from, and is mislabelled "came
  *      back from another of your Crows" at `static/ramble.js:1776`.
  *
- * Deleting the read-path call resolves both. What it does NOT do is cover
- * every emptier by itself, so this function is also called from the
- * trade-closing WRITE paths in `trades.js` (see below). Honest inventory:
+ * Honest inventory of every way the slot can empty, and what covers it:
  *
- *   - a hatch                  -> covered here
+ *   - a hatch                  -> covered HERE, and this is the main loop
  *   - `incubateEgg` swap       -> never empties the slot (one conditional
  *                                 UPDATE), and it ends in `hatchIfReady`
  *   - gifting / swapping away  -> the incubating egg is not giftable
  *                                 (`GIFTABLE = {shelf, received}`)
- *   - a swap or gift ARRIVING while the user is wholly eggless
- *                              -> covered by the trades.js calls
- *   - a swap expiring or being declined, unlocking the last shelf egg
- *                              -> covered by the trades.js calls
+ *   - a gift or swap ARRIVING, or a swap expiring/declining and unlocking
+ *     the last shelf egg, while the slot is empty
+ *                              -> NOT auto-promoted. The egg sits on the
+ *                                 shelf and the panel says so, with a button
+ *                                 that incubates it in one tap (Task 7).
  *   - a slot emptied by `applyRambleEgg` while the user holds ONLY 'user'
- *     shelf eggs -> NOT covered. `RAMBLE_EGG_REPROMOTE_SQL` drafts
- *     `shelf_origin='sync'` rows only. Unreachable on a one-instance fleet;
- *     recovered by a manual "incubate". Do not "fix" it by promoting on a
- *     read — that is what this note exists to prevent.
+ *     shelf eggs -> same: `RAMBLE_EGG_REPROMOTE_SQL` drafts
+ *                   `shelf_origin='sync'` rows only.
+ *
+ * ⚠ An earlier draft promoted from `trades.js`'s closing paths to auto-cover
+ * rows 4 and 5. It was reverted: promoting inside `expireTrades` strands an
+ * in-flight `completed` envelope — the hand-over UPDATE (`WHERE status IN
+ * ('shelf','received')`) then matches nothing while `receivedEggStatement`
+ * still inserts, so the user keeps BOTH eggs. Manufacturing a free-egg race
+ * in the phase whose whole purpose is removing the free egg is not a trade
+ * worth making, and the underlying complaint was never "the slot is empty" —
+ * it was "the player has no signal and no way back". That is an affordance
+ * problem, and it is fixed with an affordance.
  */
-export async function promoteFromShelf(db, { now, emit } = {}) {
-  void now;
+/**
+ * The egg that WOULD be promoted, or null — a pure read, no writes.
+ *
+ * Extracted so the promote and the panel's "one's waiting on your shelf" card
+ * read exactly ONE rule. A card that offers an egg the promote would not take
+ * (or the reverse) is the map/payout split this project has already had to
+ * close once in phase 1.
+ */
+export async function nextPromotable(db) {
   if (await getIncubatingEgg(db)) return null;
-
   const locked = await lockedEggIds(db);
   const { rows } = await db.execute({
     sql: `SELECT egg_id FROM ramble_eggs
@@ -783,7 +821,12 @@ export async function promoteFromShelf(db, { now, emit } = {}) {
            ORDER BY created_at ASC, egg_id ASC`,
     args: [],
   });
-  const next = rows.find((r) => !locked.has(r.egg_id));
+  return rows.find((r) => !locked.has(r.egg_id)) ?? null;
+}
+
+export async function promoteFromShelf(db, { now, emit } = {}) {
+  void now;
+  const next = await nextPromotable(db);
   if (!next) return null;
 
   // Guarded exactly like mintIncubatingEgg: the "one incubating egg" rule is
@@ -829,33 +872,6 @@ In `bundles/ramble/server/flock.js`, delete `await ensureIncubatingEgg(db, { now
 ```
 
 Update the import: drop `ensureIncubatingEgg`. **Do not add `promoteFromShelf`** — `flock.js` no longer needs it.
-
-- [ ] **Step 5b: Promote from the trade-closing paths, or a swap can deadlock the game**
-
-Without this there is a real trap, and it is not merely cosmetic. Suppose the user offers their **only** shelf egg in a swap and then hatches:
-
-- the slot empties, and `promoteFromShelf` skips the locked egg, so nothing refills it;
-- `hasAnyEggAnywhere` counts `shelf`/`received`, so the locked egg **also blocks laying**;
-- warmth vanishes (D3) with nothing to land in;
-- and once the swap expires or is declined, **nothing calls `promoteFromShelf` again**. The read paths no longer do, and there is no egg left to hatch.
-
-The player is stuck until they happen to open the flock screen and tap "incubate", with no signal that they should. These are **write** paths, so none of the read-path objections apply — no GET is queuing a sync op, and there is no drain race to lose. `trades.js` already imports from `eggs.js` (`:32`), so there is no cycle.
-
-In `bundles/ramble/server/trades.js`, extend the existing import and call the promote at the end of each path that can free or deliver an egg — `receiveTrade` (`:213`), `declineSwap` (`:187`) and `expireTrades` (`:306`):
-
-```js
-import { startOfLocalDay, promoteFromShelf } from "./eggs.js";
-
-// …at the end of receiveTrade, declineSwap and expireTrades, after their
-// existing writes and emits:
-  // Phase 3 (spec §4.2): closing a trade can free the last shelf egg, or
-  // deliver one, while the incubating slot sits empty. These are writes, not
-  // reads, so promoting here is safe — and without it a user whose only shelf
-  // egg was locked in a swap is left eggless AND unable to lay.
-  await promoteFromShelf(db, { now, emit });
-```
-
-`promoteFromShelf` writes nothing when the slot is occupied or nothing is promotable, so adding it to a path that did not need it is a no-op.
 
 - [ ] **Step 6: Correct the stale comment in `init-tables.js` — COMMENT ONLY**
 
@@ -1509,8 +1525,8 @@ git commit bundles/ramble/server/eggs.js tests/ramble-prologue.test.js \
 - **NOT modified: `bundles/ramble/server/feed.js`** — see Step 4.
 
 **Interfaces:**
-- `GET /api/ramble/egg` -> `{ egg: null | {...}, checklist: {...}, lay: { days, needed } }`
-- `GET /api/ramble/pet` -> adds `pet.egg` (`null` or `{ percent, ... }`) and `pet.lay`
+- `GET /api/ramble/egg` -> `{ egg: null | {...}, checklist: {...}, lay: { days, needed }, shelf_waiting: eggId|null }`
+- `GET /api/ramble/pet` -> adds `pet.egg` (`null` or `{ percent, ... }`), `pet.lay`, and `pet.shelf_waiting` (an `egg_id` or null)
 - `GET /api/ramble/prologue` -> `{ intro_seen, hatch_seen, granted }`
 - `POST /api/ramble/prologue/intro` -> `{ egg: row|null, intro_seen: true }` — grants and flags
 - `POST /api/ramble/prologue/hatch` -> `{ hatch_seen: true }`
@@ -1526,7 +1542,7 @@ Put them in a **new file `tests/ramble-prologue-routes.test.js`**.
 
 **⚠ A per-test `createClient` handle is NOT achievable — do not try.** `rambleRouter(dashboardAuth, options)` (`routes.js:176`) takes only an injected `emit`; the db is created inside the closure at `:230` via `mods.dbMod.createDbClient()`, which resolves `CROW_DB_PATH` → `CROW_DATA_DIR/crow.db` (`server/db.js:124`) and is then memoized for the router's lifetime. There is no seam to hand it an in-memory client.
 
-What these tests actually need is not per-test isolation but **one virgin db**, which the existing harness gives for free. Copy the setup at `tests/ramble-panel.test.js:28-44`: `mkdtemp` → set `CROW_APP_ROOT` and `CROW_DATA_DIR` → dynamic `import()` of `routes.js` → express app → `once(server, "listening")` → a `req()` helper. Keep one db for the file and rely on declaration order: tests 1 and 2 assert `egg: null` on a virgin db, test 3 grants, test 4 is order-independent. Nothing on these four routes mints, and none of them feeds — `recordHappyDay` is called only from `pet.js:feed` — so no `layday` row can appear either.
+What these tests actually need is not per-test isolation but **one virgin db**, which the existing harness gives for free. Copy that file's harness, which is spread across four places, not one range: `:17-27` (node imports, `REPO_ROOT`, `SCRATCH`), `:29-46` (`mkdtemp`, `CROW_APP_ROOT`/`CROW_DATA_DIR`, the dynamic `import()` of `routes.js`), `:109-118` (router → express app → `listen` → `once(server, "listening")`), `:161` (`req()`), and **`:146-153` (`after()` — close the server, restore env, `rmSync` the scratch dir)**. The `after()` block is not optional: without it the new file leaks a listening socket and a temp directory. Keep one db for the file and rely on declaration order: tests 1 and 2 assert `egg: null` on a virgin db, test 3 grants, test 4 is order-independent. Nothing on these four routes mints, and none of them feeds — `recordHappyDay` is called only from `pet.js:feed` — so no `layday` row can appear either.
 
 (If genuine per-test isolation is ever needed it takes a fresh `CROW_DB_PATH` **plus** a fresh `rambleRouter()` and app per test, not a client handle.)
 
@@ -1594,7 +1610,8 @@ Expected: FAIL — the prologue routes 404 and `lay` is absent.
     // launders shelf_origin. hatchIfReady is the only local emptier.
     const state = await mods.eggsMod.eggState(db, { now: Date.now() });
     const lay = await mods.eggsMod.layProgress(db);
-    res.json({ ...state, lay });
+    const waiting = await mods.eggsMod.nextPromotable(db);
+    res.json({ ...state, lay, shelf_waiting: waiting ? waiting.egg_id : null });
   }));
 
   router.get("/api/ramble/prologue", handle(async (req, res) => {
@@ -1637,11 +1654,15 @@ where `egg` is `await mods.eggsMod.eggState(db, { now })` (line 812). The moment
 ```js
     const eggSummary = await mods.eggsMod.eggState(db, { now });
     const lay = await mods.eggsMod.layProgress(db);
+    // The egg sitting on the shelf that a tap would incubate, or null. Nothing
+    // auto-promotes it (see promoteFromShelf's note), so the card offers it.
+    const waiting = await mods.eggsMod.nextPromotable(db);
     res.json({
       ...pet,
       bird,
       // null when genuinely eggless — paintPet must not assume one exists.
       egg: eggSummary.egg ?? null,
+      shelf_waiting: waiting ? waiting.egg_id : null,
       lay,
       seed: await mods.walletMod.seedBalance(db),
       hearts: await mods.heartsMod.heartsBalance(db),
@@ -1712,7 +1733,8 @@ git commit bundles/ramble/panel/routes.js bundles/ramble/server/server.js \
 |---|---|---|
 | Egg view line | unchanged | "No one on the way just now." |
 | Egg view sub-line | unchanged | "Nests hold them. So do friends." |
-| Next egg card | percent + ring | "Nothing warming just now." + the lay line |
+| Next egg card, nothing anywhere | percent + ring | "Nothing warming just now." + the lay line |
+| Next egg card, **one waiting on the shelf** | — | "One's waiting on your shelf." + a **Warm it** button — the lay line is hidden, because you are not eggless |
 | Lay line, 0 days | — | "Keep yourself happy and you'll manage one yourself, in time." |
 | Lay line, N days | — | "You've had N good days — keep it up and you'll manage one yourself." |
 | Perch status line | "Your egg is N% warm." | omit the sentence entirely |
@@ -1721,6 +1743,18 @@ git commit bundles/ramble/panel/routes.js bundles/ramble/server/server.js \
 | Map marker | walking egg | plain dot when there is no bird AND no egg |
 
 **S2 — the check-in must stop lying.** `static/ramble.js:1244` says *"Checked in. That is today's warmth."* With no egg, `credited` is true but the warmth vanished (D3). K4 requires the eggless state to be legible, and this is the one screen that would actively contradict it. Branch the message on whether an egg exists.
+
+**The Warm it button** reuses the shipped incubate endpoint — do not invent one. `static/ramble.js:1796` already has `incubate(egg, btn)` posting to `/api/ramble/eggs/<id>/incubate`; declare `var lastWaitingEggId = null;` beside the other module vars and wire the button to it:
+
+```js
+  var warmBtn = $("rb-nextegg-warm");
+  if (warmBtn) warmBtn.addEventListener("click", function () {
+    if (!lastWaitingEggId) return;
+    incubate({ egg_id: lastWaitingEggId }, warmBtn);
+  });
+```
+
+`incubate` takes an object with `egg_id` and a button, and already refreshes on success.
 
 **S3 — the perch door keeps an affordance.** An earlier draft relabelled both the marker's `aria-label` and the world view's GPS-independent button to bare `"You"`. That is inside K5 but strips the button of any sense of where it goes. Use `"How you're doing"` for the button and `"You"` for the marker's `aria-label`.
 
@@ -1734,6 +1768,17 @@ test("the Next egg card is never hidden — it is the only route to the check-in
   assert.ok(!/setHidden\(\s*\$\("rb-pet-nextegg"\)/.test(src),
     "hiding it would delete the daily check-in for an eggless player (phase 1's defect)");
   assert.ok(src.includes("rb-nextegg-empty"), "it changes state instead");
+});
+
+test("a shelf egg waiting for an empty slot is offered, not hidden", () => {
+  const shell = readFileSync("bundles/ramble/panel/ramble.js", "utf8");
+  assert.ok(shell.includes("waiting on your shelf"));
+  assert.ok(shell.includes('id="rb-nextegg-warm"'), "and a one-tap way to act on it");
+
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  assert.ok(src.includes("lastWaitingEggId"), "wired to the shipped incubate endpoint");
+  // The lay line must not claim you are eggless while an egg sits on the shelf.
+  assert.ok(/setHidden\(\$\("rb-nextegg-lay"\)|!!waiting/.test(src));
 });
 
 test("the eggless copy is present and written from inside the premise", () => {
@@ -1782,6 +1827,8 @@ New *markup* goes in `bundles/ramble/panel/ramble.js`, not the client — that i
 ```html
             <p class="rb-muted rb-fine" id="rb-nextegg-empty" hidden>Nothing warming just now.</p>
             <p class="rb-muted rb-fine" id="rb-nextegg-lay" hidden></p>
+            <p class="rb-muted rb-fine" id="rb-nextegg-waiting" hidden>One&rsquo;s waiting on your shelf.</p>
+            <button class="rb-btn rb-btn-ghost" id="rb-nextegg-warm" type="button" hidden>Warm it</button>
 ```
 
 And on the egg view, after `#rb-egg-line`, add:
@@ -1836,11 +1883,20 @@ In `bundles/ramble/panel/static/ramble.js`, `paintEgg`:
     if (nextArt) { setHidden(nextArt, !hasNext); if (hasNext) drawEggArt(nextArt, nextEgg.egg_id); }
     setHidden($("rb-nextegg-empty"), hasNext);
 
+    /* Nothing auto-promotes a shelf egg into an empty slot (see the server's
+     * promoteFromShelf note), so offer it here rather than leaving the player
+     * with no signal and no way back. It also means they are NOT eggless, so
+     * the lay line must not claim they are. */
+    var waiting = pet.shelf_waiting || null;
+    setHidden($("rb-nextegg-waiting"), hasNext || !waiting);
+    setHidden($("rb-nextegg-warm"), hasNext || !waiting);
+    lastWaitingEggId = waiting;
+
     var lay = pet.lay || null;
     var layEl = $("rb-nextegg-lay");
     if (layEl) {
-      setHidden(layEl, hasNext || !lay);
-      if (!hasNext && lay) {
+      setHidden(layEl, hasNext || !lay || !!waiting);
+      if (!hasNext && lay && !waiting) {
         setText(layEl, lay.days > 0
           ? "You've had " + lay.days + " good " + (lay.days === 1 ? "day" : "days") +
             " — keep it up and you'll manage one yourself."
@@ -1896,7 +1952,8 @@ A `null` skips `setIcon` **entirely**, so the marker keeps whatever icon it last
 
 ```js
 // 1. static/ramble.js:2125 — the panel supplies the flag
-   arSession.render({ /* …existing fields… */, hasEgg: !!eggSeedId });
+   arSession.render({ anchors: anchors, pose: arPose, bird: arBirdState(),
+                      camera: arCamera, hasEgg: !!eggSeedId });
 
 // 2. static/ramble-ar.js:228 — carry it onto the frame, beside `bird`
    bird: s.bird || null,
@@ -1930,7 +1987,7 @@ And the check-in confirmation at `static/ramble.js:1243-1246` (S2). **⚠ There 
 
 ```js
   // routes.js, POST /api/ramble/egg/checkin — add to the res.json body:
-      egg: (await mods.eggsMod.getIncubatingEgg(db)) ? true : false,
+      egg: !!(await mods.eggsMod.getIncubatingEgg(db)),
 ```
 
 and list it in Task 6's interfaces as `POST /api/ramble/egg/checkin -> { credited, warmth, hatched, egg }`. Then the client can branch honestly:
@@ -2464,3 +2521,26 @@ DELETE FROM ramble_settings WHERE key LIKE 'prologue.%';  -- both dismissal flag
 **Confirmed correct in round 3:** all four AR line references and the state-contract comment at `ramble-ar.js:8`; the proposed AR test regex matches the proposed code; `tests/ramble-ar.test.js:245`/`:242` are exactly the assertions affected and `:218` is not; `hereIcon(null)` genuinely yields the plain dot and unconditional `setIcon` causes no churn or lost aria-label; the `flock.test.js:150` re-derivation; every `server.js` name and line; the N1 two-file split; all twelve N8 line references (spot-checked 12 of 12); that gifts and swaps provably cannot empty the incubating slot; and all four hard constraints, with `init-tables.js`'s comment sitting below every line the plan cites so no reference moves.
 
 **Line-number drift noted, cosmetic, not corrected in the task tables:** `tests/ramble-eggs.test.js` `:49→:50`, `:71→:73`, `:82→:84`; `flock.js:126→:125`; `init-tables.js:105→:104`; `tests/ramble-flock.test.js:174→:173`. Implementers should grep for the quoted assertion text rather than trusting a line number — which is the right habit anyway on a branch that rewrites these files.
+
+---
+
+### Fourth review (2026-09-09), scoped to round 3's fixes
+
+**Verdict: REVISE**, and all five criticals landed on **one** fix — round 3's Task 3 Step 5b, the `trades.js` promote. T1, T2, T3, T4 and T5 were each verified genuinely fixed. The reviewer also walked all nine tasks and confirmed the suite is green at the end of every one of them except Task 3.
+
+**Step 5b is reverted, not repaired.** Its five defects were: `trades.js` was never added to Task 3's Files or its commit (the never-committed-edit failure, for the third round running); `receiveTrade` has no single "end" — it is an `if/return` chain whose textual tail is the `'expired'` no-op path, so the prescribed call would have run on nothing; it took `tests/ramble-trades.test.js` and `tests/ramble-transport.test.js` red across ten assertions, and `ramble-transport.test.js` appears **nowhere** in this plan; plain gifts go through `receiveGift`, not `receiveTrade`, so the docstring's claim that gifts were covered was false; and — decisively — **promoting inside `expireTrades` strands an in-flight `completed` envelope**: the hand-over `UPDATE … WHERE status IN ('shelf','received')` then matches nothing while `receivedEggStatement` still inserts, so the user keeps **both** eggs.
+
+Manufacturing a free-egg race in the phase built to remove the free egg is not a trade worth making. And the underlying complaint was never "the slot is empty" — it was that the player had **no signal and no way back**. That is an affordance problem, so it now gets an affordance:
+
+- `nextPromotable(db)` is extracted as a pure read, and `promoteFromShelf` uses it — so the card and the promote read exactly **one** rule, with a test asserting they agree. (This is the map/payout discipline phase 1 had to learn.)
+- `GET /api/ramble/egg` and `GET /api/ramble/pet` carry `shelf_waiting`.
+- The Next-egg card says **"One's waiting on your shelf."** with a **Warm it** button wired to the already-shipped `incubate()` / `POST /api/ramble/eggs/:id/incubate` — no new endpoint.
+- The lay line is suppressed while an egg waits, because the player is not eggless and it must not say they are.
+
+`promoteFromShelf` is once again called from exactly one place, `hatchIfReady`, which is what its docstring and interface block always claimed.
+
+**Round 4's secondaries, all applied:** Task 2 Step 7 now re-runs the three `sed`-touched suites it commits; the flock-family assertions (`ramble-tools:177`, `ramble-panel:1227/1228/1234/1239`) moved **back** to Task 3, because round 3's move to Task 2 rested on "nothing mints from Task 2 onward" and that is false — Task 2 only renames `flock.js`'s mint, and `flockState` keeps minting until Task 3 Step 5 (`ramble-panel:1347` genuinely does break at Task 2 and stays there); Task 1's re-export comment corrected for the **third** time, having been flagged in rounds 1, 3 and 4 while sitting three lines above the warning that corrects it; `tests/ramble-ar.test.js` added to the global File-structure list; the two divergent spellings of the check-in `egg` line collapsed to one; the AR `render({…})` snippet's leading-comma syntax error fixed and its fields spelled out; and T3's harness citation corrected from a single wrong range to the four real ones, including the `after()` teardown without which the new test file leaks a socket and a temp dir.
+
+**Confirmed fixed in round 4:** T1 (`flock.js` in Task 2's Files, `sed` list and commit — and Task 2 legitimately ends green with `flock.js` still minting, since the purity test arrives in Task 3); T2 (the new test file wired into all five places); T3 (the "declaration order is enough" reasoning verified true — none of the four routes mints or feeds, and `recordHappyDay` is reachable only from `pet.js:feed`); T4 (route edit homed in Task 6 with an interface line; `$("rb-egg-status")` and `out` verified correct; the three-way branch preserves the not-credited arm); T5 (no stale invitation, correct deviation number). Also re-verified: `routes.js:816`, `server.js:30/306/319`, the `eggs.js` and `pet.js` line cites, `hereArt`/`paintHereArt`, and that `egg-locks.js` trips neither `bundle-server-deps` nor `bundle-contract`.
+
+**Superseded:** the round-3 record's T6 row describes Step 5b as the resolution. It is not — Step 5b was reverted here. Read this section, not that row.
