@@ -365,7 +365,7 @@ export function shouldSyncRow(table, row) {
     return Boolean(row.trade_id);
   }
   if (table === "ramble_cells") return typeof row?.cell === "string" && row.cell.length > 0;
-  if (table === "ramble_wallet") return typeof row?.kind === "string" && typeof row?.key === "string";
+  if (table === "ramble_wallet") return typeof row?.kind === "string" && row.kind.length > 0 && typeof row?.key === "string" && row.key.length > 0;
   if (table === "ramble_settings") {
     if (!row || !row.key) return false;
     // Ruling R3: `local.`-prefixed keys are per-instance by construction
@@ -577,10 +577,17 @@ export async function applyRambleCell(db, op, row, lamportTs) {
 }
 
 /**
- * Apply a `ramble_wallet` mutation, keyed on (kind, key). A ledger row is an
- * immutable fact under an idempotent key, so a replay must NOT rewrite it and
- * a delete must not remove it — that is exactly what makes the derived balance
- * converge no matter what order rows arrive in (spec 2026-09-08 §6.1).
+ * Apply a `ramble_wallet` mutation, keyed on (kind, key). A delete must not
+ * remove it — a ledger row is a fact, not a mutable balance. But the row
+ * itself is NOT a pure function of its key: `delta` is `perPickup`, read from
+ * the live, replicated, mutable `seed.per.pickup` setting, so two instances
+ * can legitimately disagree about the delta for the SAME key. Insert-if-absent
+ * would let that disagreement freeze in whichever value arrived first on each
+ * side, permanently. MIN/MAX/MAX on the three columns is commutative,
+ * associative and idempotent, so the derived balance converges for ANY
+ * arrival order AND any disagreement about `seed.per.pickup`. MAX on delta is
+ * the deliberate choice — a disagreement resolves in the user's favour rather
+ * than silently shrinking a balance they already saw.
  */
 export async function applyRambleWallet(db, op, row, lamportTs) {
   if (!row || !row.kind || !row.key) return;
@@ -593,7 +600,10 @@ export async function applyRambleWallet(db, op, row, lamportTs) {
   const createdAt = Number.isFinite(Number(row.created_at)) ? Number(row.created_at) : Date.now();
   await db.execute({
     sql: `INSERT INTO ramble_wallet (kind, key, delta, created_at, lamport_ts) VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(kind, key) DO NOTHING`,
+          ON CONFLICT(kind, key) DO UPDATE SET
+            delta = MAX(ramble_wallet.delta, excluded.delta),
+            created_at = MIN(ramble_wallet.created_at, excluded.created_at),
+            lamport_ts = MAX(ramble_wallet.lamport_ts, excluded.lamport_ts)`,
     args: [String(row.kind), String(row.key), delta, createdAt, lamportTs],
   });
 }

@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { neighborhood, classifyCell, classifyBbox, cellBox, FRONTIER_DEPTH_DEFAULT } from "../bundles/ramble/server/zones.js";
-import { CELL7_RE } from "../bundles/ramble/server/nests.js";
+import { CELL7_RE, cellsInBbox } from "../bundles/ramble/server/nests.js";
 import { encodeGeohash, decodeGeohash } from "../bundles/ramble/server/anchors.js";
 
 const HOME = "9vk79ed";
@@ -71,11 +71,12 @@ test("classifyBbox: returns the unlocked and frontier cells inside a viewport, a
 
 test("classifyBbox expands from the unlocked cells, so a wide viewport stays cheap", () => {
   // The naive direction (ask every viewport cell for its neighbours) costs
-  // |viewport| x (2d+1)^2 and was measured at 61 ms for a 7921-cell viewport
-  // at depth 3 (see the comment in zones.js). The correct direction costs
-  // |unlocked near the viewport| x (2d+1)^2 -- one cell here, so ~48
-  // operations, which is microseconds. 30 ms leaves a wide margin on both
-  // sides (naive ~61 ms, correct <1 ms) without being flaky on a slow box.
+  // |viewport| x (2d+1)^2. The correct direction costs |unlocked near the
+  // viewport| x (2d+1)^2 -- one cell here, so ~48 operations. An absolute
+  // wall-clock bound flakes on a slow shared CI runner (measured 12 ms cold,
+  // 2-4 ms warm for the correct implementation, against cellsInBbox's own
+  // 7921 encode/decode pairs it must pay first) -- so the bound is relative
+  // to a same-run baseline instead.
   // Do not loosen this bound to "fix" a slow CI -- that puts the naive
   // direction back inside the pass window and the test stops catching it.
   const here = decodeGeohash(HOME);
@@ -86,13 +87,20 @@ test("classifyBbox expands from the unlocked cells, so a wide viewport stays che
     north: here.lat + NEAR_CEILING_SPAN / 2,
     east: here.lon + NEAR_CEILING_SPAN / 2,
   };
-  const started = Date.now();
+  /* Hardware-relative, not a wall-clock constant: the naive direction calls
+   * neighborhood() once per cell (7921 x 49 encodes), roughly 25x this
+   * baseline, so 3x + 10 ms stays discriminating on a slow shared CI runner
+   * where an absolute 30 ms bound flakes. */
+  const t0 = Date.now();
+  cellsInBbox(wide);
+  const base = Math.max(1, Date.now() - t0);
+  const t1 = Date.now();
   const out = classifyBbox(wide, new Set([HOME]), { depth: 3 });
-  const elapsed = Date.now() - started;
+  const elapsed = Date.now() - t1;
   assert.ok(out, "a wide-but-legal viewport is answerable");
   assert.equal(out.unlocked.length, 1);
   assert.equal(out.frontier.length, 48, "one unlocked cell yields exactly its 48-cell ring, whatever the viewport");
-  assert.ok(elapsed < 30, `classification is bounded by unlocked ground, not viewport size (took ${elapsed} ms)`);
+  assert.ok(elapsed < base * 3 + 10, "classifyBbox must not scan per-cell neighbourhoods (took " + elapsed + "ms vs baseline " + base + "ms)");
 
   // The 48-cell ring is a property of the unlocked set, not of the viewport --
   // assert that directly, since (unlike timing) it doesn't depend on the

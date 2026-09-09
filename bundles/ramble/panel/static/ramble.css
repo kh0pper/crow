@@ -297,8 +297,8 @@
   bottom: 22px;
   z-index: 500;
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
   pointer-events: none;
 }
 #ramble .rb-perch > * { pointer-events: auto; }
@@ -316,7 +316,8 @@
 }
 /* Scoped to the map corner: the AR sheet's own .rb-ar-perch .rb-say still sits
    beside a bird and keeps its tail. */
-#ramble .rb-perch .rb-say { border-radius: 16px; }   /* was 16px 16px 4px 16px — no bird to point at */
+#ramble .rb-perch .rb-say { border-radius: 16px; flex: 1 1 auto; min-width: 0; }   /* was 16px 16px 4px 16px — no bird to point at */
+#ramble .rb-perch-go { flex: 0 0 auto; white-space: nowrap; }
 
 /* Leaflet's own chrome, dressed in the panel's palette. */
 #ramble .leaflet-container { font-family: var(--rb-font-body); background: var(--rb-surface-2); }

@@ -268,8 +268,9 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(sent), "no emoji in the panel markup — icons are inline SVG");
 
   // The location marker is the pet now (operator request, 2026-09-08): the
-  // corner button is retired, but its status strip stays.
-  assert.ok(!sent.includes('id="rb-perch-open"'), "the corner perch button is retired");
+  // corner button was retired, but the world view still needs a door that
+  // does not depend on a GPS fix.
+  assert.ok(sent.includes('id="rb-perch-open"'), "the world view keeps a door that does not need a GPS fix");
   assert.ok(sent.includes('id="rb-perch-say"'), "the status strip stays");
 
   assert.ok(sent.includes('id="rb-seed-count"'), "the map bar carries the seed counter");
@@ -760,6 +761,8 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes("L.polygon("), "fog is a real mask, not a dim band");
   assert.ok(body.includes("fogHoles"), "the unlocked and frontier cells are punched out of it");
   assert.ok(body.includes("if (mark.beacon)"), "a beacon is drawn differently from a full mark");
+  assert.ok(body.includes("function drawBeacon(mark, layer)") && body.includes("drawBeacon(nest, nestLayer)"),
+    "a nest beacon must live in the layer its own draw pass clears");
   // The guards refreshNests already has: a zones fetch at world zoom-out would
   // 400 on every settle and leave stale rectangles pinned to ground you left.
   assert.ok(body.includes("MIN_ZONE_ZOOM"), "zones are not fetched below a zoom floor");
@@ -797,6 +800,13 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
 
   assert.ok(body.includes('if (ev.key !== "Enter" && ev.key !== " ") return;'), "Enter and Space activate the marker Leaflet only made focusable");
   assert.ok(body.includes("el.onkeydown ="), "property assignment, so re-skinning cannot stack duplicate handlers");
+
+  // The world view's GPS-independent door (FIX 1): the map marker is the
+  // pretty way in, but it needs a real position fix to exist at all.
+  assert.ok(body.includes("function paintPerchGo()"));
+  assert.ok(body.includes('perchOpenBtn.addEventListener("click"'), "the door is wired independently of the map marker");
+
+  assert.ok(body.includes("eggPercent = pet.egg.percent"), "the world view's warmth line follows the pet refresh");
   assert.ok(body.includes('opts.className = "rb-here-pet rb-here-plain"'), "a plain dot survives the bird engine failing to load");
 });
 

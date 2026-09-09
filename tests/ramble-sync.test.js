@@ -536,3 +536,43 @@ test("author_name rides the apply door (wire column) and is updatable by LWW", a
   got = (await b.execute({ sql: "SELECT author_name FROM ramble_marks WHERE mark_id = 'named-9'", args: [] })).rows[0];
   assert.equal(got.author_name, "Kev");
 });
+
+/* -------------------------------------- FIX 5: the map + wallet tables sync */
+
+test("allowlist + exclusions + gate for ramble_cells", () => {
+  assert.ok(SYNCED_TABLES.includes("ramble_cells"));
+  assert.deepEqual(EXCLUDED_COLUMNS.ramble_cells, ["lamport_ts"]);
+  assert.equal(shouldSyncRow("ramble_cells", null), false);
+  assert.equal(shouldSyncRow("ramble_cells", { first_unlocked_at: 1 }), false, "keyless rows never sync");
+  assert.equal(shouldSyncRow("ramble_cells", { cell: "" }), false, "an empty key never sync");
+  assert.equal(shouldSyncRow("ramble_cells", { cell: "9vk79ed" }), true);
+});
+
+test("outbox door: a cell unlock with no manager queues and is stamped by cell", async () => {
+  await a.execute({ sql: "INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('9vk79ez', 1000)", args: [] });
+  const { rows } = await a.execute("SELECT * FROM ramble_cells WHERE cell='9vk79ez'");
+  const res = await emitOrQueue(null, a, "ramble_cells", "insert", rows[0]);
+  assert.ok(res && res.queued, "emitOrQueue returned null — missing stampSql branch or lamport_ts?");
+  const stamped = await a.execute("SELECT lamport_ts FROM ramble_cells WHERE cell='9vk79ez'");
+  assert.ok(Number(stamped.rows[0].lamport_ts) > 0, "ramble_cells row was never stamped — missing stampSql branch?");
+});
+
+test("allowlist + exclusions + gate for ramble_wallet", () => {
+  assert.ok(SYNCED_TABLES.includes("ramble_wallet"));
+  assert.deepEqual(EXCLUDED_COLUMNS.ramble_wallet, ["lamport_ts"]);
+  assert.equal(shouldSyncRow("ramble_wallet", null), false);
+  assert.equal(shouldSyncRow("ramble_wallet", { key: "9vk79ed" }), false, "no kind, never sync");
+  assert.equal(shouldSyncRow("ramble_wallet", { kind: "seed" }), false, "no key, never sync");
+  assert.equal(shouldSyncRow("ramble_wallet", { kind: "seed", key: "" }), false, "an empty key never sync");
+  assert.equal(shouldSyncRow("ramble_wallet", { kind: "", key: "9vk79ed" }), false, "an empty kind never sync");
+  assert.equal(shouldSyncRow("ramble_wallet", { kind: "seed", key: "9vk79ed" }), true);
+});
+
+test("outbox door: a wallet write with no manager queues and is stamped by kind+key", async () => {
+  await a.execute({ sql: "INSERT INTO ramble_wallet (kind, key, delta, created_at) VALUES ('seed', '9vk79ez:1', 1, 1000)", args: [] });
+  const { rows } = await a.execute("SELECT * FROM ramble_wallet WHERE kind='seed' AND key='9vk79ez:1'");
+  const res = await emitOrQueue(null, a, "ramble_wallet", "insert", rows[0]);
+  assert.ok(res && res.queued, "emitOrQueue returned null — missing stampSql branch or lamport_ts?");
+  const stamped = await a.execute("SELECT lamport_ts FROM ramble_wallet WHERE kind='seed' AND key='9vk79ez:1'");
+  assert.ok(Number(stamped.rows[0].lamport_ts) > 0, "ramble_wallet row was never stamped — missing stampSql branch?");
+});
