@@ -25,16 +25,17 @@ export default {
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
     const { escapeHtml, section } = await import(pathToFileURL(componentsPath).href);
 
-    const { listSessions } = await import(
-      pathToFileURL(join(appRoot, "bundles/meeting-recorder/server/store.js")).href
-    ).catch(async () => {
-      const { homedir } = await import("node:os");
-      return import(
-        pathToFileURL(
-          join(homedir(), ".crow", "bundles", "meeting-recorder", "server", "store.js")
-        ).href
-      );
-    });
+    // Installed copy first (an alternate instance sets CROW_HOME), repo second.
+    const { homedir } = await import("node:os");
+    const { existsSync } = await import("node:fs");
+    const storeCandidates = [
+      join(process.env.CROW_HOME || join(homedir(), ".crow"),
+        "bundles", "meeting-recorder", "server", "store.js"),
+      join(appRoot, "bundles/meeting-recorder/server/store.js"),
+    ];
+    const storePath = storeCandidates.find((p) => existsSync(p));
+    if (!storePath) throw new Error("meeting-recorder: store.js not found");
+    const { listSessions } = await import(pathToFileURL(storePath).href);
 
     const sessions = listSessions(12);
     const clock = (s) => {
