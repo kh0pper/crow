@@ -2133,11 +2133,18 @@
 
   function hidePrologue() { setHidden($("rb-prologue"), true); }
 
-  /* Beat one is for a player who has never had an egg at all. Both the button
-   * and a dismissal grant it, so skipping the words never costs the egg. */
+  /* Beat one is for a player who has never had an egg at all — pulled out as
+   * a pure function so the gate itself (not just "is it wired at all") is
+   * unit-testable, the way nextEggVisibility is above. */
+  function shouldShowIntro(p) {
+    return !!(p && !p.intro_seen && !p.granted);
+  }
+
+  /* Both the button and a dismissal grant it, so skipping the words never
+   * costs the egg. */
   function maybeIntro() {
     return jsonFetch("/api/ramble/prologue").then(function (p) {
-      if (p && !p.intro_seen && !p.granted) showPrologue("intro");
+      if (shouldShowIntro(p)) showPrologue("intro");
     }).catch(function () { /* the prologue is never load-bearing */ });
   }
 
