@@ -732,7 +732,22 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes('map.createPane("rb-here")') && body.includes('getPane("rb-here").style.zIndex = 650'));
   assert.ok(body.includes("function startMapWatch(") && body.includes("function paintHere(") && body.includes("function setFollowing("));
   assert.ok(body.includes('map.on("dragstart"'), "a user drag ends follow mode");
-  assert.ok(body.includes("getBounds().pad(-0.3)"), "follow pans only when the dot leaves the middle of the view");
+  // CONTRACT CHANGED 2026-09-09: following now keeps you CENTRED. It used to
+  // pan only once you had drifted out of the middle 40% of the view, which
+  // reads as the map lurching every few hundred metres instead of travelling
+  // with you.
+  assert.ok(!body.includes("getBounds().pad(-0.3)"), "the leave-the-middle gate is gone");
+  assert.ok(body.includes("if (!lastPanAt || haversineMeters(lastPanAt, fix) > 10) {"),
+    "follow recentres on any real move, using the same 10 m jitter floor as the waddle");
+  assert.ok(body.includes('map.on("dragstart", function () { setFollowing(false); });'),
+    "and a manual scroll still releases it, so the user is never fighting the map");
+
+  // The opening frame has to be a walk, not a survey.
+  assert.ok(body.includes("var WALK_ZOOM = 16;"), "the default frame is walkable, not a survey of the county");
+  assert.ok(body.includes("map.setView([pos.lat, pos.lon], WALK_ZOOM);"), "and the first fix uses it");
+  assert.ok(body.includes("Math.max(map.getZoom(), WALK_ZOOM)"),
+    "re-centring never zooms you back OUT past walkable, but keeps a tighter zoom you chose");
+  assert.ok(!/setView\(\[pos\.lat, pos\.lon\], 15\)/.test(body), "no hard-coded 15 survives");
   assert.ok(body.includes("reach_m: CLAIM_M") && body.includes("UNLOCK_M : null"));
   assert.ok(body.includes("function drawEggSeed(") && body.includes("art: nestArt(nest)"));
   assert.ok(body.includes('collectFx(nest.cell, "start")') && body.includes('collectFx(nest.cell, "done")') && body.includes('collectFx(nest.cell, "clear")'));
