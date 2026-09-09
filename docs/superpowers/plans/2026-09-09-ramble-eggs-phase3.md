@@ -832,11 +832,16 @@ export async function promoteFromShelf(db, { now, emit } = {}) {
   // Guarded exactly like mintIncubatingEgg: the "one incubating egg" rule is
   // a query against the table's contents, not a schema constraint, so two
   // overlapping promotes must not both succeed.
+  // The lock is re-checked in SQL, not only in nextPromotable's JS filter, so
+  // this matches incubateEgg's own guard (flock.js:189-192) exactly and a swap
+  // opened between the peek and the write cannot slip through.
   const { rowsAffected } = await db.execute({
     sql: `UPDATE ramble_eggs SET status = 'incubating', shelf_origin = NULL
            WHERE egg_id = ? AND status IN ('shelf', 'received')
-             AND NOT EXISTS (SELECT 1 FROM ramble_eggs WHERE status = 'incubating')`,
-    args: [next.egg_id],
+             AND NOT EXISTS (SELECT 1 FROM ramble_eggs WHERE status = 'incubating')
+             AND NOT EXISTS (SELECT 1 FROM ramble_trades
+                              WHERE my_egg_id = ? AND state IN ('proposed', 'accepted'))`,
+    args: [next.egg_id, next.egg_id],
   });
   if (rowsAffected === 0) return null;
 
@@ -1525,7 +1530,7 @@ git commit bundles/ramble/server/eggs.js tests/ramble-prologue.test.js \
 - **NOT modified: `bundles/ramble/server/feed.js`** — see Step 4.
 
 **Interfaces:**
-- `GET /api/ramble/egg` -> `{ egg: null | {...}, checklist: {...}, lay: { days, needed }, shelf_waiting: eggId|null }`
+- `GET /api/ramble/egg` -> `{ egg: null | {...}, checklist: {...}, lay: { days, needed } }` — deliberately NO `shelf_waiting`: the pet card owns that affordance
 - `GET /api/ramble/pet` -> adds `pet.egg` (`null` or `{ percent, ... }`), `pet.lay`, and `pet.shelf_waiting` (an `egg_id` or null)
 - `GET /api/ramble/prologue` -> `{ intro_seen, hatch_seen, granted }`
 - `POST /api/ramble/prologue/intro` -> `{ egg: row|null, intro_seen: true }` — grants and flags
@@ -1542,7 +1547,9 @@ Put them in a **new file `tests/ramble-prologue-routes.test.js`**.
 
 **⚠ A per-test `createClient` handle is NOT achievable — do not try.** `rambleRouter(dashboardAuth, options)` (`routes.js:176`) takes only an injected `emit`; the db is created inside the closure at `:230` via `mods.dbMod.createDbClient()`, which resolves `CROW_DB_PATH` → `CROW_DATA_DIR/crow.db` (`server/db.js:124`) and is then memoized for the router's lifetime. There is no seam to hand it an in-memory client.
 
-What these tests actually need is not per-test isolation but **one virgin db**, which the existing harness gives for free. Copy that file's harness, which is spread across four places, not one range: `:17-27` (node imports, `REPO_ROOT`, `SCRATCH`), `:29-46` (`mkdtemp`, `CROW_APP_ROOT`/`CROW_DATA_DIR`, the dynamic `import()` of `routes.js`), `:109-118` (router → express app → `listen` → `once(server, "listening")`), `:161` (`req()`), and **`:146-153` (`after()` — close the server, restore env, `rmSync` the scratch dir)**. The `after()` block is not optional: without it the new file leaks a listening socket and a temp directory. Keep one db for the file and rely on declaration order: tests 1 and 2 assert `egg: null` on a virgin db, test 3 grants, test 4 is order-independent. Nothing on these four routes mints, and none of them feeds — `recordHappyDay` is called only from `pet.js:feed` — so no `layday` row can appear either.
+What these tests actually need is not per-test isolation but **one virgin db**, which the existing harness gives for free. Copy that file's harness, which is spread across four places, not one range: `:17-27` (node imports, `REPO_ROOT`, `SCRATCH`), `:29-46` (`mkdtemp`, `CROW_APP_ROOT`/`CROW_DATA_DIR`, the dynamic `import()` of `routes.js`), `:109-118` (router → express app → `listen` → `once(server, "listening")`), `:161` (`req()`), and **`:146-153` (`after()` — close the server, restore env, `rmSync` the scratch dir)**. The `after()` block is not optional: without it the new file leaks a listening socket and a temp directory.
+
+**Grep for the code, do not trust these line numbers** — several are off by one or two (`mkdtempSync` is at `:28`, `const BASE` at `:119`, `req()` at `:161` depends on `realFetch` at `:159`, and `after()` runs `:146-154`). Every omission is an instant `ReferenceError`, so copy by symbol, not by range. Keep one db for the file and rely on declaration order: tests 1 and 2 assert `egg: null` on a virgin db, test 3 grants, test 4 is order-independent. Nothing on these four routes mints, and none of them feeds — `recordHappyDay` is called only from `pet.js:feed` — so no `layday` row can appear either.
 
 (If genuine per-test isolation is ever needed it takes a fresh `CROW_DB_PATH` **plus** a fresh `rambleRouter()` and app per test, not a client handle.)
 
@@ -1610,8 +1617,12 @@ Expected: FAIL — the prologue routes 404 and `lay` is absent.
     // launders shelf_origin. hatchIfReady is the only local emptier.
     const state = await mods.eggsMod.eggState(db, { now: Date.now() });
     const lay = await mods.eggsMod.layProgress(db);
-    const waiting = await mods.eggsMod.nextPromotable(db);
-    res.json({ ...state, lay, shelf_waiting: waiting ? waiting.egg_id : null });
+    res.json({ ...state, lay });
+    // NOTE: no `shelf_waiting` here. The waiting egg is offered on the PET
+    // card (Task 7), which reads GET /api/ramble/pet; adding it to this route
+    // too would give the egg view a field it never paints, and the two
+    // surfaces would then disagree — the egg view saying "No one on the way"
+    // while the pet card offers one. One surface owns this affordance.
   }));
 
   router.get("/api/ramble/prologue", handle(async (req, res) => {
@@ -1690,6 +1701,20 @@ return text(JSON.stringify({
 
 **And `ramble_egg_state` at `:319`** still returns `{ egg, checklist }` with no `lay`, so the tool and `GET /api/ramble/egg` would disagree — the exact divergence this step exists to prevent. Add `lay` there too.
 
+**⚠ Both tools also need `shelf_waiting`**, which Step 3 adds to both routes. Leaving it off reproduces the very divergence this step exists to prevent, one field later. So the import at `:30` is:
+
+```js
+import { eggState, activeBird, isoWeek, layProgress, nextPromotable } from "./eggs.js";
+```
+
+and both payloads carry:
+
+```js
+  shelf_waiting: (await nextPromotable(db))?.egg_id ?? null,   // ramble_pet_state only
+```
+
+(`ramble_egg_state` gets `lay` but NOT `shelf_waiting`, matching its route.)
+
 A tool and a route that disagree about the same egg is the defect phase 2 caught late. After patching, grep for any other dereference of `.egg.` that assumes non-null:
 
 ```bash
@@ -1737,7 +1762,7 @@ git commit bundles/ramble/panel/routes.js bundles/ramble/server/server.js \
 | Next egg card, **one waiting on the shelf** | — | "One's waiting on your shelf." + a **Warm it** button — the lay line is hidden, because you are not eggless |
 | Lay line, 0 days | — | "Keep yourself happy and you'll manage one yourself, in time." |
 | Lay line, N days | — | "You've had N good days — keep it up and you'll manage one yourself." |
-| Perch status line | "Your egg is N% warm." | omit the sentence entirely |
+| Perch status line | "Your egg is N% warm." | fall back to the existing "Quiet around here right now." (`static/ramble.js:888`) rather than an empty line |
 | AR view | egg art | the egg element hidden |
 | Check-in confirmation | "Checked in. That is today's warmth." | "Checked in. Nothing to warm yet — but it counted." |
 | Map marker | walking egg | plain dot when there is no bird AND no egg |
@@ -1753,6 +1778,15 @@ git commit bundles/ramble/panel/routes.js bundles/ramble/server/server.js \
     incubate({ egg_id: lastWaitingEggId }, warmBtn);
   });
 ```
+
+**⚠ Give the failure somewhere to land.** `incubate`'s `.catch` calls `flockStatus(err.message)`, which writes `#rb-flock-status` — an element on the *flock* view. Tapped from the pet card, a 409 (`in-trade`, if a swap opened between the read and the tap) would re-enable the button with no message anywhere on screen. Report it on the card instead:
+
+```js
+    incubate({ egg_id: lastWaitingEggId }, warmBtn)
+      .catch(function (err) { setText($("rb-nextegg-waiting"), err.message); });
+```
+
+Check `incubate`'s return value first — if it does not return its promise, add `return` to its `jsonFetch` chain rather than duplicating the call.
 
 `incubate` takes an object with `egg_id` and a button, and already refreshes on success.
 
@@ -1952,8 +1986,13 @@ A `null` skips `setIcon` **entirely**, so the marker keeps whatever icon it last
 
 ```js
 // 1. static/ramble.js:2125 — the panel supplies the flag
-   arSession.render({ anchors: anchors, pose: arPose, bird: arBirdState(),
+   arSession.render({ anchors: arAnchors, pose: arPose, bird: arBirdState(),
                       camera: arCamera, hasEgg: !!eggSeedId });
+   // ⚠ arAnchors, NOT anchors. There is no bare `anchors` binding in this file
+   // (the var is declared at :2053). A draft of this snippet used the wrong
+   // name; nothing would have caught it — ramble-ar.test.js drives the AR
+   // module directly and ramble-panel.test.js only greps source literals, so
+   // the throw stays silent inside scheduleArRender's rAF until AR is opened.
 
 // 2. static/ramble-ar.js:228 — carry it onto the frame, beside `bird`
    bird: s.bird || null,
@@ -1970,6 +2009,12 @@ A `null` skips `setIcon` **entirely**, so the marker keeps whatever icon it last
    }
    // :435
    paintBird(frame.bird, frame.hasEgg);
+```
+
+**⚠ `tests/ramble-panel.test.js:911` goes red and is THIS task's responsibility.** It asserts the source literal `"eggPercent = pet.egg.percent"` (the real line is `static/ramble.js:1343`), which this task's `paintPet` rewrite deletes. Earlier drafts said it "is listed there" while listing it nowhere. Rewrite it to track the new code, keeping the reason string:
+
+```js
+assert.ok(body.includes("eggPercent = nextPct"), "the world view's warmth line follows the pet refresh");
 ```
 
 **`tests/ramble-ar.test.js:245` goes red and must be updated:** it calls `session.render({ anchors, pose: pose(null), bird: null })` and then asserts `els.egg.hasAttribute("hidden") === false`. With no `hasEgg` on the state that is now hidden. Pass `hasEgg: true` there, and add a new case with `bird: null, hasEgg: false` asserting the egg IS hidden. **Do not assert the presence of a line in `startAr`** — an earlier draft of this plan did exactly that, and the assertion passed against a fix that the renderer immediately undid.
@@ -2383,7 +2428,7 @@ Fix everything it finds ON THE BRANCH before opening the PR. **Re-review every f
 - **No schema change, no migration, no `SCHEMA_GENERATION` bump** — laying rides `ramble_wallet`, prologue flags ride `ramble_settings`.
 - **Finding 1**: `feedAll` gates the pet feed on `credited`, so warmth and energy had to be decoupled or laying would be unreachable.
 - **Finding 3 / Deviation 1**: the spec's starter-egg race protection is impossible because `crowId` is per-instance; a random uuid plus the existing convergence rule replaces it.
-- **Deviation 4**: auto-promote runs ONLY on hatch and the trade-closing writes — never on a read path — and why a read-path promote both races the sync drain and launders `shelf_origin`.
+- **Deviation 4**: auto-promote runs ONLY on hatch — never on a read path and never from `trades.js`. A gift, or a swap egg freed when a trade closes, is **offered by the Next-egg card** instead. Say why both alternatives were rejected: a read-path promote races the sync drain and launders `shelf_origin`, and promoting inside `expireTrades` strands an in-flight `completed` envelope so the user keeps both eggs.
 - **K1**: the grant is derived from replicated egg data so a game-state reset replays the prologue.
 - **K5**: all copy is written from "you ARE the egg; the incubating egg is the next you".
 - Ramble is installed on **grackle only** — crow primary and r4 have no Ramble bundle.
@@ -2544,3 +2589,22 @@ Manufacturing a free-egg race in the phase built to remove the free egg is not a
 **Confirmed fixed in round 4:** T1 (`flock.js` in Task 2's Files, `sed` list and commit — and Task 2 legitimately ends green with `flock.js` still minting, since the purity test arrives in Task 3); T2 (the new test file wired into all five places); T3 (the "declaration order is enough" reasoning verified true — none of the four routes mints or feeds, and `recordHappyDay` is reachable only from `pet.js:feed`); T4 (route edit homed in Task 6 with an interface line; `$("rb-egg-status")` and `out` verified correct; the three-way branch preserves the not-credited arm); T5 (no stale invitation, correct deviation number). Also re-verified: `routes.js:816`, `server.js:30/306/319`, the `eggs.js` and `pet.js` line cites, `hereArt`/`paintHereArt`, and that `egg-locks.js` trips neither `bundle-server-deps` nor `bundle-contract`.
 
 **Superseded:** the round-3 record's T6 row describes Step 5b as the resolution. It is not — Step 5b was reverted here. Read this section, not that row.
+
+---
+
+### Fifth review (2026-09-09) — REVISE on four text edits, then execute
+
+The reviewer's own judgement: *"no design change is needed and no sixth review round should happen."* The revert is clean and the affordance genuinely closes round 3's hole — verified by walking the scenario against the code: while the swap is open `nextPromotable` filters the locked egg so `shelf_waiting` is correctly null and the card shows the lay line; after `expireTrades` sets `'expired'` the egg leaves `OPEN_SQL`, `shelf_waiting` goes non-null, and recovery is one tap.
+
+| # | Issue | Resolution |
+|---|---|---|
+| C1 | **Round 4's own fix introduced a `ReferenceError`.** Fixing N2's leading-comma syntax error by "spelling out the fields" mis-transcribed one: the snippet wrote `anchors: anchors`, but the only binding in the file is `arAnchors` (`:2053`). Nothing would have caught it — `ramble-ar.test.js` drives the AR module directly and `ramble-panel.test.js` only greps source literals, so it throws silently inside a rAF callback until someone opens AR. A paste-ready snippet that is wrong is worse than the obvious placeholder it replaced. | `arAnchors`, with a note saying why no test covers it. |
+| C2 | The PR-body bullet still promised "auto-promote runs ONLY on hatch **and the trade-closing writes**" after that fix was reverted — so the PR would have described the branch falsely. Round 3 raised exactly this bullet as a critical; it is the third round in which a stale claim survived in prose while the code around it was corrected. | Rewritten, and it now also records why both rejected alternatives were rejected. |
+| C3 | **Task 7 would have ended red.** `tests/ramble-panel.test.js:911` asserts the source literal `eggPercent = pet.egg.percent`, which Task 7's `paintPet` rewrite deletes. Round 3 wrote "and is listed there"; round 4 dropped that clause without ever adding the listing. Nobody owned it. | Listed in Task 7 with the exact replacement assertion. |
+| C4 | `shelf_waiting` was added to the routes but not to the MCP tools, breaking the plan's own standing rule that `ramble_egg_state`/`ramble_pet_state` must agree with the HTTP routes — the divergence Task 6 Step 5 exists to prevent, reproduced one field later. | Added to `ramble_pet_state` with the import; scoped explicitly so `ramble_egg_state` matches its own route. |
+
+**Suggestions adopted:** `shelf_waiting` **dropped** from `GET /api/ramble/egg` — nothing painted it, and leaving it would have let the egg view say "No one on the way just now." while the pet card offered one; the pet card alone owns this affordance. The Warm-it button's failure now lands on the card rather than in `#rb-flock-status`, an element on a different view, where a 409 would have been invisible. `promoteFromShelf`'s guarded `UPDATE` re-checks the trade lock in SQL, matching `incubateEgg`'s own guard (`flock.js:189-192`) so a swap opened between the peek and the write cannot slip through. The perch's eggless status line falls back to the existing "Quiet around here right now." rather than an empty string, aligning the copy table to the better snippet. And the harness citation now tells the implementer to copy by symbol rather than by line range, since several of its numbers are off by one or two.
+
+**Accepted, recorded, not fixed:** while a swap is open on the last shelf egg the lay line still reads "…you'll manage one yourself, in time." although `hasAnyEggAnywhere` blocks accrual. It is bounded by the 7-day trade TTL, follows from a choice the user made deliberately, and the affordance restores the count's honesty as soon as the trade closes.
+
+**Review closed after five rounds.** Counts ran 9 → 13 → 6 → 5 → 4, and the character changed as well as the number: round 5 found no design defect, only mis-transcriptions and one unowned test. Continuing would be over-editing rather than improving. Execution starts now.
