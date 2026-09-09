@@ -65,7 +65,24 @@ The sweep runs on the same 15 s drain tick. Expired rows are deleted locally and
 
 ## Your egg and your bird
 
-Every instance always has one egg incubating. Real-world activity credits **warmth** toward it; once warmth reaches the hatch threshold, the egg hatches into a bird.
+You are the egg. Real-world activity credits **warmth** toward it; at the hatch threshold you hatch
+into a bird, and the incubating egg after that is the **next you**.
+
+Eggs come from three places, and none of them is free:
+
+- **Nests** — walk to one on the map, one claim per local day, within 75 m.
+- **Gifts and swaps** from contacts.
+- **Laying** — while you hold no egg at all, every local day you end happy counts one. At
+  `lay.days` (default 14) you lay one yourself. Days need not be consecutive, and the count only
+  runs while you are eggless, so this is a floor rather than a faucet.
+
+When the incubating slot empties, the oldest egg on your shelf is promoted into it automatically —
+so you are only ever eggless when you genuinely have none. **Warmth earned with no egg at all
+vanishes**; that is deliberate, and auto-promote is what keeps it rare.
+
+| Setting | Default | Governs |
+|---|---|---|
+| `lay.days` | 14 | Happy days while eggless before you lay one yourself |
 
 | Event | Warmth |
 |---|---|
@@ -85,7 +102,7 @@ Each event is idempotent per its own key, so repeating the same real-world actio
 
 Meeting crows is additionally capped at **5 credits per local calendar day** (`MEET_CROW_DAILY_CAP` in `bundles/ramble/server/eggs.js`) — a persona is just a pubkey anyone can mint, so without that ceiling a flood of spoofed personas could force hatch after hatch; meetings past the cap credit nothing and leave no ledger row.
 
-When warmth reaches the hatch threshold, a species and a seed are rolled server-side (`crypto.randomInt`, never `Math.random`, so the roll can't be predicted or replayed); the bird's look is unique to that seed. A new egg starts incubating immediately.
+When warmth reaches the hatch threshold, a species and a seed are rolled server-side (`crypto.randomInt`, never `Math.random`, so the roll can't be predicted or replayed); the bird's look is unique to that seed. If an egg is waiting on your shelf it moves into the slot; otherwise nothing new starts, and the next one has to be found, given, or laid.
 
 Your active bird rides on your **public** caws and marks — the wire JSON carries `bird: { species, seed }` so other people see it on your pins. Contacts and "Just me" marks never reach the Nostr wire (see below), so the bird is omitted from the **wire** only: those rows still store `bird_species` / `bird_seed` locally and replicate, bird and all, to your own linked instances.
 
