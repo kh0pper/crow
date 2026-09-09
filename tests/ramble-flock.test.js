@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { encodeGeohash } from "../bundles/ramble/server/anchors.js";
-import { isoWeek, mintIncubatingEgg } from "../bundles/ramble/server/eggs.js";
+import { isoWeek, mintIncubatingEgg, getIncubatingEgg } from "../bundles/ramble/server/eggs.js";
 import { nestFor, CELL7_LAT_STEP } from "../bundles/ramble/server/nests.js";
 import {
   readFlockSettings, listNests, claimNest,
@@ -141,13 +141,15 @@ test("incubateEgg swaps the slot: old egg shelved as 'user', target incubating, 
   assert.deepEqual(await incubateEgg(d, "h1", { now: T0 }), { ok: false, reason: "not-an-egg" });
 });
 
-test("incubateEgg hatches a swapped-in egg that is already past the threshold", async () => {
+test("the parked egg is promoted back into the slot", async () => {
   const d = await freshDb();
-  await mintIncubatingEgg(d, { now: T0 });
+  const parked = await mintIncubatingEgg(d, { now: T0 });
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES ('hot','shelf','user',100,5)");
   const r = await incubateEgg(d, "hot", { now: T0 });
   assert.ok(r.hatched && r.hatched.egg_id === "hot" && typeof r.hatched.species === "string");
-  assert.equal((await d.execute("SELECT count(*) AS n FROM ramble_eggs WHERE status='incubating'")).rows[0].n, 1, "a successor egg was minted");
+  // parked is 'user'-shelved by incubateEgg's swap, then hatchIfReady's own
+  // promoteFromShelf draws it straight back in — no successor was minted.
+  assert.equal((await getIncubatingEgg(d)).egg_id, parked.egg_id, "promoteFromShelf drew the parked egg back in");
 });
 
 test("activateBird points the pet at a hatched egg and refuses anything else", async () => {
@@ -164,12 +166,15 @@ test("activateBird points the pet at a hatched egg and refuses anything else", a
 
 test("flockState: birds with the active one marked, eggs incubating-first, species count, shelf cap", async () => {
   const d = await freshDb();
+  // Phase 3: flockState is a pure read and mints nothing, so the fixture
+  // must supply its own incubating egg explicitly.
+  await mintIncubatingEgg(d, { now: T0 });
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, warmth, species, seed, created_at, hatched_at) VALUES ('b1','hatched',100,'raven',9,1,20), ('b2','hatched',100,'crow',3,2,10), ('b3','hatched',100,'raven',4,3,30)");
   await d.execute("INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, found_cell, found_week, created_at) VALUES ('s1','shelf','user',50,'9v6m21h','2026-W37',100), ('s0','shelf','sync',5,NULL,NULL,50)");
   await activateBird(d, "b2");
   const s = await flockState(d, { now: T0 });
   assert.deepEqual(s.birds.map((b) => [b.egg_id, b.species, b.active]), [["b2", "crow", true], ["b1", "raven", false], ["b3", "raven", false]]);
-  assert.equal(s.eggs[0].status, "incubating", "the incubating egg is ensured and listed first");
+  assert.equal(s.eggs[0].status, "incubating", "the fixture's own egg is listed first");
   assert.deepEqual(s.eggs.slice(1).map((e) => [e.egg_id, e.status, e.percent, e.shelf_origin]), [["s0", "shelf", 5, "sync"], ["s1", "shelf", 50, "user"]]);
   // shelf_count is the user's own eggs (s1); the sync loser s0 is listed but does not use a spot.
   assert.deepEqual([s.shelf_count, s.shelf_cap, s.species_found, s.species_total, s.species.length], [1, SHELF_CAP_DEFAULT, 2, 8, 8]);

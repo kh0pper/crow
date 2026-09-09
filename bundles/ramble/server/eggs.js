@@ -12,13 +12,15 @@
  *
  * When warmth reaches `hatch_at` the egg hatches into a bird (species rolled
  * from bird-svg's ROSTER, seed a uint32 from crypto.randomInt — never
- * Math.random, so the roll can't be predicted or replayed), the next
- * incubating egg starts immediately, and if no bird is active yet
+ * Math.random, so the roll can't be predicted or replayed), the shelf
+ * refills the incubating slot if it can (`promoteFromShelf`, spec §4.2 — NO
+ * successor is minted any more), and if no bird is active yet
  * (`ramble_pet.active_egg_id IS NULL`) the newly hatched egg becomes it.
  */
 
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
+import { lockedEggIds } from "./egg-locks.js";
 
 const require = createRequire(import.meta.url);
 const { ROSTER } = require("./bird-svg.cjs");
@@ -145,13 +147,13 @@ export async function getIncubatingEgg(db) {
 
 /**
  * Insert a fresh incubating egg. THE ONLY MINTING PRIMITIVE. As of the end of
- * this phase the only callers are the starter grant and laying, both
- * deliberate acts; until those land, `flock.js`'s `flockState` still calls it
- * on every flock screen (Task 3 removes that call), and `hatchIfReady` calls
- * it to mint the successor egg after a hatch. It was called
- * `ensureIncubatingEgg` and was invoked from four sites, two of them pure
- * reads (`eggState` on every GET /api/ramble/egg, `flockState` on every flock
- * screen), so merely looking at a screen recreated the egg. Read with
+ * Task 3 the only callers are the starter grant and laying (both deliberate
+ * acts) and test fixtures; `flockState` no longer calls it (Task 3 removed
+ * that call) and neither does `hatchIfReady`, which promotes from the shelf
+ * instead of minting a successor (`promoteFromShelf`, spec §4.2). It was
+ * called `ensureIncubatingEgg` and was invoked from four sites, two of them
+ * pure reads (`eggState` on every GET /api/ramble/egg, `flockState` on every
+ * flock screen), so merely looking at a screen recreated the egg. Read with
  * `getIncubatingEgg` instead; the name is "mint" so that a future caller has
  * to mean it.
  *
@@ -191,12 +193,128 @@ async function ensurePetRow(db) {
 }
 
 /**
+ * Refill an empty incubating slot from the shelf (spec §4.2). This is the
+ * release valve that makes D3 — warmth vanishing when there is no egg —
+ * tolerable: the user is only ever eggless when they genuinely have none.
+ *
+ * Order is `created_at ASC, egg_id ASC`: a TOTAL order and a pure function of
+ * rows that replicate, so two instances reach the same answer independently
+ * with nothing to exchange and nothing to emit beyond the row itself.
+ *
+ * ⚠ NOT the same mechanism as `RAMBLE_EGG_REPROMOTE_SQL` in
+ * servers/sharing/instance-sync.js, which promotes ONLY `shelf_origin='sync'`
+ * eggs and says a 'user' egg "must never be drafted back in". That is correct
+ * FOR SYNC: it is a convergence tie-break carrying no user intent, and
+ * drafting a deliberately-parked egg on a sync apply would override a choice
+ * the user made. This one is a game rule and DOES take user eggs — that is
+ * the point of §4.2. Do not unify them.
+ *
+ * An egg named by an open swap is skipped: it is promised to a contact, and
+ * incubating it would let the user spend it twice.
+ *
+ * Writes NOTHING when the slot is occupied or nothing is promotable.
+ *
+ * ⚠ CALLED FROM EXACTLY ONE PLACE: `hatchIfReady`. Never from a read path.
+ *
+ * Two earlier drafts of this plan called it from `eggState`/`flockState` too,
+ * so that a slot emptied by a sync arrival would refill without waiting for a
+ * hatch. Both were wrong, and the second was wrong in a subtler way than the
+ * first:
+ *
+ *   1. It is a write during a GET, and `applyRambleEgg` carries an explicit
+ *      carve-out (instance-sync.js:855-860) refusing to re-promote on a peer's
+ *      USER shelve, because the replacement egg's row "follows in the same
+ *      drain" — a GET landing in that window drafts the egg the user just
+ *      parked, and it then out-ranks their real choice on both machines.
+ *   2. The attempted fix — marking such a promote `shelf_origin = 'sync'` so
+ *      it ranks below a real choice — LAUNDERS PROVENANCE. `flock.js:126`
+ *      counts `status='shelf' AND shelf_origin='user'` for the nest shelf cap
+ *      and `flock.js:253` for `shelf_count`; `instance-sync.js:831` rewrites
+ *      a demoted egg to `'sync'` unconditionally; and
+ *      `RAMBLE_EGG_REPROMOTE_SQL` drafts `'sync'` eggs only. A user egg
+ *      relabelled 'sync' therefore stops consuming a shelf slot, is
+ *      under-reported to the user, becomes draftable by the very sync rule
+ *      the 'user' mark exists to protect it from, and is mislabelled "came
+ *      back from another of your Crows" at `static/ramble.js:1776`.
+ *
+ * Honest inventory of every way the slot can empty, and what covers it:
+ *
+ *   - a hatch                  -> covered HERE, and this is the main loop
+ *   - `incubateEgg` swap       -> never empties the slot (one conditional
+ *                                 UPDATE), and it ends in `hatchIfReady`
+ *   - gifting / swapping away  -> the incubating egg is not giftable
+ *                                 (`GIFTABLE = {shelf, received}`)
+ *   - a gift or swap ARRIVING, or a swap expiring/declining and unlocking
+ *     the last shelf egg, while the slot is empty
+ *                              -> NOT auto-promoted. The egg sits on the
+ *                                 shelf and the panel says so, with a button
+ *                                 that incubates it in one tap (Task 7).
+ *   - a slot emptied by `applyRambleEgg` while the user holds ONLY 'user'
+ *     shelf eggs -> same: `RAMBLE_EGG_REPROMOTE_SQL` drafts
+ *                   `shelf_origin='sync'` rows only.
+ *
+ * ⚠ An earlier draft promoted from `trades.js`'s closing paths to auto-cover
+ * rows 4 and 5. It was reverted: promoting inside `expireTrades` strands an
+ * in-flight `completed` envelope — the hand-over UPDATE (`WHERE status IN
+ * ('shelf','received')`) then matches nothing while `receivedEggStatement`
+ * still inserts, so the user keeps BOTH eggs. Manufacturing a free-egg race
+ * in the phase whose whole purpose is removing the free egg is not a trade
+ * worth making, and the underlying complaint was never "the slot is empty" —
+ * it was "the player has no signal and no way back". That is an affordance
+ * problem, and it is fixed with an affordance.
+ */
+/**
+ * The egg that WOULD be promoted, or null — a pure read, no writes.
+ *
+ * Extracted so the promote and the panel's "one's waiting on your shelf" card
+ * read exactly ONE rule. A card that offers an egg the promote would not take
+ * (or the reverse) is the map/payout split this project has already had to
+ * close once in phase 1.
+ */
+export async function nextPromotable(db) {
+  if (await getIncubatingEgg(db)) return null;
+  const locked = await lockedEggIds(db);
+  const { rows } = await db.execute({
+    sql: `SELECT egg_id FROM ramble_eggs
+           WHERE status IN ('shelf', 'received')
+           ORDER BY created_at ASC, egg_id ASC`,
+    args: [],
+  });
+  return rows.find((r) => !locked.has(r.egg_id)) ?? null;
+}
+
+export async function promoteFromShelf(db, { now, emit } = {}) {
+  void now;
+  const next = await nextPromotable(db);
+  if (!next) return null;
+
+  // Guarded exactly like mintIncubatingEgg: the "one incubating egg" rule is
+  // a query against the table's contents, not a schema constraint, so two
+  // overlapping promotes must not both succeed.
+  // The lock is re-checked in SQL, not only in nextPromotable's JS filter, so
+  // this matches incubateEgg's own guard (flock.js:189-192) exactly and a swap
+  // opened between the peek and the write cannot slip through.
+  const { rowsAffected } = await db.execute({
+    sql: `UPDATE ramble_eggs SET status = 'incubating', shelf_origin = NULL
+           WHERE egg_id = ? AND status IN ('shelf', 'received')
+             AND NOT EXISTS (SELECT 1 FROM ramble_eggs WHERE status = 'incubating')
+             AND NOT EXISTS (SELECT 1 FROM ramble_trades
+                              WHERE my_egg_id = ? AND state IN ('proposed', 'accepted'))`,
+    args: [next.egg_id, next.egg_id],
+  });
+  if (rowsAffected === 0) return null;
+
+  const promoted = await getIncubatingEgg(db);
+  if (promoted) await safeEmit(emit, "ramble_eggs", "update", promoted);
+  return promoted;
+}
+
+/**
  * Hatches the incubating egg if its warmth has reached hatch_at. The UPDATE
- * that flips this egg to 'hatched' MUST run before the successor egg is
- * inserted: mintIncubatingEgg's "one incubating egg" guard is a query
+ * that flips this egg to 'hatched' MUST run before the shelf is asked to
+ * refill the slot: `promoteFromShelf`'s "one incubating egg" guard is a query
  * against the table's current contents, not a schema constraint, so the old
- * egg has to already be out of 'incubating' status before the next insert's
- * WHERE NOT EXISTS check runs.
+ * egg has to already be out of 'incubating' status before that guard runs.
  */
 export async function hatchIfReady(db, { now, emit } = {}) {
   const egg = await getIncubatingEgg(db);
@@ -222,8 +340,9 @@ export async function hatchIfReady(db, { now, emit } = {}) {
     await safeEmit(emit, "ramble_pet", "update", updatedPet);
   }
 
-  const nextEgg = await mintIncubatingEgg(db, { now, emit });
-  void nextEgg;
+  // Phase 3: the successor egg is NOT minted. The shelf refills the slot if
+  // it can; otherwise the player is genuinely eggless and the panel says so.
+  await promoteFromShelf(db, { now, emit });
 
   return hatchedEgg;
 }

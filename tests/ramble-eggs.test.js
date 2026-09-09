@@ -36,7 +36,7 @@ test("weights come from settings when set", async () => {
   assert.ok(rows[0].warmth >= 3);
 });
 
-test("hatch at the threshold: rolls a roster species + uint32 seed, activates, and starts the next egg", async () => {
+test("hatch at the threshold: rolls a roster species + uint32 seed, activates, and mints no successor", async () => {
   const emitted = [];
   const emit = async (t, op, row) => emitted.push([t, op, row.egg_id || row.owner]);
   let r;
@@ -47,17 +47,33 @@ test("hatch at the threshold: rolls a roster species + uint32 seed, activates, a
   const bird = await activeBird(db);
   assert.equal(bird.egg_id, r.hatched.egg_id);
   const { rows } = await db.execute("SELECT status, count(*) AS n FROM ramble_eggs GROUP BY status ORDER BY status");
-  assert.deepEqual(rows.map((x) => [x.status, x.n]), [["hatched", 1], ["incubating", 1]]);
+  assert.deepEqual(rows.map((x) => [x.status, x.n]), [["hatched", 1]], "no successor was minted, and the shelf is empty");
   assert.ok(emitted.some(([t, op]) => t === "ramble_eggs" && op === "update"));
   assert.ok(emitted.some(([t]) => t === "ramble_pet"));
   assert.equal(await hatchIfReady(db, { now: T0 }), null); // nothing else ready
 });
 
-test("eggState reports percent + checklist", async () => {
+test("eggState reports egg: null right after a hatch, then percent + checklist once the shelf promotes", async () => {
+  const empty = await eggState(db, { now: T0 });
+  assert.equal(empty.egg, null, "no successor was minted");
+  assert.equal(typeof empty.checklist.new_places_week, "number");
+  assert.equal(empty.checklist.checked_in_today, true);
+
+  // Nothing else exercises a non-zero percent any more, now that nothing
+  // auto-mints: shelve an egg, mint+hatch a throwaway incubating egg so the
+  // hatch's own promoteFromShelf draws the shelved one in, then credit it.
+  await db.execute({
+    sql: "INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES (?, 'shelf', 'user', 0, ?)",
+    args: ["waiting-on-shelf", T0],
+  });
+  const throwaway = await mintIncubatingEgg(db, { now: T0 });
+  await db.execute({ sql: "UPDATE ramble_eggs SET warmth = ? WHERE egg_id = ?", args: [WARMTH_DEFAULTS.hatch_at, throwaway.egg_id] });
+  assert.ok(await hatchIfReady(db, { now: T0 }), "the throwaway egg hatched");
+
+  await creditWarmth(db, { type: "mark_left" }, { now: T0 });
   const s = await eggState(db, { now: T0 });
-  assert.ok(s.egg.egg_id); assert.equal(typeof s.egg.percent, "number");
-  assert.equal(typeof s.checklist.new_places_week, "number");
-  assert.equal(s.checklist.checked_in_today, true);
+  assert.equal(s.egg.egg_id, "waiting-on-shelf", "the shelf refilled the slot");
+  assert.ok(s.egg.percent > 0, "the shelved egg now carries warmth");
 });
 
 test("week and day keys", () => {
@@ -67,24 +83,26 @@ test("week and day keys", () => {
 
 test("visit_place without cell never credits (not treated as always-credited)", async () => {
   const before = await eggState(db, { now: T0 });
+  const beforeWarmth = before.egg ? before.egg.warmth : 0; // Phase 3: a hatch can leave egg: null
   for (let i = 0; i < 3; i++) {
     const r = await creditWarmth(db, { type: "visit_place" }, { now: T0 });
     assert.equal(r.credited, false);
-    assert.equal(r.warmth, before.egg.warmth);
+    assert.equal(r.warmth, beforeWarmth);
   }
   const after = await eggState(db, { now: T0 });
-  assert.equal(after.egg.warmth, before.egg.warmth);
+  assert.equal(after.egg ? after.egg.warmth : 0, beforeWarmth);
 });
 
 test("meet_crow without persona never credits (not treated as always-credited)", async () => {
   const before = await eggState(db, { now: T0 });
+  const beforeWarmth = before.egg ? before.egg.warmth : 0; // Phase 3: a hatch can leave egg: null
   for (let i = 0; i < 3; i++) {
     const r = await creditWarmth(db, { type: "meet_crow" }, { now: T0 });
     assert.equal(r.credited, false);
-    assert.equal(r.warmth, before.egg.warmth);
+    assert.equal(r.warmth, beforeWarmth);
   }
   const after = await eggState(db, { now: T0 });
-  assert.equal(after.egg.warmth, before.egg.warmth);
+  assert.equal(after.egg ? after.egg.warmth : 0, beforeWarmth);
 });
 
 test("chore on a fresh db is a pure read: no egg created, nothing emitted", async () => {
