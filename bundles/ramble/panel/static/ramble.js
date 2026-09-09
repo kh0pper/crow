@@ -124,10 +124,11 @@
    * cleared ground and never saw its edge. /zones no longer has a size
    * ceiling, so this can go low. */
   var MIN_ZONE_ZOOM = 11;
-  /* The dim per-cell frontier squares are detail, and there can be a
-   * thousand of them; they only read as "previewed ground" up close, so
-   * below this the holes alone carry the shape. */
-  var MIN_FRONTIER_DETAIL_ZOOM = 15;
+  /* Per-cell detail: the dim frontier squares and the seed pips. There can be
+   * thousands of each, and both only mean anything up close, so below this the
+   * mask holes alone carry the shape and the server is told not to even build
+   * the pip list. */
+  var MIN_CELL_DETAIL_ZOOM = 15;
   var hereLayer = null, hereDot = null, hereRing = null;
   var following = false, mapWatch = null, lastPanAt = null;
   var currentCells = [];
@@ -1355,7 +1356,10 @@
     if (map.getZoom() < MIN_ZONE_ZOOM) { zoneLayer.clearLayers(); return Promise.resolve(); }
     var b = map.getBounds();
     var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(",");
-    return jsonFetch("/api/ramble/zones?bbox=" + encodeURIComponent(bbox))
+    /* Only ask for pips when they will be drawn: zoomed out, that list is
+     * thousands of footprints the client would discard. */
+    var pips = map.getZoom() >= MIN_CELL_DETAIL_ZOOM ? "&pips=1" : "";
+    return jsonFetch("/api/ramble/zones?bbox=" + encodeURIComponent(bbox) + pips)
       .then(drawZones)
       .catch(function () { /* a failed fetch leaves the last mask up */ });
   }
@@ -1378,8 +1382,10 @@
     L.polygon([outer].concat(fogHoles), {
       pane: "rb-fog", className: "rb-fog", stroke: false, interactive: false
     }).addTo(zoneLayer);
-    if (map.getZoom() >= MIN_FRONTIER_DETAIL_ZOOM) paintCells(out.frontier || [], "rb-frontier-cell");
-    paintSeedPips(out.seed || []);
+    if (map.getZoom() >= MIN_CELL_DETAIL_ZOOM) {
+      paintCells(out.frontier || [], "rb-frontier-cell");
+      paintSeedPips(out.seed || []);
+    }
   }
 
   /* A pip in every unlocked cell whose seed has regrown: the map says where

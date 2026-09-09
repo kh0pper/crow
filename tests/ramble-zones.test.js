@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { neighborhood, classifyCell, classifyBbox, cellBox, FRONTIER_DEPTH_DEFAULT } from "../bundles/ramble/server/zones.js";
+import { neighborhood, classifyCell, classifyBbox, cellBox, coalesceBoxes, FRONTIER_DEPTH_DEFAULT } from "../bundles/ramble/server/zones.js";
 import { CELL7_RE, cellsInBbox } from "../bundles/ramble/server/nests.js";
 import { encodeGeohash, decodeGeohash } from "../bundles/ramble/server/anchors.js";
 
@@ -176,4 +176,52 @@ test("classifyBbox only reports cells inside the viewport", () => {
   const bbox = { south: here.lat - 0.002, west: here.lon + 0.05, north: here.lat + 0.002, east: here.lon + 0.06 };
   const out = classifyBbox(bbox, new Set([HOME]), { depth: 3 });
   assert.deepEqual(out, { unlocked: [], frontier: [] }, "off-screen unlocked ground is not reported");
+});
+
+test("coalesceBoxes merges a row's run into one rectangle and leaves gaps alone", () => {
+  const here = decodeGeohash(HOME);
+  const LATS = 180 / 2 ** 17, LONS = 360 / 2 ** 18;
+  const at = (dRow, dCol) => cellBox(encodeGeohash(here.lat + dRow * LATS, here.lon + dCol * LONS, 7));
+
+  // Three in a row, then a gap, then one more — two rectangles, not four.
+  const run = coalesceBoxes([at(0, 0), at(0, 1), at(0, 2), at(0, 5)]);
+  assert.equal(run.length, 2, "a contiguous run collapses; a gap does not");
+  const wide = run.find((b) => b.east - b.west > LONS * 2);
+  assert.ok(wide, "the run became one wide box");
+  assert.ok(Math.abs((wide.east - wide.west) - LONS * 3) < LONS * 0.01, "spanning exactly the three cells");
+
+  // Different rows never merge, however adjacent their columns.
+  assert.equal(coalesceBoxes([at(0, 0), at(1, 0), at(2, 0)]).length, 3, "rows are independent");
+
+  assert.deepEqual(coalesceBoxes([]), []);
+  assert.deepEqual(coalesceBoxes(null), []);
+  assert.deepEqual(coalesceBoxes([null, undefined]), [], "junk entries are skipped, never thrown on");
+
+  // The merged geometry must cover exactly what the cells covered.
+  const cells = [at(0, 0), at(0, 1), at(0, 2)];
+  const [merged] = coalesceBoxes(cells);
+  assert.ok(Math.abs(merged.west - cells[0].west) < 1e-9 && Math.abs(merged.east - cells[2].east) < 1e-9);
+  assert.ok(Math.abs(merged.south - cells[0].south) < 1e-9 && Math.abs(merged.north - cells[0].north) < 1e-9);
+});
+
+test("a heavy walker's history stays a sane payload after coalescing", () => {
+  // The production risk the review named: output is bounded by how far you have
+  // WALKED, not by the viewport. People walk streets, so cells come in runs —
+  // this pins that a big contiguous history collapses instead of shipping
+  // thousands of boxes on every map settle.
+  const here = decodeGeohash(HOME);
+  const LATS = 180 / 2 ** 17, LONS = 360 / 2 ** 18;
+  const unlocked = new Set();
+  const SIDE = 70;   // 4900 cells, about a year of steady walking
+  for (let r = 0; r < SIDE; r += 1) {
+    for (let c = 0; c < SIDE; c += 1) unlocked.add(encodeGeohash(here.lat + r * LATS, here.lon + c * LONS, 7));
+  }
+  const world = { south: -85, west: -179, north: 85, east: 179 };
+  const out = classifyBbox(world, unlocked, { depth: 3 });
+  assert.equal(out.unlocked.length, unlocked.size, "every cell is in view at world zoom");
+
+  const merged = coalesceBoxes(out.unlocked);
+  assert.ok(merged.length <= SIDE + 2, "a solid block collapses to about one box per row, not " + merged.length);
+  const bytes = JSON.stringify({ unlocked: merged, frontier: coalesceBoxes(out.frontier) }).length;
+  assert.ok(bytes < 60 * 1024, "the coalesced payload stays small (" + Math.round(bytes / 1024) + " KB)");
 });

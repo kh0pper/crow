@@ -769,8 +769,10 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // see its edge. Regressing this number silently reinstates that bug, and no
   // other assertion in this file would notice.
   assert.ok(body.includes("var MIN_ZONE_ZOOM = 11;"), "fog must render far enough out to show the edge of your cleared ground");
-  assert.ok(body.includes("var MIN_FRONTIER_DETAIL_ZOOM = 15;"), "the per-cell frontier squares stay a close-up detail");
-  assert.ok(body.includes("map.getZoom() >= MIN_FRONTIER_DETAIL_ZOOM"), "and are actually gated by it, not merely declared");
+  assert.ok(body.includes("var MIN_CELL_DETAIL_ZOOM = 15;"), "per-cell detail stays a close-up detail");
+  assert.ok(body.includes("map.getZoom() >= MIN_CELL_DETAIL_ZOOM"), "and is actually gated by it, not merely declared");
+  assert.ok(body.includes('map.getZoom() >= MIN_CELL_DETAIL_ZOOM ? "&pips=1" : ""'),
+    "and the client does not even ASK for pips it will not draw");
 
   // Seed pips and the pickup moment.
   assert.ok(body.includes("function paintSeedPips("), "the map shows where seed is waiting");
@@ -1479,18 +1481,29 @@ test("GET /api/ramble/zones reports which visible cells still have seed waiting"
 
   // First visit UNLOCKS and pays nothing — so the cell is offering seed.
   await walkTo(LAT, LON);
-  const first = await (await req("/api/ramble/zones?bbox=" + encodeURIComponent(bbox))).json();
+  const url = "/api/ramble/zones?bbox=" + encodeURIComponent(bbox) + "&pips=1";
+  const first = await (await req(url)).json();
   assert.ok(Array.isArray(first.seed), "the wire carries a seed list");
   assert.equal(first.seed.length, 1, "the freshly unlocked cell is offering seed");
-  assert.ok(first.unlocked.some((c) => c.cell === first.seed[0].cell), "a pip only ever sits on unlocked ground");
-  assert.ok(first.seed[0].south < first.seed[0].north && first.seed[0].west < first.seed[0].east,
+  const pip = first.seed[0];
+  assert.ok(pip.south < pip.north && pip.west < pip.east,
     "a pip carries a real footprint, so the client needs no geohash code");
+  // unlocked is coalesced, so it has no cell ids — assert containment instead.
+  assert.ok(
+    first.unlocked.some((c) => c.south <= pip.south && c.north >= pip.north && c.west <= pip.west && c.east >= pip.east),
+    "a pip only ever sits on unlocked ground",
+  );
 
   // Second visit HARVESTS it, so the pip must go.
   await walkTo(LAT, LON);
-  const second = await (await req("/api/ramble/zones?bbox=" + encodeURIComponent(bbox))).json();
+  const second = await (await req(url)).json();
   assert.equal(second.seed.length, 0, "a harvested cell stops offering until the window turns");
   assert.ok(second.unlocked.length >= 1, "but the ground stays unlocked");
+
+  // Zoomed out, the client does not ask for pips and must not be sent any.
+  const noPips = await (await req("/api/ramble/zones?bbox=" + encodeURIComponent(bbox))).json();
+  assert.deepEqual(noPips.seed, [], "no pips requested, none built — the ledger query is skipped too");
+  assert.ok(noPips.unlocked.length >= 1, "the shape still comes back");
 });
 
 test("GET /api/ramble/zones answers a world-sized bbox instead of refusing it", async () => {
