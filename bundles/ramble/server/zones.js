@@ -14,7 +14,7 @@
  * pure and say so on the tin: `frontierDepth(db)` reads a setting, and
  * `gateForZones` takes an encoder.
  */
-import { CELL7_RE, CELL7_LAT_STEP, CELL7_LON_STEP, cellsInBbox, MAX_NEST_CELLS } from "./nests.js";
+import { CELL7_RE, CELL7_LAT_STEP, CELL7_LON_STEP } from "./nests.js";
 import { encodeGeohash, decodeGeohash } from "./anchors.js";
 
 export const FRONTIER_DEPTH_DEFAULT = 3;
@@ -71,36 +71,100 @@ export function cellBox(cell) {
 }
 
 /**
- * Classify every cell in a viewport. Returns null when the bbox covers more
- * cells than we will compute (the same ceiling nests use), so the caller can
- * answer "zoom in" rather than melt. Fog is implicit: a cell in neither list.
- * Entries are footprints (see cellBox), which is what the map draws.
+ * Which unlocked and frontier cells fall inside a viewport. Fog is implicit: a
+ * cell in neither list. Entries are footprints (see cellBox), which is what
+ * the map draws.
+ *
+ * ⚠ THIS ITERATES THE USER'S HISTORY, NOT THE VIEWPORT — deliberately, and it
+ * is why there is no longer a size ceiling. The first version enumerated every
+ * cell in the bbox and asked each whether it was unlocked, which made the cost
+ * proportional to the ZOOM LEVEL and forced a MAX_NEST_CELLS ceiling; above it
+ * the route answered "zoom in". That ceiling turned out to make the feature
+ * unreachable: a player's revealed region grows past what a viewport shows at
+ * the minimum zoom the ceiling allows, so they stand inside their own cleared
+ * ground and can never see its edge (found live on 2026-09-08 — a 2749 m
+ * revealed region against a 1611 m viewport at the old zoom floor).
+ *
+ * Expanding outward from the unlocked set instead costs |unlocked| x (2d+1)^2
+ * regardless of zoom, and the output is bounded by how far the user has walked
+ * rather than how far they have zoomed out. So fog can render at ANY zoom.
  */
-export function classifyBbox(bbox, unlocked, { depth = FRONTIER_DEPTH_DEFAULT, max = MAX_NEST_CELLS } = {}) {
-  let cells;
-  try { cells = cellsInBbox(bbox, { max }); } catch { return null; }   // cellsInBbox THROWS on a malformed bbox
-  if (!cells) return null;
+export function classifyBbox(bbox, unlocked, { depth = FRONTIER_DEPTH_DEFAULT } = {}) {
+  if (!bbox) return null;
+  const { south, west, north, east } = bbox;
+  if (![south, west, north, east].every((n) => Number.isFinite(Number(n)))) return null;
+  const view = { south: Number(south), west: Number(west), north: Number(north), east: Number(east) };
   const set = unlocked instanceof Set ? unlocked : new Set(unlocked || []);
   const out = { unlocked: [], frontier: [] };
   if (set.size === 0) return out;
 
-  // Expand OUTWARD from the unlocked cells once, rather than asking every cell
-  // in the viewport who its neighbours are. The naive direction costs
-  // |viewport| x (2d+1)^2 — measured at 61 ms of synchronous, event-loop-
-  // blocking work for a 7921-cell viewport at depth 3, on every map settle.
-  // This direction costs |unlocked near the viewport| x (2d+1)^2, which for a
-  // handful of nearby cells is a few hundred operations.
   const frontier = new Set();
   for (const u of set) {
     for (const n of neighborhood(u, depth)) if (!set.has(n)) frontier.add(n);
   }
 
-  for (const cell of cells) {
-    const box = set.has(cell) ? cellBox(cell) : (frontier.has(cell) ? cellBox(cell) : null);
-    if (!box) continue;
-    if (set.has(cell)) out.unlocked.push(box); else out.frontier.push(box);
+  for (const cell of set) {
+    const box = cellBox(cell);
+    if (box && boxInView(box, view)) out.unlocked.push(box);
+  }
+  for (const cell of frontier) {
+    const box = cellBox(cell);
+    if (box && boxInView(box, view)) out.frontier.push(box);
   }
   return out;
+}
+
+/**
+ * Merge horizontally adjacent footprints in each latitude row into single
+ * rectangles.
+ *
+ * WHY: the wire used to be bounded by the viewport and is now bounded by how
+ * far the user has walked, which is unbounded. Measured on a contiguous blob:
+ * 5000 unlocked cells is 702 KB of JSON and 5000 hole rings for the client to
+ * draw, on every map settle. People walk STREETS, so their cells come in long
+ * horizontal and vertical runs — collapsing each row's run to one rectangle
+ * turns that same blob into a few dozen boxes with identical geometry.
+ *
+ * The merged box drops `cell`: a run is not one cell. Callers that need cell
+ * ids must read them BEFORE coalescing (the zones route does).
+ */
+export function coalesceBoxes(boxes) {
+  const rows = new Map();
+  for (const b of boxes || []) {
+    if (!b) continue;
+    // Row key off the integer grid index, never the float: two cells in the
+    // same band can differ in the last bit after decode.
+    const row = Math.round((b.south + 90) / CELL7_LAT_STEP);
+    const col = Math.round((b.west + 180) / CELL7_LON_STEP);
+    if (!rows.has(row)) rows.set(row, []);
+    rows.get(row).push({ col, box: b });
+  }
+  const out = [];
+  for (const entries of rows.values()) {
+    entries.sort((a, b) => a.col - b.col);
+    let run = null;
+    for (const e of entries) {
+      if (run && e.col === run.lastCol + 1) {
+        run.east = e.box.east;
+        run.lastCol = e.col;
+        continue;
+      }
+      if (run) out.push({ south: run.south, west: run.west, north: run.north, east: run.east });
+      run = { south: e.box.south, west: e.box.west, north: e.box.north, east: e.box.east, lastCol: e.col };
+    }
+    if (run) out.push({ south: run.south, west: run.west, north: run.north, east: run.east });
+  }
+  return out;
+}
+
+/**
+ * Does a cell footprint touch the viewport? The route rejects a bbox with
+ * west > east before we ever see one, so there is no antimeridian-crossing
+ * case to handle here — a crossing viewport is a 400, not a wrap.
+ */
+function boxInView(box, view) {
+  return box.north >= view.south && box.south <= view.north
+    && box.east >= view.west && box.west <= view.east;
 }
 
 /**

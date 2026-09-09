@@ -77,6 +77,41 @@ export async function recordSeedPickup(db, cell, { now = Date.now(), emit } = {}
   }
 }
 
+/**
+ * Which of these unlocked cells still have seed waiting in the current window,
+ * so the map can show the player where walking pays. A cell is harvestable
+ * until it has a ledger row for the window it is in.
+ *
+ * Filtered by the window SUFFIX in SQL rather than by an IN list of composite
+ * keys: the ledger grows by roughly one row per cell per day forever, and a
+ * suffix match returns only today's handful, while an IN list of every visible
+ * cell would also run into SQLite's bound-variable limit once a player has
+ * walked a whole town.
+ */
+export async function harvestableCells(db, cells, { now = Date.now() } = {}) {
+  const list = (Array.from(cells || [])).filter((c) => typeof c === "string" && CELL7_RE.test(c));
+  if (!db || list.length === 0) return [];
+  try {
+    const { respawnHours } = await readWalletSettings(db);
+    const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    const suffix = ":" + harvestWindow(at, respawnHours);
+    const { rows } = await db.execute({
+      sql: "SELECT key FROM ramble_wallet WHERE kind = ? AND key LIKE ?",
+      args: [SEED_KIND, "%" + suffix],
+    });
+    const taken = new Set();
+    for (const r of rows || []) {
+      const key = String(r.key || "");
+      if (key.endsWith(suffix)) taken.add(key.slice(0, -suffix.length));
+    }
+    return list.filter((c) => !taken.has(c));
+  } catch (err) {
+    // A map that cannot say where seed is should still draw. Never throw here.
+    try { console.warn("[ramble] harvestableCells failed:", err?.message); } catch {}
+    return [];
+  }
+}
+
 /** The derived balance: every earn minus every spend. */
 export async function seedBalance(db) {
   try {
