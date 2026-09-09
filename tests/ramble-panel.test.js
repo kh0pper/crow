@@ -289,6 +289,9 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.ok(sent.includes('id="rb-perch-say"'), "the status strip stays");
 
   assert.ok(sent.includes('id="rb-seed-count"'), "the map bar carries the seed counter");
+  assert.ok(sent.includes('id="rb-heart-count"'), "the map bar carries the heart counter");
+  assert.ok(sent.indexOf('id="rb-heart-count"') > sent.indexOf('id="rb-seed-count"'),
+    "common currency first, rare currency second");
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -907,6 +910,20 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes('opts.className = "rb-here-pet rb-here-plain"'), "a plain dot survives the bird engine failing to load");
 });
 
+test("the map draws heart pips, counts them, and says something when one is taken", async () => {
+  const body = await (await req("/ramble/static/ramble.js")).text();
+  assert.ok(body.includes("function paintHeartPips("), "the map shows where a heart is waiting");
+  assert.ok(body.includes("function heartIcon()"), "pips carry the engine's heart art");
+  assert.ok(body.includes("Bird.mountHeart(svg)"), "drawn by the shared engine, like every other creature part");
+  assert.ok(body.includes("rb-heart-dot"), "and a plain dot survives the engine failing to load");
+  assert.ok(body.includes("paintHeartPips(out.hearts || [])"), "fed from the server's own list");
+  assert.ok(body.includes("out.heart_picked"), "the pickup is consumed from the area response");
+  assert.ok(body.includes("out.heart_source"), "and a regrown heart gets its own line, not the once-ever one's");
+  assert.ok(body.includes("grown here since you last came by"), "the wild heart's copy is actually there");
+  assert.ok(body.includes("function paintHearts("), "the counter is painted from the area response");
+  assert.equal(body.split("`").length - 1, 0, "the panel client must contain ZERO backticks");
+});
+
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   const res = await req("/ramble/static/ramble.css");
   assert.equal(res.status, 200);
@@ -971,6 +988,21 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
 
   assert.ok(body.includes("@keyframes rb-unlock"), "the unlock has an animation");
   assert.ok(body.includes("#ramble .rb-seed {"), "the seed counter has a rule");
+});
+
+test("heart pips, the fallback dot and the pop all have styles", async () => {
+  const css = await (await req("/ramble/static/ramble.css")).text();
+  assert.ok(css.includes("#ramble .rb-heart-pip {"));
+  assert.ok(css.includes("#ramble .rb-heart-dot {"));
+  assert.ok(css.includes("#ramble .rb-hearts {"), "the map-bar counter has a rule");
+  assert.ok(css.includes("#ramble .rb-heart-pop {"));
+  assert.ok(css.includes("@keyframes rb-heart-rise"));
+  // The heart pop joins the EXISTING comma-separated reduced-motion list, so
+  // match it as a member of that list rather than as its own rule.
+  assert.match(css, /prefers-reduced-motion[\s\S]*#ramble \.rb-heart-pop,[\s\S]*animation: none/,
+    "the pop respects reduced motion, like the seed pop already does");
+  assert.ok(css.includes("#ramble .rb-heart-pip > svg {"),
+    "the pip's svg is SIZED — without this it renders at the CSS default 300x150");
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {

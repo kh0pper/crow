@@ -589,6 +589,7 @@
   #ramble .rb-hatch .rb-hatch-bird,
   #ramble .rb-unlock-flash,
   #ramble .rb-here-pet.is-walking > *,
+  #ramble .rb-heart-pop,
   #ramble .rb-seed-pop { animation: none; }
   #ramble .rb-btn,
   #ramble .rb-ring-prg,
@@ -883,6 +884,13 @@
 #ramble .rb-seed-pip { display: grid; place-items: center; }
 #ramble .rb-seed-pip > svg { width: 18px; height: 18px; filter: drop-shadow(1px 2px 0 var(--rb-shadow-col)); }
 #ramble .rb-seed-dot { fill: var(--rb-accent-2); }
+/* A heart container waiting in ground already unlocked. #d8556a is a literal
+   rather than a token deliberately: the fallback dot stands in for the
+   engine's heart when the engine did not load, so it has to be the engine's
+   own colour, not the seed's ochre accent. */
+#ramble .rb-heart-pip { display: grid; place-items: center; }
+#ramble .rb-heart-pip > svg { width: 20px; height: 20px; filter: drop-shadow(1px 2px 0 var(--rb-shadow-col)); }
+#ramble .rb-heart-dot { fill: #d8556a; }
 #ramble .rb-beacon { stroke: var(--rb-line); fill: var(--rb-accent-2); opacity: 0.7; }
 #ramble .rb-beacon-nest { fill: var(--rb-accent); }
 
@@ -930,6 +938,24 @@
 @keyframes rb-seed-rise {
   from { opacity: 1; transform: translateY(0); }
   to { opacity: 0; transform: translateY(-16px); }
+}
+#ramble .rb-hearts {
+  position: relative;   /* anchors the +1 pop */
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 11px; border-radius: 999px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  background: var(--rb-surface); color: var(--rb-text);
+  font: 800 13px var(--rb-font-display);
+}
+#ramble .rb-heart-pop {
+  position: absolute; left: 50%; bottom: 100%;
+  transform: translateX(-50%);
+  font-weight: 700; color: #d8556a; pointer-events: none;
+  animation: rb-heart-rise 1.4s ease-out forwards;
+}
+@keyframes rb-heart-rise {
+  from { opacity: 1; transform: translate(-50%, 0); }
+  to   { opacity: 0; transform: translate(-50%, -1.6rem); }
 }
 
 /* ---------------------------------------------- phase 5: near labels + art */
