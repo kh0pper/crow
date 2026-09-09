@@ -96,6 +96,18 @@
     return drawEgg(seed) + eggFeet;
   }
   function mountWalkingEgg(el, seed) { el.setAttribute("viewBox", "0 0 120 168"); el.innerHTML = drawWalkingEgg(seed); }
+  /* A grain of birdseed. It has to read as FOOD at about 14 px, which a plain
+   * dot never did — so: an almond husk with a seam and a highlight, warm
+   * against a blue-grey map, which is also what makes it findable at a glance.
+   * Same palette family as the egg's feet, so it belongs to this world. */
+  function drawSeed() {
+    return '<g transform="rotate(-20 12 12)">'
+      + '<ellipse cx="12" cy="12" rx="5.4" ry="8" fill="#e8b256" stroke="#8a5a1e" stroke-width="1.7"/>'
+      + '<path d="M12 5 L12 19" stroke="#8a5a1e" stroke-width="1.1" opacity="0.5"/>'
+      + '<ellipse cx="9.7" cy="8.7" rx="1.4" ry="2.3" fill="#fff8e6" opacity="0.5"/>'
+      + '</g>';
+  }
+  function mountSeed(el) { el.setAttribute("viewBox", "0 0 24 24"); el.innerHTML = drawSeed(); }
   function isValidBird(x) { return !!x && typeof x === "object" && ROSTER.indexOf(x.species) >= 0 && isUint32(x.seed); }
-  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, drawBird: drawBird, drawEgg: drawEgg, drawWalkingEgg: drawWalkingEgg, mountBird: mountBird, mountWalkingEgg: mountWalkingEgg, isValidBird: isValidBird };
+  return { ROSTER: ROSTER, SPECIES: SPECIES, PARTS: PARTS, rollGenome: rollGenome, drawBird: drawBird, drawEgg: drawEgg, drawWalkingEgg: drawWalkingEgg, drawSeed: drawSeed, mountBird: mountBird, mountWalkingEgg: mountWalkingEgg, mountSeed: mountSeed, isValidBird: isValidBird };
 });

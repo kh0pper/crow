@@ -776,6 +776,46 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
 
   // Seed pips and the pickup moment.
   assert.ok(body.includes("function paintSeedPips("), "the map shows where seed is waiting");
+  // A seed, not a dot. The first version used a circleMarker in the UI accent,
+  // which read as map chrome rather than as something to walk to.
+  assert.ok(body.includes("function seedIcon()"), "pips carry the engine's seed art");
+  assert.ok(body.includes("Bird.mountSeed(svg)"), "drawn by the shared engine, like every other creature part");
+  assert.ok(body.includes('opts.html = svg;'), "an Element, so Leaflet appends and the sink count holds");
+  assert.ok(body.includes("rb-seed-dot"), "and a plain dot survives the engine failing to load");
+
+  // Fog has to look like weather, not like the geohash grid it is.
+  assert.ok(body.includes("function ensureFogFilter()"), "the mask gets cloudy edges");
+  assert.ok(body.includes('filter.setAttribute("id", "rb-fog-clouds")'), "via a filter the stylesheet can reference");
+  assert.ok(body.includes('createElementNS(NS, "feTurbulence")') && body.includes('createElementNS(NS, "feDisplacementMap")'),
+    "built with createElementNS — a filter is markup, and this file may not use a sink to make markup");
+  assert.ok(body.includes("ensureFogFilter();"), "and is actually installed before the mask draws");
+
+  // The bird's voice: moments only, plus tap/focus to ask.
+  assert.ok(body.includes("function statusLine()"), "ambient status still exists");
+  assert.ok(body.includes("function sayMoment("), "but only moments open the bubble on their own");
+  // ⚠ ONE SENTINEL PER SOURCE. Marks and nests arrive from two independent
+  // fetches, and the egg refresh (no geolocation needed) normally beats both.
+  // A single shared "first look" flag let whichever ran first consume it while
+  // the lists were still empty, so the real data landing afterwards read as an
+  // arrival and the bird announced pre-existing marks on every page load.
+  assert.ok(body.includes("function noteMarks()") && body.includes("function noteNests()"),
+    "marks and nests each judge their own arrivals");
+  assert.ok(!body.includes("function notePerch()"), "the shared-flag version must not come back");
+  assert.ok(body.includes("var spokeMarks = null;") && body.includes("var spokeNests = null;"),
+    "and each starts un-looked-at, so neither source's first draw can speak");
+  assert.ok(body.includes("spokeMarks !== null && n > spokeMarks"), "marks speak only on a real increase");
+  assert.ok(body.includes("spokeNests !== null && spokeNests === 0 && n > 0"), "nests speak only on the 0 -> something transition");
+  // The egg/pet refresh changes the ambient LINE, not the world — it must never
+  // be able to trip an arrival.
+  assert.ok(!/paintEgg[\s\S]{0,900}note(Marks|Nests)\(\)/.test(body),
+    "the egg refresh must not evaluate arrivals");
+
+  // A native title would render the browser's own grey tooltip underneath the
+  // bird's speech bubble on the same hover.
+  assert.ok(!body.includes('title: "You"'), "the marker carries no competing native title");
+  assert.ok(body.includes('sayMoment("New ground.")'), "a first unlock is one");
+  assert.ok(body.includes("|| momentTimer) return;"),
+    "an ambient refresh must not overwrite a moment that is still on screen");
   assert.ok(body.includes("paintSeedPips(out.seed || [])"), "fed from the server's seed list");
   assert.ok(body.includes("function celebrateSeed("), "a pickup is its own moment, not a silent counter tick");
   assert.ok(body.includes("out.seed_picked"), "and it consumes the field the server was already sending");
@@ -799,7 +839,13 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes("function hereIcon("));
   assert.ok(body.includes("function paintHereArt()"));
   assert.ok(body.includes("function hereArt()"));
-  assert.ok(body.includes('hereDot.on("click"'), "the marker itself opens the view — the retired button also matched showView(perchTarget)");
+  // CONTRACT CHANGED 2026-09-08: tapping the bird now ASKS it what is around
+  // rather than navigating. Leaflet opens a non-permanent tooltip on click AND
+  // on focus, so tap-to-ask and keyboard-to-ask both come from binding it. The
+  // labelled strip button is the door — see the rb-perch-open assertions.
+  assert.ok(!body.includes('hereDot.on("click"'), "tapping the bird must not navigate any more");
+  assert.ok(body.includes("function bindPerchVoice()"), "the bird has a voice bound to the marker");
+  assert.ok(body.includes('hereDot.bindTooltip("", { direction: "top"'), "a real bubble with a tail, tracking the bird");
   assert.ok(body.includes('createElementNS("http://www.w3.org/2000/svg", "svg")'), "the art is built without a markup sink");
   assert.ok(body.includes("showView(perchTarget)"), "tapping the marker still opens egg or pet");
   assert.ok(!body.includes('L.circleMarker(ll, { pane: "rb-here"'), "the plain blue dot is gone");
@@ -809,11 +855,14 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
     "the waddle has its OWN anchor — regressing it to lastPostedFix must fail here",
   );
   assert.ok(body.includes("if (moved > 10)"), "and its own 10 m threshold, not the 75 m area-post ratchet");
-  assert.ok(body.includes('setAttribute("role", "button")'), "the marker keeps the accessible role the retired button had");
+  assert.ok(body.includes('setAttribute("role", "img")'), "the marker is not a button any more — it does not navigate");
+  assert.ok(!body.includes('setAttribute("role", "button")'), "and must not claim to be one");
   assert.ok(body.includes('classList.add("is-walking")'), "the marker waddles while you move");
 
-  assert.ok(body.includes('if (ev.key !== "Enter" && ev.key !== " ") return;'), "Enter and Space activate the marker Leaflet only made focusable");
-  assert.ok(body.includes("el.onkeydown ="), "property assignment, so re-skinning cannot stack duplicate handlers");
+  // The hand-rolled Enter/Space bridge is gone with the navigation it drove.
+  // Keyboard users now get the status from Leaflet's own focus/blur tooltip
+  // handlers, and reach the view through the real <button> in the strip.
+  assert.ok(body.includes("el.onkeydown = null"), "the old keyboard bridge is explicitly cleared, not left dangling");
 
   // The world view's GPS-independent door (FIX 1): the map marker is the
   // pretty way in, but it needs a real position fix to exist at all.
@@ -872,6 +921,12 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.ok(body.includes("#ramble .rb-here-pet.rb-here-plain::before {"), "the engine-less fallback dot has a rule");
 
   assert.ok(body.includes("#ramble .rb-seed-pip {"), "seed pips have a rule");
+  assert.ok(body.includes("#ramble .rb-seed-dot {"), "and the engine-less fallback dot has its own");
+  assert.ok(body.includes("filter: url(#rb-fog-clouds)"), "the mask actually references the cloud filter");
+  assert.ok(body.includes("#ramble .rb-voice.leaflet-tooltip {"), "the bird's bubble is styled");
+  assert.ok(body.includes("#ramble .rb-voice.leaflet-tooltip-top:before"), "including the tail that makes it a speech bubble");
+  assert.match(body, /rb-unlock-flash \{[^}]*fill-opacity: 0;/,
+    "the unlock square is invisible without its animation, so reduced-motion leaves no fog block behind");
   assert.ok(body.includes("#ramble .rb-seed-pop {"), "the pickup pop has a rule");
   assert.ok(body.includes("@keyframes rb-seed-rise"), "and an animation");
   assert.match(body, /prefers-reduced-motion[\s\S]*\.rb-seed-pop \{ animation: none/,
