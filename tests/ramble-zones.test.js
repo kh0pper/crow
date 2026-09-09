@@ -65,8 +65,42 @@ test("classifyBbox: returns the unlocked and frontier cells inside a viewport, a
     "no unlocked ground means no zones at all");
   assert.equal(cellBox("nope"), null);
 
+  // CONTRACT CHANGED 2026-09-08. This used to assert null ("too large to
+  // answer") because the first implementation enumerated the viewport and hit
+  // MAX_NEST_CELLS. That ceiling is exactly what made fog unreachable in the
+  // field: a player's revealed region outgrows the viewport at the lowest zoom
+  // the ceiling permitted, so they never see its edge. classifyBbox now
+  // iterates the user's history, so a world bbox is answerable and simply
+  // returns everything they have — bounded by walking, not by zoom.
   const world = { south: -80, west: -170, north: 80, east: 170 };
-  assert.equal(classifyBbox(world, new Set([HOME]), { depth: 1 }), null, "too large to answer");
+  const wide = classifyBbox(world, new Set([HOME]), { depth: 1 });
+  assert.ok(wide, "a world bbox is answerable now — there is no size ceiling");
+  assert.deepEqual(wide.unlocked.map((c) => c.cell), [HOME]);
+  assert.equal(wide.frontier.length, 8, "and returns only what the player has, not the world");
+});
+
+test("classifyBbox cost does not depend on how far you zoom out", () => {
+  // The property the rewrite exists for. A world viewport must cost about what
+  // a street viewport costs, because both iterate the same unlocked set.
+  const here = decodeGeohash(HOME);
+  const unlocked = new Set();
+  for (const c of neighborhood(HOME, 6)) unlocked.add(c);
+  unlocked.add(HOME);
+
+  const tight = { south: here.lat - 0.001, west: here.lon - 0.001, north: here.lat + 0.001, east: here.lon + 0.001 };
+  const world = { south: -85, west: -179, north: 85, east: 179 };
+
+  const t0 = Date.now();
+  for (let i = 0; i < 20; i += 1) classifyBbox(tight, unlocked, { depth: 3 });
+  const tightMs = Math.max(1, Date.now() - t0);
+  const t1 = Date.now();
+  for (let i = 0; i < 20; i += 1) classifyBbox(world, unlocked, { depth: 3 });
+  const worldMs = Date.now() - t1;
+
+  assert.ok(worldMs < tightMs * 4 + 40,
+    "zooming out must not cost more work (tight " + tightMs + "ms vs world " + worldMs + "ms)");
+  const out = classifyBbox(world, unlocked, { depth: 3 });
+  assert.equal(out.unlocked.length, unlocked.size, "every unlocked cell is in view at world zoom");
 });
 
 test("classifyBbox expands from the unlocked cells, so a wide viewport stays cheap", () => {

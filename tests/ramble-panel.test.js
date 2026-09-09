@@ -763,9 +763,21 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   assert.ok(body.includes("if (mark.beacon)"), "a beacon is drawn differently from a full mark");
   assert.ok(body.includes("function drawBeacon(mark, layer)") && body.includes("drawBeacon(nest, nestLayer)"),
     "a nest beacon must live in the layer its own draw pass clears");
-  // The guards refreshNests already has: a zones fetch at world zoom-out would
-  // 400 on every settle and leave stale rectangles pinned to ground you left.
-  assert.ok(body.includes("MIN_ZONE_ZOOM"), "zones are not fetched below a zoom floor");
+  // PIN THE VALUE, not just the name. A floor of 15 is what made fog
+  // unreachable in the field — the viewport at 15 is smaller than a player's
+  // revealed region, so they stand inside their own cleared ground and never
+  // see its edge. Regressing this number silently reinstates that bug, and no
+  // other assertion in this file would notice.
+  assert.ok(body.includes("var MIN_ZONE_ZOOM = 11;"), "fog must render far enough out to show the edge of your cleared ground");
+  assert.ok(body.includes("var MIN_FRONTIER_DETAIL_ZOOM = 15;"), "the per-cell frontier squares stay a close-up detail");
+  assert.ok(body.includes("map.getZoom() >= MIN_FRONTIER_DETAIL_ZOOM"), "and are actually gated by it, not merely declared");
+
+  // Seed pips and the pickup moment.
+  assert.ok(body.includes("function paintSeedPips("), "the map shows where seed is waiting");
+  assert.ok(body.includes("paintSeedPips(out.seed || [])"), "fed from the server's seed list");
+  assert.ok(body.includes("function celebrateSeed("), "a pickup is its own moment, not a silent counter tick");
+  assert.ok(body.includes("out.seed_picked"), "and it consumes the field the server was already sending");
+  assert.ok(body.includes('pop.textContent = "+" + amount'), "the pop is built with textContent, never a markup sink");
 
   // Task 8: the unlock moment and the seed counter.
   assert.ok(body.includes("function celebrateUnlock("), "a first unlock is celebrated once");
@@ -856,6 +868,12 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   assert.ok(body.includes("@keyframes rb-waddle"));
   assert.ok(body.includes("#ramble .rb-here-pet.is-walking"));
   assert.ok(body.includes("#ramble .rb-here-pet.rb-here-plain::before {"), "the engine-less fallback dot has a rule");
+
+  assert.ok(body.includes("#ramble .rb-seed-pip {"), "seed pips have a rule");
+  assert.ok(body.includes("#ramble .rb-seed-pop {"), "the pickup pop has a rule");
+  assert.ok(body.includes("@keyframes rb-seed-rise"), "and an animation");
+  assert.match(body, /prefers-reduced-motion[\s\S]*\.rb-seed-pop \{ animation: none/,
+    "which honours prefers-reduced-motion like every sibling");
 
   assert.ok(body.includes("@keyframes rb-unlock"), "the unlock has an animation");
   assert.ok(body.includes("#ramble .rb-seed {"), "the seed counter has a rule");
@@ -1450,4 +1468,37 @@ test("docs: the Spanish Ramble guide mirrors the English heading structure", () 
     .filter((l) => /^#{2,3} /.test(l)).map((l) => l.split(" ")[0]);
   assert.deepEqual(levels("docs/es/guide/ramble.md"), levels("docs/guide/ramble.md"),
     "en/es Ramble guides must have the same number, order and level of ##/### headings");
+});
+
+test("GET /api/ramble/zones reports which visible cells still have seed waiting", async () => {
+  // Deliberately far from every other coordinate in this file: walkTo unlocks
+  // permanently, so a shared point would let an earlier test decide this one.
+  const LAT = 10.5, LON = 20.5;
+  const pad = 0.004;
+  const bbox = [LAT - pad, LON - pad, LAT + pad, LON + pad].join(",");
+
+  // First visit UNLOCKS and pays nothing — so the cell is offering seed.
+  await walkTo(LAT, LON);
+  const first = await (await req("/api/ramble/zones?bbox=" + encodeURIComponent(bbox))).json();
+  assert.ok(Array.isArray(first.seed), "the wire carries a seed list");
+  assert.equal(first.seed.length, 1, "the freshly unlocked cell is offering seed");
+  assert.ok(first.unlocked.some((c) => c.cell === first.seed[0].cell), "a pip only ever sits on unlocked ground");
+  assert.ok(first.seed[0].south < first.seed[0].north && first.seed[0].west < first.seed[0].east,
+    "a pip carries a real footprint, so the client needs no geohash code");
+
+  // Second visit HARVESTS it, so the pip must go.
+  await walkTo(LAT, LON);
+  const second = await (await req("/api/ramble/zones?bbox=" + encodeURIComponent(bbox))).json();
+  assert.equal(second.seed.length, 0, "a harvested cell stops offering until the window turns");
+  assert.ok(second.unlocked.length >= 1, "but the ground stays unlocked");
+});
+
+test("GET /api/ramble/zones answers a world-sized bbox instead of refusing it", async () => {
+  // The ceiling that used to 400 here is what made fog unreachable: a player's
+  // revealed region outgrows the viewport at the lowest zoom the ceiling
+  // allowed, so they never saw its edge. Bounded by walking now, not by zoom.
+  const res = await req("/api/ramble/zones?bbox=" + encodeURIComponent("-80,-170,80,170"));
+  assert.equal(res.status, 200, "a world bbox is answerable");
+  const out = await res.json();
+  assert.ok(Array.isArray(out.unlocked) && Array.isArray(out.frontier));
 });

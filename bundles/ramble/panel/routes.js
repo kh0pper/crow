@@ -873,8 +873,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     const depth = await mods.zonesMod.frontierDepth(db);
     const unlocked = await mods.cellsMod.unlockedCellsNear(db, bbox, depth);
     const out = mods.zonesMod.classifyBbox(bbox, unlocked, { depth });
-    if (!out) bad("bbox too large — zoom in");
-    res.json({ ...out, depth });
+    // Only a MALFORMED bbox returns null now. classifyBbox iterates the user's
+    // own history rather than the viewport, so there is no size ceiling and no
+    // "zoom in" answer — that ceiling is what made fog unreachable at the
+    // zooms where you can actually see the edge of your cleared ground.
+    if (!out) bad("bbox must be four finite numbers: south,west,north,east");
+    // Seed pips: which VISIBLE unlocked cells still have seed waiting. Asked of
+    // the already-computed visible list, so the query is bounded by the
+    // viewport rather than by everywhere the player has ever walked.
+    const seedSet = new Set(
+      await mods.walletMod.harvestableCells(db, out.unlocked.map((b) => b.cell), { now: Date.now() }),
+    );
+    res.json({ ...out, seed: out.unlocked.filter((b) => seedSet.has(b.cell)), depth });
   }));
 
   router.post("/api/ramble/nests/claim", handle(async (req, res) => {

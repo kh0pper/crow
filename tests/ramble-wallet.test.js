@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
-import { recordSeedPickup, seedBalance, harvestWindow, readWalletSettings, SEED_KIND } from "../bundles/ramble/server/wallet.js";
+import { recordSeedPickup, seedBalance, harvestWindow, readWalletSettings, harvestableCells, SEED_KIND } from "../bundles/ramble/server/wallet.js";
 
 async function freshDb() {
   const db = createClient({ url: "file::memory:" });
@@ -90,4 +90,43 @@ test("seedBalance nets spends against earns, and never throws on a bare database
   });
   assert.equal(await seedBalance(db), 0, "two earned, two spent");
   assert.equal(await seedBalance(createClient({ url: "file::memory:" })), 0, "no table, no throw");
+});
+
+test("harvestableCells: reports the cells whose seed has regrown, so the map can show pips", async () => {
+  const db = await freshDb();
+  const A = "9vk79e9", B = "9vk79ed", C = "9vk79e2";
+  const now = 100 * 24 * HOUR;
+
+  assert.deepEqual((await harvestableCells(db, [A, B, C], { now })).sort(), [C, A, B].sort(),
+    "nothing harvested yet, so every cell is offering");
+
+  await recordSeedPickup(db, A, { now });
+  assert.deepEqual((await harvestableCells(db, [A, B, C], { now })).sort(), [B, C].sort(),
+    "the harvested cell stops offering inside its window");
+
+  // The NEXT window regrows it — the property the whole pip is advertising.
+  assert.deepEqual((await harvestableCells(db, [A, B, C], { now: now + 24 * HOUR })).sort(), [A, B, C].sort(),
+    "seed regrows in the next window");
+});
+
+test("harvestableCells: matches on the window, not merely on the cell name", async () => {
+  const db = await freshDb();
+  const cell = "9vk79e9";
+  const now = 100 * 24 * HOUR;
+  // A row from a DIFFERENT window must not suppress today's pip. A naive
+  // "does any row mention this cell" check would get this wrong.
+  await recordSeedPickup(db, cell, { now: now - 24 * HOUR });
+  assert.deepEqual(await harvestableCells(db, [cell], { now }), [cell]);
+});
+
+test("harvestableCells: junk in, empty out, and never a throw", async () => {
+  const db = await freshDb();
+  assert.deepEqual(await harvestableCells(db, [], { now: 0 }), []);
+  assert.deepEqual(await harvestableCells(db, null, { now: 0 }), []);
+  assert.deepEqual(await harvestableCells(db, ["nope", 7, null, ""], { now: 0 }), [],
+    "a malformed cell is filtered before it can reach SQL");
+  assert.deepEqual(await harvestableCells(null, ["9vk79e9"], { now: 0 }), [], "no db is not a crash");
+  // now: 0 is a real timestamp, not a missing one — the same trap the ledger
+  // guards elsewhere in this file.
+  assert.deepEqual(await harvestableCells(db, ["9vk79e9"], { now: 0 }), ["9vk79e9"]);
 });
