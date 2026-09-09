@@ -43,7 +43,7 @@ import { getPeerCreds } from "../../shared/peer-credentials.js";
 import { signTicket, verifyTicket, isSafeDestPath } from "../../shared/sso-ticket.js";
 import { auditCrossHostCall } from "../../shared/cross-host-auth.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
-import { SUPPORTED_LANGS } from "./shared/i18n.js";
+import { SUPPORTED_LANGS, t } from "./shared/i18n.js";
 import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";

@@ -449,6 +449,27 @@ await initTable("OAuth tables", `
   CREATE INDEX IF NOT EXISTS idx_tokens_type ON oauth_tokens(token_type);
 `);
 
+// --- Pending 2FA tokens ---
+// Deliberately NOT in oauth_tokens: that table's token_type CHECK is
+// ('access','refresh'), and SQLite cannot ALTER a CHECK, so storing the
+// pending-2FA token there needed a full table rebuild. dashboard/totp.js used
+// to INSERT token_type='pending_2fa' into it, which failed the CHECK on every
+// 2FA login — attemptLogin swallowed it as a soft DB error and the operator
+// saw "Login temporarily unavailable" for a CORRECT password, with no way in
+// from the UI. Installs with 2FA off never hit it (sessions use 'access').
+// A dedicated table fixes it additively: no rebuild on a live crow.db.
+// Rows are short-lived (5 min TTL) and swept on each create.
+await initTable("dashboard_pending_2fa table", `
+  CREATE TABLE IF NOT EXISTS dashboard_pending_2fa (
+    token TEXT PRIMARY KEY,
+    meta TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_pending_2fa_expires ON dashboard_pending_2fa(expires_at);
+`);
+
 // --- P2P Sharing Tables ---
 
 await initTable("contacts table", `
