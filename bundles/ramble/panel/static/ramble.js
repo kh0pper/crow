@@ -1176,6 +1176,18 @@
   var outsideBtn = $("rb-go-outside");
   if (outsideBtn) outsideBtn.addEventListener("click", function () { showView("world"); });
 
+  /* Remember whether the reference panel is folded. Ships open, because a new
+   * player needs it; once you know the numbers it is just height above the
+   * chores. Storage can throw outright (private mode, blocked site data), and a
+   * remembered preference is never worth breaking the panel for. */
+  var runsOn = $("rb-runs-on");
+  if (runsOn) {
+    try { if (window.localStorage.getItem("rb.runsOn") === "0") runsOn.open = false; } catch (e) { /* stays open */ }
+    runsOn.addEventListener("toggle", function () {
+      try { window.localStorage.setItem("rb.runsOn", runsOn.open ? "1" : "0"); } catch (e) { /* forget it, then */ }
+    });
+  }
+
   var perchOpenBtn = $("rb-perch-open");
   if (perchOpenBtn) perchOpenBtn.addEventListener("click", function () { showView(perchTarget); });
 
