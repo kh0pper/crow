@@ -1571,6 +1571,15 @@ test("GET /api/ramble/zones reports which visible cells still have seed waiting"
   const pad = 0.004;
   const bbox = [LAT - pad, LON - pad, LAT + pad, LON + pad].join(",");
 
+  // Seed is SPARSE (one cell in seed.rate). This test is about the ROUTE, not
+  // the spawn lottery, so pin rate 1 — otherwise it passes or fails on whether
+  // this particular cell happened to hash lucky. seedFor's own tests cover the
+  // lottery.
+  const rateDb = createDbClient();
+  try {
+    await rateDb.execute("INSERT INTO ramble_settings (key, value) VALUES ('seed.rate', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  } finally { rateDb.close(); }
+
   // First visit UNLOCKS and pays nothing — so the cell is offering seed.
   await walkTo(LAT, LON);
   const url = "/api/ramble/zones?bbox=" + encodeURIComponent(bbox) + "&pips=1";
@@ -1578,12 +1587,11 @@ test("GET /api/ramble/zones reports which visible cells still have seed waiting"
   assert.ok(Array.isArray(first.seed), "the wire carries a seed list");
   assert.equal(first.seed.length, 1, "the freshly unlocked cell is offering seed");
   const pip = first.seed[0];
-  assert.ok(pip.south < pip.north && pip.west < pip.east,
-    "a pip carries a real footprint, so the client needs no geohash code");
-  // unlocked is coalesced, so it has no cell ids — assert containment instead.
+  // A POINT, not a footprint: the seed sits somewhere inside its cell.
+  assert.ok(Number.isFinite(pip.lat) && Number.isFinite(pip.lon), "a pip carries a real position");
   assert.ok(
-    first.unlocked.some((c) => c.south <= pip.south && c.north >= pip.north && c.west <= pip.west && c.east >= pip.east),
-    "a pip only ever sits on unlocked ground",
+    first.unlocked.some((c) => c.south <= pip.lat && c.north >= pip.lat && c.west <= pip.lon && c.east >= pip.lon),
+    "and it only ever sits on unlocked ground",
   );
 
   // Second visit HARVESTS it, so the pip must go.
