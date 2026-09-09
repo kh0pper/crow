@@ -4,7 +4,7 @@
  * - Secret generation, QR code rendering, verification
  * - Recovery codes (SHA-256 hashed, single-use)
  * - Device trust cookies
- * - Pending 2FA tokens (stored in oauth_tokens)
+ * - Pending 2FA tokens (stored in dashboard_pending_2fa)
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -217,7 +217,12 @@ export async function getRecoveryCodeCount() {
   }
 }
 
-// --- Pending 2FA Tokens (oauth_tokens table) ---
+// --- Pending 2FA Tokens (dashboard_pending_2fa table) ---
+//
+// NOT oauth_tokens: its token_type CHECK is ('access','refresh') and SQLite
+// cannot ALTER a CHECK, so an INSERT of token_type='pending_2fa' there failed
+// on every 2FA login and locked the dashboard out (attemptLogin reported it as
+// a soft "server database error" for a correct password). See init-db.js.
 
 /**
  * Create a pending 2FA token after successful password verification.
@@ -227,19 +232,19 @@ export async function createPending2faToken(meta = null) {
   const token = randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + PENDING_2FA_TTL).toISOString();
   // Optional context (e.g. cross-instance SSO {src, dest}) bound to THIS
-  // single-use token, stashed in the otherwise-unused `resource` column. This
+  // single-use token, stored in the `meta` column. This
   // ties the SSO handoff to the specific 2FA flow so a stale cookie can't make
   // a later normal login look like SSO.
   const resource = meta ? JSON.stringify(meta) : null;
   const db = createDbClient();
   try {
     await db.execute({
-      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, resource, expires_at) VALUES (?, 'pending_2fa', 'dashboard', '2fa', ?, ?)",
+      sql: "INSERT INTO dashboard_pending_2fa (token, meta, expires_at) VALUES (?, ?, ?)",
       args: [sha256(token), resource, expiresAt],
     });
     // Clean up expired pending tokens
     await db.execute({
-      sql: "DELETE FROM oauth_tokens WHERE token_type = 'pending_2fa' AND expires_at < datetime('now')",
+      sql: "DELETE FROM dashboard_pending_2fa WHERE expires_at < datetime('now')",
       args: [],
     });
     return token;
@@ -259,10 +264,10 @@ export async function getPending2faContext(token) {
   const db = createDbClient();
   try {
     const result = await db.execute({
-      sql: "SELECT resource FROM oauth_tokens WHERE token = ? AND token_type = 'pending_2fa' AND expires_at > datetime('now')",
+      sql: "SELECT meta FROM dashboard_pending_2fa WHERE token = ? AND expires_at > datetime('now')",
       args: [sha256(token)],
     });
-    const raw = result.rows[0]?.resource;
+    const raw = result.rows[0]?.meta;
     if (!raw) return null;
     try { return JSON.parse(raw); } catch { return null; }
   } finally {
@@ -279,14 +284,14 @@ export async function verifyPending2faToken(token) {
   const db = createDbClient();
   try {
     const result = await db.execute({
-      sql: "SELECT token FROM oauth_tokens WHERE token = ? AND token_type = 'pending_2fa' AND expires_at > datetime('now')",
+      sql: "SELECT token FROM dashboard_pending_2fa WHERE token = ? AND expires_at > datetime('now')",
       args: [sha256(token)],
     });
     if (result.rows.length === 0) return false;
 
     // Consume token
     await db.execute({
-      sql: "DELETE FROM oauth_tokens WHERE token = ? AND token_type = 'pending_2fa'",
+      sql: "DELETE FROM dashboard_pending_2fa WHERE token = ?",
       args: [sha256(token)],
     });
     return true;
