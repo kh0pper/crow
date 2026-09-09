@@ -21,6 +21,7 @@
  */
 
 import { localDay } from "./eggs.js";
+import { maxEnergy, ENERGY_MAX_BASE_DEFAULT } from "./hearts.js";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DECAY_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -76,8 +77,24 @@ export function moodFor(energy) {
   return "alarmed";
 }
 
-function clampEnergy(v) {
-  return Math.max(0, Math.min(100, v));
+/**
+ * The ceiling is DERIVED from the heart ledger (spec §3, D6), so it is passed
+ * in rather than read here — every caller has already fetched it once, and a
+ * second read would risk clamping against a different number than the one the
+ * panel is about to draw.
+ *
+ * ⚠ ASYMMETRIC, DELIBERATELY. An addition stops at the ceiling, but the
+ * ceiling NEVER reduces a value that is already above it. Sync applies
+ * ramble_pet before ramble_wallet, so a bird that is legitimately at 150 can
+ * be seen by an instance that has not yet received the heart rows and computes
+ * a ceiling of 100. A symmetric clamp would write the 150 down, last-writer-
+ * wins would propagate the loss back, and no later arrival could undo it.
+ * Decay still brings an over-ceiling bird down normally — it just is not the
+ * ceiling that does it.
+ */
+function clampEnergy(next, previous, max) {
+  const ceiling = Math.max(Number.isFinite(max) ? max : ENERGY_MAX_BASE_DEFAULT, previous || 0);
+  return Math.max(0, Math.min(ceiling, next));
 }
 
 /**
@@ -119,7 +136,8 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
   }
 
   const delta = FEED_DELTAS[type];
-  const energy = clampEnergy(row.energy + delta);
+  const max = await maxEnergy(db);
+  const energy = clampEnergy(row.energy + delta, row.energy, max);
   const mood = moodFor(energy);
 
   const counterCol = COUNTER_COLUMN[type];
@@ -138,7 +156,7 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
   const updated = await ensureRow(db);
   await safeEmit(emit, "ramble_pet", "update", updated);
 
-  return { owner: "self", mood, energy, places_week, unlocks_week, crows_week, week_start, last_fed_at };
+  return { owner: "self", mood, energy, energy_max: max, places_week, unlocks_week, crows_week, week_start, last_fed_at };
 }
 
 /**
@@ -149,12 +167,13 @@ export async function feed(db, event, { now = Date.now(), emit } = {}) {
  * the raw db row instead leaks `lamport_ts`/`chores_json` into a response
  * that otherwise never carries them. Returns null for a null row.
  */
-export function petFromRow(row) {
+export function petFromRow(row, energyMax) {
   if (!row) return null;
   return {
     owner: "self",
     mood: row.mood,
     energy: row.energy,
+    energy_max: Number.isFinite(energyMax) ? energyMax : ENERGY_MAX_BASE_DEFAULT,
     places_week: row.places_week,
     unlocks_week: row.unlocks_week,
     crows_week: row.crows_week,
@@ -179,7 +198,7 @@ export async function doChore(db, kind, { now = Date.now(), emit } = {}) {
   const chores = readChores(row, now);
 
   if (chores[kind] === true) {
-    return { done: false, chores, pet: petFromRow(row) };
+    return { done: false, chores, pet: petFromRow(row, await maxEnergy(db)) };
   }
 
   chores[kind] = true;
@@ -200,28 +219,36 @@ export async function doChore(db, kind, { now = Date.now(), emit } = {}) {
  */
 export async function petState(db, { now = Date.now() } = {}) {
   const row = await ensureRow(db);
+  const max = await maxEnergy(db);
 
   let energy = row.energy;
-  let mood = row.mood;
   let last_fed_at = row.last_fed_at;
+  let decayed = false;
 
   if (last_fed_at != null) {
     const elapsed = now - last_fed_at;
     if (elapsed >= DECAY_INTERVAL_MS) {
       const intervals = Math.floor(elapsed / DECAY_INTERVAL_MS);
-      energy = clampEnergy(energy - intervals * DECAY_PER_INTERVAL);
-      mood = moodFor(energy);
+      // `row.energy` as the floor argument, so an over-ceiling bird decays by
+      // exactly the intervals elapsed rather than snapping to the ceiling.
+      energy = clampEnergy(energy - intervals * DECAY_PER_INTERVAL, row.energy, max);
       last_fed_at = now;
-      await db.execute({
-        sql: "UPDATE ramble_pet SET energy = ?, mood = ?, last_fed_at = ? WHERE owner = 'self'",
-        args: [energy, mood, last_fed_at],
-      });
+      decayed = true;
     }
+  }
+  const mood = moodFor(energy);
+
+  if (decayed) {
+    await db.execute({
+      sql: "UPDATE ramble_pet SET energy = ?, mood = ?, last_fed_at = ? WHERE owner = 'self'",
+      args: [energy, mood, last_fed_at],
+    });
   }
 
   return {
     mood,
     energy,
+    energy_max: max,
     places_week: row.places_week,
     unlocks_week: row.unlocks_week,
     crows_week: row.crows_week,
