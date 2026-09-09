@@ -233,11 +233,17 @@
       if (perchTarget === "pet" && lastPet && lastPet.bird) {
         svg.setAttribute("class", "rb-here-bird");
         Bird.mountBird(svg, Bird.rollGenome(lastPet.bird.seed, lastPet.bird.species), (lastPet && lastPet.mood) || "happy");
-      } else {
+      } else if (eggSeedId) {
         /* The WALKING egg — legs and all. You are not carrying it, you are it. */
         svg.setAttribute("class", "rb-here-egg");
         svg.setAttribute("viewBox", "0 0 120 168");
         drawWalkingEggSeed(svg, seedFromEggId(eggSeedId));
+      } else {
+        /* No bird and no egg — the window between a first load and the
+         * prologue's Go button. seedFromEggId(null) is 0, so drawing here
+         * would show a phantom egg that does not exist. Return null and let
+         * hereIcon draw its documented plain dot (static/ramble.js:219-222). */
+        return null;
       }
     } catch (e) { return null; }
     return svg;
@@ -246,8 +252,9 @@
   /* Re-skin the marker in place when the egg hatches or the mood changes. */
   function paintHereArt() {
     if (!hereDot) return;
-    var art = hereArt();
-    if (art) hereDot.setIcon(hereIcon(art));
+    /* Unconditional: hereIcon(null) is the documented plain-dot path, and
+     * skipping setIcon here would leave a stale egg on the map forever. */
+    hereDot.setIcon(hereIcon(hereArt()));
     /* The retired perch was a button with an aria-label that tracked its
      * state; a divIcon is a focusable div with neither. Restore both. */
     var el = hereDot.getElement();
@@ -257,7 +264,7 @@
        * aria-describedby to point at it, so a screen reader hears the status
        * on focus without us inventing anything. */
       el.setAttribute("role", "img");
-      el.setAttribute("aria-label", perchTarget === "pet" ? "You, and your bird" : "You, and your egg");
+      el.setAttribute("aria-label", "You");
       el.onkeydown = null;
     }
   }
@@ -269,7 +276,7 @@
   function paintPerchGo() {
     var go = $("rb-perch-open");
     if (!go) return;
-    go.textContent = perchTarget === "pet" ? "Your bird" : "Your egg";
+    go.textContent = "How you're doing";
   }
 
   /* Shared with the area-post trigger: one notion of "moving" for both. */
@@ -837,6 +844,7 @@
   var perchTarget = "egg";
   var eggPercent = 0;
   var eggSeedId = null;
+  var lastWaitingEggId = null;
 
   function setRing(circle, percent) {
     if (!circle) return;
@@ -883,7 +891,8 @@
   function statusLine() {
     var line;
     if (perchTarget === "egg") {
-      line = "Your egg is " + Math.round(eggPercent) + "% warm.";
+      /* No egg at all: say nothing about warmth rather than claiming 0%. */
+      line = eggSeedId ? "Your egg is " + Math.round(eggPercent) + "% warm." : "Quiet around here right now.";
     } else if (lastMarks.length === 0) {
       line = "Quiet around here right now.";
     } else {
@@ -1204,19 +1213,23 @@
 
   function paintEgg(state) {
     if (!state || hatchLock) return;
-    var egg = state.egg || {};
+    var egg = state.egg;                      /* NULL when genuinely eggless */
     var list = state.checklist || {};
 
-    eggPercent = typeof egg.percent === "number" ? egg.percent : 0;
-    eggSeedId = egg.egg_id || null;
+    var has = !!egg;
+    eggPercent = has && typeof egg.percent === "number" ? egg.percent : 0;
+    eggSeedId = has ? egg.egg_id : null;
 
     setRing($("rb-egg-ring"), eggPercent);
-    setText($("rb-egg-percent"), Math.round(eggPercent) + "%");
-    setText($("rb-egg-line"), "warmth " + (egg.warmth || 0) + " of " + (egg.hatch_at || 0) +
-      " · it warms every time you get somewhere new");
+    setText($("rb-egg-percent"), has ? Math.round(eggPercent) + "%" : "—");
+    setText($("rb-egg-line"), has
+      ? "warmth " + (egg.warmth || 0) + " of " + (egg.hatch_at || 0) +
+        " · it warms every time you get somewhere new"
+      : "No one on the way just now.");
+    setHidden($("rb-egg-empty"), has);
 
     var art = $("rb-egg-art");
-    if (art) { setHidden(art, false); drawEggArt(art, egg.egg_id); }
+    if (art) { setHidden(art, !has); if (has) drawEggArt(art, egg.egg_id); }
     var birdEl = $("rb-hatch-bird");
     if (birdEl) setHidden(birdEl, true);
 
@@ -1241,9 +1254,12 @@
       setText($("rb-egg-status"), "Checking in…");
       jsonFetch("/api/ramble/egg/checkin", { method: "POST", body: {} })
         .then(function (out) {
-          setText($("rb-egg-status"), (out && out.credited)
-            ? "Checked in. That is today's warmth."
-            : "Already checked in today — go somewhere instead.");
+          /* Three arms, not two. With no egg the credit was real but the
+           * warmth had nowhere to land (D3), and a repeat tap is neither. */
+          setText($("rb-egg-status"),
+            !(out && out.credited) ? "Already checked in today — go somewhere instead."
+            : out.egg ? "Checked in. That is today's warmth."
+            : "Checked in. Nothing to warm yet — but it counted.");
           handleHatched(out && out.hatched);
           refreshPet();
           return refreshEgg();
@@ -1334,16 +1350,41 @@
     setText($("rb-stat-unlocks"), String(pet.unlocks_week || 0));
     setText($("rb-stat-crows"), String(pet.crows_week || 0));
 
-    /* The successor egg, and the only route back to the egg view (and its
-     * daily check-in) once the perch belongs to a hatched bird. */
-    var nextPct = (pet.egg && typeof pet.egg.percent === "number") ? pet.egg.percent : eggPercent;
-    /* statusLine renders the world view's warmth line from this, and the
-     * ring that used to show live progress is gone, so this is now the only
-     * thing keeping that line honest between egg-view visits. */
-    if (pet.egg && typeof pet.egg.percent === "number") eggPercent = pet.egg.percent;
+    /* The next you, and the ONLY route back to the egg view (and its daily
+     * check-in) once the perch belongs to a hatched bird. It changes state
+     * when there is no egg; it is never hidden. */
+    var nextEgg = pet.egg || null;
+    var hasNext = !!nextEgg;
+    var nextPct = hasNext && typeof nextEgg.percent === "number" ? nextEgg.percent : 0;
+    if (hasNext) { eggPercent = nextPct; eggSeedId = nextEgg.egg_id; }
+    else { eggPercent = 0; eggSeedId = null; }
+
     setRing($("rb-nextegg-ring"), nextPct);
-    setText($("rb-nextegg-percent"), Math.round(nextPct) + "%");
-    drawEggArt($("rb-nextegg-art"), eggSeedId);
+    setText($("rb-nextegg-percent"), hasNext ? Math.round(nextPct) + "%" : "—");
+    var nextArt = $("rb-nextegg-art");
+    if (nextArt) { setHidden(nextArt, !hasNext); if (hasNext) drawEggArt(nextArt, nextEgg.egg_id); }
+    setHidden($("rb-nextegg-empty"), hasNext);
+
+    /* Nothing auto-promotes a shelf egg into an empty slot (see the server's
+     * promoteFromShelf note), so offer it here rather than leaving the player
+     * with no signal and no way back. It also means they are NOT eggless, so
+     * the lay line must not claim they are. */
+    var waiting = pet.shelf_waiting || null;
+    setHidden($("rb-nextegg-waiting"), hasNext || !waiting);
+    setHidden($("rb-nextegg-warm"), hasNext || !waiting);
+    lastWaitingEggId = waiting;
+
+    var lay = pet.lay || null;
+    var layEl = $("rb-nextegg-lay");
+    if (layEl) {
+      setHidden(layEl, hasNext || !lay || !!waiting);
+      if (!hasNext && lay && !waiting) {
+        setText(layEl, lay.days > 0
+          ? "You've had " + lay.days + " good " + (lay.days === 1 ? "day" : "days") +
+            " — keep it up and you'll manage one yourself."
+          : "Keep yourself happy and you'll manage one yourself, in time.");
+      }
+    }
 
     /* "My bird" only exists once there is one. */
     var myBird = $("rb-my-bird");
@@ -1376,6 +1417,13 @@
   if (seeEggBtn) seeEggBtn.addEventListener("click", function () { showView("egg"); });
   var myBirdBtn = $("rb-my-bird");
   if (myBirdBtn) myBirdBtn.addEventListener("click", function () { showView("pet"); });
+
+  var warmBtn = $("rb-nextegg-warm");
+  if (warmBtn) warmBtn.addEventListener("click", function () {
+    if (!lastWaitingEggId) return;
+    incubate({ egg_id: lastWaitingEggId }, warmBtn)
+      .catch(function (err) { setText($("rb-nextegg-waiting"), err.message); });
+  });
 
   /* ---------------------------------------------------------------- nests */
 
@@ -1795,7 +1843,7 @@
 
   function incubate(egg, btn) {
     btn.disabled = true;
-    jsonFetch("/api/ramble/eggs/" + encodeURIComponent(egg.egg_id) + "/incubate", { method: "POST", body: {} })
+    return jsonFetch("/api/ramble/eggs/" + encodeURIComponent(egg.egg_id) + "/incubate", { method: "POST", body: {} })
       .then(function (out) {
         flockStatus("Swapped. The other one keeps its warmth on the shelf.");
         handleHatched(out && out.hatched);
@@ -1803,7 +1851,14 @@
         refreshPet();
         return refreshFlock();
       })
-      .catch(function (err) { flockStatus(err.message); btn.disabled = false; });
+      .catch(function (err) {
+        flockStatus(err.message);
+        btn.disabled = false;
+        /* Rethrown so a caller off the flock view (the pet card's Warm it
+         * button) can report the same failure somewhere ITS tap can see —
+         * the flock view's own status line is elsewhere in the DOM. */
+        throw err;
+      });
   }
 
   function giftEgg(egg, btn) {
@@ -1852,7 +1907,7 @@
     }
     var acts = document.createElement("div");
     acts.className = "rb-acts";
-    acts.appendChild(shelfAction(egg, "Incubate", function (b) { incubate(egg, b); }));
+    acts.appendChild(shelfAction(egg, "Incubate", function (b) { incubate(egg, b).catch(function () { /* already reported via flockStatus */ }); }));
     acts.appendChild(shelfAction(egg, "Gift", function (b) { giftEgg(egg, b); }));
     acts.appendChild(shelfAction(egg, "Swap", function (b) { proposeSwap(egg, b); }));
     row.appendChild(acts);
@@ -2122,7 +2177,7 @@
       /* A compass that stopped reporting (screen lock, sensor hiccup) must not
        * keep placing labels with confidence: a stale heading falls back to the ring. */
       if (arPose.heading != null && Date.now() - arHeadingAt > AR_HEADING_STALE_MS) arPose.heading = null;
-      arSession.render({ anchors: arAnchors, pose: arPose, bird: arBirdState(), camera: arCamera });
+      arSession.render({ anchors: arAnchors, pose: arPose, bird: arBirdState(), camera: arCamera, hasEgg: !!eggSeedId });
     });
   }
 

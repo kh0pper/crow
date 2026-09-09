@@ -197,6 +197,7 @@ export default {
 
             <p class="rb-big" id="rb-egg-percent">&mdash;</p>
             <p class="rb-muted rb-fine" id="rb-egg-line">Reading the warmth&hellip;</p>
+            <p class="rb-muted rb-fine" id="rb-egg-empty" hidden>Nests hold them. So do friends.</p>
           </section>
 
           <section class="rb-card rb-hatch-reveal" id="rb-hatch-reveal" hidden>
@@ -324,6 +325,10 @@ export default {
               <strong class="rb-big rb-grow" id="rb-nextegg-percent">&mdash;</strong>
               <button class="rb-btn rb-btn-ghost" id="rb-see-egg" type="button">See egg</button>
             </div>
+            <p class="rb-muted rb-fine" id="rb-nextegg-empty" hidden>Nothing warming just now.</p>
+            <p class="rb-muted rb-fine" id="rb-nextegg-lay" hidden></p>
+            <p class="rb-muted rb-fine" id="rb-nextegg-waiting" hidden>One&rsquo;s waiting on your shelf.</p>
+            <button class="rb-btn rb-btn-ghost" id="rb-nextegg-warm" type="button" hidden>Warm it</button>
           </section>
 
           <button class="rb-btn" id="rb-my-flock" type="button">${icon("flock")}My flock</button>
