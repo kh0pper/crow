@@ -167,6 +167,45 @@ async function ensureSyncConflictsOpColumn(db) {
 }
 
 /**
+ * Migration: ensure the `dashboard_pending_2fa` table exists.
+ *
+ * dashboard/totp.js stores the short-lived pending-2FA token here. It used to
+ * INSERT token_type='pending_2fa' into oauth_tokens, whose
+ * CHECK(token_type IN ('access','refresh')) rejected it — so on any install
+ * with dashboard 2FA enabled, a CORRECT password produced "Login temporarily
+ * unavailable (server database error)" (attemptLogin's DB-failure path) and
+ * the dashboard was unreachable. Installs with 2FA off never hit it, because
+ * sessions use token_type='access'.
+ *
+ * init-db.js creates the table, but a host that pulls code and restarts
+ * WITHOUT running init-db would still be locked out — the same deploy-ordering
+ * window ensureSyncConflictsOpColumn closes above. Purely additive
+ * (CREATE TABLE IF NOT EXISTS): no rebuild of a live table, nothing dropped.
+ * Idempotent by construction, so no state marker.
+ */
+async function ensurePending2faTable(db) {
+  const { rows } = await db.execute({
+    sql: "SELECT name FROM sqlite_master WHERE type='table' AND name='dashboard_pending_2fa'",
+    args: [],
+  });
+  if (rows.length > 0) return { ran: false, reason: "already-present" };
+  await db.execute({
+    sql: `CREATE TABLE IF NOT EXISTS dashboard_pending_2fa (
+            token TEXT PRIMARY KEY,
+            meta TEXT,
+            expires_at TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+          )`,
+    args: [],
+  });
+  await db.execute({
+    sql: "CREATE INDEX IF NOT EXISTS idx_pending_2fa_expires ON dashboard_pending_2fa(expires_at)",
+    args: [],
+  });
+  return { ran: true };
+}
+
+/**
  * Run all startup migrations. Safe to call multiple times (each migration
  * tracks its own run state and skips if already applied).
  */
@@ -182,6 +221,11 @@ export async function runGatewayMigrations(db) {
     results.push({ id: "2026-06-11_sync_conflicts_op_column", ...(await ensureSyncConflictsOpColumn(db)) });
   } catch (err) {
     results.push({ id: "2026-06-11_sync_conflicts_op_column", error: err.message });
+  }
+  try {
+    results.push({ id: "2026-09-09_dashboard_pending_2fa_table", ...(await ensurePending2faTable(db)) });
+  } catch (err) {
+    results.push({ id: "2026-09-09_dashboard_pending_2fa_table", error: err.message });
   }
   return results;
 }
