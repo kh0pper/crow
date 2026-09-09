@@ -248,6 +248,16 @@
     }
   }
 
+  /* The world view's GPS-independent door. The map marker is the pretty way in;
+   * this is the one that still works indoors, with location denied, or if
+   * Leaflet never loads. Retiring the old corner button without this left the
+   * view with no exit at all. */
+  function paintPerchGo() {
+    var go = $("rb-perch-open");
+    if (!go) return;
+    go.textContent = perchTarget === "pet" ? "Your bird" : "Your egg";
+  }
+
   /* Shared with the area-post trigger: one notion of "moving" for both. */
   function markWalking() {
     if (!hereDot) return;
@@ -610,7 +620,7 @@
     if (markerLayer) markerLayer.clearLayers();
     marks.forEach(function (mark) {
       if (!markerLayer) return;
-      if (mark.beacon) { drawBeacon(mark); return; }   /* forEach callback: return, never continue */
+      if (mark.beacon) { drawBeacon(mark, markerLayer); return; }   /* forEach callback: return, never continue */
       if (typeof mark.lat === "number" && typeof mark.lon === "number") {
         /* An open mark publishes its real anchor: a normal pin. */
         var marker = L.marker([mark.lat, mark.lon], { title: markLabel(mark) });
@@ -639,11 +649,11 @@
 
   /* A frontier beacon: something is there, but not what. The server already
    * stripped every detail; this only says which kind it is. */
-  function drawBeacon(mark) {
+  function drawBeacon(mark, layer) {
     var cls = mark.kind === "nest" ? "rb-beacon rb-beacon-nest" : "rb-beacon";
     L.circleMarker([mark.lat, mark.lon], {
       className: cls, radius: 7, weight: 2, fillOpacity: 0.5, interactive: false,
-    }).addTo(markerLayer);
+    }).addTo(layer);
   }
 
   /** The list under the map mirrors the pins, newest first, capped. */
@@ -757,6 +767,7 @@
     perchTarget = valid ? "pet" : "egg";
     paintPerchSay();
     paintHereArt();
+    paintPerchGo();
   }
 
   function paintPerchSay() {
@@ -1074,6 +1085,9 @@
   var outsideBtn = $("rb-go-outside");
   if (outsideBtn) outsideBtn.addEventListener("click", function () { showView("world"); });
 
+  var perchOpenBtn = $("rb-perch-open");
+  if (perchOpenBtn) perchOpenBtn.addEventListener("click", function () { showView(perchTarget); });
+
   /* ------------------------------------------------------------------ pet */
 
   var MOOD_LINE = {
@@ -1128,6 +1142,10 @@
     /* The successor egg, and the only route back to the egg view (and its
      * daily check-in) once the perch belongs to a hatched bird. */
     var nextPct = (pet.egg && typeof pet.egg.percent === "number") ? pet.egg.percent : eggPercent;
+    /* paintPerchSay renders the world view's warmth line from this, and the
+     * ring that used to show live progress is gone, so this is now the only
+     * thing keeping that line honest between egg-view visits. */
+    if (pet.egg && typeof pet.egg.percent === "number") eggPercent = pet.egg.percent;
     setRing($("rb-nextegg-ring"), nextPct);
     setText($("rb-nextegg-percent"), Math.round(nextPct) + "%");
     drawEggArt($("rb-nextegg-art"), eggSeedId);
@@ -1369,7 +1387,7 @@
     nestLayer.clearLayers();
     nestMarkers = {};
     list.forEach(function (nest) {
-      if (nest.beacon) { drawBeacon(nest); return; }
+      if (nest.beacon) { drawBeacon(nest, nestLayer); return; }
       var icon = L.divIcon({
         className: "rb-nest-pin" + (nest.claimed ? " is-claimed" : ""),
         html: nestEggHtml(nest.seed),

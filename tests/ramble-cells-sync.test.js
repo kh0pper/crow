@@ -55,14 +55,14 @@ test("applyRambleCell: inserts once, keeps the EARLIEST first_unlocked_at, ignor
   assert.equal((await rowsOf(db, "SELECT * FROM ramble_cells")).length, 1, "junk is ignored, never thrown");
 });
 
-test("applyRambleWallet: a ledger row is written once and never mutated or deleted", async () => {
+test("applyRambleWallet: the natural key deduplicates, a differing delta resolves to MAX, and deletes are ignored", async () => {
   const db = await freshDb();
   await applyRambleWallet(db, "insert", { kind: "seed", key: "9vk79ed:1", delta: 1, created_at: 100 }, 10);
   await applyRambleWallet(db, "insert", { kind: "seed", key: "9vk79ed:1", delta: 99, created_at: 200 }, 20);
   const rows = await rowsOf(db, "SELECT * FROM ramble_wallet");
   assert.equal(rows.length, 1, "the natural key deduplicates");
-  assert.equal(Number(rows[0].delta), 1, "a replay never rewrites the fact");
-  assert.equal(Number(rows[0].created_at), 100);
+  assert.equal(Number(rows[0].delta), 99, "a disagreement resolves to the higher delta, never a silent shrink");
+  assert.equal(Number(rows[0].created_at), 100, "the earlier timestamp wins");
 
   await applyRambleWallet(db, "delete", { kind: "seed", key: "9vk79ed:1" }, 30);
   assert.equal((await rowsOf(db, "SELECT * FROM ramble_wallet")).length, 1, "ledger rows are never deleted");
@@ -92,4 +92,19 @@ test("two instances converge on the union, in either arrival order", async () =>
     .map((r) => [r.cell, Number(r.first_unlocked_at)]);
   assert.deepEqual(await read(a), await read(b), "order of arrival does not matter");
   assert.deepEqual(await read(a), [["9vk79e0", 50], ["9vk79e1", 200]]);
+});
+
+test("applyRambleWallet: two instances converge on the same delta and created_at, in either arrival order", async () => {
+  const a = await freshDb();
+  const b = await freshDb();
+  const events = [
+    ["insert", { kind: "seed", key: "9vk79ed", delta: 5, created_at: 1000 }, 1],
+    ["insert", { kind: "seed", key: "9vk79ed", delta: 1, created_at: 2000 }, 2],
+  ];
+  for (const [op, row, ts] of events) await applyRambleWallet(a, op, row, ts);
+  for (const [op, row, ts] of [...events].reverse()) await applyRambleWallet(b, op, row, ts);
+  const read = async (db) => (await db.execute("SELECT delta, created_at FROM ramble_wallet WHERE kind = 'seed' AND key = '9vk79ed'")).rows
+    .map((r) => [Number(r.delta), Number(r.created_at)]);
+  assert.deepEqual(await read(a), await read(b), "order of arrival must not leave two instances with different balances");
+  assert.deepEqual(await read(a), [[5, 1000]], "the disagreement resolves to the higher delta and the earlier timestamp");
 });

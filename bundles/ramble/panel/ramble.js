@@ -128,6 +128,7 @@ export default {
 
             <div class="rb-perch">
               <div class="rb-say" id="rb-perch-say">Getting your bearings&hellip;</div>
+              <button class="rb-btn rb-btn-ghost rb-perch-go" id="rb-perch-open" type="button">Your egg</button>
             </div>
           </div>
 
