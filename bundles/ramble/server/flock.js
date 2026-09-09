@@ -19,7 +19,7 @@ import { createRequire } from "node:module";
 import { withinRange, haversineMeters } from "./anchors.js";
 import { isoWeek, startOfLocalDay, hatchIfReady, ensureIncubatingEgg, readWarmthWeights } from "./eggs.js";
 import { nestFor, cellsInBbox, nestsInCells, NEST_RATE_DEFAULT, CELL7_RE, WEEK_RE } from "./nests.js";
-import { isEggLocked, lockedEggIds } from "./trades.js";
+import { isEggLocked, lockedEggIds } from "./egg-locks.js";
 
 const require = createRequire(import.meta.url);
 const { ROSTER } = require("./bird-svg.cjs");
