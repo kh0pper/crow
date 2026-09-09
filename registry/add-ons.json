@@ -4887,7 +4887,7 @@
     {
       "id": "ramble",
       "name": "Ramble",
-      "version": "0.9.1",
+      "version": "0.9.2",
       "type": "mcp-server",
       "author": "Crow",
       "category": "social",
