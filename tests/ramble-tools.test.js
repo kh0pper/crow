@@ -110,6 +110,9 @@ test("ramble_pet_state returns the pet's current state", async () => {
   assert.equal(typeof state.crows_week, "number");
   assert.equal(typeof state.hearts, "number", "the tool reports the same wallet the panel does");
   assert.equal(typeof state.energy_max, "number");
+  assert.equal(typeof state.lay.days, "number", "ramble_pet_state must match GET /api/ramble/pet's lay progress");
+  assert.equal(typeof state.lay.needed, "number");
+  assert.ok(Object.hasOwn(state, "shelf_waiting"), "ramble_pet_state owns shelf_waiting (the egg tool does not)");
 });
 
 test("ramble_unlock on an in-range open mark feeds unlock_mark (unlocks_week increments)", async () => {
@@ -135,6 +138,9 @@ test("ramble_egg_state returns a numeric egg.percent between 0 and 100", async (
   const payload = JSON.parse(r.content[0].text);
   assert.equal(typeof payload.egg.percent, "number");
   assert.ok(payload.egg.percent >= 0 && payload.egg.percent <= 100);
+  assert.equal(typeof payload.lay.days, "number", "ramble_egg_state must match GET /api/ramble/egg's lay progress");
+  assert.equal(typeof payload.lay.needed, "number");
+  assert.ok(!Object.hasOwn(payload, "shelf_waiting"), "the egg tool deliberately does not carry shelf_waiting — that affordance is the pet card's alone");
 });
 
 test("ramble_checkin credits once per local day; a second same-day call is not credited", async () => {
@@ -228,6 +234,12 @@ test("ramble_nests lists deterministic nests nearest-first; ramble_claim_nest cl
   const petAfter = JSON.parse((await h.ramble_pet_state({})).content[0].text);
   assert.equal(eggAfter.egg.warmth, eggBefore.egg.warmth);
   assert.equal(petAfter.energy, petBefore.energy);
+  // nextPromotable only offers a shelved egg while NO egg is incubating
+  // (eggAfter.egg is still present, unchanged, above) — so the freshly
+  // shelved egg does not surface here yet; this only confirms the field
+  // exists and agrees with that rule rather than dereferencing blindly.
+  assert.equal(petAfter.shelf_waiting, null, "an egg is already incubating, so nothing is offered for promotion yet");
+  assert.ok(!Object.hasOwn(eggAfter, "shelf_waiting"), "ramble_egg_state must not disagree with GET /api/ramble/egg by carrying it");
 });
 
 test("phase 3 tools: gift and propose_swap validate the contact and the egg, queue one DM each; leave_mark reports recipients", async () => {
