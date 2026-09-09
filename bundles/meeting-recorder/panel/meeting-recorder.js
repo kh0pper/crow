@@ -92,6 +92,7 @@ export default {
                   border: 1px solid var(--crow-border); border-radius: var(--crow-radius-pill);
                   overflow: hidden; margin: var(--crow-space-3) 0 var(--crow-space-1); }
   .mr-meter { height: 100%; width: 0%; background: var(--crow-accent); transition: width .1s linear; }
+  .mr-warn { color: var(--crow-warning); }
   .mr-big { font-size: var(--crow-text-3xl); font-weight: 600;
             font-variant-numeric: tabular-nums; color: var(--crow-text-primary); }
   .mr-note { border-left: 3px solid var(--crow-warning); background: var(--crow-bg-elevated);
@@ -125,7 +126,9 @@ export default {
     system sound.</span></span></label>
   <label class="mr-check"><input type="checkbox" id="mr-src-mic" checked>
     <span><strong>My microphone</strong>
-    <span class="mr-hint">Catches what you say, including questions you ask.</span></span></label>
+    <span class="mr-hint">Catches what you say. <strong>Turn this on if you will be
+    speaking</strong>, or if anyone in the room with you will. Leave it off when you are only
+    listening.</span></span></label>
   <div class="mr-row" style="margin-top:var(--crow-space-4)">
     <button class="btn btn-primary" id="mr-start">Start recording</button>
   </div>
@@ -137,10 +140,12 @@ export default {
     <div><span class="mr-dot"></span><span class="mr-big" id="mr-elapsed">0:00</span></div>
     <button class="btn" id="mr-stop">Stop and transcribe</button>
   </div>
+  <p class="mr-hint" id="mr-live-sources"></p>
   <div class="mr-meterwrap"><div class="mr-meter" id="mr-meter"></div></div>
   <p class="mr-hint" id="mr-stat">starting…</p>
-  <div class="mr-note" id="mr-silence" hidden>No sound has reached the recorder yet. If the meeting
-    audio is the part you need, stop, start again, and tick <strong>Share tab audio</strong>.</div>
+  <div class="mr-note" id="mr-silence" hidden>No sound has reached the recorder in the last little
+    while. Recording continues either way. If the meeting audio is the part you need, stop, start
+    again, and tick <strong>Share tab audio</strong> in the picker.</div>
   <label class="mr-label" for="mr-notes" style="margin-top:var(--crow-space-4)">Notes while you listen</label>
   <textarea id="mr-notes" placeholder="Decisions, questions, anything worth flagging."></textarea>
 </div>
@@ -179,6 +184,7 @@ ${section(
 
   let rec = null, sid = null, t0 = 0, timer = null, streams = [], ac = null;
   let uploaded = 0, chunks = 0, sawSound = false, stopping = false;
+  let levelTimer = null, active = [];
 
   if (!window.isSecureContext) $("mr-insecure").hidden = false;
 
@@ -186,6 +192,10 @@ ${section(
     $("mr-setup-msg").textContent = "";
     const wantTab = $("mr-src-tab").checked, wantMic = $("mr-src-mic").checked;
     if (!wantTab && !wantMic) { $("mr-setup-msg").textContent = "Pick at least one source."; return; }
+    if (!wantMic) {
+      $("mr-setup-msg").textContent =
+        "Recording meeting audio only. Your own voice will not be captured.";
+    }
 
     ac = new AudioContext();
     const mix = ac.createMediaStreamDestination();
@@ -234,15 +244,17 @@ ${section(
     analyser.fftSize = 512;
     ac.createMediaStreamSource(mix.stream).connect(analyser);
     const buf = new Uint8Array(analyser.frequencyBinCount);
-    (function draw() {
+    // A timer, not requestAnimationFrame: the browser suspends animation frames in a
+    // background tab, and sharing a meeting tab puts this page in the background, which
+    // froze the meter and tripped the silence note while the audio recorded correctly.
+    levelTimer = setInterval(() => {
       if (!rec) return;
       analyser.getByteTimeDomainData(buf);
       let m = 0;
       for (const v of buf) m = Math.max(m, Math.abs(v - 128));
       if (m > 4) sawSound = true;
       $("mr-meter").style.width = Math.min(100, (m / 60) * 100) + "%";
-      requestAnimationFrame(draw);
-    })();
+    }, 100);
 
     rec = new MediaRecorder(mix.stream, { mimeType: "audio/webm;codecs=opus", audioBitsPerSecond: 48000 });
     rec.ondataavailable = async (e) => {
@@ -259,6 +271,11 @@ ${section(
         $("mr-stat").textContent = "Upload failed, still recording locally: " + err.message;
       }
     };
+    active = sources.slice();
+    $("mr-live-sources").textContent = "Meeting audio: "
+      + (active.includes("meeting") ? "on" : "off")
+      + " \u00b7 Microphone: " + (active.includes("microphone") ? "on" : "off");
+    $("mr-live-sources").classList.toggle("mr-warn", !active.includes("microphone"));
     rec.start(15000);
     t0 = Date.now();
     $("mr-setup").hidden = true; $("mr-upload-card").hidden = true;
@@ -345,6 +362,8 @@ ${section(
   }
 
   function cleanup() {
+    if (levelTimer) { clearInterval(levelTimer); levelTimer = null; }
+    $("mr-meter").style.width = "0%";
     streams.forEach((s) => s.getTracks().forEach((t) => t.stop()));
     streams = [];
     if (ac) { ac.close().catch(() => {}); ac = null; }
@@ -359,6 +378,7 @@ ${section(
     $("mr-done").hidden = true; $("mr-setup").hidden = false; $("mr-upload-card").hidden = false;
     $("mr-stop").disabled = false; $("mr-up-wrap").hidden = true; $("mr-up-bar").style.width = "0%";
     $("mr-file").value = ""; uploaded = 0; chunks = 0; sawSound = false; $("mr-notes").value = "";
+    active = []; $("mr-live-sources").textContent = ""; $("mr-setup-msg").textContent = "";
   });
 })();
 </script>`;
