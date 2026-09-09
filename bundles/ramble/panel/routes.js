@@ -194,7 +194,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -213,16 +213,18 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/zones.js"),
         bundleImport("server/cells.js"),
         bundleImport("server/wallet.js"),
+        bundleImport("server/hearts.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
       if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
-          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod || !zonesMod || !cellsMod || !walletMod) {
+          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod || !zonesMod ||
+          !cellsMod || !walletMod || !heartsMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, heartsMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -713,6 +715,8 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
     let unlockedNow = null;
     let seedPicked = 0;
+    let heartPicked = 0;
+    let heartSource = null;
     if (here) {
       // Geohash-7 (spec §2.1) — the credit key's period is the ISO week, so
       // the same real place only ever counts once a week no matter how many
@@ -733,17 +737,45 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       if (!out.unlocked && out.cell) {
         seedPicked = (await mods.walletMod.recordSeedPickup(db, cell, { now: Date.now(), emit })).amount;
       }
+      // 2026-09-08 §2.3: hearts are tried on EVERY fix, not only a first
+      // unlock. A first unlock grants on the spot (the cell was fogged, so it
+      // is a surprise); a cell unlocked long ago whose heart was never taken
+      // pays when the player walks back to it, which is what makes the pips on
+      // their existing map real destinations.
+      //
+      // ⚠ `out.cell`, NOT `cell`. recordUnlock nulls its cell when the fix is
+      // vaguer than unlock.max.accuracy.m, and that is the ONLY thing standing
+      // between a 2 km wifi fix and the heart sitting in a cell unlocked months
+      // ago — recordHeartPickup's own in-ramble_cells check passes happily for
+      // ground that is already unlocked, which is most of the ground that still
+      // holds a heart.
+      if (out.cell) {
+        const got = await mods.heartsMod.recordHeartPickup(db, out.cell, { now: Date.now(), emit });
+        heartPicked = got.amount;
+        // The panel says a different line for a once-ever heart and one that
+        // regrew, so the source has to survive the trip.
+        heartSource = got.source || null;
+      }
     }
 
     poke("ramble:area");
-    // `seed` rides ONLY on a post that carried a fix. An area post without
-    // `here` keeps its historical response shape byte for byte, which is what
-    // the existing "writes local.active_area" test asserts with a deepEqual.
+    // `seed` and the heart fields ride ONLY on a post that carried a fix. An
+    // area post without `here` keeps its historical response shape byte for
+    // byte, which is what the existing "writes local.active_area" test
+    // asserts with a deepEqual.
     res.json({
       cells,
       ...(unlockedNow ? { unlocked: unlockedNow } : {}),
       ...(seedPicked ? { seed_picked: seedPicked } : {}),
+      ...(heartPicked ? { heart_picked: heartPicked, heart_source: heartSource } : {}),
       ...(here ? { seed: await mods.walletMod.seedBalance(db) } : {}),
+      ...(here ? {
+        hearts: await mods.heartsMod.heartsBalance(db),
+        energy_max: await mods.heartsMod.maxEnergy(db),
+        // The ceiling's ceiling, so the panel can tell "the bar grew" from
+        // "the bar is as long as it goes" and say the right thing (Task 6).
+        energy_max_cap: (await mods.heartsMod.readHeartSettings(db)).cap,
+      } : {}),
     });
   }));
 
@@ -767,7 +799,14 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     const pet = await mods.petMod.petState(db, { now });
     const bird = await mods.eggsMod.activeBird(db);
     const egg = await mods.eggsMod.eggState(db, { now });
-    res.json({ ...pet, bird, egg: { percent: egg.egg.percent }, seed: await mods.walletMod.seedBalance(db) });
+    res.json({
+      ...pet,
+      bird,
+      egg: { percent: egg.egg.percent },
+      seed: await mods.walletMod.seedBalance(db),
+      hearts: await mods.heartsMod.heartsBalance(db),
+      energy_max_cap: (await mods.heartsMod.readHeartSettings(db)).cap,
+    });
   }));
 
   router.post("/api/ramble/pet/chore", handle(async (req, res) => {
@@ -883,11 +922,16 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     // long history would be sent thousands of pip footprints to throw away —
     // and we would run the ledger query to build them.
     let seed = [];
+    let hearts = [];
     if (req.query?.pips === "1") {
       // Read the cell ids BEFORE coalescing: a merged run is not one cell.
       // Points now, not cells: seed sits at a hash-derived spot inside its
       // cell, so a row of it along a street does not look like a pegboard.
       seed = await mods.walletMod.harvestableCells(db, out.unlocked.map((b) => b.cell), { now: Date.now() });
+      // The SAME rule the payout uses (hearts.js: availableHearts and
+      // recordHeartPickup both go through heartCandidates). A heart drawn here
+      // that a walk would not grant is the phase 1 seed defect all over again.
+      hearts = await mods.heartsMod.availableHearts(db, out.unlocked.map((b) => b.cell), { now: Date.now() });
     }
     // Coalesce the AREA geometry. The mask only needs the shape, and a walked
     // town collapses from thousands of boxes to a few dozen — see coalesceBoxes.
@@ -895,6 +939,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       unlocked: mods.zonesMod.coalesceBoxes(out.unlocked),
       frontier: mods.zonesMod.coalesceBoxes(out.frontier),
       seed,
+      hearts,
       depth,
     });
   }));

@@ -26,6 +26,7 @@ import { createMark, listMarks, unlockMark, blockPersona, unblockPersona } from 
 import { encodeGeohash } from "./anchors.js";
 import { getGrid } from "./grid.js";
 import { petState, doChore } from "./pet.js";
+import { heartsBalance } from "./hearts.js";
 import { eggState, activeBird, isoWeek } from "./eggs.js";
 import { feedAll } from "./feed.js";
 import { flockState, listNests, claimNest } from "./flock.js";
@@ -302,7 +303,7 @@ export function createRambleServer(db, options = {}) {
     async () => {
       try {
         const [state, bird, egg] = await Promise.all([petState(db), activeBird(db), eggState(db, { now: Date.now() })]);
-        return text(JSON.stringify({ ...state, bird, egg: { percent: egg.egg.percent } }));
+        return text(JSON.stringify({ ...state, bird, hearts: await heartsBalance(db), egg: { percent: egg.egg.percent } }));
       } catch (err) {
         return errorText(err.message);
       }
