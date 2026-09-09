@@ -75,9 +75,13 @@ Los huevos vienen de tres lugares, y ninguno es gratis:
   `lay.days` (predeterminado 14) pones uno tú misma. Los días no necesitan ser consecutivos, y el conteo solo
   corre mientras estés sin huevo, así que esto es un piso más que un caño.
 
-Cuando se vacía el hueco incubando, el huevo más viejo en tu repisa se promueve a él automáticamente —
-así que solo estás sin huevo cuando realmente no tienes ninguno. **El calor ganado sin ningún huevo
-desaparece**; eso es deliberado, y la auto-promoción es lo que lo mantiene raro.
+La repisa rellena la ranura de incubación cuando un huevo **eclosiona** — el más viejo de tu repisa
+entra automáticamente. Si un huevo llega mientras tu ranura está vacía en cambio — un regalo, un
+intercambio, o uno liberado cuando un intercambio caduca y desbloquea el último de tu repisa —
+**no** se promueve automáticamente: espera en tu repisa, y la página de tu mascota ofrece un
+**Calentarlo** de un toque para traerlo. **El calor ganado con la ranura vacía desaparece, incluso
+si tienes huevos esperando en tu repisa** — así que calienta un huevo en espera antes de salir a
+caminar.
 
 | Configuración | Predeterminado | Rige |
 |---|---|---|
