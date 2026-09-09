@@ -793,7 +793,26 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // The bird's voice: moments only, plus tap/focus to ask.
   assert.ok(body.includes("function statusLine()"), "ambient status still exists");
   assert.ok(body.includes("function sayMoment("), "but only moments open the bubble on their own");
-  assert.ok(body.includes("function notePerch()"), "and something decides what counts as a moment");
+  // ⚠ ONE SENTINEL PER SOURCE. Marks and nests arrive from two independent
+  // fetches, and the egg refresh (no geolocation needed) normally beats both.
+  // A single shared "first look" flag let whichever ran first consume it while
+  // the lists were still empty, so the real data landing afterwards read as an
+  // arrival and the bird announced pre-existing marks on every page load.
+  assert.ok(body.includes("function noteMarks()") && body.includes("function noteNests()"),
+    "marks and nests each judge their own arrivals");
+  assert.ok(!body.includes("function notePerch()"), "the shared-flag version must not come back");
+  assert.ok(body.includes("var spokeMarks = null;") && body.includes("var spokeNests = null;"),
+    "and each starts un-looked-at, so neither source's first draw can speak");
+  assert.ok(body.includes("spokeMarks !== null && n > spokeMarks"), "marks speak only on a real increase");
+  assert.ok(body.includes("spokeNests !== null && spokeNests === 0 && n > 0"), "nests speak only on the 0 -> something transition");
+  // The egg/pet refresh changes the ambient LINE, not the world — it must never
+  // be able to trip an arrival.
+  assert.ok(!/paintEgg[\s\S]{0,900}note(Marks|Nests)\(\)/.test(body),
+    "the egg refresh must not evaluate arrivals");
+
+  // A native title would render the browser's own grey tooltip underneath the
+  // bird's speech bubble on the same hover.
+  assert.ok(!body.includes('title: "You"'), "the marker carries no competing native title");
   assert.ok(body.includes('sayMoment("New ground.")'), "a first unlock is one");
   assert.ok(body.includes("|| momentTimer) return;"),
     "an ambient refresh must not overwrite a moment that is still on screen");

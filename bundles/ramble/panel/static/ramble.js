@@ -138,7 +138,7 @@
   var walkStopTimer = null;
   var momentTimer = null;
   var spokeMarks = null;
-  var spokeNests = 0;
+  var spokeNests = null;
   var lastMarks = [];
 
   if (mapEl && typeof L !== "undefined") {
@@ -287,14 +287,13 @@
     if (!hereDot) {
       hereRing = L.circle(ll, { pane: "rb-here", radius: r, className: "rb-here-ring", stroke: false, fillOpacity: 0.12, interactive: false }).addTo(hereLayer);
       hereDot = L.marker(ll, {
+        /* NO title option. Leaflet copies it to the element as a native HTML title,
+         * which the browser renders as its own tooltip — and the marker now
+         * carries a real Leaflet tooltip on the same hover, so keeping it would
+         * stack a grey "You" box under the bird's speech bubble. The accessible
+         * name comes from the aria-label paintHereArt sets, which is
+         * state-aware in a way a fixed title never was. */
         pane: "rb-here", icon: hereIcon(hereArt()), keyboard: true,
-        /* The retired button carried an accessible name; a divIcon has none,
-         * and the marker shows an egg as often as a bird. */
-        /* title carries the accessible name; divIcon ignores alt, which
-         * Leaflet only applies when it builds an img icon. The retired button
-         * was a real button with a state-aware label, so paintHereArt sets
-         * role and aria-label to keep that. */
-        title: "You",
       }).addTo(hereLayer);
       /* No showView here any more. Tapping the bird asks it what is around
        * (Leaflet opens the tooltip on click and on focus); the labelled strip
@@ -672,7 +671,7 @@
       }
     });
     drawNearby(full);
-    notePerch();
+    noteMarks();
   }
 
   /* A frontier beacon: something is there, but not what. The server already
@@ -793,7 +792,7 @@
     var bird = pet && pet.bird;
     var valid = !!(Bird && bird && Bird.isValidBird({ species: bird.species, seed: bird.seed }));
     perchTarget = valid ? "pet" : "egg";
-    notePerch();
+    refreshPerchVoice();
     paintHereArt();
     paintPerchGo();
   }
@@ -849,21 +848,35 @@
     }, 4200);
   }
 
-  /* Decide whether anything that just changed is worth speaking. Only
-   * ARRIVALS speak — a count going down, or staying put, is not news. */
-  function notePerch() {
-    var marks = lastMarks.length;
-    var nests = (lastNests || []).length;
-    var firstLook = spokeMarks === null;
-    if (!firstLook && nests > spokeNests && spokeNests === 0) {
-      sayMoment("There's a nest nearby.");
-    } else if (!firstLook && marks > spokeMarks) {
-      sayMoment(marks === 1 ? "One thing waiting nearby." : (marks + " things waiting nearby."));
+  /* Only ARRIVALS speak — a count going down, or holding, is not news.
+   *
+   * ⚠ EACH SOURCE TRACKS ITS OWN FIRST LOOK. One shared flag looked simpler and
+   * was wrong: marks and nests arrive from two independent fetches, and the egg
+   * refresh (which needs no geolocation) normally resolves before either of
+   * them. Whichever ran first consumed the single flag while lastMarks and
+   * lastNests were still their empty initial values, so the real data landing
+   * afterwards read as an arrival and the bird announced pre-existing marks on
+   * every page load. Two sentinels, set only by their own source. */
+  function noteMarks() {
+    var n = lastMarks.length;
+    if (spokeMarks !== null && n > spokeMarks) {
+      sayMoment(n === 1 ? "One thing waiting nearby." : (n + " things waiting nearby."));
     } else {
       refreshPerchVoice();
     }
-    spokeMarks = marks;
-    spokeNests = nests;
+    spokeMarks = n;
+  }
+
+  function noteNests() {
+    var n = (lastNests || []).length;
+    /* Only the 0 -> something transition: a nest count merely changing is not
+     * a nest ARRIVING within earshot. */
+    if (spokeNests !== null && spokeNests === 0 && n > 0) {
+      sayMoment("There's a nest nearby.");
+    } else {
+      refreshPerchVoice();
+    }
+    spokeNests = n;
   }
 
   /* -------------------------------------------------------------- compose */
@@ -1134,7 +1147,7 @@
     paintStep("rb-step-checkin", !!list.checked_in_today, list.checked_in_today ? "✓" : "·",
       list.checked_in_today ? "checked in today" : "a tap a day keeps it warm");
 
-    notePerch();
+    refreshPerchVoice();
   }
 
   function refreshEgg() {
@@ -1566,7 +1579,7 @@
       marker.addTo(nestLayer);
       nestMarkers[nest.cell] = marker;
     });
-    notePerch();
+    noteNests();
   }
 
   /* Nests are computed server-side for the viewport; below MIN_NEST_ZOOM the
