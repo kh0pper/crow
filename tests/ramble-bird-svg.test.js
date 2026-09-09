@@ -75,3 +75,28 @@ test("drawSeed: a grain that reads as food, not as another UI dot", () => {
   assert.equal(el.attrs.viewBox, "0 0 24 24");
   assert.equal(el.html, svg);
 });
+
+test("drawHeart returns inert SVG children in the seed's own idiom", () => {
+  const svg = Bird.drawHeart();
+  assert.equal(typeof svg, "string");
+  assert.ok(svg.length > 0);
+  assert.ok(/<path|<ellipse|<circle/.test(svg), "it is actually drawn, not empty");
+  assert.ok(!/<script|onload=|href=/i.test(svg), "engine output is inert");
+  // The two invariants the existing drawSeed test asserts, kept: the engine is
+  // also rendered server-side, where a CSS custom property resolves to nothing.
+  assert.ok(!svg.includes("var(--"), "no custom properties: this also renders outside the panel");
+  assert.equal(svg.indexOf("`"), -1, "no backticks");
+  assert.equal(Bird.drawHeart(), svg, "deterministic: no randomness in the art");
+});
+
+test("mountHeart sets the same 24-unit viewBox the seed pip uses", () => {
+  const calls = [];
+  const el = {
+    setAttribute: (k, v) => calls.push([k, v]),
+    set innerHTML(v) { calls.push(["innerHTML", v]); },
+  };
+  Bird.mountHeart(el);
+  assert.deepEqual(calls[0], ["viewBox", "0 0 24 24"], "same box as mountSeed, so the pips match in size");
+  assert.equal(calls[1][0], "innerHTML");
+  assert.equal(calls[1][1], Bird.drawHeart());
+});
