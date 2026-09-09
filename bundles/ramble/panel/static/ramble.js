@@ -513,6 +513,35 @@
     if (el) el.textContent = String(n);
   }
 
+  /* The containers themselves, above the bar they lengthened -- the number
+   * alone never explained where the extra bar came from. Capped at a row that
+   * still fits a phone; past that the sentence carries the count. */
+  var HEART_ROW_MAX = 10;
+
+  function paintHeartRow(n, max, cap) {
+    var row = $("rb-heart-row");
+    if (!row) return;
+    while (row.firstChild) row.removeChild(row.firstChild);
+    var shown = Math.max(0, Math.min(HEART_ROW_MAX, n));
+    for (var i = 0; i < shown; i++) {
+      var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "rb-heart-one");
+      if (Bird && typeof Bird.mountHeart === "function") {
+        try { Bird.mountHeart(svg); } catch (e) { /* cosmetic */ }
+      }
+      row.appendChild(svg);
+    }
+    var line = $("rb-heart-line");
+    if (!line) return;
+    /* At the cap the bar cannot grow again, and saying nothing about that would
+     * leave the player collecting pips that change no number they can see. */
+    if (typeof cap === "number" && typeof max === "number" && n > 0 && max >= cap) {
+      setText(line, n + " heart containers. The bar is as long as it goes.");
+    } else if (n <= 0) setText(line, "No heart containers yet. Walk somewhere new.");
+    else if (n === 1) setText(line, "One heart container.");
+    else setText(line, n + " heart containers.");
+  }
+
   /* ---------------------------------------------------------------- marks */
 
   /* The one label rule (spec 2026-09-08 §3.1), mirrored from server/labels.js:
@@ -1273,9 +1302,21 @@
     }
 
     var energy = typeof pet.energy === "number" ? pet.energy : 0;
+    /* Against the server's OWN ceiling. Drawing a percentage of a hardcoded 100
+     * would paint a 150-energy bird at 150% and a 70-of-150 bird as nearly
+     * full: the bar has to read the same number the server clamps with. */
+    var max = typeof pet.energy_max === "number" && pet.energy_max > 0 ? pet.energy_max : 100;
     var fill = $("rb-energy-fill");
-    if (fill) fill.style.width = Math.max(0, Math.min(100, energy)) + "%";
+    if (fill) fill.style.width = Math.max(0, Math.min(100, (energy / max) * 100)) + "%";
     setText($("rb-energy-num"), String(energy));
+    setText($("rb-energy-max"), String(max));
+    var hearts = typeof pet.hearts === "number" ? pet.hearts : 0;
+    paintHeartRow(hearts, max, pet.energy_max_cap);
+    /* The map bar too, not only this page: the area response carries a wallet
+     * ONLY when it carried a position fix, so a player who denies geolocation
+     * would otherwise read 0 hearts on the map forever. paintSeed is called
+     * from here for exactly this reason. */
+    paintHearts(hearts);
     setText($("rb-mood-line"), MOOD_LINE[pet.mood] || MOOD_LINE.happy);
 
     var chores = pet.chores || {};

@@ -250,8 +250,9 @@ export default {
             <div class="rb-meter">
               <strong class="rb-meter-label">Energy</strong>
               <span class="rb-meter-bar"><i id="rb-energy-fill"></i></span>
-              <strong id="rb-energy-num">&mdash;</strong>
+              <strong id="rb-energy-num">&mdash;</strong><span class="rb-meter-of">/ <span id="rb-energy-max">100</span></span>
             </div>
+            <p class="rb-hearts-line"><span id="rb-heart-row" class="rb-heart-row"></span><span class="rb-muted rb-fine" id="rb-heart-line"></span></p>
             <p class="rb-muted rb-fine" id="rb-mood-line">Checking on it&hellip;</p>
           </section>
 
