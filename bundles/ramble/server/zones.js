@@ -115,6 +115,49 @@ export function classifyBbox(bbox, unlocked, { depth = FRONTIER_DEPTH_DEFAULT } 
 }
 
 /**
+ * Merge horizontally adjacent footprints in each latitude row into single
+ * rectangles.
+ *
+ * WHY: the wire used to be bounded by the viewport and is now bounded by how
+ * far the user has walked, which is unbounded. Measured on a contiguous blob:
+ * 5000 unlocked cells is 702 KB of JSON and 5000 hole rings for the client to
+ * draw, on every map settle. People walk STREETS, so their cells come in long
+ * horizontal and vertical runs — collapsing each row's run to one rectangle
+ * turns that same blob into a few dozen boxes with identical geometry.
+ *
+ * The merged box drops `cell`: a run is not one cell. Callers that need cell
+ * ids must read them BEFORE coalescing (the zones route does).
+ */
+export function coalesceBoxes(boxes) {
+  const rows = new Map();
+  for (const b of boxes || []) {
+    if (!b) continue;
+    // Row key off the integer grid index, never the float: two cells in the
+    // same band can differ in the last bit after decode.
+    const row = Math.round((b.south + 90) / CELL7_LAT_STEP);
+    const col = Math.round((b.west + 180) / CELL7_LON_STEP);
+    if (!rows.has(row)) rows.set(row, []);
+    rows.get(row).push({ col, box: b });
+  }
+  const out = [];
+  for (const entries of rows.values()) {
+    entries.sort((a, b) => a.col - b.col);
+    let run = null;
+    for (const e of entries) {
+      if (run && e.col === run.lastCol + 1) {
+        run.east = e.box.east;
+        run.lastCol = e.col;
+        continue;
+      }
+      if (run) out.push({ south: run.south, west: run.west, north: run.north, east: run.east });
+      run = { south: e.box.south, west: e.box.west, north: e.box.north, east: e.box.east, lastCol: e.col };
+    }
+    if (run) out.push({ south: run.south, west: run.west, north: run.north, east: run.east });
+  }
+  return out;
+}
+
+/**
  * Does a cell footprint touch the viewport? The route rejects a bbox with
  * west > east before we ever see one, so there is no antimeridian-crossing
  * case to handle here — a crossing viewport is a 400, not a wrap.

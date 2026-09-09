@@ -878,13 +878,26 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     // "zoom in" answer — that ceiling is what made fog unreachable at the
     // zooms where you can actually see the edge of your cleared ground.
     if (!out) bad("bbox must be four finite numbers: south,west,north,east");
-    // Seed pips: which VISIBLE unlocked cells still have seed waiting. Asked of
-    // the already-computed visible list, so the query is bounded by the
-    // viewport rather than by everywhere the player has ever walked.
-    const seedSet = new Set(
-      await mods.walletMod.harvestableCells(db, out.unlocked.map((b) => b.cell), { now: Date.now() }),
-    );
-    res.json({ ...out, seed: out.unlocked.filter((b) => seedSet.has(b.cell)), depth });
+    // Seed pips are a CLOSE-ZOOM detail, and the client says when it will
+    // actually draw them (`pips=1`). Without that, a zoomed-out player with a
+    // long history would be sent thousands of pip footprints to throw away —
+    // and we would run the ledger query to build them.
+    let seed = [];
+    if (req.query?.pips === "1") {
+      // Read the cell ids BEFORE coalescing: a merged run is not one cell.
+      const seedSet = new Set(
+        await mods.walletMod.harvestableCells(db, out.unlocked.map((b) => b.cell), { now: Date.now() }),
+      );
+      seed = out.unlocked.filter((b) => seedSet.has(b.cell));
+    }
+    // Coalesce the AREA geometry. The mask only needs the shape, and a walked
+    // town collapses from thousands of boxes to a few dozen — see coalesceBoxes.
+    res.json({
+      unlocked: mods.zonesMod.coalesceBoxes(out.unlocked),
+      frontier: mods.zonesMod.coalesceBoxes(out.frontier),
+      seed,
+      depth,
+    });
   }));
 
   router.post("/api/ramble/nests/claim", handle(async (req, res) => {
