@@ -117,7 +117,18 @@
   var markerLayer = null;
   var nestLayer = null;
   var zoneLayer = null;
-  var MIN_ZONE_ZOOM = 15;
+  /* 11, not 15. Fog is an AREA overlay: its whole point is seeing the shape
+   * of where you have been, which needs zooming OUT — but the old floor of
+   * 15 (copied from the nest-pin floor) meant the viewport was always
+   * SMALLER than a player's revealed region, so they stood inside their own
+   * cleared ground and never saw its edge. /zones no longer has a size
+   * ceiling, so this can go low. */
+  var MIN_ZONE_ZOOM = 11;
+  /* Per-cell detail: the dim frontier squares and the seed pips. There can be
+   * thousands of each, and both only mean anything up close, so below this the
+   * mask holes alone carry the shape and the server is told not to even build
+   * the pip list. */
+  var MIN_CELL_DETAIL_ZOOM = 15;
   var hereLayer = null, hereDot = null, hereRing = null;
   var following = false, mapWatch = null, lastPanAt = null;
   var currentCells = [];
@@ -396,6 +407,9 @@
          * blank a real balance on every fix-less post and at boot without geo. */
         if (out && typeof out.seed === "number") paintSeed(out.seed);
         if (out && out.unlocked) celebrateUnlock(out.unlocked);
+        /* A pickup is its own moment, and the pip it just consumed has to go —
+         * an unlock repaints via celebrateUnlock, but a plain harvest does not. */
+        if (out && out.seed_picked) { celebrateSeed(out.seed_picked); if (!out.unlocked) refreshZones(); }
         refreshPet();
         return refreshMarks();
       })
@@ -430,6 +444,20 @@
     }
     refreshZones();
     refreshMarks();
+  }
+
+  /* The pickup moment. Built with createElement + textContent, never a markup
+   * sink. Absolutely positioned against the seed chip so it rises out of the
+   * number it just changed. */
+  function celebrateSeed(n) {
+    var chip = $("rb-seed-count");
+    var amount = Number(n);
+    if (!chip || !chip.parentNode || !Number.isFinite(amount) || amount <= 0) return;
+    var pop = document.createElement("span");
+    pop.className = "rb-seed-pop";
+    pop.textContent = "+" + amount;
+    chip.parentNode.appendChild(pop);
+    setTimeout(function () { if (pop.parentNode) pop.parentNode.removeChild(pop); }, 1100);
   }
 
   function paintSeed(n) {
@@ -1323,14 +1351,15 @@
      * panned away from. */
     var root = $("ramble");
     if (root && root.getAttribute("data-view") !== "world") return Promise.resolve();
-    /* 15, matching refreshNests, NOT 13: /zones inherits MAX_NEST_CELLS via
-     * cellsInBbox, and a 1100x700 map at zoom 13 covers ~10,700 cells, so the
-     * route would 400 on every settle — the very failure this guard exists to
-     * prevent. Measured during review. */
+    /* A floor at all only so a world-zoom settle does not draw sub-pixel
+     * geometry. The route itself no longer has a cell ceiling to trip. */
     if (map.getZoom() < MIN_ZONE_ZOOM) { zoneLayer.clearLayers(); return Promise.resolve(); }
     var b = map.getBounds();
     var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(",");
-    return jsonFetch("/api/ramble/zones?bbox=" + encodeURIComponent(bbox))
+    /* Only ask for pips when they will be drawn: zoomed out, that list is
+     * thousands of footprints the client would discard. */
+    var pips = map.getZoom() >= MIN_CELL_DETAIL_ZOOM ? "&pips=1" : "";
+    return jsonFetch("/api/ramble/zones?bbox=" + encodeURIComponent(bbox) + pips)
       .then(drawZones)
       .catch(function () { /* a failed fetch leaves the last mask up */ });
   }
@@ -1353,7 +1382,24 @@
     L.polygon([outer].concat(fogHoles), {
       pane: "rb-fog", className: "rb-fog", stroke: false, interactive: false
     }).addTo(zoneLayer);
-    paintCells(out.frontier || [], "rb-frontier-cell");
+    if (map.getZoom() >= MIN_CELL_DETAIL_ZOOM) {
+      paintCells(out.frontier || [], "rb-frontier-cell");
+      paintSeedPips(out.seed || []);
+    }
+  }
+
+  /* A pip in every unlocked cell whose seed has regrown: the map says where
+   * walking pays, instead of the counter silently ticking up. Not interactive
+   * — you collect by walking there, not by tapping. */
+  function paintSeedPips(cells) {
+    for (var i = 0; i < cells.length; i++) {
+      var c = cells[i];
+      if (!cellUsable(c)) continue;
+      L.circleMarker([(c.south + c.north) / 2, (c.west + c.east) / 2], {
+        pane: "rb-fog", className: "rb-seed-pip", radius: 4, weight: 0,
+        fillOpacity: 0.9, interactive: false
+      }).addTo(zoneLayer);
+    }
   }
 
   function addHoles(holes, cells) {
