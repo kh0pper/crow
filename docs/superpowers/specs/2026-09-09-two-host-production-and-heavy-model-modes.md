@@ -102,6 +102,10 @@ Open items for the implementer:
   (1752 versus 1777 tokens on prompt A), where it was identical at 262k. It has not shown up as a quality loss:
   the 1M arms scored 8/9 twice, the same as 262k, missing the same case. MTP is worth 1.82x on prompt A, so keep it,
   but record the caveat rather than discovering it.
+- **8030 and 8036 are mutually exclusive on raven.** 8036 is the R25/R25b benchmark port for this same
+  single-box Flash-Next config. Both ports being free is irrelevant: each instance wants about 92.6 GiB on a
+  124 GiB box. Any R25-lineage arm must treat the production service as something to evict, exactly like the
+  two-box arms in 3.0.
 - **A 262k fallback is worth defining.** 262k leaves 31.0 GiB free instead of 17.7 and is the more exercised rung.
   If 1M proves uncomfortable in standing use, 262k is the same service with one flag changed.
 

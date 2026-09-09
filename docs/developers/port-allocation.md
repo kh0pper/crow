@@ -168,7 +168,19 @@ an allocation, it is an ambiguity.
 Verified free on raven 2026-09-09: 8030 through 8033, 8035, 8036, 8037, 8098 and 8099. Raven listens only on 22,
 53, 631 and two ephemeral ports.
 
-### Two gaps this section exposes, both worth closing
+### A constraint this registry cannot express
+
+**Raven cannot host 8030 and 8036 at the same time, however free both ports are.** They are the same Flash-Next
+single-box config, one as the proposed production port and one as the R25/R25b benchmark port, and each wants
+about 92.6 GiB on a 124 GiB box. Two free ports, one machine's worth of memory. Allocating a port is not the same
+as being able to run the thing, and no port table can say so.
+
+Read it as the general case rather than one awkward pair: on a single-tenant box, port availability is a necessary
+condition and never a sufficient one. Same class as the ordering constraint in
+`docs/superpowers/specs/2026-09-09-two-host-production-and-heavy-model-modes.md` §3.0, where the port would have
+been free and the arm would still have been unsafe.
+
+### Three gaps this section exposes, all worth closing
 
 1. **Crow's own model ports are largely unlisted.** 8003 (35b), 8006 (27b solo) and 8014 (27b 512k) are absent
    from the allocation table; only 8010 (27b copilot) is recorded. They bind the tailnet IP from `crow-addons/`
@@ -179,6 +191,26 @@ Verified free on raven 2026-09-09: 8030 through 8033, 8035, 8036, 8037, 8098 and
    benchmark zoo arms conventionally use 8098 on raven. Both are correct today because they are different
    machines, and neither the table nor the checker can say so. This is precisely the class of silent
    double-allocation the conventions section warns about, one host further out.
+
+### How this list was built, because the method outlasts the list
+
+Four passes each found more, and the last two were humans reading their own trees:
+
+1. `PORT=` assignments: four ports.
+2. Adding `--port` and `host:port` forms: five more (8022, 8024 through 8027).
+3. Adding the shell-default form `${VAR:-NNNN}`: this is the easiest to miss, because a scan for `PORT=8021`,
+   `port 8021` or `:8021` returns **nothing** on a file that binds 8021 all day via `PORT="${PHASE0_PORT:-8021}"`.
+   That form is also multiplying, since parameterising a hardcoded port is the right fix for the ambiguities above
+   and creates a new hiding place every time.
+4. Two people reading their own trees: four more ports, one wrong host attribution, and one live collision inside
+   a range this section had just reserved.
+
+Two failure modes worth naming, because both happened here and neither is a missing grep. A scan **surfaced** a
+colliding port and its author read the hit as confirming their own reservation rather than as a conflict, which
+turns evidence into confirmation and is worse than missing it. And a categorical negative, "not one script on that
+host uses it", was asserted from a pattern that could not have matched the files in question. **Treat any scan of
+this kind as a lower bound.** If the checker grows host-awareness, its companion should read invocations and
+shell defaults as well as assignments.
 
 ## Process for amending this file
 
