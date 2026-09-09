@@ -17,7 +17,7 @@
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import { withinRange, haversineMeters } from "./anchors.js";
-import { isoWeek, startOfLocalDay, hatchIfReady, mintIncubatingEgg, readWarmthWeights } from "./eggs.js";
+import { isoWeek, startOfLocalDay, hatchIfReady, readWarmthWeights } from "./eggs.js";
 import { nestFor, cellsInBbox, nestsInCells, NEST_RATE_DEFAULT, CELL7_RE, WEEK_RE } from "./nests.js";
 import { isEggLocked, lockedEggIds } from "./egg-locks.js";
 
@@ -222,7 +222,10 @@ export async function activateBird(db, eggId, { emit } = {}) {
 
 /** The flock screen's data: hatched birds, unhatched eggs, and the species score. */
 export async function flockState(db, { now = Date.now() } = {}) {
-  await mintIncubatingEgg(db, { now });
+  // Phase 3: a flock screen is a READ, and now genuinely is one. It used to
+  // mint the incubating egg, so opening this view recreated one. It does NOT
+  // promote either: see promoteFromShelf's note on why a write during a GET
+  // both races the sync drain and launders shelf_origin provenance.
   const weights = await readWarmthWeights(db);
   const { shelfCap } = await readFlockSettings(db);
   const pet = await getPetRow(db);

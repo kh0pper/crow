@@ -177,7 +177,10 @@ export async function initRambleTables(db) {
   // Phase 2: WHY an egg is on the shelf. 'sync' = a convergence loser (the
   // sync layer may re-promote it when the incubating slot empties); 'user' =
   // the user put it there (claimed from a nest, or swapped out by incubate)
-  // and it must NEVER be auto-promoted. Phase 1 only ever shelved convergence
+  // and THE SYNC LAYER must never draft it back in. Phase 3's app-level
+  // auto-promote (eggs.js promoteFromShelf, spec §4.2) DOES take 'user' eggs
+  // deliberately — that is the release valve; the two are different
+  // mechanisms with different triggers. Phase 1 only ever shelved convergence
   // losers, so a NULL shelf row on disk is one of those: backfill it to 'sync'
   // (idempotent, and a 'user' row is never NULL so it is never touched).
   await ensureColumn(db, "ramble_eggs", "shelf_origin", "TEXT");

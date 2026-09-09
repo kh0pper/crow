@@ -14,7 +14,9 @@ import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import {
   mintIncubatingEgg, getIncubatingEgg, eggState, creditWarmth,
+  promoteFromShelf, nextPromotable, hatchIfReady,
 } from "../bundles/ramble/server/eggs.js";
+import { flockState } from "../bundles/ramble/server/flock.js";
 import { feedAll } from "../bundles/ramble/server/feed.js";
 
 const T0 = Date.UTC(2026, 8, 9, 12, 0, 0);
@@ -116,4 +118,165 @@ test("getIncubatingEgg is a plain read that returns null rather than throwing", 
   const egg = await mintIncubatingEgg(db, { now: T0 });
   const read = await getIncubatingEgg(db);
   assert.equal(read.egg_id, egg.egg_id);
+});
+
+async function shelveEgg(db, eggId, createdAt, { status = "shelf", origin = "user" } = {}) {
+  await db.execute({
+    sql: `INSERT INTO ramble_eggs (egg_id, status, shelf_origin, warmth, created_at) VALUES (?, ?, ?, 0, ?)`,
+    args: [eggId, status, origin, createdAt],
+  });
+}
+
+async function statusOf(db, eggId) {
+  const { rows } = await db.execute({ sql: "SELECT status, shelf_origin FROM ramble_eggs WHERE egg_id = ?", args: [eggId] });
+  return rows[0] ?? null;
+}
+
+test("promoteFromShelf takes the OLDEST shelf egg and clears shelf_origin", async () => {
+  const db = await freshDb();
+  await shelveEgg(db, "younger", T0 + 5000);
+  await shelveEgg(db, "older", T0);
+
+  const promoted = await promoteFromShelf(db, { now: T0 + 9000 });
+  assert.equal(promoted.egg_id, "older", "oldest created_at wins");
+  assert.equal((await statusOf(db, "older")).status, "incubating");
+  assert.equal((await statusOf(db, "older")).shelf_origin, null,
+    "a deliberate promote carries no shelf origin, same as the manual incubate path");
+  assert.equal((await statusOf(db, "younger")).status, "shelf", "only one is drafted");
+});
+
+test("promoteFromShelf emits, because the user really did move to a new egg", async () => {
+  const db = await freshDb();
+  await shelveEgg(db, "next", T0);
+  const emitted = [];
+  await promoteFromShelf(db, { now: T0 + 1000, emit: (t, o, r) => emitted.push([t, o, r.egg_id]) });
+  assert.deepEqual(emitted, [["ramble_eggs", "update", "next"]]);
+  assert.equal((await statusOf(db, "next")).shelf_origin, null,
+    "NULL, never 'sync': relabelling would widen the nest shelf cap (flock.js:126) and make the "
+    + "sync layer's own re-promote draftable on an egg the user parked");
+});
+
+test("a READ never promotes — flockState and the egg route are pure", async () => {
+  const db = await freshDb();
+  await shelveEgg(db, "parked", T0);
+  await flockState(db, { now: T0 + 1000 });
+  assert.equal(await getIncubatingEgg(db), null,
+    "a GET must not queue a sync op, and a read-path promote races applyRambleEgg's "
+    + "isUserShelve carve-out (instance-sync.js:855)");
+  assert.equal((await statusOf(db, "parked")).status, "shelf");
+});
+
+test("promoteFromShelf breaks a created_at tie by the lower egg_id, so two instances agree", async () => {
+  const db = await freshDb();
+  await shelveEgg(db, "bbb", T0);
+  await shelveEgg(db, "aaa", T0);
+  const promoted = await promoteFromShelf(db, { now: T0 });
+  assert.equal(promoted.egg_id, "aaa");
+});
+
+test("promoteFromShelf takes a RECEIVED (gifted) egg too", async () => {
+  const db = await freshDb();
+  await shelveEgg(db, "gift", T0, { status: "received" });
+  const promoted = await promoteFromShelf(db, { now: T0 });
+  assert.equal(promoted.egg_id, "gift");
+});
+
+test("promoteFromShelf SKIPS an egg spoken for by an open swap", async () => {
+  const db = await freshDb();
+  await shelveEgg(db, "locked-one", T0);
+  await shelveEgg(db, "free-one", T0 + 1000);
+  // ⚠ 'proposed', not 'offered'. OPEN_SQL is "state IN ('proposed','accepted')",
+  // so a made-up state would leave the egg UNLOCKED and this test would be
+  // asserting nothing about locking. counterpart/role/expires_at are NOT NULL
+  // with no defaults — omitting them fails on the constraint, not the feature.
+  await db.execute({
+    sql: `INSERT INTO ramble_trades
+            (trade_id, counterpart, role, my_egg_id, state, created_at, updated_at, expires_at)
+          VALUES ('t1', 'npub-them', 'proposer', 'locked-one', 'proposed', ?, ?, ?)`,
+    args: [T0, T0, T0 + 7 * 86400000],
+  });
+  const promoted = await promoteFromShelf(db, { now: T0 + 2000 });
+  assert.equal(promoted.egg_id, "free-one", "an egg promised to a contact is not drafted");
+  assert.equal((await statusOf(db, "locked-one")).status, "shelf");
+});
+
+test("an EXPIRED but unswept trade still locks its egg — do not 'fix' the predicate", async () => {
+  // expireTrades runs on the 15 s drain tick, so there is a window where a
+  // lapsed offer is still 'proposed' and its egg stays locked. Once it
+  // expires the egg is promotable again, but nothing auto-promotes it — the
+  // panel offers it instead (Task 7's "one's waiting on your shelf"). Pinned
+  // here so nobody widens OPEN_SQL to "fix" the window.
+  const db = await freshDb();
+  await shelveEgg(db, "only-one", T0);
+  await db.execute({
+    sql: `INSERT INTO ramble_trades
+            (trade_id, counterpart, role, my_egg_id, state, created_at, updated_at, expires_at)
+          VALUES ('t-expired', 'npub-them', 'proposer', 'only-one', 'proposed', ?, ?, ?)`,
+    args: [T0, T0, T0 - 1000],           // already past expires_at, not yet swept
+  });
+  assert.equal(await promoteFromShelf(db, { now: T0 + 5000 }), null);
+});
+
+test("nextPromotable answers the same question the promote acts on, and writes nothing", async () => {
+  const db = await freshDb();
+  assert.equal(await nextPromotable(db), null);
+  await shelveEgg(db, "younger", T0 + 5000);
+  await shelveEgg(db, "older", T0);
+
+  const peek = await nextPromotable(db);
+  assert.equal(peek.egg_id, "older");
+  assert.equal((await statusOf(db, "older")).status, "shelf", "a peek must not move it");
+
+  const promoted = await promoteFromShelf(db, { now: T0 + 9000 });
+  assert.equal(promoted.egg_id, peek.egg_id, "the card and the promote read ONE rule");
+  assert.equal(await nextPromotable(db), null, "the slot is full now");
+});
+
+test("promoteFromShelf is a NO-OP when the slot is full, and when there is nothing to promote", async () => {
+  const db = await freshDb();
+  assert.equal(await promoteFromShelf(db, { now: T0 }), null, "empty shelf, empty slot");
+  assert.equal(await eggCount(db), 0, "a no-op promote writes NOTHING — this is what makes it safe on a GET");
+
+  const sitting = await mintIncubatingEgg(db, { now: T0 });
+  await shelveEgg(db, "waiting", T0 - 5000);
+  assert.equal(await promoteFromShelf(db, { now: T0 }), null, "the slot is occupied");
+  assert.equal((await statusOf(db, "waiting")).status, "shelf");
+  assert.equal((await getIncubatingEgg(db)).egg_id, sitting.egg_id);
+});
+
+test("hatching promotes from the shelf instead of minting a successor", async () => {
+  const db = await freshDb();
+  const egg = await mintIncubatingEgg(db, { now: T0 });
+  await shelveEgg(db, "next-you", T0 + 100);
+  await db.execute({ sql: "UPDATE ramble_eggs SET warmth = 100 WHERE egg_id = ?", args: [egg.egg_id] });
+
+  const hatched = await hatchIfReady(db, { now: T0 + 1000 });
+  assert.ok(hatched, "it hatched");
+  assert.equal(await eggCount(db), 2, "NO successor was minted");
+  assert.equal((await getIncubatingEgg(db)).egg_id, "next-you", "the shelf refilled the slot");
+});
+
+test("hatching with an EMPTY shelf leaves the slot empty — no free egg", async () => {
+  const db = await freshDb();
+  const egg = await mintIncubatingEgg(db, { now: T0 });
+  await db.execute({ sql: "UPDATE ramble_eggs SET warmth = 100 WHERE egg_id = ?", args: [egg.egg_id] });
+
+  const hatched = await hatchIfReady(db, { now: T0 + 1000 });
+  assert.ok(hatched);
+  assert.equal(await getIncubatingEgg(db), null, "this is the whole phase: no successor appears");
+  assert.equal(await eggCount(db), 1);
+});
+
+test("two instances promote the SAME egg independently, with no round trip", async () => {
+  const a = await freshDb();
+  const b = await freshDb();
+  for (const db of [a, b]) {
+    await shelveEgg(db, "zzz", T0);
+    await shelveEgg(db, "aaa", T0);          // same created_at: the tie-break decides
+    await shelveEgg(db, "mmm", T0 + 1);
+  }
+  const pa = await promoteFromShelf(a, { now: T0 + 100 });
+  const pb = await promoteFromShelf(b, { now: T0 + 100 });
+  assert.equal(pa.egg_id, pb.egg_id, "the order is a pure function of replicated rows");
+  assert.equal(pa.egg_id, "aaa");
 });

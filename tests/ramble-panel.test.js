@@ -50,9 +50,10 @@ const { bboxAround } = await import("../bundles/ramble/server/around.js");
  * Fog gates public terrain (spec 2026-09-08 §2.1), so a test that lists or
  * claims a nest must first walk to ground that actually unlocks it. Each walk
  * posts /api/ramble/area with `here`, which credits +20 visit_place warmth
- * against a hatch_at of 100 — this file already churns hatches and later
- * asserts an incubating egg exists, so the credit is suppressed around the
- * walk rather than left to accumulate.
+ * against a hatch_at of 100 — this file's other warmth-accrual tests already
+ * push some hatches, and Phase 3 hatches no longer guarantee a successor
+ * (they promote from the shelf, or leave the slot empty), so the credit is
+ * suppressed around the walk rather than left to accumulate on top of that.
  *
  * ⚠ An unlock is permanent (spec §2.1): once a test calls this, that cell
  * stays unlocked for every test that runs afterward in this file. A fog
@@ -147,9 +148,11 @@ const PK_BLOCKED = "ed".repeat(32);
 // Task 2 (spec 2026-09-08 §4.1): minting is deliberate now — a read no longer
 // creates an egg by being looked at. This suite's warmth-accrual tests are
 // about the DELTA an event credits, not about egg supply, so give them an
-// explicit starter egg here rather than weaken any of their assertions; the
-// file's own hatch churn (see the walkTo/unlockRadius comment above) keeps an
-// incubating egg in place for the rest of the run.
+// explicit starter egg here rather than weaken any of their assertions.
+// ⚠ Phase 3: a hatch no longer guarantees a successor (hatchIfReady promotes
+// from the shelf, or leaves the slot empty) — any test past this point that
+// needs an incubating egg to exist must mint its own rather than assume this
+// starter, or the file's later churn, left one in place.
 {
   const db = createDbClient();
   try {
@@ -1234,6 +1237,15 @@ test("POST /api/ramble/nests/claim: too far is a friendly refusal; in range clai
 });
 
 test("GET /api/ramble/flock shows the shelf egg; incubate swaps it in and shelves the old egg as 'user'", async () => {
+  // Phase 3: flockState no longer mints or promotes on a read. This file's
+  // earlier warmth churn may already have hatched the incubating egg with
+  // nothing yet on the shelf to refill it (promoteFromShelf only runs from
+  // hatchIfReady), so make sure one exists rather than assume the old
+  // auto-mint left one lying around.
+  {
+    const db = createDbClient();
+    try { await mintIncubatingEgg(db, { now: Date.now() }); } finally { db.close(); }
+  }
   const flock = await (await req("/api/ramble/flock")).json();
   assert.equal(flock.species_total, 8);
   assert.equal(flock.shelf_cap, 5);
@@ -1700,9 +1712,10 @@ async function withHeartSettings(pairs, fn) {
 }
 
 // `warmth.visit_place` is zeroed for the same reason walkTo() zeroes it: this
-// file churns hatches and later asserts an incubating egg exists, and three or
-// four +20 credits against a hatch_at of 100 is a hatch these tests did not ask
-// for.
+// file's warmth-accrual tests already churn hatches, and three or four +20
+// credits against a hatch_at of 100 is a hatch these tests did not ask for —
+// and since Phase 3 a hatch is not guaranteed to leave a successor egg in
+// place at all.
 const HEARTS_ON = [
   ["heart.rate", "1"], ["heart.wild.rate", "999999"],
   ["unlock.max.accuracy.m", "100"], ["warmth.visit_place", "0"],
