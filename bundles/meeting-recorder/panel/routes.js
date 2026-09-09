@@ -13,27 +13,43 @@
 
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, openSync } from "node:fs";
-import { extname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
+import { extname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { Router } from "express";
-
-import { listSessions, newId, readMeta, sessionDir, writeMeta } from "../server/store.js";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const MAX_CHUNK = 32 * 1024 * 1024;
 const MAX_UPLOAD = 4 * 1024 * 1024 * 1024;
 const SAFE_SUFFIX = /^\.[a-z0-9]{1,8}$/;
 
-/**
- * The worker lives beside this file in the repo and in the installed copy, so
- * resolve it relative to the panel rather than to any app root.
- */
-function workerPath() {
-  const installed = join(HERE, "..", "server", "transcribe.js");
-  if (existsSync(installed)) return installed;
-  return join(HERE, "..", "server", "transcribe.js");
+// The panel registry installs this file to <crow-home>/panels/, which breaks
+// bundle-relative imports. Look in the installed bundle first, then the repo
+// layout. Same list serves the store module and the worker script.
+const CANDIDATE_DIRS = [
+  join(process.env.CROW_HOME || join(homedir(), ".crow"), "bundles", "meeting-recorder", "server"),
+  resolve(HERE, "../server"),
+];
+
+async function loadStore() {
+  for (const dir of CANDIDATE_DIRS) {
+    const path = join(dir, "store.js");
+    if (!existsSync(path)) continue;
+    return import(pathToFileURL(path).href);
+  }
+  throw new Error("meeting-recorder: store.js not found in " + CANDIDATE_DIRS.join(" or "));
 }
+
+function workerPath() {
+  for (const dir of CANDIDATE_DIRS) {
+    const path = join(dir, "transcribe.js");
+    if (existsSync(path)) return path;
+  }
+  throw new Error("meeting-recorder: transcribe.js not found");
+}
+
+const { listSessions, newId, readMeta, sessionDir, writeMeta } = await loadStore();
 
 function startTranscription(id) {
   const log = openSync(join(sessionDir(id), "transcribe.log"), "a");
