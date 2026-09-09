@@ -805,8 +805,8 @@ export default function rambleRouter(dashboardAuth, options = {}) {
   router.get("/api/ramble/pet", handle(async (req, res) => {
     const now = Date.now();
     // One read for the whole companion strip: mood/energy/chores, the bird
-    // that hatched (null until the first one does), and just the egg's
-    // progress percent — the panel's full egg card reads /api/ramble/egg.
+    // that hatched (null until the first one does), and the incubating egg
+    // (null if none exists) — the panel's full egg card reads /api/ramble/egg.
     const pet = await mods.petMod.petState(db, { now });
     const bird = await mods.eggsMod.activeBird(db);
     const egg = await mods.eggsMod.eggState(db, { now });
@@ -814,9 +814,9 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       ...pet,
       bird,
       // Task 2 (spec 2026-09-08 §4.1): no egg is a valid state now — a read
-      // must not crash for it, so an absent egg shows as 0% rather than
-      // dereferencing a null.
-      egg: { percent: egg.egg ? egg.egg.percent : 0 },
+      // must not crash for it, so an absent egg is reported as `null`, not
+      // dereferenced.
+      egg: egg.egg ?? null,
       seed: await mods.walletMod.seedBalance(db),
       hearts: await mods.heartsMod.heartsBalance(db),
       energy_max_cap: (await mods.heartsMod.readHeartSettings(db)).cap,
