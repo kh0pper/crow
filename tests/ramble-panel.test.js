@@ -211,6 +211,21 @@ function extractFunction(src, name) {
   return src.slice(start, end + 1);
 }
 
+/** Extract the balanced `{...}` block that begins at the first `{` AFTER a
+ * given anchor substring — for an anonymous listener body (`$("id")
+ * .addEventListener("click", function () { ... })`) that has no name for
+ * extractFunction to find. Lets a test assert a call happens WITHIN a
+ * specific handler, not merely somewhere in the file (which a whole-file
+ * `includes()` cannot distinguish from the wrong handler entirely). */
+function extractAfter(src, anchor) {
+  const anchorAt = src.indexOf(anchor);
+  if (anchorAt < 0) return null;
+  const braceStart = src.indexOf("{", anchorAt);
+  const end = matchBrace(src, braceStart);
+  if (end < 0) return null;
+  return src.slice(braceStart, end + 1);
+}
+
 // --------------------------------------------------------------- panel shape
 
 test("panel handler object has the registry-required shape", () => {
@@ -2061,4 +2076,40 @@ test("the prologue is skippable and both beats dismiss", () => {
   const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
   assert.ok(src.includes("/api/ramble/prologue/intro"));
   assert.ok(src.includes("/api/ramble/prologue/hatch"));
+});
+
+// A source grep proves the two prologue endpoints are called SOMEWHERE, but
+// not that beat one's gate is right or that beat two is hooked to the right
+// event — the exact two ways this feature can silently regress. Pulled out
+// and slice-checked the same way nextEggVisibility and the ramble-ar handler
+// tests do, rather than another whole-file includes().
+
+test("shouldShowIntro: beat one shows only for a player who has never had an egg at all", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+  const fnSrc = extractFunction(src, "shouldShowIntro");
+  assert.ok(fnSrc, "shouldShowIntro must be defined and extractable");
+  const shouldShowIntro = new Function(fnSrc + "\nreturn shouldShowIntro;")();
+
+  assert.equal(shouldShowIntro({ intro_seen: false, granted: false }), true,
+    "never had an egg, never seen the intro: show it");
+  assert.equal(shouldShowIntro({ intro_seen: true, granted: false }), false,
+    "already tapped Go: never show it again");
+  assert.equal(shouldShowIntro({ intro_seen: false, granted: true }), false,
+    "already has an egg some other way (e.g. a gift): the egg arrived without the words, don't retro-show them");
+  assert.equal(shouldShowIntro({ intro_seen: true, granted: true }), false);
+});
+
+test("the hatch beat hooks the rb-meet-bird handler, not clearHatch", () => {
+  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
+
+  const meetHandler = extractAfter(src, '$("rb-meet-bird")');
+  assert.ok(meetHandler, "the rb-meet-bird click handler must be extractable");
+  assert.ok(meetHandler.includes("maybeHatchBeat("),
+    "beat two rides the rb-meet-bird click, where the just-hatched bird is still known");
+
+  const clearHatchFn = extractFunction(src, "clearHatch");
+  assert.ok(clearHatchFn, "clearHatch must be defined and extractable");
+  assert.ok(!clearHatchFn.includes("maybeHatchBeat("),
+    "clearHatch fires on ANY view change and has no access to the hatched bird — " +
+    "hooking it here would show the beat at random moments with no species name");
 });
