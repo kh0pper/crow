@@ -4,9 +4,17 @@ import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import { feedAll } from "../bundles/ramble/server/feed.js";
 import { petState } from "../bundles/ramble/server/pet.js";
+import { mintIncubatingEgg } from "../bundles/ramble/server/eggs.js";
 
 let db; const T0 = Date.UTC(2026, 8, 7, 12);
-before(async () => { db = createClient({ url: "file::memory:" }); await initRambleTables(db); });
+before(async () => {
+  db = createClient({ url: "file::memory:" });
+  await initRambleTables(db);
+  // Task 2 (spec 2026-09-08 §4.1): minting is deliberate now — these tests
+  // are about warmth accrual and hatching, not egg supply, so give them an
+  // explicit starter egg rather than weaken their assertions.
+  await mintIncubatingEgg(db, { now: T0 });
+});
 
 test("one call credits warmth AND energy; a repeat keyed event credits neither", async () => {
   const e0 = (await petState(db, { now: T0 })).energy;
