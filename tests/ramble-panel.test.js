@@ -1615,3 +1615,190 @@ test("GET /api/ramble/zones answers a world-sized bbox instead of refusing it", 
   const out = await res.json();
   assert.ok(Array.isArray(out.unlocked) && Array.isArray(out.frontier));
 });
+
+
+/* --- Phase 2: heart containers (spec §2.3, §3). --- */
+
+/**
+ * ⚠ THIS FILE SHARES ONE SCRATCH DATABASE ACROSS EVERY TEST, so heart counts
+ * accumulate as tests run and an unlock is permanent for every test after it.
+ * Assert DELTAS, never absolute totals — an absolute assertion here passes
+ * alone and fails in the suite, which is exactly the flake shape this repo has
+ * hunted before.
+ *
+ * rate 1 so every cell in these tests holds a heart: no test may depend on a
+ * cell that happens to hash lucky (the phase 1 lesson).
+ */
+async function withHeartSettings(pairs, fn) {
+  const db = createDbClient();
+  try {
+    for (const [k, v] of pairs) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute({
+        sql: `INSERT INTO ramble_settings (key, value) VALUES (?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        args: [k, v],
+      });
+    }
+    return await fn();
+  } finally {
+    for (const [k] of pairs) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute({ sql: "DELETE FROM ramble_settings WHERE key = ?", args: [k] });
+    }
+    db.close();
+  }
+}
+
+// `warmth.visit_place` is zeroed for the same reason walkTo() zeroes it: this
+// file churns hatches and later asserts an incubating egg exists, and three or
+// four +20 credits against a hatch_at of 100 is a hatch these tests did not ask
+// for.
+const HEARTS_ON = [
+  ["heart.rate", "1"], ["heart.wild.rate", "999999"],
+  ["unlock.max.accuracy.m", "100"], ["warmth.visit_place", "0"],
+];
+const jsonOf = async (path, opts) => (await req(path, opts)).json();
+
+test("POST /api/ramble/area grants a heart on a first unlock, and reports the new ceiling", async () => {
+  await withHeartSettings(HEARTS_ON, async () => {
+    const here = { lat: 30.2672, lon: -97.7431, accuracy_m: 20 };
+    const before = await jsonOf("/api/ramble/pet");
+
+    const first = await jsonOf("/api/ramble/area", { method: "POST", body: { cells: ["9v6m2xt"], here } });
+    assert.equal(first.heart_picked, 1, "the fogged cell had a heart in it");
+    assert.equal(first.hearts, before.hearts + 1);
+    assert.equal(first.energy_max, before.energy_max + 10, "the bar grew by energy.max.per.heart");
+
+    const again = await jsonOf("/api/ramble/area", { method: "POST", body: { cells: ["9v6m2xt"], here } });
+    // Holds only because HEARTS_ON silences the wild source at rate 999999 —
+    // otherwise the same cell could pay a second, regrown heart.
+    assert.equal(again.heart_picked, undefined, "a permanent heart is taken once, ever");
+    assert.equal(first.heart_source, "first", "and the source rides along, so the panel can say the right line");
+    assert.equal(again.hearts, first.hearts, "the count still rides on every fix");
+    assert.equal(again.energy_max, first.energy_max);
+  });
+});
+
+test("a fix too vague to unlock is also too vague to pay a heart", async () => {
+  await withHeartSettings(HEARTS_ON, async () => {
+    const before = (await jsonOf("/api/ramble/pet")).hearts;
+    const res = await jsonOf("/api/ramble/area", {
+      method: "POST",
+      // `cells` is only the active-area list; the cell that matters is derived
+      // from `here` (Chicago -> dp3wjzt), which is fresh ground for this file.
+      body: { cells: ["dp3wjzt"], here: { lat: 41.8781, lon: -87.6298, accuracy_m: 2000 } },
+    });
+    assert.equal(res.unlocked, undefined, "no unlock");
+    assert.equal(res.heart_picked, undefined, "and therefore no heart");
+    assert.equal((await jsonOf("/api/ramble/pet")).hearts, before, "nothing was granted");
+  });
+});
+
+test("a vague fix cannot harvest a heart from ground unlocked LONG AGO", async () => {
+  // ⚠ The one the plan review caught. The in-ramble_cells check passes for an
+  // already-unlocked cell no matter how bad today's fix is, so this is the case
+  // the "fail closed" claim actually has to survive. Unlock the cell sharply
+  // while it holds no heart, then make it hold one, then arrive vaguely.
+  const here = { lat: 35.6762, lon: 139.6503 };   // Tokyo: fresh ground for this file
+  await withHeartSettings(
+    [["heart.rate", "999999"], ["heart.wild.rate", "999999"], ["unlock.max.accuracy.m", "100"], ["warmth.visit_place", "0"]],
+    async () => {
+      // ⚠ NO `cells: []` — routes.js rejects an empty array with a 400, and a
+      // 400 would make the assertions below pass vacuously against the buggy
+      // implementation. Omitting `cells` entirely is the supported form: the
+      // route falls back to lat/lon, exactly as walkTo() does.
+      const sharp = await jsonOf("/api/ramble/area", {
+        method: "POST", body: { ...here, here: { ...here, accuracy_m: 10 } },
+      });
+      assert.ok(sharp.unlocked, "precondition: the cell is unlocked, and held no heart");
+    },
+  );
+  await withHeartSettings(HEARTS_ON, async () => {
+    const before = (await jsonOf("/api/ramble/pet")).hearts;
+    const vague = await jsonOf("/api/ramble/area", {
+      method: "POST", body: { ...here, here: { ...here, accuracy_m: 2000 } },
+    });
+    assert.equal(vague.heart_picked, undefined,
+      "a 2 km fix must not collect the heart now waiting in already-unlocked ground");
+    assert.equal((await jsonOf("/api/ramble/pet")).hearts, before, "nothing was granted");
+  });
+});
+
+test("POST /api/ramble/area WITHOUT `here` keeps its exact historical shape", async () => {
+  const res = await jsonOf("/api/ramble/area", { method: "POST", body: { cells: ["9v6m2xt"] } });
+  assert.deepEqual(res, { cells: ["9v6m2xt"] },
+    "no fix, no currency: panning the map must not report a wallet");
+});
+
+test("GET /api/ramble/zones?pips=1 draws hearts only in unlocked ground", async () => {
+  // ⚠ A GENUINELY FRESH cell, and a length assertion BEFORE the loop. Two
+  // earlier drafts got this wrong: the first reused Austin, whose heart the
+  // previous test had already collected, so `hearts` was always [] and the loop
+  // never ran; the second reused London, which is HERE_LAT/HERE_LON's own cell
+  // (`gcpvj0d`) and is walked twice by the visit_place test — that draft passed
+  // only because heartFor("gcpvj0d", {rate: 3}) happens to miss, which is the
+  // lucky-hash dependency this plan bans.
+  //
+  // wecnrmd = 22.2233/114.2283, Hong Kong. No test in this file uses a latitude
+  // anywhere near it (they use 10.5, 30.46, 48.8584 and 51.5074).
+  await withHeartSettings(HEARTS_ON, async () => {
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('wecnrmd', 1) ON CONFLICT(cell) DO NOTHING",
+        args: [],
+      });
+    } finally { db.close(); }
+
+    const bbox = "22.21,114.21,22.24,114.25";
+    const withPips = await jsonOf("/api/ramble/zones?bbox=" + bbox + "&pips=1");
+    assert.ok(Array.isArray(withPips.hearts), "the field is always an array");
+    assert.ok(withPips.hearts.some((h) => h.cell === "wecnrmd"),
+      "there IS a heart to draw, or this test proves nothing");
+    for (const h of withPips.hearts) {
+      assert.ok(withPips.unlocked.some((b) =>
+        h.lat >= b.south && h.lat <= b.north && h.lon >= b.west && h.lon <= b.east),
+        "a heart pip only ever sits in unlocked ground");
+    }
+
+    const noPips = await jsonOf("/api/ramble/zones?bbox=" + bbox);
+    assert.deepEqual(noPips.hearts, [], "pips are a close-zoom detail; the client asks for them");
+  });
+});
+
+test("a heart in ground unlocked before this feature existed waits on the map, and pays when walked to", async () => {
+  // The K2 case, end to end: a row put straight into ramble_cells (exactly what
+  // phase 1's backfill left behind) still has its heart to walk back to.
+  await withHeartSettings(HEARTS_ON, async () => {
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES ('u33dc0e', 1) ON CONFLICT(cell) DO NOTHING",
+        args: [],
+      });
+    } finally { db.close(); }
+    // u33dc0e decodes to 52.5181, 13.4081 (Berlin); this bbox contains it.
+    const zones = await jsonOf("/api/ramble/zones?bbox=52.50,13.35,52.54,13.46&pips=1");
+    assert.equal(zones.hearts.filter((h) => h.cell === "u33dc0e").length, 1,
+      "a cell unlocked before this feature shipped still has its heart waiting");
+
+    // And walking there really does collect the pip the map just drew.
+    const before = (await jsonOf("/api/ramble/pet")).hearts;
+    const walked = await jsonOf("/api/ramble/area", {
+      method: "POST", body: { lat: 52.5181, lon: 13.4081, here: { lat: 52.5181, lon: 13.4081, accuracy_m: 15 } },
+    });
+    assert.equal(walked.heart_picked, 1, "the pip the map drew is the heart the walk grants");
+    assert.equal(walked.hearts, before + 1);
+    const after = await jsonOf("/api/ramble/zones?bbox=52.50,13.35,52.54,13.46&pips=1");
+    assert.equal(after.hearts.filter((h) => h.cell === "u33dc0e").length, 0, "and the pip is gone");
+  });
+});
+
+test("GET /api/ramble/pet carries the heart count and the ceiling", async () => {
+  const body = await jsonOf("/api/ramble/pet");
+  assert.equal(typeof body.hearts, "number");
+  assert.equal(typeof body.energy_max, "number");
+  assert.equal(body.energy_max, 100 + body.hearts * 10,
+    "the ceiling is derived from the count the same response reports");
+});
