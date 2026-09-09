@@ -129,6 +129,20 @@
 #ramble .rb-center { text-align: center; }
 #ramble .rb-label { width: 66px; font-weight: 800; color: var(--rb-muted); flex: 0 0 auto; }
 
+/* The reference panel folds away. <details> is native, so the toggle, the
+   keyboard handling and the screen-reader semantics all come for free — and if
+   the remember-my-choice script never runs, it simply stays open. */
+#ramble .rb-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
+#ramble .rb-fold > summary::-webkit-details-marker { display: none; }
+/* Our own marker, so it matches the display font rather than the OS triangle. */
+#ramble .rb-fold > summary::after {
+  content: "+"; margin-left: auto;
+  font: 800 15px/1 var(--rb-font-display); color: var(--rb-muted);
+}
+#ramble .rb-fold[open] > summary::after { content: "\2212"; }
+#ramble .rb-fold[open] > summary { margin-bottom: 10px; }
+#ramble .rb-fold > summary:focus-visible { outline: 2px solid var(--rb-accent-2); outline-offset: 3px; border-radius: 6px; }
+
 #ramble .rb-eyebrow {
   margin: 0 0 6px;
   font: 800 11px/1 var(--rb-font-display);
