@@ -10,6 +10,51 @@ async function ensureColumn(db, table, column, ddl) {
   }
 }
 
+const CELL7 = /^[0-9bcdefghjkmnpqrstuvwxyz]{7}$/;
+
+async function backfillCellsOnce(db) {
+  try {
+    const flag = await db.execute({
+      sql: "SELECT value FROM ramble_settings WHERE key = 'cells.backfilled'", args: [],
+    });
+    if (flag.rows.length) return;
+
+    const cells = new Set();
+    const add = (c) => { if (typeof c === "string" && CELL7.test(c)) cells.add(c); };
+
+    const credits = await db.execute({
+      sql: "SELECT key FROM ramble_credits WHERE kind = 'visit_place'", args: [],
+    });
+    for (const r of credits.rows) add(String(r.key || "").split(":")[0]);
+
+    const claims = await db.execute({ sql: "SELECT cell FROM ramble_nest_claims", args: [] });
+    for (const r of claims.rows) add(r.cell);
+
+    const mine = await db.execute({
+      sql: "SELECT geohash FROM ramble_marks WHERE origin = 'local'", args: [],
+    });
+    for (const r of mine.rows) add(r.geohash);
+
+    const at = Date.now();
+    for (const cell of cells) {
+      await db.execute({
+        sql: `INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES (?, ?)
+              ON CONFLICT(cell) DO NOTHING`,
+        args: [cell, at],
+      });
+    }
+    await db.execute({
+      sql: `INSERT INTO ramble_settings (key, value) VALUES ('cells.backfilled', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [String(cells.size)],
+    });
+  } catch (err) {
+    // Never block table creation: a missing legacy table on a fresh install is
+    // the normal case, not a failure.
+    try { console.warn("[ramble] cell backfill skipped:", err?.message); } catch {}
+  }
+}
+
 export async function initRambleTables(db) {
   await initTable(db, "ramble_marks", `
     CREATE TABLE IF NOT EXISTS ramble_marks (
@@ -149,6 +194,33 @@ export async function initRambleTables(db) {
       PRIMARY KEY (kind, key)
     );`);
 
+  // Phase 1 of the reward economy (spec 2026-09-08 §2, §6.2): one row per cell
+  // the user has physically stood in. An unlock is an immutable, permanent
+  // fact, so this table is append-only — the sync handler keeps the EARLIEST
+  // first_unlocked_at and honours no deletes. ⚠ PRIVACY (spec §2.4): this is a
+  // precise record of everywhere the user has been. It replicates to their OWN
+  // instances and must never appear in any contact-facing payload.
+  await initTable(db, "ramble_cells", `
+    CREATE TABLE IF NOT EXISTS ramble_cells (
+      cell TEXT PRIMARY KEY,
+      first_unlocked_at INTEGER NOT NULL,
+      lamport_ts INTEGER DEFAULT 0
+    );`);
+
+  // The currency ledger (spec §6.1). Balances are NEVER stored as balances: two
+  // instances each writing a running total would lose increments to
+  // last-writer-wins, so every earn and spend is a row under a natural
+  // idempotent key and the total is derived. Append-only, like ramble_cells.
+  await initTable(db, "ramble_wallet", `
+    CREATE TABLE IF NOT EXISTS ramble_wallet (
+      kind TEXT NOT NULL,
+      key TEXT NOT NULL,
+      delta INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      lamport_ts INTEGER DEFAULT 0,
+      PRIMARY KEY (kind, key)
+    );`);
+
   // Phase 2: which nests THIS instance's user has already claimed. Local by
   // design (spec §5): a claim is not shared state, the egg it produced is
   // (ramble_eggs replicates). PK (cell, week) makes a double-tap idempotent;
@@ -202,4 +274,14 @@ export async function initRambleTables(db) {
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS ramble_outbox_ref ON ramble_outbox(kind, ref_id);`);
+
+  // The map arrived after people had already been walking. Without this, fog
+  // covers ground the user has genuinely stood in and their whole public map
+  // goes blank on upgrade — and on a desktop, where geolocation is far vaguer
+  // than unlock.max.accuracy.m, it would never recover. visit_place credits are
+  // only ever awarded from a real position fix, so they are exactly the record
+  // we would have kept had this table existed. Local and un-emitted: each
+  // instance seeds from its own history, and the MIN() apply makes any
+  // resulting asymmetry benign.
+  await backfillCellsOnce(db);
 }

@@ -194,7 +194,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
 
   async function ensureLoaded(res) {
     if (!mods) {
-      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod] = await Promise.all([
+      const [dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, appRootMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod] = await Promise.all([
         bundleImport("server/db.js"),
         bundleImport("server/init-tables.js"),
         bundleImport("server/marks.js"),
@@ -210,16 +210,19 @@ export default function rambleRouter(dashboardAuth, options = {}) {
         bundleImport("server/delivery.js"),
         bundleImport("server/trades.js"),
         bundleImport("server/around.js"),
+        bundleImport("server/zones.js"),
+        bundleImport("server/cells.js"),
+        bundleImport("server/wallet.js"),
       ]).catch((err) => {
         console.warn(`[ramble routes] bundle modules unavailable: ${err.message}`);
         return [];
       });
       if (!dbMod || !initMod || !marksMod || !gridMod || !personaMod || !anchorsMod || !appRootMod || !petMod ||
-          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod) {
+          !eggsMod || !feedMod || !flockMod || !nestsMod || !deliveryMod || !tradesMod || !aroundMod || !zonesMod || !cellsMod || !walletMod) {
         res.status(500).json({ error: "ramble bundle modules not available" });
         return false;
       }
-      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, appImport: appRootMod.appImport };
+      mods = { dbMod, initMod, marksMod, gridMod, personaMod, anchorsMod, petMod, eggsMod, feedMod, flockMod, nestsMod, deliveryMod, tradesMod, aroundMod, zonesMod, cellsMod, walletMod, appImport: appRootMod.appImport };
     }
     if (!db) {
       db = mods.dbMod.createDbClient();
@@ -278,11 +281,26 @@ export default function rambleRouter(dashboardAuth, options = {}) {
    */
   async function annotateMarks(marks) {
     const byPubkey = await mods.deliveryMod.contactsByPubkey(db);
-    return marks.map(withApproxAnchor).map((m) => {
+    const named = marks.map(withApproxAnchor).map((m) => {
       const c = m.origin === "remote" ? byPubkey.get(String(m.author)) : null;
       // 2026-09-08 §4.5: a contact's pin carries their picture beside their name.
       return c ? { ...m, contact_name: c.name, ...(c.avatar ? { contact_avatar: c.avatar } : {}) } : m;
     });
+    // 2026-09-08 §2.1: fog the PUBLIC overlay. Runs AFTER contact naming, so a
+    // contact's mark is already marked as theirs and passes through untouched.
+    const depth = await mods.zonesMod.frontierDepth(db);
+    // Bounded like the other two gates. annotateMarks has no bbox, but the
+    // marks themselves give one: their own coordinates. An unbounded read here
+    // would undo the point of unlockedCellsNear on every /marks and /around.
+    const lats = named.map((m) => Number(m.lat ?? m.approx_lat)).filter(Number.isFinite);
+    const lons = named.map((m) => Number(m.lon ?? m.approx_lon)).filter(Number.isFinite);
+    const unlocked = lats.length
+      ? await mods.cellsMod.unlockedCellsNear(db, {
+          south: Math.min(...lats), north: Math.max(...lats),
+          west: Math.min(...lons), east: Math.max(...lons),
+        }, depth)
+      : new Set();
+    return mods.zonesMod.gateForZones(named, { unlocked, depth, encode: mods.anchorsMod.encodeGeohash });
   }
 
   /** bus.emit is synchronous and re-throws subscriber errors — never let one break a request. */
@@ -673,6 +691,15 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (b.here != null) {
       if (typeof b.here !== "object" || Array.isArray(b.here)) bad("here must be an object with lat and lon");
       here = { lat: requireLat(b.here.lat), lon: requireLon(b.here.lon) };
+      // 2026-09-08 §2.1: an unlock is permanent and undeletable, so a vague fix
+      // must not earn one. Optional — an older panel that omits it is trusted,
+      // exactly as today.
+      if (b.here.accuracy_m != null) {
+        if (typeof b.here.accuracy_m !== "number" || !Number.isFinite(b.here.accuracy_m) || b.here.accuracy_m < 0) {
+          bad("here.accuracy_m must be a non-negative number");
+        }
+        here.accuracy_m = b.here.accuracy_m;
+      }
     }
 
     // Written directly, NOT through the grid's emitting writer: `local.`-prefixed
@@ -684,16 +711,40 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       args: [JSON.stringify(cells)],
     });
 
+    let unlockedNow = null;
+    let seedPicked = 0;
     if (here) {
       // Geohash-7 (spec §2.1) — the credit key's period is the ISO week, so
       // the same real place only ever counts once a week no matter how many
       // times the panel posts its position.
       const cell = mods.anchorsMod.encodeGeohash(here.lat, here.lon, 7);
       await feedActivity({ type: "visit_place", cell });
+      // 2026-09-08 §2.1: standing in a cell unlocks it, permanently. Reported
+      // back only on the FIRST unlock so the panel celebrates once, not on
+      // every position post. `emit` is what makes the row replicate.
+      const out = await mods.cellsMod.recordUnlock(db, cell, { now: Date.now(), emit, accuracyM: here.accuracy_m });
+      // The FOOTPRINT, not just the name: the panel flashes the exact square
+      // the user just walked into, which is the whole point of the moment.
+      if (out.unlocked) unlockedNow = mods.zonesMod.cellBox(out.cell);
+      // 2026-09-08 §2.3: bird seed grows in ground you have ALREADY unlocked,
+      // so a first arrival unlocks the cell and the next visit starts paying.
+      // Deliberate: standing still after an unlock earns nothing until you
+      // move and come back, which is what "routine sustains you" means.
+      if (!out.unlocked && out.cell) {
+        seedPicked = (await mods.walletMod.recordSeedPickup(db, cell, { now: Date.now(), emit })).amount;
+      }
     }
 
     poke("ramble:area");
-    res.json({ cells });
+    // `seed` rides ONLY on a post that carried a fix. An area post without
+    // `here` keeps its historical response shape byte for byte, which is what
+    // the existing "writes local.active_area" test asserts with a deepEqual.
+    res.json({
+      cells,
+      ...(unlockedNow ? { unlocked: unlockedNow } : {}),
+      ...(seedPicked ? { seed_picked: seedPicked } : {}),
+      ...(here ? { seed: await mods.walletMod.seedBalance(db) } : {}),
+    });
   }));
 
   // --- blocks ---------------------------------------------------------------
@@ -716,7 +767,7 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     const pet = await mods.petMod.petState(db, { now });
     const bird = await mods.eggsMod.activeBird(db);
     const egg = await mods.eggsMod.eggState(db, { now });
-    res.json({ ...pet, bird, egg: { percent: egg.egg.percent } });
+    res.json({ ...pet, bird, egg: { percent: egg.egg.percent }, seed: await mods.walletMod.seedBalance(db) });
   }));
 
   router.post("/api/ramble/pet/chore", handle(async (req, res) => {
@@ -787,7 +838,43 @@ export default function rambleRouter(dashboardAuth, options = {}) {
     if (bbox.south > bbox.north || bbox.west > bbox.east) bad("bbox must have south <= north and west <= east");
     const out = await mods.flockMod.listNests(db, bbox, { now: Date.now() });
     if (!out) bad("bbox too large — zoom in");
-    res.json(out);
+    // Nests are public terrain, so they fog like public marks: whole in
+    // unlocked ground, a typed beacon in the frontier, absent in fog. The
+    // synthetic `visibility: "public"` is what marks them as gateable — nests
+    // have no visibility column of their own.
+    const depth = await mods.zonesMod.frontierDepth(db);
+    const unlocked = await mods.cellsMod.unlockedCellsNear(db, bbox, depth);
+    const gated = mods.zonesMod.gateForZones(
+      (out.nests || []).map((n) => ({ ...n, kind: "nest", origin: "remote", visibility: "public" })),
+      { unlocked, depth, encode: mods.anchorsMod.encodeGeohash },
+    ).map((n) => {
+      // gateForZones passes an UNLOCKED row through untouched, so the three
+      // synthetic keys we added to make it gateable would ride out to the
+      // client and break the route's documented shape. A beacon is rebuilt
+      // from scratch and never carries them.
+      if (n.beacon) return n;
+      const { kind, origin, visibility, ...nest } = n;
+      return nest;
+    });
+    res.json({ ...out, nests: gated });
+  }));
+
+  // The map's fog (spec 2026-09-08 §2.1). Same bbox contract as /nests: the
+  // server owns all geohash maths so the client needs none. Fog is implicit —
+  // a cell in neither list is fogged. The unlocked set is read BBOX-SCOPED, so
+  // a user with years of walked ground pays for geography, not for history.
+  router.get("/api/ramble/zones", handle(async (req, res) => {
+    const raw = req.query?.bbox;
+    if (typeof raw !== "string") bad("bbox=south,west,north,east is required");
+    const parts = raw.split(",").map((s) => Number(s.trim()));
+    if (parts.length !== 4 || !parts.every(Number.isFinite)) bad("bbox must be four numbers: south,west,north,east");
+    const bbox = { south: requireLat(parts[0]), west: requireLon(parts[1]), north: requireLat(parts[2]), east: requireLon(parts[3]) };
+    if (bbox.south > bbox.north || bbox.west > bbox.east) bad("bbox must have south <= north and west <= east");
+    const depth = await mods.zonesMod.frontierDepth(db);
+    const unlocked = await mods.cellsMod.unlockedCellsNear(db, bbox, depth);
+    const out = mods.zonesMod.classifyBbox(bbox, unlocked, { depth });
+    if (!out) bad("bbox too large — zoom in");
+    res.json({ ...out, depth });
   }));
 
   router.post("/api/ramble/nests/claim", handle(async (req, res) => {
@@ -829,7 +916,22 @@ export default function rambleRouter(dashboardAuth, options = {}) {
       if (err?.code === "too-wide") bad(err.message);
       throw err;
     }
-    res.json({ ...out, marks: await annotateMarks(out.marks) });
+    // aroundPoint owns the real bbox; this is just a bound for the unlocked
+    // read, padded by the frontier depth inside unlockedCellsNear.
+    const degLat = radiusM / 111320;
+    const degLon = radiusM / (111320 * Math.max(0.01, Math.cos(lat * Math.PI / 180)));
+    const bbox = { south: lat - degLat, west: lon - degLon, north: lat + degLat, east: lon + degLon };
+    const depth = await mods.zonesMod.frontierDepth(db);
+    const unlocked = await mods.cellsMod.unlockedCellsNear(db, bbox, depth);
+    const gatedNests = mods.zonesMod.gateForZones(
+      (out.nests || []).map((n) => ({ ...n, kind: "nest", origin: "remote", visibility: "public" })),
+      { unlocked, depth, encode: mods.anchorsMod.encodeGeohash },
+    ).map((n) => {
+      if (n.beacon) return n;
+      const { kind, origin, visibility, ...nest } = n;
+      return nest;
+    });
+    res.json({ ...out, marks: await annotateMarks(out.marks), nests: gatedNests });
   }));
 
   // --- flock ----------------------------------------------------------------

@@ -41,6 +41,64 @@ const { default: rambleRouter } = await import("../bundles/ramble/panel/routes.j
 const { default: panel } = await import("../bundles/ramble/panel/ramble.js");
 const { createDbClient } = await import("../bundles/ramble/server/db.js");
 const { default: bus } = await import("../servers/shared/event-bus.js");
+const { isoWeek } = await import("../bundles/ramble/server/eggs.js");
+const { nestsInCells, cellsInBbox, NEST_RATE_DEFAULT } = await import("../bundles/ramble/server/nests.js");
+const { bboxAround } = await import("../bundles/ramble/server/around.js");
+
+/**
+ * Fog gates public terrain (spec 2026-09-08 §2.1), so a test that lists or
+ * claims a nest must first walk to ground that actually unlocks it. Each walk
+ * posts /api/ramble/area with `here`, which credits +20 visit_place warmth
+ * against a hatch_at of 100 — this file already churns hatches and later
+ * asserts an incubating egg exists, so the credit is suppressed around the
+ * walk rather than left to accumulate.
+ *
+ * ⚠ An unlock is permanent (spec §2.1): once a test calls this, that cell
+ * stays unlocked for every test that runs afterward in this file. A fog
+ * assertion added later against this same ground will silently see it as
+ * already-walked, not fogged.
+ */
+async function walkTo(lat, lon) {
+  const db = createDbClient();
+  try {
+    await db.execute({
+      sql: `INSERT INTO ramble_settings (key, value) VALUES ('warmth.visit_place', '0')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      args: [],
+    });
+    await req("/api/ramble/area", { method: "POST", body: { lat, lon, here: { lat, lon, accuracy_m: 5 } } });
+  } finally {
+    await db.execute({ sql: "DELETE FROM ramble_settings WHERE key = 'warmth.visit_place'", args: [] });
+    db.close();
+  }
+}
+
+/**
+ * Unlock EVERY cell inside `radiusM` of (lat, lon) — not just one point. A
+ * single walkTo() only unlocks the one cell stood in, so any other nest
+ * within the radius but past the depth-3 frontier reach (~460 m) is still
+ * only a beacon (no `distance_m`, no `seed`); the /around gating test needs
+ * the whole circle to be real ground, exactly like a player who has actually
+ * explored the area, so every nest /around returns is unlocked rather than
+ * a preview. Same cells `aroundPoint` itself covers, so nothing is missed.
+ *
+ * ⚠ Same permanence caveat as walkTo: every cell it touches stays unlocked
+ * for the rest of the file's tests.
+ */
+async function unlockRadius(lat, lon, radiusM) {
+  const db = createDbClient();
+  try {
+    const cells = cellsInBbox(bboxAround({ lat, lon }, radiusM));
+    const now = Date.now();
+    for (const cell of cells) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.execute({
+        sql: `INSERT INTO ramble_cells (cell, first_unlocked_at) VALUES (?, ?) ON CONFLICT(cell) DO NOTHING`,
+        args: [cell, now],
+      });
+    }
+  } finally { db.close(); }
+}
 
 // 30.46 / -98.08 -> geohash7 "9v6m21h" -> precision-5 cell "9v6m2".
 const LAT = 30.46;
@@ -208,6 +266,14 @@ test("panel handler renders the world-first shell, its three views and every ass
   assert.match(sent, /motion access/, "the notice states the iOS prompt");
   assert.match(sent, /stays on this phone/, "the notice states the camera never leaves the device");
   assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(sent), "no emoji in the panel markup — icons are inline SVG");
+
+  // The location marker is the pet now (operator request, 2026-09-08): the
+  // corner button was retired, but the world view still needs a door that
+  // does not depend on a GPS fix.
+  assert.ok(sent.includes('id="rb-perch-open"'), "the world view keeps a door that does not need a GPS fix");
+  assert.ok(sent.includes('id="rb-perch-say"'), "the status strip stays");
+
+  assert.ok(sent.includes('id="rb-seed-count"'), "the map bar carries the seed counter");
 });
 
 // -------------------------------------------------------------- auth scoping
@@ -647,7 +713,7 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // Phase 5: one map-level watch drives the you-are-here dot (own pane) with
   // follow mode; nests carry reach + egg art into AR; the collect effect runs
   // at press, success and clear; the nest layer waits for the pin's pop.
-  assert.ok(body.includes('className: "rb-here-dot"') && body.includes('className: "rb-here-ring"'));
+  assert.ok(body.includes('className: "rb-here-ring"'));
   assert.ok(body.includes('map.createPane("rb-here")') && body.includes('getPane("rb-here").style.zIndex = 650'));
   assert.ok(body.includes("function startMapWatch(") && body.includes("function paintHere(") && body.includes("function setFollowing("));
   assert.ok(body.includes('map.on("dragstart"'), "a user drag ends follow mode");
@@ -683,6 +749,65 @@ test("GET /ramble/static/ramble.js serves the client script as JavaScript", asyn
   // itself everywhere in this file, so no direct assignment survives.
   assert.ok(body.includes("function setHidden(el, on)"), "the attribute-toggling helper is defined");
   assert.deepEqual(body.match(/\.hidden\s*=(?!=)/g) || [], [], "no .hidden = assignment remains anywhere in the file");
+
+  // Phase 1 of the reward economy (spec 2026-09-08 §2.1): the map masks
+  // everywhere the user has not been. Leaflet layer calls are not markup sinks.
+  assert.ok(body.includes("function refreshZones()"));
+  assert.ok(body.includes("function drawZones("));
+  assert.ok(body.includes("function drawBeacon("));
+  assert.ok(body.includes('"/api/ramble/zones?bbox="'), "zones are fetched by bbox like nests");
+  assert.ok(body.includes('map.createPane("rb-fog")'), "fog has its own pane");
+  assert.ok(body.includes("rb-fog\").style.zIndex = 350"), "the mask sits under the overlay pane so it cannot bury marks");
+  assert.ok(body.includes("L.polygon("), "fog is a real mask, not a dim band");
+  assert.ok(body.includes("fogHoles"), "the unlocked and frontier cells are punched out of it");
+  assert.ok(body.includes("if (mark.beacon)"), "a beacon is drawn differently from a full mark");
+  assert.ok(body.includes("function drawBeacon(mark, layer)") && body.includes("drawBeacon(nest, nestLayer)"),
+    "a nest beacon must live in the layer its own draw pass clears");
+  // The guards refreshNests already has: a zones fetch at world zoom-out would
+  // 400 on every settle and leave stale rectangles pinned to ground you left.
+  assert.ok(body.includes("MIN_ZONE_ZOOM"), "zones are not fetched below a zoom floor");
+
+  // Task 8: the unlock moment and the seed counter.
+  assert.ok(body.includes("function celebrateUnlock("), "a first unlock is celebrated once");
+  assert.ok(body.includes("rb-unlock-flash"), "the flash is a rectangle in the fog pane, not an inset shadow the tiles would hide");
+  assert.ok(body.includes("function paintSeed("), "the seed counter is painted from the area response");
+  assert.ok(body.includes("out.unlocked"), "the celebration is driven by the server saying it was the first time");
+
+  // Pin the MECHANISM, not the identifier: this is the phase's load-bearing
+  // guard, and `includes("lastPostedFix")` would pass on a variable that is
+  // declared and never used.
+  assert.ok(body.includes("haversineMeters(lastPostedFix, lastFix) > 75"),
+    "walking posts the area on distance, so it works with the map not following");
+  assert.ok(body.includes("lastPostedFix = {"), "and the anchor advances when it posts");
+
+  // The location marker IS the pet (operator request, 2026-09-08): it walks
+  // the map with you and opens the egg or pet view when tapped.
+  assert.ok(body.includes("function hereIcon("));
+  assert.ok(body.includes("function paintHereArt()"));
+  assert.ok(body.includes("function hereArt()"));
+  assert.ok(body.includes('hereDot.on("click"'), "the marker itself opens the view — the retired button also matched showView(perchTarget)");
+  assert.ok(body.includes('createElementNS("http://www.w3.org/2000/svg", "svg")'), "the art is built without a markup sink");
+  assert.ok(body.includes("showView(perchTarget)"), "tapping the marker still opens egg or pet");
+  assert.ok(!body.includes('L.circleMarker(ll, { pane: "rb-here"'), "the plain blue dot is gone");
+  assert.ok(body.includes("function markWalking()"));
+  assert.ok(
+    body.includes("haversineMeters(lastWalkFix, { lat: pos.coords.latitude, lon: pos.coords.longitude })"),
+    "the waddle has its OWN anchor — regressing it to lastPostedFix must fail here",
+  );
+  assert.ok(body.includes("if (moved > 10)"), "and its own 10 m threshold, not the 75 m area-post ratchet");
+  assert.ok(body.includes('setAttribute("role", "button")'), "the marker keeps the accessible role the retired button had");
+  assert.ok(body.includes('classList.add("is-walking")'), "the marker waddles while you move");
+
+  assert.ok(body.includes('if (ev.key !== "Enter" && ev.key !== " ") return;'), "Enter and Space activate the marker Leaflet only made focusable");
+  assert.ok(body.includes("el.onkeydown ="), "property assignment, so re-skinning cannot stack duplicate handlers");
+
+  // The world view's GPS-independent door (FIX 1): the map marker is the
+  // pretty way in, but it needs a real position fix to exist at all.
+  assert.ok(body.includes("function paintPerchGo()"));
+  assert.ok(body.includes('perchOpenBtn.addEventListener("click"'), "the door is wired independently of the map marker");
+
+  assert.ok(body.includes("eggPercent = pet.egg.percent"), "the world view's warmth line follows the pet refresh");
+  assert.ok(body.includes('opts.className = "rb-here-pet rb-here-plain"'), "a plain dot survives the bird engine failing to load");
 });
 
 test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
@@ -718,11 +843,22 @@ test("GET /ramble/static/ramble.css serves the panel stylesheet", async () => {
   // Phase 5: near-nest AR labels, the here dot, the collect fx.
   assert.match(body, /\.rb-ar-label\[data-kind="nest"\]\[data-near="true"\]/);
   assert.match(body, /\.rb-ar-label:not\(\[data-side\]\)\.rb-ar-fx-collect \.rb-ar-egg-art/);
-  assert.match(body, /\.rb-here-dot/);
   assert.match(body, /\.rb-nest-pin\.rb-nest-collect svg/);
   assert.match(body, /\.rb-ar-egg-art \{[^}]*order: -1/);
   assert.match(body, /prefers-reduced-motion[\s\S]*\.rb-nest-pin\.rb-nest-busy \{ box-shadow/);
   assert.ok(body.includes("#ramble .rb-pop-avatar {"), "a contact's picture on the pin has its rule");
+
+  assert.ok(body.includes("#ramble .rb-fog {"), "the fog mask has a rule");
+  assert.ok(body.includes("#ramble .rb-frontier-cell {"), "the frontier is dimmed, not hidden");
+  assert.ok(body.includes("#ramble .rb-beacon {"), "beacons have a rule");
+
+  assert.ok(body.includes("#ramble .rb-here-pet {"), "the pet marker has a rule");
+  assert.ok(body.includes("@keyframes rb-waddle"));
+  assert.ok(body.includes("#ramble .rb-here-pet.is-walking"));
+  assert.ok(body.includes("#ramble .rb-here-pet.rb-here-plain::before {"), "the engine-less fallback dot has a rule");
+
+  assert.ok(body.includes("@keyframes rb-unlock"), "the unlock has an animation");
+  assert.ok(body.includes("#ramble .rb-seed {"), "the seed counter has a rule");
 });
 
 test("GET /ramble/static/ramble-ar.js serves the renderer as JavaScript: zero backticks, zero markup sinks, no emoji, no capture APIs, classic script", async () => {
@@ -866,15 +1002,33 @@ let claimedEggId = null;
 
 test("GET /api/ramble/nests lists deterministic nests for a viewport and 400s a bad or too-wide bbox", async () => {
   const bbox = `${LAT - 0.01},${LON - 0.01},${LAT + 0.01},${LON + 0.01}`;
+  // Fog gates public terrain (spec 2026-09-08 §2.1), so the viewport must
+  // contain ground we have actually stood in before a nest is anything but a
+  // beacon. Nests are deterministic, so we can walk straight to one.
+  const week = isoWeek(Date.now());
+  const target = nestsInCells(
+    cellsInBbox({ south: LAT - 0.01, west: LON - 0.01, north: LAT + 0.01, east: LON + 0.01 }),
+    week,
+    { rate: NEST_RATE_DEFAULT },
+  )[0];
+  assert.ok(target, "the fixture bbox must hold at least one deterministic nest");
+  await walkTo(target.lat, target.lon);
+
   const res = await req(`/api/ramble/nests?bbox=${bbox}`);
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.match(body.week, /^\d{4}-W\d{2}$/);
   assert.ok(body.nests.length > 0, "a ~2 km box at rate 24 must hold nests");
-  assert.deepEqual(Object.keys(body.nests[0]).sort(), ["cell", "claimed", "lat", "lon", "seed", "week"]);
+  const whole = body.nests.find((n) => n.cell === target.cell);
+  assert.ok(whole, "the nest we walked to is listed in full");
+  claimedNest = whole;   // explicit: do not rely on body.nests[0] still being the whole one
+  assert.deepEqual(Object.keys(whole).sort(), ["cell", "claimed", "lat", "lon", "seed", "week"]);
+  for (const n of body.nests) {
+    if (n.cell === target.cell) continue;
+    assert.deepEqual(Object.keys(n).sort(), ["beacon", "kind", "lat", "lon"], "the rest are beacons");
+  }
   const again = await (await req(`/api/ramble/nests?bbox=${bbox}`)).json();
   assert.deepEqual(again, body);
-  claimedNest = body.nests[0];
 
   assert.equal((await req("/api/ramble/nests?bbox=1,2,3")).status, 400);
   assert.equal((await req("/api/ramble/nests?bbox=a,b,c,d")).status, 400);
@@ -885,6 +1039,9 @@ test("GET /api/ramble/nests lists deterministic nests for a viewport and 400s a 
 
 test("POST /api/ramble/nests/claim: too far is a friendly refusal; in range claims once; the claim emits the egg", async () => {
   assert.ok(claimedNest, "the nests test must run first");
+  // Fog gates public terrain: walk to the nest before claiming, exactly as a
+  // real player would — the walk unlocks the cell, then the claim follows.
+  await walkTo(claimedNest.lat, claimedNest.lon);
   const far = await req("/api/ramble/nests/claim", { method: "POST",
     body: { cell: claimedNest.cell, week: claimedNest.week, lat: claimedNest.lat + 0.01, lon: claimedNest.lon } });
   assert.equal(far.status, 200);
@@ -1011,6 +1168,22 @@ test("GET /api/ramble/marks names a remote mark by a contact; a stranger's stays
                  ('by-stranger', ?, NULL, 'mark', 'geo', '9v6m21h', ?, ?, 'public', 'open', 'yo', ?, 'remote', 'remote')`,
     args: [PK, LAT, LON, Date.now(), "99".repeat(32), LAT, LON, Date.now()],
   });
+
+  // Regression guard for the gate itself (spec 2026-09-08 §2.1): before any
+  // ground here is unlocked, the stranger's PUBLIC mark must be fogged off
+  // entirely while the contact's mark survives untouched. If `annotateMarks`
+  // ever stopped calling `gateForZones`, this is the assertion that would
+  // fail — the four tests below only add unlocked ground, so none of them
+  // would notice a removed gate.
+  const beforeWalk = (await (await req(`/api/ramble/marks?cells=${CELL}`)).json()).marks;
+  assert.ok(!beforeWalk.some((m) => m.mark_id === "by-stranger"), "a stranger's public mark is absent in fog");
+  assert.ok(beforeWalk.some((m) => m.mark_id === "by-pal"), "a contact's mark is never gated");
+
+  // Fog gates the public overlay: walking to the nest (a different, distant
+  // cell) does not unlock this fixture's own LAT/LON ground, so the stranger's
+  // public mark here would otherwise fog off and `.find(...)` would return
+  // undefined.
+  await walkTo(LAT, LON);
   const { marks } = await (await req(`/api/ramble/marks?cells=${CELL}`)).json();
   assert.equal(marks.find((m) => m.mark_id === "by-pal").contact_name, "Pal");
   assert.equal(marks.find((m) => m.mark_id === "by-stranger").contact_name, undefined);
@@ -1202,6 +1375,13 @@ test("GET /api/ramble/around: marks and nests within the radius with distance_m;
   const db = createDbClient();
   await db.execute({ sql: "INSERT INTO ramble_settings (key, value) VALUES ('nest.rate', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: [] });
   try {
+    // Fog gates nests too (spec 2026-09-08 §2.1). With nothing unlocked at
+    // LAT/LON every nest here is fog and the array is empty; walking to just
+    // the one point (walkTo) is not enough either — a nest elsewhere in the
+    // 500 m radius but past the depth-3 frontier reach (~460 m) would still
+    // come back as a beacon missing `distance_m`/`seed`, breaking this test's
+    // per-nest assertions below. Unlock the whole radius the route reads.
+    await unlockRadius(LAT, LON, 500);
     const res = await req(`/api/ramble/around?lat=${LAT}&lon=${LON}`);
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -1228,6 +1408,12 @@ test("GET /api/ramble/around: marks and nests within the radius with distance_m;
     const wide = await (await req(`/api/ramble/around?lat=${LAT}&lon=${LON}&radius_m=1000`)).json();
     assert.equal(wide.radius_m, 1000);
     assert.ok(wide.marks.map((m) => m.content_text).includes("far north"));
+    // Regression guard for the under-gating half: unlockRadius(LAT, LON, 500)
+    // above unlocks only the 500 m disc, so this wider 1000 m call reaches
+    // ground past it, where a nest.rate=1 nest still exists but is not
+    // unlocked. If gating were ever removed from /around, every nest here
+    // would come back whole and this would fail.
+    assert.ok(wide.nests.some((n) => n.beacon === true), "ground past the unlocked disc must still produce a beacon");
     // A full-precision double as String() prints it (up to 17 decimals) is a fine query.
     assert.equal((await req("/api/ramble/around?lat=30.460000000000000853&lon=-98.08")).status, 400, "18 decimals is too many");
     assert.equal((await req("/api/ramble/around?lat=30.46000000000000085&lon=-98.079999999999998")).status, 200);

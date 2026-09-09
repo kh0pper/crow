@@ -123,21 +123,12 @@ export default {
               <button class="rb-chip is-on" id="rb-chip-around" type="button" aria-pressed="true">${icon("target")}<span>Around you</span></button>
               <button class="rb-chip" id="rb-chip-visible" type="button" aria-haspopup="dialog">${icon("eye")}<span id="rb-chip-visible-label">Visible: off</span></button>
               <button class="rb-chip" id="rb-chip-ar" type="button" aria-haspopup="dialog">${icon("ar")}<span>Look around</span></button>
+              <span class="rb-seed" title="Bird seed"><strong id="rb-seed-count">0</strong><span>seed</span></span>
             </div>
 
             <div class="rb-perch">
               <div class="rb-say" id="rb-perch-say">Getting your bearings&hellip;</div>
-              <button class="rb-perch-btn" id="rb-perch-open" type="button" aria-label="Open your bird">
-                <svg id="rb-perch-bird" class="rb-bird rb-bob" viewBox="0 0 200 200" role="img" aria-label="Your bird" hidden></svg>
-                <span class="rb-ring" id="rb-perch-egg-wrap">
-                  <svg class="rb-ring-track" viewBox="0 0 240 240" aria-hidden="true">
-                    <circle class="rb-ring-trk" cx="120" cy="120" r="108" stroke-width="18" fill="none"/>
-                    <circle id="rb-perch-ring" class="rb-ring-prg" cx="120" cy="120" r="108" stroke-width="18" fill="none"
-                            stroke-linecap="round" stroke-dasharray="678.6" stroke-dashoffset="678.6"/>
-                  </svg>
-                  <svg id="rb-perch-egg" class="rb-eggart" viewBox="0 0 120 152" role="img" aria-label="Your egg"></svg>
-                </span>
-              </button>
+              <button class="rb-btn rb-btn-ghost rb-perch-go" id="rb-perch-open" type="button">Your egg</button>
             </div>
           </div>
 

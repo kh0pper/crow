@@ -116,10 +116,15 @@
   var map = null;
   var markerLayer = null;
   var nestLayer = null;
+  var zoneLayer = null;
+  var MIN_ZONE_ZOOM = 15;
   var hereLayer = null, hereDot = null, hereRing = null;
   var following = false, mapWatch = null, lastPanAt = null;
   var currentCells = [];
   var lastFix = null;      /* the most recent REAL geolocation fix */
+  var lastPostedFix = null;
+  var lastWalkFix = null;
+  var walkStopTimer = null;
   var lastMarks = [];
 
   if (mapEl && typeof L !== "undefined") {
@@ -143,6 +148,15 @@
     map.createPane("rb-here");
     map.getPane("rb-here").style.zIndex = 650;
     hereLayer = L.layerGroup().addTo(map);
+
+    /* 350: between Leaflet's tile pane (200) and its overlay pane (400).
+     * NOT 450 — markerLayer's locked-mark teasers are plain circleMarkers with
+     * no pane, so they render in the overlay pane at 400 and a 450 mask would
+     * bury them. Those include the user's OWN and their contacts' locked marks
+     * in fogged ground, which D4 says must be unaffected in every zone. */
+    map.createPane("rb-fog");
+    map.getPane("rb-fog").style.zIndex = 350;
+    zoneLayer = L.layerGroup().addTo(map);
     map.on("dragstart", function () { setFollowing(false); });
 
     /* The Android shell wraps the WebView in a SwipeRefreshLayout for
@@ -170,11 +184,92 @@
     var areaTimer = null;
     map.on("moveend", function () {
       if (areaTimer) clearTimeout(areaTimer);
-      areaTimer = setTimeout(function () { publishArea(); refreshNests(); }, 500);
+      areaTimer = setTimeout(function () { publishArea(); refreshNests(); refreshZones(); }, 500);
     });
   }
 
   /* ------------------------------------------------------------ you are here */
+
+  /* Leaflet's divIcon html option is a markup sink and this file is held to
+   * exactly two, so we never pass a string. It also accepts an ELEMENT, which
+   * Leaflet appends rather than assigning — no sink, and no getElement()
+   * timing to worry about. Note: no backticks anywhere in this file. */
+  function hereIcon(art) {
+    var opts = { className: "rb-here-pet", iconSize: [46, 46], iconAnchor: [23, 23] };
+    if (art) opts.html = art;   /* an Element, never a string */
+    /* No art means the bird engine did not load. Without a fallback the marker
+     * is an empty invisible div and the player loses their own position, which
+     * the retired circleMarker never did. Paint the old plain dot instead. */
+    else opts.className = "rb-here-pet rb-here-plain";
+    return L.divIcon(opts);
+  }
+
+  /* Fill the marker with whatever the perch would have shown: the bird once
+   * one has hatched, otherwise the egg. Built with createElementNS and handed
+   * to the shared engine, which is where the markup actually happens. */
+  function hereArt() {
+    if (!Bird) return null;
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    try {
+      if (perchTarget === "pet" && lastPet && lastPet.bird) {
+        svg.setAttribute("class", "rb-here-bird");
+        Bird.mountBird(svg, Bird.rollGenome(lastPet.bird.seed, lastPet.bird.species), (lastPet && lastPet.mood) || "happy");
+      } else {
+        /* The WALKING egg — legs and all. You are not carrying it, you are it. */
+        svg.setAttribute("class", "rb-here-egg");
+        svg.setAttribute("viewBox", "0 0 120 168");
+        drawWalkingEggSeed(svg, seedFromEggId(eggSeedId));
+      }
+    } catch (e) { return null; }
+    return svg;
+  }
+
+  /* Re-skin the marker in place when the egg hatches or the mood changes. */
+  function paintHereArt() {
+    if (!hereDot) return;
+    var art = hereArt();
+    if (art) hereDot.setIcon(hereIcon(art));
+    /* The retired perch was a button with an aria-label that tracked its
+     * state; a divIcon is a focusable div with neither. Restore both. */
+    var el = hereDot.getElement();
+    if (el) {
+      el.setAttribute("role", "button");
+      el.setAttribute("aria-label", perchTarget === "pet" ? "Open your bird" : "Open your egg");
+      /* keyboard:true only gives Leaflet's tabIndex + role; its one keypress
+       * handler is popup-only (_onKeyPress -> _openPopup) and hereDot binds no
+       * popup. A role="button" div gets no synthesized click from Enter/Space,
+       * so wire it by hand. Property assignment, not addEventListener: this runs
+       * on every re-skin and must not stack duplicate handlers. */
+      el.onkeydown = function (ev) {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        ev.preventDefault();
+        showView(perchTarget);
+      };
+    }
+  }
+
+  /* The world view's GPS-independent door. The map marker is the pretty way in;
+   * this is the one that still works indoors, with location denied, or if
+   * Leaflet never loads. Retiring the old corner button without this left the
+   * view with no exit at all. */
+  function paintPerchGo() {
+    var go = $("rb-perch-open");
+    if (!go) return;
+    go.textContent = perchTarget === "pet" ? "Your bird" : "Your egg";
+  }
+
+  /* Shared with the area-post trigger: one notion of "moving" for both. */
+  function markWalking() {
+    if (!hereDot) return;
+    var el = hereDot.getElement();
+    if (!el) return;
+    el.classList.add("is-walking");
+    if (walkStopTimer) clearTimeout(walkStopTimer);
+    walkStopTimer = setTimeout(function () {
+      var e = hereDot && hereDot.getElement();
+      if (e) e.classList.remove("is-walking");
+    }, 2200);
+  }
 
   function paintHere(fix) {
     if (!map || !hereLayer || !fix || typeof fix.lat !== "number" || typeof fix.lon !== "number") return;
@@ -182,7 +277,18 @@
     var r = Math.max(5, Math.min(200, Number(fix.accuracy_m) || 20));
     if (!hereDot) {
       hereRing = L.circle(ll, { pane: "rb-here", radius: r, className: "rb-here-ring", stroke: false, fillOpacity: 0.12, interactive: false }).addTo(hereLayer);
-      hereDot = L.circleMarker(ll, { pane: "rb-here", radius: 8, className: "rb-here-dot", weight: 3, fillOpacity: 1, interactive: false }).addTo(hereLayer);
+      hereDot = L.marker(ll, {
+        pane: "rb-here", icon: hereIcon(hereArt()), keyboard: true,
+        /* The retired button carried an accessible name; a divIcon has none,
+         * and the marker shows an egg as often as a bird. */
+        /* title carries the accessible name; divIcon ignores alt, which
+         * Leaflet only applies when it builds an img icon. The retired button
+         * was a real button with a state-aware label, so paintHereArt sets
+         * role and aria-label to keep that. */
+        title: "You",
+      }).addTo(hereLayer);
+      hereDot.on("click", function () { showView(perchTarget); });
+      paintHereArt();
     } else {
       hereRing.setLatLng(ll);
       hereRing.setRadius(r);
@@ -212,8 +318,24 @@
   function startMapWatch() {
     if (mapWatch != null || !map || !navigator.geolocation) return;
     mapWatch = navigator.geolocation.watchPosition(function (pos) {
+      /* Captured BEFORE lastFix is reassigned. 10 m clears typical
+       * high-accuracy GPS jitter (3-15 m) so a stationary user does not
+       * waddle on the spot; C1's post is a separate 75 m ratchet. */
+      var moved = lastWalkFix ? haversineMeters(lastWalkFix, { lat: pos.coords.latitude, lon: pos.coords.longitude }) : Infinity;
+      if (moved > 10) {
+        lastWalkFix = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+        markWalking();
+      }
       lastFix = { lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy_m: pos.coords.accuracy };
       paintHere(lastFix);
+      /* The map only posts on moveend, and one manual pan turns following off
+       * forever, so without this a walk unlocks nothing. Distance-driven and
+       * independent of the map: 75 m is the unlock radius, so this cannot skip
+       * a cell the user actually crossed. */
+      if (!lastPostedFix || haversineMeters(lastPostedFix, lastFix) > 75) {
+        lastPostedFix = { lat: lastFix.lat, lon: lastFix.lon };
+        publishArea();
+      }
       if (arOpen) {
         arPose.lat = lastFix.lat; arPose.lon = lastFix.lon; arPose.accuracy_m = lastFix.accuracy_m;
         maybeRefreshAround();
@@ -265,14 +387,55 @@
     if (!map) return Promise.resolve();
     var c = map.getCenter();
     var body = { lat: c.lat, lon: c.lng };
-    if (lastFix) body.here = { lat: lastFix.lat, lon: lastFix.lon };
+    if (lastFix) body.here = { lat: lastFix.lat, lon: lastFix.lon, accuracy_m: lastFix.accuracy_m };
     return jsonFetch("/api/ramble/area", { method: "POST", body: body })
       .then(function (out) {
         currentCells = (out && out.cells) || [];
+        /* Only when the server actually reported it: the seed key rides ONLY
+         * on a post that carried a fix, so treating its absence as zero would
+         * blank a real balance on every fix-less post and at boot without geo. */
+        if (out && typeof out.seed === "number") paintSeed(out.seed);
+        if (out && out.unlocked) celebrateUnlock(out.unlocked);
         refreshPet();
         return refreshMarks();
       })
       .catch(function () { /* the map still works without a subscription */ });
+  }
+
+  /* A first unlock is a moment: flash the exact square just earned, then
+   * repaint so the fog has actually retreated from it. The server tells us
+   * this was the first time, so it fires once per cell ever, not on every
+   * position post.
+   *
+   * NOT a box-shadow on the map container: an inset shadow paints beneath the
+   * container's children, and Leaflet's tile pane is opaque and covers it, so
+   * the flash would be invisible. A rectangle in the fog pane is on top of the
+   * tiles and is the thing the user actually wants to see light up. */
+  function celebrateUnlock(box) {
+    var say = $("rb-perch-say");
+    if (say) say.textContent = "New ground.";
+    /* Its OWN layer, not zoneLayer: drawZones opens with clearLayers(), and
+     * the refreshZones below resolves in tens of milliseconds, so a flash
+     * parked in zoneLayer would be wiped long before its 900 ms animation
+     * finished. */
+    var bounds = cellBounds(box);
+    if (bounds && hereLayer) {
+      /* Pane and layer are independent: the rb-fog PANE (350) keeps the flash
+       * under the pet marker instead of painting over it, while hereLayer is
+       * the group drawZones never clears. */
+      var flash = L.rectangle(bounds, {
+        pane: "rb-fog", className: "rb-unlock-flash", stroke: false, interactive: false,
+      }).addTo(hereLayer);
+      setTimeout(function () { if (hereLayer) hereLayer.removeLayer(flash); }, 900);
+    }
+    refreshZones();
+    refreshMarks();
+  }
+
+  function paintSeed(n) {
+    if (typeof n !== "number") return;
+    var el = $("rb-seed-count");
+    if (el) el.textContent = String(n);
   }
 
   /* ---------------------------------------------------------------- marks */
@@ -449,10 +612,15 @@
   }
 
   function drawMarks(marks) {
-    lastMarks = marks;
+    /* drawNearby renders a list row per mark and paintPerchSay counts
+     * lastMarks: a beacon has no content_text, mark_id or created_at, so both
+     * must work from the full marks only, never the raw response. */
+    var full = marks.filter(function (m) { return !m.beacon; });
+    lastMarks = full;
     if (markerLayer) markerLayer.clearLayers();
     marks.forEach(function (mark) {
       if (!markerLayer) return;
+      if (mark.beacon) { drawBeacon(mark, markerLayer); return; }   /* forEach callback: return, never continue */
       if (typeof mark.lat === "number" && typeof mark.lon === "number") {
         /* An open mark publishes its real anchor: a normal pin. */
         var marker = L.marker([mark.lat, mark.lon], { title: markLabel(mark) });
@@ -475,8 +643,17 @@
         blob.addTo(markerLayer);
       }
     });
-    drawNearby(marks);
+    drawNearby(full);
     paintPerchSay();
+  }
+
+  /* A frontier beacon: something is there, but not what. The server already
+   * stripped every detail; this only says which kind it is. */
+  function drawBeacon(mark, layer) {
+    var cls = mark.kind === "nest" ? "rb-beacon rb-beacon-nest" : "rb-beacon";
+    L.circleMarker([mark.lat, mark.lon], {
+      className: cls, radius: 7, weight: 2, fillOpacity: 0.5, interactive: false,
+    }).addTo(layer);
   }
 
   /** The list under the map mirrors the pins, newest first, capped. */
@@ -550,9 +727,6 @@
 
   /* ---------------------------------------------------------------- perch */
 
-  var perchBird = $("rb-perch-bird");
-  var perchEggWrap = $("rb-perch-egg-wrap");
-  var perchEgg = $("rb-perch-egg");
   var perchTarget = "egg";
   var eggPercent = 0;
   var eggSeedId = null;
@@ -579,26 +753,21 @@
   }
   function drawEggArt(el, eggId) { drawEggSeed(el, seedFromEggId(eggId)); }
 
+  /* The WALKING egg, for the location marker only: legs and all, because you
+   * are not carrying it, you are it. The write happens inside the engine's
+   * own mountWalkingEgg, so this file's sink count does not move. */
+  function drawWalkingEggSeed(el, seed) {
+    if (!el || !Bird) return;
+    try { Bird.mountWalkingEgg(el, seed >>> 0); } catch (e) { /* cosmetic */ }
+  }
+
   function paintPerch(pet) {
     var bird = pet && pet.bird;
     var valid = !!(Bird && bird && Bird.isValidBird({ species: bird.species, seed: bird.seed }));
-    if (valid) {
-      perchTarget = "pet";
-      if (perchEggWrap) setHidden(perchEggWrap, true);
-      if (perchBird) {
-        try { Bird.mountBird(perchBird, Bird.rollGenome(bird.seed, bird.species), pet.mood || "happy"); } catch (e) { /* cosmetic */ }
-        setHidden(perchBird, false);
-      }
-    } else {
-      perchTarget = "egg";
-      if (perchBird) setHidden(perchBird, true);
-      if (perchEggWrap) setHidden(perchEggWrap, false);
-      drawEggArt(perchEgg, eggSeedId);
-      setRing($("rb-perch-ring"), (pet && pet.egg && pet.egg.percent) || eggPercent);
-    }
-    var open = $("rb-perch-open");
-    if (open) open.setAttribute("aria-label", valid ? "Open your bird" : "Open your egg");
+    perchTarget = valid ? "pet" : "egg";
     paintPerchSay();
+    paintHereArt();
+    paintPerchGo();
   }
 
   function paintPerchSay() {
@@ -618,9 +787,6 @@
     if ((lastNests || []).length > 0) line += " There's a nest nearby.";
     say.textContent = line;
   }
-
-  var perchOpen = $("rb-perch-open");
-  if (perchOpen) perchOpen.addEventListener("click", function () { showView(perchTarget); });
 
   /* -------------------------------------------------------------- compose */
 
@@ -919,6 +1085,9 @@
   var outsideBtn = $("rb-go-outside");
   if (outsideBtn) outsideBtn.addEventListener("click", function () { showView("world"); });
 
+  var perchOpenBtn = $("rb-perch-open");
+  if (perchOpenBtn) perchOpenBtn.addEventListener("click", function () { showView(perchTarget); });
+
   /* ------------------------------------------------------------------ pet */
 
   var MOOD_LINE = {
@@ -933,6 +1102,7 @@
     if (!pet) return;
     lastPet = pet;
     paintPerch(pet);
+    paintSeed(pet.seed);
 
     var bird = pet.bird;
     var valid = !!(Bird && bird && Bird.isValidBird({ species: bird.species, seed: bird.seed }));
@@ -972,6 +1142,10 @@
     /* The successor egg, and the only route back to the egg view (and its
      * daily check-in) once the perch belongs to a hatched bird. */
     var nextPct = (pet.egg && typeof pet.egg.percent === "number") ? pet.egg.percent : eggPercent;
+    /* paintPerchSay renders the world view's warmth line from this, and the
+     * ring that used to show live progress is gone, so this is now the only
+     * thing keeping that line honest between egg-view visits. */
+    if (pet.egg && typeof pet.egg.percent === "number") eggPercent = pet.egg.percent;
     setRing($("rb-nextegg-ring"), nextPct);
     setText($("rb-nextegg-percent"), Math.round(nextPct) + "%");
     drawEggArt($("rb-nextegg-art"), eggSeedId);
@@ -1139,12 +1313,81 @@
     return box;
   }
 
+  /* The map's three zones (spec 2026-09-08 section 2.1). The server owns every
+   * geohash sum and sends footprints; the client punches them out of a mask. */
+  function refreshZones() {
+    if (!map || !zoneLayer) return Promise.resolve();
+    /* The same two guards refreshNests carries. Without the zoom floor the
+     * route 400s ("bbox too large") on every settle at low zoom, and the
+     * .catch below would leave the last mask pinned over ground the user has
+     * panned away from. */
+    var root = $("ramble");
+    if (root && root.getAttribute("data-view") !== "world") return Promise.resolve();
+    /* 15, matching refreshNests, NOT 13: /zones inherits MAX_NEST_CELLS via
+     * cellsInBbox, and a 1100x700 map at zoom 13 covers ~10,700 cells, so the
+     * route would 400 on every settle — the very failure this guard exists to
+     * prevent. Measured during review. */
+    if (map.getZoom() < MIN_ZONE_ZOOM) { zoneLayer.clearLayers(); return Promise.resolve(); }
+    var b = map.getBounds();
+    var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(",");
+    return jsonFetch("/api/ramble/zones?bbox=" + encodeURIComponent(bbox))
+      .then(drawZones)
+      .catch(function () { /* a failed fetch leaves the last mask up */ });
+  }
+
+  /* One polygon: the padded viewport as the outer ring, every unlocked and
+   * frontier cell as a hole. Leaflet fills even-odd, so the holes are clear
+   * and everything else is fogged. Frontier cells get a dim square on top so
+   * they read as previewed rather than owned. */
+  function drawZones(out) {
+    if (!out || !zoneLayer || !map) return;
+    zoneLayer.clearLayers();
+    var b = map.getBounds().pad(0.5);
+    var outer = [
+      [b.getSouth(), b.getWest()], [b.getSouth(), b.getEast()],
+      [b.getNorth(), b.getEast()], [b.getNorth(), b.getWest()]
+    ];
+    var fogHoles = [];
+    addHoles(fogHoles, out.unlocked);
+    addHoles(fogHoles, out.frontier);
+    L.polygon([outer].concat(fogHoles), {
+      pane: "rb-fog", className: "rb-fog", stroke: false, interactive: false
+    }).addTo(zoneLayer);
+    paintCells(out.frontier || [], "rb-frontier-cell");
+  }
+
+  function addHoles(holes, cells) {
+    for (var i = 0; i < (cells || []).length; i++) {
+      var c = cells[i];
+      if (!cellUsable(c)) continue;
+      holes.push([[c.south, c.west], [c.south, c.east], [c.north, c.east], [c.north, c.west]]);
+    }
+  }
+
+  /* One rectangle per cell. The footprint comes from the server's own list, so
+   * the client never needs a geohash encoder. */
+  function paintCells(cells, className) {
+    for (var i = 0; i < cells.length; i++) {
+      var box = cellBounds(cells[i]);
+      if (!box) continue;
+      L.rectangle(box, { pane: "rb-fog", className: className, stroke: false, interactive: false }).addTo(zoneLayer);
+    }
+  }
+
+  function cellUsable(c) {
+    return !!c && isFinite(c.south) && isFinite(c.west) && isFinite(c.north) && isFinite(c.east);
+  }
+  function cellBounds(c) {
+    return cellUsable(c) ? [[c.south, c.west], [c.north, c.east]] : null;
+  }
+
   function drawNests(list) {
     lastNests = list;
     if (!nestLayer) return;
     nestLayer.clearLayers();
     nestMarkers = {};
     list.forEach(function (nest) {
+      if (nest.beacon) { drawBeacon(nest, nestLayer); return; }
       var icon = L.divIcon({
         className: "rb-nest-pin" + (nest.claimed ? " is-claimed" : ""),
         html: nestEggHtml(nest.seed),
@@ -1571,7 +1814,18 @@
     arFetchAt = { lat: arPose.lat, lon: arPose.lon, t: Date.now() };
     /* toFixed(6) is ~0.1 m: enough for a label, and never a 400 from a long double. */
     return jsonFetch("/api/ramble/around?lat=" + encodeURIComponent(arPose.lat.toFixed(6)) + "&lon=" + encodeURIComponent(arPose.lon.toFixed(6)))
-      .then(function (out) { arAnchors = toArAnchors(out); scheduleArRender(); })
+      .then(function (out) {
+        /* toArAnchors's mark loop builds id: "m:" + mark.mark_id and its nest
+         * loop builds id: "n:" + nest.cell plus art: nestArt(nest) — a beacon
+         * has none of mark_id, cell or seed, so both arrays are filtered here,
+         * before toArAnchors ever sees a beacon. */
+        var filtered = {
+          marks: ((out && out.marks) || []).filter(function (m) { return !m.beacon; }),
+          nests: ((out && out.nests) || []).filter(function (n) { return !n.beacon; }),
+        };
+        arAnchors = toArAnchors(filtered);
+        scheduleArRender();
+      })
       .catch(function () { arFetchAt = null; /* keep the last anchors; the pose still moves them */ });
   }
 
@@ -1841,7 +2095,8 @@
       setFollowing(true);
     }).catch(function () {
       setText($("rb-perch-say"), "Pan the map to pick where you are listening.");
-    }).then(function () { publishArea(); refreshNests(); });
+    }).then(function () { publishArea(); refreshNests(); refreshZones(); });
     setInterval(refreshNests, 10 * 60e3);
+    setInterval(refreshZones, 10 * 60e3);
   }
 })();
