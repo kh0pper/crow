@@ -114,6 +114,38 @@ These bundles use `network_mode: host`. They consume whatever ports their upstre
 - `tailscale` (MagicDNS, peer connections)
 - `crowdsec-firewall-bouncer` (deferred to PR 4.5 — upstream does not publish a Docker image; needs a custom Dockerfile and a tested unwind command verified on a throwaway host) — will need host network to manipulate iptables/nftables
 
+## Second host: raven
+
+Until 2026-09-09 this registry described one machine. The two-host production design
+(`docs/superpowers/specs/2026-09-09-two-host-production-and-heavy-model-modes.md`) makes **raven** a production
+host, so ports now need a host qualifier to mean anything.
+
+Raven's ports live in their own namespace and do not collide with crow's. The first column below is deliberately
+`raven:<port>` rather than a bare number, because `scripts/check-port-allocation.js` reads bare numbers in the
+first cell as **crow** allocations. Keeping raven rows unparseable to it is correct today and is a stopgap:
+**making the checker host-aware is follow-up work**, and until it lands, a raven port is only verified by looking
+at raven.
+
+| port | bind | what | status |
+|---|---|---|---|
+| raven:8030 | 0.0.0.0 | Qwen3.8-Flash-Next @1M, production (native systemd, not a container) | planned |
+| raven:8031 | 0.0.0.0 | Flash-Next two-box master (window mode) | reserved |
+| raven:8032 | 0.0.0.0 | DeepSeek-V4-Flash two-box master (window mode) | reserved |
+| raven:8033 | 0.0.0.0 | GLM-5.3-Flash two-box master (window mode) | reserved |
+| crow:50052 | 10.99.0.1 (USB4 link) | `ggml-rpc-server` worker for every two-box arm | existing |
+
+Verified free on raven 2026-09-09: 8030 through 8033. Raven listens only on 22, 53, 631 and two ephemeral ports.
+
+### Two gaps this section exposes, both worth closing
+
+1. **Crow's own model ports are largely unlisted.** 8003 (35b), 8006 (27b solo) and 8014 (27b 512k) are absent
+   from the allocation table; only 8010 (27b copilot) is recorded. They bind the tailnet IP from `crow-addons/`
+   composes, which the conventions above already flag as a separate registry, so nothing catches them.
+2. **8098 is ambiguous across hosts.** The table allocates it to searxng on crow's loopback, while the two-box
+   benchmark zoo arms conventionally use 8098 on raven. Both are correct today because they are different
+   machines, and neither the table nor the checker can say so. This is precisely the class of silent
+   double-allocation the conventions section warns about, one host further out.
+
 ## Process for amending this file
 
 1. Pick an unallocated port in a sensible range (admin UIs in 3000-3099, backend APIs in 8000-8099, metrics in 19000-19999).
