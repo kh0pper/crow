@@ -70,7 +70,7 @@ A fixed constant id is also wrong: a contact could gift you *their* starter egg 
 - **No schema change, no migration, no `SCHEMA_GENERATION` bump.** Laying rides `ramble_wallet` (`kind`, `key`, `delta`, `created_at`, `lamport_ts`); prologue flags ride `ramble_settings`. `scripts/init-db.js` is **not modified**. `bundles/ramble/server/init-tables.js` is modified for **a comment only** (Task 3) — its SQL must be byte-identical.
 - **Ledgers, not balances (spec §6.1):** a lay-day is an append-only row under a natural idempotent key (the local day). Never store a day count.
 - **A `layday` row's `delta` is ALWAYS the integer `1`.** `applyRambleWallet` resolves conflicts with `MAX(delta)`, which is only convergent when the value cannot differ between instances for the same key. Phase 2 shipped a bug here precisely because seed's `delta` was a live setting. **Never write a negative delta** — `MAX(delta)` would resolve `-10`/`-5` to `-5`.
-- **You are never simultaneously birdless and eggless.** `hatchIfReady` sets `active_egg_id` on the first hatch and eggless can only occur after a hatch, so the eggless state always has a bird to show. Copy may rely on this; code should still not crash if it is false.
+- **⚠ A player CAN be simultaneously birdless and eggless, and it is the most important state in the phase.** An earlier draft of this plan asserted the opposite. It is false: a brand-new player between first load and tapping the prologue's **Go** button has neither, and so does anyone whose `POST /api/ramble/prologue/intro` failed. That window *is* the new-player experience this phase exists to build. Every surface must render it without a phantom egg (see Task 7's `hereArt` and AR fixes) and without a crash.
 - **Panel client rules, test-enforced:** `bundles/ramble/panel/static/ramble.js` must keep **ZERO backticks** (one truncates the served script; the slip is markdown habit in a code comment), **EXACTLY TWO** engine markup sinks, `textContent` only, and no emoji. `setAttribute`/`removeAttribute`/`className`/Leaflet layer calls are not markup sinks. Build every new node with `createElement` + `textContent`; put new *markup* in the server-rendered shell `panel/ramble.js` and toggle it with `hidden`.
 - **Invisible characters:** write any bidi/control character as a `\u` escape, never a raw byte.
 - **Commits:** subject-only message, positional paths (`git commit <path> -m "..."`, never `git add -A`), `git add` new files first. **NO AI-attribution trailers of any kind.**
@@ -83,7 +83,8 @@ A fixed constant id is also wrong: a contact could gift you *their* starter egg 
 
 1. **The starter-egg id is a random UUID gated on an empty egg table, not derived from the Crow identity.** See Finding 3 — the spec's mechanism is impossible because `crowId` is per-instance. Say this in the PR body so a reviewer reads it as a correction, not drift.
 2. **`creditWarmth` still writes its ledger row when there is no egg.** See Finding 1. The spec does not describe the interaction with `feedAll`'s `shouldFeedPet` gate at all; without this, laying is unreachable.
-3. **Auto-promote runs lazily on read paths as well as on hatch.** Spec §4.2 says "when the incubating slot empties" without saying who notices. A slot can empty from a sync arrival that no local code path observes, so the read paths carry a *guarded* promote. This is a write during a GET and a reviewer should challenge it — the justification is that it moves an egg the user already owns rather than conjuring one, and Task 3 has a test asserting a read with nothing promotable writes nothing.
+3. **A two-instance fleet can lay two eggs from one lay, and that is accepted.** Both instances eggless, both observing the same happy days, both crossing the threshold before a sync: each writes the same `lay:<local day>` key locally (so `rowsAffected` is 1 on both) and each mints an egg with its own UUID. `applyRambleEgg` then shelves one, so the user ends with one incubating and one spare on the shelf. Making this impossible would need a deterministic egg id derived from the lay day — which reintroduces exactly the cross-user collision that rules a constant id out for the starter egg (a contact who laid on the same date could gift you a colliding row). **Ramble is installed on grackle only**, so this is currently unreachable; the graceful degradation is the existing convergence rule, and the cost of the alternative is a real collision for a hypothetical one. Revisit if a second instance ever installs the bundle.
+4. **Auto-promote runs lazily on read paths as well as on hatch, in a weaker "speculative" mode.** Spec §4.2 says "when the incubating slot empties" without saying who notices. A slot can empty from a sync arrival that no local code path observes, so the read paths carry a *guarded* promote. It is still a write during a GET, and the first draft of this plan defended it only as "it moves an egg the user already owns" — which is true and beside the point. The real hazard, found in review: `applyRambleEgg` carries an explicit carve-out (`instance-sync.js:855-860`) refusing to re-promote on a peer's user-shelve, because the replacement egg's row "follows in the same drain" and promoting there would draft an old egg that then out-ranks the user's real choice on both instances. A GET landing in that window would do exactly that. So the read-path promote marks `shelf_origin = 'sync'` (which ranks *below* any NULL-origin egg, so a real choice out-ranks it on arrival) and **never emits** — the same discipline the sync layer's own re-promote uses. Task 3 tests both modes.
 
 ---
 
@@ -149,8 +150,8 @@ Create `bundles/ramble/server/egg-locks.js`, pasting the real `OPEN_SQL` from St
  * trades.js, but trades.js imports `startOfLocalDay` from eggs.js, and phase
  * 3's auto-promote (eggs.js) must skip a locked egg — so keeping it there
  * would force an eggs -> trades -> eggs cycle. trades.js re-exports both
- * helpers, so every existing consumer is unchanged and there is still exactly
- * one definition of "locked".
+ * helpers, so its existing importer (flock.js, the only one) is unchanged and
+ * there is still exactly one definition of "locked".
  */
 
 // Verbatim from trades.js:68. An "open" trade is one that still has a claim on
@@ -307,16 +308,35 @@ test("creditWarmth with no egg: the ledger row is written, warmth vanishes (D3)"
 
 test("REGRESSION: walking, meeting a crow and checking in ALL still feed energy with no egg", async () => {
   const db = await freshDb();
+  // ⚠ EXACT VALUES, NOT `> 0` OR `>=`. `ramble_pet.energy` DEFAULTS TO 60
+  // (init-tables.js:105), so `energy > 0` is true whether or not anything was
+  // fed, and `>=` is true when the feed was SKIPPED and the value did not
+  // move. An earlier draft of this very test asserted exactly that and would
+  // have passed against the death spiral it exists to prevent — phase 2's
+  // vacuous-fixture lesson, on the one test that most needed to be sharp.
+  // Deltas (pet.js FEED_DELTAS): checkin +5, visit_place +15, meet_crow +20,
+  // against the base ceiling of 100.
   const before = await feedAll(db, { type: "checkin" }, { now: T0 });
   assert.equal(await eggCount(db), 0, "feeding must not mint an egg");
-  assert.ok(before.pet, "a pet is always returned");
-  assert.ok(before.pet.energy > 0, "the check-in fed the bird even with no egg");
+  assert.equal(before.pet.energy, 65, "60 + 5: the check-in fed the bird with no egg");
 
   const place = await feedAll(db, { type: "visit_place", cell: "9vk79ed" }, { now: T0 + 1000 });
+  assert.equal(place.pet.energy, 80, "65 + 15: a new place fed the bird");
+
   const crow = await feedAll(db, { type: "meet_crow", persona: "abc123" }, { now: T0 + 2000 });
-  assert.ok(place.pet.energy >= before.pet.energy, "a new place fed the bird");
-  assert.ok(crow.pet.energy >= place.pet.energy, "meeting a crow fed the bird");
+  assert.equal(crow.pet.energy, 100, "80 + 20: meeting a crow fed the bird");
   assert.equal(await eggCount(db), 0);
+});
+
+test("NEGATIVE CONTROL: a repeat visit_place does not feed, so the test above can fail", async () => {
+  // Without this, an implementation that fed unconditionally would also pass
+  // the test above. `shouldFeedPet` must still honour the dedup key.
+  const db = await freshDb();
+  const first = await feedAll(db, { type: "visit_place", cell: "9vk79ed" }, { now: T0 });
+  assert.equal(first.pet.energy, 75, "60 + 15");
+  const repeat = await feedAll(db, { type: "visit_place", cell: "9vk79ed" }, { now: T0 + 1000 });
+  assert.equal(repeat.credited, false, "same cell, same ISO week");
+  assert.equal(repeat.pet.energy, 75, "a not-credited keyed event must NOT feed");
 });
 
 test("an unknown or pet-only event is still a pure read with no egg", async () => {
@@ -463,10 +483,24 @@ git commit bundles/ramble/server/eggs.js tests/ramble-eggs-supply.test.js tests/
 **Files:**
 - Modify: `bundles/ramble/server/eggs.js`, `bundles/ramble/server/flock.js`, `bundles/ramble/server/init-tables.js` (comment only)
 - Modify: `tests/ramble-eggs-supply.test.js`
+- **Modify (these WILL go red — they assert the behaviour this task removes):** `tests/ramble-eggs.test.js`, `tests/ramble-flock.test.js`, `tests/ramble-tools.test.js`, `tests/ramble-panel.test.js`
+
+**⚠ Task 3 breaks seven existing assertions. They are not "maybe" — each was checked against the code. Rewrite each to assert the NEW contract; do not weaken or delete a test to make it pass:**
+
+| File:line | What it asserts today | What it becomes |
+|---|---|---|
+| `tests/ramble-eggs.test.js:49` | `[["hatched",1],["incubating",1]]`, titled *"…and starts the next egg"* | `[["hatched",1]]` — no successor. Retitle. |
+| `tests/ramble-eggs.test.js:58` | `s.egg.egg_id` after a hatch | `assert.equal(s.egg, null)` |
+| `tests/ramble-eggs.test.js:71` | `before.egg.warmth` after a hatch | null-guard, or shelve an egg first so one exists |
+| `tests/ramble-eggs.test.js:82` | `before.egg.warmth` after a hatch | same |
+| `tests/ramble-flock.test.js:150` | *"a successor egg was minted"* | the slot is empty after a hatch with an empty shelf |
+| `tests/ramble-flock.test.js:172` | *"the incubating egg is ensured and listed first"* | mint one explicitly as a fixture, then assert ordering |
+| `tests/ramble-tools.test.js:177` | `s.eggs[0].status === "incubating"` | mint a fixture, or assert the eggless shape |
+| `tests/ramble-panel.test.js:1227` | `flock.eggs.find(e => e.status === "incubating")` — the file header (line 53) says it "churns hatches and later asserts an incubating egg exists" | give the fixture an explicit egg |
 
 **Interfaces:**
-- Produces: `promoteFromShelf(db, { now, emit }) -> Promise<row|null>` — promotes the oldest non-locked `shelf`/`received` egg into the incubating slot, or returns null.
-- Consumed by: `hatchIfReady` (eggs.js), `eggState`/`flockState`/`petState` read paths (Task 4/6), `panel/routes.js`.
+- Produces: `promoteFromShelf(db, { now, emit, speculative }) -> Promise<row|null>` — promotes the oldest non-locked `shelf`/`received` egg into the incubating slot, or returns null.
+- Consumed by: `hatchIfReady` (eggs.js, `speculative: false`), `flockState` (eggs.js, `speculative: true`), and `GET /api/ramble/egg` in `panel/routes.js` (Task 6, `speculative: true`). **`petState` does NOT promote** — an earlier draft's interface block claimed it did while no task added it.
 
 **The ordering rule, which is the whole design:** both instances must pick the **same** egg with no round trip. The order is `created_at ASC, egg_id ASC` — a total order and a pure function of replicated rows, exactly the order `RAMBLE_EGG_REPROMOTE_SQL` already uses for the sync layer's own re-promote.
 
@@ -500,8 +534,30 @@ test("promoteFromShelf takes the OLDEST shelf egg and clears shelf_origin", asyn
   assert.equal(promoted.egg_id, "older", "oldest created_at wins");
   assert.equal((await statusOf(db, "older")).status, "incubating");
   assert.equal((await statusOf(db, "older")).shelf_origin, null,
-    "an incubating egg carries no shelf origin, same as the manual incubate path");
+    "a deliberate promote carries no shelf origin, same as the manual incubate path");
   assert.equal((await statusOf(db, "younger")).status, "shelf", "only one is drafted");
+});
+
+test("a SPECULATIVE promote marks 'sync' and never emits, so it cannot out-rank a real choice", async () => {
+  const db = await freshDb();
+  await shelveEgg(db, "parked", T0);
+  const emitted = [];
+  const emit = (table, op, row) => { emitted.push([table, op, row.egg_id]); };
+
+  const promoted = await promoteFromShelf(db, { now: T0 + 1000, emit, speculative: true });
+  assert.equal(promoted.egg_id, "parked");
+  assert.equal((await statusOf(db, "parked")).shelf_origin, "sync",
+    "'sync' ranks BELOW a NULL-origin egg in applyRambleEgg, so the user's real choice wins");
+  assert.deepEqual(emitted, [],
+    "a guess must not replicate — instance-sync.js:855 refuses to draft during an incubate swap");
+});
+
+test("a DELIBERATE promote does emit, because the user really moved to a new egg", async () => {
+  const db = await freshDb();
+  await shelveEgg(db, "next", T0);
+  const emitted = [];
+  await promoteFromShelf(db, { now: T0 + 1000, emit: (t, o, r) => emitted.push([t, o, r.egg_id]) });
+  assert.deepEqual(emitted, [["ramble_eggs", "update", "next"]]);
 });
 
 test("promoteFromShelf breaks a created_at tie by the lower egg_id, so two instances agree", async () => {
@@ -536,6 +592,21 @@ test("promoteFromShelf SKIPS an egg spoken for by an open swap", async () => {
   const promoted = await promoteFromShelf(db, { now: T0 + 2000 });
   assert.equal(promoted.egg_id, "free-one", "an egg promised to a contact is not drafted");
   assert.equal((await statusOf(db, "locked-one")).status, "shelf");
+});
+
+test("an EXPIRED but unswept trade still locks its egg — do not 'fix' the predicate", async () => {
+  // expireTrades runs on the 15 s drain tick, so there is a window where a
+  // lapsed offer is still 'proposed'. The slot stays empty until the sweep.
+  // Harmless, and pinned here so nobody later widens OPEN_SQL to "fix" it.
+  const db = await freshDb();
+  await shelveEgg(db, "only-one", T0);
+  await db.execute({
+    sql: `INSERT INTO ramble_trades
+            (trade_id, counterpart, role, my_egg_id, state, created_at, updated_at, expires_at)
+          VALUES ('t-expired', 'npub-them', 'proposer', 'only-one', 'proposed', ?, ?, ?)`,
+    args: [T0, T0, T0 - 1000],           // already past expires_at, not yet swept
+  });
+  assert.equal(await promoteFromShelf(db, { now: T0 + 5000 }), null);
 });
 
 test("promoteFromShelf is a NO-OP when the slot is full, and when there is nothing to promote", async () => {
@@ -629,8 +700,30 @@ Then:
  *
  * Writes NOTHING when the slot is occupied or nothing is promotable, which is
  * what makes it safe to call from a read path.
+ *
+ * ⚠ TWO MODES, and the difference is a real hazard, not a style choice.
+ *
+ * `speculative: false` (the hatch path) is a deliberate local event: the egg
+ * takes `shelf_origin = NULL` — the TOP class in applyRambleEgg's convergence
+ * rule — and the row is emitted, because the user really did just move to a
+ * new egg.
+ *
+ * `speculative: true` (the read paths) is a guess. The slot may be empty only
+ * because a peer's drain is mid-flight: applyRambleEgg carries an explicit
+ * carve-out (instance-sync.js:855-860) saying a peer's USER shelve is half of
+ * an "incubate" swap and the replacement row "follows in the same drain", so
+ * re-promoting there "would draft an old convergence loser into the slot,
+ * which then out-ranks the user's real choice by created_at on both sides".
+ * A GET landing in that window would do exactly what that carve-out refuses
+ * to do. So a speculative promote:
+ *   - marks the egg `shelf_origin = 'sync'`, which ranks BELOW any NULL-origin
+ *     egg, so the user's real choice out-ranks it the moment it arrives; and
+ *   - NEVER emits, so it stays a local re-derivation each instance performs
+ *     for itself — the same discipline the sync layer's own re-promote uses.
+ * This is deliberately the same semantics as RAMBLE_EGG_REPROMOTE_SQL,
+ * extended to 'user' eggs so §4.2's release valve still works.
  */
-export async function promoteFromShelf(db, { now, emit } = {}) {
+export async function promoteFromShelf(db, { now, emit, speculative = false } = {}) {
   void now;
   if (await getIncubatingEgg(db)) return null;
 
@@ -648,15 +741,16 @@ export async function promoteFromShelf(db, { now, emit } = {}) {
   // a query against the table's contents, not a schema constraint, so two
   // overlapping promotes must not both succeed.
   const { rowsAffected } = await db.execute({
-    sql: `UPDATE ramble_eggs SET status = 'incubating', shelf_origin = NULL
+    sql: `UPDATE ramble_eggs SET status = 'incubating', shelf_origin = ?
            WHERE egg_id = ? AND status IN ('shelf', 'received')
              AND NOT EXISTS (SELECT 1 FROM ramble_eggs WHERE status = 'incubating')`,
-    args: [next.egg_id],
+    args: [speculative ? "sync" : null, next.egg_id],
   });
   if (rowsAffected === 0) return null;
 
   const promoted = await getIncubatingEgg(db);
-  if (promoted) await safeEmit(emit, "ramble_eggs", "update", promoted);
+  // A speculative promote never emits — see the two-modes note above.
+  if (promoted && !speculative) await safeEmit(emit, "ramble_eggs", "update", promoted);
   return promoted;
 }
 ```
@@ -685,7 +779,9 @@ In `bundles/ramble/server/flock.js`, delete `await ensureIncubatingEgg(db, { now
   // can empty from a sync arrival that no local code path observed — that
   // moves an egg the user already owns rather than conjuring one, and
   // promoteFromShelf writes nothing when there is nothing to promote.
-  await promoteFromShelf(db, { now });
+  // SPECULATIVE: marks 'sync' and does not emit, so a GET landing mid-drain
+  // cannot out-rank a deliberate incubate made on another instance.
+  await promoteFromShelf(db, { now, speculative: true });
 ```
 
 Update the import: drop `ensureIncubatingEgg`, add `promoteFromShelf`.
@@ -718,17 +814,21 @@ Expected: **no output.** Any line here means executable SQL changed and the chan
 
 ```bash
 node scripts/run-suite.mjs tests/ramble-eggs-supply.test.js
+node scripts/run-suite.mjs tests/ramble-eggs.test.js
 node scripts/run-suite.mjs tests/ramble-flock.test.js
+node scripts/run-suite.mjs tests/ramble-tools.test.js
+node scripts/run-suite.mjs tests/ramble-panel.test.js
 node scripts/run-suite.mjs tests/ramble-sync.test.js
 ```
 
-Expected: all PASS. `tests/ramble-flock.test.js` may have a test asserting a successor appears after a hatch — if so, it is asserting the behaviour this phase removes: update it to assert the slot is empty, and say so in the commit.
+Expected: all PASS, after the seven assertions in the table above have been rewritten. **Do not proceed to Task 4 with any of these red** — a later task's failure is much harder to attribute once several are broken at once.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git commit bundles/ramble/server/eggs.js bundles/ramble/server/flock.js \
-  bundles/ramble/server/init-tables.js tests/ramble-eggs-supply.test.js tests/ramble-flock.test.js \
+  bundles/ramble/server/init-tables.js tests/ramble-eggs-supply.test.js \
+  tests/ramble-eggs.test.js tests/ramble-flock.test.js tests/ramble-tools.test.js tests/ramble-panel.test.js \
   -m "ramble: the shelf refills the incubating slot, and hatching mints nothing"
 ```
 
@@ -773,8 +873,9 @@ import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
 import {
   mintIncubatingEgg, getIncubatingEgg, recordHappyDay, layProgress,
-  hasAnyEggAnywhere, readLaySettings, LAY_DAYS_DEFAULT,
+  hasAnyEggAnywhere, readLaySettings, LAY_DAYS_DEFAULT, localDay,
 } from "../bundles/ramble/server/eggs.js";
+import { applyRambleWallet } from "../servers/sharing/instance-sync.js";
 
 const DAY = 86400000;
 const T0 = Date.UTC(2026, 8, 9, 12, 0, 0);
@@ -892,6 +993,61 @@ test("layProgress reports what the panel needs", async () => {
   await recordHappyDay(db, { now: T0, mood: "happy" });
   assert.deepEqual(await layProgress(db), { days: 1, needed: 14 });
 });
+
+/* ------------------------------------------------------- multi-instance
+ * Spec §8: "every currency ledger replicates, so both need multi-instance
+ * tests, not single-database ones." A sync defect already cost this project
+ * real data; prose review is not sufficient here. The pattern below follows
+ * tests/ramble-cells-sync.test.js.
+ */
+
+test("MULTI-INSTANCE: a peer's layday rows converge to the same count", async () => {
+  const a = await freshDb();
+  const b = await freshDb();
+  await setLayDays(a, 5); await setLayDays(b, 5);
+
+  const rows = [];
+  const emit = (table, op, row) => { if (table === "ramble_wallet") rows.push(row); };
+  await recordHappyDay(a, { now: T0, mood: "happy", emit });
+  await recordHappyDay(a, { now: T0 + DAY, mood: "happy", emit });
+
+  for (const r of rows) await applyRambleWallet(b, "insert", r, 1);
+  assert.equal((await layProgress(b)).days, 2, "b sees a's days");
+  assert.equal((await layProgress(a)).days, 2, "and a is unchanged");
+});
+
+test("MULTI-INSTANCE: created_at going BACKWARDS on apply must not change the count", async () => {
+  // applyRambleWallet does created_at = MIN(local, incoming). This is exactly
+  // why layProgress orders by `key` and not by `created_at`: an apply can move
+  // a row's timestamp across the reset boundary, and clock skew between the
+  // user's own machines is enough to do it.
+  const db = await freshDb();
+  await setLayDays(db, 99);
+  await recordHappyDay(db, { now: T0, mood: "happy" });
+  await recordHappyDay(db, { now: T0 + DAY, mood: "happy" });
+  const before = (await layProgress(db)).days;
+
+  await applyRambleWallet(db, "insert",
+    { kind: "layday", key: localDay(T0 + DAY), delta: 1, created_at: 0 }, 9);
+
+  assert.equal((await layProgress(db)).days, before,
+    "a rewritten created_at must not move a day in or out of the count");
+});
+
+test("MULTI-INSTANCE: a peer's lay row resets this instance's count too", async () => {
+  const db = await freshDb();
+  await setLayDays(db, 99);
+  await recordHappyDay(db, { now: T0, mood: "happy" });
+  await recordHappyDay(db, { now: T0 + DAY, mood: "happy" });
+  assert.equal((await layProgress(db)).days, 2);
+
+  // The peer laid on the later day.
+  await applyRambleWallet(db, "insert",
+    { kind: "lay", key: localDay(T0 + DAY), delta: 1, created_at: T0 + DAY }, 5);
+
+  assert.equal((await layProgress(db)).days, 0,
+    "both instances agree the count is spent, with nothing deleted");
+});
 ```
 
 - [ ] **Step 2: Run it to watch it fail**
@@ -934,19 +1090,27 @@ export async function hasAnyEggAnywhere(db) {
 
 /**
  * Happy days banked since the last lay. The count RESETS without deleting a
- * row: `lay` rows mark each laying, and only `layday` rows newer than the most
- * recent one count. Both instances derive the same number from the same
- * replicated rows, and the ledger stays append-only (spec §6.1).
+ * row: `lay` rows mark each laying, and only `layday` rows AFTER the most
+ * recent one count. The ledger stays append-only (spec §6.1).
+ *
+ * ⚠ ORDERED BY `key`, NEVER BY `created_at`. Both are tempting; only one
+ * converges. `applyRambleWallet` resolves a conflict with
+ * `created_at = MIN(local, incoming)` (instance-sync.js:620), so a sync apply
+ * can move a row's timestamp BACKWARDS — across the reset boundary, in either
+ * direction — and clock skew between the user's machines is enough to do it
+ * on its own. `key` is the local day (`YYYY-MM-DD`), it is half the primary
+ * key, it sorts lexically in true date order, and `applyRambleWallet` never
+ * rewrites it. Comparing keys therefore yields the same number on every
+ * instance from the same rows. It also excludes the lay-day itself, which is
+ * correct: the day you laid is spent.
  */
 export async function layProgress(db) {
   const { layDays } = await readLaySettings(db);
-  const { rows: lastLay } = await db.execute({
-    sql: `SELECT MAX(created_at) AS at FROM ramble_wallet WHERE kind = ?`, args: [LAY_KIND],
-  });
-  const since = Number(lastLay[0]?.at ?? 0) || 0;
   const { rows } = await db.execute({
-    sql: `SELECT count(*) AS n FROM ramble_wallet WHERE kind = ? AND created_at > ?`,
-    args: [LAYDAY_KIND, since],
+    sql: `SELECT count(*) AS n FROM ramble_wallet
+           WHERE kind = ?
+             AND key > COALESCE((SELECT MAX(key) FROM ramble_wallet WHERE kind = ?), '')`,
+    args: [LAYDAY_KIND, LAY_KIND],
   });
   return { days: Number(rows[0]?.n ?? 0), needed: layDays };
 }
@@ -963,6 +1127,15 @@ export async function layProgress(db) {
  * supply instead of a backstop.
  *
  * ⚠ delta is the literal 1. See applyRambleWallet's MAX(delta) rule.
+ *
+ * ⚠ Called ONLY from the write paths (`feed`, and `doChore` through it) —
+ * never from `petState`. `pet.js:18` records the invariant: "petState's
+ * decay-on-read write never emits, because a GET must never queue a sync op",
+ * and `petState` has no `emit` in scope to pass. A day is therefore earned by
+ * DOING something — a walk, a chore, a check-in — not by opening the app,
+ * which is also the truer reading of §4.3's "sustained care". A player who
+ * denies geolocation can still bank days: chores and the daily check-in both
+ * run through `feed`.
  */
 export async function recordHappyDay(db, { now = Date.now(), mood, emit } = {}) {
   if (mood !== "happy") return { recorded: false, laid: false };
@@ -979,34 +1152,38 @@ export async function recordHappyDay(db, { now = Date.now(), mood, emit } = {}) 
   const { days, needed } = await layProgress(db);
   if (days < needed) return { recorded: true, laid: false };
 
-  await db.execute({
+  // ⚠ The mint is gated on the `lay` row being NEW. Without checking
+  // rowsAffected the dedup key just written would be decorative, and two
+  // overlapping calls would each mint an egg.
+  const { rowsAffected: laidNow } = await db.execute({
     sql: `INSERT OR IGNORE INTO ramble_wallet (kind, key, delta, created_at) VALUES (?, ?, 1, ?)`,
     args: [LAY_KIND, key, now],
   });
+  if (laidNow === 0) return { recorded: true, laid: false };
+
   await safeEmit(emit, "ramble_wallet", "insert", { kind: LAY_KIND, key, delta: 1, created_at: now });
   await mintIncubatingEgg(db, { now, emit });
   return { recorded: true, laid: true };
 }
 ```
 
-- [ ] **Step 4: Call it from `pet.js`, after the mood is known**
+- [ ] **Step 4: Call it from `pet.js`'s WRITE path only**
 
-`pet.js` already imports `localDay` from `eggs.js`; extend that import with `recordHappyDay`. In **`petState`**, after decay has been applied and `mood` computed, and after the decay row is persisted:
+`pet.js` already imports `localDay` from `eggs.js`; extend that import with `recordHappyDay`. In **`feed`** only, after `const mood = moodFor(energy);` and the pet row has been written:
 
 ```js
-  // Phase 3 (spec §4.3): a day counts when the bird is OBSERVED happy while
-  // wholly eggless. Idempotent per local day, and a no-op the moment the
-  // player holds any egg — so this is cheap on every poll.
+  // Phase 3 (spec §4.3): a day counts when the bird is happy while wholly
+  // eggless. Idempotent per local day, and a no-op the moment the player
+  // holds any egg. `doChore` reaches this through feed(), so chores and the
+  // daily check-in both count.
   await recordHappyDay(db, { now, mood, emit });
 ```
 
-And in **`feed`**, after `const mood = moodFor(energy);` and the row is written:
+**⚠ Do NOT also call it from `petState`.** Three reasons, and the first is fatal on its own:
 
-```js
-  await recordHappyDay(db, { now, mood, emit });
-```
-
-Both call sites are needed: a player who walks (feed) and a player who only looks (petState) have both been seen that day, and `paintPet` polls `/api/ramble/pet` on a player who never posts a fix.
+1. `petState(db, { now = Date.now() } = {})` has **no `emit` in scope** (`pet.js:223`). The call would be a `ReferenceError` on every `GET /api/ramble/pet` and every `ramble_pet_state` MCP call — for every player, egg or not.
+2. `pet.js:13-21` documents the invariant it would break: *"`petState`'s decay-on-read write never emits, because a GET must never queue a sync op."* Neither caller passes an `emit` (`routes.js` calls `petState(db, { now })`; `server.js:305` calls `petState(db)`), so even adding the parameter would silently produce lay-days that never replicate.
+3. It is the better game rule anyway: a day is earned by **doing** something, not by opening the app. That is the truer reading of §4.3's "sustained care", and a player who denies geolocation is not shut out — chores and the daily check-in both run through `feed`.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1319,7 +1496,10 @@ In `bundles/ramble/panel/routes.js`, wherever `mods.eggsMod` is assembled, make 
   router.get("/api/ramble/egg", handle(async (req, res) => {
     // A slot can empty from a sync arrival no local path observed; this moves
     // an egg the user already owns and writes nothing when there is none.
-    await mods.eggsMod.promoteFromShelf(db, { now: Date.now(), emit });
+    // SPECULATIVE and therefore NOT emitting — a GET must never queue a sync
+    // op, and a promote landing mid-drain must not out-rank a deliberate
+    // incubate made on another instance. Note there is no `emit` argument.
+    await mods.eggsMod.promoteFromShelf(db, { now: Date.now(), speculative: true });
     const state = await mods.eggsMod.eggState(db, { now: Date.now() });
     const lay = await mods.eggsMod.layProgress(db);
     res.json({ ...state, lay });
@@ -1343,26 +1523,49 @@ In `bundles/ramble/panel/routes.js`, wherever `mods.eggsMod` is assembled, make 
 
 Keep the existing `GET /api/ramble/egg` handler's other behaviour (auth, error handling) exactly as it was — copy the surrounding shape from the file rather than the sketch above.
 
-- [ ] **Step 4: Carry the egg summary and lay progress on the pet read**
+- [ ] **Step 4: Fix `GET /api/ramble/pet`, which 500s for every eggless player**
 
-In `bundles/ramble/server/feed.js`, `readPet` already returns the pet row shape the panel uses. Extend it so the pet response carries a **nullable** egg summary and the lay count — `paintPet` reads `pet.egg.percent` today and must not throw on `null`:
+**⚠ This is the single highest-severity line in the phase.** `bundles/ramble/panel/routes.js:816` currently reads:
 
 ```js
-  const eggSummary = await eggState(db, { now });
-  const lay = await layProgress(db);
-  return {
-    ...pet,
-    // null when the player is genuinely eggless. paintPet must not assume one.
-    egg: eggSummary.egg ? { ...eggSummary.egg } : null,
-    lay,
-  };
+      egg: { percent: egg.egg.percent },
 ```
 
-Import `eggState` and `layProgress` from `./eggs.js` in `feed.js`.
+where `egg` is `await mods.eggsMod.eggState(db, { now })` (line 812). The moment Task 2 makes `eggState` return `egg: null`, that dereference throws, `handle()` turns it into a 500, and the **pet view dies entirely** — which is the only view an eggless player with a bird can reach from the perch. Replace lines 812-820's egg line with:
 
-- [ ] **Step 5: Keep the MCP tools in step with the HTTP routes**
+```js
+    const eggSummary = await mods.eggsMod.eggState(db, { now });
+    const lay = await mods.eggsMod.layProgress(db);
+    res.json({
+      ...pet,
+      bird,
+      // null when genuinely eggless — paintPet must not assume one exists.
+      egg: eggSummary.egg ?? null,
+      lay,
+      seed: await mods.walletMod.seedBalance(db),
+      hearts: await mods.heartsMod.heartsBalance(db),
+      energy_max_cap: (await mods.heartsMod.readHeartSettings(db)).cap,
+    });
+```
 
-In `bundles/ramble/server/server.js`, the `ramble_egg_state` and `ramble_pet_state` tools call the same functions. They pick up `egg: null` and `lay` for free from the spread — **verify that by reading the code**, and if either tool destructures `egg` or assumes it, fix it there. A tool and a route that disagree about the same egg is the defect phase 2 caught late.
+**⚠ Do NOT touch `readPet` in `bundles/ramble/server/feed.js`.** An earlier draft of this plan directed the change there, wrongly: `readPet` is private to `feedAll` and is used only on its not-credited branch (`feed.js:48`) — nothing on the `/api/ramble/pet` path calls it, so editing it would leave line 816 unpatched. Worse, adding keys to `readPet` breaks a green test: `tests/ramble-feed.test.js:68` asserts `Object.keys(repeat.pet)` equals `Object.keys(first.pet)`, where `first.pet` comes from `petFeed` and `repeat.pet` from `readPet`. Adding `egg`/`lay` to one and not the other is exactly the divergence that test exists to catch.
+
+- [ ] **Step 5: Fix the MCP tool, which breaks the same way**
+
+`bundles/ramble/server/server.js:306` **explicitly dereferences** `egg.egg.percent` — it does not pick the new shape up "for free from the spread". Patch it exactly as the route above:
+
+```js
+      egg: eggSummary.egg ?? null,
+      lay: await layProgress(db),
+```
+
+A tool and a route that disagree about the same egg is the defect phase 2 caught late. After patching, grep for any other dereference of `.egg.` that assumes non-null:
+
+```bash
+grep -rn "\.egg\.\(percent\|warmth\|egg_id\|hatch_at\)" bundles/ramble/ | grep -v node_modules
+```
+
+Every hit must be null-guarded or provably reached only when an egg exists.
 
 - [ ] **Step 6: Run the tests**
 
@@ -1386,8 +1589,8 @@ git commit bundles/ramble/panel/routes.js bundles/ramble/server/feed.js bundles/
 ## Task 7: the five eggless surfaces
 
 **Files:**
-- Modify: `bundles/ramble/panel/ramble.js`, `bundles/ramble/panel/static/ramble.js`, `bundles/ramble/panel/static/ramble.css`
-- Modify: `tests/ramble-panel.test.js`
+- Modify: `bundles/ramble/panel/ramble.js`, `bundles/ramble/panel/static/ramble.js`, `bundles/ramble/panel/static/ramble-ar.js`, `bundles/ramble/panel/static/ramble.css`
+- Modify: `tests/ramble-panel.test.js`, `tests/ramble-ar.test.js`
 
 **⚠ Finding 2 governs this task.** The **Next egg card must never be hidden** — it is the only route to the egg view and its daily check-in once a bird exists. It changes state.
 
@@ -1402,6 +1605,12 @@ git commit bundles/ramble/panel/routes.js bundles/ramble/server/feed.js bundles/
 | Lay line, N days | — | "You've had N good days — keep it up and you'll manage one yourself." |
 | Perch status line | "Your egg is N% warm." | omit the sentence entirely |
 | AR view | egg art | the egg element hidden |
+| Check-in confirmation | "Checked in. That is today's warmth." | "Checked in. Nothing to warm yet — but it counted." |
+| Map marker | walking egg | plain dot when there is no bird AND no egg |
+
+**S2 — the check-in must stop lying.** `static/ramble.js:1244` says *"Checked in. That is today's warmth."* With no egg, `credited` is true but the warmth vanished (D3). K4 requires the eggless state to be legible, and this is the one screen that would actively contradict it. Branch the message on whether an egg exists.
+
+**S3 — the perch door keeps an affordance.** An earlier draft relabelled both the marker's `aria-label` and the world view's GPS-independent button to bare `"You"`. That is inside K5 but strips the button of any sense of where it goes. Use `"How you're doing"` for the button and `"You"` for the marker's `aria-label`.
 
 - [ ] **Step 1: Write the failing panel-source tests**
 
@@ -1422,17 +1631,19 @@ test("the eggless copy is present and written from inside the premise", () => {
   assert.ok(src.includes("good days"), "K4: the soft count is named");
 });
 
-test("the AR view hides the egg rather than drawing a phantom seed-0 one", () => {
-  const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
-  const ar = src.slice(src.indexOf("function startAr()"), src.indexOf("function closeAr()"));
-  assert.ok(/setHidden\(\s*\$\("rb-ar-egg"\)/.test(ar),
-    "seedFromEggId(null) is 0, so an unguarded draw shows an egg that does not exist");
+test("the AR renderer hides the egg when there is neither bird nor egg", () => {
+  // In the RENDERER, not startAr: ramble-ar.js repaints every frame and would
+  // otherwise un-hide the egg whenever there is no valid bird.
+  const src = readFileSync("bundles/ramble/panel/static/ramble-ar.js", "utf8");
+  assert.ok(/setHidden\(e\.egg,\s*valid\s*\|\|\s*!.*hasEgg/.test(src),
+    "seedFromEggId(null) is 0, so an unguarded frame shows an egg that does not exist");
 });
 
-test("the panel client still obeys its rules", () => {
+test("the map marker does not draw a phantom egg for a player who has neither", () => {
   const src = readFileSync("bundles/ramble/panel/static/ramble.js", "utf8");
-  assert.equal((src.match(/`/g) || []).length, 0, "ZERO backticks: one truncates the served script");
-  assert.equal((src.match(/innerHTML/g) || []).length, 2, "EXACTLY two markup sinks");
+  const fn = src.slice(src.indexOf("function hereArt()"), src.indexOf("function paintHereArt()"));
+  assert.ok(/else if \(eggSeedId\)/.test(fn),
+    "hereArt must fall through to the plain dot when there is no bird and no egg");
 });
 ```
 
@@ -1527,15 +1738,34 @@ In `bundles/ramble/panel/static/ramble.js`, `paintEgg`:
     } else if (lastMarks.length === 0) {
 ```
 
-`startAr`, guarding the draw:
+**The sixth surface — your own map marker.** `hereArt()` at `static/ramble.js:236-241` draws the walking egg whenever `perchTarget !== "pet"`, and `seedFromEggId(null)` returns `0`, so a player with no egg *and* no bird gets a phantom seed-0 egg walking around as their location marker. Guard it:
 
 ```js
-    /* seedFromEggId(null) is 0, so an unguarded call draws a phantom egg that
-     * does not exist. Hide the element instead. */
-    var arEgg = $("rb-ar-egg");
-    setHidden(arEgg, !eggSeedId);
-    if (eggSeedId) drawEggArt(arEgg, eggSeedId);
+      } else if (eggSeedId) {
+        /* The WALKING egg — legs and all. You are not carrying it, you are it. */
+        svg.setAttribute("class", "rb-here-egg");
+        svg.setAttribute("viewBox", "0 0 120 168");
+        drawWalkingEggSeed(svg, seedFromEggId(eggSeedId));
+      } else {
+        /* No bird and no egg — the window between a first load and the
+         * prologue's Go button. seedFromEggId(null) is 0, so drawing here
+         * would show a phantom egg that does not exist. Fall through to the
+         * plain dot, which hereIcon already handles. */
+        return null;
+      }
 ```
+
+**The AR view (`rb-ar-egg`) must be fixed in the RENDERER, not in `startAr`.** `ramble-ar.js:378` runs `if (e.egg) setHidden(e.egg, valid);` on every frame, where `valid` means "a valid bird exists" — so it *un-hides* the egg whenever there is no bird, overriding anything `startAr` set within one animation frame. Add `bundles/ramble/panel/static/ramble-ar.js` to this task's files and thread a `hasEgg` flag onto the render frame:
+
+```js
+      // ramble-ar.js, paintBird:
+      if (e.bird) setHidden(e.bird, !valid);
+      // Phase 3: with no bird AND no egg there is nothing to draw. Without the
+      // hasEgg term this un-hides a phantom seed-0 egg every frame.
+      if (e.egg) setHidden(e.egg, valid || !frame.hasEgg);
+```
+
+Set `hasEgg` where the frame is built from the pet state, and update `tests/ramble-ar.test.js` to cover the no-bird-no-egg case. **Do not assert the presence of a line in `startAr`** — an earlier draft of this plan did exactly that, and the assertion passed against a fix that the renderer immediately undid.
 
 The framing fix (K5), in `paintHereArt` and `paintPerchGo`:
 
@@ -1543,7 +1773,17 @@ The framing fix (K5), in `paintHereArt` and `paintPerchGo`:
       el.setAttribute("aria-label", "You");        /* was "You, and your bird" / "You, and your egg" */
 ```
 ```js
-    go.textContent = "You";                        /* was "Your bird" / "Your egg" */
+    go.textContent = "How you're doing";           /* was "Your bird" / "Your egg" */
+```
+
+And the check-in confirmation at `static/ramble.js:1244` (S2) — the exact surrounding code must be read first; the branch is on whether the response carried an egg:
+
+```js
+      /* With no egg the credit was real but the warmth had nowhere to land
+       * (D3). Saying "that is today's warmth" would be false on the one
+       * screen K4 requires to be legible. */
+      setText(el, hasEgg ? "Checked in. That is today's warmth."
+                         : "Checked in. Nothing to warm yet — but it counted.");
 ```
 
 - [ ] **Step 5: Style the eggless card**
@@ -1721,7 +1961,17 @@ In `bundles/ramble/panel/static/ramble.js` — `textContent` only, no backticks:
   });
 ```
 
-Call `maybeIntro()` once from the panel's existing start-up sequence, beside the other first-load fetches. Call `maybeHatchBeat(hatched)` from wherever the hatch reveal is dismissed, passing the hatched bird — grep for `hatchLock` to find that path and hook the existing dismissal rather than adding a second one.
+Call `maybeIntro()` once from the panel's existing start-up sequence, beside the other first-load fetches.
+
+**The hatch beat's hook point, precisely** — an earlier draft said "grep for `hatchLock`", which points at the wrong function. `clearHatch()` takes no argument, has no access to the hatched bird (`shownHatch` holds a string key, not `{species, seed}`), and fires on *any* view change, so hooking it would show the beat at random moments with no species name. Hook the **`rb-meet-bird` button handler** instead, and stash the bird in a module var when the hatch is handled:
+
+```js
+  var lastHatched = null;          /* set by handleHatched, read by the beat */
+```
+
+In `handleHatched(h)`, add `lastHatched = h;`. Then in the `rb-meet-bird` click handler, after its existing work, call `maybeHatchBeat(lastHatched)`.
+
+**If the player closes the tab after seeing beat one but before tapping Go**, `intro_seen` and `granted` are both still false, so `maybeIntro()` shows it again on the next load — intended. The egg arrives only when they engage, and there is exactly one button, so there is no dismissal path that skips the grant.
 
 - [ ] **Step 5: Style the overlay**
 
@@ -1791,6 +2041,20 @@ vanishes**; that is deliberate, and auto-promote is what keeps it rare.
 | `lay.days` | 14 | Happy days while eggless before you lay one yourself |
 ```
 
+- [ ] **Step 1b: Fix the SECOND false sentence, which is easy to miss**
+
+`docs/guide/ramble.md:88` ends with **"A new egg starts incubating immediately."** — falsified by this phase just as line 68 is. Replace that clause with:
+
+```markdown
+the bird's look is unique to that seed. If an egg is waiting on your shelf it moves into the slot; otherwise nothing new starts, and the next one has to be found, given, or laid.
+```
+
+The Spanish mirror at `docs/es/guide/ramble.md:88` ends with **"Un huevo nuevo empieza a incubar de inmediato."** and needs the same correction:
+
+```markdown
+el aspecto del pájaro es único para esa semilla. Si tienes un huevo esperando en la repisa, pasa al hueco; si no, no empieza nada nuevo, y el siguiente hay que encontrarlo, recibirlo o ponerlo.
+```
+
 - [ ] **Step 2: Mirror it in Spanish, by hand**
 
 **⚠ There is NO CI gate for guide-doc i18n parity** — `tests/i18n-global-parity.test.js` covers the translation-key mechanism only, and nothing diffs `docs/guide/` against `docs/es/guide/`. Phase 2's plan wrongly claimed otherwise and parity had to be done by hand. Update `docs/es/guide/ramble.md` to match, then verify by eye:
@@ -1835,7 +2099,11 @@ cd /home/kh0pp/crow-wt-ramble-eggs
 npm test 2>&1 | tail -25
 ```
 
-Expected: **4340 + the new tests**, 0 fail. A drop below 4340 means something was deleted, not fixed. **If the run reports ~552 failures, `node_modules` is missing** — re-create the symlink; it is not a regression.
+Expected: **0 fail**, and a total of roughly 4340 plus the new tests.
+
+**⚠ Do not use "≥ 4340" as a mechanical gate.** Task 3 legitimately rewrites seven existing assertions (see its table), which changes what is counted; a naive floor would either fire spuriously or hide a real deletion. The honest check is: **every test file this branch touched must be named in the PR body with what changed and why**, and the only assertions that changed meaning are the ones in Task 3's table. Any *other* count movement is unexplained and must be chased.
+
+**If the run reports ~552 failures, `node_modules` is missing** — re-create the symlink; it is not a regression.
 
 - [ ] **Confirm no schema change slipped in**
 
@@ -1863,12 +2131,10 @@ Expected: the definition, plus **exactly two** call sites — `grantStarterEgg` 
 - [ ] **Confirm the panel client rules held**
 
 ```bash
-grep -c '`' bundles/ramble/panel/static/ramble.js    # must print 0
-grep -c 'innerHTML' bundles/ramble/panel/static/ramble.js
-git show origin/main:bundles/ramble/panel/static/ramble.js | grep -c innerHTML
+node scripts/run-suite.mjs tests/ramble-panel.test.js
 ```
 
-Zero backticks; the two `innerHTML` counts must match.
+The backtick and markup-sink invariants are **already enforced** by that file (the sink check at `tests/ramble-panel.test.js:776-779` strips comments and matches `/\.innerHTML\s*=|\bhtml:\s/g`, asserting 2). Do **not** add a raw `grep -c innerHTML` gate: the file contains the literal string `innerHTML` exactly twice today — once in the header comment at line 7 and once in the real sink at line 859 — while the *second* real sink is `html: nestEggHtml(` and contains no `innerHTML` at all. A raw grep reads 2 for the wrong reasons and would not notice a third real sink.
 
 - [ ] **Whole-branch adversarial review — NOT OPTIONAL**
 
@@ -1924,7 +2190,19 @@ Every run must be `completed` / `success`. Contexts: `suite`, `static-checks`, `
 
 - [ ] **Hand back to Kevin**
 
-Say plainly: what shipped; that his current egg is grandfathered and will be the last one that arrives on its own; that after it hatches the slot stays empty unless the shelf has one; what the eggless card will say; that the prologue will not fire for him until the game-state reset, and what that reset needs to clear (`ramble_eggs` and the two `prologue.%` settings rows); the phone smoke test still outstanding from phase 2 (walk to one of the 14 heart pips); and anything the whole-branch review found.
+Say plainly: what shipped; that his current egg is grandfathered and will be the last one that arrives on its own; that after it hatches the slot stays empty unless the shelf has one; what the eggless card will say; the phone smoke test still outstanding from phase 2 (walk to one of the 14 heart pips); and anything the whole-branch review found.
+
+**The game-state reset needs more than two tables — spell it out.** The prologue will not fire for Kevin until he resets, and clearing only `ramble_eggs` plus the `prologue.%` settings would start the "new game" with a full energy bar, a dangling `active_egg_id`, and a part-finished lay count. The full set is:
+
+```sql
+DELETE FROM ramble_eggs;                                  -- every egg and bird
+DELETE FROM ramble_pet;                                   -- energy, mood, chores, active_egg_id, weekly counters
+DELETE FROM ramble_credits;                               -- the warmth no-double-count ledger
+DELETE FROM ramble_wallet WHERE kind IN ('layday','lay'); -- the lay count (KEEP seed and heart rows unless he wants those reset too)
+DELETE FROM ramble_settings WHERE key LIKE 'prologue.%';  -- both dismissal flags
+```
+
+**⚠ And it must be done fleet-wide, or it undoes itself.** `ramble_eggs`, `ramble_pet`, `ramble_settings` and `ramble_wallet` are all in `SYNCED_TABLES`, so wiping one instance while another holds the rows means the next drain re-populates it. Ramble is currently installed on **grackle only**, so today this is a single-machine operation — but say so, because that stops being true the moment a second instance installs the bundle. Ask before running it; this is destructive and it is his save file.
 
 ---
 
@@ -1936,3 +2214,30 @@ Say plainly: what shipped; that his current egg is grandfathered and will be the
 - D2's sad portrait to contacts, and any change to `servers/sharing/profile-avatar.js`.
 - Sweeping the pet page's leftover keeper framing ("Still an egg", "My bird", the chore card). This phase fixes the framing only on surfaces it already rewrites; the rest is a copy pass of its own.
 - Fixing phase 1 and 2's known follow-ups: `unlockedCellsNear`'s full-table read, the seed cooldown's global UTC bucket, the AR view carrying no hearts or seed, `.rb-mapbar` wrapping on a phone. None is made worse by this phase.
+
+---
+
+## Review
+
+**Reviewer:** adversarial staff-engineer pass (Plan subagent), 2026-09-09, against the real code rather than the plan's description of it.
+
+**Verdict: REVISE** — nine critical issues. The architecture and all three Findings were independently confirmed correct; the failures were all *mechanical accuracy*. Every issue is fixed in this document.
+
+| # | Issue | Resolution |
+|---|---|---|
+| C1 | `GET /api/ramble/pet` would 500 for every eggless player: `routes.js:816` is `egg: { percent: egg.egg.percent }`. The plan patched `feed.js`'s `readPet` instead, which is private to `feedAll` and **is not on that code path at all** — so the real line would have stayed unpatched. This is the pet view, the only view an eggless player can reach from the perch. | Task 6 Step 4 now edits `routes.js:812-820` directly. |
+| C2 | Editing `readPet` would break a green test the plan never listed: `tests/ramble-feed.test.js:68` asserts `Object.keys(repeat.pet)` equals `Object.keys(first.pet)`, and only `readPet` feeds one side. | `readPet` is now explicitly not touched, with the reason recorded so it is not "helpfully" changed later. |
+| C3 | `recordHappyDay(db, { now, mood, emit })` inside `petState` is a **`ReferenceError`** — `petState(db, { now })` has no `emit` in scope — and `pet.js:18` documents "a GET must never queue a sync op". Neither caller passes an emit, so even adding the parameter would produce lay-days that never replicate. | The `petState` call site is removed entirely. Days are earned on the write path (`feed`, and `doChore` through it), which is also the truer reading of §4.3's "sustained care". A geolocation-denying player still banks days via chores and the check-in. |
+| C4a | **`layProgress` did not converge.** `applyRambleWallet` does `created_at = MIN(local, incoming)` (`instance-sync.js:620`), so a sync apply can move a row's timestamp backwards across the reset boundary; clock skew between the user's own machines does it too. | Ordering moved to `key` (the `YYYY-MM-DD` local day) — half the primary key, lexically date-ordered, and never rewritten by the apply. Three multi-instance tests added, including one that applies a `created_at: 0` row and asserts the count does not move. |
+| C4b | The mint ran unconditionally after `INSERT OR IGNORE` on the `lay` row, so the dedup key it had just written was decorative. | Gated on `rowsAffected === 1`. The remaining cross-instance case (two eggless instances crossing the threshold before a sync) is recorded as **Deviation 3** and accepted: it yields one spare shelf egg via the existing convergence rule, and the alternative — a deterministic egg id — reintroduces the cross-user collision that rules out a constant id for the starter egg. |
+| C5 | Task 3 left the suite red and listed **none** of the four test files it breaks. Seven specific assertions, verified by grep, not hypothesised. | Task 3 now lists `ramble-eggs`, `ramble-flock`, `ramble-tools` and `ramble-panel`, carries a line-by-line table of what each assertion becomes, runs all of them in Step 7, and commits them. |
+| C6 | **The plan's flagship regression test was vacuous.** `ramble_pet.energy` DEFAULTS TO 60 (`init-tables.js:105`), so `energy > 0` holds whether or not anything was fed, and the two `>=` comparisons hold when the feed is skipped — the test passed against the exact death spiral it existed to prevent. Phase 2's vacuous-fixture lesson, on the one test that most needed to be sharp. | Exact values: `60 → 65 → 80 → 100` with `assert.equal`, plus a negative control proving a repeat `visit_place` does not feed (without which an unconditionally-feeding implementation would also pass). |
+| C7 | A **sixth** egg surface, missed: `hereArt()` (`static/ramble.js:236-241`) draws the walking egg from `seedFromEggId(null)` → seed 0, so a player with neither bird nor egg gets a phantom egg as their own map marker. And the plan's Global Constraint "you are never simultaneously birdless and eggless" is **false on the build this phase creates** — that is precisely the new-player window between first load and tapping **Go**. | `hereArt` falls through to the plain dot; the constraint is corrected and now flags that state as the most important one in the phase. |
+| C8 | The AR fix was **dead on arrival**: `ramble-ar.js:378` runs `if (e.egg) setHidden(e.egg, valid)` every frame and un-hides the egg whenever there is no valid bird, overriding `startAr` within one frame. `ramble-ar.js` was not even in the file list. Worse, the accompanying test asserted the *presence of the ineffective line* — passing against a wrong implementation. | The guard moves into `paintBird` with a `hasEgg` term on the render frame; `ramble-ar.js` and `tests/ramble-ar.test.js` join Task 7; the test now asserts the renderer's behaviour. |
+| C9 | Promote-on-read could **silently undo a deliberate `incubate` made on another instance**. `applyRambleEgg` carries an explicit carve-out (`instance-sync.js:855-860`) refusing to re-promote on a peer's user-shelve because the replacement row "follows in the same drain"; a GET landing in that window promoted the parked egg, set `shelf_origin = NULL` (the *top* convergence class), **and emitted** — beating the user's real choice on both machines. The two call sites also disagreed about `emit`. | `promoteFromShelf` gains an explicit `speculative` mode: read paths mark `shelf_origin = 'sync'` (which ranks below any NULL-origin egg) and **never emit**; only the hatch path clears the origin and emits. Both modes are tested. Deviation 4 rewritten to argue the real hazard rather than the irrelevant one. |
+
+**Suggestions adopted:** the raw `grep -c innerHTML` gate dropped in favour of the existing comment-stripping check at `tests/ramble-panel.test.js:776-779` (the literal string appears twice for the wrong reasons — a header comment and one real sink — while the second real sink is `html:` and contains no `innerHTML`); the check-in confirmation no longer tells an eggless player "that is today's warmth" when the warmth vanished; the perch door reads "How you're doing" rather than a bare "You", keeping the affordance; `docs/guide/ramble.md:88` and its Spanish mirror added to Task 9 ("A new egg starts incubating immediately." is falsified just as line 68 is); the false claim that `panel/routes.js` imports the lock helpers corrected before it could ship in a comment (`flock.js` is the only importer); Task 8's hatch-beat hook specified as the `rb-meet-bird` handler with a `lastHatched` module var, since `clearHatch()` takes no argument, holds only a string key, and fires on any view change; a pinned test for the expired-but-unswept trade window; the full fleet-wide game-state reset enumerated for the hand-back, since clearing only eggs and flags would start the "new game" with a full energy bar and a part-finished lay count.
+
+**Baseline gate softened, deliberately (reviewer Q5).** "A drop below 4340 means something was deleted" would misfire once Task 3 legitimately rewrites seven assertions. The gate is now: 0 fail, and every touched test file named in the PR with what changed — the only assertions permitted to change meaning are the ones in Task 3's table.
+
+**Confirmed by the reviewer, needing no change:** Finding 1 is real (`feed.js:42`, `KEYED_TYPES` at `:14`) and chore/mark paths are genuinely unaffected — `chore` is not in `ACCEPTED_TYPES` and reaches `pet.js:feed` directly, while `mark_left`/`unlock_mark` are unkeyed so `shouldFeedPet` is unconditionally true. `ensureIncubatingEgg` has exactly the four claimed call sites, and nothing in `instance-sync.js`, `trades.js`, `delivery.js`, `claimNest` or `server.js` mints. Finding 2's quoted comment is real (`panel/ramble.js:311-313`) and the Next-egg card genuinely is the only route to the check-in. Finding 3 is real (`identity.js:136` — `randomBytes(32)` per instance). Task 3's trade fixtures are schema-valid and `OPEN_SQL` really is `"state IN ('proposed','accepted')"`. The `delta = 1` discipline matches `hearts.js`. The `eggs -> trades -> eggs` cycle Task 1 breaks is real and `flock.js:22` is the only external importer. Same-instance concurrent double-lay is already impossible via `INSERT OR IGNORE`. Privacy holds — no egg, lay-day or balance reaches a contact-facing payload. No schema change is needed. `mods.eggsMod` is a namespace import, so new exports are reachable automatically.
