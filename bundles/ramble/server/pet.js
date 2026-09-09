@@ -84,13 +84,16 @@ export function moodFor(energy) {
  * panel is about to draw.
  *
  * ⚠ ASYMMETRIC, DELIBERATELY. An addition stops at the ceiling, but the
- * ceiling NEVER reduces a value that is already above it. Sync applies
- * ramble_pet before ramble_wallet, so a bird that is legitimately at 150 can
- * be seen by an instance that has not yet received the heart rows and computes
- * a ceiling of 100. A symmetric clamp would write the 150 down, last-writer-
- * wins would propagate the loss back, and no later arrival could undo it.
- * Decay still brings an over-ceiling bird down normally — it just is not the
- * ceiling that does it.
+ * ceiling NEVER reduces a value that is already above it. instance-sync
+ * applies each incoming entry one at a time, in the order it arrived, with no
+ * guarantee that a pet row and the wallet rows that justify its energy land
+ * together or in any particular relative order — so an instance can apply a
+ * synced pet row at energy 150 while it still holds none of the heart rows
+ * and computes a ceiling of 100. A symmetric clamp would write the 150 down
+ * right there, and last-writer-wins would then carry that loss back to the
+ * instance it came from, with no later arrival able to undo it. Decay still
+ * brings an over-ceiling bird down normally — it just is not the ceiling that
+ * does it.
  */
 function clampEnergy(next, previous, max) {
   const ceiling = Math.max(Number.isFinite(max) ? max : ENERGY_MAX_BASE_DEFAULT, previous || 0);
