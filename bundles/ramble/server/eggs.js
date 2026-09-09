@@ -585,3 +585,68 @@ export async function eggState(db, { now } = {}) {
     checklist: { new_places_week: newPlacesWeek, first_mark: firstMark, checked_in_today: checkedInToday },
   };
 }
+
+export const PROLOGUE_INTRO_KEY = "prologue.intro.seen";
+export const PROLOGUE_HATCH_KEY = "prologue.hatch.seen";
+const PROLOGUE_KEYS = { intro: PROLOGUE_INTRO_KEY, hatch: PROLOGUE_HATCH_KEY };
+
+/**
+ * Mirrors grid.js's private writeSetting rather than importing it: eggs.js has
+ * no other reason to depend on grid.js, and the SQL is one statement.
+ */
+async function writeSetting(db, key, value, { emit } = {}) {
+  await db.execute({
+    sql: `INSERT INTO ramble_settings (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    args: [key, value],
+  });
+  await safeEmit(emit, "ramble_settings", "update", { key, value });
+}
+
+/**
+ * Has ANY egg ever existed on this fleet — including one that has since
+ * hatched. Read from ramble_eggs, which replicates, so the answer is the same
+ * on every one of the user's Crows and a data wipe genuinely resets it (K1).
+ */
+async function anyEggEverExisted(db) {
+  const { rows } = await db.execute({ sql: "SELECT 1 FROM ramble_eggs LIMIT 1", args: [] });
+  return rows.length > 0;
+}
+
+export async function readPrologue(db) {
+  return {
+    intro_seen: (await readSetting(db, PROLOGUE_INTRO_KEY)) === "1",
+    hatch_seen: (await readSetting(db, PROLOGUE_HATCH_KEY)) === "1",
+    granted: await anyEggEverExisted(db),
+  };
+}
+
+export async function setPrologueSeen(db, which, { emit } = {}) {
+  // Object.hasOwn, not a truthiness check: PROLOGUE_KEYS is a plain literal,
+  // so `setPrologueSeen(db, "constructor")` would otherwise return a function
+  // and bind it into the SQL args instead of throwing.
+  const key = Object.hasOwn(PROLOGUE_KEYS, which) ? PROLOGUE_KEYS[which] : null;
+  if (!key) throw new Error(`unknown prologue beat: ${which}`);
+  await writeSetting(db, key, "1", { emit });
+}
+
+/**
+ * One starter egg, once ever (spec §4.4, D12), granted as a narrative gift.
+ *
+ * ⚠ The spec says to derive the id from the Crow identity so a simultaneous
+ * two-instance first run collapses into one insert. That cannot work:
+ * loadOrCreateIdentity generates a RANDOM PER-INSTANCE seed, so crowId differs
+ * between the user's own Crows and deriving from it would grant two eggs — the
+ * outcome it was meant to prevent. A fixed constant is worse still: a contact
+ * could gift you their starter egg and the ids would collide in the
+ * receivedEggStatement upsert.
+ *
+ * So: a random uuid, gated on the egg table being empty. If a genuine race
+ * ever happened, applyRambleEgg's existing "one incubating egg" rule keeps the
+ * older and SHELVES the younger with its warmth intact — a spare egg, not a
+ * duplicate disaster. That machinery is already built and tested.
+ */
+export async function grantStarterEgg(db, { now = Date.now(), emit } = {}) {
+  if (await anyEggEverExisted(db)) return null;
+  return mintIncubatingEgg(db, { now, emit });
+}
