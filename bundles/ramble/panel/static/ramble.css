@@ -181,8 +181,7 @@
 #ramble .rb-chip:focus-visible,
 #ramble .rb-chore:focus-visible,
 #ramble .rb-seg button:focus-visible,
-#ramble .rb-icon-btn:focus-visible,
-#ramble .rb-perch-btn:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
+#ramble .rb-icon-btn:focus-visible { outline: 3px solid var(--rb-accent-2); outline-offset: 3px; }
 
 #ramble .rb-icon-btn {
   display: inline-flex;
@@ -298,8 +297,8 @@
   bottom: 22px;
   z-index: 500;
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
   pointer-events: none;
 }
 #ramble .rb-perch > * { pointer-events: auto; }
@@ -315,18 +314,10 @@
   font-size: 13px;
   transform: rotate(-2deg);
 }
-#ramble .rb-perch-btn {
-  border: 0;
-  background: transparent;
-  padding: 0;
-  cursor: pointer;
-  min-width: var(--rb-tap);
-  min-height: var(--rb-tap);
-  display: block;
-}
-#ramble .rb-perch .rb-bird { width: 92px; height: 92px; display: block; filter: drop-shadow(3px 4px 0 var(--rb-shadow-col)); }
-#ramble .rb-perch .rb-ring { width: 76px; height: 76px; }
-#ramble .rb-perch .rb-eggart { width: 42px; height: 54px; }
+/* Scoped to the map corner: the AR sheet's own .rb-ar-perch .rb-say still sits
+   beside a bird and keeps its tail. */
+#ramble .rb-perch .rb-say { border-radius: 16px; flex: 1 1 auto; min-width: 0; }   /* was 16px 16px 4px 16px — no bird to point at */
+#ramble .rb-perch-go { flex: 0 0 auto; white-space: nowrap; }
 
 /* Leaflet's own chrome, dressed in the panel's palette. */
 #ramble .leaflet-container { font-family: var(--rb-font-body); background: var(--rb-surface-2); }
@@ -581,7 +572,9 @@
   #ramble .rb-bob,
   #ramble .rb-sheet-panel,
   #ramble .rb-hatch .rb-eggart,
-  #ramble .rb-hatch .rb-hatch-bird { animation: none; }
+  #ramble .rb-hatch .rb-hatch-bird,
+  #ramble .rb-unlock-flash,
+  #ramble .rb-here-pet.is-walking > * { animation: none; }
   #ramble .rb-btn,
   #ramble .rb-ring-prg,
   #ramble .rb-meter-bar i { transition: none; }
@@ -840,8 +833,51 @@
 
 /* ------------------------------------------------------- phase 5: here dot */
 
-#ramble .rb-here-dot { fill: var(--rb-accent-2); stroke: var(--rb-surface); }
 #ramble .rb-here-ring { fill: var(--rb-accent-2); }
+
+/* -------------------------------------------- phase 7: the marker is a pet */
+
+#ramble .rb-here-pet { display: grid; place-items: center; cursor: pointer; }
+/* A waddle, not a bob: a small rock about the feet, so an egg on legs and a
+   bird read the same way when they walk. Matches the panel's existing motion
+   vocabulary (see rb-bob). */
+@keyframes rb-waddle {
+  0%, 100% { transform: rotate(-4deg) translateY(0); }
+  25% { transform: rotate(0deg) translateY(-2px); }
+  50% { transform: rotate(4deg) translateY(0); }
+  75% { transform: rotate(0deg) translateY(-2px); }
+}
+#ramble .rb-here-pet.is-walking > * { animation: rb-waddle .7s ease-in-out infinite; transform-origin: 50% 90%; }
+#ramble .rb-here-pet .rb-here-bird { width: 46px; height: 46px; filter: drop-shadow(2px 3px 0 var(--rb-shadow-col)); }
+#ramble .rb-here-pet .rb-here-egg { width: 30px; height: 38px; filter: drop-shadow(2px 3px 0 var(--rb-shadow-col)); }
+/* Bird engine failed to load: hereArt() returns null and hereIcon falls back
+   to this className. A pseudo-element, so the .is-walking > * waddle rule
+   above does not match it — a plain dot has no legs to waddle on. */
+#ramble .rb-here-pet.rb-here-plain::before { content: ""; width: 18px; height: 18px; border-radius: 50%; background: var(--rb-accent-2); box-shadow: 0 0 0 3px var(--rb-surface); }
+
+/* --------------------------------------------------------------- map zones */
+/* Unlocked ground is punched out of the mask: a clear map is what walking
+   buys you. The frontier is a hole too, then dimmed on top, so it reads as
+   previewed rather than owned. */
+#ramble .rb-fog { fill: var(--rb-surface-2); fill-opacity: 0.93; }
+#ramble .rb-frontier-cell { fill: var(--rb-line); fill-opacity: 0.3; }
+#ramble .rb-beacon { stroke: var(--rb-line); fill: var(--rb-accent-2); opacity: 0.7; }
+#ramble .rb-beacon-nest { fill: var(--rb-accent); }
+
+/* ------------------------------------------------------- the unlock moment */
+@keyframes rb-unlock {
+  0% { fill-opacity: 0; }
+  35% { fill-opacity: 0.75; }
+  100% { fill-opacity: 0; }
+}
+#ramble .rb-unlock-flash { fill: var(--rb-accent-2); animation: rb-unlock .9s ease-out; }
+#ramble .rb-seed {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 11px; border-radius: 999px;
+  border: var(--rb-line-w) solid var(--rb-line);
+  background: var(--rb-surface); color: var(--rb-text);
+  font: 800 13px var(--rb-font-display);
+}
 
 /* ---------------------------------------------- phase 5: near labels + art */
 

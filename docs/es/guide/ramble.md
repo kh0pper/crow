@@ -113,6 +113,8 @@ Camina hasta quedar a menos de **75 m** de un nido y toca **Tomar el huevo** (`P
 
 Siempre incuba exactamente un huevo. Desde la pantalla **Bandada** puedes **incubar** cualquier huevo del estante (`POST /api/ramble/eggs/:id/incubate`); el que reemplaza pasa al estante conservando su calor. Instance sync distingue un huevo que *tú* aparcaste (`shelf_origin = 'user'`) de uno que la capa de sincronización dejó en el estante al reconciliar dos instancias (`'sync'`): solo este último se recupera automáticamente a la ranura de incubación.
 
+**El mapa se desbloquea al caminar.** El terreno donde realmente has estado queda desbloqueado para siempre: puedes leer las marcas y los caws que hay allí y recoger el huevo de cualquier nido. Unas manzanas más allá está la frontera, donde ves que algo te espera sin ver qué es. Todo lo demás es niebla hasta que vayas. Solo el mapa público funciona así: la marca de un contacto siempre te llega, estés donde estés. Caminar por terreno que ya desbloqueaste hace aparecer **alpiste**, que vuelve a crecer al cabo de un día.
+
 ## Tu bandada
 
 Cada pájaro eclosionado se queda en tu bandada. La pantalla **Bandada** (`GET /api/ramble/flock`) los lista con el **activo** marcado — ese es el pájaro que aparece en tu mapa, en la cabecera del Nest y en tus caws públicos — y tocar otro pájaro lo activa (`POST /api/ramble/birds/:id/activate`). La puntuación es especies encontradas de 8 posibles; un segundo pájaro de una especie que ya tienes sigue siendo un pájaro, solo que no es una especie nueva.
@@ -189,6 +191,10 @@ Cada peso de la tabla anterior es también un override de `ramble_settings`, le�
 |---|---|---|
 | `nest.rate` | 24 | Aproximadamente un nido cada este número de celdas geohash-7 por semana (entero ≥ 1). Se replica con tus ajustes, así que tus propias instancias concuerdan; es un ajuste de operador, y una tasa distinta ya no coincide con los nidos de otras personas. |
 | `shelf.cap` | 5 | Cuántos huevos sin eclosionar caben en el estante (entero ≥ 0; 0 desactiva la recogida). |
+| `frontier.depth` | 3 | Cuántas manzanas más allá de tu terreno desbloqueado puedes ver. |
+| `seed.respawn.hours` | 24 | Cuánto tarda el alpiste en volver a aparecer en un lugar. |
+| `seed.per.pickup` | 1 | Cuánto alpiste da un lugar. |
+| `unlock.max.accuracy.m` | 100 | Qué tan precisa debe ser tu ubicación para que un lugar cuente como visitado. |
 
 ## Herramientas MCP
 
@@ -226,6 +232,8 @@ El transporte vive en el núcleo (`servers/gateway/boot/ramble-transport.js`), n
 La segunda significa que el bundle está instalado pero nunca se publicará ni se recibirá nada — verifica que sharing/Nostr esté habilitado en esa instancia. Ningún fallo de Ramble puede bloquear el arranque del gateway; todo problema es una advertencia.
 
 El límite de una recogida por día y el tope del estante se comprueban por instancia (las recogidas no se replican), así que un usuario con dos Crows puede recoger un huevo por día en cada una.
+
+El mapa de los lugares que has desbloqueado, y tu saldo de alpiste, se replican a tus propios Crows enlazados, y nunca llegan a un contacto.
 
 El tope solo limita las recogidas. Incubar un huevo que la capa de sincronización había dejado aparcado (`shelf_origin='sync'`) manda al estante el huevo que reemplaza sin que nada salga de él, así que el estante puede leer brevemente `6 de 5`; se estabiliza a medida que eclosionas huevos.
 

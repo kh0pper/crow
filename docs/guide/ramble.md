@@ -113,6 +113,8 @@ Walk within **75 m** of a nest and tap **Take the egg** (`POST /api/ramble/nests
 
 Exactly one egg incubates at a time. From the **Flock** screen you can **incubate** any shelf egg (`POST /api/ramble/eggs/:id/incubate`); the one it replaces goes to the shelf keeping its warmth. Instance sync distinguishes an egg *you* parked (`shelf_origin = 'user'`) from one the sync layer shelved while reconciling two instances (`'sync'`): only the latter is ever pulled back into the incubating slot automatically.
 
+**The map unlocks as you walk.** Ground you have actually stood in stays unlocked for good: you can read the marks and caws left there and claim any nest. A few blocks further out is the frontier, where you can see that something is waiting without seeing what it is. Everything beyond that is fog until you go there. Only the public map works this way — a contact's mark always reaches you wherever you are. Walking ground you have already unlocked turns up **bird seed**, which regrows after a day.
+
 ## Your flock
 
 Every hatched bird stays in your flock. The Flock screen (`GET /api/ramble/flock`) lists them with the **active** one tagged — that is the bird on your map, in the Nest header and on your public caws — and tapping another bird activates it (`POST /api/ramble/birds/:id/activate`). The score is species found out of the 8 kinds; a second bird of a kind you already have is still a bird, just not a new kind.
@@ -189,6 +191,10 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 |---|---|---|
 | `nest.rate` | 24 | About one nest per this many geohash-7 cells per week (integer ≥ 1). Replicates with your settings, so your own instances agree; it is an operator knob, and a changed rate no longer matches other people's nests. |
 | `shelf.cap` | 5 | How many unhatched eggs the shelf holds (integer ≥ 0; 0 turns claiming off). |
+| `frontier.depth` | 3 | How many blocks ahead of your unlocked ground you can see. |
+| `seed.respawn.hours` | 24 | How long before bird seed regrows in a place. |
+| `seed.per.pickup` | 1 | How much seed a place gives. |
+| `unlock.max.accuracy.m` | 100 | How sharp your location has to be before a place counts as visited. |
 
 ## MCP tools
 
@@ -226,6 +232,8 @@ The transport lives in core (`servers/gateway/boot/ramble-transport.js`), not in
 The second line means the bundle is installed but nothing will ever be published or received — check that sharing/Nostr is enabled on that instance. No Ramble failure can block gateway boot; every problem is a warning.
 
 The one-claim-per-day limit and the shelf cap are checked per instance (claims do not replicate), so a user with two Crows can claim once per day on each.
+
+The map of places you have unlocked, and your seed balance, replicate to your own linked Crows, and they never go to a contact.
 
 The cap only gates claims. Incubating an egg the sync layer had parked (`shelf_origin='sync'`) moves the egg it replaces to your own shelf without anything leaving, so the shelf can briefly read `6 of 5`; it settles as you hatch.
 
