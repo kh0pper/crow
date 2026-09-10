@@ -1,8 +1,11 @@
-// The hub is a full document, not a dashboard panel: the panel shell is a
-// large part of what made the drawer cramped on a phone. It still lives under
-// /dashboard so it inherits dashboardAuth, CSRF and the Funnel rejection —
-// dashboard/index.js applies those with router.use("/dashboard", ...), so a
-// bare top-level /perch would inherit none of them.
+// The hub IS a registered dashboard panel (panels/perch-hub.js) — that's what
+// gives it a nav entry and a launcher icon — but its handler renders its own
+// standalone document (perchHubDocument) instead of calling the `layout()`
+// the generic panel dispatcher hands it: the panel shell is a large part of
+// what made the drawer cramped on a phone. It still lives under /dashboard,
+// dispatched by dashboard/index.js's generic "/dashboard/:panelId" route, so
+// it inherits dashboardAuth, CSRF and the Funnel rejection the same way every
+// other panel does — a bare top-level /perch would inherit none of them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -37,24 +40,23 @@ test("the stylesheet keeps Perch's own palette and honours OS dark mode", async 
   assert.ok(!css.includes("<style>"), "perchHubCss returns bare CSS; html.js wraps it");
 });
 
-test("perchHubRouter serves /dashboard/perch when auth passes (the /perch redirect below is this test's own stand-in route, not perchHubRouter's)", async () => {
-  const { default: perchHubRouter } = await import("../servers/gateway/routes/perch-hub.js");
+test("the perch panel handler serves the standalone Perch document, not the dashboard shell (the /perch redirect below is this test's own stand-in route, not the dispatcher's)", async () => {
+  const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { default: express } = await import("express");
   const app = express();
-  // Auth is a pass-through stub here deliberately — this test exercises only
-  // perchHubRouter's own routing: it registers a relative "/perch" handler
-  // that SERVES the page (mounted under "/dashboard" below, so the effective
-  // path is /dashboard/perch). It does NOT redirect a bare top-level /perch —
-  // that redirect is a separate route dashboard/index.js registers directly
-  // on the app, outside this router. The app.get("/perch", ...) line right
-  // below is this test's OWN stand-in for that separate route, added only so
-  // this fetch block can exercise the same short-link flow a real request
-  // would follow. The real wiring — that dashboard/index.js actually mounts
-  // perchHubRouter AND actually registers that redirect — is pinned
-  // separately by the source-level guard below, "dashboard/index.js source
-  // mounts perchHubRouter and registers the /perch redirect" — see that
-  // test's own comment for why it reads source instead of firing requests.
-  app.use("/dashboard", perchHubRouter((req, res, next) => next()));
+  // No auth stub needed here — the panel manifest's handler takes no auth
+  // parameter at all; dashboardAuth is applied once, by the generic
+  // "/dashboard/:panelId" dispatcher in dashboard/index.js, to every
+  // registered panel alike. This test exercises only the handler itself: it
+  // is called directly with a context carrying NO `layout` function, so if
+  // the handler ever tried to call layout() (wrapping the page in the
+  // dashboard shell — the thing that made the old drawer cramped on a
+  // phone) this would throw instead of silently passing. The real wiring —
+  // that dashboard/index.js actually registers this panel AND actually
+  // registers the /perch redirect — is pinned separately by the
+  // source-level guard below; see that test's own comment for why it reads
+  // source instead of firing requests.
+  app.get("/dashboard/perch", (req, res) => perchHubPanel.handler(req, res, { lang: "en" }));
   app.get("/perch", (req, res) => res.redirect(302, "/dashboard/perch"));
   const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   try {
@@ -68,32 +70,63 @@ test("perchHubRouter serves /dashboard/perch when auth passes (the /perch redire
   } finally { srv.close(); }
 });
 
-test("dashboard/index.js source mounts perchHubRouter and registers the /perch redirect", () => {
+test("the perch panel manifest has the shape the registry needs: id/route match, category drives the Agents nav group, handler never calls layout()", async () => {
+  const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
+  assert.equal(perchHubPanel.id, "perch", "getPanel('perch') keys off this — must match the URL segment");
+  assert.equal(perchHubPanel.route, "/dashboard/perch");
+  // nav-registry.js's CATEGORY_TO_GROUP maps category "ai" -> the "agents"
+  // nav group, and auto-assigns any panel missing from stored
+  // nav_panel_assignments by this field — this is what puts Perch in the
+  // nav on an existing install with no migration.
+  assert.equal(perchHubPanel.category, "ai");
+  assert.equal(typeof perchHubPanel.handler, "function");
+  const src = readFileSync(join(REPO, "servers/gateway/dashboard/panels/perch-hub.js"), "utf8");
+  assert.match(src, /perchHubDocument\(/, "must render the standalone Perch document");
+  // Comments (this file's own header explains the layout()-avoidance rule in
+  // prose) are stripped first so a doc comment mentioning "layout(" can't
+  // make this pass without the code itself actually avoiding the call.
+  const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  assert.ok(!/\blayout\(/.test(codeOnly), "must never wrap perchHubDocument in the dashboard shell");
+});
+
+test("dashboard/index.js registers the perch panel exactly once and keeps the /perch short link", () => {
   // SOURCE-LEVEL guard, not a request-level one — and it has to be, not by
   // choice. dashboardAuth is a static import near the top of dashboard/index.js,
   // not the mcpAuthMiddleware parameter dashboardRouter() actually takes, so
   // there is no way to inject a pass-through auth and reach a handler at
-  // runtime to prove presence/absence of either wiring. Worse: dashboardAuth
+  // runtime to prove presence/absence of registration. Worse: dashboardAuth
   // is applied to the WHOLE "/dashboard" prefix (router.use("/dashboard",
-  // dashboardAuth), further down in the same file) and its isAllowedNetwork() check 403s an
-  // unauthenticated off-network request BEFORE any route matching happens —
-  // identically whether or not perchHubRouter is mounted underneath it. A
-  // request-level test therefore cannot distinguish "mounted" from "not
-  // mounted"; it was tried and proved not to (round 2 of this task's review
-  // deleted only the mount line, left the /perch redirect, and the prior
-  // version of this test stayed green). Reading the source and asserting on
-  // it is the only thing that actually pins these two lines.
+  // dashboardAuth), further down in the same file) and its isAllowedNetwork()
+  // check 403s an unauthenticated off-network request BEFORE any route
+  // matching happens — identically whether or not the panel is registered. A
+  // request-level test therefore cannot distinguish "registered" from "not
+  // registered"; a predecessor of this test proved that the hard way (round
+  // 2 of this feature's review deleted only the mount line, left the /perch
+  // redirect, and the prior version of this test stayed green). Reading the
+  // source and asserting on it is the only thing that actually pins this.
   const src = readFileSync(join(REPO, "servers/gateway/dashboard/index.js"), "utf8");
   assert.match(
     src,
-    /router\.use\(\s*"\/dashboard",\s*perchHubRouter\(dashboardAuth\)\s*\)/,
-    "perchHubRouter must be mounted onto the /dashboard prefix"
+    /import\s+perchHubPanel\s+from\s+"\.\/panels\/perch-hub\.js"/,
+    "the perch panel module must be imported"
+  );
+  assert.match(
+    src,
+    /registerPanel\(perchHubPanel\)/,
+    "the perch panel must be registered like every other built-in panel"
   );
   assert.match(
     src,
     /router\.get\(\s*"\/perch",[\s\S]{0,120}?\/dashboard\/perch/,
     "the top-level /perch short link must redirect to /dashboard/perch"
   );
+  // Exactly ONE handler must serve /dashboard/perch: the registered panel,
+  // dispatched by the generic "/dashboard/:panelId" route. The old bespoke
+  // router (routes/perch-hub.js, and its mount here) must be gone entirely —
+  // a leftover mount would double-register the route and this file's own
+  // import list would carry a router that duplicates what the panel already
+  // does.
+  assert.ok(!src.includes("perchHubRouter"), "the old bespoke router must not be mounted alongside the panel");
 });
 
 test("an absent bot engine is stated up front, not discovered on the first tap", async () => {

@@ -7,7 +7,6 @@ import express from "express";
 import { renderLayout, renderLogin, render2faVerify, render2faRecovery, render2faSetup, renderResetRequest, renderResetForm } from "./shared/layout.js";
 import { playerBarHtml, playerBarJs } from "./shared/player.js";
 import { headerIconsHtml, headerIconsJs, tamagotchiHtml, tamagotchiJs } from "./shared/notifications.js";
-import perchHubRouter from "../routes/perch-hub.js";
 import {
   dashboardAuth,
   isPasswordSet,
@@ -80,6 +79,7 @@ import onboardingPanel, { handleIdentityBackupPost, handleCloudProviderPost, han
 import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
 import meteringPanel from "./panels/metering.js";
+import perchHubPanel from "./panels/perch-hub.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 import perchApiRouter from "../routes/perch.js";
@@ -114,6 +114,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(connectPanel);
   registerPanel(fediversePanel);
   registerPanel(meteringPanel);
+  registerPanel(perchHubPanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -713,9 +714,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Normal mount (session-cookie-authenticated path)
   router.use("/dashboard", bundlesRouter);
 
-  router.use("/dashboard", perchHubRouter(dashboardAuth));
-  // Short link. Outside the /dashboard mount, so it carries no auth — it is a
-  // redirect with no content, and the destination is fully gated.
+  // Perch Hub itself is a registered panel now (panels/perch-hub.js),
+  // dispatched by the generic "/dashboard/:panelId" route below — no
+  // separate mount here. This is just the short link. Outside the
+  // /dashboard mount, so it carries no auth — it is a redirect with no
+  // content, and the destination is fully gated.
   router.get("/perch", (req, res) => res.redirect(302, "/dashboard/perch"));
 
   // SSO launch — authenticated on THIS instance (after dashboardAuth). Mints a
