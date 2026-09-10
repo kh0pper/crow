@@ -79,23 +79,45 @@ async function evaluate(width, height, expression) {
 }
 
 // 60 lines, not 16: enough that the transcript's OWN content height clearly
-// exceeds both tested viewports (730px and 900px) on its own — verified by
-// mutation (removing #perch-chat's flex:1/min-height:0, or #perch-transcript's
-// min-height:0, left this GREEN at 16 lines; only a transcript tall enough to
-// actually overflow makes those rules provable here instead of only in the
-// static check in perch-hub-page.test.js).
-const SEED_AND_MEASURE = `
+// exceeds both tested viewports (730px and 900px) on its own, which the
+// mutation-driven tests further down need in order to produce real overflow.
+//
+// ⚠ Length alone does NOT make the #perch-chat flex rules provable through
+// the two reachability tests below. Re-measured 2026-09-10: delete
+// #perch-chat's flex:1/min-height:0 with all 60 lines seeded and Send is
+// still at 668-704 / 854-890 and still reachable — position:sticky picks it
+// up and both tests stay green. What changes is .content-body's scroll
+// height (0 -> 3001 / 1431), which is why the pair of tests below measure
+// that instead. An earlier version of this comment claimed the opposite.
+// `mutation` is extra CSS appended to <head> before the measurement, so a
+// test can knock out one rule at a time in the live page and observe what
+// actually changes. That is the only way to tell which of the two competing
+// mechanisms (the #perch-chat flex chain vs #perch-composer's sticky) is
+// carrying reachability — mutating only one of them and watching this file
+// stay green is exactly how the earlier comment in perch-hub-page.test.js
+// reached the inverse conclusion.
+const seedAndMeasure = (mutation = "") => `
 (function(){
+  ${mutation ? `var s=document.createElement('style');s.textContent=${JSON.stringify(mutation)};document.head.appendChild(s);` : ""}
   document.body.setAttribute('data-view','chat');
   var tr=document.getElementById('perch-transcript');
   for(var i=0;i<60;i++){ var d=document.createElement('div');
     d.textContent='bot: a transcript line long enough to take a row or two, number '+i;
     tr.appendChild(d); }
   tr.scrollTop=0;                                  // where a reader starts
+  var cb=document.querySelector('.content-body');
   var b=document.getElementById('perch-send').getBoundingClientRect();
   return JSON.stringify({viewport:innerHeight,top:Math.round(b.top),
-    bottom:Math.round(b.bottom),reachable:b.bottom<=innerHeight&&b.top>=0});
+    bottom:Math.round(b.bottom),reachable:b.bottom<=innerHeight&&b.top>=0,
+    contentBodyScroll:cb.scrollHeight-cb.clientHeight,
+    composerPosition:getComputedStyle(document.getElementById('perch-composer')).position});
 })()`;
+const SEED_AND_MEASURE = seedAndMeasure();
+
+// The flex chain, expressed as the browser would have to see it removed.
+// Matches deleting `flex:1;min-height:0` from #perch-chat in
+// perch-hub/css.js — the rule perch-hub-page.test.js pins statically.
+const NO_FLEX_CHAIN = "#perch-chat{flex:none !important;min-height:auto !important}";
 
 test("the crow sidebar is present on /dashboard/perch", async (t) => {
   if (!available) return t.skip("no CDP endpoint at " + CDP);
@@ -123,6 +145,44 @@ test("Send is reachable at 1280x900 with the transcript scrolled to the top", as
   assert.equal(measured.reachable, true,
     `Send at ${measured.top}-${measured.bottom} in a ${measured.viewport}px viewport`);
 });
+
+// ─── which mechanism actually carries Send's reachability ─────────────────
+// These two pin the relationship the round-1 review corrected: the flex
+// chain is the mechanism, sticky is the backstop. Without them, a maintainer
+// can delete either rule and every other test in this file stays green,
+// because whichever rule survives masks the loss of the other.
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`the flex chain keeps .content-body from scrolling at all at ${w}x${h}`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    // This — not sticky — is what makes Send reachable in the shipped
+    // configuration. #perch-chat resolving against the definite height
+    // .content-body hands it means the panel never overflows, so there is
+    // no scroll position from which Send could be off-screen. Remove
+    // #perch-chat's flex:1/min-height:0 and this goes to 3001 (412x730) /
+    // 1431 (1280x900) while the reachability tests above stay green.
+    const m = JSON.parse(await evaluate(w, h, SEED_AND_MEASURE));
+    assert.equal(m.contentBodyScroll, 0,
+      `.content-body must not scroll; it scrolls ${m.contentBodyScroll}px, so the flex chain is broken ` +
+      "and only #perch-composer's sticky is still holding Send on screen");
+  });
+
+  test(`sticky is the backstop: Send survives a broken flex chain at ${w}x${h}`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    // The other direction. With the flex chain knocked out, .content-body
+    // genuinely overflows — and position:sticky;bottom:0 is then the only
+    // thing keeping Send on screen (measured: drop sticky too and Send
+    // lands at 3685 / 2285, far below the fold). This is the state in which
+    // sticky does real work, and the reason it is not dead code.
+    const m = JSON.parse(await evaluate(w, h, seedAndMeasure(NO_FLEX_CHAIN)));
+    assert.ok(m.contentBodyScroll > 0,
+      "the mutation must actually produce overflow, or this proves nothing");
+    assert.equal(m.composerPosition, "sticky",
+      "#perch-composer must still be sticky — that is the rule under test");
+    assert.equal(m.reachable, true,
+      `Send at ${m.top}-${m.bottom} in a ${m.viewport}px viewport with ${m.contentBodyScroll}px of overflow`);
+  });
+}
 
 test("both views are visible side by side at desktop width", async (t) => {
   if (!available) return t.skip("no CDP endpoint at " + CDP);
