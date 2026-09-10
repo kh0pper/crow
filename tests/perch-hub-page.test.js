@@ -33,16 +33,17 @@ test("the stylesheet keeps Perch's own palette and honours OS dark mode", async 
   assert.ok(!css.includes("<style>"), "perchHubCss returns bare CSS; html.js wraps it");
 });
 
-test("GET /perch redirects to the authed page rather than serving it unauthed", async () => {
+test("perchHubRouter itself redirects /perch and serves /dashboard/perch when auth passes", async () => {
   const { default: perchHubRouter } = await import("../servers/gateway/routes/perch-hub.js");
   const { default: express } = await import("express");
   const app = express();
-  // Mounted the way dashboard/index.js mounts it, with auth as a pass-through
-  // so this test exercises routing rather than the auth module.
+  // Auth is a pass-through stub here deliberately — this test exercises only
+  // perchHubRouter's own routing (the /perch redirect it registers plus its
+  // /dashboard/perch handler), not the dashboardAuth module and not whether
+  // dashboard/index.js actually mounts this router. That wiring is proven
+  // for real, against the real dashboardRouter, in the integration test
+  // below ("dashboard/index.js really mounts...").
   app.use("/dashboard", perchHubRouter((req, res, next) => next()));
-  // The redirect is asserted against the REAL dashboard router in the
-  // integration case below, not re-declared here — a test that defines the
-  // route it then asserts would pass even if index.js never gained it.
   app.get("/perch", (req, res) => res.redirect(302, "/dashboard/perch"));
   const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   try {
@@ -53,6 +54,39 @@ test("GET /perch redirects to the authed page rather than serving it unauthed", 
     const page = await fetch(base + "/dashboard/perch");
     assert.equal(page.status, 200);
     assert.ok((await page.text()).startsWith("<!DOCTYPE html>"));
+  } finally { srv.close(); }
+});
+
+test("dashboard/index.js really mounts perchHubRouter and the /perch redirect — a real request against the real dashboardRouter proves it, not a stub", async () => {
+  // Regression target: if someone later deleted the two lines added to
+  // dashboard/index.js (the perchHubRouter mount and the /perch redirect),
+  // this test must go red. Importing the REAL dashboardRouter default export
+  // and firing real HTTP requests at it is what makes that true — a stub
+  // route defined inline in the test would keep passing after that deletion.
+  const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
+  const { default: express } = await import("express");
+  const app = express();
+  // mcpAuthMiddleware (the constructor arg) is unrelated to dashboardAuth —
+  // dashboardAuth is imported directly inside dashboard/index.js and applied
+  // to the /dashboard mount regardless of what's passed here. null matches
+  // how boot wires this when unified OAuth is off.
+  app.use(dashboardRouter(null));
+  const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  try {
+    const base = "http://127.0.0.1:" + srv.address().port;
+    const red = await fetch(base + "/perch", { redirect: "manual" });
+    assert.equal(red.status, 302);
+    assert.equal(red.headers.get("location"), "/dashboard/perch");
+    // Off-network request (bare loopback fetch, no Tailscale/local-network
+    // signal) — dashboardAuth's isAllowedNetwork check refuses it before the
+    // session check even runs, same as the existing perch-interactive-api
+    // precedent (tests/perch-interactive-routes.test.js, "an unauthenticated
+    // request to a REAL perch-interactive route never reaches the handler").
+    // The point isn't the exact status — it's that this is NOT a 404. A 404
+    // would mean perchHubRouter was never mounted onto dashboardRouter at all.
+    const page = await fetch(base + "/dashboard/perch", { redirect: "manual" });
+    assert.notEqual(page.status, 404, "a 404 here means the mount in dashboard/index.js was removed");
+    assert.equal(page.status, 403, "off-network, unauthenticated: dashboardAuth's network gate refuses before the handler runs");
   } finally { srv.close(); }
 });
 
