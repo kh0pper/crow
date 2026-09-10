@@ -2617,6 +2617,7 @@ await initTable("bot_sessions table", `
     escalated         INTEGER DEFAULT 0,
     kind              TEXT NOT NULL DEFAULT 'chat',
     narrowed_tools    TEXT,
+    label             TEXT,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -2641,6 +2642,18 @@ await addColumnIfMissing("bot_sessions", "kind", "TEXT NOT NULL DEFAULT 'chat'")
 // idiom as `kind` above: CREATE body for fresh installs, guarded ALTER for
 // pre-existing ones. Additive-only — no SCHEMA_GENERATION bump.
 await addColumnIfMissing("bot_sessions", "narrowed_tools", "TEXT");
+
+// bot_sessions.label: an operator-settable name for a Perch session. The
+// machine-minted gateway_thread_id (perchlive-xxxxxxxx) is the IDENTITY and
+// stays so — this is a convenience the list and the chat header render
+// alongside it, never instead of it, and NULL/empty means "no name", which is
+// how clearing one works. Persisted on the session's own row rather than in a
+// second store, exactly like `status`. Same both-places idiom as `kind` and
+// `narrowed_tools` above: CREATE body for fresh installs, guarded ALTER for
+// pre-existing ones, and listed in BOT_SESSIONS_CANONICAL_COLUMNS below so the
+// control-CHECK rebuild carries it instead of aborting on it as drift.
+// Additive-only — no SCHEMA_GENERATION bump.
+await addColumnIfMissing("bot_sessions", "label", "TEXT");
 
 // bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
 // (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
@@ -2690,8 +2703,8 @@ await addColumnIfMissing("bot_sessions", "narrowed_tools", "TEXT");
 const BOT_SESSIONS_CANONICAL_COLUMNS = [
   "id", "bot_id", "pi_session_id", "pi_session_dir", "gateway_type",
   "gateway_thread_id", "project_id", "card_id", "plan_path", "status",
-  "control", "model", "escalated", "kind", "narrowed_tools", "created_at",
-  "updated_at",
+  "control", "model", "escalated", "kind", "narrowed_tools", "label",
+  "created_at", "updated_at",
 ];
 await (async () => {
   const tableInfo = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'");
@@ -2752,6 +2765,7 @@ await (async () => {
         escalated         INTEGER DEFAULT 0,
         kind              TEXT NOT NULL DEFAULT 'chat',
         narrowed_tools    TEXT,
+        label             TEXT,
         created_at        TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
       )

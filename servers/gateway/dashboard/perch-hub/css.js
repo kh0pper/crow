@@ -19,6 +19,13 @@
  * ID selectors (#perch-list, #perch-chat, #perch-transcript, #perch-composer,
  * #perch-back) are left unprefixed — they're already unique in the page.
  */
+/** The split-view breakpoint, in px. EXPORTED because the client script needs
+ *  the same number: at and above this width `.hub-split` is a two-column grid
+ *  and the session list stays on screen while a chat is open, so the list must
+ *  keep polling there. A second hardcoded 900 in client.js would go stale the
+ *  first time this one moved. */
+export const PERCH_SPLIT_MIN_WIDTH = 900;
+
 export function perchHubCss() {
   return `
 #perch-hub-root{--sky:#eef1f3;--card:#fff;--ink:#22303a;--dim:#6b7c88;--teal:#0e6b62;--teal-soft:#dcecea;
@@ -53,6 +60,16 @@ export function perchHubCss() {
    live while the launch buttons it shipped alongside measured 44px. Verified
    by computed style at 412x730, not by reading the cascade. */
 #perch-hub-root #perch-close{white-space:nowrap;padding:8px 12px;font-size:13px;min-height:44px}
+/* Rename: same two-id rule and the same 44px floor, for the same reason. It is
+   NOT destructive, so unlike Close it needs no confirmation — but a thumb has
+   to be able to hit it. */
+#perch-hub-root #perch-rename{white-space:nowrap;padding:8px 12px;font-size:13px;min-height:44px}
+/* The operator's session name, in the chat header and on a list row. Clipped
+   the same way .roost-cwd is: a name is free text and must not be able to give
+   the 320px list column a horizontal scrollbar. */
+#perch-hub-root .session-name{font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#perch-hub-root .roost-name{font-weight:500;font-size:14px;color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#perch-hub-root .perch-head [hidden],#perch-hub-root .roost-main [hidden]{display:none}
 /* The unconditional launcher. Wraps rather than overflowing on a phone, and
    its select is capped so a long bot name cannot push the button off-screen. */
 #perch-launch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 0 12px}
@@ -149,7 +166,7 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
 #perch-hub-root .field-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:10px 0}
 #perch-hub-root .field{display:flex;flex-direction:column;gap:3px;flex:1 1 150px;min-width:0}
 #perch-hub-root .field-label{font:11px/1 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
-@media (min-width:900px){
+@media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
   #perch-hub-root{max-width:1100px}
   body[data-view="chat"] #perch-list{display:block}
   #perch-hub-root .hub-split{display:grid;grid-template-columns:320px 1fr;gap:20px;align-items:stretch}

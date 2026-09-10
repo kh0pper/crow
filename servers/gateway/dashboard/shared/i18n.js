@@ -2287,6 +2287,12 @@ export const translations = {
   "perch.closeFailed": { en: "That session did not close.", es: "Esa sesión no se cerró." },
   "perch.closeFailedFor": { en: "{session} did not close.", es: "{session} no se cerró." },
   "perch.rowCard": { en: "card {id}", es: "tarjeta {id}" },
+  "perch.rename": { en: "Rename", es: "Renombrar" },
+  "perch.renamePrompt": {
+    en: "Name this session. Leave it empty to clear the name.",
+    es: "Nombra esta sesión. Déjalo vacío para quitar el nombre.",
+  },
+  "perch.renameFailed": { en: "That session was not renamed.", es: "Esa sesión no se renombró." },
   "perch.roostUnreachable": {
     en: "Could not reach the session list.",
     es: "No se pudo obtener la lista de sesiones.",

@@ -133,6 +133,17 @@ test("bot_sessions pre-existing WITHOUT kind: re-running init-db.js adds it", ()
       assert.ok(postCols.includes("kind"), "kind must be added by a second init-db.js run");
       assert.ok(postCols.includes("model") && postCols.includes("escalated"),
         "pre-existing columns must survive the migration");
+      // Every later post-hoc column takes the same path, and each one has to
+      // be in BOT_SESSIONS_CANONICAL_COLUMNS as well: this fixture's narrow
+      // control CHECK also triggers the table REBUILD, whose drift guard
+      // aborts init-db (exit non-zero) on any column it does not recognise.
+      // A new column added to the CREATE body and forgotten there would fail
+      // exactly here, on the hosts least able to afford it.
+      assert.ok(postCols.includes("narrowed_tools"), "narrowed_tools must be added too");
+      assert.ok(postCols.includes("label"), "label (the session name) must be added too");
+      assert.ok(!post.prepare("SELECT sql FROM sqlite_master WHERE name='bot_sessions'").get().sql
+        .includes("CHECK (control IN ('run','stop'))"),
+        "and the control-CHECK rebuild must have run, not aborted on the new column as drift");
     } finally {
       post.close();
     }

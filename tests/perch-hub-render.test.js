@@ -46,7 +46,12 @@ function serveApi(req, res) {
       birds: [{
         id: "r4-assistant", name: "R4 Assistant", perch_attached: true, state: "working",
         sessions: liveSids.map((sid) => ({ sessionId: sid, state: "awake",
-          cardId: sid === "perchlive-11111111" ? 248 : null, pendingUi: false })),
+          cardId: sid === "perchlive-11111111" ? 248 : null, pendingUi: false,
+          // One named session, with a name long enough to test the clipping:
+          // free operator text must never give the 320px list column a
+          // horizontal scrollbar.
+          label: sid === "perchlive-22222222"
+            ? "November package copy pass, English and Spanish together" : null })),
       }],
       occupiedCardIds: [],
     });
@@ -80,6 +85,7 @@ function serveApi(req, res) {
     default: "crow-local/qwen3.6-35b-a3b",
   });
   if (url.endsWith("/transcript")) return send(200, { events: [] });
+  if (url.endsWith("/rename")) return send(200, { label: "renamed" });
   if (url.endsWith("/interactive") && req.method === "POST") return send(200, { sessionId: "perchlive-99999999" });
   return send(200, {});
 }
@@ -304,6 +310,10 @@ async function session(width, height) {
   return {
     evalIn,
     json: async (expression) => JSON.parse(await evalIn(expression)),
+    /** Resize the emulated viewport mid-session, so a test can cross the
+     *  split breakpoint the way an operator dragging a window does. */
+    metrics: async (w, h) => send("Emulation.setDeviceMetricsOverride",
+      { width: w, height: h, deviceScaleFactor: 1, mobile: w < 900 }),
     close: async () => { ws.close(); await fetch(CDP + "/json/close/" + tab.id).catch(() => {}); },
   };
 }
@@ -580,6 +590,159 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(m.reachable, true, `Send at ${m.top}-${m.bottom} in a ${m.viewport}px viewport`);
       assert.equal(m.contentBodyScroll, 0,
         "the flex chain must still be the mechanism — a taller launcher must not make .content-body scroll");
+    } finally { await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Finding 1 — the list column in split view. Measured at the width where the
+// defect exists; a unit test cannot see it, because what makes the list
+// visible with a chat open is a CSS media query.
+// ---------------------------------------------------------------------------
+
+const ROW_COUNT = `JSON.stringify({
+  rows: document.querySelectorAll('#perch-list-body .roost-row').length,
+  listVisible: getComputedStyle(document.getElementById('perch-list')).display !== 'none',
+  view: document.body.getAttribute('data-view') })`;
+
+test("F1b live @1280x900: with a chat open the VISIBLE list keeps polling", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  resetApi();
+  const s = await session(1280, 900);
+  try {
+    await s.evalIn(`location.hash='perchlive-11111111'; 'go'`);
+    await new Promise((r) => setTimeout(r, 900));
+    const before = await s.json(ROW_COUNT);
+    assert.equal(before.view, "chat");
+    assert.equal(before.listVisible, true, "precondition: this is the split view, the list is on screen");
+    assert.equal(before.rows, 3);
+
+    // The world moves on: one session ends elsewhere.
+    liveSids = liveSids.slice(0, 2);
+    await new Promise((r) => setTimeout(r, 11000));   // one 10s poll interval
+
+    const after = await s.json(ROW_COUNT);
+    assert.equal(after.rows, 2,
+      "a visible list that stopped polling is what showed an idle row beside an awake session");
+  } finally { await s.close(); }
+});
+
+test("F1b live @412x730: with a chat open the HIDDEN list stops polling", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  resetApi();
+  const s = await session(412, 730);
+  try {
+    await s.evalIn(`location.hash='perchlive-11111111'; 'go'`);
+    await new Promise((r) => setTimeout(r, 900));
+    const before = await s.json(ROW_COUNT);
+    assert.equal(before.listVisible, false, "precondition: below the breakpoint the list really is hidden");
+    assert.equal(before.rows, 3);
+
+    liveSids = liveSids.slice(0, 2);
+    await new Promise((r) => setTimeout(r, 11000));
+
+    const after = await s.json(ROW_COUNT);
+    assert.equal(after.rows, 3,
+      "the other direction: nothing may keep polling behind a hidden list — SSE is the live signal there");
+  } finally { await s.close(); }
+});
+
+test("F1b live: crossing the breakpoint with a chat open refreshes the list that just appeared", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  resetApi();
+  const s = await session(412, 730);
+  try {
+    await s.evalIn(`location.hash='perchlive-11111111'; 'go'`);
+    await new Promise((r) => setTimeout(r, 900));
+    liveSids = liveSids.slice(0, 2);       // changed while the list was hidden and frozen
+    assert.equal((await s.json(ROW_COUNT)).rows, 3, "still stale, as it should be at this width");
+
+    await s.metrics(1280, 900);            // the operator widens the window
+    await new Promise((r) => setTimeout(r, 1200));
+
+    const after = await s.json(ROW_COUNT);
+    assert.equal(after.listVisible, true);
+    assert.equal(after.rows, 2,
+      "a breakpoint crossing is not a navigation, so nothing else would have refreshed it");
+  } finally { await s.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// Finding 3 — the rename controls, measured. A third button on a row and a
+// second one in the chat header are exactly where a 412px layout breaks.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`F3 live @${w}x${h}: a named row shows the name, clips it, and keeps three thumb-sized controls`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`(function(){
+        var rows=document.querySelectorAll('#perch-list-body .roost-row');
+        var named=null;
+        for(var i=0;i<rows.length;i++){ if(rows[i].querySelector('.roost-name')) named=rows[i]; }
+        var nameEl=named&&named.querySelector('.roost-name');
+        var btns=named?Array.prototype.map.call(named.querySelectorAll('button'),function(b){
+          var r=b.getBoundingClientRect();
+          return { text:b.textContent, w:Math.round(r.width), h:Math.round(r.height),
+                   inViewport: r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth,
+                   hit:(function(){ var e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                                    return !!e && (e===b||b.contains(e)); })() };
+        }):[];
+        var doc=document.documentElement;
+        return JSON.stringify({
+          rows: rows.length,
+          name: nameEl?nameEl.textContent:null,
+          nameClipped: nameEl? nameEl.scrollWidth > nameEl.clientWidth + 1 : null,
+          nameOverflowsRow: nameEl? nameEl.getBoundingClientRect().right > named.getBoundingClientRect().right + 1 : null,
+          btns: btns,
+          hScroll: doc.scrollWidth > doc.clientWidth });
+      })()`);
+      assert.equal(seen.rows, 3, "fixture check");
+      assert.equal(seen.name, "November package copy pass, English and Spanish together");
+      assert.equal(seen.nameOverflowsRow, false,
+        "an 80-char operator name must be clipped inside its row, not spill out of it");
+      assert.deepEqual(seen.btns.map((b) => b.text), ["Open", "Rename", "Close"],
+        "the row grew a third control: " + JSON.stringify(seen.btns.map((b) => b.text)));
+      for (const b of seen.btns) {
+        assert.ok(b.h >= 44, `${b.text} is ${b.w}x${b.h}; every row control clears the 44px thumb target`);
+        assert.equal(b.inViewport, true, `${b.text} must be on screen`);
+        assert.equal(b.hit, true, `${b.text} must be hit-testable`);
+      }
+      assert.equal(seen.hScroll, false, "no horizontal scroll at " + w + "px");
+    } finally { await s.close(); }
+  });
+
+  test(`F3 live @${w}x${h}: the chat header's Rename is reachable and Send still is`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 900));
+      const seen = await s.json(`(function(){
+        var b=document.getElementById('perch-rename'), r=b.getBoundingClientRect();
+        var nm=document.getElementById('perch-session-name');
+        var send=document.getElementById('perch-send').getBoundingClientRect();
+        return JSON.stringify({
+          name: nm.hidden?null:nm.textContent,
+          meta: document.getElementById('perch-session-meta').textContent,
+          w:Math.round(r.width), h:Math.round(r.height),
+          inViewport: r.top>=0 && r.bottom<=innerHeight,
+          hit:(function(){ var e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                           return !!e && (e===b||b.contains(e)); })(),
+          sendReachable: send.bottom<=innerHeight && send.top>=0,
+          hScroll: document.documentElement.scrollWidth > document.documentElement.clientWidth });
+      })()`);
+      assert.equal(seen.name, "November package copy pass, English and Spanish together",
+        "the open session's name is in the header");
+      assert.equal(seen.meta, "perchlive-22222222", "and the id line is untouched — it is the identity");
+      assert.ok(seen.h >= 44, `Rename is ${seen.w}x${seen.h}`);
+      assert.equal(seen.inViewport, true);
+      assert.equal(seen.hit, true);
+      assert.equal(seen.sendReachable, true, "a second header control must not disturb the composer");
+      assert.equal(seen.hScroll, false);
     } finally { await s.close(); }
   });
 }

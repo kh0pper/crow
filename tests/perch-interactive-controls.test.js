@@ -767,3 +767,126 @@ test("options(): unknown session is refused with no_such_session", async () => {
   const { engine } = makeEngine();
   await assert.rejects(() => engine.options("perchlive-nope"), (e) => e.code === "no_such_session");
 });
+
+// ---------------------------------------------------------------------------
+// 8. rename() — "it seems like there is not a way to rename the sessions"
+// ---------------------------------------------------------------------------
+
+function labelOf(threadId) {
+  const c = raw();
+  const row = c.prepare("SELECT label FROM bot_sessions WHERE gateway_thread_id=? ORDER BY id DESC LIMIT 1").get(threadId);
+  c.close();
+  return row ? row.label : undefined;
+}
+
+test("rename(): the name lands on the session's OWN row — no second store", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  const r = await engine.rename(s.sessionId, "Nov package copy pass");
+  assert.deepEqual(r, { label: "Nov package copy pass" });
+  assert.equal(labelOf(s.sessionId), "Nov package copy pass");
+  assert.equal((await engine.get(s.sessionId)).label, "Nov package copy pass");
+});
+
+test("rename(): a name survives a gateway restart, because adoptRow restores it", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await engine.rename(s.sessionId, "survives a deploy");
+
+  // A FRESH engine on the same DB: exactly what a restart is, and the state in
+  // which the operator hit the empty model picker.
+  _resetInteractiveEngineForTest();
+  const { engine: reborn } = makeEngine();
+  const snap = await reborn.get(s.sessionId);
+  assert.equal(snap.state, "hibernating", "precondition: adopted, not held");
+  assert.equal(snap.label, "survives a deploy", "a name lost on every restart would make renaming pointless");
+});
+
+test("rename(): trimmed, whitespace-collapsed and capped — the WRITER guarantees what is stored", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  assert.deepEqual(await engine.rename(s.sessionId, "   spaced   out   name  "), { label: "spaced out name" });
+  const long = "x".repeat(200);
+  const capped = await engine.rename(s.sessionId, long);
+  assert.equal(capped.label.length, 80, "80 chars: long enough to be useful, short enough for a 320px column");
+  assert.equal(labelOf(s.sessionId).length, 80, "and the ROW holds the capped value, not the raw one");
+});
+
+test("rename(): empty CLEARS the name — a real action, not a way to go anonymous", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await engine.rename(s.sessionId, "temporary");
+  assert.deepEqual(await engine.rename(s.sessionId, "   "), { label: null });
+  assert.equal(labelOf(s.sessionId), null, "a COALESCE here would make clearing impossible");
+  assert.equal((await engine.get(s.sessionId)).label, null);
+});
+
+test("rename(): a later lifecycle write does not resurrect a cleared name", async () => {
+  // End-state property, mechanism-independent: whatever writeRow does on the
+  // next hibernate, a name the operator cleared stays cleared.
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  await engine.rename(s.sessionId, "gone in a moment");
+  await engine.rename(s.sessionId, "");
+  clock.advance(600_001);
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating", "the hibernate wrote the row");
+  assert.equal(labelOf(s.sessionId), null);
+});
+
+test("rename(): pushes a state event, so an open drawer sees a rename made elsewhere", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  const sub = await collect(engine, s.sessionId);
+  await engine.rename(s.sessionId, "watch this");
+  const states = sub.ofType("state");
+  assert.ok(states.length >= 1);
+  assert.equal(states[states.length - 1].label, "watch this");
+  sub.off();
+});
+
+test("rename(): a STOPPED session can still be named, and an unknown one is refused", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await engine.stop(s.sessionId);
+  // Naming a finished session while sorting through what happened is exactly
+  // when an operator wants to — and it touches no child, so nothing to refuse.
+  assert.deepEqual(await engine.rename(s.sessionId, "the one that failed"), { label: "the one that failed" });
+  assert.equal(labelOf(s.sessionId), "the one that failed");
+  await assert.rejects(() => engine.rename("perchlive-nope", "x"), (e) => e.code === "no_such_session");
+});
+
+test("rename(): a mid-turn rename is never refused — it touches no child", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go");                 // turn in flight
+  assert.deepEqual(await engine.rename(s.sessionId, "named mid-turn"), { label: "named mid-turn" });
+  state.instances[0].lastTurn().resolve({
+    type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
+  });
+  await tick();
+});
+
+test("rename(): does not clear the 'interrupted' flag a shutdown left on the row", async () => {
+  // writeRow() stamps `status` and resets `control` to 'run' on every call, so
+  // rename() deliberately uses a targeted UPDATE instead. stopAll() marks a
+  // session that was mid-turn when the gateway went down control='interrupted'
+  // and the drawer reads that to say "interrupted, not answered" — a rename
+  // must not quietly erase it.
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  const c = raw();
+  c.prepare("UPDATE bot_sessions SET control='interrupted', status='waiting-user' WHERE gateway_thread_id=?")
+    .run(s.sessionId);
+  c.close();
+
+  await engine.rename(s.sessionId, "named after the crash");
+
+  const after = raw();
+  const row = after.prepare("SELECT control, status, label FROM bot_sessions WHERE gateway_thread_id=?")
+    .get(s.sessionId);
+  after.close();
+  assert.equal(row.label, "named after the crash");
+  assert.equal(row.control, "interrupted", "a rename must not reset the control flag");
+  assert.equal(row.status, "waiting-user", "nor restamp the status");
+});
