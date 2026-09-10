@@ -185,6 +185,7 @@ export function perchHubJs(lang = "en") {
   var FILE_QUEUED='${tJs("perch.fileQueued", lang)}';
   var FILE_FAILED='${tJs("perch.fileFailed", lang)}';
   var NO_TRANSCRIPT='${tJs("perch.noTranscript", lang)}';
+  var TRANSCRIPT_FAILED='${tJs("perch.transcriptFailed", lang)}';
   var RECONNECTING='${tJs("perch.reconnecting", lang)}';
   var RECONNECT_FAILED='${tJs("perch.reconnectFailed", lang)}';
   var ASK_STALE='${tJs("perch.askStale", lang)}';
@@ -879,7 +880,13 @@ export function perchHubJs(lang = "en") {
     perchApi('GET','/bots/'+encodeURIComponent(botId)+'/sessions/'+encodeURIComponent(sid)+'/transcript')
       .then(function(r){
         if(current.sid!==mySid) return;            /* identity guard, as everywhere */
-        var events=(r.ok&&r.j&&r.j.events)||[];
+        /* A FAILED FETCH IS NOT AN EMPTY TRANSCRIPT. The old
+           \`(r.ok&&r.j&&r.j.events)||[]\` collapsed a 500, a dropped tunnel and
+           a logged-out session into the same "No transcript yet." — a
+           reassuring sentence about a conversation that is still there. Say
+           which happened. */
+        if(!r.ok||!r.j){ appendNote(TRANSCRIPT_FAILED); return; }
+        var events=r.j.events||[];
         if(!events.length){ appendNote(NO_TRANSCRIPT); return; }
         events.filter(function(e){ return e&&e.type==='message'; }).forEach(function(e){
           var m=e.message||{};
