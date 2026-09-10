@@ -111,6 +111,36 @@ test("the emitted client script is valid JavaScript", async () => {
   assert.doesNotThrow(() => new Function(perchHubJs("en")));
 });
 
+test("the chat column carries the rules the renderer cannot prove", async () => {
+  // Headless Chrome under setDeviceMetricsOverride has no URL bar, so
+  // 100dvh === 100vh there and this rule can't be proven by rendering it —
+  // it is pinned here instead. Likewise the reachability render assertion
+  // is close to unfailable on its own (the composer is structurally last in
+  // a viewport-height flex column), so position:sticky, bottom:0, the
+  // composer's own background and the transcript's min-height:0 are pinned
+  // directly against the stylesheet text.
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\s+/g, "");
+  assert.ok(css.includes("height:100vh;height:100dvh"),
+    "dvh must FOLLOW vh — vh alone hides the last strip behind the browser chrome");
+  assert.ok(/#perch-composer\{[^}]*position:sticky/.test(css));
+  assert.ok(/#perch-composer\{[^}]*bottom:0/.test(css));
+  assert.ok(/#perch-composer\{[^}]*background:/.test(css), "or the transcript shows through it");
+  assert.ok(/#perch-transcript\{[^}]*min-height:0/.test(css),
+    "a flex child without min-height:0 refuses to shrink and pushes the composer off-screen");
+});
+
+test("the on-screen keyboard is accounted for", async () => {
+  // No headless harness raises a keyboard, so this only asserts the listener
+  // is wired — it does not prove the on-screen behaviour. iOS Safari does
+  // not shrink the layout viewport for the keyboard, so 100dvh alone stays
+  // full-height and a bottom:0 sticky composer sits behind it; visualViewport
+  // is the only API that reports the genuinely visible area.
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  assert.ok(perchHubJs("en").includes("visualViewport"),
+    "iOS keeps 100dvh full-height under the keyboard; only visualViewport sees the real area");
+});
+
 test("every control in the chat header carries a visible label", async () => {
   const { perchHubDocument } = await import("../servers/gateway/dashboard/perch-hub/html.js");
   const html = perchHubDocument("en");

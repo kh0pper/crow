@@ -611,6 +611,18 @@ export function perchHubJs(lang = "en") {
   }
   el('perch-abort').onclick=abortTurn;
 
+  /* iOS does not shrink the layout viewport for the keyboard, so dvh alone
+     leaves the composer behind it. Offset the chat column by the hidden part. */
+  if(window.visualViewport){
+    var vv=window.visualViewport;
+    var applyVV=function(){
+      var hidden=Math.max(0,window.innerHeight-vv.height-vv.offsetTop);
+      el('perch-chat').style.paddingBottom=hidden?hidden+'px':'';
+    };
+    vv.addEventListener('resize',applyVV);
+    vv.addEventListener('scroll',applyVV);
+  }
+
   /* BOOTSTRAP — the plan shipped without this once and everything looked fine.
      Task 7 navigates with location.href='/dashboard/perch#<sid>', a FULL page
      load, and a full load fires no hashchange. Without this line every board
