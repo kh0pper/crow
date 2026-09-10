@@ -168,3 +168,53 @@ test("the i18n keys index.js asks for actually exist", async () => {
     assert.notEqual(t(k, "en"), k, `i18n key "${k}" is missing from shared/i18n.js`);
   }
 });
+
+// --- Defect 3: verifyTotp threw on a missing code ----------------------------
+//
+// A POST to /dashboard/login/2fa (or /2fa/setup, or the settings enable_2fa
+// action) with the `totp_code` field simply absent reached
+// verifyTotp(undefined, secret). otpauth reads `.length` off the token, so an
+// absent field raised `TypeError: Cannot read properties of undefined` inside
+// an async route handler — an unhandled rejection, which is fatal, so a
+// malformed request took the gateway down. Same class as defect 2: a bad
+// request must render an error, never end the process.
+
+const TEST_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"; // RFC 6238 SHA1 seed
+
+test("verifyTotp answers false for a missing code instead of throwing", async () => {
+  const { verifyTotp } = await import("../servers/gateway/dashboard/totp.js");
+  for (const absent of [undefined, null]) {
+    assert.equal(verifyTotp(absent, TEST_SECRET), false);
+  }
+});
+
+test("verifyTotp answers false for a code that is not a usable string", async () => {
+  const { verifyTotp } = await import("../servers/gateway/dashboard/totp.js");
+  for (const junk of ["", "   ", "abc", 123456, {}, [], true]) {
+    assert.equal(verifyTotp(junk, TEST_SECRET), false);
+  }
+});
+
+test("verifyTotp answers false for a missing or unusable secret", async () => {
+  const { verifyTotp } = await import("../servers/gateway/dashboard/totp.js");
+  // /dashboard/login/2fa/setup and the settings enable_2fa action both pass a
+  // secret straight from the request body, so this argument is attacker-shaped
+  // too — and Secret.fromBase32(undefined) throws the same way.
+  for (const bad of [undefined, null, "", "not base32!"]) {
+    assert.equal(verifyTotp("123456", bad), false);
+  }
+});
+
+test("verifyTotp still accepts the real code for the current period", async () => {
+  const { verifyTotp } = await import("../servers/gateway/dashboard/totp.js");
+  const OTPAuth = await import("otpauth");
+  const totp = new OTPAuth.TOTP({
+    issuer: "Crow",
+    label: "Crow's Nest",
+    algorithm: "SHA1",
+    digits: 6,
+    period: 30,
+    secret: OTPAuth.Secret.fromBase32(TEST_SECRET),
+  });
+  assert.equal(verifyTotp(totp.generate(), TEST_SECRET), true);
+});
