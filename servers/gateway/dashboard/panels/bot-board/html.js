@@ -291,14 +291,23 @@ export function birdDrawerMarkup(lang) {
     <div id="bb-bd-card-link-wrap" class="bb-msg" style="display:none"><a id="bb-bd-card-link" href="#"></a></div>
     <div id="bb-bd-hibernating" class="bb-msg warn" style="display:none">${t("botboard.bdHibernating", lang)}</div>
     <div class="bb-bd-controls-row">
-      <select id="bb-bd-model" disabled aria-label="${escapeHtml(t("botboard.bdEnvelopeModelPrefix", lang))}"></select>
-      <select id="bb-bd-thinking" disabled></select>
-      <select id="bb-bd-permission">
-        <option value="guarded">${t("botboard.bdPermGuarded", lang)}</option>
-        <option value="ask">${t("botboard.bdPermAsk", lang)}</option>
-        <option value="bypass">${t("botboard.bdPermBypass", lang)}</option>
-      </select>
-      <label class="bb-bd-plan-label"><input type="checkbox" id="bb-bd-plan-toggle"> ${t("botboard.bdPlanModeLabel", lang)}</label>
+      <span class="bb-bd-field bb-bd-field-model">
+        <span class="bb-bd-field-label" id="bb-bd-model-label">${t("botboard.bdModelSelectLabel", lang)}</span>
+        <select id="bb-bd-model" disabled aria-labelledby="bb-bd-model-label"></select>
+      </span>
+      <span class="bb-bd-field">
+        <span class="bb-bd-field-label" id="bb-bd-thinking-label">${t("botboard.bdThinkingSelectLabel", lang)}</span>
+        <select id="bb-bd-thinking" disabled aria-labelledby="bb-bd-thinking-label"></select>
+      </span>
+      <span class="bb-bd-field">
+        <span class="bb-bd-field-label" id="bb-bd-permission-label">${t("botboard.bdPermissionSelectLabel", lang)}</span>
+        <select id="bb-bd-permission" aria-labelledby="bb-bd-permission-label">
+          <option value="guarded">${t("botboard.bdPermGuarded", lang)}</option>
+          <option value="ask">${t("botboard.bdPermAsk", lang)}</option>
+          <option value="bypass">${t("botboard.bdPermBypass", lang)}</option>
+        </select>
+      </span>
+      <label class="bb-bd-plan-label"><input type="checkbox" id="bb-bd-plan-toggle"> <span>${t("botboard.bdPlanModeLabel", lang)}</span></label>
     </div>
     <div id="bb-bd-bindsatwake" class="bb-msg warn" style="display:none">
       <span id="bb-bd-bindsatwake-text">${t("botboard.bdBindsAtWake", lang)}</span>

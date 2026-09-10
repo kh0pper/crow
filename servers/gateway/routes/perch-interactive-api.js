@@ -48,6 +48,7 @@ import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard } from "../board/card-service.js";
+import { annotateAvailability } from "../model-availability.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -244,7 +245,7 @@ async function loadBotRow(db, botId) {
  *   directly — what every fake-engine test below injects, so a turn is never
  *   driven and no pi is ever spawned.
  */
-export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine } = {}) {
+export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability } = {}) {
   const router = Router();
 
   // FIRST statement: auth-gate the whole prefix (perch.js / bot-board-api idiom).
@@ -558,11 +559,20 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   });
 
   // ---- GET /interactive/:sid/options — live model / thinking-level menus ----
+  // Each model carries an `availability` (up | on_demand | unavailable) so the
+  // picker can say which choices actually work. Without it a provider row
+  // pointing at a windowed endpoint (`crow-dsv4` → 127.0.0.1:8020) is
+  // indistinguishable from a serving one, and picking it fails every turn on
+  // connection refused. `models: null` is the hibernating contract and is
+  // passed through untouched — the drawer disables the picker on it.
   router.get(P + "/interactive/:sid/options", async (req, res) => {
     try {
       const eng = resolveEngine();
       const result = await eng.options(String(req.params.sid));
-      res.json(result);
+      const models = Array.isArray(result && result.models)
+        ? await annotate(result.models)
+        : (result && result.models) || null;
+      res.json({ ...result, models });
     } catch (err) {
       mapEngineError(res, err);
     }

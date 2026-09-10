@@ -179,7 +179,15 @@ before(async () => {
   app.use(perchApiRouter(fakeAuth, {
     interactiveEngine: () => engineImpl,
   }));
-  app.use(perchInteractiveApiRouter(fakeAuth, { engine: () => engineImpl }));
+  // `annotate` is injected for the same reason `engine` is: the real one
+  // dynamically imports gpu-orchestrator and probes every provider's baseUrl
+  // over the network. Availability itself is covered in
+  // tests/model-availability.test.js; here the seam only has to prove the
+  // route threads it through.
+  app.use(perchInteractiveApiRouter(fakeAuth, {
+    engine: () => engineImpl,
+    annotate: async (models) => models.map((m) => ({ ...m, availability: "up" })),
+  }));
 
   await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
   base = "http://127.0.0.1:" + server.address().port + "/dashboard/perch-api";
@@ -812,15 +820,29 @@ test("POST /interactive/:sid/cycle maps cycle_busy and session_stopped", async (
 // GET /interactive/:sid/options
 // ---------------------------------------------------------------------------
 
-test("GET /interactive/:sid/options 200s with the engine's models/thinkingLevels", async () => {
+test("GET /interactive/:sid/options 200s with the engine's models/thinkingLevels, each model carrying its availability", async () => {
   engineImpl.options = async (sid) => {
     engineCalls.options.push({ sid });
     return { models: [{ provider: "crow-local", id: "qwen3.6-35b-a3b" }], thinkingLevels: ["low", "high"] };
   };
   const { status, body } = await getJson("/interactive/sess-1/options");
   assert.equal(status, 200);
-  assert.deepEqual(body, { models: [{ provider: "crow-local", id: "qwen3.6-35b-a3b" }], thinkingLevels: ["low", "high"] });
+  assert.deepEqual(body, {
+    models: [{ provider: "crow-local", id: "qwen3.6-35b-a3b", availability: "up" }],
+    thinkingLevels: ["low", "high"],
+  });
   assert.deepEqual(engineCalls.options, [{ sid: "sess-1" }]);
+});
+
+test("GET /interactive/:sid/options passes models:null through — a hibernating session is not annotated", async () => {
+  // The null arrays are how the engine says "I did not wake a child just to
+  // list", and the drawer disables both pickers on them. Annotating would turn
+  // that into an empty list, which reads as "no models exist".
+  engineImpl.options = async () => ({ models: null, thinkingLevels: null });
+  const { status, body } = await getJson("/interactive/sess-1/options");
+  assert.equal(status, 200);
+  assert.equal(body.models, null);
+  assert.equal(body.thinkingLevels, null);
 });
 
 test("GET /interactive/:sid/options 404s no_such_session", async () => {

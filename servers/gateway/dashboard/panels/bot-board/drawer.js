@@ -50,10 +50,25 @@ export function birdDrawerCss() {
   .bb-bd-ask-answered{font-size:.82rem;color:var(--crow-text-muted);font-style:italic;margin:.5rem 0}
   .bb-bd-picker-row{display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid var(--crow-border);font-size:.85rem}
   .bb-card-focus{outline:2px solid ${PERCH_TOKENS.light.teal};outline-offset:2px}
-  .bb-bd-controls-row{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin:.6rem 0}
-  .bb-bd-controls-row select{width:auto;flex:1 1 auto;min-width:110px;padding:.3rem .4rem;font-size:.8rem}
-  .bb-bd-plan-label{display:flex;align-items:center;gap:.3rem;font-size:.8rem;color:var(--crow-text-secondary);text-transform:none;letter-spacing:normal;margin:0;flex:0 0 auto}
-  .bb-bd-plan-label input{width:auto}
+  /* Every rule that has to beat css.js's \`.bb-drawer label\` / \`.bb-drawer
+     select\` (specificity 0,1,1) is written .bb-drawer-qualified. A bare
+     .bb-bd-plan-label is 0,1,0 and LOSES, which is why the plan checkbox used
+     to render as a block with uppercase letter-spaced text instead of the flex
+     row it asks for -- at every width, not just narrow ones. */
+  .bb-bd-controls-row{display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-end;margin:.6rem 0}
+  /* Each control names itself. Unlabelled dropdowns read fine in a wide row
+     where the grouping carries the meaning, and read as three loose menus once
+     the row wraps on a phone. A span, not a label: .bb-drawer label is block +
+     uppercase, and these sit inside the field. */
+  .bb-bd-field{display:flex;flex-direction:column;gap:.15rem;flex:1 1 150px;min-width:0}
+  .bb-bd-field-model{flex:1 1 100%}
+  .bb-bd-field-label{font-size:.68rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:.05em}
+  .bb-drawer .bb-bd-controls-row select{width:100%;min-width:0;padding:.3rem .4rem;font-size:.8rem}
+  .bb-drawer .bb-bd-plan-label{display:flex;align-items:center;gap:.35rem;font-size:.8rem;color:var(--crow-text-secondary);text-transform:none;letter-spacing:normal;margin:0;flex:0 0 auto;align-self:flex-end;padding-bottom:.3rem}
+  .bb-drawer .bb-bd-plan-label input{width:auto;min-width:0;margin:0;flex:0 0 auto}
+  /* A model whose endpoint nothing is serving stays listed and stays readable,
+     but must not look like the plain working choice next to it. */
+  .bb-bd-model-off{color:var(--crow-text-muted)}
   .bb-bd-controls-toggle-wrap{display:flex;gap:.4rem;flex-wrap:wrap;margin:.3rem 0}
   .bb-bd-controls-pane{margin:.4rem 0;padding:.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px}
   .bb-bd-tools{display:flex;flex-direction:column;gap:.25rem;margin:.4rem 0}
@@ -102,6 +117,8 @@ export function birdDrawerJs(lang) {
     hibernating:'${tJs("botboard.roostStateHibernating", lang)}',
     stopped:'${tJs("botboard.bdStateStopped", lang)}'
   };
+  var BD_ON_DEMAND='${tJs("botboard.bdModelOnDemand", lang)}';
+  var BD_UNAVAILABLE='${tJs("botboard.bdModelUnavailable", lang)}';
 
   function bdBlank(){
     return {sid:null,botId:null,botName:null,threadId:null,cardId:null,
@@ -158,7 +175,18 @@ export function birdDrawerJs(lang) {
         models.forEach(function(m){
           var o=document.createElement('option');
           o.value=m.provider+'/'+m.id;
-          o.textContent=m.label||(m.provider+'/'+m.id);
+          // The payload has carried a human name all along ("Qwen3.6 35B A3B
+          // (Crow, Q5_K_XL MTP+vision, 256K)"); this read m.label, which no
+          // provider row sets, so every entry fell back to provider/id.
+          var text=m.name||m.label||(m.provider+'/'+m.id);
+          // Availability, from GET options. "up" says nothing — a working
+          // choice should read as the plain default.
+          if(m.availability==='on_demand'){ text+=' \u2014 '+BD_ON_DEMAND; }
+          else if(m.availability==='unavailable'){
+            text+=' \u2014 '+BD_UNAVAILABLE;
+            o.className='bb-bd-model-off';
+          }
+          o.textContent=text;
           bdModelSel.appendChild(o);
         });
       } else { bdModelSel.disabled=true; }
