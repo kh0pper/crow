@@ -184,6 +184,7 @@ const DRAWER_JS_KEYS = [
   "botboard.bdFilesQueuedPrefix", "botboard.bdFileUploaded", "botboard.bdFullEnvelopeRestored",
   "botboard.bdInterruptedNote",
   "botboard.bdModelOnDemand", "botboard.bdModelUnavailable",
+  "botboard.bdPlanOn", "botboard.bdPlanExecuting",
   "botboard.bdNarrowedToMid", "botboard.bdNarrowedToPrefix", "botboard.bdNarrowedToSuffix",
   "botboard.bdNarrowFailed", "botboard.bdNarrowNoteEmpty", "botboard.bdNarrowNoteSaved",
   "botboard.bdNarrowNoteUnknown", "botboard.bdNarrowRejected",
