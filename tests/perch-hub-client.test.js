@@ -472,12 +472,18 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
   const fetchCalls = [];
   const fetchFn = fetchImpl || (() => Promise.resolve(makeResponse(200, {})));
 
-  const doc = {
+  // addEventListener on the DOCUMENT, not just window: the hub script now
+  // listens for Turbo's turbo:before-render to retire itself when the shell
+  // swaps the body out from under it (perch-hub/client.js's ONE ACTIVE
+  // INSTANCE block). A document without it throws at script-run time, which
+  // would fail every test in this harness for the wrong reason.
+  const docTarget = makeEventTarget();
+  const doc = Object.assign(docTarget, {
     cookie: "crow_csrf=test-csrf-token",
     body: bodyEl,
     getElementById(id) { return els[id] || null; },
     createElement(tag) { return makeFakeElement(tag); },
-  };
+  });
 
   const winTarget = makeEventTarget();
   const vvTarget = makeEventTarget();

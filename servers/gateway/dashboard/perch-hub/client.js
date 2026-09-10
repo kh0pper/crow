@@ -18,6 +18,61 @@ export function perchHubJs(lang = "en") {
   function line(cls,text){ var d=document.createElement('div');
     if(cls) d.className=cls; d.textContent=text==null?'':String(text); return d; }
 
+  /* ── ONE ACTIVE INSTANCE PER DOCUMENT ─────────────────────────────────────
+     The dashboard runs Turbo Drive (shared/layout.js's turboHead(), on unless
+     CROW_ENABLE_TURBO=0). A Turbo visit REPLACES <body> WITHOUT reloading the
+     JS realm, so this script runs again while every closure the previous run
+     created is still alive — its EventSource, its 10s list-poll interval, and
+     the listeners it put on \`window\` (hashchange, focus, visualViewport),
+     which survive because \`window\` does.
+
+     Those survivors are not inert. \`el()\` resolves by id AT CALL TIME, so an
+     old instance writes into the NEW document. Measured, not theorised
+     (tests/perch-hub-stream-leak.test.js, and the scratch reproduction it was
+     written from): four visits to /dashboard/perch, then ONE tap on a session
+     row, gives four openSession()s, four loadHistory()s, four live
+     EventSource objects and four server-side /events connections — and
+     "No transcript yet." four times. The operator's own typed message is the
+     ONE thing not duplicated, because \`el('perch-send').onclick=\` is a single
+     slot the newest instance owns outright: exactly the asymmetry in the
+     transcript Kevin pasted (every streamed element ×6, his message ×1).
+
+     So instances are made mutually exclusive HERE, rather than by closing one
+     more path. A window-level registry gives two things a closure variable
+     cannot:
+       • streams closable BY IDENTITY. \`stream\` below only ever names THIS
+         instance's connection; a previous instance's is unreachable from this
+         closure, and the registry is the only thing that can still name it.
+       • a generation counter, so a retired instance's window listeners become
+         no-ops instead of a second writer. Every listener that outlives a
+         document — including any added later, e.g. a matchMedia breakpoint
+         listener — must be guarded with live().
+     ──────────────────────────────────────────────────────────────────────── */
+  var HUB=window.__crowPerchHub||(window.__crowPerchHub={gen:0,streams:{},retire:null});
+  /* Retire the previous instance BEFORE this one wires anything up.
+     BACKSTOP, not the mechanism: with Turbo present the outgoing instance has
+     already retired itself on turbo:before-render below, and deleting this
+     line leaves the whole leak suite green (measured). It is what still runs
+     if that event never fires — a Turbo upgrade that renames it, or any other
+     path that re-executes this script in a live document. */
+  if(HUB.retire){ try{ HUB.retire(); }catch(e){} }
+  var GEN=++HUB.gen, retired=false;
+  /* True only for the instance that owns the document right now. */
+  function live(){ return !retired&&HUB.gen===GEN; }
+  HUB.retire=function(){
+    retired=true;
+    stopListPolling(); cancelReconnect(); closeStream();
+    /* Anything left in the registry belongs to an instance older still (or to
+       a session this one never held): close it by identity — that is the
+       whole point of keeping the registry. */
+    for(var k in HUB.streams){ try{ HUB.streams[k].close(); }catch(e){} delete HUB.streams[k]; }
+  };
+  /* Turbo tears the document down before the next instance's script runs, so
+     retire on the way out too: without it this instance keeps a live SSE
+     connection (and a gateway-side subscriber) for the whole time the
+     operator is looking at some other panel. */
+  document.addEventListener('turbo:before-render',function(){ if(live()) HUB.retire(); });
+
   /* The two transcript writers. Defined HERE because the error and
      empty-transcript paths call them, and those are the FIRST paths a user
      hits when something goes wrong — a ReferenceError there is invisible to a
@@ -397,9 +452,15 @@ export function perchHubJs(lang = "en") {
   }
   /* Poll only while the list is showing. In the chat view the SSE stream is
      already the live signal, so polling there is pure waste. */
-  function startListPolling(){ stopListPolling(); listTimer=setInterval(loadList,10000); }
+  /* Every timer and window listener below is gated on live(): they outlive
+     the document Turbo replaces, and an ungated one is a retired instance
+     still polling, still rendering rows, still opening streams. */
+  function startListPolling(){ stopListPolling(); listTimer=setInterval(function(){ if(live()) loadList(); },10000); }
   function stopListPolling(){ if(listTimer){ clearInterval(listTimer); listTimer=null; } }
-  window.addEventListener('focus',function(){ if(body.getAttribute('data-view')==='list') loadList(); });
+  window.addEventListener('focus',function(){
+    if(!live()) return;
+    if(body.getAttribute('data-view')==='list') loadList();
+  });
 
   /* Engine-minted ids only: "perchlive-" + 8 hex (perch-interactive.js:1473).
      A loose pattern would admit ".." and this value is concatenated into an
@@ -471,7 +532,7 @@ export function perchHubJs(lang = "en") {
     var hit=parseHash(location.hash);
     if(hit) openSession(hit.sessionId); else closeSession();
   }
-  window.addEventListener('hashchange',applyHash);
+  window.addEventListener('hashchange',function(){ if(live()) applyHash(); });
 
   function planStateText(st){
     if(!st||typeof st!=='object') return typeof st==='string'?st:'';
@@ -512,21 +573,35 @@ export function perchHubJs(lang = "en") {
 
   var stream=null;
 
+  /** Drop \`es\` from the shared registry, whoever put it there. */
+  function unregisterStream(es){
+    for(var k in HUB.streams){ if(HUB.streams[k]===es) delete HUB.streams[k]; }
+  }
+
   function closeStream(){
     cancelReconnect();                 /* timer only — NOT the retry counter */
     var es=stream; stream=null;        /* null FIRST: idempotent under a double call
                                           from openSession + hashchange */
-    if(es){ try{ es.close(); }catch(e){} }
+    if(es){ try{ es.close(); }catch(e){} unregisterStream(es); }
   }
 
   function openStream(sid){
     closeStream();
+    /* EXPLICIT REPLACE, by identity. closeStream() above can only reach the
+       connection THIS instance holds; a stream opened for this session by an
+       older instance (or by a path that lost its handle) is named only by the
+       registry, and leaving it open is what multiplied every streamed event
+       by the number of surviving instances. */
+    var prev=HUB.streams[sid];
+    if(prev){ try{ prev.close(); }catch(e){} delete HUB.streams[sid]; }
     var es=new EventSource(API+'/interactive/'+encodeURIComponent(sid)+'/events');
     stream=es;
+    HUB.streams[sid]=es;
     es.onopen=function(){ resetBackoff(); };
 
     var on=function(type,fn){
       es.addEventListener(type,function(ev){
+        if(!live()) return;                           /* a retired instance never writes */
         if(current.sid!==sid) return;                 /* identity guard, every listener */
         /* A native EventSource connection failure delivers a type "error"
            Event to every listener registered for "error" via addEventListener
@@ -602,6 +677,7 @@ export function perchHubJs(lang = "en") {
     appendNote(RECONNECTING);
     var mySid=current.sid;                          /* no parameter to get wrong */
     retryTimer=setTimeout(function(){
+      if(!live()) return;                           /* retired mid-backoff */
       if(current.sid!==mySid) return;               /* navigated away mid-backoff */
       openStream(mySid);
     },2000);
@@ -887,6 +963,7 @@ export function perchHubJs(lang = "en") {
   if(window.visualViewport){
     var vv=window.visualViewport;
     var applyVV=function(){
+      if(!live()) return;
       var hidden=Math.max(0,window.innerHeight-vv.height-vv.offsetTop);
       el('perch-chat').style.paddingBottom=hidden?hidden+'px':'';
     };
