@@ -90,6 +90,26 @@ export function perchHubJs(lang = "en") {
     return out;
   }
 
+  /* Every perch-attached bot, whether or not it already has a live session.
+     listRows() deliberately drops a bot's idle row the moment it has one live
+     session, which is correct for a SESSION list and is exactly why the
+     launcher cannot be derived from rows: on an instance where the one
+     attached bot has eight live sessions there is no idle row left, and that
+     is the state Kevin reported with no way to start a ninth. Same filter as
+     listRows (perch_attached), same reason: POST /bots/<id>/interactive 403s
+     for a bot with no perch gateway record. Reads the /roost payload
+     loadList() already fetched — no second request. */
+  function spawnableBots(roost){
+    var birds=(roost&&roost.birds)||[];
+    var out=[];
+    birds.forEach(function(b){
+      if(!b||!b.perch_attached) return;
+      out.push({id:b.id,name:b.name||b.id});
+    });
+    out.sort(function(a,b){ return String(a.name).localeCompare(String(b.name)); });
+    return out;
+  }
+
   /* tJs escapes \\, ', \` and \${, so these interpolate safely. */
   var NO_SESSIONS='${tJs("perch.noSessions", lang)}';
   var WAITING_ON_YOU='${tJs("perch.waitingOnYou", lang)}';
@@ -115,6 +135,39 @@ export function perchHubJs(lang = "en") {
   var ASK_DENY='${tJs("perch.askDeny", lang)}';
   var ASK_CANCEL='${tJs("perch.askCancel", lang)}';
   var ASK_SUBMIT='${tJs("perch.askSubmit", lang)}';
+  var NO_ATTACHED_BOTS='${tJs("perch.noAttachedBots", lang)}';
+  var CLOSE_LABEL='${tJs("perch.close", lang)}';
+  var CLOSE_CONFIRM='${tJs("perch.closeConfirm", lang)}';
+  var CLOSE_FAILED='${tJs("perch.closeFailed", lang)}';
+  var CLOSE_FAILED_FOR='${tJs("perch.closeFailedFor", lang)}';
+  var ROW_CARD='${tJs("perch.rowCard", lang)}';
+  var ROOST_UNREACHABLE='${tJs("perch.roostUnreachable", lang)}';
+
+  /* Row identity. One bot with eight sessions renders eight rows that read
+     "R4 Assistant / awake" and nothing else — measured verbatim in a browser
+     as "R4AssistantawakeOpenCloseR4Assistant..." — so telling the mistakes
+     from the real work meant Open, read the meta, Back, once per candidate,
+     each pass sitting on top of an irreversible Close. Open is recoverable;
+     Close is not, which is what makes identity load-bearing here rather than
+     decorative. The engine mints "perchlive-" + 8 hex, so the hex alone is
+     the short, unambiguous handle. */
+  function shortSid(sid){ return String(sid==null?'':sid).replace(/^perchlive-/,''); }
+  function rowSubtitle(r){
+    if(!r) return '';
+    var parts=[r.pendingUi?WAITING_ON_YOU:r.state];
+    if(r.sessionId) parts.push(shortSid(r.sessionId));
+    /* The card a session is working is the most human handle there is, when
+       it has one. cardId is already on every row listRows() builds. */
+    if(r.cardId!=null) parts.push(ROW_CARD.replace('{id}',String(r.cardId)));
+    return parts.filter(Boolean).join(' \\u00b7 ');
+  }
+  /* What the confirm calls the session it is about to destroy. A confirm that
+     names nothing cannot correct a mis-tap, which is the only thing it is
+     there to do. */
+  function sessionLabel(sid){
+    var r=rowIndex[sid], short=shortSid(sid);
+    return (r&&r.botName)?(r.botName+' '+short):short;
+  }
 
   var pendingNote=null;                 /* survives the loadList that follows a note */
   function showListNote(text){
@@ -139,7 +192,7 @@ export function perchHubJs(lang = "en") {
       row.appendChild(line('roost-dot',''));
       var main=document.createElement('div'); main.className='roost-main';
       main.appendChild(line('roost-cwd',r.botName));
-      main.appendChild(line('roost-when',r.pendingUi?WAITING_ON_YOU:r.state));
+      main.appendChild(line('roost-when',rowSubtitle(r)));
       row.appendChild(main);
       var b=document.createElement('button');
       b.type='button'; b.textContent=r.sessionId?OPEN_LABEL:TALK_LABEL;
@@ -147,10 +200,144 @@ export function perchHubJs(lang = "en") {
         ? function(){ rowIndex[r.sessionId]=r; location.hash=r.sessionId; }
         : function(){ startSession(r.botId,r.botName); };
       row.appendChild(b);
+      /* Only a live session can be closed; an idle bot row has nothing to
+         stop. Second button, not a swipe or a long-press: this has to work
+         with a thumb on a 412px screen. */
+      if(r.sessionId){
+        var x=document.createElement('button');
+        x.type='button'; x.className='roost-close'; x.textContent=CLOSE_LABEL;
+        x.onclick=function(){ stopSession(r.sessionId); };
+        row.appendChild(x);
+      }
       if(r.sessionId) rowIndex[r.sessionId]=r;
       body.appendChild(row);
     });
     flushPendingNote();               /* a parked note must survive this render */
+  }
+
+  /* The bots the launcher can spawn against, refreshed by every loadList().
+     Empty until the first /roost answers — which is why #perch-new ships
+     disabled in the markup rather than enabled-and-lying. */
+  var launchBots=[];
+
+  function sameBotIds(a,b){
+    if(a.length!==b.length) return false;
+    for(var i=0;i<a.length;i++){ if(a[i].id!==b[i].id) return false; }
+    return true;
+  }
+
+  /* The launcher's one-line explainer. Factored out because loadList()'s
+     failure branch needs it too — a greyed button with no reason beside it is
+     the thing finding 3 was about. */
+  function setLaunchNote(text){
+    var note=el('perch-launch-note'); if(!note) return;
+    note.textContent=text||'';
+    note.hidden=!text;
+  }
+
+  function renderLauncher(bots){
+    var btn=el('perch-new'), sel=el('perch-new-bot'),
+        lbl=el('perch-new-bot-label');
+    if(!btn) return;
+    var changed=!sameBotIds(launchBots,bots);
+    launchBots=bots;
+    if(!bots.length){
+      /* Never offer a spawn that is guaranteed to 403 — say why instead. */
+      btn.disabled=true;
+      if(sel){ sel.hidden=true; if(changed) clearEl(sel); }
+      if(lbl) lbl.hidden=true;
+      setLaunchNote(NO_ATTACHED_BOTS);
+      return;
+    }
+    btn.disabled=false;
+    setLaunchNote('');
+    /* One attached bot is the common case (and Kevin's): no picker, one tap. */
+    if(bots.length===1){
+      if(sel){ sel.hidden=true; if(changed) clearEl(sel); }
+      if(lbl) lbl.hidden=true;
+      return;
+    }
+    if(lbl) lbl.hidden=false;
+    if(sel){
+      sel.hidden=false;
+      /* Rebuild ONLY when the roster actually changed: this runs on every
+         10s poll, and repopulating unconditionally would throw away the
+         operator's pick mid-tap. */
+      if(changed){
+        var keep=sel.value;
+        clearEl(sel);
+        bots.forEach(function(b){
+          var opt=document.createElement('option');
+          opt.value=b.id; opt.textContent=b.name;
+          sel.appendChild(opt);
+        });
+        if(keep&&bots.filter(function(b){ return b.id===keep; }).length) sel.value=keep;
+      }
+    }
+  }
+
+  /* The launch control's own handler. Resolves the bot from the picker when
+     there is one, then hands off to startSession() verbatim — the 409/403/
+     missing-sessionId handling, the rowIndex write, the hash navigation and
+     the current.sid identity guard all live there and are not duplicated. */
+  function startNewSession(){
+    if(!launchBots.length){ setLaunchNote(NO_ATTACHED_BOTS); return; }
+    var pick=launchBots[0];
+    if(launchBots.length>1){
+      var sel=el('perch-new-bot');
+      var want=sel?String(sel.value||''):'';
+      var hit=launchBots.filter(function(b){ return b.id===want; })[0];
+      if(hit) pick=hit;
+    }
+    startSession(pick.id,pick.name);
+  }
+  el('perch-new').onclick=startNewSession;
+
+  /* engine.stop() (perch-interactive.js:1955) kills the pi child and parks the
+     row: TERMINAL, no resume. Hence the confirm, whose copy says so — an
+     accidental thumb on a phone must not destroy a conversation. The
+     dashboard's own idiom for this is a native confirm guarded by an early
+     return (bot-board/drawer.js:941), so that is what this uses.
+     No mySid capture: this is keyed on the sid being STOPPED, not on whatever
+     is open, so a stop fired from a list row while another session is open
+     resolves against the right session. current.sid is consulted only to
+     decide WHERE the outcome is shown — and, on success, to leave a chat view
+     whose SSE stream the engine has just closed. */
+  function stopSession(sid){
+    if(!sid) return;
+    if(!confirm(CLOSE_CONFIRM.replace('{session}',sessionLabel(sid)))) return;
+    perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/stop').then(function(r){
+      /* 404 no_such_session / 410 already stopped: the operator's goal is
+         already true. Refresh, show nothing — an error there would be a lie. */
+      if(r.ok||r.status===404||r.status===410){
+        /* Navigate rather than call closeSession() directly, so applyHash ->
+           closeSession runs and closeSession's setView('list') +
+           startListPolling() + loadList() all fire.
+           REPLACE, not assign: the #perchlive-<sid> entry we are leaving now
+           points at a session that no longer exists. Pushing a new entry on
+           top of it means Back lands on the dead deep link, which
+           openSession's cold /roost miss bounces through
+           noteAndReturnToList -> another entry -> Back again forever. The
+           operator could never get behind this page. */
+        if(current.sid===sid){ leaveToList(); return; }
+        loadList();
+        return;
+      }
+      var text=(r.j&&r.j.error)||CLOSE_FAILED;
+      /* showListNote writes into #perch-list-body, which the chat view
+         display:none's below 900px — so an in-chat failure goes to the
+         transcript instead, the same split every other in-chat failure in
+         this file uses (SEND_FAILED, ASK_STALE). */
+      if(current.sid===sid){ appendNote(text); return; }
+      /* Not the session on screen, but still IN a chat view: the operator
+         closed this session, the POST was slow, and they moved on. The list
+         body is hidden, so showListNote here is an invisible error about a
+         session that is still alive and still costing a pi child. Park it —
+         renderList flushes it the moment they come back to the list — and
+         name the session, because it is no longer the one in front of them. */
+      if(current.sid){ pendingNote=CLOSE_FAILED_FOR.replace('{session}',sessionLabel(sid)); return; }
+      showListNote(text);
+    });
   }
 
   /* A bot with no session: spawn, then let the hash router open it, so history
@@ -161,9 +348,17 @@ export function perchHubJs(lang = "en") {
                                                 yank them out of it */
     perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive').then(function(r){
       if(current.sid!==mySid) return;
-      if(r.status===409){ showListNote(ENGINE_REQUIRED); return; }
-      if(r.status===403){ showListNote(NOT_ATTACHED); return; }
-      if(!r.ok||!r.j||!r.j.sessionId){ showListNote(START_FAILED); return; }
+      /* setLaunchNote, not showListNote: a FAILED SPAWN is a fact about the
+         launcher, and showListNote clears #perch-list-body — which would wipe
+         every session row and, with them, every Close button, for up to the
+         10s until the next poll. That was tolerable while the only spawn
+         trigger was an idle row (a list with idle rows has nothing much to
+         lose); the always-present launcher makes it routine, and it lands
+         hardest on an operator whose actual job right now is closing
+         sessions. The note belongs next to the control that produced it. */
+      if(r.status===409){ setLaunchNote(ENGINE_REQUIRED); return; }
+      if(r.status===403){ setLaunchNote(NOT_ATTACHED); return; }
+      if(!r.ok||!r.j||!r.j.sessionId){ setLaunchNote(START_FAILED); return; }
       rowIndex[r.j.sessionId]={botId:botId,botName:botName,sessionId:r.j.sessionId};
       location.hash=r.j.sessionId;
     });
@@ -172,8 +367,32 @@ export function perchHubJs(lang = "en") {
   var listTimer=null;
   function loadList(){
     return perchApi('GET','/roost').then(function(r){
-      if(r.ok&&r.j) renderList(listRows(r.j));
-      else renderList([]);
+      /* One payload, two renders: the rows AND the launcher's bot roster.
+         Deriving the launcher from the same /roost response is what keeps
+         this to a single request per poll. */
+      if(r.ok&&r.j){ renderLauncher(spawnableBots(r.j)); renderList(listRows(r.j)); return; }
+      /* A failed /roost is NOT an empty roost, and the old else branch said
+         both of the wrong things at once: it rendered "No live sessions." (a
+         lie) and skipped renderLauncher entirely, leaving #perch-new greyed
+         out with no reason given. Measured live against a 503: greyed button,
+         hidden note, false empty list — which is precisely the "I can only
+         interact with what already exists" state this whole task exists to
+         end, re-created by a gateway blip. Self-heals on the next 10s poll;
+         permanent if the failure is.
+         rowIndex is cleared but pendingNote is deliberately NOT flushed here:
+         a parked note ("That session is gone.") survives the blip and lands
+         on the next successful render, which is where it was going anyway. */
+      rowIndex={};
+      showListNote(ROOST_UNREACHABLE);
+      if(launchBots.length){
+        /* A roster we already know stays usable — the bots did not vanish
+           because one poll failed, and spawning is still worth attempting. */
+        var btn=el('perch-new'); if(btn) btn.disabled=false;
+      } else {
+        /* Never seen a roster: the button has nothing to spawn against, so
+           say why rather than just greying out. */
+        setLaunchNote(ROOST_UNREACHABLE);
+      }
     });
   }
   /* Poll only while the list is showing. In the chat view the SSE stream is
@@ -214,6 +433,10 @@ export function perchHubJs(lang = "en") {
       if(current.sid!==mySid) return;       /* the hash moved on while we waited */
       var hit=r.ok&&r.j?listRows(r.j).filter(function(x){return x.sessionId===mySid;})[0]:null;
       if(!hit){ noteAndReturnToList(SESSION_GONE); return; }
+      /* Cache it: sessionLabel() reads rowIndex to name the session in the
+         close confirm, and without this a cold deep link would offer an
+         irreversible "Close 22222222?" with no bot name on it. */
+      rowIndex[mySid]=hit;
       showHeader(hit.botId,hit.botName); afterHeader(mySid,hit.botId);
     });
   }
@@ -230,7 +453,19 @@ export function perchHubJs(lang = "en") {
   /* A note set before loadList() resolves is wiped by renderList. Park it and
      let renderList re-append it — otherwise "That session is gone." is never
      seen, on exactly the dead-deep-link path it exists for. */
-  function noteAndReturnToList(text){ pendingNote=text; location.hash=''; }   /* pendingNote: Task 2 */
+  /* Leave a session that no longer exists, WITHOUT stacking a history entry
+     on top of a dead deep link. location.hash='' pushes one, so Back returns
+     to #perchlive-<gone> -> openSession -> cold /roost miss ->
+     noteAndReturnToList -> another entry: the operator can never get behind
+     this page with Back.
+     location.replace('#') is the form that works, and the alternative is a
+     trap worth naming: location.replace(location.pathname+location.search)
+     gives a tidier URL, adds no history entry either — and fires NO
+     hashchange, so applyHash -> closeSession never runs and the view stays on
+     a dead chat. Measured both in a real browser; '#' fires hashchange and
+     leaves location.hash === ''. Do not "clean up" the trailing #. */
+  function leaveToList(){ location.replace('#'); }
+  function noteAndReturnToList(text){ pendingNote=text; leaveToList(); }   /* pendingNote: Task 2 */
 
   function applyHash(){
     var hit=parseHash(location.hash);
@@ -645,6 +880,7 @@ export function perchHubJs(lang = "en") {
     perchApi('POST','/interactive/'+encodeURIComponent(current.sid)+'/abort');
   }
   el('perch-abort').onclick=abortTurn;
+  el('perch-close').onclick=function(){ stopSession(current.sid); };
 
   /* iOS does not shrink the layout viewport for the keyboard, so dvh alone
      leaves the composer behind it. Offset the chat column by the hidden part. */

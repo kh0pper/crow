@@ -135,9 +135,17 @@ Rules learned the hard way on 2026-09-09 and non-negotiable here:
 
 - `100dvh`, never bare `100vh` — `100vh` is the large viewport and hides whatever
   sits in the last strip behind the browser chrome.
-- The composer is `position:sticky; bottom:0` with its own background, so Send is
-  reachable at any scroll position rather than only at the bottom of a long
-  transcript.
+- Send's reachability comes from the flex chain, not from the composer.
+  `#perch-chat{flex:1;min-height:0}` and `#perch-transcript{flex:1;overflow:auto;
+  min-height:0}` make the transcript the only scroller, so the page itself never
+  scrolls and the composer is always on screen. `position:sticky; bottom:0` on the
+  composer is a backstop that does nothing until that chain breaks — measured,
+  removing it from the shipped layout moves Send by zero pixels.
+  **Corrected 2026-09-10.** This bullet previously said sticky was the reason,
+  which is the inverse. It was written when Perch owned the viewport at `100dvh`;
+  once Perch moved inside the dashboard shell, `.content-body` took over the
+  scroll and the flex chain became the mechanism. The old wording survived the
+  move and would have led a maintainer to delete the load-bearing rule.
 - No control is unlabelled. A row of bare dropdowns reads fine wide and becomes
   meaningless the moment it wraps.
 - Full-bleed width on a phone. `min(480px, 92vw)` leaves a dead gutter.
