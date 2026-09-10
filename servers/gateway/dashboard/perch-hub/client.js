@@ -277,6 +277,13 @@ export function perchHubJs(lang = "en") {
     var on=function(type,fn){
       es.addEventListener(type,function(ev){
         if(current.sid!==sid) return;                 /* identity guard, every listener */
+        /* A native EventSource connection failure delivers a type "error"
+           Event to every listener registered for "error" via addEventListener
+           — not only es.onerror — and unlike a real engine error FRAME it
+           carries no .data. Without this check, every dropped connection
+           printed a bare "error" note here before onStreamError (bound
+           through the single-slot es.onerror property) ever got to reconnect. */
+        if(typeof ev.data!=='string') return;
         var d={}; try{ d=JSON.parse(ev.data); }catch(e){ d={}; }
         fn(d);
       });
