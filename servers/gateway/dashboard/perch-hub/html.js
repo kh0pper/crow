@@ -43,6 +43,20 @@ ${engineBanner(engine, lang)}
     <div class="perch-head"><div><div class="title" id="perch-bot-name"></div>
       <div class="meta" id="perch-session-meta"></div></div>
       <div class="state" id="perch-state"></div></div>
+    <div class="field-row">
+      <div class="field"><span class="field-label" id="perch-model-label">${escapeHtml(t("perch.modelLabel", lang))}</span>
+        <select id="perch-model" aria-labelledby="perch-model-label" disabled></select></div>
+      <div class="field"><span class="field-label" id="perch-thinking-label">${escapeHtml(t("perch.thinkingLabel", lang))}</span>
+        <select id="perch-thinking" aria-labelledby="perch-thinking-label" disabled></select></div>
+      <div class="field"><span class="field-label" id="perch-permission-label">${escapeHtml(t("perch.permissionLabel", lang))}</span>
+        <select id="perch-permission" aria-labelledby="perch-permission-label">
+          <option value="guarded">${escapeHtml(t("perch.permGuarded", lang))}</option>
+          <option value="ask">${escapeHtml(t("perch.permAsk", lang))}</option>
+          <option value="bypass">${escapeHtml(t("perch.permBypass", lang))}</option>
+        </select></div>
+      <div class="field"><span class="field-label" id="perch-plan-mode-label">${escapeHtml(t("perch.planModeLabel", lang))}</span>
+        <input type="checkbox" id="perch-plan-mode" aria-labelledby="perch-plan-mode-label"></div>
+    </div>
     <div id="perch-transcript"></div>
     <div id="perch-ask"></div>
     <div id="perch-composer">

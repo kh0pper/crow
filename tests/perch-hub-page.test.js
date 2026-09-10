@@ -110,3 +110,12 @@ test("the emitted client script is valid JavaScript", async () => {
   // new Function throws a SyntaxError on malformed source without running it.
   assert.doesNotThrow(() => new Function(perchHubJs("en")));
 });
+
+test("every control in the chat header carries a visible label", async () => {
+  const { perchHubDocument } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubDocument("en");
+  for (const id of ["perch-model", "perch-thinking", "perch-permission"]) {
+    assert.ok(html.includes(`id="${id}-label"`), `${id} needs a visible label`);
+    assert.ok(new RegExp(`id="${id}"[^>]*aria-labelledby="${id}-label"`).test(html));
+  }
+});

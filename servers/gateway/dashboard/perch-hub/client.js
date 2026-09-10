@@ -179,6 +179,7 @@ export function perchHubJs(lang = "en") {
     setView('chat');
     stopListPolling();                      /* SSE is the live signal here */
     clearEl(el('perch-transcript')); clearEl(el('perch-ask'));
+    resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     var known=rowIndex[sid];
     if(known){ showHeader(known.botId,known.botName); afterHeader(mySid,known.botId); return; }
     /* A cold deep link does not know the bot; ask /roost rather than guess. */
@@ -191,7 +192,7 @@ export function perchHubJs(lang = "en") {
   }
 
   /* Stream FIRST, history second: the stream carries no backlog. */
-  function afterHeader(sid,botId){ openStream(sid); loadHistory(botId,sid); }
+  function afterHeader(sid,botId){ openStream(sid); loadHistory(botId,sid); loadOptions(sid); }
 
   function closeSession(){
     closeStream(); current.sid=null;
@@ -268,7 +269,15 @@ export function perchHubJs(lang = "en") {
         fn(d);
       });
     };
-    on('state',function(d){ setTurnInFlight(turnFlagFor(d)); el('perch-state').textContent=d.state||''; });
+    on('state',function(d){
+      setTurnInFlight(turnFlagFor(d));
+      el('perch-state').textContent=d.state||'';
+      /* Reflects the engine's own record (snapshot()/stateEvent() in
+         perch-interactive.js), never the picker back at it — setting
+         .value/.checked does not fire change, so this cannot loop. */
+      if(d.permissionMode){ var permSel=el('perch-permission'); if(permSel) permSel.value=d.permissionMode; }
+      var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=!!d.planMode;
+    });
     on('text',function(d){ appendMessage('bot','bot',d.text||''); });
     on('tool',function(d){ if(d.phase==='start') appendNote('['+(d.name||'?')+']'); });
     on('log',function(d){ if(d.text) appendNote(d.text); });
@@ -341,6 +350,88 @@ export function perchHubJs(lang = "en") {
         });
       });
   }
+
+  /* Track 3 Task 4: session controls — model, thinking level, permission
+     mode, plan mode. Both models and thinkingLevels are null while the
+     session hibernates (perch-interactive.js:1877): the engine will not
+     wake a child merely to list, so optionsUsable() gates a DISABLED pair
+     of selects rather than an empty-but-enabled one. */
+  /* "up" is deliberately undecorated: a working choice should read as the
+     plain default. The name is on the payload; the drawer read m.label, which
+     no provider row sets, and every model listed as provider/id for months. */
+  function modelOptionText(m){
+    var text=(m&&m.name)||((m&&m.provider)+'/'+(m&&m.id));
+    if(m&&m.availability==='on_demand') text+=' \\u2014 ${tJs("perch.modelOnDemand", lang)}';
+    else if(m&&m.availability==='unavailable') text+=' \\u2014 ${tJs("perch.modelUnavailable", lang)}';
+    return text;
+  }
+
+  function optionsUsable(o){
+    return !!(o&&Array.isArray(o.models)&&o.models.length
+              &&Array.isArray(o.thinkingLevels)&&o.thinkingLevels.length);
+  }
+
+  /* Populates #perch-model / #perch-thinking from GET .../options, or
+     disables both rather than leaving an empty-but-enabled dropdown — that
+     is what made a hibernating session look broken. */
+  function renderOptions(o){
+    var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
+    if(!modelSel||!thinkSel) return;
+    clearEl(modelSel); clearEl(thinkSel);
+    if(!optionsUsable(o)){ modelSel.disabled=true; thinkSel.disabled=true; return; }
+    o.models.forEach(function(m){
+      var opt=document.createElement('option');
+      opt.value=(m&&m.provider)+'/'+(m&&m.id);
+      opt.textContent=modelOptionText(m);
+      modelSel.appendChild(opt);
+    });
+    o.thinkingLevels.forEach(function(lv){
+      var opt=document.createElement('option');
+      opt.value=lv; opt.textContent=lv;
+      thinkSel.appendChild(opt);
+    });
+    modelSel.disabled=false; thinkSel.disabled=false;
+  }
+
+  function loadOptions(sid){
+    var mySid=sid;
+    perchApi('GET','/interactive/'+encodeURIComponent(sid)+'/options').then(function(r){
+      if(current.sid!==mySid) return;               /* identity guard, as everywhere */
+      renderOptions(r.ok?r.j:null);
+    });
+  }
+
+  /* A newly opened session starts with no known options and the default
+     permission/plan state, cleared here so the PREVIOUS session's picker
+     contents never bleed into this one while loadOptions() is in flight. */
+  function resetControls(){
+    var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
+    if(modelSel){ clearEl(modelSel); modelSel.disabled=true; }
+    if(thinkSel){ clearEl(thinkSel); thinkSel.disabled=true; }
+    var permSel=el('perch-permission'); if(permSel) permSel.value='guarded';
+    var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
+  }
+
+  /* routes/perch-interactive-api.js:531-540 reads permission_mode and
+     plan_mode in snake_case and SILENTLY DROPS any other key — an operator
+     flipping the permission mode gets a 200 and nothing changes. Every other
+     body in this file is camelCase JS; these two stay snake_case on purpose. */
+  function controlBody(kind,value){
+    if(kind==='model'){ var i=value.indexOf('/');
+      return {model:{provider:value.slice(0,i),id:value.slice(i+1)}}; }
+    if(kind==='thinking') return {thinking:value};
+    if(kind==='permission') return {permission_mode:value};   /* snake_case */
+    return {plan_mode:!!value};                                /* snake_case */
+  }
+
+  function sendControl(kind,value){
+    if(!current.sid) return;
+    perchApi('POST','/interactive/'+encodeURIComponent(current.sid)+'/control',controlBody(kind,value));
+  }
+  el('perch-model').onchange=function(){ sendControl('model',this.value); };
+  el('perch-thinking').onchange=function(){ sendControl('thinking',this.value); };
+  el('perch-permission').onchange=function(){ sendControl('permission',this.value); };
+  el('perch-plan-mode').onchange=function(){ sendControl('plan',this.checked); };
 
   function sendable(text){ return String(text==null?'':text).trim().length>0; }
   function sendPath(sid,inFlight){

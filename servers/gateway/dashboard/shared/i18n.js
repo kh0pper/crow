@@ -2249,6 +2249,15 @@ export const translations = {
   "perch.noTranscript": { en: "No transcript yet.", es: "Aún no hay transcripción." },
   "perch.reconnecting": { en: "Reconnecting…", es: "Reconectando…" },
   "perch.reconnectFailed": { en: "Lost the connection to this session.", es: "Se perdió la conexión con esta sesión." },
+  "perch.modelLabel": { en: "Model", es: "Modelo" },
+  "perch.thinkingLabel": { en: "Thinking", es: "Razonamiento" },
+  "perch.permissionLabel": { en: "Permissions", es: "Permisos" },
+  "perch.planModeLabel": { en: "Plan mode", es: "Modo de plan" },
+  "perch.permGuarded": { en: "Guarded", es: "Vigilado" },
+  "perch.permAsk": { en: "Ask", es: "Preguntar" },
+  "perch.permBypass": { en: "Bypass", es: "Omitir" },
+  "perch.modelOnDemand": { en: "starts on demand", es: "se inicia bajo demanda" },
+  "perch.modelUnavailable": { en: "not running", es: "no está en ejecución" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

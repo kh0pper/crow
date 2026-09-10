@@ -201,8 +201,11 @@ test("the emitted script never assigns to an innerHTML-class sink", async () => 
   // these sinks exfiltrates it. A bare `.includes("innerHTML")` substring
   // check also fails on a comment that WARNS against innerHTML, which is
   // backwards — assert on the assignment/call shape instead.
-  assert.ok(!/\.innerHTML\s*=/.test(js), "no .innerHTML assignment");
-  assert.ok(!/\.outerHTML\s*=/.test(js), "no .outerHTML assignment");
+  // Matches both plain (=) and compound (+=) assignment — a compound
+  // assignment against these sinks parses and executes the same injection
+  // and a narrower regex let it through undetected.
+  assert.ok(!/\.innerHTML\s*\+?=/.test(js), "no .innerHTML assignment");
+  assert.ok(!/\.outerHTML\s*\+?=/.test(js), "no .outerHTML assignment");
   assert.ok(!/\.insertAdjacentHTML\s*\(/.test(js), "no insertAdjacentHTML call");
   assert.ok(!/document\.write\s*\(/.test(js), "no document.write call");
 });
@@ -226,4 +229,34 @@ test("the reconnect cap is actually reachable", async () => {
     "cancelling the timer must not reset the counter — closeStream() runs before every schedule");
   assert.ok(js.includes("function resetBackoff"), "the counter resets on a stream that opened, not on cancel");
   assert.ok(/scheduleReconnect\(\)/.test(js), "no argument — the arity mismatch that made this dead code");
+});
+
+test("a model option shows its human name and says when it is not serving", async () => {
+  const modelOptionText = await extract("modelOptionText");
+  assert.equal(modelOptionText({ provider: "crow-local", id: "qwen3.6-35b-a3b",
+    name: "Qwen3.6 35B A3B", availability: "up" }), "Qwen3.6 35B A3B");
+  assert.equal(modelOptionText({ provider: "p", id: "m", name: "Big Model",
+    availability: "on_demand" }), "Big Model — starts on demand");
+  assert.equal(modelOptionText({ provider: "crow-dsv4", id: "deepseek-v4-flash",
+    name: "DeepSeek-V4-Flash", availability: "unavailable" }), "DeepSeek-V4-Flash — not running");
+  // No name on the entry falls back to provider/id, never to "undefined".
+  assert.equal(modelOptionText({ provider: "p", id: "m", availability: "up" }), "p/m");
+});
+
+test("a hibernating session disables the pickers rather than emptying them", async () => {
+  const optionsUsable = await extract("optionsUsable");
+  assert.equal(optionsUsable({ models: null, thinkingLevels: null }), false);
+  assert.equal(optionsUsable({ models: [], thinkingLevels: [] }), false);
+  assert.equal(optionsUsable({ models: [{ id: "m", provider: "p" }], thinkingLevels: ["off"] }), true);
+  assert.equal(optionsUsable(null), false);
+});
+
+test("control bodies use the exact keys the route reads, not camelCase", async () => {
+  const controlBody = await extract("controlBody");
+  assert.deepEqual(controlBody("model", "crow-local/qwen3.6-35b-a3b"),
+    { model: { provider: "crow-local", id: "qwen3.6-35b-a3b" } });
+  assert.deepEqual(controlBody("thinking", "off"), { thinking: "off" });
+  // The silent-failure guards: the route drops unknown keys and still 200s.
+  assert.deepEqual(controlBody("permission", "bypass"), { permission_mode: "bypass" });
+  assert.deepEqual(controlBody("plan", true), { plan_mode: true });
 });

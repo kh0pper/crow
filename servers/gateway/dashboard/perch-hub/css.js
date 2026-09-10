@@ -68,6 +68,9 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column}
 #perch-composer .send-row{display:flex;gap:8px}
 #perch-composer textarea{min-height:72px}
 #perch-back{align-self:flex-start}
+.field-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:10px 0}
+.field{display:flex;flex-direction:column;gap:3px;flex:1 1 150px;min-width:0}
+.field-label{font:11px/1 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 @media (min-width:900px){
   body{max-width:1100px}
   body[data-view="chat"] #perch-list{display:block}
