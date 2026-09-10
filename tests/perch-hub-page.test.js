@@ -188,27 +188,37 @@ test("the emitted client script is valid JavaScript", async () => {
 });
 
 test("the chat column carries the rules the renderer cannot prove", async () => {
-  // Verified by actually mutating each rule and running perch-hub-render
-  // .test.js against it (mutation-tested 2026-09-10, restored after):
-  // NONE of the four rules checked below turn that live render test red,
-  // even with a 60-line seeded transcript that genuinely overflows both
-  // tested viewports. That's not a gap in the render test's coverage of
-  // "can Send be reached" — it's what #perch-composer{position:sticky;
-  // bottom:0} is FOR: sticky pins the composer to the bottom of
-  // .content-body's viewport (the nearest real scrolling ancestor, per
-  // layout.js's "body:has(#perch-chat)" rules) regardless of how tall
-  // #perch-chat's own box ends up being. So sticky alone already guarantees
-  // reachability; #perch-chat's flex:1/min-height:0 are about a DIFFERENT
-  // property entirely — making the TRANSCRIPT the thing that scrolls
-  // (rather than #perch-chat overflowing .content-body and forcing the
-  // whole page to scroll to reach later messages) — and that property has
-  // no getBoundingClientRect signature the render test can observe. This is
-  // the same situation the original standalone-page version of this test
-  // already flagged for the transcript's own min-height:0 ("the seeded
-  // transcript isn't long enough to force the shrink") — it turned out to
-  // apply to #perch-chat's own sizing too, at any transcript length, for a
-  // different reason (sticky masking it), so this static check is the only
-  // thing pinning it.
+  // ⚠ An earlier version of this comment had the relationship backwards —
+  // it said sticky alone guarantees Send's reachability and that
+  // #perch-chat's flex:1/min-height:0 are "about a DIFFERENT property".
+  // That was inferred from a one-directional mutation (drop the flex rules,
+  // watch the render test stay green) and it is wrong. Measured in BOTH
+  // directions, 2026-09-10, through perch-hub-render.test.js's own CDP
+  // harness with its 60-line seeded transcript:
+  //
+  //   config                              Send top-bottom     .content-body scroll
+  //   412x730 / 1280x900 as shipped       668-704 / 854-890   0 / 0
+  //   … + #perch-composer{position:static} 668-704 / 854-890   0 / 0   ← identical
+  //   … flex chain removed from #perch-chat 668-704 / 854-890  3001 / 1431
+  //   … flex chain removed AND static      3685 / 2285         3001 / 1431  ← UNREACHABLE
+  //
+  // Read the first two rows: sticky moves Send by ZERO pixels in the
+  // shipped configuration, because nothing overflows .content-body for it
+  // to stick against. The flex chain is what carries reachability — it
+  // keeps #perch-chat inside the definite height .content-body hands down
+  // (layout.js's "body:has(#perch-chat)" rules), so there is no scroll for
+  // Send to be pushed below, and the TRANSCRIPT is what scrolls instead of
+  // the panel. Read the last two rows: sticky is the backstop that engages
+  // only once the flex chain has already broken, and then it is the only
+  // thing keeping Send on screen.
+  //
+  // Both rules are real; neither is dead; and the flex chain is emphatically
+  // not decorative. Delete it on the strength of the old comment and the
+  // panel silently reverts to a page-scrolling .content-body with sticky
+  // masking the regression. perch-hub-render.test.js now asserts both halves
+  // live (".content-body does not scroll" and "with the flex chain broken,
+  // sticky still holds Send"); the static checks below pin the exact
+  // declarations those two measurements depend on.
   const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
   const css = perchHubCss().replace(/\s+/g, "");
   assert.ok(!/#perch-chat\{[^}]*height:100dvh/.test(css),
