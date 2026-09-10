@@ -44,9 +44,10 @@ test("perchHubRouter itself redirects /perch and serves /dashboard/perch when au
   // Auth is a pass-through stub here deliberately — this test exercises only
   // perchHubRouter's own routing (the /perch redirect it registers plus its
   // /dashboard/perch handler), not the dashboardAuth module and not whether
-  // dashboard/index.js actually mounts this router. That wiring is proven
-  // for real, against the real dashboardRouter, in the integration test
-  // below ("dashboard/index.js really mounts...").
+  // dashboard/index.js actually mounts this router. That wiring is pinned
+  // separately by the source-level guard below, "dashboard/index.js source
+  // mounts perchHubRouter and registers the /perch redirect" — see that
+  // test's own comment for why it reads source instead of firing requests.
   app.use("/dashboard", perchHubRouter((req, res, next) => next()));
   app.get("/perch", (req, res) => res.redirect(302, "/dashboard/perch"));
   const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
@@ -63,12 +64,12 @@ test("perchHubRouter itself redirects /perch and serves /dashboard/perch when au
 
 test("dashboard/index.js source mounts perchHubRouter and registers the /perch redirect", () => {
   // SOURCE-LEVEL guard, not a request-level one — and it has to be, not by
-  // choice. dashboardAuth is a static import in dashboard/index.js (line 11),
+  // choice. dashboardAuth is a static import near the top of dashboard/index.js,
   // not the mcpAuthMiddleware parameter dashboardRouter() actually takes, so
   // there is no way to inject a pass-through auth and reach a handler at
   // runtime to prove presence/absence of either wiring. Worse: dashboardAuth
   // is applied to the WHOLE "/dashboard" prefix (router.use("/dashboard",
-  // dashboardAuth) at line ~613) and its isAllowedNetwork() check 403s an
+  // dashboardAuth), further down in the same file) and its isAllowedNetwork() check 403s an
   // unauthenticated off-network request BEFORE any route matching happens —
   // identically whether or not perchHubRouter is mounted underneath it. A
   // request-level test therefore cannot distinguish "mounted" from "not
