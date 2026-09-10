@@ -2267,6 +2267,24 @@ export const translations = {
   "perch.attachFile": { en: "Attach image", es: "Adjuntar imagen" },
   "perch.fileQueued": { en: "Image attached to the next message.", es: "Imagen adjunta al siguiente mensaje." },
   "perch.fileFailed": { en: "The image did not upload.", es: "La imagen no se subió." },
+  "perch.newSession": { en: "New session", es: "Nueva sesión" },
+  "perch.newSessionBot": { en: "Bot", es: "Bot" },
+  "perch.noAttachedBots": {
+    en: "No bot has a Perch channel attached, so there is nothing to start.",
+    es: "Ningún bot tiene un canal Perch, así que no hay nada que iniciar.",
+  },
+  "perch.close": { en: "Close", es: "Cerrar" },
+  "perch.closeConfirm": {
+    en: "Close {session}? It cannot be reopened.",
+    es: "¿Cerrar {session}? No se podrá volver a abrir.",
+  },
+  "perch.closeFailed": { en: "That session did not close.", es: "Esa sesión no se cerró." },
+  "perch.closeFailedFor": { en: "{session} did not close.", es: "{session} no se cerró." },
+  "perch.rowCard": { en: "card {id}", es: "tarjeta {id}" },
+  "perch.roostUnreachable": {
+    en: "Could not reach the session list.",
+    es: "No se pudo obtener la lista de sesiones.",
+  },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
