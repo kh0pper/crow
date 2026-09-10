@@ -1267,6 +1267,72 @@ test("GET /interactive/:sid/events streams text | tool | log | reply | error eve
   try { await reader.cancel(); } catch { /* already closed */ }
 });
 
+test("GET /interactive/:sid/events carries rendered markdown ALONGSIDE the raw text, on prose frames only", async () => {
+  let push;
+  engineImpl.subscribe = async (sid, fn) => {
+    fn({ type: "state", sessionId: sid, state: "awake", lastError: null, pendingUi: null });
+    push = fn;
+    return () => {};
+  };
+  const res = await fetch(base + "/interactive/sess-1/events");
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  const readUntil = async (n) => {
+    while (sseEvents(buf).length < n) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+    }
+  };
+  await readUntil(1);
+  push({ type: "text", text: "## Boards\n\nThere are **four**." });
+  push({ type: "reply", text: "Done, see [the docs](https://example.com)." });
+  push({ type: "log", text: "warm crow-local -> 200" });
+  push({ type: "tool", name: "bash", phase: "start", isError: false });
+  await readUntil(5);
+
+  const text = sseDataAt(buf, "text", 0);
+  assert.equal(text.text, "## Boards\n\nThere are **four**.", "the raw text still rides the frame");
+  assert.match(text.html, /<h2[^>]*>Boards<\/h2>/, "rendered on the SERVER — the client has no parser");
+  assert.match(text.html, /<strong>four<\/strong>/);
+
+  const reply = sseDataAt(buf, "reply", 0);
+  assert.match(reply.html, /<a href="https:\/\/example\.com">the docs<\/a>/);
+
+  // Gateway chrome is not model prose: a log line saying "warm crow-local ->
+  // 200" must not be handed to a markdown parser.
+  assert.equal(sseDataAt(buf, "log", 0).html, undefined);
+  assert.equal(sseDataAt(buf, "tool", 0).html, undefined);
+  try { await reader.cancel(); } catch { /* already closed */ }
+});
+
+test("GET /interactive/:sid/events omits html for an empty or whitespace text frame", async () => {
+  let push;
+  engineImpl.subscribe = async (sid, fn) => {
+    fn({ type: "state", sessionId: sid, state: "awake", lastError: null, pendingUi: null });
+    push = fn;
+    return () => {};
+  };
+  const res = await fetch(base + "/interactive/sess-1/events");
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  const readUntil = async (n) => {
+    while (sseEvents(buf).length < n) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+    }
+  };
+  await readUntil(1);
+  push({ type: "reply", text: "   " });
+  await readUntil(2);
+  assert.equal(sseDataAt(buf, "reply", 0).html, undefined,
+    "no html means the client takes its textContent path, which is today's behaviour");
+  try { await reader.cancel(); } catch { /* already closed */ }
+});
+
 test("GET /interactive/:sid/events unsubscribes when the client disconnects — no leaked subscriber", async () => {
   const subscribers = new Set();
   engineImpl.subscribe = async (sid, fn) => {

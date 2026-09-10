@@ -129,6 +129,53 @@ border-radius:10px;background:var(--sky);color:var(--ink);flex:1 1 140px;min-wid
 #perch-hub-root .who{flex:0 0 64px;font:11px/1.6 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;color:var(--dim)}
 #perch-hub-root .entry.user .who{color:var(--teal)}
 #perch-hub-root .what{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+/* Rendered markdown. TWO ids' worth of weight is not needed here (nothing
+   competes), but \`white-space:pre-wrap\` from .what above IS: markdown output
+   is real block elements, and pre-wrap would double every blank line between
+   them. */
+/* #perch-transcript is a GRID (see its own rule below), so every row in it is
+   a grid ITEM, and a grid item's automatic minimum size is its MIN-CONTENT.
+   One unbreakable table cell therefore widened the whole row past the column
+   and made the transcript scroll sideways instead of the table scrolling
+   inside itself. Measured at 412x730: row 666px in a 380px column, table
+   clipped by nothing; with this, row 380, table 306 wide scrolling its own
+   475px of content. min-width:0 on the ITEM is the item-side half of the
+   standard remedy (grid-template-columns:minmax(0,1fr) is the container-side
+   half); applied to every row, not just .entry, because an ask card can carry
+   the same unbreakable content. */
+#perch-transcript > *{min-width:0}
+#perch-hub-root .what.md{white-space:normal}
+#perch-hub-root .what.md > :first-child{margin-top:0}
+#perch-hub-root .what.md > :last-child{margin-bottom:0}
+#perch-hub-root .what.md p{margin:0 0 8px}
+#perch-hub-root .what.md h1,#perch-hub-root .what.md h2,#perch-hub-root .what.md h3,
+#perch-hub-root .what.md h4,#perch-hub-root .what.md h5,#perch-hub-root .what.md h6{
+font-size:15px;font-weight:600;margin:10px 0 6px;text-transform:none;letter-spacing:0;color:var(--ink)}
+#perch-hub-root .what.md ul,#perch-hub-root .what.md ol{margin:0 0 8px;padding-left:20px}
+#perch-hub-root .what.md li{margin:2px 0}
+#perch-hub-root .what.md a{color:var(--teal)}
+#perch-hub-root .what.md code{font:12.5px/1.5 "JetBrains Mono",ui-monospace,monospace;
+background:var(--sky);border:1px solid var(--line);border-radius:5px;padding:1px 4px;word-break:break-word}
+#perch-hub-root .what.md blockquote{margin:0 0 8px;padding-left:10px;border-left:2px solid var(--line);color:var(--dim)}
+#perch-hub-root .what.md hr{border:none;border-top:1px solid var(--line);margin:10px 0}
+/* WIDE CONTENT SCROLLS INSIDE ITSELF. A table or a long code fence is the one
+   thing in a bot answer that cannot be wrapped, and at 412px an unscoped one
+   would give the whole page a horizontal scrollbar — .roost-when's own
+   clipping rules exist for the same reason. max-width:100% needs the min-width:0
+   already on .what to actually bind inside the flex row. */
+#perch-hub-root .what.md pre{margin:0 0 8px;padding:9px 10px;background:var(--sky);
+border:1px solid var(--line);border-radius:8px;max-width:100%;overflow-x:auto}
+#perch-hub-root .what.md pre code{background:none;border:none;padding:0;white-space:pre;word-break:normal}
+#perch-hub-root .what.md table{display:block;max-width:100%;overflow-x:auto;
+border-collapse:collapse;margin:0 0 8px;font-size:13px}
+/* word-break:normal UNDOES .what's break-word inside a table. A data table
+   whose long tokens are shredded mid-character is unreadable; the honest
+   behaviour is to keep the cell intact and let the table scroll inside its own
+   box, which is what overflow-x above is for. Without this the table can never
+   overflow, and that rule would be dead. */
+#perch-hub-root .what.md th,#perch-hub-root .what.md td{border:1px solid var(--line);padding:5px 8px;text-align:left;word-break:normal}
+#perch-hub-root .what.md th{background:var(--sky);font-weight:600}
+#perch-hub-root .what.md img{max-width:100%;height:auto}
 #perch-hub-root .note{color:var(--dim);font-size:12.5px;font-style:italic}
 #perch-hub-root .ask-card{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:8px;background:var(--sky)}
 #perch-hub-root .ask-title{font-weight:600}

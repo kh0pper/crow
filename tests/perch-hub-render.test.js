@@ -34,9 +34,12 @@ const stopped = [];
 /** The bot's configured default, as GET /bots/:id/models reports it. null is
  *  the common case on the reporting instance (3 of 5 R4 bot defs). */
 let modelsDefault = "crow-local/qwen3.6-35b-a3b";
+/** Transcript history, so a test can seed rendered markdown into the real DOM. */
+let transcriptEvents = [];
 function resetApi() {
   liveSids = SIDS.slice(); stopped.length = 0; roostFails = false;
   modelsDefault = "crow-local/qwen3.6-35b-a3b";
+  transcriptEvents = [];
 }
 
 let roostFails = false;
@@ -100,7 +103,7 @@ function serveApi(req, res) {
     ],
     default: modelsDefault,
   });
-  if (url.endsWith("/transcript")) return send(200, { events: [] });
+  if (url.endsWith("/transcript")) return send(200, { events: transcriptEvents });
   if (url.endsWith("/rename")) return send(200, { label: "renamed" });
   if (url.endsWith("/interactive") && req.method === "POST") return send(200, { sessionId: "perchlive-99999999" });
   return send(200, {});
@@ -827,6 +830,119 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.index, 0);
       assert.equal(seen.value, "", "an empty value is what makes startSession send no control()");
       assert.equal(seen.shown, "The bot's own model");
+    } finally { resetApi(); await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// TASK-3 item 2, live — rendered markdown in a real browser. A wide table is
+// the one thing in a bot answer that cannot be wrapped, and 412px is where an
+// unscoped one gives the whole page a horizontal scrollbar.
+// ---------------------------------------------------------------------------
+
+/** What the server sends: rendered by servers/blog/renderer.js, sanitized. */
+async function renderedTranscript() {
+  const { renderMarkdown } = await import("../servers/blog/renderer.js");
+  const wide = "## Boards\n\n" +
+    "| id | board | cards | owner | updated | status | notes |\n" +
+    "|---|---|---|---|---|---|---|\n" +
+    "| 1 | TEHCY resource grant | 12 | Kevin Hopper | 2026-09-10 | in review | " +
+    // An unbreakable token, deliberately: a table of ordinary prose wraps and
+    // never overflows, so it would prove nothing about the scroll container.
+    "outputs/2026-09-10T14-22-05Z_november-package-copy-pass_en-es_final.tar.gz |\n" +
+    "| 2 | Comms | 3 | Edrice Bell | 2026-09-08 | approved | waiting on the translation answer |\n\n" +
+    "```js\nconst aVeryLongLineOfCodeThatCannotWrapAnywhereAtAllBecauseItIsOneToken = 1;\n```\n";
+  const hostile = "<img src=x onerror=\"window.__pwned=1\">\n\n" +
+    "<script>window.__pwned=1</script>\n\n[click me](javascript:window.__pwned=1)";
+  return [
+    { type: "message", message: { role: "user", content: "how many boards?" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: wide }] },
+      html: renderMarkdown(wide) },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: hostile }] },
+      html: renderMarkdown(hostile) },
+  ];
+}
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`MD live @${w}x${h}: markdown renders as elements, wide content scrolls itself, page does not`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    transcriptEvents = await renderedTranscript();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 1200));
+      const seen = await s.json(`(function(){
+        var tr=document.getElementById('perch-transcript');
+        var md=tr.querySelectorAll('.what.md');
+        var table=tr.querySelector('.what.md table');
+        var pre=tr.querySelector('.what.md pre');
+        var doc=document.documentElement;
+        var box=function(e){ var r=e.getBoundingClientRect(); return {right:Math.round(r.right),width:Math.round(r.width)}; };
+        var send=document.getElementById('perch-send').getBoundingClientRect();
+        return JSON.stringify({
+          whiteSpace: md.length ? getComputedStyle(md[0]).whiteSpace : null,
+          mdHeight: md.length ? Math.round(md[0].getBoundingClientRect().height) : null,
+          mdBlocks: md.length,
+          headings: tr.querySelectorAll('.what.md h2').length,
+          tables: tr.querySelectorAll('.what.md table').length,
+          tableScrolls: table ? table.scrollWidth > table.clientWidth : null,
+          tableWithin: table ? box(table).right <= box(tr).right + 1 : null,
+          preScrolls: pre ? pre.scrollWidth > pre.clientWidth : null,
+          preWithin: pre ? box(pre).right <= box(tr).right + 1 : null,
+          pageHScroll: doc.scrollWidth > doc.clientWidth,
+          transcriptHScroll: tr.scrollWidth > tr.clientWidth,
+          sendReachable: send.bottom<=innerHeight && send.top>=0,
+          sendTop: Math.round(send.top), sendBottom: Math.round(send.bottom), vp: innerHeight,
+          scripts: tr.querySelectorAll('script').length,
+          iframes: tr.querySelectorAll('iframe').length,
+          jsHrefs: Array.prototype.filter.call(tr.querySelectorAll('a'),
+            function(a){ return /^javascript:/i.test(a.getAttribute('href')||''); }).length,
+          pwned: !!window.__pwned
+        });
+      })()`);
+      assert.equal(seen.mdBlocks, 2, "both assistant messages rendered as markdown");
+      assert.equal(seen.headings, 1, "a heading is a real <h2>, not literal '## Boards'");
+      // .what carries white-space:pre-wrap for plain text; rendered markdown is
+      // real block elements, so inheriting it honours the SOURCE newlines and
+      // pads every gap between blocks. Measured at 412x730: 287px with the
+      // override, 410px without — 123px of blank space in one answer.
+      assert.equal(seen.whiteSpace, "normal",
+        "rendered markdown must not inherit .what's pre-wrap");
+      if (w < 900) {
+        assert.ok(seen.mdHeight < 350,
+          `the rendered block is ${seen.mdHeight}px; pre-wrap measured 410px for the same content`);
+      }
+      assert.equal(seen.tables, 1);
+
+      // The wide-content rule. The code fence is the guaranteed-overflow
+      // element at BOTH widths (an unbreakable 74-char line against a 304px
+      // and a 560px column); the table overflows at 412 and happens to fit at
+      // 1280, so its scroll is asserted only where it is real.
+      assert.equal(seen.preScrolls, true,
+        "the code fence must genuinely exceed its box, or the scroll container proves nothing");
+      assert.equal(seen.preWithin, true, "and it is contained by the transcript rather than spilling out");
+      assert.equal(seen.tableWithin, true);
+      if (w < 900) {
+        assert.equal(seen.tableScrolls, true, "at 412px the table exceeds the column and must scroll itself");
+      }
+      assert.equal(seen.pageHScroll, false, "no horizontal PAGE scroll at " + w + "px");
+      // THE invariant this needed a CSS fix for: the transcript is a grid, and
+      // a grid item's automatic minimum size is its min-content, so one
+      // unbreakable cell used to widen the whole row (measured 666px in a
+      // 380px column) and the transcript scrolled sideways.
+      assert.equal(seen.transcriptHScroll, false, "the transcript column must not scroll sideways either");
+
+      // Send reachability, re-measured: the flex chain is the mechanism.
+      assert.equal(seen.sendReachable, true,
+        `Send at ${seen.sendTop}-${seen.sendBottom} in a ${seen.vp}px viewport`);
+
+      // Sanitization, in a real browser: not "the string looks safe" but
+      // "nothing executed and no such element exists".
+      assert.equal(seen.pwned, false, "the hostile payload must not have fired");
+      assert.equal(seen.scripts, 0);
+      assert.equal(seen.iframes, 0);
+      assert.equal(seen.jsHrefs, 0);
     } finally { resetApi(); await s.close(); }
   });
 }

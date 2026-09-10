@@ -50,6 +50,7 @@ import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard } from "../board/card-service.js";
 import { annotateAvailability } from "../model-availability.js";
 import { providerModelListWarm } from "../perch-model-catalog.js";
+import { renderMarkdown } from "../../blog/renderer.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -401,7 +402,33 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     // ask_user card, if any) synchronously into this callback before it
     // resolves — the "on connect, replay" contract lives THERE, once, so
     // every subscriber (this route, and any future one) gets it for free.
-    const forward = (event) => stream.send(event.type, event);
+    /* Bot output is markdown. It is rendered HERE, on the server, by the same
+       `renderMarkdown` (marked + sanitize-html with an explicit allow-list)
+       the memory panel already uses — the client cannot import a server
+       module, and must never be handed a markdown parser plus untrusted model
+       output. Carried ALONGSIDE the raw text rather than replacing it: a
+       frame whose render fails arrives with no `html` and the client falls
+       back to textContent, which is exactly today's behaviour.
+
+       On the frame rather than through a per-message endpoint, because that
+       would cost a round trip per message on a phone; and every bot message
+       already passes through this one function. Message-level streaming means
+       every frame carries a COMPLETE message (perch-interactive.js:1257), so
+       there is no partial markdown to render and nothing to swap afterwards.
+
+       `text` and `reply` only: `log`, `tool` and `error` are gateway chrome,
+       not model prose. */
+    const withHtml = (event) => {
+      if (!event || (event.type !== "text" && event.type !== "reply")) return event;
+      if (typeof event.text !== "string" || !event.text.trim()) return event;
+      try {
+        const html = renderMarkdown(event.text);
+        return html ? { ...event, html } : event;
+      } catch {
+        return event;                                // the client's textContent path
+      }
+    };
+    const forward = (event) => { const e = withHtml(event); stream.send(e.type, e); };
 
     // Register the close handler BEFORE the subscribe await (fix-round F1): a
     // client abort DURING that await (subscribe→resolveSession→adoptRow does a

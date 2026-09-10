@@ -212,10 +212,21 @@ test("the emitted script never assigns to an innerHTML-class sink", async () => 
   // Matches both plain (=) and compound (+=) assignment — a compound
   // assignment against these sinks parses and executes the same injection
   // and a narrower regex let it through undetected.
-  assert.ok(!/\.innerHTML\s*\+?=/.test(js), "no .innerHTML assignment");
   assert.ok(!/\.outerHTML\s*\+?=/.test(js), "no .outerHTML assignment");
   assert.ok(!/\.insertAdjacentHTML\s*\(/.test(js), "no insertAdjacentHTML call");
   assert.ok(!/document\.write\s*\(/.test(js), "no document.write call");
+
+  // ONE innerHTML assignment is now permitted — server-rendered, sanitized
+  // markdown for a bot message — and the permission is written as a COUNT plus
+  // a location, not as a hole. A second one, anywhere, fails here.
+  const assignments = js.match(/\.innerHTML\s*\+?=/g) || [];
+  assert.equal(assignments.length, 1, "exactly one .innerHTML assignment: " + assignments.length);
+  assert.match(js, /function setSanitizedHtml\(node,html\)\{ node\.innerHTML=html; \}/,
+    "and it is the single named sink, so a reader can find every path into it at once");
+  // …and that sink has exactly one caller. Reusing it for anything that is not
+  // server-sanitized is the way this permission would rot.
+  const calls = js.match(/setSanitizedHtml\(/g) || [];
+  assert.equal(calls.length, 2, "one definition, one call site: " + calls.length);
 });
 
 /** A function's OWN source, brace-matched. Never a fixed-size window: every
@@ -421,6 +432,11 @@ function makeFakeElement(tag) {
     get() { return this.children[0] || null; },
     configurable: true,
   });
+  // innerHTML: the ONE sanitized sink the client has (server-rendered
+  // markdown). Recorded rather than parsed — this harness is not a DOM, and
+  // what matters here is WHICH path appendMessage took and with what string.
+  // The rendered result itself is measured live in perch-hub-render.test.js.
+  node.innerHTML = "";
   // A real <select> exposes its options BOTH as .children and as .options;
   // the client reads .options (the idiomatic API) and this harness had only
   // the former, which surfaced as a TypeError rather than as a failed
@@ -2038,4 +2054,81 @@ test("an empty reply on a turn that rendered nothing appends no empty entry", as
   runTurn(hub, [], "");
   assert.deepEqual(botEntries(hub), []);
   assert.equal(hub.els["perch-send"].textContent, "Send", "and the flag is still cleared");
+});
+
+// ---------------------------------------------------------------------------
+// TASK-3 item 2 — bot markdown is rendered, from server-sanitized HTML.
+// ---------------------------------------------------------------------------
+
+/** The .what node of the last bot entry. */
+function lastWhat(hub) {
+  const entries = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("entry"));
+  const row = entries[entries.length - 1];
+  return row && row.children.find((k) => String(k.className).includes("what"));
+}
+
+test("a bot message with server-rendered html takes the sanitized-HTML path", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("state", { state: "awake", turnInFlight: true });
+  FakeEventSource.instances[0]._serverFrame("text",
+    { text: "## Boards\n\nThere are **four**.", html: "<h2>Boards</h2><p>There are <strong>four</strong>.</p>" });
+  const what = lastWhat(hub);
+  assert.equal(what.className, "what md", "a distinct class, so the stylesheet can undo pre-wrap for real blocks");
+  assert.equal(what.innerHTML, "<h2>Boards</h2><p>There are <strong>four</strong>.</p>");
+  assert.equal(what.textContent, "", "the raw markdown must not ALSO be written as text");
+});
+
+test("a message with no html falls back to textContent — byte-for-byte the old behaviour", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("state", { state: "awake", turnInFlight: true });
+  // What a failed render, an older gateway, or a non-prose frame all produce.
+  FakeEventSource.instances[0]._serverFrame("text", { text: "## not rendered" });
+  const what = lastWhat(hub);
+  assert.equal(what.className, "what");
+  assert.equal(what.textContent, "## not rendered");
+  assert.equal(what.innerHTML, "", "nothing may reach the sink without server-rendered html");
+});
+
+test("the operator's own message is never routed through the HTML sink", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "**not mine to render**";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const what = lastWhat(hub);
+  assert.equal(what.className, "what");
+  assert.equal(what.textContent, "**not mine to render**");
+});
+
+test("history renders each message's own html, and still one entry per message", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "how many boards?" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "**four**" }] },
+      html: "<p><strong>four</strong></p>" },
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "board_list_boards" }] } },
+  ];
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  const rows = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("entry"));
+  assert.equal(rows.length, 3, "one entry per message, unchanged by rendering");
+  const whats = rows.map((r) => r.children.find((k) => String(k.className).includes("what")));
+  assert.equal(whats[0].className, "what", "the user's line stays plain");
+  assert.equal(whats[1].className, "what md");
+  assert.equal(whats[1].innerHTML, "<p><strong>four</strong></p>");
+  assert.equal(whats[2].className, "what", "a tool-call message keeps the [tool: name] line");
+  assert.equal(whats[2].textContent, "[tool: board_list_boards]");
+});
+
+test("rendering does not re-open the duplicate: a turn with html still renders once", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "**one**", html: "<p><strong>one</strong></p>" });
+  es._serverFrame("text", { text: "**two**", html: "<p><strong>two</strong></p>" });
+  es._serverFrame("reply", { text: "**one****two**", html: "<p><strong>one</strong><strong>two</strong></p>" });
+  const rows = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("entry bot"));
+  assert.equal(rows.length, 2, "the concatenated reply is still suppressed when the messages rendered");
 });
