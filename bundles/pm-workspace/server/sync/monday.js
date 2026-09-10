@@ -47,6 +47,11 @@ const MONDAY_API = "https://api.monday.com/v2";
 const MONDAY_TIMEOUT_MS = 30_000;
 const PAGE_SIZE = 100;
 
+// Statuses that mean "this card is finished". Used only to decide whether a
+// never-mapped card may be CREATED on Monday (see syncTwowayBoard); it never
+// stops an already-mapped card from syncing.
+const TERMINAL_STATUSES = ["done", "cancelled"];
+
 // tasks_items columns the column_map may address on kanban targets.
 const KANBAN_FIELDS = new Set(["title", "description", "due_date", "priority", "owner", "tags", "phase"]);
 
@@ -367,12 +372,26 @@ async function flagRemoteDeletions(db, board, seenItemIds, totals) {
   });
   for (const row of rows) {
     if (seenItemIds.has(String(row.item_id))) continue;
-    await logSync(db, {
-      direction: "pull", board_id: board.board_id, action: "delete_flagged",
-      item_ref: `monday:${row.item_id}`,
-      detail: `Monday item ${row.item_id} no longer in pull (deleted, archived, or moved out of group_ids); local ${row.local_kind} ${row.local_id} kept`,
-      ok: true,
+    // Flag each vanished item ONCE, not once per run. A mapping whose Monday
+    // item is gone stays gone, so re-logging it every 15 minutes writes the
+    // same line forever: on one instance 74 dead mappings had produced
+    // 178,525 rows, 94% of pm_sync_log, in a database that has already been
+    // rebuilt twice. The mapping row is deliberately KEPT (dropping it would
+    // let the create step publish the card to Monday again), so silence here
+    // is the whole fix. totals.flagged still counts every dead mapping, so the
+    // run summary keeps reporting the true number.
+    const { rows: already } = await db.execute({
+      sql: "SELECT 1 FROM pm_sync_log WHERE action = 'delete_flagged' AND item_ref = ? LIMIT 1",
+      args: [`monday:${row.item_id}`],
     });
+    if (!already.length) {
+      await logSync(db, {
+        direction: "pull", board_id: board.board_id, action: "delete_flagged",
+        item_ref: `monday:${row.item_id}`,
+        detail: `Monday item ${row.item_id} no longer in pull (deleted, archived, or moved out of group_ids); local ${row.local_kind} ${row.local_id} kept`,
+        ok: true,
+      });
+    }
     totals.flagged++;
   }
 }
@@ -625,10 +644,19 @@ export async function syncTwowayBoard(db, tdb, board, items, token, totals) {
   // not have converged through migration 0004 yet.
   if (board.target.project_id != null) {
     const archivedClause = archivedAtCol ? " AND archived_at IS NULL" : "";
+    // A card that reached a TERMINAL status without ever being mapped is work
+    // that finished somewhere else; creating it on Monday now would publish a
+    // backlog of completed items nobody asked for. This is the same concern the
+    // archived guard above addresses -- archiving is just the other way a
+    // finished card leaves the board -- so the two exclusions belong together.
+    // Terminal cards that ARE already mapped keep syncing normally; this only
+    // governs first creation.
+    const terminalList = TERMINAL_STATUSES.map(() => "?").join(", ");
     const { rows: candidates } = await tdb.execute({
       sql: `SELECT * FROM tasks_items
-            WHERE project_id = ? AND parent_id IS NULL AND status != 'cancelled'${archivedClause}`,
-      args: [Number(board.target.project_id)],
+            WHERE project_id = ? AND parent_id IS NULL
+              AND status NOT IN (${terminalList})${archivedClause}`,
+      args: [Number(board.target.project_id), ...TERMINAL_STATUSES],
     });
     const { rows: mapped } = await db.execute({
       sql: "SELECT local_id FROM pm_sync_state WHERE board_id = ? AND local_kind = 'kanban'",
@@ -646,6 +674,12 @@ export async function syncTwowayBoard(db, tdb, board, items, token, totals) {
           content_hash: contentHash(kanbanRowShape(board, row)),
           monday_updated_at: created.updated_at || null,
         });
+        // `seen` was built from THIS run's pull, which happened before the item
+        // existed. flagRemoteDeletions runs after this loop and treats anything
+        // outside `seen` as vanished, so without this an item reports as
+        // deleted in the very run that created it — on a bulk backfill that
+        // turned one run's flagged count from 74 into 128.
+        seen.add(String(created.id));
         await logSync(db, {
           direction: "push", board_id: board.board_id, action: "create_remote",
           item_ref: row.title, detail: `Monday item ${created.id}`, ok: true,
