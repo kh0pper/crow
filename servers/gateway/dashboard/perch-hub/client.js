@@ -14,7 +14,7 @@ export function perchHubJs(lang = "en") {
      emits a script, so no later task references something undefined. */
   function el(id){ return document.getElementById(id); }
   function clearEl(node){ while(node&&node.firstChild) node.removeChild(node.firstChild); }
-  /* textContent only, never innerHTML — see Global Constraints. */
+  /* textContent only, no raw-markup assignment — see Global Constraints. */
   function line(cls,text){ var d=document.createElement('div');
     if(cls) d.className=cls; d.textContent=text==null?'':String(text); return d; }
 
@@ -31,7 +31,7 @@ export function perchHubJs(lang = "en") {
     var tr=el('perch-transcript'); if(!tr) return;
     var row=document.createElement('div'); row.className='entry '+cls;
     row.appendChild(line('who',who));
-    row.appendChild(line('what',text));      /* textContent, never innerHTML */
+    row.appendChild(line('what',text));      /* textContent, no raw-markup assignment */
     tr.appendChild(row);
     tr.scrollTop=tr.scrollHeight;
   }
@@ -84,6 +84,20 @@ export function perchHubJs(lang = "en") {
   var START_FAILED='${tJs("perch.startFailed", lang)}';
   var NOT_ATTACHED='${tJs("perch.notAttached", lang)}';
   var ENGINE_REQUIRED='${tJs("perch.engineRequired", lang)}';
+
+  /* Interpolated at emit time. tJs escapes quotes, backticks and \${, so these
+     are safe inside single-quoted literals. */
+  var SESSION_GONE='${tJs("perch.sessionGone", lang)}';
+  var SEND_FAILED='${tJs("perch.sendFailed", lang)}';
+  var FILE_QUEUED='${tJs("perch.fileQueued", lang)}';
+  var FILE_FAILED='${tJs("perch.fileFailed", lang)}';
+  var ATTACH_FAILED='${tJs("perch.attachFailed", lang)}';
+  var NO_TRANSCRIPT='${tJs("perch.noTranscript", lang)}';
+  var RECONNECTING='${tJs("perch.reconnecting", lang)}';
+  var RECONNECT_FAILED='${tJs("perch.reconnectFailed", lang)}';
+  var ASK_STALE='${tJs("perch.askStale", lang)}';
+  var STEER_LABEL='${tJs("perch.steer", lang)}';
+  var SEND_LABEL='${tJs("perch.send", lang)}';
 
   var pendingNote=null;                 /* survives the loadList that follows a note */
   function showListNote(text){
@@ -147,6 +161,222 @@ export function perchHubJs(lang = "en") {
   function stopListPolling(){ if(listTimer){ clearInterval(listTimer); listTimer=null; } }
   window.addEventListener('focus',function(){ if(body.getAttribute('data-view')==='list') loadList(); });
 
-  setView('list');
+  /* Engine-minted ids only: "perchlive-" + 8 hex (perch-interactive.js:1473).
+     A loose pattern would admit ".." and this value is concatenated into an
+     API path. Encoded at every use site as well, belt and braces. */
+  function parseHash(h){
+    var raw=String(h==null?'':h).replace(/^#/,'');
+    return /^perchlive-[0-9a-f]{8}$/.test(raw)?{sessionId:raw}:null;
+  }
+
+  var current={sid:null};
+
+  function openSession(sid){
+    if(current.sid===sid) return;          /* a re-entered hash is a no-op */
+    closeStream();
+    current.sid=sid;
+    var mySid=sid;                          /* identity guard for every await below */
+    setView('chat');
+    stopListPolling();                      /* SSE is the live signal here */
+    clearEl(el('perch-transcript')); clearEl(el('perch-ask'));
+    var known=rowIndex[sid];
+    if(known){ showHeader(known.botId,known.botName); afterHeader(mySid,known.botId); return; }
+    /* A cold deep link does not know the bot; ask /roost rather than guess. */
+    perchApi('GET','/roost').then(function(r){
+      if(current.sid!==mySid) return;       /* the hash moved on while we waited */
+      var hit=r.ok&&r.j?listRows(r.j).filter(function(x){return x.sessionId===mySid;})[0]:null;
+      if(!hit){ noteAndReturnToList(SESSION_GONE); return; }
+      showHeader(hit.botId,hit.botName); afterHeader(mySid,hit.botId);
+    });
+  }
+
+  /* Stream FIRST, history second: the stream carries no backlog. */
+  function afterHeader(sid,botId){ openStream(sid); loadHistory(botId,sid); }
+
+  function closeSession(){
+    closeStream(); current.sid=null;
+    setView('list'); startListPolling(); loadList();
+  }
+
+  /* A note set before loadList() resolves is wiped by renderList. Park it and
+     let renderList re-append it — otherwise "That session is gone." is never
+     seen, on exactly the dead-deep-link path it exists for. */
+  function noteAndReturnToList(text){ pendingNote=text; location.hash=''; }   /* pendingNote: Task 2 */
+
+  function applyHash(){
+    var hit=parseHash(location.hash);
+    if(hit) openSession(hit.sessionId); else closeSession();
+  }
+  window.addEventListener('hashchange',applyHash);
+
+  function planStateText(st){
+    if(!st||typeof st!=='object') return typeof st==='string'?st:'';
+    if(!st.enabled&&!st.executing) return '';
+    var total=Number(st.todosTotal||0), done=Number(st.todosDone||0);
+    /* Interpolated at emit time, NOT bound to a script-level constant: the
+       test extracts this function in isolation, and a free variable would
+       throw ReferenceError before reaching any assertion. tJs escapes quotes,
+       backticks and dollar-brace interpolation markers, so this is safe
+       inside a single-quoted literal. */
+    var head=st.executing?'${tJs("perch.planExecuting", lang)}':'${tJs("perch.planOn", lang)}';
+    return total>0?head+' ('+done+'/'+total+')':head;
+  }
+
+  /* NOTE the '\\n' below: this whole script lives inside a template literal,
+     so a single-backslash escape would become a REAL newline and split the string
+     literal across lines. drawer.js:650 writes it the same way. */
+  function messageText(message){
+    var content=message&&message.content;
+    if(typeof content==='string') return content;
+    if(Array.isArray(content)){
+      return content.map(function(b){
+        if(!b) return '';
+        if(typeof b.text==='string') return b.text;
+        if(b.type==='toolCall') return '[tool: '+(b.name||'?')+']';
+        return b.type?'['+b.type+']':'';
+      }).filter(Boolean).join('\\n');
+    }
+    if(typeof (message&&message.text)==='string') return message.text;
+    return '';
+  }
+
+  /* drawer.js:829, verbatim in effect: mirror the engine, and a stopped
+     session is never in flight whatever the frame says. */
+  function turnFlagFor(st){ return (st&&st.state==='stopped')?false:!!(st&&st.turnInFlight); }
+
+  function isTerminalStreamStatus(code){ return code===404||code===410||code===401; }
+
+  var stream=null;
+
+  function closeStream(){
+    cancelReconnect();                 /* timer only — NOT the retry counter */
+    var es=stream; stream=null;        /* null FIRST: idempotent under a double call
+                                          from openSession + hashchange */
+    if(es){ try{ es.close(); }catch(e){} }
+  }
+
+  function openStream(sid){
+    closeStream();
+    var es=new EventSource(API+'/interactive/'+encodeURIComponent(sid)+'/events');
+    stream=es;
+    es.onopen=function(){ resetBackoff(); };
+
+    var on=function(type,fn){
+      es.addEventListener(type,function(ev){
+        if(current.sid!==sid) return;                 /* identity guard, every listener */
+        var d={}; try{ d=JSON.parse(ev.data); }catch(e){ d={}; }
+        fn(d);
+      });
+    };
+    on('state',function(d){ setTurnInFlight(turnFlagFor(d)); el('perch-state').textContent=d.state||''; });
+    on('text',function(d){ appendMessage('bot','bot',d.text||''); });
+    on('tool',function(d){ if(d.phase==='start') appendNote('['+(d.name||'?')+']'); });
+    on('log',function(d){ if(d.text) appendNote(d.text); });
+    on('reply',function(d){ appendMessage('bot','bot',d.text||''); setTurnInFlight(false); });
+    on('ask_user',function(d){ renderAsk(d); });
+    on('error',function(d){ appendNote(d.text||'error'); });
+    on('plan_state',function(d){ var t=planStateText(d.state); if(t) appendNote(t); });
+    /* No 'attention' listener: attention is not a stream event —
+       perch-interactive.js:1243/:1360 push it through pushAttention into the
+       notification pipeline, and perch-interactive-api.js:349-351 enumerates
+       the stream as state | text | tool | ask_user | log | reply | error plus
+       plan_state. A listener for it would never fire. */
+
+    /* openAuthedStream emits a NAMED session-expired event before closing when
+       the dashboard session is invalidated (streams/authed-stream.js:50-53).
+       Retrying that five times is five requests from a logged-out browser. */
+    es.addEventListener('session-expired',function(){
+      closeStream();
+      location.href='/dashboard/login';
+    });
+
+    /* A session that was stopped or reaped while we watched answers 404/410 on
+       reconnect. Terminal: say so and go back to the list. */
+    function onStreamError(){
+      closeStream();
+      if(current.sid!==sid) return;
+      perchApi('GET','/interactive/'+encodeURIComponent(sid)+'/options').then(function(r){
+        if(current.sid!==sid) return;
+        if(isTerminalStreamStatus(r.status)){ noteAndReturnToList(SESSION_GONE); return; }
+        scheduleReconnect();                  /* bounded 2s backoff, cap 5 */
+      });
+    }
+    es.onerror=onStreamError;
+  }
+
+  function showHeader(botId,botName){
+    el('perch-bot-name').textContent=botName||botId;
+    el('perch-session-meta').textContent=current.sid||'';
+  }
+  /* Bounded backoff. TWO separate operations, and conflating them is what made
+     an earlier draft of this dead code: cancelling the TIMER must not reset the
+     COUNTER, because onStreamError calls closeStream() (which cancels) before
+     every scheduleReconnect(), so a combined reset meant retries could never
+     reach 5 and the cap was unreachable. The counter resets only when a stream
+     actually opens. */
+  var retries=0, retryTimer=null;
+  function cancelReconnect(){ if(retryTimer){ clearTimeout(retryTimer); retryTimer=null; } }
+  function resetBackoff(){ retries=0; }            /* called from onopen ONLY */
+  function scheduleReconnect(){
+    if(retries>=5){ appendNote(RECONNECT_FAILED); return; }
+    retries++;
+    appendNote(RECONNECTING);
+    var mySid=current.sid;                          /* no parameter to get wrong */
+    retryTimer=setTimeout(function(){
+      if(current.sid!==mySid) return;               /* navigated away mid-backoff */
+      openStream(mySid);
+    },2000);
+  }
+
+  function loadHistory(botId,sid){
+    var mySid=sid;
+    perchApi('GET','/bots/'+encodeURIComponent(botId)+'/sessions/'+encodeURIComponent(sid)+'/transcript')
+      .then(function(r){
+        if(current.sid!==mySid) return;            /* identity guard, as everywhere */
+        var events=(r.ok&&r.j&&r.j.events)||[];
+        if(!events.length){ appendNote(NO_TRANSCRIPT); return; }
+        events.filter(function(e){ return e&&e.type==='message'; }).forEach(function(e){
+          var m=e.message||{};
+          appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), messageText(m));
+        });
+      });
+  }
+
+  function sendable(text){ return String(text==null?'':text).trim().length>0; }
+  function sendPath(sid,inFlight){
+    return '/interactive/'+encodeURIComponent(sid)+(inFlight?'/steer':'/message');
+  }
+
+  var turnInFlight=false;
+  function setTurnInFlight(flag){
+    turnInFlight=!!flag;
+    el('perch-send').textContent=turnInFlight?STEER_LABEL:SEND_LABEL;
+    el('perch-abort').style.display=turnInFlight?'':'none';
+  }
+
+  function send(){
+    var input=el('perch-input'); if(!input) return;
+    var text=input.value;
+    if(!sendable(text)||!current.sid) return;
+    var mySid=current.sid;
+    appendMessage('user','you',text);      /* echo before the round trip */
+    input.value='';
+    perchApi('POST',sendPath(mySid,turnInFlight),{message:text}).then(function(r){
+      if(current.sid!==mySid) return;
+      if(r.status===409){ setTurnInFlight(true); return; }   /* raced a turn start */
+      if(!r.ok) appendNote((r.j&&r.j.error)||SEND_FAILED);
+    });
+  }
+
+  /* BOOTSTRAP — the plan shipped without this once and everything looked fine.
+     Task 7 navigates with location.href='/dashboard/perch#<sid>', a FULL page
+     load, and a full load fires no hashchange. Without this line every board
+     hand-off (talk, dispatch, open, answer, the bird glyph, the #bird= deep
+     link) lands on a session list stuck on "Loading sessions…" forever,
+     because nothing kicks the first loadList() either. parseHash being
+     exhaustively unit-tested does not help: it is a pure function and it was
+     green throughout. */
+  if(parseHash(location.hash)) applyHash();
+  else { startListPolling(); loadList(); }
 })();`;
 }

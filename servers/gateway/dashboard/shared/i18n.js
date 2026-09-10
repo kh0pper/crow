@@ -2242,6 +2242,13 @@ export const translations = {
   "perch.engineInstall": { en: "Install it", es: "Instalarlo" },
   "perch.engineInstalling": { en: "The bot engine is still installing.", es: "El motor de bots aún se está instalando." },
   "perch.engineUnhealthy": { en: "The bot engine is not responding.", es: "El motor de bots no responde." },
+  "perch.planOn": { en: "plan mode on", es: "modo de plan activado" },
+  "perch.planExecuting": { en: "executing the plan", es: "ejecutando el plan" },
+  "perch.sessionGone": { en: "That session is gone.", es: "Esa sesión ya no existe." },
+  "perch.steer": { en: "Steer", es: "Guiar" },
+  "perch.noTranscript": { en: "No transcript yet.", es: "Aún no hay transcripción." },
+  "perch.reconnecting": { en: "Reconnecting…", es: "Reconectando…" },
+  "perch.reconnectFailed": { en: "Lost the connection to this session.", es: "Se perdió la conexión con esta sesión." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
