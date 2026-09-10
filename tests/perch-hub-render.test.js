@@ -31,8 +31,9 @@ let available = false, server = null, port = 0;
 const SIDS = ["perchlive-11111111", "perchlive-22222222", "perchlive-33333333"];
 let liveSids = SIDS.slice();
 const stopped = [];
-function resetApi() { liveSids = SIDS.slice(); stopped.length = 0; }
+function resetApi() { liveSids = SIDS.slice(); stopped.length = 0; roostFails = false; }
 
+let roostFails = false;
 function serveApi(req, res) {
   const url = req.url.split("?")[0];
   const send = (code, obj) => {
@@ -40,10 +41,12 @@ function serveApi(req, res) {
     res.end(JSON.stringify(obj));
   };
   if (url.endsWith("/roost")) {
+    if (roostFails) return send(503, { error: "upstream" });
     return send(200, {
       birds: [{
         id: "r4-assistant", name: "R4 Assistant", perch_attached: true, state: "working",
-        sessions: liveSids.map((sid) => ({ sessionId: sid, state: "awake", cardId: null, pendingUi: false })),
+        sessions: liveSids.map((sid) => ({ sessionId: sid, state: "awake",
+          cardId: sid === "perchlive-11111111" ? 248 : null, pendingUi: false })),
       }],
       occupiedCardIds: [],
     });
@@ -338,7 +341,10 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.inViewport, true,
         `the launcher sits at ${seen.top}-${seen.bottom} in a ${h}px viewport`);
       assert.equal(seen.hit, true, "and nothing overlaps it — a thumb there hits the button");
-      assert.ok(seen.w >= 44 && seen.h >= 40, `tap target ${seen.w}x${seen.h} is too small for a thumb`);
+      // 44, not 40. The commit that introduced this asserted >=40 while its
+      // message and its CSS both claimed a 44px floor, so the suite did not pin
+      // the floor the code stated.
+      assert.ok(seen.w >= 44 && seen.h >= 44, `tap target ${seen.w}x${seen.h} is too small for a thumb`);
       assert.equal(seen.hScroll, false, "no horizontal scroll at " + w + "px");
     } finally { await s.close(); }
   });
@@ -386,10 +392,22 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
         return JSON.stringify({ inViewport: r.top>=0 && r.bottom<=innerHeight,
           hit: (function(){ var e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
                             return !!e && (e===b||b.contains(e)); })(),
-          w: Math.round(r.width), h: Math.round(r.height) });
+          w: Math.round(r.width), h: Math.round(r.height),
+          padding: getComputedStyle(b).padding, fontSize: getComputedStyle(b).fontSize });
       })()`);
       assert.equal(btn.inViewport, true, "close must be reachable without scrolling the chat");
       assert.equal(btn.hit, true);
+      // The number this test already COLLECTED and never asserted. It measured
+      // 36px live: a bare "#perch-close" rule is (1,0,0) and loses to
+      // "#perch-hub-root button" at (1,0,1), so neither of its declarations
+      // applied — and the one irreversible control in the chat view shipped as
+      // the smallest target on a page whose reason for existing is a phone,
+      // in the same commit that raised the launch buttons to 44px.
+      assert.ok(btn.h >= 44,
+        `Close is ${btn.w}x${btn.h}; the irreversible control must clear the 44px thumb target`);
+      assert.equal(btn.padding, "8px 12px",
+        "the scoped rule must actually win the cascade, not merely be present in the sheet");
+      assert.equal(btn.fontSize, "13px");
 
       // Send must still be reachable — the close control must not have
       // disturbed the sticky composer this page's mobile fix rests on.
@@ -412,5 +430,80 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(back.hash, "", "and the hash drives it, so Back still works");
       assert.equal(back.rows, 2, "the list came back refreshed, without the closed session");
     } finally { await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — findings 1, 3 and 4 were each found live, so each is settled
+// live. A static argument about the cascade is what shipped finding 2.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`F1 live @${w}x${h}: rows on one bot are actually distinguishable`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`JSON.stringify({
+        subtitles: Array.from(document.querySelectorAll('#perch-list-body .roost-when')).map(e=>e.textContent),
+        flat: document.getElementById('perch-list-body').innerText.replace(/\\s+/g,''),
+        hScroll: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        overflow: Array.from(document.querySelectorAll('#perch-list-body .roost-when'))
+          .map(e=>e.scrollWidth > e.clientWidth + 1)
+      })`);
+      // Before the fix this read, verbatim:
+      // "R4AssistantawakeOpenCloseR4AssistantawakeOpenCloseR4AssistantawakeOpenClose"
+      assert.equal(seen.subtitles.length, 3);
+      assert.equal(new Set(seen.subtitles).size, 3,
+        "three sessions on one bot must read as three different things: " + JSON.stringify(seen.subtitles));
+      assert.match(seen.subtitles[0], /11111111/, "the short sid is the unambiguous handle");
+      assert.match(seen.subtitles[0], /card 248/, "and the card is the human one, when there is one");
+      assert.equal(seen.hScroll, false, "identity must not cost a horizontal scrollbar at " + w + "px");
+      assert.deepEqual(seen.overflow, [false, false, false],
+        "and must not be clipped inside its own row: " + JSON.stringify(seen.subtitles));
+    } finally { await s.close(); }
+  });
+
+  test(`F1 live @${w}x${h}: the close confirm names the session`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`(function(){ window.__asked=[];
+        window.confirm=function(m){ window.__asked.push(String(m)); return false; }; return 'ok'; })()`);
+      await s.evalIn(`document.querySelectorAll('#perch-list-body .roost-close')[1].click(); 'x'`);
+      await new Promise((r) => setTimeout(r, 400));
+      const asked = await s.json(`JSON.stringify(window.__asked)`);
+      assert.equal(asked.length, 1);
+      assert.match(asked[0], /R4 Assistant 22222222/,
+        "an irreversible confirm that names nothing cannot correct a mis-tap: " + asked[0]);
+      assert.deepEqual(stopped, [], "and a declined confirm still posts nothing");
+    } finally { await s.close(); }
+  });
+
+  test(`F3 live @${w}x${h}: a failed /roost says why instead of faking an empty list`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    roostFails = true;
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`JSON.stringify({
+        body: document.getElementById('perch-list-body').innerText.trim(),
+        newDisabled: document.getElementById('perch-new').disabled,
+        noteHidden: document.getElementById('perch-launch-note').hidden,
+        noteText: document.getElementById('perch-launch-note').textContent,
+        notePadding: getComputedStyle(document.getElementById('perch-launch-note')).padding })`);
+      // Measured before the fix: {newDisabled:true, noteHidden:true, body:"No live sessions."}
+      assert.notEqual(seen.body, "No live sessions.",
+        "a gateway blip must not report an empty roost — that is the exact symptom this task ends");
+      assert.match(seen.body, /Could not reach the session list/);
+      assert.equal(seen.noteHidden, false, "and the launcher must say why it cannot help");
+      assert.match(seen.noteText, /Could not reach the session list/);
+      // Finding 4, in the same read: "#perch-launch .empty" tied with
+      // "#perch-hub-root .empty" and lost on source order, so its padding:0
+      // never applied and the note box measured 74px tall at 412px.
+      assert.equal(seen.notePadding, "0px",
+        "the note's own padding rule must win the cascade, not merely exist");
+    } finally { roostFails = false; await s.close(); }
   });
 }
