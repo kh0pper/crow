@@ -1934,3 +1934,108 @@ test("the breakpoint listener binds through addListener where that is the only s
   assert.ok(hub.timers.size > 0,
     "on that browser the re-evaluation would otherwise silently never bind");
 });
+
+// ---------------------------------------------------------------------------
+// TASK-3 item 1 — every turn's output was rendered TWICE.
+//
+// The engine streams message-level (perch-interactive.js:1257, "delta-level is
+// a recorded non-goal"), so `text` fires once per completed assistant message.
+// At turn end `reply` carries replyTextOf(end) — every assistant message of
+// that turn CONCATENATED. A two-message turn therefore rendered three entries:
+// each message, then both again as one block.
+//
+// COUNT assertions throughout: a contains-assertion passes through a duplicate
+// happily, which is how this survived.
+// ---------------------------------------------------------------------------
+
+/** Bot entries currently in the transcript, in order. */
+function botEntries(hub) {
+  return hub.els["perch-transcript"].children
+    .filter((c) => String(c.className).includes("entry") && String(c.className).includes("bot"))
+    .map((c) => (c.children.find((k) => String(k.className).includes("what")) || {}).textContent);
+}
+
+/** Drive one turn on the open session's stream. */
+function runTurn(hub, texts, replyText) {
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  for (const t of texts) es._serverFrame("text", { text: t });
+  if (replyText !== null) es._serverFrame("reply", { text: replyText });
+  return es;
+}
+
+test("a several-message turn renders one entry per message, not per message plus the join", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, ["Let me check.", "There are four boards."], "Let me check.There are four boards.");
+  assert.deepEqual(botEntries(hub), ["Let me check.", "There are four boards."],
+    "the concatenated reply must not be appended on top of the messages it is made of");
+});
+
+test("a one-message turn renders exactly one entry", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, ["Just the one."], "Just the one.");
+  assert.deepEqual(botEntries(hub), ["Just the one."]);
+});
+
+test("a ZERO-message turn still renders its reply — that text arrived by no other path", async () => {
+  // The decisive case, and it is reachable for a real operator: the stream
+  // carries NO backlog, so anyone who opens the drawer mid-turn sees no `text`
+  // frames for the messages already streamed. `reply` is then the only source
+  // of that turn's answer, and it is the more authoritative one anyway
+  // (replyTextOf reads the agent_end the engine was handed, never the child's
+  // accumulating log, which trimLog() empties).
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, [], "The whole answer, and the only copy of it.");
+  assert.deepEqual(botEntries(hub), ["The whole answer, and the only copy of it."]);
+});
+
+test("an ABORTED turn renders nothing extra and still leaves the composer usable", async () => {
+  // An aborted turn emits no reply at all (perch-interactive.js:1418 — the
+  // invariant is stated over the turn, so an abort landing during the metering
+  // awaits still silences it). The flag is cleared by the state frame, which is
+  // why dropping the append from `reply` could never have stranded it.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "half an answer" });
+  es._serverFrame("state", { state: "awake", turnInFlight: false });   // the abort's own state event
+  assert.deepEqual(botEntries(hub), ["half an answer"]);
+  assert.equal(hub.els["perch-send"].textContent, "Send", "back to Send, not stuck on Steer");
+});
+
+test("two turns in a row: the second turn's reply is judged on ITS OWN turn", async () => {
+  // The per-turn flag has to reset when a turn STARTS, or turn 2's
+  // reply-only answer would be swallowed by turn 1 having rendered.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, ["turn one streamed"], "turn one streamed");
+  runTurn(hub, [], "turn two arrived only as a reply");
+  assert.deepEqual(botEntries(hub), ["turn one streamed", "turn two arrived only as a reply"]);
+});
+
+test("a mid-turn state frame does not reset the per-turn flag and re-admit the duplicate", async () => {
+  // stateEvent() is emitted for model_select, ask_user, aborts — several can
+  // land between the first `text` and the `reply`, all carrying
+  // turnInFlight:true. Resetting on every true frame instead of on the
+  // false->true transition would put the duplicate straight back.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "the answer" });
+  es._serverFrame("state", { state: "awake", turnInFlight: true, model: "crow-local/qwen" });
+  es._serverFrame("reply", { text: "the answer" });
+  assert.deepEqual(botEntries(hub), ["the answer"]);
+});
+
+test("an empty reply on a turn that rendered nothing appends no empty entry", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, [], "");
+  assert.deepEqual(botEntries(hub), []);
+  assert.equal(hub.els["perch-send"].textContent, "Send", "and the flag is still cleared");
+});

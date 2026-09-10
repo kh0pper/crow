@@ -875,10 +875,28 @@ export function perchHubJs(lang = "en") {
       if(d.permissionMode){ var permSel=el('perch-permission'); if(permSel) permSel.value=d.permissionMode; }
       var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=!!d.planMode;
     });
-    on('text',function(d){ appendMessage('bot','bot',d.text||''); });
+    /* MESSAGE-LEVEL, not delta-level (perch-interactive.js:1257 says so
+       outright): one frame per COMPLETED assistant message, so each is
+       rendered on arrival and nothing has to be patched afterwards. */
+    on('text',function(d){ appendMessage('bot','bot',d.text||''); turnRendered=true; });
     on('tool',function(d){ if(d.phase==='start') appendNote('['+(d.name||'?')+']'); });
     on('log',function(d){ if(d.text) appendNote(d.text); });
-    on('reply',function(d){ appendMessage('bot','bot',d.text||''); setTurnInFlight(false); });
+    /* \`reply\` carries replyTextOf(end) — every assistant message of the turn
+       CONCATENATED — so appending it unconditionally rendered a two-message
+       turn three times: each message, then both again as one block. It cannot
+       simply stop being handled either: it clears the turn flag, and its text
+       comes from the agent_end the engine was handed rather than the child's
+       accumulating log (which trimLog() empties), so it is the more
+       authoritative source when it is the only one.
+       So: append ONLY when nothing rendered for this turn. That case is real,
+       not theoretical — the stream carries no backlog, so an operator who
+       opens the drawer mid-turn sees no \`text\` frames for the messages already
+       streamed, and \`reply\` is the only copy of that answer they will get.
+       Flag read BEFORE setTurnInFlight(false), which is what resets it. */
+    on('reply',function(d){
+      if(!turnRendered&&d.text) appendMessage('bot','bot',d.text);
+      setTurnInFlight(false);
+    });
     on('ask_user',function(d){ renderAsk(d); });
     on('error',function(d){ appendNote(d.text||'error'); });
     on('plan_state',function(d){ var t=planStateText(d.state); if(t) appendNote(t); });
@@ -1062,6 +1080,7 @@ export function perchHubJs(lang = "en") {
     var permSel=el('perch-permission'); if(permSel) permSel.value='guarded';
     var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
     setTurnInFlight(false);      /* the PREVIOUS session's Steer/Stop state must not bleed in */
+    turnRendered=false;          /* nor its "this turn already rendered" bookkeeping */
     pendingImages=[];            /* nor its queued-but-unsent image */
   }
 
@@ -1092,8 +1111,18 @@ export function perchHubJs(lang = "en") {
   }
 
   var turnInFlight=false;
+  /* Did anything render for the turn currently in flight? See the \`reply\`
+     listener for why this exists and why it is per TURN. */
+  var turnRendered=false;
   function setTurnInFlight(flag){
-    turnInFlight=!!flag;
+    var next=!!flag;
+    /* Reset on the false->TRUE TRANSITION only. stateEvent() is emitted for
+       model_select, ask_user and aborts as well as turn start, so several
+       frames carrying turnInFlight:true can land between the first \`text\` and
+       the \`reply\` — resetting on every true frame would put the duplicate
+       straight back. */
+    if(next&&!turnInFlight) turnRendered=false;
+    turnInFlight=next;
     el('perch-send').textContent=turnInFlight?STEER_LABEL:SEND_LABEL;
     el('perch-abort').style.display=turnInFlight?'':'none';
   }
