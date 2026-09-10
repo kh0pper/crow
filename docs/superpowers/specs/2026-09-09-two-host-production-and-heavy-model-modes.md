@@ -100,6 +100,15 @@ Open items for the implementer:
   - Set **`host = 'raven'`**, on every instance that carries the row. `host` rides the wire, so whichever copy
     wins on `lamport_ts` imposes its value fleet-wide, and `host = 'local'` tells
     `resolveWarmableProviderName` the endpoint is startable on the local box when it is not.
+
+    **Setting it explicitly is not a checklist item — it is a workaround for an unsound inference.** When a
+    caller omits `host`, `inferHost` (`shared/providers-db.js:50`) supplies one, and it classifies every
+    `10.`, `192.168.` and `100.` address as `local`. That is the whole RFC1918 space plus the entire Tailscale
+    CGNAT range: by that rule raven, grackle, black-swan, colibri and mockingbird are all "local" to every box
+    in the lab. The only two answers it can return honestly are loopback and public. Existing rows are shielded
+    only by `if (existingHost) return existingHost` and by long-lived rows carrying explicit hosts, so the
+    exposure is the seed path — which means the next new id reproduces it. Until that inference is fixed, treat
+    an omitted `host` on any non-loopback row as a wrong value rather than a missing one.
   - **Publish the row only once the endpoint is reachable from the instances that will inherit it.** raven's
     `ufw` rule currently admits crow alone; grackle and black-swan are paired with crow and cannot reach 8030.
     Either widen the rule or accept that those instances carry an entry that probes as down. See §7 for the
