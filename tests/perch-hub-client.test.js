@@ -3,6 +3,7 @@
 // shape, so the list logic is covered without a browser.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import vm from "node:vm";
 
 /** Replace the interior of every block and line comment with spaces (keeping
  *  length and newlines), so a `{` or `}` inside a comment can't unbalance the
@@ -190,8 +191,14 @@ test("async continuations are guarded — a fast back button must not cross sess
   // The guards are load-bearing and were previously pinned only by a commit
   // message. openSession's /roost fetch, loadHistory, onStreamError's options
   // fetch, the reconnect timer, answerAsk, and every SSE listener.
+  // 11 as of this fix wave: openSession's /roost fetch, startSession's spawn
+  // continuation, every SSE listener (shared through on()), onStreamError's
+  // options probe, the reconnect timer, loadHistory, loadOptions, send(),
+  // answerAsk, and attachFile's upload continuation. A regression that drops
+  // one — the count that shipped with only 6 asserted — is invisible until
+  // an operator hits the exact race the dropped guard covered.
   const guards = (js.match(/current\.sid\s*!==/g) || []).length;
-  assert.ok(guards >= 6, "expected at least 6 identity guards, found " + guards);
+  assert.equal(guards, 11, "expected exactly 11 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -284,7 +291,7 @@ test("perch-send, perch-back and perch-abort are actually wired to handlers", as
     "#perch-back must set location.hash='' so applyHash -> closeSession runs and history stays correct");
   assert.ok(/el\(\s*['"]perch-abort['"]\s*\)\.onclick\s*=/.test(code),
     "#perch-abort has no click handler bound");
-  assert.ok(/interactive\/'\+encodeURIComponent\(mySid\)\+'\/abort/.test(code),
+  assert.ok(/interactive\/'\+encodeURIComponent\(current\.sid\)\+'\/abort/.test(code),
     "the abort handler must POST /interactive/<sid>/abort");
 });
 
@@ -330,16 +337,391 @@ test("cancel is a real answer and outranks the method", async () => {
 test("an editor card offers its prefill and an input its placeholder", async () => {
   const askFields = await extract("askFields");
   assert.deepEqual(askFields({ requestId: "r1", method: "editor", prefill: "draft" }),
-    { needsText: true, initial: "draft", placeholder: "" });
+    { initial: "draft", placeholder: "" });
   assert.deepEqual(askFields({ requestId: "r2", method: "input", placeholder: "your name" }),
-    { needsText: true, initial: "", placeholder: "your name" });
+    { initial: "", placeholder: "your name" });
   assert.deepEqual(askFields({ requestId: "r3", method: "select", options: ["a"] }),
-    { needsText: false, initial: "", placeholder: "" });
+    { initial: "", placeholder: "" });
 });
 
-test("attach-to-card sends card_id, the key the route actually reads", async () => {
+// attachToCard (and its ATTACH_FAILED string) was zero-reference dead code —
+// no UI ever called it. Removed; it returns in a later PR with a real
+// trigger, at which point it gets its own test again.
+test("attachToCard is gone — dead code with no UI trigger, not a live route binding", async () => {
   const js = (await import("../servers/gateway/dashboard/perch-hub/client.js")).perchHubJs("en");
-  const fn = await fnSrc("attachToCard");   // brace-matched, never a magic number
-  assert.ok(fn.includes("card_id"), "parseCardId reads body.card_id; cardId is a 400");
-  assert.ok(!/\bcardId\s*:/.test(fn), "no camelCase key — the route drops it silently");
+  assert.ok(!js.includes("attachToCard"));
+  assert.ok(!js.includes("ATTACH_FAILED"));
+});
+
+// ---------------------------------------------------------------------------
+// Full-script harness — runs the WHOLE emitted IIFE (not one extracted
+// function) against a fake DOM/fetch/EventSource in a fresh vm context.
+// Needed for anything the pure-function extractor above cannot see: real
+// bootstrap-time bindings (el('x').onchange=...), the effect of a rejected
+// fetch() on the promise chain, and event-listener collisions on the same
+// EventSource instance. vm.createContext gives ECMAScript builtins (Array,
+// JSON, Math, Promise, encodeURIComponent, ...) for free; document, window,
+// location, EventSource, fetch and the timer functions are supplied here.
+// ---------------------------------------------------------------------------
+
+function makeEventTarget() {
+  const listeners = {};
+  return {
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) {
+      const a = listeners[type]; if (!a) return;
+      const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+    },
+    _dispatch(type, ev) { (listeners[type] || []).slice().forEach((fn) => fn(ev)); },
+    _listenerCount(type) { return (listeners[type] || []).length; },
+  };
+}
+
+function makeFakeElement(tag) {
+  const target = makeEventTarget();
+  const attrs = {};
+  return Object.assign(target, {
+    tagName: String(tag || "div").toUpperCase(),
+    children: [],
+    style: {},
+    className: "",
+    textContent: "",
+    value: "",
+    checked: false,
+    disabled: false,
+    placeholder: "",
+    type: "",
+    files: null,
+    appendChild(child) { this.children.push(child); return child; },
+    removeChild(child) { const i = this.children.indexOf(child); if (i >= 0) this.children.splice(i, 1); return child; },
+    get firstChild() { return this.children[0] || null; },
+    insertBefore(node, ref) {
+      const i = ref ? this.children.indexOf(ref) : -1;
+      if (i < 0) this.children.unshift(node); else this.children.splice(i, 0, node);
+      return node;
+    },
+    setAttribute(name, val) { attrs[name] = String(val); },
+    getAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null; },
+    click() { if (this.onclick) this.onclick(); },
+  });
+}
+
+/** A fake EventSource that keeps addEventListener('error', ...) listeners
+ *  SEPARATE from the onerror property — exactly like a real one, where a
+ *  native connection failure reaches every "error" listener (not just
+ *  onerror) with an event that carries no .data, and a named server frame
+ *  reaches only addEventListener('error', ...) with a real .data string. */
+class FakeEventSource {
+  constructor(url) {
+    this.url = url;
+    this._t = makeEventTarget();
+    this.onopen = null;
+    this.onerror = null;
+    this.closed = false;
+    FakeEventSource.instances.push(this);
+  }
+  addEventListener(type, fn) { this._t.addEventListener(type, fn); }
+  removeEventListener(type, fn) { this._t.removeEventListener(type, fn); }
+  close() { this.closed = true; }
+  _open() { if (this.onopen) this.onopen(); }
+  /** A real named SSE frame: `event: <type>\ndata: <json>`. */
+  _serverFrame(type, dataObj) { this._t._dispatch(type, { data: JSON.stringify(dataObj) }); }
+  /** A native connection failure: type "error", no .data, delivered to every
+   *  "error" listener AND the onerror property — the collision I3 fixes. */
+  _nativeError() {
+    const ev = {};
+    this._t._dispatch("error", ev);
+    if (this.onerror) this.onerror(ev);
+  }
+}
+FakeEventSource.instances = [];
+
+function makeResponse(status, body) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+}
+
+/** Mounts the real emitted script in a fresh vm context. `fetchImpl(method,
+ *  path, opts)` decides how every perchApi call resolves; the default 200s
+ *  everything with `{}`. Returns the fake DOM pieces and every fetch call
+ *  made, in order, so a test can assert on both wiring and traffic. */
+async function mountHub({ fetchImpl } = {}) {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const js = perchHubJs("en");
+
+  const IDS = ["perch-list-body", "perch-transcript", "perch-ask", "perch-bot-name",
+    "perch-session-meta", "perch-state", "perch-model", "perch-thinking", "perch-permission",
+    "perch-plan-mode", "perch-input", "perch-send", "perch-back", "perch-abort",
+    "perch-attach", "perch-file-input", "perch-chat"];
+  const els = {};
+  for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
+
+  const bodyEl = makeFakeElement("body");
+  const fetchCalls = [];
+  const fetchFn = fetchImpl || (() => Promise.resolve(makeResponse(200, {})));
+
+  const doc = {
+    cookie: "crow_csrf=test-csrf-token",
+    body: bodyEl,
+    getElementById(id) { return els[id] || null; },
+    createElement(tag) { return makeFakeElement(tag); },
+  };
+
+  const winTarget = makeEventTarget();
+  const vvTarget = makeEventTarget();
+  const visualViewport = Object.assign(vvTarget, { height: 700, offsetTop: 0 });
+  const win = Object.assign(winTarget, { visualViewport, innerHeight: 800 });
+
+  const locState = { hash: "" };
+  const location = {
+    get hash() { return locState.hash; },
+    set hash(v) { locState.hash = v; winTarget._dispatch("hashchange", {}); },
+    href: "",
+  };
+
+  // Timers are recorded, never actually fired by the real clock — nothing
+  // under test needs a real 2s/10s wait, and a live setInterval would leak a
+  // handle past the end of every test that mounts this harness.
+  let timerSeq = 1;
+  const timers = new Map();
+  const sandbox = {
+    document: doc,
+    window: win,
+    location,
+    EventSource: FakeEventSource,
+    fetch(url, opts) {
+      const method = (opts && opts.method) || "GET";
+      const path = String(url).replace(/^.*perch-api/, "");
+      fetchCalls.push({ method, path, opts });
+      return Promise.resolve(fetchFn(method, path, opts));
+    },
+    setTimeout(fn) { const id = timerSeq++; timers.set(id, fn); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    setInterval(fn) { const id = timerSeq++; timers.set(id, fn); return id; },
+    clearInterval(id) { timers.delete(id); },
+    FileReader: class {
+      constructor() { this.onload = null; this.result = null; }
+      readAsDataURL(file) {
+        this.result = "data:" + (file.type || "") + ";base64," + (file.b64 || "AAAA");
+        if (this.onload) this.onload();
+      }
+    },
+  };
+  vm.createContext(sandbox);
+  FakeEventSource.instances.length = 0;
+  vm.runInContext(js, sandbox);
+
+  // Drain one microtask hop so the bootstrap's own loadList() promise chain
+  // (perchApi -> .then -> renderList) has actually run before a test reads
+  // fetchCalls or the DOM it produced.
+  await new Promise((r) => setTimeout(r, 0));
+
+  return { els, doc, win, location, fetchCalls, sandbox, timers };
+}
+
+/** Opens a chat session the same way a real click does: seed a /roost
+ *  response with one live session, let the bootstrap's loadList() render it,
+ *  then click its row button — this drives openSession()/afterHeader() as
+ *  real user input would, rather than reaching into the closure. */
+async function openChatSession(hub, sid = "perchlive-aaaaaaaa") {
+  hub.location.hash = sid;
+  await new Promise((r) => setTimeout(r, 0));
+}
+
+const ROOST_ONE_LIVE = {
+  birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false }] }],
+};
+
+/** A fetchImpl covering the calls afterHeader() fires on a cold deep link
+ *  (GET /roost to resolve the bot, then options + transcript + the SSE
+ *  connect isn't fetch-based). Individual tests override specific paths via
+ *  `overrides`. */
+function stdFetch(overrides = {}) {
+  return (method, path) => {
+    for (const [matcher, fn] of Object.entries(overrides)) {
+      if (path.includes(matcher)) return fn(method, path);
+    }
+    if (path === "/roost") return makeResponse(200, ROOST_ONE_LIVE);
+    if (path.endsWith("/options")) return makeResponse(200, { models: [], thinkingLevels: [] });
+    if (path.endsWith("/transcript")) return makeResponse(200, { events: [] });
+    return makeResponse(200, {});
+  };
+}
+
+// ---- C1: the queued image actually rides the next message, then clears ----
+
+test("C1: an attached image rides the NEXT /message body and the queue empties", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+
+  // attachFile() is reached only through the real onchange binding — set a
+  // file on the fake input and fire it, exactly as a browser would.
+  hub.els["perch-file-input"].files = [{ name: "shot.png", type: "image/png", b64: "Zm9v" }];
+  hub.els["perch-file-input"].onchange();
+  await new Promise((r) => setTimeout(r, 0));
+
+  hub.els["perch-input"].value = "look at this";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const sent = hub.fetchCalls.filter((c) => c.path.endsWith("/message"));
+  assert.equal(sent.length, 1, "one message went out");
+  const body = JSON.parse(sent[0].opts.body);
+  assert.deepEqual(body.images, [{ mime: "image/png", data_b64: "Zm9v" }],
+    "the image the drawer's own wire shape uses — {mime,data_b64}");
+
+  // A second send with nothing newly attached must not resend the same image.
+  hub.els["perch-input"].value = "and again";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const secondBody = JSON.parse(hub.fetchCalls.filter((c) => c.path.endsWith("/message")).at(-1).opts.body);
+  assert.equal("images" in secondBody, false, "the queue must be empty on the next send");
+});
+
+test("C1: a non-image upload is never queued onto a send", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  hub.els["perch-file-input"].files = [{ name: "notes.txt", type: "text/plain", b64: "aGk=" }];
+  hub.els["perch-file-input"].onchange();
+  await new Promise((r) => setTimeout(r, 0));
+  hub.els["perch-input"].value = "hello";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const sent = hub.fetchCalls.filter((c) => c.path.endsWith("/message"));
+  const body = JSON.parse(sent.at(-1).opts.body);
+  assert.equal("images" in body, false);
+});
+
+// ---- C2: perchApi resolves (never rejects) on a network-level failure ----
+
+test("C2: a destroyed socket reaches onStreamError and schedules a reconnect", async () => {
+  // The options probe onStreamError fires rejects at the transport level —
+  // exactly what a dropped tunnel/gateway restart looks like from fetch().
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/options": () => Promise.reject(new Error("network down")) }),
+  });
+  await openChatSession(hub);
+  assert.equal(FakeEventSource.instances.length, 1);
+  const es = FakeEventSource.instances[0];
+  es._nativeError();                          // the onerror property fires this
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));  // one more hop: options probe -> scheduleReconnect
+
+  const notes = hub.els["perch-transcript"].children
+    .filter((c) => c.className.includes("note")).map((c) => c.textContent);
+  assert.ok(notes.includes("Reconnecting…"),
+    "scheduleReconnect() must run — before this fix the options probe's promise " +
+    "never settled and this .then() body never ran at all");
+});
+
+test("C2: a failed send appends a visible note instead of vanishing silently", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/message": () => Promise.reject(new Error("network down")) }),
+  });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "hello";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const notes = hub.els["perch-transcript"].children
+    .filter((c) => c.className.includes("note")).map((c) => c.textContent);
+  assert.ok(notes.includes("The message did not send."),
+    "send()'s .then must actually run on a rejected fetch for this note to appear");
+});
+
+// ---- I3: a native connection error must not masquerade as an engine frame ----
+
+test("I3: a native EventSource error prints nothing; a real error FRAME prints its text", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+
+  const notesBefore = hub.els["perch-transcript"].children.length;
+  es._t._dispatch("error", {});               // native: no .data, addEventListener path only
+  await new Promise((r) => setTimeout(r, 0));
+  const notesAfterNative = hub.els["perch-transcript"].children
+    .filter((c) => c.className.includes("note")).map((c) => c.textContent);
+  assert.ok(!notesAfterNative.includes("error"),
+    "a native connection failure must not print a bare 'error' note");
+
+  es._serverFrame("error", { text: "pi crashed" });
+  await new Promise((r) => setTimeout(r, 0));
+  const notesAfterFrame = hub.els["perch-transcript"].children
+    .filter((c) => c.className.includes("note")).map((c) => c.textContent);
+  assert.ok(notesAfterFrame.includes("pi crashed"),
+    "a real engine error FRAME must still render its text");
+  assert.ok(notesBefore <= notesAfterFrame.length - 1);
+});
+
+// ---- I2: bindings a green suite could previously delete undetected ----
+
+test("I2: perchApi sends X-Crow-Csrf carrying the actual cookie value", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  assert.ok(hub.fetchCalls.length >= 1, "the bootstrap's own loadList() must have fired");
+  const headers = hub.fetchCalls[0].opts.headers;
+  assert.equal(headers["X-Crow-Csrf"], "test-csrf-token",
+    "must carry the value parsed out of document.cookie, not a hardcoded or absent header");
+});
+
+test("I2: the model/thinking/permission/plan-mode pickers are wired to POST /control", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  hub.fetchCalls.length = 0;
+
+  hub.els["perch-model"].value = "crow-local/qwen3.6-35b-a3b";
+  hub.els["perch-model"].onchange();
+  hub.els["perch-thinking"].value = "high";
+  hub.els["perch-thinking"].onchange();
+  hub.els["perch-permission"].value = "bypass";
+  hub.els["perch-permission"].onchange();
+  hub.els["perch-plan-mode"].checked = true;
+  hub.els["perch-plan-mode"].onchange();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const controlCalls = hub.fetchCalls.filter((c) => c.path.endsWith("/control"));
+  assert.equal(controlCalls.length, 4, "all four pickers must post a control change");
+  const bodies = controlCalls.map((c) => JSON.parse(c.opts.body));
+  assert.deepEqual(bodies[0], { model: { provider: "crow-local", id: "qwen3.6-35b-a3b" } });
+  assert.deepEqual(bodies[1], { thinking: "high" });
+  assert.deepEqual(bodies[2], { permission_mode: "bypass" });
+  assert.deepEqual(bodies[3], { plan_mode: true });
+});
+
+test("I2: an ask_user frame actually renders the card — the listener is live", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("ask_user", { requestId: "r1", method: "confirm", title: "Run bash?" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-ask"].children.length, 1, "renderAsk must have written a card");
+  assert.equal(hub.els["perch-ask"].children[0].className, "ask-card");
+});
+
+test("I2: the attach button opens the file picker", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  let clicked = false;
+  hub.els["perch-file-input"].click = () => { clicked = true; };
+  hub.els["perch-attach"].onclick();
+  assert.ok(clicked, "#perch-attach must delegate to the hidden file input");
+});
+
+test("I2: applyVV is bound to BOTH visualViewport events, not two different handlers", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const vv = hub.win.visualViewport;
+  assert.equal(vv._listenerCount("resize"), 1);
+  assert.equal(vv._listenerCount("scroll"), 1);
+  // Firing either must run the SAME real computation, not a no-op stand-in —
+  // rebinding both calls to `function(){}` still satisfies "one listener
+  // each", so the proof has to be behavioral: it must actually move the
+  // padding, from the visualViewport numbers this harness set.
+  hub.win.innerHeight = 800;
+  vv.height = 650; vv.offsetTop = 0;           // 150px of keyboard behind the layout viewport
+  vv._dispatch("resize", {});
+  assert.equal(hub.els["perch-chat"].style.paddingBottom, "150px");
+  hub.els["perch-chat"].style.paddingBottom = "";
+  vv.height = 800;                             // keyboard gone
+  vv._dispatch("scroll", {});
+  assert.equal(hub.els["perch-chat"].style.paddingBottom, "",
+    "scroll must run the identical calculation, not a stub bound separately");
 });

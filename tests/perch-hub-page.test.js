@@ -37,14 +37,20 @@ test("the stylesheet keeps Perch's own palette and honours OS dark mode", async 
   assert.ok(!css.includes("<style>"), "perchHubCss returns bare CSS; html.js wraps it");
 });
 
-test("perchHubRouter itself redirects /perch and serves /dashboard/perch when auth passes", async () => {
+test("perchHubRouter serves /dashboard/perch when auth passes (the /perch redirect below is this test's own stand-in route, not perchHubRouter's)", async () => {
   const { default: perchHubRouter } = await import("../servers/gateway/routes/perch-hub.js");
   const { default: express } = await import("express");
   const app = express();
   // Auth is a pass-through stub here deliberately — this test exercises only
-  // perchHubRouter's own routing (the /perch redirect it registers plus its
-  // /dashboard/perch handler), not the dashboardAuth module and not whether
-  // dashboard/index.js actually mounts this router. That wiring is pinned
+  // perchHubRouter's own routing: it registers a relative "/perch" handler
+  // that SERVES the page (mounted under "/dashboard" below, so the effective
+  // path is /dashboard/perch). It does NOT redirect a bare top-level /perch —
+  // that redirect is a separate route dashboard/index.js registers directly
+  // on the app, outside this router. The app.get("/perch", ...) line right
+  // below is this test's OWN stand-in for that separate route, added only so
+  // this fetch block can exercise the same short-link flow a real request
+  // would follow. The real wiring — that dashboard/index.js actually mounts
+  // perchHubRouter AND actually registers that redirect — is pinned
   // separately by the source-level guard below, "dashboard/index.js source
   // mounts perchHubRouter and registers the /perch redirect" — see that
   // test's own comment for why it reads source instead of firing requests.
