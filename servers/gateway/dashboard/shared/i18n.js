@@ -2224,7 +2224,6 @@ export const translations = {
   },
   // ─── Perch Hub (2026-09-09 restore) ───
   "perch.title": { en: "Perch", es: "Perch" },
-  "perch.subtitle": { en: "your bot sessions", es: "tus sesiones de bots" },
   "perch.navBoard": { en: "Board", es: "Tablero" },
   "perch.sessionsHeading": { en: "Sessions", es: "Sesiones" },
   "perch.loading": { en: "Loading sessions…", es: "Cargando sesiones…" },
