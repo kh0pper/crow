@@ -191,14 +191,15 @@ test("async continuations are guarded — a fast back button must not cross sess
   // The guards are load-bearing and were previously pinned only by a commit
   // message. openSession's /roost fetch, loadHistory, onStreamError's options
   // fetch, the reconnect timer, answerAsk, and every SSE listener.
-  // 11 as of this fix wave: openSession's /roost fetch, startSession's spawn
-  // continuation, every SSE listener (shared through on()), onStreamError's
-  // options probe, the reconnect timer, loadHistory, loadOptions, send(),
-  // answerAsk, and attachFile's upload continuation. A regression that drops
-  // one — the count that shipped with only 6 asserted — is invisible until
-  // an operator hits the exact race the dropped guard covered.
+  // 12 as of the launch-model wave: openSession's /roost fetch, startSession's
+  // spawn continuation AND its launch-model control continuation, every SSE
+  // listener (shared through on()), onStreamError's options probe, the
+  // reconnect timer, loadHistory, loadOptions, send(), answerAsk, and
+  // attachFile's upload continuation. A regression that drops one — the count
+  // that shipped with only 6 asserted — is invisible until an operator hits
+  // the exact race the dropped guard covered.
   const guards = (js.match(/current\.sid\s*!==/g) || []).length;
-  assert.equal(guards, 11, "expected exactly 11 identity guards, found " + guards);
+  assert.equal(guards, 12, "expected exactly 12 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -211,10 +212,21 @@ test("the emitted script never assigns to an innerHTML-class sink", async () => 
   // Matches both plain (=) and compound (+=) assignment — a compound
   // assignment against these sinks parses and executes the same injection
   // and a narrower regex let it through undetected.
-  assert.ok(!/\.innerHTML\s*\+?=/.test(js), "no .innerHTML assignment");
   assert.ok(!/\.outerHTML\s*\+?=/.test(js), "no .outerHTML assignment");
   assert.ok(!/\.insertAdjacentHTML\s*\(/.test(js), "no insertAdjacentHTML call");
   assert.ok(!/document\.write\s*\(/.test(js), "no document.write call");
+
+  // ONE innerHTML assignment is now permitted — server-rendered, sanitized
+  // markdown for a bot message — and the permission is written as a COUNT plus
+  // a location, not as a hole. A second one, anywhere, fails here.
+  const assignments = js.match(/\.innerHTML\s*\+?=/g) || [];
+  assert.equal(assignments.length, 1, "exactly one .innerHTML assignment: " + assignments.length);
+  assert.match(js, /function setSanitizedHtml\(node,html\)\{ node\.innerHTML=html; \}/,
+    "and it is the single named sink, so a reader can find every path into it at once");
+  // …and that sink has exactly one caller. Reusing it for anything that is not
+  // server-sanitized is the way this permission would rot.
+  const calls = js.match(/setSanitizedHtml\(/g) || [];
+  assert.equal(calls.length, 2, "one definition, one call site: " + calls.length);
 });
 
 /** A function's OWN source, brace-matched. Never a fixed-size window: every
@@ -250,12 +262,18 @@ test("a model option shows its human name and says when it is not serving", asyn
   assert.equal(modelOptionText({ provider: "p", id: "m", availability: "up" }), "p/m");
 });
 
-test("a hibernating session disables the pickers rather than emptying them", async () => {
-  const optionsUsable = await extract("optionsUsable");
-  assert.equal(optionsUsable({ models: null, thinkingLevels: null }), false);
-  assert.equal(optionsUsable({ models: [], thinkingLevels: [] }), false);
-  assert.equal(optionsUsable({ models: [{ id: "m", provider: "p" }], thinkingLevels: ["off"] }), true);
-  assert.equal(optionsUsable(null), false);
+test("the two pickers are gated separately — the fallback list must not be disabled by a missing thinking list", async () => {
+  // The engine's hibernating answer is now {models: <provider catalogue>,
+  // thinkingLevels: null}: a model switch made while asleep binds at the next
+  // wake and really works, a thinking switch does nothing at all. One shared
+  // gate would disable the picker that WORKS because of the one that does not,
+  // which is the dead dropdown this wave exists to end.
+  const listUsable = await extract("listUsable");
+  assert.equal(listUsable([{ id: "m" }]), true);
+  assert.equal(listUsable([]), false);
+  assert.equal(listUsable(null), false);
+  assert.equal(listUsable(undefined), false);
+  assert.equal(listUsable("crow-local/qwen"), false, "a string is not a list");
 });
 
 test("control bodies use the exact keys the route reads, not camelCase", async () => {
@@ -414,6 +432,19 @@ function makeFakeElement(tag) {
     get() { return this.children[0] || null; },
     configurable: true,
   });
+  // innerHTML: the ONE sanitized sink the client has (server-rendered
+  // markdown). Recorded rather than parsed — this harness is not a DOM, and
+  // what matters here is WHICH path appendMessage took and with what string.
+  // The rendered result itself is measured live in perch-hub-render.test.js.
+  node.innerHTML = "";
+  // A real <select> exposes its options BOTH as .children and as .options;
+  // the client reads .options (the idiomatic API) and this harness had only
+  // the former, which surfaced as a TypeError rather than as a failed
+  // assertion the first time production code used it.
+  Object.defineProperty(node, "options", {
+    get() { return this.children; },
+    configurable: true,
+  });
   return node;
 }
 
@@ -455,7 +486,8 @@ function makeResponse(status, body) {
  *  path, opts)` decides how every perchApi call resolves; the default 200s
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
-async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
+async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", split = false,
+                          legacyMediaQuery = false } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
 
@@ -464,7 +496,11 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
     "perch-plan-mode", "perch-input", "perch-send", "perch-back", "perch-abort",
     "perch-attach", "perch-file-input", "perch-chat",
     // Task C: the unconditional launcher and the two close controls.
-    "perch-new", "perch-new-bot", "perch-new-bot-label", "perch-launch-note", "perch-close"];
+    "perch-new", "perch-new-bot", "perch-new-bot-label", "perch-launch-note", "perch-close",
+    // The launch-model picker.
+    "perch-new-model", "perch-new-model-label",
+    // Session rename: the header control and the name line it writes.
+    "perch-rename", "perch-session-name"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -472,17 +508,45 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
   const fetchCalls = [];
   const fetchFn = fetchImpl || (() => Promise.resolve(makeResponse(200, {})));
 
-  const doc = {
+  // addEventListener on the DOCUMENT, not just window: the hub script now
+  // listens for Turbo's turbo:before-render to retire itself when the shell
+  // swaps the body out from under it (perch-hub/client.js's ONE ACTIVE
+  // INSTANCE block). A document without it throws at script-run time, which
+  // would fail every test in this harness for the wrong reason.
+  const docTarget = makeEventTarget();
+  const doc = Object.assign(docTarget, {
     cookie: "crow_csrf=test-csrf-token",
     body: bodyEl,
     getElementById(id) { return els[id] || null; },
     createElement(tag) { return makeFakeElement(tag); },
-  };
+  });
 
   const winTarget = makeEventTarget();
   const vvTarget = makeEventTarget();
   const visualViewport = Object.assign(vvTarget, { height: 700, offsetTop: 0 });
-  const win = Object.assign(winTarget, { visualViewport, innerHeight: 800 });
+  // The split-view media query. `split: true` puts the harness at >=900px,
+  // where .hub-split is a two-column grid and the session list stays on screen
+  // with a chat open — the state finding 1 is about. `mq._set(matches)` fires a
+  // real change event, which is how a window crossing the breakpoint behaves.
+  const mqTarget = makeEventTarget();
+  const mq = Object.assign(mqTarget, {
+    matches: !!split,
+    media: "(min-width:900px)",
+    _set(v) { this.matches = !!v; this._dispatch("change", { matches: this.matches }); },
+  });
+  // Q8: pre-2019 Safari exposes only addListener on a MediaQueryList. Drop the
+  // modern spelling and map the legacy one onto the same dispatcher, so a test
+  // can prove the fallback binds rather than silently doing nothing.
+  if (legacyMediaQuery) {
+    const modern = mq.addEventListener.bind(mqTarget);
+    mq.addListener = (fn) => modern("change", fn);
+    mq.removeListener = () => {};
+    delete mq.addEventListener;                    // the only spelling that browser has
+  }
+  const win = Object.assign(winTarget, {
+    visualViewport, innerHeight: 800,
+    matchMedia: () => mq,
+  });
 
   // history is counted, not simulated: assigning location.hash pushes an entry,
   // location.replace('#') does not. Both fire hashchange — verified in a real
@@ -518,9 +582,19 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
   // is a stop with no gate, which is the failure mode the confirmation exists
   // to prevent.
   const confirms = [];
+  // Renaming asks through prompt(), the same native primitive the close gate
+  // uses for confirm(). Recorded with its prefill so a test can prove BOTH
+  // that the operator was asked and what they were shown. Default: cancelled
+  // (null) — a rename that posts under this default is a rename with no
+  // operator input at all.
+  const prompts = [];
   const sandbox = {
     document: doc,
     confirm(msg) { confirms.push(String(msg)); return confirmImpl ? confirmImpl(String(msg)) : false; },
+    prompt(msg, prefill) {
+      prompts.push({ msg: String(msg), prefill: prefill == null ? null : String(prefill) });
+      return promptImpl ? promptImpl(String(msg), prefill) : null;
+    },
     window: win,
     location,
     EventSource: FakeEventSource,
@@ -551,7 +625,7 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
   // fetchCalls or the DOM it produced.
   await new Promise((r) => setTimeout(r, 0));
 
-  return { els, doc, win, location, fetchCalls, sandbox, timers, confirms, history };
+  return { els, doc, win, location, fetchCalls, sandbox, timers, confirms, prompts, history, mq };
 }
 
 /** Opens a chat session the same way a real click does: seed a /roost
@@ -821,9 +895,18 @@ function roostFetch(roost, overrides = {}) {
     if (path.endsWith("/stop")) return makeResponse(200, { ok: true });
     if (path.endsWith("/options")) return makeResponse(200, { models: [], thinkingLevels: [] });
     if (path.endsWith("/transcript")) return makeResponse(200, { events: [] });
+    if (path.endsWith("/models")) return makeResponse(200, { models: LAUNCH_MODELS, default: "crow-local/qwen" });
     return makeResponse(200, {});
   };
 }
+
+/** The launcher's session-free list, as GET /bots/:id/models answers it:
+ *  annotated entries plus the bot's own configured default. */
+const LAUNCH_MODELS = [
+  { provider: "crow-local", id: "qwen", name: "Qwen", availability: "up" },
+  { provider: "raven-flash", id: "flash-next", name: "Flash Next", availability: "on_demand" },
+  { provider: "crow-dsv4", id: "deepseek-v4", name: "DeepSeek V4", availability: "unavailable" },
+];
 
 /** Every button rendered into the list, flattened, with the row it came from. */
 function listButtons(hub) {
@@ -863,11 +946,13 @@ test("C1: the launch control is live while EVERY attached bot already has a sess
     "startSession()'s own hash navigation ran — the launcher reuses it rather than respawning it");
 });
 
-test("C1: the launcher issues no extra request — the bot list rides the list's own /roost", async () => {
+test("C1: the bot ROSTER still rides the list's own /roost — the models call is the only addition", async () => {
   const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
-  const gets = hub.fetchCalls.filter((c) => c.method === "GET");
-  assert.equal(gets.length, 1, "exactly one GET on first paint: " + JSON.stringify(gets.map((g) => g.path)));
-  assert.equal(gets[0].path, "/roost");
+  const gets = hub.fetchCalls.filter((c) => c.method === "GET").map((g) => g.path);
+  // Two, not one: the roster comes off /roost as it always has, and the model
+  // picker needs a list /roost does not carry. It is fetched per BOT, not per
+  // poll — the test below pins that.
+  assert.deepEqual(gets, ["/roost", "/bots/r4-assistant/models"], JSON.stringify(gets));
 });
 
 test("C1: with more than one attached bot the picker decides, and only attached bots are offered", async () => {
@@ -1392,4 +1477,757 @@ test("F6: a 403 and a shapeless 200 report on the launcher too", async () => {
     assert.equal(hub.els["perch-launch-note"].textContent, expected);
     assert.equal(hub.els["perch-list-body"].children.length, 3, "rows survive: " + expected);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The launcher's model picker — "I would like to choose the model I want to
+// use for the session up front."
+// ---------------------------------------------------------------------------
+
+test("the picker lists the bot's models, opens on its configured default, and says which are unavailable", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const sel = hub.els["perch-new-model"];
+  assert.equal(sel.hidden, false, "one attached bot still gets a MODEL picker — models are per bot, not per roster");
+  assert.equal(hub.els["perch-new-model-label"].hidden, false);
+  assert.deepEqual(sel.children.map((o) => o.value),
+    ["crow-local/qwen", "raven-flash/flash-next", "crow-dsv4/deepseek-v4"]);
+  assert.equal(sel.value, "crow-local/qwen", "pre-selected on the bot's own model, so launching stays one tap");
+  assert.deepEqual(sel.children.map((o) => o.textContent), [
+    "Qwen — bot default",
+    "Flash Next — starts on demand",
+    "DeepSeek V4 — not running",
+  ], "an unavailable model must be visibly unavailable, never silently selectable");
+});
+
+test("launching on the default spawns and opens — no redundant model switch", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const posts = hub.fetchCalls.filter((c) => c.method === "POST").map((c) => c.path);
+  assert.deepEqual(posts, ["/bots/r4-assistant/interactive"],
+    "the spawn already resolved this model; switching to it would warm a provider twice for no change");
+  assert.equal(hub.location.hash, "perchlive-99999999");
+});
+
+test("launching on a NON-default model switches it before the session is opened at all", async () => {
+  let releaseControl;
+  const controlPending = new Promise((r) => { releaseControl = r; });
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, {
+      "/control": () => controlPending.then(() => makeResponse(200, { applied: { model: "raven-flash/flash-next" } })),
+    }),
+  });
+  hub.els["perch-new-model"].value = "raven-flash/flash-next";
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const control = hub.fetchCalls.filter((c) => c.path.includes("/control"));
+  assert.equal(control.length, 1, "the model is applied through control(), not through a new spawn parameter");
+  assert.equal(control[0].path, "/interactive/perchlive-99999999/control");
+  assert.deepEqual(JSON.parse(control[0].opts.body), { model: { provider: "raven-flash", id: "flash-next" } },
+    "the exact body the route reads — {provider, id}, mapped to modelId engine-side");
+  // THE POINT: the chat is not reachable until the switch has landed, so the
+  // first message cannot go out on the model the spawn happened to resolve.
+  assert.equal(hub.location.hash, "", "the session must not open while the switch is still in flight");
+  releaseControl();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.location.hash, "perchlive-99999999", "and it opens once the switch has landed");
+});
+
+test("a refused model switch opens the session anyway and says what happened", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/control": () => makeResponse(409, { error: "turn_in_progress" }) }),
+  });
+  hub.els["perch-new-model"].value = "raven-flash/flash-next";
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-launch-note"].textContent,
+    "The session started on the bot's own model; the switch did not take.");
+  assert.equal(hub.location.hash, "perchlive-99999999",
+    "the session is real and usable — stranding a live child behind an error would be worse");
+});
+
+test("the model list is fetched per BOT, not per poll", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const modelGets = () => hub.fetchCalls.filter((c) => c.path.endsWith("/models")).length;
+  assert.equal(modelGets(), 1);
+  hub.els["perch-new-model"].value = "raven-flash/flash-next";
+  for (const fn of hub.timers.values()) fn();          // the 10s poll body, verbatim
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(modelGets(), 1, "a poll must not refetch — repopulating would throw away a mid-tap pick");
+  assert.equal(hub.els["perch-new-model"].value, "raven-flash/flash-next", "and the pick survives");
+});
+
+test("with several bots the model list follows the roster select", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_TWO_BOTS) });
+  const modelPaths = () => hub.fetchCalls.filter((c) => c.path.endsWith("/models")).map((c) => c.path);
+  assert.deepEqual(modelPaths(), ["/bots/alpha/models"], "the bot the launcher would spawn against");
+  hub.els["perch-new-bot"].value = "beta";
+  hub.els["perch-new-bot"].onchange();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(modelPaths(), ["/bots/alpha/models", "/bots/beta/models"],
+    "models are per-bot; a picker still showing alpha's models must not choose for beta");
+});
+
+test("a model list that does not arrive leaves NO picker, rather than an empty enabled one", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/models": () => makeResponse(503, { error: "upstream" }) }),
+  });
+  assert.equal(hub.els["perch-new-model"].hidden, true);
+  assert.equal(hub.els["perch-new-model-label"].hidden, true);
+  assert.equal(hub.els["perch-new"].disabled, false, "and the launcher still works — the model is optional");
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const posts = hub.fetchCalls.filter((c) => c.method === "POST").map((c) => c.path);
+  assert.deepEqual(posts, ["/bots/r4-assistant/interactive"], "no control from a picker that is not there");
+});
+
+test("with no attached bot there is no model picker either", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_NO_ATTACHED) });
+  assert.equal(hub.els["perch-new-model"].hidden, true);
+  assert.equal(hub.fetchCalls.filter((c) => c.path.endsWith("/models")).length, 0,
+    "no bot to ask about");
+});
+
+test("the drawer's model picker is ENABLED on a hibernating session's fallback list", async () => {
+  // Kevin's actual bug: he switched a session's model, a deploy restarted the
+  // gateway, and the picker "stopped working". The switch itself was always
+  // honoured (control() stores it, startChild reads it before warmModel); only
+  // the list was missing, and an empty dropdown reads as a broken page.
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/options": () => makeResponse(200, {
+      models: [{ provider: "crow-local", id: "qwen", name: "Qwen", availability: "up" }],
+      thinkingLevels: null, current: "crow-local/qwen", source: "providers" }) }),
+  });
+  await openChatSession(hub);
+  const modelSel = hub.els["perch-model"], thinkSel = hub.els["perch-thinking"];
+  assert.equal(modelSel.disabled, false, "the fallback list is a real list and the switch really binds at the next wake");
+  assert.deepEqual(modelSel.children.map((o) => o.value), ["crow-local/qwen"]);
+  assert.equal(modelSel.value, "crow-local/qwen",
+    "and it must SAY which one is live — enabled-and-listing was the assertion this bug walked through");
+  assert.equal(thinkSel.disabled, true,
+    "thinking stays disabled: control()'s thinking branch is a no-op with no child, so offering it would lie");
+  assert.equal(thinkSel.children.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Finding 1 — in split view the list is VISIBLE, so it must keep polling.
+// ---------------------------------------------------------------------------
+
+test("below the breakpoint, opening a session stops the list poll — the list really is hidden there", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), split: false });
+  assert.equal(hub.timers.size > 0, true, "the list view polls");
+  await openChatSession(hub);
+  assert.equal(hub.timers.size, 0, "nothing left ticking behind a hidden list");
+});
+
+test("in SPLIT view, opening a session keeps the list polling and refreshes it at once", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), split: true });
+  const roostsBefore = hub.fetchCalls.filter((c) => c.path === "/roost").length;
+  await openChatSession(hub);
+  assert.ok(hub.timers.size > 0,
+    "the list is on screen beside the chat; a frozen list is what showed an idle row for an awake session");
+  const roosts = hub.fetchCalls.filter((c) => c.path === "/roost").length;
+  assert.ok(roosts > roostsBefore, "and it refreshes immediately, so the session just opened appears as a row");
+});
+
+test("crossing the breakpoint with a chat open starts and stops the poll, with no navigation at all", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), split: false });
+  await openChatSession(hub);
+  assert.equal(hub.timers.size, 0);
+  hub.mq._set(true);                       // the operator widened the window
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(hub.timers.size > 0, "the list just came on screen; it must not sit there stale");
+  hub.mq._set(false);                      // and narrowed it again
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.timers.size, 0);
+});
+
+test("in split view the poll renders the newly opened session as a live row with a Close", async () => {
+  // Kevin's screenshot: an awake session open on the right, and on the left a
+  // single "R4 Assistant / idle" row with a Talk button. Close lives on live
+  // rows only, so that surface offered no way to end anything.
+  let roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "idle", sessions: [] }] };
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/roost": () => makeResponse(200, roost) }), split: true });
+  assert.deepEqual(listButtons(hub).map((b) => b.text), ["Talk"], "precondition: an idle bot, nothing live");
+
+  // The session exists now — exactly what the frozen list never learned.
+  roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false }] }] };
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  for (const fn of hub.timers.values()) fn();          // the 10s poll body, verbatim
+  await new Promise((r) => setTimeout(r, 0));
+
+  const texts = listButtons(hub).map((b) => b.text);
+  assert.ok(texts.includes("Open"), "the live session must be a row: " + JSON.stringify(texts));
+  assert.ok(texts.includes("Close"), "and it must offer the Close the operator went looking for");
+  assert.equal(texts.includes("Talk"), false, "the bot is no longer idle");
+});
+
+// ---------------------------------------------------------------------------
+// Finding 3 — sessions can be named. "It seems like there is not a way to
+// rename the sessions."
+// ---------------------------------------------------------------------------
+
+const ROOST_NAMED = {
+  birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: 248, pendingUi: false,
+      label: "Nov package copy pass" }] }],
+};
+
+test("a named session renders its name AND keeps the id subtitle it always had", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/roost": () => makeResponse(200, ROOST_NAMED) }) });
+  const rowEl = hub.els["perch-list-body"].children[0];
+  const texts = rowEl.children.find((c) => c.className === "roost-main").children.map((c) => c.textContent);
+  assert.deepEqual(texts, ["R4 Assistant", "Nov package copy pass", "awake · aaaaaaaa · card 248"],
+    "the name is a convenience; the machine id is the identity and stays visible");
+});
+
+test("an unnamed session falls back to exactly the subtitle it had before", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  const rowEl = hub.els["perch-list-body"].children[0];
+  const texts = rowEl.children.find((c) => c.className === "roost-main").children.map((c) => c.textContent);
+  assert.deepEqual(texts, ["R4 Assistant", "awake · aaaaaaaa"], "no empty name line, no change to the old rendering");
+});
+
+test("a name containing markup is rendered as TEXT, in the row and in the confirm", async () => {
+  const nasty = "<img src=x onerror=alert(1)>";
+  const roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false, label: nasty }] }] };
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/roost": () => makeResponse(200, roost) }) });
+  const rowEl = hub.els["perch-list-body"].children[0];
+  const nameLine = rowEl.children.find((c) => c.className === "roost-main").children
+    .find((c) => c.className === "roost-name");
+  // line() builds with textContent; the value is never assigned to an HTML
+  // sink (the whole-script no-innerHTML test above covers that structurally).
+  assert.equal(nameLine.textContent, nasty);
+  const close = listButtons(hub).find((b) => b.text === "Close");
+  close.btn.onclick();
+  assert.equal(hub.confirms.length, 1);
+  assert.ok(hub.confirms[0].includes(nasty), "the confirm carries it as text too: " + hub.confirms[0]);
+  assert.ok(hub.confirms[0].includes("aaaaaaaa"),
+    "and still names the id — two sessions can carry the same name: " + hub.confirms[0]);
+});
+
+test("renaming from a row asks first, posts the new name, and needs no confirmation", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/rename": () => makeResponse(200, { label: "Nov package" }) }),
+    promptImpl: () => "  Nov   package  ",
+  });
+  const rename = listButtons(hub).find((b) => b.text === "Rename");
+  assert.ok(rename, "a live row must offer it");
+  rename.btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.prompts.length, 1, "the operator was asked");
+  assert.equal(hub.confirms.length, 0, "renaming is reversible — no confirmation gate");
+  const posts = hub.fetchCalls.filter((c) => c.path.includes("/rename"));
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].path, "/interactive/perchlive-aaaaaaaa/rename");
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { label: "  Nov   package  " },
+    "raw as typed — the ENGINE normalizes, so what is stored is what comes back");
+});
+
+test("a cancelled rename posts nothing at all", async () => {
+  // promptImpl defaults to null, which is what Cancel gives.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  listButtons(hub).find((b) => b.text === "Rename").btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.prompts.length, 1);
+  assert.equal(hub.fetchCalls.filter((c) => c.path.includes("/rename")).length, 0);
+});
+
+test("an EMPTY answer clears the name — that is an action, not a cancel", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/roost": () => makeResponse(200, ROOST_NAMED),
+                          "/rename": () => makeResponse(200, { label: null }) }),
+    promptImpl: () => "",
+  });
+  const rename = listButtons(hub).find((b) => b.text === "Rename");
+  assert.equal(hub.prompts[0], undefined);
+  rename.btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.prompts[0].prefill, "Nov package copy pass", "the prompt is prefilled with the current name");
+  const posts = hub.fetchCalls.filter((c) => c.path.includes("/rename"));
+  assert.equal(posts.length, 1, "an empty string must reach the engine; only null (Cancel) is a no-op");
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { label: "" });
+});
+
+test("the chat header shows the name, and a state frame keeps it current", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/roost": () => makeResponse(200, ROOST_NAMED) }) });
+  await openChatSession(hub);
+  assert.equal(hub.els["perch-session-name"].textContent, "Nov package copy pass");
+  assert.equal(hub.els["perch-session-name"].hidden, false);
+  assert.equal(hub.els["perch-session-meta"].textContent, "perchlive-aaaaaaaa",
+    "the id line is untouched — it is the identity");
+
+  // Renamed from somewhere else (another tab, a list row): the engine echoes
+  // the label on every state frame.
+  FakeEventSource.instances[0]._serverFrame("state", { state: "awake", turnInFlight: false, label: "Renamed elsewhere" });
+  assert.equal(hub.els["perch-session-name"].textContent, "Renamed elsewhere");
+
+  FakeEventSource.instances[0]._serverFrame("state", { state: "awake", turnInFlight: false, label: null });
+  assert.equal(hub.els["perch-session-name"].hidden, true, "a cleared name hides the line rather than showing an empty one");
+});
+
+test("the header's Rename control is wired and prefilled from the open session", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/roost": () => makeResponse(200, ROOST_NAMED),
+                          "/rename": () => makeResponse(200, { label: "Renamed" }) }),
+    promptImpl: () => "Renamed",
+  });
+  await openChatSession(hub);
+  hub.els["perch-rename"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.prompts[0].prefill, "Nov package copy pass");
+  const posts = hub.fetchCalls.filter((c) => c.path.includes("/rename"));
+  assert.equal(posts[0].path, "/interactive/perchlive-aaaaaaaa/rename");
+  assert.equal(hub.els["perch-session-name"].textContent, "Renamed",
+    "the header reflects what the engine STORED, not what was typed");
+});
+
+test("a refused rename says so instead of silently keeping the old name", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/rename": () => makeResponse(404, { error: "no_such_session" }) }),
+    promptImpl: () => "whatever",
+  });
+  listButtons(hub).find((b) => b.text === "Rename").btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const noteText = hub.els["perch-list-body"].children.map((c) => c.textContent).join(" ");
+  assert.ok(noteText.includes("That session was not renamed."), noteText);
+});
+
+test("a transcript that FAILED to load says so, instead of reporting an empty one", async () => {
+  // The old code collapsed a 500, a dropped tunnel and a logged-out session
+  // into "No transcript yet." — a reassuring sentence about a conversation
+  // that is still there. Flagged twice before this fix.
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/transcript": () => makeResponse(503, { error: "upstream" }) }) });
+  await openChatSession(hub);
+  assert.deepEqual(notesIn(hub.els["perch-transcript"]), ["Could not load this session's history."]);
+});
+
+test("a genuinely empty transcript still reports empty, not failed", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });      // 200 with events: []
+  await openChatSession(hub);
+  assert.deepEqual(notesIn(hub.els["perch-transcript"]), ["No transcript yet."]);
+});
+
+test("the emitted script is syntactically valid JS", async () => {
+  // Cheap guard for a trap this file has hit three times: the whole client is
+  // emitted INSIDE a template literal, so one unescaped backtick — in a
+  // COMMENT is the usual way — terminates the literal and turns the rest of
+  // the script into code evaluated at emit time. The symptom is a
+  // ReferenceError from perchHubJs() itself, nowhere near the typo.
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  for (const lang of ["en", "es"]) {
+    const js = perchHubJs(lang);          // throws on its own if the literal broke
+    assert.doesNotThrow(() => new Function(js), lang + " must emit parseable JS");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q1 — the select must report the model the session is ON.
+// ---------------------------------------------------------------------------
+
+const THREE_MODELS = [
+  { provider: "crow-local", id: "qwen", name: "Qwen", availability: "up" },
+  { provider: "raven-flash", id: "flash-next", name: "Flash Next", availability: "on_demand" },
+  { provider: "crow-dsv4", id: "deepseek-v4", name: "DeepSeek V4", availability: "unavailable" },
+];
+const optionsWith = (current) => stdFetch({
+  "/options": () => makeResponse(200, { models: THREE_MODELS, thinkingLevels: ["off", "high"], current }),
+});
+
+test("the drawer's model select reads the session's model, not whichever option sorts first", async () => {
+  // The measured bug: nothing ever assigned modelSel.value, so the picker
+  // asserted crow-local/qwen — the first entry — for a session running
+  // flash-next, on the one control this feature exists for.
+  const hub = await mountHub({ fetchImpl: optionsWith("raven-flash/flash-next") });
+  await openChatSession(hub);
+  assert.equal(hub.els["perch-model"].value, "raven-flash/flash-next");
+  assert.notEqual(hub.els["perch-model"].value, hub.els["perch-model"].children[0].value,
+    "fixture check: the live model is deliberately NOT option 0, or this proves nothing");
+});
+
+test("a state frame moves the select — pi's own /model and auto-fallbacks were on the wire all along", async () => {
+  const hub = await mountHub({ fetchImpl: optionsWith("crow-local/qwen") });
+  await openChatSession(hub);
+  assert.equal(hub.els["perch-model"].value, "crow-local/qwen");
+  FakeEventSource.instances[0]._serverFrame("state",
+    { state: "awake", turnInFlight: false, model: "crow-dsv4/deepseek-v4" });
+  assert.equal(hub.els["perch-model"].value, "crow-dsv4/deepseek-v4");
+});
+
+test("a model the list does not carry is added and selected, not silently dropped", async () => {
+  // A provider row removed since the session started, or a model pi resolved
+  // on its own. Leaving the select on nothing would report the same "don't
+  // know" the empty dropdown did.
+  const hub = await mountHub({ fetchImpl: optionsWith("retired-provider/old-model") });
+  await openChatSession(hub);
+  const sel = hub.els["perch-model"];
+  assert.equal(sel.value, "retired-provider/old-model");
+  assert.equal(sel.children[0].value, "retired-provider/old-model", "prepended, so it reads first");
+  assert.equal(sel.children[0].textContent, "retired-provider/old-model — current");
+  assert.equal(sel.children.length, 4, "and the catalogue is still all there");
+});
+
+test("a disabled model select is never given a value — there is no list to be right about", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/options": () => makeResponse(200, { models: [], thinkingLevels: [], current: "crow-local/qwen" }) }),
+  });
+  await openChatSession(hub);
+  assert.equal(hub.els["perch-model"].disabled, true);
+  assert.equal(hub.els["perch-model"].children.length, 0,
+    "an unlisted-current option must not resurrect a picker with no catalogue behind it");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q2 — a bot with no configured default
+// ---------------------------------------------------------------------------
+
+const modelsFetch = (dflt) => roostFetch(ROOST_ALL_BUSY, {
+  "/models": () => makeResponse(200, { models: LAUNCH_MODELS, default: dflt }),
+});
+
+test("a bot with NO configured default offers 'the bot's own model', preselected", async () => {
+  // Measured: 3 of 5 R4 bot defs carry models:null. Without this option nothing
+  // was preselected, the browser picked option 0, and tapping New session fired
+  // a REAL control() switch onto whatever sorted first in provider order.
+  const hub = await mountHub({ fetchImpl: modelsFetch(null) });
+  const sel = hub.els["perch-new-model"];
+  assert.equal(sel.children[0].value, "");
+  assert.equal(sel.children[0].textContent, "The bot's own model");
+  assert.equal(sel.value, "", "preselected, so one tap means what it always meant");
+});
+
+test("launching on 'the bot's own model' sends NO control at all", async () => {
+  const hub = await mountHub({ fetchImpl: modelsFetch(null) });
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const posts = hub.fetchCalls.filter((c) => c.method === "POST").map((c) => c.path);
+  assert.deepEqual(posts, ["/bots/r4-assistant/interactive"],
+    "letting the spawn resolve the model is the whole point of the option");
+});
+
+test("a default naming a model the catalogue no longer carries falls back the same way", async () => {
+  // A def pointing at a provider row that has since been disabled.
+  const hub = await mountHub({ fetchImpl: modelsFetch("retired-provider/gone") });
+  const sel = hub.els["perch-new-model"];
+  assert.equal(sel.value, "", "no silent switch onto option 0");
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(hub.fetchCalls.filter((c) => c.method === "POST").map((c) => c.path),
+    ["/bots/r4-assistant/interactive"]);
+});
+
+test("a bot WITH a configured default gets no sentinel — it already has an answer", async () => {
+  const hub = await mountHub({ fetchImpl: modelsFetch("raven-flash/flash-next") });
+  const sel = hub.els["perch-new-model"];
+  assert.equal(sel.children.filter((o) => o.value === "").length, 0);
+  assert.equal(sel.value, "raven-flash/flash-next");
+});
+
+test("the sentinel is still an explicit choice: picking a real model from it switches", async () => {
+  const hub = await mountHub({ fetchImpl: modelsFetch(null) });
+  hub.els["perch-new-model"].value = "crow-dsv4/deepseek-v4";
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const control = hub.fetchCalls.filter((c) => c.path.includes("/control"));
+  assert.equal(control.length, 1, "an operator who DID choose still gets their choice");
+  assert.deepEqual(JSON.parse(control[0].opts.body), { model: { provider: "crow-dsv4", id: "deepseek-v4" } });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q8 — the pre-2019 MediaQueryList spelling
+// ---------------------------------------------------------------------------
+
+test("the breakpoint listener binds through addListener where that is the only spelling", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), split: false, legacyMediaQuery: true });
+  await openChatSession(hub);
+  assert.equal(hub.timers.size, 0, "precondition: narrow, chat open, list hidden, nothing polling");
+  hub.mq._set(true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(hub.timers.size > 0,
+    "on that browser the re-evaluation would otherwise silently never bind");
+});
+
+// ---------------------------------------------------------------------------
+// TASK-3 item 1 — every turn's output was rendered TWICE.
+//
+// The engine streams message-level (perch-interactive.js:1257, "delta-level is
+// a recorded non-goal"), so `text` fires once per completed assistant message.
+// At turn end `reply` carries replyTextOf(end) — every assistant message of
+// that turn CONCATENATED. A two-message turn therefore rendered three entries:
+// each message, then both again as one block.
+//
+// COUNT assertions throughout: a contains-assertion passes through a duplicate
+// happily, which is how this survived.
+// ---------------------------------------------------------------------------
+
+/** Bot entries currently in the transcript, in order. */
+function botEntries(hub) {
+  return hub.els["perch-transcript"].children
+    .filter((c) => String(c.className).includes("entry") && String(c.className).includes("bot"))
+    .map((c) => (c.children.find((k) => String(k.className).includes("what")) || {}).textContent);
+}
+
+/** Drive one turn on the open session's stream. */
+function runTurn(hub, texts, replyText) {
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  for (const t of texts) es._serverFrame("text", { text: t });
+  if (replyText !== null) es._serverFrame("reply", { text: replyText });
+  return es;
+}
+
+test("a several-message turn renders one entry per message, not per message plus the join", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, ["Let me check.", "There are four boards."], "Let me check.There are four boards.");
+  assert.deepEqual(botEntries(hub), ["Let me check.", "There are four boards."],
+    "the concatenated reply must not be appended on top of the messages it is made of");
+});
+
+test("a one-message turn renders exactly one entry", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, ["Just the one."], "Just the one.");
+  assert.deepEqual(botEntries(hub), ["Just the one."]);
+});
+
+test("a ZERO-message turn still renders its reply — that text arrived by no other path", async () => {
+  // The decisive case, and it is reachable for a real operator: the stream
+  // carries NO backlog, so anyone who opens the drawer mid-turn sees no `text`
+  // frames for the messages already streamed. `reply` is then the only source
+  // of that turn's answer, and it is the more authoritative one anyway
+  // (replyTextOf reads the agent_end the engine was handed, never the child's
+  // accumulating log, which trimLog() empties).
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, [], "The whole answer, and the only copy of it.");
+  assert.deepEqual(botEntries(hub), ["The whole answer, and the only copy of it."]);
+});
+
+test("an ABORTED turn renders nothing extra and still leaves the composer usable", async () => {
+  // An aborted turn emits no reply at all (perch-interactive.js:1418 — the
+  // invariant is stated over the turn, so an abort landing during the metering
+  // awaits still silences it). The flag is cleared by the state frame, which is
+  // why dropping the append from `reply` could never have stranded it.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "half an answer" });
+  es._serverFrame("state", { state: "awake", turnInFlight: false });   // the abort's own state event
+  assert.deepEqual(botEntries(hub), ["half an answer"]);
+  assert.equal(hub.els["perch-send"].textContent, "Send", "back to Send, not stuck on Steer");
+});
+
+test("two turns in a row: the second turn's reply is judged on ITS OWN turn", async () => {
+  // The per-turn flag has to reset when a turn STARTS, or turn 2's
+  // reply-only answer would be swallowed by turn 1 having rendered.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, ["turn one streamed"], "turn one streamed");
+  runTurn(hub, [], "turn two arrived only as a reply");
+  assert.deepEqual(botEntries(hub), ["turn one streamed", "turn two arrived only as a reply"]);
+});
+
+test("a mid-turn state frame does not reset the per-turn flag and re-admit the duplicate", async () => {
+  // stateEvent() is emitted for model_select, ask_user, aborts — several can
+  // land between the first `text` and the `reply`, all carrying
+  // turnInFlight:true. Resetting on every true frame instead of on the
+  // false->true transition would put the duplicate straight back.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "the answer" });
+  es._serverFrame("state", { state: "awake", turnInFlight: true, model: "crow-local/qwen" });
+  es._serverFrame("reply", { text: "the answer" });
+  assert.deepEqual(botEntries(hub), ["the answer"]);
+});
+
+test("an empty reply on a turn that rendered nothing appends no empty entry", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  runTurn(hub, [], "");
+  assert.deepEqual(botEntries(hub), []);
+  assert.equal(hub.els["perch-send"].textContent, "Send", "and the flag is still cleared");
+});
+
+// ---------------------------------------------------------------------------
+// TASK-3 item 2 — bot markdown is rendered, from server-sanitized HTML.
+// ---------------------------------------------------------------------------
+
+/** The .what node of the last bot entry. */
+function lastWhat(hub) {
+  const entries = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("entry"));
+  const row = entries[entries.length - 1];
+  return row && row.children.find((k) => String(k.className).includes("what"));
+}
+
+test("a bot message with server-rendered html takes the sanitized-HTML path", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("state", { state: "awake", turnInFlight: true });
+  FakeEventSource.instances[0]._serverFrame("text",
+    { text: "## Boards\n\nThere are **four**.", html: "<h2>Boards</h2><p>There are <strong>four</strong>.</p>" });
+  const what = lastWhat(hub);
+  assert.equal(what.className, "what md", "a distinct class, so the stylesheet can undo pre-wrap for real blocks");
+  assert.equal(what.innerHTML, "<h2>Boards</h2><p>There are <strong>four</strong>.</p>");
+  assert.equal(what.textContent, "", "the raw markdown must not ALSO be written as text");
+});
+
+test("a message with no html falls back to textContent — byte-for-byte the old behaviour", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("state", { state: "awake", turnInFlight: true });
+  // What a failed render, an older gateway, or a non-prose frame all produce.
+  FakeEventSource.instances[0]._serverFrame("text", { text: "## not rendered" });
+  const what = lastWhat(hub);
+  assert.equal(what.className, "what");
+  assert.equal(what.textContent, "## not rendered");
+  assert.equal(what.innerHTML, "", "nothing may reach the sink without server-rendered html");
+});
+
+test("the operator's own message is never routed through the HTML sink", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  hub.els["perch-input"].value = "**not mine to render**";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const what = lastWhat(hub);
+  assert.equal(what.className, "what");
+  assert.equal(what.textContent, "**not mine to render**");
+});
+
+test("history renders each message's own html, and still one entry per message", async () => {
+  const events = [
+    { type: "message", message: { role: "user", content: "how many boards?" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "**four**" }] },
+      html: "<p><strong>four</strong></p>" },
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "board_list_boards" }] } },
+  ];
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/transcript": () => makeResponse(200, { events }) }) });
+  await openChatSession(hub);
+  const rows = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("entry"));
+  assert.equal(rows.length, 3, "one entry per message, unchanged by rendering");
+  const whats = rows.map((r) => r.children.find((k) => String(k.className).includes("what")));
+  assert.equal(whats[0].className, "what", "the user's line stays plain");
+  assert.equal(whats[1].className, "what md");
+  assert.equal(whats[1].innerHTML, "<p><strong>four</strong></p>");
+  assert.equal(whats[2].className, "what", "a tool-call message keeps the [tool: name] line");
+  assert.equal(whats[2].textContent, "[tool: board_list_boards]");
+});
+
+test("rendering does not re-open the duplicate: a turn with html still renders once", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "**one**", html: "<p><strong>one</strong></p>" });
+  es._serverFrame("text", { text: "**two**", html: "<p><strong>two</strong></p>" });
+  es._serverFrame("reply", { text: "**one****two**", html: "<p><strong>one</strong><strong>two</strong></p>" });
+  const rows = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("entry bot"));
+  assert.equal(rows.length, 2, "the concatenated reply is still suppressed when the messages rendered");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2 N1 — a reconnect across a turn boundary silently ate the answer.
+//
+// The suppression flag was client state that survived a stream teardown and
+// reset only on a turnInFlight false->true transition. A reconnect that never
+// saw the separating false frame therefore carried a stale "already rendered"
+// across into the NEXT turn and dropped its reply. The engine's
+// replay-on-subscribe does not close it: the replayed frame is true and the
+// client is already true, so there is no transition.
+//
+// The frames now carry the turn they belong to, so `reply` judges its own turn.
+// BOTH reconnect shapes are driven below, with entry COUNTS.
+// ---------------------------------------------------------------------------
+
+/** Drop the live stream the way a blip does, and let the backoff timer
+ *  re-open it — the real path (onStreamError -> options probe ->
+ *  scheduleReconnect -> openStream), not a reach into the closure. */
+async function reconnect(hub) {
+  const before = FakeEventSource.instances.length;
+  FakeEventSource.instances[before - 1]._nativeError();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  for (const fn of hub.timers.values()) fn();          // the 2s backoff, fired
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(FakeEventSource.instances.length > before, "the reconnect must actually open a new stream");
+  return FakeEventSource.instances[FakeEventSource.instances.length - 1];
+}
+
+test("N1 CROSS-turn reconnect: the next turn's reply still renders", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es1 = FakeEventSource.instances[0];
+  es1._serverFrame("state", { state: "awake", turnInFlight: true });
+  es1._serverFrame("text", { text: "turn 1 streamed half", turnId: "turn-1" });
+  assert.deepEqual(botEntries(hub), ["turn 1 streamed half"]);
+
+  // The blip: turn 1 ends and turn 2 runs inside it, so the client never sees
+  // the turnInFlight:false that separates them.
+  const es2 = await reconnect(hub);
+  es2._serverFrame("state", { state: "awake", turnInFlight: true });   // the engine's replay
+  es2._serverFrame("reply", { text: "turn 2's whole answer", turnId: "turn-2" });
+
+  assert.deepEqual(botEntries(hub), ["turn 1 streamed half", "turn 2's whole answer"],
+    "measured before the fix: turn 2 never rendered at all");
+});
+
+test("N1 SAME-turn reconnect: the reply is still suppressed, no duplicate", async () => {
+  // The case a bare reset in openStream() would have broken — which is why
+  // this is a turn id and not a reset.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es1 = FakeEventSource.instances[0];
+  es1._serverFrame("state", { state: "awake", turnInFlight: true });
+  es1._serverFrame("text", { text: "the answer", turnId: "turn-1" });
+
+  const es2 = await reconnect(hub);
+  es2._serverFrame("state", { state: "awake", turnInFlight: true });
+  es2._serverFrame("reply", { text: "the answer", turnId: "turn-1" });   // the SAME turn ends
+
+  assert.deepEqual(botEntries(hub), ["the answer"], "one entry, not two");
+});
+
+test("N1: a reply for a turn whose text was never seen renders, reconnect or not", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "turn 1", turnId: "turn-1" });
+  es._serverFrame("state", { state: "awake", turnInFlight: false });
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("reply", { text: "turn 2, reply only", turnId: "turn-2" });
+  assert.deepEqual(botEntries(hub), ["turn 1", "turn 2, reply only"]);
+});
+
+test("N1 fallback: frames with no turn id still use the transition flag", async () => {
+  // A gateway older than this script, or the child speaking outside a turn.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "streamed" });                       // no turnId
+  es._serverFrame("reply", { text: "streamed" });                      // no turnId
+  assert.deepEqual(botEntries(hub), ["streamed"], "the old mechanism still suppresses the join");
+});
+
+test("N1 sibling: an unparseable text frame appends nothing and suppresses nothing", async () => {
+  // on()'s JSON.parse failure hands the listener d={}. That used to append an
+  // empty .entry.bot AND mark the turn rendered, so the real reply was dropped
+  // too — one malformed frame cost the whole answer.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._t._dispatch("text", { data: "{ this is not json" });             // the real failure shape
+  assert.deepEqual(botEntries(hub), [], "no empty entry");
+  es._serverFrame("reply", { text: "the real answer", turnId: "turn-1" });
+  assert.deepEqual(botEntries(hub), ["the real answer"]);
 });

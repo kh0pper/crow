@@ -63,6 +63,7 @@ import { sessionBirdState, foldBirdStates } from "../dashboard/panels/bot-board/
 import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
 import { JOB_LOCK_STATUSES } from "./board-lock.js";
+import { renderMarkdown } from "../../blog/renderer.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -331,13 +332,69 @@ function readTailBytes(file, maxBytes) {
  * genuinely unknown and reporting 0 would be a lie. The lens words the notice
  * without a count in that case.
  */
+/**
+ * The markdown rendering of an assistant message, or null.
+ *
+ * Bot output IS markdown — headings, tables, bold, code fences — and rendered
+ * as literal text until this. It is rendered on the SERVER, by the same
+ * `renderMarkdown` (marked + sanitize-html with an explicit allow-list) the
+ * memory panel already uses (dashboard/panels/memory.js:20), because the
+ * client cannot import a server module and must never be handed a markdown
+ * parser plus untrusted model output.
+ *
+ * TEXT BLOCKS ONLY, and only for the assistant: a tool-call block renders as
+ * the client's own "[tool: name]" line, and the operator's own typing is not
+ * markdown. A message with no text block gets null and the client falls back
+ * to textContent, which is exactly today's behaviour.
+ *
+ * Measured cost: 0.075 ms for a typical message, so the 2000-line tail cap
+ * above bounds a history load at ~150 ms, and the 2 MB byte cap bounds the
+ * pathological case at roughly half a second. Once per session open.
+ */
+function assistantHtml(event) {
+  const message = event && event.message;
+  if (!message || message.role !== "assistant") return null;
+  const content = message.content;
+  const text = typeof content === "string"
+    ? content
+    : (Array.isArray(content)
+      ? content.filter((c) => c && typeof c.text === "string").map((c) => c.text).join("\n")
+      : "");
+  // THE correctness gate, and a short-circuit as well.
+  //
+  // An earlier version of this comment called it only a short-circuit, on the
+  // grounds that `renderMarkdown(…) || null` is already null for whitespace.
+  // That is true of THIS tree — measured: "", " ", "   ", "\n" and "\t" all
+  // render to "" — but it is marked's behaviour, not ours, and the reviewer
+  // measured `<p> </p>` from the same call on their own harness. Betting a
+  // "no html for a message with no text" guarantee on a third party's
+  // whitespace handling is the wrong way round, so the guard stays and the
+  // guarantee is stated here. It also spares a parse on every tool-call-only
+  // message, which is most of a busy turn.
+  if (!text.trim()) return null;
+  try {
+    return renderMarkdown(text) || null;
+  } catch {
+    // A render failure must not cost the operator the message: the client
+    // falls back to textContent whenever `html` is absent.
+    return null;
+  }
+}
+
 function readTranscript(file) {
   const { text, headDropped } = readTailBytes(file, TRANSCRIPT_TAIL_BYTES);
   const all = text.split("\n").filter((l) => l.trim());
   const kept = all.length > TRANSCRIPT_TAIL_LINES ? all.slice(-TRANSCRIPT_TAIL_LINES) : all;
   const events = [];
   for (const line of kept) {
-    try { events.push(JSON.parse(line)); } catch { /* skip: not our business to guess */ }
+    try {
+      const event = JSON.parse(line);
+      // Additive: `html` rides ALONGSIDE the untouched pi event, so the
+      // client keeps its own messageText() fallback and nothing downstream
+      // that reads `message` sees a changed shape.
+      const html = event && event.type === "message" ? assistantHtml(event) : null;
+      events.push(html ? { ...event, html } : event);
+    } catch { /* skip: not our business to guess */ }
   }
   return {
     events,
@@ -447,7 +504,7 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
       const rowById = new Map();
       try {
         const { rows: sessRows } = await db.execute({
-          sql: "SELECT gateway_thread_id, card_id, control FROM bot_sessions WHERE kind='perch-live' AND status != 'stopped'",
+          sql: "SELECT gateway_thread_id, card_id, control, label FROM bot_sessions WHERE kind='perch-live' AND status != 'stopped'",
           args: [],
         });
         for (const r of sessRows) rowById.set(String(r.gateway_thread_id), r);
@@ -496,6 +553,11 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
             cardId,
             pendingUi: !!s.pendingUi,
             control: dbRow ? dbRow.control : null,
+            // The operator's name for this session, ALONGSIDE the id — never
+            // instead of it. Same backfill rule as cardId above: the engine
+            // snapshot wins when this process holds the session, and the row
+            // fills in for an entry eng.list() built from the DB alone.
+            label: (s.label != null ? s.label : (dbRow && dbRow.label)) || null,
           };
         });
         // spec §3.2 priority fold: waiting-on-you > working > hibernating >

@@ -2248,6 +2248,10 @@ export const translations = {
   "perch.sessionGone": { en: "That session is gone.", es: "Esa sesión ya no existe." },
   "perch.steer": { en: "Steer", es: "Guiar" },
   "perch.noTranscript": { en: "No transcript yet.", es: "Aún no hay transcripción." },
+  "perch.transcriptFailed": {
+    en: "Could not load this session's history.",
+    es: "No se pudo cargar el historial de esta sesión.",
+  },
   "perch.reconnecting": { en: "Reconnecting…", es: "Reconectando…" },
   "perch.reconnectFailed": { en: "Lost the connection to this session.", es: "Se perdió la conexión con esta sesión." },
   "perch.modelLabel": { en: "Model", es: "Modelo" },
@@ -2269,6 +2273,17 @@ export const translations = {
   "perch.fileFailed": { en: "The image did not upload.", es: "La imagen no se subió." },
   "perch.newSession": { en: "New session", es: "Nueva sesión" },
   "perch.newSessionBot": { en: "Bot", es: "Bot" },
+  "perch.newSessionModel": { en: "Model", es: "Modelo" },
+  "perch.modelBotDefault": { en: "bot default", es: "predeterminado del bot" },
+  "perch.modelBotResolves": {
+    en: "The bot's own model",
+    es: "El modelo propio del bot",
+  },
+  "perch.modelCurrentUnlisted": { en: "current", es: "actual" },
+  "perch.launchModelFailed": {
+    en: "The session started on the bot's own model; the switch did not take.",
+    es: "La sesión se inició con el modelo propio del bot; el cambio no se aplicó.",
+  },
   "perch.noAttachedBots": {
     en: "No bot has a Perch channel attached, so there is nothing to start.",
     es: "Ningún bot tiene un canal Perch, así que no hay nada que iniciar.",
@@ -2281,6 +2296,12 @@ export const translations = {
   "perch.closeFailed": { en: "That session did not close.", es: "Esa sesión no se cerró." },
   "perch.closeFailedFor": { en: "{session} did not close.", es: "{session} no se cerró." },
   "perch.rowCard": { en: "card {id}", es: "tarjeta {id}" },
+  "perch.rename": { en: "Rename", es: "Renombrar" },
+  "perch.renamePrompt": {
+    en: "Name this session. Leave it empty to clear the name.",
+    es: "Nombra esta sesión. Déjalo vacío para quitar el nombre.",
+  },
+  "perch.renameFailed": { en: "That session was not renamed.", es: "Esa sesión no se renombró." },
   "perch.roostUnreachable": {
     en: "Could not reach the session list.",
     es: "No se pudo obtener la lista de sesiones.",
