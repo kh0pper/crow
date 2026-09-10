@@ -115,6 +115,34 @@ function lockExemptMatches(lock, lockExempt) {
 
 // ---- card side ----
 
+/**
+ * The project a card belongs to when the caller named none.
+ *
+ * A card with a NULL project_id is invisible: the Bot Board renders
+ * `WHERE project_id = ?` and the Monday sync creates remote items for the same
+ * scope, so an unprojected card exists only to whoever queries the database
+ * directly. On one instance this silently hid 97 of 190 live cards, because
+ * every card a session created arrived without one while every card pulled from
+ * Monday inherited it.
+ *
+ * When the instance has exactly ONE project board there is no ambiguity to
+ * resolve, so adopt it. With zero or several, the caller genuinely has to say,
+ * and the field stays null as before.
+ */
+async function soleProjectId(tdb) {
+  try {
+    const { rows } = await tdb.execute({
+      sql: "SELECT DISTINCT project_id FROM board_defs WHERE project_id IS NOT NULL",
+      args: [],
+    });
+    return rows.length === 1 ? Number(rows[0].project_id) : null;
+  } catch {
+    // board_defs is a Track 0 table; a store that has not migrated onto it yet
+    // keeps the old behaviour rather than failing the create.
+    return null;
+  }
+}
+
 export async function createCard(tdb, fields, actor) {
   const f = fields || {};
   let projectId = f.project_id == null ? null : Number(f.project_id);
@@ -124,6 +152,8 @@ export async function createCard(tdb, fields, actor) {
     const parent = await getCard(tdb, parentId);
     if (!parent) throw fail(`parent card not found: ${parentId}`, "bad_parent", 400);
     projectId = parent.project_id == null ? null : Number(parent.project_id);
+  } else if (projectId == null) {
+    projectId = await soleProjectId(tdb);
   }
 
   const def = await resolveBoardDef(tdb, { projectId });

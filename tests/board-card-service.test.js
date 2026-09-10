@@ -178,11 +178,49 @@ test("updateCard records a field diff and refuses archived cards", async () => {
   });
 });
 
+// ---- createCard project default ----
+
+test("createCard: adopts the sole project board when the caller names none", async () => {
+  await withStore(async ({ tdb }) => {
+    // The fixture defines exactly one project board (project_id 1) alongside a
+    // slug-scoped tracker board, which is the shape of a single-project
+    // instance. A card created without a project must land on that board, or it
+    // renders nowhere: the Bot Board and the Monday sync both scope by project.
+    const { id } = await createCard(tdb, { title: "unprojected", status: "pending" }, HUMAN);
+    const row = await getCard(tdb, id);
+    assert.equal(row.project_id, 1);
+  });
+});
+
+test("createCard: an explicit project_id still wins over the default", async () => {
+  await withStore(async ({ tdb }) => {
+    const { id } = await createCard(tdb, { title: "explicit", status: "pending", project_id: 1 }, HUMAN);
+    assert.equal((await getCard(tdb, id)).project_id, 1);
+  });
+});
+
+test("createCard: no default when the instance has several project boards", async () => {
+  await withStore(async ({ tdb }) => {
+    // Two project boards make the choice genuinely ambiguous, so the caller has
+    // to say which one and the field stays null rather than guessing.
+    await tdb.execute({
+      sql: "INSERT INTO board_defs (project_id, display_name, status_values, terminal_values, fields_json) VALUES (2,'Second',?,?,'[]')",
+      args: ['["pending","done"]', '["done"]'],
+    });
+    const { id } = await createCard(tdb, { title: "ambiguous", status: "pending" }, HUMAN);
+    assert.equal((await getCard(tdb, id)).project_id, null);
+  });
+});
+
 // ---- Track 1 review fix wave (Finding 1 + Finding 3) ----
 
 test("updateCard: project_id is a plain set (no re-inheritance), recorded in the diff", async () => {
   await withStore(async ({ tdb }) => {
     const { id } = await createCard(tdb, { title: "orphan", status: "pending" }, HUMAN);
+    // createCard adopts the instance's sole project board when the caller names
+    // none, so clear it explicitly: this test's subject is updateCard's
+    // project_id semantics, which need a genuinely unprojected starting card.
+    await updateCard(tdb, id, { project_id: null }, HUMAN);
     let row = await getCard(tdb, id);
     assert.equal(row.project_id, null);
 
