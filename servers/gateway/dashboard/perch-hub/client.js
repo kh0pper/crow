@@ -99,7 +99,6 @@ export function perchHubJs(lang = "en") {
   var SEND_FAILED='${tJs("perch.sendFailed", lang)}';
   var FILE_QUEUED='${tJs("perch.fileQueued", lang)}';
   var FILE_FAILED='${tJs("perch.fileFailed", lang)}';
-  var ATTACH_FAILED='${tJs("perch.attachFailed", lang)}';
   var NO_TRANSCRIPT='${tJs("perch.noTranscript", lang)}';
   var RECONNECTING='${tJs("perch.reconnecting", lang)}';
   var RECONNECT_FAILED='${tJs("perch.reconnectFailed", lang)}';
@@ -151,7 +150,11 @@ export function perchHubJs(lang = "en") {
   /* A bot with no session: spawn, then let the hash router open it, so history
      stays correct and the cold-deep-link path is the same code. */
   function startSession(botId,botName){
+    var mySid=current.sid;                  /* identity guard: a spawn resolving after the
+                                                operator has opened another session must not
+                                                yank them out of it */
     perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive').then(function(r){
+      if(current.sid!==mySid) return;
       if(r.status===409){ showListNote(ENGINE_REQUIRED); return; }
       if(r.status===403){ showListNote(NOT_ATTACHED); return; }
       if(!r.ok||!r.j||!r.j.sessionId){ showListNote(START_FAILED); return; }
@@ -214,6 +217,7 @@ export function perchHubJs(lang = "en") {
 
   function closeSession(){
     closeStream(); current.sid=null;
+    setTurnInFlight(false);      /* the list has no Steer/Stop to show */
     setView('list'); startListPolling(); loadList();
   }
 
@@ -505,10 +509,11 @@ export function perchHubJs(lang = "en") {
     return Array.isArray(card.options)?card.options.slice():[];
   }
 
+  /* renderAsk already branches on card.method (confirm/select handled above
+     the call site, everything else falls to the input/editor branch below),
+     so this carries only the two fields that branch actually reads. */
   function askFields(card){
-    var m=card&&card.method;
     return {
-      needsText: m==='input'||m==='editor',
       initial: (card&&card.prefill!=null)?String(card.prefill):'',
       placeholder: (card&&card.placeholder!=null)?String(card.placeholder):''
     };
@@ -631,10 +636,7 @@ export function perchHubJs(lang = "en") {
   el('perch-back').onclick=function(){ location.hash=''; };
   function abortTurn(){
     if(!current.sid) return;
-    var mySid=current.sid;
-    perchApi('POST','/interactive/'+encodeURIComponent(mySid)+'/abort').then(function(r){
-      if(current.sid!==mySid) return;
-    });
+    perchApi('POST','/interactive/'+encodeURIComponent(current.sid)+'/abort');
   }
   el('perch-abort').onclick=abortTurn;
 
@@ -650,14 +652,13 @@ export function perchHubJs(lang = "en") {
     vv.addEventListener('scroll',applyVV);
   }
 
-  /* BOOTSTRAP — the plan shipped without this once and everything looked fine.
-     Task 7 navigates with location.href='/dashboard/perch#<sid>', a FULL page
-     load, and a full load fires no hashchange. Without this line every board
-     hand-off (talk, dispatch, open, answer, the bird glyph, the #bird= deep
-     link) lands on a session list stuck on "Loading sessions…" forever,
-     because nothing kicks the first loadList() either. parseHash being
-     exhaustively unit-tested does not help: it is a pure function and it was
-     green throughout. */
+  /* BOOTSTRAP — a hashchange event fires only on a LATER change to the hash;
+     it never fires for the page's own initial load. Without this line, every
+     direct load of this page — the /perch short link, a bookmarked #<sid>
+     URL, a plain refresh — sits on the static "Loading sessions…" shell
+     forever, because nothing else calls applyHash() or loadList() on first
+     paint. parseHash being exhaustively unit-tested does not help: it is a
+     pure function and it was green throughout. */
   if(parseHash(location.hash)) applyHash();
   else { startListPolling(); loadList(); }
 })();`;
