@@ -252,9 +252,15 @@ test("the on-screen keyboard is accounted for", async () => {
   // stay where the flex column it's compensating for actually lives.
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
-  assert.match(js, /vv\.addEventListener\(\s*['"]resize['"]/,
+  // Both listeners now go through bindOnce() — the fix-round-1 Q3 guard that
+  // stops a Turbo visit stacking another copy of each. Still a SOURCE check
+  // (this file has no DOM harness), and still not a behavioural one: the
+  // proof that applyVV is really bound to both events AND really moves the
+  // padding lives in tests/perch-hub-client.test.js's "I2: applyVV is bound
+  // to BOTH visualViewport events" against a fake visualViewport.
+  assert.match(js, /bindOnce\(\s*vv\s*,\s*['"]resize['"]/,
     "the resize listener must be bound, not just the visualViewport token present");
-  assert.match(js, /vv\.addEventListener\(\s*['"]scroll['"]/,
+  assert.match(js, /bindOnce\(\s*vv\s*,\s*['"]scroll['"]/,
     "the scroll listener must be bound, not just the visualViewport token present");
   assert.match(js, /el\(\s*['"]perch-chat['"]\s*\)\.style\.paddingBottom/,
     "the keyboard-avoidance padding must land on #perch-chat, the flex column it's compensating for");

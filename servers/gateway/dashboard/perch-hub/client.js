@@ -68,11 +68,40 @@ export function perchHubJs(lang = "en") {
        whole point of keeping the registry. */
     for(var k in HUB.streams){ try{ HUB.streams[k].close(); }catch(e){} delete HUB.streams[k]; }
   };
+
+  /* ONE listener per realm, forwarding to whichever instance is current.
+
+     live() alone made a retired instance's listeners inert but left them
+     ATTACHED: measured with DOMDebugger.getEventListeners, five Turbo visits
+     took window.focus and window.hashchange from 1 to 5 while the shell's own
+     listeners stayed flat, and each retained closure holds rowIndex,
+     launchBots, launchModels and pendingImages — the last carrying base64
+     image data from any attach. The shell solves this two files away
+     (layout.js:390 / :610, "Guarded so Turbo re-executing this script does not
+     stack a new listener on every navigation"), and this is that guard with
+     one addition it does not need: the shell's handlers act on the document by
+     id, while these need INSTANCE state, so the single bound listener
+     dispatches through HUB.handlers, which each new instance overwrites with
+     its own. Bind once, always current, no growth.
+
+     live() is kept inside each handler: a retired instance with no successor
+     is still the registered handler, and must stay inert. */
+  HUB.handlers=HUB.handlers||{};
+  HUB.bound=HUB.bound||{};
+  function bindOnce(target,type,key,fn){
+    HUB.handlers[key]=fn;
+    if(HUB.bound[key]||!target||!target.addEventListener) return;
+    HUB.bound[key]=true;
+    target.addEventListener(type,function(ev){
+      var h=HUB.handlers[key]; if(h) h(ev);
+    });
+  }
+
   /* Turbo tears the document down before the next instance's script runs, so
      retire on the way out too: without it this instance keeps a live SSE
      connection (and a gateway-side subscriber) for the whole time the
      operator is looking at some other panel. */
-  document.addEventListener('turbo:before-render',function(){ if(live()) HUB.retire(); });
+  bindOnce(document,'turbo:before-render','beforeRender',function(){ if(live()) HUB.retire(); });
 
   /* The two transcript writers. Defined HERE because the error and
      empty-transcript paths call them, and those are the FIRST paths a user
@@ -197,6 +226,8 @@ export function perchHubJs(lang = "en") {
   var ASK_SUBMIT='${tJs("perch.askSubmit", lang)}';
   var NO_ATTACHED_BOTS='${tJs("perch.noAttachedBots", lang)}';
   var MODEL_BOT_DEFAULT='${tJs("perch.modelBotDefault", lang)}';
+  var MODEL_BOT_RESOLVES='${tJs("perch.modelBotResolves", lang)}';
+  var MODEL_CURRENT_UNLISTED='${tJs("perch.modelCurrentUnlisted", lang)}';
   var LAUNCH_MODEL_FAILED='${tJs("perch.launchModelFailed", lang)}';
   var CLOSE_LABEL='${tJs("perch.close", lang)}';
   var CLOSE_CONFIRM='${tJs("perch.closeConfirm", lang)}';
@@ -402,6 +433,22 @@ export function perchHubJs(lang = "en") {
     var sel=el('perch-new-model'), lbl=el('perch-new-model-label');
     if(!sel) return;
     clearEl(sel);
+    var listed=dflt&&list.filter(function(m){ return (m&&m.provider)+'/'+(m&&m.id)===dflt; }).length>0;
+    /* NO CONFIGURED DEFAULT — the common case on this instance: 3 of 5 R4 bot
+       defs carry models:null, and a def naming a since-disabled provider row
+       lands here too. Without this option nothing was preselected, the browser
+       picked option 0, and startSession() then saw a value different from the
+       (null) default and fired a REAL control() switch — so one tap on
+       "New session" silently moved the session onto whatever sorted first in
+       provider order, where spawn would have resolved model_resolver.mjs's own
+       fallback. An empty value means "send no control at all", which is
+       exactly what letting the spawn decide has to mean. */
+    if(!listed){
+      var none=document.createElement('option');
+      none.value='';                                   /* startSession(): falsy => no control() */
+      none.textContent=MODEL_BOT_RESOLVES;
+      sel.appendChild(none);
+    }
     list.forEach(function(m){
       var opt=document.createElement('option');
       var key=(m&&m.provider)+'/'+(m&&m.id);
@@ -412,9 +459,12 @@ export function perchHubJs(lang = "en") {
       opt.textContent=modelOptionText(m)+(key===dflt?' \u2014 '+MODEL_BOT_DEFAULT:'');
       sel.appendChild(opt);
     });
-    /* Pre-selected on the bot's own configured model: an operator who does
-       not care taps the button and gets what the bot was built with. */
-    if(dflt&&list.filter(function(m){ return (m&&m.provider)+'/'+(m&&m.id)===dflt; }).length) sel.value=dflt;
+    /* Pre-selected on the bot's own configured model when there IS one: an
+       operator who does not care taps the button and gets what the bot was
+       built with. With no default the sentinel above is option 0 and the
+       browser selects it unaided — an explicit sel.value='' here was measured
+       redundant (removing it left every test green), so it is not written. */
+    if(listed) sel.value=dflt;
     sel.hidden=false;
     if(lbl) lbl.hidden=false;
   }
@@ -619,7 +669,9 @@ export function perchHubJs(lang = "en") {
      1900px window saw "R4 Assistant / idle" with a Talk button next to the
      awake session he was typing in, and no Close anywhere on that surface,
      because Close only exists on a live row. */
-  var SPLIT=window.matchMedia?window.matchMedia('(min-width:${PERCH_SPLIT_MIN_WIDTH}px)'):null;
+  /* ONE MediaQueryList per realm: window.matchMedia() mints a new object every
+     call, so a per-instance one could never be bound once. */
+  var SPLIT=HUB.split||(HUB.split=(window.matchMedia?window.matchMedia('(min-width:${PERCH_SPLIT_MIN_WIDTH}px)'):null));
   function listOnScreen(){ return body.getAttribute('data-view')==='list'||!!(SPLIT&&SPLIT.matches); }
   function syncListPolling(){
     if(listOnScreen()){ startListPolling(); loadList(); }
@@ -629,9 +681,23 @@ export function perchHubJs(lang = "en") {
      navigation — the same class of problem shared/layout.js's own sidebar
      matchMedia listener handles, and the same guard: a retired instance must
      not start polling again from here. */
-  if(SPLIT&&SPLIT.addEventListener) SPLIT.addEventListener('change',function(){ if(live()) syncListPolling(); });
+  /* addListener is the pre-2019 Safari spelling; still the only one there —
+     the shell's own breakpoint listener carries the same fallback
+     (layout.js:~620), and without it the re-evaluation silently never binds on
+     that browser. bindOnce handles the modern spelling; the legacy branch
+     repeats its bookkeeping because MediaQueryList.addListener is not
+     addEventListener. */
+  if(SPLIT&&SPLIT.addEventListener){
+    bindOnce(SPLIT,'change','splitChange',function(){ if(live()) syncListPolling(); });
+  } else if(SPLIT&&SPLIT.addListener){
+    HUB.handlers.splitChange=function(){ if(live()) syncListPolling(); };
+    if(!HUB.bound.splitChange){
+      HUB.bound.splitChange=true;
+      SPLIT.addListener(function(ev){ var h=HUB.handlers.splitChange; if(h) h(ev); });
+    }
+  }
 
-  window.addEventListener('focus',function(){
+  bindOnce(window,'focus','focus',function(){
     if(!live()) return;
     if(listOnScreen()) loadList();
   });
@@ -709,7 +775,7 @@ export function perchHubJs(lang = "en") {
     var hit=parseHash(location.hash);
     if(hit) openSession(hit.sessionId); else closeSession();
   }
-  window.addEventListener('hashchange',function(){ if(live()) applyHash(); });
+  bindOnce(window,'hashchange','hashchange',function(){ if(live()) applyHash(); });
 
   function planStateText(st){
     if(!st||typeof st!=='object') return typeof st==='string'?st:'';
@@ -801,6 +867,11 @@ export function perchHubJs(lang = "en") {
       /* Reflects the engine's own record (snapshot()/stateEvent() in
          perch-interactive.js), never the picker back at it — setting
          .value/.checked does not fire change, so this cannot loop. */
+      /* d.model is servingModel(): pi's own /model, an auto-fallback, or the
+         echo of our own switch. It was on the wire all along and ignored —
+         which is how the picker came to assert a model nobody measured. */
+      var modelSel=el('perch-model');
+      if(modelSel&&d.model&&!modelSel.disabled) selectCurrentModel(modelSel,d.model);
       if(d.permissionMode){ var permSel=el('perch-permission'); if(permSel) permSel.value=d.permissionMode; }
       var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=!!d.planMode;
     });
@@ -916,14 +987,37 @@ export function perchHubJs(lang = "en") {
   }
 
   /* One list, one answer: a non-empty array is usable, anything else (null,
-     [], absent, a non-array) is not. */
+     [], absent, a non-array) is not. THE gate for both pickers — an
+     \`optionsUsable()\` that ANDed the two lists together lived here until fix
+     round 1 Q5 found it was called by nothing but its own tests. */
   function listUsable(a){ return !!(Array.isArray(a)&&a.length); }
-  function optionsUsable(o){
-    return !!o&&listUsable(o.models)&&listUsable(o.thinkingLevels);
+
+  /* Point the model select at the model the session is ACTUALLY on.
+
+     Fix round 1 Q1: nothing ever assigned modelSel.value, so a populated
+     select read whichever option sorted first and asserted a model the
+     session had never been measured on — on the one control this feature
+     exists for, answering "which model is this session running?" wrongly.
+     The empty disabled select it replaced was unhelpful but honest.
+
+     A key the list does not carry is still the truth (a provider row removed
+     since the session started, or a model pi resolved on its own), so it is
+     PREPENDED rather than dropped: selecting nothing at all would report the
+     same "don't know" as before. */
+  function selectCurrentModel(sel,current){
+    if(!sel||!current) return;
+    for(var i=0;i<sel.options.length;i++){
+      if(sel.options[i].value===current){ sel.value=current; return; }
+    }
+    var opt=document.createElement('option');
+    opt.value=current;
+    opt.textContent=current+' \u2014 '+MODEL_CURRENT_UNLISTED;
+    sel.insertBefore(opt,sel.firstChild);
+    sel.value=current;
   }
 
   /* Populates #perch-model / #perch-thinking from GET .../options, or
-     disables both rather than leaving an empty-but-enabled dropdown — that
+     disables each rather than leaving an empty-but-enabled dropdown — that
      is what made a hibernating session look broken. */
   function renderOptions(o){
     var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
@@ -946,6 +1040,7 @@ export function perchHubJs(lang = "en") {
        dropdown that looks like a broken page, and never a disabled one for a
        list that is right there. */
     modelSel.disabled=!models; thinkSel.disabled=!levels;
+    if(models) selectCurrentModel(modelSel,o&&o.current);
   }
 
   function loadOptions(sid){
@@ -1181,8 +1276,8 @@ export function perchHubJs(lang = "en") {
       var hidden=Math.max(0,window.innerHeight-vv.height-vv.offsetTop);
       el('perch-chat').style.paddingBottom=hidden?hidden+'px':'';
     };
-    vv.addEventListener('resize',applyVV);
-    vv.addEventListener('scroll',applyVV);
+    bindOnce(vv,'resize','vvResize',applyVV);
+    bindOnce(vv,'scroll','vvScroll',applyVV);
   }
 
   /* BOOTSTRAP — a hashchange event fires only on a LATER change to the hash;

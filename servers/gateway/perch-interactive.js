@@ -433,6 +433,15 @@ export function createInteractiveEngine({
     };
   }
 
+  /** The model this session is actually on: the engine's own tracking (a live
+   *  `model_select`, or a `control()` switch) wins over the raw prepareSpawn
+   *  resolution once one is known. ONE expression, because snapshot(),
+   *  stateEvent() and options() must never disagree about it — the drawer
+   *  cross-checks the picker against exactly this value. */
+  function servingModel(s) {
+    return s.currentModel || (s.resolved ? s.resolved.key : null);
+  }
+
   function snapshot(s) {
     return {
       sessionId: s.sessionId,
@@ -446,7 +455,7 @@ export function createInteractiveEngine({
       // prepareSpawn resolution once one is known (a live model_select or a
       // control() switch), so the lens reports the model actually serving
       // the NEXT turn, not just the one the last spawn/wake resolved to.
-      model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      model: servingModel(s),
       label: s.label || null,
       permissionMode: s.permissionMode,
       planMode: s.planMode,
@@ -514,7 +523,7 @@ export function createInteractiveEngine({
       lastError: s.lastError || null,
       pendingUi: s.pendingUi || null,
       // Track 3 Task 4: same three additions as snapshot(), same rule.
-      model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      model: servingModel(s),
       label: s.label || null,
       permissionMode: s.permissionMode,
       planMode: s.planMode,
@@ -697,13 +706,18 @@ export function createInteractiveEngine({
     }
   }
 
-  /** Persist the operator's session name. Targeted UPDATE by row id — see
-   * rename()'s doc for why this is not writeRow. A session with no row yet
-   * (rowId null) has nothing to write to, and minting one here would create a
-   * phantom row for a session that never spawned; the in-memory label still
-   * rides the next writeRow the normal lifecycle performs. */
+  /** Persist the operator's session name. Targeted UPDATE by row id, and the
+   * ONLY writer of `label` — see rename()'s doc for why it is not writeRow,
+   * and note that writeRow deliberately does not touch the column either.
+   *
+   * A session with no row (rowId null) cannot be persisted to at all, and
+   * minting one here would create a phantom row for a session that never
+   * spawned. Nothing later repairs it either — writeRow does not carry the
+   * label — so this THROWS rather than returning quietly: fix round 1 Q4
+   * found the silent version answering HTTP 200 with the label, painting it
+   * into the list and the header, and storing nothing. */
   async function writeLabel(s) {
-    if (s.rowId == null) return;
+    if (s.rowId == null) throw engineError("not_persisted");
     const db = createDbClient();
     try {
       await db.execute({
@@ -1945,18 +1959,27 @@ export function createInteractiveEngine({
    * nothing), so offering the picker would promise a change that never
    * happens. `source` names which half answered, so a caller never has to
    * infer it from the shape.
+   *
+   * `current` is the model the session is ACTUALLY on — the same value
+   * `snapshot()`/`stateEvent()` report. Fix round 1 Q1: without it a caller
+   * has a list and no way to know which entry is live, and the drawer showed
+   * whichever option sorted first. A list that asserts the wrong answer is
+   * worse than the empty one it replaced, on the one control this feature
+   * exists for.
    */
   async function options(sessionId) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
-    if (!s.pi) return { models: await catalogModels(), thinkingLevels: null, source: "providers" };
+    if (!s.pi) return { models: await catalogModels(), thinkingLevels: null, current: servingModel(s), source: "providers" };
     const [modelsRes, levelsRes] = await Promise.all([
       s.pi.commandSince({ type: "get_available_models" }),
       s.pi.commandSince({ type: "get_available_thinking_levels" }),
     ]);
     const models = (modelsRes && modelsRes.data && modelsRes.data.models) || [];
     const thinkingLevels = (levelsRes && levelsRes.data && levelsRes.data.levels) || [];
-    return { models, thinkingLevels, source: "child" };
+    // Read AFTER the RPCs: a model_select the child emitted while we were
+    // waiting is the newest truth, and the picker is about to be set from it.
+    return { models, thinkingLevels, current: servingModel(s), source: "child" };
   }
 
   /**
@@ -1967,9 +1990,11 @@ export function createInteractiveEngine({
    */
   async function catalogModels() {
     try {
-      if (providerModels) return providerModels() || [];
+      if (providerModels) return (await providerModels()) || [];
       const mod = await import("./perch-model-catalog.js");
-      return mod.providerModelList() || [];
+      // The WARM variant: a cold provider cache would otherwise answer [] and
+      // put the drawer back into the empty-disabled-picker state this fixes.
+      return (await mod.providerModelListWarm()) || [];
     } catch (e) {
       log("provider catalogue unavailable: " + (e && e.message));
       return [];
@@ -2054,9 +2079,14 @@ export function createInteractiveEngine({
    * whitespace-only label CLEARS the name (normalizeLabel returns null), which
    * is a real action and not a way to make a session anonymous.
    *
-   * Persisted on the session's own bot_sessions row through the SAME writeRow
-   * every other state change goes through — no second store to keep in sync —
-   * and adoptRow restores it, so a rename survives a gateway restart.
+   * Persisted on the session's own bot_sessions row — no second store to keep
+   * in sync — by writeLabel(), which is its single writer. Deliberately NOT
+   * through writeRow: that stamps `status` and resets `control` to 'run', and
+   * a rename must not quietly clear the 'interrupted' flag stopAll() sets on a
+   * session that was mid-turn when the gateway went down (the drawer reads it
+   * to say "interrupted, not answered"). writeRow's own args list says the
+   * same thing from the other side. adoptRow restores the label, so a rename
+   * survives a gateway restart.
    *
    * A STOPPED session is still renameable: the row and its transcript outlive
    * the child, and naming one while sorting through what happened is exactly
@@ -2066,13 +2096,18 @@ export function createInteractiveEngine({
   async function rename(sessionId, label) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
-    s.label = normalizeLabel(label);
-    // A targeted UPDATE, not writeRow: writeRow also stamps `status` and
-    // resets `control` to 'run', and a rename must not quietly clear the
-    // 'interrupted' flag stopAll() sets on a session that was mid-turn when
-    // the gateway went down — the drawer reads that to say "interrupted, not
-    // answered". Same shape and same idiom as writePiSessionId().
-    await writeLabel(s);
+    const next = normalizeLabel(label);
+    // Persist FIRST, then adopt it in memory: a rename that could not be
+    // written must not leave the engine reporting a name the row does not
+    // carry (writeLabel throws `not_persisted` for a session with no row).
+    const previous = s.label;
+    s.label = next;
+    try {
+      await writeLabel(s);
+    } catch (e) {
+      s.label = previous;
+      throw e;
+    }
     emit(s, stateEvent(s));
     return { label: s.label };
   }
@@ -2311,6 +2346,11 @@ export function createInteractiveEngine({
       if (!s) throw engineError("no_such_session");
       return hibernate(s);
     },
+    /** Fix round 1 Q4 test surface: the internal session record, so a test can
+     * produce the "no row yet" state (rowId null) that rename() must refuse.
+     * No public method exposes it, and spawning a session that fails to get a
+     * row is not reachable through the API. */
+    _sessionRecordForTest: (sessionId) => sessions.get(String(sessionId)) || null,
     /** M2 (final review) test-only reach into the internal `cardClaims` map
      * — the DB rail (checkCardFree) always 409s correctly regardless of this
      * map's state, so no PUBLIC method exposes WHICH sessionId currently

@@ -898,9 +898,44 @@ test("POST /interactive/:sid/rename with no label at all is a clear, not a crash
 
 test("POST /interactive/:sid/rename maps the engine's refusals", async () => {
   engineImpl.rename = async () => { throw engineErr("no_such_session"); };
-  const { status, body } = await postJson("/interactive/perchlive-abc/rename", { label: "x" });
-  assert.equal(status, 404);
-  assert.equal(body.error, "no_such_session");
+  let r = await postJson("/interactive/perchlive-abc/rename", { label: "x" });
+  assert.equal(r.status, 404);
+  assert.equal(r.body.error, "no_such_session");
+
+  // Fix round 1 Q4: a session with no row cannot be persisted to. 409 with an
+  // honest code, never a 200 carrying a label nothing stored.
+  engineImpl.rename = async () => { throw engineErr("not_persisted"); };
+  r = await postJson("/interactive/perchlive-abc/rename", { label: "x" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "not_persisted");
+});
+
+test("GET /bots/:id/models awaits the catalogue, so a cold provider cache is not served as an empty list", async () => {
+  // Fix round 1 Q6: the seam is async here on purpose — providerModelListWarm
+  // awaits a real refresh when the synchronous loader answers empty.
+  catalogueImpl = null;
+  let resolveIt;
+  const pending = new Promise((r) => { resolveIt = r; });
+  const slow = () => { catalogueCalls++; return pending; };
+  const { default: router } = await import("../servers/gateway/routes/perch-interactive-api.js");
+  const { default: express } = await import("express");
+  const app = express();
+  app.use(express.json());
+  app.use(router((req, res, next) => next(), {
+    engine: () => engineImpl,
+    annotate: async (models) => models.map((m) => ({ ...m, availability: "up" })),
+    providerModels: slow,
+  }));
+  const srv = await new Promise((r) => { const x = app.listen(0, "127.0.0.1", () => r(x)); });
+  try {
+    const url = "http://127.0.0.1:" + srv.address().port + "/dashboard/perch-api/bots/chatty/models";
+    const inFlight = fetch(url).then(async (res) => ({ status: res.status, body: await res.json() }));
+    resolveIt([{ provider: "local", id: "qwen", baseUrl: "u" }]);
+    const { status, body } = await inFlight;
+    assert.equal(status, 200);
+    assert.deepEqual(body.models.map((m) => m.provider + "/" + m.id), ["local/qwen"],
+      "a route that did not await would have served the unresolved value as an empty list");
+  } finally { srv.close(); }
 });
 
 // ---------------------------------------------------------------------------

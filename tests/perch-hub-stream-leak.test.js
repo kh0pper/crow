@@ -136,6 +136,20 @@ async function session(width = 1900, height = 900) {
     if (out.exceptionDetails) throw new Error("page threw: " + JSON.stringify(out.exceptionDetails));
     return out.result.value;
   };
+  await send("DOM.enable");
+  await send("Runtime.enable");
+  /** Real registered listeners on window/document, counted by type. Not a
+   *  page-side proxy: DOMDebugger reads the browser's own listener table, so a
+   *  handler that is inert but still ATTACHED is still counted. */
+  const listenerCounts = async () => {
+    const out = {};
+    for (const [label, expr] of [["window", "window"], ["document", "document"]]) {
+      const handle = await send("Runtime.evaluate", { expression: expr, returnByValue: false });
+      const { listeners } = await send("DOMDebugger.getEventListeners", { objectId: handle.result.objectId, depth: 0 });
+      for (const l of listeners) { const k = label + "." + l.type; out[k] = (out[k] || 0) + 1; }
+    }
+    return out;
+  };
   // Count the EventSource objects the page constructs. The wrapper survives
   // Turbo visits (window does), which is exactly why it can see the leak.
   await evalIn(`(function(){
@@ -150,6 +164,7 @@ async function session(width = 1900, height = 900) {
     evalIn,
     json: async (expr) => JSON.parse(await evalIn(expr)),
     turboLoaded: async () => (await evalIn(`typeof window.Turbo`)) === "object",
+    listenerCounts,
     visit: async (url) => { await evalIn(`Turbo.visit(${JSON.stringify(url)},{action:'replace'}); 'go'`); await sleep(1200); },
     open: async () => { await evalIn(`location.hash='${SID}'; 'go'`); await sleep(2200); },
     close: async () => { ws.close(); await fetch(CDP + "/json/close/" + tab.id).catch(() => {}); },
@@ -262,5 +277,33 @@ test("a stream this instance never opened is still closable — by identity, fro
     assert.equal(openStreams.length, 1,
       `exactly one connection may remain; ${openStreams.length} are open`);
     assert.equal(seen.esLive, 1);
+  } finally { await s.close(); }
+});
+
+test("five Turbo visits retain five instances but not five listeners", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const s = await session();
+  try {
+    const before = await s.listenerCounts();
+    assert.equal(await s.evalIn("window.__crowPerchHub.gen"), 1, "one instance so far");
+    for (let i = 0; i < 4; i++) await s.visit("/dashboard/perch");
+    const gen = await s.evalIn("window.__crowPerchHub.gen");
+    assert.equal(gen, 5, "fixture check: five script instances really did run, or this proves nothing");
+
+    const after = await s.listenerCounts();
+    // Fix round 1 Q3. live() made a retired instance's listeners inert but
+    // left them ATTACHED, and each retained closure holds rowIndex,
+    // launchBots, launchModels and pendingImages — the last carrying base64
+    // image data from any attach. Measured before the fix: 1 -> 5 on each of
+    // these, while the shell's own listeners stayed flat because it guards
+    // its bindings (layout.js:390 / :610).
+    for (const key of ["window.focus", "window.hashchange", "document.turbo:before-render"]) {
+      assert.equal(after[key], 1, `${key} grew to ${after[key]} across ${gen} instances`);
+      assert.equal(before[key], 1, `${key} must start at 1`);
+    }
+    // The shell's own, as the control: if THESE grew, the page is stacking
+    // listeners for a reason that has nothing to do with this script.
+    assert.equal(after["document.keydown"], before["document.keydown"],
+      "control: the shell's listeners must be flat too, or the measurement is about something else");
   } finally { await s.close(); }
 });

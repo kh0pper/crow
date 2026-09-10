@@ -60,9 +60,9 @@ const ENGINE_SESSIONS = [
   { sessionId: "asker-b", botId: "asker", state: "hibernating", pendingUi: null, cardId: null },
   { sessionId: "sleepy-1", botId: "sleepy", state: "hibernating", pendingUi: null, cardId: null },
 ];
-// asker-b's label is deliberately absent from the engine snapshot and present
-// on its ROW: the DB backfill has to cover an entry eng.list() built without
-// one, exactly as it does for cardId.
+// chatty-1 carries its label on the ENGINE snapshot, which must win.
+// (asker-b gets the mirror case — a label on its ROW only — seeded in
+// before(), so the DB backfill is covered too.)
 ENGINE_SESSIONS[0].label = "Nov package copy pass";
 
 let server, noEngineServer, defaultServer, base, noEngineBase, defaultBase;
@@ -90,6 +90,9 @@ before(async () => {
   insSession.run("chatty", "perch", "chatty-2", "perch-live", "stopped", 99, "run");
   insSession.run("asker", "perch", "asker-a", "perch-live", "active", 11, "run");
   insSession.run("asker", "perch", "asker-b", "perch-live", "waiting-user", null, "run");
+  // The mirror of chatty-1 above: no label on the engine snapshot, one on the
+  // row — the DB backfill has to cover an entry eng.list() built without one,
+  // exactly as it does for cardId.
   c.prepare("UPDATE bot_sessions SET label=? WHERE gateway_thread_id=?").run("named on the row only", "asker-b");
   insSession.run("sleepy", "perch", "sleepy-1", "perch-live", "waiting-user", null, "run");
 

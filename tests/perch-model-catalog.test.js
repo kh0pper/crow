@@ -4,7 +4,7 @@
 // class the module exists to prevent, so this pins the SHAPE both consume.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { providerModelList, modelKey } from "../servers/gateway/perch-model-catalog.js";
+import { providerModelList, providerModelListWarm, modelKey, chatCapable } from "../servers/gateway/perch-model-catalog.js";
 
 const cfg = (providers) => ({ load: () => ({ providers }) });
 
@@ -85,4 +85,55 @@ test("the default source really is loadProviders — the established session-fre
   // to bite the first operator who opens the launcher on a live box.
   const list = providerModelList();
   assert.ok(Array.isArray(list), "the DB/models.json-backed default must return a list, whatever this host has");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q7 — an endpoint that answers is not a model you can talk to.
+// ---------------------------------------------------------------------------
+
+test("embedding and reranker entries are not offered as session models", async () => {
+  // Measured on the live R4 registry: grackle-embed/qwen3-embedding-0.6b and
+  // grackle-rerank/qwen3-reranker-0.6b were listed reading "— up", because
+  // annotateAvailability answers "did anything answer at this address" and an
+  // embedding server does. One tap from being a session's model, and every
+  // turn on it would fail.
+  const list = providerModelList(cfg({
+    "grackle-embed": { baseUrl: "http://g:9100/v1", models: [{ id: "qwen3-embedding-0.6b", task: "embed", dim: 1024 }] },
+    "grackle-rerank": { baseUrl: "http://g:9101/v1", models: [{ id: "qwen3-reranker-0.6b", task: "score" }] },
+    "crow-local": { baseUrl: "http://c:8003/v1", models: [{ id: "qwen3.6-35b-a3b" }] },
+  }));
+  assert.deepEqual(list.map(modelKey), ["crow-local/qwen3.6-35b-a3b"]);
+});
+
+test("the exclusion is by TASK, and covers both spellings the repo uses", async () => {
+  // Provider rows on this instance say task:"embed"/"score"; the model catalog
+  // vocabulary (scripts/validate-model-catalog.js:75) says
+  // "embedding"/"rerank". Both are non-chat and both are excluded.
+  for (const task of ["embed", "embedding", "rerank", "score", "classify", "EMBED"]) {
+    assert.equal(chatCapable({ id: "m", task }), false, task + " must not be offered");
+  }
+});
+
+test("no task at all means chat — most provider rows never tag their models", async () => {
+  // A strict allowlist would empty the picker on this instance: not one
+  // crow-local/zai-coding/qwen-cloud entry carries a task field.
+  assert.equal(chatCapable({ id: "m" }), true);
+  assert.equal(chatCapable({ id: "m", task: null }), true);
+  assert.equal(chatCapable({ id: "m", task: "chat" }), true);
+  // vision, deliberately: models/manager.js's own isChatClassRow counts
+  // task:"vision" as chat-class, and a -vl-…-instruct model serves chat
+  // completions. Filtering it out would drop a model an operator can use.
+  assert.equal(chatCapable({ id: "qwen3-vl-4b-instruct-fp8", task: "vision" }), true);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q6 — the cold-cache window
+// ---------------------------------------------------------------------------
+
+test("the warm variant does not try to warm an INJECTED loader", async () => {
+  // A test seam has no cache to refresh, and warming one would reach for the
+  // real DB from a hermetic test.
+  assert.deepEqual(await providerModelListWarm(cfg({})), []);
+  assert.deepEqual((await providerModelListWarm(cfg({ p: { baseUrl: "u", models: [{ id: "m" }] } }))).map(modelKey),
+    ["p/m"]);
 });
