@@ -85,6 +85,7 @@ const IDENTICAL_OK = new Set([
   "onboarding.ai.sizeGb", // "{gb} GB" — the unit abbreviation is unchanged in Spanish
   // Bot-engine uninstall blast-radius (C4 Task 10)
   "extensions.engineBlastItem", // "{name} ({types})" — pure template shape, no words to translate
+  "perch.title", // a product name, identical in both languages
 ]);
 
 const keys = Object.keys(translations);

@@ -7,6 +7,7 @@ import express from "express";
 import { renderLayout, renderLogin, render2faVerify, render2faRecovery, render2faSetup, renderResetRequest, renderResetForm } from "./shared/layout.js";
 import { playerBarHtml, playerBarJs } from "./shared/player.js";
 import { headerIconsHtml, headerIconsJs, tamagotchiHtml, tamagotchiJs } from "./shared/notifications.js";
+import perchHubRouter from "../routes/perch-hub.js";
 import {
   dashboardAuth,
   isPasswordSet,
@@ -711,6 +712,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // Normal mount (session-cookie-authenticated path)
   router.use("/dashboard", bundlesRouter);
+
+  router.use("/dashboard", perchHubRouter(dashboardAuth));
+  // Short link. Outside the /dashboard mount, so it carries no auth — it is a
+  // redirect with no content, and the destination is fully gated.
+  router.get("/perch", (req, res) => res.redirect(302, "/dashboard/perch"));
 
   // SSO launch — authenticated on THIS instance (after dashboardAuth). Mints a
   // signed ticket for a paired+trusted target and 302s the browser to the
