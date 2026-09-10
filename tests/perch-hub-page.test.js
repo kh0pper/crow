@@ -308,11 +308,20 @@ test("the launcher ships disabled, so the pre-data frame never claims there are 
 });
 
 test("the chat-view close control is in the header, not in the sticky composer", async () => {
-  // #perch-composer{position:sticky;bottom:0} is the whole reason Send is
-  // reachable at any scroll position (the drawer's defining mobile failure).
-  // A control added INTO that box changes its height and puts that property
-  // back in play; .perch-head is a non-scrolling flex child of #perch-chat and
-  // is permanently on screen without touching the composer at all.
+  // Send stays reachable because #perch-chat{flex:1;min-height:0} and
+  // #perch-transcript{flex:1;overflow:auto;min-height:0} make the TRANSCRIPT the
+  // only scroller, so .content-body never scrolls and the composer never leaves
+  // the viewport. #perch-composer{position:sticky;bottom:0} is the BACKSTOP, not
+  // the mechanism: measured, killing sticky in the shipped config is
+  // pixel-identical (Send 668-704 at 412x730), while removing the flex chain
+  // scrolls .content-body ~2962px with sticky still holding Send. Both matter;
+  // the order matters more, because a maintainer who believes sticky is the
+  // mechanism will delete the flex chain and the pre-existing reachability tests
+  // stay GREEN through that deletion.
+  //
+  // Either way a control added INTO the composer changes its box and puts the
+  // backstop in play, so .perch-head — a non-scrolling flex child of #perch-chat,
+  // permanently on screen — is where it belongs.
   const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
   const html = perchHubContent("en");
   const close = html.indexOf('id="perch-close"');

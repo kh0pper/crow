@@ -57,10 +57,11 @@ export function perchHubCss() {
    its select is capped so a long bot name cannot push the button off-screen. */
 #perch-launch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 0 12px}
 /* Same 44px floor as the row controls: this is the primary action on the page
-   and it is tapped with a thumb. Scoped to #perch-new — NOT the shared button
-   rule, which also sizes #perch-send inside the sticky composer whose box is
-   what keeps Send reachable. */
-#perch-new{min-height:44px}
+   and it is tapped with a thumb. Two ids, matching #perch-close: one id ties
+   with #perch-hub-root button on specificity and wins only on source order, and
+   that near-miss is exactly how #perch-close shipped at 36px. Deliberately NOT
+   the shared button rule, which also sizes #perch-send. */
+#perch-hub-root #perch-new{min-height:44px}
 #perch-launch select{font:14px Inter,system-ui,sans-serif;padding:9px 10px;border:1px solid var(--line);
 border-radius:10px;background:var(--sky);color:var(--ink);flex:1 1 140px;min-width:0;max-width:100%}
 /* By id, for the same reason as #perch-close above: "#perch-launch .empty" is
