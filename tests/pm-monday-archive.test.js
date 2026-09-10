@@ -230,6 +230,145 @@ test("syncTwowayBoard: archived+unmapped done card is not created remotely (no r
 });
 
 // ---------------------------------------------------------------------------
+// 2b. an unarchived-but-FINISHED unmapped card is not created remotely either
+// ---------------------------------------------------------------------------
+test("syncTwowayBoard: unmapped card in a terminal status is not created remotely", async () => {
+  const f = fixture();
+  // stubFetchOk, NOT stubFetchThrows: with every create failing, a test that
+  // merely checks "no mapping for the done card" passes even with the guard
+  // removed. Letting creates SUCCEED is what makes the assertion discriminate.
+  const fetchStub = stubFetchOk();
+  try {
+    const { createDbClient } = await import("../servers/db.js");
+    const { syncTwowayBoard } = await import("../bundles/pm-workspace/server/sync/monday.js");
+
+    const t = new Database(f.tasksDbPath);
+    // None of these are archived, they are merely finished. Archiving is only
+    // ONE of the ways a card leaves the board; a card can sit done-and-live
+    // indefinitely, and publishing it would announce completed work as new.
+    const ids = {};
+    for (const [title, status] of [["Done Card", "done"], ["Cancelled Card", "cancelled"], ["Open Card", "pending"]]) {
+      ids[title] = Number(
+        t.prepare("INSERT INTO tasks_items (title, status, project_id) VALUES (?,?,?)")
+          .run(title, status, PROJECT_ID).lastInsertRowid
+      );
+    }
+    t.close();
+
+    const cdb = createDbClient(f.crowDbPath);
+    const tdb = createDbClient(f.tasksDbPath);
+    const totals = { created: 0, updated: 0, pushed: 0, conflicts: 0, flagged: 0, errors: 0 };
+
+    await syncTwowayBoard(cdb, tdb, kanbanBoard(), [], "test-token", totals);
+
+    assert.equal(totals.errors, 0);
+    assert.equal(totals.created, 1, "exactly one of the three cards may reach Monday");
+
+    const mapped = (await cdb.execute({
+      sql: "SELECT local_id FROM pm_sync_state WHERE local_kind='kanban'", args: [],
+    })).rows.map((r) => Number(r.local_id));
+    assert.deepEqual(mapped, [ids["Open Card"]], "and it is the open one");
+
+    await cdb.close();
+    await tdb.close();
+  } finally {
+    fetchStub.restore();
+    cleanup(f);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 2b-ii. an item created during the run is not then reported as vanished
+// ---------------------------------------------------------------------------
+test("syncTwowayBoard: a freshly created item is not flagged as deleted in the same run", async () => {
+  const f = fixture();
+  const fetchStub = stubFetchOk();
+  try {
+    const { createDbClient } = await import("../servers/db.js");
+    const { syncTwowayBoard } = await import("../bundles/pm-workspace/server/sync/monday.js");
+
+    const t = new Database(f.tasksDbPath);
+    t.prepare("INSERT INTO tasks_items (title, status, project_id) VALUES (?,?,?)")
+      .run("Brand New Card", "pending", PROJECT_ID);
+    t.close();
+
+    const cdb = createDbClient(f.crowDbPath);
+    const tdb = createDbClient(f.tasksDbPath);
+    const totals = { created: 0, updated: 0, pushed: 0, conflicts: 0, flagged: 0, errors: 0 };
+
+    // The pull list is empty because the item did not exist when it was taken.
+    await syncTwowayBoard(cdb, tdb, kanbanBoard(), [], "test-token", totals);
+
+    assert.equal(totals.created, 1);
+    assert.equal(totals.flagged, 0, "the item it just created must not count as vanished");
+    const flags = (await cdb.execute({
+      sql: "SELECT count(*) AS n FROM pm_sync_log WHERE action='delete_flagged'", args: [],
+    })).rows[0];
+    assert.equal(Number(flags.n), 0);
+
+    await cdb.close();
+    await tdb.close();
+  } finally {
+    fetchStub.restore();
+    cleanup(f);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 2c. a vanished Monday item is flagged ONCE, not once per run
+// ---------------------------------------------------------------------------
+test("syncTwowayBoard: a dead mapping is flagged once, not on every run", async () => {
+  const f = fixture();
+  const fetchStub = stubFetchThrows();
+  try {
+    const { createDbClient } = await import("../servers/db.js");
+    const { syncTwowayBoard } = await import("../bundles/pm-workspace/server/sync/monday.js");
+
+    const t = new Database(f.tasksDbPath);
+    const rowId = Number(
+      t.prepare("INSERT INTO tasks_items (title, status, project_id, archived_at) VALUES (?,?,?,?)")
+        .run("Vanished Card", "done", PROJECT_ID, "2026-08-15T00:00:00Z").lastInsertRowid
+    );
+    t.close();
+
+    const c = new Database(f.crowDbPath);
+    c.prepare(
+      "INSERT INTO pm_sync_state (source, board_id, item_id, local_kind, local_id, content_hash, monday_updated_at) VALUES ('monday',?,?,?,?,?,?)"
+    ).run(BOARD_ID, "item-gone", "kanban", rowId, "h", "2026-01-01T00:00:00Z");
+    c.close();
+
+    const cdb = createDbClient(f.crowDbPath);
+    const tdb = createDbClient(f.tasksDbPath);
+    const board = kanbanBoard();
+
+    // Three runs with the item absent from the pull, as the real cron does
+    // every 15 minutes for as long as the mapping survives.
+    for (let i = 0; i < 3; i++) {
+      const totals = { created: 0, updated: 0, pushed: 0, conflicts: 0, flagged: 0, errors: 0 };
+      await syncTwowayBoard(cdb, tdb, board, [], "test-token", totals);
+      assert.equal(totals.flagged, 1, "every run still COUNTS the dead mapping");
+    }
+
+    const logged = (await cdb.execute({
+      sql: "SELECT count(*) AS n FROM pm_sync_log WHERE action='delete_flagged' AND item_ref='monday:item-gone'",
+      args: [],
+    })).rows[0];
+    assert.equal(Number(logged.n), 1, "but it is written to the log exactly once");
+
+    const state = (await cdb.execute({
+      sql: "SELECT count(*) AS n FROM pm_sync_state WHERE item_id='item-gone'", args: [],
+    })).rows[0];
+    assert.equal(Number(state.n), 1, "the mapping is KEPT — dropping it would let the card be re-created on Monday");
+
+    await cdb.close();
+    await tdb.close();
+  } finally {
+    fetchStub.restore();
+    cleanup(f);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 3. pull targeting an archived row updates in place, stays archived, logs
 //    pull_archived_update, does not re-INSERT
 // ---------------------------------------------------------------------------
@@ -444,9 +583,14 @@ test("syncTwowayBoard: a store without archived_at (legacy shape) runs all paths
       t.prepare("INSERT INTO tasks_items (title, status, project_id) VALUES (?,?,?)")
         .run("Legacy Old Title", "in_progress", PROJECT_ID).lastInsertRowid
     );
-    // unmapped row → create-scan path
+    // unmapped OPEN row → create-scan path
     t.prepare("INSERT INTO tasks_items (title, status, project_id) VALUES (?,?,?)")
-      .run("Legacy Unmapped Card", "done", PROJECT_ID);
+      .run("Legacy Unmapped Card", "pending", PROJECT_ID);
+    // unmapped FINISHED row → excluded by the terminal-status guard. On a legacy
+    // store there is no archived_at to guard on, so the status check is the only
+    // thing standing between a finished card and a surprise Monday item.
+    t.prepare("INSERT INTO tasks_items (title, status, project_id) VALUES (?,?,?)")
+      .run("Legacy Unmapped Done Card", "done", PROJECT_ID);
     t.close();
 
     const c = new Database(f.crowDbPath);
@@ -482,7 +626,7 @@ test("syncTwowayBoard: a store without archived_at (legacy shape) runs all paths
 
     assert.equal(totals.errors, 0);
     assert.equal(totals.updated, 1, "the pull-target row updates");
-    assert.equal(totals.created, 1, "the unmapped done card creates remotely (no archived_at to guard on)");
+    assert.equal(totals.created, 1, "the unmapped OPEN card creates remotely; the done one is held back by the terminal-status guard");
 
     const logRows = (await cdb.execute({ sql: "SELECT action FROM pm_sync_log", args: [] })).rows;
     assert.ok(logRows.some((r) => r.action === "update_local"), "legacy row uses the normal action, not pull_archived_update");
