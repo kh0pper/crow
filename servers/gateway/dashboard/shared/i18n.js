@@ -15,6 +15,7 @@ export const translations = {
   // ─── Nav & Layout ───
   "nav.logout": { en: "Logout", es: "Cerrar sesión" },
   "nav.toggleMenu": { en: "Toggle menu", es: "Alternar menú" },
+  "nav.collapseSidebar": { en: "Collapse sidebar", es: "Contraer panel lateral" },
   // Panel nav names (keyed by panel id)
   "nav.nest": { en: "Crow's Nest", es: "Nido del Cuervo" },
   "nav.messages": { en: "Messages", es: "Mensajes" },
@@ -2223,7 +2224,6 @@ export const translations = {
   },
   // ─── Perch Hub (2026-09-09 restore) ───
   "perch.title": { en: "Perch", es: "Perch" },
-  "perch.subtitle": { en: "your bot sessions", es: "tus sesiones de bots" },
   "perch.navBoard": { en: "Board", es: "Tablero" },
   "perch.sessionsHeading": { en: "Sessions", es: "Sesiones" },
   "perch.loading": { en: "Loading sessions…", es: "Cargando sesiones…" },

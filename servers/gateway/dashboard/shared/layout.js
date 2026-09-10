@@ -230,6 +230,20 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
   ${turboHead()}
 </head>
 <body class="${bodyClass}">
+  <script>
+    // Pre-paint sidebar-collapse restore (desktop-scoped by CSS below, see
+    // dashboardCss()'s "@media not all and (max-width: 768px)" block) —
+    // applying the class here, before .dashboard is even parsed, avoids a
+    // flash of the wrong layout on load. Mobile ignores this class entirely
+    // (its own off-canvas default + .open overlay are unaffected — see the
+    // ≤768px media query, unchanged). Wrapped in try/catch: localStorage
+    // can throw (private mode, blocked storage) and must never break render.
+    try {
+      if (localStorage.getItem('crow-sidebar-collapsed') === '1') {
+        document.body.classList.add('sidebar-collapsed');
+      }
+    } catch (e) {}
+  </script>
   <div id="kiosk-overlay" class="kiosk-overlay">
     <!-- Always-present close button so a broken/unreachable companion iframe
          never strands the user with no way back to the dashboard. The iframe
@@ -244,9 +258,21 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
     </button>
   </div>
   <div class="dashboard">
-    <aside class="sidebar">
+    <!-- The aside's id exists so the two toggle controls can point
+         aria-controls at the thing they operate; the class is what CSS
+         still selects on. Both controls ship aria-expanded="false" rather
+         than "true": the real value lives in localStorage, which the server
+         cannot read, and on a phone the sidebar is genuinely closed at
+         first paint. syncSidebarToggleAria() corrects it upward in the same
+         inline script block that runs before .dashboard finishes parsing.
+         Shipping "true" would instead be a lie on every phone load, and a
+         permanent one if scripts are blocked. -->
+    <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
         <h1 class="logo">Crow</h1>
+        <button type="button" id="sidebar-collapse-btn" class="sidebar-collapse-btn" onclick="toggleSidebar()" aria-controls="sidebar" aria-expanded="false" aria-label="${escapeHtml(t("nav.collapseSidebar", lang))}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 19l-7-7 7-7"/><path d="M4 12h16"/></svg>
+        </button>
       </div>
       <nav class="sidebar-nav">
         ${navItems}
@@ -258,7 +284,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
     <div class="sidebar-overlay" onclick="closeSidebar()"></div>
     <main class="main-content">
       <header class="content-header">
-        <button class="hamburger" onclick="toggleSidebar()" aria-label="Toggle menu">
+        <button class="hamburger" id="sidebar-reveal-btn" onclick="toggleSidebar()" aria-controls="sidebar" aria-expanded="false" aria-label="${escapeHtml(t("nav.toggleMenu", lang))}">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
         </button>
         <h2>${escapeHtml(title)}</h2>
@@ -472,14 +498,89 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
       }
     }
 
+    // Desktop collapse (persisted) and mobile open/close (ephemeral,
+    // unchanged from before) are two independent axes, kept apart entirely
+    // by CSS breakpoint scoping — "(max-width: 768px)" and its exact
+    // complement "not all and (max-width: 768px)", see dashboardCss() — so
+    // they never fight AND no fractional width (768.5px under zoom) can
+    // fall between them. isMobileWidth() below queries the same
+    // "(max-width: 768px)" text, so JS and CSS always agree on which axis a
+    // click belongs to.
+    //
+    // Both the in-sidebar collapse button and the header hamburger call
+    // toggleSidebar(); it does the right thing for each because the two
+    // controls are never usable at the same time. Note what actually
+    // achieves that on the collapse button: NO rule hides it outside the
+    // ≤768px block — it goes off-canvas with the sidebar it lives in
+    // (transform:translateX(-100%)), and it is the sidebar's
+    // visibility:hidden (see dashboardCss()) plus the inert attribute
+    // syncSidebarToggleAria() sets that take it out of the tab order and the
+    // accessibility tree with it. The hamburger, by contrast,
+    // really is display-toggled: it shows once collapsed on desktop, and is
+    // always shown on mobile.
+    function isMobileWidth() {
+      return window.matchMedia('(max-width: 768px)').matches;
+    }
+    // Single source of truth for "is the nav currently exposed", on whichever
+    // axis is live, and the only place that writes it onto the DOM.
+    function syncSidebarToggleAria() {
+      var collapsed = document.body.classList.contains('sidebar-collapsed');
+      var sidebarEl = document.querySelector('.sidebar');
+      var expanded = isMobileWidth()
+        ? !!(sidebarEl && sidebarEl.classList.contains('open'))
+        : !collapsed;
+      var collapseBtn = document.getElementById('sidebar-collapse-btn');
+      var revealBtn = document.getElementById('sidebar-reveal-btn');
+      if (collapseBtn) collapseBtn.setAttribute('aria-expanded', String(expanded));
+      if (revealBtn) revealBtn.setAttribute('aria-expanded', String(expanded));
+      // inert belongs to the same state, and it is not redundant with the
+      // visibility:hidden in dashboardCss(). That rule is deliberately
+      // delayed 0.2s so the slide-out stays visible, and measured in Chrome
+      // the inherited value reaches the nav items a further ~200ms after the
+      // aside itself flips — so for roughly 400ms after a collapse the links
+      // are still focusable. inert applies synchronously and closes that
+      // window; the CSS remains the no-JS baseline and the thing that
+      // actually removes the pixels.
+      if (sidebarEl) {
+        if (expanded) sidebarEl.removeAttribute('inert');
+        else sidebarEl.setAttribute('inert', '');
+      }
+    }
+    function setSidebarCollapsed(collapsed) {
+      document.body.classList.toggle('sidebar-collapsed', collapsed);
+      try { localStorage.setItem('crow-sidebar-collapsed', collapsed ? '1' : '0'); } catch (e) {}
+      syncSidebarToggleAria();
+    }
+    // Either half of the collapse pair strands keyboard focus if nothing
+    // moves it: collapsing leaves focus on #sidebar-collapse-btn, which has
+    // just travelled to x = -49 inside a position:fixed, unscrollable
+    // container (and, since the visibility:hidden fix, is no longer
+    // focusable at all); revealing sets the hamburger to display:none, so
+    // the browser blurs it and activeElement falls back to <body> — the next
+    // Tab restarts from the top of the document. Hand focus to whichever
+    // control is the live one after the change. Called only from
+    // toggleSidebar()'s desktop branch, i.e. only from a real user gesture:
+    // setSidebarCollapsed() itself must stay focus-neutral because the
+    // pre-paint restore and any future programmatic caller go through it.
+    function focusSidebarControl(collapsed) {
+      var next = document.getElementById(collapsed ? 'sidebar-reveal-btn' : 'sidebar-collapse-btn');
+      if (next && typeof next.focus === 'function') next.focus();
+    }
     function toggleSidebar() {
-      var sidebar = document.querySelector('.sidebar');
-      if (sidebar.classList.contains('open')) {
-        closeSidebar();
+      if (isMobileWidth()) {
+        var sidebar = document.querySelector('.sidebar');
+        if (sidebar.classList.contains('open')) {
+          closeSidebar();
+        } else {
+          document.body._scrollY = window.scrollY;
+          sidebar.classList.add('open');
+          document.body.classList.add('sidebar-open');
+          syncSidebarToggleAria();
+        }
       } else {
-        document.body._scrollY = window.scrollY;
-        sidebar.classList.add('open');
-        document.body.classList.add('sidebar-open');
+        var nowCollapsed = !document.body.classList.contains('sidebar-collapsed');
+        setSidebarCollapsed(nowCollapsed);
+        focusSidebarControl(nowCollapsed);
       }
     }
     function closeSidebar() {
@@ -488,7 +589,43 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
       if (document.body._scrollY !== undefined) {
         window.scrollTo(0, document.body._scrollY);
       }
+      syncSidebarToggleAria();
     }
+    // Crossing the breakpoint changes which axis is live, and nothing else
+    // recomputes when it does. Two concrete failures without this:
+    //   • Phone, sidebar closed, both controls reporting aria-expanded
+    //     ="false". Rotate to landscape ≥769px: the sidebar is now expanded
+    //     (the ≤768px off-canvas rule no longer applies) and both controls
+    //     still announce "collapsed".
+    //   • Open the sidebar at ≤768px, then widen. The .open class persists,
+    //     but its transform:translateX(0) is inert up here so nothing looks
+    //     wrong; toggleSidebar() has switched to the desktop branch and will
+    //     never clear it. Narrow again and the user lands on a mobile page
+    //     with the sidebar already open and its overlay up.
+    // body.sidebar-collapsed is deliberately NOT cleared going the other
+    // way: it is a persisted desktop preference, no rule below 769px reads
+    // it, and dropping it would silently discard the user's setting on a
+    // rotation. Only the state belonging to the range being LEFT is torn
+    // down. Guarded so Turbo re-executing this script does not stack a new
+    // listener on every navigation (window survives the body swap).
+    if (!window.__crowSidebarBreakpointBound) {
+      window.__crowSidebarBreakpointBound = true;
+      var sidebarBreakpoint = window.matchMedia('(max-width: 768px)');
+      var onSidebarBreakpointChange = function () {
+        if (!isMobileWidth()) {
+          var sb = document.querySelector('.sidebar');
+          if (sb && sb.classList.contains('open')) closeSidebar();
+        }
+        syncSidebarToggleAria();
+      };
+      // addListener is the pre-2019 Safari spelling; still the only one there.
+      if (sidebarBreakpoint.addEventListener) {
+        sidebarBreakpoint.addEventListener('change', onSidebarBreakpointChange);
+      } else if (sidebarBreakpoint.addListener) {
+        sidebarBreakpoint.addListener(onSidebarBreakpointChange);
+      }
+    }
+    syncSidebarToggleAria();
     // Sidebar nav-item click handlers are attached fresh each nav because
     // the sidebar DOM is swapped — listeners auto-GC with old DOM.
     document.querySelectorAll('.sidebar .nav-item').forEach(function(a) {
@@ -868,17 +1005,53 @@ function dashboardCss() {
     left: 0;
     bottom: 0;
     z-index: 100;
-    transition: transform 0.2s ease-out;
+    /* visibility rides along with the transform because translateX(-100%)
+       hides pixels ONLY: an off-canvas sidebar stays in the tab order and
+       in the accessibility tree, so a screen reader announces a nav that is
+       visually gone and a keyboard user tabs through invisible links. The
+       hidden states below pair visibility:hidden with a 0.2s delay so it
+       lands after the slide-out finishes; this base rule transitions it back
+       with no delay so the reveal is instant. */
+    visibility: visible;
+    transition: transform 0.2s ease-out, visibility 0s;
   }
   .sidebar-header {
     padding: 1.5rem;
     border-bottom: 1px solid var(--crow-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
   }
   .logo {
     font-family: var(--crow-body-font);
     font-size: 1.5rem;
     font-weight: 700;
     color: var(--crow-text-primary);
+  }
+  /* Desktop-only collapse trigger, sitting next to the logo — the sidebar's
+     own affordance for hiding itself (the header hamburger is the reveal
+     side of this pair; see dashboardCss()'s "@media not all and
+     (max-width: 768px)" block and toggleSidebar() in renderLayout's
+     script). Hidden on mobile: the hamburger + overlay + Escape key already
+     cover close there. Note that nothing hides this button on DESKTOP once
+     the sidebar is collapsed — it rides off-canvas inside the sidebar, and
+     the sidebar's visibility:hidden is what takes it out of the tab order. */
+  .sidebar-collapse-btn {
+    background: none;
+    border: none;
+    color: var(--crow-text-secondary);
+    cursor: pointer;
+    padding: 0.25rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--crow-radius-control);
+    flex-shrink: 0;
+  }
+  .sidebar-collapse-btn:hover {
+    color: var(--crow-text-primary);
+    background: var(--crow-bg-elevated);
   }
   .sidebar-nav {
     flex: 1;
@@ -963,6 +1136,7 @@ function dashboardCss() {
     min-width: 0;
     margin-left: 240px;
     min-height: 100vh;
+    transition: margin-left 0.2s ease-out;
   }
   .content-header {
     padding: 1.25rem 2rem;
@@ -1244,9 +1418,13 @@ function dashboardCss() {
   @media (max-width: 768px) {
     .sidebar {
       transform: translateX(-100%);
+      visibility: hidden;
+      transition: transform 0.2s ease-out, visibility 0s linear 0.2s;
     }
     .sidebar.open {
       transform: translateX(0);
+      visibility: visible;
+      transition: transform 0.2s ease-out, visibility 0s;
       box-shadow: 4px 0 24px rgba(0,0,0,0.5);
     }
     .sidebar.open ~ .sidebar-overlay {
@@ -1279,6 +1457,50 @@ function dashboardCss() {
     .dashboard {
       height: 100vh;
       height: 100dvh;
+    }
+    /* The desktop collapse trigger lives in the sidebar itself; mobile
+       already has hide/reveal via the hamburger + overlay + Escape, above. */
+    .sidebar-collapse-btn { display: none; }
+  }
+
+  /* The hamburger is the reveal side of the desktop collapse pair (see
+     .sidebar-collapse-btn above + toggleSidebar() in renderLayout's script):
+     shown whenever the sidebar is collapsed, at ANY width — not just the
+     ≤768px range it already covered. On mobile this is a no-op (the block
+     above already forces display:block there unconditionally). */
+  body.sidebar-collapsed .hamburger {
+    display: block;
+  }
+
+  /* Desktop sidebar collapse — a persisted-per-viewer preference, entirely
+     separate from the ≤768px overlay above (disjoint breakpoints, so the
+     two never contend for the same .sidebar/.main-content declarations).
+     Collapsed = sidebar off-canvas, .main-content reclaims its 240px.
+
+     "not all and (max-width: 768px)", not "(min-width: 769px)": those are
+     NOT the same range. A width of 768.5px — reachable through browser zoom
+     and some device pixel ratios — matches neither "(max-width: 768px)" nor
+     "(min-width: 769px)", so the whole collapse axis would go dead there
+     while isMobileWidth() (which queries "(max-width: 768px)") sends the
+     click down the desktop branch: the sidebar would not move, and the
+     unscoped "body.sidebar-collapsed .hamburger" rule above would put a
+     redundant hamburger beside a still-visible sidebar. Negating the mobile
+     query makes the two ranges exact complements at every fractional width.
+
+     visibility:hidden alongside the transform for the same reason as the
+     ≤768px closed state above — off-canvas must also mean out of the tab
+     order and out of the accessibility tree. It is what actually makes the
+     in-sidebar collapse button unreachable while collapsed; no rule up here
+     hides that button. syncSidebarToggleAria() also sets inert on the aside,
+     which covers the ~400ms this rule's deliberate delay leaves open. */
+  @media not all and (max-width: 768px) {
+    body.sidebar-collapsed .sidebar {
+      transform: translateX(-100%);
+      visibility: hidden;
+      transition: transform 0.2s ease-out, visibility 0s linear 0.2s;
+    }
+    body.sidebar-collapsed .main-content {
+      margin-left: 0;
     }
   }
 
@@ -1404,6 +1626,30 @@ function dashboardCss() {
   }
   .crow-toast__close:hover { color:var(--crow-text-primary); }
   .crow-toast__close:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; border-radius:2px; }
+
+  /* ─── Perch Hub app-shell opt-in ───
+     Perch Hub (dashboard/panels/perch-hub.js) is the one panel whose chat
+     view needs the composer reachable without scrolling the page, at ANY
+     width — not just the ≤768px range the media query above already
+     app-shells. Scoping by :has(#perch-chat) — Perch's own chat root,
+     unique to this panel — means this only ever fires on that page; every
+     other panel keeps the plain scrolling .content-body it already had.
+     This mirrors the ≤768px rule above exactly (fixed-height .main-content,
+     internally-scrolling .content-body); Perch's own CSS (perch-hub/css.js)
+     then makes #perch-hub-root/.hub-split/#perch-chat fill that height with
+     flex:1;min-height:0 so the transcript — not the page — is what scrolls. */
+  body:has(#perch-chat) .main-content {
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  body:has(#perch-chat) .content-body {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+  }
 
   /* primitives' delegated copy/tabs JS (componentsJs) is appended right after
      this style block closes, so it also loads on the login/2FA/setup pages,
