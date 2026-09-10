@@ -19,30 +19,17 @@ header{padding:30px 0 20px;display:flex;align-items:baseline;justify-content:spa
 .brand small{color:var(--dim);font-weight:400;font-size:15px;margin-left:6px}
 .machines{display:flex;gap:6px;font-size:13px}
 .machines a{text-decoration:none;color:var(--dim);padding:5px 12px;border-radius:999px;border:1px solid var(--line)}
-.machines a.here{background:var(--teal);border-color:var(--teal);color:#fff}
 a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
 h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);font-weight:600;margin:30px 0 12px}
-.perch{position:relative;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 16px 0;margin:22px 0 12px;box-shadow:0 1px 2px rgb(0 0 0/4%)}
-.perch::before{content:"";position:absolute;left:-6px;right:-6px;top:0;border-top:2px solid var(--wire)}
-.bird{position:absolute;top:-17px;left:22px;width:26px;height:18px;color:var(--alive)}
-.bird svg{width:100%;height:100%;display:block}
-.bird.attn{color:var(--attn)}.bird.idle{color:var(--wire)}
 .perch-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .title{font-weight:600;font-size:17px}
 .meta{color:var(--dim);font-size:13px;margin-top:2px;word-break:break-all}
 .state{font-size:13px;color:var(--alive);font-weight:500;white-space:nowrap}
-.state.attn{color:var(--attn)}.state.idle{color:var(--dim)}
-.row-actions{display:flex;gap:8px;margin:12px 0 14px;flex-wrap:wrap}
 button{font:500 14px/1 Inter,system-ui,sans-serif;cursor:pointer;border-radius:10px;padding:10px 16px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
 button.primary{background:var(--teal);border-color:var(--teal);color:#fff}
 button.quiet{color:var(--dim)}
-a.btn{display:inline-block;text-decoration:none;font:500 14px/1 Inter,system-ui,sans-serif;border-radius:10px;padding:10px 16px;background:var(--teal);color:#fff}
-.databar{margin:0 -16px;background:var(--teal-soft);border-top:1px solid var(--line);border-radius:0 0 13px 13px;padding:7px 16px;font:12px "JetBrains Mono",ui-monospace,monospace;color:var(--teal);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.databar .mono-dim{color:var(--dim)}
-.spawn{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;display:grid;gap:10px}
 input,textarea{font:14px Inter,system-ui,sans-serif;width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:var(--sky);color:var(--ink)}
 input::placeholder,textarea::placeholder{color:var(--dim)}
-.roost{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
 .roost-row{display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .roost-row:last-child{border-bottom:none}
 .roost-dot{width:8px;height:8px;border-radius:50% 50% 50% 2px;background:var(--wire);flex-shrink:0;transform:rotate(-8deg)}
@@ -50,8 +37,22 @@ input::placeholder,textarea::placeholder{color:var(--dim)}
 .roost-cwd{font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .roost-when{color:var(--dim);font-size:12.5px;font-family:"JetBrains Mono",ui-monospace,monospace}
 .roost-row button{padding:8px 12px;font-size:13px}
-#msg{margin:10px 0;font-size:13px;min-height:18px}.ok{color:var(--alive)}
 .empty{color:var(--dim);padding:16px;font-size:14px}
+/* --- chat transcript + ask cards, ported from the deleted bundle's own
+   equivalents (42f39160^:bundles/perch-hub/payload/hub/bots-page.mjs
+   .entry/.entry .who/.entry .what/.ask-card/.ask-card .title/
+   .ask-card .ask-message) and renamed onto the classes THIS script emits
+   (entry/who/what/ask-card/ask-title/ask-message/ask-controls — the bundle's
+   own ask card nested a bare .title and used .ask-opts for the button row). */
+.entry{display:flex;gap:10px;font-size:14px}
+.who{flex:0 0 64px;font:11px/1.6 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;color:var(--dim)}
+.entry.user .who{color:var(--teal)}
+.what{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+.note{color:var(--dim);font-size:12.5px;font-style:italic}
+.ask-card{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:8px;background:var(--sky)}
+.ask-title{font-weight:600}
+.ask-message{white-space:pre-wrap}
+.ask-controls{display:flex;flex-wrap:wrap;gap:6px}
 /* --- hub layout ------------------------------------------------------- */
 /* Two views, one at a time on a phone, side by side on a wide screen. */
 #perch-list,#perch-chat{display:none}
