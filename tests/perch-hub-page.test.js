@@ -1,11 +1,13 @@
 // The hub IS a registered dashboard panel (panels/perch-hub.js) — that's what
-// gives it a nav entry and a launcher icon — but its handler renders its own
-// standalone document (perchHubDocument) instead of calling the `layout()`
-// the generic panel dispatcher hands it: the panel shell is a large part of
-// what made the drawer cramped on a phone. It still lives under /dashboard,
-// dispatched by dashboard/index.js's generic "/dashboard/:panelId" route, so
-// it inherits dashboardAuth, CSRF and the Funnel rejection the same way every
-// other panel does — a bare top-level /perch would inherit none of them.
+// gives it a nav entry and a launcher icon — and it renders through the
+// dashboard shell's layout(), exactly like every other panel. It used to
+// render its own standalone document (perchHubDocument) instead, deliberately
+// bypassing layout() — that's what made the crow sidebar vanish on this page
+// (the operator regression this file now pins the fix for). It still lives
+// under /dashboard, dispatched by dashboard/index.js's generic
+// "/dashboard/:panelId" route, so it inherits dashboardAuth, CSRF and the
+// Funnel rejection the same way every other panel does — a bare top-level
+// /perch would inherit none of them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -13,18 +15,25 @@ import { join } from "node:path";
 
 const REPO = new URL("..", import.meta.url).pathname;
 
-test("the hub renders a complete HTML document with a mobile viewport", async () => {
-  const { perchHubDocument } = await import("../servers/gateway/dashboard/perch-hub/html.js");
-  const html = perchHubDocument("en");
-  assert.ok(html.startsWith("<!DOCTYPE html>"), "a document, not a fragment");
-  assert.ok(html.includes('name="viewport"'), "without this a phone renders it at desktop width");
-  assert.ok(html.includes("width=device-width"));
-  assert.ok(/<html lang="en"/.test(html));
+test("perchHubContent renders a shell-embeddable fragment, not a standalone document", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  // These are the exact properties the OLD perchHubDocument() had (doctype,
+  // <html lang>, its own viewport meta) — asserting their ABSENCE pins that
+  // the shell now supplies the document, not this function. A leftover
+  // <!DOCTYPE>/<html> here would mean two documents nested inside one
+  // response.
+  assert.ok(!html.startsWith("<!DOCTYPE html>"), "the shell supplies the document now");
+  assert.ok(!/<html[\s>]/.test(html), "must not open its own <html>");
+  assert.ok(!/<head[\s>]/.test(html), "must not open its own <head>");
+  assert.ok(!/name="viewport"/.test(html), "the shell's own viewport meta covers this now");
+  assert.ok(html.includes('id="perch-hub-root"'), "everything Perch-specific is scoped under this root");
+  assert.ok(html.includes("<style>"), "styles are still inlined — no extra request on a phone");
 });
 
-test("the document carries both view shells and the hub stylesheet", async () => {
-  const { perchHubDocument } = await import("../servers/gateway/dashboard/perch-hub/html.js");
-  const html = perchHubDocument("en");
+test("the content carries both view shells and the hub stylesheet", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
   assert.ok(html.includes('id="perch-list"'), "the session list view");
   assert.ok(html.includes('id="perch-chat"'), "the chat view");
   assert.ok(html.includes("<style>"), "styles are inlined — no extra request on a phone");
@@ -40,37 +49,65 @@ test("the stylesheet keeps Perch's own palette and honours OS dark mode", async 
   assert.ok(!css.includes("<style>"), "perchHubCss returns bare CSS; html.js wraps it");
 });
 
-test("the perch panel handler serves the standalone Perch document, not the dashboard shell (the /perch redirect below is this test's own stand-in route, not the dispatcher's)", async () => {
+test("every Perch selector is scoped under #perch-hub-root, not leaking onto the shared shell", async () => {
+  // The generic-sounding class names Perch reuses (.title/.meta/.state/
+  // .field/button/input/textarea/h2/header) would otherwise restyle the
+  // sidebar, the hamburger, and every other panel once this CSS ships
+  // inside the shared dashboard document instead of its own standalone
+  // page. A bare `button{` or `header{` rule anywhere in the sheet is
+  // exactly that leak. Anchored on line-start (`(^|\n)\s*`): in this file
+  // every SCOPED occurrence has "#perch-hub-root " (or similar) BEFORE the
+  // tag name on the same line, so only a genuinely bare, line-leading
+  // selector matches — a naive "preceding char isn't a hyphen" check would
+  // false-positive on "#perch-hub-root button{" itself (preceded by a
+  // space), which is exactly why this isn't written that way.
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss();
+  const BARE_PATTERNS = [
+    [/(^|\n)\s*button\s*\{/, "button{"],
+    [/(^|\n)\s*button\.primary\s*\{/, "button.primary{"],
+    [/(^|\n)\s*button\.quiet\s*\{/, "button.quiet{"],
+    [/(^|\n)\s*header\s*\{/, "header{"],
+    [/(^|\n)\s*h2\s*\{/, "h2{"],
+    [/(^|\n)\s*input\s*[,{]/, "input (unscoped)"],
+    [/(^|\n)\s*textarea\s*\{/, "textarea{"],
+    [/(^|\n)\s*\*\s*\{/, "*{"],
+    [/(^|\n)\s*a:focus-visible/, "a:focus-visible (unscoped)"],
+    [/(^|\n)\s*\.hub-split\s*\{/, ".hub-split{ (unscoped)"],
+  ];
+  const offenders = BARE_PATTERNS.filter(([re]) => re.test(css)).map(([, label]) => label);
+  assert.deepEqual(offenders, [], `unscoped selector(s) found: ${offenders.join(", ")}`);
+});
+
+test("the perch panel handler renders through the dashboard shell — the sidebar survives, unlike the old standalone document", async () => {
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
+  const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
   const { default: express } = await import("express");
   const app = express();
-  // No auth stub needed here — the panel manifest's handler takes no auth
-  // parameter at all; dashboardAuth is applied once, by the generic
-  // "/dashboard/:panelId" dispatcher in dashboard/index.js, to every
-  // registered panel alike. This test exercises only the handler itself: it
-  // is called directly with a context carrying NO `layout` function, so if
-  // the handler ever tried to call layout() (wrapping the page in the
-  // dashboard shell — the thing that made the old drawer cramped on a
-  // phone) this would throw instead of silently passing. The real wiring —
-  // that dashboard/index.js actually registers this panel AND actually
-  // registers the /perch redirect — is pinned separately by the
-  // source-level guard below; see that test's own comment for why it reads
-  // source instead of firing requests.
-  app.get("/dashboard/perch", (req, res) => perchHubPanel.handler(req, res, { lang: "en" }));
-  app.get("/perch", (req, res) => res.redirect(302, "/dashboard/perch"));
+  // Minimal stand-in for dashboard/index.js's real panel dispatcher: enough
+  // of a `layout` to prove the panel actually calls it and the resulting
+  // page carries the shell's chrome, without pulling in the full
+  // dispatcher's tamagotchi/companion/nav-group machinery this test doesn't
+  // need. dashboard/index.js's own registration wiring is pinned separately,
+  // below.
+  app.get("/dashboard/perch", async (req, res) => {
+    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang: "en" });
+    const html = await perchHubPanel.handler(req, res, { lang: "en", layout });
+    if (!res.headersSent) res.type("html").send(html);
+  });
   const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   try {
     const base = "http://127.0.0.1:" + srv.address().port;
-    const red = await fetch(base + "/perch", { redirect: "manual" });
-    assert.equal(red.status, 302);
-    assert.equal(red.headers.get("location"), "/dashboard/perch");
     const page = await fetch(base + "/dashboard/perch");
     assert.equal(page.status, 200);
-    assert.ok((await page.text()).startsWith("<!DOCTYPE html>"));
+    const html = await page.text();
+    assert.ok(html.startsWith("<!DOCTYPE html>"), "the shell supplies the document now");
+    assert.ok(html.includes('class="sidebar'), "the crow nav sidebar must be present — this is the regression this feature fixes");
+    assert.ok(html.includes('id="perch-hub-root"'), "and the panel's own content must still be there, inside the shell");
   } finally { srv.close(); }
 });
 
-test("the perch panel manifest has the shape the registry needs: id/route match, category drives the Agents nav group, handler never calls layout()", async () => {
+test("the perch panel manifest has the shape the registry needs: id/route match, category drives the Agents nav group, handler renders through layout()", async () => {
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   assert.equal(perchHubPanel.id, "perch", "getPanel('perch') keys off this — must match the URL segment");
   assert.equal(perchHubPanel.route, "/dashboard/perch");
@@ -81,12 +118,12 @@ test("the perch panel manifest has the shape the registry needs: id/route match,
   assert.equal(perchHubPanel.category, "ai");
   assert.equal(typeof perchHubPanel.handler, "function");
   const src = readFileSync(join(REPO, "servers/gateway/dashboard/panels/perch-hub.js"), "utf8");
-  assert.match(src, /perchHubDocument\(/, "must render the standalone Perch document");
-  // Comments (this file's own header explains the layout()-avoidance rule in
-  // prose) are stripped first so a doc comment mentioning "layout(" can't
-  // make this pass without the code itself actually avoiding the call.
+  assert.match(src, /perchHubContent\(/, "must render Perch's content");
+  // Comments (this file's own header explains the layout() rule in prose)
+  // are stripped first so a doc comment mentioning "layout(" can't make
+  // this pass without the code itself actually calling it.
   const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-  assert.ok(!/\blayout\(/.test(codeOnly), "must never wrap perchHubDocument in the dashboard shell");
+  assert.match(codeOnly, /\blayout\(/, "must render through the dashboard shell, like every other panel");
 });
 
 test("dashboard/index.js registers the perch panel exactly once and keeps the /perch short link", () => {
@@ -130,15 +167,15 @@ test("dashboard/index.js registers the perch panel exactly once and keeps the /p
 });
 
 test("an absent bot engine is stated up front, not discovered on the first tap", async () => {
-  const { perchHubDocument } = await import("../servers/gateway/dashboard/perch-hub/html.js");
-  const absent = perchHubDocument("en", { state: "absent" });
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const absent = perchHubContent("en", { state: "absent" });
   assert.ok(absent.includes("/dashboard/extensions"), "with a way to fix it");
-  const ready = perchHubDocument("en", { state: "ready" });
+  const ready = perchHubContent("en", { state: "ready" });
   assert.ok(!ready.includes("perch-engine-banner"), "no banner when the engine is fine");
   // engineStatus has FOUR states. Only "absent" means "go install it" —
   // sending a mid-install or breaker-open operator to Extensions is a dead end.
   for (const state of ["installing", "unhealthy"]) {
-    const html = perchHubDocument("en", { state });
+    const html = perchHubContent("en", { state });
     assert.ok(html.includes("perch-engine-banner"), state + " still warrants a banner");
     assert.ok(!html.includes("/dashboard/extensions"), state + " must not say 'install it'");
   }
@@ -151,25 +188,35 @@ test("the emitted client script is valid JavaScript", async () => {
 });
 
 test("the chat column carries the rules the renderer cannot prove", async () => {
-  // Headless Chrome under setDeviceMetricsOverride has no URL bar, so
-  // 100dvh === 100vh there and this rule can't be proven by rendering it —
-  // it is pinned here instead. The other three are pinned directly against
-  // the stylesheet text for different reasons, checked by mutation against
-  // the phone reachability render test in perch-hub-render.test.js:
-  // dropping #perch-composer's position:sticky OR its bottom:0, each alone,
-  // does turn that render test red (it is not "close to unfailable" on that
-  // pair, as an earlier version of this comment claimed) — pinned here
-  // anyway so the CSS rule is documented and the failure is legible without
-  // a browser. Dropping the composer's own background, or the transcript's
-  // min-height:0, leaves the render test green (background is a paint
-  // property invisible to getBoundingClientRect; the seeded transcript
-  // in this repo's render test isn't long enough to force the shrink
-  // min-height:0 guards against) — for those two, this is the only test
-  // that catches a regression.
+  // Verified by actually mutating each rule and running perch-hub-render
+  // .test.js against it (mutation-tested 2026-09-10, restored after):
+  // NONE of the four rules checked below turn that live render test red,
+  // even with a 60-line seeded transcript that genuinely overflows both
+  // tested viewports. That's not a gap in the render test's coverage of
+  // "can Send be reached" — it's what #perch-composer{position:sticky;
+  // bottom:0} is FOR: sticky pins the composer to the bottom of
+  // .content-body's viewport (the nearest real scrolling ancestor, per
+  // layout.js's "body:has(#perch-chat)" rules) regardless of how tall
+  // #perch-chat's own box ends up being. So sticky alone already guarantees
+  // reachability; #perch-chat's flex:1/min-height:0 are about a DIFFERENT
+  // property entirely — making the TRANSCRIPT the thing that scrolls
+  // (rather than #perch-chat overflowing .content-body and forcing the
+  // whole page to scroll to reach later messages) — and that property has
+  // no getBoundingClientRect signature the render test can observe. This is
+  // the same situation the original standalone-page version of this test
+  // already flagged for the transcript's own min-height:0 ("the seeded
+  // transcript isn't long enough to force the shrink") — it turned out to
+  // apply to #perch-chat's own sizing too, at any transcript length, for a
+  // different reason (sticky masking it), so this static check is the only
+  // thing pinning it.
   const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
   const css = perchHubCss().replace(/\s+/g, "");
-  assert.ok(css.includes("height:100vh;height:100dvh"),
-    "dvh must FOLLOW vh — vh alone hides the last strip behind the browser chrome");
+  assert.ok(!/#perch-chat\{[^}]*height:100dvh/.test(css),
+    "#perch-chat must not claim the viewport itself — it is no longer the viewport owner");
+  assert.ok(/#perch-chat\{[^}]*flex:1/.test(css),
+    "#perch-chat must fill whatever height its container hands it instead");
+  assert.ok(/#perch-chat\{[^}]*min-height:0/.test(css),
+    "without this the chat column refuses to shrink and overflows its container");
   assert.ok(/#perch-composer\{[^}]*position:sticky/.test(css));
   assert.ok(/#perch-composer\{[^}]*bottom:0/.test(css));
   assert.ok(/#perch-composer\{[^}]*background:/.test(css), "or the transcript shows through it");
@@ -184,21 +231,28 @@ test("the on-screen keyboard is accounted for", async () => {
   // with both addEventListener calls stripped out, a dead stub. No headless
   // harness raises a keyboard, so this proves the wiring only, never the
   // on-screen behaviour: iOS Safari does not shrink the layout viewport for
-  // the keyboard, so 100dvh alone stays full-height and a bottom:0 sticky
-  // composer sits behind it; visualViewport is the only API that reports the
-  // genuinely visible area, and resize/scroll are the events it fires when
-  // that area changes.
+  // the keyboard, so #perch-chat's fixed height (handed down by the shell,
+  // now — see the previous test) stays full-size and a bottom:0 sticky
+  // composer sits behind the keyboard; visualViewport is the only API that
+  // reports the genuinely visible area, and resize/scroll are the events it
+  // fires when that area changes. This padding is still applied to
+  // #perch-chat itself, not .content-body: the shell's own dvh-based height
+  // has exactly the same "doesn't shrink for the keyboard" problem, so
+  // moving the fix up a level would not have solved anything — it has to
+  // stay where the flex column it's compensating for actually lives.
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
   assert.match(js, /vv\.addEventListener\(\s*['"]resize['"]/,
     "the resize listener must be bound, not just the visualViewport token present");
   assert.match(js, /vv\.addEventListener\(\s*['"]scroll['"]/,
     "the scroll listener must be bound, not just the visualViewport token present");
+  assert.match(js, /el\(\s*['"]perch-chat['"]\s*\)\.style\.paddingBottom/,
+    "the keyboard-avoidance padding must land on #perch-chat, the flex column it's compensating for");
 });
 
 test("every control in the chat header carries a visible label", async () => {
-  const { perchHubDocument } = await import("../servers/gateway/dashboard/perch-hub/html.js");
-  const html = perchHubDocument("en");
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
   for (const id of ["perch-model", "perch-thinking", "perch-permission"]) {
     assert.ok(html.includes(`id="${id}-label"`), `${id} needs a visible label`);
     assert.ok(new RegExp(`id="${id}"[^>]*aria-labelledby="${id}-label"`).test(html));

@@ -230,6 +230,20 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
   ${turboHead()}
 </head>
 <body class="${bodyClass}">
+  <script>
+    // Pre-paint sidebar-collapse restore (desktop-scoped by CSS below, see
+    // dashboardCss()'s "@media (min-width: 769px)" block) — applying the
+    // class here, before .dashboard is even parsed, avoids a flash of the
+    // wrong layout on load. Mobile ignores this class entirely (its own
+    // off-canvas default + .open overlay are unaffected — see the
+    // ≤768px media query, unchanged). Wrapped in try/catch: localStorage
+    // can throw (private mode, blocked storage) and must never break render.
+    try {
+      if (localStorage.getItem('crow-sidebar-collapsed') === '1') {
+        document.body.classList.add('sidebar-collapsed');
+      }
+    } catch (e) {}
+  </script>
   <div id="kiosk-overlay" class="kiosk-overlay">
     <!-- Always-present close button so a broken/unreachable companion iframe
          never strands the user with no way back to the dashboard. The iframe
@@ -247,6 +261,9 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
     <aside class="sidebar">
       <div class="sidebar-header">
         <h1 class="logo">Crow</h1>
+        <button type="button" id="sidebar-collapse-btn" class="sidebar-collapse-btn" onclick="toggleSidebar()" aria-expanded="true" aria-label="${escapeHtml(t("nav.collapseSidebar", lang))}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 19l-7-7 7-7"/><path d="M4 12h16"/></svg>
+        </button>
       </div>
       <nav class="sidebar-nav">
         ${navItems}
@@ -258,7 +275,7 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
     <div class="sidebar-overlay" onclick="closeSidebar()"></div>
     <main class="main-content">
       <header class="content-header">
-        <button class="hamburger" onclick="toggleSidebar()" aria-label="Toggle menu">
+        <button class="hamburger" id="sidebar-reveal-btn" onclick="toggleSidebar()" aria-expanded="true" aria-label="${escapeHtml(t("nav.toggleMenu", lang))}">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
         </button>
         <h2>${escapeHtml(title)}</h2>
@@ -472,14 +489,46 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
       }
     }
 
+    // Desktop collapse (persisted) and mobile open/close (ephemeral,
+    // unchanged from before) are two independent axes, kept apart entirely
+    // by CSS breakpoint scoping (max-width:768px vs min-width:769px — see
+    // dashboardCss()), so they never fight. Both the in-sidebar collapse
+    // button and the header hamburger call toggleSidebar(); it does the
+    // right thing for each because the two controls are never visible at
+    // the same time (collapse button hides once collapsed; hamburger only
+    // shows once collapsed on desktop, and is always shown on mobile).
+    function isMobileWidth() {
+      return window.matchMedia('(max-width: 768px)').matches;
+    }
+    function syncSidebarToggleAria() {
+      var collapsed = document.body.classList.contains('sidebar-collapsed');
+      var sidebarEl = document.querySelector('.sidebar');
+      var expanded = isMobileWidth()
+        ? !!(sidebarEl && sidebarEl.classList.contains('open'))
+        : !collapsed;
+      var collapseBtn = document.getElementById('sidebar-collapse-btn');
+      var revealBtn = document.getElementById('sidebar-reveal-btn');
+      if (collapseBtn) collapseBtn.setAttribute('aria-expanded', String(expanded));
+      if (revealBtn) revealBtn.setAttribute('aria-expanded', String(expanded));
+    }
+    function setSidebarCollapsed(collapsed) {
+      document.body.classList.toggle('sidebar-collapsed', collapsed);
+      try { localStorage.setItem('crow-sidebar-collapsed', collapsed ? '1' : '0'); } catch (e) {}
+      syncSidebarToggleAria();
+    }
     function toggleSidebar() {
-      var sidebar = document.querySelector('.sidebar');
-      if (sidebar.classList.contains('open')) {
-        closeSidebar();
+      if (isMobileWidth()) {
+        var sidebar = document.querySelector('.sidebar');
+        if (sidebar.classList.contains('open')) {
+          closeSidebar();
+        } else {
+          document.body._scrollY = window.scrollY;
+          sidebar.classList.add('open');
+          document.body.classList.add('sidebar-open');
+          syncSidebarToggleAria();
+        }
       } else {
-        document.body._scrollY = window.scrollY;
-        sidebar.classList.add('open');
-        document.body.classList.add('sidebar-open');
+        setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
       }
     }
     function closeSidebar() {
@@ -488,7 +537,9 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
       if (document.body._scrollY !== undefined) {
         window.scrollTo(0, document.body._scrollY);
       }
+      syncSidebarToggleAria();
     }
+    syncSidebarToggleAria();
     // Sidebar nav-item click handlers are attached fresh each nav because
     // the sidebar DOM is swapped — listeners auto-GC with old DOM.
     document.querySelectorAll('.sidebar .nav-item').forEach(function(a) {
@@ -873,12 +924,37 @@ function dashboardCss() {
   .sidebar-header {
     padding: 1.5rem;
     border-bottom: 1px solid var(--crow-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
   }
   .logo {
     font-family: var(--crow-body-font);
     font-size: 1.5rem;
     font-weight: 700;
     color: var(--crow-text-primary);
+  }
+  /* Desktop-only collapse trigger, sitting next to the logo — the sidebar's
+     own affordance for hiding itself (the header hamburger is the reveal
+     side of this pair; see dashboardCss()'s "@media (min-width: 769px)"
+     block and toggleSidebar() in renderLayout's script). Hidden on mobile:
+     the hamburger + overlay + Escape key already cover close there. */
+  .sidebar-collapse-btn {
+    background: none;
+    border: none;
+    color: var(--crow-text-secondary);
+    cursor: pointer;
+    padding: 0.25rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--crow-radius-control);
+    flex-shrink: 0;
+  }
+  .sidebar-collapse-btn:hover {
+    color: var(--crow-text-primary);
+    background: var(--crow-bg-elevated);
   }
   .sidebar-nav {
     flex: 1;
@@ -963,6 +1039,7 @@ function dashboardCss() {
     min-width: 0;
     margin-left: 240px;
     min-height: 100vh;
+    transition: margin-left 0.2s ease-out;
   }
   .content-header {
     padding: 1.25rem 2rem;
@@ -1280,6 +1357,31 @@ function dashboardCss() {
       height: 100vh;
       height: 100dvh;
     }
+    /* The desktop collapse trigger lives in the sidebar itself; mobile
+       already has hide/reveal via the hamburger + overlay + Escape, above. */
+    .sidebar-collapse-btn { display: none; }
+  }
+
+  /* The hamburger is the reveal side of the desktop collapse pair (see
+     .sidebar-collapse-btn above + toggleSidebar() in renderLayout's script):
+     shown whenever the sidebar is collapsed, at ANY width — not just the
+     ≤768px range it already covered. On mobile this is a no-op (the block
+     above already forces display:block there unconditionally). */
+  body.sidebar-collapsed .hamburger {
+    display: block;
+  }
+
+  /* Desktop sidebar collapse — a persisted-per-viewer preference, entirely
+     separate from the ≤768px overlay above (disjoint breakpoints, so the
+     two never contend for the same .sidebar/.main-content declarations).
+     Collapsed = sidebar off-canvas, .main-content reclaims its 240px. */
+  @media (min-width: 769px) {
+    body.sidebar-collapsed .sidebar {
+      transform: translateX(-100%);
+    }
+    body.sidebar-collapsed .main-content {
+      margin-left: 0;
+    }
   }
 
   /* ─── Instance Tabs Strip (unified multi-instance; permanent across Turbo nav) ─── */
@@ -1404,6 +1506,30 @@ function dashboardCss() {
   }
   .crow-toast__close:hover { color:var(--crow-text-primary); }
   .crow-toast__close:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; border-radius:2px; }
+
+  /* ─── Perch Hub app-shell opt-in ───
+     Perch Hub (dashboard/panels/perch-hub.js) is the one panel whose chat
+     view needs the composer reachable without scrolling the page, at ANY
+     width — not just the ≤768px range the media query above already
+     app-shells. Scoping by :has(#perch-chat) — Perch's own chat root,
+     unique to this panel — means this only ever fires on that page; every
+     other panel keeps the plain scrolling .content-body it already had.
+     This mirrors the ≤768px rule above exactly (fixed-height .main-content,
+     internally-scrolling .content-body); Perch's own CSS (perch-hub/css.js)
+     then makes #perch-hub-root/.hub-split/#perch-chat fill that height with
+     flex:1;min-height:0 so the transcript — not the page — is what scrolls. */
+  body:has(#perch-chat) .main-content {
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  body:has(#perch-chat) .content-body {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+  }
 
   /* primitives' delegated copy/tabs JS (componentsJs) is appended right after
      this style block closes, so it also loads on the login/2FA/setup pages,

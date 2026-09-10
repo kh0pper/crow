@@ -18,18 +18,19 @@ function engineBanner(engine, lang) {
   return `<div class="empty" id="perch-engine-banner">${escapeHtml(t(key, lang))}</div>`;
 }
 
-/** The whole page. Static shell only — every list row and transcript line is
+/** Perch's markup + styles + client script, meant to be handed to a panel's
+ *  `layout()` as `content` (dashboard/panels/perch-hub.js does exactly
+ *  that) — NOT a standalone document. Rendering inside the dashboard shell
+ *  is what keeps the crow sidebar present on this page; the old
+ *  perchHubDocument() bypassed layout() entirely and that's what made the
+ *  nav vanish here. Everything Perch-specific is scoped under
+ *  #perch-hub-root (see css.js for why that scoping is load-bearing, not
+ *  cosmetic) so it can't leak onto the sidebar or any other panel, and vice
+ *  versa. Static shell only — every list row and transcript line is
  *  rendered client-side, the same split birdDrawerMarkup() uses. */
-export function perchHubDocument(lang = "en", engine = { state: "ready" }) {
-  return `<!DOCTYPE html>
-<html lang="${escapeHtml(lang)}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>${escapeHtml(t("perch.title", lang))}</title>
-<style>${perchHubCss()}</style>
-</head>
-<body data-view="list">
+export function perchHubContent(lang = "en", engine = { state: "ready" }) {
+  return `<style>${perchHubCss()}</style>
+<div id="perch-hub-root">
 ${engineBanner(engine, lang)}
 <header><div class="brand">Perch<small>${escapeHtml(t("perch.subtitle", lang))}</small></div>
 <nav class="machines"><a href="/dashboard/bot-board">${escapeHtml(t("perch.navBoard", lang))}</a></nav></header>
@@ -70,6 +71,6 @@ ${engineBanner(engine, lang)}
     </div>
   </div>
 </div>
-<script>${perchHubJs(lang)}</script>
-</body></html>`;
+</div>
+<script>${perchHubJs(lang)}</script>`;
 }

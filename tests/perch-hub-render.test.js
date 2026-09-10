@@ -2,6 +2,13 @@
 // every scroll position except the very bottom. Assert reachability with the
 // transcript scrolled to the TOP, which is where a reader starts. A screenshot
 // did not catch this; getBoundingClientRect did.
+//
+// This renders through the REAL dashboard shell now (the panel handler +
+// renderLayout), not perchHubDocument() in isolation — Perch no longer owns
+// its own document, so testing it standalone would miss the exact CSS chain
+// (layout.js's "body:has(#perch-chat)" rules -> perch-hub/css.js's
+// #perch-hub-root/.hub-split/#perch-chat flex chain) that reachability now
+// depends on.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -21,9 +28,13 @@ before(async () => {
     available = r.ok;
   } catch { available = false; }
   if (!available) return;
-  const { perchHubDocument } = await import("../servers/gateway/dashboard/perch-hub/html.js");
-  const doc = perchHubDocument("en");
-  server = http.createServer((req, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end(doc); });
+  const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
+  const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
+  server = http.createServer(async (req, res) => {
+    const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang: "en" });
+    const html = await perchHubPanel.handler(req, res, { lang: "en", layout });
+    if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
+  });
   await new Promise((r) => server.listen(0, "0.0.0.0", r));
   port = server.address().port;
 });
@@ -52,7 +63,7 @@ async function evaluate(width, height, expression) {
     await send("Emulation.setDeviceMetricsOverride",
       { width, height, deviceScaleFactor: 2, mobile: width < 900 });
     await send("Page.enable");
-    await send("Page.navigate", { url: `http://${HOST_FROM_CONTAINER}:${port}/` });
+    await send("Page.navigate", { url: `http://${HOST_FROM_CONTAINER}:${port}/dashboard/perch` });
     await new Promise((r) => setTimeout(r, 1500));
     const out = await send("Runtime.evaluate", { expression, returnByValue: true });
     // Without this, an expression that threw returns undefined and the caller's
@@ -67,11 +78,17 @@ async function evaluate(width, height, expression) {
   }
 }
 
+// 60 lines, not 16: enough that the transcript's OWN content height clearly
+// exceeds both tested viewports (730px and 900px) on its own — verified by
+// mutation (removing #perch-chat's flex:1/min-height:0, or #perch-transcript's
+// min-height:0, left this GREEN at 16 lines; only a transcript tall enough to
+// actually overflow makes those rules provable here instead of only in the
+// static check in perch-hub-page.test.js).
 const SEED_AND_MEASURE = `
 (function(){
   document.body.setAttribute('data-view','chat');
   var tr=document.getElementById('perch-transcript');
-  for(var i=0;i<16;i++){ var d=document.createElement('div');
+  for(var i=0;i<60;i++){ var d=document.createElement('div');
     d.textContent='bot: a transcript line long enough to take a row or two, number '+i;
     tr.appendChild(d); }
   tr.scrollTop=0;                                  // where a reader starts
@@ -80,9 +97,29 @@ const SEED_AND_MEASURE = `
     bottom:Math.round(b.bottom),reachable:b.bottom<=innerHeight&&b.top>=0});
 })()`;
 
+test("the crow sidebar is present on /dashboard/perch", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const present = JSON.parse(await evaluate(1280, 900, `
+    JSON.stringify({ sidebar: !!document.querySelector('.sidebar'),
+      perch: !!document.getElementById('perch-hub-root') })`));
+  assert.equal(present.sidebar, true, "the regression this feature fixes: the nav must not vanish on this page");
+  assert.equal(present.perch, true);
+});
+
 test("Send is reachable at 412x730 with the transcript scrolled to the top", async (t) => {
   if (!available) return t.skip("no CDP endpoint at " + CDP);
   const measured = JSON.parse(await evaluate(412, 730, SEED_AND_MEASURE));
+  assert.equal(measured.reachable, true,
+    `Send at ${measured.top}-${measured.bottom} in a ${measured.viewport}px viewport`);
+});
+
+test("Send is reachable at 1280x900 with the transcript scrolled to the top", async (t) => {
+  // The shell's app-shell height-clamp (layout.js's "body:has(#perch-chat)"
+  // rules) is NOT width-scoped — unlike the pre-existing ≤768px-only mobile
+  // behaviour it mirrors, it applies at every width, so this must hold on
+  // desktop too, not just on a phone.
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const measured = JSON.parse(await evaluate(1280, 900, SEED_AND_MEASURE));
   assert.equal(measured.reachable, true,
     `Send at ${measured.top}-${measured.bottom} in a ${measured.viewport}px viewport`);
 });
