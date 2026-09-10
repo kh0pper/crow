@@ -64,6 +64,7 @@ const IDENTICAL_OK = new Set([
   "botboard.jsLeasePrefix", // prefixes a raw English enum value — translating only the prefix buys nothing
   "botboard.labelBotSwitcher", // "Bot"
   "botboard.colBot",
+  "perch.newSessionBot", // "Bot" — same as botboard.colBot above
   "settings.ed25519", // key-algorithm name
   "settings.serif",
   "settings.local",

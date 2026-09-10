@@ -268,3 +268,75 @@ test("every control in the chat header carries a visible label", async () => {
     assert.ok(new RegExp(`id="${id}"[^>]*aria-labelledby="${id}-label"`).test(html));
   }
 });
+
+// ---------------------------------------------------------------------------
+// Task C — structural properties the vm harness in perch-hub-client.test.js
+// cannot see. That harness serves elements from a FLAT id->element map with no
+// tree, so "the launcher is not inside the container that gets cleared" is
+// trivially and meaninglessly true there. It is load-bearing in a real
+// document: renderList() and showListNote() both clearEl(#perch-list-body) on
+// every 10s poll and every note, and a launch control living inside that body
+// would be wiped by both — which is a different flavour of the exact defect
+// this task fixes (a launcher that disappears).
+// ---------------------------------------------------------------------------
+
+test("the launch control lives outside the list body that every poll clears", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  const launch = html.indexOf('id="perch-launch"');
+  const listOpen = html.indexOf('id="perch-list"');
+  const bodyOpen = html.indexOf('id="perch-list-body"');
+  assert.ok(launch > -1, "there is no launch control in the markup at all");
+  assert.ok(listOpen > -1 && bodyOpen > -1);
+  assert.ok(launch > listOpen, "the launcher belongs to the list view");
+  assert.ok(launch < bodyOpen,
+    "it must precede #perch-list-body, whose contents renderList()/showListNote() clear");
+  // And the launcher's own div must close before the body opens — "before it
+  // in source" is not the same as "not nested inside it".
+  const closeOfLaunch = html.indexOf("</div>", launch);
+  assert.ok(closeOfLaunch > -1 && closeOfLaunch < bodyOpen,
+    "#perch-launch must not wrap or contain #perch-list-body");
+});
+
+test("the launcher ships disabled, so the pre-data frame never claims there are no bots", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  assert.ok(/id="perch-new"[^>]*disabled/.test(html) || /disabled[^>]*id="perch-new"/.test(html),
+    "renderLauncher() enables it once /roost answers; before that it must not invite a tap");
+  assert.ok(/id="perch-new-bot"[^>]*hidden/.test(html), "and the picker starts hidden");
+  assert.ok(/id="perch-launch-note"[^>]*hidden/.test(html), "as does its note");
+});
+
+test("the chat-view close control is in the header, not in the sticky composer", async () => {
+  // #perch-composer{position:sticky;bottom:0} is the whole reason Send is
+  // reachable at any scroll position (the drawer's defining mobile failure).
+  // A control added INTO that box changes its height and puts that property
+  // back in play; .perch-head is a non-scrolling flex child of #perch-chat and
+  // is permanently on screen without touching the composer at all.
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  const close = html.indexOf('id="perch-close"');
+  const head = html.indexOf('class="perch-head"');
+  const composer = html.indexOf('id="perch-composer"');
+  assert.ok(close > -1, "the open session needs a close control");
+  assert.ok(head > -1 && composer > -1);
+  assert.ok(close > head && close < composer, "close belongs to the header block");
+  // The composer's own markup must be untouched by this task.
+  const composerBlock = html.slice(composer, html.indexOf("</div>", html.indexOf("send-row")));
+  assert.ok(!composerBlock.includes("perch-close"), "nothing new inside the sticky box");
+});
+
+test("the launcher and the row close button cannot overflow a 412px column", async () => {
+  // Static counterpart to the live 412px CDP check: both new controls sit in
+  // wrapping flex containers, so a long bot name cannot force a horizontal
+  // scrollbar onto the list.
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\s+/g, "");
+  assert.ok(/#perch-launch\{[^}]*display:flex/.test(css));
+  assert.ok(/#perch-launch\{[^}]*flex-wrap:wrap/.test(css), "the launcher must wrap, not overflow");
+  assert.ok(/#perch-launchselect\{[^}]*min-width:0/.test(css),
+    "a flex item without min-width:0 refuses to shrink below its content width");
+  assert.ok(/\.roost-row\{[^}]*flex-wrap:wrap/.test(css), "two buttons per row must be able to wrap");
+  assert.ok(/\.perch-head\{[^}]*flex-wrap:wrap/.test(css),
+    "the bot name, the state word and Close must wrap rather than overflow the chat column");
+});
