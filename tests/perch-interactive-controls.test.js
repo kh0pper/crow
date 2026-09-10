@@ -253,6 +253,10 @@ function makeEngine(o = {}) {
     crowHome: CROW_HOME,
     env,
     bridge,
+    // The session-free provider catalogue options() falls back to with no live
+    // child. Injected so a test never depends on this machine's provider DB or
+    // models.json; omitted, the engine lazily imports perch-model-catalog.js.
+    providerModels: o.providerModels,
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
@@ -469,6 +473,33 @@ test("control() model switch (awake): updates currentModel/resolved so snapshot(
   assert.equal(state.audit[0].payload.model, "crow-chat/big-model");
 });
 
+// The launcher's path, end to end on the engine side: the operator picks a
+// model beside "New session", the client spawns and then control()s it BEFORE
+// any message. The point is that turn 1 is served and priced by the picked
+// model, not that a later switch corrects it.
+test("launch path: a control() between spawn and the first message serves turn 1 on the picked model", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  assert.equal((await engine.get(s.sessionId)).model, "crow-local/qwen3.6-35b-a3b", "the bot's own default, as spawned");
+  const spawnWarms = state.warm.length;
+
+  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal(r.applied.model, "crow-chat/big-model");
+  assert.equal(state.warm[spawnWarms], "crow-chat",
+    "the picked provider is warmed before the switch, so the first turn does not race a cold endpoint");
+  assert.equal((await engine.get(s.sessionId)).model, "crow-chat/big-model");
+
+  await engine.message(s.sessionId, "hello - can you see the board?");
+  state.instances[0].lastTurn().resolve({
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
+  });
+  await tick();
+  assert.equal(state.meter.length, 1, "exactly one turn ran");
+  assert.equal(state.meter[0].resolved.key, "crow-chat/big-model",
+    "TURN ONE is priced on the picked model — not the spawn-resolved one with a switch after it");
+});
+
 test("control() model switch while hibernating: nothing live to command — tracked for the next wake under bindsAtWake", async () => {
   const { engine, clock, state } = makeEngine();
   const s = await spawned(engine);
@@ -682,15 +713,54 @@ test("options(): awake session returns the live models + thinking levels from th
   assert.deepEqual(r.thinkingLevels, ["off", "low", "high"]);
 });
 
-test("options(): hibernating session returns {models: null, thinkingLevels: null} — never wakes a child just to list", async () => {
-  const { engine, clock, state } = makeEngine();
+// The defect Kevin hit: he switched a session to another model, a deploy
+// restarted the gateway, and the picker "stopped working". The engine
+// hibernates idle sessions by design and adoptRow brings a restart-orphaned
+// row back hibernating too, so `models: null` was the answer for the
+// commonest state of a perfectly healthy session — and an empty dropdown is
+// indistinguishable from a broken page.
+const CATALOGUE = [
+  { provider: "crow-local", id: "qwen3.6-35b-a3b", name: "Qwen", baseUrl: "http://x:8003/v1" },
+  { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1" },
+];
+
+test("options(): a hibernating session lists the provider catalogue, and still never wakes a child", async () => {
+  let calls = 0;
+  const { engine, clock, state } = makeEngine({ providerModels: () => { calls++; return CATALOGUE; } });
   const s = await spawned(engine);
   clock.advance(600_001);
   await tick();
   assert.equal((await engine.get(s.sessionId)).state, "hibernating");
   const r = await engine.options(s.sessionId);
-  assert.deepEqual(r, { models: null, thinkingLevels: null });
+  assert.deepEqual(r.models, CATALOGUE, "an empty picker on a live session is the bug this ends");
+  assert.equal(calls, 1);
+  assert.equal(r.source, "providers", "the caller must not have to infer which half answered");
+  // Deliberately still null: control()'s thinking branch is a no-op with no
+  // child (pi's own session file owns the level across a --session resume),
+  // so offering that picker would promise a change that never happens.
+  assert.equal(r.thinkingLevels, null);
   assert.equal(state.instances.length, 1, "no second child was spawned");
+});
+
+test("options(): a LIVE child stays authoritative — the catalogue is not even consulted", async () => {
+  let calls = 0;
+  const { engine } = makeEngine({ providerModels: () => { calls++; return CATALOGUE; } });
+  const s = await spawned(engine);
+  const r = await engine.options(s.sessionId);
+  assert.deepEqual(r.models, [{ provider: "crow-local", id: "qwen3.6-35b-a3b" }, { provider: "crow-chat", id: "big-model" }],
+    "pi is the process that will route the next turn; its list wins whenever there is one");
+  assert.equal(r.source, "child");
+  assert.equal(calls, 0);
+});
+
+test("options(): a catalogue that throws degrades to an empty list, never a failed GET", async () => {
+  const { engine, clock } = makeEngine({ providerModels: () => { throw new Error("no provider registry"); } });
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  const r = await engine.options(s.sessionId);
+  assert.deepEqual(r.models, [], "the drawer renders a disabled picker on this — an honest answer");
+  assert.equal(r.thinkingLevels, null);
 });
 
 test("options(): unknown session is refused with no_such_session", async () => {

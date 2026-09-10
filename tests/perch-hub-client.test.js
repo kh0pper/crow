@@ -191,14 +191,15 @@ test("async continuations are guarded — a fast back button must not cross sess
   // The guards are load-bearing and were previously pinned only by a commit
   // message. openSession's /roost fetch, loadHistory, onStreamError's options
   // fetch, the reconnect timer, answerAsk, and every SSE listener.
-  // 11 as of this fix wave: openSession's /roost fetch, startSession's spawn
-  // continuation, every SSE listener (shared through on()), onStreamError's
-  // options probe, the reconnect timer, loadHistory, loadOptions, send(),
-  // answerAsk, and attachFile's upload continuation. A regression that drops
-  // one — the count that shipped with only 6 asserted — is invisible until
-  // an operator hits the exact race the dropped guard covered.
+  // 12 as of the launch-model wave: openSession's /roost fetch, startSession's
+  // spawn continuation AND its launch-model control continuation, every SSE
+  // listener (shared through on()), onStreamError's options probe, the
+  // reconnect timer, loadHistory, loadOptions, send(), answerAsk, and
+  // attachFile's upload continuation. A regression that drops one — the count
+  // that shipped with only 6 asserted — is invisible until an operator hits
+  // the exact race the dropped guard covered.
   const guards = (js.match(/current\.sid\s*!==/g) || []).length;
-  assert.equal(guards, 11, "expected exactly 11 identity guards, found " + guards);
+  assert.equal(guards, 12, "expected exactly 12 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -250,12 +251,26 @@ test("a model option shows its human name and says when it is not serving", asyn
   assert.equal(modelOptionText({ provider: "p", id: "m", availability: "up" }), "p/m");
 });
 
-test("a hibernating session disables the pickers rather than emptying them", async () => {
-  const optionsUsable = await extract("optionsUsable");
+test("a missing list disables its OWN picker rather than emptying it", async () => {
+  const optionsUsable = await extract("optionsUsable", "function listUsable(a){ return !!(Array.isArray(a)&&a.length); }\n");
   assert.equal(optionsUsable({ models: null, thinkingLevels: null }), false);
   assert.equal(optionsUsable({ models: [], thinkingLevels: [] }), false);
   assert.equal(optionsUsable({ models: [{ id: "m", provider: "p" }], thinkingLevels: ["off"] }), true);
   assert.equal(optionsUsable(null), false);
+});
+
+test("the two pickers are gated separately — the fallback list must not be disabled by a missing thinking list", async () => {
+  // The engine's hibernating answer is now {models: <provider catalogue>,
+  // thinkingLevels: null}: a model switch made while asleep binds at the next
+  // wake and really works, a thinking switch does nothing at all. One shared
+  // gate would disable the picker that WORKS because of the one that does not,
+  // which is the dead dropdown this wave exists to end.
+  const listUsable = await extract("listUsable");
+  assert.equal(listUsable([{ id: "m" }]), true);
+  assert.equal(listUsable([]), false);
+  assert.equal(listUsable(null), false);
+  assert.equal(listUsable(undefined), false);
+  assert.equal(listUsable("crow-local/qwen"), false, "a string is not a list");
 });
 
 test("control bodies use the exact keys the route reads, not camelCase", async () => {
@@ -464,7 +479,9 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
     "perch-plan-mode", "perch-input", "perch-send", "perch-back", "perch-abort",
     "perch-attach", "perch-file-input", "perch-chat",
     // Task C: the unconditional launcher and the two close controls.
-    "perch-new", "perch-new-bot", "perch-new-bot-label", "perch-launch-note", "perch-close"];
+    "perch-new", "perch-new-bot", "perch-new-bot-label", "perch-launch-note", "perch-close",
+    // The launch-model picker.
+    "perch-new-model", "perch-new-model-label"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -827,9 +844,18 @@ function roostFetch(roost, overrides = {}) {
     if (path.endsWith("/stop")) return makeResponse(200, { ok: true });
     if (path.endsWith("/options")) return makeResponse(200, { models: [], thinkingLevels: [] });
     if (path.endsWith("/transcript")) return makeResponse(200, { events: [] });
+    if (path.endsWith("/models")) return makeResponse(200, { models: LAUNCH_MODELS, default: "crow-local/qwen" });
     return makeResponse(200, {});
   };
 }
+
+/** The launcher's session-free list, as GET /bots/:id/models answers it:
+ *  annotated entries plus the bot's own configured default. */
+const LAUNCH_MODELS = [
+  { provider: "crow-local", id: "qwen", name: "Qwen", availability: "up" },
+  { provider: "raven-flash", id: "flash-next", name: "Flash Next", availability: "on_demand" },
+  { provider: "crow-dsv4", id: "deepseek-v4", name: "DeepSeek V4", availability: "unavailable" },
+];
 
 /** Every button rendered into the list, flattened, with the row it came from. */
 function listButtons(hub) {
@@ -869,11 +895,13 @@ test("C1: the launch control is live while EVERY attached bot already has a sess
     "startSession()'s own hash navigation ran — the launcher reuses it rather than respawning it");
 });
 
-test("C1: the launcher issues no extra request — the bot list rides the list's own /roost", async () => {
+test("C1: the bot ROSTER still rides the list's own /roost — the models call is the only addition", async () => {
   const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
-  const gets = hub.fetchCalls.filter((c) => c.method === "GET");
-  assert.equal(gets.length, 1, "exactly one GET on first paint: " + JSON.stringify(gets.map((g) => g.path)));
-  assert.equal(gets[0].path, "/roost");
+  const gets = hub.fetchCalls.filter((c) => c.method === "GET").map((g) => g.path);
+  // Two, not one: the roster comes off /roost as it always has, and the model
+  // picker needs a list /roost does not carry. It is fetched per BOT, not per
+  // poll — the test below pins that.
+  assert.deepEqual(gets, ["/roost", "/bots/r4-assistant/models"], JSON.stringify(gets));
 });
 
 test("C1: with more than one attached bot the picker decides, and only attached bots are offered", async () => {
@@ -1398,4 +1426,133 @@ test("F6: a 403 and a shapeless 200 report on the launcher too", async () => {
     assert.equal(hub.els["perch-launch-note"].textContent, expected);
     assert.equal(hub.els["perch-list-body"].children.length, 3, "rows survive: " + expected);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The launcher's model picker — "I would like to choose the model I want to
+// use for the session up front."
+// ---------------------------------------------------------------------------
+
+test("the picker lists the bot's models, opens on its configured default, and says which are unavailable", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const sel = hub.els["perch-new-model"];
+  assert.equal(sel.hidden, false, "one attached bot still gets a MODEL picker — models are per bot, not per roster");
+  assert.equal(hub.els["perch-new-model-label"].hidden, false);
+  assert.deepEqual(sel.children.map((o) => o.value),
+    ["crow-local/qwen", "raven-flash/flash-next", "crow-dsv4/deepseek-v4"]);
+  assert.equal(sel.value, "crow-local/qwen", "pre-selected on the bot's own model, so launching stays one tap");
+  assert.deepEqual(sel.children.map((o) => o.textContent), [
+    "Qwen — bot default",
+    "Flash Next — starts on demand",
+    "DeepSeek V4 — not running",
+  ], "an unavailable model must be visibly unavailable, never silently selectable");
+});
+
+test("launching on the default spawns and opens — no redundant model switch", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const posts = hub.fetchCalls.filter((c) => c.method === "POST").map((c) => c.path);
+  assert.deepEqual(posts, ["/bots/r4-assistant/interactive"],
+    "the spawn already resolved this model; switching to it would warm a provider twice for no change");
+  assert.equal(hub.location.hash, "perchlive-99999999");
+});
+
+test("launching on a NON-default model switches it before the session is opened at all", async () => {
+  let releaseControl;
+  const controlPending = new Promise((r) => { releaseControl = r; });
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, {
+      "/control": () => controlPending.then(() => makeResponse(200, { applied: { model: "raven-flash/flash-next" } })),
+    }),
+  });
+  hub.els["perch-new-model"].value = "raven-flash/flash-next";
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const control = hub.fetchCalls.filter((c) => c.path.includes("/control"));
+  assert.equal(control.length, 1, "the model is applied through control(), not through a new spawn parameter");
+  assert.equal(control[0].path, "/interactive/perchlive-99999999/control");
+  assert.deepEqual(JSON.parse(control[0].opts.body), { model: { provider: "raven-flash", id: "flash-next" } },
+    "the exact body the route reads — {provider, id}, mapped to modelId engine-side");
+  // THE POINT: the chat is not reachable until the switch has landed, so the
+  // first message cannot go out on the model the spawn happened to resolve.
+  assert.equal(hub.location.hash, "", "the session must not open while the switch is still in flight");
+  releaseControl();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.location.hash, "perchlive-99999999", "and it opens once the switch has landed");
+});
+
+test("a refused model switch opens the session anyway and says what happened", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/control": () => makeResponse(409, { error: "turn_in_progress" }) }),
+  });
+  hub.els["perch-new-model"].value = "raven-flash/flash-next";
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-launch-note"].textContent,
+    "The session started on the bot's own model; the switch did not take.");
+  assert.equal(hub.location.hash, "perchlive-99999999",
+    "the session is real and usable — stranding a live child behind an error would be worse");
+});
+
+test("the model list is fetched per BOT, not per poll", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const modelGets = () => hub.fetchCalls.filter((c) => c.path.endsWith("/models")).length;
+  assert.equal(modelGets(), 1);
+  hub.els["perch-new-model"].value = "raven-flash/flash-next";
+  for (const fn of hub.timers.values()) fn();          // the 10s poll body, verbatim
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(modelGets(), 1, "a poll must not refetch — repopulating would throw away a mid-tap pick");
+  assert.equal(hub.els["perch-new-model"].value, "raven-flash/flash-next", "and the pick survives");
+});
+
+test("with several bots the model list follows the roster select", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_TWO_BOTS) });
+  const modelPaths = () => hub.fetchCalls.filter((c) => c.path.endsWith("/models")).map((c) => c.path);
+  assert.deepEqual(modelPaths(), ["/bots/alpha/models"], "the bot the launcher would spawn against");
+  hub.els["perch-new-bot"].value = "beta";
+  hub.els["perch-new-bot"].onchange();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(modelPaths(), ["/bots/alpha/models", "/bots/beta/models"],
+    "models are per-bot; a picker still showing alpha's models must not choose for beta");
+});
+
+test("a model list that does not arrive leaves NO picker, rather than an empty enabled one", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/models": () => makeResponse(503, { error: "upstream" }) }),
+  });
+  assert.equal(hub.els["perch-new-model"].hidden, true);
+  assert.equal(hub.els["perch-new-model-label"].hidden, true);
+  assert.equal(hub.els["perch-new"].disabled, false, "and the launcher still works — the model is optional");
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const posts = hub.fetchCalls.filter((c) => c.method === "POST").map((c) => c.path);
+  assert.deepEqual(posts, ["/bots/r4-assistant/interactive"], "no control from a picker that is not there");
+});
+
+test("with no attached bot there is no model picker either", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_NO_ATTACHED) });
+  assert.equal(hub.els["perch-new-model"].hidden, true);
+  assert.equal(hub.fetchCalls.filter((c) => c.path.endsWith("/models")).length, 0,
+    "no bot to ask about");
+});
+
+test("the drawer's model picker is ENABLED on a hibernating session's fallback list", async () => {
+  // Kevin's actual bug: he switched a session's model, a deploy restarted the
+  // gateway, and the picker "stopped working". The switch itself was always
+  // honoured (control() stores it, startChild reads it before warmModel); only
+  // the list was missing, and an empty dropdown reads as a broken page.
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/options": () => makeResponse(200, {
+      models: [{ provider: "crow-local", id: "qwen", name: "Qwen", availability: "up" }],
+      thinkingLevels: null, source: "providers" }) }),
+  });
+  await openChatSession(hub);
+  const modelSel = hub.els["perch-model"], thinkSel = hub.els["perch-thinking"];
+  assert.equal(modelSel.disabled, false, "the fallback list is a real list and the switch really binds at the next wake");
+  assert.deepEqual(modelSel.children.map((o) => o.value), ["crow-local/qwen"]);
+  assert.equal(thinkSel.disabled, true,
+    "thinking stays disabled: control()'s thinking branch is a no-op with no child, so offering it would lie");
+  assert.equal(thinkSel.children.length, 0);
 });

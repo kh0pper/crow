@@ -64,6 +64,17 @@ export function perchHubCss() {
 #perch-hub-root #perch-new{min-height:44px}
 #perch-launch select{font:14px Inter,system-ui,sans-serif;padding:9px 10px;border:1px solid var(--line);
 border-radius:10px;background:var(--sky);color:var(--ink);flex:1 1 140px;min-width:0;max-width:100%}
+/* The model picker. TWO ids (2,0,0), for the same reason #perch-new carries
+   two: "#perch-launch select" above is (1,0,1) and a single-id override would
+   only tie-and-win on source order — the near-miss that shipped #perch-close
+   at 36px.
+   min-height IS load-bearing: drop it and the picker measures under the 44px
+   thumb floor at both viewports (measured; perch-hub-render.test.js's M1 goes
+   red). The flex-basis is a LAYOUT choice, not a safety rule — a model name is
+   long and reads better on its own row — and it is honest to say so: dropping
+   it leaves every M1 measurement green, because the shared select rule's
+   140px basis plus flex-wrap already keeps New session on screen at 412px. */
+#perch-launch #perch-new-model{min-height:44px;flex:1 1 100%}
 /* By id, for the same reason as #perch-close above: "#perch-launch .empty" is
    (1,1,0) and ties with "#perch-hub-root .empty" further down, which then wins
    on source order. Measured dead: computed padding stayed 16px. */

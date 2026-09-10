@@ -239,6 +239,11 @@ function cardFrom(m) {
  *   Default is a LAZY import of bot-world.mjs + bridge.mjs + pi_lifecycle.mjs +
  *   warm.mjs + metering.mjs (the perch.js `loadBridge` idiom — gateway boot
  *   must not pay for the bot engine).
+ * @param {Function} [opts.providerModels] test seam: `() => Array<model>`, the
+ *   session-free provider catalogue `options()` falls back to when a session
+ *   has no live child. Default is a LAZY import of perch-model-catalog.js —
+ *   same discipline as `bridge` above: a gateway that never lists models must
+ *   not pay for the provider registry at construction time.
  * @param {Function} [opts.now] injectable clock (lease expiry is testable).
  * @param {Function} [opts.setTimer] injectable timer factory.
  * @param {Function} [opts.clearTimer]
@@ -248,6 +253,7 @@ export function createInteractiveEngine({
   env = process.env,
   crowHome = env.CROW_HOME || join(homedir(), ".crow"),
   bridge = null,
+  providerModels = null,
   now = Date.now,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -1866,22 +1872,60 @@ export function createInteractiveEngine({
   }
 
   /**
-   * Track 3 Task 4: live model/thinking-level menus for the drawer (Task 8).
-   * Wakes are NEVER required just to list — a hibernating session (or one this
-   * process has never held; resolveSession adopts) returns null arrays so the
-   * caller can disable the pickers instead of spawning a child on a mere GET.
+   * Track 3 Task 4: model/thinking-level menus for the drawer (Task 8).
+   * Wakes are NEVER required just to list.
+   *
+   * A LIVE child is authoritative: it is the process that will actually route
+   * the next turn, so its `get_available_models` wins whenever there is one.
+   *
+   * With NO child the answer used to be `models: null`, and the drawer
+   * rendered an empty, disabled picker. That is wrong for a session that is
+   * merely asleep — the engine hibernates idle sessions by design and
+   * `adoptRow` brings a restart-orphaned row back hibernating too, so the
+   * commonest state of a perfectly healthy session reported the same thing a
+   * broken page would. Worse, the switch itself WORKS while hibernating:
+   * `control()` stores `currentModelParts` and `startChild` reads it BEFORE
+   * `warmModel`/`PiRpc` construction, so the next wake serves and prices the
+   * chosen provider from turn 1. Only the list was missing. It now falls back
+   * to the session-free provider catalogue — the SAME list the launcher's
+   * `GET /bots/:id/models` offers (perch-model-catalog.js), never a second
+   * one that could disagree.
+   *
+   * `thinkingLevels` stays null in that state on purpose: `control()`'s
+   * thinking branch is a no-op with no child (pi's own session file owns the
+   * level across a `--session` resume, and this engine deliberately persists
+   * nothing), so offering the picker would promise a change that never
+   * happens. `source` names which half answered, so a caller never has to
+   * infer it from the shape.
    */
   async function options(sessionId) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
-    if (!s.pi) return { models: null, thinkingLevels: null };
+    if (!s.pi) return { models: await catalogModels(), thinkingLevels: null, source: "providers" };
     const [modelsRes, levelsRes] = await Promise.all([
       s.pi.commandSince({ type: "get_available_models" }),
       s.pi.commandSince({ type: "get_available_thinking_levels" }),
     ]);
     const models = (modelsRes && modelsRes.data && modelsRes.data.models) || [];
     const thinkingLevels = (levelsRes && levelsRes.data && levelsRes.data.levels) || [];
-    return { models, thinkingLevels };
+    return { models, thinkingLevels, source: "child" };
+  }
+
+  /**
+   * The session-free model catalogue, lazily resolved. Never throws: a
+   * provider registry this process cannot read is an EMPTY list, which the
+   * drawer renders as a disabled picker — the honest answer — rather than an
+   * options() call that 500s a session the operator was only looking at.
+   */
+  async function catalogModels() {
+    try {
+      if (providerModels) return providerModels() || [];
+      const mod = await import("./perch-model-catalog.js");
+      return mod.providerModelList() || [];
+    } catch (e) {
+      log("provider catalogue unavailable: " + (e && e.message));
+      return [];
+    }
   }
 
   /** Resolve a session this process holds, or adopt its row (gateway restart).

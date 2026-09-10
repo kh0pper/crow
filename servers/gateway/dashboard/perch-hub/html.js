@@ -54,6 +54,14 @@ ${engineBanner(engine, lang)}
     <div id="perch-launch">
       <label class="field-label" id="perch-new-bot-label" for="perch-new-bot" hidden>${escapeHtml(t("perch.newSessionBot", lang))}</label>
       <select id="perch-new-bot" aria-labelledby="perch-new-bot-label" hidden></select>
+      <!-- The model for the session about to be started. Populated from
+           GET /bots/<id>/models (session-free — there is no session yet to
+           ask), pre-selected on the bot's own configured default, so the
+           common case stays one tap on the button beside it. Hidden until
+           that list arrives: an empty-but-visible picker is the state this
+           whole task exists to stop shipping. -->
+      <label class="field-label" id="perch-new-model-label" for="perch-new-model" hidden>${escapeHtml(t("perch.newSessionModel", lang))}</label>
+      <select id="perch-new-model" aria-labelledby="perch-new-model-label" hidden></select>
       <button type="button" class="primary" id="perch-new" disabled>${escapeHtml(t("perch.newSession", lang))}</button>
       <div class="empty" id="perch-launch-note" hidden></div>
     </div>
