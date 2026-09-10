@@ -1,4 +1,5 @@
 import { tJs } from "../shared/i18n.js";
+import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
 
 /** The hub's client script. Emitted INSIDE a template literal — a bare
  *  backtick or ${ anywhere in here breaks the module at import time.
@@ -133,7 +134,10 @@ export function perchHubJs(lang = "en") {
       if(!live.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:'idle',cardId:null,pendingUi:false}); return; }
       live.forEach(function(s){
         out.push({botId:b.id,botName:b.name,sessionId:s.sessionId,state:s.state,
-                  cardId:s.cardId==null?null:s.cardId,pendingUi:!!s.pendingUi});
+                  cardId:s.cardId==null?null:s.cardId,pendingUi:!!s.pendingUi,
+                  /* /roost carries the operator's name alongside the id
+                     (routes/perch.js) — null when there isn't one. */
+                  label:(s.label==null||s.label==='')?null:String(s.label)});
       });
     });
     /* Blocked-on-you first: those are the only rows that need you right now. */
@@ -198,6 +202,9 @@ export function perchHubJs(lang = "en") {
   var CLOSE_FAILED='${tJs("perch.closeFailed", lang)}';
   var CLOSE_FAILED_FOR='${tJs("perch.closeFailedFor", lang)}';
   var ROW_CARD='${tJs("perch.rowCard", lang)}';
+  var RENAME_LABEL='${tJs("perch.rename", lang)}';
+  var RENAME_PROMPT='${tJs("perch.renamePrompt", lang)}';
+  var RENAME_FAILED='${tJs("perch.renameFailed", lang)}';
   var ROOST_UNREACHABLE='${tJs("perch.roostUnreachable", lang)}';
 
   /* Row identity. One bot with eight sessions renders eight rows that read
@@ -221,9 +228,14 @@ export function perchHubJs(lang = "en") {
   /* What the confirm calls the session it is about to destroy. A confirm that
      names nothing cannot correct a mis-tap, which is the only thing it is
      there to do. */
+  /* Names the session in the close confirmation. The operator's own name
+     leads when there is one, but the bot and the short id STAY: an
+     irreversible confirm has to name something unambiguous, and two sessions
+     can carry the same name. */
   function sessionLabel(sid){
     var r=rowIndex[sid], short=shortSid(sid);
-    return (r&&r.botName)?(r.botName+' '+short):short;
+    var base=(r&&r.botName)?(r.botName+' '+short):short;
+    return (r&&r.label)?(r.label+' ('+base+')'):base;
   }
 
   var pendingNote=null;                 /* survives the loadList that follows a note */
@@ -249,6 +261,12 @@ export function perchHubJs(lang = "en") {
       row.appendChild(line('roost-dot',''));
       var main=document.createElement('div'); main.className='roost-main';
       main.appendChild(line('roost-cwd',r.botName));
+      /* The name on its OWN line, above the unchanged subtitle. Folding it
+         into rowSubtitle() instead would push state/id/card out of a 320px
+         column; this keeps "state · id · card" exactly as it was, which is
+         also the fallback when there is no name. textContent via line(),
+         never innerHTML — this string came from an operator. */
+      if(r.label) main.appendChild(line('roost-name',r.label));
       main.appendChild(line('roost-when',rowSubtitle(r)));
       row.appendChild(main);
       var b=document.createElement('button');
@@ -261,6 +279,11 @@ export function perchHubJs(lang = "en") {
          stop. Second button, not a swipe or a long-press: this has to work
          with a thumb on a 412px screen. */
       if(r.sessionId){
+        /* No confirm on this one: renaming is reversible and cheap. */
+        var n=document.createElement('button');
+        n.type='button'; n.className='roost-rename'; n.textContent=RENAME_LABEL;
+        n.onclick=function(){ renameSession(r.sessionId,r.label||''); };
+        row.appendChild(n);
         var x=document.createElement('button');
         x.type='button'; x.className='roost-close'; x.textContent=CLOSE_LABEL;
         x.onclick=function(){ stopSession(r.sessionId); };
@@ -440,6 +463,29 @@ export function perchHubJs(lang = "en") {
      resolves against the right session. current.sid is consulted only to
      decide WHERE the outcome is shown — and, on success, to leave a chat view
      whose SSE stream the engine has just closed. */
+  /* Rename, or clear a name. No confirm — this is reversible and touches no
+     child; the confirm on stopSession() below exists because THAT is
+     terminal. prompt() returning null is a CANCEL and must do nothing;
+     returning '' is a deliberate CLEAR and must go through, which is why this
+     branches on null rather than on falsiness. */
+  function renameSession(sid,currentLabel){
+    if(!sid) return;
+    var next=prompt(RENAME_PROMPT,String(currentLabel==null?'':currentLabel));
+    if(next===null) return;                       /* cancelled, not cleared */
+    perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/rename',{label:next}).then(function(r){
+      if(!r.ok){
+        if(current.sid===sid) appendNote(RENAME_FAILED); else showListNote(RENAME_FAILED);
+        return;
+      }
+      /* The engine normalizes (trim, cap, empty -> null), so the stored value
+         is what comes BACK, never what was typed. */
+      var stored=(r.j&&r.j.label)||null;
+      if(rowIndex[sid]) rowIndex[sid].label=stored;
+      if(current.sid===sid) showSessionName(stored);
+      loadList();
+    });
+  }
+
   function stopSession(sid){
     if(!sid) return;
     if(!confirm(CLOSE_CONFIRM.replace('{session}',sessionLabel(sid)))) return;
@@ -561,9 +607,32 @@ export function perchHubJs(lang = "en") {
      still polling, still rendering rows, still opening streams. */
   function startListPolling(){ stopListPolling(); listTimer=setInterval(function(){ if(live()) loadList(); },10000); }
   function stopListPolling(){ if(listTimer){ clearInterval(listTimer); listTimer=null; } }
+
+  /* Whether the session list is ON SCREEN, which is the only thing that
+     decides whether it must keep polling — NOT which view is "current".
+     At and above the split breakpoint (perch-hub/css.js's
+     PERCH_SPLIT_MIN_WIDTH; the media query and this share the one constant)
+     .hub-split is a two-column grid and body[data-view="chat"] #perch-list is
+     display:block, so opening a session leaves the list right there beside it.
+     Stopping the poll on open therefore froze a VISIBLE list: an operator on a
+     1900px window saw "R4 Assistant / idle" with a Talk button next to the
+     awake session he was typing in, and no Close anywhere on that surface,
+     because Close only exists on a live row. */
+  var SPLIT=window.matchMedia?window.matchMedia('(min-width:${PERCH_SPLIT_MIN_WIDTH}px)'):null;
+  function listOnScreen(){ return body.getAttribute('data-view')==='list'||!!(SPLIT&&SPLIT.matches); }
+  function syncListPolling(){
+    if(listOnScreen()){ startListPolling(); loadList(); }
+    else stopListPolling();                    /* below the breakpoint it really is hidden */
+  }
+  /* Crossing the breakpoint changes the answer with no view change and no
+     navigation — the same class of problem shared/layout.js's own sidebar
+     matchMedia listener handles, and the same guard: a retired instance must
+     not start polling again from here. */
+  if(SPLIT&&SPLIT.addEventListener) SPLIT.addEventListener('change',function(){ if(live()) syncListPolling(); });
+
   window.addEventListener('focus',function(){
     if(!live()) return;
-    if(body.getAttribute('data-view')==='list') loadList();
+    if(listOnScreen()) loadList();
   });
 
   /* Engine-minted ids only: "perchlive-" + 8 hex (perch-interactive.js:1473).
@@ -588,7 +657,10 @@ export function perchHubJs(lang = "en") {
     current.sid=sid;
     var mySid=sid;                          /* identity guard for every await below */
     setView('chat');
-    stopListPolling();                      /* SSE is the live signal here */
+    /* SSE is the live signal for the CHAT. It says nothing about the list,
+       which in split view is still on screen — so the poll stops only when the
+       list is genuinely hidden. */
+    syncListPolling();
     clearEl(el('perch-transcript')); clearEl(el('perch-ask'));
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     var known=rowIndex[sid];
@@ -721,6 +793,10 @@ export function perchHubJs(lang = "en") {
     on('state',function(d){
       setTurnInFlight(turnFlagFor(d));
       el('perch-state').textContent=d.state||'';
+      /* The engine echoes the label on every state frame, so a rename made
+         from the list row (or another tab) shows up here without a reload. */
+      if(rowIndex[sid]) rowIndex[sid].label=d.label||null;
+      showSessionName(d.label||null);
       /* Reflects the engine's own record (snapshot()/stateEvent() in
          perch-interactive.js), never the picker back at it — setting
          .value/.checked does not fire change, so this cannot loop. */
@@ -762,9 +838,20 @@ export function perchHubJs(lang = "en") {
     es.onerror=onStreamError;
   }
 
+  /* The name line in the chat header. textContent and \`hidden\` only — the
+     value is operator free text and must never reach an HTML sink. */
+  function showSessionName(label){
+    var e=el('perch-session-name'); if(!e) return;
+    e.textContent=label==null?'':String(label);
+    e.hidden=!label;
+  }
   function showHeader(botId,botName){
     el('perch-bot-name').textContent=botName||botId;
+    /* The session id stays here, unchanged and on its own: it is the identity
+       the close confirm and every API path use. */
     el('perch-session-meta').textContent=current.sid||'';
+    var known=rowIndex[current.sid];
+    showSessionName(known?known.label:null);
   }
   /* Bounded backoff. TWO separate operations, and conflating them is what made
      an earlier draft of this dead code: cancelling the TIMER must not reset the
@@ -869,6 +956,7 @@ export function perchHubJs(lang = "en") {
     var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
     if(modelSel){ clearEl(modelSel); modelSel.disabled=true; }
     if(thinkSel){ clearEl(thinkSel); thinkSel.disabled=true; }
+    showSessionName(null);       /* the PREVIOUS session's name must not bleed in */
     var permSel=el('perch-permission'); if(permSel) permSel.value='guarded';
     var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
     setTurnInFlight(false);      /* the PREVIOUS session's Steer/Stop state must not bleed in */
@@ -1072,6 +1160,10 @@ export function perchHubJs(lang = "en") {
   }
   el('perch-abort').onclick=abortTurn;
   el('perch-close').onclick=function(){ stopSession(current.sid); };
+  el('perch-rename').onclick=function(){
+    var known=rowIndex[current.sid];
+    renameSession(current.sid,(known&&known.label)||'');
+  };
 
   /* iOS does not shrink the layout viewport for the keyboard, so dvh alone
      leaves the composer behind it. Offset the chat column by the hidden part. */

@@ -79,9 +79,15 @@ ${engineBanner(engine, lang)}
          (css.js:89-91), and .perch-head is already a non-scrolling child of
          the #perch-chat flex column, so a control here is permanently on
          screen without touching that box. -->
+    <!-- The session's operator-set name sits between the bot name and the
+         session id, never replacing either: the id stays the identity (the
+         close confirmation names it), the name is the convenience. Hidden
+         until there is one; rendered with textContent, never markup. -->
     <div class="perch-head"><div><div class="title" id="perch-bot-name"></div>
+      <div class="session-name" id="perch-session-name" hidden></div>
       <div class="meta" id="perch-session-meta"></div></div>
       <div class="state" id="perch-state"></div>
+      <button type="button" id="perch-rename" class="quiet">${escapeHtml(t("perch.rename", lang))}</button>
       <button type="button" id="perch-close" class="quiet">${escapeHtml(t("perch.close", lang))}</button></div>
     <div class="field-row">
       <div class="field"><span class="field-label" id="perch-model-label">${escapeHtml(t("perch.modelLabel", lang))}</span>

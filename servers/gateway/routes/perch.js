@@ -447,7 +447,7 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
       const rowById = new Map();
       try {
         const { rows: sessRows } = await db.execute({
-          sql: "SELECT gateway_thread_id, card_id, control FROM bot_sessions WHERE kind='perch-live' AND status != 'stopped'",
+          sql: "SELECT gateway_thread_id, card_id, control, label FROM bot_sessions WHERE kind='perch-live' AND status != 'stopped'",
           args: [],
         });
         for (const r of sessRows) rowById.set(String(r.gateway_thread_id), r);
@@ -496,6 +496,11 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
             cardId,
             pendingUi: !!s.pendingUi,
             control: dbRow ? dbRow.control : null,
+            // The operator's name for this session, ALONGSIDE the id — never
+            // instead of it. Same backfill rule as cardId above: the engine
+            // snapshot wins when this process holds the session, and the row
+            // fills in for an entry eng.list() built from the DB alone.
+            label: (s.label != null ? s.label : (dbRow && dbRow.label)) || null,
           };
         });
         // spec §3.2 priority fold: waiting-on-you > working > hibernating >

@@ -470,7 +470,7 @@ function makeResponse(status, body) {
  *  path, opts)` decides how every perchApi call resolves; the default 200s
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
-async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
+async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", split = false } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
 
@@ -481,7 +481,9 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
     // Task C: the unconditional launcher and the two close controls.
     "perch-new", "perch-new-bot", "perch-new-bot-label", "perch-launch-note", "perch-close",
     // The launch-model picker.
-    "perch-new-model", "perch-new-model-label"];
+    "perch-new-model", "perch-new-model-label",
+    // Session rename: the header control and the name line it writes.
+    "perch-rename", "perch-session-name"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -505,7 +507,20 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
   const winTarget = makeEventTarget();
   const vvTarget = makeEventTarget();
   const visualViewport = Object.assign(vvTarget, { height: 700, offsetTop: 0 });
-  const win = Object.assign(winTarget, { visualViewport, innerHeight: 800 });
+  // The split-view media query. `split: true` puts the harness at >=900px,
+  // where .hub-split is a two-column grid and the session list stays on screen
+  // with a chat open — the state finding 1 is about. `mq._set(matches)` fires a
+  // real change event, which is how a window crossing the breakpoint behaves.
+  const mqTarget = makeEventTarget();
+  const mq = Object.assign(mqTarget, {
+    matches: !!split,
+    media: "(min-width:900px)",
+    _set(v) { this.matches = !!v; this._dispatch("change", { matches: this.matches }); },
+  });
+  const win = Object.assign(winTarget, {
+    visualViewport, innerHeight: 800,
+    matchMedia: () => mq,
+  });
 
   // history is counted, not simulated: assigning location.hash pushes an entry,
   // location.replace('#') does not. Both fire hashchange — verified in a real
@@ -541,9 +556,19 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
   // is a stop with no gate, which is the failure mode the confirmation exists
   // to prevent.
   const confirms = [];
+  // Renaming asks through prompt(), the same native primitive the close gate
+  // uses for confirm(). Recorded with its prefill so a test can prove BOTH
+  // that the operator was asked and what they were shown. Default: cancelled
+  // (null) — a rename that posts under this default is a rename with no
+  // operator input at all.
+  const prompts = [];
   const sandbox = {
     document: doc,
     confirm(msg) { confirms.push(String(msg)); return confirmImpl ? confirmImpl(String(msg)) : false; },
+    prompt(msg, prefill) {
+      prompts.push({ msg: String(msg), prefill: prefill == null ? null : String(prefill) });
+      return promptImpl ? promptImpl(String(msg), prefill) : null;
+    },
     window: win,
     location,
     EventSource: FakeEventSource,
@@ -574,7 +599,7 @@ async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
   // fetchCalls or the DOM it produced.
   await new Promise((r) => setTimeout(r, 0));
 
-  return { els, doc, win, location, fetchCalls, sandbox, timers, confirms, history };
+  return { els, doc, win, location, fetchCalls, sandbox, timers, confirms, prompts, history, mq };
 }
 
 /** Opens a chat session the same way a real click does: seed a /roost
@@ -1555,4 +1580,191 @@ test("the drawer's model picker is ENABLED on a hibernating session's fallback l
   assert.equal(thinkSel.disabled, true,
     "thinking stays disabled: control()'s thinking branch is a no-op with no child, so offering it would lie");
   assert.equal(thinkSel.children.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Finding 1 — in split view the list is VISIBLE, so it must keep polling.
+// ---------------------------------------------------------------------------
+
+test("below the breakpoint, opening a session stops the list poll — the list really is hidden there", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), split: false });
+  assert.equal(hub.timers.size > 0, true, "the list view polls");
+  await openChatSession(hub);
+  assert.equal(hub.timers.size, 0, "nothing left ticking behind a hidden list");
+});
+
+test("in SPLIT view, opening a session keeps the list polling and refreshes it at once", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), split: true });
+  const roostsBefore = hub.fetchCalls.filter((c) => c.path === "/roost").length;
+  await openChatSession(hub);
+  assert.ok(hub.timers.size > 0,
+    "the list is on screen beside the chat; a frozen list is what showed an idle row for an awake session");
+  const roosts = hub.fetchCalls.filter((c) => c.path === "/roost").length;
+  assert.ok(roosts > roostsBefore, "and it refreshes immediately, so the session just opened appears as a row");
+});
+
+test("crossing the breakpoint with a chat open starts and stops the poll, with no navigation at all", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), split: false });
+  await openChatSession(hub);
+  assert.equal(hub.timers.size, 0);
+  hub.mq._set(true);                       // the operator widened the window
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(hub.timers.size > 0, "the list just came on screen; it must not sit there stale");
+  hub.mq._set(false);                      // and narrowed it again
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.timers.size, 0);
+});
+
+test("in split view the poll renders the newly opened session as a live row with a Close", async () => {
+  // Kevin's screenshot: an awake session open on the right, and on the left a
+  // single "R4 Assistant / idle" row with a Talk button. Close lives on live
+  // rows only, so that surface offered no way to end anything.
+  let roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "idle", sessions: [] }] };
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/roost": () => makeResponse(200, roost) }), split: true });
+  assert.deepEqual(listButtons(hub).map((b) => b.text), ["Talk"], "precondition: an idle bot, nothing live");
+
+  // The session exists now — exactly what the frozen list never learned.
+  roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false }] }] };
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  for (const fn of hub.timers.values()) fn();          // the 10s poll body, verbatim
+  await new Promise((r) => setTimeout(r, 0));
+
+  const texts = listButtons(hub).map((b) => b.text);
+  assert.ok(texts.includes("Open"), "the live session must be a row: " + JSON.stringify(texts));
+  assert.ok(texts.includes("Close"), "and it must offer the Close the operator went looking for");
+  assert.equal(texts.includes("Talk"), false, "the bot is no longer idle");
+});
+
+// ---------------------------------------------------------------------------
+// Finding 3 — sessions can be named. "It seems like there is not a way to
+// rename the sessions."
+// ---------------------------------------------------------------------------
+
+const ROOST_NAMED = {
+  birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: 248, pendingUi: false,
+      label: "Nov package copy pass" }] }],
+};
+
+test("a named session renders its name AND keeps the id subtitle it always had", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/roost": () => makeResponse(200, ROOST_NAMED) }) });
+  const rowEl = hub.els["perch-list-body"].children[0];
+  const texts = rowEl.children.find((c) => c.className === "roost-main").children.map((c) => c.textContent);
+  assert.deepEqual(texts, ["R4 Assistant", "Nov package copy pass", "awake · aaaaaaaa · card 248"],
+    "the name is a convenience; the machine id is the identity and stays visible");
+});
+
+test("an unnamed session falls back to exactly the subtitle it had before", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  const rowEl = hub.els["perch-list-body"].children[0];
+  const texts = rowEl.children.find((c) => c.className === "roost-main").children.map((c) => c.textContent);
+  assert.deepEqual(texts, ["R4 Assistant", "awake · aaaaaaaa"], "no empty name line, no change to the old rendering");
+});
+
+test("a name containing markup is rendered as TEXT, in the row and in the confirm", async () => {
+  const nasty = "<img src=x onerror=alert(1)>";
+  const roost = { birds: [{ id: "r4", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [{ sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false, label: nasty }] }] };
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/roost": () => makeResponse(200, roost) }) });
+  const rowEl = hub.els["perch-list-body"].children[0];
+  const nameLine = rowEl.children.find((c) => c.className === "roost-main").children
+    .find((c) => c.className === "roost-name");
+  // line() builds with textContent; the value is never assigned to an HTML
+  // sink (the whole-script no-innerHTML test above covers that structurally).
+  assert.equal(nameLine.textContent, nasty);
+  const close = listButtons(hub).find((b) => b.text === "Close");
+  close.btn.onclick();
+  assert.equal(hub.confirms.length, 1);
+  assert.ok(hub.confirms[0].includes(nasty), "the confirm carries it as text too: " + hub.confirms[0]);
+  assert.ok(hub.confirms[0].includes("aaaaaaaa"),
+    "and still names the id — two sessions can carry the same name: " + hub.confirms[0]);
+});
+
+test("renaming from a row asks first, posts the new name, and needs no confirmation", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/rename": () => makeResponse(200, { label: "Nov package" }) }),
+    promptImpl: () => "  Nov   package  ",
+  });
+  const rename = listButtons(hub).find((b) => b.text === "Rename");
+  assert.ok(rename, "a live row must offer it");
+  rename.btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.prompts.length, 1, "the operator was asked");
+  assert.equal(hub.confirms.length, 0, "renaming is reversible — no confirmation gate");
+  const posts = hub.fetchCalls.filter((c) => c.path.includes("/rename"));
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].path, "/interactive/perchlive-aaaaaaaa/rename");
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { label: "  Nov   package  " },
+    "raw as typed — the ENGINE normalizes, so what is stored is what comes back");
+});
+
+test("a cancelled rename posts nothing at all", async () => {
+  // promptImpl defaults to null, which is what Cancel gives.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  listButtons(hub).find((b) => b.text === "Rename").btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.prompts.length, 1);
+  assert.equal(hub.fetchCalls.filter((c) => c.path.includes("/rename")).length, 0);
+});
+
+test("an EMPTY answer clears the name — that is an action, not a cancel", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/roost": () => makeResponse(200, ROOST_NAMED),
+                          "/rename": () => makeResponse(200, { label: null }) }),
+    promptImpl: () => "",
+  });
+  const rename = listButtons(hub).find((b) => b.text === "Rename");
+  assert.equal(hub.prompts[0], undefined);
+  rename.btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.prompts[0].prefill, "Nov package copy pass", "the prompt is prefilled with the current name");
+  const posts = hub.fetchCalls.filter((c) => c.path.includes("/rename"));
+  assert.equal(posts.length, 1, "an empty string must reach the engine; only null (Cancel) is a no-op");
+  assert.deepEqual(JSON.parse(posts[0].opts.body), { label: "" });
+});
+
+test("the chat header shows the name, and a state frame keeps it current", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/roost": () => makeResponse(200, ROOST_NAMED) }) });
+  await openChatSession(hub);
+  assert.equal(hub.els["perch-session-name"].textContent, "Nov package copy pass");
+  assert.equal(hub.els["perch-session-name"].hidden, false);
+  assert.equal(hub.els["perch-session-meta"].textContent, "perchlive-aaaaaaaa",
+    "the id line is untouched — it is the identity");
+
+  // Renamed from somewhere else (another tab, a list row): the engine echoes
+  // the label on every state frame.
+  FakeEventSource.instances[0]._serverFrame("state", { state: "awake", turnInFlight: false, label: "Renamed elsewhere" });
+  assert.equal(hub.els["perch-session-name"].textContent, "Renamed elsewhere");
+
+  FakeEventSource.instances[0]._serverFrame("state", { state: "awake", turnInFlight: false, label: null });
+  assert.equal(hub.els["perch-session-name"].hidden, true, "a cleared name hides the line rather than showing an empty one");
+});
+
+test("the header's Rename control is wired and prefilled from the open session", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/roost": () => makeResponse(200, ROOST_NAMED),
+                          "/rename": () => makeResponse(200, { label: "Renamed" }) }),
+    promptImpl: () => "Renamed",
+  });
+  await openChatSession(hub);
+  hub.els["perch-rename"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.prompts[0].prefill, "Nov package copy pass");
+  const posts = hub.fetchCalls.filter((c) => c.path.includes("/rename"));
+  assert.equal(posts[0].path, "/interactive/perchlive-aaaaaaaa/rename");
+  assert.equal(hub.els["perch-session-name"].textContent, "Renamed",
+    "the header reflects what the engine STORED, not what was typed");
+});
+
+test("a refused rename says so instead of silently keeping the old name", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/rename": () => makeResponse(404, { error: "no_such_session" }) }),
+    promptImpl: () => "whatever",
+  });
+  listButtons(hub).find((b) => b.text === "Rename").btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const noteText = hub.els["perch-list-body"].children.map((c) => c.textContent).join(" ");
+  assert.ok(noteText.includes("That session was not renamed."), noteText);
 });

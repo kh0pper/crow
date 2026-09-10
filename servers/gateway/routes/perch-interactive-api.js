@@ -589,6 +589,32 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     }
   });
 
+  // ---- POST /interactive/:sid/rename — name a session, or clear its name ----
+  // The operator's report was "there is not a way to rename the sessions".
+  // The engine's `perchlive-xxxxxxxx` stays the identity; this is the
+  // convenience name rendered beside it. An empty/whitespace body CLEARS the
+  // name (the engine's normalizeLabel returns null) — clearing is a real
+  // action, and the row falls back to the short id it always had. No
+  // confirmation anywhere on this path: renaming is reversible and cheap,
+  // unlike /stop.
+  //
+  // The body cap lives in the ENGINE (LABEL_CAP), not here: the value is
+  // written to a row and re-rendered from it, so the one place that can
+  // guarantee what is stored is the writer. The route's own slice is only a
+  // parser guard against a megabyte of JSON string.
+  router.post(P + "/interactive/:sid/rename", async (req, res) => {
+    const sid = String(req.params.sid);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const label = String(body.label == null ? "" : body.label).slice(0, MESSAGE_CAP);
+    try {
+      const eng = resolveEngine();
+      const result = await eng.rename(sid, label);
+      res.json(result);
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
   // ---- POST /interactive/:sid/cycle — force a respawn ----
   router.post(P + "/interactive/:sid/cycle", async (req, res) => {
     try {

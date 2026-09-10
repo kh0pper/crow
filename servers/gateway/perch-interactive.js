@@ -211,6 +211,20 @@ const PERMISSION_MODES = new Set(["guarded", "ask", "bypass"]);
  * come back as an opaque `command_failed`. */
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
+/** Operator-set session name cap. Long enough for "the Nov package copy pass",
+ *  short enough that a 320px list column renders it without a scrollbar. The
+ *  value is stored TEXT and rendered with textContent everywhere — never
+ *  markup — because it reaches the list, the chat header and a confirm string. */
+const LABEL_CAP = 80;
+
+/** Normalize an operator-supplied label: trimmed, capped, and EMPTY IS NULL —
+ *  clearing a name is a valid action, not a way to make a session anonymous
+ *  (the row falls back to the machine-minted id it always had). */
+function normalizeLabel(raw) {
+  const text = String(raw == null ? "" : raw).replace(/\s+/g, " ").trim().slice(0, LABEL_CAP);
+  return text ? text : null;
+}
+
 /**
  * Build a pendingUi card from an `extension_ui_request`.
  *
@@ -364,6 +378,9 @@ export function createInteractiveEngine({
       // string snapshot()/stateEvent() report.
       currentModelParts: null,
       currentModel: null,
+      /** Operator-set name, persisted on the row. NULL means "no name", and
+       *  every render falls back to the short session id. */
+      label: null,
       // Track 3 Task 4: binds at wake, never applied to a live child (pi's
       // permission policy is fixed via env at spawn time). Reset to
       // "guarded" on every adoptRow (gateway restart) — see adoptRow's
@@ -430,6 +447,7 @@ export function createInteractiveEngine({
       // control() switch), so the lens reports the model actually serving
       // the NEXT turn, not just the one the last spawn/wake resolved to.
       model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      label: s.label || null,
       permissionMode: s.permissionMode,
       planMode: s.planMode,
       // I3 (final review): neither stateEvent() nor snapshot() used to
@@ -497,6 +515,7 @@ export function createInteractiveEngine({
       pendingUi: s.pendingUi || null,
       // Track 3 Task 4: same three additions as snapshot(), same rule.
       model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      label: s.label || null,
       permissionMode: s.permissionMode,
       planMode: s.planMode,
       // I3 (final review): same addition, same reasoning, as snapshot()
@@ -651,6 +670,11 @@ export function createInteractiveEngine({
           // Track 3 Task 7: `control` defaults to 'run' — only stopAll's
           // interrupted-mid-turn park passes 'interrupted'; every OTHER write
           // (including this row's own NEXT normal write) resets it to 'run'.
+          // NOTE: no `label` here. writeLabel() is its single writer — a
+          // targeted UPDATE that can clear it — and adding it to this statement
+          // was measurably unobservable (a mutation turning it into a COALESCE
+          // left the whole suite green), so it is one writer, not two that have
+          // to agree.
           args: [status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
         },
         {
@@ -658,6 +682,8 @@ export function createInteractiveEngine({
             "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,card_id,project_id,pi_session_dir,model) " +
             "SELECT ?,'perch',?,'perch-live',?,?,?,?,?,? " +
             "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
+          // A row this INSERT mints is brand new and cannot have a name yet;
+          // label defaults to NULL and writeLabel() owns it from there.
           args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
         },
       ]);
@@ -666,6 +692,24 @@ export function createInteractiveEngine({
         args: [s.botId, s.threadId],
       });
       if (rows[0]) s.rowId = Number(rows[0].id);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  }
+
+  /** Persist the operator's session name. Targeted UPDATE by row id — see
+   * rename()'s doc for why this is not writeRow. A session with no row yet
+   * (rowId null) has nothing to write to, and minting one here would create a
+   * phantom row for a session that never spawned; the in-memory label still
+   * rides the next writeRow the normal lifecycle performs. */
+  async function writeLabel(s) {
+    if (s.rowId == null) return;
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "UPDATE bot_sessions SET label=?, updated_at=datetime('now') WHERE id=?",
+        args: [s.label || null, s.rowId],
+      });
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
@@ -737,7 +781,7 @@ export function createInteractiveEngine({
     try {
       const { rows } = await db.execute({
         sql:
-          "SELECT id, bot_id, gateway_thread_id, status, model, pi_session_id, project_id, card_id " +
+          "SELECT id, bot_id, gateway_thread_id, status, model, pi_session_id, project_id, card_id, label " +
           "FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1",
         args: [sessionId],
       });
@@ -748,6 +792,10 @@ export function createInteractiveEngine({
       s.piSessionId = row.pi_session_id || null;
       s.projectId = row.project_id == null ? null : Number(row.project_id);
       s.cardId = row.card_id == null ? null : Number(row.card_id);
+      // Unlike permissionMode just below, the label IS restored: it is a name
+      // the operator chose, carries no authority, and losing it on every
+      // gateway restart would make renaming pointless.
+      s.label = row.label ? String(row.label) : null;
       s.state = row.status === "stopped" ? "stopped" : "hibernating";
       // Track 3 Task 4 (spec §5.3, RESTART SEMANTICS — named for the
       // reviewer): deliberately NOT restoring permissionMode from anywhere.
@@ -1996,6 +2044,39 @@ export function createInteractiveEngine({
     return abortInFlight(s);
   }
 
+  /**
+   * Name a session, or clear its name (Task: "there is not a way to rename the
+   * sessions").
+   *
+   * The `perchlive-xxxxxxxx` id stays the IDENTITY — this is a convenience
+   * rendered ALONGSIDE it, never instead of it, so the close confirmation and
+   * every log line keep naming something unambiguous. An empty or
+   * whitespace-only label CLEARS the name (normalizeLabel returns null), which
+   * is a real action and not a way to make a session anonymous.
+   *
+   * Persisted on the session's own bot_sessions row through the SAME writeRow
+   * every other state change goes through — no second store to keep in sync —
+   * and adoptRow restores it, so a rename survives a gateway restart.
+   *
+   * A STOPPED session is still renameable: the row and its transcript outlive
+   * the child, and naming one while sorting through what happened is exactly
+   * when an operator wants to. Renaming is reversible and touches no child, so
+   * unlike stop() it is never refused mid-turn.
+   */
+  async function rename(sessionId, label) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    s.label = normalizeLabel(label);
+    // A targeted UPDATE, not writeRow: writeRow also stamps `status` and
+    // resets `control` to 'run', and a rename must not quietly clear the
+    // 'interrupted' flag stopAll() sets on a session that was mid-turn when
+    // the gateway went down — the drawer reads that to say "interrupted, not
+    // answered". Same shape and same idiom as writePiSessionId().
+    await writeLabel(s);
+    emit(s, stateEvent(s));
+    return { label: s.label };
+  }
+
   async function stop(sessionId) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
@@ -2202,6 +2283,7 @@ export function createInteractiveEngine({
     cycle,
     control,
     options,
+    rename,
     answer,
     abort,
     stop,

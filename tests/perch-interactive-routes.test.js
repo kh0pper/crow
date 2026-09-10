@@ -215,7 +215,7 @@ beforeEach(() => {
   ];
   engineCalls = {
     spawn: [], message: [], steer: [], answer: [], abort: [], stop: [], get: [], subscribe: [],
-    checkCardFree: [], attachCard: [], control: [], cycle: [], options: [],
+    checkCardFree: [], attachCard: [], control: [], cycle: [], options: [], rename: [],
   };
   engineImpl = {
     async spawn({ botId, cardId }) {
@@ -239,6 +239,10 @@ beforeEach(() => {
     async attachCard(sid, cardId) {
       engineCalls.attachCard.push({ sid, cardId });
       return { ok: true, cardId, botId: "chatty" };
+    },
+    async rename(sid, label) {
+      engineCalls.rename.push({ sid, label });
+      return { label: label.trim() || null };
     },
     async control(sid, opts) {
       engineCalls.control.push({ sid, opts });
@@ -863,6 +867,38 @@ test("GET /interactive/:sid/options passes a null list through unannotated", asy
 test("GET /interactive/:sid/options 404s no_such_session", async () => {
   engineImpl.options = async () => { throw engineErr("no_such_session"); };
   const { status, body } = await getJson("/interactive/sess-1/options");
+  assert.equal(status, 404);
+  assert.equal(body.error, "no_such_session");
+});
+
+// ---------------------------------------------------------------------------
+// POST /interactive/:sid/rename
+// ---------------------------------------------------------------------------
+
+test("POST /interactive/:sid/rename passes the label through and returns what was STORED", async () => {
+  const { status, body } = await postJson("/interactive/perchlive-abc/rename", { label: "  Nov package  " });
+  assert.equal(status, 200);
+  assert.deepEqual(body, { label: "Nov package" }, "the engine normalizes; the route reports its answer");
+  assert.deepEqual(engineCalls.rename, [{ sid: "perchlive-abc", label: "  Nov package  " }]);
+});
+
+test("POST /interactive/:sid/rename with an empty label clears the name rather than 400ing", async () => {
+  const { status, body } = await postJson("/interactive/perchlive-abc/rename", { label: "" });
+  assert.equal(status, 200);
+  assert.equal(body.label, null);
+  assert.deepEqual(engineCalls.rename, [{ sid: "perchlive-abc", label: "" }],
+    "clearing a name is an action; refusing it would leave no way to undo a rename");
+});
+
+test("POST /interactive/:sid/rename with no label at all is a clear, not a crash", async () => {
+  const { status, body } = await postJson("/interactive/perchlive-abc/rename", {});
+  assert.equal(status, 200);
+  assert.equal(body.label, null);
+});
+
+test("POST /interactive/:sid/rename maps the engine's refusals", async () => {
+  engineImpl.rename = async () => { throw engineErr("no_such_session"); };
+  const { status, body } = await postJson("/interactive/perchlive-abc/rename", { label: "x" });
   assert.equal(status, 404);
   assert.equal(body.error, "no_such_session");
 });
