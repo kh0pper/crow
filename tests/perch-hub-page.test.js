@@ -5,6 +5,10 @@
 // bare top-level /perch would inherit none of them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const REPO = new URL("..", import.meta.url).pathname;
 
 test("the hub renders a complete HTML document with a mobile viewport", async () => {
   const { perchHubDocument } = await import("../servers/gateway/dashboard/perch-hub/html.js");
@@ -57,37 +61,32 @@ test("perchHubRouter itself redirects /perch and serves /dashboard/perch when au
   } finally { srv.close(); }
 });
 
-test("dashboard/index.js really mounts perchHubRouter and the /perch redirect — a real request against the real dashboardRouter proves it, not a stub", async () => {
-  // Regression target: if someone later deleted the two lines added to
-  // dashboard/index.js (the perchHubRouter mount and the /perch redirect),
-  // this test must go red. Importing the REAL dashboardRouter default export
-  // and firing real HTTP requests at it is what makes that true — a stub
-  // route defined inline in the test would keep passing after that deletion.
-  const { default: dashboardRouter } = await import("../servers/gateway/dashboard/index.js");
-  const { default: express } = await import("express");
-  const app = express();
-  // mcpAuthMiddleware (the constructor arg) is unrelated to dashboardAuth —
-  // dashboardAuth is imported directly inside dashboard/index.js and applied
-  // to the /dashboard mount regardless of what's passed here. null matches
-  // how boot wires this when unified OAuth is off.
-  app.use(dashboardRouter(null));
-  const srv = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
-  try {
-    const base = "http://127.0.0.1:" + srv.address().port;
-    const red = await fetch(base + "/perch", { redirect: "manual" });
-    assert.equal(red.status, 302);
-    assert.equal(red.headers.get("location"), "/dashboard/perch");
-    // Off-network request (bare loopback fetch, no Tailscale/local-network
-    // signal) — dashboardAuth's isAllowedNetwork check refuses it before the
-    // session check even runs, same as the existing perch-interactive-api
-    // precedent (tests/perch-interactive-routes.test.js, "an unauthenticated
-    // request to a REAL perch-interactive route never reaches the handler").
-    // The point isn't the exact status — it's that this is NOT a 404. A 404
-    // would mean perchHubRouter was never mounted onto dashboardRouter at all.
-    const page = await fetch(base + "/dashboard/perch", { redirect: "manual" });
-    assert.notEqual(page.status, 404, "a 404 here means the mount in dashboard/index.js was removed");
-    assert.equal(page.status, 403, "off-network, unauthenticated: dashboardAuth's network gate refuses before the handler runs");
-  } finally { srv.close(); }
+test("dashboard/index.js source mounts perchHubRouter and registers the /perch redirect", () => {
+  // SOURCE-LEVEL guard, not a request-level one — and it has to be, not by
+  // choice. dashboardAuth is a static import in dashboard/index.js (line 11),
+  // not the mcpAuthMiddleware parameter dashboardRouter() actually takes, so
+  // there is no way to inject a pass-through auth and reach a handler at
+  // runtime to prove presence/absence of either wiring. Worse: dashboardAuth
+  // is applied to the WHOLE "/dashboard" prefix (router.use("/dashboard",
+  // dashboardAuth) at line ~613) and its isAllowedNetwork() check 403s an
+  // unauthenticated off-network request BEFORE any route matching happens —
+  // identically whether or not perchHubRouter is mounted underneath it. A
+  // request-level test therefore cannot distinguish "mounted" from "not
+  // mounted"; it was tried and proved not to (round 2 of this task's review
+  // deleted only the mount line, left the /perch redirect, and the prior
+  // version of this test stayed green). Reading the source and asserting on
+  // it is the only thing that actually pins these two lines.
+  const src = readFileSync(join(REPO, "servers/gateway/dashboard/index.js"), "utf8");
+  assert.match(
+    src,
+    /router\.use\(\s*"\/dashboard",\s*perchHubRouter\(dashboardAuth\)\s*\)/,
+    "perchHubRouter must be mounted onto the /dashboard prefix"
+  );
+  assert.match(
+    src,
+    /router\.get\(\s*"\/perch",[\s\S]{0,120}?\/dashboard\/perch/,
+    "the top-level /perch short link must redirect to /dashboard/perch"
+  );
 });
 
 test("an absent bot engine is stated up front, not discovered on the first tap", async () => {
