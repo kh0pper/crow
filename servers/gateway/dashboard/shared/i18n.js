@@ -2275,6 +2275,11 @@ export const translations = {
   "perch.newSessionBot": { en: "Bot", es: "Bot" },
   "perch.newSessionModel": { en: "Model", es: "Modelo" },
   "perch.modelBotDefault": { en: "bot default", es: "predeterminado del bot" },
+  "perch.modelBotResolves": {
+    en: "The bot's own model",
+    es: "El modelo propio del bot",
+  },
+  "perch.modelCurrentUnlisted": { en: "current", es: "actual" },
   "perch.launchModelFailed": {
     en: "The session started on the bot's own model; the switch did not take.",
     es: "La sesión se inició con el modelo propio del bot; el cambio no se aplicó.",

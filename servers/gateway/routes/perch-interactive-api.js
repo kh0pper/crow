@@ -49,7 +49,7 @@ import { getInteractiveEngine } from "../perch-interactive.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard } from "../board/card-service.js";
 import { annotateAvailability } from "../model-availability.js";
-import { providerModelList } from "../perch-model-catalog.js";
+import { providerModelListWarm } from "../perch-model-catalog.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -140,6 +140,10 @@ const ERROR_MAP = {
   // live child, never queued).
   not_awake: [409, "not_awake"],
   command_failed: [502, "command_failed"],
+  // rename() on a session with no bot_sessions row yet: there is nothing to
+  // write to, and minting a row would leave a phantom for a session that never
+  // spawned. 409, not 500 — the refusal is honest and the session is fine.
+  not_persisted: [409, "not_persisted"],
 };
 
 function mapEngineError(res, err) {
@@ -246,7 +250,7 @@ async function loadBotRow(db, botId) {
  *   directly — what every fake-engine test below injects, so a turn is never
  *   driven and no pi is ever spawned.
  */
-export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelList } = {}) {
+export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelListWarm } = {}) {
   const router = Router();
 
   // FIRST statement: auth-gate the whole prefix (perch.js / bot-board-api idiom).
@@ -322,7 +326,9 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       // Annotated for the same reason the options route annotates: an
       // unavailable model must be visibly unavailable, never silently
       // selectable (model-availability.js's header).
-      const models = await annotate(providerModels());
+      // awaited: the catalogue warms a cold provider cache rather than
+      // serving the empty list loadProviders() answers on a fresh process.
+      const models = await annotate(await providerModels());
       const dflt = def.models && typeof def.models.default === "string" && def.models.default
         ? def.models.default : null;
       res.json({ models, default: dflt });

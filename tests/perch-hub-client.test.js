@@ -251,14 +251,6 @@ test("a model option shows its human name and says when it is not serving", asyn
   assert.equal(modelOptionText({ provider: "p", id: "m", availability: "up" }), "p/m");
 });
 
-test("a missing list disables its OWN picker rather than emptying it", async () => {
-  const optionsUsable = await extract("optionsUsable", "function listUsable(a){ return !!(Array.isArray(a)&&a.length); }\n");
-  assert.equal(optionsUsable({ models: null, thinkingLevels: null }), false);
-  assert.equal(optionsUsable({ models: [], thinkingLevels: [] }), false);
-  assert.equal(optionsUsable({ models: [{ id: "m", provider: "p" }], thinkingLevels: ["off"] }), true);
-  assert.equal(optionsUsable(null), false);
-});
-
 test("the two pickers are gated separately — the fallback list must not be disabled by a missing thinking list", async () => {
   // The engine's hibernating answer is now {models: <provider catalogue>,
   // thinkingLevels: null}: a model switch made while asleep binds at the next
@@ -429,6 +421,14 @@ function makeFakeElement(tag) {
     get() { return this.children[0] || null; },
     configurable: true,
   });
+  // A real <select> exposes its options BOTH as .children and as .options;
+  // the client reads .options (the idiomatic API) and this harness had only
+  // the former, which surfaced as a TypeError rather than as a failed
+  // assertion the first time production code used it.
+  Object.defineProperty(node, "options", {
+    get() { return this.children; },
+    configurable: true,
+  });
   return node;
 }
 
@@ -470,7 +470,8 @@ function makeResponse(status, body) {
  *  path, opts)` decides how every perchApi call resolves; the default 200s
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
-async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", split = false } = {}) {
+async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", split = false,
+                          legacyMediaQuery = false } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
 
@@ -517,6 +518,15 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     media: "(min-width:900px)",
     _set(v) { this.matches = !!v; this._dispatch("change", { matches: this.matches }); },
   });
+  // Q8: pre-2019 Safari exposes only addListener on a MediaQueryList. Drop the
+  // modern spelling and map the legacy one onto the same dispatcher, so a test
+  // can prove the fallback binds rather than silently doing nothing.
+  if (legacyMediaQuery) {
+    const modern = mq.addEventListener.bind(mqTarget);
+    mq.addListener = (fn) => modern("change", fn);
+    mq.removeListener = () => {};
+    delete mq.addEventListener;                    // the only spelling that browser has
+  }
   const win = Object.assign(winTarget, {
     visualViewport, innerHeight: 800,
     matchMedia: () => mq,
@@ -1571,12 +1581,14 @@ test("the drawer's model picker is ENABLED on a hibernating session's fallback l
   const hub = await mountHub({
     fetchImpl: stdFetch({ "/options": () => makeResponse(200, {
       models: [{ provider: "crow-local", id: "qwen", name: "Qwen", availability: "up" }],
-      thinkingLevels: null, source: "providers" }) }),
+      thinkingLevels: null, current: "crow-local/qwen", source: "providers" }) }),
   });
   await openChatSession(hub);
   const modelSel = hub.els["perch-model"], thinkSel = hub.els["perch-thinking"];
   assert.equal(modelSel.disabled, false, "the fallback list is a real list and the switch really binds at the next wake");
   assert.deepEqual(modelSel.children.map((o) => o.value), ["crow-local/qwen"]);
+  assert.equal(modelSel.value, "crow-local/qwen",
+    "and it must SAY which one is live — enabled-and-listing was the assertion this bug walked through");
   assert.equal(thinkSel.disabled, true,
     "thinking stays disabled: control()'s thinking branch is a no-op with no child, so offering it would lie");
   assert.equal(thinkSel.children.length, 0);
@@ -1795,4 +1807,130 @@ test("the emitted script is syntactically valid JS", async () => {
     const js = perchHubJs(lang);          // throws on its own if the literal broke
     assert.doesNotThrow(() => new Function(js), lang + " must emit parseable JS");
   }
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q1 — the select must report the model the session is ON.
+// ---------------------------------------------------------------------------
+
+const THREE_MODELS = [
+  { provider: "crow-local", id: "qwen", name: "Qwen", availability: "up" },
+  { provider: "raven-flash", id: "flash-next", name: "Flash Next", availability: "on_demand" },
+  { provider: "crow-dsv4", id: "deepseek-v4", name: "DeepSeek V4", availability: "unavailable" },
+];
+const optionsWith = (current) => stdFetch({
+  "/options": () => makeResponse(200, { models: THREE_MODELS, thinkingLevels: ["off", "high"], current }),
+});
+
+test("the drawer's model select reads the session's model, not whichever option sorts first", async () => {
+  // The measured bug: nothing ever assigned modelSel.value, so the picker
+  // asserted crow-local/qwen — the first entry — for a session running
+  // flash-next, on the one control this feature exists for.
+  const hub = await mountHub({ fetchImpl: optionsWith("raven-flash/flash-next") });
+  await openChatSession(hub);
+  assert.equal(hub.els["perch-model"].value, "raven-flash/flash-next");
+  assert.notEqual(hub.els["perch-model"].value, hub.els["perch-model"].children[0].value,
+    "fixture check: the live model is deliberately NOT option 0, or this proves nothing");
+});
+
+test("a state frame moves the select — pi's own /model and auto-fallbacks were on the wire all along", async () => {
+  const hub = await mountHub({ fetchImpl: optionsWith("crow-local/qwen") });
+  await openChatSession(hub);
+  assert.equal(hub.els["perch-model"].value, "crow-local/qwen");
+  FakeEventSource.instances[0]._serverFrame("state",
+    { state: "awake", turnInFlight: false, model: "crow-dsv4/deepseek-v4" });
+  assert.equal(hub.els["perch-model"].value, "crow-dsv4/deepseek-v4");
+});
+
+test("a model the list does not carry is added and selected, not silently dropped", async () => {
+  // A provider row removed since the session started, or a model pi resolved
+  // on its own. Leaving the select on nothing would report the same "don't
+  // know" the empty dropdown did.
+  const hub = await mountHub({ fetchImpl: optionsWith("retired-provider/old-model") });
+  await openChatSession(hub);
+  const sel = hub.els["perch-model"];
+  assert.equal(sel.value, "retired-provider/old-model");
+  assert.equal(sel.children[0].value, "retired-provider/old-model", "prepended, so it reads first");
+  assert.equal(sel.children[0].textContent, "retired-provider/old-model — current");
+  assert.equal(sel.children.length, 4, "and the catalogue is still all there");
+});
+
+test("a disabled model select is never given a value — there is no list to be right about", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/options": () => makeResponse(200, { models: [], thinkingLevels: [], current: "crow-local/qwen" }) }),
+  });
+  await openChatSession(hub);
+  assert.equal(hub.els["perch-model"].disabled, true);
+  assert.equal(hub.els["perch-model"].children.length, 0,
+    "an unlisted-current option must not resurrect a picker with no catalogue behind it");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q2 — a bot with no configured default
+// ---------------------------------------------------------------------------
+
+const modelsFetch = (dflt) => roostFetch(ROOST_ALL_BUSY, {
+  "/models": () => makeResponse(200, { models: LAUNCH_MODELS, default: dflt }),
+});
+
+test("a bot with NO configured default offers 'the bot's own model', preselected", async () => {
+  // Measured: 3 of 5 R4 bot defs carry models:null. Without this option nothing
+  // was preselected, the browser picked option 0, and tapping New session fired
+  // a REAL control() switch onto whatever sorted first in provider order.
+  const hub = await mountHub({ fetchImpl: modelsFetch(null) });
+  const sel = hub.els["perch-new-model"];
+  assert.equal(sel.children[0].value, "");
+  assert.equal(sel.children[0].textContent, "The bot's own model");
+  assert.equal(sel.value, "", "preselected, so one tap means what it always meant");
+});
+
+test("launching on 'the bot's own model' sends NO control at all", async () => {
+  const hub = await mountHub({ fetchImpl: modelsFetch(null) });
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const posts = hub.fetchCalls.filter((c) => c.method === "POST").map((c) => c.path);
+  assert.deepEqual(posts, ["/bots/r4-assistant/interactive"],
+    "letting the spawn resolve the model is the whole point of the option");
+});
+
+test("a default naming a model the catalogue no longer carries falls back the same way", async () => {
+  // A def pointing at a provider row that has since been disabled.
+  const hub = await mountHub({ fetchImpl: modelsFetch("retired-provider/gone") });
+  const sel = hub.els["perch-new-model"];
+  assert.equal(sel.value, "", "no silent switch onto option 0");
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(hub.fetchCalls.filter((c) => c.method === "POST").map((c) => c.path),
+    ["/bots/r4-assistant/interactive"]);
+});
+
+test("a bot WITH a configured default gets no sentinel — it already has an answer", async () => {
+  const hub = await mountHub({ fetchImpl: modelsFetch("raven-flash/flash-next") });
+  const sel = hub.els["perch-new-model"];
+  assert.equal(sel.children.filter((o) => o.value === "").length, 0);
+  assert.equal(sel.value, "raven-flash/flash-next");
+});
+
+test("the sentinel is still an explicit choice: picking a real model from it switches", async () => {
+  const hub = await mountHub({ fetchImpl: modelsFetch(null) });
+  hub.els["perch-new-model"].value = "crow-dsv4/deepseek-v4";
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const control = hub.fetchCalls.filter((c) => c.path.includes("/control"));
+  assert.equal(control.length, 1, "an operator who DID choose still gets their choice");
+  assert.deepEqual(JSON.parse(control[0].opts.body), { model: { provider: "crow-dsv4", id: "deepseek-v4" } });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q8 — the pre-2019 MediaQueryList spelling
+// ---------------------------------------------------------------------------
+
+test("the breakpoint listener binds through addListener where that is the only spelling", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch(), split: false, legacyMediaQuery: true });
+  await openChatSession(hub);
+  assert.equal(hub.timers.size, 0, "precondition: narrow, chat open, list hidden, nothing polling");
+  hub.mq._set(true);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(hub.timers.size > 0,
+    "on that browser the re-evaluation would otherwise silently never bind");
 });

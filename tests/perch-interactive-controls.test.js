@@ -735,6 +735,9 @@ test("options(): a hibernating session lists the provider catalogue, and still n
   assert.deepEqual(r.models, CATALOGUE, "an empty picker on a live session is the bug this ends");
   assert.equal(calls, 1);
   assert.equal(r.source, "providers", "the caller must not have to infer which half answered");
+  // Fix round 1 Q1: a list with no "which one is live" is how the picker came
+  // to assert whichever model sorted first.
+  assert.equal(r.current, "crow-local/qwen3.6-35b-a3b", "the model this session is actually on");
   // Deliberately still null: control()'s thinking branch is a no-op with no
   // child (pi's own session file owns the level across a --session resume),
   // so offering that picker would promise a change that never happens.
@@ -750,7 +753,35 @@ test("options(): a LIVE child stays authoritative — the catalogue is not even 
   assert.deepEqual(r.models, [{ provider: "crow-local", id: "qwen3.6-35b-a3b" }, { provider: "crow-chat", id: "big-model" }],
     "pi is the process that will route the next turn; its list wins whenever there is one");
   assert.equal(r.source, "child");
+  assert.equal(r.current, "crow-local/qwen3.6-35b-a3b");
   assert.equal(calls, 0);
+});
+
+test("options(): `current` follows a model switch, in both the live and the hibernating answer", async () => {
+  const { engine, clock, state } = makeEngine({ providerModels: () => CATALOGUE });
+  const s = await spawned(engine);
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal((await engine.options(s.sessionId)).current, "crow-chat/big-model",
+    "a live session reports the model control() moved it to, not the spawn-resolved one");
+
+  clock.advance(600_001);
+  await tick();
+  const asleep = await engine.options(s.sessionId);
+  assert.equal(asleep.source, "providers");
+  assert.equal(asleep.current, "crow-chat/big-model",
+    "and hibernating it still reports it — that switch binds at the next wake and really works");
+  assert.equal(state.instances.length, 1, "still no second child");
+});
+
+test("options(): `current` reflects a model pi chose ON ITS OWN, read after the RPCs", async () => {
+  // An auto-fallback, or the operator's own /model in the TUI: the engine
+  // learns it from a model_select frame, and the picker is about to be set
+  // from this value.
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  state.instances[0].emit({ type: "model_select", model: { provider: "crow-chat", id: "big-model" },
+    previousModel: null, source: "user" });
+  assert.equal((await engine.options(s.sessionId)).current, "crow-chat/big-model");
 });
 
 test("options(): a catalogue that throws degrades to an empty list, never a failed GET", async () => {
@@ -889,4 +920,18 @@ test("rename(): does not clear the 'interrupted' flag a shutdown left on the row
   assert.equal(row.label, "named after the crash");
   assert.equal(row.control, "interrupted", "a rename must not reset the control flag");
   assert.equal(row.status, "waiting-user", "nor restamp the status");
+});
+
+test("rename(): a session with no row is refused, not answered 200 with nothing written", async () => {
+  // Fix round 1 Q4. The silent version returned {label}, the route answered
+  // 200, and the list and header painted a name that no row carried and that
+  // nothing later repaired — writeRow does not touch the column.
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  const rec = engine._sessionRecordForTest(s.sessionId);
+  rec.rowId = null;                                  // a session that never got a row
+  rec.label = "before";
+  await assert.rejects(() => engine.rename(s.sessionId, "after"), (e) => e.code === "not_persisted");
+  assert.equal(rec.label, "before",
+    "and the in-memory label is rolled back — the engine must not report a name the row lacks");
 });

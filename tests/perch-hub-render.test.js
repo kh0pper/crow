@@ -31,7 +31,13 @@ let available = false, server = null, port = 0;
 const SIDS = ["perchlive-11111111", "perchlive-22222222", "perchlive-33333333"];
 let liveSids = SIDS.slice();
 const stopped = [];
-function resetApi() { liveSids = SIDS.slice(); stopped.length = 0; roostFails = false; }
+/** The bot's configured default, as GET /bots/:id/models reports it. null is
+ *  the common case on the reporting instance (3 of 5 R4 bot defs). */
+let modelsDefault = "crow-local/qwen3.6-35b-a3b";
+function resetApi() {
+  liveSids = SIDS.slice(); stopped.length = 0; roostFails = false;
+  modelsDefault = "crow-local/qwen3.6-35b-a3b";
+}
 
 let roostFails = false;
 function serveApi(req, res) {
@@ -72,7 +78,17 @@ function serveApi(req, res) {
     res.write(": open\n\n");
     return;
   }
-  if (url.endsWith("/options")) return send(200, { models: [], thinkingLevels: [] });
+  // A real drawer list whose CURRENT entry is deliberately not the first one:
+  // the picker asserting option 0 is exactly the fix-round-1 Q1 defect.
+  if (url.endsWith("/options")) return send(200, {
+    models: [
+      { provider: "crow-local", id: "qwen3.6-35b-a3b", name: "Qwen3.6 35B", availability: "up" },
+      { provider: "raven-flash-next", id: "qwen3.8-flash-next", name: "Flash Next", availability: "on_demand" },
+    ],
+    thinkingLevels: ["off", "high"],
+    current: "raven-flash-next/qwen3.8-flash-next",
+    source: "child",
+  });
   // The launcher's session-free list, with a long name on purpose: the thing
   // that must never happen at 412px is a model name pushing New session off
   // the screen.
@@ -82,7 +98,7 @@ function serveApi(req, res) {
         name: "Qwen3.6 35B A3B (Crow, Q5_K_XL MTP+vision, 256K)", availability: "up" },
       { provider: "crow-dsv4", id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash", availability: "unavailable" },
     ],
-    default: "crow-local/qwen3.6-35b-a3b",
+    default: modelsDefault,
   });
   if (url.endsWith("/transcript")) return send(200, { events: [] });
   if (url.endsWith("/rename")) return send(200, { label: "renamed" });
@@ -551,6 +567,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
         var doc=document.documentElement;
         return JSON.stringify({ model:box('perch-new-model'), newBtn:box('perch-new'),
           value: sel.value, options: Array.prototype.map.call(sel.options,function(o){return o.textContent;}),
+          selectedText: sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].textContent:null,
           hScroll: doc.scrollWidth > doc.clientWidth });
       })()`);
       assert.equal(seen.model.hidden, false, "the picker must be there once the list arrives");
@@ -559,6 +576,8 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.model.hit, true, "and nothing overlaps it");
       assert.ok(seen.model.h >= 44, `tap target ${seen.model.w}x${seen.model.h} is too small for a thumb`);
       assert.equal(seen.value, "crow-local/qwen3.6-35b-a3b", "opened on the bot's configured model");
+      assert.equal(seen.selectedText, seen.options[0],
+        "and the browser really shows that entry, not merely stores the value");
       assert.match(seen.options[1], /not running/, "an unavailable model must read as unavailable");
       // The regression a long model name would cause.
       assert.equal(seen.newBtn.inViewport, true,
@@ -744,5 +763,70 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.sendReachable, true, "a second header control must not disturb the composer");
       assert.equal(seen.hScroll, false);
     } finally { await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q1, live — the drawer picker must report the session's model.
+// A jsdom-free browser check, because `selectedIndex` is the browser's own
+// answer to "what does the operator see selected".
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`Q1 live @${w}x${h}: the model select shows the model the session is on`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 900));
+      const seen = await s.json(`(function(){
+        var sel=document.getElementById('perch-model');
+        return JSON.stringify({
+          disabled: sel.disabled,
+          value: sel.value,
+          index: sel.selectedIndex,
+          shown: sel.selectedIndex>=0?sel.options[sel.selectedIndex].textContent:null,
+          first: sel.options.length?sel.options[0].value:null,
+          count: sel.options.length });
+      })()`);
+      assert.equal(seen.disabled, false);
+      assert.equal(seen.count, 2, "fixture check");
+      assert.equal(seen.first, "crow-local/qwen3.6-35b-a3b",
+        "fixture check: the live model is deliberately NOT option 0");
+      assert.equal(seen.value, "raven-flash-next/qwen3.8-flash-next");
+      assert.equal(seen.index, 1, "the browser's own selection, not just an attribute we set");
+      assert.match(seen.shown, /Flash Next/,
+        "what the operator actually reads off the control this feature exists for");
+    } finally { await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q2, live — a bot with no configured default. The unit assertion
+// for this is weak on its own (a fake select's .value starts ""), so the
+// browser's own selectedIndex is what settles it.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`Q2 live @${w}x${h}: with no configured default the launcher preselects "the bot's own model"`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    modelsDefault = null;
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`(function(){
+        var sel=document.getElementById('perch-new-model');
+        return JSON.stringify({
+          index: sel.selectedIndex,
+          value: sel.value,
+          shown: sel.selectedIndex>=0?sel.options[sel.selectedIndex].textContent:null,
+          count: sel.options.length });
+      })()`);
+      assert.equal(seen.count, 3, "the sentinel plus the two catalogue entries");
+      assert.equal(seen.index, 0);
+      assert.equal(seen.value, "", "an empty value is what makes startSession send no control()");
+      assert.equal(seen.shown, "The bot's own model");
+    } finally { resetApi(); await s.close(); }
   });
 }
