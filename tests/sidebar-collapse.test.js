@@ -6,9 +6,18 @@
  *
  * Mobile hide/reveal (the ≤768px .open/.sidebar-overlay/hamburger machinery)
  * already existed and is NOT under test here — this file covers only what's
- * new: a persisted desktop collapse, scoped to min-width:769px so it can
- * never contend with the mobile rules, plus the hamburger's new job as the
- * reveal control for that collapsed state at any width.
+ * new: a persisted desktop collapse, scoped to `not all and (max-width:768px)`
+ * so it can never contend with the mobile rules, plus the hamburger's new job
+ * as the reveal control for that collapsed state at any width.
+ *
+ * The scope is the NEGATION of the mobile query, deliberately, not
+ * `min-width:769px`: those two agree at every integer width but not at a
+ * fractional one, so `min-width:769px` leaves a dead band in (768, 769) --
+ * reachable via zoom and some device pixel ratios -- where neither axis
+ * matches, the click takes the desktop branch, the sidebar does not move, and
+ * an unscoped rule reveals a redundant hamburger beside a still-visible
+ * sidebar. The assertion "no rule may reintroduce the 769px floor" below
+ * exists to stop exactly that being restored to match a stale comment.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
