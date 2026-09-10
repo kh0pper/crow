@@ -183,6 +183,7 @@ const DRAWER_JS_KEYS = [
   "botboard.bdEnvelopeModelPrefix", "botboard.bdEnvelopeModelUnset", "botboard.bdEnvelopeSkillsPrefix",
   "botboard.bdFilesQueuedPrefix", "botboard.bdFileUploaded", "botboard.bdFullEnvelopeRestored",
   "botboard.bdInterruptedNote",
+  "botboard.bdModelOnDemand", "botboard.bdModelUnavailable",
   "botboard.bdNarrowedToMid", "botboard.bdNarrowedToPrefix", "botboard.bdNarrowedToSuffix",
   "botboard.bdNarrowFailed", "botboard.bdNarrowNoteEmpty", "botboard.bdNarrowNoteSaved",
   "botboard.bdNarrowNoteUnknown", "botboard.bdNarrowRejected",
@@ -340,7 +341,13 @@ const DISPATCH_SSR_KEYS = [
 
 const DRAWER_SSR_KEYS = [
   "botboard.bdMoreAria", "botboard.bdStop", "botboard.bdHibernating",
-  "botboard.bdEnvelopeModelPrefix", "botboard.bdPermGuarded", "botboard.bdPermAsk",
+  // bdEnvelopeModelPrefix moved OUT of the SSR shell: it used to be the model
+  // select's aria-label, and the select now carries a visible
+  // bdModelSelectLabel instead. The key is still live in the client script
+  // (the envelope summary line), where DRAWER_JS_KEYS above covers it.
+  "botboard.bdModelSelectLabel", "botboard.bdThinkingSelectLabel",
+  "botboard.bdPermissionSelectLabel",
+  "botboard.bdPermGuarded", "botboard.bdPermAsk",
   "botboard.bdPermBypass", "botboard.bdPlanModeLabel", "botboard.bdBindsAtWake",
   "botboard.bdApplyNow", "botboard.bdEnvelopeToggle", "botboard.bdAttachCard",
   "botboard.bdAttachFile", "botboard.bdComposerPlaceholder", "botboard.bdSend", "botboard.bdAbort",

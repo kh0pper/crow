@@ -41,6 +41,10 @@ export function botBoardStyles() {
   .bb-roost-state{font-size:.68rem;color:var(--crow-text-muted)}
   .bb-roost-primary{font-size:.7rem;padding:.2rem .5rem;background:${PERCH_TOKENS.light.teal};border:none;border-radius:var(--crow-radius-control);color:${PERCH_TOKENS.light.card};cursor:pointer}
   .bb-roost-primary.bb-roost-link{background:none;color:${PERCH_TOKENS.light.teal};text-decoration:underline;padding:0}
+  /* Talk sits beside the primary and must not compete with it: same size and
+     shape, outlined instead of filled. */
+  .bb-roost-secondary{font-size:.7rem;padding:.2rem .5rem;background:none;border:1px solid ${PERCH_TOKENS.light.teal};border-radius:var(--crow-radius-control);color:${PERCH_TOKENS.light.teal};cursor:pointer}
+  .bb-roost-secondary:hover{background:${PERCH_TOKENS.light.teal};color:${PERCH_TOKENS.light.card}}
   .bb-roost-more{background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:.85rem;padding:.1rem .3rem;line-height:1}
   .bb-roost-more:hover{color:var(--crow-text-primary)}
   .bb-roost-menu{display:none;position:absolute;top:100%;right:0;margin-top:.2rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.2);padding:.3rem;z-index:20;min-width:130px}
@@ -52,6 +56,8 @@ export function botBoardStyles() {
     .bb-roost-track{border-bottom-color:${PERCH_TOKENS.dark.wire}}
     .bb-roost-primary{background:${PERCH_TOKENS.dark.teal};color:${PERCH_TOKENS.dark.card}}
     .bb-roost-primary.bb-roost-link{color:${PERCH_TOKENS.dark.teal}}
+    .bb-roost-secondary{border-color:${PERCH_TOKENS.dark.teal};color:${PERCH_TOKENS.dark.teal}}
+    .bb-roost-secondary:hover{background:${PERCH_TOKENS.dark.teal};color:${PERCH_TOKENS.dark.card}}
   }`;
   return `<style>
   ${birdCss}

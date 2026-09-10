@@ -1441,6 +1441,16 @@ export const translations = {
   "botboard.bdPermAsk": { en: "Ask", es: "Preguntar" },
   "botboard.bdPermBypass": { en: "Bypass", es: "Omitir" },
   "botboard.bdPlanModeLabel": { en: "Plan mode", es: "Modo de plan" },
+  // The controls row is three unlabelled selects on a wide screen, where the
+  // grouping carries the meaning. Stacked on a phone it reads as three loose
+  // dropdowns, so each one names itself.
+  "botboard.bdModelSelectLabel": { en: "Model", es: "Modelo" },
+  "botboard.bdThinkingSelectLabel": { en: "Thinking", es: "Razonamiento" },
+  "botboard.bdPermissionSelectLabel": { en: "Permissions", es: "Permisos" },
+  // Model availability (see servers/gateway/model-availability.js). "up" needs
+  // no suffix — a working choice should read as the plain default.
+  "botboard.bdModelOnDemand": { en: "starts on demand", es: "se inicia bajo demanda" },
+  "botboard.bdModelUnavailable": { en: "not running", es: "no está en ejecución" },
   // T3-10 honesty: a permission/model change only binds at the NEXT wake —
   // the affordance below is the only place that promise is ever displayed.
   "botboard.bdBindsAtWake": { en: "Applies at the next wake.", es: "Se aplicará en el próximo despertar." },

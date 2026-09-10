@@ -286,3 +286,55 @@ test("roost i18n keys exist in both languages and are not identical placeholders
     assert.notEqual(entry.en, entry.es, `${key} es must be a real translation, not a copy of en`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Talk is a visible control, not an overflow item
+// ---------------------------------------------------------------------------
+//
+// Talk is the ONLY way to start a session that is not tied to a card: it POSTs
+// /bots/<id>/interactive, which takes cardId = null. It lived in the ⋯ menu, so
+// the only visible action on an idle bird was "Send out" — the card dispatch —
+// and the card-less path read as though it did not exist.
+//
+// It stays off an `observing` bird, where perch is not attached and the same
+// POST would 403.
+
+function birdMarkup(html, id) {
+  const start = html.indexOf(`data-bot="${id}"`);
+  return html.slice(start, html.indexOf("</div>", html.indexOf("bb-roost-menu", start)) + 6);
+}
+
+test("every perch-attached bird carries a visible Talk control, whatever its state", async () => {
+  const html = await render();
+  for (const id of ["empty-bot", "chatty", "asker", "sleepy"]) {
+    const bird = birdMarkup(html, id);
+    assert.ok(
+      /<button[^>]*class="bb-roost-secondary"[^>]*data-roost-action="talk"/.test(bird),
+      `${id} needs Talk as a visible control`
+    );
+  }
+});
+
+test("an observing bird offers no Talk — perch is not attached and the POST would 403", async () => {
+  const bird = birdMarkup(await render(), "quiet");
+  assert.ok(bird.includes("bb-roost-primary bb-roost-link"), "observing still links to Bot Builder");
+  assert.ok(!bird.includes('data-roost-action="talk"'), "no Talk on a bot that cannot hold a session");
+});
+
+test("Talk is not duplicated into the overflow menu", async () => {
+  const bird = birdMarkup(await render(), "empty-bot");
+  const menuStart = bird.indexOf("bb-roost-menu");
+  assert.ok(!bird.slice(menuStart).includes('data-roost-action="talk"'),
+    "one Talk per bird — the visible one");
+  // The rest of the menu is untouched.
+  assert.ok(bird.slice(menuStart).includes('data-roost-action="sessions"'));
+});
+
+test("an idle bird shows BOTH the card dispatch and the card-less Talk", async () => {
+  const bird = birdMarkup(await render(), "empty-bot");
+  assert.ok(bird.includes('data-roost-action="dispatch"'), "Send out stays the primary");
+  const dispatchAt = bird.indexOf('data-roost-action="dispatch"');
+  const talkAt = bird.indexOf('data-roost-action="talk"');
+  assert.ok(dispatchAt > -1 && talkAt > dispatchAt, "Talk sits after the primary, before the ⋯");
+  assert.ok(talkAt < bird.indexOf("bb-roost-more"), "Talk is outside the overflow toggle");
+});
