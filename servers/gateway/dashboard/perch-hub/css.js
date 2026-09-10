@@ -44,7 +44,22 @@ export function perchHubCss() {
 #perch-hub-root .machines a{text-decoration:none;color:var(--dim);padding:5px 12px;border-radius:999px;border:1px solid var(--line)}
 #perch-hub-root a:focus-visible,#perch-hub-root button:focus-visible,#perch-hub-root input:focus-visible,#perch-hub-root textarea:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
 #perch-hub-root h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);font-weight:600;margin:30px 0 12px}
-#perch-hub-root .perch-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+/* wrap: at 412px the bot name, the state word and Close must not force a
+   horizontal scrollbar onto the chat column. */
+#perch-hub-root .perch-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+#perch-close{white-space:nowrap;padding:8px 12px;font-size:13px}
+/* The unconditional launcher. Wraps rather than overflowing on a phone, and
+   its select is capped so a long bot name cannot push the button off-screen. */
+#perch-launch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 0 12px}
+/* Same 44px floor as the row controls: this is the primary action on the page
+   and it is tapped with a thumb. Scoped to #perch-new — NOT the shared button
+   rule, which also sizes #perch-send inside the sticky composer whose box is
+   what keeps Send reachable. */
+#perch-new{min-height:44px}
+#perch-launch select{font:14px Inter,system-ui,sans-serif;padding:9px 10px;border:1px solid var(--line);
+border-radius:10px;background:var(--sky);color:var(--ink);flex:1 1 140px;min-width:0;max-width:100%}
+#perch-launch .empty{padding:0;flex:1 1 100%}
+#perch-launch [hidden]{display:none}
 #perch-hub-root .title{font-weight:600;font-size:17px}
 #perch-hub-root .meta{color:var(--dim);font-size:13px;margin-top:2px;word-break:break-all}
 #perch-hub-root .state{font-size:13px;color:var(--alive);font-weight:500;white-space:nowrap}
@@ -59,7 +74,13 @@ export function perchHubCss() {
 #perch-hub-root .roost-main{flex:1;min-width:180px}
 #perch-hub-root .roost-cwd{font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #perch-hub-root .roost-when{color:var(--dim);font-size:12.5px;font-family:"JetBrains Mono",ui-monospace,monospace}
-#perch-hub-root .roost-row button{padding:8px 12px;font-size:13px}
+/* min-height, not more padding: the base button rule's 10px/14px line box
+   comes out 36px tall and these rows carry TWO controls now (Open and Close).
+   44px is the smallest reliable thumb target; measured live at 412x730 in
+   perch-hub-render.test.js, which is what caught the 36px in the first place. */
+#perch-hub-root .roost-row button{padding:8px 12px;font-size:13px;min-height:44px}
+/* Close is destructive and must not compete with Open for a thumb. */
+#perch-hub-root .roost-close{color:var(--dim)}
 #perch-hub-root .empty{color:var(--dim);padding:16px;font-size:14px}
 /* --- chat transcript + ask cards, ported from the deleted bundle's own
    equivalents (42f39160^:bundles/perch-hub/payload/hub/bots-page.mjs

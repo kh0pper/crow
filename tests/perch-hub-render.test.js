@@ -22,6 +22,54 @@ const HOST_FROM_CONTAINER = process.env.CROW_CDP_HOST_IP || "172.17.0.1";
 
 let available = false, server = null, port = 0;
 
+// ---------------------------------------------------------------------------
+// Task C — a scripted perch-api, so the real client can be driven into the
+// exact state Kevin reported: ONE perch-attached bot with several live
+// sessions and therefore NO idle row to spawn from. An empty roost would not
+// reproduce the bug; it passes against the broken build.
+// ---------------------------------------------------------------------------
+const SIDS = ["perchlive-11111111", "perchlive-22222222", "perchlive-33333333"];
+let liveSids = SIDS.slice();
+const stopped = [];
+function resetApi() { liveSids = SIDS.slice(); stopped.length = 0; }
+
+function serveApi(req, res) {
+  const url = req.url.split("?")[0];
+  const send = (code, obj) => {
+    res.writeHead(code, { "content-type": "application/json" });
+    res.end(JSON.stringify(obj));
+  };
+  if (url.endsWith("/roost")) {
+    return send(200, {
+      birds: [{
+        id: "r4-assistant", name: "R4 Assistant", perch_attached: true, state: "working",
+        sessions: liveSids.map((sid) => ({ sessionId: sid, state: "awake", cardId: null, pendingUi: false })),
+      }],
+      occupiedCardIds: [],
+    });
+  }
+  const stop = url.match(/\/interactive\/([^/]+)\/stop$/);
+  if (stop && req.method === "POST") {
+    const sid = decodeURIComponent(stop[1]);
+    stopped.push(sid);
+    liveSids = liveSids.filter((s) => s !== sid);      // the engine parks the row
+    return send(200, { ok: true });
+  }
+  if (url.endsWith("/events")) {
+    // A real SSE connection that stays open and sends nothing: without it the
+    // EventSource errors immediately and the client's terminal-status probe
+    // bounces the operator back to the list on its own, which would fake a
+    // pass on "closing the open session returns to the list".
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+    res.write(": open\n\n");
+    return;
+  }
+  if (url.endsWith("/options")) return send(200, { models: [], thinkingLevels: [] });
+  if (url.endsWith("/transcript")) return send(200, { events: [] });
+  if (url.endsWith("/interactive") && req.method === "POST") return send(200, { sessionId: "perchlive-99999999" });
+  return send(200, {});
+}
+
 before(async () => {
   try {
     const r = await fetch(CDP + "/json/version", { signal: AbortSignal.timeout(2000) });
@@ -31,6 +79,10 @@ before(async () => {
   const { default: perchHubPanel } = await import("../servers/gateway/dashboard/panels/perch-hub.js");
   const { renderLayout } = await import("../servers/gateway/dashboard/shared/layout.js");
   server = http.createServer(async (req, res) => {
+    // Task C: the same real client script, in the same real browser, now with
+    // a scripted /dashboard/perch-api behind it — otherwise every fetch it
+    // makes 404s and the list can never reach the state being tested.
+    if (req.url.startsWith("/dashboard/perch-api/")) return serveApi(req, res);
     const layout = (opts) => renderLayout({ ...opts, activePanel: "perch", panels: [perchHubPanel], lang: "en" });
     const html = await perchHubPanel.handler(req, res, { lang: "en", layout });
     if (!res.headersSent) { res.writeHead(200, { "content-type": "text/html" }); res.end(html); }
@@ -196,3 +248,169 @@ test("both views are visible side by side at desktop width", async (t) => {
   assert.equal(visible.list, true, "the min-width:900px split keeps the list up");
   assert.equal(visible.chat, true);
 });
+
+// ---------------------------------------------------------------------------
+// Task C — live in a real browser, at both viewports. These drive the REAL
+// onclick handlers on the REAL rendered page against the scripted perch-api
+// above, and read the resulting DOM back. The vm harness in
+// perch-hub-client.test.js proves the calls and the bodies; only this proves
+// the controls are on screen, hit-testable, and inside the viewport at 412px.
+// ---------------------------------------------------------------------------
+
+/** A tab that stays open across several evaluations, unlike evaluate() above
+ *  which opens and closes one per call — clicking and then reading the result
+ *  has to happen in the same document. */
+async function session(width, height) {
+  const tab = await (await fetch(CDP + "/json/new?about:blank", { method: "PUT" })).json();
+  const { default: WebSocket } = await import("ws");
+  const ws = new WebSocket(tab.webSocketDebuggerUrl);
+  await new Promise((r, j) => { ws.once("open", r); ws.once("error", j); });
+  let id = 0;
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const mine = ++id;
+    const onMsg = (raw) => {
+      const m = JSON.parse(raw);
+      if (m.id !== mine) return;
+      ws.off("message", onMsg);
+      m.error ? reject(new Error(JSON.stringify(m.error))) : resolve(m.result || {});
+    };
+    ws.on("message", onMsg);
+    ws.send(JSON.stringify({ id: mine, method, params }));
+  });
+  await send("Emulation.setDeviceMetricsOverride",
+    { width, height, deviceScaleFactor: 2, mobile: width < 900 });
+  await send("Page.enable");
+  await send("Page.navigate", { url: `http://${HOST_FROM_CONTAINER}:${port}/dashboard/perch` });
+  await new Promise((r) => setTimeout(r, 1500));
+  const evalIn = async (expression) => {
+    const out = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    if (out.exceptionDetails) throw new Error("page threw: " + JSON.stringify(out.exceptionDetails));
+    return out.result.value;
+  };
+  return {
+    evalIn,
+    json: async (expression) => JSON.parse(await evalIn(expression)),
+    close: async () => { ws.close(); await fetch(CDP + "/json/close/" + tab.id).catch(() => {}); },
+  };
+}
+
+/** confirm() blocks a real browser tab, so it is replaced with a recorder.
+ *  The gate itself is proved in perch-hub-client.test.js (a cancelled confirm
+ *  posts nothing); what these tests need is the path PAST it. */
+const STUB_CONFIRM = `(function(){ window.__asked=[];
+  window.confirm=function(m){ window.__asked.push(String(m)); return true; }; return 'ok'; })()`;
+
+const ROW_STATE = `JSON.stringify({
+  sids: Array.from(document.querySelectorAll('#perch-list-body .roost-row .roost-cwd')).length,
+  closes: Array.from(document.querySelectorAll('#perch-list-body .roost-close')).length,
+  rows: document.querySelectorAll('#perch-list-body .roost-row').length })`;
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`C1 live @${w}x${h}: the launch control is on screen while EVERY attached bot is busy`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`(function(){
+        var b=document.getElementById('perch-new');
+        var r=b.getBoundingClientRect();
+        var cs=getComputedStyle(b);
+        var doc=document.documentElement;
+        return JSON.stringify({
+          rows: document.querySelectorAll('#perch-list-body .roost-row').length,
+          talk: Array.from(document.querySelectorAll('#perch-list-body button'))
+                  .filter(function(x){return x.textContent==='Talk';}).length,
+          disabled: b.disabled, display: cs.display, visibility: cs.visibility,
+          w: Math.round(r.width), h: Math.round(r.height),
+          top: Math.round(r.top), bottom: Math.round(r.bottom),
+          inViewport: r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth,
+          // hit-testable: the point the thumb lands on resolves to this button
+          hit: (function(){ var e=document.elementFromPoint(r.left+r.width/2, r.top+r.height/2);
+                            return !!e && (e===b || b.contains(e)); })(),
+          hScroll: doc.scrollWidth > doc.clientWidth
+        });
+      })()`);
+      assert.equal(seen.rows, 3, "the roost fixture must actually be in the reported state");
+      assert.equal(seen.talk, 0,
+        "fixture check: every attached bot is busy, so listRows() emits NO idle row — this is the bug");
+      assert.equal(seen.disabled, false, "the launcher must be usable in exactly that state");
+      assert.equal(seen.display !== "none" && seen.visibility !== "hidden", true, "and visible");
+      assert.equal(seen.inViewport, true,
+        `the launcher sits at ${seen.top}-${seen.bottom} in a ${h}px viewport`);
+      assert.equal(seen.hit, true, "and nothing overlaps it — a thumb there hits the button");
+      assert.ok(seen.w >= 44 && seen.h >= 40, `tap target ${seen.w}x${seen.h} is too small for a thumb`);
+      assert.equal(seen.hScroll, false, "no horizontal scroll at " + w + "px");
+    } finally { await s.close(); }
+  });
+
+  test(`C2 live @${w}x${h}: closing a session removes it from the list`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(STUB_CONFIRM);
+      const before = await s.json(ROW_STATE);
+      assert.equal(before.rows, 3);
+      assert.equal(before.closes, 3, "every live row needs its own close control");
+
+      // A real click on the real button, dispatched by the browser.
+      await s.evalIn(`document.querySelectorAll('#perch-list-body .roost-close')[0].click(); 'clicked'`);
+      await new Promise((r) => setTimeout(r, 800));
+
+      const asked = await s.json(`JSON.stringify(window.__asked)`);
+      assert.equal(asked.length, 1, "the operator was asked before anything terminal happened");
+      assert.match(asked[0], /cannot be reopened/i);
+      assert.deepEqual(stopped, ["perchlive-11111111"], "the server saw exactly one stop, for that row");
+
+      const after = await s.json(ROW_STATE);
+      assert.equal(after.rows, 2, "the closed session must be gone from the list, not merely greyed");
+    } finally { await s.close(); }
+  });
+
+  test(`C2 live @${w}x${h}: closing the OPEN session returns to the list`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(STUB_CONFIRM);
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 800));
+      const inChat = await s.json(`JSON.stringify({
+        view: document.body.getAttribute('data-view'),
+        meta: document.getElementById('perch-session-meta').textContent })`);
+      assert.equal(inChat.view, "chat");
+      assert.equal(inChat.meta, "perchlive-22222222", "precondition: that session is the one open");
+
+      const btn = await s.json(`(function(){
+        var b=document.getElementById('perch-close'), r=b.getBoundingClientRect();
+        return JSON.stringify({ inViewport: r.top>=0 && r.bottom<=innerHeight,
+          hit: (function(){ var e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                            return !!e && (e===b||b.contains(e)); })(),
+          w: Math.round(r.width), h: Math.round(r.height) });
+      })()`);
+      assert.equal(btn.inViewport, true, "close must be reachable without scrolling the chat");
+      assert.equal(btn.hit, true);
+
+      // Send must still be reachable — the close control must not have
+      // disturbed the sticky composer this page's mobile fix rests on.
+      const sendBox = await s.json(`(function(){
+        var r=document.getElementById('perch-send').getBoundingClientRect();
+        return JSON.stringify({ reachable: r.bottom<=innerHeight && r.top>=0,
+                                top: Math.round(r.top), bottom: Math.round(r.bottom), vp: innerHeight });
+      })()`);
+      assert.equal(sendBox.reachable, true,
+        `Send at ${sendBox.top}-${sendBox.bottom} in a ${sendBox.vp}px viewport`);
+
+      await s.evalIn(`document.getElementById('perch-close').click(); 'clicked'`);
+      await new Promise((r) => setTimeout(r, 800));
+
+      assert.deepEqual(stopped, ["perchlive-22222222"]);
+      const back = await s.json(`JSON.stringify({
+        view: document.body.getAttribute('data-view'), hash: location.hash,
+        rows: document.querySelectorAll('#perch-list-body .roost-row').length })`);
+      assert.equal(back.view, "list", "an operator must not be left in a chat whose stream is dead");
+      assert.equal(back.hash, "", "and the hash drives it, so Back still works");
+      assert.equal(back.rows, 2, "the list came back refreshed, without the closed session");
+    } finally { await s.close(); }
+  });
+}

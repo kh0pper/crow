@@ -43,6 +43,20 @@ ${engineBanner(engine, lang)}
 <div class="hub-split">
   <div id="perch-list">
     <h2>${escapeHtml(t("perch.sessionsHeading", lang))}</h2>
+    <!-- The launcher sits OUTSIDE #perch-list-body on purpose. renderList()
+         and showListNote() both clearEl() that body, so a launch control
+         living inside it would be wiped by every poll and every note — and
+         the defect this fixes is precisely that the only way to start a
+         session was a row that disappears once the bot is busy. Out here it
+         is unconditional, independent of what the rows contain.
+         It ships disabled: renderLauncher() enables it once the first
+         /roost answers, so the pre-data frame never claims "no bots". -->
+    <div id="perch-launch">
+      <label class="field-label" id="perch-new-bot-label" for="perch-new-bot" hidden>${escapeHtml(t("perch.newSessionBot", lang))}</label>
+      <select id="perch-new-bot" aria-labelledby="perch-new-bot-label" hidden></select>
+      <button type="button" class="primary" id="perch-new" disabled>${escapeHtml(t("perch.newSession", lang))}</button>
+      <div class="empty" id="perch-launch-note" hidden></div>
+    </div>
     <div id="perch-list-body"><div class="empty">${escapeHtml(t("perch.loading", lang))}</div></div>
   </div>
   <!-- ⚠ #perch-chat is now GLOBALLY significant, not just a local handle:
@@ -52,9 +66,15 @@ ${engineBanner(engine, lang)}
        inherits that clamp. Rename here and that rule goes dead too. -->
   <div id="perch-chat">
     <button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button>
+    <!-- Close lives in .perch-head, NOT in #perch-composer: the composer's
+         sticky box is what keeps Send reachable at any scroll position
+         (css.js:89-91), and .perch-head is already a non-scrolling child of
+         the #perch-chat flex column, so a control here is permanently on
+         screen without touching that box. -->
     <div class="perch-head"><div><div class="title" id="perch-bot-name"></div>
       <div class="meta" id="perch-session-meta"></div></div>
-      <div class="state" id="perch-state"></div></div>
+      <div class="state" id="perch-state"></div>
+      <button type="button" id="perch-close" class="quiet">${escapeHtml(t("perch.close", lang))}</button></div>
     <div class="field-row">
       <div class="field"><span class="field-label" id="perch-model-label">${escapeHtml(t("perch.modelLabel", lang))}</span>
         <select id="perch-model" aria-labelledby="perch-model-label" disabled></select></div>

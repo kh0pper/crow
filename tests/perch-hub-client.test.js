@@ -444,14 +444,16 @@ function makeResponse(status, body) {
  *  path, opts)` decides how every perchApi call resolves; the default 200s
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
-async function mountHub({ fetchImpl } = {}) {
+async function mountHub({ fetchImpl, confirmImpl } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
 
   const IDS = ["perch-list-body", "perch-transcript", "perch-ask", "perch-bot-name",
     "perch-session-meta", "perch-state", "perch-model", "perch-thinking", "perch-permission",
     "perch-plan-mode", "perch-input", "perch-send", "perch-back", "perch-abort",
-    "perch-attach", "perch-file-input", "perch-chat"];
+    "perch-attach", "perch-file-input", "perch-chat",
+    // Task C: the unconditional launcher and the two close controls.
+    "perch-new", "perch-new-bot", "perch-new-bot-label", "perch-launch-note", "perch-close"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -483,8 +485,15 @@ async function mountHub({ fetchImpl } = {}) {
   // handle past the end of every test that mounts this harness.
   let timerSeq = 1;
   const timers = new Map();
+  // Every confirm() the script asks is recorded with the exact prompt text, so
+  // a test can prove BOTH that the gate was consulted and what it said.
+  // Default: the operator cancels. A stop that fires anyway under this default
+  // is a stop with no gate, which is the failure mode the confirmation exists
+  // to prevent.
+  const confirms = [];
   const sandbox = {
     document: doc,
+    confirm(msg) { confirms.push(String(msg)); return confirmImpl ? confirmImpl(String(msg)) : false; },
     window: win,
     location,
     EventSource: FakeEventSource,
@@ -515,7 +524,7 @@ async function mountHub({ fetchImpl } = {}) {
   // fetchCalls or the DOM it produced.
   await new Promise((r) => setTimeout(r, 0));
 
-  return { els, doc, win, location, fetchCalls, sandbox, timers };
+  return { els, doc, win, location, fetchCalls, sandbox, timers, confirms };
 }
 
 /** Opens a chat session the same way a real click does: seed a /roost
@@ -724,4 +733,351 @@ test("I2: applyVV is bound to BOTH visualViewport events, not two different hand
   vv._dispatch("scroll", {});
   assert.equal(hub.els["perch-chat"].style.paddingBottom, "",
     "scroll must run the identical calculation, not a stub bound separately");
+});
+
+// ---------------------------------------------------------------------------
+// Task C — Perch owns its own session lifecycle.
+//
+// Kevin, verbatim: "there is no way to launch a new session, rather you can
+// only interact with already existing sessions" and "it looks like there are 8
+// sessions running, most of which were started by mistake, and I cannot close
+// them".
+//
+// Every test below drives a REAL onclick handler through mountHub() and
+// asserts on the REAL fetch bodies. Extracting the new pure functions and
+// asserting on their return values would prove nothing about whether anything
+// is bound to a control — which is the exact class of miss this file already
+// carries a scar for (see "perch-send, perch-back and perch-abort are actually
+// wired to handlers" above, where send() was correct, unit-tested, and wired
+// to nothing).
+// ---------------------------------------------------------------------------
+
+/** Kevin's instance, reduced: ONE perch-attached bot, and it is busy. There is
+ *  no idle row here, because listRows() drops a bot's idle row the moment it
+ *  has a live session — so a launcher derived from rows would be absent. A
+ *  fixture with an empty roost, or with one idle bot, would NOT reproduce the
+ *  reported bug and would pass against the broken code. */
+const ROOST_ALL_BUSY = {
+  birds: [{
+    id: "r4-assistant", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [
+      { sessionId: "perchlive-11111111", state: "awake", cardId: null, pendingUi: false },
+      { sessionId: "perchlive-22222222", state: "awake", cardId: null, pendingUi: false },
+      { sessionId: "perchlive-33333333", state: "hibernating", cardId: null, pendingUi: false },
+    ],
+  }],
+};
+
+const ROOST_TWO_BOTS = {
+  birds: [
+    { id: "alpha", name: "Alpha", perch_attached: true, state: "working",
+      sessions: [{ sessionId: "perchlive-aaaa1111", state: "awake", cardId: null, pendingUi: false }] },
+    { id: "beta", name: "Beta", perch_attached: true, state: "working",
+      sessions: [{ sessionId: "perchlive-bbbb2222", state: "awake", cardId: null, pendingUi: false }] },
+    { id: "quiet", name: "Quiet", perch_attached: false, state: "observing", sessions: [] },
+  ],
+};
+
+const ROOST_NO_ATTACHED = {
+  birds: [{ id: "quiet", name: "Quiet", perch_attached: false, state: "observing", sessions: [] }],
+};
+
+/** A fetchImpl serving a fixed roost, with the spawn/stop/session routes
+ *  answering 200 by default and overridable per test. */
+function roostFetch(roost, overrides = {}) {
+  return (method, path) => {
+    for (const [matcher, fn] of Object.entries(overrides)) {
+      if (path.includes(matcher)) return fn(method, path);
+    }
+    if (path === "/roost") return makeResponse(200, roost);
+    if (path.endsWith("/interactive")) return makeResponse(200, { sessionId: "perchlive-99999999" });
+    if (path.endsWith("/stop")) return makeResponse(200, { ok: true });
+    if (path.endsWith("/options")) return makeResponse(200, { models: [], thinkingLevels: [] });
+    if (path.endsWith("/transcript")) return makeResponse(200, { events: [] });
+    return makeResponse(200, {});
+  };
+}
+
+/** Every button rendered into the list, flattened, with the row it came from. */
+function listButtons(hub) {
+  const out = [];
+  for (const row of hub.els["perch-list-body"].children) {
+    for (const child of row.children || []) {
+      if (child.tagName === "BUTTON") out.push({ row, btn: child, text: child.textContent });
+    }
+  }
+  return out;
+}
+
+const notesIn = (el) => el.children.filter((c) => String(c.className).includes("note"))
+  .map((c) => c.textContent);
+
+// ---- C1: a launcher that exists when every attached bot is already busy ----
+
+test("C1: the launch control is live while EVERY attached bot already has a session", async () => {
+  // The reported state exactly. Before this change the ONLY way to spawn was
+  // an idle row, and listRows() emits none here.
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+
+  assert.equal(hub.els["perch-new"].disabled, false,
+    "the launcher must be usable even though no bot is idle");
+  assert.equal(listButtons(hub).some((b) => b.text === "Talk"), false,
+    "fixture check: there is genuinely no idle row to spawn from, which is the bug");
+
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const spawns = hub.fetchCalls.filter((c) => c.path.endsWith("/interactive"));
+  assert.equal(spawns.length, 1, "one spawn went out");
+  assert.equal(spawns[0].method, "POST");
+  assert.equal(spawns[0].path, "/bots/r4-assistant/interactive",
+    "spawned against the perch-attached bot from the roost the list already fetched");
+  assert.equal(hub.location.hash, "perchlive-99999999",
+    "startSession()'s own hash navigation ran — the launcher reuses it rather than respawning it");
+});
+
+test("C1: the launcher issues no extra request — the bot list rides the list's own /roost", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const gets = hub.fetchCalls.filter((c) => c.method === "GET");
+  assert.equal(gets.length, 1, "exactly one GET on first paint: " + JSON.stringify(gets.map((g) => g.path)));
+  assert.equal(gets[0].path, "/roost");
+});
+
+test("C1: with more than one attached bot the picker decides, and only attached bots are offered", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_TWO_BOTS) });
+  const sel = hub.els["perch-new-bot"];
+  assert.equal(sel.hidden, false, "two bots means the operator picks");
+  assert.deepEqual(sel.children.map((o) => o.value), ["alpha", "beta"],
+    "the un-attached bot must not be offered — POST /bots/quiet/interactive 403s");
+
+  sel.value = "beta";
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const spawns = hub.fetchCalls.filter((c) => c.path.endsWith("/interactive"));
+  assert.equal(spawns[0].path, "/bots/beta/interactive", "the picked bot, not the first one");
+});
+
+test("C1: one attached bot spawns with no picker at all", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  assert.equal(hub.els["perch-new-bot"].hidden, true, "a one-item dropdown is a tap for nothing");
+  assert.equal(hub.els["perch-new-bot-label"].hidden, true);
+});
+
+test("C1: with no attached bot the launcher says so instead of offering a guaranteed 403", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_NO_ATTACHED) });
+  assert.equal(hub.els["perch-new"].disabled, true);
+  assert.equal(hub.els["perch-launch-note"].hidden, false);
+  assert.equal(hub.els["perch-launch-note"].textContent,
+    "No bot has a Perch channel attached, so there is nothing to start.");
+
+  // Even driven directly — a stale enabled button, a keyboard activation — it
+  // must not fire a spawn that cannot succeed.
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.fetchCalls.filter((c) => c.path.endsWith("/interactive")).length, 0);
+});
+
+test("C1: the launcher's picker survives a poll, so a mid-tap refresh cannot change the bot", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_TWO_BOTS) });
+  hub.els["perch-new-bot"].value = "beta";
+  // Re-run the poll body exactly as the 10s interval would.
+  for (const fn of hub.timers.values()) fn();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-new-bot"].value, "beta", "a poll must not reset the operator's pick");
+  assert.deepEqual(hub.els["perch-new-bot"].children.map((o) => o.value), ["alpha", "beta"],
+    "and must not duplicate the options either");
+});
+
+test("C1: the idle-row Talk button still spawns — same call, not a second path", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST) });
+  const talk = listButtons(hub).find((b) => b.text === "Talk");
+  assert.ok(talk, "an attached bot with no session keeps its row");
+  talk.btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const spawns = hub.fetchCalls.filter((c) => c.path.endsWith("/interactive"));
+  assert.equal(spawns[0].path, "/bots/idle-bot/interactive");
+});
+
+// ---- C2: closing a session ------------------------------------------------
+
+test("C2: a row's Close asks first, and a cancelled confirm posts nothing at all", async () => {
+  // confirmImpl defaults to false: the operator says no.
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const close = listButtons(hub).find((b) => b.text === "Close");
+  assert.ok(close, "every live row needs a close control");
+  close.btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(hub.confirms.length, 1, "the gate was consulted");
+  assert.match(hub.confirms[0], /cannot be reopened/i,
+    "stop() is terminal — the copy has to say so, or the confirm is decoration");
+  assert.equal(hub.fetchCalls.filter((c) => c.path.endsWith("/stop")).length, 0,
+    "a declined confirm must leave the conversation alive");
+});
+
+test("C2: a confirmed row Close posts /interactive/<sid>/stop and refreshes the list", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY), confirmImpl: () => true });
+  const before = hub.fetchCalls.filter((c) => c.path === "/roost").length;
+  const close = listButtons(hub).find((b) => b.text === "Close");
+  close.btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const stops = hub.fetchCalls.filter((c) => c.path.endsWith("/stop"));
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].method, "POST");
+  assert.equal(stops[0].path, "/interactive/perchlive-11111111/stop");
+  assert.ok(hub.fetchCalls.filter((c) => c.path === "/roost").length > before,
+    "the stopped row has to leave the list, which takes a re-poll");
+});
+
+test("C2: closing the session you are IN returns to the list — no chat view on a dead stream", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY), confirmImpl: () => true,
+  });
+  hub.location.hash = "perchlive-11111111";
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.doc.body.getAttribute("data-view"), "chat", "precondition: we are in the chat view");
+
+  hub.els["perch-close"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(hub.fetchCalls.filter((c) => c.path.endsWith("/stop")).at(-1).path,
+    "/interactive/perchlive-11111111/stop");
+  assert.equal(hub.location.hash, "", "history stays correct: the hash drives the view, not a direct call");
+  assert.equal(hub.doc.body.getAttribute("data-view"), "list");
+  assert.equal(FakeEventSource.instances.at(-1).closed, true, "the SSE stream must not be left open");
+});
+
+test("C2: closing a DIFFERENT session while a chat is open does not yank the operator out of it", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY), confirmImpl: () => true });
+  hub.location.hash = "perchlive-22222222";
+  await new Promise((r) => setTimeout(r, 0));
+  // The desktop split keeps the list rendered beside the chat, so its rows —
+  // and their Close buttons — are still reachable while a session is open.
+  const close = listButtons(hub).find((b) => b.text === "Close");
+  close.btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(hub.fetchCalls.filter((c) => c.path.endsWith("/stop")).at(-1).path,
+    "/interactive/perchlive-11111111/stop", "the row's own session, not the open one");
+  assert.equal(hub.location.hash, "perchlive-22222222", "the open session stays open");
+  assert.equal(hub.doc.body.getAttribute("data-view"), "chat");
+});
+
+test("C2: a 410 means it is already gone — refresh, and show no error", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/stop": () => makeResponse(410, { error: "stopped" }) }),
+    confirmImpl: () => true,
+  });
+  const before = hub.fetchCalls.filter((c) => c.path === "/roost").length;
+  listButtons(hub).find((b) => b.text === "Close").btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.ok(hub.fetchCalls.filter((c) => c.path === "/roost").length > before, "still refreshes");
+  const shown = hub.els["perch-list-body"].children.map((c) => c.textContent);
+  assert.equal(shown.includes("That session did not close."), false,
+    "the operator's goal is already true — an error here would be a lie");
+});
+
+test("C2: a 404 is treated the same way as a 410", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/stop": () => makeResponse(404, { error: "no_such_session" }) }),
+    confirmImpl: () => true,
+  });
+  listButtons(hub).find((b) => b.text === "Close").btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const shown = hub.els["perch-list-body"].children.map((c) => c.textContent);
+  assert.equal(shown.includes("That session did not close."), false);
+});
+
+test("C2: any other failure is an error note, not a silent no-op", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/stop": () => makeResponse(500, null) }),
+    confirmImpl: () => true,
+  });
+  listButtons(hub).find((b) => b.text === "Close").btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const shown = hub.els["perch-list-body"].children.map((c) => c.textContent);
+  assert.ok(shown.includes("That session did not close."),
+    "a stop that failed must say so — the row is still there and the operator needs to know why");
+});
+
+test("C2: a failure while that session is OPEN reaches the transcript, not the hidden list", async () => {
+  // showListNote() writes into #perch-list-body, which the chat view hides on
+  // a phone — routing an in-chat failure there would be an invisible error.
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/stop": () => makeResponse(500, { error: "engine_down" }) }),
+    confirmImpl: () => true,
+  });
+  hub.location.hash = "perchlive-11111111";
+  await new Promise((r) => setTimeout(r, 0));
+  hub.els["perch-close"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.ok(notesIn(hub.els["perch-transcript"]).includes("engine_down"));
+  assert.equal(hub.doc.body.getAttribute("data-view"), "chat",
+    "a session that did NOT stop must not be abandoned as though it had");
+});
+
+test("C2: an idle bot row offers no Close — there is nothing to stop", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST) });
+  const idleRow = hub.els["perch-list-body"].children
+    .find((row) => row.children.some((c) => c.textContent === "Talk"));
+  assert.ok(idleRow);
+  assert.equal(idleRow.children.some((c) => c.textContent === "Close"), false);
+});
+
+test("C2: every live row gets its own Close, bound to its own session id", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY), confirmImpl: () => true });
+  const closes = listButtons(hub).filter((b) => b.text === "Close");
+  assert.equal(closes.length, 3, "three live sessions, three close controls");
+  closes[2].btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.fetchCalls.filter((c) => c.path.endsWith("/stop")).at(-1).path,
+    "/interactive/perchlive-33333333/stop", "each row closes ITS session, not a shared one");
+});
+
+test("C2: the session id is encoded into the stop path, never concatenated raw", async () => {
+  const js = (await import("../servers/gateway/dashboard/perch-hub/client.js")).perchHubJs("en");
+  const code = maskComments(js);
+  assert.ok(/interactive\/'\+encodeURIComponent\([^)]*\)\+'\/stop/.test(code),
+    "this value reaches an API path — every use site encodes it");
+  // parseHash must stay strict: it is the gate that keeps ".." out of the ids
+  // this file concatenates into paths.
+  assert.ok(/\/\^perchlive-\[0-9a-f\]\{8\}\$\//.test(code),
+    "the engine-minted id pattern must not be loosened to admit the new controls");
+});
+
+test("C: the new controls are wired at bootstrap, not merely defined", async () => {
+  const js = (await import("../servers/gateway/dashboard/perch-hub/client.js")).perchHubJs("en");
+  const code = maskComments(js);   // a comment quoting the binding must not satisfy this
+  assert.ok(/el\(\s*['"]perch-new['"]\s*\)\.onclick\s*=/.test(code), "#perch-new has no handler bound");
+  assert.ok(/el\(\s*['"]perch-close['"]\s*\)\.onclick\s*=/.test(code), "#perch-close has no handler bound");
+});
+
+test("C: no hardcoded English — every new string comes from the perch.* i18n block", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const en = perchHubJs("en"), es = perchHubJs("es");
+  const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  // Asserted against the RAW table, not through t(): t() falls back to en for a
+  // missing es, so a key with no Spanish at all still returns a string and a
+  // t()-based check passes on exactly the omission it is meant to catch.
+  for (const key of ["perch.newSession", "perch.newSessionBot", "perch.noAttachedBots",
+                     "perch.close", "perch.closeConfirm", "perch.closeFailed"]) {
+    const entry = translations[key];
+    assert.ok(entry, key + " is not in the translations table");
+    assert.equal(typeof entry.en, "string", key + " has no en string");
+    assert.equal(typeof entry.es, "string", key + " has no es string");
+    // "Bot" is "Bot" in Spanish; every key that carries a real sentence must
+    // actually differ.
+    if (entry.en.includes(" ")) {
+      assert.notEqual(entry.es, entry.en, key + " is untranslated — es must not be the English string");
+    }
+  }
+  // The client-side ones must actually reach the emitted script, in BOTH langs.
+  for (const [key, text] of [["perch.close", "Close"], ["perch.closeConfirm", "cannot be reopened"]]) {
+    assert.ok(en.includes(text), key + " must be interpolated into the en script");
+  }
+  assert.ok(es.includes("No se podrá volver a abrir") || es.includes("No se podr"),
+    "the es script must carry the es confirm copy, not the English one");
 });
