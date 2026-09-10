@@ -114,11 +114,19 @@ test("the emitted client script is valid JavaScript", async () => {
 test("the chat column carries the rules the renderer cannot prove", async () => {
   // Headless Chrome under setDeviceMetricsOverride has no URL bar, so
   // 100dvh === 100vh there and this rule can't be proven by rendering it —
-  // it is pinned here instead. Likewise the reachability render assertion
-  // is close to unfailable on its own (the composer is structurally last in
-  // a viewport-height flex column), so position:sticky, bottom:0, the
-  // composer's own background and the transcript's min-height:0 are pinned
-  // directly against the stylesheet text.
+  // it is pinned here instead. The other three are pinned directly against
+  // the stylesheet text for different reasons, checked by mutation against
+  // the phone reachability render test in perch-hub-render.test.js:
+  // dropping #perch-composer's position:sticky OR its bottom:0, each alone,
+  // does turn that render test red (it is not "close to unfailable" on that
+  // pair, as an earlier version of this comment claimed) — pinned here
+  // anyway so the CSS rule is documented and the failure is legible without
+  // a browser. Dropping the composer's own background, or the transcript's
+  // min-height:0, leaves the render test green (background is a paint
+  // property invisible to getBoundingClientRect; the seeded transcript
+  // in this repo's render test isn't long enough to force the shrink
+  // min-height:0 guards against) — for those two, this is the only test
+  // that catches a regression.
   const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
   const css = perchHubCss().replace(/\s+/g, "");
   assert.ok(css.includes("height:100vh;height:100dvh"),
@@ -131,14 +139,22 @@ test("the chat column carries the rules the renderer cannot prove", async () => 
 });
 
 test("the on-screen keyboard is accounted for", async () => {
-  // No headless harness raises a keyboard, so this only asserts the listener
-  // is wired — it does not prove the on-screen behaviour. iOS Safari does
-  // not shrink the layout viewport for the keyboard, so 100dvh alone stays
-  // full-height and a bottom:0 sticky composer sits behind it; visualViewport
-  // is the only API that reports the genuinely visible area.
+  // Asserts that BOTH listeners are actually bound, not just that the word
+  // "visualViewport" appears somewhere in the source — a bare .includes()
+  // still passes against `if(window.visualViewport){ var vv=window.visualViewport; }`
+  // with both addEventListener calls stripped out, a dead stub. No headless
+  // harness raises a keyboard, so this proves the wiring only, never the
+  // on-screen behaviour: iOS Safari does not shrink the layout viewport for
+  // the keyboard, so 100dvh alone stays full-height and a bottom:0 sticky
+  // composer sits behind it; visualViewport is the only API that reports the
+  // genuinely visible area, and resize/scroll are the events it fires when
+  // that area changes.
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
-  assert.ok(perchHubJs("en").includes("visualViewport"),
-    "iOS keeps 100dvh full-height under the keyboard; only visualViewport sees the real area");
+  const js = perchHubJs("en");
+  assert.match(js, /vv\.addEventListener\(\s*['"]resize['"]/,
+    "the resize listener must be bound, not just the visualViewport token present");
+  assert.match(js, /vv\.addEventListener\(\s*['"]scroll['"]/,
+    "the scroll listener must be bound, not just the visualViewport token present");
 });
 
 test("every control in the chat header carries a visible label", async () => {
