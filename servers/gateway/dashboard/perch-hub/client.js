@@ -37,11 +37,17 @@ export function perchHubJs(lang = "en") {
   }
 
   var API='/dashboard/perch-api';
-  /* The hub is a STANDALONE document, so it does NOT get shared/layout.js's
-     global fetch/XHR patch (layout.js:401-465) that attaches X-Crow-Csrf for
-     every dashboard page. That is why the board's own perchApi sends no header
-     and this one must. Do not "simplify" by copying the board's version: every
-     POST would 403. */
+  /* Perch now renders inside the dashboard shell (perch-hub/html.js, via
+     layout()), so shared/layout.js's global fetch/XHR patch DOES also attach
+     X-Crow-Csrf to same-origin POSTs here. This function still sets it
+     directly too: perchHubJs() is a plain script generator with no build
+     step or dependency on layout.js's own inline script existing, unlike
+     the board's client.js (bundled together, sharing that page's helpers) —
+     so its perchApi has always read the cookie and set the header itself.
+     Keeping that is belt-and-suspenders, not a workaround for a missing
+     patch; do not "simplify" by dropping it on the assumption the shell's
+     patch alone covers it — that couples this file to being loaded only
+     inside the shell, which is more fragile than just keeping the header. */
   function csrf(){ var m=document.cookie.match(/(?:^|; )crow_csrf=([^;]*)/); return m?decodeURIComponent(m[1]):''; }
   function perchApi(method,path,body){
     var opts={method:method,headers:{'X-Crow-Csrf':csrf()}};

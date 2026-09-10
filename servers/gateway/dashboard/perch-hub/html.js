@@ -18,26 +18,38 @@ function engineBanner(engine, lang) {
   return `<div class="empty" id="perch-engine-banner">${escapeHtml(t(key, lang))}</div>`;
 }
 
-/** The whole page. Static shell only — every list row and transcript line is
+/** Perch's markup + styles + client script, meant to be handed to a panel's
+ *  `layout()` as `content` (dashboard/panels/perch-hub.js does exactly
+ *  that) — NOT a standalone document. Rendering inside the dashboard shell
+ *  is what keeps the crow sidebar present on this page; the old
+ *  perchHubDocument() bypassed layout() entirely and that's what made the
+ *  nav vanish here. Everything Perch-specific is scoped under
+ *  #perch-hub-root (see css.js for why that scoping is load-bearing, not
+ *  cosmetic) so it can't leak onto the sidebar or any other panel, and vice
+ *  versa. Static shell only — every list row and transcript line is
  *  rendered client-side, the same split birdDrawerMarkup() uses. */
-export function perchHubDocument(lang = "en", engine = { state: "ready" }) {
-  return `<!DOCTYPE html>
-<html lang="${escapeHtml(lang)}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>${escapeHtml(t("perch.title", lang))}</title>
-<style>${perchHubCss()}</style>
-</head>
-<body data-view="list">
+export function perchHubContent(lang = "en", engine = { state: "ready" }) {
+  return `<style>${perchHubCss()}</style>
+<div id="perch-hub-root">
 ${engineBanner(engine, lang)}
-<header><div class="brand">Perch<small>${escapeHtml(t("perch.subtitle", lang))}</small></div>
-<nav class="machines"><a href="/dashboard/bot-board">${escapeHtml(t("perch.navBoard", lang))}</a></nav></header>
+<!-- No brand block here. The shell's .content-header already renders
+     <h2>Perch</h2> from this panel's title (panels/perch-hub.js), and
+     Perch's own <div class="brand">Perch</div> printed the same word again
+     directly underneath it. The shell header is canonical now; the
+     "your bot sessions" subtitle went with the block rather than being
+     restated somewhere it would read as a second page title. This header
+     survives only to carry the link back to the board. -->
+<header><nav class="machines"><a href="/dashboard/bot-board">${escapeHtml(t("perch.navBoard", lang))}</a></nav></header>
 <div class="hub-split">
   <div id="perch-list">
     <h2>${escapeHtml(t("perch.sessionsHeading", lang))}</h2>
     <div id="perch-list-body"><div class="empty">${escapeHtml(t("perch.loading", lang))}</div></div>
   </div>
+  <!-- ⚠ #perch-chat is now GLOBALLY significant, not just a local handle:
+       layout.js keys a document-wide app-shell clamp on "body:has(#perch-chat)"
+       (height:100dvh + overflow:hidden on .main-content, an internally
+       scrolling .content-body). Any other panel that reuses this id silently
+       inherits that clamp. Rename here and that rule goes dead too. -->
   <div id="perch-chat">
     <button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button>
     <div class="perch-head"><div><div class="title" id="perch-bot-name"></div>
@@ -70,6 +82,6 @@ ${engineBanner(engine, lang)}
     </div>
   </div>
 </div>
-<script>${perchHubJs(lang)}</script>
-</body></html>`;
+</div>
+<script>${perchHubJs(lang)}</script>`;
 }
