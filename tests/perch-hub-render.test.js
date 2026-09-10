@@ -36,10 +36,15 @@ const stopped = [];
 let modelsDefault = "crow-local/qwen3.6-35b-a3b";
 /** Transcript history, so a test can seed rendered markdown into the real DOM. */
 let transcriptEvents = [];
+/** The /options answer. Defaults to the awake shape; a test flips it to the
+ *  HIBERNATING one (thinkingLevels null, source "providers") to stand in the
+ *  state an operator is in after a gateway restart. */
+let optionsHibernating = false;
 function resetApi() {
   liveSids = SIDS.slice(); stopped.length = 0; roostFails = false;
   modelsDefault = "crow-local/qwen3.6-35b-a3b";
   transcriptEvents = [];
+  optionsHibernating = false;
 }
 
 let roostFails = false;
@@ -88,9 +93,9 @@ function serveApi(req, res) {
       { provider: "crow-local", id: "qwen3.6-35b-a3b", name: "Qwen3.6 35B", availability: "up" },
       { provider: "raven-flash-next", id: "qwen3.8-flash-next", name: "Flash Next", availability: "on_demand" },
     ],
-    thinkingLevels: ["off", "high"],
+    thinkingLevels: optionsHibernating ? null : ["off", "high"],
     current: "raven-flash-next/qwen3.8-flash-next",
-    source: "child",
+    source: optionsHibernating ? "providers" : "child",
   });
   // The launcher's session-free list, with a long name on purpose: the thing
   // that must never happen at 412px is a model name pushing New session off
@@ -943,6 +948,44 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.scripts, 0);
       assert.equal(seen.iframes, 0);
       assert.equal(seen.jsHrefs, 0);
+    } finally { resetApi(); await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 2 N2, live — the state the operator is actually in.
+//
+// A session hibernating after a gateway restart: options() answers from the
+// provider catalogue, and `current` is the model adoptRow restored from the
+// row. Measured null before the fix, which is what made the picker show
+// whichever model sorted first while the session was on another one.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`N2 live @${w}x${h}: a hibernating session's picker names the model it is on`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    optionsHibernating = true;
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 900));
+      const seen = await s.json(`(function(){
+        var sel=document.getElementById('perch-model'), th=document.getElementById('perch-thinking');
+        return JSON.stringify({
+          disabled: sel.disabled, thinkingDisabled: th.disabled,
+          value: sel.value, index: sel.selectedIndex,
+          shown: sel.selectedIndex>=0?sel.options[sel.selectedIndex].textContent:null,
+          first: sel.options.length?sel.options[0].value:null });
+      })()`);
+      assert.equal(seen.disabled, false, "the fallback list is a real list");
+      assert.equal(seen.thinkingDisabled, true, "thinking still has no list, and still says so");
+      assert.equal(seen.first, "crow-local/qwen3.6-35b-a3b",
+        "fixture check: the live model is deliberately NOT option 0");
+      assert.equal(seen.value, "raven-flash-next/qwen3.8-flash-next");
+      assert.equal(seen.index, 1, "the browser's own selection");
+      assert.match(seen.shown, /Flash Next/,
+        "what the operator reads after a restart — measured as the FIRST option before the fix");
     } finally { resetApi(); await s.close(); }
   });
 }

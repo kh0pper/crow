@@ -360,10 +360,17 @@ function assistantHtml(event) {
     : (Array.isArray(content)
       ? content.filter((c) => c && typeof c.text === "string").map((c) => c.text).join("\n")
       : "");
-  // A SHORT-CIRCUIT, not the correctness gate: `renderMarkdown("") || null` is
-  // already null, and removing this line leaves the whole suite green
-  // (measured). It is here so a tool-call-only message — most of a busy turn —
-  // does not pay for a parse that can only return nothing.
+  // THE correctness gate, and a short-circuit as well.
+  //
+  // An earlier version of this comment called it only a short-circuit, on the
+  // grounds that `renderMarkdown(…) || null` is already null for whitespace.
+  // That is true of THIS tree — measured: "", " ", "   ", "\n" and "\t" all
+  // render to "" — but it is marked's behaviour, not ours, and the reviewer
+  // measured `<p> </p>` from the same call on their own harness. Betting a
+  // "no html for a message with no text" guarantee on a third party's
+  // whitespace handling is the wrong way round, so the guard stays and the
+  // guarantee is stated here. It also spares a parse on every tool-call-only
+  // message, which is most of a busy turn.
   if (!text.trim()) return null;
   try {
     return renderMarkdown(text) || null;

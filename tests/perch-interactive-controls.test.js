@@ -935,3 +935,160 @@ test("rename(): a session with no row is refused, not answered 200 with nothing 
   assert.equal(rec.label, "before",
     "and the in-memory label is rolled back — the engine must not report a name the row lacks");
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 2 N2 — Q1 survived for every session adopted after a restart.
+//
+// adoptRow SELECTed the row's `model` and threw it away, so servingModel()
+// returned null for every adopted session and options() answered
+// `current: null`. The drawer then enabled the picker, populated the whole
+// catalogue, and selected option 0 — the exact defect Q1 exists for, in the
+// one case the !s.pi branch of options() was added to serve.
+//
+// This is Kevin's sequence: switch the model, the gateway restarts, open the
+// session again.
+// ---------------------------------------------------------------------------
+
+function rowModelOf(threadId) {
+  const c = raw();
+  const row = c.prepare("SELECT model FROM bot_sessions WHERE gateway_thread_id=? ORDER BY id DESC LIMIT 1").get(threadId);
+  c.close();
+  return row ? row.model : undefined;
+}
+
+test("N2: a session adopted after a restart reports the model its ROW carries", async () => {
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  // Deliberately NOT the spawn model, and deliberately not first in the
+  // fixture catalogue — option 0 must not be able to pass by accident.
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  clock.advance(600_001);
+  await tick();
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model", "precondition: the row carries it");
+
+  // The restart.
+  _resetInteractiveEngineForTest();
+  const { engine: reborn } = makeEngine({ providerModels: () => CATALOGUE });
+  const snap = await reborn.get(s.sessionId);
+  assert.equal(snap.state, "hibernating", "precondition: adopted, not held");
+  assert.equal(snap.model, "crow-chat/big-model",
+    "measured null before the fix, which made the drawer show whichever model sorted first");
+
+  const opts = await reborn.options(s.sessionId);
+  assert.equal(opts.source, "providers");
+  assert.equal(opts.current, "crow-chat/big-model", "and the picker is told which entry is live");
+  assert.notEqual(opts.current, opts.models[0].provider + "/" + opts.models[0].id,
+    "fixture check: the live model is not option 0, or this proves nothing");
+});
+
+test("N2: the report and the next WAKE agree — turn 1 runs on the adopted model", async () => {
+  // Restoring only a reporting field would swap one lie for a subtler one: the
+  // picker saying flash-next while the next turn quietly ran on the def's
+  // default. startChild reads currentModelParts before warmModel/PiRpc, so the
+  // adopted value is what actually serves.
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  clock.advance(600_001);
+  await tick();
+
+  _resetInteractiveEngineForTest();
+  const { engine: reborn, state } = makeEngine();
+  await reborn.message(s.sessionId, "after the restart");
+  await tick();
+  const pi = state.instances[state.instances.length - 1];
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+  assert.equal(state.meter.length, 1);
+  assert.equal(state.meter[0].resolved.key, "crow-chat/big-model",
+    "the wake serves the model the row recorded, not the def's default");
+  assert.ok(state.warm.includes("crow-chat"), "and warms that provider before spawning");
+});
+
+test("N2: a row with no usable model key leaves the tracking alone", async () => {
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  for (const bad of ["", "no-slash", "/leading", "trailing/"]) {
+    const c = raw();
+    c.prepare("UPDATE bot_sessions SET model=? WHERE gateway_thread_id=?").run(bad, s.sessionId);
+    c.close();
+    _resetInteractiveEngineForTest();
+    const { engine: reborn } = makeEngine();
+    const snap = await reborn.get(s.sessionId);
+    assert.equal(snap.model, null, JSON.stringify(bad) + " must not be parsed into a model");
+  }
+});
+
+test("N2: a switch made while HIBERNATING also survives the restart", async () => {
+  // The other half of the operator's sequence: the session was already asleep
+  // when the model was changed, so nothing wakes to write a turn row.
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal(r.bindsAtWake.model, "crow-chat/big-model", "precondition: the hibernating path, not the live one");
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model",
+    "and it reaches the row, or a restart before the next turn loses it");
+
+  _resetInteractiveEngineForTest();
+  const { engine: reborn } = makeEngine({ providerModels: () => CATALOGUE });
+  assert.equal((await reborn.get(s.sessionId)).model, "crow-chat/big-model");
+  assert.equal((await reborn.options(s.sessionId)).current, "crow-chat/big-model");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2 N1, engine side — the frames must NAME their turn.
+//
+// The drawer judges a `reply` against the turn it completes rather than against
+// a client-side memory that a reconnect invalidates. That only works if the
+// engine stamps the id, and the client tests build their own frames, so
+// nothing over there can prove this half.
+// ---------------------------------------------------------------------------
+
+test("N1: text and reply frames carry the id of the turn they belong to", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sub = await collect(engine, s.sessionId);
+  const pi = state.instances[0];
+
+  const t1 = await engine.message(s.sessionId, "one");
+  pi.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "streamed" }] } });
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "streamed" }] }] });
+  await tick();
+
+  const text1 = sub.ofType("text");
+  const reply1 = sub.ofType("reply");
+  assert.equal(text1.length, 1);
+  assert.equal(reply1.length, 1);
+  assert.equal(text1[0].turnId, t1.turnId, "the text frame names the turn message() returned");
+  assert.equal(reply1[0].turnId, t1.turnId, "and the reply names the SAME turn it completes");
+
+  const t2 = await engine.message(s.sessionId, "two");
+  assert.notEqual(t2.turnId, t1.turnId, "fixture check: a second turn is a different turn");
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "again" }] }] });
+  await tick();
+  const reply2 = sub.ofType("reply");
+  assert.equal(reply2.length, 2);
+  assert.equal(reply2[1].turnId, t2.turnId,
+    "turn 2's reply must be distinguishable from turn 1's — that is the whole mechanism");
+  sub.off();
+});
+
+test("N1: a child speaking OUTSIDE a turn emits a text frame with a null turn id", async () => {
+  // The honest answer, and what the client's fallback flag is for.
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sub = await collect(engine, s.sessionId);
+  state.instances[0].emit({
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "unsolicited" }] },
+  });
+  await tick();
+  const texts = sub.ofType("text");
+  assert.equal(texts.length, 1);
+  assert.equal(texts[0].turnId, null);
+  sub.off();
+});
