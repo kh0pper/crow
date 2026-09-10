@@ -1449,6 +1449,8 @@ export const translations = {
   "botboard.bdPermissionSelectLabel": { en: "Permissions", es: "Permisos" },
   // Model availability (see servers/gateway/model-availability.js). "up" needs
   // no suffix — a working choice should read as the plain default.
+  "botboard.bdPlanOn": { en: "plan mode on", es: "modo de plan activado" },
+  "botboard.bdPlanExecuting": { en: "executing the plan", es: "ejecutando el plan" },
   "botboard.bdModelOnDemand": { en: "starts on demand", es: "se inicia bajo demanda" },
   "botboard.bdModelUnavailable": { en: "not running", es: "no está en ejecución" },
   // T3-10 honesty: a permission/model change only binds at the NEXT wake —

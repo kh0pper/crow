@@ -69,6 +69,17 @@ export function birdDrawerCss() {
   /* A model whose endpoint nothing is serving stays listed and stays readable,
      but must not look like the plain working choice next to it. */
   .bb-bd-model-off{color:var(--crow-text-muted)}
+  /* PHONES. Reported from one: "I can't even scroll down far enough to hit the
+     send button." The transcript and the composer each carried a 220px floor,
+     which is 440px of minimum under ~400px of header and controls, and nothing
+     pinned the composer. Below 640px the floors come down and the composer
+     sticks to the bottom of the scroller, so Send is reachable at any scroll
+     position instead of only at the very end of a long transcript. */
+  @media (max-width: 640px) {
+    .bb-bd-transcript{min-height:120px}
+    #bb-bd-input{min-height:90px}
+    #bb-bd-composer{position:sticky;bottom:0;background:var(--crow-bg-surface);padding-top:.4rem;margin-top:.2rem;border-top:1px solid var(--crow-border);z-index:2}
+  }
   .bb-bd-controls-toggle-wrap{display:flex;gap:.4rem;flex-wrap:wrap;margin:.3rem 0}
   .bb-bd-controls-pane{margin:.4rem 0;padding:.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px}
   .bb-bd-tools{display:flex;flex-direction:column;gap:.25rem;margin:.4rem 0}
@@ -642,6 +653,18 @@ export function birdDrawerJs(lang) {
     return '';
   }
 
+  /* pi's plan state is an OBJECT: {enabled, executing, todosDone, todosTotal,
+   * todos}. This listener used to hand it straight to bdAppendNote, whose
+   * textContent turned it into the literal "[object Object]" on every freshly
+   * opened drawer. An inactive plan is the normal case and says nothing. */
+  function bdPlanStateText(st){
+    if(!st||typeof st!=='object') return typeof st==='string'?st:'';
+    if(!st.enabled&&!st.executing) return '';
+    var total=Number(st.todosTotal||0), done=Number(st.todosDone||0);
+    var head=st.executing?'${tJs("botboard.bdPlanExecuting", lang)}':'${tJs("botboard.bdPlanOn", lang)}';
+    return total>0?head+' ('+done+'/'+total+')':head;
+  }
+
   function bdLoadTranscript(){
     if(!bd.botId||!bd.threadId) return;
     var mySid=bd.sid;
@@ -839,7 +862,8 @@ export function birdDrawerJs(lang) {
     });
     es.addEventListener('plan_state',function(e){
       if(bd.sid!==mySid) return;
-      bdAppendNote('',(parsed(e).state||''));
+      var txt=bdPlanStateText(parsed(e).state);
+      if(txt) bdAppendNote('',txt);
     });
     es.addEventListener('error',function(e){
       if(bd.sid!==mySid) return;

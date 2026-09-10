@@ -862,3 +862,80 @@ test("an unavailable model is greyed but still listed and still selectable", asy
   // to bring up in a window.
   assert.ok(!js.includes("o.disabled=true"));
 });
+
+// ---------------------------------------------------------------------------
+// The drawer has to be usable on a phone
+// ---------------------------------------------------------------------------
+//
+// Reported from an actual phone: "I can't even scroll down far enough to hit
+// the send button." Three causes, all in this file's own CSS:
+//
+//   1. `.bb-drawer` was `height:100vh`. On mobile browsers 100vh is the LARGE
+//      viewport — it excludes the URL bar and the bottom nav — so the drawer is
+//      taller than the visible area and its last ~90px, which is exactly where
+//      Send lives, sits permanently behind the browser chrome. Scrolling the
+//      container cannot reach what the container itself renders off-screen.
+//   2. The transcript and the composer each carried `min-height:220px`. That is
+//      440px of floor before the buttons, under ~400px of header and controls.
+//   3. Nothing pinned the composer, so Send is only ever reachable by scrolling
+//      to the very bottom of a long transcript.
+
+test("the drawer sizes to the VISIBLE viewport, not the large one", async () => {
+  const { botBoardStyles } = await import("../servers/gateway/dashboard/panels/bot-board/css.js");
+  const css = botBoardStyles();
+  assert.ok(/\.bb-drawer\{[^}]*height:100vh/.test(css), "the 100vh fallback stays for old engines");
+  assert.ok(/\.bb-drawer\{[^}]*height:100dvh/.test(css),
+    "100dvh tracks the viewport as the browser chrome shows and hides");
+  const rule = css.match(/\.bb-drawer\{[^}]*\}/)[0];
+  assert.ok(rule.indexOf("100dvh") > rule.indexOf("100vh"),
+    "dvh must come AFTER vh or the fallback wins everywhere");
+});
+
+test("on a narrow screen the composer is pinned so Send is always reachable", async () => {
+  const { birdDrawerCss } = await import("../servers/gateway/dashboard/panels/bot-board/drawer.js");
+  const css = birdDrawerCss();
+  const narrow = css.slice(css.indexOf("@media (max-width:"));
+  assert.ok(narrow.length > 0, "there is a narrow-width block");
+  assert.ok(/#bb-bd-composer\{[^}]*position:sticky/.test(narrow), "the composer sticks");
+  assert.ok(/#bb-bd-composer\{[^}]*bottom:0/.test(narrow), "pinned to the bottom of the scroller");
+  assert.ok(/#bb-bd-composer\{[^}]*background:/.test(narrow),
+    "it needs its own background or the transcript shows through it");
+});
+
+test("on a narrow screen the two 220px floors come down", async () => {
+  const { birdDrawerCss } = await import("../servers/gateway/dashboard/panels/bot-board/drawer.js");
+  const narrow = birdDrawerCss().slice(birdDrawerCss().indexOf("@media (max-width:"));
+  const transcript = narrow.match(/\.bb-bd-transcript\{[^}]*min-height:(\d+)px/);
+  const textarea = narrow.match(/#bb-bd-input\{[^}]*min-height:(\d+)px/);
+  assert.ok(transcript && Number(transcript[1]) < 220, "the transcript floor drops below 220px");
+  assert.ok(textarea && Number(textarea[1]) < 220, "the composer floor drops below 220px");
+});
+
+// ---------------------------------------------------------------------------
+// plan_state carries an object, and the drawer printed it
+// ---------------------------------------------------------------------------
+//
+// The engine emits {type:"plan_state", state:{enabled,executing,todosDone,
+// todosTotal,todos}}. The listener did bdAppendNote('', parsed(e).state), and
+// textContent of an object is the literal string "[object Object]" — which is
+// what a freshly opened drawer showed, every time, right under "No transcript
+// yet."
+
+test("plan_state renders a sentence, never a stringified object", async () => {
+  const { birdDrawerJs } = await import("../servers/gateway/dashboard/panels/bot-board/drawer.js");
+  const js = birdDrawerJs("en");
+  assert.ok(!/bdAppendNote\('',\s*\(?parsed\(e\)\.state/.test(js),
+    "the raw state object must never reach bdAppendNote");
+  assert.ok(js.includes("bdPlanStateText"), "it goes through a formatter");
+});
+
+test("an inactive plan says nothing at all — no empty note, no noise line", async () => {
+  const { birdDrawerJs } = await import("../servers/gateway/dashboard/panels/bot-board/drawer.js");
+  const js = birdDrawerJs("en");
+  const fn = js.slice(js.indexOf("function bdPlanStateText"));
+  assert.ok(fn.includes("return ''"), "a disabled, non-executing plan formats to nothing");
+  // And the listener must not append an empty note when the formatter returns "".
+  const listener = js.slice(js.indexOf("addEventListener('plan_state'"));
+  assert.ok(/if\s*\(\s*txt\s*\)/.test(listener.slice(0, 400)),
+    "only append when there is something to say");
+});
