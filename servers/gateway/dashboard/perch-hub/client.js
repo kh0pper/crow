@@ -48,6 +48,14 @@ export function perchHubJs(lang = "en") {
     if(body!==undefined){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
     return fetch(API+path,opts).then(function(r){
       return r.json().catch(function(){return null;}).then(function(j){ return {ok:r.ok,status:r.status,j:j}; });
+    },function(){
+      /* fetch() itself rejected — a destroyed socket, a dropped tunnel, a
+         gateway restart. Resolving a well-formed failure object here, rather
+         than leaving the promise rejected, means every existing .then at
+         every call site (onStreamError's reconnect probe, send()'s
+         SEND_FAILED note) runs on this path exactly as it does for an HTTP
+         error, with no .catch needed at each call site. */
+      return {ok:false,status:0,j:null};
     });
   }
 
