@@ -2266,7 +2266,6 @@ export const translations = {
   "perch.attachFile": { en: "Attach image", es: "Adjuntar imagen" },
   "perch.fileQueued": { en: "Image attached to the next message.", es: "Imagen adjunta al siguiente mensaje." },
   "perch.fileFailed": { en: "The image did not upload.", es: "La imagen no se subió." },
-  "perch.attachFailed": { en: "Could not attach to that card.", es: "No se pudo vincular a esa tarjeta." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

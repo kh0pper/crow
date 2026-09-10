@@ -182,6 +182,12 @@ export function perchHubJs(lang = "en") {
   }
 
   var current={sid:null};
+  /* Images attached via attachFile(), queued for the NEXT send() only —
+     drawer.js:406/916 does the same two-part attach: upload now (POST
+     .../files), attach the wire-shape {mime,data_b64} array on the send that
+     follows, then clear regardless of outcome. resetControls() also clears
+     this so a new session never inherits a stale queue. */
+  var pendingImages=[];
 
   function openSession(sid){
     if(current.sid===sid) return;          /* a re-entered hash is a no-op */
@@ -429,6 +435,8 @@ export function perchHubJs(lang = "en") {
     if(thinkSel){ clearEl(thinkSel); thinkSel.disabled=true; }
     var permSel=el('perch-permission'); if(permSel) permSel.value='guarded';
     var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
+    setTurnInFlight(false);      /* the PREVIOUS session's Steer/Stop state must not bleed in */
+    pendingImages=[];            /* nor its queued-but-unsent image */
   }
 
   /* routes/perch-interactive-api.js:531-540 reads permission_mode and
@@ -471,15 +479,22 @@ export function perchHubJs(lang = "en") {
     var mySid=current.sid;
     appendMessage('user','you',text);      /* echo before the round trip */
     input.value='';
-    perchApi('POST',sendPath(mySid,turnInFlight),{message:text}).then(function(r){
+    var body={message:text};
+    /* routes/perch-interactive-api.js's normalizeMessageImages reads
+       body.images on /message only — /steer never looks at it, so attaching
+       here regardless of path is harmless on a steer. Cleared immediately,
+       matching the textarea's own discipline: a failed send still consumes
+       the queue, and re-attaching is one tap away. */
+    if(pendingImages.length) body.images=pendingImages;
+    pendingImages=[];
+    perchApi('POST',sendPath(mySid,turnInFlight),body).then(function(r){
       if(current.sid!==mySid) return;
       if(r.status===409){ setTurnInFlight(true); return; }   /* raced a turn start */
       if(!r.ok) appendNote((r.j&&r.j.error)||SEND_FAILED);
     });
   }
 
-  /* Track 3 Task 5: ask_user cards, file attach, attach-to-card. The real
-     card shape (perch-interactive.js:222) uses \`method\` as the
+  /* ask_user cards. The real card shape (perch-interactive.js:222) uses \`method\` as the
      discriminator (select|input|confirm|editor, never \`kind\`), \`options\`
      as plain strings (never {value,label}), and answer() is a tri-state —
      cancelled first, then confirmed for a confirm card, else value. A
@@ -576,6 +591,7 @@ export function perchHubJs(lang = "en") {
 
   function attachFile(file){
     var mySid=current.sid;
+    var isImage=/^image\\//.test(file.type);
     var reader=new FileReader();
     reader.onload=function(){
       /* result is "data:<mime>;base64,<payload>" — the route wants the payload. */
@@ -583,22 +599,18 @@ export function perchHubJs(lang = "en") {
       perchApi('POST','/interactive/'+encodeURIComponent(mySid)+'/files',
                {name:file.name,data_b64:b64}).then(function(r){
         if(current.sid!==mySid) return;
-        appendNote(r.ok?FILE_QUEUED:((r.j&&r.j.error)||FILE_FAILED));
+        if(r.ok){
+          /* Queued onto send()'s pendingImages, in pi's wire shape
+             {mime,data_b64} — an upload that isn't an image has nothing to
+             queue: the model reads images, not arbitrary files. */
+          if(isImage) pendingImages.push({mime:file.type,data_b64:b64});
+          appendNote(FILE_QUEUED);
+        } else {
+          appendNote((r.j&&r.j.error)||FILE_FAILED);
+        }
       });
     };
     reader.readAsDataURL(file);        /* 5 MB post-decode cap, route-side */
-  }
-
-  function attachToCard(cardId){
-    var mySid=current.sid;
-    /* snake_case: parseCardId reads body.card_id and 400s on anything else.
-       /roost returns cardId (camelCase) on each session; both are correct,
-       this is not a normalisation bug. */
-    return perchApi('POST','/interactive/'+encodeURIComponent(mySid)+'/attach-card',
-                    {card_id:Number(cardId)}).then(function(r){
-      if(current.sid!==mySid) return;
-      if(!r.ok) appendNote((r.j&&r.j.error)||ATTACH_FAILED);
-    });
   }
 
   var attachBtn=el('perch-attach'), fileInput=el('perch-file-input');
