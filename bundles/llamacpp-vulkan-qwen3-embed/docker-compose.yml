@@ -27,8 +27,13 @@ services:
       - --alias
       - qwen3-embedding-0.6b
       - --embedding
+      # Qwen3-Embedding is trained with LAST-TOKEN (EOS) pooling. Mean pooling runs without
+      # error and produces vectors that cannot rank: measured 0/3 top-1 on a 5-doc/3-query
+      # retrieval check where the same model with native pooling scored 3/3, with a
+      # top1-to-top2 margin of +0.03 against +0.12. Changing this invalidates any index built
+      # against the old setting, so re-embed after changing it.
       - --pooling
-      - "mean"
+      - "last"
       - --host
       - "0.0.0.0"
       - --port
