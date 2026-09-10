@@ -53,18 +53,35 @@ export async function generateQrDataUri(uri) {
 
 /**
  * Verify a TOTP code against a secret.
+ *
+ * Total on both arguments by design. Every caller passes at least one of them
+ * straight out of a request body (`/dashboard/login/2fa` the code,
+ * `/dashboard/login/2fa/setup` and the settings enable_2fa action both), so an
+ * absent field is an ordinary malformed request. otpauth reads `.length` off
+ * the token and `.replace` off the secret, so `undefined` used to raise a
+ * TypeError inside an async route handler — an unhandled rejection, and
+ * therefore fatal to the whole gateway process. A bad input answers false.
+ *
  * @param {string} token - 6-digit code from authenticator
  * @param {string} secret - Base32-encoded secret
  * @returns {boolean}
  */
 export function verifyTotp(token, secret) {
+  if (typeof token !== "string" || token.trim() === "") return false;
+  if (typeof secret !== "string" || secret.trim() === "") return false;
+  let parsedSecret;
+  try {
+    parsedSecret = OTPAuth.Secret.fromBase32(secret);
+  } catch {
+    return false; // not base32 at all
+  }
   const totp = new OTPAuth.TOTP({
     issuer: "Crow",
     label: "Crow's Nest",
     algorithm: "SHA1",
     digits: 6,
     period: 30,
-    secret: OTPAuth.Secret.fromBase32(secret),
+    secret: parsedSecret,
   });
   // window: 1 allows previous + next 30-second period (clock skew tolerance)
   const delta = totp.validate({ token, window: 1 });
