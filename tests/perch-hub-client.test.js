@@ -380,7 +380,7 @@ function makeEventTarget() {
 function makeFakeElement(tag) {
   const target = makeEventTarget();
   const attrs = {};
-  return Object.assign(target, {
+  const node = Object.assign(target, {
     tagName: String(tag || "div").toUpperCase(),
     children: [],
     style: {},
@@ -394,7 +394,6 @@ function makeFakeElement(tag) {
     files: null,
     appendChild(child) { this.children.push(child); return child; },
     removeChild(child) { const i = this.children.indexOf(child); if (i >= 0) this.children.splice(i, 1); return child; },
-    get firstChild() { return this.children[0] || null; },
     insertBefore(node, ref) {
       const i = ref ? this.children.indexOf(ref) : -1;
       if (i < 0) this.children.unshift(node); else this.children.splice(i, 0, node);
@@ -404,6 +403,18 @@ function makeFakeElement(tag) {
     getAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null; },
     click() { if (this.onclick) this.onclick(); },
   });
+  // defineProperty, NOT a `get firstChild()` in the object literal above:
+  // Object.assign copies a getter's VALUE, not the getter, so firstChild was
+  // frozen at null (children was empty at creation) for the life of every
+  // element. clearEl()'s `while(node.firstChild)` therefore never removed
+  // anything, and #perch-list-body silently ACCUMULATED every render on top of
+  // the last. Found while debugging an off-by-four row count; the assertions
+  // it weakened were the ones that read the list body.
+  Object.defineProperty(node, "firstChild", {
+    get() { return this.children[0] || null; },
+    configurable: true,
+  });
+  return node;
 }
 
 /** A fake EventSource that keeps addEventListener('error', ...) listeners
@@ -444,7 +455,7 @@ function makeResponse(status, body) {
  *  path, opts)` decides how every perchApi call resolves; the default 200s
  *  everything with `{}`. Returns the fake DOM pieces and every fetch call
  *  made, in order, so a test can assert on both wiring and traffic. */
-async function mountHub({ fetchImpl, confirmImpl } = {}) {
+async function mountHub({ fetchImpl, confirmImpl, initialHash = "" } = {}) {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const js = perchHubJs("en");
 
@@ -473,10 +484,26 @@ async function mountHub({ fetchImpl, confirmImpl } = {}) {
   const visualViewport = Object.assign(vvTarget, { height: 700, offsetTop: 0 });
   const win = Object.assign(winTarget, { visualViewport, innerHeight: 800 });
 
-  const locState = { hash: "" };
+  // history is counted, not simulated: assigning location.hash pushes an entry,
+  // location.replace('#') does not. Both fire hashchange — verified in a real
+  // browser, where the tidier-looking location.replace(pathname) fires NONE and
+  // would leave the operator on a dead chat view. `replaced` records the raw
+  // argument so a test can prove the terminal path took the replace form.
+  // initialHash is set BEFORE the script runs, which is the only way to reach
+  // the genuinely cold deep-link path: the bootstrap branches on
+  // parseHash(location.hash) at load, so a hash assigned afterwards has always
+  // been preceded by a list render that already populated rowIndex.
+  const locState = { hash: initialHash };
+  const history = { pushes: 0, replaces: 0 };
   const location = {
     get hash() { return locState.hash; },
-    set hash(v) { locState.hash = v; winTarget._dispatch("hashchange", {}); },
+    set hash(v) { locState.hash = v; history.pushes++; winTarget._dispatch("hashchange", {}); },
+    replace(v) {
+      const next = String(v);
+      locState.hash = next === "#" || next === "" ? "" : next;
+      history.replaces++;
+      winTarget._dispatch("hashchange", {});
+    },
     href: "",
   };
 
@@ -524,7 +551,7 @@ async function mountHub({ fetchImpl, confirmImpl } = {}) {
   // fetchCalls or the DOM it produced.
   await new Promise((r) => setTimeout(r, 0));
 
-  return { els, doc, win, location, fetchCalls, sandbox, timers, confirms };
+  return { els, doc, win, location, fetchCalls, sandbox, timers, confirms, history };
 }
 
 /** Opens a chat session the same way a real click does: seed a /roost
@@ -1080,4 +1107,289 @@ test("C: no hardcoded English — every new string comes from the perch.* i18n b
   }
   assert.ok(es.includes("No se podrá volver a abrir") || es.includes("No se podr"),
     "the es script must carry the es confirm copy, not the English one");
+});
+
+// ---------------------------------------------------------------------------
+// Task C — fix round 1.
+// ---------------------------------------------------------------------------
+
+/** ROOST_ALL_BUSY, but with a card on the first session, so the row subtitle
+ *  has all three parts to show. Mirrors routes/perch.js:484-513: cardId is a
+ *  number or null on every session entry. */
+const ROOST_ALL_BUSY_CARDED = {
+  birds: [{
+    id: "r4-assistant", name: "R4 Assistant", perch_attached: true, state: "working",
+    sessions: [
+      { sessionId: "perchlive-11111111", state: "awake", cardId: 248, pendingUi: false },
+      { sessionId: "perchlive-22222222", state: "awake", cardId: null, pendingUi: false },
+      { sessionId: "perchlive-33333333", state: "hibernating", cardId: null, pendingUi: false },
+    ],
+  }],
+};
+
+const subtitles = (hub) => hub.els["perch-list-body"].children
+  .map((row) => (row.children || []).filter((c) => String(c.className) === "roost-main")[0])
+  .filter(Boolean)
+  .map((main) => main.children.filter((c) => String(c.className) === "roost-when")[0])
+  .map((w) => (w ? w.textContent : null));
+
+// ---- Finding 1: eight identical rows ----
+
+test("F1: a row says WHICH session it is, not just which bot", async () => {
+  const rowSubtitle = await extract("rowSubtitle",
+    "var WAITING_ON_YOU='waiting on you', ROW_CARD='card {id}';" +
+    "function shortSid(s){return String(s==null?'':s).replace(/^perchlive-/,'');}");
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-11111111", cardId: 248 }),
+    "awake · 11111111 · card 248");
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-22222222", cardId: null }),
+    "awake · 22222222");
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-33333333", cardId: null, pendingUi: true }),
+    "waiting on you · 33333333", "pendingUi still outranks the state word");
+  // An idle bot row is unchanged: no session, so nothing to disambiguate.
+  assert.equal(rowSubtitle({ state: "idle", sessionId: null, cardId: null }), "idle");
+  // cardId 0 is a real id, not an absence.
+  assert.equal(rowSubtitle({ state: "awake", sessionId: "perchlive-abcdef01", cardId: 0 }),
+    "awake · abcdef01 · card 0");
+});
+
+test("F1: eight sessions on one bot render eight DISTINGUISHABLE rows", async () => {
+  // The reported shape. Before this fix every row read "R4 Assistant / awake"
+  // and the only way to tell them apart was Open -> read the meta -> Back,
+  // once per candidate, each pass sitting on top of an irreversible Close.
+  const eight = {
+    birds: [{
+      id: "r4-assistant", name: "R4 Assistant", perch_attached: true, state: "working",
+      sessions: Array.from({ length: 8 }, (_, i) => ({
+        sessionId: "perchlive-" + String(i).repeat(8), state: "awake", cardId: null, pendingUi: false,
+      })),
+    }],
+  };
+  const hub = await mountHub({ fetchImpl: roostFetch(eight) });
+  const seen = subtitles(hub);
+  assert.equal(seen.length, 8);
+  assert.equal(new Set(seen).size, 8, "every row must be distinguishable: " + JSON.stringify(seen));
+});
+
+test("F1: the irreversible confirm names the session it is about to destroy", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY_CARDED), confirmImpl: () => false });
+  listButtons(hub).filter((b) => b.text === "Close")[1].btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.confirms.length, 1);
+  assert.match(hub.confirms[0], /R4 Assistant 22222222/,
+    "a confirm that names nothing cannot correct a mis-tap, which is all it is for");
+  assert.match(hub.confirms[0], /cannot be reopened/i);
+});
+
+test("F1: a cold deep link can still name its session in the confirm", async () => {
+  // A GENUINELY cold link: the hash is set before the script runs, so the
+  // bootstrap goes straight to openSession and no list render has populated
+  // rowIndex. An earlier version of this test assigned the hash afterwards,
+  // which meant renderList had already cached every row and openSession took
+  // its warm branch — the cold path was never executed, and removing the
+  // rowIndex write left the test green. The mutation was right; the test was
+  // not exercising what it named.
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY_CARDED),
+    confirmImpl: () => false,
+    initialHash: "perchlive-22222222",
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.doc.body.getAttribute("data-view"), "chat", "precondition: opened cold");
+  assert.equal(hub.els["perch-list-body"].children.length, 0,
+    "precondition: nothing rendered the list, so rowIndex was never warmed");
+  hub.els["perch-close"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.match(hub.confirms.at(-1), /R4 Assistant 22222222/,
+    "without the cold-path rowIndex write this reads 'Close 22222222?' — an " +
+    "irreversible prompt with no bot name on it");
+});
+
+// ---- Finding 3: a failed /roost must not re-create the original symptom ----
+
+test("F3: a failed /roost says so instead of showing a false empty list", async () => {
+  const hub = await mountHub({ fetchImpl: () => makeResponse(503, { error: "upstream" }) });
+  const shown = hub.els["perch-list-body"].children.map((c) => c.textContent);
+  assert.equal(shown.includes("No live sessions."), false,
+    "a failed roost is not an empty roost — saying so is a lie");
+  assert.ok(shown.includes("Could not reach the session list."));
+  assert.equal(hub.els["perch-launch-note"].hidden, false,
+    "and a greyed-out New session button with no reason beside it is the exact " +
+    "'I can only interact with what already exists' state this task ends");
+  assert.equal(hub.els["perch-launch-note"].textContent, "Could not reach the session list.");
+});
+
+test("F3: a roster we already know survives a blip and stays spawnable", async () => {
+  let fail = false;
+  const hub = await mountHub({
+    fetchImpl: (method, path) => (path === "/roost" && fail)
+      ? makeResponse(503, { error: "upstream" })
+      : roostFetch(ROOST_ALL_BUSY)(method, path),
+  });
+  assert.equal(hub.els["perch-new"].disabled, false, "precondition: a good first poll");
+
+  fail = true;
+  for (const fn of hub.timers.values()) fn();          // the 10s poll, failing
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-new"].disabled, false,
+    "the bots did not vanish because one poll failed — spawning is still worth attempting");
+
+  fail = false;
+  for (const fn of hub.timers.values()) fn();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-launch-note"].hidden, true, "and it self-heals on the next good poll");
+  assert.equal(hub.els["perch-list-body"].children.length, 3);
+});
+
+// ---- Finding 5: a stop failure you navigated away from must still land ----
+
+test("F5: a stop that fails after you move on surfaces on the next list render", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY_CARDED, {
+      "/stop": () => gate.then(() => makeResponse(500, { error: "engine_down" })),
+    }),
+    confirmImpl: () => true,
+  });
+
+  hub.location.hash = "perchlive-11111111";
+  await new Promise((r) => setTimeout(r, 0));
+  hub.els["perch-close"].onclick();                    // slow POST, still in flight
+  await new Promise((r) => setTimeout(r, 0));
+
+  hub.location.hash = "perchlive-22222222";            // the operator moves on
+  await new Promise((r) => setTimeout(r, 0));
+
+  release();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+
+  // Nothing may be written into the hidden list body while a chat is open.
+  assert.equal(hub.doc.body.getAttribute("data-view"), "chat");
+
+  hub.els["perch-back"].onclick();                     // back to the list
+  await new Promise((r) => setTimeout(r, 0));
+  const shown = hub.els["perch-list-body"].children.map((c) => c.textContent);
+  assert.ok(shown.some((t) => /11111111 did not close/.test(String(t))),
+    "the session is still alive and still costing a pi child — the operator has to be told, " +
+    "and told WHICH one: " + JSON.stringify(shown));
+});
+
+// ---- Finding 7: Back after a close must not be a one-way trap ----
+
+test("F7: closing the open session REPLACES the dead entry instead of stacking one", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY), confirmImpl: () => true });
+  hub.location.hash = "perchlive-11111111";
+  await new Promise((r) => setTimeout(r, 0));
+  const pushesBefore = hub.history.pushes;
+
+  hub.els["perch-close"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(hub.history.pushes, pushesBefore,
+    "pushing on top of #perchlive-<gone> means Back lands on the dead deep link, " +
+    "which bounces through noteAndReturnToList into another entry, forever");
+  assert.equal(hub.history.replaces, 1);
+  assert.equal(hub.location.hash, "", "and it still reaches the list");
+  assert.equal(hub.doc.body.getAttribute("data-view"), "list");
+});
+
+test("F7: a dead deep link also replaces rather than stacking", async () => {
+  // noteAndReturnToList is the other terminal path — the one Back would land
+  // on if the close path stacked. It must not stack either.
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  hub.location.hash = "perchlive-deadbeef";            // valid shape, absent from /roost
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.history.replaces, 1, "the bounce back off a gone session must replace");
+  const shown = hub.els["perch-list-body"].children.map((c) => c.textContent);
+  assert.ok(shown.includes("That session is gone."), "and the parked note must still land");
+});
+
+test("F7: an ordinary Back out of a live session still uses a normal navigation", async () => {
+  // Only the TERMINAL paths replace. Leaving a session that still exists is
+  // ordinary navigation and must stay in history, or Back stops working.
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  hub.location.hash = "perchlive-11111111";
+  await new Promise((r) => setTimeout(r, 0));
+  const replacesBefore = hub.history.replaces;
+  hub.els["perch-back"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.history.replaces, replacesBefore, "#perch-back is not a terminal path");
+  assert.equal(hub.doc.body.getAttribute("data-view"), "list");
+});
+
+test("F1/F3/F5: the new strings are translated, with matching placeholders", async () => {
+  const { translations } = await import("../servers/gateway/dashboard/shared/i18n.js");
+  for (const key of ["perch.rowCard", "perch.roostUnreachable", "perch.closeFailedFor", "perch.closeConfirm"]) {
+    const e = translations[key];
+    assert.ok(e, key + " missing");
+    assert.equal(typeof e.es, "string", key + " has no es string");
+    assert.notEqual(e.es, e.en, key + " is untranslated");
+    const ph = (s) => (s.match(/\{[a-z]+\}/gi) || []).sort().join(",");
+    assert.equal(ph(e.es), ph(e.en), key + "'s placeholders differ between en and es");
+  }
+  // {session} has to survive into the emitted script, or the confirm names nothing.
+  const es = (await import("../servers/gateway/dashboard/perch-hub/client.js")).perchHubJs("es");
+  assert.ok(es.includes("{session}"), "the es confirm must still carry the placeholder");
+});
+
+test("harness integrity: clearEl actually clears, so a re-render replaces rather than accumulates", async () => {
+  // This harness's fake element used `get firstChild()` inside an object
+  // literal handed to Object.assign, which copies the getter's VALUE. It was
+  // frozen at null, clearEl()'s `while(node.firstChild)` never removed
+  // anything, and every render piled on top of the last. Every assertion that
+  // read #perch-list-body was weaker than it looked: `includes(...)` checks
+  // could be satisfied by a stale render from three polls ago.
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  assert.equal(hub.els["perch-list-body"].children.length, 3);
+  for (let i = 0; i < 3; i++) {
+    for (const fn of hub.timers.values()) fn();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  assert.equal(hub.els["perch-list-body"].children.length, 3,
+    "four polls must leave three rows, not twelve");
+  // And the primitive itself, directly.
+  const node = hub.doc.createElement("div");
+  node.appendChild(hub.doc.createElement("span"));
+  assert.ok(node.firstChild, "firstChild must be a live getter, not a value snapshotted at creation");
+  node.removeChild(node.firstChild);
+  assert.equal(node.firstChild, null);
+});
+
+// ---- Finding 6: a failed spawn must not blank the rows you came to close ----
+
+test("F6: a failed spawn keeps the session rows and their Close buttons on screen", async () => {
+  // showListNote clears #perch-list-body. With the launcher now always
+  // present, a spawn failure became a routine way to lose every row — and
+  // every Close — for up to 10s, for an operator whose whole task is closing
+  // sessions. The note belongs on the launcher that produced it.
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/interactive": () => makeResponse(409, { error: "engine_required" }) }),
+  });
+  assert.equal(hub.els["perch-list-body"].children.length, 3, "precondition");
+
+  hub.els["perch-new"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(hub.els["perch-launch-note"].hidden, false, "the failure must still be reported");
+  assert.equal(hub.els["perch-launch-note"].textContent, "The bot engine is not installed.");
+  assert.equal(hub.els["perch-list-body"].children.length, 3,
+    "and the rows the operator came to close must survive it");
+  assert.equal(listButtons(hub).filter((b) => b.text === "Close").length, 3);
+});
+
+test("F6: a 403 and a shapeless 200 report on the launcher too", async () => {
+  for (const [resp, expected] of [
+    [makeResponse(403, { error: "perch_not_attached" }), "That bot has no Perch channel attached."],
+    [makeResponse(200, {}), "Could not start a session."],
+  ]) {
+    const hub = await mountHub({
+      fetchImpl: roostFetch(ROOST_ALL_BUSY, { "/interactive": () => resp }),
+    });
+    hub.els["perch-new"].onclick();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(hub.els["perch-launch-note"].textContent, expected);
+    assert.equal(hub.els["perch-list-body"].children.length, 3, "rows survive: " + expected);
+  }
 });
