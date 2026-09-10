@@ -98,6 +98,10 @@ export function perchHubJs(lang = "en") {
   var ASK_STALE='${tJs("perch.askStale", lang)}';
   var STEER_LABEL='${tJs("perch.steer", lang)}';
   var SEND_LABEL='${tJs("perch.send", lang)}';
+  var ASK_CONFIRM='${tJs("perch.askConfirm", lang)}';
+  var ASK_DENY='${tJs("perch.askDeny", lang)}';
+  var ASK_CANCEL='${tJs("perch.askCancel", lang)}';
+  var ASK_SUBMIT='${tJs("perch.askSubmit", lang)}';
 
   var pendingNote=null;                 /* survives the loadList that follows a note */
   function showListNote(text){
@@ -458,6 +462,154 @@ export function perchHubJs(lang = "en") {
       if(!r.ok) appendNote((r.j&&r.j.error)||SEND_FAILED);
     });
   }
+
+  /* Track 3 Task 5: ask_user cards, file attach, attach-to-card. The real
+     card shape (perch-interactive.js:222) uses \`method\` as the
+     discriminator (select|input|confirm|editor, never \`kind\`), \`options\`
+     as plain strings (never {value,label}), and answer() is a tri-state —
+     cancelled first, then confirmed for a confirm card, else value. A
+     confirm card answered with value reads at the engine as confirmed:false,
+     which would silently DENY a permission prompt while looking approved. */
+  function askOptions(card){
+    if(!card||!card.requestId) return [];
+    return Array.isArray(card.options)?card.options.slice():[];
+  }
+
+  function askFields(card){
+    var m=card&&card.method;
+    return {
+      needsText: m==='input'||m==='editor',
+      initial: (card&&card.prefill!=null)?String(card.prefill):'',
+      placeholder: (card&&card.placeholder!=null)?String(card.placeholder):''
+    };
+  }
+
+  /* Mirrors engine.answer's tri-state (perch-interactive.js:1904). cancelled
+     is checked first there, so it is checked first here. A confirm card MUST
+     answer with confirmed: sending value on one reads as a denial. */
+  function answerPayloadFor(card,choice){
+    var out={requestId:card.requestId};
+    if(choice&&choice.cancelled){ out.cancelled=true; return out; }
+    if(card.method==='confirm'){ out.confirmed=!!(choice&&choice.confirm); return out; }
+    out.value=String(choice&&choice.value!=null?choice.value:'');
+    return out;
+  }
+
+  /* Every continuation here carries the same mySid guard as the rest of the
+     file: an answer that resolves after the operator has moved on must not
+     write into the new session's pane. A 409 no_such_request means the card
+     was already answered or the child died — clear the pane and say so
+     rather than leaving a dead card on screen. */
+  function answerAsk(card,choice){
+    var mySid=current.sid;
+    return perchApi('POST','/interactive/'+encodeURIComponent(mySid)+'/answer',
+                    answerPayloadFor(card,choice)).then(function(r){
+      if(current.sid!==mySid) return;
+      clearEl(el('perch-ask'));
+      if(r.status===409) appendNote(ASK_STALE);
+    });
+  }
+
+  /* Writes into #perch-ask, which sits ABOVE the sticky composer: an
+     ask_user frame blocks the turn until answered, so it must not be
+     scrollable past inside the transcript. Built with createElement/
+     textContent only — never innerHTML. */
+  function renderAsk(card){
+    var pane=el('perch-ask'); if(!pane) return;
+    clearEl(pane);
+    if(!card||!card.requestId) return;
+    var frame=document.createElement('div'); frame.className='ask-card';
+    if(card.title) frame.appendChild(line('ask-title',card.title));
+    if(card.message) frame.appendChild(line('ask-message',card.message));
+
+    var controls=document.createElement('div'); controls.className='ask-controls';
+
+    if(card.method==='confirm'){
+      var yes=document.createElement('button'); yes.type='button'; yes.textContent=ASK_CONFIRM;
+      yes.onclick=function(){ answerAsk(card,{confirm:true}); };
+      var no=document.createElement('button'); no.type='button'; no.textContent=ASK_DENY;
+      no.onclick=function(){ answerAsk(card,{confirm:false}); };
+      controls.appendChild(yes); controls.appendChild(no);
+    } else if(card.method==='select'){
+      /* options is an array of plain strings (cardFrom() does options.slice()
+         on whatever pi sent) — never {value,label}. */
+      askOptions(card).forEach(function(opt){
+        var b=document.createElement('button'); b.type='button'; b.textContent=opt;
+        b.onclick=function(){ answerAsk(card,{value:opt}); };
+        controls.appendChild(b);
+      });
+    } else {
+      var fields=askFields(card);
+      var field=card.method==='editor'?document.createElement('textarea'):document.createElement('input');
+      if(card.method!=='editor') field.type='text';
+      field.value=fields.initial;
+      field.placeholder=fields.placeholder;
+      var submit=document.createElement('button'); submit.type='button'; submit.textContent=ASK_SUBMIT;
+      submit.onclick=function(){ answerAsk(card,{value:field.value}); };
+      controls.appendChild(field); controls.appendChild(submit);
+    }
+
+    /* Every card gets a cancel: without it, a card whose options do not fit
+       the situation blocks the turn with no way out. */
+    var cancel=document.createElement('button'); cancel.type='button'; cancel.textContent=ASK_CANCEL;
+    cancel.onclick=function(){ answerAsk(card,{cancelled:true}); };
+    controls.appendChild(cancel);
+
+    frame.appendChild(controls);
+    pane.appendChild(frame);
+  }
+
+  function attachFile(file){
+    var mySid=current.sid;
+    var reader=new FileReader();
+    reader.onload=function(){
+      /* result is "data:<mime>;base64,<payload>" — the route wants the payload. */
+      var b64=String(reader.result||'').split(',')[1]||'';
+      perchApi('POST','/interactive/'+encodeURIComponent(mySid)+'/files',
+               {name:file.name,data_b64:b64}).then(function(r){
+        if(current.sid!==mySid) return;
+        appendNote(r.ok?FILE_QUEUED:((r.j&&r.j.error)||FILE_FAILED));
+      });
+    };
+    reader.readAsDataURL(file);        /* 5 MB post-decode cap, route-side */
+  }
+
+  function attachToCard(cardId){
+    var mySid=current.sid;
+    /* snake_case: parseCardId reads body.card_id and 400s on anything else.
+       /roost returns cardId (camelCase) on each session; both are correct,
+       this is not a normalisation bug. */
+    return perchApi('POST','/interactive/'+encodeURIComponent(mySid)+'/attach-card',
+                    {card_id:Number(cardId)}).then(function(r){
+      if(current.sid!==mySid) return;
+      if(!r.ok) appendNote((r.j&&r.j.error)||ATTACH_FAILED);
+    });
+  }
+
+  var attachBtn=el('perch-attach'), fileInput=el('perch-file-input');
+  if(attachBtn&&fileInput){
+    attachBtn.onclick=function(){ fileInput.click(); };
+    fileInput.onchange=function(){
+      if(fileInput.files&&fileInput.files[0]) attachFile(fileInput.files[0]);
+      fileInput.value='';
+    };
+  }
+
+  /* Carried-over fix: send(), closeSession() and the abort path were all
+     written by an earlier task but never connected to the DOM — the chat
+     view rendered and Send did nothing. #perch-back sets location.hash=''
+     rather than calling closeSession() directly, so applyHash -> hashchange
+     -> closeSession runs and browser history stays correct. */
+  el('perch-send').onclick=send;
+  el('perch-back').onclick=function(){ location.hash=''; };
+  function abortTurn(){
+    if(!current.sid) return;
+    var mySid=current.sid;
+    perchApi('POST','/interactive/'+encodeURIComponent(mySid)+'/abort').then(function(r){
+      if(current.sid!==mySid) return;
+    });
+  }
+  el('perch-abort').onclick=abortTurn;
 
   /* BOOTSTRAP — the plan shipped without this once and everything looked fine.
      Task 7 navigates with location.href='/dashboard/perch#<sid>', a FULL page

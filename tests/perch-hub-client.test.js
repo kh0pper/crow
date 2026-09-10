@@ -260,3 +260,86 @@ test("control bodies use the exact keys the route reads, not camelCase", async (
   assert.deepEqual(controlBody("permission", "bypass"), { permission_mode: "bypass" });
   assert.deepEqual(controlBody("plan", true), { plan_mode: true });
 });
+
+// Carried-over fix (found during Task 4): send(), closeSession() and the
+// abort path were all written but never connected to a DOM control, so the
+// chat view rendered and Send did nothing. Every review round missed it
+// because every test here extracts a pure function and asserts behaviour,
+// never reachability. This test pins reachability with structural regexes
+// against the assignment expression itself — a bare substring scan on
+// "send" false-negatives here, because that word also appears inside the
+// string 'The message did not send.' (SEND_FAILED's translation).
+test("perch-send, perch-back and perch-abort are actually wired to handlers", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const js = perchHubJs("en");
+  // Masked against comments (same helper the extractor uses): a comment
+  // that merely NAMES the binding expression — e.g. one documenting this
+  // very fix — must not satisfy the assertion. Caught live while writing
+  // this test: replacing the real binding line with a comment that quoted
+  // it verbatim kept this test green until the mask was added.
+  const code = maskComments(js);
+  assert.ok(/el\(\s*['"]perch-send['"]\s*\)\.onclick\s*=\s*send\s*;/.test(code),
+    "#perch-send has no click handler bound to send()");
+  assert.ok(/el\(\s*['"]perch-back['"]\s*\)\.onclick\s*=\s*function\s*\(\)\s*\{\s*location\.hash\s*=\s*'';/.test(code),
+    "#perch-back must set location.hash='' so applyHash -> closeSession runs and history stays correct");
+  assert.ok(/el\(\s*['"]perch-abort['"]\s*\)\.onclick\s*=/.test(code),
+    "#perch-abort has no click handler bound");
+  assert.ok(/interactive\/'\+encodeURIComponent\(mySid\)\+'\/abort/.test(code),
+    "the abort handler must POST /interactive/<sid>/abort");
+});
+
+test("ask options are plain strings, exactly as the engine sends them", async () => {
+  const askOptions = await extract("askOptions");
+  // cardFrom() does options.slice() on whatever pi sent — strings.
+  assert.deepEqual(askOptions({ requestId: "r1", method: "select", options: ["yes", "no"] }), ["yes", "no"]);
+  assert.deepEqual(askOptions({ requestId: "r2", method: "input", placeholder: "name" }), []);
+  assert.deepEqual(askOptions({ requestId: "r3", method: "confirm" }), []);
+  assert.deepEqual(askOptions({ method: "select", options: ["a"] }), [], "no requestId is unanswerable");
+  assert.deepEqual(askOptions(null), []);
+});
+
+test("a confirm card answers with confirmed, never value — this one denies permissions if wrong", async () => {
+  const payloadFor = await extract("answerPayloadFor");
+  const card = { requestId: "r9", method: "confirm", title: "Run bash?" };
+  assert.deepEqual(payloadFor(card, { confirm: true }), { requestId: "r9", confirmed: true });
+  assert.deepEqual(payloadFor(card, { confirm: false }), { requestId: "r9", confirmed: false });
+  // The bug being guarded: {value:"yes"} on a confirm card reads as DENY.
+  const wrong = payloadFor(card, { confirm: true });
+  assert.ok(!("value" in wrong), "a confirm card must not carry value");
+});
+
+test("select, input and editor answer with value", async () => {
+  const payloadFor = await extract("answerPayloadFor");
+  assert.deepEqual(payloadFor({ requestId: "r1", method: "select" }, { value: "yes" }),
+    { requestId: "r1", value: "yes" });
+  assert.deepEqual(payloadFor({ requestId: "r2", method: "input" }, { value: "Kevin" }),
+    { requestId: "r2", value: "Kevin" });
+  assert.deepEqual(payloadFor({ requestId: "r3", method: "editor" }, { value: "line\nline" }),
+    { requestId: "r3", value: "line\nline" });
+});
+
+test("cancel is a real answer and outranks the method", async () => {
+  const payloadFor = await extract("answerPayloadFor");
+  // engine.answer checks cancelled FIRST, before the confirm branch.
+  assert.deepEqual(payloadFor({ requestId: "r4", method: "confirm" }, { cancelled: true }),
+    { requestId: "r4", cancelled: true });
+  assert.deepEqual(payloadFor({ requestId: "r5", method: "select" }, { cancelled: true }),
+    { requestId: "r5", cancelled: true });
+});
+
+test("an editor card offers its prefill and an input its placeholder", async () => {
+  const askFields = await extract("askFields");
+  assert.deepEqual(askFields({ requestId: "r1", method: "editor", prefill: "draft" }),
+    { needsText: true, initial: "draft", placeholder: "" });
+  assert.deepEqual(askFields({ requestId: "r2", method: "input", placeholder: "your name" }),
+    { needsText: true, initial: "", placeholder: "your name" });
+  assert.deepEqual(askFields({ requestId: "r3", method: "select", options: ["a"] }),
+    { needsText: false, initial: "", placeholder: "" });
+});
+
+test("attach-to-card sends card_id, the key the route actually reads", async () => {
+  const js = (await import("../servers/gateway/dashboard/perch-hub/client.js")).perchHubJs("en");
+  const fn = await fnSrc("attachToCard");   // brace-matched, never a magic number
+  assert.ok(fn.includes("card_id"), "parseCardId reads body.card_id; cardId is a 400");
+  assert.ok(!/\bcardId\s*:/.test(fn), "no camelCase key — the route drops it silently");
+});

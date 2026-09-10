@@ -2258,6 +2258,15 @@ export const translations = {
   "perch.permBypass": { en: "Bypass", es: "Omitir" },
   "perch.modelOnDemand": { en: "starts on demand", es: "se inicia bajo demanda" },
   "perch.modelUnavailable": { en: "not running", es: "no está en ejecución" },
+  "perch.askConfirm": { en: "Confirm", es: "Confirmar" },
+  "perch.askDeny": { en: "Deny", es: "Denegar" },
+  "perch.askCancel": { en: "Cancel", es: "Cancelar" },
+  "perch.askSubmit": { en: "Answer", es: "Responder" },
+  "perch.askStale": { en: "That question is no longer open.", es: "Esa pregunta ya no está abierta." },
+  "perch.attachFile": { en: "Attach image", es: "Adjuntar imagen" },
+  "perch.fileQueued": { en: "Image attached to the next message.", es: "Imagen adjunta al siguiente mensaje." },
+  "perch.fileFailed": { en: "The image did not upload.", es: "La imagen no se subió." },
+  "perch.attachFailed": { en: "Could not attach to that card.", es: "No se pudo vincular a esa tarjeta." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

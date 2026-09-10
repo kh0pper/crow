@@ -62,6 +62,8 @@ ${engineBanner(engine, lang)}
     <div id="perch-composer">
       <textarea id="perch-input" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
       <div class="send-row">
+        <button type="button" id="perch-attach" class="quiet">${escapeHtml(t("perch.attachFile", lang))}</button>
+        <input type="file" id="perch-file-input" style="display:none" accept="image/*">
         <button type="button" class="primary" id="perch-send">${escapeHtml(t("perch.send", lang))}</button>
         <button type="button" id="perch-abort" style="display:none">${escapeHtml(t("perch.abort", lang))}</button>
       </div>
