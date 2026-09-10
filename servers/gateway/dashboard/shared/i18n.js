@@ -2220,6 +2220,28 @@ export const translations = {
     en: "No starter memories left to clear.",
     es: "No quedan memorias iniciales por borrar.",
   },
+  // ─── Perch Hub (2026-09-09 restore) ───
+  "perch.title": { en: "Perch", es: "Perch" },
+  "perch.subtitle": { en: "your bot sessions", es: "tus sesiones de bots" },
+  "perch.navBoard": { en: "Board", es: "Tablero" },
+  "perch.sessionsHeading": { en: "Sessions", es: "Sesiones" },
+  "perch.loading": { en: "Loading sessions…", es: "Cargando sesiones…" },
+  "perch.noSessions": { en: "No live sessions.", es: "No hay sesiones activas." },
+  "perch.waitingOnYou": { en: "waiting on you", es: "esperándote" },
+  "perch.open": { en: "Open", es: "Abrir" },
+  "perch.talk": { en: "Talk", es: "Hablar" },
+  "perch.startFailed": { en: "Could not start a session.", es: "No se pudo iniciar una sesión." },
+  "perch.notAttached": { en: "That bot has no Perch channel attached.", es: "Ese bot no tiene canal Perch." },
+  "perch.engineRequired": { en: "The bot engine is not installed.", es: "El motor de bots no está instalado." },
+  "perch.sendFailed": { en: "The message did not send.", es: "El mensaje no se envió." },
+  "perch.back": { en: "← Sessions", es: "← Sesiones" },
+  "perch.composerPlaceholder": { en: "Message your bot…", es: "Escribe a tu bot…" },
+  "perch.send": { en: "Send", es: "Enviar" },
+  "perch.abort": { en: "Stop", es: "Detener" },
+  "perch.engineAbsent": { en: "The bot engine is not installed.", es: "El motor de bots no está instalado." },
+  "perch.engineInstall": { en: "Install it", es: "Instalarlo" },
+  "perch.engineInstalling": { en: "The bot engine is still installing.", es: "El motor de bots aún se está instalando." },
+  "perch.engineUnhealthy": { en: "The bot engine is not responding.", es: "El motor de bots no responde." },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
