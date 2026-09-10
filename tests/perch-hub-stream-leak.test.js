@@ -211,6 +211,28 @@ test("four Turbo visits, one session: ONE stream, ONE subscriber, ONE empty-stat
   } finally { await s.close(); }
 });
 
+test("a two-message turn renders two entries, not two plus the concatenation", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const s = await session();
+  try {
+    await s.open();
+    // The real shape of a turn: a state frame opening it, one `text` per
+    // completed assistant message (message-level streaming), then `reply`
+    // carrying replyTextOf(end) — both messages CONCATENATED. Appending that
+    // rendered every turn twice, on this branch and on deployed main.
+    broadcast("state", { state: "awake", turnInFlight: true });
+    broadcast("text", { text: "Let me check." });
+    broadcast("text", { text: "There are four boards." });
+    broadcast("reply", { text: "Let me check.There are four boards." });
+    await sleep(500);
+    const seen = await s.json(`JSON.stringify(
+      Array.from(document.querySelectorAll('#perch-transcript .entry.bot .what')).map(function(n){return n.textContent;}))`);
+    // A COUNT assertion: a contains-assertion passes through a duplicate.
+    assert.equal(seen.length, 2, "rendered entries: " + JSON.stringify(seen));
+    assert.deepEqual(seen, ["Let me check.", "There are four boards."]);
+  } finally { await s.close(); }
+});
+
 test("a streamed reply is appended once, not once per surviving instance", async (t) => {
   if (!available) return t.skip("no CDP endpoint at " + CDP);
   const s = await session();
@@ -219,6 +241,9 @@ test("a streamed reply is appended once, not once per surviving instance", async
     await s.open();
     // This is the operator's actual symptom: the bot answered ONCE and the
     // transcript showed the answer six times.
+    // No `text` frames: the zero-message path, where `reply` IS the only copy
+    // of the answer — which is what an operator who opened the drawer mid-turn
+    // sees, since the stream carries no backlog.
     broadcast("reply", { text: "the one and only answer" });
     await sleep(500);
     const seen = await s.json(PAGE_STATE);
