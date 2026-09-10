@@ -141,8 +141,11 @@ border-radius:10px;background:var(--sky);color:var(--ink);flex:1 1 140px;min-wid
    clipped by nothing; with this, row 380, table 306 wide scrolling its own
    475px of content. min-width:0 on the ITEM is the item-side half of the
    standard remedy (grid-template-columns:minmax(0,1fr) is the container-side
-   half); applied to every row, not just .entry, because an ask card can carry
-   the same unbreakable content. */
+   half). Written as a child selector rather than as .entry so a future row type
+   is covered too — NOT, as an earlier version of this comment claimed, because
+   it reaches the ask card: #perch-ask is a SIBLING of #perch-transcript
+   (html.js), never a child, and at 412px the card sits in its own pane
+   untouched by this rule. */
 #perch-transcript > *{min-width:0}
 #perch-hub-root .what.md{white-space:normal}
 #perch-hub-root .what.md > :first-child{margin-top:0}

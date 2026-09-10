@@ -2132,3 +2132,102 @@ test("rendering does not re-open the duplicate: a turn with html still renders o
   const rows = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("entry bot"));
   assert.equal(rows.length, 2, "the concatenated reply is still suppressed when the messages rendered");
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 2 N1 — a reconnect across a turn boundary silently ate the answer.
+//
+// The suppression flag was client state that survived a stream teardown and
+// reset only on a turnInFlight false->true transition. A reconnect that never
+// saw the separating false frame therefore carried a stale "already rendered"
+// across into the NEXT turn and dropped its reply. The engine's
+// replay-on-subscribe does not close it: the replayed frame is true and the
+// client is already true, so there is no transition.
+//
+// The frames now carry the turn they belong to, so `reply` judges its own turn.
+// BOTH reconnect shapes are driven below, with entry COUNTS.
+// ---------------------------------------------------------------------------
+
+/** Drop the live stream the way a blip does, and let the backoff timer
+ *  re-open it — the real path (onStreamError -> options probe ->
+ *  scheduleReconnect -> openStream), not a reach into the closure. */
+async function reconnect(hub) {
+  const before = FakeEventSource.instances.length;
+  FakeEventSource.instances[before - 1]._nativeError();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  for (const fn of hub.timers.values()) fn();          // the 2s backoff, fired
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(FakeEventSource.instances.length > before, "the reconnect must actually open a new stream");
+  return FakeEventSource.instances[FakeEventSource.instances.length - 1];
+}
+
+test("N1 CROSS-turn reconnect: the next turn's reply still renders", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es1 = FakeEventSource.instances[0];
+  es1._serverFrame("state", { state: "awake", turnInFlight: true });
+  es1._serverFrame("text", { text: "turn 1 streamed half", turnId: "turn-1" });
+  assert.deepEqual(botEntries(hub), ["turn 1 streamed half"]);
+
+  // The blip: turn 1 ends and turn 2 runs inside it, so the client never sees
+  // the turnInFlight:false that separates them.
+  const es2 = await reconnect(hub);
+  es2._serverFrame("state", { state: "awake", turnInFlight: true });   // the engine's replay
+  es2._serverFrame("reply", { text: "turn 2's whole answer", turnId: "turn-2" });
+
+  assert.deepEqual(botEntries(hub), ["turn 1 streamed half", "turn 2's whole answer"],
+    "measured before the fix: turn 2 never rendered at all");
+});
+
+test("N1 SAME-turn reconnect: the reply is still suppressed, no duplicate", async () => {
+  // The case a bare reset in openStream() would have broken — which is why
+  // this is a turn id and not a reset.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es1 = FakeEventSource.instances[0];
+  es1._serverFrame("state", { state: "awake", turnInFlight: true });
+  es1._serverFrame("text", { text: "the answer", turnId: "turn-1" });
+
+  const es2 = await reconnect(hub);
+  es2._serverFrame("state", { state: "awake", turnInFlight: true });
+  es2._serverFrame("reply", { text: "the answer", turnId: "turn-1" });   // the SAME turn ends
+
+  assert.deepEqual(botEntries(hub), ["the answer"], "one entry, not two");
+});
+
+test("N1: a reply for a turn whose text was never seen renders, reconnect or not", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "turn 1", turnId: "turn-1" });
+  es._serverFrame("state", { state: "awake", turnInFlight: false });
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("reply", { text: "turn 2, reply only", turnId: "turn-2" });
+  assert.deepEqual(botEntries(hub), ["turn 1", "turn 2, reply only"]);
+});
+
+test("N1 fallback: frames with no turn id still use the transition flag", async () => {
+  // A gateway older than this script, or the child speaking outside a turn.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._serverFrame("text", { text: "streamed" });                       // no turnId
+  es._serverFrame("reply", { text: "streamed" });                      // no turnId
+  assert.deepEqual(botEntries(hub), ["streamed"], "the old mechanism still suppresses the join");
+});
+
+test("N1 sibling: an unparseable text frame appends nothing and suppresses nothing", async () => {
+  // on()'s JSON.parse failure hands the listener d={}. That used to append an
+  // empty .entry.bot AND mark the turn rendered, so the real reply was dropped
+  // too — one malformed frame cost the whole answer.
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  es._t._dispatch("text", { data: "{ this is not json" });             // the real failure shape
+  assert.deepEqual(botEntries(hub), [], "no empty entry");
+  es._serverFrame("reply", { text: "the real answer", turnId: "turn-1" });
+  assert.deepEqual(botEntries(hub), ["the real answer"]);
+});

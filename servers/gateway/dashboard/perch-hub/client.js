@@ -898,7 +898,16 @@ export function perchHubJs(lang = "en") {
     /* MESSAGE-LEVEL, not delta-level (perch-interactive.js:1257 says so
        outright): one frame per COMPLETED assistant message, so each is
        rendered on arrival and nothing has to be patched afterwards. */
-    on('text',function(d){ appendMessage('bot','bot',d.text||'',d.html); turnRendered=true; });
+    on('text',function(d){
+      /* The engine only emits \`text\` for a NON-EMPTY assistant message
+         (perch-interactive.js's message_end branch), so an empty one here is a
+         frame whose JSON did not parse — on()'s \`d={}\` fallback. Appending it
+         put an empty entry in the transcript AND marked the turn rendered,
+         suppressing the real reply. Skip it entirely. */
+      if(!d.text) return;
+      appendMessage('bot','bot',d.text,d.html);
+      if(d.turnId) renderedTurn=d.turnId; else turnRendered=true;
+    });
     on('tool',function(d){ if(d.phase==='start') appendNote('['+(d.name||'?')+']'); });
     on('log',function(d){ if(d.text) appendNote(d.text); });
     /* \`reply\` carries replyTextOf(end) — every assistant message of the turn
@@ -914,7 +923,11 @@ export function perchHubJs(lang = "en") {
        streamed, and \`reply\` is the only copy of that answer they will get.
        Flag read BEFORE setTurnInFlight(false), which is what resets it. */
     on('reply',function(d){
-      if(!turnRendered&&d.text) appendMessage('bot','bot',d.text,d.html);
+      /* Judged against THIS turn when the frame names one, and only against the
+         client's transition flag when it does not. Read before
+         setTurnInFlight(false), which is what resets that flag. */
+      var already=d.turnId?(renderedTurn===d.turnId):turnRendered;
+      if(!already&&d.text) appendMessage('bot','bot',d.text,d.html);
       setTurnInFlight(false);
     });
     on('ask_user',function(d){ renderAsk(d); });
@@ -1105,6 +1118,7 @@ export function perchHubJs(lang = "en") {
     var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
     setTurnInFlight(false);      /* the PREVIOUS session's Steer/Stop state must not bleed in */
     turnRendered=false;          /* nor its "this turn already rendered" bookkeeping */
+    renderedTurn=null;           /* nor the turn id that bookkeeping now keys on */
     pendingImages=[];            /* nor its queued-but-unsent image */
   }
 
@@ -1135,8 +1149,30 @@ export function perchHubJs(lang = "en") {
   }
 
   var turnInFlight=false;
-  /* Did anything render for the turn currently in flight? See the \`reply\`
-     listener for why this exists and why it is per TURN. */
+  /* Which turn the transcript has already rendered text for.
+
+     Fix round 2 N1: the previous version of this was a BOOLEAN reset on the
+     false->true turnInFlight transition, and it survived a stream teardown. A
+     reconnect that missed the separating turnInFlight:false frame — a 2s blip
+     inside the client's own backoff, with turn 1 ending and turn 2 running
+     inside it — therefore left the flag stale-true and suppressed turn 2's
+     reply entirely. The engine's replay-on-subscribe does NOT close that: the
+     replayed frame is turnInFlight:true and the client is already true, so
+     there is no transition and no reset. Measured: turn 2's answer never
+     rendered at all, which is worse than the duplicate the flag exists to
+     prevent.
+
+     Identity, not memory, is the fix: the frames now carry the turn they
+     belong to, so \`reply\` judges its OWN turn. A cross-turn reconnect sees a
+     different id and renders; a SAME-turn reconnect sees the same id and stays
+     suppressed. The bare alternative — resetting the flag in openStream() —
+     fixes the first case by reintroducing the second, and that trade is the
+     reason this is a turn id instead. */
+  var renderedTurn=null;
+  /* The fallback for a frame that carries NO turn id (the child speaking
+     outside a turn, or a gateway older than this script). Same transition-reset
+     rule as before, and the same reason for it: several turnInFlight:true
+     frames land inside one turn. */
   var turnRendered=false;
   function setTurnInFlight(flag){
     var next=!!flag;

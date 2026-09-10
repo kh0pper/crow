@@ -332,3 +332,69 @@ test("five Turbo visits retain five instances but not five listeners", async (t)
       "control: the shell's listeners must be flat too, or the measurement is about something else");
   } finally { await s.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 2 N1, live — a real EventSource, really dropped, really reconnected.
+// The unit harness fires the backoff timer by hand; this one lets the browser
+// do it, over a connection the server actually closes.
+// ---------------------------------------------------------------------------
+
+/** Close every open SSE response, the way a blip or a gateway restart does. */
+function dropStreams() {
+  for (const res of openStreams) { try { res.end(); } catch { /* already gone */ } }
+  openStreams = [];
+}
+
+const BOT_TEXTS = `JSON.stringify(
+  Array.from(document.querySelectorAll('#perch-transcript .entry.bot .what')).map(function(n){return n.textContent;}))`;
+
+test("N1 live: a reconnect ACROSS a turn boundary still renders the next turn's reply", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const s = await session();
+  try {
+    await s.open();
+    broadcast("state", { state: "awake", turnInFlight: true });
+    broadcast("text", { text: "turn 1 streamed half", turnId: "turn-1" });
+    await sleep(300);
+    assert.deepEqual(await s.json(BOT_TEXTS), ["turn 1 streamed half"], "precondition");
+
+    // The blip. Turn 1 ends and turn 2 runs inside it, so the client never sees
+    // the turnInFlight:false that separates them.
+    dropStreams();
+    await sleep(3500);                       // the client's own 2s backoff, plus slack
+    assert.equal(openStreams.length, 1, "the client must have reconnected on its own");
+
+    broadcast("state", { state: "awake", turnInFlight: true });   // the engine's replay
+    broadcast("reply", { text: "turn 2's whole answer", turnId: "turn-2" });
+    await sleep(500);
+
+    const seen = await s.json(BOT_TEXTS);
+    assert.equal(seen.length, 2, "entries: " + JSON.stringify(seen));
+    assert.deepEqual(seen, ["turn 1 streamed half", "turn 2's whole answer"],
+      "measured before the fix: turn 2 never rendered at all");
+  } finally { await s.close(); }
+});
+
+test("N1 live: a reconnect WITHIN a turn does not duplicate that turn's answer", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const s = await session();
+  try {
+    await s.open();
+    broadcast("state", { state: "awake", turnInFlight: true });
+    broadcast("text", { text: "the answer", turnId: "turn-1" });
+    await sleep(300);
+
+    dropStreams();
+    await sleep(3500);
+    assert.equal(openStreams.length, 1, "reconnected");
+
+    broadcast("state", { state: "awake", turnInFlight: true });
+    broadcast("reply", { text: "the answer", turnId: "turn-1" });   // the SAME turn ends
+    await sleep(500);
+
+    const seen = await s.json(BOT_TEXTS);
+    assert.equal(seen.length, 1, "entries: " + JSON.stringify(seen));
+    assert.deepEqual(seen, ["the answer"],
+      "the case a bare reset in openStream() would have broken — which is why this is a turn id");
+  } finally { await s.close(); }
+});

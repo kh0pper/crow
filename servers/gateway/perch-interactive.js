@@ -190,6 +190,17 @@ function replyTextOf(end) {
   return out.trim();
 }
 
+/** Split a stored "provider/id" model key on its FIRST slash — the same rule
+ *  control()'s route body and the drawer's <option value> both use. Anything
+ *  that is not two non-empty halves yields null, and the caller leaves its
+ *  model tracking alone. */
+function splitModelKey(key) {
+  const text = typeof key === "string" ? key : "";
+  const i = text.indexOf("/");
+  if (i <= 0 || i === text.length - 1) return null;
+  return { provider: text.slice(0, i), modelId: text.slice(i + 1) };
+}
+
 /** The four ask_user methods that produce an operator-facing card. Everything
  * else pi's extension UI channel carries is chrome we deliberately ignore. */
 const ASK_METHODS = new Set(["select", "input", "confirm", "editor"]);
@@ -706,6 +717,35 @@ export function createInteractiveEngine({
     }
   }
 
+  /** Persist the model the engine now considers this session's.
+   *
+   * Fix round 2 N2: the row's `model` column was only written by onTurnEnd and
+   * by a turn's own `active` stamp, so a switch made and then left un-exercised
+   * — control() to another model, then a gateway restart before the next turn —
+   * was not in the row at all, and adoptRow had nothing to restore. That is
+   * exactly the sequence the operator reported: switch the model, a deploy
+   * restarts the gateway, open the session again.
+   *
+   * Targeted UPDATE by row id, for the same reason writeLabel() is one:
+   * writeRow() also stamps `status` and resets `control` to 'run', and a model
+   * switch must not restamp either. Non-fatal — the switch's operative effect
+   * is the in-memory tracking that startChild reads; the row is what carries it
+   * across a restart. */
+  async function writeModel(s) {
+    if (s.rowId == null) return;
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "UPDATE bot_sessions SET model=?, updated_at=datetime('now') WHERE id=?",
+        args: [servingModel(s), s.rowId],
+      });
+    } catch (e) {
+      log(s.sessionId + ": model not persisted (non-fatal): " + ((e && e.message) || e));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  }
+
   /** Persist the operator's session name. Targeted UPDATE by row id, and the
    * ONLY writer of `label` — see rename()'s doc for why it is not writeRow,
    * and note that writeRow deliberately does not touch the column either.
@@ -810,6 +850,30 @@ export function createInteractiveEngine({
       // the operator chose, carries no authority, and losing it on every
       // gateway restart would make renaming pointless.
       s.label = row.label ? String(row.label) : null;
+      // Fix round 2 N2: the row's `model` column was SELECTed and then thrown
+      // away, so servingModel() returned null for EVERY adopted session and the
+      // drawer's picker — populated, enabled — fell back to whichever option
+      // sorted first. That is verbatim the defect fix round 1 Q1 exists for,
+      // surviving in the one case the !s.pi branch of options() was added to
+      // serve: a session hibernating after a gateway restart, which is the
+      // common way an operator opens an old one.
+      //
+      // Restored into the ENGINE'S OWN tracking, not just into a reporting
+      // field, so the report and the next wake agree: startChild reads
+      // currentModelParts before warmModel/PiRpc, so the session resumes on the
+      // model it was actually on rather than snapping back to the def's
+      // default. Reporting one and serving the other would be a subtler lie
+      // than the one being fixed.
+      //
+      // A row naming a provider this instance no longer has is not a wedge:
+      // warmModel() is best-effort and never throws (warm.mjs), and pi surfaces
+      // the real connection error — the same outcome as picking that model in
+      // the drawer.
+      const restored = splitModelKey(row.model);
+      if (restored) {
+        s.currentModelParts = restored;
+        s.currentModel = restored.provider + "/" + restored.modelId;
+      }
       s.state = row.status === "stopped" ? "stopped" : "hibernating";
       // Track 3 Task 4 (spec §5.3, RESTART SEMANTICS — named for the
       // reviewer): deliberately NOT restoring permissionMode from anywhere.
@@ -1256,7 +1320,12 @@ export function createInteractiveEngine({
       case "message_end": {
         // Message-level streaming; delta-level is a recorded non-goal.
         const text = assistantTextOf(m.message);
-        if (text) emit(s, { type: "text", text });
+        // Fix round 2 N1: the turn this message belongs to rides the frame, so
+        // the drawer can judge a `reply` against its OWN turn instead of
+        // against a client-side memory of one that a reconnect invalidates.
+        // null when the child speaks outside a turn — the client falls back to
+        // its transition flag there.
+        if (text) emit(s, { type: "text", text, turnId: s.turn ? s.turn.id : null });
         return;
       }
       case "extension_ui_request":
@@ -1417,7 +1486,10 @@ export function createInteractiveEngine({
     // abort that landed during the metering awaits still silences the reply.
     if (!turn.aborted) {
       const replyText = replyTextOf(end);
-      emit(s, { type: "reply", text: replyText });
+      // The id of the turn this reply COMPLETES (see the text frame above):
+      // without it a reconnected drawer cannot tell "I already rendered this
+      // turn" from "I already rendered a different one".
+      emit(s, { type: "reply", text: replyText, turnId: turn.id });
       // Track 3 Task 8: an operator watching the drawer live (any live
       // subscriber) already sees the reply — the push is for someone who
       // is AWAY, and only for a turn that actually took a while.
@@ -1867,6 +1939,7 @@ export function createInteractiveEngine({
         s.currentModel = rKey;
         s.resolved = Object.assign({}, s.resolved, { provider: rProvider, model: rId, key: rKey });
         applied.model = rKey;
+        await writeModel(s);                           // survives a restart (N2)
         // The child's OWN model_select event for this same switch will also
         // arrive shortly — onModelSelect dedupes on an unchanged value, so
         // this is the only "now on <key>" log line the operator sees.
@@ -1877,6 +1950,7 @@ export function createInteractiveEngine({
         const key = provider + "/" + modelId;
         s.currentModelParts = { provider, modelId };
         s.currentModel = key;
+        await writeModel(s);                           // survives a restart (N2)
         bindsAtWake.model = key;
       }
     }
