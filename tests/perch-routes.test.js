@@ -408,6 +408,77 @@ test("GET transcript resolves the session file by GLOB and skips unparseable lin
   assert.equal(body.omitted, 0);
 });
 
+test("GET transcript renders assistant markdown, and ONLY assistant text", async () => {
+  const sessions = join(dir, "sessions-md");
+  mkdirSync(sessions, { recursive: true });
+  const uuid = "019eeb17-0000-7000-8000-bbbbbbbbbbbb";
+  const asst = (content) => JSON.stringify({ type: "message", id: "m", message: { role: "assistant", content } });
+  writeFileSync(join(sessions, "2026-06-21T16-50-50-013Z_" + uuid + ".jsonl"),
+    JSON.stringify({ type: "message", id: "u", message: { role: "user", content: "**not mine to render**" } }) + "\n" +
+    asst([{ type: "text", text: "## Boards\n\nThere are **four**.\n\n| id | name |\n|---|---|\n| 1 | TEHCY |" }]) + "\n" +
+    asst([{ type: "toolCall", id: "c1", name: "board_list_boards", arguments: {} }]) + "\n" +
+    asst([{ type: "text", text: "   " }]) + "\n");
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-md',?,?,'waiting-user')"
+  ).run(sessions, uuid);
+  c.close();
+
+  const { status, body } = await getJson("/bots/chatty/sessions/t-md/transcript");
+  assert.equal(status, 200);
+  const [user, prose, toolOnly, blank] = body.events;
+
+  assert.equal(user.html, undefined, "the operator's own typing is not markdown");
+  assert.equal(user.message.content, "**not mine to render**", "and it is untouched");
+
+  assert.match(prose.html, /<h2[^>]*>Boards<\/h2>/);
+  assert.match(prose.html, /<strong>four<\/strong>/);
+  assert.match(prose.html, /<table>[\s\S]*TEHCY[\s\S]*<\/table>/, "gfm tables, which is most of what a bot answers with");
+  assert.equal(prose.message.content[0].text.startsWith("## Boards"), true,
+    "the RAW text still rides the payload — the client falls back to it");
+
+  assert.equal(toolOnly.html, undefined, "a pure tool-call message keeps the client's own [tool: name] line");
+  assert.equal(blank.html, undefined, "and whitespace renders nothing rather than an empty block");
+});
+
+test("GET transcript SANITIZES: a hostile bot message reaches the client with nothing executable", async () => {
+  // Bot output is model-generated and can carry tool results read from files,
+  // so this is untrusted input that ends up in the ONE innerHTML sink the
+  // client has. The rendering path is servers/blog/renderer.js — marked plus
+  // sanitize-html with an explicit allow-list.
+  const sessions = join(dir, "sessions-xss");
+  mkdirSync(sessions, { recursive: true });
+  const uuid = "019eeb17-0000-7000-8000-cccccccccccc";
+  const hostile = [
+    "<img src=x onerror=\"window.__pwned=1\">",
+    "<script>window.__pwned=1</script>",
+    "[click me](javascript:window.__pwned=1)",
+    "<a href=\"javascript:window.__pwned=1\">or me</a>",
+    "<iframe src=\"https://evil.example\"></iframe>",
+    "<div onclick=\"window.__pwned=1\">or this</div>",
+  ].join("\n\n");
+  writeFileSync(join(sessions, "2026-06-21T16-50-50-013Z_" + uuid + ".jsonl"),
+    JSON.stringify({ type: "message", id: "m", message: { role: "assistant", content: [{ type: "text", text: hostile }] } }) + "\n");
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,pi_session_dir,pi_session_id,status) " +
+    "VALUES ('chatty','perch','t-xss',?,?,'waiting-user')"
+  ).run(sessions, uuid);
+  c.close();
+
+  const { body } = await getJson("/bots/chatty/sessions/t-xss/transcript");
+  const html = body.events[0].html;
+  assert.ok(html, "it still renders — sanitizing is not dropping the message");
+  assert.ok(!/<script/i.test(html), "no script element: " + html);
+  assert.ok(!/onerror/i.test(html), "no inline event handler: " + html);
+  assert.ok(!/onclick/i.test(html), "no inline event handler: " + html);
+  assert.ok(!/javascript:/i.test(html), "no javascript: URL: " + html);
+  assert.ok(!/<iframe/i.test(html), "no iframe: " + html);
+  assert.ok(!/__pwned/.test(html) || !/<[^>]*__pwned/.test(html),
+    "the payload may survive as TEXT, but never inside a tag: " + html);
+});
+
 test("GET transcript TAIL-truncates: the newest turns survive, the oldest are counted", async () => {
   const sessions = join(dir, "sessions-big");
   mkdirSync(sessions, { recursive: true });

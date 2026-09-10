@@ -112,11 +112,31 @@ export function perchHubJs(lang = "en") {
     tr.appendChild(line('entry note',text));
     tr.scrollTop=tr.scrollHeight;
   }
-  function appendMessage(cls,who,text){
+  /* THE ONLY innerHTML assignment in this file, and the only one there may be.
+
+     \`html\` is produced on the SERVER by servers/blog/renderer.js — marked
+     plus sanitize-html with an explicit allow-list, the same path the memory
+     panel uses — and reaches here on the transcript payload and on the SSE
+     frame. Bot output is model-generated and can carry tool results read from
+     files, so the RAW text is never trusted: appendMessage falls back to
+     line()'s textContent whenever \`html\` is absent or empty, which is what a
+     failed render, an older gateway, or a non-prose frame all produce. */
+  function setSanitizedHtml(node,html){ node.innerHTML=html; }
+
+  /* \`html\` is optional and server-rendered; without it this is byte-for-byte
+     the old textContent behaviour. */
+  function appendMessage(cls,who,text,html){
     var tr=el('perch-transcript'); if(!tr) return;
     var row=document.createElement('div'); row.className='entry '+cls;
     row.appendChild(line('who',who));
-    row.appendChild(line('what',text));      /* textContent, never innerHTML */
+    if(html&&typeof html==='string'){
+      var what=document.createElement('div');
+      what.className='what md';
+      setSanitizedHtml(what,html);
+      row.appendChild(what);
+    } else {
+      row.appendChild(line('what',text));   /* textContent, never innerHTML */
+    }
     tr.appendChild(row);
     tr.scrollTop=tr.scrollHeight;
   }
@@ -878,7 +898,7 @@ export function perchHubJs(lang = "en") {
     /* MESSAGE-LEVEL, not delta-level (perch-interactive.js:1257 says so
        outright): one frame per COMPLETED assistant message, so each is
        rendered on arrival and nothing has to be patched afterwards. */
-    on('text',function(d){ appendMessage('bot','bot',d.text||''); turnRendered=true; });
+    on('text',function(d){ appendMessage('bot','bot',d.text||'',d.html); turnRendered=true; });
     on('tool',function(d){ if(d.phase==='start') appendNote('['+(d.name||'?')+']'); });
     on('log',function(d){ if(d.text) appendNote(d.text); });
     /* \`reply\` carries replyTextOf(end) — every assistant message of the turn
@@ -894,7 +914,7 @@ export function perchHubJs(lang = "en") {
        streamed, and \`reply\` is the only copy of that answer they will get.
        Flag read BEFORE setTurnInFlight(false), which is what resets it. */
     on('reply',function(d){
-      if(!turnRendered&&d.text) appendMessage('bot','bot',d.text);
+      if(!turnRendered&&d.text) appendMessage('bot','bot',d.text,d.html);
       setTurnInFlight(false);
     });
     on('ask_user',function(d){ renderAsk(d); });
@@ -979,7 +999,11 @@ export function perchHubJs(lang = "en") {
         if(!events.length){ appendNote(NO_TRANSCRIPT); return; }
         events.filter(function(e){ return e&&e.type==='message'; }).forEach(function(e){
           var m=e.message||{};
-          appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), messageText(m));
+          /* e.html is present only for an ASSISTANT message that had text
+             (routes/perch.js's assistantHtml) — the operator's own typing is
+             not markdown, and a pure tool-call message still renders as
+             messageText()'s "[tool: name]" line. */
+          appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), messageText(m), e.html);
         });
       });
   }
