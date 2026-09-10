@@ -788,3 +788,77 @@ test("the drawer SSR shell carries the controls row, envelope toggle, attach-to-
     assert.ok(html.includes('id="' + id + '"'), "missing mount point: " + id);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Controls row: labels, CSS specificity, and model availability
+// ---------------------------------------------------------------------------
+//
+// Three defects lived in this row at once, all visible in one phone screenshot
+// of the R4 instance:
+//
+//   1. `.bb-bd-plan-label` (specificity 0,1,0) was written to override
+//      css.js's `.bb-drawer label` (0,1,1) and LOST, so the plan-mode checkbox
+//      rendered as a block with uppercase letter-spaced text instead of the
+//      flex row it asks for. Wrong at every width, not just narrow.
+//   2. The thinking and permission selects carried no label at all. Fine in a
+//      wide row where the grouping carries the meaning; unreadable once the
+//      row wraps.
+//   3. The option text read `m.label`, which no provider row sets, so every
+//      model showed as `provider/id` while the human `name` sat unused in the
+//      same payload.
+
+test("the plan-mode label outranks .bb-drawer label instead of losing to it", async () => {
+  const { birdDrawerCss } = await import("../servers/gateway/dashboard/panels/bot-board/drawer.js");
+  const css = birdDrawerCss();
+  assert.ok(css.includes(".bb-drawer .bb-bd-plan-label{"),
+    "the plan label must be .bb-drawer-qualified (0,2,1) to beat .bb-drawer label (0,1,1)");
+  assert.ok(!/(^|[^ ])\.bb-bd-plan-label\{/.test(css),
+    "no bare .bb-bd-plan-label rule may remain — it is the one that silently lost");
+  assert.ok(css.includes(".bb-drawer .bb-bd-plan-label input{"),
+    "the checkbox width override needs the same qualification");
+});
+
+test("each select in the controls row names itself", async () => {
+  const { birdDrawerMarkup } = await import("../servers/gateway/dashboard/panels/bot-board/html.js");
+  const html = birdDrawerMarkup("en");
+  for (const id of ["bb-bd-model", "bb-bd-thinking", "bb-bd-permission"]) {
+    assert.ok(html.includes(`id="${id}-label"`), `${id} needs a visible label element`);
+    assert.ok(new RegExp(`id="${id}"[^>]*aria-labelledby="${id}-label"`).test(html),
+      `${id} must point at its label`);
+  }
+});
+
+test("the field labels are spans, not labels — .bb-drawer label is block + uppercase", async () => {
+  const { birdDrawerMarkup } = await import("../servers/gateway/dashboard/panels/bot-board/html.js");
+  const html = birdDrawerMarkup("en");
+  assert.ok(html.includes('<span class="bb-bd-field-label" id="bb-bd-model-label">'));
+  assert.ok(!/<label[^>]*id="bb-bd-(model|thinking|permission)-label"/.test(html));
+});
+
+test("model options render the human name, not provider/id", async () => {
+  const { birdDrawerJs } = await import("../servers/gateway/dashboard/panels/bot-board/drawer.js");
+  const js = birdDrawerJs("en");
+  assert.ok(js.includes("m.name||m.label||(m.provider+'/'+m.id)"),
+    "name first, then the old label, then the provider/id fallback");
+});
+
+test("model options say when a model is on demand or not running, and say nothing when it is up", async () => {
+  const { birdDrawerJs } = await import("../servers/gateway/dashboard/panels/bot-board/drawer.js");
+  const js = birdDrawerJs("en");
+  assert.ok(js.includes("m.availability==='on_demand'"));
+  assert.ok(js.includes("m.availability==='unavailable'"));
+  assert.ok(js.includes("starts on demand") && js.includes("not running"));
+  // "up" must not be decorated — a working choice reads as the plain default.
+  assert.ok(!js.includes("m.availability==='up'"));
+});
+
+test("an unavailable model is greyed but still listed and still selectable", async () => {
+  const { birdDrawerJs } = await import("../servers/gateway/dashboard/panels/bot-board/drawer.js");
+  const { birdDrawerCss } = await import("../servers/gateway/dashboard/panels/bot-board/drawer.js");
+  const js = birdDrawerJs("en");
+  assert.ok(js.includes("o.className='bb-bd-model-off'"));
+  assert.ok(birdDrawerCss().includes(".bb-bd-model-off{"));
+  // Never disabled: an operator may deliberately pick a model they are about
+  // to bring up in a window.
+  assert.ok(!js.includes("o.disabled=true"));
+});

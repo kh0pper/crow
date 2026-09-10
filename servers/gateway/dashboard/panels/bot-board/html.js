@@ -187,11 +187,20 @@ async function computeRoostBirds(bots, engine) {
   });
 }
 
-// One `.bb-roost-bird[data-bot]` — glyph, name, state text, and the ONE
-// primary action for this state (spec: idle→Send out, working/hibernating→
-// Open, waiting→Answer, observing→a plain link to Bot Builder). The overflow
-// menu (Talk/Sessions/Recall/Setup) is the SAME on every bird; Recall is
-// omitted when there is no live session to stop (idle/observing).
+// One `.bb-roost-bird[data-bot]` — glyph, name, state text, the primary action
+// for this state (spec: idle→Send out, working/hibernating→Open, waiting→
+// Answer, observing→a plain link to Bot Builder), and Talk.
+//
+// Talk is visible rather than an overflow item because it is the ONLY way to
+// start a session that is not tied to a card — it POSTs /bots/<id>/interactive,
+// whose cardId defaults to null. Buried in the ⋯ menu it left "Send out", the
+// card dispatch, as the only visible action on an idle bird, and the card-less
+// path read as though it did not exist. It is omitted on `observing`, where
+// perch is not attached and that POST would 403.
+//
+// The overflow menu (Sessions/Recall/Setup) is otherwise the SAME on every
+// bird; Recall is omitted when there is no live session to stop
+// (idle/observing).
 function roostBirdHtml(bird, lang) {
   const state = bird.state;
   const idAttr = escapeHtml(String(bird.id));
@@ -214,6 +223,12 @@ function roostBirdHtml(bird, lang) {
     primaryHtml = `<button type="button" class="bb-roost-primary" data-roost-action="open" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionOpen", lang)}</button>`;
   }
 
+  // `observing` is the one state with no perch gateway record, so it is the one
+  // state where a session cannot be started at all.
+  const talkHtml = state === "observing"
+    ? ""
+    : `<button type="button" class="bb-roost-secondary" data-roost-action="talk" data-bot="${idAttr}">${t("botboard.roostActionTalk", lang)}</button>`;
+
   const recallHtml = bird.sessionId != null
     ? `<button type="button" data-roost-action="recall" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionRecall", lang)}</button>`
     : "";
@@ -223,9 +238,9 @@ function roostBirdHtml(bird, lang) {
     `<span class="bb-roost-name">${escapeHtml(String(bird.name))}</span>` +
     `<span class="bb-roost-state">${escapeHtml(stateText)}</span>` +
     primaryHtml +
+    talkHtml +
     `<button type="button" class="bb-roost-more" data-roost-menu-toggle aria-haspopup="true" aria-expanded="false" aria-label="${escapeHtml(t("botboard.roostMoreAria", lang))}">⋯</button>` +
     `<div class="bb-roost-menu" aria-hidden="true">` +
-    `<button type="button" data-roost-action="talk" data-bot="${idAttr}">${t("botboard.roostActionTalk", lang)}</button>` +
     `<button type="button" data-roost-action="sessions" data-bot="${idAttr}"${sidDataAttr}>${t("botboard.roostActionSessions", lang)}</button>` +
     recallHtml +
     `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(String(bird.id))}&tab=tracker">${t("botboard.roostActionSetup", lang)}</a>` +
@@ -291,14 +306,23 @@ export function birdDrawerMarkup(lang) {
     <div id="bb-bd-card-link-wrap" class="bb-msg" style="display:none"><a id="bb-bd-card-link" href="#"></a></div>
     <div id="bb-bd-hibernating" class="bb-msg warn" style="display:none">${t("botboard.bdHibernating", lang)}</div>
     <div class="bb-bd-controls-row">
-      <select id="bb-bd-model" disabled aria-label="${escapeHtml(t("botboard.bdEnvelopeModelPrefix", lang))}"></select>
-      <select id="bb-bd-thinking" disabled></select>
-      <select id="bb-bd-permission">
-        <option value="guarded">${t("botboard.bdPermGuarded", lang)}</option>
-        <option value="ask">${t("botboard.bdPermAsk", lang)}</option>
-        <option value="bypass">${t("botboard.bdPermBypass", lang)}</option>
-      </select>
-      <label class="bb-bd-plan-label"><input type="checkbox" id="bb-bd-plan-toggle"> ${t("botboard.bdPlanModeLabel", lang)}</label>
+      <span class="bb-bd-field bb-bd-field-model">
+        <span class="bb-bd-field-label" id="bb-bd-model-label">${t("botboard.bdModelSelectLabel", lang)}</span>
+        <select id="bb-bd-model" disabled aria-labelledby="bb-bd-model-label"></select>
+      </span>
+      <span class="bb-bd-field">
+        <span class="bb-bd-field-label" id="bb-bd-thinking-label">${t("botboard.bdThinkingSelectLabel", lang)}</span>
+        <select id="bb-bd-thinking" disabled aria-labelledby="bb-bd-thinking-label"></select>
+      </span>
+      <span class="bb-bd-field">
+        <span class="bb-bd-field-label" id="bb-bd-permission-label">${t("botboard.bdPermissionSelectLabel", lang)}</span>
+        <select id="bb-bd-permission" aria-labelledby="bb-bd-permission-label">
+          <option value="guarded">${t("botboard.bdPermGuarded", lang)}</option>
+          <option value="ask">${t("botboard.bdPermAsk", lang)}</option>
+          <option value="bypass">${t("botboard.bdPermBypass", lang)}</option>
+        </select>
+      </span>
+      <label class="bb-bd-plan-label"><input type="checkbox" id="bb-bd-plan-toggle"> <span>${t("botboard.bdPlanModeLabel", lang)}</span></label>
     </div>
     <div id="bb-bd-bindsatwake" class="bb-msg warn" style="display:none">
       <span id="bb-bd-bindsatwake-text">${t("botboard.bdBindsAtWake", lang)}</span>
