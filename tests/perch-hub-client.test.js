@@ -1768,3 +1768,31 @@ test("a refused rename says so instead of silently keeping the old name", async 
   const noteText = hub.els["perch-list-body"].children.map((c) => c.textContent).join(" ");
   assert.ok(noteText.includes("That session was not renamed."), noteText);
 });
+
+test("a transcript that FAILED to load says so, instead of reporting an empty one", async () => {
+  // The old code collapsed a 500, a dropped tunnel and a logged-out session
+  // into "No transcript yet." — a reassuring sentence about a conversation
+  // that is still there. Flagged twice before this fix.
+  const hub = await mountHub({ fetchImpl: stdFetch({ "/transcript": () => makeResponse(503, { error: "upstream" }) }) });
+  await openChatSession(hub);
+  assert.deepEqual(notesIn(hub.els["perch-transcript"]), ["Could not load this session's history."]);
+});
+
+test("a genuinely empty transcript still reports empty, not failed", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });      // 200 with events: []
+  await openChatSession(hub);
+  assert.deepEqual(notesIn(hub.els["perch-transcript"]), ["No transcript yet."]);
+});
+
+test("the emitted script is syntactically valid JS", async () => {
+  // Cheap guard for a trap this file has hit three times: the whole client is
+  // emitted INSIDE a template literal, so one unescaped backtick — in a
+  // COMMENT is the usual way — terminates the literal and turns the rest of
+  // the script into code evaluated at emit time. The symptom is a
+  // ReferenceError from perchHubJs() itself, nowhere near the typo.
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  for (const lang of ["en", "es"]) {
+    const js = perchHubJs(lang);          // throws on its own if the literal broke
+    assert.doesNotThrow(() => new Function(js), lang + " must emit parseable JS");
+  }
+});

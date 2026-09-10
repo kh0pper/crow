@@ -2248,6 +2248,10 @@ export const translations = {
   "perch.sessionGone": { en: "That session is gone.", es: "Esa sesión ya no existe." },
   "perch.steer": { en: "Steer", es: "Guiar" },
   "perch.noTranscript": { en: "No transcript yet.", es: "Aún no hay transcripción." },
+  "perch.transcriptFailed": {
+    en: "Could not load this session's history.",
+    es: "No se pudo cargar el historial de esta sesión.",
+  },
   "perch.reconnecting": { en: "Reconnecting…", es: "Reconectando…" },
   "perch.reconnectFailed": { en: "Lost the connection to this session.", es: "Se perdió la conexión con esta sesión." },
   "perch.modelLabel": { en: "Model", es: "Modelo" },
