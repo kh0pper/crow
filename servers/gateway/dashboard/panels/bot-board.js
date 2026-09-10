@@ -116,12 +116,21 @@ export default {
         `title="Edit bot definition">${t("botboard.editBotLink", lang)}</a>`
       : "";
 
+    // Mirrors Perch's own "Board" link back to here (perch-hub/html.js's
+    // <nav class="machines">) — unconditional, like that one, so the board
+    // is reachable from Perch and vice versa regardless of which bot (if
+    // any) is selected.
+    const perchLink =
+      `<a href="/dashboard/perch" ` +
+      `style="font-size:.78rem;color:var(--crow-text-muted);text-decoration:none;margin-left:.3rem">` +
+      `${t("botboard.perchLink", lang)}</a>`;
+
     const switcher =
       `<form method="GET" action="/dashboard/bot-board" class="bb-switch">` +
       `<label for="bb-bot" style="font-size:.8rem;color:var(--crow-text-muted)">${t("botboard.labelBotSwitcher", lang)}</label>` +
       `<select id="bb-bot" name="bot" onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()">` +
       switcherOptions +
-      `</select>` + editBotLink +
+      `</select>` + editBotLink + perchLink +
       `<noscript><button type="submit">Go</button></noscript>` +
       switcherButtons +
       `</form>`;

@@ -243,9 +243,9 @@ test("fix round 1: bird-state falls through to the SHARED guarded reload when it
   assert.ok(handlerSrc.includes("guardedReload()"), "the fallback is the SAME shared guard, not a bespoke reload");
 });
 
-// ---- Fix round 1: successful dispatch must be visible, not silent ----
+// ---- Nav-gap fix: successful dispatch must be visible, and go to Perch ----
 
-test("dispatch success shows a perceivable message and defers to reload(), never closes silently", async () => {
+test("dispatch success shows a perceivable message and navigates to the new session in Perch, never closes silently", async () => {
   const js = clientJs("scout", "kanban", 9, null, null, "en");
   const body = js.replace(/^<script>/, "").replace(/<\/script>$/, "");
   const anchor = "$('bb-rd-send').onclick=function(){";
@@ -260,14 +260,74 @@ test("dispatch success shows a perceivable message and defers to reload(), never
   const okBranch = handlerSrc.slice(okBraceStart, matchBrace(handlerSrc, okBraceStart) + 1);
 
   assert.ok(okBranch.includes(t("botboard.roostDispatchSent", "en")), "success branch shows the perceivable i18n success line");
-  assert.ok(okBranch.includes("setTimeout(reload,600)"), "success branch defers to reload() with a perceivable delay");
+  // Nav-gap fix: the drawer is no longer the destination — a successful
+  // dispatch now navigates straight to the new session in Perch, using the
+  // sessionId POST /bots/:id/dispatch responds with. There is no more
+  // reload to defer to.
+  assert.ok(okBranch.includes("goToPerch(r.j&&r.j.sessionId)"), "success branch navigates to the new session in Perch");
+  assert.ok(!okBranch.includes("setTimeout(reload,600)"), "must not still defer to a reload — navigation replaces it");
   assert.ok(!okBranch.includes("closeRoostDispatch()"), "must NOT close silently — the success line is the visible feedback");
-  assert.ok(!okBranch.includes("openBirdDrawer("), "the stub can't show anything real yet — reload is the honest fallback");
+  assert.ok(!okBranch.includes("openBirdDrawer("), "the drawer is not the destination any more");
 
-  // The 409/error branches must NOT reload — they're inline, in-dialog errors.
+  // The 409/error branches must stay in-dialog: no reload, no navigation.
   const restBranch = handlerSrc.slice(matchBrace(handlerSrc, okBraceStart) + 1);
   assert.ok(!restBranch.includes("setTimeout(reload"), "error/409 branches must stay in-dialog, never reload");
+  assert.ok(!restBranch.includes("goToPerch("), "error/409 branches must stay in-dialog, never navigate");
   assert.doesNotThrow(() => new Function(handlerSrc.slice(1, -1)), "handler body parses standalone");
+});
+
+// ---- Nav-gap fix: every remaining session-open path goes to Perch ----
+
+test("the card-face bird glyph navigates to Perch instead of opening the drawer", async () => {
+  const js = clientJs("scout", "kanban", 9, null, null, "en");
+  const body = js.replace(/^<script>/, "").replace(/<\/script>$/, "");
+  const anchor = "birdGlyph=ev.target.closest";
+  const start = body.indexOf(anchor);
+  assert.ok(start >= 0, "the card-face bird glyph handler must exist");
+  const scope = body.slice(start, body.indexOf("return;", start) + "return;".length);
+  assert.ok(scope.includes("goToPerch(birdGlyph.getAttribute('data-bird-sid'))"), "must navigate with the glyph's session id");
+  assert.ok(!scope.includes("openBirdDrawer("), "must not still open the drawer");
+});
+
+test("the #bird=<sid> deep link navigates to Perch instead of opening the drawer", async () => {
+  const js = clientJs("scout", "kanban", 9, null, null, "en");
+  const body = js.replace(/^<script>/, "").replace(/<\/script>$/, "");
+  const anchor = "if(window._bbForeignHash){";
+  // Two "if(window._bbForeignHash){" blocks are emitted: updateFilterHash's
+  // (round-trips search/status filters) comes first, the hash-driven-open
+  // block this test targets comes second — lastIndexOf, not indexOf.
+  const start = body.lastIndexOf(anchor);
+  assert.ok(start >= 0, "the foreign-hash open block must exist");
+  const braceStart = start + anchor.length - 1;
+  const scope = body.slice(braceStart, matchBrace(body, braceStart) + 1);
+  assert.ok(scope.includes("goToPerch(window._bbForeignHash.bird)"), "the bird hash key must navigate to that session");
+  assert.ok(!scope.includes("openBirdDrawer("), "must not still open the drawer");
+  // The card key is a DIFFERENT feature (scrolls the card into view) and is
+  // untouched by this fix — still routed through bdFocusCard.
+  assert.ok(scope.includes("bdFocusCard(window._bbForeignHash.card)"), "the card hash key must still be handled");
+});
+
+test("roost strip actions open/answer/sessions/talk navigate to Perch instead of opening the drawer", async () => {
+  const js = clientJs("scout", "kanban", 9, null, null, "en");
+  const body = js.replace(/^<script>/, "").replace(/<\/script>$/, "");
+  // Three "document.addEventListener('click',function(ev){" blocks are
+  // emitted (card-drag delegation, the spliced-in drawer's own listener,
+  // and this roost-strip delegation) — anchor on the roost-only marker
+  // "[data-roost-action]" and walk back to the nearest enclosing listener
+  // so the right one is sliced, not just the first match.
+  const needle = "document.addEventListener('click',function(ev){";
+  const roostMarker = body.indexOf("[data-roost-action]");
+  assert.ok(roostMarker >= 0, "the roost action delegation must exist");
+  const start = body.lastIndexOf(needle, roostMarker);
+  assert.ok(start >= 0, "must find the enclosing click listener");
+  const braceStart = body.indexOf("{", body.indexOf("function(ev)", start));
+  const handlerSrc = body.slice(braceStart, matchBrace(body, braceStart) + 1);
+
+  assert.ok(handlerSrc.includes("goToPerch(sid); return; }"), "action=open/answer must navigate with the session id");
+  assert.ok(handlerSrc.includes("goToPerch(); return; }"), "action=sessions has no specific session — bare hub, no fragment");
+  assert.ok(handlerSrc.includes("goToPerch(r.j&&r.j.sessionId); }"), "action=talk's spawn-success branch must navigate to the new session");
+  assert.ok(!handlerSrc.includes("openBirdDrawer("), "none of these actions may still open the drawer");
+  assert.doesNotThrow(() => new Function("ev", handlerSrc.slice(1, -1)), "handler body must parse standalone");
 });
 
 // ---- i18n ----
