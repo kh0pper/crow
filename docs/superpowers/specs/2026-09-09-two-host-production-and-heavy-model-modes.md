@@ -92,9 +92,18 @@ Open items for the implementer:
 - **Port 8030, confirmed free on raven** (2026-09-09: only 22, 53, 631 and two ephemeral ports listen there).
   8031 through 8033 are free too. Closing this before the provider row exists matters, because a provider row
   pointing at an occupied port is a subtler form of the `crow-dsv4` bug this spec retires.
-- **Provider row** pointing at `http://10.0.0.126:<port>/v1`. Note `providers` is in `SYNCED_TABLES`
-  (`servers/sharing/instance-sync.js:68`), so the row replicates to every paired instance. That is desirable here
-  and must be deliberate.
+- **Provider row** pointing at `http://10.0.0.126:<port>/v1`. This row **does** replicate to every paired
+  instance, and that is desirable — but membership in `SYNCED_TABLES` is not what decides it. `shouldSyncRow`
+  does, and it exempts loopback endpoints; this row syncs because `10.0.0.126` is routable, where the
+  `crow-dsv4` row §7 retires never synced at all. Two requirements follow, and both were violated on the first
+  attempt (2026-09-10):
+  - Set **`host = 'raven'`**, on every instance that carries the row. `host` rides the wire, so whichever copy
+    wins on `lamport_ts` imposes its value fleet-wide, and `host = 'local'` tells
+    `resolveWarmableProviderName` the endpoint is startable on the local box when it is not.
+  - **Publish the row only once the endpoint is reachable from the instances that will inherit it.** raven's
+    `ufw` rule currently admits crow alone; grackle and black-swan are paired with crow and cannot reach 8030.
+    Either widen the rule or accept that those instances carry an entry that probes as down. See §7 for the
+    full argument and the reason `gpu_policy.local_only` is the wrong lever.
 - **Restart policy and a memory watchdog.** 17.7 GiB is the permanent headroom on raven in this state. It is a
   shape that has run for hours (R25/R25b) and never wedged, and it is still the tightest standing configuration in
   the lab.
@@ -270,11 +279,52 @@ confirmation run first, for the Mesa reason in 3.1.
 
 ## 7. Decisions still open
 
-- **The `crow-dsv4` provider row.** It points at `http://127.0.0.1:8020/v1`, is enabled, and validates in
-  `resolveModel` while nothing listens there, so a bot pointed at it fails every turn on connection refused.
-  Confirmed live on both the crow and R4 instances. Because `providers` syncs, this is a fleet decision and no
-  session has touched it. Under this spec DSv4 is a window mode with no standing endpoint, so the row should be
-  retired rather than repointed. Kevin's call.
+- **The `crow-dsv4` provider row — RESOLVED 2026-09-10.** It pointed at `http://127.0.0.1:8020/v1`, was
+  enabled, and validated in `resolveModel` while nothing listened there, so a bot pointed at it failed every
+  turn on connection refused. Kevin approved retirement. Both instances now carry `disabled = 1` rather than a
+  `DELETE`: `resolveModel`'s predicate is `WHERE id = ? AND disabled = 0`, so the row stops resolving while
+  staying reversible if DSv4 ever returns as a windowed serve.
+
+  **The retirement had to be performed twice, once per instance, and the reason generalises.** An earlier draft
+  of this bullet said "because `providers` syncs, this is a fleet decision". That is false for this row.
+  Membership in `SYNCED_TABLES` is necessary but not sufficient — `shouldSyncRow` decides, and it carries a
+  loopback carve-out (`servers/sharing/instance-sync.js:328`):
+
+  ```js
+  if (host === "localhost" || host === "::1" || /^127\./.test(host)) return false;
+  ```
+
+  `http://127.0.0.1:8020/v1` matches, and that gate covers **both emit and apply**. A peer dialing 127.0.0.1
+  reaches itself and never the origin's service, so loopback provider rows are per-instance by construction.
+  Retiring one is a per-instance action each session performs on its own box, and waiting to observe it arrive
+  from a peer yields a false negative rather than a result.
+
+- **Loopback and routable provider rows sit on opposite sides of that carve-out, and this spec creates one of
+  each.** They are not one category and their failure modes are opposites, so the distinction is load-bearing
+  rather than editorial:
+
+  | | `crow-dsv4` | `raven-flash-next` |
+  |---|---|---|
+  | base_url | `http://127.0.0.1:8020/v1` | `http://10.0.0.126:8030/v1` |
+  | syncs? | no — loopback carve-out | **yes** |
+  | a stale row costs | a local annoyance each box fixes itself | a fleet-wide pointer every paired instance inherits |
+
+  §3.1 already wants the raven row to propagate, and that remains right. What follows from it is that the row
+  must not be published before the service behind it is real and reachable from the instances that will inherit
+  it — otherwise the spec fleet-publishes exactly the class of dead pointer the bullet above spent a day
+  retiring. Two consequences, both verified live on 2026-09-10:
+
+  - **`host` rides the wire** (it is not in `EXCLUDED_COLUMNS.providers`), so whichever copy of a row wins on
+    `lamport_ts` imposes its `host` value fleet-wide. A row whose service runs on raven must say `host = 'raven'`
+    on **every** instance. `host = 'local'` is not merely cosmetic: `resolveWarmableProviderName`
+    (`gpu-orchestrator.js:619`) returns null only for a non-`local` host, so a `local` mislabel falls through to
+    the sibling scan and is one same-baseUrl bundle away from an instance trying to warm a service on another
+    machine.
+  - **Reachability is per-instance and the firewall decides it.** raven's `ufw` rule scopes 8030 to `10.0.0.237`
+    (crow) alone. The crow instance is paired with grackle and black-swan as well, neither of which can reach
+    that endpoint — black-swan, off-LAN, never will. Publishing the row to them costs an entry that probes as
+    down. The honest fix is the firewall rule, not `gpu_policy.local_only`, which would suppress the crow↔R4
+    sync this spec actually wants.
 - **Priority of the two harness changes** against the catalog work. Note that remote lifecycle (3.3) is *not*
   needed for the standard state and should not be built speculatively. That leaves the two-host window (3.0) and the
   swap predicate (3.4). pi-lab's read, which this spec endorses: **the two-host window first**, because it is the
