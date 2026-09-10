@@ -32,13 +32,24 @@ export function perchHubContent(lang = "en", engine = { state: "ready" }) {
   return `<style>${perchHubCss()}</style>
 <div id="perch-hub-root">
 ${engineBanner(engine, lang)}
-<header><div class="brand">Perch<small>${escapeHtml(t("perch.subtitle", lang))}</small></div>
-<nav class="machines"><a href="/dashboard/bot-board">${escapeHtml(t("perch.navBoard", lang))}</a></nav></header>
+<!-- No brand block here. The shell's .content-header already renders
+     <h2>Perch</h2> from this panel's title (panels/perch-hub.js), and
+     Perch's own <div class="brand">Perch</div> printed the same word again
+     directly underneath it. The shell header is canonical now; the
+     "your bot sessions" subtitle went with the block rather than being
+     restated somewhere it would read as a second page title. This header
+     survives only to carry the link back to the board. -->
+<header><nav class="machines"><a href="/dashboard/bot-board">${escapeHtml(t("perch.navBoard", lang))}</a></nav></header>
 <div class="hub-split">
   <div id="perch-list">
     <h2>${escapeHtml(t("perch.sessionsHeading", lang))}</h2>
     <div id="perch-list-body"><div class="empty">${escapeHtml(t("perch.loading", lang))}</div></div>
   </div>
+  <!-- ⚠ #perch-chat is now GLOBALLY significant, not just a local handle:
+       layout.js keys a document-wide app-shell clamp on "body:has(#perch-chat)"
+       (height:100dvh + overflow:hidden on .main-content, an internally
+       scrolling .content-body). Any other panel that reuses this id silently
+       inherits that clamp. Rename here and that rule goes dead too. -->
   <div id="perch-chat">
     <button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button>
     <div class="perch-head"><div><div class="title" id="perch-bot-name"></div>
