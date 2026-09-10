@@ -43,6 +43,11 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       .then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,status:r.status,j:j};});});
   }
   function reload(){ location.reload(); }
+  // Nav-gap fix: every session action that used to open the in-page bird
+  // drawer now navigates to the standalone Perch Hub instead — a full-page
+  // chat surface, not a cramped side panel. sid is optional: action=sessions
+  // has no specific session, so it goes to the bare hub with no fragment.
+  function goToPerch(sid){ location.href = sid ? '/dashboard/perch#'+encodeURIComponent(sid) : '/dashboard/perch'; }
 
   var drawer=$('bb-drawer'), trackerDrawer=$('bb-tracker-drawer'), cur=null, dragId=null, dragType=null;
   // Track 1: plans are RECORDS now (board_plans), not a file — no mtime
@@ -446,7 +451,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     if(birdGlyph && ev.target.closest('.bb-card')){
       ev.preventDefault();
       ev.stopPropagation();
-      openBirdDrawer(birdGlyph.getAttribute('data-bird-sid'));
+      goToPerch(birdGlyph.getAttribute('data-bird-sid'));
       return;
     }
     var c=ev.target.closest && ev.target.closest('.bb-card');
@@ -876,13 +881,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     parseFilterHash();
     applyFilters();
 
-    // Track 3 Task 13: hash-driven drawer open — #bird=<sid> opens straight
-    // to that session, #card=<id> scrolls the card into view and opens its
-    // live bird's drawer if one is on it. Runs AFTER parseFilterHash so a
-    // drawer link co-existing with a search/status hash is never lost.
+    // Track 3 Task 13: hash-driven open — #bird=<sid> navigates straight to
+    // that session in Perch, #card=<id> scrolls the card into view and opens
+    // its live bird's drawer if one is on it. Runs AFTER parseFilterHash so
+    // a link co-existing with a search/status hash is never lost.
     if(window._bbForeignHash){
-      if(window._bbForeignHash.bird && typeof openBirdDrawer==='function'){
-        openBirdDrawer(window._bbForeignHash.bird);
+      if(window._bbForeignHash.bird){
+        goToPerch(window._bbForeignHash.bird);
       } else if(window._bbForeignHash.card && typeof bdFocusCard==='function'){
         bdFocusCard(window._bbForeignHash.card);
       }
@@ -1235,15 +1240,12 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     if(sendBtn) sendBtn.disabled=true;
     perchApi('POST','/bots/'+encodeURIComponent(roostDispatchBotId)+'/dispatch',{card_id:Number(cardId),note:note}).then(function(r){
       if(r.ok){
-        // Fix round 1: a successful dispatch used to close the dialog and
-        // call the (still-stub) openBirdDrawer — invisible, indistinguishable
-        // from a dropped click. The strip/card-face bird can't be patched
-        // into existence client-side (a bird-less card face carries no
-        // .bb-bird span to patch — see the bird-state handler below), so the
-        // honest fix is: show a perceivable success line, THEN reload. The
-        // reloaded SSR renders the bird on the strip + card truthfully.
+        // Nav-gap fix: a successful dispatch shows the perceivable success
+        // line, then navigates to the new session in Perch — POST
+        // /bots/:id/dispatch responds with the spawned session's id
+        // (perch-interactive-api.js's result object, which carries sessionId).
         msg($('bb-rd-msg'),'${tJs("botboard.roostDispatchSent", lang)}','ok');
-        setTimeout(reload,600);
+        goToPerch(r.j&&r.j.sessionId);
       } else if(r.status===409 && r.j && r.j.error==='card_occupied'){
         // A raced dispatch — surfaced as the dialog's OWN error line, not a
         // toast: the picker is still open and the operator needs to pick a
@@ -1291,17 +1293,16 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var botId=actBtn.getAttribute('data-bot');
     var sid=actBtn.getAttribute('data-sid');
     if(action==='dispatch'){ openRoostDispatch(botId); return; }
-    // The DOM already carries the bird's display name (.bb-roost-name,
-    // rendered by roostBirdHtml) — read it here rather than a fresh API
-    // round trip just to fill in the drawer header.
-    var birdWrap=actBtn.closest&&actBtn.closest('.bb-roost-bird');
-    var nameEl=birdWrap&&birdWrap.querySelector('.bb-roost-name');
-    var botName=nameEl?nameEl.textContent:null;
-    if(action==='open' || action==='answer'){ openBirdDrawer(sid,botId,botName); return; }
-    if(action==='sessions'){ openBirdDrawer(sid||null,botId,botName); return; }
+    // Nav-gap fix: these used to open the in-page bird drawer — they now
+    // navigate to Perch, so the bird's display name (only ever needed for
+    // the drawer's own header) is no longer read here.
+    if(action==='open' || action==='answer'){ goToPerch(sid); return; }
+    // action='sessions' has no specific session to jump to — it goes to
+    // the bare hub, not a session fragment.
+    if(action==='sessions'){ goToPerch(); return; }
     if(action==='talk'){
       perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive').then(function(r){
-        if(r.ok){ openBirdDrawer(r.j&&r.j.sessionId,botId,botName); }
+        if(r.ok){ goToPerch(r.j&&r.j.sessionId); }
         else { crowToast((r.j&&r.j.error)||'${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); }
       }).catch(function(){ crowToast('${tJs("botboard.roostActionFailed", lang)}', {type:'error'}); });
       return;
