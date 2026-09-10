@@ -4,17 +4,37 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+/** Replace the interior of every block and line comment with spaces (keeping
+ *  length and newlines), so a `{` or `}` inside a comment can't unbalance the
+ *  depth counter below. Same length as the input, so indices found against
+ *  the masked copy still address the original source. Does not account for
+ *  braces inside string/template literals — none of this codebase's
+ *  extracted functions put one there. */
+function maskComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, " "));
+}
+
+/** Brace-matched end index of the function body starting at `start` (the
+ *  index of "function <name>"), depth-counted against a comment-masked copy
+ *  of `src` so a stray brace inside a comment can't extend the match past
+ *  the real end. */
+function braceMatchEnd(src, start) {
+  const masked = maskComments(src);
+  let depth = 0, end = -1;
+  for (let i = masked.indexOf("{", start); i < masked.length; i++) {
+    if (masked[i] === "{") depth++;
+    else if (masked[i] === "}") { depth--; if (!depth) { end = i; break; } }
+  }
+  return end;
+}
+
 /** Pull one named function out of the emitted script and make it callable. */
 async function extract(name, extra = "") {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
   const src = perchHubJs("en");
   const start = src.indexOf("function " + name);
   assert.ok(start > -1, name + " is not in the emitted script");
-  let depth = 0, end = -1;
-  for (let i = src.indexOf("{", start); i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") { depth--; if (!depth) { end = i; break; } }
-  }
+  const end = braceMatchEnd(src, start);
   return new Function(extra + src.slice(start, end + 1) + "; return " + name + ";")();
 }
 
@@ -174,10 +194,17 @@ test("async continuations are guarded — a fast back button must not cross sess
   assert.ok(guards >= 6, "expected at least 6 identity guards, found " + guards);
 });
 
-test("the emitted script never writes innerHTML", async () => {
+test("the emitted script never assigns to an innerHTML-class sink", async () => {
   const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
-  // crow_csrf is deliberately not HttpOnly, so an injection here exfiltrates it.
-  assert.ok(!perchHubJs("en").includes("innerHTML"));
+  const js = perchHubJs("en");
+  // crow_csrf is deliberately not HttpOnly, so an injection into any of
+  // these sinks exfiltrates it. A bare `.includes("innerHTML")` substring
+  // check also fails on a comment that WARNS against innerHTML, which is
+  // backwards — assert on the assignment/call shape instead.
+  assert.ok(!/\.innerHTML\s*=/.test(js), "no .innerHTML assignment");
+  assert.ok(!/\.outerHTML\s*=/.test(js), "no .outerHTML assignment");
+  assert.ok(!/\.insertAdjacentHTML\s*\(/.test(js), "no insertAdjacentHTML call");
+  assert.ok(!/document\.write\s*\(/.test(js), "no document.write call");
 });
 
 /** A function's OWN source, brace-matched. Never a fixed-size window: every
@@ -189,11 +216,7 @@ async function fnSrc(name) {
   const src = perchHubJs("en");
   const start = src.indexOf("function " + name);
   assert.ok(start > -1, name + " is not in the emitted script");
-  let depth = 0, end = -1;
-  for (let i = src.indexOf("{", start); i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") { depth--; if (!depth) { end = i; break; } }
-  }
+  const end = braceMatchEnd(src, start);
   return src.slice(start, end + 1);
 }
 

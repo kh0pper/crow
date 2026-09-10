@@ -14,7 +14,7 @@ export function perchHubJs(lang = "en") {
      emits a script, so no later task references something undefined. */
   function el(id){ return document.getElementById(id); }
   function clearEl(node){ while(node&&node.firstChild) node.removeChild(node.firstChild); }
-  /* textContent only, no raw-markup assignment — see Global Constraints. */
+  /* Builds with textContent/createElement; never assigns innerHTML. */
   function line(cls,text){ var d=document.createElement('div');
     if(cls) d.className=cls; d.textContent=text==null?'':String(text); return d; }
 
@@ -31,7 +31,7 @@ export function perchHubJs(lang = "en") {
     var tr=el('perch-transcript'); if(!tr) return;
     var row=document.createElement('div'); row.className='entry '+cls;
     row.appendChild(line('who',who));
-    row.appendChild(line('what',text));      /* textContent, no raw-markup assignment */
+    row.appendChild(line('what',text));      /* textContent, never innerHTML */
     tr.appendChild(row);
     tr.scrollTop=tr.scrollHeight;
   }
