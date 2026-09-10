@@ -31,7 +31,21 @@ let available = false, server = null, port = 0;
 const SIDS = ["perchlive-11111111", "perchlive-22222222", "perchlive-33333333"];
 let liveSids = SIDS.slice();
 const stopped = [];
-function resetApi() { liveSids = SIDS.slice(); stopped.length = 0; roostFails = false; }
+/** The bot's configured default, as GET /bots/:id/models reports it. null is
+ *  the common case on the reporting instance (3 of 5 R4 bot defs). */
+let modelsDefault = "crow-local/qwen3.6-35b-a3b";
+/** Transcript history, so a test can seed rendered markdown into the real DOM. */
+let transcriptEvents = [];
+/** The /options answer. Defaults to the awake shape; a test flips it to the
+ *  HIBERNATING one (thinkingLevels null, source "providers") to stand in the
+ *  state an operator is in after a gateway restart. */
+let optionsHibernating = false;
+function resetApi() {
+  liveSids = SIDS.slice(); stopped.length = 0; roostFails = false;
+  modelsDefault = "crow-local/qwen3.6-35b-a3b";
+  transcriptEvents = [];
+  optionsHibernating = false;
+}
 
 let roostFails = false;
 function serveApi(req, res) {
@@ -46,7 +60,12 @@ function serveApi(req, res) {
       birds: [{
         id: "r4-assistant", name: "R4 Assistant", perch_attached: true, state: "working",
         sessions: liveSids.map((sid) => ({ sessionId: sid, state: "awake",
-          cardId: sid === "perchlive-11111111" ? 248 : null, pendingUi: false })),
+          cardId: sid === "perchlive-11111111" ? 248 : null, pendingUi: false,
+          // One named session, with a name long enough to test the clipping:
+          // free operator text must never give the 320px list column a
+          // horizontal scrollbar.
+          label: sid === "perchlive-22222222"
+            ? "November package copy pass, English and Spanish together" : null })),
       }],
       occupiedCardIds: [],
     });
@@ -67,8 +86,30 @@ function serveApi(req, res) {
     res.write(": open\n\n");
     return;
   }
-  if (url.endsWith("/options")) return send(200, { models: [], thinkingLevels: [] });
-  if (url.endsWith("/transcript")) return send(200, { events: [] });
+  // A real drawer list whose CURRENT entry is deliberately not the first one:
+  // the picker asserting option 0 is exactly the fix-round-1 Q1 defect.
+  if (url.endsWith("/options")) return send(200, {
+    models: [
+      { provider: "crow-local", id: "qwen3.6-35b-a3b", name: "Qwen3.6 35B", availability: "up" },
+      { provider: "raven-flash-next", id: "qwen3.8-flash-next", name: "Flash Next", availability: "on_demand" },
+    ],
+    thinkingLevels: optionsHibernating ? null : ["off", "high"],
+    current: "raven-flash-next/qwen3.8-flash-next",
+    source: optionsHibernating ? "providers" : "child",
+  });
+  // The launcher's session-free list, with a long name on purpose: the thing
+  // that must never happen at 412px is a model name pushing New session off
+  // the screen.
+  if (url.endsWith("/models")) return send(200, {
+    models: [
+      { provider: "crow-local", id: "qwen3.6-35b-a3b",
+        name: "Qwen3.6 35B A3B (Crow, Q5_K_XL MTP+vision, 256K)", availability: "up" },
+      { provider: "crow-dsv4", id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash", availability: "unavailable" },
+    ],
+    default: modelsDefault,
+  });
+  if (url.endsWith("/transcript")) return send(200, { events: transcriptEvents });
+  if (url.endsWith("/rename")) return send(200, { label: "renamed" });
   if (url.endsWith("/interactive") && req.method === "POST") return send(200, { sessionId: "perchlive-99999999" });
   return send(200, {});
 }
@@ -293,6 +334,10 @@ async function session(width, height) {
   return {
     evalIn,
     json: async (expression) => JSON.parse(await evalIn(expression)),
+    /** Resize the emulated viewport mid-session, so a test can cross the
+     *  split breakpoint the way an operator dragging a window does. */
+    metrics: async (w, h) => send("Emulation.setDeviceMetricsOverride",
+      { width: w, height: h, deviceScaleFactor: 1, mobile: w < 900 }),
     close: async () => { ws.close(); await fetch(CDP + "/json/close/" + tab.id).catch(() => {}); },
   };
 }
@@ -505,5 +550,442 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.notePadding, "0px",
         "the note's own padding rule must win the cascade, not merely exist");
     } finally { roostFails = false; await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The launcher's model picker, live at both viewports. A 44px floor argued
+// from the cascade is how #perch-close shipped at 36px; these measure it.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`M1 live @${w}x${h}: the model picker is on screen, thumb-sized, and does not push New session off`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`(function(){
+        var box=function(id){ var e=document.getElementById(id), r=e.getBoundingClientRect();
+          return { hidden:e.hidden, w:Math.round(r.width), h:Math.round(r.height),
+                   top:Math.round(r.top), bottom:Math.round(r.bottom),
+                   inViewport: r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth,
+                   hit:(function(){ var el=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                                    return !!el && (el===e || e.contains(el)); })() }; };
+        var sel=document.getElementById('perch-new-model');
+        var doc=document.documentElement;
+        return JSON.stringify({ model:box('perch-new-model'), newBtn:box('perch-new'),
+          value: sel.value, options: Array.prototype.map.call(sel.options,function(o){return o.textContent;}),
+          selectedText: sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].textContent:null,
+          hScroll: doc.scrollWidth > doc.clientWidth });
+      })()`);
+      assert.equal(seen.model.hidden, false, "the picker must be there once the list arrives");
+      assert.equal(seen.model.inViewport, true,
+        `the picker sits at ${seen.model.top}-${seen.model.bottom} in a ${h}px viewport`);
+      assert.equal(seen.model.hit, true, "and nothing overlaps it");
+      assert.ok(seen.model.h >= 44, `tap target ${seen.model.w}x${seen.model.h} is too small for a thumb`);
+      assert.equal(seen.value, "crow-local/qwen3.6-35b-a3b", "opened on the bot's configured model");
+      assert.equal(seen.selectedText, seen.options[0],
+        "and the browser really shows that entry, not merely stores the value");
+      assert.match(seen.options[1], /not running/, "an unavailable model must read as unavailable");
+      // The regression a long model name would cause.
+      assert.equal(seen.newBtn.inViewport, true,
+        `New session at ${seen.newBtn.top}-${seen.newBtn.bottom} in a ${h}px viewport`);
+      assert.equal(seen.newBtn.hit, true);
+      assert.ok(seen.newBtn.h >= 44, `New session is ${seen.newBtn.w}x${seen.newBtn.h}`);
+      assert.equal(seen.hScroll, false, "no horizontal scroll at " + w + "px");
+    } finally { await s.close(); }
+  });
+
+  test(`M1 live @${w}x${h}: the picker does not disturb Send reachability`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const m = await s.json(`(function(){
+        document.body.setAttribute('data-view','chat');
+        var tr=document.getElementById('perch-transcript');
+        for(var i=0;i<60;i++){ var d=document.createElement('div');
+          d.textContent='bot: a transcript line long enough to take a row or two, number '+i;
+          tr.appendChild(d); }
+        tr.scrollTop=0;
+        var cb=document.querySelector('.content-body');
+        var b=document.getElementById('perch-send').getBoundingClientRect();
+        return JSON.stringify({ viewport:innerHeight, top:Math.round(b.top), bottom:Math.round(b.bottom),
+          reachable: b.bottom<=innerHeight && b.top>=0,
+          contentBodyScroll: cb.scrollHeight-cb.clientHeight });
+      })()`);
+      assert.equal(m.reachable, true, `Send at ${m.top}-${m.bottom} in a ${m.viewport}px viewport`);
+      assert.equal(m.contentBodyScroll, 0,
+        "the flex chain must still be the mechanism — a taller launcher must not make .content-body scroll");
+    } finally { await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Finding 1 — the list column in split view. Measured at the width where the
+// defect exists; a unit test cannot see it, because what makes the list
+// visible with a chat open is a CSS media query.
+// ---------------------------------------------------------------------------
+
+const ROW_COUNT = `JSON.stringify({
+  rows: document.querySelectorAll('#perch-list-body .roost-row').length,
+  listVisible: getComputedStyle(document.getElementById('perch-list')).display !== 'none',
+  view: document.body.getAttribute('data-view') })`;
+
+test("F1b live @1280x900: with a chat open the VISIBLE list keeps polling", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  resetApi();
+  const s = await session(1280, 900);
+  try {
+    await s.evalIn(`location.hash='perchlive-11111111'; 'go'`);
+    await new Promise((r) => setTimeout(r, 900));
+    const before = await s.json(ROW_COUNT);
+    assert.equal(before.view, "chat");
+    assert.equal(before.listVisible, true, "precondition: this is the split view, the list is on screen");
+    assert.equal(before.rows, 3);
+
+    // The world moves on: one session ends elsewhere.
+    liveSids = liveSids.slice(0, 2);
+    await new Promise((r) => setTimeout(r, 11000));   // one 10s poll interval
+
+    const after = await s.json(ROW_COUNT);
+    assert.equal(after.rows, 2,
+      "a visible list that stopped polling is what showed an idle row beside an awake session");
+  } finally { await s.close(); }
+});
+
+test("F1b live @412x730: with a chat open the HIDDEN list stops polling", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  resetApi();
+  const s = await session(412, 730);
+  try {
+    await s.evalIn(`location.hash='perchlive-11111111'; 'go'`);
+    await new Promise((r) => setTimeout(r, 900));
+    const before = await s.json(ROW_COUNT);
+    assert.equal(before.listVisible, false, "precondition: below the breakpoint the list really is hidden");
+    assert.equal(before.rows, 3);
+
+    liveSids = liveSids.slice(0, 2);
+    await new Promise((r) => setTimeout(r, 11000));
+
+    const after = await s.json(ROW_COUNT);
+    assert.equal(after.rows, 3,
+      "the other direction: nothing may keep polling behind a hidden list — SSE is the live signal there");
+  } finally { await s.close(); }
+});
+
+test("F1b live: crossing the breakpoint with a chat open refreshes the list that just appeared", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  resetApi();
+  const s = await session(412, 730);
+  try {
+    await s.evalIn(`location.hash='perchlive-11111111'; 'go'`);
+    await new Promise((r) => setTimeout(r, 900));
+    liveSids = liveSids.slice(0, 2);       // changed while the list was hidden and frozen
+    assert.equal((await s.json(ROW_COUNT)).rows, 3, "still stale, as it should be at this width");
+
+    await s.metrics(1280, 900);            // the operator widens the window
+    await new Promise((r) => setTimeout(r, 1200));
+
+    const after = await s.json(ROW_COUNT);
+    assert.equal(after.listVisible, true);
+    assert.equal(after.rows, 2,
+      "a breakpoint crossing is not a navigation, so nothing else would have refreshed it");
+  } finally { await s.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// Finding 3 — the rename controls, measured. A third button on a row and a
+// second one in the chat header are exactly where a 412px layout breaks.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`F3 live @${w}x${h}: a named row shows the name, clips it, and keeps three thumb-sized controls`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`(function(){
+        var rows=document.querySelectorAll('#perch-list-body .roost-row');
+        var named=null;
+        for(var i=0;i<rows.length;i++){ if(rows[i].querySelector('.roost-name')) named=rows[i]; }
+        var nameEl=named&&named.querySelector('.roost-name');
+        var btns=named?Array.prototype.map.call(named.querySelectorAll('button'),function(b){
+          var r=b.getBoundingClientRect();
+          return { text:b.textContent, w:Math.round(r.width), h:Math.round(r.height),
+                   inViewport: r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth,
+                   hit:(function(){ var e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                                    return !!e && (e===b||b.contains(e)); })() };
+        }):[];
+        var doc=document.documentElement;
+        return JSON.stringify({
+          rows: rows.length,
+          name: nameEl?nameEl.textContent:null,
+          nameClipped: nameEl? nameEl.scrollWidth > nameEl.clientWidth + 1 : null,
+          nameOverflowsRow: nameEl? nameEl.getBoundingClientRect().right > named.getBoundingClientRect().right + 1 : null,
+          btns: btns,
+          hScroll: doc.scrollWidth > doc.clientWidth });
+      })()`);
+      assert.equal(seen.rows, 3, "fixture check");
+      assert.equal(seen.name, "November package copy pass, English and Spanish together");
+      assert.equal(seen.nameOverflowsRow, false,
+        "an 80-char operator name must be clipped inside its row, not spill out of it");
+      assert.deepEqual(seen.btns.map((b) => b.text), ["Open", "Rename", "Close"],
+        "the row grew a third control: " + JSON.stringify(seen.btns.map((b) => b.text)));
+      for (const b of seen.btns) {
+        assert.ok(b.h >= 44, `${b.text} is ${b.w}x${b.h}; every row control clears the 44px thumb target`);
+        assert.equal(b.inViewport, true, `${b.text} must be on screen`);
+        assert.equal(b.hit, true, `${b.text} must be hit-testable`);
+      }
+      assert.equal(seen.hScroll, false, "no horizontal scroll at " + w + "px");
+    } finally { await s.close(); }
+  });
+
+  test(`F3 live @${w}x${h}: the chat header's Rename is reachable and Send still is`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 900));
+      const seen = await s.json(`(function(){
+        var b=document.getElementById('perch-rename'), r=b.getBoundingClientRect();
+        var nm=document.getElementById('perch-session-name');
+        var send=document.getElementById('perch-send').getBoundingClientRect();
+        return JSON.stringify({
+          name: nm.hidden?null:nm.textContent,
+          meta: document.getElementById('perch-session-meta').textContent,
+          w:Math.round(r.width), h:Math.round(r.height),
+          inViewport: r.top>=0 && r.bottom<=innerHeight,
+          hit:(function(){ var e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                           return !!e && (e===b||b.contains(e)); })(),
+          sendReachable: send.bottom<=innerHeight && send.top>=0,
+          hScroll: document.documentElement.scrollWidth > document.documentElement.clientWidth });
+      })()`);
+      assert.equal(seen.name, "November package copy pass, English and Spanish together",
+        "the open session's name is in the header");
+      assert.equal(seen.meta, "perchlive-22222222", "and the id line is untouched — it is the identity");
+      assert.ok(seen.h >= 44, `Rename is ${seen.w}x${seen.h}`);
+      assert.equal(seen.inViewport, true);
+      assert.equal(seen.hit, true);
+      assert.equal(seen.sendReachable, true, "a second header control must not disturb the composer");
+      assert.equal(seen.hScroll, false);
+    } finally { await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q1, live — the drawer picker must report the session's model.
+// A jsdom-free browser check, because `selectedIndex` is the browser's own
+// answer to "what does the operator see selected".
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`Q1 live @${w}x${h}: the model select shows the model the session is on`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 900));
+      const seen = await s.json(`(function(){
+        var sel=document.getElementById('perch-model');
+        return JSON.stringify({
+          disabled: sel.disabled,
+          value: sel.value,
+          index: sel.selectedIndex,
+          shown: sel.selectedIndex>=0?sel.options[sel.selectedIndex].textContent:null,
+          first: sel.options.length?sel.options[0].value:null,
+          count: sel.options.length });
+      })()`);
+      assert.equal(seen.disabled, false);
+      assert.equal(seen.count, 2, "fixture check");
+      assert.equal(seen.first, "crow-local/qwen3.6-35b-a3b",
+        "fixture check: the live model is deliberately NOT option 0");
+      assert.equal(seen.value, "raven-flash-next/qwen3.8-flash-next");
+      assert.equal(seen.index, 1, "the browser's own selection, not just an attribute we set");
+      assert.match(seen.shown, /Flash Next/,
+        "what the operator actually reads off the control this feature exists for");
+    } finally { await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 Q2, live — a bot with no configured default. The unit assertion
+// for this is weak on its own (a fake select's .value starts ""), so the
+// browser's own selectedIndex is what settles it.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`Q2 live @${w}x${h}: with no configured default the launcher preselects "the bot's own model"`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    modelsDefault = null;
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`(function(){
+        var sel=document.getElementById('perch-new-model');
+        return JSON.stringify({
+          index: sel.selectedIndex,
+          value: sel.value,
+          shown: sel.selectedIndex>=0?sel.options[sel.selectedIndex].textContent:null,
+          count: sel.options.length });
+      })()`);
+      assert.equal(seen.count, 3, "the sentinel plus the two catalogue entries");
+      assert.equal(seen.index, 0);
+      assert.equal(seen.value, "", "an empty value is what makes startSession send no control()");
+      assert.equal(seen.shown, "The bot's own model");
+    } finally { resetApi(); await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// TASK-3 item 2, live — rendered markdown in a real browser. A wide table is
+// the one thing in a bot answer that cannot be wrapped, and 412px is where an
+// unscoped one gives the whole page a horizontal scrollbar.
+// ---------------------------------------------------------------------------
+
+/** What the server sends: rendered by servers/blog/renderer.js, sanitized. */
+async function renderedTranscript() {
+  const { renderMarkdown } = await import("../servers/blog/renderer.js");
+  const wide = "## Boards\n\n" +
+    "| id | board | cards | owner | updated | status | notes |\n" +
+    "|---|---|---|---|---|---|---|\n" +
+    "| 1 | TEHCY resource grant | 12 | Kevin Hopper | 2026-09-10 | in review | " +
+    // An unbreakable token, deliberately: a table of ordinary prose wraps and
+    // never overflows, so it would prove nothing about the scroll container.
+    "outputs/2026-09-10T14-22-05Z_november-package-copy-pass_en-es_final.tar.gz |\n" +
+    "| 2 | Comms | 3 | Edrice Bell | 2026-09-08 | approved | waiting on the translation answer |\n\n" +
+    "```js\nconst aVeryLongLineOfCodeThatCannotWrapAnywhereAtAllBecauseItIsOneToken = 1;\n```\n";
+  const hostile = "<img src=x onerror=\"window.__pwned=1\">\n\n" +
+    "<script>window.__pwned=1</script>\n\n[click me](javascript:window.__pwned=1)";
+  return [
+    { type: "message", message: { role: "user", content: "how many boards?" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: wide }] },
+      html: renderMarkdown(wide) },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: hostile }] },
+      html: renderMarkdown(hostile) },
+  ];
+}
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`MD live @${w}x${h}: markdown renders as elements, wide content scrolls itself, page does not`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    transcriptEvents = await renderedTranscript();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 1200));
+      const seen = await s.json(`(function(){
+        var tr=document.getElementById('perch-transcript');
+        var md=tr.querySelectorAll('.what.md');
+        var table=tr.querySelector('.what.md table');
+        var pre=tr.querySelector('.what.md pre');
+        var doc=document.documentElement;
+        var box=function(e){ var r=e.getBoundingClientRect(); return {right:Math.round(r.right),width:Math.round(r.width)}; };
+        var send=document.getElementById('perch-send').getBoundingClientRect();
+        return JSON.stringify({
+          whiteSpace: md.length ? getComputedStyle(md[0]).whiteSpace : null,
+          mdHeight: md.length ? Math.round(md[0].getBoundingClientRect().height) : null,
+          mdBlocks: md.length,
+          headings: tr.querySelectorAll('.what.md h2').length,
+          tables: tr.querySelectorAll('.what.md table').length,
+          tableScrolls: table ? table.scrollWidth > table.clientWidth : null,
+          tableWithin: table ? box(table).right <= box(tr).right + 1 : null,
+          preScrolls: pre ? pre.scrollWidth > pre.clientWidth : null,
+          preWithin: pre ? box(pre).right <= box(tr).right + 1 : null,
+          pageHScroll: doc.scrollWidth > doc.clientWidth,
+          transcriptHScroll: tr.scrollWidth > tr.clientWidth,
+          sendReachable: send.bottom<=innerHeight && send.top>=0,
+          sendTop: Math.round(send.top), sendBottom: Math.round(send.bottom), vp: innerHeight,
+          scripts: tr.querySelectorAll('script').length,
+          iframes: tr.querySelectorAll('iframe').length,
+          jsHrefs: Array.prototype.filter.call(tr.querySelectorAll('a'),
+            function(a){ return /^javascript:/i.test(a.getAttribute('href')||''); }).length,
+          pwned: !!window.__pwned
+        });
+      })()`);
+      assert.equal(seen.mdBlocks, 2, "both assistant messages rendered as markdown");
+      assert.equal(seen.headings, 1, "a heading is a real <h2>, not literal '## Boards'");
+      // .what carries white-space:pre-wrap for plain text; rendered markdown is
+      // real block elements, so inheriting it honours the SOURCE newlines and
+      // pads every gap between blocks. Measured at 412x730: 287px with the
+      // override, 410px without — 123px of blank space in one answer.
+      assert.equal(seen.whiteSpace, "normal",
+        "rendered markdown must not inherit .what's pre-wrap");
+      if (w < 900) {
+        assert.ok(seen.mdHeight < 350,
+          `the rendered block is ${seen.mdHeight}px; pre-wrap measured 410px for the same content`);
+      }
+      assert.equal(seen.tables, 1);
+
+      // The wide-content rule. The code fence is the guaranteed-overflow
+      // element at BOTH widths (an unbreakable 74-char line against a 304px
+      // and a 560px column); the table overflows at 412 and happens to fit at
+      // 1280, so its scroll is asserted only where it is real.
+      assert.equal(seen.preScrolls, true,
+        "the code fence must genuinely exceed its box, or the scroll container proves nothing");
+      assert.equal(seen.preWithin, true, "and it is contained by the transcript rather than spilling out");
+      assert.equal(seen.tableWithin, true);
+      if (w < 900) {
+        assert.equal(seen.tableScrolls, true, "at 412px the table exceeds the column and must scroll itself");
+      }
+      assert.equal(seen.pageHScroll, false, "no horizontal PAGE scroll at " + w + "px");
+      // THE invariant this needed a CSS fix for: the transcript is a grid, and
+      // a grid item's automatic minimum size is its min-content, so one
+      // unbreakable cell used to widen the whole row (measured 666px in a
+      // 380px column) and the transcript scrolled sideways.
+      assert.equal(seen.transcriptHScroll, false, "the transcript column must not scroll sideways either");
+
+      // Send reachability, re-measured: the flex chain is the mechanism.
+      assert.equal(seen.sendReachable, true,
+        `Send at ${seen.sendTop}-${seen.sendBottom} in a ${seen.vp}px viewport`);
+
+      // Sanitization, in a real browser: not "the string looks safe" but
+      // "nothing executed and no such element exists".
+      assert.equal(seen.pwned, false, "the hostile payload must not have fired");
+      assert.equal(seen.scripts, 0);
+      assert.equal(seen.iframes, 0);
+      assert.equal(seen.jsHrefs, 0);
+    } finally { resetApi(); await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 2 N2, live — the state the operator is actually in.
+//
+// A session hibernating after a gateway restart: options() answers from the
+// provider catalogue, and `current` is the model adoptRow restored from the
+// row. Measured null before the fix, which is what made the picker show
+// whichever model sorted first while the session was on another one.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`N2 live @${w}x${h}: a hibernating session's picker names the model it is on`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    optionsHibernating = true;
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 900));
+      const seen = await s.json(`(function(){
+        var sel=document.getElementById('perch-model'), th=document.getElementById('perch-thinking');
+        return JSON.stringify({
+          disabled: sel.disabled, thinkingDisabled: th.disabled,
+          value: sel.value, index: sel.selectedIndex,
+          shown: sel.selectedIndex>=0?sel.options[sel.selectedIndex].textContent:null,
+          first: sel.options.length?sel.options[0].value:null });
+      })()`);
+      assert.equal(seen.disabled, false, "the fallback list is a real list");
+      assert.equal(seen.thinkingDisabled, true, "thinking still has no list, and still says so");
+      assert.equal(seen.first, "crow-local/qwen3.6-35b-a3b",
+        "fixture check: the live model is deliberately NOT option 0");
+      assert.equal(seen.value, "raven-flash-next/qwen3.8-flash-next");
+      assert.equal(seen.index, 1, "the browser's own selection");
+      assert.match(seen.shown, /Flash Next/,
+        "what the operator reads after a restart — measured as the FIRST option before the fix");
+    } finally { resetApi(); await s.close(); }
   });
 }

@@ -60,6 +60,10 @@ const ENGINE_SESSIONS = [
   { sessionId: "asker-b", botId: "asker", state: "hibernating", pendingUi: null, cardId: null },
   { sessionId: "sleepy-1", botId: "sleepy", state: "hibernating", pendingUi: null, cardId: null },
 ];
+// chatty-1 carries its label on the ENGINE snapshot, which must win.
+// (asker-b gets the mirror case — a label on its ROW only — seeded in
+// before(), so the DB backfill is covered too.)
+ENGINE_SESSIONS[0].label = "Nov package copy pass";
 
 let server, noEngineServer, defaultServer, base, noEngineBase, defaultBase;
 
@@ -86,6 +90,10 @@ before(async () => {
   insSession.run("chatty", "perch", "chatty-2", "perch-live", "stopped", 99, "run");
   insSession.run("asker", "perch", "asker-a", "perch-live", "active", 11, "run");
   insSession.run("asker", "perch", "asker-b", "perch-live", "waiting-user", null, "run");
+  // The mirror of chatty-1 above: no label on the engine snapshot, one on the
+  // row — the DB backfill has to cover an entry eng.list() built without one,
+  // exactly as it does for cardId.
+  c.prepare("UPDATE bot_sessions SET label=? WHERE gateway_thread_id=?").run("named on the row only", "asker-b");
   insSession.run("sleepy", "perch", "sleepy-1", "perch-live", "waiting-user", null, "run");
 
   const insJob = c.prepare(
@@ -169,6 +177,19 @@ test("GET /roost's session shape merges engine state with bot_sessions card_id/c
   assert.equal(askerSessions["asker-a"].pendingUi, true);
   assert.equal(askerSessions["asker-a"].cardId, 11);
   assert.equal(askerSessions["asker-b"].cardId, null);
+});
+
+test("GET /roost carries each session's operator-set label, ALONGSIDE its id", async () => {
+  const { body } = await getJson(base, "/roost");
+  const b = byId(body.birds);
+  const chatty = Object.fromEntries(b.chatty.sessions.map((s) => [s.sessionId, s]));
+  const asker = Object.fromEntries(b.asker.sessions.map((s) => [s.sessionId, s]));
+
+  assert.equal(chatty["chatty-1"].label, "Nov package copy pass", "the engine snapshot wins when it has one");
+  assert.equal(chatty["chatty-1"].sessionId, "chatty-1", "the id is still the identity and still shipped");
+  assert.equal(asker["asker-b"].label, "named on the row only",
+    "same DB backfill as cardId — an entry eng.list() built without a label still gets one");
+  assert.equal(asker["asker-a"].label, null, "an unnamed session is null, never undefined or an empty string");
 });
 
 test("GET /roost's occupiedCardIds is the session rail (non-stopped) union the job rail (queued/running)", async () => {

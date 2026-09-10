@@ -253,6 +253,10 @@ function makeEngine(o = {}) {
     crowHome: CROW_HOME,
     env,
     bridge,
+    // The session-free provider catalogue options() falls back to with no live
+    // child. Injected so a test never depends on this machine's provider DB or
+    // models.json; omitted, the engine lazily imports perch-model-catalog.js.
+    providerModels: o.providerModels,
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
@@ -469,6 +473,33 @@ test("control() model switch (awake): updates currentModel/resolved so snapshot(
   assert.equal(state.audit[0].payload.model, "crow-chat/big-model");
 });
 
+// The launcher's path, end to end on the engine side: the operator picks a
+// model beside "New session", the client spawns and then control()s it BEFORE
+// any message. The point is that turn 1 is served and priced by the picked
+// model, not that a later switch corrects it.
+test("launch path: a control() between spawn and the first message serves turn 1 on the picked model", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  assert.equal((await engine.get(s.sessionId)).model, "crow-local/qwen3.6-35b-a3b", "the bot's own default, as spawned");
+  const spawnWarms = state.warm.length;
+
+  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal(r.applied.model, "crow-chat/big-model");
+  assert.equal(state.warm[spawnWarms], "crow-chat",
+    "the picked provider is warmed before the switch, so the first turn does not race a cold endpoint");
+  assert.equal((await engine.get(s.sessionId)).model, "crow-chat/big-model");
+
+  await engine.message(s.sessionId, "hello - can you see the board?");
+  state.instances[0].lastTurn().resolve({
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
+  });
+  await tick();
+  assert.equal(state.meter.length, 1, "exactly one turn ran");
+  assert.equal(state.meter[0].resolved.key, "crow-chat/big-model",
+    "TURN ONE is priced on the picked model — not the spawn-resolved one with a switch after it");
+});
+
 test("control() model switch while hibernating: nothing live to command — tracked for the next wake under bindsAtWake", async () => {
   const { engine, clock, state } = makeEngine();
   const s = await spawned(engine);
@@ -682,18 +713,382 @@ test("options(): awake session returns the live models + thinking levels from th
   assert.deepEqual(r.thinkingLevels, ["off", "low", "high"]);
 });
 
-test("options(): hibernating session returns {models: null, thinkingLevels: null} — never wakes a child just to list", async () => {
-  const { engine, clock, state } = makeEngine();
+// The defect Kevin hit: he switched a session to another model, a deploy
+// restarted the gateway, and the picker "stopped working". The engine
+// hibernates idle sessions by design and adoptRow brings a restart-orphaned
+// row back hibernating too, so `models: null` was the answer for the
+// commonest state of a perfectly healthy session — and an empty dropdown is
+// indistinguishable from a broken page.
+const CATALOGUE = [
+  { provider: "crow-local", id: "qwen3.6-35b-a3b", name: "Qwen", baseUrl: "http://x:8003/v1" },
+  { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1" },
+];
+
+test("options(): a hibernating session lists the provider catalogue, and still never wakes a child", async () => {
+  let calls = 0;
+  const { engine, clock, state } = makeEngine({ providerModels: () => { calls++; return CATALOGUE; } });
   const s = await spawned(engine);
   clock.advance(600_001);
   await tick();
   assert.equal((await engine.get(s.sessionId)).state, "hibernating");
   const r = await engine.options(s.sessionId);
-  assert.deepEqual(r, { models: null, thinkingLevels: null });
+  assert.deepEqual(r.models, CATALOGUE, "an empty picker on a live session is the bug this ends");
+  assert.equal(calls, 1);
+  assert.equal(r.source, "providers", "the caller must not have to infer which half answered");
+  // Fix round 1 Q1: a list with no "which one is live" is how the picker came
+  // to assert whichever model sorted first.
+  assert.equal(r.current, "crow-local/qwen3.6-35b-a3b", "the model this session is actually on");
+  // Deliberately still null: control()'s thinking branch is a no-op with no
+  // child (pi's own session file owns the level across a --session resume),
+  // so offering that picker would promise a change that never happens.
+  assert.equal(r.thinkingLevels, null);
   assert.equal(state.instances.length, 1, "no second child was spawned");
+});
+
+test("options(): a LIVE child stays authoritative — the catalogue is not even consulted", async () => {
+  let calls = 0;
+  const { engine } = makeEngine({ providerModels: () => { calls++; return CATALOGUE; } });
+  const s = await spawned(engine);
+  const r = await engine.options(s.sessionId);
+  assert.deepEqual(r.models, [{ provider: "crow-local", id: "qwen3.6-35b-a3b" }, { provider: "crow-chat", id: "big-model" }],
+    "pi is the process that will route the next turn; its list wins whenever there is one");
+  assert.equal(r.source, "child");
+  assert.equal(r.current, "crow-local/qwen3.6-35b-a3b");
+  assert.equal(calls, 0);
+});
+
+test("options(): `current` follows a model switch, in both the live and the hibernating answer", async () => {
+  const { engine, clock, state } = makeEngine({ providerModels: () => CATALOGUE });
+  const s = await spawned(engine);
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal((await engine.options(s.sessionId)).current, "crow-chat/big-model",
+    "a live session reports the model control() moved it to, not the spawn-resolved one");
+
+  clock.advance(600_001);
+  await tick();
+  const asleep = await engine.options(s.sessionId);
+  assert.equal(asleep.source, "providers");
+  assert.equal(asleep.current, "crow-chat/big-model",
+    "and hibernating it still reports it — that switch binds at the next wake and really works");
+  assert.equal(state.instances.length, 1, "still no second child");
+});
+
+test("options(): `current` reflects a model pi chose ON ITS OWN, read after the RPCs", async () => {
+  // An auto-fallback, or the operator's own /model in the TUI: the engine
+  // learns it from a model_select frame, and the picker is about to be set
+  // from this value.
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  state.instances[0].emit({ type: "model_select", model: { provider: "crow-chat", id: "big-model" },
+    previousModel: null, source: "user" });
+  assert.equal((await engine.options(s.sessionId)).current, "crow-chat/big-model");
+});
+
+test("options(): a catalogue that throws degrades to an empty list, never a failed GET", async () => {
+  const { engine, clock } = makeEngine({ providerModels: () => { throw new Error("no provider registry"); } });
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  const r = await engine.options(s.sessionId);
+  assert.deepEqual(r.models, [], "the drawer renders a disabled picker on this — an honest answer");
+  assert.equal(r.thinkingLevels, null);
 });
 
 test("options(): unknown session is refused with no_such_session", async () => {
   const { engine } = makeEngine();
   await assert.rejects(() => engine.options("perchlive-nope"), (e) => e.code === "no_such_session");
+});
+
+// ---------------------------------------------------------------------------
+// 8. rename() — "it seems like there is not a way to rename the sessions"
+// ---------------------------------------------------------------------------
+
+function labelOf(threadId) {
+  const c = raw();
+  const row = c.prepare("SELECT label FROM bot_sessions WHERE gateway_thread_id=? ORDER BY id DESC LIMIT 1").get(threadId);
+  c.close();
+  return row ? row.label : undefined;
+}
+
+test("rename(): the name lands on the session's OWN row — no second store", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  const r = await engine.rename(s.sessionId, "Nov package copy pass");
+  assert.deepEqual(r, { label: "Nov package copy pass" });
+  assert.equal(labelOf(s.sessionId), "Nov package copy pass");
+  assert.equal((await engine.get(s.sessionId)).label, "Nov package copy pass");
+});
+
+test("rename(): a name survives a gateway restart, because adoptRow restores it", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await engine.rename(s.sessionId, "survives a deploy");
+
+  // A FRESH engine on the same DB: exactly what a restart is, and the state in
+  // which the operator hit the empty model picker.
+  _resetInteractiveEngineForTest();
+  const { engine: reborn } = makeEngine();
+  const snap = await reborn.get(s.sessionId);
+  assert.equal(snap.state, "hibernating", "precondition: adopted, not held");
+  assert.equal(snap.label, "survives a deploy", "a name lost on every restart would make renaming pointless");
+});
+
+test("rename(): trimmed, whitespace-collapsed and capped — the WRITER guarantees what is stored", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  assert.deepEqual(await engine.rename(s.sessionId, "   spaced   out   name  "), { label: "spaced out name" });
+  const long = "x".repeat(200);
+  const capped = await engine.rename(s.sessionId, long);
+  assert.equal(capped.label.length, 80, "80 chars: long enough to be useful, short enough for a 320px column");
+  assert.equal(labelOf(s.sessionId).length, 80, "and the ROW holds the capped value, not the raw one");
+});
+
+test("rename(): empty CLEARS the name — a real action, not a way to go anonymous", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await engine.rename(s.sessionId, "temporary");
+  assert.deepEqual(await engine.rename(s.sessionId, "   "), { label: null });
+  assert.equal(labelOf(s.sessionId), null, "a COALESCE here would make clearing impossible");
+  assert.equal((await engine.get(s.sessionId)).label, null);
+});
+
+test("rename(): a later lifecycle write does not resurrect a cleared name", async () => {
+  // End-state property, mechanism-independent: whatever writeRow does on the
+  // next hibernate, a name the operator cleared stays cleared.
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  await engine.rename(s.sessionId, "gone in a moment");
+  await engine.rename(s.sessionId, "");
+  clock.advance(600_001);
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating", "the hibernate wrote the row");
+  assert.equal(labelOf(s.sessionId), null);
+});
+
+test("rename(): pushes a state event, so an open drawer sees a rename made elsewhere", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  const sub = await collect(engine, s.sessionId);
+  await engine.rename(s.sessionId, "watch this");
+  const states = sub.ofType("state");
+  assert.ok(states.length >= 1);
+  assert.equal(states[states.length - 1].label, "watch this");
+  sub.off();
+});
+
+test("rename(): a STOPPED session can still be named, and an unknown one is refused", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await engine.stop(s.sessionId);
+  // Naming a finished session while sorting through what happened is exactly
+  // when an operator wants to — and it touches no child, so nothing to refuse.
+  assert.deepEqual(await engine.rename(s.sessionId, "the one that failed"), { label: "the one that failed" });
+  assert.equal(labelOf(s.sessionId), "the one that failed");
+  await assert.rejects(() => engine.rename("perchlive-nope", "x"), (e) => e.code === "no_such_session");
+});
+
+test("rename(): a mid-turn rename is never refused — it touches no child", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go");                 // turn in flight
+  assert.deepEqual(await engine.rename(s.sessionId, "named mid-turn"), { label: "named mid-turn" });
+  state.instances[0].lastTurn().resolve({
+    type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
+  });
+  await tick();
+});
+
+test("rename(): does not clear the 'interrupted' flag a shutdown left on the row", async () => {
+  // writeRow() stamps `status` and resets `control` to 'run' on every call, so
+  // rename() deliberately uses a targeted UPDATE instead. stopAll() marks a
+  // session that was mid-turn when the gateway went down control='interrupted'
+  // and the drawer reads that to say "interrupted, not answered" — a rename
+  // must not quietly erase it.
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  const c = raw();
+  c.prepare("UPDATE bot_sessions SET control='interrupted', status='waiting-user' WHERE gateway_thread_id=?")
+    .run(s.sessionId);
+  c.close();
+
+  await engine.rename(s.sessionId, "named after the crash");
+
+  const after = raw();
+  const row = after.prepare("SELECT control, status, label FROM bot_sessions WHERE gateway_thread_id=?")
+    .get(s.sessionId);
+  after.close();
+  assert.equal(row.label, "named after the crash");
+  assert.equal(row.control, "interrupted", "a rename must not reset the control flag");
+  assert.equal(row.status, "waiting-user", "nor restamp the status");
+});
+
+test("rename(): a session with no row is refused, not answered 200 with nothing written", async () => {
+  // Fix round 1 Q4. The silent version returned {label}, the route answered
+  // 200, and the list and header painted a name that no row carried and that
+  // nothing later repaired — writeRow does not touch the column.
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  const rec = engine._sessionRecordForTest(s.sessionId);
+  rec.rowId = null;                                  // a session that never got a row
+  rec.label = "before";
+  await assert.rejects(() => engine.rename(s.sessionId, "after"), (e) => e.code === "not_persisted");
+  assert.equal(rec.label, "before",
+    "and the in-memory label is rolled back — the engine must not report a name the row lacks");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2 N2 — Q1 survived for every session adopted after a restart.
+//
+// adoptRow SELECTed the row's `model` and threw it away, so servingModel()
+// returned null for every adopted session and options() answered
+// `current: null`. The drawer then enabled the picker, populated the whole
+// catalogue, and selected option 0 — the exact defect Q1 exists for, in the
+// one case the !s.pi branch of options() was added to serve.
+//
+// This is Kevin's sequence: switch the model, the gateway restarts, open the
+// session again.
+// ---------------------------------------------------------------------------
+
+function rowModelOf(threadId) {
+  const c = raw();
+  const row = c.prepare("SELECT model FROM bot_sessions WHERE gateway_thread_id=? ORDER BY id DESC LIMIT 1").get(threadId);
+  c.close();
+  return row ? row.model : undefined;
+}
+
+test("N2: a session adopted after a restart reports the model its ROW carries", async () => {
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  // Deliberately NOT the spawn model, and deliberately not first in the
+  // fixture catalogue — option 0 must not be able to pass by accident.
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  clock.advance(600_001);
+  await tick();
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model", "precondition: the row carries it");
+
+  // The restart.
+  _resetInteractiveEngineForTest();
+  const { engine: reborn } = makeEngine({ providerModels: () => CATALOGUE });
+  const snap = await reborn.get(s.sessionId);
+  assert.equal(snap.state, "hibernating", "precondition: adopted, not held");
+  assert.equal(snap.model, "crow-chat/big-model",
+    "measured null before the fix, which made the drawer show whichever model sorted first");
+
+  const opts = await reborn.options(s.sessionId);
+  assert.equal(opts.source, "providers");
+  assert.equal(opts.current, "crow-chat/big-model", "and the picker is told which entry is live");
+  assert.notEqual(opts.current, opts.models[0].provider + "/" + opts.models[0].id,
+    "fixture check: the live model is not option 0, or this proves nothing");
+});
+
+test("N2: the report and the next WAKE agree — turn 1 runs on the adopted model", async () => {
+  // Restoring only a reporting field would swap one lie for a subtler one: the
+  // picker saying flash-next while the next turn quietly ran on the def's
+  // default. startChild reads currentModelParts before warmModel/PiRpc, so the
+  // adopted value is what actually serves.
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  clock.advance(600_001);
+  await tick();
+
+  _resetInteractiveEngineForTest();
+  const { engine: reborn, state } = makeEngine();
+  await reborn.message(s.sessionId, "after the restart");
+  await tick();
+  const pi = state.instances[state.instances.length - 1];
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+  assert.equal(state.meter.length, 1);
+  assert.equal(state.meter[0].resolved.key, "crow-chat/big-model",
+    "the wake serves the model the row recorded, not the def's default");
+  assert.ok(state.warm.includes("crow-chat"), "and warms that provider before spawning");
+});
+
+test("N2: a row with no usable model key leaves the tracking alone", async () => {
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  for (const bad of ["", "no-slash", "/leading", "trailing/"]) {
+    const c = raw();
+    c.prepare("UPDATE bot_sessions SET model=? WHERE gateway_thread_id=?").run(bad, s.sessionId);
+    c.close();
+    _resetInteractiveEngineForTest();
+    const { engine: reborn } = makeEngine();
+    const snap = await reborn.get(s.sessionId);
+    assert.equal(snap.model, null, JSON.stringify(bad) + " must not be parsed into a model");
+  }
+});
+
+test("N2: a switch made while HIBERNATING also survives the restart", async () => {
+  // The other half of the operator's sequence: the session was already asleep
+  // when the model was changed, so nothing wakes to write a turn row.
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal(r.bindsAtWake.model, "crow-chat/big-model", "precondition: the hibernating path, not the live one");
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model",
+    "and it reaches the row, or a restart before the next turn loses it");
+
+  _resetInteractiveEngineForTest();
+  const { engine: reborn } = makeEngine({ providerModels: () => CATALOGUE });
+  assert.equal((await reborn.get(s.sessionId)).model, "crow-chat/big-model");
+  assert.equal((await reborn.options(s.sessionId)).current, "crow-chat/big-model");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2 N1, engine side — the frames must NAME their turn.
+//
+// The drawer judges a `reply` against the turn it completes rather than against
+// a client-side memory that a reconnect invalidates. That only works if the
+// engine stamps the id, and the client tests build their own frames, so
+// nothing over there can prove this half.
+// ---------------------------------------------------------------------------
+
+test("N1: text and reply frames carry the id of the turn they belong to", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sub = await collect(engine, s.sessionId);
+  const pi = state.instances[0];
+
+  const t1 = await engine.message(s.sessionId, "one");
+  pi.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "streamed" }] } });
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "streamed" }] }] });
+  await tick();
+
+  const text1 = sub.ofType("text");
+  const reply1 = sub.ofType("reply");
+  assert.equal(text1.length, 1);
+  assert.equal(reply1.length, 1);
+  assert.equal(text1[0].turnId, t1.turnId, "the text frame names the turn message() returned");
+  assert.equal(reply1[0].turnId, t1.turnId, "and the reply names the SAME turn it completes");
+
+  const t2 = await engine.message(s.sessionId, "two");
+  assert.notEqual(t2.turnId, t1.turnId, "fixture check: a second turn is a different turn");
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "again" }] }] });
+  await tick();
+  const reply2 = sub.ofType("reply");
+  assert.equal(reply2.length, 2);
+  assert.equal(reply2[1].turnId, t2.turnId,
+    "turn 2's reply must be distinguishable from turn 1's — that is the whole mechanism");
+  sub.off();
+});
+
+test("N1: a child speaking OUTSIDE a turn emits a text frame with a null turn id", async () => {
+  // The honest answer, and what the client's fallback flag is for.
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sub = await collect(engine, s.sessionId);
+  state.instances[0].emit({
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "unsolicited" }] },
+  });
+  await tick();
+  const texts = sub.ofType("text");
+  assert.equal(texts.length, 1);
+  assert.equal(texts[0].turnId, null);
+  sub.off();
 });

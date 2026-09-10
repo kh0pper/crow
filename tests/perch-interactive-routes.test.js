@@ -50,6 +50,12 @@ let liveCardId, archivedCardId, itemId;
  * individual tests overwrite whichever methods they need to observe or fail. */
 let engineImpl;
 let engineCalls;
+/** The session-free provider catalogue GET /bots/:id/models serves. Injected
+ * for the same reason `annotate` is: the real one reads this host's provider
+ * DB / models.json. Its own shaping is covered in
+ * tests/perch-model-catalog.test.js. */
+let catalogueImpl;
+let catalogueCalls;
 
 function raw() {
   return new Database(DB_FILE);
@@ -187,6 +193,7 @@ before(async () => {
   app.use(perchInteractiveApiRouter(fakeAuth, {
     engine: () => engineImpl,
     annotate: async (models) => models.map((m) => ({ ...m, availability: "up" })),
+    providerModels: () => { catalogueCalls++; return catalogueImpl; },
   }));
 
   await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
@@ -201,9 +208,14 @@ after(() => {
 
 beforeEach(() => {
   _setEngineStatusForTest({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
+  catalogueCalls = 0;
+  catalogueImpl = [
+    { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1" },
+    { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1" },
+  ];
   engineCalls = {
     spawn: [], message: [], steer: [], answer: [], abort: [], stop: [], get: [], subscribe: [],
-    checkCardFree: [], attachCard: [], control: [], cycle: [], options: [],
+    checkCardFree: [], attachCard: [], control: [], cycle: [], options: [], rename: [],
   };
   engineImpl = {
     async spawn({ botId, cardId }) {
@@ -227,6 +239,10 @@ beforeEach(() => {
     async attachCard(sid, cardId) {
       engineCalls.attachCard.push({ sid, cardId });
       return { ok: true, cardId, botId: "chatty" };
+    },
+    async rename(sid, label) {
+      engineCalls.rename.push({ sid, label });
+      return { label: label.trim() || null };
     },
     async control(sid, opts) {
       engineCalls.control.push({ sid, opts });
@@ -834,10 +850,13 @@ test("GET /interactive/:sid/options 200s with the engine's models/thinkingLevels
   assert.deepEqual(engineCalls.options, [{ sid: "sess-1" }]);
 });
 
-test("GET /interactive/:sid/options passes models:null through — a hibernating session is not annotated", async () => {
-  // The null arrays are how the engine says "I did not wake a child just to
-  // list", and the drawer disables both pickers on them. Annotating would turn
-  // that into an empty list, which reads as "no models exist".
+test("GET /interactive/:sid/options passes a null list through unannotated", async () => {
+  // A null is how the engine says "there is no list for this one", and the
+  // drawer disables that ONE picker on it. Annotating would turn it into an
+  // empty array, which reads as "no models exist". The real engine now sends
+  // null only for thinkingLevels (a hibernating session's models come from the
+  // provider catalogue); the passthrough is pinned for both, because the route
+  // must not start inventing a shape the engine did not send.
   engineImpl.options = async () => ({ models: null, thinkingLevels: null });
   const { status, body } = await getJson("/interactive/sess-1/options");
   assert.equal(status, 200);
@@ -850,6 +869,127 @@ test("GET /interactive/:sid/options 404s no_such_session", async () => {
   const { status, body } = await getJson("/interactive/sess-1/options");
   assert.equal(status, 404);
   assert.equal(body.error, "no_such_session");
+});
+
+// ---------------------------------------------------------------------------
+// POST /interactive/:sid/rename
+// ---------------------------------------------------------------------------
+
+test("POST /interactive/:sid/rename passes the label through and returns what was STORED", async () => {
+  const { status, body } = await postJson("/interactive/perchlive-abc/rename", { label: "  Nov package  " });
+  assert.equal(status, 200);
+  assert.deepEqual(body, { label: "Nov package" }, "the engine normalizes; the route reports its answer");
+  assert.deepEqual(engineCalls.rename, [{ sid: "perchlive-abc", label: "  Nov package  " }]);
+});
+
+test("POST /interactive/:sid/rename with an empty label clears the name rather than 400ing", async () => {
+  const { status, body } = await postJson("/interactive/perchlive-abc/rename", { label: "" });
+  assert.equal(status, 200);
+  assert.equal(body.label, null);
+  assert.deepEqual(engineCalls.rename, [{ sid: "perchlive-abc", label: "" }],
+    "clearing a name is an action; refusing it would leave no way to undo a rename");
+});
+
+test("POST /interactive/:sid/rename with no label at all is a clear, not a crash", async () => {
+  const { status, body } = await postJson("/interactive/perchlive-abc/rename", {});
+  assert.equal(status, 200);
+  assert.equal(body.label, null);
+});
+
+test("POST /interactive/:sid/rename maps the engine's refusals", async () => {
+  engineImpl.rename = async () => { throw engineErr("no_such_session"); };
+  let r = await postJson("/interactive/perchlive-abc/rename", { label: "x" });
+  assert.equal(r.status, 404);
+  assert.equal(r.body.error, "no_such_session");
+
+  // Fix round 1 Q4: a session with no row cannot be persisted to. 409 with an
+  // honest code, never a 200 carrying a label nothing stored.
+  engineImpl.rename = async () => { throw engineErr("not_persisted"); };
+  r = await postJson("/interactive/perchlive-abc/rename", { label: "x" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "not_persisted");
+});
+
+test("GET /bots/:id/models awaits the catalogue, so a cold provider cache is not served as an empty list", async () => {
+  // Fix round 1 Q6: the seam is async here on purpose — providerModelListWarm
+  // awaits a real refresh when the synchronous loader answers empty.
+  catalogueImpl = null;
+  let resolveIt;
+  const pending = new Promise((r) => { resolveIt = r; });
+  const slow = () => { catalogueCalls++; return pending; };
+  const { default: router } = await import("../servers/gateway/routes/perch-interactive-api.js");
+  const { default: express } = await import("express");
+  const app = express();
+  app.use(express.json());
+  app.use(router((req, res, next) => next(), {
+    engine: () => engineImpl,
+    annotate: async (models) => models.map((m) => ({ ...m, availability: "up" })),
+    providerModels: slow,
+  }));
+  const srv = await new Promise((r) => { const x = app.listen(0, "127.0.0.1", () => r(x)); });
+  try {
+    const url = "http://127.0.0.1:" + srv.address().port + "/dashboard/perch-api/bots/chatty/models";
+    const inFlight = fetch(url).then(async (res) => ({ status: res.status, body: await res.json() }));
+    resolveIt([{ provider: "local", id: "qwen", baseUrl: "u" }]);
+    const { status, body } = await inFlight;
+    assert.equal(status, 200);
+    assert.deepEqual(body.models.map((m) => m.provider + "/" + m.id), ["local/qwen"],
+      "a route that did not await would have served the unresolved value as an empty list");
+  } finally { srv.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// GET /bots/:id/models — the launcher's session-free list
+// ---------------------------------------------------------------------------
+
+test("GET /bots/:id/models 200s with the annotated catalogue and the bot's configured default", async () => {
+  const { status, body } = await getJson("/bots/chatty/models");
+  assert.equal(status, 200);
+  assert.deepEqual(body.models, [
+    { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1", availability: "up" },
+    { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1", availability: "up" },
+  ], "annotated for the same reason the options route annotates: an unavailable model must read as unavailable");
+  assert.equal(body.default, "local/qwen", "so the picker can open pre-selected and launching stays one tap");
+});
+
+test("GET /bots/:id/models 409s engine_required, and never builds a list for a spawn that cannot happen", async () => {
+  _setEngineStatusForTest({ state: "absent" });
+  const { status, body } = await getJson("/bots/chatty/models");
+  assert.equal(status, 409);
+  assert.equal(body.error, "engine_required");
+  assert.equal(catalogueCalls, 0, "the same gate, in the same order, as the sibling spawn route");
+});
+
+test("GET /bots/:id/models 403s perch_not_attached — a bot that would 403 on spawn offers no models", async () => {
+  const { status, body } = await getJson("/bots/quiet/models");
+  assert.equal(status, 403);
+  assert.equal(body.error, "perch_not_attached");
+  assert.equal(catalogueCalls, 0);
+});
+
+test("GET /bots/:id/models on an unknown bot resolves to perch_not_attached, exactly like the spawn route", async () => {
+  const { status, body } = await getJson("/bots/does-not-exist/models");
+  assert.equal(status, 403);
+  assert.equal(body.error, "perch_not_attached");
+});
+
+test("GET /bots/:id/models reports a default with no catalogue entry rather than hiding it", async () => {
+  // A default naming a provider row that has since been disabled is a fact the
+  // operator should see (the picker will show nothing selected), not one to
+  // quietly drop.
+  catalogueImpl = [{ provider: "raven-flash", id: "flash-next", baseUrl: "http://y:8010/v1" }];
+  const { status, body } = await getJson("/bots/chatty/models");
+  assert.equal(status, 200);
+  assert.equal(body.default, "local/qwen");
+  assert.deepEqual(body.models.map((m) => m.provider + "/" + m.id), ["raven-flash/flash-next"]);
+});
+
+test("GET /bots/:id/models on a bot with no configured model answers default:null, not \"undefined\"", async () => {
+  seedBot("modelless", { gateways: [{ type: "perch" }], tools: {} }, { name: "Modelless" });
+  const { status, body } = await getJson("/bots/modelless/models");
+  assert.equal(status, 200);
+  assert.equal(body.default, null);
+  assert.equal(body.models.length, 2);
 });
 
 // ---------------------------------------------------------------------------
@@ -1124,6 +1264,72 @@ test("GET /interactive/:sid/events streams text | tool | log | reply | error eve
   assert.equal(sseDataAt(buf, "text", 0).text, "partial reply");
   assert.equal(sseDataAt(buf, "tool", 0).name, "bash");
   assert.equal(sseDataAt(buf, "reply", 0).text, "done");
+  try { await reader.cancel(); } catch { /* already closed */ }
+});
+
+test("GET /interactive/:sid/events carries rendered markdown ALONGSIDE the raw text, on prose frames only", async () => {
+  let push;
+  engineImpl.subscribe = async (sid, fn) => {
+    fn({ type: "state", sessionId: sid, state: "awake", lastError: null, pendingUi: null });
+    push = fn;
+    return () => {};
+  };
+  const res = await fetch(base + "/interactive/sess-1/events");
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  const readUntil = async (n) => {
+    while (sseEvents(buf).length < n) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+    }
+  };
+  await readUntil(1);
+  push({ type: "text", text: "## Boards\n\nThere are **four**." });
+  push({ type: "reply", text: "Done, see [the docs](https://example.com)." });
+  push({ type: "log", text: "warm crow-local -> 200" });
+  push({ type: "tool", name: "bash", phase: "start", isError: false });
+  await readUntil(5);
+
+  const text = sseDataAt(buf, "text", 0);
+  assert.equal(text.text, "## Boards\n\nThere are **four**.", "the raw text still rides the frame");
+  assert.match(text.html, /<h2[^>]*>Boards<\/h2>/, "rendered on the SERVER — the client has no parser");
+  assert.match(text.html, /<strong>four<\/strong>/);
+
+  const reply = sseDataAt(buf, "reply", 0);
+  assert.match(reply.html, /<a href="https:\/\/example\.com">the docs<\/a>/);
+
+  // Gateway chrome is not model prose: a log line saying "warm crow-local ->
+  // 200" must not be handed to a markdown parser.
+  assert.equal(sseDataAt(buf, "log", 0).html, undefined);
+  assert.equal(sseDataAt(buf, "tool", 0).html, undefined);
+  try { await reader.cancel(); } catch { /* already closed */ }
+});
+
+test("GET /interactive/:sid/events omits html for an empty or whitespace text frame", async () => {
+  let push;
+  engineImpl.subscribe = async (sid, fn) => {
+    fn({ type: "state", sessionId: sid, state: "awake", lastError: null, pendingUi: null });
+    push = fn;
+    return () => {};
+  };
+  const res = await fetch(base + "/interactive/sess-1/events");
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  const readUntil = async (n) => {
+    while (sseEvents(buf).length < n) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+    }
+  };
+  await readUntil(1);
+  push({ type: "reply", text: "   " });
+  await readUntil(2);
+  assert.equal(sseDataAt(buf, "reply", 0).html, undefined,
+    "no html means the client takes its textContent path, which is today's behaviour");
   try { await reader.cancel(); } catch { /* already closed */ }
 });
 

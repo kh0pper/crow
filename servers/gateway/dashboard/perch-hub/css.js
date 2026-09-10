@@ -19,6 +19,13 @@
  * ID selectors (#perch-list, #perch-chat, #perch-transcript, #perch-composer,
  * #perch-back) are left unprefixed — they're already unique in the page.
  */
+/** The split-view breakpoint, in px. EXPORTED because the client script needs
+ *  the same number: at and above this width `.hub-split` is a two-column grid
+ *  and the session list stays on screen while a chat is open, so the list must
+ *  keep polling there. A second hardcoded 900 in client.js would go stale the
+ *  first time this one moved. */
+export const PERCH_SPLIT_MIN_WIDTH = 900;
+
 export function perchHubCss() {
   return `
 #perch-hub-root{--sky:#eef1f3;--card:#fff;--ink:#22303a;--dim:#6b7c88;--teal:#0e6b62;--teal-soft:#dcecea;
@@ -53,6 +60,16 @@ export function perchHubCss() {
    live while the launch buttons it shipped alongside measured 44px. Verified
    by computed style at 412x730, not by reading the cascade. */
 #perch-hub-root #perch-close{white-space:nowrap;padding:8px 12px;font-size:13px;min-height:44px}
+/* Rename: same two-id rule and the same 44px floor, for the same reason. It is
+   NOT destructive, so unlike Close it needs no confirmation — but a thumb has
+   to be able to hit it. */
+#perch-hub-root #perch-rename{white-space:nowrap;padding:8px 12px;font-size:13px;min-height:44px}
+/* The operator's session name, in the chat header and on a list row. Clipped
+   the same way .roost-cwd is: a name is free text and must not be able to give
+   the 320px list column a horizontal scrollbar. */
+#perch-hub-root .session-name{font-weight:500;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#perch-hub-root .roost-name{font-weight:500;font-size:14px;color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#perch-hub-root .perch-head [hidden],#perch-hub-root .roost-main [hidden]{display:none}
 /* The unconditional launcher. Wraps rather than overflowing on a phone, and
    its select is capped so a long bot name cannot push the button off-screen. */
 #perch-launch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 0 12px}
@@ -64,6 +81,17 @@ export function perchHubCss() {
 #perch-hub-root #perch-new{min-height:44px}
 #perch-launch select{font:14px Inter,system-ui,sans-serif;padding:9px 10px;border:1px solid var(--line);
 border-radius:10px;background:var(--sky);color:var(--ink);flex:1 1 140px;min-width:0;max-width:100%}
+/* The model picker. TWO ids (2,0,0), for the same reason #perch-new carries
+   two: "#perch-launch select" above is (1,0,1) and a single-id override would
+   only tie-and-win on source order — the near-miss that shipped #perch-close
+   at 36px.
+   min-height IS load-bearing: drop it and the picker measures under the 44px
+   thumb floor at both viewports (measured; perch-hub-render.test.js's M1 goes
+   red). The flex-basis is a LAYOUT choice, not a safety rule — a model name is
+   long and reads better on its own row — and it is honest to say so: dropping
+   it leaves every M1 measurement green, because the shared select rule's
+   140px basis plus flex-wrap already keeps New session on screen at 412px. */
+#perch-launch #perch-new-model{min-height:44px;flex:1 1 100%}
 /* By id, for the same reason as #perch-close above: "#perch-launch .empty" is
    (1,1,0) and ties with "#perch-hub-root .empty" further down, which then wins
    on source order. Measured dead: computed padding stayed 16px. */
@@ -101,6 +129,56 @@ border-radius:10px;background:var(--sky);color:var(--ink);flex:1 1 140px;min-wid
 #perch-hub-root .who{flex:0 0 64px;font:11px/1.6 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;color:var(--dim)}
 #perch-hub-root .entry.user .who{color:var(--teal)}
 #perch-hub-root .what{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+/* Rendered markdown. TWO ids' worth of weight is not needed here (nothing
+   competes), but \`white-space:pre-wrap\` from .what above IS: markdown output
+   is real block elements, and pre-wrap would double every blank line between
+   them. */
+/* #perch-transcript is a GRID (see its own rule below), so every row in it is
+   a grid ITEM, and a grid item's automatic minimum size is its MIN-CONTENT.
+   One unbreakable table cell therefore widened the whole row past the column
+   and made the transcript scroll sideways instead of the table scrolling
+   inside itself. Measured at 412x730: row 666px in a 380px column, table
+   clipped by nothing; with this, row 380, table 306 wide scrolling its own
+   475px of content. min-width:0 on the ITEM is the item-side half of the
+   standard remedy (grid-template-columns:minmax(0,1fr) is the container-side
+   half). Written as a child selector rather than as .entry so a future row type
+   is covered too — NOT, as an earlier version of this comment claimed, because
+   it reaches the ask card: #perch-ask is a SIBLING of #perch-transcript
+   (html.js), never a child, and at 412px the card sits in its own pane
+   untouched by this rule. */
+#perch-transcript > *{min-width:0}
+#perch-hub-root .what.md{white-space:normal}
+#perch-hub-root .what.md > :first-child{margin-top:0}
+#perch-hub-root .what.md > :last-child{margin-bottom:0}
+#perch-hub-root .what.md p{margin:0 0 8px}
+#perch-hub-root .what.md h1,#perch-hub-root .what.md h2,#perch-hub-root .what.md h3,
+#perch-hub-root .what.md h4,#perch-hub-root .what.md h5,#perch-hub-root .what.md h6{
+font-size:15px;font-weight:600;margin:10px 0 6px;text-transform:none;letter-spacing:0;color:var(--ink)}
+#perch-hub-root .what.md ul,#perch-hub-root .what.md ol{margin:0 0 8px;padding-left:20px}
+#perch-hub-root .what.md li{margin:2px 0}
+#perch-hub-root .what.md a{color:var(--teal)}
+#perch-hub-root .what.md code{font:12.5px/1.5 "JetBrains Mono",ui-monospace,monospace;
+background:var(--sky);border:1px solid var(--line);border-radius:5px;padding:1px 4px;word-break:break-word}
+#perch-hub-root .what.md blockquote{margin:0 0 8px;padding-left:10px;border-left:2px solid var(--line);color:var(--dim)}
+#perch-hub-root .what.md hr{border:none;border-top:1px solid var(--line);margin:10px 0}
+/* WIDE CONTENT SCROLLS INSIDE ITSELF. A table or a long code fence is the one
+   thing in a bot answer that cannot be wrapped, and at 412px an unscoped one
+   would give the whole page a horizontal scrollbar — .roost-when's own
+   clipping rules exist for the same reason. max-width:100% needs the min-width:0
+   already on .what to actually bind inside the flex row. */
+#perch-hub-root .what.md pre{margin:0 0 8px;padding:9px 10px;background:var(--sky);
+border:1px solid var(--line);border-radius:8px;max-width:100%;overflow-x:auto}
+#perch-hub-root .what.md pre code{background:none;border:none;padding:0;white-space:pre;word-break:normal}
+#perch-hub-root .what.md table{display:block;max-width:100%;overflow-x:auto;
+border-collapse:collapse;margin:0 0 8px;font-size:13px}
+/* word-break:normal UNDOES .what's break-word inside a table. A data table
+   whose long tokens are shredded mid-character is unreadable; the honest
+   behaviour is to keep the cell intact and let the table scroll inside its own
+   box, which is what overflow-x above is for. Without this the table can never
+   overflow, and that rule would be dead. */
+#perch-hub-root .what.md th,#perch-hub-root .what.md td{border:1px solid var(--line);padding:5px 8px;text-align:left;word-break:normal}
+#perch-hub-root .what.md th{background:var(--sky);font-weight:600}
+#perch-hub-root .what.md img{max-width:100%;height:auto}
 #perch-hub-root .note{color:var(--dim);font-size:12.5px;font-style:italic}
 #perch-hub-root .ask-card{border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:grid;gap:8px;background:var(--sky)}
 #perch-hub-root .ask-title{font-weight:600}
@@ -138,7 +216,7 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
 #perch-hub-root .field-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:10px 0}
 #perch-hub-root .field{display:flex;flex-direction:column;gap:3px;flex:1 1 150px;min-width:0}
 #perch-hub-root .field-label{font:11px/1 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
-@media (min-width:900px){
+@media (min-width:${PERCH_SPLIT_MIN_WIDTH}px){
   #perch-hub-root{max-width:1100px}
   body[data-view="chat"] #perch-list{display:block}
   #perch-hub-root .hub-split{display:grid;grid-template-columns:320px 1fr;gap:20px;align-items:stretch}

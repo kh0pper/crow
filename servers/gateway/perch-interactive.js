@@ -190,6 +190,17 @@ function replyTextOf(end) {
   return out.trim();
 }
 
+/** Split a stored "provider/id" model key on its FIRST slash — the same rule
+ *  control()'s route body and the drawer's <option value> both use. Anything
+ *  that is not two non-empty halves yields null, and the caller leaves its
+ *  model tracking alone. */
+function splitModelKey(key) {
+  const text = typeof key === "string" ? key : "";
+  const i = text.indexOf("/");
+  if (i <= 0 || i === text.length - 1) return null;
+  return { provider: text.slice(0, i), modelId: text.slice(i + 1) };
+}
+
 /** The four ask_user methods that produce an operator-facing card. Everything
  * else pi's extension UI channel carries is chrome we deliberately ignore. */
 const ASK_METHODS = new Set(["select", "input", "confirm", "editor"]);
@@ -210,6 +221,20 @@ const PERMISSION_MODES = new Set(["guarded", "ask", "bypass"]);
  * fails fast as `bad_request` instead of round-tripping to the child only to
  * come back as an opaque `command_failed`. */
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
+/** Operator-set session name cap. Long enough for "the Nov package copy pass",
+ *  short enough that a 320px list column renders it without a scrollbar. The
+ *  value is stored TEXT and rendered with textContent everywhere — never
+ *  markup — because it reaches the list, the chat header and a confirm string. */
+const LABEL_CAP = 80;
+
+/** Normalize an operator-supplied label: trimmed, capped, and EMPTY IS NULL —
+ *  clearing a name is a valid action, not a way to make a session anonymous
+ *  (the row falls back to the machine-minted id it always had). */
+function normalizeLabel(raw) {
+  const text = String(raw == null ? "" : raw).replace(/\s+/g, " ").trim().slice(0, LABEL_CAP);
+  return text ? text : null;
+}
 
 /**
  * Build a pendingUi card from an `extension_ui_request`.
@@ -239,6 +264,11 @@ function cardFrom(m) {
  *   Default is a LAZY import of bot-world.mjs + bridge.mjs + pi_lifecycle.mjs +
  *   warm.mjs + metering.mjs (the perch.js `loadBridge` idiom — gateway boot
  *   must not pay for the bot engine).
+ * @param {Function} [opts.providerModels] test seam: `() => Array<model>`, the
+ *   session-free provider catalogue `options()` falls back to when a session
+ *   has no live child. Default is a LAZY import of perch-model-catalog.js —
+ *   same discipline as `bridge` above: a gateway that never lists models must
+ *   not pay for the provider registry at construction time.
  * @param {Function} [opts.now] injectable clock (lease expiry is testable).
  * @param {Function} [opts.setTimer] injectable timer factory.
  * @param {Function} [opts.clearTimer]
@@ -248,6 +278,7 @@ export function createInteractiveEngine({
   env = process.env,
   crowHome = env.CROW_HOME || join(homedir(), ".crow"),
   bridge = null,
+  providerModels = null,
   now = Date.now,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -358,6 +389,9 @@ export function createInteractiveEngine({
       // string snapshot()/stateEvent() report.
       currentModelParts: null,
       currentModel: null,
+      /** Operator-set name, persisted on the row. NULL means "no name", and
+       *  every render falls back to the short session id. */
+      label: null,
       // Track 3 Task 4: binds at wake, never applied to a live child (pi's
       // permission policy is fixed via env at spawn time). Reset to
       // "guarded" on every adoptRow (gateway restart) — see adoptRow's
@@ -410,6 +444,15 @@ export function createInteractiveEngine({
     };
   }
 
+  /** The model this session is actually on: the engine's own tracking (a live
+   *  `model_select`, or a `control()` switch) wins over the raw prepareSpawn
+   *  resolution once one is known. ONE expression, because snapshot(),
+   *  stateEvent() and options() must never disagree about it — the drawer
+   *  cross-checks the picker against exactly this value. */
+  function servingModel(s) {
+    return s.currentModel || (s.resolved ? s.resolved.key : null);
+  }
+
   function snapshot(s) {
     return {
       sessionId: s.sessionId,
@@ -423,7 +466,8 @@ export function createInteractiveEngine({
       // prepareSpawn resolution once one is known (a live model_select or a
       // control() switch), so the lens reports the model actually serving
       // the NEXT turn, not just the one the last spawn/wake resolved to.
-      model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      model: servingModel(s),
+      label: s.label || null,
       permissionMode: s.permissionMode,
       planMode: s.planMode,
       // I3 (final review): neither stateEvent() nor snapshot() used to
@@ -490,7 +534,8 @@ export function createInteractiveEngine({
       lastError: s.lastError || null,
       pendingUi: s.pendingUi || null,
       // Track 3 Task 4: same three additions as snapshot(), same rule.
-      model: s.currentModel || (s.resolved ? s.resolved.key : null),
+      model: servingModel(s),
+      label: s.label || null,
       permissionMode: s.permissionMode,
       planMode: s.planMode,
       // I3 (final review): same addition, same reasoning, as snapshot()
@@ -645,6 +690,11 @@ export function createInteractiveEngine({
           // Track 3 Task 7: `control` defaults to 'run' — only stopAll's
           // interrupted-mid-turn park passes 'interrupted'; every OTHER write
           // (including this row's own NEXT normal write) resets it to 'run'.
+          // NOTE: no `label` here. writeLabel() is its single writer — a
+          // targeted UPDATE that can clear it — and adding it to this statement
+          // was measurably unobservable (a mutation turning it into a COALESCE
+          // left the whole suite green), so it is one writer, not two that have
+          // to agree.
           args: [status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
         },
         {
@@ -652,6 +702,8 @@ export function createInteractiveEngine({
             "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,card_id,project_id,pi_session_dir,model) " +
             "SELECT ?,'perch',?,'perch-live',?,?,?,?,?,? " +
             "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
+          // A row this INSERT mints is brand new and cannot have a name yet;
+          // label defaults to NULL and writeLabel() owns it from there.
           args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
         },
       ]);
@@ -660,6 +712,58 @@ export function createInteractiveEngine({
         args: [s.botId, s.threadId],
       });
       if (rows[0]) s.rowId = Number(rows[0].id);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  }
+
+  /** Persist the model the engine now considers this session's.
+   *
+   * Fix round 2 N2: the row's `model` column was only written by onTurnEnd and
+   * by a turn's own `active` stamp, so a switch made and then left un-exercised
+   * — control() to another model, then a gateway restart before the next turn —
+   * was not in the row at all, and adoptRow had nothing to restore. That is
+   * exactly the sequence the operator reported: switch the model, a deploy
+   * restarts the gateway, open the session again.
+   *
+   * Targeted UPDATE by row id, for the same reason writeLabel() is one:
+   * writeRow() also stamps `status` and resets `control` to 'run', and a model
+   * switch must not restamp either. Non-fatal — the switch's operative effect
+   * is the in-memory tracking that startChild reads; the row is what carries it
+   * across a restart. */
+  async function writeModel(s) {
+    if (s.rowId == null) return;
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "UPDATE bot_sessions SET model=?, updated_at=datetime('now') WHERE id=?",
+        args: [servingModel(s), s.rowId],
+      });
+    } catch (e) {
+      log(s.sessionId + ": model not persisted (non-fatal): " + ((e && e.message) || e));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  }
+
+  /** Persist the operator's session name. Targeted UPDATE by row id, and the
+   * ONLY writer of `label` — see rename()'s doc for why it is not writeRow,
+   * and note that writeRow deliberately does not touch the column either.
+   *
+   * A session with no row (rowId null) cannot be persisted to at all, and
+   * minting one here would create a phantom row for a session that never
+   * spawned. Nothing later repairs it either — writeRow does not carry the
+   * label — so this THROWS rather than returning quietly: fix round 1 Q4
+   * found the silent version answering HTTP 200 with the label, painting it
+   * into the list and the header, and storing nothing. */
+  async function writeLabel(s) {
+    if (s.rowId == null) throw engineError("not_persisted");
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "UPDATE bot_sessions SET label=?, updated_at=datetime('now') WHERE id=?",
+        args: [s.label || null, s.rowId],
+      });
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
@@ -731,7 +835,7 @@ export function createInteractiveEngine({
     try {
       const { rows } = await db.execute({
         sql:
-          "SELECT id, bot_id, gateway_thread_id, status, model, pi_session_id, project_id, card_id " +
+          "SELECT id, bot_id, gateway_thread_id, status, model, pi_session_id, project_id, card_id, label " +
           "FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1",
         args: [sessionId],
       });
@@ -742,6 +846,34 @@ export function createInteractiveEngine({
       s.piSessionId = row.pi_session_id || null;
       s.projectId = row.project_id == null ? null : Number(row.project_id);
       s.cardId = row.card_id == null ? null : Number(row.card_id);
+      // Unlike permissionMode just below, the label IS restored: it is a name
+      // the operator chose, carries no authority, and losing it on every
+      // gateway restart would make renaming pointless.
+      s.label = row.label ? String(row.label) : null;
+      // Fix round 2 N2: the row's `model` column was SELECTed and then thrown
+      // away, so servingModel() returned null for EVERY adopted session and the
+      // drawer's picker — populated, enabled — fell back to whichever option
+      // sorted first. That is verbatim the defect fix round 1 Q1 exists for,
+      // surviving in the one case the !s.pi branch of options() was added to
+      // serve: a session hibernating after a gateway restart, which is the
+      // common way an operator opens an old one.
+      //
+      // Restored into the ENGINE'S OWN tracking, not just into a reporting
+      // field, so the report and the next wake agree: startChild reads
+      // currentModelParts before warmModel/PiRpc, so the session resumes on the
+      // model it was actually on rather than snapping back to the def's
+      // default. Reporting one and serving the other would be a subtler lie
+      // than the one being fixed.
+      //
+      // A row naming a provider this instance no longer has is not a wedge:
+      // warmModel() is best-effort and never throws (warm.mjs), and pi surfaces
+      // the real connection error — the same outcome as picking that model in
+      // the drawer.
+      const restored = splitModelKey(row.model);
+      if (restored) {
+        s.currentModelParts = restored;
+        s.currentModel = restored.provider + "/" + restored.modelId;
+      }
       s.state = row.status === "stopped" ? "stopped" : "hibernating";
       // Track 3 Task 4 (spec §5.3, RESTART SEMANTICS — named for the
       // reviewer): deliberately NOT restoring permissionMode from anywhere.
@@ -1188,7 +1320,12 @@ export function createInteractiveEngine({
       case "message_end": {
         // Message-level streaming; delta-level is a recorded non-goal.
         const text = assistantTextOf(m.message);
-        if (text) emit(s, { type: "text", text });
+        // Fix round 2 N1: the turn this message belongs to rides the frame, so
+        // the drawer can judge a `reply` against its OWN turn instead of
+        // against a client-side memory of one that a reconnect invalidates.
+        // null when the child speaks outside a turn — the client falls back to
+        // its transition flag there.
+        if (text) emit(s, { type: "text", text, turnId: s.turn ? s.turn.id : null });
         return;
       }
       case "extension_ui_request":
@@ -1349,7 +1486,10 @@ export function createInteractiveEngine({
     // abort that landed during the metering awaits still silences the reply.
     if (!turn.aborted) {
       const replyText = replyTextOf(end);
-      emit(s, { type: "reply", text: replyText });
+      // The id of the turn this reply COMPLETES (see the text frame above):
+      // without it a reconnected drawer cannot tell "I already rendered this
+      // turn" from "I already rendered a different one".
+      emit(s, { type: "reply", text: replyText, turnId: turn.id });
       // Track 3 Task 8: an operator watching the drawer live (any live
       // subscriber) already sees the reply — the push is for someone who
       // is AWAY, and only for a turn that actually took a while.
@@ -1799,6 +1939,7 @@ export function createInteractiveEngine({
         s.currentModel = rKey;
         s.resolved = Object.assign({}, s.resolved, { provider: rProvider, model: rId, key: rKey });
         applied.model = rKey;
+        await writeModel(s);                           // survives a restart (N2)
         // The child's OWN model_select event for this same switch will also
         // arrive shortly — onModelSelect dedupes on an unchanged value, so
         // this is the only "now on <key>" log line the operator sees.
@@ -1809,6 +1950,7 @@ export function createInteractiveEngine({
         const key = provider + "/" + modelId;
         s.currentModelParts = { provider, modelId };
         s.currentModel = key;
+        await writeModel(s);                           // survives a restart (N2)
         bindsAtWake.model = key;
       }
     }
@@ -1866,22 +2008,71 @@ export function createInteractiveEngine({
   }
 
   /**
-   * Track 3 Task 4: live model/thinking-level menus for the drawer (Task 8).
-   * Wakes are NEVER required just to list — a hibernating session (or one this
-   * process has never held; resolveSession adopts) returns null arrays so the
-   * caller can disable the pickers instead of spawning a child on a mere GET.
+   * Track 3 Task 4: model/thinking-level menus for the drawer (Task 8).
+   * Wakes are NEVER required just to list.
+   *
+   * A LIVE child is authoritative: it is the process that will actually route
+   * the next turn, so its `get_available_models` wins whenever there is one.
+   *
+   * With NO child the answer used to be `models: null`, and the drawer
+   * rendered an empty, disabled picker. That is wrong for a session that is
+   * merely asleep — the engine hibernates idle sessions by design and
+   * `adoptRow` brings a restart-orphaned row back hibernating too, so the
+   * commonest state of a perfectly healthy session reported the same thing a
+   * broken page would. Worse, the switch itself WORKS while hibernating:
+   * `control()` stores `currentModelParts` and `startChild` reads it BEFORE
+   * `warmModel`/`PiRpc` construction, so the next wake serves and prices the
+   * chosen provider from turn 1. Only the list was missing. It now falls back
+   * to the session-free provider catalogue — the SAME list the launcher's
+   * `GET /bots/:id/models` offers (perch-model-catalog.js), never a second
+   * one that could disagree.
+   *
+   * `thinkingLevels` stays null in that state on purpose: `control()`'s
+   * thinking branch is a no-op with no child (pi's own session file owns the
+   * level across a `--session` resume, and this engine deliberately persists
+   * nothing), so offering the picker would promise a change that never
+   * happens. `source` names which half answered, so a caller never has to
+   * infer it from the shape.
+   *
+   * `current` is the model the session is ACTUALLY on — the same value
+   * `snapshot()`/`stateEvent()` report. Fix round 1 Q1: without it a caller
+   * has a list and no way to know which entry is live, and the drawer showed
+   * whichever option sorted first. A list that asserts the wrong answer is
+   * worse than the empty one it replaced, on the one control this feature
+   * exists for.
    */
   async function options(sessionId) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
-    if (!s.pi) return { models: null, thinkingLevels: null };
+    if (!s.pi) return { models: await catalogModels(), thinkingLevels: null, current: servingModel(s), source: "providers" };
     const [modelsRes, levelsRes] = await Promise.all([
       s.pi.commandSince({ type: "get_available_models" }),
       s.pi.commandSince({ type: "get_available_thinking_levels" }),
     ]);
     const models = (modelsRes && modelsRes.data && modelsRes.data.models) || [];
     const thinkingLevels = (levelsRes && levelsRes.data && levelsRes.data.levels) || [];
-    return { models, thinkingLevels };
+    // Read AFTER the RPCs: a model_select the child emitted while we were
+    // waiting is the newest truth, and the picker is about to be set from it.
+    return { models, thinkingLevels, current: servingModel(s), source: "child" };
+  }
+
+  /**
+   * The session-free model catalogue, lazily resolved. Never throws: a
+   * provider registry this process cannot read is an EMPTY list, which the
+   * drawer renders as a disabled picker — the honest answer — rather than an
+   * options() call that 500s a session the operator was only looking at.
+   */
+  async function catalogModels() {
+    try {
+      if (providerModels) return (await providerModels()) || [];
+      const mod = await import("./perch-model-catalog.js");
+      // The WARM variant: a cold provider cache would otherwise answer [] and
+      // put the drawer back into the empty-disabled-picker state this fixes.
+      return (await mod.providerModelListWarm()) || [];
+    } catch (e) {
+      log("provider catalogue unavailable: " + (e && e.message));
+      return [];
+    }
   }
 
   /** Resolve a session this process holds, or adopt its row (gateway restart).
@@ -1950,6 +2141,49 @@ export function createInteractiveEngine({
     // refusal, never a silent ok and never no_such_session.
     if (!s.turn && !s.pendingUi) throw engineError("no_turn");
     return abortInFlight(s);
+  }
+
+  /**
+   * Name a session, or clear its name (Task: "there is not a way to rename the
+   * sessions").
+   *
+   * The `perchlive-xxxxxxxx` id stays the IDENTITY — this is a convenience
+   * rendered ALONGSIDE it, never instead of it, so the close confirmation and
+   * every log line keep naming something unambiguous. An empty or
+   * whitespace-only label CLEARS the name (normalizeLabel returns null), which
+   * is a real action and not a way to make a session anonymous.
+   *
+   * Persisted on the session's own bot_sessions row — no second store to keep
+   * in sync — by writeLabel(), which is its single writer. Deliberately NOT
+   * through writeRow: that stamps `status` and resets `control` to 'run', and
+   * a rename must not quietly clear the 'interrupted' flag stopAll() sets on a
+   * session that was mid-turn when the gateway went down (the drawer reads it
+   * to say "interrupted, not answered"). writeRow's own args list says the
+   * same thing from the other side. adoptRow restores the label, so a rename
+   * survives a gateway restart.
+   *
+   * A STOPPED session is still renameable: the row and its transcript outlive
+   * the child, and naming one while sorting through what happened is exactly
+   * when an operator wants to. Renaming is reversible and touches no child, so
+   * unlike stop() it is never refused mid-turn.
+   */
+  async function rename(sessionId, label) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    const next = normalizeLabel(label);
+    // Persist FIRST, then adopt it in memory: a rename that could not be
+    // written must not leave the engine reporting a name the row does not
+    // carry (writeLabel throws `not_persisted` for a session with no row).
+    const previous = s.label;
+    s.label = next;
+    try {
+      await writeLabel(s);
+    } catch (e) {
+      s.label = previous;
+      throw e;
+    }
+    emit(s, stateEvent(s));
+    return { label: s.label };
   }
 
   async function stop(sessionId) {
@@ -2158,6 +2392,7 @@ export function createInteractiveEngine({
     cycle,
     control,
     options,
+    rename,
     answer,
     abort,
     stop,
@@ -2185,6 +2420,11 @@ export function createInteractiveEngine({
       if (!s) throw engineError("no_such_session");
       return hibernate(s);
     },
+    /** Fix round 1 Q4 test surface: the internal session record, so a test can
+     * produce the "no row yet" state (rowId null) that rename() must refuse.
+     * No public method exposes it, and spawning a session that fails to get a
+     * row is not reachable through the API. */
+    _sessionRecordForTest: (sessionId) => sessions.get(String(sessionId)) || null,
     /** M2 (final review) test-only reach into the internal `cardClaims` map
      * — the DB rail (checkCardFree) always 409s correctly regardless of this
      * map's state, so no PUBLIC method exposes WHICH sessionId currently

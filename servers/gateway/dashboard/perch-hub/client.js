@@ -1,4 +1,5 @@
 import { tJs } from "../shared/i18n.js";
+import { PERCH_SPLIT_MIN_WIDTH } from "./css.js";
 
 /** The hub's client script. Emitted INSIDE a template literal — a bare
  *  backtick or ${ anywhere in here breaks the module at import time.
@@ -18,6 +19,90 @@ export function perchHubJs(lang = "en") {
   function line(cls,text){ var d=document.createElement('div');
     if(cls) d.className=cls; d.textContent=text==null?'':String(text); return d; }
 
+  /* ── ONE ACTIVE INSTANCE PER DOCUMENT ─────────────────────────────────────
+     The dashboard runs Turbo Drive (shared/layout.js's turboHead(), on unless
+     CROW_ENABLE_TURBO=0). A Turbo visit REPLACES <body> WITHOUT reloading the
+     JS realm, so this script runs again while every closure the previous run
+     created is still alive — its EventSource, its 10s list-poll interval, and
+     the listeners it put on \`window\` (hashchange, focus, visualViewport),
+     which survive because \`window\` does.
+
+     Those survivors are not inert. \`el()\` resolves by id AT CALL TIME, so an
+     old instance writes into the NEW document. Measured, not theorised
+     (tests/perch-hub-stream-leak.test.js, and the scratch reproduction it was
+     written from): four visits to /dashboard/perch, then ONE tap on a session
+     row, gives four openSession()s, four loadHistory()s, four live
+     EventSource objects and four server-side /events connections — and
+     "No transcript yet." four times. The operator's own typed message is the
+     ONE thing not duplicated, because \`el('perch-send').onclick=\` is a single
+     slot the newest instance owns outright: exactly the asymmetry in the
+     transcript Kevin pasted (every streamed element ×6, his message ×1).
+
+     So instances are made mutually exclusive HERE, rather than by closing one
+     more path. A window-level registry gives two things a closure variable
+     cannot:
+       • streams closable BY IDENTITY. \`stream\` below only ever names THIS
+         instance's connection; a previous instance's is unreachable from this
+         closure, and the registry is the only thing that can still name it.
+       • a generation counter, so a retired instance's window listeners become
+         no-ops instead of a second writer. Every listener that outlives a
+         document — including any added later, e.g. a matchMedia breakpoint
+         listener — must be guarded with live().
+     ──────────────────────────────────────────────────────────────────────── */
+  var HUB=window.__crowPerchHub||(window.__crowPerchHub={gen:0,streams:{},retire:null});
+  /* Retire the previous instance BEFORE this one wires anything up.
+     BACKSTOP, not the mechanism: with Turbo present the outgoing instance has
+     already retired itself on turbo:before-render below, and deleting this
+     line leaves the whole leak suite green (measured). It is what still runs
+     if that event never fires — a Turbo upgrade that renames it, or any other
+     path that re-executes this script in a live document. */
+  if(HUB.retire){ try{ HUB.retire(); }catch(e){} }
+  var GEN=++HUB.gen, retired=false;
+  /* True only for the instance that owns the document right now. */
+  function live(){ return !retired&&HUB.gen===GEN; }
+  HUB.retire=function(){
+    retired=true;
+    stopListPolling(); cancelReconnect(); closeStream();
+    /* Anything left in the registry belongs to an instance older still (or to
+       a session this one never held): close it by identity — that is the
+       whole point of keeping the registry. */
+    for(var k in HUB.streams){ try{ HUB.streams[k].close(); }catch(e){} delete HUB.streams[k]; }
+  };
+
+  /* ONE listener per realm, forwarding to whichever instance is current.
+
+     live() alone made a retired instance's listeners inert but left them
+     ATTACHED: measured with DOMDebugger.getEventListeners, five Turbo visits
+     took window.focus and window.hashchange from 1 to 5 while the shell's own
+     listeners stayed flat, and each retained closure holds rowIndex,
+     launchBots, launchModels and pendingImages — the last carrying base64
+     image data from any attach. The shell solves this two files away
+     (layout.js:390 / :610, "Guarded so Turbo re-executing this script does not
+     stack a new listener on every navigation"), and this is that guard with
+     one addition it does not need: the shell's handlers act on the document by
+     id, while these need INSTANCE state, so the single bound listener
+     dispatches through HUB.handlers, which each new instance overwrites with
+     its own. Bind once, always current, no growth.
+
+     live() is kept inside each handler: a retired instance with no successor
+     is still the registered handler, and must stay inert. */
+  HUB.handlers=HUB.handlers||{};
+  HUB.bound=HUB.bound||{};
+  function bindOnce(target,type,key,fn){
+    HUB.handlers[key]=fn;
+    if(HUB.bound[key]||!target||!target.addEventListener) return;
+    HUB.bound[key]=true;
+    target.addEventListener(type,function(ev){
+      var h=HUB.handlers[key]; if(h) h(ev);
+    });
+  }
+
+  /* Turbo tears the document down before the next instance's script runs, so
+     retire on the way out too: without it this instance keeps a live SSE
+     connection (and a gateway-side subscriber) for the whole time the
+     operator is looking at some other panel. */
+  bindOnce(document,'turbo:before-render','beforeRender',function(){ if(live()) HUB.retire(); });
+
   /* The two transcript writers. Defined HERE because the error and
      empty-transcript paths call them, and those are the FIRST paths a user
      hits when something goes wrong — a ReferenceError there is invisible to a
@@ -27,11 +112,31 @@ export function perchHubJs(lang = "en") {
     tr.appendChild(line('entry note',text));
     tr.scrollTop=tr.scrollHeight;
   }
-  function appendMessage(cls,who,text){
+  /* THE ONLY innerHTML assignment in this file, and the only one there may be.
+
+     \`html\` is produced on the SERVER by servers/blog/renderer.js — marked
+     plus sanitize-html with an explicit allow-list, the same path the memory
+     panel uses — and reaches here on the transcript payload and on the SSE
+     frame. Bot output is model-generated and can carry tool results read from
+     files, so the RAW text is never trusted: appendMessage falls back to
+     line()'s textContent whenever \`html\` is absent or empty, which is what a
+     failed render, an older gateway, or a non-prose frame all produce. */
+  function setSanitizedHtml(node,html){ node.innerHTML=html; }
+
+  /* \`html\` is optional and server-rendered; without it this is byte-for-byte
+     the old textContent behaviour. */
+  function appendMessage(cls,who,text,html){
     var tr=el('perch-transcript'); if(!tr) return;
     var row=document.createElement('div'); row.className='entry '+cls;
     row.appendChild(line('who',who));
-    row.appendChild(line('what',text));      /* textContent, never innerHTML */
+    if(html&&typeof html==='string'){
+      var what=document.createElement('div');
+      what.className='what md';
+      setSanitizedHtml(what,html);
+      row.appendChild(what);
+    } else {
+      row.appendChild(line('what',text));   /* textContent, never innerHTML */
+    }
     tr.appendChild(row);
     tr.scrollTop=tr.scrollHeight;
   }
@@ -78,7 +183,10 @@ export function perchHubJs(lang = "en") {
       if(!live.length){ out.push({botId:b.id,botName:b.name,sessionId:null,state:'idle',cardId:null,pendingUi:false}); return; }
       live.forEach(function(s){
         out.push({botId:b.id,botName:b.name,sessionId:s.sessionId,state:s.state,
-                  cardId:s.cardId==null?null:s.cardId,pendingUi:!!s.pendingUi});
+                  cardId:s.cardId==null?null:s.cardId,pendingUi:!!s.pendingUi,
+                  /* /roost carries the operator's name alongside the id
+                     (routes/perch.js) — null when there isn't one. */
+                  label:(s.label==null||s.label==='')?null:String(s.label)});
       });
     });
     /* Blocked-on-you first: those are the only rows that need you right now. */
@@ -126,6 +234,7 @@ export function perchHubJs(lang = "en") {
   var FILE_QUEUED='${tJs("perch.fileQueued", lang)}';
   var FILE_FAILED='${tJs("perch.fileFailed", lang)}';
   var NO_TRANSCRIPT='${tJs("perch.noTranscript", lang)}';
+  var TRANSCRIPT_FAILED='${tJs("perch.transcriptFailed", lang)}';
   var RECONNECTING='${tJs("perch.reconnecting", lang)}';
   var RECONNECT_FAILED='${tJs("perch.reconnectFailed", lang)}';
   var ASK_STALE='${tJs("perch.askStale", lang)}';
@@ -136,11 +245,18 @@ export function perchHubJs(lang = "en") {
   var ASK_CANCEL='${tJs("perch.askCancel", lang)}';
   var ASK_SUBMIT='${tJs("perch.askSubmit", lang)}';
   var NO_ATTACHED_BOTS='${tJs("perch.noAttachedBots", lang)}';
+  var MODEL_BOT_DEFAULT='${tJs("perch.modelBotDefault", lang)}';
+  var MODEL_BOT_RESOLVES='${tJs("perch.modelBotResolves", lang)}';
+  var MODEL_CURRENT_UNLISTED='${tJs("perch.modelCurrentUnlisted", lang)}';
+  var LAUNCH_MODEL_FAILED='${tJs("perch.launchModelFailed", lang)}';
   var CLOSE_LABEL='${tJs("perch.close", lang)}';
   var CLOSE_CONFIRM='${tJs("perch.closeConfirm", lang)}';
   var CLOSE_FAILED='${tJs("perch.closeFailed", lang)}';
   var CLOSE_FAILED_FOR='${tJs("perch.closeFailedFor", lang)}';
   var ROW_CARD='${tJs("perch.rowCard", lang)}';
+  var RENAME_LABEL='${tJs("perch.rename", lang)}';
+  var RENAME_PROMPT='${tJs("perch.renamePrompt", lang)}';
+  var RENAME_FAILED='${tJs("perch.renameFailed", lang)}';
   var ROOST_UNREACHABLE='${tJs("perch.roostUnreachable", lang)}';
 
   /* Row identity. One bot with eight sessions renders eight rows that read
@@ -164,9 +280,14 @@ export function perchHubJs(lang = "en") {
   /* What the confirm calls the session it is about to destroy. A confirm that
      names nothing cannot correct a mis-tap, which is the only thing it is
      there to do. */
+  /* Names the session in the close confirmation. The operator's own name
+     leads when there is one, but the bot and the short id STAY: an
+     irreversible confirm has to name something unambiguous, and two sessions
+     can carry the same name. */
   function sessionLabel(sid){
     var r=rowIndex[sid], short=shortSid(sid);
-    return (r&&r.botName)?(r.botName+' '+short):short;
+    var base=(r&&r.botName)?(r.botName+' '+short):short;
+    return (r&&r.label)?(r.label+' ('+base+')'):base;
   }
 
   var pendingNote=null;                 /* survives the loadList that follows a note */
@@ -192,6 +313,12 @@ export function perchHubJs(lang = "en") {
       row.appendChild(line('roost-dot',''));
       var main=document.createElement('div'); main.className='roost-main';
       main.appendChild(line('roost-cwd',r.botName));
+      /* The name on its OWN line, above the unchanged subtitle. Folding it
+         into rowSubtitle() instead would push state/id/card out of a 320px
+         column; this keeps "state · id · card" exactly as it was, which is
+         also the fallback when there is no name. textContent via line(),
+         never innerHTML — this string came from an operator. */
+      if(r.label) main.appendChild(line('roost-name',r.label));
       main.appendChild(line('roost-when',rowSubtitle(r)));
       row.appendChild(main);
       var b=document.createElement('button');
@@ -204,6 +331,11 @@ export function perchHubJs(lang = "en") {
          stop. Second button, not a swipe or a long-press: this has to work
          with a thumb on a 412px screen. */
       if(r.sessionId){
+        /* No confirm on this one: renaming is reversible and cheap. */
+        var n=document.createElement('button');
+        n.type='button'; n.className='roost-rename'; n.textContent=RENAME_LABEL;
+        n.onclick=function(){ renameSession(r.sessionId,r.label||''); };
+        row.appendChild(n);
         var x=document.createElement('button');
         x.type='button'; x.className='roost-close'; x.textContent=CLOSE_LABEL;
         x.onclick=function(){ stopSession(r.sessionId); };
@@ -247,14 +379,18 @@ export function perchHubJs(lang = "en") {
       if(sel){ sel.hidden=true; if(changed) clearEl(sel); }
       if(lbl) lbl.hidden=true;
       setLaunchNote(NO_ATTACHED_BOTS);
+      hideLaunchModels();          /* no bot, no model list that means anything */
       return;
     }
     btn.disabled=false;
     setLaunchNote('');
-    /* One attached bot is the common case (and Kevin's): no picker, one tap. */
+    /* One attached bot is the common case (and Kevin's): no BOT picker, one
+       tap. The MODEL picker is still offered — it is per-bot, not per-roster,
+       and this is the path his instance actually takes. */
     if(bots.length===1){
       if(sel){ sel.hidden=true; if(changed) clearEl(sel); }
       if(lbl) lbl.hidden=true;
+      syncLaunchModels();
       return;
     }
     if(lbl) lbl.hidden=false;
@@ -274,7 +410,98 @@ export function perchHubJs(lang = "en") {
         if(keep&&bots.filter(function(b){ return b.id===keep; }).length) sel.value=keep;
       }
     }
+    syncLaunchModels();
   }
+
+  /* ---- the launcher's model picker ------------------------------------
+     Models are per-bot, and the session whose model this chooses does not
+     exist yet — so this reads GET /bots/<id>/models (perch-model-catalog.js
+     behind it), NOT /interactive/<sid>/options, which is keyed on a session
+     id. It follows whichever bot the roster select is on.
+
+     \`botId\` is the roster the list belongs to; \`want\` is the fetch in
+     flight. Fetching only when the bot CHANGES matters: renderLauncher runs
+     on every 10s poll, and repopulating unconditionally would throw away the
+     operator's pick mid-tap — the same reason the bot roster itself is
+     rebuilt only on a real change. */
+  var launchModels={botId:null,default:null,want:null};
+
+  /* Which bot the launcher would spawn against right now. startNewSession()
+     resolves the same thing for the same reason; both go through here so the
+     model list and the spawn can never disagree about the bot. */
+  function launchBotId(){
+    if(!launchBots.length) return null;
+    if(launchBots.length>1){
+      var sel=el('perch-new-bot');
+      var want=sel?String(sel.value||''):'';
+      var hit=launchBots.filter(function(b){ return b.id===want; })[0];
+      if(hit) return hit.id;
+    }
+    return launchBots[0].id;
+  }
+
+  function hideLaunchModels(){
+    var sel=el('perch-new-model'), lbl=el('perch-new-model-label');
+    if(sel){ sel.hidden=true; clearEl(sel); }
+    if(lbl) lbl.hidden=true;
+    /* want cleared too, so the next poll retries a list that failed to load
+       rather than leaving the picker permanently absent. */
+    launchModels={botId:null,default:null,want:null};
+  }
+
+  function renderLaunchModels(list,dflt){
+    var sel=el('perch-new-model'), lbl=el('perch-new-model-label');
+    if(!sel) return;
+    clearEl(sel);
+    var listed=dflt&&list.filter(function(m){ return (m&&m.provider)+'/'+(m&&m.id)===dflt; }).length>0;
+    /* NO CONFIGURED DEFAULT — the common case on this instance: 3 of 5 R4 bot
+       defs carry models:null, and a def naming a since-disabled provider row
+       lands here too. Without this option nothing was preselected, the browser
+       picked option 0, and startSession() then saw a value different from the
+       (null) default and fired a REAL control() switch — so one tap on
+       "New session" silently moved the session onto whatever sorted first in
+       provider order, where spawn would have resolved model_resolver.mjs's own
+       fallback. An empty value means "send no control at all", which is
+       exactly what letting the spawn decide has to mean. */
+    if(!listed){
+      var none=document.createElement('option');
+      none.value='';                                   /* startSession(): falsy => no control() */
+      none.textContent=MODEL_BOT_RESOLVES;
+      sel.appendChild(none);
+    }
+    list.forEach(function(m){
+      var opt=document.createElement('option');
+      var key=(m&&m.provider)+'/'+(m&&m.id);
+      opt.value=key;
+      /* modelOptionText carries the availability annotation, so an
+         unavailable model reads as unavailable here exactly as it does in
+         the drawer — never a silently selectable dead choice. */
+      opt.textContent=modelOptionText(m)+(key===dflt?' \u2014 '+MODEL_BOT_DEFAULT:'');
+      sel.appendChild(opt);
+    });
+    /* Pre-selected on the bot's own configured model when there IS one: an
+       operator who does not care taps the button and gets what the bot was
+       built with. With no default the sentinel above is option 0 and the
+       browser selects it unaided — an explicit sel.value='' here was measured
+       redundant (removing it left every test green), so it is not written. */
+    if(listed) sel.value=dflt;
+    sel.hidden=false;
+    if(lbl) lbl.hidden=false;
+  }
+
+  function syncLaunchModels(){
+    var botId=launchBotId();
+    if(!botId){ hideLaunchModels(); return; }
+    if(launchModels.botId===botId||launchModels.want===botId) return;   /* shown, or in flight */
+    launchModels.want=botId;
+    perchApi('GET','/bots/'+encodeURIComponent(botId)+'/models').then(function(r){
+      if(launchModels.want!==botId) return;      /* the operator moved to another bot */
+      if(!r.ok||!r.j||!Array.isArray(r.j.models)||!r.j.models.length){ hideLaunchModels(); return; }
+      launchModels={botId:botId,default:r.j['default']||null,want:null};
+      renderLaunchModels(r.j.models,launchModels.default);
+    });
+  }
+  el('perch-new-bot').onchange=function(){ syncLaunchModels(); };
 
   /* The launch control's own handler. Resolves the bot from the picker when
      there is one, then hands off to startSession() verbatim — the 409/403/
@@ -289,7 +516,11 @@ export function perchHubJs(lang = "en") {
       var hit=launchBots.filter(function(b){ return b.id===want; })[0];
       if(hit) pick=hit;
     }
-    startSession(pick.id,pick.name);
+    /* Only a list that belongs to THIS bot may speak for it — a picker still
+       showing the previous bot's models must not choose for this spawn. */
+    var msel=el('perch-new-model');
+    var model=(msel&&!msel.hidden&&launchModels.botId===pick.id)?String(msel.value||''):'';
+    startSession(pick.id,pick.name,model);
   }
   el('perch-new').onclick=startNewSession;
 
@@ -303,6 +534,29 @@ export function perchHubJs(lang = "en") {
      resolves against the right session. current.sid is consulted only to
      decide WHERE the outcome is shown — and, on success, to leave a chat view
      whose SSE stream the engine has just closed. */
+  /* Rename, or clear a name. No confirm — this is reversible and touches no
+     child; the confirm on stopSession() below exists because THAT is
+     terminal. prompt() returning null is a CANCEL and must do nothing;
+     returning '' is a deliberate CLEAR and must go through, which is why this
+     branches on null rather than on falsiness. */
+  function renameSession(sid,currentLabel){
+    if(!sid) return;
+    var next=prompt(RENAME_PROMPT,String(currentLabel==null?'':currentLabel));
+    if(next===null) return;                       /* cancelled, not cleared */
+    perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/rename',{label:next}).then(function(r){
+      if(!r.ok){
+        if(current.sid===sid) appendNote(RENAME_FAILED); else showListNote(RENAME_FAILED);
+        return;
+      }
+      /* The engine normalizes (trim, cap, empty -> null), so the stored value
+         is what comes BACK, never what was typed. */
+      var stored=(r.j&&r.j.label)||null;
+      if(rowIndex[sid]) rowIndex[sid].label=stored;
+      if(current.sid===sid) showSessionName(stored);
+      loadList();
+    });
+  }
+
   function stopSession(sid){
     if(!sid) return;
     if(!confirm(CLOSE_CONFIRM.replace('{session}',sessionLabel(sid)))) return;
@@ -341,8 +595,10 @@ export function perchHubJs(lang = "en") {
   }
 
   /* A bot with no session: spawn, then let the hash router open it, so history
-     stays correct and the cold-deep-link path is the same code. */
-  function startSession(botId,botName){
+     stays correct and the cold-deep-link path is the same code.
+     \`modelKey\` ("provider/id", optional) is the launcher's pick. A row-driven
+     spawn passes none and behaves exactly as it always has. */
+  function startSession(botId,botName,modelKey){
     var mySid=current.sid;                  /* identity guard: a spawn resolving after the
                                                 operator has opened another session must not
                                                 yank them out of it */
@@ -359,8 +615,28 @@ export function perchHubJs(lang = "en") {
       if(r.status===409){ setLaunchNote(ENGINE_REQUIRED); return; }
       if(r.status===403){ setLaunchNote(NOT_ATTACHED); return; }
       if(!r.ok||!r.j||!r.j.sessionId){ setLaunchNote(START_FAILED); return; }
-      rowIndex[r.j.sessionId]={botId:botId,botName:botName,sessionId:r.j.sessionId};
-      location.hash=r.j.sessionId;
+      var sid=r.j.sessionId;
+      rowIndex[sid]={botId:botId,botName:botName,sessionId:sid};
+      /* The model, applied BEFORE the first message and before the operator
+         can send one. spawn() takes no model on purpose — the engine's
+         control-before-wake path already exists (perch-interactive.js:78-92)
+         and is the one the drawer's own picker uses. On a session this fresh
+         the child is up but has never run a turn, so control() warms the
+         chosen provider and set_model's it while nothing is in flight: the
+         first turn is served by it, not a later switch.
+         Nothing to do when the pick IS the bot's default — that is what the
+         spawn already resolved, and a redundant switch would warm a provider
+         twice for no change. */
+      if(!modelKey||modelKey===launchModels.default){ location.hash=sid; return; }
+      perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/control',controlBody('model',modelKey))
+        .then(function(c){
+          if(current.sid!==mySid) return;   /* same identity guard as the spawn above */
+          /* A refused switch is not a refused session: the session is real
+             and usable on the bot's own model, so say what happened and open
+             it rather than stranding a live child behind an error. */
+          if(!c.ok) setLaunchNote(LAUNCH_MODEL_FAILED);
+          location.hash=sid;
+        });
     });
   }
 
@@ -397,9 +673,54 @@ export function perchHubJs(lang = "en") {
   }
   /* Poll only while the list is showing. In the chat view the SSE stream is
      already the live signal, so polling there is pure waste. */
-  function startListPolling(){ stopListPolling(); listTimer=setInterval(loadList,10000); }
+  /* Every timer and window listener below is gated on live(): they outlive
+     the document Turbo replaces, and an ungated one is a retired instance
+     still polling, still rendering rows, still opening streams. */
+  function startListPolling(){ stopListPolling(); listTimer=setInterval(function(){ if(live()) loadList(); },10000); }
   function stopListPolling(){ if(listTimer){ clearInterval(listTimer); listTimer=null; } }
-  window.addEventListener('focus',function(){ if(body.getAttribute('data-view')==='list') loadList(); });
+
+  /* Whether the session list is ON SCREEN, which is the only thing that
+     decides whether it must keep polling — NOT which view is "current".
+     At and above the split breakpoint (perch-hub/css.js's
+     PERCH_SPLIT_MIN_WIDTH; the media query and this share the one constant)
+     .hub-split is a two-column grid and body[data-view="chat"] #perch-list is
+     display:block, so opening a session leaves the list right there beside it.
+     Stopping the poll on open therefore froze a VISIBLE list: an operator on a
+     1900px window saw "R4 Assistant / idle" with a Talk button next to the
+     awake session he was typing in, and no Close anywhere on that surface,
+     because Close only exists on a live row. */
+  /* ONE MediaQueryList per realm: window.matchMedia() mints a new object every
+     call, so a per-instance one could never be bound once. */
+  var SPLIT=HUB.split||(HUB.split=(window.matchMedia?window.matchMedia('(min-width:${PERCH_SPLIT_MIN_WIDTH}px)'):null));
+  function listOnScreen(){ return body.getAttribute('data-view')==='list'||!!(SPLIT&&SPLIT.matches); }
+  function syncListPolling(){
+    if(listOnScreen()){ startListPolling(); loadList(); }
+    else stopListPolling();                    /* below the breakpoint it really is hidden */
+  }
+  /* Crossing the breakpoint changes the answer with no view change and no
+     navigation — the same class of problem shared/layout.js's own sidebar
+     matchMedia listener handles, and the same guard: a retired instance must
+     not start polling again from here. */
+  /* addListener is the pre-2019 Safari spelling; still the only one there —
+     the shell's own breakpoint listener carries the same fallback
+     (layout.js:~620), and without it the re-evaluation silently never binds on
+     that browser. bindOnce handles the modern spelling; the legacy branch
+     repeats its bookkeeping because MediaQueryList.addListener is not
+     addEventListener. */
+  if(SPLIT&&SPLIT.addEventListener){
+    bindOnce(SPLIT,'change','splitChange',function(){ if(live()) syncListPolling(); });
+  } else if(SPLIT&&SPLIT.addListener){
+    HUB.handlers.splitChange=function(){ if(live()) syncListPolling(); };
+    if(!HUB.bound.splitChange){
+      HUB.bound.splitChange=true;
+      SPLIT.addListener(function(ev){ var h=HUB.handlers.splitChange; if(h) h(ev); });
+    }
+  }
+
+  bindOnce(window,'focus','focus',function(){
+    if(!live()) return;
+    if(listOnScreen()) loadList();
+  });
 
   /* Engine-minted ids only: "perchlive-" + 8 hex (perch-interactive.js:1473).
      A loose pattern would admit ".." and this value is concatenated into an
@@ -423,7 +744,10 @@ export function perchHubJs(lang = "en") {
     current.sid=sid;
     var mySid=sid;                          /* identity guard for every await below */
     setView('chat');
-    stopListPolling();                      /* SSE is the live signal here */
+    /* SSE is the live signal for the CHAT. It says nothing about the list,
+       which in split view is still on screen — so the poll stops only when the
+       list is genuinely hidden. */
+    syncListPolling();
     clearEl(el('perch-transcript')); clearEl(el('perch-ask'));
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     var known=rowIndex[sid];
@@ -471,7 +795,7 @@ export function perchHubJs(lang = "en") {
     var hit=parseHash(location.hash);
     if(hit) openSession(hit.sessionId); else closeSession();
   }
-  window.addEventListener('hashchange',applyHash);
+  bindOnce(window,'hashchange','hashchange',function(){ if(live()) applyHash(); });
 
   function planStateText(st){
     if(!st||typeof st!=='object') return typeof st==='string'?st:'';
@@ -512,21 +836,35 @@ export function perchHubJs(lang = "en") {
 
   var stream=null;
 
+  /** Drop \`es\` from the shared registry, whoever put it there. */
+  function unregisterStream(es){
+    for(var k in HUB.streams){ if(HUB.streams[k]===es) delete HUB.streams[k]; }
+  }
+
   function closeStream(){
     cancelReconnect();                 /* timer only — NOT the retry counter */
     var es=stream; stream=null;        /* null FIRST: idempotent under a double call
                                           from openSession + hashchange */
-    if(es){ try{ es.close(); }catch(e){} }
+    if(es){ try{ es.close(); }catch(e){} unregisterStream(es); }
   }
 
   function openStream(sid){
     closeStream();
+    /* EXPLICIT REPLACE, by identity. closeStream() above can only reach the
+       connection THIS instance holds; a stream opened for this session by an
+       older instance (or by a path that lost its handle) is named only by the
+       registry, and leaving it open is what multiplied every streamed event
+       by the number of surviving instances. */
+    var prev=HUB.streams[sid];
+    if(prev){ try{ prev.close(); }catch(e){} delete HUB.streams[sid]; }
     var es=new EventSource(API+'/interactive/'+encodeURIComponent(sid)+'/events');
     stream=es;
+    HUB.streams[sid]=es;
     es.onopen=function(){ resetBackoff(); };
 
     var on=function(type,fn){
       es.addEventListener(type,function(ev){
+        if(!live()) return;                           /* a retired instance never writes */
         if(current.sid!==sid) return;                 /* identity guard, every listener */
         /* A native EventSource connection failure delivers a type "error"
            Event to every listener registered for "error" via addEventListener
@@ -542,16 +880,56 @@ export function perchHubJs(lang = "en") {
     on('state',function(d){
       setTurnInFlight(turnFlagFor(d));
       el('perch-state').textContent=d.state||'';
+      /* The engine echoes the label on every state frame, so a rename made
+         from the list row (or another tab) shows up here without a reload. */
+      if(rowIndex[sid]) rowIndex[sid].label=d.label||null;
+      showSessionName(d.label||null);
       /* Reflects the engine's own record (snapshot()/stateEvent() in
          perch-interactive.js), never the picker back at it — setting
          .value/.checked does not fire change, so this cannot loop. */
+      /* d.model is servingModel(): pi's own /model, an auto-fallback, or the
+         echo of our own switch. It was on the wire all along and ignored —
+         which is how the picker came to assert a model nobody measured. */
+      var modelSel=el('perch-model');
+      if(modelSel&&d.model&&!modelSel.disabled) selectCurrentModel(modelSel,d.model);
       if(d.permissionMode){ var permSel=el('perch-permission'); if(permSel) permSel.value=d.permissionMode; }
       var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=!!d.planMode;
     });
-    on('text',function(d){ appendMessage('bot','bot',d.text||''); });
+    /* MESSAGE-LEVEL, not delta-level (perch-interactive.js:1257 says so
+       outright): one frame per COMPLETED assistant message, so each is
+       rendered on arrival and nothing has to be patched afterwards. */
+    on('text',function(d){
+      /* The engine only emits \`text\` for a NON-EMPTY assistant message
+         (perch-interactive.js's message_end branch), so an empty one here is a
+         frame whose JSON did not parse — on()'s \`d={}\` fallback. Appending it
+         put an empty entry in the transcript AND marked the turn rendered,
+         suppressing the real reply. Skip it entirely. */
+      if(!d.text) return;
+      appendMessage('bot','bot',d.text,d.html);
+      if(d.turnId) renderedTurn=d.turnId; else turnRendered=true;
+    });
     on('tool',function(d){ if(d.phase==='start') appendNote('['+(d.name||'?')+']'); });
     on('log',function(d){ if(d.text) appendNote(d.text); });
-    on('reply',function(d){ appendMessage('bot','bot',d.text||''); setTurnInFlight(false); });
+    /* \`reply\` carries replyTextOf(end) — every assistant message of the turn
+       CONCATENATED — so appending it unconditionally rendered a two-message
+       turn three times: each message, then both again as one block. It cannot
+       simply stop being handled either: it clears the turn flag, and its text
+       comes from the agent_end the engine was handed rather than the child's
+       accumulating log (which trimLog() empties), so it is the more
+       authoritative source when it is the only one.
+       So: append ONLY when nothing rendered for this turn. That case is real,
+       not theoretical — the stream carries no backlog, so an operator who
+       opens the drawer mid-turn sees no \`text\` frames for the messages already
+       streamed, and \`reply\` is the only copy of that answer they will get.
+       Flag read BEFORE setTurnInFlight(false), which is what resets it. */
+    on('reply',function(d){
+      /* Judged against THIS turn when the frame names one, and only against the
+         client's transition flag when it does not. Read before
+         setTurnInFlight(false), which is what resets that flag. */
+      var already=d.turnId?(renderedTurn===d.turnId):turnRendered;
+      if(!already&&d.text) appendMessage('bot','bot',d.text,d.html);
+      setTurnInFlight(false);
+    });
     on('ask_user',function(d){ renderAsk(d); });
     on('error',function(d){ appendNote(d.text||'error'); });
     on('plan_state',function(d){ var t=planStateText(d.state); if(t) appendNote(t); });
@@ -583,9 +961,20 @@ export function perchHubJs(lang = "en") {
     es.onerror=onStreamError;
   }
 
+  /* The name line in the chat header. textContent and \`hidden\` only — the
+     value is operator free text and must never reach an HTML sink. */
+  function showSessionName(label){
+    var e=el('perch-session-name'); if(!e) return;
+    e.textContent=label==null?'':String(label);
+    e.hidden=!label;
+  }
   function showHeader(botId,botName){
     el('perch-bot-name').textContent=botName||botId;
+    /* The session id stays here, unchanged and on its own: it is the identity
+       the close confirm and every API path use. */
     el('perch-session-meta').textContent=current.sid||'';
+    var known=rowIndex[current.sid];
+    showSessionName(known?known.label:null);
   }
   /* Bounded backoff. TWO separate operations, and conflating them is what made
      an earlier draft of this dead code: cancelling the TIMER must not reset the
@@ -602,6 +991,7 @@ export function perchHubJs(lang = "en") {
     appendNote(RECONNECTING);
     var mySid=current.sid;                          /* no parameter to get wrong */
     retryTimer=setTimeout(function(){
+      if(!live()) return;                           /* retired mid-backoff */
       if(current.sid!==mySid) return;               /* navigated away mid-backoff */
       openStream(mySid);
     },2000);
@@ -612,20 +1002,35 @@ export function perchHubJs(lang = "en") {
     perchApi('GET','/bots/'+encodeURIComponent(botId)+'/sessions/'+encodeURIComponent(sid)+'/transcript')
       .then(function(r){
         if(current.sid!==mySid) return;            /* identity guard, as everywhere */
-        var events=(r.ok&&r.j&&r.j.events)||[];
+        /* A FAILED FETCH IS NOT AN EMPTY TRANSCRIPT. The old
+           \`(r.ok&&r.j&&r.j.events)||[]\` collapsed a 500, a dropped tunnel and
+           a logged-out session into the same "No transcript yet." — a
+           reassuring sentence about a conversation that is still there. Say
+           which happened. */
+        if(!r.ok||!r.j){ appendNote(TRANSCRIPT_FAILED); return; }
+        var events=r.j.events||[];
         if(!events.length){ appendNote(NO_TRANSCRIPT); return; }
         events.filter(function(e){ return e&&e.type==='message'; }).forEach(function(e){
           var m=e.message||{};
-          appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), messageText(m));
+          /* e.html is present only for an ASSISTANT message that had text
+             (routes/perch.js's assistantHtml) — the operator's own typing is
+             not markdown, and a pure tool-call message still renders as
+             messageText()'s "[tool: name]" line. */
+          appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), messageText(m), e.html);
         });
       });
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
-     mode, plan mode. Both models and thinkingLevels are null while the
-     session hibernates (perch-interactive.js:1877): the engine will not
-     wake a child merely to list, so optionsUsable() gates a DISABLED pair
-     of selects rather than an empty-but-enabled one. */
+     mode, plan mode.
+     The two lists are gated SEPARATELY, because they no longer arrive or
+     fail together. A hibernating session now answers with the instance's
+     provider catalogue for \`models\` and \`thinkingLevels: null\` (the engine's
+     options() doc says why: a model switch made while asleep binds at the
+     next wake and really works, a thinking switch does nothing at all). A
+     single shared gate would therefore disable the picker that WORKS because
+     of the one that does not — which is exactly the empty, dead model
+     dropdown this fixes. */
   /* "up" is deliberately undecorated: a working choice should read as the
      plain default. The name is on the payload; the drawer read m.label, which
      no provider row sets, and every model listed as provider/id for months. */
@@ -636,31 +1041,61 @@ export function perchHubJs(lang = "en") {
     return text;
   }
 
-  function optionsUsable(o){
-    return !!(o&&Array.isArray(o.models)&&o.models.length
-              &&Array.isArray(o.thinkingLevels)&&o.thinkingLevels.length);
+  /* One list, one answer: a non-empty array is usable, anything else (null,
+     [], absent, a non-array) is not. THE gate for both pickers — an
+     \`optionsUsable()\` that ANDed the two lists together lived here until fix
+     round 1 Q5 found it was called by nothing but its own tests. */
+  function listUsable(a){ return !!(Array.isArray(a)&&a.length); }
+
+  /* Point the model select at the model the session is ACTUALLY on.
+
+     Fix round 1 Q1: nothing ever assigned modelSel.value, so a populated
+     select read whichever option sorted first and asserted a model the
+     session had never been measured on — on the one control this feature
+     exists for, answering "which model is this session running?" wrongly.
+     The empty disabled select it replaced was unhelpful but honest.
+
+     A key the list does not carry is still the truth (a provider row removed
+     since the session started, or a model pi resolved on its own), so it is
+     PREPENDED rather than dropped: selecting nothing at all would report the
+     same "don't know" as before. */
+  function selectCurrentModel(sel,current){
+    if(!sel||!current) return;
+    for(var i=0;i<sel.options.length;i++){
+      if(sel.options[i].value===current){ sel.value=current; return; }
+    }
+    var opt=document.createElement('option');
+    opt.value=current;
+    opt.textContent=current+' \u2014 '+MODEL_CURRENT_UNLISTED;
+    sel.insertBefore(opt,sel.firstChild);
+    sel.value=current;
   }
 
   /* Populates #perch-model / #perch-thinking from GET .../options, or
-     disables both rather than leaving an empty-but-enabled dropdown — that
+     disables each rather than leaving an empty-but-enabled dropdown — that
      is what made a hibernating session look broken. */
   function renderOptions(o){
     var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
     if(!modelSel||!thinkSel) return;
     clearEl(modelSel); clearEl(thinkSel);
-    if(!optionsUsable(o)){ modelSel.disabled=true; thinkSel.disabled=true; return; }
-    o.models.forEach(function(m){
+    var models=(o&&listUsable(o.models))?o.models:null;
+    var levels=(o&&listUsable(o.thinkingLevels))?o.thinkingLevels:null;
+    if(models) models.forEach(function(m){
       var opt=document.createElement('option');
       opt.value=(m&&m.provider)+'/'+(m&&m.id);
       opt.textContent=modelOptionText(m);
       modelSel.appendChild(opt);
     });
-    o.thinkingLevels.forEach(function(lv){
+    if(levels) levels.forEach(function(lv){
       var opt=document.createElement('option');
       opt.value=lv; opt.textContent=lv;
       thinkSel.appendChild(opt);
     });
-    modelSel.disabled=false; thinkSel.disabled=false;
+    /* Each select is enabled iff ITS OWN list arrived — never an empty
+       dropdown that looks like a broken page, and never a disabled one for a
+       list that is right there. */
+    modelSel.disabled=!models; thinkSel.disabled=!levels;
+    if(models) selectCurrentModel(modelSel,o&&o.current);
   }
 
   function loadOptions(sid){
@@ -678,9 +1113,12 @@ export function perchHubJs(lang = "en") {
     var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
     if(modelSel){ clearEl(modelSel); modelSel.disabled=true; }
     if(thinkSel){ clearEl(thinkSel); thinkSel.disabled=true; }
+    showSessionName(null);       /* the PREVIOUS session's name must not bleed in */
     var permSel=el('perch-permission'); if(permSel) permSel.value='guarded';
     var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
     setTurnInFlight(false);      /* the PREVIOUS session's Steer/Stop state must not bleed in */
+    turnRendered=false;          /* nor its "this turn already rendered" bookkeeping */
+    renderedTurn=null;           /* nor the turn id that bookkeeping now keys on */
     pendingImages=[];            /* nor its queued-but-unsent image */
   }
 
@@ -711,8 +1149,40 @@ export function perchHubJs(lang = "en") {
   }
 
   var turnInFlight=false;
+  /* Which turn the transcript has already rendered text for.
+
+     Fix round 2 N1: the previous version of this was a BOOLEAN reset on the
+     false->true turnInFlight transition, and it survived a stream teardown. A
+     reconnect that missed the separating turnInFlight:false frame — a 2s blip
+     inside the client's own backoff, with turn 1 ending and turn 2 running
+     inside it — therefore left the flag stale-true and suppressed turn 2's
+     reply entirely. The engine's replay-on-subscribe does NOT close that: the
+     replayed frame is turnInFlight:true and the client is already true, so
+     there is no transition and no reset. Measured: turn 2's answer never
+     rendered at all, which is worse than the duplicate the flag exists to
+     prevent.
+
+     Identity, not memory, is the fix: the frames now carry the turn they
+     belong to, so \`reply\` judges its OWN turn. A cross-turn reconnect sees a
+     different id and renders; a SAME-turn reconnect sees the same id and stays
+     suppressed. The bare alternative — resetting the flag in openStream() —
+     fixes the first case by reintroducing the second, and that trade is the
+     reason this is a turn id instead. */
+  var renderedTurn=null;
+  /* The fallback for a frame that carries NO turn id (the child speaking
+     outside a turn, or a gateway older than this script). Same transition-reset
+     rule as before, and the same reason for it: several turnInFlight:true
+     frames land inside one turn. */
+  var turnRendered=false;
   function setTurnInFlight(flag){
-    turnInFlight=!!flag;
+    var next=!!flag;
+    /* Reset on the false->TRUE TRANSITION only. stateEvent() is emitted for
+       model_select, ask_user and aborts as well as turn start, so several
+       frames carrying turnInFlight:true can land between the first \`text\` and
+       the \`reply\` — resetting on every true frame would put the duplicate
+       straight back. */
+    if(next&&!turnInFlight) turnRendered=false;
+    turnInFlight=next;
     el('perch-send').textContent=turnInFlight?STEER_LABEL:SEND_LABEL;
     el('perch-abort').style.display=turnInFlight?'':'none';
   }
@@ -881,17 +1351,22 @@ export function perchHubJs(lang = "en") {
   }
   el('perch-abort').onclick=abortTurn;
   el('perch-close').onclick=function(){ stopSession(current.sid); };
+  el('perch-rename').onclick=function(){
+    var known=rowIndex[current.sid];
+    renameSession(current.sid,(known&&known.label)||'');
+  };
 
   /* iOS does not shrink the layout viewport for the keyboard, so dvh alone
      leaves the composer behind it. Offset the chat column by the hidden part. */
   if(window.visualViewport){
     var vv=window.visualViewport;
     var applyVV=function(){
+      if(!live()) return;
       var hidden=Math.max(0,window.innerHeight-vv.height-vv.offsetTop);
       el('perch-chat').style.paddingBottom=hidden?hidden+'px':'';
     };
-    vv.addEventListener('resize',applyVV);
-    vv.addEventListener('scroll',applyVV);
+    bindOnce(vv,'resize','vvResize',applyVV);
+    bindOnce(vv,'scroll','vvScroll',applyVV);
   }
 
   /* BOOTSTRAP — a hashchange event fires only on a LATER change to the hash;
