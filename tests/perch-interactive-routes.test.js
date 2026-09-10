@@ -50,6 +50,12 @@ let liveCardId, archivedCardId, itemId;
  * individual tests overwrite whichever methods they need to observe or fail. */
 let engineImpl;
 let engineCalls;
+/** The session-free provider catalogue GET /bots/:id/models serves. Injected
+ * for the same reason `annotate` is: the real one reads this host's provider
+ * DB / models.json. Its own shaping is covered in
+ * tests/perch-model-catalog.test.js. */
+let catalogueImpl;
+let catalogueCalls;
 
 function raw() {
   return new Database(DB_FILE);
@@ -187,6 +193,7 @@ before(async () => {
   app.use(perchInteractiveApiRouter(fakeAuth, {
     engine: () => engineImpl,
     annotate: async (models) => models.map((m) => ({ ...m, availability: "up" })),
+    providerModels: () => { catalogueCalls++; return catalogueImpl; },
   }));
 
   await new Promise((r) => { server = app.listen(0, "127.0.0.1", r); });
@@ -201,6 +208,11 @@ after(() => {
 
 beforeEach(() => {
   _setEngineStatusForTest({ state: "ready", source: "test", cliPath: "/nonexistent/pi" });
+  catalogueCalls = 0;
+  catalogueImpl = [
+    { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1" },
+    { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1" },
+  ];
   engineCalls = {
     spawn: [], message: [], steer: [], answer: [], abort: [], stop: [], get: [], subscribe: [],
     checkCardFree: [], attachCard: [], control: [], cycle: [], options: [],
@@ -834,10 +846,13 @@ test("GET /interactive/:sid/options 200s with the engine's models/thinkingLevels
   assert.deepEqual(engineCalls.options, [{ sid: "sess-1" }]);
 });
 
-test("GET /interactive/:sid/options passes models:null through — a hibernating session is not annotated", async () => {
-  // The null arrays are how the engine says "I did not wake a child just to
-  // list", and the drawer disables both pickers on them. Annotating would turn
-  // that into an empty list, which reads as "no models exist".
+test("GET /interactive/:sid/options passes a null list through unannotated", async () => {
+  // A null is how the engine says "there is no list for this one", and the
+  // drawer disables that ONE picker on it. Annotating would turn it into an
+  // empty array, which reads as "no models exist". The real engine now sends
+  // null only for thinkingLevels (a hibernating session's models come from the
+  // provider catalogue); the passthrough is pinned for both, because the route
+  // must not start inventing a shape the engine did not send.
   engineImpl.options = async () => ({ models: null, thinkingLevels: null });
   const { status, body } = await getJson("/interactive/sess-1/options");
   assert.equal(status, 200);
@@ -850,6 +865,60 @@ test("GET /interactive/:sid/options 404s no_such_session", async () => {
   const { status, body } = await getJson("/interactive/sess-1/options");
   assert.equal(status, 404);
   assert.equal(body.error, "no_such_session");
+});
+
+// ---------------------------------------------------------------------------
+// GET /bots/:id/models — the launcher's session-free list
+// ---------------------------------------------------------------------------
+
+test("GET /bots/:id/models 200s with the annotated catalogue and the bot's configured default", async () => {
+  const { status, body } = await getJson("/bots/chatty/models");
+  assert.equal(status, 200);
+  assert.deepEqual(body.models, [
+    { provider: "local", id: "qwen", name: "Qwen", baseUrl: "http://x:8003/v1", availability: "up" },
+    { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1", availability: "up" },
+  ], "annotated for the same reason the options route annotates: an unavailable model must read as unavailable");
+  assert.equal(body.default, "local/qwen", "so the picker can open pre-selected and launching stays one tap");
+});
+
+test("GET /bots/:id/models 409s engine_required, and never builds a list for a spawn that cannot happen", async () => {
+  _setEngineStatusForTest({ state: "absent" });
+  const { status, body } = await getJson("/bots/chatty/models");
+  assert.equal(status, 409);
+  assert.equal(body.error, "engine_required");
+  assert.equal(catalogueCalls, 0, "the same gate, in the same order, as the sibling spawn route");
+});
+
+test("GET /bots/:id/models 403s perch_not_attached — a bot that would 403 on spawn offers no models", async () => {
+  const { status, body } = await getJson("/bots/quiet/models");
+  assert.equal(status, 403);
+  assert.equal(body.error, "perch_not_attached");
+  assert.equal(catalogueCalls, 0);
+});
+
+test("GET /bots/:id/models on an unknown bot resolves to perch_not_attached, exactly like the spawn route", async () => {
+  const { status, body } = await getJson("/bots/does-not-exist/models");
+  assert.equal(status, 403);
+  assert.equal(body.error, "perch_not_attached");
+});
+
+test("GET /bots/:id/models reports a default with no catalogue entry rather than hiding it", async () => {
+  // A default naming a provider row that has since been disabled is a fact the
+  // operator should see (the picker will show nothing selected), not one to
+  // quietly drop.
+  catalogueImpl = [{ provider: "raven-flash", id: "flash-next", baseUrl: "http://y:8010/v1" }];
+  const { status, body } = await getJson("/bots/chatty/models");
+  assert.equal(status, 200);
+  assert.equal(body.default, "local/qwen");
+  assert.deepEqual(body.models.map((m) => m.provider + "/" + m.id), ["raven-flash/flash-next"]);
+});
+
+test("GET /bots/:id/models on a bot with no configured model answers default:null, not \"undefined\"", async () => {
+  seedBot("modelless", { gateways: [{ type: "perch" }], tools: {} }, { name: "Modelless" });
+  const { status, body } = await getJson("/bots/modelless/models");
+  assert.equal(status, 200);
+  assert.equal(body.default, null);
+  assert.equal(body.models.length, 2);
 });
 
 // ---------------------------------------------------------------------------

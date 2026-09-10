@@ -49,6 +49,7 @@ import { getInteractiveEngine } from "../perch-interactive.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard } from "../board/card-service.js";
 import { annotateAvailability } from "../model-availability.js";
+import { providerModelList } from "../perch-model-catalog.js";
 
 /** Mount prefix. Every route below is registered under it, after the auth gate. */
 const P = "/dashboard/perch-api";
@@ -245,7 +246,7 @@ async function loadBotRow(db, botId) {
  *   directly — what every fake-engine test below injects, so a turn is never
  *   driven and no pi is ever spawned.
  */
-export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability } = {}) {
+export default function perchInteractiveApiRouter(dashboardAuth, { engine = getInteractiveEngine, annotate = annotateAvailability, providerModels = providerModelList } = {}) {
   const router = Router();
 
   // FIRST statement: auth-gate the whole prefix (perch.js / bot-board-api idiom).
@@ -284,6 +285,47 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       const eng = resolveEngine();
       const result = await eng.spawn({ botId });
       res.status(201).json(result);
+    } catch (err) {
+      mapEngineError(res, err);
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  });
+
+  // ---- GET /bots/:id/models — the launcher's model list, no session needed ----
+  // The picker beside "New session" has to offer a model BEFORE the session
+  // that would list one exists, and `GET /interactive/:sid/options` cannot
+  // help: it is keyed on a session id. This is that list, from the same
+  // session-free catalogue options() falls back to (perch-model-catalog.js) —
+  // one source, so the launcher and a hibernating session's drawer can never
+  // show two different answers about what this instance serves.
+  //
+  // SAME GATES AS THE SPAWN ROUTE ABOVE, in the same order and for the same
+  // reasons: a bot that would 403 on spawn must not be offered a model list.
+  // Anything else would let the launcher build a picker for a session it can
+  // never start.
+  //
+  // `default` is the bot's own configured model (definition.models.default,
+  // the "provider/id" key model_resolver.mjs reads), so the client can open
+  // pre-selected on it and launching stays one tap. It is reported even when
+  // no catalogue entry matches it — a default naming a provider row that has
+  // since been disabled is a fact the operator should see, not one to hide.
+  router.get(P + "/bots/:id/models", async (req, res) => {
+    const botId = String(req.params.id);
+    const db = createDbClient();
+    try {
+      const row = await loadBotRow(db, botId);
+      if (resolveEngineStatus().state !== "ready") return jsonError(res, 409, "engine_required");
+      const def = row ? parseDef(row) : {};
+      if (!perchAttached(def)) return jsonError(res, 403, "perch_not_attached");
+
+      // Annotated for the same reason the options route annotates: an
+      // unavailable model must be visibly unavailable, never silently
+      // selectable (model-availability.js's header).
+      const models = await annotate(providerModels());
+      const dflt = def.models && typeof def.models.default === "string" && def.models.default
+        ? def.models.default : null;
+      res.json({ models, default: dflt });
     } catch (err) {
       mapEngineError(res, err);
     } finally {
@@ -563,8 +605,15 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // picker can say which choices actually work. Without it a provider row
   // pointing at a windowed endpoint (`crow-dsv4` → 127.0.0.1:8020) is
   // indistinguishable from a serving one, and picking it fails every turn on
-  // connection refused. `models: null` is the hibernating contract and is
-  // passed through untouched — the drawer disables the picker on it.
+  // connection refused.
+  //
+  // A HIBERNATING session no longer answers `models: null` here: the engine
+  // falls back to the session-free provider catalogue (perch-interactive.js's
+  // options() doc), so the list annotated below is the child's when there is a
+  // child and the instance's otherwise. `thinkingLevels` is still null in that
+  // state — control()'s thinking branch does nothing without a child — and a
+  // null of either kind is passed through untouched for the drawer to disable
+  // that one picker on.
   router.get(P + "/interactive/:sid/options", async (req, res) => {
     try {
       const eng = resolveEngine();

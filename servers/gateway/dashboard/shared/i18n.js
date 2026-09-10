@@ -2269,6 +2269,12 @@ export const translations = {
   "perch.fileFailed": { en: "The image did not upload.", es: "La imagen no se subió." },
   "perch.newSession": { en: "New session", es: "Nueva sesión" },
   "perch.newSessionBot": { en: "Bot", es: "Bot" },
+  "perch.newSessionModel": { en: "Model", es: "Modelo" },
+  "perch.modelBotDefault": { en: "bot default", es: "predeterminado del bot" },
+  "perch.launchModelFailed": {
+    en: "The session started on the bot's own model; the switch did not take.",
+    es: "La sesión se inició con el modelo propio del bot; el cambio no se aplicó.",
+  },
   "perch.noAttachedBots": {
     en: "No bot has a Perch channel attached, so there is nothing to start.",
     es: "Ningún bot tiene un canal Perch, así que no hay nada que iniciar.",

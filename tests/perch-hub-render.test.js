@@ -68,6 +68,17 @@ function serveApi(req, res) {
     return;
   }
   if (url.endsWith("/options")) return send(200, { models: [], thinkingLevels: [] });
+  // The launcher's session-free list, with a long name on purpose: the thing
+  // that must never happen at 412px is a model name pushing New session off
+  // the screen.
+  if (url.endsWith("/models")) return send(200, {
+    models: [
+      { provider: "crow-local", id: "qwen3.6-35b-a3b",
+        name: "Qwen3.6 35B A3B (Crow, Q5_K_XL MTP+vision, 256K)", availability: "up" },
+      { provider: "crow-dsv4", id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash", availability: "unavailable" },
+    ],
+    default: "crow-local/qwen3.6-35b-a3b",
+  });
   if (url.endsWith("/transcript")) return send(200, { events: [] });
   if (url.endsWith("/interactive") && req.method === "POST") return send(200, { sessionId: "perchlive-99999999" });
   return send(200, {});
@@ -505,5 +516,70 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.notePadding, "0px",
         "the note's own padding rule must win the cascade, not merely exist");
     } finally { roostFails = false; await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The launcher's model picker, live at both viewports. A 44px floor argued
+// from the cascade is how #perch-close shipped at 36px; these measure it.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`M1 live @${w}x${h}: the model picker is on screen, thumb-sized, and does not push New session off`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const seen = await s.json(`(function(){
+        var box=function(id){ var e=document.getElementById(id), r=e.getBoundingClientRect();
+          return { hidden:e.hidden, w:Math.round(r.width), h:Math.round(r.height),
+                   top:Math.round(r.top), bottom:Math.round(r.bottom),
+                   inViewport: r.top>=0 && r.bottom<=innerHeight && r.left>=0 && r.right<=innerWidth,
+                   hit:(function(){ var el=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+                                    return !!el && (el===e || e.contains(el)); })() }; };
+        var sel=document.getElementById('perch-new-model');
+        var doc=document.documentElement;
+        return JSON.stringify({ model:box('perch-new-model'), newBtn:box('perch-new'),
+          value: sel.value, options: Array.prototype.map.call(sel.options,function(o){return o.textContent;}),
+          hScroll: doc.scrollWidth > doc.clientWidth });
+      })()`);
+      assert.equal(seen.model.hidden, false, "the picker must be there once the list arrives");
+      assert.equal(seen.model.inViewport, true,
+        `the picker sits at ${seen.model.top}-${seen.model.bottom} in a ${h}px viewport`);
+      assert.equal(seen.model.hit, true, "and nothing overlaps it");
+      assert.ok(seen.model.h >= 44, `tap target ${seen.model.w}x${seen.model.h} is too small for a thumb`);
+      assert.equal(seen.value, "crow-local/qwen3.6-35b-a3b", "opened on the bot's configured model");
+      assert.match(seen.options[1], /not running/, "an unavailable model must read as unavailable");
+      // The regression a long model name would cause.
+      assert.equal(seen.newBtn.inViewport, true,
+        `New session at ${seen.newBtn.top}-${seen.newBtn.bottom} in a ${h}px viewport`);
+      assert.equal(seen.newBtn.hit, true);
+      assert.ok(seen.newBtn.h >= 44, `New session is ${seen.newBtn.w}x${seen.newBtn.h}`);
+      assert.equal(seen.hScroll, false, "no horizontal scroll at " + w + "px");
+    } finally { await s.close(); }
+  });
+
+  test(`M1 live @${w}x${h}: the picker does not disturb Send reachability`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      const m = await s.json(`(function(){
+        document.body.setAttribute('data-view','chat');
+        var tr=document.getElementById('perch-transcript');
+        for(var i=0;i<60;i++){ var d=document.createElement('div');
+          d.textContent='bot: a transcript line long enough to take a row or two, number '+i;
+          tr.appendChild(d); }
+        tr.scrollTop=0;
+        var cb=document.querySelector('.content-body');
+        var b=document.getElementById('perch-send').getBoundingClientRect();
+        return JSON.stringify({ viewport:innerHeight, top:Math.round(b.top), bottom:Math.round(b.bottom),
+          reachable: b.bottom<=innerHeight && b.top>=0,
+          contentBodyScroll: cb.scrollHeight-cb.clientHeight });
+      })()`);
+      assert.equal(m.reachable, true, `Send at ${m.top}-${m.bottom} in a ${m.viewport}px viewport`);
+      assert.equal(m.contentBodyScroll, 0,
+        "the flex chain must still be the mechanism — a taller launcher must not make .content-body scroll");
+    } finally { await s.close(); }
   });
 }

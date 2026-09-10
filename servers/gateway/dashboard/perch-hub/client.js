@@ -191,6 +191,8 @@ export function perchHubJs(lang = "en") {
   var ASK_CANCEL='${tJs("perch.askCancel", lang)}';
   var ASK_SUBMIT='${tJs("perch.askSubmit", lang)}';
   var NO_ATTACHED_BOTS='${tJs("perch.noAttachedBots", lang)}';
+  var MODEL_BOT_DEFAULT='${tJs("perch.modelBotDefault", lang)}';
+  var LAUNCH_MODEL_FAILED='${tJs("perch.launchModelFailed", lang)}';
   var CLOSE_LABEL='${tJs("perch.close", lang)}';
   var CLOSE_CONFIRM='${tJs("perch.closeConfirm", lang)}';
   var CLOSE_FAILED='${tJs("perch.closeFailed", lang)}';
@@ -302,14 +304,18 @@ export function perchHubJs(lang = "en") {
       if(sel){ sel.hidden=true; if(changed) clearEl(sel); }
       if(lbl) lbl.hidden=true;
       setLaunchNote(NO_ATTACHED_BOTS);
+      hideLaunchModels();          /* no bot, no model list that means anything */
       return;
     }
     btn.disabled=false;
     setLaunchNote('');
-    /* One attached bot is the common case (and Kevin's): no picker, one tap. */
+    /* One attached bot is the common case (and Kevin's): no BOT picker, one
+       tap. The MODEL picker is still offered — it is per-bot, not per-roster,
+       and this is the path his instance actually takes. */
     if(bots.length===1){
       if(sel){ sel.hidden=true; if(changed) clearEl(sel); }
       if(lbl) lbl.hidden=true;
+      syncLaunchModels();
       return;
     }
     if(lbl) lbl.hidden=false;
@@ -329,7 +335,79 @@ export function perchHubJs(lang = "en") {
         if(keep&&bots.filter(function(b){ return b.id===keep; }).length) sel.value=keep;
       }
     }
+    syncLaunchModels();
   }
+
+  /* ---- the launcher's model picker ------------------------------------
+     Models are per-bot, and the session whose model this chooses does not
+     exist yet — so this reads GET /bots/<id>/models (perch-model-catalog.js
+     behind it), NOT /interactive/<sid>/options, which is keyed on a session
+     id. It follows whichever bot the roster select is on.
+
+     \`botId\` is the roster the list belongs to; \`want\` is the fetch in
+     flight. Fetching only when the bot CHANGES matters: renderLauncher runs
+     on every 10s poll, and repopulating unconditionally would throw away the
+     operator's pick mid-tap — the same reason the bot roster itself is
+     rebuilt only on a real change. */
+  var launchModels={botId:null,default:null,want:null};
+
+  /* Which bot the launcher would spawn against right now. startNewSession()
+     resolves the same thing for the same reason; both go through here so the
+     model list and the spawn can never disagree about the bot. */
+  function launchBotId(){
+    if(!launchBots.length) return null;
+    if(launchBots.length>1){
+      var sel=el('perch-new-bot');
+      var want=sel?String(sel.value||''):'';
+      var hit=launchBots.filter(function(b){ return b.id===want; })[0];
+      if(hit) return hit.id;
+    }
+    return launchBots[0].id;
+  }
+
+  function hideLaunchModels(){
+    var sel=el('perch-new-model'), lbl=el('perch-new-model-label');
+    if(sel){ sel.hidden=true; clearEl(sel); }
+    if(lbl) lbl.hidden=true;
+    /* want cleared too, so the next poll retries a list that failed to load
+       rather than leaving the picker permanently absent. */
+    launchModels={botId:null,default:null,want:null};
+  }
+
+  function renderLaunchModels(list,dflt){
+    var sel=el('perch-new-model'), lbl=el('perch-new-model-label');
+    if(!sel) return;
+    clearEl(sel);
+    list.forEach(function(m){
+      var opt=document.createElement('option');
+      var key=(m&&m.provider)+'/'+(m&&m.id);
+      opt.value=key;
+      /* modelOptionText carries the availability annotation, so an
+         unavailable model reads as unavailable here exactly as it does in
+         the drawer — never a silently selectable dead choice. */
+      opt.textContent=modelOptionText(m)+(key===dflt?' \u2014 '+MODEL_BOT_DEFAULT:'');
+      sel.appendChild(opt);
+    });
+    /* Pre-selected on the bot's own configured model: an operator who does
+       not care taps the button and gets what the bot was built with. */
+    if(dflt&&list.filter(function(m){ return (m&&m.provider)+'/'+(m&&m.id)===dflt; }).length) sel.value=dflt;
+    sel.hidden=false;
+    if(lbl) lbl.hidden=false;
+  }
+
+  function syncLaunchModels(){
+    var botId=launchBotId();
+    if(!botId){ hideLaunchModels(); return; }
+    if(launchModels.botId===botId||launchModels.want===botId) return;   /* shown, or in flight */
+    launchModels.want=botId;
+    perchApi('GET','/bots/'+encodeURIComponent(botId)+'/models').then(function(r){
+      if(launchModels.want!==botId) return;      /* the operator moved to another bot */
+      if(!r.ok||!r.j||!Array.isArray(r.j.models)||!r.j.models.length){ hideLaunchModels(); return; }
+      launchModels={botId:botId,default:r.j['default']||null,want:null};
+      renderLaunchModels(r.j.models,launchModels.default);
+    });
+  }
+  el('perch-new-bot').onchange=function(){ syncLaunchModels(); };
 
   /* The launch control's own handler. Resolves the bot from the picker when
      there is one, then hands off to startSession() verbatim — the 409/403/
@@ -344,7 +422,11 @@ export function perchHubJs(lang = "en") {
       var hit=launchBots.filter(function(b){ return b.id===want; })[0];
       if(hit) pick=hit;
     }
-    startSession(pick.id,pick.name);
+    /* Only a list that belongs to THIS bot may speak for it — a picker still
+       showing the previous bot's models must not choose for this spawn. */
+    var msel=el('perch-new-model');
+    var model=(msel&&!msel.hidden&&launchModels.botId===pick.id)?String(msel.value||''):'';
+    startSession(pick.id,pick.name,model);
   }
   el('perch-new').onclick=startNewSession;
 
@@ -396,8 +478,10 @@ export function perchHubJs(lang = "en") {
   }
 
   /* A bot with no session: spawn, then let the hash router open it, so history
-     stays correct and the cold-deep-link path is the same code. */
-  function startSession(botId,botName){
+     stays correct and the cold-deep-link path is the same code.
+     \`modelKey\` ("provider/id", optional) is the launcher's pick. A row-driven
+     spawn passes none and behaves exactly as it always has. */
+  function startSession(botId,botName,modelKey){
     var mySid=current.sid;                  /* identity guard: a spawn resolving after the
                                                 operator has opened another session must not
                                                 yank them out of it */
@@ -414,8 +498,28 @@ export function perchHubJs(lang = "en") {
       if(r.status===409){ setLaunchNote(ENGINE_REQUIRED); return; }
       if(r.status===403){ setLaunchNote(NOT_ATTACHED); return; }
       if(!r.ok||!r.j||!r.j.sessionId){ setLaunchNote(START_FAILED); return; }
-      rowIndex[r.j.sessionId]={botId:botId,botName:botName,sessionId:r.j.sessionId};
-      location.hash=r.j.sessionId;
+      var sid=r.j.sessionId;
+      rowIndex[sid]={botId:botId,botName:botName,sessionId:sid};
+      /* The model, applied BEFORE the first message and before the operator
+         can send one. spawn() takes no model on purpose — the engine's
+         control-before-wake path already exists (perch-interactive.js:78-92)
+         and is the one the drawer's own picker uses. On a session this fresh
+         the child is up but has never run a turn, so control() warms the
+         chosen provider and set_model's it while nothing is in flight: the
+         first turn is served by it, not a later switch.
+         Nothing to do when the pick IS the bot's default — that is what the
+         spawn already resolved, and a redundant switch would warm a provider
+         twice for no change. */
+      if(!modelKey||modelKey===launchModels.default){ location.hash=sid; return; }
+      perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/control',controlBody('model',modelKey))
+        .then(function(c){
+          if(current.sid!==mySid) return;   /* same identity guard as the spawn above */
+          /* A refused switch is not a refused session: the session is real
+             and usable on the bot's own model, so say what happened and open
+             it rather than stranding a live child behind an error. */
+          if(!c.ok) setLaunchNote(LAUNCH_MODEL_FAILED);
+          location.hash=sid;
+        });
     });
   }
 
@@ -698,10 +802,15 @@ export function perchHubJs(lang = "en") {
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
-     mode, plan mode. Both models and thinkingLevels are null while the
-     session hibernates (perch-interactive.js:1877): the engine will not
-     wake a child merely to list, so optionsUsable() gates a DISABLED pair
-     of selects rather than an empty-but-enabled one. */
+     mode, plan mode.
+     The two lists are gated SEPARATELY, because they no longer arrive or
+     fail together. A hibernating session now answers with the instance's
+     provider catalogue for \`models\` and \`thinkingLevels: null\` (the engine's
+     options() doc says why: a model switch made while asleep binds at the
+     next wake and really works, a thinking switch does nothing at all). A
+     single shared gate would therefore disable the picker that WORKS because
+     of the one that does not — which is exactly the empty, dead model
+     dropdown this fixes. */
   /* "up" is deliberately undecorated: a working choice should read as the
      plain default. The name is on the payload; the drawer read m.label, which
      no provider row sets, and every model listed as provider/id for months. */
@@ -712,9 +821,11 @@ export function perchHubJs(lang = "en") {
     return text;
   }
 
+  /* One list, one answer: a non-empty array is usable, anything else (null,
+     [], absent, a non-array) is not. */
+  function listUsable(a){ return !!(Array.isArray(a)&&a.length); }
   function optionsUsable(o){
-    return !!(o&&Array.isArray(o.models)&&o.models.length
-              &&Array.isArray(o.thinkingLevels)&&o.thinkingLevels.length);
+    return !!o&&listUsable(o.models)&&listUsable(o.thinkingLevels);
   }
 
   /* Populates #perch-model / #perch-thinking from GET .../options, or
@@ -724,19 +835,23 @@ export function perchHubJs(lang = "en") {
     var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
     if(!modelSel||!thinkSel) return;
     clearEl(modelSel); clearEl(thinkSel);
-    if(!optionsUsable(o)){ modelSel.disabled=true; thinkSel.disabled=true; return; }
-    o.models.forEach(function(m){
+    var models=(o&&listUsable(o.models))?o.models:null;
+    var levels=(o&&listUsable(o.thinkingLevels))?o.thinkingLevels:null;
+    if(models) models.forEach(function(m){
       var opt=document.createElement('option');
       opt.value=(m&&m.provider)+'/'+(m&&m.id);
       opt.textContent=modelOptionText(m);
       modelSel.appendChild(opt);
     });
-    o.thinkingLevels.forEach(function(lv){
+    if(levels) levels.forEach(function(lv){
       var opt=document.createElement('option');
       opt.value=lv; opt.textContent=lv;
       thinkSel.appendChild(opt);
     });
-    modelSel.disabled=false; thinkSel.disabled=false;
+    /* Each select is enabled iff ITS OWN list arrived — never an empty
+       dropdown that looks like a broken page, and never a disabled one for a
+       list that is right there. */
+    modelSel.disabled=!models; thinkSel.disabled=!levels;
   }
 
   function loadOptions(sid){
