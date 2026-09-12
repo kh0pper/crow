@@ -139,9 +139,9 @@
  * (spec §9).
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { createDbClient } from "../db.js";
 import { jobLockFor } from "./routes/board-lock.js";
@@ -395,6 +395,13 @@ export function createInteractiveEngine({
       /** Operator-set name, persisted on the row. NULL means "no name", and
        *  every render falls back to the short session id. */
       label: null,
+      /** Open-anywhere B4: the session's working directory. NULL until the
+       *  first startChild resolves it (world.cwd), or an operator chooses one
+       *  via spawn({cwd}) / control({cwd}). It is pi's process cwd, the dir
+       *  added to write_paths, and where the per-bot .mcp.json lives — but the
+       *  world root (sessionDir) keeps storage duty (sessions/outputs/uploads).
+       *  Persisted on the row so a wake after restart runs in the same place. */
+      cwd: null,
       // Track 3 Task 4: binds at wake, never applied to a live child (pi's
       // permission policy is fixed via env at spawn time). Reset to
       // "guarded" on every adoptRow (gateway restart) — see adoptRow's
@@ -473,6 +480,10 @@ export function createInteractiveEngine({
       label: s.label || null,
       permissionMode: s.permissionMode,
       planMode: s.planMode,
+      // Open-anywhere B4: the effective working directory (world.cwd, set by
+      // startChild; null until the first spawn/wake). The Session/Files tabs
+      // and the launcher read it to show where the bot actually runs.
+      cwd: s.cwd || null,
       // I3 (final review): neither stateEvent() nor snapshot() used to
       // expose whether a turn is actually in flight, and drawer.js's
       // bd.turnInFlight was set only by the SENDING tab — so on the primary
@@ -541,6 +552,7 @@ export function createInteractiveEngine({
       label: s.label || null,
       permissionMode: s.permissionMode,
       planMode: s.planMode,
+      cwd: s.cwd || null,
       // I3 (final review): same addition, same reasoning, as snapshot()
       // above — see its comment.
       turnInFlight: !!s.turn,
@@ -684,7 +696,7 @@ export function createInteractiveEngine({
           sql:
             "UPDATE bot_sessions SET kind='perch-live', gateway_type='perch', status=?, control=?, " +
             "card_id=?, project_id=COALESCE(?, project_id), pi_session_dir=COALESCE(?, pi_session_dir), " +
-            "model=COALESCE(?, model), updated_at=datetime('now') " +
+            "model=COALESCE(?, model), cwd=COALESCE(?, cwd), updated_at=datetime('now') " +
             "WHERE id=(SELECT id FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1)",
           // Track 3 Task 6: card_id is COALESCE-free — this row is owned
           // entirely by this engine session (never shared with a bridge.mjs
@@ -698,16 +710,23 @@ export function createInteractiveEngine({
           // was measurably unobservable (a mutation turning it into a COALESCE
           // left the whole suite green), so it is one writer, not two that have
           // to agree.
-          args: [status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
+          // Open-anywhere B4: `cwd` is COALESCE'd like model/pi_session_dir —
+          // the engine owns this row, so every write carries the effective
+          // working directory (s.cwd, resolved by startChild). COALESCE means a
+          // pre-spawn write (s.cwd null) never erases a directory a prior wake
+          // or control({cwd}) stamped. writeCwd() is the targeted single-column
+          // writer for a control() change (no status restamp), exactly as
+          // writeModel() is for the model column.
+          args: [status, control, s.cardId, s.projectId, piSessionDir, model, s.cwd || null, s.botId, s.threadId],
         },
         {
           sql:
-            "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,card_id,project_id,pi_session_dir,model) " +
-            "SELECT ?,'perch',?,'perch-live',?,?,?,?,?,? " +
+            "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,control,card_id,project_id,pi_session_dir,model,cwd) " +
+            "SELECT ?,'perch',?,'perch-live',?,?,?,?,?,?,? " +
             "WHERE NOT EXISTS (SELECT 1 FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=?)",
           // A row this INSERT mints is brand new and cannot have a name yet;
           // label defaults to NULL and writeLabel() owns it from there.
-          args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.botId, s.threadId],
+          args: [s.botId, s.threadId, status, control, s.cardId, s.projectId, piSessionDir, model, s.cwd || null, s.botId, s.threadId],
         },
       ]);
       const { rows } = await db.execute({
@@ -763,6 +782,36 @@ export function createInteractiveEngine({
       });
     } catch (e) {
       log(s.sessionId + ": model not persisted (non-fatal): " + ((e && e.message) || e));
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  }
+
+  /** Persist the operator's chosen working directory for this session.
+   *
+   * Open-anywhere B4. Targeted UPDATE by row id — the same shape and rationale
+   * as writeModel(): a cwd change must NOT restamp `status` or reset `control`
+   * to 'run' (writeRow does both), so it gets its own single-column writer.
+   * The in-memory s.cwd is the operative state startChild reads at the next
+   * wake; the row is what carries the choice across a gateway restart
+   * (adoptRow restores it). Non-fatal — a failed write leaves the in-memory
+   * choice intact for this process's lifetime.
+   *
+   * A session with no row yet (rowId null) has nothing to persist to; unlike
+   * writeLabel this is a silent no-op rather than a throw, because control({cwd})
+   * on the awake path is immediately followed by hibernate() → writeRow, which
+   * stamps s.cwd then, and the hibernating path's next wake reads the in-memory
+   * s.cwd. So the choice is never lost; it just rides the next writeRow. */
+  async function writeCwd(s) {
+    if (s.rowId == null) return;
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "UPDATE bot_sessions SET cwd=?, updated_at=datetime('now') WHERE id=?",
+        args: [s.cwd || null, s.rowId],
+      });
+    } catch (e) {
+      log(s.sessionId + ": cwd not persisted (non-fatal): " + ((e && e.message) || e));
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
@@ -857,7 +906,7 @@ export function createInteractiveEngine({
     try {
       const { rows } = await db.execute({
         sql:
-          "SELECT id, bot_id, gateway_thread_id, status, model, pi_session_id, project_id, card_id, label " +
+          "SELECT id, bot_id, gateway_thread_id, status, model, pi_session_id, project_id, card_id, label, cwd " +
           "FROM bot_sessions WHERE gateway_thread_id=? AND kind='perch-live' ORDER BY id DESC LIMIT 1",
         args: [sessionId],
       });
@@ -868,6 +917,11 @@ export function createInteractiveEngine({
       s.piSessionId = row.pi_session_id || null;
       s.projectId = row.project_id == null ? null : Number(row.project_id);
       s.cardId = row.card_id == null ? null : Number(row.card_id);
+      // Open-anywhere B4: restore the operator's chosen working directory so a
+      // wake after a gateway restart runs pi in the SAME dir (startChild passes
+      // s.cwd into buildBotWorld, which resolves cwd || sessionDir). NULL means
+      // no explicit choice — the world builder keeps its own resolution.
+      s.cwd = row.cwd || null;
       // Unlike permissionMode just below, the label IS restored: it is a name
       // the operator chose, carries no authority, and losing it on every
       // gateway restart would make renaming pointless.
@@ -1175,7 +1229,7 @@ export function createInteractiveEngine({
     // board MCP entry whatever the def's own tool selection says.
     const world = await buildWorldSerialized(S, {
       botId: s.botId, threadId: s.threadId, gatewayType: "perch", log: slog,
-      cardBound: s.cardId != null,
+      cardBound: s.cardId != null, cwd: s.cwd || null,
     });
     // Acceptance F4: narrate the rebuild for the drawer (spawn, wake and
     // cycle all come through here). The world itself does not expose what
@@ -1189,6 +1243,13 @@ export function createInteractiveEngine({
     s.tasksDbPath = world.tasksDbPath;
     s.projectSpace = world.projectSpace;
     s.projectMembers = world.projectMembers;
+    // Open-anywhere B4: the world builder resolved the effective working
+    // directory (the operator's choice if one was passed, else the world root).
+    // Record it as the session's truth so snapshot()/stateEvent() report where
+    // pi actually runs, even for a default session. world.cwd is always set by
+    // the real builder (B2); the `|| world.sessionDir` guard keeps a test seam
+    // that returns no cwd from poisoning s.cwd with undefined.
+    s.cwd = world.cwd || world.sessionDir || null;
     // Track 3 Task 4 (wake fidelity, review finding 8): if the engine tracks a
     // model different from what prepareSpawn just resolved fresh (a live
     // model_select or a control() switch made while this session was awake or
@@ -1251,6 +1312,10 @@ export function createInteractiveEngine({
     const resume = (world.session && world.session.pi_session_id) || s.piSessionId || null;
     const pi = new S.PiRpc(Object.assign({}, prep.piRpcOpts, {
       piSessionId: resume,
+      // Open-anywhere B3/B4: pi's process cwd is the operator's chosen dir.
+      // Undefined when a test seam returns no world.cwd — PiRpc then falls back
+      // to its own sessionDir, byte-identical to before.
+      cwd: world.cwd || undefined,
       onEvent: (m) => onChildEvent(s, m),
       // The ONE thing the interactive engine adds to a bot's spawn: pi-lab's
       // ask-user ctx.ui unlock (PL-3). C-12's spawn_env hygiene guarantees a
@@ -1263,7 +1328,13 @@ export function createInteractiveEngine({
       permissionMode: s.permissionMode,
       // Track 3 Task 6 (Task 3's extraWritePaths option): the child's ONLY
       // confined write target for deliverables it wants the operator to see.
-      extraWritePaths: [outputsDir],
+      // Open-anywhere decision 2: when the operator CHOSE a working directory
+      // (world.cwd differs from the world root), it is added too so the bot can
+      // do real work there like bare pi did. A DEFAULT session (cwd === the
+      // world root) keeps its exact pre-change write_paths — no widening.
+      extraWritePaths: (world.cwd && world.cwd !== world.sessionDir)
+        ? [outputsDir, world.cwd]
+        : [outputsDir],
     }));
     s.pi = pi;
     s.piSessionId = resume;
@@ -1651,7 +1722,7 @@ export function createInteractiveEngine({
 
   // ---- public surface ------------------------------------------------------
 
-  async function spawn({ botId, cardId = null }) {
+  async function spawn({ botId, cardId = null, cwd = null }) {
     if (!botId) throw engineError("bad_request");
     const S = await loadSeams();
     const cid = cardId == null ? null : Number(cardId);
@@ -1667,6 +1738,11 @@ export function createInteractiveEngine({
     // the card claim) ----
     const threadId = "perchlive-" + randomUUID().slice(0, 8);
     const s = newSession(String(botId), threadId);
+    // Open-anywhere B4: store the operator's chosen working directory before
+    // startChild so the world builder resolves it (buildBotWorld validates it
+    // hard and throws bad_cwd on a non-directory; the route maps that to 400).
+    // NULL = no explicit choice — the world builder keeps its own resolution.
+    s.cwd = cwd || null;
     // Track 3 Task 7: added to `sessions` BEFORE the reservation attempt, not
     // after — reserveWithEviction's eviction path awaits the victim's
     // hibernate() before this call resumes, and a concurrent second caller's
@@ -1964,18 +2040,32 @@ export function createInteractiveEngine({
     const hasThinking = opts.thinking != null;
     const hasPermissionMode = opts.permissionMode != null;
     const hasPlanMode = Object.prototype.hasOwnProperty.call(opts, "planMode");
+    // Open-anywhere B4: like `model`, an explicit cwd is keyed on presence
+    // (undefined = "not in this request"), so a caller can send cwd without
+    // disturbing the other controls.
+    const hasCwd = opts.cwd !== undefined;
 
     // Model/thinking/planMode switches share the one child clock a turn
     // already owns (commandSince/promptAckOnly ride the SAME correlated
     // response stream promptTurn does) — refused mid-turn rather than racing
     // it. permissionMode never touches the live child, so it alone is never
     // refused here.
-    if ((hasModel || hasThinking || hasPlanMode) && s.turn) throw engineError("turn_in_progress");
+    if ((hasModel || hasThinking || hasPlanMode || hasCwd) && s.turn) throw engineError("turn_in_progress");
 
     if (hasModel && opts.model !== null && (!opts.model.provider || !opts.model.modelId)) throw engineError("bad_request");
     if (hasThinking && !THINKING_LEVELS.has(opts.thinking)) throw engineError("bad_request");
     if (hasPermissionMode && !PERMISSION_MODES.has(opts.permissionMode)) throw engineError("bad_request");
     if (hasPlanMode && typeof opts.planMode !== "boolean") throw engineError("bad_request");
+    // Open-anywhere B4: validate the cwd exactly like the route does (C1) —
+    // non-empty absolute path that exists and is a directory. The engine is
+    // the second gate (buildBotWorld is the third); a bad value is a 400-class
+    // bad_request, never a persisted poison pill that every wake replays.
+    if (hasCwd) {
+      const c = opts.cwd;
+      let ok = typeof c === "string" && c.length > 0 && isAbsolute(c);
+      if (ok) { try { ok = statSync(c).isDirectory(); } catch { ok = false; } }
+      if (!ok) throw engineError("bad_request");
+    }
 
     const S = await loadSeams();
     const applied = {};
@@ -2096,6 +2186,24 @@ export function createInteractiveEngine({
       // — `applied.planMode` here only echoes the requested on/off intent,
       // confirming the ack succeeded, not the full state object.
       applied.planMode = opts.planMode;
+    }
+
+    if (hasCwd) {
+      // Open-anywhere B4: a cwd change can NEVER apply to a live child — pi's
+      // process cwd is fixed at spawn (there is no live chdir). So an awake
+      // session is hibernated; the next message() wakes it in the new directory
+      // with a fresh pi context there (the operator sees exactly that in the log
+      // frame). Persist the choice first (targeted writeCwd — no status
+      // restamp), report it under bindsAtWake like permissionMode, and run LAST
+      // among the controls so a combined control({planMode, cwd}) never
+      // hibernates the child out from under the planMode branch above.
+      const dir = opts.cwd;
+      s.cwd = dir;
+      await writeCwd(s);
+      applied.cwd = dir;
+      bindsAtWake.cwd = dir;
+      if (s.pi) await hibernate(s);
+      emit(s, { type: "log", text: "working directory → " + dir + " — resumes there on the next message" });
     }
 
     emit(s, stateEvent(s));
