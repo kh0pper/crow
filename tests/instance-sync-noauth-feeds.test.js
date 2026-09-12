@@ -12,13 +12,31 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { InstanceSyncManager, shouldInitInstanceSync } from "../servers/sharing/instance-sync.js";
+import { InstanceSyncManager, shouldInitInstanceSync, stdioCompanionEnv } from "../servers/sharing/instance-sync.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
 
 test("shouldInitInstanceSync: enabled by default, disabled on --no-auth or kill-switch", () => {
   assert.equal(shouldInitInstanceSync({ argv: ["node", "index.js"], env: {} }), true, "default enabled");
   assert.equal(shouldInitInstanceSync({ argv: ["node", "index.js", "--no-auth"], env: {} }), false, "--no-auth disables");
   assert.equal(shouldInitInstanceSync({ argv: ["node", "index.js"], env: { CROW_DISABLE_INSTANCE_SYNC: "1" } }), false, "env kill-switch disables");
+});
+
+test("stdioCompanionEnv: the stdio MCP entry defaults the kill-switch ON, explicit =0 opts out", () => {
+  // Unset → defaulted to "1": a per-session MCP spawn must never race the
+  // primary gateway for the on-disk feed lock ("File descriptor could not be
+  // locked" on the loser; silent replication starvation if the companion wins).
+  assert.equal(stdioCompanionEnv({}).CROW_DISABLE_INSTANCE_SYNC, "1", "unset defaults to disabled");
+  assert.equal(stdioCompanionEnv({ CROW_DISABLE_INSTANCE_SYNC: "0" }).CROW_DISABLE_INSTANCE_SYNC, undefined,
+    "explicit =0 removes the var (standalone host with no gateway owns the feeds)");
+  assert.equal(stdioCompanionEnv({ CROW_DISABLE_INSTANCE_SYNC: "1" }).CROW_DISABLE_INSTANCE_SYNC, "1", "explicit =1 passes through");
+  const untouched = { PATH: "/usr/bin" };
+  const out = stdioCompanionEnv(untouched);
+  assert.equal(untouched.CROW_DISABLE_INSTANCE_SYNC, undefined, "pure: input env not mutated");
+  assert.equal(out.PATH, "/usr/bin", "other keys preserved");
+  // And the default actually gates: a manager constructed with the companion env
+  // reports feeds disabled.
+  assert.equal(shouldInitInstanceSync({ argv: ["node", "servers/sharing/index.js"], env: stdioCompanionEnv({}) }), false,
+    "companion env disables instance sync");
 });
 
 test("feedsDisabled manager: initInstance + emitChange are no-ops (no feed dir, no throw)", async () => {
