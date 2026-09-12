@@ -200,6 +200,11 @@ function makeBridge(opts = {}) {
         projectSpace: null,
         projectMembers: [],
         sessionDir: join(dir, "bots", args.botId),
+        // Mirror the real B2 builder: the effective working directory is the
+        // operator's choice when one was passed, else the world root. The
+        // engine reads world.cwd into s.cwd, so a spawn/control({cwd}) can be
+        // observed end-to-end through the fake seam.
+        cwd: args.cwd || join(dir, "bots", args.botId),
         tasksDbPath: join(dir, "tasks.db"),
         remoteEnabled: false,
         peerGatewayUrls: {},
@@ -1249,4 +1254,109 @@ test("R2b: an adopted session whose recorded model died falls open to the def, w
   assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model",
     "the ROW keeps the choice — a temporarily disabled provider must not erase it");
   sub.off();
+});
+
+// ---------------------------------------------------------------------------
+// 9. Open-anywhere B4 — cwd is a session property: spawn, wake, adopt, control
+// ---------------------------------------------------------------------------
+
+/** A real on-disk dir under the scratch root (control() validates with statSync). */
+function workDir(name) {
+  const d = join(dir, name);
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
+test("B4: spawn({cwd}) runs pi in the chosen dir, makes it writable, and reports it in the snapshot", async () => {
+  const { engine, state } = makeEngine();
+  const chosen = workDir("b4-spawn-chosen");
+  const r = await engine.spawn({ botId: "botty", cwd: chosen });
+  await tick();
+  assert.equal(state.worlds[0].cwd, chosen, "the chosen dir reaches buildBotWorld");
+  const pi = state.instances[0];
+  assert.equal(pi.opts.cwd, chosen, "pi's process cwd is the chosen dir");
+  assert.ok(pi.opts.extraWritePaths.includes(chosen), "the chosen dir is added to write_paths (decision 2)");
+  assert.ok(pi.opts.extraWritePaths.some((p) => p === join(dir, "bots", "botty", "outputs", r.sessionId)),
+    "outputsDir stays writable alongside the chosen dir");
+  assert.equal((await engine.get(r.sessionId)).cwd, chosen, "snapshot reports the chosen cwd");
+});
+
+test("B4: spawn() without cwd keeps the default world root — no write_paths widening", async () => {
+  const { engine, state } = makeEngine();
+  const r = await engine.spawn({ botId: "botty" });
+  await tick();
+  const pi = state.instances[0];
+  const worldRoot = join(dir, "bots", "botty");
+  assert.equal(pi.opts.cwd, worldRoot, "default cwd is the world root");
+  assert.deepEqual(pi.opts.extraWritePaths, [join(worldRoot, "outputs", r.sessionId)],
+    "a default session's write_paths is exactly [outputsDir] — byte-identical, no widening");
+  assert.equal((await engine.get(r.sessionId)).cwd, worldRoot, "snapshot reports the effective (default) cwd");
+});
+
+test("B4: spawn({cwd}) survives a simulated restart — a fresh engine adopts the row and reports the same cwd", async () => {
+  const { engine: engineA } = makeEngine();
+  const chosen = workDir("b4-restart-chosen");
+  const s = await engineA.spawn({ botId: "botty", cwd: chosen });
+  await tick();
+  await engineA.stopAll();
+
+  const { engine: engineB } = makeEngine();
+  const snap = await engineB.get(s.sessionId);
+  assert.ok(snap, "the row is adopted");
+  assert.equal(snap.cwd, chosen, "the chosen cwd is persisted on the row and restored on adopt");
+});
+
+test("B4: control({cwd}) while hibernating binds at the next wake — the fresh PiRpc runs in the new dir", async () => {
+  const { engine, clock, state } = makeEngine();
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating");
+
+  const chosen = workDir("b4-control-hib");
+  const r = await engine.control(s.sessionId, { cwd: chosen });
+  assert.equal(r.bindsAtWake.cwd, chosen, "reported under bindsAtWake like permissionMode");
+  assert.equal((await engine.get(s.sessionId)).cwd, chosen, "snapshot reflects the new cwd immediately");
+
+  await engine.message(s.sessionId, "wake in the new dir");
+  await tick();
+  const wakePi = state.instances[1];
+  assert.equal(wakePi.opts.cwd, chosen, "the wake's PiRpc runs in the chosen dir");
+  assert.ok(wakePi.opts.extraWritePaths.includes(chosen), "and the chosen dir is writable after the wake");
+  wakePi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+});
+
+test("B4: control({cwd}) while awake hibernates the live child (no live chdir) and logs the change", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  assert.equal((await engine.get(s.sessionId)).state, "awake", "a healthy spawn is awake");
+  const sub = await collect(engine, s.sessionId);
+  const chosen = workDir("b4-control-awake");
+  await engine.control(s.sessionId, { cwd: chosen });
+  assert.equal((await engine.get(s.sessionId)).state, "hibernating", "pi's cwd is fixed at spawn, so the child hibernates");
+  assert.equal(state.instances[0].closed, 1, "the live child was closed");
+  assert.ok(sub.ofType("log").some((e) => /working directory/.test(e.text || "")),
+    "a visible log frame states the directory change");
+  sub.off();
+});
+
+test("B4: control({cwd}) is refused turn_in_progress while a turn is in flight", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "long one");
+  const chosen = workDir("b4-midturn");
+  await assert.rejects(() => engine.control(s.sessionId, { cwd: chosen }), (e) => e.code === "turn_in_progress");
+  state.instances[0].lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+});
+
+test("B4: control({cwd}) refuses a relative path, a nonexistent path, and a file — all bad_request", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await assert.rejects(() => engine.control(s.sessionId, { cwd: "relative/path" }), (e) => e.code === "bad_request", "relative refused");
+  await assert.rejects(() => engine.control(s.sessionId, { cwd: join(dir, "does-not-exist") }), (e) => e.code === "bad_request", "nonexistent refused");
+  const filePath = join(dir, "b4-a-file.txt");
+  writeFileSync(filePath, "not a dir");
+  await assert.rejects(() => engine.control(s.sessionId, { cwd: filePath }), (e) => e.code === "bad_request", "a file is not a directory");
 });
