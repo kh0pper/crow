@@ -7,9 +7,14 @@
 > 1. This plan: `docs/superpowers/plans/2026-09-11-perch-hub-open-anywhere.md`
 > 2. The review it implements Phase A from: `docs/reviews/2026-09-11-perch-pr356-review-completion.md`
 > 3. The surface spec it slots under: `docs/superpowers/specs/2026-09-09-perch-hub-design.md`
-> Execution state: **no code written yet** — if work has begun, tick progress against the
-> numbered steps (A1…E2) and record any named deviation in the "Risk notes" section's spirit:
-> measured, not asserted. PR shape: PR 1 = Phase A, PR 2 = Phases B+C, PR 3 = Phase D+E.
+> Execution state: **Phases A + B + C1 SHIPPED; C2 + D + E remain.** Phase A
+> (A1–A4) merged to `main`. Phase B (B1–B4) + C1 shipped as PR2 (#360, branch
+> `feat/perch-open-anywhere`, full suite 4686/0 green). Remaining: **C2**
+> (launcher directory-picker UI), **Phase D** (Chat/Session/Files/Activity tabs),
+> **Phase E** (docs + the mandated live CDP browser walk). Resume brief:
+> `docs/superpowers/handoffs/2026-09-12-perch-open-anywhere-pr2-shipped.md`.
+> Record any named deviation in the "Risk notes" section's spirit: measured, not
+> asserted. PR shape: PR 1 = Phase A (DONE), PR 2 = B+C1 (DONE #360), PR 3 = C2+D+E.
 
 **Status:** approved by operator 2026-09-11 (four decisions captured below)
 **Supersedes:** the directory-containment decisions of the M3 project-native workspace model *for Perch sessions*, and completes the outstanding review of PR #356 → `docs/reviews/2026-09-11-perch-pr356-review-completion.md` (findings R1, R2, R4-adjacent become Phase A).
