@@ -355,3 +355,47 @@ test("the launcher and the row close button cannot overflow a 412px column", asy
   assert.ok(/\.perch-head\{[^}]*flex-wrap:wrap/.test(css),
     "the bot name, the state word and Close must wrap rather than overflow the chat column");
 });
+
+// ---------------------------------------------------------------------------
+// Open-anywhere C2 — the launcher's directory field + picker, statically.
+// The live walk (browse → choose → spawn carries cwd) is measured in
+// perch-hub-render.test.js; these pin the markup/source properties a browser
+// test cannot see.
+// ---------------------------------------------------------------------------
+
+test("the launcher carries a labelled directory field, a Browse button and the default note", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  assert.ok(html.includes('id="perch-new-cwd-label"'), "the field needs a visible label");
+  assert.ok(/id="perch-new-cwd"[^>]*aria-labelledby="perch-new-cwd-label"/.test(html));
+  assert.ok(html.includes('id="perch-browse-btn"'), "the picker's trigger");
+  // House rule: no unlabelled controls — the Browse button carries its text.
+  assert.ok(/id="perch-browse-btn">[^<]+</.test(html), "Browse must carry a visible label");
+  assert.ok(html.includes('id="perch-cwd-note"'), "empty = the bot's default, stated on the page");
+  // The field lives in the launch row (before #perch-new), never inside the
+  // list body every poll clears — the same structural rule the launcher's
+  // own controls are pinned under above.
+  const cwd = html.indexOf('id="perch-new-cwd"');
+  assert.ok(cwd > html.indexOf('id="perch-launch"') && cwd < html.indexOf('id="perch-list-body"'));
+});
+
+test("the picker dismiss never depends on one path: Escape via the registry AND a visible Cancel", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const js = perchHubJs("en");
+  // Review S5: both dismiss paths, and the keydown listener goes through the
+  // generation-checked bindOnce registry so the Turbo-leak guard covers it.
+  assert.match(js, /bindOnce\(\s*document\s*,\s*'keydown'\s*,\s*'browseEscape'/,
+    "Escape must be bound through the hub's one-listener-per-realm registry");
+  assert.match(js, /cancel\.id='perch-browse-cancel';\s*cancel\.textContent=ASK_CANCEL/,
+    "a visible, labelled Cancel button");
+  assert.match(js, /choose\.id='perch-browse-choose';\s*choose\.textContent=CHOOSE_LABEL/,
+    "Choose is labelled too");
+  // '..' navigates to the SERVER-resolved parent, never a client-side string
+  // chop (a symlinked dir would ping-pong — the C1 endpoint's whole reason
+  // for deriving parent from the realpath).
+  assert.match(js, /loadBrowseDir\(r\.j\.parent\)/);
+  // The modal is built with createElement/textContent only — the existing
+  // "never assigns to an innerHTML-class sink" pin in
+  // perch-hub-client.test.js already covers the whole emitted script, so
+  // directory names cannot reach a sink without tripping that one.
+});
