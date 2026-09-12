@@ -196,11 +196,12 @@ test("async continuations are guarded — a fast back button must not cross sess
   // listener (shared through on()), onStreamError's options probe, the
   // reconnect timer, loadHistory, loadOptions, send(), answerAsk, and
   // attachFile's upload continuation. 13 as of open-anywhere D2: the Session
-  // tab's control({cwd}) continuation. A regression that drops one — the count
+  // tab's control({cwd}) continuation. 14 as of D3: the Files tab's
+  // files/list fetch. A regression that drops one — the count
   // that shipped with only 6 asserted — is invisible until an operator hits
   // the exact race the dropped guard covered.
   const guards = (js.match(/current\.sid\s*!==/g) || []).length;
-  assert.equal(guards, 13, "expected exactly 13 identity guards, found " + guards);
+  assert.equal(guards, 14, "expected exactly 14 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -2632,4 +2633,83 @@ test("D2: an accepted cwd change writes the readout; the next state frame owns t
   es._serverFrame("state", { state: "hibernating", turnInFlight: false, cwd: "/home/tester" });
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(hub.els["perch-session-cwd"].textContent, "/home/tester");
+});
+
+// ---------------------------------------------------------------------------
+// Phase D3: the Files tab — fetch on activation (never on open), rows link
+// the existing workspace download route, and empty/failed states never wear
+// each other's line.
+// ---------------------------------------------------------------------------
+
+function filesFetch(items, status = 200, counter) {
+  const std = stdFetch();
+  return (method, path) => {
+    if (path.endsWith("/files/list")) {
+      if (counter) counter.calls++;
+      return makeResponse(status, items === null ? { error: "no_session_dir" } : { items });
+    }
+    return std(method, path);
+  };
+}
+
+test("D3: the Files tab fetches on ACTIVATION only, and rows link the workspace download route", async () => {
+  const counter = { calls: 0 };
+  const hub = await mountHub({
+    fetchImpl: filesFetch([
+      { name: "report.md", size: 2048, mtime: 1757600000000 },
+      { name: "tiny.txt", size: 12, mtime: 1757500000000 },
+    ], 200, counter),
+  });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(counter.calls, 0, "a session open must not fetch the list — the chat fast path stays one less round trip");
+
+  hub.els["perch-tab-btn-files"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(counter.calls, 1, "tab activation does");
+
+  const rows = hub.els["perch-files-list"].children;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].tagName, "A");
+  assert.equal(rows[0].href, "/dashboard/perch-api/interactive/perchlive-aaaaaaaa/workspace/report.md",
+    "the whole row links the EXISTING download route — no new serving path");
+  assert.equal(rows[0].children[0].textContent, "report.md");
+  assert.match(rows[0].children[1].textContent, /^2K\b|2\.0K|M/, "size renders human");
+  assert.match(rows[1].children[1].textContent, /^12B/, "bytes stay bytes");
+
+  hub.els["perch-files-refresh"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(counter.calls, 2, "the labelled Refresh refetches");
+});
+
+test("D3: an empty outputs dir and a failed list say different true things", async () => {
+  const hub = await mountHub({ fetchImpl: filesFetch([]) });
+  await openChatSession(hub);
+  hub.els["perch-tab-btn-files"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const empty = hub.els["perch-files-list"].children;
+  assert.equal(empty.length, 1);
+  assert.match(empty[0].textContent, /Nothing here yet/, "empty is empty, in words");
+
+  const failed = await mountHub({ fetchImpl: filesFetch(null, 409) });
+  await openChatSession(failed);
+  failed.els["perch-tab-btn-files"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = failed.els["perch-files-list"].children;
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].textContent, /Could not list the files/, "a failure never wears the empty line");
+});
+
+test("D3: a file name is rendered as text, never as markup", async () => {
+  const hostile = '<img src=x onerror="window.__pwned=1">.md';
+  const hub = await mountHub({ fetchImpl: filesFetch([{ name: hostile, size: 1, mtime: 0 }]) });
+  await openChatSession(hub);
+  hub.els["perch-tab-btn-files"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const row = hub.els["perch-files-list"].children[0];
+  assert.equal(row.children[0].textContent, hostile,
+    "textContent end to end — the harness records the string, and the live" +
+    " browser check (render test) proves the DOM never parses it");
+  assert.ok(row.href.endsWith("/workspace/" + encodeURIComponent(hostile)),
+    "and the link carries the encoded name");
 });

@@ -2342,6 +2342,14 @@ export const translations = {
   },
   "perch.cwdChangeFailed": { en: "The directory did not change.", es: "El directorio no cambió." },
   "perch.filesRefresh": { en: "Refresh", es: "Actualizar" },
+  "perch.filesEmpty": {
+    en: "Nothing here yet — files the bot writes land in this list.",
+    es: "Aún no hay nada — los archivos que el bot escriba aparecerán en esta lista.",
+  },
+  "perch.filesFailed": {
+    en: "Could not list the files.",
+    es: "No se pudo listar los archivos.",
+  },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

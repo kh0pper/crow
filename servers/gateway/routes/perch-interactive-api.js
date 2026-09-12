@@ -39,6 +39,7 @@ import {
   createReadStream,
   readdirSync,
   statSync,
+  lstatSync,
   constants as fsConstants,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -827,6 +828,47 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
         try { closeSync(fd); } catch { /* already closed */ }
       }
       res.json({ path: name });
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
+  // ---- GET /interactive/:sid/files/list — the Files tab's outputs listing ----
+  // Phase D3. A FLAT listing of the session's outputsDir ONLY: never
+  // uploadsDir (that direction is upload-only, never re-served), never
+  // recursive (the jail is one directory deep by construction), never
+  // dotfiles, never symlinks — lstatSync skips a symlink outright AND the
+  // size/mtime stat can therefore never be redirected through one (a racing
+  // child swapping a listed name for a link to ~/.crow/data/crow.db leaks
+  // nothing but a name the download route's own O_NOFOLLOW jail still
+  // refuses). There is NO user path input on this endpoint at all, so `..`
+  // is not merely refused — it is unrepresentable. Names + size + mtime,
+  // newest first, capped: a chatty bot's outputs dir must not balloon the
+  // response any more than /browse's 500 cap does.
+  router.get(P + "/interactive/:sid/files/list", async (req, res) => {
+    const sid = String(req.params.sid);
+    try {
+      const eng = resolveEngine();
+      const snap = await eng.get(sid);
+      // Same 404/409 shapes as the workspace download route below.
+      if (!snap) return jsonError(res, 404, "no_such_session");
+      if (!snap.outputsDir) return jsonError(res, 409, "no_session_dir");
+      let entries;
+      try {
+        entries = readdirSync(snap.outputsDir, { withFileTypes: true });
+      } catch {
+        return jsonError(res, 404, "not_found");
+      }
+      const items = [];
+      for (const e of entries) {
+        if (e.name.startsWith(".")) continue;              // dotfile: invisible here, as in the jail
+        let st;
+        try { st = lstatSync(join(snap.outputsDir, e.name)); } catch { continue; }
+        if (st.isSymbolicLink() || !st.isFile()) continue;  // symlinks skipped; dirs never recursed
+        items.push({ name: e.name, size: st.size, mtime: Math.round(st.mtimeMs) });
+      }
+      items.sort((a, b) => b.mtime - a.mtime);
+      res.json({ items: items.slice(0, 200) });
     } catch (err) {
       mapEngineError(res, err);
     }

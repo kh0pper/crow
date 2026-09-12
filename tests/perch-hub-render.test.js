@@ -46,12 +46,17 @@ function resetApi() {
   transcriptEvents = [];
   optionsHibernating = false;
   lastSpawnBody = null;
+  filesListCalls = 0;
 }
 
 let roostFails = false;
 /** Open-anywhere C2: the body of the last POST /bots/:id/interactive, so a
  *  test can prove the launcher sent (or never sent) the cwd key. */
 let lastSpawnBody = null;
+/** Phase D3: how many times the page fetched the Files tab's listing — the
+ *  activation-only discipline is half the design (the chat fast path stays
+ *  one less round trip), so it is measured, not trusted. */
+let filesListCalls = 0;
 /** The picker's scripted directory tree — names and paths only, exactly the
  *  shape GET /browse answers with (routes/perch-interactive-api.js). */
 const BROWSE_TREE = {
@@ -121,6 +126,13 @@ function serveApi(req, res) {
   });
   if (url.endsWith("/transcript")) return send(200, { events: transcriptEvents });
   if (url.endsWith("/rename")) return send(200, { label: "renamed" });
+  if (url.endsWith("/files/list")) {
+    filesListCalls++;
+    return send(200, { items: [
+      { name: "draft.md", size: 20480, mtime: Date.now() },
+      { name: "notes.txt", size: 512, mtime: Date.now() - 60000 },
+    ] });
+  }
   // Open-anywhere C2: the picker's server-backed listing. An unknown path is
   // the real endpoint's 404 shape; no path means "start at home".
   if (url.endsWith("/browse")) {
@@ -1191,6 +1203,47 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
         assert.ok(m.bar.h >= 44, `the bar is thumb-sized on ${n}: ${m.bar.h}px`);
         assert.equal(m.hScroll, false, `no horizontal scroll on the ${n} tab`);
       }
+    } finally { resetApi(); await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase D3, live — the Files tab in a real browser: the list is fetched on
+// ACTIVATION only, rows are real links through the existing workspace
+// download route, and a hostile file name reaches the DOM as text.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`D3 live @${w}x${h}: the Files tab lists outputs on activation and links the download route`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 900));
+      assert.equal(filesListCalls, 0, "a session open must not fetch the list");
+
+      const seen = await s.json(`(async function(){
+        document.getElementById('perch-tab-btn-files').click();
+        await new Promise(function(r){setTimeout(r,400);});
+        var rows=Array.from(document.querySelectorAll('#perch-files-list .file-row'));
+        return JSON.stringify({
+          n: rows.length,
+          first: rows.length?{text:rows[0].querySelector('.file-name').textContent,
+                              href:rows[0].getAttribute('href'),
+                              meta:rows[0].querySelector('.file-meta').textContent}:null,
+          inViewport: (function(){ var r=document.getElementById('perch-files-list').getBoundingClientRect();
+                                   return r.top>=0; })(),
+          hScroll: document.documentElement.scrollWidth>document.documentElement.clientWidth });
+      })()`);
+      assert.equal(filesListCalls, 1, "tab activation fetches exactly once");
+      assert.equal(seen.n, 2);
+      assert.equal(seen.first.text, "draft.md");
+      assert.ok(seen.first.href.endsWith("/interactive/perchlive-22222222/workspace/draft.md"),
+        `the row links the existing jail: ${seen.first.href}`);
+      assert.match(seen.first.meta, /20K|20\.0K/, "human size in the meta column");
+      assert.equal(seen.inViewport, true);
+      assert.equal(seen.hScroll, false, "no horizontal scroll on the files tab");
     } finally { resetApi(); await s.close(); }
   });
 }
