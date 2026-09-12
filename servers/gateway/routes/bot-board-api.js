@@ -212,8 +212,17 @@ function wantsArchived(req) {
 
 // Fail-closed pi-liveness (Step-1 pinned pattern, recorded in the plan's
 // Verified Claims): a process is "the live pi holding bot_sessions row R"
-// iff basename(/proc/<pid>/comm) === "node" AND /proc/<pid>/cmdline contains
-// the substring `--session-dir <R.pi_session_dir>`. Returns:
+// iff basename(argv0 of /proc/<pid>/cmdline) is node/nodejs AND the cmdline
+// contains the substring `--session-dir <R.pi_session_dir>`. Returns:
+//
+// The predicate used to test /proc/<pid>/comm === "node". That is silently
+// FALSE on Node 24, which renames the main thread "MainThread" (measured:
+// v20.20.2 and v22.23.1 → "node"; v24.21.0 → "MainThread") — and this fleet's
+// gateway runs 24, so every LIVE pi read as dead: the job rail could
+// force-unlock a card a running child still held. argv0 is the honest
+// identity: the kernel's comm is a 15-char thread label, not the executable.
+// A bash -c wrapper whose command string carries the needle stays correctly
+// excluded — its argv0 is "bash".
 //   "alive"   — a matching live pi process was positively found
 //   "dead"    — scanned cleanly, no matching process exists
 //   "unknown" — anything ambiguous/errored/unverifiable (⇒ caller refuses)
@@ -228,22 +237,27 @@ function piLiveness(piSessionDir) {
   }
   let scannedAny = false;
   for (const pid of pids) {
-    let comm, cmdline;
     try {
-      comm = readFileSync("/proc/" + pid + "/comm", "utf8").trim();
+      // The comm read is no longer the identity test (Node ≥ 24 renames the
+      // main thread — see the header); it is kept as the cheap mid-scan
+      // exit skip, so a vanished process is stepped over before its cmdline
+      // is consulted.
+      readFileSync("/proc/" + pid + "/comm", "utf8");
     } catch {
       continue; // process exited mid-scan — fine, keep scanning
     }
+    let cmdline;
     try {
       cmdline = readFileSync("/proc/" + pid + "/cmdline").toString("utf8");
     } catch {
       continue;
     }
     scannedAny = true;
-    // /proc/<pid>/comm is the argv0 basename (truncated to 15 chars by the
-    // kernel; "node" is 4 so exact compare is safe). cmdline is NUL-joined;
-    // normalise NUL→space for the substring test.
-    if (comm === "node" && cmdline.replace(/\0/g, " ").includes(needle)) {
+    // Identity from argv0: the first NUL-terminated field of cmdline, by
+    // basename. Normalise NUL→space for the substring test.
+    const argv0 = (cmdline.split("\0")[0] || "").trim();
+    const exe = argv0.slice(argv0.lastIndexOf("/") + 1);
+    if (/^node(js)?$/.test(exe) && cmdline.replace(/\0/g, " ").includes(needle)) {
       return "alive";
     }
   }

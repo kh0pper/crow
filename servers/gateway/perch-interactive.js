@@ -389,6 +389,9 @@ export function createInteractiveEngine({
       // string snapshot()/stateEvent() report.
       currentModelParts: null,
       currentModel: null,
+      // Round 3 belt (writeModel's docstring): true when a model choice was
+      // made before this session had any rowId; writeRow's tail replays it.
+      _modelWritePending: false,
       /** Operator-set name, persisted on the row. NULL means "no name", and
        *  every render falls back to the short session id. */
       label: null,
@@ -712,32 +715,51 @@ export function createInteractiveEngine({
         args: [s.botId, s.threadId],
       });
       if (rows[0]) s.rowId = Number(rows[0].id);
+      // Round 3 belt (writeModel's docstring): a model choice made while this
+      // session had no rowId at all is replayed here, once, the moment the
+      // row exists. Cleared BEFORE the call so a failing write never loops.
+      if (rows[0] && s._modelWritePending) {
+        s._modelWritePending = false;
+        await writeModel(s);
+      }
     } finally {
       try { db.close(); } catch { /* already closed */ }
     }
   }
 
-  /** Persist the model the engine now considers this session's.
+  /** Persist the engine's EXPLICIT model choice for this session.
    *
-   * Fix round 2 N2: the row's `model` column was only written by onTurnEnd and
-   * by a turn's own `active` stamp, so a switch made and then left un-exercised
-   * — control() to another model, then a gateway restart before the next turn —
-   * was not in the row at all, and adoptRow had nothing to restore. That is
-   * exactly the sequence the operator reported: switch the model, a deploy
-   * restarts the gateway, open the session again.
+   * Fix round 2 N2: a switch made and then left un-exercised — control() to
+   * another model, then a gateway restart before the next turn — used to never
+   * reach the row, and adoptRow had nothing to restore. That is exactly the
+   * sequence the operator reported: switch the model, a deploy restarts the
+   * gateway, open the session again.
+   *
+   * Fix round 3 R1: writes `s.currentModel` — the explicit choice ONLY — not
+   * servingModel(), which falls back to the resolver's `s.resolved.key`. A
+   * null here is a real value: "the operator revoked the choice"
+   * (control() model:null), so the next wake re-resolves from the bot def.
+   * The automatic stamps (startChild, onTurnEnd, spawn-active) stopped
+   * writing this column: stamped defaults were being adopted as overrides and
+   * silently pinned every session to its spawn-time model across restarts.
    *
    * Targeted UPDATE by row id, for the same reason writeLabel() is one:
    * writeRow() also stamps `status` and resets `control` to 'run', and a model
    * switch must not restamp either. Non-fatal — the switch's operative effect
    * is the in-memory tracking that startChild reads; the row is what carries it
-   * across a restart. */
+   * across a restart.
+   *
+   * Round 3 belt (staff review C2): a child's first `model_select` CAN land
+   * before this process has any rowId (construction-to-writeRow window on a
+   * fresh spawn). Rather than drop that choice, park a pending flag; the tail
+   * of writeRow() replays it the moment the row exists. */
   async function writeModel(s) {
-    if (s.rowId == null) return;
+    if (s.rowId == null) { s._modelWritePending = true; return; }
     const db = createDbClient();
     try {
       await db.execute({
         sql: "UPDATE bot_sessions SET model=?, updated_at=datetime('now') WHERE id=?",
-        args: [servingModel(s), s.rowId],
+        args: [s.currentModel || null, s.rowId],
       });
     } catch (e) {
       log(s.sessionId + ": model not persisted (non-fatal): " + ((e && e.message) || e));
@@ -1178,6 +1200,28 @@ export function createInteractiveEngine({
     // NEW model, but those two fields do not feed metering or spawn args, so
     // leaving them as prepareSpawn resolved them is harmless — only
     // provider/model/key are load-bearing here).
+    // Fix round 3 R2b: a recorded choice can outlive its provider —
+    // crow-dsv4 was disabled on this fleet the day PR #356 merged, and the
+    // adopt-restore hands whatever the row says straight to the override
+    // below, which skips model_resolver.mjs's fail-closed rail entirely.
+    // Validate against the same catalogue the picker offers; when the key
+    // is gone, fall open to the def's fresh resolution with an honest log
+    // line instead of spawning a child on a provider that cannot answer
+    // (whose only report would be attachExit's "pi exited unexpectedly").
+    // The ROW keeps the key — a temporarily disabled provider must not
+    // erase a real choice — and a re-enabled one is honored again next
+    // restart. Empty catalogue fails open, same contract as control()'s
+    // gate (R2a).
+    if (s.currentModelParts) {
+      const catalogue = await catalogModels();
+      const chosen = servingModel(s);
+      if (catalogue.length && chosen &&
+          !catalogue.some((m) => m && (m.provider + "/" + m.id) === chosen)) {
+        s.currentModelParts = null;
+        s.currentModel = null;
+        emit(s, { type: "log", text: "recorded model " + chosen + " is not available — resumed on " + (prep.resolved && prep.resolved.key) });
+      }
+    }
     if (s.currentModelParts &&
         (s.currentModelParts.provider !== prep.resolved.provider ||
          s.currentModelParts.modelId !== prep.resolved.model)) {
@@ -1231,7 +1275,11 @@ export function createInteractiveEngine({
       // resolveTranscriptFile(row.pi_session_dir, …) 404s and the resume pane
       // is dead.
       piSessionDir: world.sessionDir + "/sessions",
-      model: prep.resolved.key,
+      // Fix round 3 R1: NO model here. The row's `model` column means "the
+      // operator explicitly chose this model" and nothing else; the resolver's
+      // answer at spawn/wake is not a choice, and stamping it here is what
+      // pinned bot defs to their old default across restarts (adoptRow treats
+      // every stamped value as an override). writeModel() owns the column.
     });
 
     const st = await pi.getState().catch(() => null);
@@ -1362,6 +1410,12 @@ export function createInteractiveEngine({
     // s.resolved says NOW, not what the turn started on — so the model that
     // actually served the reply is what gets metered.
     s.resolved = Object.assign({}, s.resolved, { provider: model.provider, model: model.id, key });
+    // Fix round 3 R1: a /model typed in the TUI is an operator choice exactly
+    // like the drawer's switch, and must survive a restart too. Never throws
+    // (writeModel's own contract); pending-belted when the row is not yet
+    // written. Without this, the drawer's switch persisted but the TUI's did
+    // not — one action, two durabilities.
+    writeModel(s);
     emit(s, stateEvent(s));
     emit(s, { type: "log", text: "now on " + key });
   }
@@ -1509,7 +1563,8 @@ export function createInteractiveEngine({
     // r2 S7: bound the child's accumulating log now that nothing is waiting on
     // it. trimLog preserves _seq, so the next turn's `since` correlation holds.
     try { if (s.pi) s.pi.trimLog(); } catch { /* non-fatal */ }
-    await writeRow(s, { status: "waiting-user", model: s.resolved ? s.resolved.key : null }).catch(() => {});
+    // Fix round 3 R1: no model stamp — see the startChild writeRow above.
+    await writeRow(s, { status: "waiting-user" }).catch(() => {});
     // M-4: the turn is released HERE, after reply + trimLog — never at the top.
     if (s.turn === turn) s.turn = null;
     s.lastEventAt = now();                            // Track 3 Task 7: became idle now
@@ -1707,7 +1762,8 @@ export function createInteractiveEngine({
         await assertRowClaimable(s);
         await startChild(S, s);
       } else {
-        await writeRow(s, { status: "active", model: s.resolved ? s.resolved.key : null });
+        // Fix round 3 R1: no model stamp — see the startChild writeRow above.
+        await writeRow(s, { status: "active" });
       }
     } catch (e) {
       s.turn = null;
@@ -1900,7 +1956,11 @@ export function createInteractiveEngine({
     if (!s) throw engineError("no_such_session");
     if (s.state === "stopped") throw engineError("session_stopped");
 
-    const hasModel = opts.model != null;
+    // Fix round 3 R1: `model: null` is a MEANINGFUL value here — "revoke the
+    // explicit choice, follow the bot's own model again" — so presence is
+    // keyed on undefined, not truthiness. (The route maps an explicit JSON
+    // null to this; an absent key stays undefined and does nothing.)
+    const hasModel = opts.model !== undefined;
     const hasThinking = opts.thinking != null;
     const hasPermissionMode = opts.permissionMode != null;
     const hasPlanMode = Object.prototype.hasOwnProperty.call(opts, "planMode");
@@ -1912,7 +1972,7 @@ export function createInteractiveEngine({
     // refused here.
     if ((hasModel || hasThinking || hasPlanMode) && s.turn) throw engineError("turn_in_progress");
 
-    if (hasModel && (!opts.model.provider || !opts.model.modelId)) throw engineError("bad_request");
+    if (hasModel && opts.model !== null && (!opts.model.provider || !opts.model.modelId)) throw engineError("bad_request");
     if (hasThinking && !THINKING_LEVELS.has(opts.thinking)) throw engineError("bad_request");
     if (hasPermissionMode && !PERMISSION_MODES.has(opts.permissionMode)) throw engineError("bad_request");
     if (hasPlanMode && typeof opts.planMode !== "boolean") throw engineError("bad_request");
@@ -1921,7 +1981,41 @@ export function createInteractiveEngine({
     const applied = {};
     const bindsAtWake = {};
 
+    if (hasModel && opts.model !== null) {
+      // Fix round 3 R2a: an explicit pair must be one this instance can
+      // actually serve. The drawer only ever offers catalogue entries, but
+      // the API accepts any strings, and writeModel() now makes the choice
+      // DURABLE — without this gate a typo or a retired name becomes a
+      // poison pill that every future wake replays. Fail-OPEN on an empty
+      // catalogue: catalogModels() answers [] when the registry is
+      // unreadable, and a registry hiccup must not lock an operator out of
+      // a session that is working fine (catalogModels' own never-throw
+      // contract). Key shape matches providerModelList(): pi-shaped
+      // {provider, id} entries.
+      const catalogue = await catalogModels();
+      if (catalogue.length) {
+        const want = opts.model.provider + "/" + opts.model.modelId;
+        if (!catalogue.some((m) => m && (m.provider + "/" + m.id) === want)) {
+          throw engineError("bad_request");
+        }
+      }
+    }
     if (hasModel) {
+      if (opts.model === null) {
+        // Revoke the explicit choice (the drawer's "the bot's own model"
+        // option). In-memory tracking clears immediately so snapshot() and
+        // options() report the fallback honestly; the ROW gets NULL, so the
+        // next adopt re-resolves from the def instead of honoring a choice
+        // nobody stands behind. A live child keeps its model until the next
+        // wake — the log line says exactly that rather than implying an
+        // immediate switch.
+        s.currentModelParts = null;
+        s.currentModel = null;
+        await writeModel(s);                            // writes NULL
+        applied.model = null;
+        bindsAtWake.model = null;
+        emit(s, { type: "log", text: "model choice cleared — the next wake follows the bot's own model" });
+      } else {
       const { provider, modelId } = opts.model;
       if (s.pi) {
         // Warm BEFORE the switch (spec: pi-lab's local-models starter
@@ -1952,6 +2046,7 @@ export function createInteractiveEngine({
         s.currentModel = key;
         await writeModel(s);                           // survives a restart (N2)
         bindsAtWake.model = key;
+      }
       }
     }
 

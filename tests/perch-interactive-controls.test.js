@@ -722,6 +722,10 @@ test("options(): awake session returns the live models + thinking levels from th
 const CATALOGUE = [
   { provider: "crow-local", id: "qwen3.6-35b-a3b", name: "Qwen", baseUrl: "http://x:8003/v1" },
   { provider: "raven-flash", id: "flash-next", name: "Flash", baseUrl: "http://y:8010/v1" },
+  // Round 3 R2a: the switch tests use crow-chat/big-model (it is in the real
+  // models.json fixture this mirrors), so the catalogue that GATES control()
+  // must carry it — the rejection cases (ghost/nope) stay valid regardless.
+  { provider: "crow-chat", id: "big-model", name: "Big", baseUrl: "http://z:8020/v1" },
 ];
 
 test("options(): a hibernating session lists the provider catalogue, and still never wakes a child", async () => {
@@ -1090,5 +1094,159 @@ test("N1: a child speaking OUTSIDE a turn emits a text frame with a null turn id
   const texts = sub.ofType("text");
   assert.equal(texts.length, 1);
   assert.equal(texts[0].turnId, null);
+  sub.off();
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 3 R1 — the row's `model` column means "explicit operator choice"
+// and nothing else. The spawn/wake/turn-end stamps wrote the RESOLVER's answer
+// into it, and adoptRow then treated every such value as an override: after a
+// gateway restart, a changed bot-def default was silently ignored by every
+// existing session, forever, self-perpetuated by the next wake's re-stamp.
+// ---------------------------------------------------------------------------
+
+test("R1: a def-default change reaches a session whose row carries no explicit choice", async () => {
+  // The exact pin the review flagged: spawn on default A, hibernate, change
+  // the def to B, restart (adopt), send — turn 1 must run on B. Pre-fix this
+  // served A: the row held the stamped default and the restore treated it as
+  // the operator's override.
+  const { engine, bridge, clock } = makeEngine();
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  assert.equal(rowModelOf(s.sessionId), null, "round 3: a plain spawn leaves the row choiceless");
+
+  bridge._state.modelKey = "crow-chat/big-model";           // the def's new default
+  _resetInteractiveEngineForTest();
+  const { engine: reborn, state } = makeEngine({ bridge });
+  await reborn.message(s.sessionId, "after the def change");
+  await tick();
+  const pi = state.instances[state.instances.length - 1];
+  assert.equal(pi.opts.resolved.key, "crow-chat/big-model",
+    "wake follows the DEF, not the old stamped value — this is the whole fix");
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+  assert.equal(state.meter[state.meter.length - 1].resolved.key, "crow-chat/big-model",
+    "and metering prices the new default, not the pinned one");
+});
+
+test("R1: control({model:null}) revokes the choice — row NULLed, next wake re-resolves from the def", async () => {
+  // Revocation is what makes a legacy auto-stamped row recoverable from the
+  // UI (the drawer's "the bot's own model" option POSTs model:null).
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model", "precondition: an explicit choice is stamped");
+
+  const r = await engine.control(s.sessionId, { model: null });
+  assert.equal(r.applied.model, null, "the engine speaks the revocation back");
+  assert.equal(rowModelOf(s.sessionId), null, "and it reaches the row");
+
+  // Honest reporting: the live child keeps its model until the next wake —
+  // snapshot() must not claim null while it is still serving big-model.
+  const snap = await engine.get(s.sessionId);
+  assert.equal(snap.model, "crow-chat/big-model", "servingModel falls back to s.resolved — truthful for the live child");
+
+  clock.advance(600_001);
+  await tick();
+  _resetInteractiveEngineForTest();
+  const { engine: reborn, state } = makeEngine();
+  await reborn.message(s.sessionId, "wake");
+  await tick();
+  const pi = state.instances[state.instances.length - 1];
+  assert.equal(pi.opts.resolved.key, "crow-local/qwen3.6-35b-a3b",
+    "the next wake follows the def again — a revoked choice must not resurrect");
+});
+
+test("R1 belt: a model_select landing before any rowId is persisted when the row appears", async () => {
+  // Staff review C2: on a fresh spawn there is a window between PiRpc
+  // construction and writeRow completing where s.rowId is null. A child's
+  // FIRST model_select in that window used to be dropped forever — every
+  // later writeRow COALESCE-preserves, it does not re-write from tracking.
+  // The fake child emits the event synchronously from the constructor, the
+  // hardest shape the window can produce.
+  const { engine, bridge } = makeEngine();
+  const Base = bridge.PiRpc;
+  bridge.PiRpc = class ChattyPi extends Base {
+    constructor(o) {
+      super(o);
+      this.emit({ type: "model_select", model: { provider: "crow-chat", id: "big-model" }, source: "test" });
+    }
+  };
+  const s = await spawned(engine);
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model",
+    "the writeRow-tail belt replayed the choice that arrived with no rowId");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 3 R2 — a dead model key must not become a durable poison pill.
+//
+// model_resolver.mjs is fail-closed (an invalid key resolves to LOCAL_FALLBACK),
+// but control()'s switch and the adopt-restore bypass that resolver entirely:
+// the pair is written straight to s.currentModelParts and, now, to the row.
+// crow-dsv4 was disabled the very day PR #356 merged, so the case is live.
+// Two rails: validate at the switch (R2a), fall open with a log at wake (R2b).
+// ---------------------------------------------------------------------------
+
+test("R2a: control() refuses a model the catalogue does not carry, and changes nothing", async () => {
+  const { engine } = makeEngine({ providerModels: () => CATALOGUE });   // crow-local/qwen, raven-flash/flash-next
+  const s = await spawned(engine);
+  await assert.rejects(
+    engine.control(s.sessionId, { model: { provider: "ghost", modelId: "nope" } }),
+    /bad_request/,
+    "an arbitrary pair the instance cannot serve is rejected, not persisted",
+  );
+  assert.equal(rowModelOf(s.sessionId), null, "the rejection leaves the row choiceless — no pill planted");
+  const snap = await engine.get(s.sessionId);
+  assert.equal(snap.model, "crow-local/qwen3.6-35b-a3b", "and the in-memory tracking still reports the last-good model");
+});
+
+test("R2a: control() accepts a catalogue model even under an injected partial list (the switch's real target)", async () => {
+  const { engine } = makeEngine({ providerModels: () => CATALOGUE });
+  const s = await spawned(engine);
+  const r = await engine.control(s.sessionId, { model: { provider: "raven-flash", modelId: "flash-next" } });
+  assert.equal(r.applied.model, "raven-flash/flash-next", "a listed pair switches normally");
+  assert.equal(rowModelOf(s.sessionId), "raven-flash/flash-next");
+});
+
+test("R2a: an EMPTY catalogue fails open — a registry hiccup must not lock out a live session", async () => {
+  const { engine, clock } = makeEngine({ providerModels: () => [] });   // cold/unreadable registry
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  const r = await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal(r.bindsAtWake.model, "crow-chat/big-model",
+    "with nothing to check against, the operator's choice is honored, not refused");
+});
+
+test("R2b: an adopted session whose recorded model died falls open to the def, with a log", async () => {
+  // The exact crow-dsv4 shape: the row carries crow-chat/big-model, a provider
+  // later disabled. On wake, servingModel is validated against the catalogue;
+  // absent => drop the override, serve the def's fresh resolution, and TELL
+  // the operator rather than spawning a child on a provider that cannot answer.
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model", "precondition: the durable choice is in the row");
+  clock.advance(600_001);
+  await tick();
+
+  _resetInteractiveEngineForTest();
+  // A fresh engine whose catalogue no longer lists crow-chat/big-model (it was
+  // disabled), while the def still resolves to crow-local's default.
+  const { engine: reborn, state } = makeEngine({ providerModels: () => [
+    { provider: "crow-local", id: "qwen3.6-35b-a3b", name: "Qwen" },
+  ] });
+  const sub = await collect(reborn, s.sessionId);
+  await reborn.message(s.sessionId, "wake after the provider died");
+  await tick();
+  const pi = state.instances[state.instances.length - 1];
+  assert.equal(pi.opts.resolved.key, "crow-local/qwen3.6-35b-a3b",
+    "the dead recorded model is NOT forced onto the wake — the def's resolution serves");
+  const logs = sub.ofType("log");
+  assert.ok(logs.some((l) => /not available/.test(l.text) && /crow-chat\/big-model/.test(l.text)),
+    "and the drawer is told why, naming the dead model");
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model",
+    "the ROW keeps the choice — a temporarily disabled provider must not erase it");
   sub.off();
 });
