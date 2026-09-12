@@ -1092,3 +1092,84 @@ test("N1: a child speaking OUTSIDE a turn emits a text frame with a null turn id
   assert.equal(texts[0].turnId, null);
   sub.off();
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 3 R1 — the row's `model` column means "explicit operator choice"
+// and nothing else. The spawn/wake/turn-end stamps wrote the RESOLVER's answer
+// into it, and adoptRow then treated every such value as an override: after a
+// gateway restart, a changed bot-def default was silently ignored by every
+// existing session, forever, self-perpetuated by the next wake's re-stamp.
+// ---------------------------------------------------------------------------
+
+test("R1: a def-default change reaches a session whose row carries no explicit choice", async () => {
+  // The exact pin the review flagged: spawn on default A, hibernate, change
+  // the def to B, restart (adopt), send — turn 1 must run on B. Pre-fix this
+  // served A: the row held the stamped default and the restore treated it as
+  // the operator's override.
+  const { engine, bridge, clock } = makeEngine();
+  const s = await spawned(engine);
+  clock.advance(600_001);
+  await tick();
+  assert.equal(rowModelOf(s.sessionId), null, "round 3: a plain spawn leaves the row choiceless");
+
+  bridge._state.modelKey = "crow-chat/big-model";           // the def's new default
+  _resetInteractiveEngineForTest();
+  const { engine: reborn, state } = makeEngine({ bridge });
+  await reborn.message(s.sessionId, "after the def change");
+  await tick();
+  const pi = state.instances[state.instances.length - 1];
+  assert.equal(pi.opts.resolved.key, "crow-chat/big-model",
+    "wake follows the DEF, not the old stamped value — this is the whole fix");
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+  assert.equal(state.meter[state.meter.length - 1].resolved.key, "crow-chat/big-model",
+    "and metering prices the new default, not the pinned one");
+});
+
+test("R1: control({model:null}) revokes the choice — row NULLed, next wake re-resolves from the def", async () => {
+  // Revocation is what makes a legacy auto-stamped row recoverable from the
+  // UI (the drawer's "the bot's own model" option POSTs model:null).
+  const { engine, clock } = makeEngine();
+  const s = await spawned(engine);
+  await engine.control(s.sessionId, { model: { provider: "crow-chat", modelId: "big-model" } });
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model", "precondition: an explicit choice is stamped");
+
+  const r = await engine.control(s.sessionId, { model: null });
+  assert.equal(r.applied.model, null, "the engine speaks the revocation back");
+  assert.equal(rowModelOf(s.sessionId), null, "and it reaches the row");
+
+  // Honest reporting: the live child keeps its model until the next wake —
+  // snapshot() must not claim null while it is still serving big-model.
+  const snap = await engine.get(s.sessionId);
+  assert.equal(snap.model, "crow-chat/big-model", "servingModel falls back to s.resolved — truthful for the live child");
+
+  clock.advance(600_001);
+  await tick();
+  _resetInteractiveEngineForTest();
+  const { engine: reborn, state } = makeEngine();
+  await reborn.message(s.sessionId, "wake");
+  await tick();
+  const pi = state.instances[state.instances.length - 1];
+  assert.equal(pi.opts.resolved.key, "crow-local/qwen3.6-35b-a3b",
+    "the next wake follows the def again — a revoked choice must not resurrect");
+});
+
+test("R1 belt: a model_select landing before any rowId is persisted when the row appears", async () => {
+  // Staff review C2: on a fresh spawn there is a window between PiRpc
+  // construction and writeRow completing where s.rowId is null. A child's
+  // FIRST model_select in that window used to be dropped forever — every
+  // later writeRow COALESCE-preserves, it does not re-write from tracking.
+  // The fake child emits the event synchronously from the constructor, the
+  // hardest shape the window can produce.
+  const { engine, bridge } = makeEngine();
+  const Base = bridge.PiRpc;
+  bridge.PiRpc = class ChattyPi extends Base {
+    constructor(o) {
+      super(o);
+      this.emit({ type: "model_select", model: { provider: "crow-chat", id: "big-model" }, source: "test" });
+    }
+  };
+  const s = await spawned(engine);
+  assert.equal(rowModelOf(s.sessionId), "crow-chat/big-model",
+    "the writeRow-tail belt replayed the choice that arrived with no rowId");
+});

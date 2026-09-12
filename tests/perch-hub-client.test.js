@@ -1602,7 +1602,10 @@ test("the drawer's model picker is ENABLED on a hibernating session's fallback l
   await openChatSession(hub);
   const modelSel = hub.els["perch-model"], thinkSel = hub.els["perch-thinking"];
   assert.equal(modelSel.disabled, false, "the fallback list is a real list and the switch really binds at the next wake");
-  assert.deepEqual(modelSel.children.map((o) => o.value), ["crow-local/qwen"]);
+  // Round 3 R1: the picker now LEADS with the revocation sentinel (value '')
+  // — "the bot's own model" POSTs control {model:null} — with the live model
+  // still second and still selected.
+  assert.deepEqual(modelSel.children.map((o) => o.value), ["", "crow-local/qwen"]);
   assert.equal(modelSel.value, "crow-local/qwen",
     "and it must SAY which one is live — enabled-and-listing was the assertion this bug walked through");
   assert.equal(thinkSel.disabled, true,
@@ -1868,7 +1871,32 @@ test("a model the list does not carry is added and selected, not silently droppe
   assert.equal(sel.value, "retired-provider/old-model");
   assert.equal(sel.children[0].value, "retired-provider/old-model", "prepended, so it reads first");
   assert.equal(sel.children[0].textContent, "retired-provider/old-model — current");
-  assert.equal(sel.children.length, 4, "and the catalogue is still all there");
+  // Round 3 R1: +1 for the revocation sentinel the picker now always leads with.
+  assert.equal(sel.children.length, 5, "and the catalogue is still all there");
+});
+
+test("the drawer's picker leads with 'the bot's own model', and picking it POSTs the revocation", async () => {
+  // Round 3 R1 (client half): the sentinel is how a legacy auto-stamped row
+  // becomes recoverable from the UI. It must be the FIRST option, must not
+  // out-select a live current model, and must speak the engine's revocation
+  // vocabulary — control body {model:null}, not an omitted field.
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/options": () => makeResponse(200, {
+      models: [{ provider: "crow-local", id: "qwen", name: "Qwen" },
+               { provider: "crow-chat", id: "big", name: "Big" }],
+      thinkingLevels: null, current: "crow-local/qwen", source: "providers" }) }),
+  });
+  await openChatSession(hub);
+  const sel = hub.els["perch-model"];
+  assert.equal(sel.children[0].value, "", "sentinel is option 0");
+  assert.match(sel.children[0].textContent, /own model/i, "labelled, never a bare blank");
+  assert.equal(sel.value, "crow-local/qwen", "a live current still wins the selection");
+  // Operate it: select '' and fire the change handler, as the browser would.
+  sel.value = "";
+  sel.onchange({ target: sel });
+  const ctl = hub.fetchCalls.filter((c) => c.path.endsWith("/control"));
+  assert.equal(ctl.length, 1, "one POST, and it is exactly the revocation");
+  assert.deepEqual(JSON.parse(ctl[0].opts.body), { model: null });
 });
 
 test("a disabled model select is never given a value — there is no list to be right about", async () => {

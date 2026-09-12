@@ -1080,6 +1080,18 @@ export function perchHubJs(lang = "en") {
     clearEl(modelSel); clearEl(thinkSel);
     var models=(o&&listUsable(o.models))?o.models:null;
     var levels=(o&&listUsable(o.thinkingLevels))?o.thinkingLevels:null;
+    if(models){
+      /* Fix round 3 R1: "the bot's own model" is also the REVOCATION option
+         in the session picker (it already means "choose nothing" in the
+         launcher). Selecting it POSTs control {model:null}: the engine clears
+         the explicit choice and NULLs the row, so the next wake re-resolves
+         from the def. Without this, a legacy row stamped before the column
+         meant "explicit choice" could never be un-pinned from the UI. */
+      var none=document.createElement('option');
+      none.value='';
+      none.textContent=MODEL_BOT_RESOLVES;
+      modelSel.appendChild(none);
+    }
     if(models) models.forEach(function(m){
       var opt=document.createElement('option');
       opt.value=(m&&m.provider)+'/'+(m&&m.id);
@@ -1127,8 +1139,13 @@ export function perchHubJs(lang = "en") {
      flipping the permission mode gets a 200 and nothing changes. Every other
      body in this file is camelCase JS; these two stay snake_case on purpose. */
   function controlBody(kind,value){
-    if(kind==='model'){ var i=value.indexOf('/');
-      return {model:{provider:value.slice(0,i),id:value.slice(i+1)}}; }
+    if(kind==='model'){
+      /* '' is the revocation sentinel — see renderOptions. The route maps a
+         present-but-null model to "clear the explicit choice". */
+      if(value==='') return {model:null};
+      var i=value.indexOf('/');
+      return {model:{provider:value.slice(0,i),id:value.slice(i+1)}};
+    }
     if(kind==='thinking') return {thinking:value};
     if(kind==='permission') return {permission_mode:value};   /* snake_case */
     return {plan_mode:!!value};                                /* snake_case */

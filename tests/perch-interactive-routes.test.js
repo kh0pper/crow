@@ -789,6 +789,17 @@ test("POST /interactive/:sid/control forwards plan_mode:false — a present fals
   assert.deepEqual(engineCalls.control[0].opts, { planMode: false });
 });
 
+test("POST /interactive/:sid/control forwards model:null as a revocation — present-but-null, not an omitted field", async () => {
+  // Round 3 R1: the drawer's "the bot's own model" option POSTs exactly this
+  // (client.js controlBody('model','') -> {model:null}). An engine that
+  // keyed model presence on truthiness would silently no-op the clear — the
+  // same silent-drop class as the old snake_case permission bug this file's
+  // own comment documents.
+  const { status } = await postJson("/interactive/sess-1/control", { model: null });
+  assert.equal(status, 200);
+  assert.deepEqual(engineCalls.control[0].opts, { model: null });
+});
+
 test("POST /interactive/:sid/control sends an empty opts object when the body carries no recognized fields", async () => {
   await postJson("/interactive/sess-1/control", {});
   assert.deepEqual(engineCalls.control[0].opts, {});

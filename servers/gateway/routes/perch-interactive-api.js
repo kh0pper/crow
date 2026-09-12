@@ -603,12 +603,20 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
   // engine's camelCase here, the ONE place that translation happens. `model`
   // accepts {provider, id} (the shape options()'s listings hand back) and
   // maps id→modelId for the engine.
+  //
+  // Fix round 3 R1: an explicit `"model": null` in the body REVOKES the
+  // operator's choice (the drawer's "the bot's own model" option) — the next
+  // wake re-resolves from the def. Presence is therefore keyed on the key,
+  // not on truthiness, the same hasOwnProperty idiom plan_mode already uses;
+  // a body without `model` stays untouched, exactly as before.
   router.post(P + "/interactive/:sid/control", async (req, res) => {
     const sid = String(req.params.sid);
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const opts = {};
-    if (body.model != null && typeof body.model === "object") {
-      opts.model = { provider: body.model.provider, modelId: body.model.id };
+    if (Object.prototype.hasOwnProperty.call(body, "model")) {
+      opts.model = body.model && typeof body.model === "object"
+        ? { provider: body.model.provider, modelId: body.model.id }
+        : null;
     }
     if (body.thinking != null) opts.thinking = body.thinking;
     if (body.permission_mode != null) opts.permissionMode = body.permission_mode;
