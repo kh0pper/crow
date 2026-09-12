@@ -309,8 +309,14 @@ function piVisible(sessionDir) {
   const needle = "--session-dir " + sessionDir;
   for (const pid of readdirSync("/proc").filter((n) => /^\d+$/.test(n))) {
     try {
-      if (readFileSync("/proc/" + pid + "/comm", "utf8").trim() !== "node") continue;
-      if (readFileSync("/proc/" + pid + "/cmdline").toString("utf8").replace(/\0/g, " ").includes(needle)) return true;
+      // Mirrors piLiveness()'s current predicate: identity from argv0, not
+      // comm — Node 24 renames the main thread "MainThread", which made the
+      // comm === "node" test silently false on this fleet's gateway (the
+      // fixture's 5s timeout was the canary).
+      const cmdline = readFileSync("/proc/" + pid + "/cmdline").toString("utf8");
+      const argv0 = (cmdline.split("\0")[0] || "").trim();
+      if (!/^node(js)?$/.test(argv0.slice(argv0.lastIndexOf("/") + 1))) continue;
+      if (cmdline.replace(/\0/g, " ").includes(needle)) return true;
     } catch { /* exited mid-scan */ }
   }
   return false;
