@@ -492,7 +492,7 @@ test("spawn passes cardBound to buildBotWorld: true for a card-bound spawn, fals
   assert.equal(byBot.freebot.cardBound, false, "free chat keeps the def's closed-world selection");
 });
 
-test("buildBotWorld with no def.session_dir and no project workspace throws code no_session_dir", async () => {
+test("buildBotWorld with no def.session_dir and no project workspace falls back to <crowHome>/pi-bots/<botId> (open-anywhere B2)", async () => {
   const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
   const botId = "nowhereBot";
   const c = raw();
@@ -505,10 +505,14 @@ test("buildBotWorld with no def.session_dir and no project workspace throws code
     }), 1);
   c.close();
 
-  await assert.rejects(
-    () => buildBotWorld({ botId, threadId: "perchlive-nowhere", gatewayType: "perch" }),
-    (e) => e.code === "no_session_dir"
-  );
+  // The old behavior was a typed no_session_dir refusal; the open-anywhere
+  // split gives every bot a storage root: the world root falls back to
+  // <crowHome>/pi-bots/<botId>, and cwd defaults to it.
+  const world = await buildBotWorld({ botId, threadId: "perchlive-nowhere", gatewayType: "perch" });
+  const expected = join(CROW_HOME, "pi-bots", botId);
+  assert.equal(world.sessionDir, expected, "world root falls back to <crowHome>/pi-bots/<botId>");
+  assert.equal(world.cwd, expected, "cwd defaults to the world root when unchosen");
+  assert.ok(existsSync(join(expected, "sessions")), "sessions dir minted under the fallback world root");
 });
 
 // ---------------------------------------------------------------------------

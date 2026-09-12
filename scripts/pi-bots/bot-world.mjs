@@ -35,7 +35,7 @@
  * loadBridge()). Everything taken from bridge is part of its public export
  * surface — which job_runner.mjs also consumes, so those names are stable.
  */
-import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeBotMcp } from "./mcp_writer.mjs";
@@ -52,7 +52,8 @@ function loadBridge() { return import("./bridge.mjs"); }
  * Phase A — identity. The exact sequence handleInbound ran inline before C-11.
  *
  * @param {{botId: string, threadId: string, gatewayType?: string,
- *          log?: (m: string) => void, jobId?: string|null, cardBound?: boolean}} opts
+ *          log?: (m: string) => void, jobId?: string|null, cardBound?: boolean,
+ *          cwd?: string|null}} opts
  *   `jobId` (Track 1 Task 7 — the missing link in the job_id chain):
  *   job_runner.runCardExecute passes job.job_id through here so it reaches
  *   writeBotMcp's board-entry headers (X-Crow-Job-Id) — without it the
@@ -62,11 +63,15 @@ function loadBridge() { return import("./bridge.mjs"); }
  *   card. Like a job turn, it must be able to call board_report_result (the
  *   dispatch brief ends the run with that call), so the board MCP entry is
  *   ensured regardless of the def's own crow_mcp selection.
+ *   `cwd` (open-anywhere plan, Phase B): the operator's chosen working
+ *   directory — pi's process cwd AND the home of the per-bot `.mcp.json`
+ *   (pi-lab's mcp-client reads `cwd/.mcp.json`). NULL/unset keeps today's
+ *   behavior byte-identically: cwd === sessionDir (the world root).
  * @returns {Promise<{def, bot, crowHome, projectId, projectSpace, projectMembers,
- *          sessionDir, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
+ *          sessionDir, cwd, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
  *          narrowedTools, gatewayType}>}
  */
-export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null, cardBound = false }) {
+export async function buildBotWorld({ botId, threadId, gatewayType = "perch", log = () => {}, jobId = null, cardBound = false, cwd = null }) {
   const B = await loadBridge();
   const bot = B.loadBot(botId);
   const def = bot.def;
@@ -83,32 +88,49 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // (new project-native bots). Legacy bots without a project_space row, or
   // whose row has no workspace_dir, fall back to def.session_dir (the
   // pre-M3 ~/.crow-mpa/pi-bots/<bot_id>/ path).
+  // Open-anywhere B2: a bot with NEITHER is no longer refused — the world
+  // root falls back to <crowHome>/pi-bots/<botId> (mkdir'd below via the
+  // sessions mkdir). The old no_session_dir throw made an unconfigured bot
+  // unspawnable on every rail; with the cwd/world-root split there is always
+  // a sane storage root, and a perch operator can point the session anywhere.
   const sessionDir = (projectSpace && projectSpace.workspace_dir)
     ? (projectSpace.workspace_dir + "/bots/" + botId)
-    : def.session_dir;
-  const tasksDbPath = (projectSpace && projectSpace.tasks_db_uri) || B.TASKS_DB;
-  // Track 3 Task 6: a bot with neither a project-space workspace nor its own
-  // def.session_dir has nowhere to run — the pre-existing code below would
-  // silently mkdir "undefined/sessions" (the literal `undefined/` bug, for
-  // EVERY rail this function serves: gmail, discord, job_runner, perch). Fail
-  // loud and typed instead, so the caller (perch's free-chat spawn above all —
-  // a bot with no bound project and no session_dir configured) gets an
-  // actionable refusal rather than a mangled path on disk.
-  if (!sessionDir) {
-    throw Object.assign(
-      new Error("bot has no working directory — set one in Bot Builder (session_dir) or bind the bot to a project space"),
-      { code: "no_session_dir" }
-    );
+    : (def.session_dir || join(crowHome, "pi-bots", botId));
+  // The operator's chosen working directory (open-anywhere). Defaults to the
+  // world root, which keeps every pre-existing caller byte-identical. It is
+  // pi's process cwd, the directory added to write_paths at spawn, and where
+  // the per-bot .mcp.json lives — so validate it hard, before any side effect:
+  // absolute, existing, a directory. The gateway route validates first; this
+  // is the belt-and-braces second gate (engineError-shaped code for the map).
+  const resolvedCwd = cwd || sessionDir;
+  if (cwd) {
+    let ok = typeof cwd === "string" && cwd.startsWith("/");
+    if (ok) { try { ok = statSync(cwd).isDirectory(); } catch { ok = false; } }
+    if (!ok) {
+      throw Object.assign(
+        new Error("cwd is not an existing directory: " + JSON.stringify(cwd)),
+        { code: "bad_cwd" }
+      );
+    }
   }
+  const tasksDbPath = (projectSpace && projectSpace.tasks_db_uri) || B.TASKS_DB;
+  // World root storage: pi session files, outputs/<sid>, uploads — always
+  // under sessionDir, NEVER inside the operator's chosen cwd (a session's
+  // deliverables must not litter the project directory).
   mkdirSync(sessionDir + "/sessions", { recursive: true });
 
-  // Keep the per-bot <sessionDir>/.mcp.json in sync with the def on every
+  // Keep the per-bot <cwd>/.mcp.json in sync with the def on every
   // turn (best-effort; additive merge — homedir ~/.pi/agent/mcp.json still
   // wins on collision, so a writer hiccup can never break a turn). Primary
   // writer is the GUI save handler; this is the defensive backstop.
   // M3b: pass the resolved sessionDir (which may differ from def.session_dir
   // when the bot has a project_space workspace) so the .mcp.json lives next
   // to where pi actually runs.
+  // Open-anywhere B2: "where pi actually runs" is now the operator's cwd, not
+  // the world root — pi-lab's mcp-client reads `cwd/.mcp.json` (bridge.mjs's
+  // own comment says so), so writing it anywhere else would silently strip
+  // the bot of every MCP tool. writeBotMcp is an additive merge, so a chosen
+  // dir that carries its own .mcp.json survives.
   // F4a L2b: read the remote_invocation flag + trusted peer gateway URLs once
   // (local-only, default off). With the flag off, remoteEnabled=false ⇒
   // writeBotMcp mints no remote blocks and toolAllowlist adds no remote entries
@@ -123,7 +145,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     // acceptance F2: a card-bound session (or a job turn) must be able to
     // call board_report_result — ensure the board entry is minted.
     const w = writeBotMcp(def, {
-      sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId,
+      sessionDir: resolvedCwd, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId,
       ensureServers: (jobId || cardBound) ? ["board"] : [],
     });
     if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
@@ -155,8 +177,10 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
 
   // gatewayType is carried through inert (no behavior depends on it here) so a
   // caller that only holds the world still knows which channel asked for it.
+  // cwd: the resolved working directory (=== sessionDir when not chosen).
   return { def, bot, crowHome, projectId, projectSpace, projectMembers, sessionDir,
-    tasksDbPath, remoteEnabled, peerGatewayUrls, session, narrowedTools, gatewayType };
+    cwd: resolvedCwd, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
+    narrowedTools, gatewayType };
 }
 
 /**
@@ -190,7 +214,10 @@ export async function prepareSpawn(world, { escalate = false, log = () => {} } =
   // true, the bot MAY draft a new skill into a CONFINED staging dir. The dir is
   // keyed on def.session_dir (NOT the resolved sessionDir, which for a
   // project-native bot is <workspace>/bots/<id>) so it is the exact location the
-  // Bot Builder review UI scans — no write-here/scan-there split. We mkdir it,
+  // Bot Builder review UI scans — no write-here/scan-there split. Open-anywhere
+  // B2 (review Q1): it also does NOT follow the operator's perch cwd — a
+  // session working in an arbitrary project directory still stages proposals
+  // where the review UI looks. We mkdir it,
   // make it writable for the write tool (PiRpc augments write_paths below), and
   // inject the directive + full skill-writing guidance into the system prompt.
   // A staged file stays INERT (skill_resolver loads only by name from the skill
