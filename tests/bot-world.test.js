@@ -476,3 +476,46 @@ test("B2: no session_dir + no project space falls back to <crowHome>/pi-bots/<bo
   assert.equal(world.cwd, expected, "cwd defaults to the world root");
   assert.ok(existsSync(join(expected, "sessions")), "fallback root is mkdir'd");
 });
+
+test("B3: PiRpc spawns pi in opts.cwd; no cwd keeps the world root; --session-dir never follows the cwd", async () => {
+  const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
+  const stub = join(dir, "b3-stub.mjs");
+  writeFileSync(stub, [
+    'import { writeFileSync } from "node:fs";',
+    'writeFileSync(process.env.B3_REPORT, JSON.stringify({ cwd: process.cwd(), argv: process.argv.slice(2) }));',
+    'process.exit(0);',
+  ].join("\n"));
+  const def = {
+    system_prompt: "x", models: { default: "stub/m1" },
+    tools: { pi_builtin: ["read"] },
+    permission_policy: { bash: "deny", write_paths: [] },
+  };
+  async function spawnRecord(tag, opts) {
+    const report = join(dir, `b3-report-${tag}.json`);
+    const pi = new PiRpc(Object.assign({
+      def,
+      resolved: { provider: "stub", model: "m1" },
+      nodeBin: process.execPath,
+      cliPath: stub,
+      extraEnv: { B3_REPORT: report },
+    }, opts));
+    for (let i = 0; i < 100 && !existsSync(report); i++) await new Promise((r) => setTimeout(r, 50));
+    try { await pi.close(); } catch {}
+    return JSON.parse(readFileSync(report, "utf8"));
+  }
+
+  const chosen = mkdtempSync(join(dir, "b3-chosen-"));
+  const worldRoot = join(dir, "b3-world");
+  mkdirSync(worldRoot, { recursive: true });
+
+  const withCwd = await spawnRecord("cwd", { sessionDir: worldRoot, cwd: chosen });
+  assert.equal(withCwd.cwd, chosen, "pi's process cwd is the operator's chosen directory");
+  const sd = withCwd.argv.indexOf("--session-dir");
+  assert.ok(sd >= 0, "--session-dir is still pinned");
+  assert.equal(withCwd.argv[sd + 1], join(worldRoot, "sessions"),
+    "pi session files stay in the WORLD root, never the chosen directory");
+
+  const noCwd = await spawnRecord("default", { sessionDir: worldRoot });
+  assert.equal(noCwd.cwd, worldRoot, "no opts.cwd → spawn cwd is the world root (byte-identical for every channel caller)");
+  assert.equal(noCwd.argv[noCwd.argv.indexOf("--session-dir") + 1], join(worldRoot, "sessions"));
+});
