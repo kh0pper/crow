@@ -37,9 +37,12 @@ import {
   ftruncateSync,
   writeSync,
   createReadStream,
+  readdirSync,
+  statSync,
   constants as fsConstants,
 } from "node:fs";
-import { basename, extname, join, sep } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { jsonError } from "./_error.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
 import { resolveEngineStatus } from "../dashboard/panels/bot-builder/engine-gate.js";
@@ -135,6 +138,10 @@ const ERROR_MAP = {
   // Track 3 Task 9 additions.
   card_occupied: [409, "card_occupied"],
   no_session_dir: [409, "no_session_dir"],
+  // Open-anywhere C1: spawn/control with a cwd that is not an existing
+  // directory. The route validates first (400 bad_cwd); buildBotWorld is the
+  // belt-and-braces second gate and throws the same typed code.
+  bad_cwd: [400, "bad_cwd"],
   cycle_busy: [409, "cycle_busy"],
   // control({planMode}) on a hibernating session (perch-interactive.js's own
   // `if (!s.pi) throw engineError("not_awake")` — plan mode always needs a
@@ -271,6 +278,56 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     return typeof engine === "function" ? engine() : engine;
   }
 
+  // ---- GET /browse — server-backed directory listing for the launcher's
+  // "open anywhere" picker (open-anywhere C1). Directory NAMES + paths only,
+  // NEVER file contents, never file entries. Behind the same dashboardAuth as
+  // every perch-api route (router.use(P, dashboardAuth) above) and NOT in
+  // PUBLIC_FUNNEL_PREFIXES — the network invariant holds: private routes are
+  // never funnel-reachable. The dashboard operator IS the machine owner, so
+  // this is a picker, not a trust boundary.
+  router.get(P + "/browse", (req, res) => {
+    try {
+      const q = req.query.path;
+      const raw = (q == null || q === "") ? homedir() : String(q);
+      // Expand a leading ~ (the shell idiom an operator pastes).
+      const expanded = raw === "~" ? homedir()
+        : raw.startsWith("~/") ? join(homedir(), raw.slice(2))
+        : raw;
+      // resolve() collapses any `..`/`.` harmlessly; the result is always
+      // absolute, so traversal in the query can't escape into a relative read.
+      const target = resolve(expanded);
+      let real;
+      try { real = realpathSync(target); } catch { return jsonError(res, 404, "unreadable"); }
+      let entries;
+      try { entries = readdirSync(real, { withFileTypes: true }); }
+      catch { return jsonError(res, 404, "unreadable"); }
+      const dirs = [];
+      for (const e of entries) {
+        // Keep directories; follow a symlink only when it resolves to a real
+        // directory (statSync on the joined path), skipping one that errors or
+        // lands on a file — never leak a file entry, never throw on a broken link.
+        let isDir = false;
+        if (e.isDirectory()) isDir = true;
+        else if (e.isSymbolicLink()) {
+          try { isDir = statSync(join(real, e.name)).isDirectory(); } catch { isDir = false; }
+        }
+        if (isDir) dirs.push({ name: e.name, path: join(real, e.name) });
+      }
+      // Dot-dirs kept but sorted last; alphabetical within each group. Cap 500
+      // so a huge home dir can't balloon the response.
+      dirs.sort((a, b) => {
+        const ad = a.name.startsWith("."), bd = b.name.startsWith(".");
+        if (ad !== bd) return ad ? 1 : -1;
+        return a.name.localeCompare(b.name);
+      });
+      // `parent` is derived from the RESOLVED realpath (not the raw input) so
+      // `..` navigation out of a symlinked dir doesn't ping-pong.
+      res.json({ path: real, parent: dirname(real), dirs: dirs.slice(0, 500) });
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
   // ---- POST /bots/:id/interactive — spawn a long-lived session ----
   router.post(P + "/bots/:id/interactive", async (req, res) => {
     const botId = String(req.params.id);
@@ -287,8 +344,23 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       const def = row ? parseDef(row) : {};
       if (!perchAttached(def)) return jsonError(res, 403, "perch_not_attached");
 
+      // Open-anywhere C1: an optional { cwd } points the session at an
+      // operator-chosen directory. Validate here (the route is the first gate;
+      // buildBotWorld is the second) — absolute, existing, a directory — else
+      // 400 bad_cwd. An absent/empty cwd means "the bot's default" and is
+      // never sent to the engine.
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      let cwd = null;
+      if (body.cwd != null && body.cwd !== "") {
+        const c = String(body.cwd);
+        let ok = isAbsolute(c);
+        if (ok) { try { ok = statSync(c).isDirectory(); } catch { ok = false; } }
+        if (!ok) return jsonError(res, 400, "bad_cwd");
+        cwd = c;
+      }
+
       const eng = resolveEngine();
-      const result = await eng.spawn({ botId });
+      const result = await eng.spawn({ botId, cwd });
       res.status(201).json(result);
     } catch (err) {
       mapEngineError(res, err);
@@ -621,6 +693,11 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     if (body.thinking != null) opts.thinking = body.thinking;
     if (body.permission_mode != null) opts.permissionMode = body.permission_mode;
     if (Object.prototype.hasOwnProperty.call(body, "plan_mode")) opts.planMode = body.plan_mode;
+    // Open-anywhere C1: forward an explicit cwd to control() — the engine
+    // validates it (absolute/existing/directory → bad_request) and hibernates
+    // an awake child so the next message wakes in the new dir. Keyed on
+    // presence, like plan_mode, so a body without cwd leaves it untouched.
+    if (Object.prototype.hasOwnProperty.call(body, "cwd")) opts.cwd = body.cwd;
     try {
       const eng = resolveEngine();
       const result = await eng.control(sid, opts);

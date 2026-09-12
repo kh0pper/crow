@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import http from "node:http";
 import Database from "better-sqlite3";
 
@@ -218,8 +218,8 @@ beforeEach(() => {
     checkCardFree: [], attachCard: [], control: [], cycle: [], options: [], rename: [],
   };
   engineImpl = {
-    async spawn({ botId, cardId }) {
-      engineCalls.spawn.push({ botId, cardId });
+    async spawn({ botId, cardId, cwd }) {
+      engineCalls.spawn.push({ botId, cardId, cwd });
       return { sessionId: "perchlive-abc", threadId: "perchlive-abc", state: "awake" };
     },
     async message(sid, text, images) {
@@ -340,7 +340,7 @@ test("POST /bots/:id/interactive 201s and passes botId through to the engine", a
   const { status, body } = await postJson("/bots/chatty/interactive", {});
   assert.equal(status, 201);
   assert.deepEqual(body, { sessionId: "perchlive-abc", threadId: "perchlive-abc", state: "awake" });
-  assert.deepEqual(engineCalls.spawn, [{ botId: "chatty", cardId: undefined }]);
+  assert.deepEqual(engineCalls.spawn, [{ botId: "chatty", cardId: undefined, cwd: null }]);
 });
 
 test("POST /bots/:id/interactive 409s engine_required before ever touching the engine", async () => {
@@ -544,7 +544,7 @@ test("POST /bots/:id/dispatch 201s, spawns with cardId, writes assigned_bot, and
   const { status, body } = await postJson("/bots/chatty/dispatch", { card_id: liveCardId, note: "please work this" });
   assert.equal(status, 201);
   assert.deepEqual(body, { sessionId: "perchlive-abc", threadId: "perchlive-abc", state: "awake" });
-  assert.deepEqual(engineCalls.spawn, [{ botId: "chatty", cardId: liveCardId }]);
+  assert.deepEqual(engineCalls.spawn, [{ botId: "chatty", cardId: liveCardId, cwd: undefined }]);
   // Fix round 1: dispatch keeps calling checkCardFree WITHOUT an exclusion —
   // a fresh spawn always mints a brand-new sessionId, so it can never
   // collide with its own not-yet-existent row.
@@ -1653,4 +1653,95 @@ test("perchAttached is imported from the shared module, not redefined locally (T
     "perch-interactive-api.js must import perchAttached from the shared module");
   assert.doesNotMatch(src, /function perchAttached\(/,
     "perch-interactive-api.js must not define its own local perchAttached — that is the duplication this task removes");
+});
+
+// ---------------------------------------------------------------------------
+// Open-anywhere C1 — GET /browse (directory names only) + spawn/control cwd
+// ---------------------------------------------------------------------------
+
+test("GET /browse lists only directories, alphabetical with dot-dirs last, echoing the resolved path", async () => {
+  const root = join(dir, "browse-root");
+  mkdirSync(join(root, "zeta"), { recursive: true });
+  mkdirSync(join(root, "alpha"), { recursive: true });
+  mkdirSync(join(root, ".hidden"), { recursive: true });
+  writeFileSync(join(root, "a-file.txt"), "not a dir");
+  const { status, body } = await getJson("/browse?path=" + encodeURIComponent(root));
+  assert.equal(status, 200);
+  assert.equal(body.path, root, "the resolved path is echoed");
+  assert.equal(body.parent, dirname(root), "parent is the resolved dir's parent");
+  assert.deepEqual(body.dirs.map((d) => d.name), ["alpha", "zeta", ".hidden"],
+    "dirs only, alphabetical, dot-dirs sorted last, no file entries");
+  assert.ok(body.dirs.every((d) => typeof d.name === "string" && typeof d.path === "string"),
+    "each entry carries name + path only — never contents");
+  assert.ok(!body.dirs.some((d) => d.name === "a-file.txt"), "a plain file is never listed");
+});
+
+test("GET /browse follows a symlink to a directory but never lists a symlink to a file", async () => {
+  const root = join(dir, "browse-sym");
+  mkdirSync(join(root, "real-dir"), { recursive: true });
+  writeFileSync(join(root, "real-file.txt"), "x");
+  symlinkSync(join(root, "real-dir"), join(root, "link-to-dir"));
+  symlinkSync(join(root, "real-file.txt"), join(root, "link-to-file"));
+  const { status, body } = await getJson("/browse?path=" + encodeURIComponent(root));
+  assert.equal(status, 200);
+  const names = body.dirs.map((d) => d.name);
+  assert.ok(names.includes("link-to-dir"), "a symlink resolving to a directory is listed");
+  assert.ok(!names.includes("link-to-file"), "a symlink to a file is never listed");
+  assert.ok(!names.includes("real-file.txt"), "a plain file is never listed");
+});
+
+test("GET /browse collapses .. traversal via resolve", async () => {
+  const root = join(dir, "browse-dotdot", "child");
+  mkdirSync(root, { recursive: true });
+  const { status, body } = await getJson("/browse?path=" + encodeURIComponent(join(root, "..")));
+  assert.equal(status, 200);
+  assert.equal(body.path, join(dir, "browse-dotdot"), "the .. collapsed harmlessly to the parent");
+});
+
+test("GET /browse 404s unreadable for a nonexistent path", async () => {
+  const { status, body } = await getJson("/browse?path=" + encodeURIComponent(join(dir, "no-such-dir")));
+  assert.equal(status, 404);
+  assert.equal(body.error, "unreadable");
+});
+
+test("POST /bots/:id/interactive with a real cwd validates it and passes it to the engine", async () => {
+  const chosen = join(dir, "spawn-cwd-ok");
+  mkdirSync(chosen, { recursive: true });
+  const { status } = await postJson("/bots/chatty/interactive", { cwd: chosen });
+  assert.equal(status, 201);
+  assert.equal(engineCalls.spawn[0].cwd, chosen, "the validated cwd reaches the engine");
+});
+
+test("POST /bots/:id/interactive 400s bad_cwd for a nonexistent cwd, before the engine", async () => {
+  const { status, body } = await postJson("/bots/chatty/interactive", { cwd: join(dir, "does-not-exist") });
+  assert.equal(status, 400);
+  assert.equal(body.error, "bad_cwd");
+  assert.equal(engineCalls.spawn.length, 0, "the route validates before the engine is ever called");
+});
+
+test("POST /bots/:id/interactive 400s bad_cwd for a relative cwd", async () => {
+  const { status, body } = await postJson("/bots/chatty/interactive", { cwd: "relative/path" });
+  assert.equal(status, 400);
+  assert.equal(body.error, "bad_cwd");
+  assert.equal(engineCalls.spawn.length, 0);
+});
+
+test("POST /bots/:id/interactive without cwd passes cwd:null (the bot's default)", async () => {
+  const { status } = await postJson("/bots/chatty/interactive", {});
+  assert.equal(status, 201);
+  assert.equal(engineCalls.spawn[0].cwd, null, "an absent cwd → null, never a phantom value");
+});
+
+test("POST /interactive/:sid/control forwards an explicit cwd to the engine", async () => {
+  const chosen = join(dir, "control-cwd-fwd");
+  mkdirSync(chosen, { recursive: true });
+  const { status } = await postJson("/interactive/sess-1/control", { cwd: chosen });
+  assert.equal(status, 200);
+  assert.deepEqual(engineCalls.control[0], { sid: "sess-1", opts: { cwd: chosen } });
+});
+
+test("POST /interactive/:sid/control without cwd does not add the key (presence-keyed)", async () => {
+  const { status } = await postJson("/interactive/sess-1/control", { thinking: "high" });
+  assert.equal(status, 200);
+  assert.ok(!("cwd" in engineCalls.control[0].opts), "a body without cwd leaves opts.cwd absent");
 });
