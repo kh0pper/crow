@@ -62,6 +62,15 @@ ${engineBanner(engine, lang)}
            whole task exists to stop shipping. -->
       <label class="field-label" id="perch-new-model-label" for="perch-new-model" hidden>${escapeHtml(t("perch.newSessionModel", lang))}</label>
       <select id="perch-new-model" aria-labelledby="perch-new-model-label" hidden></select>
+      <!-- Open-anywhere C2: the directory the session about to be started
+           runs in. EMPTY means "the bot's default" and the key is never
+           sent — the route/engine treat an absent cwd as the world root.
+           The browse button opens the server-backed picker modal (built
+           client-side; GET /dashboard/perch-api/browse). -->
+      <label class="field-label" id="perch-new-cwd-label" for="perch-new-cwd">${escapeHtml(t("perch.cwdLabel", lang))}</label>
+      <input type="text" id="perch-new-cwd" aria-labelledby="perch-new-cwd-label" placeholder="${escapeHtml(t("perch.cwdPlaceholder", lang))}" autocomplete="off" spellcheck="false">
+      <button type="button" id="perch-browse-btn">${escapeHtml(t("perch.browse", lang))}</button>
+      <div class="empty" id="perch-cwd-note">${escapeHtml(t("perch.cwdDefaultNote", lang))}</div>
       <button type="button" class="primary" id="perch-new" disabled>${escapeHtml(t("perch.newSession", lang))}</button>
       <div class="empty" id="perch-launch-note" hidden></div>
     </div>

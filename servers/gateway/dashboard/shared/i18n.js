@@ -2306,6 +2306,26 @@ export const translations = {
     en: "Could not reach the session list.",
     es: "No se pudo obtener la lista de sesiones.",
   },
+  "perch.cwdLabel": { en: "Directory", es: "Directorio" },
+  "perch.cwdPlaceholder": {
+    en: "The bot's default directory",
+    es: "El directorio predeterminado del bot",
+  },
+  "perch.browse": { en: "Browse…", es: "Explorar…" },
+  "perch.browseTitle": { en: "Choose a directory", es: "Elige un directorio" },
+  "perch.choose": { en: "Choose", es: "Elegir" },
+  "perch.browseFailed": {
+    en: "Could not read that directory.",
+    es: "No se pudo leer ese directorio.",
+  },
+  "perch.cwdDefaultNote": {
+    en: "Empty = the bot's own directory.",
+    es: "Vacío = el directorio propio del bot.",
+  },
+  "perch.cwdInvalid": {
+    en: "That folder does not exist or is not a directory.",
+    es: "Esa carpeta no existe o no es un directorio.",
+  },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
