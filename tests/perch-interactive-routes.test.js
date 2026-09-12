@@ -1745,3 +1745,90 @@ test("POST /interactive/:sid/control without cwd does not add the key (presence-
   assert.equal(status, 200);
   assert.ok(!("cwd" in engineCalls.control[0].opts), "a body without cwd leaves opts.cwd absent");
 });
+
+// ---------------------------------------------------------------------------
+// Phase D3 — GET /interactive/:sid/files/list. The jail's attack inventory,
+// mirrored at the LIST level: symlink absent, dotfile absent, uploadsDir
+// never listed, and no user path input anywhere (so `..` is unrepresentable,
+// not merely refused).
+// ---------------------------------------------------------------------------
+
+test("files/list lists the outputsDir flat: names, sizes, mtimes, newest first", async () => {
+  const outputsDir = mkdtempSync(join(tmpdir(), "perch-files-"));
+  writeFileSync(join(outputsDir, "older.md"), "aaa");
+  // Force a deterministic mtime ordering (filesystem granularity varies).
+  const { utimesSync } = await import("node:fs");
+  utimesSync(join(outputsDir, "older.md"), new Date(1000), new Date(1000));
+  writeFileSync(join(outputsDir, "newer.md"), "bbbbbb");
+  utimesSync(join(outputsDir, "newer.md"), new Date(2000000), new Date(2000000));
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir: null, outputsDir });
+
+  const { status, body } = await getJson("/interactive/perchlive-11111111/files/list");
+  assert.equal(status, 200);
+  assert.deepEqual(body.items.map((i) => i.name), ["newer.md", "older.md"], "mtime desc");
+  const newer = body.items[0];
+  assert.equal(newer.size, 6, "the stat's size, never a re-read of contents");
+  assert.equal(typeof newer.mtime, "number");
+});
+
+test("files/list skips dotfiles, symlinks and subdirectories outright", async () => {
+  const outputsDir = mkdtempSync(join(tmpdir(), "perch-files-"));
+  writeFileSync(join(outputsDir, "real.md"), "x");
+  writeFileSync(join(outputsDir, ".hidden"), "secret");
+  mkdirSync(join(outputsDir, "subdir"), { recursive: true });
+  writeFileSync(join(outputsDir, "subdir", "deep.md"), "never seen");
+  // The jail's own attack, at the list level: a symlink whose target lives
+  // OUTSIDE outputsDir. The name must not appear — and even if it did, the
+  // download route's O_NOFOLLOW jail would refuse it. Both layers, tested
+  // in their own files.
+  const secret = join(dir, "files-list-secret.txt");
+  writeFileSync(secret, "crown jewels");
+  symlinkSync(secret, join(outputsDir, "link-to-secret"));
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir: null, outputsDir });
+
+  const { status, body } = await getJson("/interactive/perchlive-11111111/files/list");
+  assert.equal(status, 200);
+  assert.deepEqual(body.items.map((i) => i.name), ["real.md"],
+    "dotfile, symlink and subdirectory are all absent; no recursion");
+});
+
+test("files/list NEVER lists uploadsDir, even when both dirs exist", async () => {
+  const outputsDir = mkdtempSync(join(tmpdir(), "perch-files-"));
+  const uploadsDir = mkdtempSync(join(tmpdir(), "perch-files-up-"));
+  writeFileSync(join(outputsDir, "output.md"), "o");
+  writeFileSync(join(uploadsDir, "operator-upload.png"), "u");
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir, outputsDir });
+
+  const { status, body } = await getJson("/interactive/perchlive-11111111/files/list");
+  assert.equal(status, 200);
+  assert.deepEqual(body.items.map((i) => i.name), ["output.md"],
+    "uploads are upload-only; re-listing them would be a new serving path");
+});
+
+test("files/list caps at 200 entries", async () => {
+  const outputsDir = mkdtempSync(join(tmpdir(), "perch-files-"));
+  for (let i = 0; i < 205; i++) writeFileSync(join(outputsDir, `f${String(i).padStart(3, "0")}.txt`), "x");
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir: null, outputsDir });
+  const { status, body } = await getJson("/interactive/perchlive-11111111/files/list");
+  assert.equal(status, 200);
+  assert.equal(body.items.length, 200);
+});
+
+test("files/list carries the download route's own 404/409 shapes", async () => {
+  engineImpl.get = async () => null;
+  let r = await getJson("/interactive/perchlive-dead0000/files/list");
+  assert.equal(r.status, 404);
+  assert.equal(r.body.error, "no_such_session");
+
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir: null, outputsDir: null });
+  r = await getJson("/interactive/perchlive-11111111/files/list");
+  assert.equal(r.status, 409);
+  assert.equal(r.body.error, "no_session_dir");
+
+  // A directory that vanished under us reads as not_found, not a crash.
+  engineImpl.get = async (sid) => ({ sessionId: sid, uploadsDir: null,
+    outputsDir: join(dir, "files-list-gone") });
+  r = await getJson("/interactive/perchlive-11111111/files/list");
+  assert.equal(r.status, 404);
+  assert.equal(r.body.error, "not_found");
+});

@@ -284,6 +284,9 @@ export function perchHubJs(lang = "en") {
   var CWD_CHANGE_NOTE='${tJs("perch.cwdChangeNote", lang)}';
   var CWD_BUSY='${tJs("perch.cwdBusy", lang)}';
   var CWD_CHANGE_FAILED='${tJs("perch.cwdChangeFailed", lang)}';
+  /* Phase D3: the Files tab. */
+  var FILES_EMPTY='${tJs("perch.filesEmpty", lang)}';
+  var FILES_FAILED='${tJs("perch.filesFailed", lang)}';
 
   /* Row identity. One bot with eight sessions renders eight rows that read
      "R4 Assistant / awake" and nothing else — measured verbatim in a browser
@@ -1606,9 +1609,8 @@ export function perchHubJs(lang = "en") {
       if(btn) btn.setAttribute('aria-selected',nm===name?'true':'false');
     });
     /* Files fetches on ACTIVATION, never on session open (D3) — the chat
-       fast path stays one less round trip. The typeof guard is temporary:
-       D3 lands loadFiles in the very next step. */
-    if(name==='files'&&typeof loadFiles==='function') loadFiles();
+       fast path stays one less round trip. */
+    if(name==='files') loadFiles();
   }
   TAB_NAMES.forEach(function(nm){
     var btn=el('perch-tab-btn-'+nm);
@@ -1653,6 +1655,41 @@ export function perchHubJs(lang = "en") {
     var shown=cwdEl?String(cwdEl.textContent||''):'';
     return (shown&&shown!==CWD_DEFAULT_TEXT)?shown:'';
   }
+
+  /* ---- Phase D3: the Files tab ------------------------------------------
+     One GET /interactive/<sid>/files/list per activation (never on session
+     open), rows linking the EXISTING workspace download route — the list
+     adds no new serving path, and the jail's O_NOFOLLOW fd discipline is
+     what makes each download safe, not anything about this markup. Rows are
+     built with createElement/textContent only: names come from a filesystem
+     a bot child can write to. */
+  function fmtSize(b){
+    b=Number(b)||0;
+    return b>1048576?(b/1048576).toFixed(1)+'M':b>1024?Math.round(b/1024)+'K':b+'B';
+  }
+  function loadFiles(){
+    var list=el('perch-files-list');
+    if(!list||!current.sid) return;
+    var mySid=current.sid;
+    perchApi('GET','/interactive/'+encodeURIComponent(mySid)+'/files/list').then(function(r){
+      if(current.sid!==mySid) return;                  /* identity guard, as everywhere */
+      clearEl(list);
+      if(!r.ok||!r.j||!Array.isArray(r.j.items)){ list.appendChild(line('empty',FILES_FAILED)); return; }
+      if(!r.j.items.length){ list.appendChild(line('empty',FILES_EMPTY)); return; }
+      r.j.items.forEach(function(it){
+        if(!it||!it.name) return;
+        var a=document.createElement('a'); a.className='file-row';
+        a.href=API+'/interactive/'+encodeURIComponent(mySid)+'/workspace/'+encodeURIComponent(it.name);
+        a.appendChild(line('file-name',it.name));
+        var meta=fmtSize(it.size);
+        try{ meta+=' \\u00b7 '+new Date(it.mtime).toLocaleString(); }catch(e){}
+        a.appendChild(line('file-meta',meta));
+        list.appendChild(a);
+      });
+    });
+  }
+  var filesRefresh=el('perch-files-refresh');
+  if(filesRefresh) filesRefresh.onclick=loadFiles;
 
   /* iOS does not shrink the layout viewport for the keyboard, so dvh alone
      leaves the composer behind it. Offset the chat column by the hidden part. */
