@@ -112,6 +112,20 @@ export function perchHubJs(lang = "en") {
     tr.appendChild(line('entry note',text));
     tr.scrollTop=tr.scrollHeight;
   }
+  /* Phase D2: the Activity rail. Log-ish frames (log, tool starts, plan
+     state, soft error frames, the reconnect notice) land HERE, and the
+     transcript keeps only user/bot messages, ask cards and the hard
+     failures an operator must see where they read (a failed transcript
+     load, a failed send, a lost connection, a stale ask). A timestamp
+     leads each row because this rail is exactly where an operator
+     reconstructs WHEN something happened. */
+  function appendActivity(text){
+    var list=el('perch-activity-list'); if(!list) return;
+    var stamp='';
+    try{ stamp=new Date().toLocaleTimeString()+'  '; }catch(e){}
+    list.appendChild(line('activity-row',stamp+text));
+    list.scrollTop=list.scrollHeight;
+  }
   /* THE ONLY innerHTML assignment in this file, and the only one there may be.
 
      \`html\` is produced on the SERVER by servers/blog/renderer.js — marked
@@ -265,6 +279,11 @@ export function perchHubJs(lang = "en") {
   var CHOOSE_LABEL='${tJs("perch.choose", lang)}';
   var BROWSE_FAILED='${tJs("perch.browseFailed", lang)}';
   var CWD_INVALID='${tJs("perch.cwdInvalid", lang)}';
+  /* Phase D2: the Session tab's cwd readout + change flow. */
+  var CWD_DEFAULT_TEXT='${tJs("perch.cwdPlaceholder", lang)}';
+  var CWD_CHANGE_NOTE='${tJs("perch.cwdChangeNote", lang)}';
+  var CWD_BUSY='${tJs("perch.cwdBusy", lang)}';
+  var CWD_CHANGE_FAILED='${tJs("perch.cwdChangeFailed", lang)}';
 
   /* Row identity. One bot with eight sessions renders eight rows that read
      "R4 Assistant / awake" and nothing else — measured verbatim in a browser
@@ -880,6 +899,7 @@ export function perchHubJs(lang = "en") {
        list is genuinely hidden. */
     syncListPolling();
     clearEl(el('perch-transcript')); clearEl(el('perch-ask'));
+    clearEl(el('perch-activity-list'));   /* the previous session's log is not this one's */
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     var known=rowIndex[sid];
     if(known){ showHeader(known.botId,known.botName); afterHeader(mySid,known.botId); return; }
@@ -1025,6 +1045,13 @@ export function perchHubJs(lang = "en") {
       if(modelSel&&d.model&&!modelSel.disabled) selectCurrentModel(modelSel,d.model);
       if(d.permissionMode){ var permSel=el('perch-permission'); if(permSel) permSel.value=d.permissionMode; }
       var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=!!d.planMode;
+      /* Open-anywhere D2: the Session tab's read-only cwd readout, refreshed
+         from the engine's own record on every state frame (subscribe replays
+         one on connect, so this is also how the tab learns cwd FIRST — there
+         is no separate snapshot fetch). null = the bot's default directory.
+         textContent only: the value is a filesystem path, never markup. */
+      var cwdEl=el('perch-session-cwd');
+      if(cwdEl) cwdEl.textContent=d.cwd||CWD_DEFAULT_TEXT;
     });
     /* MESSAGE-LEVEL, not delta-level (perch-interactive.js:1257 says so
        outright): one frame per COMPLETED assistant message, so each is
@@ -1039,8 +1066,8 @@ export function perchHubJs(lang = "en") {
       if(!histSettled){ histBuf.push(d); return; }   /* round 3 R4, see flushHistBuf */
       renderTextFrame(d);
     });
-    on('tool',function(d){ if(d.phase==='start') appendNote('['+(d.name||'?')+']'); });
-    on('log',function(d){ if(d.text) appendNote(d.text); });
+    on('tool',function(d){ if(d.phase==='start') appendActivity('[tool: '+(d.name||'?')+']'); });
+    on('log',function(d){ if(d.text) appendActivity(d.text); });
     /* \`reply\` carries replyTextOf(end) — every assistant message of the turn
        CONCATENATED — so appending it unconditionally rendered a two-message
        turn three times: each message, then both again as one block. It cannot
@@ -1071,8 +1098,8 @@ export function perchHubJs(lang = "en") {
       setTurnInFlight(false);
     });
     on('ask_user',function(d){ renderAsk(d); });
-    on('error',function(d){ appendNote(d.text||'error'); });
-    on('plan_state',function(d){ var t=planStateText(d.state); if(t) appendNote(t); });
+    on('error',function(d){ appendActivity(d.text||'error'); });
+    on('plan_state',function(d){ var t=planStateText(d.state); if(t) appendActivity(t); });
     /* No 'attention' listener: attention is not a stream event —
        perch-interactive.js:1243/:1360 push it through pushAttention into the
        notification pipeline, and perch-interactive-api.js:349-351 enumerates
@@ -1128,7 +1155,7 @@ export function perchHubJs(lang = "en") {
   function scheduleReconnect(){
     if(retries>=5){ appendNote(RECONNECT_FAILED); return; }
     retries++;
-    appendNote(RECONNECTING);
+    appendActivity(RECONNECTING);   /* D2: chatter to the rail; the CAP is a hard failure and stays in chat */
     var mySid=current.sid;                          /* no parameter to get wrong */
     retryTimer=setTimeout(function(){
       if(!live()) return;                           /* retired mid-backoff */
@@ -1302,12 +1329,14 @@ export function perchHubJs(lang = "en") {
      permission/plan state, cleared here so the PREVIOUS session's picker
      contents never bleed into this one while loadOptions() is in flight. */
   function resetControls(){
+    switchTab('chat');           /* D2: a session opens on the conversation, never on the tab the last one was left on */
     var modelSel=el('perch-model'), thinkSel=el('perch-thinking');
     if(modelSel){ clearEl(modelSel); modelSel.disabled=true; }
     if(thinkSel){ clearEl(thinkSel); thinkSel.disabled=true; }
     showSessionName(null);       /* the PREVIOUS session's name must not bleed in */
     var permSel=el('perch-permission'); if(permSel) permSel.value='guarded';
     var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
+    var cwdEl=el('perch-session-cwd'); if(cwdEl) cwdEl.textContent='';   /* nor its directory */
     setTurnInFlight(false);      /* the PREVIOUS session's Steer/Stop state must not bleed in */
     turnRendered=false;          /* nor its "this turn already rendered" bookkeeping */
     renderedTurn=null;           /* nor the turn id that bookkeeping now keys on */
@@ -1556,6 +1585,74 @@ export function perchHubJs(lang = "en") {
     var known=rowIndex[current.sid];
     renameSession(current.sid,(known&&known.label)||'');
   };
+
+  /* ---- Phase D2: the tab surface ----------------------------------------
+     Tab state is a plain variable, reset to 'chat' on every session open
+     (resetControls). Switching is PURE VISIBILITY TOGGLING — it must never
+     touch the EventSource, openStream, closeSession or any SSE lifecycle
+     (review S6): the stream belongs to the SESSION, not to the tab, and a
+     tab tap that reopened a stream would drop frames mid-turn. Deliberately
+     NOT in the hash: the hash is the session router (#<sid> deep links);
+     '#<sid>:<tab>' would fight every parseHash guard in this file for a
+     convenience nobody deep-links to. */
+  var TAB_NAMES=['chat','session','files','activity'];
+  var tab='chat';
+  function switchTab(name){
+    if(TAB_NAMES.indexOf(name)<0) name='chat';
+    tab=name;
+    TAB_NAMES.forEach(function(nm){
+      var sec=el('perch-tab-'+nm), btn=el('perch-tab-btn-'+nm);
+      if(sec) sec.hidden=(nm!==name);
+      if(btn) btn.setAttribute('aria-selected',nm===name?'true':'false');
+    });
+    /* Files fetches on ACTIVATION, never on session open (D3) — the chat
+       fast path stays one less round trip. The typeof guard is temporary:
+       D3 lands loadFiles in the very next step. */
+    if(name==='files'&&typeof loadFiles==='function') loadFiles();
+  }
+  TAB_NAMES.forEach(function(nm){
+    var btn=el('perch-tab-btn-'+nm);
+    if(btn) btn.onclick=function(){ switchTab(nm); };
+  });
+
+  /* Session tab: "Change directory" reopens the SAME browse modal the
+     launcher uses (one picker, two callers) and POSTs control({cwd}). The
+     engine refuses mid-turn (409) and hibernates an awake child on accept —
+     the modal's hint line says so BEFORE the operator chooses, and the
+     hibernate's own log frame lands in the Activity rail. */
+  var changeCwdBtn=el('perch-change-cwd');
+  if(changeCwdBtn) changeCwdBtn.onclick=function(){
+    if(!current.sid) return;
+    var mySid=current.sid;
+    openBrowseModal({
+      initial:launchCwdInitial(),
+      note:CWD_CHANGE_NOTE,
+      onChoose:function(p){
+        perchApi('POST','/interactive/'+encodeURIComponent(mySid)+'/control',{cwd:p}).then(function(r){
+          if(current.sid!==mySid) return;
+          var cwdEl=el('perch-session-cwd');
+          if(r.ok){
+            /* Optimistic write; the next state frame carries the engine's
+               own record and overwrites this with the truth. */
+            if(cwdEl) cwdEl.textContent=p;
+            return;
+          }
+          if(r.status===409&&r.j&&r.j.error==='turn_in_progress'){ appendNote(CWD_BUSY); return; }
+          if(r.status===400){ appendNote(CWD_INVALID); return; }
+          appendNote((r.j&&r.j.error)||CWD_CHANGE_FAILED);
+        });
+      }
+    });
+  };
+  /* The picker starts where the session is. The readout doubles as the
+     source (textContent, set only from state frames) because there is no
+     other client-side copy of cwd; the placeholder text means "default" and
+     must not ride into the picker as a path. */
+  function launchCwdInitial(){
+    var cwdEl=el('perch-session-cwd');
+    var shown=cwdEl?String(cwdEl.textContent||''):'';
+    return (shown&&shown!==CWD_DEFAULT_TEXT)?shown:'';
+  }
 
   /* iOS does not shrink the layout viewport for the keyboard, so dvh alone
      leaves the composer behind it. Offset the chat column by the hidden part. */

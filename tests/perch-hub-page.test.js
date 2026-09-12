@@ -313,7 +313,7 @@ test("the launcher ships disabled, so the pre-data frame never claims there are 
   assert.ok(/id="perch-launch-note"[^>]*hidden/.test(html), "as does its note");
 });
 
-test("the chat-view close control is in the header, not in the sticky composer", async () => {
+test("the chat-view close control lives in the Session tab, not in the sticky composer", async () => {
   // Send stays reachable because #perch-chat{flex:1;min-height:0} and
   // #perch-transcript{flex:1;overflow:auto;min-height:0} make the TRANSCRIPT the
   // only scroller, so .content-body never scrolls and the composer never leaves
@@ -325,20 +325,113 @@ test("the chat-view close control is in the header, not in the sticky composer",
   // mechanism will delete the flex chain and the pre-existing reachability tests
   // stay GREEN through that deletion.
   //
-  // Either way a control added INTO the composer changes its box and puts the
-  // backstop in play, so .perch-head — a non-scrolling flex child of #perch-chat,
-  // permanently on screen — is where it belongs.
+  // Phase D moved Close (with rename and the state pill) out of .perch-head
+  // into the Session tab — the plan's D1/D2 shape, mirroring the original
+  // pi-lab hub. What must NOT change: a control added INTO the composer
+  // changes its box and puts the backstop in play, so the composer stays
+  // message-only, and Close stays reachable via the Session tab AND every
+  // list row's own Close button.
   const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
   const html = perchHubContent("en");
   const close = html.indexOf('id="perch-close"');
-  const head = html.indexOf('class="perch-head"');
-  const composer = html.indexOf('id="perch-composer"');
+  const sessionTab = html.indexOf('id="perch-tab-session"');
+  const filesTab = html.indexOf('id="perch-tab-files"');
   assert.ok(close > -1, "the open session needs a close control");
-  assert.ok(head > -1 && composer > -1);
-  assert.ok(close > head && close < composer, "close belongs to the header block");
-  // The composer's own markup must be untouched by this task.
+  assert.ok(sessionTab > -1 && filesTab > -1);
+  assert.ok(close > sessionTab && close < filesTab,
+    "close belongs to the Session tab section, between its open and the next section");
+  // The composer's own markup must stay untouched by this task.
+  const composer = html.indexOf('id="perch-composer"');
   const composerBlock = html.slice(composer, html.indexOf("</div>", html.indexOf("send-row")));
   assert.ok(!composerBlock.includes("perch-close"), "nothing new inside the sticky box");
+});
+
+// ---------------------------------------------------------------------------
+// Phase D1 — the tab surface, statically. The live measurements (Send
+// reachable in EVERY tab at both breakpoints, bar never overlapping it) run
+// in perch-hub-render.test.js over CDP.
+// ---------------------------------------------------------------------------
+
+test("the chat column is a tablist of four labelled tabs over four panels", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  assert.ok(/id="perch-tabs"[^>]*role="tablist"/.test(html));
+  for (const name of ["chat", "session", "files", "activity"]) {
+    // Attribute order inside the tag is the markup's business, not the
+    // test's — match the tag, then assert each attribute on it.
+    const tag = (html.match(new RegExp(`<button[^>]*id="perch-tab-btn-${name}"[^>]*>`)) || [null])[0];
+    assert.ok(tag, `${name} tab button exists`);
+    assert.ok(tag.includes('role="tab"'), `${name} carries role=tab`);
+    assert.ok(tag.includes(`aria-controls="perch-tab-${name}"`), `${name} tab button wires to its panel`);
+    assert.ok(html.includes(`id="perch-tab-${name}"`), `${name} panel exists`);
+    // House rule: no unlabelled controls — each button carries text after its
+    // aria-hidden glyph.
+    const seg = html.slice(html.indexOf(`id="perch-tab-btn-${name}"`));
+    assert.ok(/<\/svg>[^<]+$/.test(seg.slice(0, seg.indexOf("</button>"))),
+      `${name} tab has a visible text label beside the glyph`);
+  }
+  // Exactly one selected at rest, and it is chat — the client's switchTab()
+  // flips aria-selected from there.
+  const chatTag = html.match(/<button[^>]*id="perch-tab-btn-chat"[^>]*>/)[0];
+  assert.ok(chatTag.includes('aria-selected="true"'));
+  for (const name of ["session", "files", "activity"]) {
+    const tag = html.match(new RegExp(`<button[^>]*id="perch-tab-btn-${name}"[^>]*>`))[0];
+    assert.ok(tag.includes('aria-selected="false"'));
+    const sec = html.match(new RegExp(`<section[^>]*id="perch-tab-${name}"[^>]*>`))[0];
+    assert.ok(/(^|\s)hidden(=|>|\s)/.test(sec) || sec.endsWith("hidden>"),
+      `${name} panel ships hidden — only the active section is displayed`);
+  }
+});
+
+test("the chat panel keeps the transcript, ask pane and composer — in that order", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  const chatTab = html.indexOf('id="perch-tab-chat"');
+  const sessionTab = html.indexOf('id="perch-tab-session"');
+  const tr = html.indexOf('id="perch-transcript"');
+  const ask = html.indexOf('id="perch-ask"');
+  const composer = html.indexOf('id="perch-composer"');
+  assert.ok(chatTab < tr && tr < ask && ask < composer && composer < sessionTab,
+    "the old column, wrapped — order is the flex chain's order");
+});
+
+test("the session panel carries the controls, the cwd readout and the head's old buttons", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  const s = html.indexOf('id="perch-tab-session"');
+  const e = html.indexOf('id="perch-tab-files"');
+  const seg = html.slice(s, e);
+  for (const id of ["perch-model", "perch-thinking", "perch-permission", "perch-plan-mode",
+                    "perch-session-cwd", "perch-change-cwd", "perch-state",
+                    "perch-rename", "perch-close"]) {
+    assert.ok(seg.includes(`id="${id}"`), `${id} lives in the Session tab`);
+  }
+  // Identity stays in the head — the tabs must not orphan it.
+  const head = html.slice(html.indexOf('class="perch-head"'), html.indexOf('id="perch-tabs"'));
+  for (const id of ["perch-bot-name", "perch-session-name", "perch-session-meta"]) {
+    assert.ok(head.includes(`id="${id}"`), `${id} stays in the head`);
+  }
+});
+
+test("the tab CSS keeps the flex chain intact and hides panels by attribute", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\s+/g, "");
+  // The chat panel must BE the column the old #perch-chat rules describe,
+  // or the reachability backstop comment becomes a lie again.
+  assert.ok(/#perch-tab-chat\{[^}]*flex:1/.test(css));
+  assert.ok(/#perch-tab-chat\{[^}]*min-height:0/.test(css));
+  assert.ok(/#perch-tab-chat\{[^}]*display:flex/.test(css));
+  // The bar is a non-shrinking sibling — if it can shrink, a long transcript
+  // squeezes it and the phone loses its navigation.
+  assert.ok(/#perch-tabs\{[^}]*flex-shrink:0/.test(css));
+  // Phone: the bar is LAST (bottom); desktop media query puts it back on top.
+  assert.ok(/#perch-tabs\{[^}]*order:10/.test(css));
+  assert.ok(/#perch-tabs\{order:0/.test(css), "the desktop strip returns to natural order");
+  // [hidden] outranks the panels' display rules, and does it by specificity
+  // (id+type+attr), not by !important. NOTE: the whitespace strip above also
+  // eats the descendant-selector space, hence the run-together pattern.
+  assert.ok(/#perch-hub-rootsection\[hidden\]\{display:none\}/.test(css));
+  assert.ok(!/!important/.test(css.match(/#perch-hub-rootsection\[hidden\]\{[^}]*\}/)[0]));
 });
 
 test("the launcher and the row close button cannot overflow a 412px column", async () => {

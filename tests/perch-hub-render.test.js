@@ -464,6 +464,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(inChat.meta, "perchlive-22222222", "precondition: that session is the one open");
 
       const btn = await s.json(`(function(){
+        document.getElementById('perch-tab-btn-session').click();   /* Phase D: Close lives in the Session tab */
         var b=document.getElementById('perch-close'), r=b.getBoundingClientRect();
         return JSON.stringify({ inViewport: r.top>=0 && r.bottom<=innerHeight,
           hit: (function(){ var e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
@@ -471,7 +472,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
           w: Math.round(r.width), h: Math.round(r.height),
           padding: getComputedStyle(b).padding, fontSize: getComputedStyle(b).fontSize });
       })()`);
-      assert.equal(btn.inViewport, true, "close must be reachable without scrolling the chat");
+      assert.equal(btn.inViewport, true, "close must be reachable without scrolling the Session tab");
       assert.equal(btn.hit, true);
       // The number this test already COLLECTED and never asserted. It measured
       // 36px live: a bare "#perch-close" rule is (1,0,0) and loses to
@@ -485,9 +486,10 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
         "the scoped rule must actually win the cascade, not merely be present in the sheet");
       assert.equal(btn.fontSize, "13px");
 
-      // Send must still be reachable — the close control must not have
-      // disturbed the sticky composer this page's mobile fix rests on.
+      // Send must still be reachable — on the CHAT tab, where the composer
+      // lives; a Session-tab control must not have disturbed the sticky box.
       const sendBox = await s.json(`(function(){
+        document.getElementById('perch-tab-btn-chat').click();
         var r=document.getElementById('perch-send').getBoundingClientRect();
         return JSON.stringify({ reachable: r.bottom<=innerHeight && r.top>=0,
                                 top: Math.round(r.top), bottom: Math.round(r.bottom), vp: innerHeight });
@@ -495,7 +497,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(sendBox.reachable, true,
         `Send at ${sendBox.top}-${sendBox.bottom} in a ${sendBox.vp}px viewport`);
 
-      await s.evalIn(`document.getElementById('perch-close').click(); 'clicked'`);
+      await s.evalIn(`document.getElementById('perch-tab-btn-session').click(); document.getElementById('perch-close').click(); 'clicked'`);
       await new Promise((r) => setTimeout(r, 800));
 
       assert.deepEqual(stopped, ["perchlive-22222222"]);
@@ -772,7 +774,7 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
     } finally { await s.close(); }
   });
 
-  test(`F3 live @${w}x${h}: the chat header's Rename is reachable and Send still is`, async (t) => {
+  test(`F3 live @${w}x${h}: the Session tab's Rename is reachable and Send still is`, async (t) => {
     if (!available) return t.skip("no CDP endpoint at " + CDP);
     resetApi();
     const s = await session(w, h);
@@ -780,9 +782,9 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
       await new Promise((r) => setTimeout(r, 900));
       const seen = await s.json(`(function(){
+        document.getElementById('perch-tab-btn-session').click();   /* Phase D: Rename lives in the Session tab */
         var b=document.getElementById('perch-rename'), r=b.getBoundingClientRect();
         var nm=document.getElementById('perch-session-name');
-        var send=document.getElementById('perch-send').getBoundingClientRect();
         return JSON.stringify({
           name: nm.hidden?null:nm.textContent,
           meta: document.getElementById('perch-session-meta').textContent,
@@ -790,17 +792,21 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
           inViewport: r.top>=0 && r.bottom<=innerHeight,
           hit:(function(){ var e=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
                            return !!e && (e===b||b.contains(e)); })(),
-          sendReachable: send.bottom<=innerHeight && send.top>=0,
           hScroll: document.documentElement.scrollWidth > document.documentElement.clientWidth });
       })()`);
       assert.equal(seen.name, "November package copy pass, English and Spanish together",
-        "the open session's name is in the header");
+        "the open session's name stays in the head — identity never moved to a tab");
       assert.equal(seen.meta, "perchlive-22222222", "and the id line is untouched — it is the identity");
       assert.ok(seen.h >= 44, `Rename is ${seen.w}x${seen.h}`);
       assert.equal(seen.inViewport, true);
       assert.equal(seen.hit, true);
-      assert.equal(seen.sendReachable, true, "a second header control must not disturb the composer");
       assert.equal(seen.hScroll, false);
+      const send = await s.json(`(function(){
+        document.getElementById('perch-tab-btn-chat').click();
+        var r=document.getElementById('perch-send').getBoundingClientRect();
+        return JSON.stringify({ reachable: r.bottom<=innerHeight && r.top>=0 });
+      })()`);
+      assert.equal(send.reachable, true, "a Session-tab control must not disturb the composer");
     } finally { await s.close(); }
   });
 }
@@ -1130,6 +1136,61 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
         return 'spawned';
       })()`);
       assert.equal(lastSpawnBody, null, "no cwd, no body at all — an empty string must never ride");
+    } finally { resetApi(); await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase D1, live — the flex chain has killed a Send button before, so the
+// tab bar's arrival is measured, not argued: Send reachable with the
+// transcript scrolled to the TOP, the bar on screen in EVERY tab, the bar
+// never overlapping Send, and no horizontal scroll at either breakpoint.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`D1 live @${w}x${h}: Send is reachable on chat and the tab bar never covers it`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 900));
+      const seen = await s.json(`(async function(){
+        var tr=document.getElementById('perch-transcript');
+        for(var i=0;i<60;i++){ var d=document.createElement('div');
+          d.textContent='bot: a transcript line long enough to take a row or two, number '+i;
+          tr.appendChild(d); }
+        tr.scrollTop=0;                                   /* where a reader starts */
+        function rect(id){ var r=document.getElementById(id).getBoundingClientRect();
+          return {top:Math.round(r.top),bottom:Math.round(r.bottom),h:Math.round(r.height)}; }
+        var out={tabs:{}};
+        var names=['chat','session','files','activity'];
+        for(var i=0;i<names.length;i++){
+          var n=names[i];
+          document.getElementById('perch-tab-btn-'+n).click();
+          await new Promise(function(r){setTimeout(r,60);});
+          var bar=rect('perch-tabs');
+          out.tabs[n]={bar:bar,
+            barInViewport:bar.top>=0&&bar.bottom<=innerHeight,
+            hScroll:document.documentElement.scrollWidth>document.documentElement.clientWidth};
+          if(n==='chat'){
+            var snd=rect('perch-send');
+            out.send=snd;
+            out.sendReachable=snd.bottom<=innerHeight&&snd.top>=0;
+            out.barOverlapsSend=!(bar.top>=snd.bottom||snd.top>=bar.bottom);
+          }
+        }
+        return JSON.stringify(out);
+      })()`);
+      assert.equal(seen.sendReachable, true,
+        `Send at ${seen.send.top}-${seen.send.bottom} in a ${h}px viewport`);
+      assert.equal(seen.barOverlapsSend, false,
+        `the bar (${seen.tabs.chat.bar.top}-${seen.tabs.chat.bar.bottom}) must not cover Send`);
+      for (const [n, m] of Object.entries(seen.tabs)) {
+        assert.equal(m.barInViewport, true, `the bar is on screen on the ${n} tab`);
+        assert.ok(m.bar.h >= 44, `the bar is thumb-sized on ${n}: ${m.bar.h}px`);
+        assert.equal(m.hScroll, false, `no horizontal scroll on the ${n} tab`);
+      }
     } finally { resetApi(); await s.close(); }
   });
 }
