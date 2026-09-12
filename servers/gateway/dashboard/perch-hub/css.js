@@ -226,6 +226,51 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
 #perch-composer .send-row{display:flex;gap:8px}
 #perch-composer textarea{min-height:72px}
 #perch-back{align-self:flex-start}
+/* --- Phase D1: the tab surface ------------------------------------------
+   ONE strip, two placements. Desktop: a top strip in the right pane (natural
+   DOM order). Phone: order:10 makes the SAME element the last flex child of
+   #perch-chat — a bottom tab bar without position:fixed, so the flex chain
+   that keeps Send reachable (#perch-chat{flex:1;min-height:0} + the
+   transcript as the only scroller) is untouched and the composer sits above
+   the bar inside the chat tab. The chain has killed a Send button before;
+   the bar joins it as a NON-SHRINKING sibling and nothing else changes. */
+#perch-tabs{display:flex;gap:4px;flex-shrink:0;order:10;border-top:1px solid var(--line);
+padding:6px 0 calc(6px + env(safe-area-inset-bottom,0px))}
+/* Two ids: the base "#perch-hub-root button" rule (1,0,1) would otherwise
+   paint these with card background and ink border — the selected tab owns
+   its own highlight. 44px floor: a bottom bar is thumb territory. */
+#perch-hub-root #perch-tabs button{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
+min-height:44px;padding:6px 4px;font-size:11px;border-color:transparent;background:transparent;color:var(--dim)}
+#perch-tabs svg{width:20px;height:20px;flex-shrink:0}
+#perch-hub-root #perch-tabs button[aria-selected="true"]{color:var(--teal);background:var(--teal-soft)}
+/* The four panels. Chat inherits the old column exactly: it IS the flex
+   column the transcript and the sticky composer lived in before the tabs
+   existed, so the reachability measurements carry over unchanged. The other
+   three are plain scrollers — a long directory path or file list must never
+   push the tab bar off screen. */
+#perch-tab-chat{order:1;flex:1;min-height:0;display:flex;flex-direction:column}
+#perch-tab-session,#perch-tab-files,#perch-tab-activity{order:1;flex:1;min-height:0;overflow-y:auto}
+/* [hidden] must outrank the display rules above — id + type + attribute is
+   (1,1,1) against their (1,0,0), so the client's pure-hidden-toggle works
+   without an !important anywhere. */
+#perch-hub-root section[hidden]{display:none}
+/* Session tab: the state pill + rename + close row. Wraps at phone width;
+   the two controls keep their own 44px two-id rules further up. */
+#perch-hub-root .session-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 12px}
+#perch-hub-root .session-row .state{flex:1;min-width:0}
+/* Files tab rows: the whole row is the download link (thumb target), name
+   breaks long, meta never does. */
+#perch-hub-root .files-bar{display:flex;justify-content:flex-end;padding:6px 0}
+#perch-hub-root .file-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+padding:11px 12px;border-bottom:1px solid var(--line);text-decoration:none;color:var(--ink);min-height:44px}
+#perch-hub-root .file-name{word-break:break-all;font-weight:500;font-size:14px}
+#perch-hub-root .file-meta{color:var(--dim);font-size:12px;white-space:nowrap;
+font-family:"JetBrains Mono",ui-monospace,monospace}
+/* Activity tab: monospace log lines, dimmest text on the page — this is the
+   rail you READ AFTER the conversation, never instead of it. */
+#perch-activity-list{display:grid;gap:6px;padding:12px 0;align-content:start}
+#perch-hub-root .activity-row{color:var(--dim);font-size:12.5px;word-break:break-word;
+font-family:"JetBrains Mono",ui-monospace,monospace}
 /* --- open-anywhere C2: the directory-picker modal ---------------------
    Built client-side (client.js buildBrowseModal) and appended INSIDE
    #perch-hub-root, so every class rule here stays scoped the way the
@@ -265,6 +310,10 @@ border-top:1px solid var(--line);flex-shrink:0}
   body[data-view="chat"] #perch-list{display:block}
   #perch-hub-root .hub-split{display:grid;grid-template-columns:320px 1fr;gap:20px;align-items:stretch}
   #perch-back{display:none}
+  /* Desktop: the strip returns to natural DOM order (top of the right pane)
+     and reads as a horizontal tab row, not a phone bar. */
+  #perch-tabs{order:0;border-top:none;border-bottom:1px solid var(--line);padding:6px 0}
+  #perch-hub-root #perch-tabs button{flex:0 0 auto;flex-direction:row;gap:6px;font-size:13px;padding:8px 14px}
 }
 `;
 }

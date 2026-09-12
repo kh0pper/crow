@@ -398,3 +398,35 @@ test("N1 live: a reconnect WITHIN a turn does not duplicate that turn's answer",
       "the case a bare reset in openStream() would have broken — which is why this is a turn id");
   } finally { await s.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// Phase D2 — the Activity rail under the same Turbo regime. A surviving
+// instance used to write every frame once per instance; the rail is a new
+// writer, so it gets the same treatment the transcript has: N visits, ONE
+// frame, ONE row.
+// ---------------------------------------------------------------------------
+
+test("a log/tool frame lands in the Activity rail ONCE, not once per surviving instance", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const s = await session();
+  try {
+    for (let i = 0; i < 3; i++) await s.visit("/dashboard/perch");
+    await s.open();
+    broadcast("log", { text: "one line of gateway chatter" });
+    broadcast("tool", { phase: "start", name: "crow_search_memories" });
+    await sleep(500);
+    const rows = await s.json(`JSON.stringify(
+      Array.from(document.querySelectorAll('#perch-activity-list .activity-row'))
+        .map(function(n){return n.textContent;}))`);
+    assert.equal(rows.length, 2, "one row per frame, whatever the visit count: " + JSON.stringify(rows));
+    assert.ok(rows[0].includes("one line of gateway chatter"));
+    assert.ok(rows[1].includes("[tool: crow_search_memories]"));
+    // And the conversation stayed a conversation — the frames must not ALSO
+    // have landed in the transcript through a surviving pre-D2 instance.
+    const notes = await s.json(`JSON.stringify(
+      Array.from(document.querySelectorAll('#perch-transcript .note'))
+        .map(function(n){return n.textContent;}))`);
+    assert.ok(!notes.some((x) => x.includes("gateway chatter") || x.includes("[tool:")),
+      "no frame chatter in the transcript: " + JSON.stringify(notes));
+  } finally { await s.close(); }
+});

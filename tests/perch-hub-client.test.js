@@ -195,11 +195,12 @@ test("async continuations are guarded — a fast back button must not cross sess
   // spawn continuation AND its launch-model control continuation, every SSE
   // listener (shared through on()), onStreamError's options probe, the
   // reconnect timer, loadHistory, loadOptions, send(), answerAsk, and
-  // attachFile's upload continuation. A regression that drops one — the count
+  // attachFile's upload continuation. 13 as of open-anywhere D2: the Session
+  // tab's control({cwd}) continuation. A regression that drops one — the count
   // that shipped with only 6 asserted — is invisible until an operator hits
   // the exact race the dropped guard covered.
   const guards = (js.match(/current\.sid\s*!==/g) || []).length;
-  assert.equal(guards, 12, "expected exactly 12 identity guards, found " + guards);
+  assert.equal(guards, 13, "expected exactly 13 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -513,7 +514,13 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     "perch-rename", "perch-session-name",
     // Open-anywhere C2: the launcher's directory field, its picker trigger,
     // and the root the client-built modal appends itself to.
-    "perch-new-cwd", "perch-browse-btn", "perch-cwd-note", "perch-hub-root"];
+    "perch-new-cwd", "perch-browse-btn", "perch-cwd-note", "perch-hub-root",
+    // Phase D: the four tab panels + their buttons, the Activity rail, the
+    // Session tab's cwd readout and its change trigger, the Files pane.
+    "perch-tab-chat", "perch-tab-session", "perch-tab-files", "perch-tab-activity",
+    "perch-tab-btn-chat", "perch-tab-btn-session", "perch-tab-btn-files", "perch-tab-btn-activity",
+    "perch-activity-list", "perch-session-cwd", "perch-change-cwd",
+    "perch-files-list", "perch-files-refresh"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -734,11 +741,12 @@ test("C2: a destroyed socket reaches onStreamError and schedules a reconnect", a
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));  // one more hop: options probe -> scheduleReconnect
 
-  const notes = hub.els["perch-transcript"].children
-    .filter((c) => c.className.includes("note")).map((c) => c.textContent);
-  assert.ok(notes.includes("Reconnecting…"),
+  const notes = hub.els["perch-activity-list"].children
+    .map((c) => c.textContent);
+  assert.ok(notes.some((x) => x.includes("Reconnecting…")),
     "scheduleReconnect() must run — before this fix the options probe's promise " +
-    "never settled and this .then() body never ran at all");
+    "never settled and this .then() body never ran at all. Phase D2 routes the " +
+    "notice to the Activity rail; the transcript keeps the CAP (hard failure).");
 });
 
 test("C2: a failed send appends a visible note instead of vanishing silently", async () => {
@@ -762,21 +770,20 @@ test("I3: a native EventSource error prints nothing; a real error FRAME prints i
   await openChatSession(hub);
   const es = FakeEventSource.instances[0];
 
-  const notesBefore = hub.els["perch-transcript"].children.length;
+  const rowsOf = (elName) => hub.els[elName].children.map((c) => c.textContent);
   es._t._dispatch("error", {});               // native: no .data, addEventListener path only
   await new Promise((r) => setTimeout(r, 0));
-  const notesAfterNative = hub.els["perch-transcript"].children
-    .filter((c) => c.className.includes("note")).map((c) => c.textContent);
-  assert.ok(!notesAfterNative.includes("error"),
+  assert.ok(!rowsOf("perch-transcript").some((x) => x.includes("error")),
     "a native connection failure must not print a bare 'error' note");
+  assert.deepEqual(rowsOf("perch-activity-list"), [],
+    "nor an Activity row — the native error belongs to onStreamError alone");
 
+  // Phase D2: an engine error FRAME is gateway chrome, so it renders on the
+  // Activity rail rather than in the conversation.
   es._serverFrame("error", { text: "pi crashed" });
   await new Promise((r) => setTimeout(r, 0));
-  const notesAfterFrame = hub.els["perch-transcript"].children
-    .filter((c) => c.className.includes("note")).map((c) => c.textContent);
-  assert.ok(notesAfterFrame.includes("pi crashed"),
+  assert.ok(rowsOf("perch-activity-list").some((x) => x.includes("pi crashed")),
     "a real engine error FRAME must still render its text");
-  assert.ok(notesBefore <= notesAfterFrame.length - 1);
 });
 
 // ---- I2: bindings a green suite could previously delete undetected ----
@@ -2464,4 +2471,165 @@ test("C2: a retired instance's Escape handler is inert — the keydown listener 
   hub.win.__crowPerchHub.retire();
   hub.doc._dispatch("keydown", { key: "Escape" });
   assert.equal(modal.hidden, false, "a retired instance writes nothing, not even a close");
+});
+
+// ---------------------------------------------------------------------------
+// Phase D2: the tab surface — visibility-only switching, the Activity rail,
+// and the Session tab's cwd flow.
+// ---------------------------------------------------------------------------
+
+test("D2: log/tool/plan_state frames land in the Activity rail, not the transcript", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("log", { text: "warming provider" });
+  es._serverFrame("tool", { phase: "start", name: "crow_search_memories" });
+  es._serverFrame("tool", { phase: "end", name: "crow_search_memories" });
+  es._serverFrame("plan_state", { state: { enabled: true, executing: false, todosDone: 1, todosTotal: 4 } });
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = hub.els["perch-activity-list"].children.map((c) => c.textContent);
+  assert.ok(rows.some((x) => x.includes("warming provider")), "log frame → activity");
+  assert.ok(rows.some((x) => x.includes("[tool: crow_search_memories]")),
+    "tool start → activity, in the drawer's [tool: name] formatting");
+  assert.equal(rows.filter((x) => x.includes("[tool:")).length, 1, "tool END frames print nothing");
+  assert.ok(rows.some((x) => x.includes("plan mode on (1/4)")), "plan state → activity");
+  // The conversation stays a conversation.
+  const transcript = hub.els["perch-transcript"].children.map((c) => c.textContent);
+  assert.ok(!transcript.some((x) => x.includes("warming provider") || x.includes("[tool:")),
+    "no frame chatter in the transcript");
+});
+
+test("D2: tab switching is pure visibility — the SSE lifecycle is untouched", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  assert.equal(es.closed, false);
+  hub.els["perch-tab-btn-session"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-tab-session"].hidden, false);
+  assert.equal(hub.els["perch-tab-chat"].hidden, true);
+  assert.equal(hub.els["perch-tab-btn-session"].getAttribute("aria-selected"), "true");
+  assert.equal(hub.els["perch-tab-btn-chat"].getAttribute("aria-selected"), "false");
+  hub.els["perch-tab-btn-activity"].onclick();
+  hub.els["perch-tab-btn-chat"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  // Review S6: the stream belongs to the SESSION, not the tab. Same instance,
+  // never closed, no second connection minted by the round trip.
+  assert.equal(es.closed, false, "no tab tap may close the stream");
+  assert.equal(FakeEventSource.instances.length, 1, "and none may open another");
+  assert.equal(hub.els["perch-tab-chat"].hidden, false);
+  assert.equal(hub.els["perch-tab-activity"].hidden, true);
+});
+
+test("D2: a session switch resets the tab to chat and clears the previous Activity", async () => {
+  const two = {
+    birds: [{ id: "r4", name: "R4", perch_attached: true, state: "working",
+      sessions: [
+        { sessionId: "perchlive-aaaaaaaa", state: "awake", cardId: null, pendingUi: false },
+        { sessionId: "perchlive-bbbbbbbb", state: "awake", cardId: null, pendingUi: false }] }],
+  };
+  const hub = await mountHub({
+    fetchImpl: (method, path) => {
+      if (path === "/roost") return makeResponse(200, two);
+      if (path.endsWith("/options")) return makeResponse(200, { models: [], thinkingLevels: [] });
+      if (path.endsWith("/transcript")) return makeResponse(200, { events: [] });
+      return makeResponse(200, {});
+    },
+  });
+  hub.location.hash = "perchlive-aaaaaaaa";
+  await new Promise((r) => setTimeout(r, 0));
+  hub.els["perch-tab-btn-activity"].onclick();
+  FakeEventSource.instances[0]._serverFrame("log", { text: "session A chatter" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(hub.els["perch-activity-list"].children.length > 0);
+
+  hub.location.hash = "perchlive-bbbbbbbb";
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-tab-chat"].hidden, false, "a session opens on the conversation");
+  assert.equal(hub.els["perch-tab-activity"].hidden, true);
+  assert.equal(hub.els["perch-activity-list"].children.length, 0,
+    "session A's log must not sit under session B's tabs");
+});
+
+test("D2: the state frame refreshes the Session tab's cwd readout — engine record, never an echo", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: false, cwd: "/home/kevin/projects" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-session-cwd"].textContent, "/home/kevin/projects");
+  // null = the bot's default directory, stated in words, never blank and
+  // never a stale path from the previous session.
+  es._serverFrame("state", { state: "awake", turnInFlight: false, cwd: null });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-session-cwd"].textContent, "The bot's default directory");
+});
+
+test("D2: Change directory POSTs control({cwd}) through the browse modal; mid-turn refusal says why in chat", async () => {
+  const controls = [];
+  const TREE = { "/home/u": { parent: "/", dirs: [{ name: "work", path: "/home/u/work" }] },
+                   "/home/u/work": { parent: "/home/u", dirs: [] } };
+  const hub = await mountHub({
+    fetchImpl: (method, path, opts) => {
+      if (path.startsWith("/browse")) {
+        const p = new URL("http://x" + path).searchParams.get("path") || "/home/u";
+        const hit = TREE[p];
+        return hit ? makeResponse(200, { path: p, parent: hit.parent, dirs: hit.dirs })
+                   : makeResponse(404, { error: "unreadable" });
+      }
+      if (method === "POST" && path.endsWith("/control")) {
+        controls.push(JSON.parse(opts.body));
+        return makeResponse(409, { error: "turn_in_progress" });
+      }
+      if (path === "/roost") return makeResponse(200, ROOST_ONE_LIVE);
+      if (path.endsWith("/options")) return makeResponse(200, { models: [], thinkingLevels: [] });
+      if (path.endsWith("/transcript")) return makeResponse(200, { events: [] });
+      return makeResponse(200, {});
+    },
+  });
+  await openChatSession(hub);
+  hub.els["perch-session-cwd"].textContent = "/home/u";
+  hub.els["perch-change-cwd"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const modal = hub.doc.getElementById("perch-browse-modal");
+  assert.equal(modal.hidden, false, "the same picker the launcher uses");
+  assert.equal(hub.doc.getElementById("perch-browse-path").textContent, "/home/u",
+    "it starts where the session is");
+  assert.ok(hub.doc.getElementById("perch-browse-hint").textContent.includes("sleeps and wakes"),
+    "the hibernate-on-change is stated BEFORE the operator chooses");
+  hub.doc.getElementById("perch-browse-list").children[1].click();   // into work/
+  await new Promise((r) => setTimeout(r, 0));
+  hub.doc.getElementById("perch-browse-choose").click();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(controls, [{ cwd: "/home/u/work" }], "presence-keyed cwd, the only key");
+  // The engine refuses mid-turn; the refusal must be visible WHERE they read.
+  const notes = hub.els["perch-transcript"].children
+    .filter((c) => String(c.className).includes("note")).map((c) => c.textContent);
+  assert.ok(notes.some((x) => x.includes("mid-turn")), "a 409 turn_in_progress says so in chat");
+});
+
+test("D2: an accepted cwd change writes the readout; the next state frame owns the truth", async () => {
+  const hub = await mountHub({
+    fetchImpl: (method, path, opts) => {
+      if (method === "POST" && path.endsWith("/control")) return makeResponse(200, { ok: true });
+      if (path.startsWith("/browse")) {
+        return makeResponse(200, { path: "/home/tester", parent: "/home", dirs: [] });
+      }
+      return stdFetch()(method, path);
+    },
+  });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  hub.els["perch-session-cwd"].textContent = "The bot's default directory";
+  hub.els["perch-change-cwd"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  // The placeholder must not ride into the picker as a path — the picker
+  // starts from the server's home, and Choose takes THAT path.
+  hub.doc.getElementById("perch-browse-choose").click();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-session-cwd"].textContent, "/home/tester",
+    "optimistic write of the chosen path");
+  es._serverFrame("state", { state: "hibernating", turnInFlight: false, cwd: "/home/tester" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-session-cwd"].textContent, "/home/tester");
 });
