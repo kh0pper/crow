@@ -133,7 +133,7 @@ The queue is per instance: only the Crow you authored on sends a mark, a gift or
 
 ## Gifts and swaps
 
-Any unhatched egg on your shelf — claimed from a nest or received from someone — can be **gifted** to a contact (`POST /api/ramble/eggs/:id/gift { crow_id }`, tool `ramble_gift_egg`). The egg leaves your shelf as `gifted` and arrives on theirs as `received`, still unhatched: the wire carries only `{ egg_id, warmth, found_cell, found_week }`, never a species or seed — whoever hatches it rolls the bird. A received egg shows "A gift · from <name>" and can be incubated, gifted on, or offered in a swap. Received eggs do not use one of the five nest-claim spots. A gift delivered twice is stored once; an egg you gave away that comes back to you simply returns to your shelf.
+Any unhatched egg on your shelf — claimed from a nest or received from someone — can be **gifted** to a contact (`POST /api/ramble/eggs/:id/gift { crow_id }`, tool `ramble_gift_egg`). The egg leaves your shelf as `gifted` and arrives on theirs as `received`, still unhatched: the wire carries only `{ egg_id, warmth, found_cell, found_week }`, never a species or seed — whoever hatches it rolls the bird. A received egg shows "A gift · from `<name>`" and can be incubated, gifted on, or offered in a swap. Received eggs do not use one of the five nest-claim spots. A gift delivered twice is stored once; an egg you gave away that comes back to you simply returns to your shelf.
 
 A **swap** is an offer of one of your eggs for one of theirs (`POST /api/ramble/trades { egg_id, crow_id }`, tool `ramble_propose_swap`). The contact sees the offer on their Flock screen and answers with an egg of their choice (**Accept**, `POST /api/ramble/trades/:id/accept { egg_id }`) or **Decline**; you can **Withdraw** an unanswered offer. Eggs change hands only when the swap completes — on each side, atomically — and an egg named by an open offer is locked (it cannot be incubated, gifted or offered again until the offer closes). Offers lapse after seven days on each side; a lapsed offer releases the egg. If your answer arrives after the offer lapsed on their side, they reply with a decline and your egg is released. Accept and decline are panel actions (there is no MCP tool for them).
 
@@ -209,7 +209,7 @@ Every weight from the table above is also a `ramble_settings` override, read liv
 |---|---|
 | `ramble_leave_mark` | Leave a mark at a location. |
 | `ramble_caw` | Broadcast a short-lived public presence marker. |
-| `ramble_query_world` | List nearby marks and caws in the cell containing a location; each row carries a `label` ("your mark", "mark by <contact>", "mark by <world name> · <key4>", or "mark by <key8>"). |
+| `ramble_query_world` | List nearby marks and caws in the cell containing a location; each row carries a `label` ("your mark", "mark by `<contact>`", "mark by `<world name>` · `<key4>`", or "mark by `<key8>`"). |
 | `ramble_unlock` | Unlock a locked mark by proving proximity to its anchor. |
 | `ramble_pet_state` | The companion pet's mood, energy, weekly counters, active bird, and egg progress. |
 | `ramble_egg_state` | The incubating egg's warmth progress and hatch checklist. |
