@@ -422,3 +422,57 @@ test("GOLDEN: job_runner.runJob spawn (the second bridge consumer)", async () =>
   assert.equal(r.sessionId, "golden-uuid");
   check("runjob", readCapture());
 });
+
+// ---------------------------------------------------------------------------
+// Open-anywhere B2 — the cwd / world-root split (buildBotWorld direct units).
+// The golden legs above ARE the byte-identity guard for callers that pass no
+// cwd (every leg's spawn surface is unchanged); these cover the new seam.
+// ---------------------------------------------------------------------------
+
+test("B2: an explicit cwd is honored and returned; the world root keeps storage duty", async () => {
+  const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
+  const chosen = mkdtempSync(join(dir, "chosen-"));
+  const world = await buildBotWorld({ botId: "goldenbot", threadId: "b2-cwd", gatewayType: "perch", cwd: chosen });
+  assert.equal(world.cwd, chosen, "cwd is the operator's chosen directory");
+  assert.equal(world.sessionDir, join(dir, "bots", "goldenbot"), "world root is unchanged by a chosen cwd");
+  assert.ok(existsSync(join(chosen, ".mcp.json")),
+    ".mcp.json is written at the chosen cwd — pi-lab's mcp-client reads cwd/.mcp.json, so anywhere else silently strips every MCP tool");
+  assert.ok(existsSync(join(dir, "bots", "goldenbot", "sessions")),
+    "sessions/ is minted under the WORLD root");
+  assert.ok(!existsSync(join(chosen, "sessions")),
+    "no sessions/ dir littering the operator's chosen directory");
+});
+
+test("B2: a bad cwd is refused as bad_cwd, before any side effect", async () => {
+  const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
+  await assert.rejects(
+    () => buildBotWorld({ botId: "goldenbot", threadId: "b2-bad-rel", cwd: "relative/path" }),
+    (e) => e.code === "bad_cwd", "relative path refused");
+  await assert.rejects(
+    () => buildBotWorld({ botId: "goldenbot", threadId: "b2-bad-missing", cwd: join(dir, "does-not-exist") }),
+    (e) => e.code === "bad_cwd", "nonexistent path refused");
+  const filePath = join(dir, "b2-a-file.txt");
+  writeFileSync(filePath, "not a directory");
+  await assert.rejects(
+    () => buildBotWorld({ botId: "goldenbot", threadId: "b2-bad-file", cwd: filePath }),
+    (e) => e.code === "bad_cwd", "a file is not a directory");
+});
+
+test("B2: no session_dir + no project space falls back to <crowHome>/pi-bots/<botId> instead of throwing", async () => {
+  const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
+  const botId = "homelessbot";
+  const c = new Database(DB_FILE);
+  c.prepare("INSERT OR REPLACE INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,?)")
+    .run(botId, "Homeless Bot", JSON.stringify({
+      system_prompt: "You are a test bot.",
+      models: { default: "stub/m1" },
+      tools: { pi_builtin: ["read"] },
+      // deliberately no session_dir, no project binding
+    }), 1);
+  c.close();
+  const world = await buildBotWorld({ botId, threadId: "b2-fallback", gatewayType: "perch" });
+  const expected = join(process.env.CROW_HOME, "pi-bots", botId);
+  assert.equal(world.sessionDir, expected, "the old no_session_dir refusal is now a fallback world root");
+  assert.equal(world.cwd, expected, "cwd defaults to the world root");
+  assert.ok(existsSync(join(expected, "sessions")), "fallback root is mkdir'd");
+});
