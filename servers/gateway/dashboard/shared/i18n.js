@@ -2326,6 +2326,22 @@ export const translations = {
     en: "That folder does not exist or is not a directory.",
     es: "Esa carpeta no existe o no es un directorio.",
   },
+  "perch.tabsLabel": { en: "Session views", es: "Vistas de la sesión" },
+  "perch.tabChat": { en: "Chat", es: "Chat" },
+  "perch.tabSession": { en: "Session", es: "Sesión" },
+  "perch.tabFiles": { en: "Files", es: "Archivos" },
+  "perch.tabActivity": { en: "Activity", es: "Actividad" },
+  "perch.changeDirectory": { en: "Change directory", es: "Cambiar directorio" },
+  "perch.cwdChangeNote": {
+    en: "The session sleeps and wakes in the new directory; the next message starts a fresh context there.",
+    es: "La sesión se duerme y despierta en el nuevo directorio; el siguiente mensaje inicia un contexto nuevo allí.",
+  },
+  "perch.cwdBusy": {
+    en: "The bot is mid-turn — the directory changes once it is idle.",
+    es: "El bot está a media vuelta — el directorio cambia cuando quede libre.",
+  },
+  "perch.cwdChangeFailed": { en: "The directory did not change.", es: "El directorio no cambió." },
+  "perch.filesRefresh": { en: "Refresh", es: "Actualizar" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

@@ -65,6 +65,7 @@ const IDENTICAL_OK = new Set([
   "botboard.labelBotSwitcher", // "Bot"
   "botboard.colBot",
   "perch.newSessionBot", // "Bot" — same as botboard.colBot above
+  "perch.tabChat", // "Chat" — same word in Spanish UIs
   "settings.ed25519", // key-algorithm name
   "settings.serif",
   "settings.local",

@@ -83,21 +83,61 @@ ${engineBanner(engine, lang)}
        inherits that clamp. Rename here and that rule goes dead too. -->
   <div id="perch-chat">
     <button type="button" id="perch-back" class="quiet">${escapeHtml(t("perch.back", lang))}</button>
-    <!-- Close lives in .perch-head, NOT in #perch-composer: the composer's
-         sticky box is what keeps Send reachable at any scroll position
-         (css.js:89-91), and .perch-head is already a non-scrolling child of
-         the #perch-chat flex column, so a control here is permanently on
-         screen without touching that box. -->
+    <!-- Identity stays in the head: the bot name, the operator's session name
+         and the session id are what tell the operator WHICH session any tab
+         below is about. Everything OPERATIONAL (state pill, rename, close,
+         the model/thinking/permission/plan controls) moved into the Session
+         tab in Phase D — the head is never a control surface, which is also
+         why the old "close lives in .perch-head so it is permanently on
+         screen" comment no longer applies: Close now lives in the Session
+         tab AND on every list row, and the sticky composer keeps Send (the
+         control that must never leave the screen) reachable. -->
     <!-- The session's operator-set name sits between the bot name and the
          session id, never replacing either: the id stays the identity (the
          close confirmation names it), the name is the convenience. Hidden
          until there is one; rendered with textContent, never markup. -->
     <div class="perch-head"><div><div class="title" id="perch-bot-name"></div>
       <div class="session-name" id="perch-session-name" hidden></div>
-      <div class="meta" id="perch-session-meta"></div></div>
-      <div class="state" id="perch-state"></div>
-      <button type="button" id="perch-rename" class="quiet">${escapeHtml(t("perch.rename", lang))}</button>
-      <button type="button" id="perch-close" class="quiet">${escapeHtml(t("perch.close", lang))}</button></div>
+      <div class="meta" id="perch-session-meta"></div></div></div>
+    <!-- Phase D1: the tab strip. FOUR buttons, inline SVG glyphs ported from
+         the original pi-lab hub's icon set (~/pi-lab/extensions/web/public/
+         app.html, the I set) recoloured via currentColor so crow's teal owns
+         them. Every button carries a visible text label beside its glyph
+         (house rule: no unlabelled controls). Desktop: a top strip in the
+         right pane. Phone: the strip joins the #perch-chat flex chain as a
+         non-shrinking LAST sibling (css.js order:10) — a bottom tab bar
+         without position:fixed, so the composer sits above it inside the
+         chat tab and the flex chain that keeps Send reachable is untouched.
+         aria-selected is flipped by the client's switchTab(). -->
+    <nav id="perch-tabs" role="tablist" aria-label="${escapeHtml(t("perch.tabsLabel", lang))}">
+      <button type="button" role="tab" id="perch-tab-btn-chat" data-tab="chat" aria-controls="perch-tab-chat" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z"/></svg>${escapeHtml(t("perch.tabChat", lang))}</button>
+      <button type="button" role="tab" id="perch-tab-btn-session" data-tab="session" aria-controls="perch-tab-session" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M2 9h20"/><circle cx="8" cy="9" r="2.4" fill="currentColor" stroke="none"/><path d="M4 20h16M8 11v4m0 0h8m-8 0-3 5m11-9v4m0 0 3 5"/></svg>${escapeHtml(t("perch.tabSession", lang))}</button>
+      <button type="button" role="tab" id="perch-tab-btn-files" data-tab="files" aria-controls="perch-tab-files" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/></svg>${escapeHtml(t("perch.tabFiles", lang))}</button>
+      <button type="button" role="tab" id="perch-tab-btn-activity" data-tab="activity" aria-controls="perch-tab-activity" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></svg>${escapeHtml(t("perch.tabActivity", lang))}</button>
+    </nav>
+    <!-- Chat tab: transcript + ask cards + composer, exactly the old column —
+         the section wrapper inherits the flex chain (#perch-tab-chat is
+         flex:1/min-height:0/display:flex column in css.js) so the transcript
+         stays the ONLY scroller and the sticky composer backstop is intact. -->
+    <section id="perch-tab-chat" role="tabpanel" aria-labelledby="perch-tab-btn-chat">
+    <div id="perch-transcript"></div>
+    <div id="perch-ask"></div>
+    <div id="perch-composer">
+      <textarea id="perch-input" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
+      <div class="send-row">
+        <button type="button" id="perch-attach" class="quiet">${escapeHtml(t("perch.attachFile", lang))}</button>
+        <input type="file" id="perch-file-input" style="display:none" accept="image/*">
+        <button type="button" class="primary" id="perch-send">${escapeHtml(t("perch.send", lang))}</button>
+        <button type="button" id="perch-abort" style="display:none">${escapeHtml(t("perch.abort", lang))}</button>
+      </div>
+    </div>
+    </section>
+    <!-- Session tab: the controls row (moved verbatim — ids unchanged, so
+         every client binding and state-frame sync keeps working), the
+         read-only cwd display with its "Change directory" button (D2 wires
+         it to the browse modal + control({cwd})), and the state pill beside
+         rename/close. -->
+    <section id="perch-tab-session" role="tabpanel" aria-labelledby="perch-tab-btn-session" hidden>
     <div class="field-row">
       <div class="field"><span class="field-label" id="perch-model-label">${escapeHtml(t("perch.modelLabel", lang))}</span>
         <select id="perch-model" aria-labelledby="perch-model-label" disabled></select></div>
@@ -112,17 +152,29 @@ ${engineBanner(engine, lang)}
       <div class="field"><span class="field-label" id="perch-plan-mode-label">${escapeHtml(t("perch.planModeLabel", lang))}</span>
         <input type="checkbox" id="perch-plan-mode" aria-labelledby="perch-plan-mode-label"></div>
     </div>
-    <div id="perch-transcript"></div>
-    <div id="perch-ask"></div>
-    <div id="perch-composer">
-      <textarea id="perch-input" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
-      <div class="send-row">
-        <button type="button" id="perch-attach" class="quiet">${escapeHtml(t("perch.attachFile", lang))}</button>
-        <input type="file" id="perch-file-input" style="display:none" accept="image/*">
-        <button type="button" class="primary" id="perch-send">${escapeHtml(t("perch.send", lang))}</button>
-        <button type="button" id="perch-abort" style="display:none">${escapeHtml(t("perch.abort", lang))}</button>
-      </div>
+    <div class="field-row">
+      <div class="field"><span class="field-label" id="perch-cwd-label">${escapeHtml(t("perch.cwdLabel", lang))}</span>
+        <div class="meta" id="perch-session-cwd"></div>
+        <button type="button" id="perch-change-cwd">${escapeHtml(t("perch.changeDirectory", lang))}</button></div>
     </div>
+    <div class="session-row">
+      <div class="state" id="perch-state"></div>
+      <button type="button" id="perch-rename" class="quiet">${escapeHtml(t("perch.rename", lang))}</button>
+      <button type="button" id="perch-close" class="quiet">${escapeHtml(t("perch.close", lang))}</button>
+    </div>
+    </section>
+    <!-- Files tab: the session's outputs, listed by D3's endpoint and linked
+         through the existing workspace download route. Populated on tab
+         activation, never on session open. -->
+    <section id="perch-tab-files" role="tabpanel" aria-labelledby="perch-tab-btn-files" hidden>
+    <div class="files-bar"><button type="button" id="perch-files-refresh" class="quiet">${escapeHtml(t("perch.filesRefresh", lang))}</button></div>
+    <div id="perch-files-list"></div>
+    </section>
+    <!-- Activity tab: log/tool/plan/error FRAMES land here (D2), so the chat
+         transcript stays a conversation. -->
+    <section id="perch-tab-activity" role="tabpanel" aria-labelledby="perch-tab-btn-activity" hidden>
+    <div id="perch-activity-list"></div>
+    </section>
   </div>
 </div>
 </div>
