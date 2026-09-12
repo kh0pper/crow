@@ -7,14 +7,34 @@
 > 1. This plan: `docs/superpowers/plans/2026-09-11-perch-hub-open-anywhere.md`
 > 2. The review it implements Phase A from: `docs/reviews/2026-09-11-perch-pr356-review-completion.md`
 > 3. The surface spec it slots under: `docs/superpowers/specs/2026-09-09-perch-hub-design.md`
-> Execution state: **Phases A + B + C1 SHIPPED; C2 + D + E remain.** Phase A
-> (A1–A4) merged to `main`. Phase B (B1–B4) + C1 shipped as PR2 (#360, branch
-> `feat/perch-open-anywhere`, full suite 4686/0 green). Remaining: **C2**
-> (launcher directory-picker UI), **Phase D** (Chat/Session/Files/Activity tabs),
-> **Phase E** (docs + the mandated live CDP browser walk). Resume brief:
-> `docs/superpowers/handoffs/2026-09-12-perch-open-anywhere-pr2-shipped.md`.
+> Execution state: **ALL PHASES SHIPPED.** Phase A
+> (A1–A4) merged to `main` (PR #357). Phase B (B1–B4) + C1 shipped as PR2
+> (#360, full suite 4686/0 green). **C2 + Phase D + Phase E** shipped as PR3
+> (branch `feat/perch-open-anywhere-pr3`): the launcher directory picker, the
+> Chat/Session/Files/Activity tabs, the Files-tab outputs endpoint, the full
+> `npm test` suite (4717/0), and the mandated live walk on a real gateway +
+> real local model (spawn-in-chosen-dir → file write → MCP tool call through
+> the relocated `.mcp.json` → model switch → gateway restart → adopt on the
+> switched model in the chosen dir → provider-disable fail-open → mid-turn cwd
+> refusal / idle accept) plus CDP render checks at 412×730 and 1280×900.
+> Resume brief (PR2): `docs/superpowers/handoffs/2026-09-12-perch-open-anywhere-pr2-shipped.md`.
 > Record any named deviation in the "Risk notes" section's spirit: measured, not
-> asserted. PR shape: PR 1 = Phase A (DONE), PR 2 = B+C1 (DONE #360), PR 3 = C2+D+E.
+> asserted. PR shape: PR 1 = Phase A (DONE #357), PR 2 = B+C1 (DONE #360), PR 3 = C2+D+E (DONE).
+>
+> **Named deviations (PR3), measured not asserted:** (1) The plan's E1 said
+> "switch model while hibernating"; the live walk switched while AWAKE (the
+> stronger `set_model`-the-live-child path) and proved the hibernate-bind path
+> separately via the cwd-change leg (which hibernates) + the restart-adopt leg;
+> the model `bindsAtWake` path stays covered by `perch-interactive-controls.test.js`.
+> (2) The scratch gateway's local model server (`qwen3.6-35b-a3b`) is a REASONING
+> model that spends its token budget on `reasoning_content`; a session recycled
+> 5× through repeated wakes eventually returned a dead pi child (`pi_gone`) with
+> degenerate output. A FRESH session on the same gateway wrote its file and
+> replied cleanly — environmental (model-server fatigue), not a PR3 regression.
+> (3) `docs/architecture/gateway-server.md` does not exist; the perch-interactive
+> architecture note landed in `docs/developers/bot-engine.md`'s "Long-lived
+> (interactive) children" section (its existing home) and the operator walkthrough
+> in `docs/guide/bot-builder.md`.
 
 **Status:** approved by operator 2026-09-11 (four decisions captured below)
 **Supersedes:** the directory-containment decisions of the M3 project-native workspace model *for Perch sessions*, and completes the outstanding review of PR #356 → `docs/reviews/2026-09-11-perch-pr356-review-completion.md` (findings R1, R2, R4-adjacent become Phase A).

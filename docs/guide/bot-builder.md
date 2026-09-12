@@ -52,7 +52,7 @@ Binding glasses to an agent is one-to-one: a device drives one agent at a time, 
 
 ## Perch: talk to an agent from your own dashboard
 
-Perch is the board's own **roost strip** — a row of birds, one per agent, sitting above the cards — plus a **session drawer** that opens beside the board when you click one. Together they show every agent's live and recent sessions, their transcripts, and a place to message them directly. It is native to the board: nothing to install, nothing to configure beyond attaching the channel.
+Perch is the dashboard's own chat surface for agents — the **Perch hub** at `/dashboard/perch` (a nav entry under Agents). One page holds a live session list, a launcher to start a new session, and the chat itself. The board also carries a compact **roost strip** above the cards that links into the hub. There is nothing to install and nothing to configure beyond attaching the channel.
 
 Nothing about it is exposed to the internet. It runs as part of the gateway, listens only there, and is reachable only through your dashboard login.
 
@@ -62,48 +62,52 @@ Open the agent in Bot Builder, go to the **Gateways** tab, choose **Perch (dashb
 
 Perch turns run on the same bot engine that Gmail and Discord use, so if the engine is not installed yet Crow will offer to install it before letting you save.
 
-Agents without the channel attached appear in the roost strip too, as **Observing** — you can jump to Bot Builder to attach them, but there is no session to open until you do.
+Agents without the channel attached still appear in the hub's list, but there is no session to open until you attach them — jump to Bot Builder to do that.
 
-### 2. Find the agent in the roost strip
+### 2. Start a session — optionally in any directory
 
-Open the board. Each attached agent is a bird with a state and one primary action:
+Open the Perch hub. The launcher at the top of the list starts a new session: pick the agent (when there is more than one), optionally pick a model, and **optionally pick a working directory**.
 
-- **Idle** — no live session. The button is **Send out**: type a message, send it, and a new session starts.
-- **Waiting on you** — the agent asked a question mid-session and is paused for your answer. The button is **Answer**.
-- **Working** / **Hibernating** — a session is live or has gone quietly idle. The button is **Open**.
-- **Observing** — no channel attached yet (see step 1). The link goes straight to Bot Builder.
+The directory field is the open-anywhere control. Leave it empty and the session runs in the agent's own default directory. Fill it in — by typing a path or by tapping **Browse…**, which opens a picker fed by the server (it lists directory names only, never file contents) — and the agent runs *there*: it can read and write that directory, and its per-agent MCP tools follow it. This is how you point an agent at a real project checkout instead of its own sandbox. The chosen directory must already exist; the picker only ever offers directories that do.
 
-An overflow menu on every bird also offers **Talk** (start a fresh session even if one is already open), **Sessions** (pick from the agent's other recent sessions), **Recall** (stop the live session), and **Setup** (jump to the agent in Bot Builder).
+> Perch does not jail an agent to a directory on this machine — the picker can reach any directory the gateway user can. The barrier between agents is each one's own tools and permissions, not the directory. Treat the Perch hub like the shell access it is (see [Before you attach it](#before-you-attach-it)).
 
-### 3. The session drawer
+Tap **New session**. The chat opens on the conversation.
 
-Clicking a bird — or a session badge on a board card — opens the drawer: the transcript, a composer to send a message or steer a running turn, and an **Abort** button while a turn is in flight. Tool activity streams in as it happens, so you can see what the agent is doing before the reply lands.
+### 3. The chat: four tabs
 
-Each session carries a state: **Awake** while the agent can take a message right now, hibernating once it has gone idle and quietly shut itself down (nothing is lost — the next message wakes it back up mid-conversation), and **Stopped** once you or Recall have ended it for good. A stopped session cannot be woken again — start a new one from **Send out** or **Talk** if you want to keep talking to that agent this way.
+The chat has four tabs across the bottom (phone) or top (desktop). Switching tabs never interrupts the session — the live connection belongs to the session, not the tab.
+
+- **Chat** — the transcript, a composer to send a message or steer a running turn, and any question card the agent is waiting on. Tool activity and log lines do *not* clutter this view; they go to Activity.
+- **Session** — the model, thinking level, permission mode and plan-mode controls; the session's state; Rename and Close; and the working directory with a **Change directory** button. Changing the directory puts the session to sleep and wakes it in the new directory on your next message (an agent's process cannot change directory mid-run) — the button says so before you commit, and it is refused while a turn is in flight.
+- **Files** — what the agent has written to its outputs directory this session, newest first, each row a download. This is the session's own deliverables folder, not the working directory you chose.
+- **Activity** — the timestamped log/tool/error rail: what the agent did, which tools it called, and any gateway notes, so the Chat tab stays a clean conversation.
+
+Each session carries a state: **Awake** while the agent can take a message right now, hibernating once it has gone idle and quietly shut itself down (nothing is lost — the next message wakes it back up mid-conversation, in its chosen directory and on its chosen model), and **Stopped** once you or Close have ended it for good. A stopped session cannot be woken again — start a new one if you want to keep talking to that agent this way.
 
 Only one session per agent runs at a time by default, and every session competes for the same processing slots every other agent turn uses — Gmail replies, Discord replies, background jobs. Leaving a session awake and idle for a long stretch can make those wait; let it hibernate (it will, on its own) or stop it when you're done.
 
 ### 4. Narrow an agent's tools for one session
 
-Open **Envelope & tools** in the drawer. You see the agent's full envelope: every tool it is allowed to use, each with a checkbox, plus its model and skills.
+Open **Envelope & tools** for the session. You see the agent's full envelope: every tool it is allowed to use, each with a checkbox, plus its model and skills.
 
 Uncheck a tool and it is switched off **for that session only**, from the next message onward. The agent's definition is untouched, and every other session keeps the full set. This is for the moment when you want an agent to answer without touching your files, without editing anything, without reaching out over the network — for this one session, right now.
 
-Tools shown with a padlock are ones the agent is not allowed at all. They are not togglable here; they link to Bot Builder, which is the only place that grants a tool. The drawer can only ever take away.
+Tools shown with a padlock are ones the agent is not allowed at all. They are not togglable here; they link to Bot Builder, which is the only place that grants a tool. The session can only ever take away.
 
 ### 5. Answering a question the agent asks you
 
-Some skills ask you something mid-task instead of guessing — pick from a list, confirm before doing something, type free text, or edit a block of text. That shows up in the drawer as a card in place of the reply: the question, and the way to answer it. Answer it and the agent continues right where it left off. If a card is still waiting on you when you navigate away, it is there again when you come back to the session — the roost bird shows **Waiting on you** in the meantime.
+Some skills ask you something mid-task instead of guessing — pick from a list, confirm before doing something, type free text, or edit a block of text. That shows up on the Chat tab as a card in place of the reply: the question, and the way to answer it. Answer it and the agent continues right where it left off. If a card is still waiting on you when you navigate away, it is there again when you come back to the session — the hub's list shows the session as **waiting on you** in the meantime.
 
 ### 6. Coming back later
 
-Reload the board and every attached agent's roost state and most recent session pick up right where you left them — reopen the drawer and the transcript, live state, and any pending question are all still there. You never have to hunt for which session was which.
+Reload the hub and every attached agent's sessions pick up right where you left them — reopen a session and the transcript, live state, chosen directory and model, and any pending question are all still there. You never have to hunt for which session was which.
 
 ### Before you attach it
 
 A few things are worth knowing, because Perch does not hide them.
 
-Everyone who can sign in to your dashboard can read **every** agent's transcripts in the drawer. There is no per-agent access control.
+Everyone who can sign in to your dashboard can read **every** agent's transcripts in the hub. There is no per-agent access control.
 
 Messaging or steering a session extends that from reading to driving: anyone who can sign in can hold a live conversation as any agent, using that agent's own tools and permissions, not just watch what it already did. This is not a new trust boundary — a dashboard session could already trigger an agent by messaging it through its real channel (an email, a Discord message). Perch just makes that reachable straight from the board, without going out and back through a channel.
 

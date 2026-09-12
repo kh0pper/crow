@@ -102,3 +102,24 @@ The rushed merge did not break anything that the merged tests cover — the clie
 | R4-adjacent | openStream/loadHistory duplicate bubble race (pre-existing) | Low | separate issue — belongs to the integration-issues plan |
 
 R1 and R2 share a root: the engine grants the row's `model` column more trust than the column's writers deserve. They should ship as one change, and they are candidates to fold into the perch-hub integration issue plan (next section, awaiting Kevin's notes).
+
+---
+
+## Status footer (resolved 2026-09-12)
+
+All three findings are **closed**, shipped as Phase A of the operator-approved
+open-anywhere plan (`docs/superpowers/plans/2026-09-11-perch-hub-open-anywhere.md`):
+
+| Finding | Closed by | Where |
+|---|---|---|
+| **R1** — row-stamped defaults got operator-choice authority | **PR #357** | `perch-interactive.js` A1: the `model` column means an explicit choice only (stamps dropped; `onModelSelect`→`writeModel`; revocation path clears to NULL) |
+| **R2** — well-formed dead model key: unvalidated at write, unprobed at wake | **PR #357** | A2: `control()` validates the pair against the catalogue before persisting; A3: a dead recorded model falls open at wake with a log frame naming the fallback |
+| **R4-adjacent** — openStream/loadHistory duplicate bubble | **PR #357** | A4: a message landing between subscribe and history renders once (the client's `histBuf`/`flushHistBuf` sequence-guard) |
+
+The verification checklist's mutation matrix and the two new drives (dead-provider
+wake, def-change pin) are covered by `tests/perch-interactive-controls.test.js`
+and were re-run green in PR #357 and again in the open-anywhere PR3 full suite
+(`npm test`, 4717/0). R1/R2's fail-open path was additionally walked live on a
+real gateway + real local model on 2026-09-12 (a disabled provider resumed on
+the def default with the `recorded model … is not available — resumed on …` log
+line; the row kept the dead key by design).
