@@ -404,6 +404,30 @@ export function shouldInitInstanceSync({ argv = [], env = {} } = {}) {
   return true;
 }
 
+/**
+ * The stdio MCP entrypoint (servers/sharing/index.js) is ALWAYS a companion
+ * to the primary gateway — same class as the --no-auth loopback gateway above.
+ * Apply the instance-sync kill-switch by default so a per-session MCP spawn
+ * never grabs the on-disk Hypercore feed lock and starves the primary ("File
+ * descriptor could not be locked"). An explicit CROW_DISABLE_INSTANCE_SYNC=0
+ * opts back in (standalone host with no gateway). Nostr is gated separately
+ * (CROW_DISABLE_NOSTR), so messaging/sharing tools stay live either way.
+ * Pure: takes an env-shaped object, returns a new one. Called at module top
+ * of the stdio entrypoint before any manager construction.
+ * @param {Record<string,string|undefined>} env
+ * @returns {Record<string,string|undefined>}
+ */
+export function stdioCompanionEnv(env = {}) {
+  const out = { ...env };
+  const current = out.CROW_DISABLE_INSTANCE_SYNC;
+  if (current === undefined) {
+    out.CROW_DISABLE_INSTANCE_SYNC = "1";
+  } else if (current === "0") {
+    delete out.CROW_DISABLE_INSTANCE_SYNC;
+  }
+  return out;
+}
+
 /* ------------------------------------------------- ramble natural-key apply */
 
 /**
