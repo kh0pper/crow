@@ -1200,6 +1200,28 @@ export function createInteractiveEngine({
     // NEW model, but those two fields do not feed metering or spawn args, so
     // leaving them as prepareSpawn resolved them is harmless — only
     // provider/model/key are load-bearing here).
+    // Fix round 3 R2b: a recorded choice can outlive its provider —
+    // crow-dsv4 was disabled on this fleet the day PR #356 merged, and the
+    // adopt-restore hands whatever the row says straight to the override
+    // below, which skips model_resolver.mjs's fail-closed rail entirely.
+    // Validate against the same catalogue the picker offers; when the key
+    // is gone, fall open to the def's fresh resolution with an honest log
+    // line instead of spawning a child on a provider that cannot answer
+    // (whose only report would be attachExit's "pi exited unexpectedly").
+    // The ROW keeps the key — a temporarily disabled provider must not
+    // erase a real choice — and a re-enabled one is honored again next
+    // restart. Empty catalogue fails open, same contract as control()'s
+    // gate (R2a).
+    if (s.currentModelParts) {
+      const catalogue = await catalogModels();
+      const chosen = servingModel(s);
+      if (catalogue.length && chosen &&
+          !catalogue.some((m) => m && (m.provider + "/" + m.id) === chosen)) {
+        s.currentModelParts = null;
+        s.currentModel = null;
+        emit(s, { type: "log", text: "recorded model " + chosen + " is not available — resumed on " + (prep.resolved && prep.resolved.key) });
+      }
+    }
     if (s.currentModelParts &&
         (s.currentModelParts.provider !== prep.resolved.provider ||
          s.currentModelParts.modelId !== prep.resolved.model)) {
@@ -1959,6 +1981,25 @@ export function createInteractiveEngine({
     const applied = {};
     const bindsAtWake = {};
 
+    if (hasModel && opts.model !== null) {
+      // Fix round 3 R2a: an explicit pair must be one this instance can
+      // actually serve. The drawer only ever offers catalogue entries, but
+      // the API accepts any strings, and writeModel() now makes the choice
+      // DURABLE — without this gate a typo or a retired name becomes a
+      // poison pill that every future wake replays. Fail-OPEN on an empty
+      // catalogue: catalogModels() answers [] when the registry is
+      // unreadable, and a registry hiccup must not lock an operator out of
+      // a session that is working fine (catalogModels' own never-throw
+      // contract). Key shape matches providerModelList(): pi-shaped
+      // {provider, id} entries.
+      const catalogue = await catalogModels();
+      if (catalogue.length) {
+        const want = opts.model.provider + "/" + opts.model.modelId;
+        if (!catalogue.some((m) => m && (m.provider + "/" + m.id) === want)) {
+          throw engineError("bad_request");
+        }
+      }
+    }
     if (hasModel) {
       if (opts.model === null) {
         // Revoke the explicit choice (the drawer's "the bot's own model"
