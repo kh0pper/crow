@@ -1602,7 +1602,10 @@ test("the drawer's model picker is ENABLED on a hibernating session's fallback l
   await openChatSession(hub);
   const modelSel = hub.els["perch-model"], thinkSel = hub.els["perch-thinking"];
   assert.equal(modelSel.disabled, false, "the fallback list is a real list and the switch really binds at the next wake");
-  assert.deepEqual(modelSel.children.map((o) => o.value), ["crow-local/qwen"]);
+  // Round 3 R1: the picker now LEADS with the revocation sentinel (value '')
+  // — "the bot's own model" POSTs control {model:null} — with the live model
+  // still second and still selected.
+  assert.deepEqual(modelSel.children.map((o) => o.value), ["", "crow-local/qwen"]);
   assert.equal(modelSel.value, "crow-local/qwen",
     "and it must SAY which one is live — enabled-and-listing was the assertion this bug walked through");
   assert.equal(thinkSel.disabled, true,
@@ -1868,7 +1871,32 @@ test("a model the list does not carry is added and selected, not silently droppe
   assert.equal(sel.value, "retired-provider/old-model");
   assert.equal(sel.children[0].value, "retired-provider/old-model", "prepended, so it reads first");
   assert.equal(sel.children[0].textContent, "retired-provider/old-model — current");
-  assert.equal(sel.children.length, 4, "and the catalogue is still all there");
+  // Round 3 R1: +1 for the revocation sentinel the picker now always leads with.
+  assert.equal(sel.children.length, 5, "and the catalogue is still all there");
+});
+
+test("the drawer's picker leads with 'the bot's own model', and picking it POSTs the revocation", async () => {
+  // Round 3 R1 (client half): the sentinel is how a legacy auto-stamped row
+  // becomes recoverable from the UI. It must be the FIRST option, must not
+  // out-select a live current model, and must speak the engine's revocation
+  // vocabulary — control body {model:null}, not an omitted field.
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/options": () => makeResponse(200, {
+      models: [{ provider: "crow-local", id: "qwen", name: "Qwen" },
+               { provider: "crow-chat", id: "big", name: "Big" }],
+      thinkingLevels: null, current: "crow-local/qwen", source: "providers" }) }),
+  });
+  await openChatSession(hub);
+  const sel = hub.els["perch-model"];
+  assert.equal(sel.children[0].value, "", "sentinel is option 0");
+  assert.match(sel.children[0].textContent, /own model/i, "labelled, never a bare blank");
+  assert.equal(sel.value, "crow-local/qwen", "a live current still wins the selection");
+  // Operate it: select '' and fire the change handler, as the browser would.
+  sel.value = "";
+  sel.onchange({ target: sel });
+  const ctl = hub.fetchCalls.filter((c) => c.path.endsWith("/control"));
+  assert.equal(ctl.length, 1, "one POST, and it is exactly the revocation");
+  assert.deepEqual(JSON.parse(ctl[0].opts.body), { model: null });
 });
 
 test("a disabled model select is never given a value — there is no list to be right about", async () => {
@@ -2230,4 +2258,90 @@ test("N1 sibling: an unparseable text frame appends nothing and suppresses nothi
   assert.deepEqual(botEntries(hub), [], "no empty entry");
   es._serverFrame("reply", { text: "the real answer", turnId: "turn-1" });
   assert.deepEqual(botEntries(hub), ["the real answer"]);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 3 R4 — the openStream/loadHistory seam.
+//
+// The stream subscribes BEFORE the transcript batch lands, and both writers
+// render the same completed message: the frame on arrival, the batch behind
+// it — the duplicate bubble the review named, measured NOT adjacent, which
+// is why a last-entry comparison could never catch it and the frames are
+// buffered against the batch instead. The pending-promise fetch override is
+// the whole trick: it freezes the batch so a test can park frames inside the
+// real window.
+// ---------------------------------------------------------------------------
+
+function batchEvents(msgs) {
+  return { events: msgs.map((m) => ({ type: "message", message: m })) };
+}
+const asst = (text) => ({ role: "assistant", content: [{ type: "text", text }] });
+
+test("R4: a message completed inside the subscribe/fetch window renders once", async () => {
+  let settleBatch;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/transcript": () => new Promise((r) => { settleBatch = r; }) }),
+  });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+
+  es._serverFrame("text", { text: "the answer", turnId: "turn-9" });
+  assert.deepEqual(botEntries(hub), [],
+    "buffered until the batch settles — rendering now is exactly the duplicate");
+
+  settleBatch(makeResponse(200, batchEvents([asst("the answer")])));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(botEntries(hub), ["the answer"], "ONE entry, the batch's");
+
+  // And the turn's reply, arriving live AFTER the settle, is judged against
+  // the buffered text frame's bookkeeping — renderedTurn was set even though
+  // the frame's own append was dropped.
+  es._serverFrame("reply", { text: "the answer", turnId: "turn-9" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(botEntries(hub), ["the answer"], "reply suppressed — that turn IS on screen");
+});
+
+test("R4: frames newer than the batch snapshot flush behind it, in arrival order", async () => {
+  let settleBatch;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/transcript": () => new Promise((r) => { settleBatch = r; }) }),
+  });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("text", { text: "streamed after the snapshot", turnId: "turn-10" });
+  settleBatch(makeResponse(200, batchEvents([asst("older message")])));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(botEntries(hub), ["older message", "streamed after the snapshot"],
+    "batch first, buffered frames behind it — the order the browser could not get by writing live");
+});
+
+test("R4: a FAILED history fetch flushes the buffer — frames are the only copy", async () => {
+  let settleBatch;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/transcript": () => new Promise((r) => { settleBatch = r; }) }),
+  });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("text", { text: "the only copy", turnId: "turn-11" });
+  settleBatch(makeResponse(503, { error: "upstream" }));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(botEntries(hub), ["the only copy"], "nothing to dedup against — render it");
+  assert.ok(String(hub.els["perch-transcript"].children.map((c) => c.textContent).join(" "))
+    .includes("Could not load"), "and the failure note still says history is missing");
+});
+
+test("R4: a reply buffered across the window is judged at flush, not lost", async () => {
+  // Zero-text-frame turn opened mid-stream: the reply is the answer's only
+  // copy on the wire; it was parked WITH nothing to dedup against, and the
+  // flush must still render it.
+  let settleBatch;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/transcript": () => new Promise((r) => { settleBatch = r; }) }),
+  });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("reply", { text: "arrived while history was in flight", turnId: "turn-12" });
+  settleBatch(makeResponse(200, batchEvents([])));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(botEntries(hub), ["arrived while history was in flight"]);
 });

@@ -363,7 +363,11 @@ test("spawn: builds the world, warms, constructs PiRpc with the FULL piRpcOpts +
   assert.equal(row.bot_id, "botty");
   // r1 C6: without pi_session_dir the P1 transcript endpoint 404s forever.
   assert.equal(row.pi_session_dir, join(dir, "bots", "botty") + "/sessions");
-  assert.equal(row.model, "crow-local/qwen3.6-35b-a3b");
+  // Round 3 R1: NO model stamp without an explicit choice — the resolver's
+  // answer is not the operator's override. (This read the spawn-resolved key
+  // before; the change IS the fix, and controls' N2 tests cover the explicit
+  // path.)
+  assert.equal(row.model, null);
   // get_state → pi_session_id persisted
   assert.equal(row.pi_session_id, state.instances[0].piSessionId);
 });
@@ -642,7 +646,10 @@ test("clean completion: meters + audits, emits reply, trims the log, and parks t
 
   const row = rowFor(s.threadId);
   assert.equal(row.status, "waiting-user");
-  assert.equal(row.model, "crow-local/qwen3.6-35b-a3b");
+  // Round 3 R1: a plain turn end no longer stamps the row — the audit line
+  // above still records what actually served (it reads s.resolved, not the
+  // row). The column means "explicit choice" now.
+  assert.equal(row.model, null);
   assert.equal((await engine.get(s.sessionId)).state, "awake");
 });
 
