@@ -103,7 +103,25 @@ Five gateway types need the engine — `gmail`, `discord`, `telegram`, `slack`, 
 
 ## Long-lived (interactive) children
 
-Every mode above assumes a child that lives for exactly one turn: spawn, one `promptTurn`, close. Perch's interactive sessions (the board's roost strip + session drawer) are the one exception — a child spawned by `servers/gateway/perch-interactive.js` stays up across many turns, hibernating (closing) when idle and waking (respawning, resuming the same pi session file) on the next message. It is assembled through the same `buildBotWorld`/`prepareSpawn` path as every other engine channel and is gated by the same `ENGINE_CHANNELS` / attach-time engine check as a `perch` gateway generally, so nothing above this section changes for it. What is specific to the long-lived shape — its own state machine, its capacity accounting against this same `PIBOT_MAX_PI` budget, its stall/abort policy, and the `PI_BOT_INTERACTIVE` env marker it alone sets — lives entirely in `perch-interactive.js`'s own header comment, since none of it is reachable outside a spawned interactive session.
+Every mode above assumes a child that lives for exactly one turn: spawn, one `promptTurn`, close. Perch's interactive sessions (the `/dashboard/perch` hub) are the one exception — a child spawned by `servers/gateway/perch-interactive.js` stays up across many turns, hibernating (closing) when idle and waking (respawning, resuming the same pi session file) on the next message. It is assembled through the same `buildBotWorld`/`prepareSpawn` path as every other engine channel and is gated by the same `ENGINE_CHANNELS` / attach-time engine check as a `perch` gateway generally, so nothing above this section changes for it. What is specific to the long-lived shape — its own state machine, its capacity accounting against this same `PIBOT_MAX_PI` budget, its stall/abort policy, and the `PI_BOT_INTERACTIVE` env marker it alone sets — lives entirely in `perch-interactive.js`'s own header comment, since none of it is reachable outside a spawned interactive session.
+
+### Open-anywhere: cwd is split from the world root
+
+A Perch session runs in **any directory the operator picks**, not only its bot's configured workspace. Two values that used to be one are now separate (`buildBotWorld` returns both):
+
+- **`cwd`** — the operator's chosen working directory (`bot_sessions.cwd`, nullable; set at spawn via `POST /bots/:id/interactive {cwd}` or mid-session via `POST /interactive/:sid/control {cwd}`). It is pi's process cwd, the directory added to the child's `write_paths` (so the bot can do real work there, like bare pi did), and where the per-bot `.mcp.json` is written — pi-lab's mcp-client reads `cwd/.mcp.json`, so an arbitrary cwd without relocating that file would silently strip every MCP tool. A bot with no configured directory at all falls back to `<crowHome>/pi-bots/<botId>` rather than refusing to spawn.
+- **world root (`sessionDir`)** — still the *storage* root: pi session files (`sessions/`), `outputs/<sid>`, and uploads. A session's deliverables never litter the chosen directory, and the existing outputs-download jail is untouched.
+
+A mid-session cwd change persists to the row and **hibernates the live child** with a visible log frame; the next message wakes in the new directory. It is never a live `chdir` (pi's process cwd is fixed at spawn). `control({cwd})` is refused with `turn_in_progress` mid-turn.
+
+Supporting endpoints (all behind the same `dashboardAuth` as every perch-api route, and **not** in `PUBLIC_FUNNEL_PREFIXES`):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /dashboard/perch-api/browse?path=` | Server-backed directory **names** + paths only (never contents) for the launcher's picker. `~` expansion, `..` collapsed via `resolve()`, realpath'd, dot-dirs last, capped 500; `parent` derived from the resolved realpath so `..` from a symlinked dir doesn't ping-pong. |
+| `GET /dashboard/perch-api/interactive/:sid/files/list` | Flat listing of the session's **outputsDir only** (never uploadsDir): dotfiles and symlinks skipped (`lstatSync`), no recursion, mtime-desc, capped 200. Downloads still go through the existing `workspace/*` fd-based `O_NOFOLLOW` jail. |
+
+The hub's chat surface is four tabs (Chat / Session / Files / Activity). Tab switching is pure visibility toggling on the client — it never touches the SSE lifecycle, which belongs to the session, not the tab. Log/tool/error frames route to the Activity rail; the Chat transcript keeps only messages, ask cards, and hard failures.
 
 ## See also
 
