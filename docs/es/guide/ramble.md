@@ -133,7 +133,7 @@ La cola es por instancia: solo el Crow desde el que escribiste envía una marca,
 
 ## Regalos e intercambios
 
-Cualquier huevo sin eclosionar de tu estante — recogido de un nido o recibido de alguien — se puede **regalar** a un contacto (`POST /api/ramble/eggs/:id/gift { crow_id }`, herramienta `ramble_gift_egg`). El huevo sale de tu estante como `gifted` y llega al suyo como `received`, aún sin eclosionar: el cable solo lleva `{ egg_id, warmth, found_cell, found_week }`, nunca una especie ni una semilla — quien lo haga eclosionar tira el pájaro. Un huevo recibido se muestra como "Un regalo · de <nombre>" y se puede incubar, regalar de nuevo u ofrecer en un intercambio. Los huevos recibidos no ocupan ninguna de las cinco plazas de recogida. Un regalo entregado dos veces se guarda una sola vez; un huevo que diste y te devuelven simplemente vuelve a tu estante.
+Cualquier huevo sin eclosionar de tu estante — recogido de un nido o recibido de alguien — se puede **regalar** a un contacto (`POST /api/ramble/eggs/:id/gift { crow_id }`, herramienta `ramble_gift_egg`). El huevo sale de tu estante como `gifted` y llega al suyo como `received`, aún sin eclosionar: el cable solo lleva `{ egg_id, warmth, found_cell, found_week }`, nunca una especie ni una semilla — quien lo haga eclosionar tira el pájaro. Un huevo recibido se muestra como "Un regalo · de `<nombre>`" y se puede incubar, regalar de nuevo u ofrecer en un intercambio. Los huevos recibidos no ocupan ninguna de las cinco plazas de recogida. Un regalo entregado dos veces se guarda una sola vez; un huevo que diste y te devuelven simplemente vuelve a tu estante.
 
 Un **intercambio** es una oferta de uno de tus huevos por uno de los suyos (`POST /api/ramble/trades { egg_id, crow_id }`, herramienta `ramble_propose_swap`). El contacto ve la oferta en su pantalla Bandada y responde con un huevo de su elección (**Aceptar**, `POST /api/ramble/trades/:id/accept { egg_id }`) o **Rechazar**; tú puedes **Retirar** una oferta sin respuesta. Los huevos cambian de manos solo cuando el intercambio se completa — en cada lado, de forma atómica — y un huevo nombrado por una oferta abierta queda bloqueado (no se puede incubar, regalar ni ofrecer de nuevo hasta que la oferta se cierre). Las ofertas caducan a los siete días en cada lado; una oferta caducada libera el huevo. Si tu respuesta llega cuando la oferta ya caducó en su lado, responden con un rechazo y tu huevo queda libre. Aceptar y rechazar son acciones del panel (no hay herramienta MCP para ellas).
 
@@ -209,7 +209,7 @@ Cada peso de la tabla anterior es también un override de `ramble_settings`, le�
 |---|---|
 | `ramble_leave_mark` | Dejar una marca en una ubicación. |
 | `ramble_caw` | Emitir un marcador de presencia público y efímero. |
-| `ramble_query_world` | Listar marcas y caws cercanos en la celda que contiene una ubicación; cada fila lleva un `label` ("your mark", "mark by <contacto>", "mark by <nombre en el mundo> · <clave4>" o "mark by <clave8>"). |
+| `ramble_query_world` | Listar marcas y caws cercanos en la celda que contiene una ubicación; cada fila lleva un `label` ("your mark", "mark by `<contacto>`", "mark by `<nombre en el mundo>` · `<clave4>`" o "mark by `<clave8>`"). |
 | `ramble_unlock` | Desbloquear una marca bloqueada probando proximidad a su ancla. |
 | `ramble_pet_state` | Ánimo, energía, contadores semanales, pájaro activo y progreso del huevo de la mascota compañera. |
 | `ramble_egg_state` | El progreso de calor del huevo incubando y la lista de comprobación hacia la eclosión. |
