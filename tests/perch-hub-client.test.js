@@ -395,6 +395,12 @@ function makeEventTarget() {
   };
 }
 
+/* Open-anywhere C2: elements the SCRIPT mints at runtime (the browse modal)
+   carry ids a flat pre-seeded map cannot know. mountHub points this at a
+   per-mount registry; appendChild registers any child that has an id, which
+   mirrors what a real document's getElementById resolves after an append. */
+let ID_REGISTRY = null;
+
 function makeFakeElement(tag) {
   const target = makeEventTarget();
   const attrs = {};
@@ -410,7 +416,11 @@ function makeFakeElement(tag) {
     placeholder: "",
     type: "",
     files: null,
-    appendChild(child) { this.children.push(child); return child; },
+    appendChild(child) {
+      this.children.push(child);
+      if (ID_REGISTRY && child && child.id) ID_REGISTRY[child.id] = child;
+      return child;
+    },
     removeChild(child) { const i = this.children.indexOf(child); if (i >= 0) this.children.splice(i, 1); return child; },
     insertBefore(node, ref) {
       const i = ref ? this.children.indexOf(ref) : -1;
@@ -500,13 +510,20 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     // The launch-model picker.
     "perch-new-model", "perch-new-model-label",
     // Session rename: the header control and the name line it writes.
-    "perch-rename", "perch-session-name"];
+    "perch-rename", "perch-session-name",
+    // Open-anywhere C2: the launcher's directory field, its picker trigger,
+    // and the root the client-built modal appends itself to.
+    "perch-new-cwd", "perch-browse-btn", "perch-cwd-note", "perch-hub-root"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
   const bodyEl = makeFakeElement("body");
   const fetchCalls = [];
   const fetchFn = fetchImpl || (() => Promise.resolve(makeResponse(200, {})));
+  // Runtime-minted ids (the browse modal and its parts) resolve through this
+  // per-mount registry — see ID_REGISTRY's comment above.
+  const dynamic = {};
+  ID_REGISTRY = dynamic;
 
   // addEventListener on the DOCUMENT, not just window: the hub script now
   // listens for Turbo's turbo:before-render to retire itself when the shell
@@ -517,7 +534,7 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
   const doc = Object.assign(docTarget, {
     cookie: "crow_csrf=test-csrf-token",
     body: bodyEl,
-    getElementById(id) { return els[id] || null; },
+    getElementById(id) { return els[id] || dynamic[id] || null; },
     createElement(tag) { return makeFakeElement(tag); },
   });
 
@@ -2344,4 +2361,107 @@ test("R4: a reply buffered across the window is judged at flush, not lost", asyn
   settleBatch(makeResponse(200, batchEvents([])));
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(botEntries(hub), ["arrived while history was in flight"]);
+});
+
+// ---------------------------------------------------------------------------
+// Open-anywhere C2: the launcher's directory field and the browse picker.
+// The live browser walk is measured in perch-hub-render.test.js; these drive
+// the same emitted script through the vm harness for the logic a browser
+// test would only re-prove slowly: WHICH KEYS ride the spawn, and the
+// modal's navigate/choose/dismiss wiring.
+// ---------------------------------------------------------------------------
+
+test("C2: the launcher sends cwd only when the directory field is non-empty", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  const spawns = () => hub.fetchCalls.filter(
+    (c) => c.method === "POST" && /\/bots\/[^/]+\/interactive$/.test(c.path));
+
+  hub.els["perch-new-cwd"].value = "  /tmp/chosen  ";
+  hub.els["perch-new"].click();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(spawns().length, 1);
+  assert.deepEqual(JSON.parse(spawns()[0].opts.body), { cwd: "/tmp/chosen" },
+    "trimmed, and the ONLY key — the model pick was empty so no control rides");
+
+  hub.els["perch-new-cwd"].value = "   ";
+  hub.els["perch-new"].click();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(spawns().length, 2);
+  assert.equal(spawns()[1].opts.body, undefined,
+    "an empty field means 'the bot's default' — the key is never sent, and " +
+    "perchApi leaves the body (and the JSON content-type) off entirely");
+});
+
+test("C2: the picker navigates by server answers; Choose fills the field; Escape and Cancel both dismiss", async () => {
+  const TREE = {
+    "/home/u": { parent: "/home", dirs: [{ name: "a", path: "/home/u/a" }, { name: "b", path: "/home/u/b" }] },
+    "/home/u/a": { parent: "/home/u", dirs: [] },
+  };
+  const hub = await mountHub({
+    fetchImpl: (method, path) => {
+      if (path.startsWith("/browse")) {
+        const p = new URL("http://x" + path).searchParams.get("path") || "/home/u";
+        const hit = TREE[p];
+        if (!hit) return makeResponse(404, { error: "unreadable" });
+        return makeResponse(200, { path: p, parent: hit.parent, dirs: hit.dirs });
+      }
+      return makeResponse(200, {});
+    },
+  });
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const rows = () => hub.doc.getElementById("perch-browse-list").children.map((b) => b.textContent);
+
+  hub.els["perch-browse-btn"].click();
+  await tick();
+  const modal = hub.doc.getElementById("perch-browse-modal");
+  assert.ok(modal, "the modal is minted into the document on first open");
+  assert.equal(modal.hidden, false);
+  assert.equal(modal.children[0].getAttribute("role"), "dialog", "the box inside the overlay is the dialog");
+  assert.equal(hub.doc.getElementById("perch-browse-path").textContent, "/home/u");
+  assert.deepEqual(rows(), ["..", "a", "b"], "'..' first, then the server's dirs");
+
+  // Navigate via the row's own onclick — the client never chops the path.
+  hub.doc.getElementById("perch-browse-list").children[1].click();
+  await tick();
+  assert.equal(hub.doc.getElementById("perch-browse-path").textContent, "/home/u/a");
+
+  hub.doc.getElementById("perch-browse-choose").click();
+  await tick();
+  assert.equal(hub.els["perch-new-cwd"].value, "/home/u/a", "Choose writes the field");
+  assert.equal(modal.hidden, true, "and closes");
+
+  // Escape (review S5, path one of two).
+  hub.els["perch-browse-btn"].click();
+  await tick();
+  assert.equal(modal.hidden, false);
+  hub.doc._dispatch("keydown", { key: "Escape" });
+  assert.equal(modal.hidden, true, "Escape dismisses");
+  assert.equal(hub.els["perch-new-cwd"].value, "/home/u/a", "a dismissed picker never writes");
+
+  // Cancel (path two of two).
+  hub.els["perch-browse-btn"].click();
+  await tick();
+  hub.doc.getElementById("perch-browse-cancel").click();
+  assert.equal(modal.hidden, true, "the visible Cancel dismisses too");
+
+  // An unreadable directory says so instead of rendering an empty list.
+  hub.els["perch-new-cwd"].value = "/home/u/gone";
+  hub.els["perch-browse-btn"].click();
+  await tick();
+  assert.deepEqual(rows(), ["Could not read that directory."]);
+  hub.doc.getElementById("perch-browse-cancel").click();
+});
+
+test("C2: a retired instance's Escape handler is inert — the keydown listener is generation-guarded", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  hub.els["perch-browse-btn"].click();
+  await new Promise((r) => setTimeout(r, 0));
+  const modal = hub.doc.getElementById("perch-browse-modal");
+  assert.equal(modal.hidden, false);
+  // Retire this instance the way Turbo does, then fire Escape: the handler is
+  // still the registered one (no successor overwrote it), and live() is what
+  // stops it from acting.
+  hub.win.__crowPerchHub.retire();
+  hub.doc._dispatch("keydown", { key: "Escape" });
+  assert.equal(modal.hidden, false, "a retired instance writes nothing, not even a close");
 });

@@ -45,9 +45,20 @@ function resetApi() {
   modelsDefault = "crow-local/qwen3.6-35b-a3b";
   transcriptEvents = [];
   optionsHibernating = false;
+  lastSpawnBody = null;
 }
 
 let roostFails = false;
+/** Open-anywhere C2: the body of the last POST /bots/:id/interactive, so a
+ *  test can prove the launcher sent (or never sent) the cwd key. */
+let lastSpawnBody = null;
+/** The picker's scripted directory tree — names and paths only, exactly the
+ *  shape GET /browse answers with (routes/perch-interactive-api.js). */
+const BROWSE_TREE = {
+  "/home/tester": { parent: "/home", dirs: ["projects", "docs", "zz-long-name", ".config"] },
+  "/home/tester/projects": { parent: "/home/tester", dirs: ["crow", "r4"] },
+  "/home/tester/projects/crow": { parent: "/home/tester/projects", dirs: [] },
+};
 function serveApi(req, res) {
   const url = req.url.split("?")[0];
   const send = (code, obj) => {
@@ -110,7 +121,27 @@ function serveApi(req, res) {
   });
   if (url.endsWith("/transcript")) return send(200, { events: transcriptEvents });
   if (url.endsWith("/rename")) return send(200, { label: "renamed" });
-  if (url.endsWith("/interactive") && req.method === "POST") return send(200, { sessionId: "perchlive-99999999" });
+  // Open-anywhere C2: the picker's server-backed listing. An unknown path is
+  // the real endpoint's 404 shape; no path means "start at home".
+  if (url.endsWith("/browse")) {
+    const u = new URL(req.url, "http://local");
+    const p = u.searchParams.get("path") || "/home/tester";
+    const hit = BROWSE_TREE[p];
+    if (!hit) return send(404, { error: "unreadable" });
+    return send(200, { path: p, parent: hit.parent,
+      dirs: hit.dirs.map((n) => ({ name: n, path: p + "/" + n })) });
+  }
+  if (url.endsWith("/interactive") && req.method === "POST") {
+    // Capture the spawn body: the C2 assertion is about WHICH KEYS the client
+    // sent, and an absent cwd must stay absent (never an empty string).
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      try { lastSpawnBody = raw ? JSON.parse(raw) : null; } catch { lastSpawnBody = null; }
+      send(200, { sessionId: "perchlive-99999999" });
+    });
+    return;
+  }
   return send(200, {});
 }
 
@@ -992,6 +1023,113 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.index, 2, "the browser's own selection");
       assert.match(seen.shown, /Flash Next/,
         "what the operator reads after a restart — measured as the FIRST option before the fix");
+    } finally { resetApi(); await s.close(); }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Open-anywhere C2, live — the directory picker in a real browser: browse
+// from the scripted home two levels down, Choose writes the field, the spawn
+// carries the cwd key, an EMPTY field never sends it, and BOTH dismiss paths
+// (Escape and the visible Cancel) close the modal — review S5's pair.
+// ---------------------------------------------------------------------------
+
+const sleepJs = (ms) => `await new Promise(function(r){setTimeout(r,${ms});})`;
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`C2 live @${w}x${h}: the picker browses, Choose fills the field, and the spawn carries cwd`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    const s = await session(w, h);
+    try {
+      // 1. Open the picker from the launcher's Browse button.
+      const opened = await s.json(`(async function(){
+        document.getElementById('perch-browse-btn').click();
+        ${sleepJs(400)}
+        var m=document.getElementById('perch-browse-modal');
+        var box=m.querySelector('.browse-box').getBoundingClientRect();
+        var names=[].slice.call(document.querySelectorAll('#perch-browse-list button'))
+          .map(function(b){return b.textContent;});
+        return JSON.stringify({visible:!m.hidden,
+          path:document.getElementById('perch-browse-path').textContent,
+          names:names, boxWidth:Math.round(box.width),
+          innerWidth:innerWidth,
+          hScroll:document.documentElement.scrollWidth>innerWidth});
+      })()`);
+      assert.equal(opened.visible, true, "the modal is on screen");
+      assert.equal(opened.path, "/home/tester", "an empty field starts the picker at home");
+      assert.deepEqual(opened.names, ["..", "projects", "docs", "zz-long-name", ".config"],
+        "directories only, dot-dirs last, '..' first");
+      assert.equal(opened.hScroll, false, "the modal must not give the page a horizontal scrollbar");
+      if (w < 900) {
+        assert.equal(opened.boxWidth, opened.innerWidth, "full-bleed at phone width");
+      } else {
+        assert.ok(opened.boxWidth <= 560, `desktop caps the box at 560px, measured ${opened.boxWidth}`);
+      }
+
+      // 2. Navigate two levels down and Choose.
+      const chosen = await s.json(`(async function(){
+        function tap(name){
+          var b=[].slice.call(document.querySelectorAll('#perch-browse-list button'))
+            .filter(function(x){return x.textContent===name;})[0];
+          if(!b) throw new Error('no row: '+name);
+          b.click();
+        }
+        tap('projects');
+        ${sleepJs(350)}
+        tap('crow');
+        ${sleepJs(350)}
+        var atPath=document.getElementById('perch-browse-path').textContent;
+        document.getElementById('perch-browse-choose').click();
+        ${sleepJs(80)}
+        return JSON.stringify({atPath:atPath,
+          field:document.getElementById('perch-new-cwd').value,
+          hidden:document.getElementById('perch-browse-modal').hidden});
+      })()`);
+      assert.equal(chosen.atPath, "/home/tester/projects/crow");
+      assert.equal(chosen.field, "/home/tester/projects/crow", "Choose writes the field");
+      assert.equal(chosen.hidden, true, "Choose closes the modal");
+
+      // 3. Escape dismisses (the S5 pair: never dependent on one path).
+      const escaped = await s.json(`(async function(){
+        document.getElementById('perch-browse-btn').click();
+        ${sleepJs(350)}
+        var reopened=!document.getElementById('perch-browse-modal').hidden;
+        document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));
+        ${sleepJs(80)}
+        var afterEscape=document.getElementById('perch-browse-modal').hidden;
+        document.getElementById('perch-browse-btn').click();
+        ${sleepJs(350)}
+        document.getElementById('perch-browse-cancel').click();
+        ${sleepJs(80)}
+        var afterCancel=document.getElementById('perch-browse-modal').hidden;
+        var fieldUntouched=document.getElementById('perch-new-cwd').value;
+        return JSON.stringify({reopened:reopened,afterEscape:afterEscape,
+          afterCancel:afterCancel,fieldUntouched:fieldUntouched});
+      })()`);
+      assert.equal(escaped.reopened, true);
+      assert.equal(escaped.afterEscape, true, "Escape closes the picker");
+      assert.equal(escaped.afterCancel, true, "the visible Cancel closes it too");
+      assert.equal(escaped.fieldUntouched, "/home/tester/projects/crow",
+        "a dismissed picker never touches the field");
+
+      // 4. New session carries the chosen cwd.
+      await s.evalIn(`(async function(){
+        document.getElementById('perch-new').click();
+        ${sleepJs(400)}
+        return 'spawned';
+      })()`);
+      assert.deepEqual(lastSpawnBody, { cwd: "/home/tester/projects/crow" },
+        "the spawn body carries exactly the chosen directory");
+
+      // 5. An EMPTY field means "the bot's default" — the key is never sent.
+      await s.evalIn(`(async function(){
+        document.getElementById('perch-new-cwd').value='';
+        document.getElementById('perch-new').click();
+        ${sleepJs(400)}
+        return 'spawned';
+      })()`);
+      assert.equal(lastSpawnBody, null, "no cwd, no body at all — an empty string must never ride");
     } finally { resetApi(); await s.close(); }
   });
 }

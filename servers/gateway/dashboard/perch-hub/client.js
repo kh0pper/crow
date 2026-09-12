@@ -258,6 +258,13 @@ export function perchHubJs(lang = "en") {
   var RENAME_PROMPT='${tJs("perch.renamePrompt", lang)}';
   var RENAME_FAILED='${tJs("perch.renameFailed", lang)}';
   var ROOST_UNREACHABLE='${tJs("perch.roostUnreachable", lang)}';
+  /* Open-anywhere C2: the directory picker's own strings. ASK_CANCEL
+     ("Cancel") doubles as the modal's visible Cancel — dismiss must never
+     depend on Escape alone (review S5). */
+  var BROWSE_TITLE='${tJs("perch.browseTitle", lang)}';
+  var CHOOSE_LABEL='${tJs("perch.choose", lang)}';
+  var BROWSE_FAILED='${tJs("perch.browseFailed", lang)}';
+  var CWD_INVALID='${tJs("perch.cwdInvalid", lang)}';
 
   /* Row identity. One bot with eight sessions renders eight rows that read
      "R4 Assistant / awake" and nothing else — measured verbatim in a browser
@@ -520,9 +527,127 @@ export function perchHubJs(lang = "en") {
        showing the previous bot's models must not choose for this spawn. */
     var msel=el('perch-new-model');
     var model=(msel&&!msel.hidden&&launchModels.botId===pick.id)?String(msel.value||''):'';
-    startSession(pick.id,pick.name,model);
+    /* Open-anywhere C2: the directory field. EMPTY means "the bot's
+       default" and the key is NEVER sent — an empty string must not reach
+       the route as a cwd it then validates and 400s. */
+    var cwdEl=el('perch-new-cwd');
+    var cwd=cwdEl?String(cwdEl.value||'').trim():'';
+    startSession(pick.id,pick.name,model,cwd||null);
   }
   el('perch-new').onclick=startNewSession;
+
+  /* ---- open-anywhere C2: the server-backed directory picker ------------
+     A modal overlay fed by GET /browse (directory NAMES + paths only, never
+     contents — routes/perch-interactive-api.js). One modal, two callers:
+     the launcher's Browse button (onChoose writes #perch-new-cwd) and, from
+     D2 on, the Session tab's "Change directory" (onChoose POSTs
+     control({cwd})). Built lazily with createElement/textContent only — the
+     house rule on innerHTML (setSanitizedHtml's comment) admits no second
+     sink, and a directory name is operator-adjacent free text. */
+  var browse={open:false,onChoose:null,path:''};
+
+  function closeBrowseModal(){
+    browse.open=false; browse.onChoose=null;
+    var m=el('perch-browse-modal'); if(m) m.hidden=true;
+  }
+
+  function buildBrowseModal(){
+    if(el('perch-browse-modal')) return;
+    var root=el('perch-hub-root'); if(!root) return;
+    var overlay=document.createElement('div'); overlay.id='perch-browse-modal'; overlay.hidden=true;
+    var box=document.createElement('div'); box.className='browse-box';
+    box.setAttribute('role','dialog'); box.setAttribute('aria-modal','true');
+    box.setAttribute('aria-label',BROWSE_TITLE);
+    var head=document.createElement('div'); head.className='browse-head';
+    var pathEl=document.createElement('div'); pathEl.className='browse-path'; pathEl.id='perch-browse-path';
+    head.appendChild(pathEl);
+    var hint=document.createElement('div'); hint.className='browse-hint'; hint.id='perch-browse-hint'; hint.hidden=true;
+    var list=document.createElement('div'); list.className='browse-list'; list.id='perch-browse-list';
+    var foot=document.createElement('div'); foot.className='browse-foot';
+    var choose=document.createElement('button'); choose.type='button'; choose.className='primary';
+    choose.id='perch-browse-choose'; choose.textContent=CHOOSE_LABEL;
+    var cancel=document.createElement('button'); cancel.type='button';
+    cancel.id='perch-browse-cancel'; cancel.textContent=ASK_CANCEL;
+    foot.appendChild(choose); foot.appendChild(cancel);
+    box.appendChild(head); box.appendChild(hint); box.appendChild(list); box.appendChild(foot);
+    overlay.appendChild(box);
+    root.appendChild(overlay);
+    /* Choose hands the CURRENT path (wherever navigation ended) to the
+       caller and closes BEFORE invoking it, so a failure note the callback
+       writes lands on a clean screen. */
+    choose.onclick=function(){
+      if(!browse.open) return;
+      var fn=browse.onChoose, p=browse.path;
+      closeBrowseModal();
+      if(fn&&p) fn(p);
+    };
+    cancel.onclick=closeBrowseModal;
+  }
+
+  function loadBrowseDir(p){
+    var q=p?('?path='+encodeURIComponent(p)):'';
+    return perchApi('GET','/browse'+q).then(function(r){
+      if(!browse.open) return;
+      var list=el('perch-browse-list'); if(!list) return;
+      if(!r.ok||!r.j||!Array.isArray(r.j.dirs)){
+        /* A failed fetch is not an empty directory: keep the rows the
+           operator can still navigate out of, and say what happened. */
+        clearEl(list); list.appendChild(line('empty',BROWSE_FAILED));
+        return;
+      }
+      browse.path=r.j.path;
+      var pathEl=el('perch-browse-path'); if(pathEl) pathEl.textContent=r.j.path;
+      clearEl(list);
+      /* The '..' row uses the RESOLVED parent the endpoint reports — never a
+         client-side string chop, which a symlinked dir would ping-pong. */
+      if(r.j.parent&&r.j.parent!==r.j.path){
+        var up=document.createElement('button'); up.type='button'; up.textContent='..';
+        up.onclick=function(){ loadBrowseDir(r.j.parent); };
+        list.appendChild(up);
+      }
+      r.j.dirs.forEach(function(d){
+        if(!d||!d.name) return;
+        var b=document.createElement('button'); b.type='button'; b.textContent=d.name;
+        b.onclick=function(){ loadBrowseDir(d.path); };
+        list.appendChild(b);
+      });
+      list.scrollTop=0;
+    });
+  }
+
+  function openBrowseModal(opts){
+    buildBrowseModal();
+    var m=el('perch-browse-modal'); if(!m) return;
+    browse.open=true;
+    browse.onChoose=(opts&&opts.onChoose)||null;
+    browse.path='';
+    var hint=el('perch-browse-hint');
+    if(hint){
+      var note=(opts&&opts.note)||'';
+      hint.textContent=note; hint.hidden=!note;
+    }
+    m.hidden=false;
+    loadBrowseDir((opts&&opts.initial)||'');
+    var c=el('perch-browse-cancel'); if(c&&c.focus) c.focus();
+  }
+
+  /* Escape closes the picker — the second dismiss path review S5 demands
+     beside the visible Cancel button. document OUTLIVES a Turbo body swap,
+     so this goes through the generation-checked registry like every other
+     window/document listener in this file. */
+  bindOnce(document,'keydown','browseEscape',function(ev){
+    if(!live()) return;
+    if(ev.key==='Escape'&&browse.open) closeBrowseModal();
+  });
+
+  var browseBtn=el('perch-browse-btn');
+  if(browseBtn) browseBtn.onclick=function(){
+    var f=el('perch-new-cwd');
+    openBrowseModal({
+      initial:f?String(f.value||'').trim():'',
+      onChoose:function(p){ var f2=el('perch-new-cwd'); if(f2) f2.value=p; }
+    });
+  };
 
   /* engine.stop() (perch-interactive.js:1955) kills the pi child and parks the
      row: TERMINAL, no resume. Hence the confirm, whose copy says so — an
@@ -597,12 +722,14 @@ export function perchHubJs(lang = "en") {
   /* A bot with no session: spawn, then let the hash router open it, so history
      stays correct and the cold-deep-link path is the same code.
      \`modelKey\` ("provider/id", optional) is the launcher's pick. A row-driven
-     spawn passes none and behaves exactly as it always has. */
-  function startSession(botId,botName,modelKey){
+     spawn passes none and behaves exactly as it always has.
+     \`cwd\` (open-anywhere C2, optional) is the launcher's directory field;
+     null means the key is never sent — the bot's default world root. */
+  function startSession(botId,botName,modelKey,cwd){
     var mySid=current.sid;                  /* identity guard: a spawn resolving after the
                                                 operator has opened another session must not
                                                 yank them out of it */
-    perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive').then(function(r){
+    perchApi('POST','/bots/'+encodeURIComponent(botId)+'/interactive',cwd?{cwd:cwd}:undefined).then(function(r){
       if(current.sid!==mySid) return;
       /* setLaunchNote, not showListNote: a FAILED SPAWN is a fact about the
          launcher, and showListNote clears #perch-list-body — which would wipe
@@ -614,6 +741,10 @@ export function perchHubJs(lang = "en") {
          sessions. The note belongs next to the control that produced it. */
       if(r.status===409){ setLaunchNote(ENGINE_REQUIRED); return; }
       if(r.status===403){ setLaunchNote(NOT_ATTACHED); return; }
+      /* The route validated the directory before the engine ever saw it
+         (open-anywhere C1): a stale picker choice — deleted between browse
+         and spawn — lands here, and the note belongs beside the field. */
+      if(r.status===400&&r.j&&r.j.error==='bad_cwd'){ setLaunchNote(CWD_INVALID); return; }
       if(!r.ok||!r.j||!r.j.sessionId){ setLaunchNote(START_FAILED); return; }
       var sid=r.j.sessionId;
       rowIndex[sid]={botId:botId,botName:botName,sessionId:sid};

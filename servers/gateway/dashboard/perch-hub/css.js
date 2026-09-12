@@ -96,6 +96,19 @@ border-radius:10px;background:var(--sky);color:var(--ink);flex:1 1 140px;min-wid
    (1,1,0) and ties with "#perch-hub-root .empty" further down, which then wins
    on source order. Measured dead: computed padding stayed 16px. */
 #perch-hub-root #perch-launch-note{padding:0;flex:1 1 100%}
+/* Open-anywhere C2: the launch row's directory field + Browse button.
+   TWO ids on the input, same reasoning as #perch-new-model above: the
+   shared "#perch-hub-root input" rule (1,0,1) gives width:100%, which in
+   this flex row would take the whole line and shove Browse onto the next
+   one; width:auto + a flex basis lets the two share a row and wrap as a
+   unit on a phone. 44px floor: thumb targets, same as every control here. */
+#perch-launch #perch-new-cwd{flex:1 1 180px;min-width:0;width:auto;min-height:44px;
+font:14px Inter,system-ui,sans-serif;padding:9px 10px;border:1px solid var(--line);
+border-radius:10px;background:var(--sky);color:var(--ink)}
+#perch-hub-root #perch-browse-btn{min-height:44px;white-space:nowrap;flex:0 0 auto}
+/* The "Empty = the bot's own directory." explainer. Two ids for the same
+   source-order reason as #perch-launch-note above. */
+#perch-hub-root #perch-cwd-note{padding:0;flex:1 1 100%;font-size:12.5px}
 #perch-launch [hidden]{display:none}
 #perch-hub-root .title{font-weight:600;font-size:17px}
 #perch-hub-root .meta{color:var(--dim);font-size:13px;margin-top:2px;word-break:break-all}
@@ -213,6 +226,37 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
 #perch-composer .send-row{display:flex;gap:8px}
 #perch-composer textarea{min-height:72px}
 #perch-back{align-self:flex-start}
+/* --- open-anywhere C2: the directory-picker modal ---------------------
+   Built client-side (client.js buildBrowseModal) and appended INSIDE
+   #perch-hub-root, so every class rule here stays scoped the way the
+   sheet's header comment demands. position:fixed + inset:0 covers the
+   whole viewport (the shell's own clamp gives .main-content no transform,
+   verified live at both breakpoints — a transformed ancestor would make
+   "fixed" resolve against it instead). The [hidden] rule must outrank the
+   display:flex on the same id selector, hence the attribute on an id. */
+#perch-browse-modal{position:fixed;inset:0;z-index:60;background:rgba(10,18,24,.45);
+display:flex;align-items:center;justify-content:center;padding:16px}
+#perch-browse-modal[hidden]{display:none}
+#perch-hub-root .browse-box{background:var(--card);border:1px solid var(--line);border-radius:14px;
+width:100%;max-width:min(560px,92vw);max-height:min(70vh,560px);display:flex;flex-direction:column;
+min-height:0;box-shadow:0 12px 40px rgba(0,0,0,.28)}
+#perch-hub-root .browse-head{padding:12px 14px;border-bottom:1px solid var(--line);flex-shrink:0}
+#perch-hub-root .browse-path{font:12.5px/1.4 "JetBrains Mono",ui-monospace,monospace;color:var(--dim);word-break:break-all}
+#perch-hub-root .browse-hint{padding:8px 14px 0;font-size:13px;color:var(--dim);flex-shrink:0}
+#perch-hub-root .browse-list{overflow-y:auto;flex:1;min-height:0;padding:8px;display:grid;gap:4px;align-content:start}
+/* Directory rows are buttons with the directory NAME as the visible label
+   (house rule: no unlabelled controls). break-all: one long directory name
+   must not give the modal a horizontal scrollbar at 320px. */
+#perch-hub-root .browse-list button{display:block;text-align:left;min-height:44px;padding:10px 12px;word-break:break-all}
+#perch-hub-root .browse-foot{display:flex;gap:8px;justify-content:flex-end;padding:10px 14px;
+border-top:1px solid var(--line);flex-shrink:0}
+#perch-hub-root .browse-foot button{min-height:44px}
+/* Full-bleed at phone width: a centered card with 8% gutters on a 360px
+   screen is a keyhole; the picker is the whole screen there. */
+@media (max-width:599px){
+  #perch-browse-modal{padding:0}
+  #perch-hub-root .browse-box{max-width:100%;height:100%;max-height:100%;border-radius:0}
+}
 #perch-hub-root .field-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:10px 0}
 #perch-hub-root .field{display:flex;flex-direction:column;gap:3px;flex:1 1 150px;min-width:0}
 #perch-hub-root .field-label{font:11px/1 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
