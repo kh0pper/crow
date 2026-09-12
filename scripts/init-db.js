@@ -2614,6 +2614,7 @@ await initTable("bot_sessions table", `
     control           TEXT NOT NULL DEFAULT 'run'
                         CHECK (control IN ('run','stop','interrupted')),
     model             TEXT,
+    cwd               TEXT,
     escalated         INTEGER DEFAULT 0,
     kind              TEXT NOT NULL DEFAULT 'chat',
     narrowed_tools    TEXT,
@@ -2655,6 +2656,17 @@ await addColumnIfMissing("bot_sessions", "narrowed_tools", "TEXT");
 // Additive-only — no SCHEMA_GENERATION bump.
 await addColumnIfMissing("bot_sessions", "label", "TEXT");
 
+// bot_sessions.cwd: the operator-chosen working directory for a Perch session
+// (open-anywhere plan, Phase B). NULL means "no explicit choice" — the world
+// builder falls back to the bot's configured dir / project workspace, exactly
+// as before this column existed. Like `label` it is operator state persisted
+// on the session's own row, and the same both-places idiom applies: CREATE
+// body above for fresh installs, this guarded ALTER for pre-existing ones,
+// and listed in BOT_SESSIONS_CANONICAL_COLUMNS so the control-CHECK rebuild
+// carries it instead of aborting on it as drift. Additive-only — no
+// SCHEMA_GENERATION bump (the `kind`/`narrowed_tools`/`label` precedent).
+await addColumnIfMissing("bot_sessions", "cwd", "TEXT");
+
 // bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
 // (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
 // when the gateway shut down with control='interrupted' instead of 'run', so
@@ -2686,7 +2698,7 @@ await addColumnIfMissing("bot_sessions", "label", "TEXT");
 // is never reached, so the next run retries the migration.
 //
 // I13: PRAGMA table_info(bot_sessions) is diffed against the canonical
-// 17-column list BEFORE any DDL — an unrecognized host-present column (or a
+// 19-column list BEFORE any DDL — an unrecognized host-present column (or a
 // canonical column gone missing) aborts the migration instead of silently
 // vanishing with its data, matching the reference rebuild's C2/N1 guard.
 //
@@ -2703,8 +2715,8 @@ await addColumnIfMissing("bot_sessions", "label", "TEXT");
 const BOT_SESSIONS_CANONICAL_COLUMNS = [
   "id", "bot_id", "pi_session_id", "pi_session_dir", "gateway_type",
   "gateway_thread_id", "project_id", "card_id", "plan_path", "status",
-  "control", "model", "escalated", "kind", "narrowed_tools", "label",
-  "created_at", "updated_at",
+  "control", "model", "cwd", "escalated", "kind", "narrowed_tools",
+  "label", "created_at", "updated_at",
 ];
 await (async () => {
   const tableInfo = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'");
@@ -2762,6 +2774,7 @@ await (async () => {
         control           TEXT NOT NULL DEFAULT 'run'
                             CHECK (control IN ('run','stop','interrupted')),
         model             TEXT,
+        cwd               TEXT,
         escalated         INTEGER DEFAULT 0,
         kind              TEXT NOT NULL DEFAULT 'chat',
         narrowed_tools    TEXT,

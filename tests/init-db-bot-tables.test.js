@@ -29,6 +29,7 @@ test("bot_sessions exists with model + escalated columns", () => {
   const c = cols("bot_sessions");
   assert.ok(c.includes("model"));
   assert.ok(c.includes("escalated"));
+  assert.ok(c.includes("cwd"), "cwd (the operator-chosen working directory, open-anywhere B1)");
 });
 
 test("bot_skill_events exists with action column", () => {
@@ -141,6 +142,7 @@ test("bot_sessions pre-existing WITHOUT kind: re-running init-db.js adds it", ()
       // exactly here, on the hosts least able to afford it.
       assert.ok(postCols.includes("narrowed_tools"), "narrowed_tools must be added too");
       assert.ok(postCols.includes("label"), "label (the session name) must be added too");
+      assert.ok(postCols.includes("cwd"), "cwd (the chosen working directory) must be added too");
       assert.ok(!post.prepare("SELECT sql FROM sqlite_master WHERE name='bot_sessions'").get().sql
         .includes("CHECK (control IN ('run','stop'))"),
         "and the control-CHECK rebuild must have run, not aborted on the new column as drift");
