@@ -52,7 +52,7 @@ Vincular los lentes a un agente es uno a uno: un dispositivo dirige un agente a 
 
 ## Perch: habla con un agente desde tu propio panel
 
-Perch es la propia **franja de percha (roost)** del tablero: una fila de aves, una por agente, encima de las tarjetas — más un **panel lateral de sesión** que se abre junto al tablero al hacer clic en una de ellas. Juntos muestran las sesiones en vivo y recientes de cada agente, sus transcripciones, y un lugar para escribirles directamente. Es nativo del tablero: nada que instalar, nada que configurar más allá de adjuntar el canal.
+Perch es la superficie de chat del propio panel para los agentes — el **hub de Perch** en `/dashboard/perch` (una entrada del nav bajo Agents). Una sola página reúne una lista de sesiones en vivo, un lanzador para iniciar una sesión nueva y el chat. El tablero también lleva una compacta **franja de percha (roost)** encima de las tarjetas que enlaza al hub. No hay nada que instalar y nada que configurar más allá de adjuntar el canal.
 
 Nada de esto queda expuesto a internet. Corre como parte de la puerta de enlace, escucha solo ahí, y solo es accesible a través del inicio de sesión de tu panel.
 
@@ -62,48 +62,52 @@ Abre el agente en el Bot Builder, ve a la pestaña **Gateways**, elige **Perch (
 
 Los turnos de Perch corren sobre el mismo motor de bots que usan Gmail y Discord, así que si el motor todavía no está instalado, Crow te ofrecerá instalarlo antes de dejarte guardar.
 
-Los agentes sin el canal adjunto también aparecen en la franja de percha, como **Observando** — puedes saltar al Bot Builder para adjuntarlos, pero no hay sesión que abrir hasta que lo hagas.
+Los agentes sin el canal adjunto aun así aparecen en la lista del hub, pero no hay sesión que abrir hasta que lo adjuntes — salta al Bot Builder para hacerlo.
 
-### 2. Encuentra al agente en la franja de percha
+### 2. Inicia una sesión — opcionalmente en cualquier directorio
 
-Abre el tablero. Cada agente adjunto es un ave con un estado y una acción principal:
+Abre el hub de Perch. El lanzador en la parte superior de la lista inicia una sesión nueva: elige el agente (cuando hay más de uno), opcionalmente elige un modelo y **opcionalmente elige un directorio de trabajo**.
 
-- **Inactivo** — sin sesión en vivo. El botón es **Enviar**: escribe un mensaje, envíalo, y arranca una sesión nueva.
-- **Esperando tu respuesta** — el agente hizo una pregunta a mitad de la sesión y está en pausa esperando tu respuesta. El botón es **Responder**.
-- **Trabajando** / **Hibernando** — hay una sesión en vivo o que se puso inactiva sola. El botón es **Abrir**.
-- **Observando** — todavía sin canal adjunto (ver paso 1). El enlace va directo al Bot Builder.
+El campo de directorio es el control de abrir-en-cualquier-lugar. Déjalo vacío y la sesión corre en el directorio predeterminado del propio agente. Llénalo — escribiendo una ruta o tocando **Explorar…**, que abre un selector alimentado por el servidor (lista solo nombres de directorios, nunca contenido de archivos) — y el agente corre *ahí*: puede leer y escribir ese directorio, y sus herramientas MCP por agente lo siguen. Así es como apuntas un agente a un checkout de proyecto real en vez de a su propio sandbox. El directorio elegido ya debe existir; el selector solo ofrece directorios que existen.
 
-Un menú desplegable en cada ave también ofrece **Hablar** (iniciar una sesión nueva aunque ya haya una abierta), **Sesiones** (elegir entre las demás sesiones recientes del agente), **Retirar** (detener la sesión en vivo) y **Configurar** (saltar al agente en el Bot Builder).
+> Perch no enjaula a un agente en un directorio en esta máquina — el selector puede alcanzar cualquier directorio que el usuario de la puerta de enlace pueda. La barrera entre agentes son las herramientas y permisos de cada uno, no el directorio. Trata al hub de Perch como el acceso por shell que es (ver [Antes de adjuntarlo](#antes-de-adjuntarlo)).
 
-### 3. El panel lateral de sesión
+Toca **Nueva sesión**. El chat se abre en la conversación.
 
-Al hacer clic en un ave — o en una insignia de sesión de una tarjeta del tablero — se abre el panel lateral: la transcripción, un cuadro para enviar un mensaje o redirigir un turno en curso, y un botón **Abortar** mientras hay un turno corriendo. La actividad de las herramientas se transmite en tiempo real, así que puedes ver qué está haciendo el agente antes de que llegue la respuesta.
+### 3. El chat: cuatro pestañas
 
-Cada sesión lleva un estado: **Despierto** mientras el agente puede recibir un mensaje ahora mismo, hibernando una vez que ha estado inactiva y se apagó sola (no se pierde nada: el siguiente mensaje la despierta de nuevo a mitad de la conversación), y **Detenido** una vez que tú o Retirar la terminaron definitivamente. Una sesión detenida no se puede volver a despertar — inicia una nueva desde **Enviar** o **Hablar** si quieres seguir hablando con ese agente de esta forma.
+El chat tiene cuatro pestañas a lo ancho de la parte inferior (teléfono) o superior (escritorio). Cambiar de pestaña nunca interrumpe la sesión — la conexión en vivo pertenece a la sesión, no a la pestaña.
+
+- **Chat** — la transcripción, un cuadro para enviar un mensaje o redirigir un turno en curso, y cualquier tarjeta de pregunta que el agente esté esperando. La actividad de herramientas y las líneas de registro *no* atiborran esta vista; van a Actividad.
+- **Sesión** — los controles de modelo, nivel de razonamiento, modo de permisos y modo de plan; el estado de la sesión; Renombrar y Cerrar; y el directorio de trabajo con un botón **Cambiar directorio**. Cambiar el directorio duerme la sesión y la despierta en el directorio nuevo con tu siguiente mensaje (el proceso de un agente no puede cambiar de directorio a mitad de ejecución) — el botón lo advierte antes de que confirmes, y se rechaza mientras hay un turno en curso.
+- **Archivos** — lo que el agente ha escrito en su directorio de resultados esta sesión, lo más reciente primero, cada fila una descarga. Esta es la carpeta de entregables propia de la sesión, no el directorio de trabajo que elegiste.
+- **Actividad** — el riel de registro/herramientas/error con marca de tiempo: qué hizo el agente, qué herramientas llamó, y cualquier nota de la puerta de enlace, para que la pestaña Chat siga siendo una conversación limpia.
+
+Cada sesión lleva un estado: **Despierto** mientras el agente puede recibir un mensaje ahora mismo, hibernando una vez que ha estado inactiva y se apagó sola (no se pierde nada: el siguiente mensaje la despierta de nuevo a mitad de la conversación, en su directorio elegido y con su modelo elegido), y **Detenido** una vez que tú o Cerrar la terminaron definitivamente. Una sesión detenida no se puede volver a despertar — inicia una nueva si quieres seguir hablando con ese agente de esta forma.
 
 Por defecto solo una sesión por agente corre a la vez, y cada sesión compite por los mismos cupos de procesamiento que usa cualquier otro turno de agente: respuestas de Gmail, respuestas de Discord, trabajos en segundo plano. Dejar una sesión despierta e inactiva por un rato largo puede hacer que esos esperen; deja que hiberne (lo hará sola) o deténla cuando termines.
 
 ### 4. Acota las herramientas de un agente para una sola sesión
 
-Abre **Envoltura y herramientas** en el panel lateral. Verás el envelope completo del agente: todas las herramientas que tiene permitidas, cada una con una casilla, además de su modelo y sus skills.
+Abre **Envoltura y herramientas** de la sesión. Verás el envelope completo del agente: todas las herramientas que tiene permitidas, cada una con una casilla, además de su modelo y sus skills.
 
 Desmarca una herramienta y queda apagada **solo para esa sesión**, a partir del siguiente mensaje. La definición del agente no se toca, y todas las demás sesiones conservan el conjunto completo. Esto es para el momento en que quieres que un agente responda sin tocar tus archivos, sin editar nada, sin salir a la red: en esta sesión, ahora mismo.
 
-Las herramientas que aparecen con un candado son las que el agente no tiene permitidas en absoluto. Ahí no se pueden activar; enlazan al Bot Builder, que es el único lugar que otorga una herramienta. El panel lateral solo puede quitar, nunca dar.
+Las herramientas que aparecen con un candado son las que el agente no tiene permitidas en absoluto. Ahí no se pueden activar; enlazan al Bot Builder, que es el único lugar que otorga una herramienta. La sesión solo puede quitar, nunca dar.
 
 ### 5. Responder una pregunta que te hace el agente
 
-Algunas skills te preguntan algo a mitad de la tarea en vez de adivinar: elegir de una lista, confirmar antes de hacer algo, escribir texto libre, o editar un bloque de texto. Eso aparece en el panel lateral como una tarjeta en lugar de la respuesta: la pregunta, y la forma de responderla. Respóndela y el agente continúa justo donde se quedó. Si una tarjeta sigue esperando tu respuesta cuando sales de la página, ahí sigue cuando vuelves a la sesión — mientras tanto, el ave muestra **Esperando tu respuesta**.
+Algunas skills te preguntan algo a mitad de la tarea en vez de adivinar: elegir de una lista, confirmar antes de hacer algo, escribir texto libre, o editar un bloque de texto. Eso aparece en la pestaña Chat como una tarjeta en lugar de la respuesta: la pregunta, y la forma de responderla. Respóndela y el agente continúa justo donde se quedó. Si una tarjeta sigue esperando tu respuesta cuando sales de la página, ahí sigue cuando vuelves a la sesión — mientras tanto, la lista del hub muestra la sesión como **esperando tu respuesta**.
 
 ### 6. Volver más tarde
 
-Recarga el tablero y el estado de percha y la sesión más reciente de cada agente adjunto siguen justo donde los dejaste — reabre el panel lateral y la transcripción, el estado en vivo y cualquier pregunta pendiente siguen ahí. Nunca tienes que buscar cuál sesión era cuál.
+Recarga el hub y las sesiones de cada agente adjunto siguen justo donde las dejaste — reabre una sesión y la transcripción, el estado en vivo, el directorio y modelo elegidos, y cualquier pregunta pendiente siguen ahí. Nunca tienes que buscar cuál sesión era cuál.
 
 ### Antes de adjuntarlo
 
 Vale la pena saber varias cosas, porque Perch no las esconde.
 
-Cualquiera que pueda entrar a tu panel puede leer las transcripciones de **todos** los agentes en el panel lateral. No hay control de acceso por agente.
+Cualquiera que pueda entrar a tu panel puede leer las transcripciones de **todos** los agentes en el hub. No hay control de acceso por agente.
 
 Escribir o redirigir una sesión extiende eso de leer a conducir: cualquiera que pueda iniciar sesión puede sostener una conversación en vivo como cualquier agente, usando las herramientas y permisos propios de ese agente, no solo observar lo que ya hizo. No es un límite de confianza nuevo: una sesión del panel ya podía activar a un agente escribiéndole por su canal real (un correo, un mensaje de Discord). Perch solo lo hace alcanzable directamente desde el tablero, sin salir y volver por un canal.
 
