@@ -905,8 +905,8 @@ export function perchHubJs(lang = "en") {
          put an empty entry in the transcript AND marked the turn rendered,
          suppressing the real reply. Skip it entirely. */
       if(!d.text) return;
-      appendMessage('bot','bot',d.text,d.html);
-      if(d.turnId) renderedTurn=d.turnId; else turnRendered=true;
+      if(!histSettled){ histBuf.push(d); return; }   /* round 3 R4, see flushHistBuf */
+      renderTextFrame(d);
     });
     on('tool',function(d){ if(d.phase==='start') appendNote('['+(d.name||'?')+']'); });
     on('log',function(d){ if(d.text) appendNote(d.text); });
@@ -925,9 +925,18 @@ export function perchHubJs(lang = "en") {
     on('reply',function(d){
       /* Judged against THIS turn when the frame names one, and only against the
          client's transition flag when it does not. Read before
-         setTurnInFlight(false), which is what resets that flag. */
-      var already=d.turnId?(renderedTurn===d.turnId):turnRendered;
-      if(!already&&d.text) appendMessage('bot','bot',d.text,d.html);
+         setTurnInFlight(false), which is what resets that flag.
+         Round 3 R4: while the history batch is still in flight the APPEND
+         decision is buffered with the text frames — judging it now would
+         compare against a transcript the batch has not filled yet. The
+         composer state is NOT buffered: it never appears in the batch, and
+         delaying Steer/Stop back to "sendable" is worse than one frame of
+         lag on the prose. */
+      if(!histSettled) histBuf.push({ reply:true, text:d.text, html:d.html, turnId:d.turnId });
+      else {
+        var already=d.turnId?(renderedTurn===d.turnId):turnRendered;
+        if(!already&&d.text) appendMessage('bot','bot',d.text,d.html);
+      }
       setTurnInFlight(false);
     });
     on('ask_user',function(d){ renderAsk(d); });
@@ -1007,18 +1016,58 @@ export function perchHubJs(lang = "en") {
            a logged-out session into the same "No transcript yet." — a
            reassuring sentence about a conversation that is still there. Say
            which happened. */
-        if(!r.ok||!r.j){ appendNote(TRANSCRIPT_FAILED); return; }
+        if(!r.ok||!r.j){ appendNote(TRANSCRIPT_FAILED); flushHistBuf([]); return; }
         var events=r.j.events||[];
-        if(!events.length){ appendNote(NO_TRANSCRIPT); return; }
+        if(!events.length){ appendNote(NO_TRANSCRIPT); flushHistBuf([]); return; }
+        var batchTexts=[];
         events.filter(function(e){ return e&&e.type==='message'; }).forEach(function(e){
           var m=e.message||{};
           /* e.html is present only for an ASSISTANT message that had text
              (routes/perch.js's assistantHtml) — the operator's own typing is
              not markdown, and a pure tool-call message still renders as
              messageText()'s "[tool: name]" line. */
-          appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), messageText(m), e.html);
+          var txt=messageText(m);
+          if(String(m.role||'?')!=='user') batchTexts.push(txt);
+          appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), txt, e.html);
         });
+        flushHistBuf(batchTexts);
       });
+  }
+
+  /* Round 3 R4 — the subscribe/fetch seam. openStream subscribes BEFORE
+     loadHistory resolves, and both writers hit the same completed message:
+     the frame on arrival, the batch when the fetch lands after it. Measured
+     shape of the duplicate the review named — and it is not adjacent to
+     anything (the frame writes first, the whole batch appends behind it),
+     so a last-entry comparison could never catch it. Transcript-writing
+     text/reply frames park in histBuf until the batch settles; the flush
+     renders each buffered entry unless its EXACT text is already on screen
+     from the batch (bookkeeping still applies — that turn IS rendered), so
+     a message that completed between subscribe and snapshot lands once.
+     Failed or empty history flushes against nothing: the frames are then
+     the only copy. Notes and state frames are never buffered — they are
+     not in the batch, and delaying them delays the composer. */
+  var histSettled=false;
+  var histBuf=[];
+  function renderTextFrame(d){
+    appendMessage('bot','bot',d.text,d.html);
+    if(d.turnId) renderedTurn=d.turnId; else turnRendered=true;
+  }
+  function flushHistBuf(batchTexts){
+    histSettled=true;
+    var buf=histBuf; histBuf=[];
+    buf.forEach(function(f){
+      if(f.reply){
+        var already=f.turnId?(renderedTurn===f.turnId):turnRendered;
+        if(!already&&f.text&&batchTexts.indexOf(f.text)<0) appendMessage('bot','bot',f.text,f.html);
+        return;
+      }
+      if(batchTexts.indexOf(f.text)>=0){
+        if(f.turnId) renderedTurn=f.turnId; else turnRendered=true;
+        return;
+      }
+      renderTextFrame(f);
+    });
   }
 
   /* Track 3 Task 4: session controls — model, thinking level, permission
@@ -1131,6 +1180,10 @@ export function perchHubJs(lang = "en") {
     setTurnInFlight(false);      /* the PREVIOUS session's Steer/Stop state must not bleed in */
     turnRendered=false;          /* nor its "this turn already rendered" bookkeeping */
     renderedTurn=null;           /* nor the turn id that bookkeeping now keys on */
+    /* Round 3 R4: nor its history seam — closed again until THIS session's
+       batch lands, with any frames still parked in it. */
+    histSettled=false;
+    histBuf=[];
     pendingImages=[];            /* nor its queued-but-unsent image */
   }
 

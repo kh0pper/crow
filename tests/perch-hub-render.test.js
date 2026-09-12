@@ -799,11 +799,13 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
           count: sel.options.length });
       })()`);
       assert.equal(seen.disabled, false);
-      assert.equal(seen.count, 2, "fixture check");
-      assert.equal(seen.first, "crow-local/qwen3.6-35b-a3b",
-        "fixture check: the live model is deliberately NOT option 0");
+      // Round 3 R1: the drawer picker leads with the revocation sentinel
+      // (value '') — the recovery path for a session pinned by a pre-A1
+      // auto-stamped row. The live model must still be selected over it.
+      assert.equal(seen.count, 3, "fixture check: the sentinel plus the two catalogue entries");
+      assert.equal(seen.first, "", "option 0 is the revocation sentinel");
       assert.equal(seen.value, "raven-flash-next/qwen3.8-flash-next");
-      assert.equal(seen.index, 1, "the browser's own selection, not just an attribute we set");
+      assert.equal(seen.index, 2, "the browser's own selection, not just an attribute we set");
       assert.match(seen.shown, /Flash Next/,
         "what the operator actually reads off the control this feature exists for");
     } finally { await s.close(); }
@@ -980,10 +982,14 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       })()`);
       assert.equal(seen.disabled, false, "the fallback list is a real list");
       assert.equal(seen.thinkingDisabled, true, "thinking still has no list, and still says so");
-      assert.equal(seen.first, "crow-local/qwen3.6-35b-a3b",
-        "fixture check: the live model is deliberately NOT option 0");
+      // Round 3 R1: sentinel first, the live model selected over it — the
+      // defect this guards ("measured as the FIRST option before the fix")
+      // still cannot pass: option 0 now reads "the bot's own model", which
+      // is exactly what a wrong selection WOULD look like, and the
+      // assertion below still demands the real model instead.
+      assert.equal(seen.first, "", "option 0 is the revocation sentinel");
       assert.equal(seen.value, "raven-flash-next/qwen3.8-flash-next");
-      assert.equal(seen.index, 1, "the browser's own selection");
+      assert.equal(seen.index, 2, "the browser's own selection");
       assert.match(seen.shown, /Flash Next/,
         "what the operator reads after a restart — measured as the FIRST option before the fix");
     } finally { resetApi(); await s.close(); }
