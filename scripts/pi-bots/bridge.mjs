@@ -143,6 +143,17 @@ export function readPeerGatewayUrls(conn) {
 export class PiRpc {
   constructor(opts) {
     const def = opts.def, sessionDir = opts.sessionDir;
+    // Open-anywhere B3: pi's process cwd is the operator's chosen directory
+    // when one was passed; the world root (sessionDir) remains the storage
+    // root — --session-dir below still points at sessionDir + "/sessions", so
+    // pi session files never land in the chosen project directory. Callers
+    // that pass no cwd (every channel caller — prepareSpawn's piRpcOpts stay
+    // cwd-free by design) get spawnCwd === sessionDir: byte-identical spawn.
+    // --no-approve keeps project-trust DENY in the chosen cwd too (the bot
+    // must never load .pi/ config from an arbitrary directory), and pi-lab's
+    // mcp-client reads spawnCwd/.mcp.json — which is why buildBotWorld writes
+    // the per-bot .mcp.json there (B2).
+    const spawnCwd = opts.cwd || sessionDir;
     // Phase 3.0 (R3): provider+model are resolved per-turn by
     // model_resolver.resolveModel() and passed in via opts.resolved — there
     // is NO hardcoded crow-local anywhere in the spawn path anymore.
@@ -273,7 +284,7 @@ export class PiRpc {
     // the whole tree (pi + its MCP children). Without this, killing pi leaves
     // its MCP server children (brave-search, google-workspace, github, etc.)
     // running indefinitely — observed leak of ~5 MCP procs per turn.
-    this.proc = spawn(nodeBin, args, { cwd: sessionDir, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    this.proc = spawn(nodeBin, args, { cwd: spawnCwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     this.events = []; this.responses = []; this.stderr = ""; this._b = ""; this._w = []; this.badStdout = 0;
     this._exitCode = null;
     // C-12: monotonic per-message sequence number, stamped on every parsed
