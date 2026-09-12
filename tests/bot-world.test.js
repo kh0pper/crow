@@ -69,6 +69,18 @@ writeFileSync(process.env.PI_MODELS_JSON, JSON.stringify({
   providers: { stub: { models: [{ id: "m1" }] } },
 }));
 
+// mcp_writer pins CANONICAL_MCP_PATH = $HOME/.pi/agent/mcp.json at MODULE LOAD
+// (the bridge import below triggers it). buildBotWorld's writeBotMcp throws —
+// non-fatally, caught — when that canonical is unreadable, so the golden legs
+// (which never assert the file) pass either way, but B2's placement assertion
+// needs writeBotMcp to actually SUCCEED. A clean CI runner has no pi installed
+// there. Point HOME at a scratch dir carrying a minimal valid canonical BEFORE
+// the import so the write is deterministic and hermetic. Isolated: node --test
+// runs each file in its own process, so this never leaks to another suite.
+process.env.HOME = join(dir, "fakehome");
+mkdirSync(join(process.env.HOME, ".pi", "agent"), { recursive: true });
+writeFileSync(join(process.env.HOME, ".pi", "agent", "mcp.json"), JSON.stringify({ mcpServers: {} }));
+
 // Skills must resolve inside the SCRATCH crowHome: skill_resolver falls back to
 // ~/.crow/skills and ~/crow/skills, whose contents differ per host — the
 // sysFile sha would not be reproducible in CI.
