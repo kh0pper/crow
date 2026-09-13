@@ -730,9 +730,18 @@ test("F1b live: crossing the breakpoint with a chat open refreshes the list that
     assert.equal((await s.json(ROW_COUNT)).rows, 3, "still stale, as it should be at this width");
 
     await s.metrics(1280, 900);            // the operator widens the window
-    await new Promise((r) => setTimeout(r, 1200));
-
-    const after = await s.json(ROW_COUNT);
+    // POLL, do not sleep a fixed budget: the refresh is async (matchMedia
+    // change → syncListPolling → loadList → render) and the whole suite's CDP
+    // tests share ONE Chrome, so under full-suite load a fixed 1200ms flakes
+    // (measured twice: rows still 3 when the budget ran out). The property
+    // under test is that the crossing REFRESHES the list at all — nothing
+    // else would — not how fast it lands.
+    let after = null;
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      after = await s.json(ROW_COUNT);
+      if (after.rows === 2) break;
+    }
     assert.equal(after.listVisible, true);
     assert.equal(after.rows, 2,
       "a breakpoint crossing is not a navigation, so nothing else would have refreshed it");
