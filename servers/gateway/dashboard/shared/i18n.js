@@ -2349,6 +2349,7 @@ export const translations = {
     en: "Could not list the files.",
     es: "No se pudo listar los archivos.",
   },
+  "perch.working": { en: "Working…", es: "Trabajando…" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

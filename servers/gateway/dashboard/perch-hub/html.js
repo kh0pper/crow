@@ -122,6 +122,17 @@ ${engineBanner(engine, lang)}
     <section id="perch-tab-chat" role="tabpanel" aria-labelledby="perch-tab-btn-chat">
     <div id="perch-transcript"></div>
     <div id="perch-ask"></div>
+    <!-- The working strip: the chat tab's own "the bot is busy" signal.
+         Since Phase D moved the state pill into the Session tab, the only
+         in-chat evidence of a running turn was Send flipping to Steer —
+         which reads as a button change, not as activity. A turning gear
+         beside one word, driven by the SAME turnInFlight flag that flips
+         the composer (setTurnInFlight), so the two can never disagree.
+         aria-live=polite: a screen reader announces the state change
+         without interrupting mid-sentence. -->
+    <div id="perch-working" hidden aria-live="polite">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>${escapeHtml(t("perch.working", lang))}</span></div>
     <div id="perch-composer">
       <textarea id="perch-input" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
       <div class="send-row">

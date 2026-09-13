@@ -430,3 +430,23 @@ test("a log/tool frame lands in the Activity rail ONCE, not once per surviving i
       "no frame chatter in the transcript: " + JSON.stringify(notes));
   } finally { await s.close(); }
 });
+
+test("the working strip is live in the real DOM: shown by a turn-start frame, hidden by the reply", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const s = await session();
+  try {
+    await s.open();
+    broadcast("state", { state: "awake", turnInFlight: true });
+    await sleep(300);
+    assert.equal(await s.evalIn(`document.getElementById('perch-working').hidden`), false,
+      "the gear shows while the turn runs");
+    assert.equal(await s.evalIn(`getComputedStyle(document.getElementById('perch-working').querySelector('svg')).animationName`),
+      "perch-spin", "and it is actually spinning");
+    broadcast("state", { state: "awake", turnInFlight: true });
+    broadcast("text", { text: "answer", turnId: "t-1" });
+    broadcast("reply", { text: "answer", turnId: "t-1" });
+    await sleep(300);
+    assert.equal(await s.evalIn(`document.getElementById('perch-working').hidden`), true,
+      "the turn ending hides it");
+  } finally { await s.close(); }
+});

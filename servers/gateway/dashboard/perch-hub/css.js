@@ -224,6 +224,18 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
    ~3000px below the fold. Keep both rules; neither is dead. */
 #perch-composer{position:sticky;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:10px 0;display:grid;gap:8px}
 #perch-composer .send-row{display:flex;gap:8px}
+/* The working strip (html.js's #perch-working): a turning gear + one word,
+   sitting between the ask pane and the composer as a non-shrinking flex
+   child — it must never squeeze the transcript or push Send off screen, and
+   [hidden] must outrank the display:flex on the same id (id+attr = (1,1,0)
+   beats id = (1,0,0)). The spin slows instead of stopping under
+   prefers-reduced-motion, matching pi-lab's own tool-spinner choice: motion
+   is the signal here, so the honest reduction is "calmer", not "frozen". */
+#perch-working{display:flex;align-items:center;gap:8px;padding:6px 2px 0;color:var(--dim);font-size:12.5px;flex-shrink:0}
+#perch-working[hidden]{display:none}
+#perch-working svg{width:15px;height:15px;color:var(--teal);flex-shrink:0;animation:perch-spin 1.4s linear infinite}
+@keyframes perch-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){#perch-working svg{animation-duration:6s}}
 #perch-composer textarea{min-height:72px}
 #perch-back{align-self:flex-start}
 /* --- Phase D1: the tab surface ------------------------------------------
