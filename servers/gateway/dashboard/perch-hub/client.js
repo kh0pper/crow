@@ -250,7 +250,6 @@ export function perchHubJs(lang = "en") {
   var NO_TRANSCRIPT='${tJs("perch.noTranscript", lang)}';
   var TRANSCRIPT_FAILED='${tJs("perch.transcriptFailed", lang)}';
   var RECONNECTING='${tJs("perch.reconnecting", lang)}';
-  var RECONNECT_FAILED='${tJs("perch.reconnectFailed", lang)}';
   var ASK_STALE='${tJs("perch.askStale", lang)}';
   var STEER_LABEL='${tJs("perch.steer", lang)}';
   var SEND_LABEL='${tJs("perch.send", lang)}';
@@ -875,6 +874,20 @@ export function perchHubJs(lang = "en") {
     if(listOnScreen()) loadList();
   });
 
+  /* Phone unlock / tab re-focus: a dozed socket is rediscovered NOW, not at
+     the next backoff slot (which can be up to 30s away on a long streak).
+     onStreamError closeStreams FIRST, so \'stream\' is null exactly in the
+     window where a retry is pending or the radio just came back; a live
+     stream is left alone. Guarded like every document listener (bindOnce +
+     live()) so a retired instance never re-opens from here. */
+  bindOnce(document,'visibilitychange','visibility',function(){
+    if(!live()) return;
+    if(document.visibilityState!=='visible') return;
+    if(!current.sid||stream) return;
+    cancelReconnect(); retries=0;
+    openStream(current.sid);
+  });
+
   /* Engine-minted ids only: "perchlive-" + 8 hex (perch-interactive.js:1473).
      A loose pattern would admit ".." and this value is concatenated into an
      API path. Encoded at every use site as well, belt and braces. */
@@ -1146,25 +1159,42 @@ export function perchHubJs(lang = "en") {
     var known=rowIndex[current.sid];
     showSessionName(known?known.label:null);
   }
-  /* Bounded backoff. TWO separate operations, and conflating them is what made
-     an earlier draft of this dead code: cancelling the TIMER must not reset the
+  /* Unbounded exponential backoff — the 2026-09-12 phone finding. The old cap
+     (5 tries, fixed 2s) was written for a desktop browser and a gateway
+     restart; on a phone the socket dies every time the screen dozes, and the
+     radio can take longer than the whole 10s retry window to come back — so
+     the operator unlocked their phone to a permanent "Lost the connection to
+     this session" over a session that was perfectly alive (measured: the
+     engine row sat at waiting-user with its last turn completed while the UI
+     declared death). Now: retries never give up, 2s doubling to a 30s cap,
+     reset ONLY on a stream that actually opened (resetBackoff, via onopen).
+     Truly dead sessions are still detected — not by a retry budget but by
+     onStreamError's options probe, whose 404/410/401 terminal statuses leave
+     to the list. ONE "Reconnecting…" line per failure streak (first miss
+     only) rides the Activity rail; repeating it every slot would paper the
+     rail with noise.
+     The two operations below stay separate, and conflating them is what made
+     an earlier draft dead code: cancelling the TIMER must not reset the
      COUNTER, because onStreamError calls closeStream() (which cancels) before
-     every scheduleReconnect(), so a combined reset meant retries could never
-     reach 5 and the cap was unreachable. The counter resets only when a stream
+     every scheduleReconnect(). The counter resets only when a stream
      actually opens. */
   var retries=0, retryTimer=null;
   function cancelReconnect(){ if(retryTimer){ clearTimeout(retryTimer); retryTimer=null; } }
   function resetBackoff(){ retries=0; }            /* called from onopen ONLY */
+  function reconnectDelayMs(){
+    var d=2000*Math.pow(2,retries-1);
+    return d>30000?30000:d;
+  }
   function scheduleReconnect(){
-    if(retries>=5){ appendNote(RECONNECT_FAILED); return; }
     retries++;
-    appendActivity(RECONNECTING);   /* D2: chatter to the rail; the CAP is a hard failure and stays in chat */
+    if(retries===1) appendActivity(RECONNECTING);
     var mySid=current.sid;                          /* no parameter to get wrong */
     retryTimer=setTimeout(function(){
+      retryTimer=null;
       if(!live()) return;                           /* retired mid-backoff */
       if(current.sid!==mySid) return;               /* navigated away mid-backoff */
       openStream(mySid);
-    },2000);
+    },reconnectDelayMs());
   }
 
   function loadHistory(botId,sid){

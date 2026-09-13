@@ -2253,7 +2253,6 @@ export const translations = {
     es: "No se pudo cargar el historial de esta sesión.",
   },
   "perch.reconnecting": { en: "Reconnecting…", es: "Reconectando…" },
-  "perch.reconnectFailed": { en: "Lost the connection to this session.", es: "Se perdió la conexión con esta sesión." },
   "perch.modelLabel": { en: "Model", es: "Modelo" },
   "perch.thinkingLabel": { en: "Thinking", es: "Razonamiento" },
   "perch.permissionLabel": { en: "Permissions", es: "Permisos" },
