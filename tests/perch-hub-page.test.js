@@ -492,3 +492,37 @@ test("the picker dismiss never depends on one path: Escape via the registry AND 
   // perch-hub-client.test.js already covers the whole emitted script, so
   // directory names cannot reach a sink without tripping that one.
 });
+
+// ---------------------------------------------------------------------------
+// The working strip — the chat tab's "the bot is busy" signal (a turning
+// gear + one word), driven by the same turnInFlight flag as the composer.
+// ---------------------------------------------------------------------------
+
+test("the working strip ships hidden, labelled, and polite — between ask pane and composer", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  const strip = html.match(/<div id="perch-working"[^>]*>/);
+  assert.ok(strip, "the strip exists");
+  assert.ok(strip[0].includes("hidden"), "ships hidden — an idle session must not claim to be working");
+  assert.ok(strip[0].includes('aria-live="polite"'), "a screen reader announces the state change");
+  const ask = html.indexOf('id="perch-ask"');
+  const w = html.indexOf('id="perch-working"');
+  const composer = html.indexOf('id="perch-composer"');
+  assert.ok(ask < w && w < composer, "it sits between the ask pane and the composer, inside the chat tab");
+  // House rule: visible label beside the glyph.
+  const seg = html.slice(w, composer);
+  assert.ok(/<\/svg>\s*<span>[^<]+<\/span>/.test(seg), "the gear carries a visible word");
+});
+
+test("the working strip CSS spins, hides by attribute, and calms under reduced motion", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\s+/g, "");
+  assert.ok(/#perch-working\{[^}]*flex-shrink:0/.test(css),
+    "a non-shrinking flex child — it must never squeeze the transcript or push Send off screen");
+  assert.ok(/#perch-working\[hidden\]\{display:none\}/.test(css),
+    "[hidden] must outrank the strip's own display:flex");
+  assert.ok(/@keyframesperch-spin\{to\{transform:rotate\(360deg\)\}\}/.test(css));
+  assert.ok(/animation:perch-spin/.test(css));
+  assert.ok(/prefers-reduced-motion:reduce\)\{#perch-workingsvg\{animation-duration:6s\}/.test(css),
+    "reduced motion slows the gear instead of freezing the signal");
+});

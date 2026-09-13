@@ -579,7 +579,7 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     // Session tab's cwd readout and its change trigger, the Files pane.
     "perch-tab-chat", "perch-tab-session", "perch-tab-files", "perch-tab-activity",
     "perch-tab-btn-chat", "perch-tab-btn-session", "perch-tab-btn-files", "perch-tab-btn-activity",
-    "perch-activity-list", "perch-session-cwd", "perch-change-cwd",
+    "perch-activity-list", "perch-session-cwd", "perch-change-cwd", "perch-working",
     "perch-files-list", "perch-files-refresh"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
@@ -2776,4 +2776,33 @@ test("D3: a file name is rendered as text, never as markup", async () => {
     " browser check (render test) proves the DOM never parses it");
   assert.ok(row.href.endsWith("/workspace/" + encodeURIComponent(hostile)),
     "and the link carries the encoded name");
+});
+
+// ---------------------------------------------------------------------------
+// The working strip: one flag, two surfaces. The gear must agree with the
+// composer's Send→Steer flip on EVERY transition, because a strip that lies
+// is worse than no strip.
+// ---------------------------------------------------------------------------
+
+test("the working strip tracks turnInFlight through state frames, replies and aborts", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const strip = hub.els["perch-working"];
+  const es = FakeEventSource.instances[0];
+
+  es._serverFrame("state", { state: "awake", turnInFlight: true });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(strip.hidden, false, "a turn starting shows the gear");
+  assert.equal(hub.els["perch-send"].textContent, "Steer", "and the composer flips in the same breath");
+
+  es._serverFrame("reply", { text: "done", turnId: "t1" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(strip.hidden, true, "the reply hides it");
+  assert.equal(hub.els["perch-send"].textContent, "Send");
+
+  // A stopped session is never in flight, whatever a stale frame claims —
+  // the gear must obey turnFlagFor, not the raw frame.
+  es._serverFrame("state", { state: "stopped", turnInFlight: true });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(strip.hidden, true, "a stopped session never shows the gear");
 });
