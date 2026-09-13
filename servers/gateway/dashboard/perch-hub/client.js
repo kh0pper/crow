@@ -62,7 +62,7 @@ export function perchHubJs(lang = "en") {
   function live(){ return !retired&&HUB.gen===GEN; }
   HUB.retire=function(){
     retired=true;
-    stopListPolling(); cancelReconnect(); closeStream();
+    stopListPolling(); cancelReconnect(); stopWatchdog(); closeStream();
     /* Anything left in the registry belongs to an instance older still (or to
        a session this one never held): close it by identity — that is the
        whole point of keeping the registry. */
@@ -137,6 +137,59 @@ export function perchHubJs(lang = "en") {
      failed render, an older gateway, or a non-prose frame all produce. */
   function setSanitizedHtml(node,html){ node.innerHTML=html; }
 
+  /* Wave 1: one-tap copy, ported from pi-lab's behaviour verbatim — a ✓
+     flash for 1.2s, execCommand fallback for non-secure contexts
+     (navigator.clipboard is undefined there; the dashboard can be served
+     over plain http on the LAN). typeof-guarded for the vm test harness,
+     which has no navigator at all. */
+  function copyText(text,btn){
+    var flash=function(){
+      if(!btn) return;
+      var orig=btn.textContent;
+      btn.textContent='\\u2713';
+      if(btn.classList) btn.classList.add('copied');
+      setTimeout(function(){
+        btn.textContent=orig;
+        if(btn.classList) btn.classList.remove('copied');
+      },1200);
+    };
+    if(typeof navigator!=='undefined'&&navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(String(text==null?'':text)).then(flash,function(){});
+      return;
+    }
+    try{
+      var ta=document.createElement('textarea');
+      ta.value=String(text==null?'':text);
+      ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy');
+      flash();
+      document.body.removeChild(ta);
+    }catch(e){}
+  }
+
+  /* Wave 1: every server-rendered code fence gets a copy button. The
+     wrapper is minted HERE (client-side DOM surgery, never innerHTML): the
+     button must be a SIBLING of the <pre>, not a child, or its own glyph
+     pollutes pre.textContent — the copy source. Guarded on querySelectorAll
+     because vm-harness elements do not carry it; the live CDP test measures
+     the real thing. */
+  function enhancePres(what){
+    if(!what.querySelectorAll) return;
+    var pres=what.querySelectorAll('pre');
+    for(var i=0;i<pres.length;i++){
+      var pre=pres[i];
+      if(!pre.parentNode||pre.parentNode.className==='prewrap') continue;
+      var wrap=document.createElement('div'); wrap.className='prewrap';
+      pre.parentNode.insertBefore(wrap,pre);
+      wrap.appendChild(pre);
+      var b=document.createElement('button'); b.type='button'; b.className='copy-pre';
+      b.textContent='\\u29c9'; b.setAttribute('aria-label',COPY_CODE_LABEL);
+      b.onclick=(function(p,btn){ return function(){ copyText(p.textContent,btn); }; })(pre,b);
+      wrap.appendChild(b);
+    }
+  }
+
   /* \`html\` is optional and server-rendered; without it this is byte-for-byte
      the old textContent behaviour. */
   function appendMessage(cls,who,text,html){
@@ -147,9 +200,19 @@ export function perchHubJs(lang = "en") {
       var what=document.createElement('div');
       what.className='what md';
       setSanitizedHtml(what,html);
+      enhancePres(what);                     /* Wave 1: copy buttons on fences */
       row.appendChild(what);
     } else {
       row.appendChild(line('what',text));   /* textContent, never innerHTML */
+    }
+    /* Wave 1: every BOT row is one tap from the clipboard — and the copy
+       source is the RAW text (the markdown the model wrote), never the
+       rendered DOM's textContent, which has lost the fences and links. */
+    if(cls==='bot'){
+      var cp=document.createElement('button'); cp.type='button'; cp.className='copy-msg';
+      cp.textContent='\\u29c9'; cp.setAttribute('aria-label',COPY_MSG_LABEL);
+      cp.onclick=(function(t,btn){ return function(){ copyText(t,btn); }; })(text,cp);
+      row.appendChild(cp);
     }
     tr.appendChild(row);
     tr.scrollTop=tr.scrollHeight;
@@ -286,6 +349,11 @@ export function perchHubJs(lang = "en") {
   /* Phase D3: the Files tab. */
   var FILES_EMPTY='${tJs("perch.filesEmpty", lang)}';
   var FILES_FAILED='${tJs("perch.filesFailed", lang)}';
+  /* Wave 1: copy buttons + non-image upload path injection. */
+  var COPY_MSG_LABEL='${tJs("perch.copyMessage", lang)}';
+  var COPY_CODE_LABEL='${tJs("perch.copyCode", lang)}';
+  var FILE_QUEUED_PATH='${tJs("perch.fileQueuedPath", lang)}';
+  var UPLOADED_HEADER='${tJs("perch.uploadedHeader", lang)}';
 
   /* Row identity. One bot with eight sessions renders eight rows that read
      "R4 Assistant / awake" and nothing else — measured verbatim in a browser
@@ -874,19 +942,28 @@ export function perchHubJs(lang = "en") {
     if(listOnScreen()) loadList();
   });
 
-  /* Phone unlock / tab re-focus: a dozed socket is rediscovered NOW, not at
-     the next backoff slot (which can be up to 30s away on a long streak).
-     onStreamError closeStreams FIRST, so \'stream\' is null exactly in the
-     window where a retry is pending or the radio just came back; a live
-     stream is left alone. Guarded like every document listener (bindOnce +
-     live()) so a retired instance never re-opens from here. */
-  bindOnce(document,'visibilitychange','visibility',function(){
+  /* Phone unlock / tab re-focus / pageshow / back online: a dozed socket is
+     rediscovered NOW, not at the next backoff slot (which can be up to 30s
+     away on a long streak). onStreamError closeStreams FIRST, so \'stream\' is
+     null exactly in the window where a retry is pending or the radio just
+     came back; a live stream is left alone. The re-open carries resync=true:
+     the engine replays only state + the pending card on subscribe, so frames
+     that COMPLETED while the socket was dead are re-fetched with the
+     transcript instead of silently missing until a manual reload (Wave 1
+     item 19; pi-lab has reloaded on every reconnect since day one). Guarded
+     like every document/window listener (bindOnce + live()). */
+  function reviveStream(){
     if(!live()) return;
-    if(document.visibilityState!=='visible') return;
+    if(document.visibilityState&&document.visibilityState!=='visible') return;
     if(!current.sid||stream) return;
     cancelReconnect(); retries=0;
-    openStream(current.sid);
+    openStream(current.sid,true);
+  }
+  bindOnce(document,'visibilitychange','visibility',function(){
+    if(document.visibilityState==='visible') reviveStream();
   });
+  bindOnce(window,'pageshow','pageshow',reviveStream);
+  bindOnce(window,'online','online',reviveStream);
 
   /* Engine-minted ids only: "perchlive-" + 8 hex (perch-interactive.js:1473).
      A loose pattern would admit ".." and this value is concatenated into an
@@ -903,6 +980,11 @@ export function perchHubJs(lang = "en") {
      follows, then clear regardless of outcome. resetControls() also clears
      this so a new session never inherits a stale queue. */
   var pendingImages=[];
+  /* Wave 1: non-image uploads. The file is already on disk in the session's
+     uploadsDir, and the model can no more SEE the upload than it can see
+     the wire — so its PATH rides the next outgoing message (pi-lab's
+     idiom, its wording). Images ride the wire; files ride the filesystem. */
+  var pendingFilePaths=[];
 
   function openSession(sid){
     if(current.sid===sid) return;          /* a re-entered hash is a no-op */
@@ -1010,12 +1092,13 @@ export function perchHubJs(lang = "en") {
 
   function closeStream(){
     cancelReconnect();                 /* timer only — NOT the retry counter */
+    stopWatchdog();                    /* Wave 1: no stream, nothing to watchdog */
     var es=stream; stream=null;        /* null FIRST: idempotent under a double call
                                           from openSession + hashchange */
     if(es){ try{ es.close(); }catch(e){} unregisterStream(es); }
   }
 
-  function openStream(sid){
+  function openStream(sid,resync){
     closeStream();
     /* EXPLICIT REPLACE, by identity. closeStream() above can only reach the
        connection THIS instance holds; a stream opened for this session by an
@@ -1027,7 +1110,14 @@ export function perchHubJs(lang = "en") {
     var es=new EventSource(API+'/interactive/'+encodeURIComponent(sid)+'/events');
     stream=es;
     HUB.streams[sid]=es;
-    es.onopen=function(){ resetBackoff(); };
+    noteEvent();   /* Wave 1: a fresh socket starts with a fresh silence budget — the watchdog measures from HERE, not from the last frame of the previous stream */
+    es.onopen=function(){ resetBackoff(); noteEvent(); if(resync) resyncHistory(); };
+    /* Wave 1 item 20 fuel: the server's 30s named ping (sse.js) is the only
+       traffic an IDLE-but-healthy stream sees, so it is what the watchdog
+       measures silence against. Raw listener, not on(): a ping carries no
+       session semantics and must never touch the transcript. */
+    es.addEventListener('ping',function(){ if(live()) noteEvent(); });
+    startWatchdog();
 
     var on=function(type,fn){
       es.addEventListener(type,function(ev){
@@ -1040,6 +1130,7 @@ export function perchHubJs(lang = "en") {
            printed a bare "error" note here before onStreamError (bound
            through the single-slot es.onerror property) ever got to reconnect. */
         if(typeof ev.data!=='string') return;
+        noteEvent();                              /* Wave 1: any frame is liveness */
         var d={}; try{ d=JSON.parse(ev.data); }catch(e){ d={}; }
         fn(d);
       });
@@ -1152,6 +1243,10 @@ export function perchHubJs(lang = "en") {
     e.hidden=!label;
   }
   function showHeader(botId,botName){
+    /* Wave 1: the bot id is remembered for the session's life —
+       resync-on-reconnect re-fetches the transcript BY BOT, and the cold
+       deep-link path learns it from /roost before ever calling this. */
+    current.botId=botId;
     el('perch-bot-name').textContent=botName||botId;
     /* The session id stays here, unchanged and on its own: it is the identity
        the close confirm and every API path use. */
@@ -1193,8 +1288,50 @@ export function perchHubJs(lang = "en") {
       retryTimer=null;
       if(!live()) return;                           /* retired mid-backoff */
       if(current.sid!==mySid) return;               /* navigated away mid-backoff */
-      openStream(mySid);
+      openStream(mySid,true);                       /* resync: the gap is exactly what this stream missed */
     },reconnectDelayMs());
+  }
+
+  /* Wave 1 item 20: the stale-ping watchdog. A dozed phone can leave a
+     ZOMBIE socket that fires NO error event at all — visibilitychange
+     covers the unlock, but a silently-dead socket on a FOREGROUND tab is
+     only discoverable by the absence of traffic. The server pings every
+     30s (sse.js's named ping), so 75s of silence while visible with a
+     held stream is two missed pings plus scheduling slack: proved dead.
+     Drop it and re-open WITH resync, because whatever completed during
+     the zombie window is exactly what the transcript refetch is for.
+     15s tick: worst-case discovery is 90s, versus never. */
+  var lastEventAt=0, watchTimer=null;
+  function noteEvent(){ lastEventAt=Date.now(); }
+  function startWatchdog(){
+    stopWatchdog();
+    watchTimer=setInterval(function(){
+      if(!live()) return;
+      if(document.visibilityState&&document.visibilityState!=='visible') return;
+      if(!current.sid||!stream) return;
+      if(Date.now()-lastEventAt>75000){ closeStream(); openStream(current.sid,true); }
+    },15000);
+  }
+  function stopWatchdog(){ if(watchTimer){ clearInterval(watchTimer); watchTimer=null; } }
+
+  /* Wave 1 item 19: the resync itself. A REPLACE, never an append: the
+     whole transcript refetches (the engine's own history endpoint is the
+     source of truth), and the history seam re-opens so frames arriving
+     DURING the refetch still dedupe through histBuf exactly as they do at
+     first open. The turn-render bookkeeping (renderedTurn/turnRendered) is
+     deliberately KEPT across a resync: the batch re-renders every completed
+     message the live frames already showed, and that memory is what
+     suppresses the in-flight turn's reply from appending its concatenation
+     on top (the N1-within-turn duplicate). Clearing it re-broke exactly
+     what N1 pins — measured red before this comment existed. The ask pane
+     is untouched: the engine replays a pending card on the fresh subscribe,
+     and renderAsk clears before it draws. */
+  function resyncHistory(){
+    var sid=current.sid, botId=current.botId;
+    if(!sid||!botId) return;
+    clearEl(el('perch-transcript'));
+    histSettled=false; histBuf=[];
+    loadHistory(botId,sid);
   }
 
   function loadHistory(botId,sid){
@@ -1378,6 +1515,8 @@ export function perchHubJs(lang = "en") {
     histSettled=false;
     histBuf=[];
     pendingImages=[];            /* nor its queued-but-unsent image */
+    pendingFilePaths=[];         /* nor its queued upload paths (Wave 1) */
+    setAttn(false);              /* nor its unanswered-question banner */
   }
 
   /* routes/perch-interactive-api.js:531-540 reads permission_mode and
@@ -1460,7 +1599,16 @@ export function perchHubJs(lang = "en") {
     var mySid=current.sid;
     appendMessage('user','you',text);      /* echo before the round trip */
     input.value='';
+    input.style.height='auto';             /* Wave 1: the auto-grow collapses back after a send */
     var body={message:text};
+    /* Wave 1: non-image uploads ride the message as PATHS — the file is
+       already in the session's uploadsDir on this machine, and pi's read
+       tool is not write-jailed, so the bot can open what the operator
+       attached. The local echo stays the operator's own words; the prefix
+       is for the model, not for the human. */
+    if(pendingFilePaths.length){
+      body.message=UPLOADED_HEADER+'\\n'+pendingFilePaths.map(function(p){return '- '+p;}).join('\\n')+'\\n\\n'+text;
+    }
     /* routes/perch-interactive-api.js's normalizeMessageImages reads
        body.images on /message only — /steer never looks at it, so attaching
        here regardless of path is harmless on a steer. Cleared immediately,
@@ -1468,6 +1616,7 @@ export function perchHubJs(lang = "en") {
        the queue, and re-attaching is one tap away. */
     if(pendingImages.length) body.images=pendingImages;
     pendingImages=[];
+    pendingFilePaths=[];
     perchApi('POST',sendPath(mySid,turnInFlight),body).then(function(r){
       if(current.sid!==mySid) return;
       if(r.status===409){ setTurnInFlight(true); return; }   /* raced a turn start */
@@ -1518,6 +1667,7 @@ export function perchHubJs(lang = "en") {
                     answerPayloadFor(card,choice)).then(function(r){
       if(current.sid!==mySid) return;
       clearEl(el('perch-ask'));
+      setAttn(false);                          /* the banner dies with the card */
       if(r.status===409) appendNote(ASK_STALE);
     });
   }
@@ -1526,10 +1676,11 @@ export function perchHubJs(lang = "en") {
      ask_user frame blocks the turn until answered, so it must not be
      scrollable past inside the transcript. Built with createElement/
      textContent only — never innerHTML. */
+  function setAttn(show){ var b=el('perch-attn'); if(b) b.hidden=!show; }
   function renderAsk(card){
     var pane=el('perch-ask'); if(!pane) return;
     clearEl(pane);
-    if(!card||!card.requestId) return;
+    if(!card||!card.requestId){ setAttn(false); return; }
     var frame=document.createElement('div'); frame.className='ask-card';
     if(card.title) frame.appendChild(line('ask-title',card.title));
     if(card.message) frame.appendChild(line('ask-message',card.message));
@@ -1569,6 +1720,7 @@ export function perchHubJs(lang = "en") {
 
     frame.appendChild(controls);
     pane.appendChild(frame);
+    setAttn(true);                             /* Wave 1: say why the bot went quiet */
   }
 
   function attachFile(file){
@@ -1582,11 +1734,14 @@ export function perchHubJs(lang = "en") {
                {name:file.name,data_b64:b64}).then(function(r){
         if(current.sid!==mySid) return;
         if(r.ok){
-          /* Queued onto send()'s pendingImages, in pi's wire shape
-             {mime,data_b64} — an upload that isn't an image has nothing to
-             queue: the model reads images, not arbitrary files. */
+          /* Images queue onto send()'s pendingImages in pi's wire shape
+             {mime,data_b64}. Everything else queues its on-disk PATH
+             (Wave 1): the upload landed in uploadsDir, and a path in the
+             next message is what turns it from stored bytes into something
+             the bot can actually read. */
           if(isImage) pendingImages.push({mime:file.type,data_b64:b64});
-          appendNote(FILE_QUEUED);
+          else if(r.j&&r.j.full_path) pendingFilePaths.push(r.j.full_path);
+          appendNote(isImage?FILE_QUEUED:FILE_QUEUED_PATH);
         } else {
           appendNote((r.j&&r.j.error)||FILE_FAILED);
         }
@@ -1610,6 +1765,23 @@ export function perchHubJs(lang = "en") {
      rather than calling closeSession() directly, so applyHash -> hashchange
      -> closeSession runs and browser history stays correct. */
   el('perch-send').onclick=send;
+  /* Wave 1: Enter sends, Shift+Enter newlines (pi-lab's composer rule
+     verbatim — phone soft keyboards included, which is what its own
+     mobile-first page ships), and the textarea grows with its content up
+     to the CSS 120px ceiling, then scrolls inside itself. */
+  var composerInput=el('perch-input');
+  if(composerInput){
+    composerInput.onkeydown=function(ev){
+      if(ev&&ev.key==='Enter'&&!ev.shiftKey){
+        if(ev.preventDefault) ev.preventDefault();
+        send();
+      }
+    };
+    composerInput.oninput=function(){
+      this.style.height='auto';
+      this.style.height=Math.min(this.scrollHeight||72,120)+'px';
+    };
+  }
   el('perch-back').onclick=function(){ location.hash=''; };
   function abortTurn(){
     if(!current.sid) return;

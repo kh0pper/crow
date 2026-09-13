@@ -72,8 +72,16 @@ export function openStream(res, { heartbeatMs = 30000 } = {}) {
     sendRaw(`event: ${event}\ndata: ${payload}\n\n`);
   };
 
+  // Heartbeat: a NAMED ping event, not a `: keepalive` comment (Wave 1).
+  // Comments are invisible to EventSource clients — a phone whose socket
+  // zombied through a screen-doze never fires an error and had nothing to
+  // notice the silence with. A named frame carries the same proxy-keepalive
+  // bytes AND feeds the perch hub's stale-ping watchdog. Every other
+  // consumer (turbo stream sources, board, messages, ramble) listens by
+  // name and ignores 'ping' — EventSource only delivers named events to
+  // matching listeners.
   const heartbeat = setInterval(() => {
-    sendRaw(": keepalive\n\n");
+    sendRaw("event: ping\ndata: {}\n\n");
   }, heartbeatMs);
 
   const close = () => {

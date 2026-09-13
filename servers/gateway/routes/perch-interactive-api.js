@@ -827,7 +827,13 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       } finally {
         try { closeSync(fd); } catch { /* already closed */ }
       }
-      res.json({ path: name });
+      // Wave 1: full_path is the on-disk location the client injects into the
+      // next message for non-image uploads ("I uploaded files: <path>"), so
+      // the bot can actually READ what was uploaded — pi's read tool is not
+      // write-jailed and uploadsDir is a real path the child's user owns.
+      // The dashboard operator is the machine owner (same posture as
+      // /browse), so disclosing the path discloses nothing new.
+      res.json({ path: name, full_path: join(snap.uploadsDir, name) });
     } catch (err) {
       mapEngineError(res, err);
     }
