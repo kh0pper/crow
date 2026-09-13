@@ -211,6 +211,10 @@ export class PiRpc {
     // non-perch caller) leaves `tools` untouched and the branch below identical
     // to what shipped before.
     const narrowedTools = applySessionNarrowing(tools, opts.narrowedTools);
+    // Wave 2: the FINAL csv, exposed so the interactive engine's Session-tab
+    // facts can report the tool count the child was actually pinned with
+    // (envelope + appends − narrowing) without re-deriving this assembly.
+    this.toolsCsv = narrowedTools;
     // `--tools` is ALWAYS pinned. pi parses "" to an empty allowlist
     // (dist/cli/args.js:85-89 → core/sdk.js:133-136, verified on 0.82.0),
     // whereas OMITTING the flag hands pi defaultActiveToolNames — bash, edit,
