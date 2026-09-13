@@ -50,6 +50,7 @@ import { resolveEngineStatus } from "../dashboard/panels/bot-builder/engine-gate
 import { createDbClient } from "../../db.js";
 import { perchAttached } from "../shared/perch-attached.js";
 import { getInteractiveEngine } from "../perch-interactive.js";
+import { cwdList, cwdRead } from "../perch-files.js";
 import { tasksDbPath } from "../../../scripts/pi-bots/instance-paths.mjs";
 import { updateCard } from "../board/card-service.js";
 import { annotateAvailability } from "../model-availability.js";
@@ -891,6 +892,50 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
       }
       items.sort((a, b) => b.mtime - a.mtime);
       res.json({ items: items.slice(0, 200) });
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
+  // ---- GET /interactive/:sid/cwd/list — read-only cwd browse (PR-B, item 18) ----
+  // Lists dirs + files inside the session's OWN cwd, realpath-jailed under it
+  // (never the uploadsDir). The Files tab's browser: a picker/viewer, not a
+  // trust boundary (open-anywhere decision 1 — dashboard operator = machine
+  // owner), but the jail keeps a session's scope honest. Reuses the /browse
+  // idiom, scoped to s.cwd. `path` may be empty (the cwd root), relative, or
+  // absolute; anything resolving outside the cwd 404s.
+  router.get(P + "/interactive/:sid/cwd/list", async (req, res) => {
+    const sid = String(req.params.sid);
+    try {
+      const eng = resolveEngine();
+      const snap = await eng.get(sid);
+      if (!snap) return jsonError(res, 404, "no_such_session");
+      if (!snap.cwd) return jsonError(res, 409, "no_cwd");
+      const out = cwdList(snap.cwd, req.query.path, { uploadsDir: snap.uploadsDir });
+      if (!out) return jsonError(res, 404, "not_found");
+      res.json(out);
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
+  // ---- GET /interactive/:sid/cwd/read — in-app TEXT viewer (PR-B, item 18) ----
+  // Serves a text/plain-ish file under the cwd, capped (CWD_READ_CAP) and
+  // fail-closed on type (extension allowlist + NUL guard). A non-text/binary
+  // file → 415 unsupported_type; not-found / jail-escape / not-a-regular-file
+  // → 404. DOWNLOADS stay outputs-jail-only via the fd-based workspace route
+  // below — this viewer never serves the outputs jail and never streams binary.
+  router.get(P + "/interactive/:sid/cwd/read", async (req, res) => {
+    const sid = String(req.params.sid);
+    try {
+      const eng = resolveEngine();
+      const snap = await eng.get(sid);
+      if (!snap) return jsonError(res, 404, "no_such_session");
+      if (!snap.cwd) return jsonError(res, 409, "no_cwd");
+      const out = cwdRead(snap.cwd, req.query.path, { uploadsDir: snap.uploadsDir });
+      if (!out) return jsonError(res, 404, "not_found");
+      if (out.error === "unsupported") return jsonError(res, 415, "unsupported_type");
+      res.json(out);
     } catch (err) {
       mapEngineError(res, err);
     }

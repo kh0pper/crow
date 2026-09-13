@@ -310,12 +310,39 @@ min-height:44px;padding:6px 4px;font-size:11px;border-color:transparent;backgrou
 #perch-hub-root .session-row .state{flex:1;min-width:0}
 /* Files tab rows: the whole row is the download link (thumb target), name
    breaks long, meta never does. */
-#perch-hub-root .files-bar{display:flex;justify-content:flex-end;padding:6px 0}
+#perch-hub-root .files-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0}
+#perch-hub-root .files-bar-label{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);font-weight:600}
 #perch-hub-root .file-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
 padding:11px 12px;border-bottom:1px solid var(--line);text-decoration:none;color:var(--ink);min-height:44px}
 #perch-hub-root .file-name{word-break:break-all;font-weight:500;font-size:14px}
 #perch-hub-root .file-meta{color:var(--dim);font-size:12px;white-space:nowrap;
 font-family:"JetBrains Mono",ui-monospace,monospace}
+/* PR-B (audit item 18): the read-only cwd browser + in-app text viewer. Dirs
+   are tinted/bold to distinguish from files (no icon glyphs — keeps the CSS
+   escape-free). The viewer is an overlay covering the Files tab, so its
+   section is the offset parent. */
+#perch-hub-root .files-subhead{margin:18px 0 6px}
+#perch-hub-root .cwd-crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px 0 8px;font-size:13px}
+#perch-hub-root .crumb{background:none;border:0;padding:2px 4px;color:var(--teal);cursor:pointer;font:inherit;border-radius:6px}
+#perch-hub-root .crumb[aria-current]{color:var(--ink);font-weight:600;cursor:default}
+#perch-hub-root .crumb-sep{color:var(--dim)}
+#perch-hub-root .cwd-list{display:grid}
+#perch-hub-root .cwd-row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;text-align:left;
+padding:10px 12px;border:0;border-bottom:1px solid var(--line);background:none;color:var(--ink);cursor:pointer;
+min-height:44px;font:inherit;width:100%}
+#perch-hub-root .cwd-dir .cwd-name{color:var(--teal);font-weight:600}
+#perch-hub-root .cwd-name{word-break:break-all;font-weight:500;font-size:14px}
+#perch-hub-root .cwd-meta{color:var(--dim);font-size:12px;white-space:nowrap;
+font-family:"JetBrains Mono",ui-monospace,monospace}
+#perch-tab-files{position:relative}
+#perch-hub-root .file-viewer{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;
+background:var(--card);border:1px solid var(--line);border-radius:10px}
+#perch-hub-root .file-viewer[hidden]{display:none}
+#perch-hub-root .fv-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;
+padding:8px 12px;border-bottom:1px solid var(--line)}
+#perch-hub-root .fv-name{font-weight:600;font-size:13.5px;word-break:break-all}
+#perch-hub-root .fv-body{margin:0;padding:12px;overflow:auto;flex:1;min-height:0;color:var(--ink);
+font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
 /* Activity tab: monospace log lines, dimmest text on the page — this is the
    rail you READ AFTER the conversation, never instead of it. */
 #perch-activity-list{display:grid;gap:6px;padding:12px 0;align-content:start}

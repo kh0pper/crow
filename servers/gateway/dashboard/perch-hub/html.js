@@ -206,12 +206,27 @@ ${engineBanner(engine, lang)}
       <button type="button" id="perch-close" class="quiet">${escapeHtml(t("perch.close", lang))}</button>
     </div>
     </section>
-    <!-- Files tab: the session's outputs, listed by D3's endpoint and linked
-         through the existing workspace download route. Populated on tab
-         activation, never on session open. -->
+    <!-- Files tab: (PR-B, item 18) a read-only browser of the session's cwd
+         (breadcrumbs + dirs/files, an in-app TEXT viewer) ABOVE the existing
+         outputs download list. The cwd browse is jailed under s.cwd server-side
+         and never lists the uploadsDir; downloads stay outputs-jail-only via the
+         fd-based workspace route. Populated on tab activation, never on open. -->
     <section id="perch-tab-files" role="tabpanel" aria-labelledby="perch-tab-btn-files" hidden>
-    <div class="files-bar"><button type="button" id="perch-files-refresh" class="quiet">${escapeHtml(t("perch.filesRefresh", lang))}</button></div>
+    <div class="files-bar">
+      <span class="files-bar-label">${escapeHtml(t("perch.filesCwdHeading", lang))}</span>
+      <button type="button" id="perch-files-refresh" class="quiet">${escapeHtml(t("perch.filesRefresh", lang))}</button>
+    </div>
+    <nav id="perch-cwd-crumbs" class="cwd-crumbs" aria-label="${escapeHtml(t("perch.filesCwdHeading", lang))}"></nav>
+    <div id="perch-cwd-list" class="cwd-list"></div>
+    <h2 class="files-subhead">${escapeHtml(t("perch.filesOutputsHeading", lang))}</h2>
     <div id="perch-files-list"></div>
+    <div id="perch-file-viewer" class="file-viewer" hidden>
+      <div class="fv-bar">
+        <span id="perch-fv-name" class="fv-name"></span>
+        <button type="button" id="perch-fv-close" class="quiet">${escapeHtml(t("perch.filesViewerClose", lang))}</button>
+      </div>
+      <pre id="perch-fv-body" class="fv-body"></pre>
+    </div>
     </section>
     <!-- Activity tab: log/tool/plan/error FRAMES land here (D2), so the chat
          transcript stays a conversation. -->

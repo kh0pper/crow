@@ -1198,6 +1198,100 @@ test("POST /interactive/:sid/files still overwrites a LEGITIMATE prior upload of
 });
 
 // ---------------------------------------------------------------------------
+// GET /interactive/:sid/cwd/list + /cwd/read — read-only cwd browse (PR-B, item 18)
+// ---------------------------------------------------------------------------
+
+test("cwd/list lists the session cwd (dirs+files), jailed; escape/outside 404", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "perch-cwd-"));
+  const uploadsDir = mkdtempSync(join(tmpdir(), "perch-uploads-"));
+  mkdirSync(join(cwd, "src"));
+  writeFileSync(join(cwd, "notes.txt"), "hi");
+  engineImpl.get = async (sid) => ({ sessionId: sid, cwd, uploadsDir, outputsDir: null });
+  try {
+    const ok = await getJson("/interactive/sess-1/cwd/list");
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.rel, "");
+    assert.ok(ok.body.dirs.some((d) => d.name === "src"));
+    assert.ok(ok.body.files.some((f) => f.name === "notes.txt"));
+    assert.equal(ok.body.parent, null, "no parent above the cwd root");
+
+    const sub = await getJson("/interactive/sess-1/cwd/list?path=src");
+    assert.equal(sub.status, 200);
+    assert.equal(sub.body.rel, "src");
+
+    const escape = await getJson("/interactive/sess-1/cwd/list?path=" + encodeURIComponent("../"));
+    assert.equal(escape.status, 404);
+    assert.equal(escape.body.error, "not_found");
+
+    const outside = await getJson("/interactive/sess-1/cwd/list?path=" + encodeURIComponent("/etc"));
+    assert.equal(outside.status, 404);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(uploadsDir, { recursive: true, force: true });
+  }
+});
+
+test("cwd/list 409s no_cwd when the session has no cwd", async () => {
+  engineImpl.get = async (sid) => ({ sessionId: sid, cwd: null, uploadsDir: null, outputsDir: null });
+  const { status, body } = await getJson("/interactive/sess-1/cwd/list");
+  assert.equal(status, 409);
+  assert.equal(body.error, "no_cwd");
+});
+
+test("cwd/list never lists the uploadsDir even when it sits under cwd", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "perch-cwd-"));
+  const uploadsDir = join(cwd, "uploads");
+  mkdirSync(uploadsDir);
+  writeFileSync(join(uploadsDir, "u.txt"), "secret");
+  engineImpl.get = async (sid) => ({ sessionId: sid, cwd, uploadsDir, outputsDir: null });
+  try {
+    const list = await getJson("/interactive/sess-1/cwd/list");
+    assert.equal(list.status, 200);
+    assert.ok(!list.body.dirs.some((d) => d.name === "uploads"), "uploadsDir hidden from the listing");
+    const into = await getJson("/interactive/sess-1/cwd/list?path=uploads");
+    assert.equal(into.status, 404, "navigating into the uploadsDir is refused");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("cwd/read serves a text file; 415 on binary; 404 on dir/escape", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "perch-cwd-"));
+  writeFileSync(join(cwd, "notes.txt"), "line one\nline two\n");
+  writeFileSync(join(cwd, "blob.bin"), Buffer.from([0x89, 0x50, 0x00]));
+  mkdirSync(join(cwd, "src"));
+  engineImpl.get = async (sid) => ({ sessionId: sid, cwd, uploadsDir: null, outputsDir: null });
+  try {
+    const txt = await getJson("/interactive/sess-1/cwd/read?path=notes.txt");
+    assert.equal(txt.status, 200);
+    assert.equal(txt.body.text, "line one\nline two\n");
+    assert.equal(txt.body.mime, "text/plain");
+    assert.equal(txt.body.truncated, false);
+
+    const bin = await getJson("/interactive/sess-1/cwd/read?path=blob.bin");
+    assert.equal(bin.status, 415);
+    assert.equal(bin.body.error, "unsupported_type");
+
+    const dirRead = await getJson("/interactive/sess-1/cwd/read?path=src");
+    assert.equal(dirRead.status, 404);
+
+    const escape = await getJson("/interactive/sess-1/cwd/read?path=" + encodeURIComponent("/etc/passwd"));
+    assert.equal(escape.status, 404);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("cwd/list + cwd/read 404 no_such_session for an unknown sid", async () => {
+  engineImpl.get = async () => null;
+  for (const p of ["/interactive/ghost/cwd/list", "/interactive/ghost/cwd/read?path=x.txt"]) {
+    const { status, body } = await getJson(p);
+    assert.equal(status, 404, p);
+    assert.equal(body.error, "no_such_session", p);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // no_such_session, uniformly, across the mutating routes that resolve a session
 // ---------------------------------------------------------------------------
 
