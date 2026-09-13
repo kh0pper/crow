@@ -2364,6 +2364,18 @@ export const translations = {
     en: "I uploaded files for you to look at:",
     es: "Subí archivos para que los revises:",
   },
+  "perch.factContext": { en: "Context", es: "Contexto" },
+  "perch.factUptime": { en: "Uptime", es: "Tiempo activo" },
+  "perch.factMemory": { en: "Memory", es: "Memoria" },
+  "perch.factTools": { en: "Tools", es: "Herramientas" },
+  "perch.planProgress": { en: "Plan progress", es: "Progreso del plan" },
+  "perch.toolRunning": { en: "running", es: "ejecutando" },
+  "perch.toolDone": { en: "done", es: "listo" },
+  "perch.toolFailed": { en: "failed", es: "falló" },
+  "perch.commandsHibernating": {
+    en: "The session is asleep — send a message first.",
+    es: "La sesión está dormida — envía un mensaje primero.",
+  },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
