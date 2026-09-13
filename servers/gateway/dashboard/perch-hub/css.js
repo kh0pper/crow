@@ -236,7 +236,26 @@ body[data-view="chat"] #perch-chat{display:flex;flex-direction:column;flex:1;min
 #perch-working svg{width:15px;height:15px;color:var(--teal);flex-shrink:0;animation:perch-spin 1.4s linear infinite}
 @keyframes perch-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){#perch-working svg{animation-duration:6s}}
-#perch-composer textarea{min-height:72px}
+#perch-composer textarea{min-height:72px;max-height:120px;overflow-y:auto}
+/* Wave 1: the composer auto-grows (client.js oninput, pi-lab's exact idiom)
+   up to the 120px ceiling above, then scrolls inside itself — a pasted
+   essay must not push Send off screen, the one sin this page's whole flex
+   chain exists to prevent. */
+/* Wave 1: copy buttons, ported from pi-lab (copy-msg floats in the message,
+   copy-pre pins to its code fence's corner). Deliberately quiet: they are
+   chrome on somebody's answer, not controls competing with the composer.
+   The prewrap wrapper is minted client-side around each server-rendered
+   <pre> (enhancePres) so the button is a SIBLING of the pre — inside it,
+   the button's own glyph would pollute pre.textContent, the copy source. */
+#perch-hub-root .copy-msg{align-self:flex-start;flex-shrink:0;margin:0 0 0 4px;background:none;border:none;color:inherit;opacity:.45;font-size:13px;cursor:pointer;padding:2px 6px;min-height:24px}
+#perch-hub-root .prewrap{position:relative}
+#perch-hub-root .copy-pre{position:absolute;top:6px;right:6px;z-index:1;background:var(--card);border:1px solid var(--line);border-radius:6px;color:var(--dim);font-size:12px;padding:1px 7px;cursor:pointer;opacity:.75;min-height:24px}
+#perch-hub-root .copy-msg.copied,#perch-hub-root .copy-pre.copied{opacity:1;color:var(--teal)}
+/* Wave 1: the attention banner (html.js's #perch-attn). [hidden] on an id
+   with its own display rule needs the attribute selector to outrank it —
+   (1,1,0) over (1,0,0), same discipline as the tab sections. */
+#perch-hub-root .attn-banner{display:flex;align-items:center;gap:8px;background:var(--teal-soft);border:1px solid var(--attn);color:var(--attn);border-radius:10px;padding:9px 12px;font-size:13px;font-weight:500;margin:8px 0 0;flex-shrink:0}
+#perch-hub-root .attn-banner[hidden]{display:none}
 #perch-back{align-self:flex-start}
 /* --- Phase D1: the tab surface ------------------------------------------
    ONE strip, two placements. Desktop: a top strip in the right pane (natural

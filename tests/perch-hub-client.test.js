@@ -274,7 +274,9 @@ test("a failing reconnect schedules the NEXT slot at the doubled delay, and one 
   FakeEventSource.instances[0]._nativeError();
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));   // probe rejection -> schedule
-  assert.deepEqual([...hub.timerDelays.values()], [2000], "first retry at 2s");
+  // Wave 1: the watchdog (15000) shares the delay map — assert on the retry slots.
+  const retryDelays = () => [...hub.timerDelays.values()].filter((d) => d !== 15000);
+  assert.deepEqual(retryDelays(), [2000], "first retry at 2s");
   let notes = hub.els["perch-activity-list"].children.map((c) => c.textContent);
   assert.equal(notes.filter((x) => x.includes("Reconnecting…")).length, 1);
 
@@ -287,7 +289,7 @@ test("a failing reconnect schedules the NEXT slot at the doubled delay, and one 
   FakeEventSource.instances[1]._nativeError();
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual([...hub.timerDelays.values()], [4000], "second slot doubles");
+  assert.deepEqual(retryDelays(), [4000], "second slot doubles");
   notes = hub.els["perch-activity-list"].children.map((c) => c.textContent);
   assert.equal(notes.filter((x) => x.includes("Reconnecting…")).length, 1,
     "still ONE rail note for the streak — a note per slot would be noise");
@@ -297,7 +299,10 @@ test("a failing reconnect schedules the NEXT slot at the doubled delay, and one 
   hub.doc._dispatch("visibilitychange", {});
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(FakeEventSource.instances.length, 3, "re-opens immediately, not at the next slot");
-  assert.equal(hub.timers.size, 0, "the pending backoff slot is cancelled, not stacked");
+  // Wave 1: the watchdog interval (15000) is a legitimate resident now —
+  // assert the RETRY SLOT is gone, not that the map is empty.
+  assert.equal([...hub.timerDelays.values()].filter((d) => d !== 15000).length, 0,
+    "the pending backoff slot is cancelled, not stacked");
 });
 
 test("a live stream is left alone by the visibility handler", async () => {
@@ -580,7 +585,7 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     "perch-tab-chat", "perch-tab-session", "perch-tab-files", "perch-tab-activity",
     "perch-tab-btn-chat", "perch-tab-btn-session", "perch-tab-btn-files", "perch-tab-btn-activity",
     "perch-activity-list", "perch-session-cwd", "perch-change-cwd", "perch-working",
-    "perch-files-list", "perch-files-refresh"];
+    "perch-files-list", "perch-files-refresh", "perch-attn"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -695,8 +700,8 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     },
     setTimeout(fn, delay) { const id = timerSeq++; timers.set(id, fn); timerDelays.set(id, delay == null ? undefined : delay); return id; },
     clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
-    setInterval(fn) { const id = timerSeq++; timers.set(id, fn); return id; },
-    clearInterval(id) { timers.delete(id); },
+    setInterval(fn, delay) { const id = timerSeq++; timers.set(id, fn); timerDelays.set(id, delay == null ? undefined : delay); return id; },
+    clearInterval(id) { timers.delete(id); timerDelays.delete(id); },
     FileReader: class {
       constructor() { this.onload = null; this.result = null; }
       readAsDataURL(file) {
@@ -1710,7 +1715,10 @@ test("below the breakpoint, opening a session stops the list poll — the list r
   const hub = await mountHub({ fetchImpl: stdFetch(), split: false });
   assert.equal(hub.timers.size > 0, true, "the list view polls");
   await openChatSession(hub);
-  assert.equal(hub.timers.size, 0, "nothing left ticking behind a hidden list");
+  // Wave 1: the stream watchdog (15s) now also lives in the timer map while a
+  // session is open — count the LIST POLL by its delay, not the map's size.
+  const polls = () => [...hub.timerDelays.values()].filter((d) => d === 10000).length;
+  assert.equal(polls(), 0, "nothing left polling behind a hidden list");
 });
 
 test("in SPLIT view, opening a session keeps the list polling and refreshes it at once", async () => {
@@ -1726,13 +1734,16 @@ test("in SPLIT view, opening a session keeps the list polling and refreshes it a
 test("crossing the breakpoint with a chat open starts and stops the poll, with no navigation at all", async () => {
   const hub = await mountHub({ fetchImpl: stdFetch(), split: false });
   await openChatSession(hub);
-  assert.equal(hub.timers.size, 0);
+  // Wave 1: filter to the list poll's own delay — the stream watchdog shares
+  // the timer map while a session is open.
+  const polls = () => [...hub.timerDelays.values()].filter((d) => d === 10000).length;
+  assert.equal(polls(), 0);
   hub.mq._set(true);                       // the operator widened the window
   await new Promise((r) => setTimeout(r, 0));
-  assert.ok(hub.timers.size > 0, "the list just came on screen; it must not sit there stale");
+  assert.ok(polls() > 0, "the list just came on screen; it must not sit there stale");
   hub.mq._set(false);                      // and narrowed it again
   await new Promise((r) => setTimeout(r, 0));
-  assert.equal(hub.timers.size, 0);
+  assert.equal(polls(), 0);
 });
 
 test("in split view the poll renders the newly opened session as a live row with a Close", async () => {
@@ -2061,10 +2072,13 @@ test("the sentinel is still an explicit choice: picking a real model from it swi
 test("the breakpoint listener binds through addListener where that is the only spelling", async () => {
   const hub = await mountHub({ fetchImpl: stdFetch(), split: false, legacyMediaQuery: true });
   await openChatSession(hub);
-  assert.equal(hub.timers.size, 0, "precondition: narrow, chat open, list hidden, nothing polling");
+  // Wave 1: count the LIST POLL by its delay — the stream watchdog (15000)
+  // shares the timer map while a chat is open.
+  const polls = () => [...hub.timerDelays.values()].filter((d) => d === 10000).length;
+  assert.equal(polls(), 0, "precondition: narrow, chat open, list hidden, nothing polling");
   hub.mq._set(true);
   await new Promise((r) => setTimeout(r, 0));
-  assert.ok(hub.timers.size > 0,
+  assert.ok(polls() > 0,
     "on that browser the re-evaluation would otherwise silently never bind");
 });
 
@@ -2805,4 +2819,153 @@ test("the working strip tracks turnInFlight through state frames, replies and ab
   es._serverFrame("state", { state: "stopped", turnInFlight: true });
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(strip.hidden, true, "a stopped session never shows the gear");
+});
+
+// ---------------------------------------------------------------------------
+// Wave 1 (pi-lab parity quick wins): Enter-to-send, auto-grow, copy buttons,
+// the attention banner, non-image upload path injection, resync-on-reconnect,
+// the stale-ping watchdog, and the pageshow/online revive signals.
+// ---------------------------------------------------------------------------
+
+test("W1: Enter sends, Shift+Enter does not (it is a newline)", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const input = hub.els["perch-input"];
+  input.value = "hello";
+  input.onkeydown({ key: "Enter", shiftKey: true, preventDefault() { throw new Error("must not preventDefault a newline"); } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.fetchCalls.filter((c) => /\/message$/.test(c.path)).length, 0,
+    "Shift+Enter is a newline, never a send");
+  let prevented = false;
+  input.onkeydown({ key: "Enter", shiftKey: false, preventDefault() { prevented = true; } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(prevented, true, "plain Enter preventDefaults (so the textarea does not also insert a newline)");
+  assert.equal(hub.fetchCalls.filter((c) => /\/message$/.test(c.path)).length, 1, "and sends");
+});
+
+test("W1: auto-grow caps at the CSS ceiling and collapses back after a send", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const input = hub.els["perch-input"];
+  input.scrollHeight = 300;                 // a pasted essay
+  input.oninput.call(input);
+  assert.equal(input.style.height, "120px", "grows to the ceiling, never past it (Send must stay reachable)");
+  input.value = "x";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(input.style.height, "auto", "and collapses back after the send");
+});
+
+test("W1: a bot message carries a copy button whose source is the RAW text, and a code fence gets its own", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("text", { text: "**bold** answer", turnId: "t1" });   // no html → textContent path
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("bot"));
+  const copyBtn = rows[0].children.filter((c) => String(c.className).includes("copy-msg"))[0];
+  assert.ok(copyBtn, "every bot row is one tap from the clipboard");
+  assert.equal(copyBtn.getAttribute("aria-label"), "Copy message", "and it is labelled, not glyph-only");
+  // The copy source is the raw markdown, captured in the closure — proven by
+  // what copyText receives. navigator is absent in the vm, so copyText falls
+  // to the execCommand branch; intercept document.execCommand to read the value.
+  let copied = null;
+  hub.doc.createElement_orig = hub.doc.createElement;
+  const realCreate = hub.doc.createElement.bind(hub.doc);
+  hub.doc.createElement = (tag) => { const n = realCreate(tag); if (tag === "textarea") { Object.defineProperty(n, "value", { set(v) { copied = v; }, get() { return copied; } }); } return n; };
+  hub.doc.execCommand = () => true;
+  copyBtn.onclick();
+  assert.equal(copied, "**bold** answer", "copies the markdown the model wrote, not the rendered DOM");
+  hub.doc.createElement = hub.doc.createElement_orig;
+});
+
+test("W1: an ask card raises the attention banner; answering lowers it", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const attn = hub.els["perch-attn"];
+  assert.ok(attn.hidden !== false, "no card, no banner");
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("ask_user", { requestId: "r1", method: "select", title: "Pick one", options: ["a", "b"] });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(attn.hidden, false, "a pending card says why the bot went quiet");
+  // Answer it: the pane clears and the banner drops with it.
+  hub.els["perch-ask"].children[0].querySelectorAll = undefined; // n/a
+  const answerBtn = hub.els["perch-ask"].children[0].children[1].children[0]; // first option button
+  answerBtn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(attn.hidden, true, "the banner dies with the card");
+});
+
+test("W1: a non-image upload injects its PATH into the next message; an image still rides the wire", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/files": () => makeResponse(200, { path: "report.pdf", full_path: "/tmp/up/report.pdf" }) }),
+  });
+  await openChatSession(hub);
+  hub.els["perch-file-input"].files = [{ name: "report.pdf", type: "application/pdf", b64: "AAA" }];
+  hub.els["perch-file-input"].onchange();
+  await new Promise((r) => setTimeout(r, 0));
+  const notes = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("note")).map((c) => c.textContent);
+  assert.ok(notes.some((x) => x.includes("path rides your next message")), "a file upload says what will happen to it");
+
+  hub.els["perch-input"].value = "summarize this";
+  hub.els["perch-send"].onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const msg = hub.fetchCalls.filter((c) => /\/message$/.test(c.path)).pop();
+  const body = JSON.parse(msg.opts.body);
+  assert.match(body.message, /\u0055ploads?|uploaded files/i, "the model is TOLD about the file");
+  assert.ok(body.message.includes("/tmp/up/report.pdf"), "with its on-disk path so pi's read tool can open it");
+  assert.ok(body.message.includes("summarize this"), "and the operator's own words survive");
+  assert.equal(body.images, undefined, "a PDF is not an image — nothing rides the wire");
+});
+
+test("W1: reconnect RESYNCS — the transcript refetches whole instead of silently missing the gap", async () => {
+  let transcriptCalls = 0;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({
+      "/transcript": () => { transcriptCalls++; return makeResponse(200, { events: [] }); },
+      "/options": () => Promise.reject(new Error("network down")),   // probe fails → scheduleReconnect
+    }),
+  });
+  await openChatSession(hub);
+  assert.equal(transcriptCalls, 1, "first open loads history once");
+  const first = FakeEventSource.instances[0];
+  first._nativeError();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  // Fire the scheduled reconnect, then open the new stream: onopen must resync.
+  for (const [id, fn] of [...hub.timers.entries()]) { hub.timers.delete(id); hub.timerDelays.delete(id); fn(); }
+  await new Promise((r) => setTimeout(r, 0));
+  const second = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  assert.ok(second && second !== first, "a fresh EventSource was built");
+  second._open();                             // fires onopen → resyncHistory
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(transcriptCalls, 2,
+    "the reconnect refetches the transcript — messages that completed during the drop are recovered, not lost until a manual reload");
+});
+
+test("W1: the watchdog and revive listeners are registered once per realm and retire cleanly", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  // The watchdog interval is live while a stream is held.
+  assert.ok([...hub.timerDelays.values()].includes(15000), "a 15s watchdog tick is armed");
+  // pageshow/online/visibilitychange go through bindOnce — one listener each per realm.
+  assert.equal(hub.win._listenerCount("pageshow"), 1);
+  assert.equal(hub.win._listenerCount("online"), 1);
+  assert.equal(hub.doc._listenerCount("visibilitychange"), 1);
+  // Retire must stop the watchdog (closeStream does), leaving no interval behind.
+  hub.win.__crowPerchHub.retire();
+  assert.ok(![...hub.timerDelays.values()].includes(15000), "retiring stops the watchdog");
+});
+
+test("W1: a held stream is left alone by a revive — no double-subscribe on focus/pageshow", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const n = FakeEventSource.instances.length;
+  hub.doc.visibilityState = "visible";
+  hub.doc._dispatch("visibilitychange", {});
+  hub.win._dispatch("pageshow", {});
+  hub.win._dispatch("online", {});
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(FakeEventSource.instances.length, n,
+    "a live stream is never re-opened by a wake signal — that would double-subscribe");
 });

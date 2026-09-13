@@ -1256,3 +1256,58 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
     } finally { resetApi(); await s.close(); }
   });
 }
+
+// ---------------------------------------------------------------------------
+// Wave 1, live — copy buttons on real server-rendered markdown fences, and
+// the auto-grow composer measured against its own ceiling.
+// ---------------------------------------------------------------------------
+
+for (const [w, h] of [[412, 730], [1280, 900]]) {
+  test(`W1 live @${w}x${h}: code fences get a working copy button; the composer grows to its ceiling and stops`, async (t) => {
+    if (!available) return t.skip("no CDP endpoint at " + CDP);
+    resetApi();
+    // Seed a transcript whose assistant message carries a real server-rendered
+    // <pre> — the exact shape routes/perch.js's assistantHtml produces.
+    transcriptEvents = [{
+      type: "message",
+      message: { role: "assistant", content: [{ text: "run this:\n```\nls -la\n```" }] },
+      html: "<p>run this:</p>\n<pre><code>ls -la\n</code></pre>\n",
+    }];
+    const s = await session(w, h);
+    try {
+      await s.evalIn(`location.hash='perchlive-22222222'; 'go'`);
+      await new Promise((r) => setTimeout(r, 900));
+      const seen = await s.json(`(function(){
+        var pre=document.querySelector('#perch-transcript .what.md pre');
+        var wrap=pre&&pre.parentElement;
+        var btn=wrap&&wrap.querySelector('.copy-pre');
+        var msgBtn=document.querySelector('#perch-transcript .entry.bot .copy-msg');
+        var out={pre:!!pre, wrapped:wrap&&wrap.className==='prewrap', btn:!!btn,
+                 btnOutsidePre:btn?!pre.contains(btn):null,
+                 msgBtn:!!msgBtn};
+        if(btn){ btn.click(); out.flashed=btn.classList.contains('copied'); }
+        // The composer: ten lines must grow it, but never past 120px.
+        var ta=document.getElementById('perch-input');
+        ta.value='1\\n2\\n3\\n4\\n5\\n6\\n7\\n8\\n9\\n10';
+        ta.dispatchEvent(new Event('input',{bubbles:true}));
+        var r2=ta.getBoundingClientRect();
+        out.grew=Math.round(r2.height);
+        out.hScroll=document.documentElement.scrollWidth>document.documentElement.clientWidth;
+        var send=document.getElementById('perch-send').getBoundingClientRect();
+        out.sendReachable=send.bottom<=innerHeight&&send.top>=0;
+        return JSON.stringify(out);
+      })()`);
+      assert.equal(seen.pre, true, "fixture check: the seeded fence rendered");
+      assert.equal(seen.wrapped, true, "the fence is wrapped client-side (.prewrap)");
+      assert.equal(seen.btn, true, "and carries a copy button");
+      assert.equal(seen.btnOutsidePre, true,
+        "the button is a SIBLING of the pre — inside it, the glyph would pollute the copy source");
+      assert.equal(seen.flashed, true, "a tap flashes ✓ (clipboard API or the execCommand fallback)");
+      assert.equal(seen.msgBtn, true, "bot rows carry the per-message copy too");
+      assert.ok(seen.grew > 72 && seen.grew <= 121,
+        `ten lines grew the composer to ${seen.grew}px — above the floor, at/under the 120px ceiling`);
+      assert.equal(seen.sendReachable, true, "a grown composer must never push Send off screen");
+      assert.equal(seen.hScroll, false);
+    } finally { resetApi(); await s.close(); }
+  });
+}

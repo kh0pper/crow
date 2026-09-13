@@ -32,6 +32,12 @@ const SID = "perchlive-aaaaaaaa";
 let available = false, server = null, port = 0;
 /** Every open SSE response, so a test can count concurrency and broadcast. */
 let openStreams = [];
+/** Wave 1: the server-side history the transcript endpoint reads. A `text`
+ *  frame IS a completed assistant message (message-level streaming), and in
+ *  the real engine every one of them lands in the session file — so the
+ *  fixture accumulates them. A transcript stuck at [] would test the new
+ *  resync-on-reconnect against a server that forgets, which no engine does. */
+let historyEvents = [];
 
 function serveApi(req, res) {
   const url = req.url.split("?")[0];
@@ -55,15 +61,20 @@ function serveApi(req, res) {
     req.on("close", () => { openStreams = openStreams.filter((r) => r !== res); });
     return;
   }
-  // An EMPTY transcript, which is what a freshly spawned session has and what
-  // made "No transcript yet." the correct line to print — once.
-  if (url.endsWith("/transcript")) return send(200, { events: [] });
+  // The transcript the resync refetches: whatever this fixture has broadcast
+  // as completed messages (see historyEvents).
+  if (url.endsWith("/transcript")) return send(200, { events: historyEvents });
   if (url.endsWith("/options")) return send(200, { models: [], thinkingLevels: [] });
   return send(200, {});
 }
 
 /** Push one named SSE frame to every connection the page currently holds. */
 function broadcast(type, data) {
+  // Model the server-side truth: every completed assistant message lands in
+  // the history the transcript endpoint serves (see historyEvents).
+  if (type === "text" && data && typeof data.text === "string") {
+    historyEvents.push({ type: "message", message: { role: "assistant", content: [{ text: data.text }] } });
+  }
   for (const res of openStreams) res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
@@ -102,7 +113,7 @@ before(async () => {
   port = server.address().port;
 });
 
-beforeEach(() => { openStreams = []; });
+beforeEach(() => { openStreams = []; historyEvents = []; });
 after(() => { if (server) server.close(); });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
