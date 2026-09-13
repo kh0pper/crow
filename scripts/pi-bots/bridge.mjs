@@ -190,6 +190,21 @@ export class PiRpc {
     // hand DB-edit bypasses this.
     let tools = toolAllowlist(def, { remoteEnabled: opts.remoteEnabled });
     if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
+    // PL-3 completion, same belt as subagent above. pi-lab's ask-user
+    // extension REGISTERS ask_user only under PI_BOT_INTERACTIVE=1
+    // (shared/bot-mode.mjs askUserPath: "ui" for interactive, "off" for
+    // channel bots — no user to ask there), and `--tools` filters
+    // extension-registered tools too (R7). Without this append the perch
+    // unlock the engine's extraEnv was built for never reached the model:
+    // the tool was registered but invisible, so a bot asked "can you give me
+    // choices?" truthfully answered no (measured live on r4-assistant,
+    // 2026-09-12). Appended exactly where the tool exists — interactive
+    // spawns — so every channel caller's csv stays byte-identical, and the
+    // per-session narrowing below can still take it away (envelope model:
+    // narrowing only ever removes).
+    if (opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1") {
+      tools = [tools, "ask_user"].filter(Boolean).join(",");
+    }
     // C-6: per-session narrowing is applied to the FINAL csv — AFTER the
     // subagent append — so a session can narrow `subagent` away too. Narrowing
     // only ever removes (applySessionNarrowing); opts.narrowedTools absent (every
