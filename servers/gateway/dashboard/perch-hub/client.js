@@ -355,6 +355,13 @@ export function perchHubJs(lang = "en") {
   /* Phase D3: the Files tab. */
   var FILES_EMPTY='${tJs("perch.filesEmpty", lang)}';
   var FILES_FAILED='${tJs("perch.filesFailed", lang)}';
+  /* PR-B (item 18): the Files tab's read-only cwd browser + text viewer. */
+  var FILES_CWD_EMPTY='${tJs("perch.filesCwdEmpty", lang)}';
+  var FILES_CWD_FAILED='${tJs("perch.filesCwdFailed", lang)}';
+  var FILES_NO_CWD='${tJs("perch.filesNoCwd", lang)}';
+  var FILES_VIEWER_FAILED='${tJs("perch.filesViewerFailed", lang)}';
+  var FILES_VIEWER_UNSUPPORTED='${tJs("perch.filesViewerUnsupported", lang)}';
+  var FILES_VIEWER_TRUNCATED='${tJs("perch.filesViewerTruncated", lang)}';
   /* Wave 1: copy buttons + non-image upload path injection. */
   var COPY_MSG_LABEL='${tJs("perch.copyMessage", lang)}';
   var COPY_CODE_LABEL='${tJs("perch.copyCode", lang)}';
@@ -1538,6 +1545,7 @@ export function perchHubJs(lang = "en") {
     var permSel=el('perch-permission'); if(permSel) permSel.value='guarded';
     var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
     var cwdEl=el('perch-session-cwd'); if(cwdEl) cwdEl.textContent='';   /* nor its directory */
+    cwdPath=''; closeFileViewer();   /* PR-B: nor its cwd browse cursor or open text viewer */
     setTurnInFlight(false);      /* the PREVIOUS session's Steer/Stop state must not bleed in */
     turnRendered=false;          /* nor its "this turn already rendered" bookkeeping */
     renderedTurn=null;           /* nor the turn id that bookkeeping now keys on */
@@ -1939,7 +1947,7 @@ export function perchHubJs(lang = "en") {
     });
     /* Files fetches on ACTIVATION, never on session open (D3) — the chat
        fast path stays one less round trip. */
-    if(name==='files') loadFiles();
+    if(name==='files'){ loadCwd(cwdPath); loadFiles(); }
   }
   TAB_NAMES.forEach(function(nm){
     var btn=el('perch-tab-btn-'+nm);
@@ -2018,7 +2026,87 @@ export function perchHubJs(lang = "en") {
     });
   }
   var filesRefresh=el('perch-files-refresh');
-  if(filesRefresh) filesRefresh.onclick=loadFiles;
+  if(filesRefresh) filesRefresh.onclick=function(){ loadCwd(cwdPath); loadFiles(); };
+
+  /* ---- PR-B (audit item 18): read-only cwd browser + in-app text viewer ----
+     The Files tab's TOP pane walks the session's OWN cwd (server-jailed under
+     it via realpath; the uploadsDir is never listed). A dir row navigates; a
+     file row opens the capped text viewer — a non-text file gets an honest
+     "not viewable" line, NEVER a download (downloads stay outputs-jail-only
+     via the fd-based workspace route below). Built with createElement/
+     textContent only: names come from a filesystem a bot child can write to.
+     cwdPath is the browse cursor (rel to the cwd root), reset on every session
+     open so the next session never inherits a path. Both async continuations
+     carry the file-wide mySid identity guard. */
+  var cwdPath='';
+  function closeFileViewer(){ var v=el('perch-file-viewer'); if(v) v.hidden=true; }
+  function crumbBtn(label,target){
+    var b=document.createElement('button'); b.type='button'; b.className='crumb'; b.textContent=label;
+    b.onclick=function(){ closeFileViewer(); loadCwd(target); };
+    return b;
+  }
+  function renderCrumbs(crumbs,d){
+    if(!crumbs) return;
+    var root=String(d.root||'').split('/').pop()||'/';
+    var segs=d.rel?String(d.rel).split('/'):[];
+    var last=crumbBtn(root,''); crumbs.appendChild(last);
+    var acc='';
+    segs.forEach(function(s){
+      acc=acc?acc+'/'+s:s;
+      var sep=document.createElement('span'); sep.className='crumb-sep'; sep.textContent='/'; crumbs.appendChild(sep);
+      last=crumbBtn(s,acc); crumbs.appendChild(last);
+    });
+    last.setAttribute('aria-current','location'); last.onclick=null;   /* here, not a nav target */
+  }
+  function loadCwd(path){
+    var list=el('perch-cwd-list'); var crumbs=el('perch-cwd-crumbs');
+    if(!list||!current.sid) return;
+    if(path==null) path=cwdPath;
+    var mySid=current.sid;
+    perchApi('GET','/interactive/'+encodeURIComponent(mySid)+'/cwd/list?path='+encodeURIComponent(path)).then(function(r){
+      if(current.sid!==mySid) return;                  /* identity guard, as everywhere */
+      clearEl(list); if(crumbs) clearEl(crumbs);
+      if(r.status===409&&r.j&&r.j.error==='no_cwd'){ list.appendChild(line('empty',FILES_NO_CWD)); return; }
+      if(!r.ok||!r.j){ list.appendChild(line('empty',FILES_CWD_FAILED)); return; }
+      var d=r.j;
+      cwdPath=d.rel||'';                                /* sync the cursor to the resolved path */
+      renderCrumbs(crumbs,d);
+      var dirs=Array.isArray(d.dirs)?d.dirs:[], files=Array.isArray(d.files)?d.files:[];
+      if(!dirs.length&&!files.length){ list.appendChild(line('empty',FILES_CWD_EMPTY)); return; }
+      dirs.forEach(function(it){
+        if(!it||!it.name) return;
+        var row=document.createElement('button'); row.type='button'; row.className='cwd-row cwd-dir';
+        row.appendChild(line('cwd-name',it.name));
+        row.onclick=function(){ closeFileViewer(); loadCwd(it.path); };
+        list.appendChild(row);
+      });
+      files.forEach(function(it){
+        if(!it||!it.name) return;
+        var row=document.createElement('button'); row.type='button'; row.className='cwd-row cwd-file';
+        row.appendChild(line('cwd-name',it.name));
+        row.appendChild(line('cwd-meta',fmtSize(it.size)));
+        row.onclick=function(){ openFileViewer(it.path); };
+        list.appendChild(row);
+      });
+    });
+  }
+  function openFileViewer(path){
+    var viewer=el('perch-file-viewer'); var body=el('perch-fv-body'); var nameEl=el('perch-fv-name');
+    if(!viewer||!current.sid) return;
+    var mySid=current.sid;
+    if(nameEl) nameEl.textContent='';
+    if(body) body.textContent='\\u2026';                 /* loading ellipsis */
+    viewer.hidden=false;
+    perchApi('GET','/interactive/'+encodeURIComponent(mySid)+'/cwd/read?path='+encodeURIComponent(path)).then(function(r){
+      if(current.sid!==mySid) return;                   /* identity guard, as everywhere */
+      if(!body) return;
+      if(r.status===415){ body.textContent=FILES_VIEWER_UNSUPPORTED; return; }
+      if(!r.ok||!r.j){ body.textContent=FILES_VIEWER_FAILED; return; }
+      if(nameEl) nameEl.textContent=r.j.name||'';
+      body.textContent=String(r.j.text||'')+(r.j.truncated?('\\n\\n'+FILES_VIEWER_TRUNCATED):'');
+    });
+  }
+  var fvClose=el('perch-fv-close'); if(fvClose) fvClose.onclick=closeFileViewer;
 
   /* ---- Wave 2: Session-tab facts + plan progress -------------------------
      All readings ride the state/plan_state frames the engine already emits
