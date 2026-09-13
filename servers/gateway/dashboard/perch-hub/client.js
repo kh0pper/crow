@@ -354,6 +354,12 @@ export function perchHubJs(lang = "en") {
   var COPY_CODE_LABEL='${tJs("perch.copyCode", lang)}';
   var FILE_QUEUED_PATH='${tJs("perch.fileQueuedPath", lang)}';
   var UPLOADED_HEADER='${tJs("perch.uploadedHeader", lang)}';
+  /* Wave 2/3: facts card, plan checklist, tool chips, slash menu. */
+  var PLAN_HEAD='${tJs("perch.planProgress", lang)}';
+  var TOOL_RUNNING='${tJs("perch.toolRunning", lang)}';
+  var TOOL_DONE='${tJs("perch.toolDone", lang)}';
+  var TOOL_FAILED='${tJs("perch.toolFailed", lang)}';
+  var COMMANDS_HIBERNATING='${tJs("perch.commandsHibernating", lang)}';
 
   /* Row identity. One bot with eight sessions renders eight rows that read
      "R4 Assistant / awake" and nothing else — measured verbatim in a browser
@@ -726,7 +732,10 @@ export function perchHubJs(lang = "en") {
      window/document listener in this file. */
   bindOnce(document,'keydown','browseEscape',function(ev){
     if(!live()) return;
-    if(ev.key==='Escape'&&browse.open) closeBrowseModal();
+    if(ev.key!=='Escape') return;
+    if(browse.open){ closeBrowseModal(); return; }
+    var m=el('perch-cmdmenu');            /* Wave 3: Escape closes the slash menu too */
+    if(m&&!m.hidden) m.hidden=true;
   });
 
   var browseBtn=el('perch-browse-btn');
@@ -998,6 +1007,7 @@ export function perchHubJs(lang = "en") {
     syncListPolling();
     clearEl(el('perch-transcript')); clearEl(el('perch-ask'));
     clearEl(el('perch-activity-list'));   /* the previous session's log is not this one's */
+    toolChips={};                         /* Wave 3: the chip index dies with the transcript */
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     var known=rowIndex[sid];
     if(known){ showHeader(known.botId,known.botName); afterHeader(mySid,known.botId); return; }
@@ -1159,6 +1169,9 @@ export function perchHubJs(lang = "en") {
          textContent only: the value is a filesystem path, never markup. */
       var cwdEl=el('perch-session-cwd');
       if(cwdEl) cwdEl.textContent=d.cwd||CWD_DEFAULT_TEXT;
+      /* Wave 2: the facts card rides the same frame — one source, one
+         refresh path, no polling of its own. */
+      renderFacts(d);
     });
     /* MESSAGE-LEVEL, not delta-level (perch-interactive.js:1257 says so
        outright): one frame per COMPLETED assistant message, so each is
@@ -1173,7 +1186,14 @@ export function perchHubJs(lang = "en") {
       if(!histSettled){ histBuf.push(d); return; }   /* round 3 R4, see flushHistBuf */
       renderTextFrame(d);
     });
-    on('tool',function(d){ if(d.phase==='start') appendActivity('[tool: '+(d.name||'?')+']'); });
+    on('tool',function(d){
+      if(d.phase==='start'){
+        appendActivity('[tool: '+(d.name||'?')+']');
+        appendToolChip(d);            /* Wave 3: the chat gets the live chip */
+      } else if(d.phase==='end'){
+        finishToolChip(d);
+      }
+    });
     on('log',function(d){ if(d.text) appendActivity(d.text); });
     /* \`reply\` carries replyTextOf(end) — every assistant message of the turn
        CONCATENATED — so appending it unconditionally rendered a two-message
@@ -1206,7 +1226,11 @@ export function perchHubJs(lang = "en") {
     });
     on('ask_user',function(d){ renderAsk(d); });
     on('error',function(d){ appendActivity(d.text||'error'); });
-    on('plan_state',function(d){ var t=planStateText(d.state); if(t) appendActivity(t); });
+    on('plan_state',function(d){
+      var t=planStateText(d.state); if(t) appendActivity(t);
+      planState=(d&&d.state&&typeof d.state==='object')?d.state:null;
+      renderPlan();                   /* Wave 2: bar + step checklist */
+    });
     /* No 'attention' listener: attention is not a stream event —
        perch-interactive.js:1243/:1360 push it through pushAttention into the
        notification pipeline, and perch-interactive-api.js:349-351 enumerates
@@ -1330,6 +1354,7 @@ export function perchHubJs(lang = "en") {
     var sid=current.sid, botId=current.botId;
     if(!sid||!botId) return;
     clearEl(el('perch-transcript'));
+    toolChips={};                    /* the chips just died with the transcript; a stale index would write into detached DOM */
     histSettled=false; histBuf=[];
     loadHistory(botId,sid);
   }
@@ -1517,6 +1542,10 @@ export function perchHubJs(lang = "en") {
     pendingImages=[];            /* nor its queued-but-unsent image */
     pendingFilePaths=[];         /* nor its queued upload paths (Wave 1) */
     setAttn(false);              /* nor its unanswered-question banner */
+    /* Wave 2/3: the new session inherits none of the old one's readings. */
+    planState=null; renderPlan();
+    toolChips={}; commandsCache=null; hideCmdMenu();
+    resetFacts();
   }
 
   /* routes/perch-interactive-api.js:531-540 reads permission_mode and
@@ -1601,6 +1630,7 @@ export function perchHubJs(lang = "en") {
     input.value='';
     input.style.height='auto';             /* Wave 1: the auto-grow collapses back after a send */
     var body={message:text};
+    hideCmdMenu();                         /* Wave 3: a sent command closes its own menu */
     /* Wave 1: non-image uploads ride the message as PATHS — the file is
        already in the session's uploadsDir on this machine, and pi's read
        tool is not write-jailed, so the bot can open what the operator
@@ -1780,6 +1810,7 @@ export function perchHubJs(lang = "en") {
     composerInput.oninput=function(){
       this.style.height='auto';
       this.style.height=Math.min(this.scrollHeight||72,120)+'px';
+      maybeCmdMenu(this.value);            /* Wave 3: '/' opens the command menu */
     };
   }
   el('perch-back').onclick=function(){ location.hash=''; };
@@ -1895,6 +1926,187 @@ export function perchHubJs(lang = "en") {
   }
   var filesRefresh=el('perch-files-refresh');
   if(filesRefresh) filesRefresh.onclick=loadFiles;
+
+  /* ---- Wave 2: Session-tab facts + plan progress -------------------------
+     All readings ride the state/plan_state frames the engine already emits
+     (contextUsage = pi's own numbers captured at turn end; uptime/RSS are
+     per-CHILD, so a hibernating session honestly shows dashes). A value
+     that cannot be measured renders as an em dash — never a guess, never a
+     stale reading from the previous session (resetControls clears). */
+  var planState=null;
+  function fmtUptime(sec){
+    sec=Math.max(0,Math.round(Number(sec)||0));
+    if(sec<60) return sec+'s';
+    if(sec<3600) return Math.floor(sec/60)+'m';
+    var h=Math.floor(sec/3600);
+    return h+'h '+Math.floor((sec%3600)/60)+'m';
+  }
+  function resetFacts(){
+    ['perch-fact-context','perch-fact-uptime','perch-fact-memory','perch-fact-tools'].forEach(function(id){
+      var e=el(id); if(e) e.textContent='\\u2014';
+    });
+    var bar=el('perch-ctxbar'); if(bar) bar.hidden=true;
+  }
+  function renderFacts(d){
+    if(!d) return;
+    var cu=d.contextUsage;
+    if(cu!==undefined){
+      var c=el('perch-fact-context'), bar=el('perch-ctxbar'), fill=el('perch-ctxbar-fill');
+      if(cu&&cu.percent!=null){
+        var txt=Math.round(cu.percent)+'%';
+        if(cu.tokens!=null&&cu.contextWindow) txt+=' \\u00b7 '+Math.round(cu.tokens/1000)+'k/'+Math.round(cu.contextWindow/1000)+'k';
+        if(c) c.textContent=txt;
+        if(fill) fill.style.width=Math.max(0,Math.min(100,Number(cu.percent)||0))+'%';
+        if(bar) bar.hidden=false;
+      } else {
+        if(c) c.textContent='\\u2014';
+        if(bar) bar.hidden=true;
+      }
+    }
+    if(d.uptimeSeconds!==undefined){
+      var u=el('perch-fact-uptime');
+      if(u) u.textContent=d.uptimeSeconds==null?'\\u2014':fmtUptime(d.uptimeSeconds);
+    }
+    if(d.memoryMB!==undefined){
+      var m=el('perch-fact-memory');
+      if(m) m.textContent=d.memoryMB==null?'\\u2014':d.memoryMB+' MB';
+    }
+    if(d.toolCount!==undefined){
+      var tc=el('perch-fact-tools');
+      if(tc) tc.textContent=d.toolCount==null?'\\u2014':String(d.toolCount);
+    }
+  }
+  function renderPlan(){
+    var st=planState;
+    var active=!!(st&&(st.enabled||st.executing));
+    var card=el('perch-plan-card'), bar=el('perch-planbar'), fill=el('perch-planbar-fill');
+    if(card) card.hidden=!active;
+    var total=active?Number(st.todosTotal||0):0;
+    if(bar) bar.hidden=!(active&&total>0);
+    if(!active) return;
+    var done=Number(st.todosDone||0);
+    if(fill&&total>0) fill.style.width=Math.round(100*done/total)+'%';
+    var head=el('perch-plan-head');
+    if(head) head.textContent=PLAN_HEAD+(total>0?' \\u2014 '+done+'/'+total:'')+(st.executing?' \\u25b6':'');
+    var steps=el('perch-plan-steps');
+    if(!steps) return;
+    clearEl(steps);
+    var todos=Array.isArray(st.todos)?st.todos:[];
+    var curIdx=-1;
+    for(var i=0;i<todos.length;i++){ if(todos[i]&&!todos[i].completed){ curIdx=i; break; } }
+    todos.forEach(function(td,i){
+      if(!td) return;
+      var row=document.createElement('div');
+      row.className='plan-step'+(td.completed?' done':(i===curIdx?' cur':''));
+      row.appendChild(line('sbox',td.completed?'\\u2611':(i===curIdx?'\\u25b6':'\\u2610')));
+      row.appendChild(line('stxt',(td.step!=null?td.step+'. ':'')+String(td.text==null?'':td.text)));
+      steps.appendChild(row);
+    });
+  }
+
+  /* ---- Wave 3: inline tool chips -----------------------------------------
+     pi-lab's shape: a pill per tool call with a spinner while running, tap
+     to expand args/result. Chips are LIVE-TURN UI: they exist in the
+     transcript only while this client watched them happen — a reload or a
+     resync drops them (the transcript endpoint carries messages, not tool
+     calls), and the Activity rail keeps the durable record. Args/results
+     arrive pre-truncated by the engine (600/2000 chars) and land via
+     textContent only — child-controlled bytes never reach a markup sink. */
+  var toolChips={};
+  function appendToolChip(d){
+    var tr=el('perch-transcript'); if(!tr) return;
+    var wrap=document.createElement('div'); wrap.className='entry toolwrap';
+    var chip=document.createElement('button'); chip.type='button'; chip.className='tool-chip';
+    var spin=document.createElement('span'); spin.className='spin';
+    var name=document.createElement('span'); name.className='tn'; name.textContent=(d&&d.name)||'?';
+    var status=document.createElement('span'); status.textContent=TOOL_RUNNING;
+    chip.appendChild(spin); chip.appendChild(name); chip.appendChild(status);
+    var details=document.createElement('div'); details.className='tool-details'; details.hidden=true;
+    if(d&&d.argsText!=null){
+      details.appendChild(line('td-h','args'));
+      var pa=document.createElement('pre'); pa.textContent=String(d.argsText);
+      details.appendChild(pa);
+    }
+    chip.onclick=function(){ details.hidden=!details.hidden; };
+    wrap.appendChild(chip); wrap.appendChild(details);
+    tr.appendChild(wrap);
+    tr.scrollTop=tr.scrollHeight;
+    if(d&&d.toolCallId!=null) toolChips[d.toolCallId]={chip:chip,spin:spin,status:status,details:details};
+  }
+  function finishToolChip(d){
+    var rec=(d&&d.toolCallId!=null)?toolChips[d.toolCallId]:null;
+    /* An end without a start means the operator opened mid-call: the rail
+       has the line, and minting a chip for a call nobody watched begin
+       would show a "done" with no story. */
+    if(!rec) return;
+    if(rec.spin&&rec.spin.parentNode) rec.spin.parentNode.removeChild(rec.spin);
+    rec.status.textContent=(d&&d.isError)?TOOL_FAILED:TOOL_DONE;
+    if(d&&d.isError) rec.chip.className='tool-chip err';
+    if(d&&d.resultText!=null){
+      rec.details.appendChild(line('td-h',(d&&d.isError)?'error':'result'));
+      var pr=document.createElement('pre'); pr.textContent=String(d.resultText);
+      rec.details.appendChild(pr);
+    }
+    if(d&&d.toolCallId!=null) delete toolChips[d.toolCallId];
+  }
+
+  /* ---- Wave 3: the slash-command menu ------------------------------------
+     Fed by pi's OWN get_commands registry through the engine (never a
+     hardcoded list — a bot's commands depend on its loaded extensions and
+     skills). One fetch per session, cached; the menu opens on a bare
+     "/…" composer and filters as you type. A hibernating child has no
+     registry to ask, and waking one because the operator typed "/" would
+     be a lie of availability — the menu says "asleep" instead. */
+  var commandsCache=null;              /* {list:[],hibernating:bool} per session */
+  function hideCmdMenu(){ var m=el('perch-cmdmenu'); if(m){ m.hidden=true; clearEl(m); } }
+  function maybeCmdMenu(val){
+    var m=el('perch-cmdmenu'); if(!m) return;
+    var v=String(val==null?'':val);
+    if(!/^\\/[^\\s]*$/.test(v)){ m.hidden=true; return; }
+    var q=v.slice(1).toLowerCase();
+    if(commandsCache){ renderCmdList(q); return; }
+    if(!current.sid) return;
+    var mySid=current.sid;
+    perchApi('GET','/interactive/'+encodeURIComponent(mySid)+'/commands').then(function(r){
+      if(current.sid!==mySid) return;                     /* identity guard, as everywhere */
+      commandsCache=(r.ok&&r.j&&Array.isArray(r.j.commands))
+        ? {list:r.j.commands,hibernating:!!r.j.hibernating}
+        : {list:[],hibernating:false};
+      var inp=el('perch-input');
+      var cur=inp?String(inp.value||''):'';
+      if(/^\\/[^\\s]*$/.test(cur)) renderCmdList(cur.slice(1).toLowerCase());
+    });
+  }
+  function renderCmdList(q){
+    var m=el('perch-cmdmenu'); if(!m||!commandsCache) return;
+    clearEl(m);
+    var hits=commandsCache.list.filter(function(c){
+      return String(c&&c.name||'').toLowerCase().indexOf(q)>=0;
+    }).slice(0,30);
+    if(!hits.length){
+      if(commandsCache.hibernating){ m.appendChild(line('cmd-empty',COMMANDS_HIBERNATING)); m.hidden=false; }
+      else m.hidden=true;
+      return;
+    }
+    hits.forEach(function(c){
+      var b=document.createElement('button'); b.type='button';
+      var n=document.createElement('span'); n.className='cmd-name'; n.textContent='/'+c.name;
+      b.appendChild(n);
+      if(c.description){
+        var ds=document.createElement('span'); ds.className='cmd-desc'; ds.textContent=String(c.description);
+        b.appendChild(ds);
+      }
+      b.onclick=function(){
+        var inp=el('perch-input');
+        if(inp){ inp.value='/'+c.name+' '; if(inp.focus) inp.focus();
+          /* the value changed without an input event — keep the grow in sync */
+          inp.style.height='auto'; }
+        m.hidden=true;
+      };
+      m.appendChild(b);
+    });
+    m.hidden=false;
+  }
 
   /* iOS does not shrink the layout viewport for the keyboard, so dvh alone
      leaves the composer behind it. Offset the chat column by the hidden part. */

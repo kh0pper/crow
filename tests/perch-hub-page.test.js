@@ -593,3 +593,57 @@ test("the SSE heartbeat is a named ping frame, visible to client watchdogs", asy
   assert.match(src, /event: ping\\ndata: \{\}\\n\\n/);
   assert.ok(!src.includes(': keepalive\\n\\n"'), "the comment-only heartbeat is gone");
 });
+
+// ---------------------------------------------------------------------------
+// Wave 2/3 — the facts card, plan surfaces, and the slash menu, statically.
+// ---------------------------------------------------------------------------
+
+test("the Session tab carries the facts card and the plan checklist; the chat carries the plan bar", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  const s = html.indexOf('id="perch-tab-session"');
+  const e = html.indexOf('id="perch-tab-files"');
+  const seg = html.slice(s, e);
+  for (const id of ["perch-facts", "perch-fact-context", "perch-fact-uptime", "perch-fact-memory",
+                    "perch-fact-tools", "perch-ctxbar", "perch-plan-card", "perch-plan-steps"]) {
+    assert.ok(seg.includes(`id="${id}"`), `${id} lives in the Session tab`);
+  }
+  assert.ok(/id="perch-plan-card"[^>]*hidden/.test(html), "the plan card ships hidden until a plan exists");
+  assert.ok(/id="perch-ctxbar"[^>]*hidden/.test(html), "so does the context bar");
+  // The chat tab's progress bar sits above the transcript.
+  const chat = html.indexOf('id="perch-tab-chat"');
+  const bar = html.indexOf('id="perch-planbar"');
+  const tr = html.indexOf('id="perch-transcript"');
+  assert.ok(chat < bar && bar < tr, "the plan bar rides above the transcript");
+  assert.ok(/id="perch-planbar"[^>]*hidden/.test(html));
+  // Facts labels are visible text, every one.
+  for (const word of ["Context", "Uptime", "Memory", "Tools"]) {
+    assert.ok(seg.includes(`>${word}<`), `the ${word} row is labelled`);
+  }
+});
+
+test("the slash menu lives INSIDE the sticky composer, so it anchors above Send and never covers it", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  const composer = html.indexOf('id="perch-composer"');
+  const menu = html.indexOf('id="perch-cmdmenu"');
+  const input = html.indexOf('id="perch-input"');
+  assert.ok(composer < menu && menu < input, "the menu is the composer's first child");
+  assert.ok(/id="perch-cmdmenu"[^>]*hidden/.test(html), "and ships hidden");
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\s+/g, "");
+  assert.ok(/#perch-cmdmenu\{position:absolute;bottom:100%/.test(css),
+    "anchored to the sticky composer, growing UPWARD — bottom:100% can never cover Send");
+  assert.ok(/#perch-cmdmenu\[hidden\]/.test(css) || /#perch-cmdmenu\[hidden\],/.test(css) ||
+    css.includes("#perch-planbar[hidden],#perch-cmdmenu[hidden]"), "[hidden] outranks its display rules");
+});
+
+test("the tool-chip CSS reuses the one spin keyframe and keeps results scrolling inside themselves", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\s+/g, "");
+  assert.equal((css.match(/@keyframesperch-spin/g) || []).length, 1,
+    "ONE keyframe definition — the gear and the chip spinner share it");
+  assert.ok(/\.tool-chip\.spin|\.tool-chip \.spin/.test(css.replace(/\s+/g, " ")) || css.includes(".tool-chip .spin".replace(/ /g, "")));
+  assert.ok(/\.tool-detailspre\{[^}]*max-height:240px/.test(css), "a 2000-char result scrolls in its own box");
+  assert.ok(/\.tool-detailspre\{[^}]*word-break:break-word/.test(css));
+});

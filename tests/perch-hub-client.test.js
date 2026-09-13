@@ -179,7 +179,9 @@ test("every string constant the script references is bound", async () => {
   // missing constant — it surfaces as a ReferenceError on the error path, which
   // is the path nobody exercises by hand.
   for (const name of ["SESSION_GONE", "NO_TRANSCRIPT", "RECONNECTING",
-                      "ASK_STALE", "STEER_LABEL", "SEND_LABEL"]) {
+                      "ASK_STALE", "STEER_LABEL", "SEND_LABEL",
+                      "PLAN_HEAD", "TOOL_RUNNING", "TOOL_DONE", "TOOL_FAILED",
+                      "COMMANDS_HIBERNATING"]) {
     if (!js.includes(name)) continue;               // not every task binds all of them
     assert.ok(new RegExp("var\\s+" + name + "\\s*=").test(js), name + " is used but never bound");
   }
@@ -199,9 +201,10 @@ test("async continuations are guarded — a fast back button must not cross sess
   // tab's control({cwd}) continuation. 14 as of D3: the Files tab's
   // files/list fetch. A regression that drops one — the count
   // that shipped with only 6 asserted — is invisible until an operator hits
-  // the exact race the dropped guard covered.
+  // the exact race the dropped guard covered. 15 as of Wave 3: the slash
+  // menu's commands fetch.
   const guards = (js.match(/current\.sid\s*!==/g) || []).length;
-  assert.equal(guards, 14, "expected exactly 14 identity guards, found " + guards);
+  assert.equal(guards, 15, "expected exactly 15 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -484,13 +487,20 @@ function makeFakeElement(tag) {
     files: null,
     appendChild(child) {
       this.children.push(child);
+      if (child && typeof child === "object") child.parentNode = this;   // real DOM semantics — client code walks parentNode
       if (ID_REGISTRY && child && child.id) ID_REGISTRY[child.id] = child;
       return child;
     },
-    removeChild(child) { const i = this.children.indexOf(child); if (i >= 0) this.children.splice(i, 1); return child; },
+    removeChild(child) {
+      const i = this.children.indexOf(child);
+      if (i >= 0) this.children.splice(i, 1);
+      if (child && typeof child === "object") child.parentNode = null;
+      return child;
+    },
     insertBefore(node, ref) {
       const i = ref ? this.children.indexOf(ref) : -1;
       if (i < 0) this.children.unshift(node); else this.children.splice(i, 0, node);
+      if (node && typeof node === "object") node.parentNode = this;
       return node;
     },
     setAttribute(name, val) { attrs[name] = String(val); },
@@ -585,7 +595,11 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     "perch-tab-chat", "perch-tab-session", "perch-tab-files", "perch-tab-activity",
     "perch-tab-btn-chat", "perch-tab-btn-session", "perch-tab-btn-files", "perch-tab-btn-activity",
     "perch-activity-list", "perch-session-cwd", "perch-change-cwd", "perch-working",
-    "perch-files-list", "perch-files-refresh", "perch-attn"];
+    "perch-files-list", "perch-files-refresh", "perch-attn",
+    // Wave 2/3: the facts card, plan bar + card, and the slash menu.
+    "perch-fact-context", "perch-fact-uptime", "perch-fact-memory", "perch-fact-tools",
+    "perch-ctxbar", "perch-ctxbar-fill", "perch-planbar", "perch-planbar-fill",
+    "perch-plan-card", "perch-plan-head", "perch-plan-steps", "perch-cmdmenu"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -2968,4 +2982,164 @@ test("W1: a held stream is left alone by a revive — no double-subscribe on foc
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(FakeEventSource.instances.length, n,
     "a live stream is never re-opened by a wake signal — that would double-subscribe");
+});
+
+// ---------------------------------------------------------------------------
+// Wave 2 live in the harness: the facts card and the plan checklist render
+// from the frames alone — no polling, no second source.
+// ---------------------------------------------------------------------------
+
+test("W2: state frames drive the facts card; unmeasurable values render as em dashes", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("state", { state: "awake", turnInFlight: false,
+    contextUsage: { tokens: 110163, contextWindow: 262144, percent: 42 },
+    uptimeSeconds: 3725, memoryMB: 830, toolCount: 14 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-fact-context"].textContent, "42% \u00b7 110k/262k");
+  assert.equal(hub.els["perch-ctxbar"].hidden, false);
+  assert.equal(hub.els["perch-ctxbar-fill"].style.width, "42%");
+  assert.equal(hub.els["perch-fact-uptime"].textContent, "1h 2m", "an uptime reads as an uptime");
+  assert.equal(hub.els["perch-fact-memory"].textContent, "830 MB");
+  assert.equal(hub.els["perch-fact-tools"].textContent, "14");
+
+  // A hibernating session: the child facts go honest-dash, the bar hides.
+  es._serverFrame("state", { state: "hibernating", turnInFlight: false,
+    contextUsage: null, uptimeSeconds: null, memoryMB: null, toolCount: 14 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-fact-context"].textContent, "\u2014");
+  assert.equal(hub.els["perch-ctxbar"].hidden, true);
+  assert.equal(hub.els["perch-fact-uptime"].textContent, "\u2014");
+  assert.equal(hub.els["perch-fact-memory"].textContent, "\u2014");
+  assert.equal(hub.els["perch-fact-tools"].textContent, "14", "the envelope fact survives a hibernate");
+});
+
+test("W2: plan_state renders the progress bar and the step checklist", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("plan_state", { state: { enabled: true, executing: true, todosDone: 1, todosTotal: 3,
+    todos: [ { step: 1, text: "read the brief", completed: true },
+             { step: 2, text: "draft the answer", completed: false },
+             { step: 3, text: "send it", completed: false } ] } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-plan-card"].hidden, false);
+  assert.equal(hub.els["perch-planbar"].hidden, false);
+  assert.equal(hub.els["perch-planbar-fill"].style.width, "33%");
+  assert.match(hub.els["perch-plan-head"].textContent, /1\/3/);
+  const steps = hub.els["perch-plan-steps"].children;
+  assert.equal(steps.length, 3);
+  assert.match(steps[0].className, /done/);
+  assert.match(steps[1].className, /cur/, "the first incomplete step is the current one");
+  assert.equal(steps[0].children[0].textContent, "\u2611", "done box");
+  assert.equal(steps[1].children[0].textContent, "\u25b6", "current marker");
+  assert.equal(steps[2].children[0].textContent, "\u2610", "todo box");
+  assert.match(steps[1].children[1].textContent, /^2\. draft the answer$/);
+
+  // A session switch wipes the previous session's plan.
+  hub.location.hash = "";
+  await new Promise((r) => setTimeout(r, 0));
+  hub.location.hash = "perchlive-aaaaaaaa";
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-plan-card"].hidden, true);
+  assert.equal(hub.els["perch-planbar"].hidden, true);
+});
+
+// ---------------------------------------------------------------------------
+// Wave 3 live in the harness: the inline tool chips and the slash menu.
+// ---------------------------------------------------------------------------
+
+test("W3: a tool call grows a chip that spins, expands, and settles to done/failed", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("tool", { phase: "start", name: "bash", toolCallId: "tc-1", argsText: '{"command":"ls"}' });
+  await new Promise((r) => setTimeout(r, 0));
+  const wrap = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("toolwrap"))[0];
+  assert.ok(wrap, "the chip lives in the transcript, where the operator is looking");
+  const chip = wrap.children[0], details = wrap.children[1];
+  assert.equal(chip.children.length, 3, "spinner + name + status");
+  assert.equal(chip.children[1].textContent, "bash");
+  assert.equal(chip.children[2].textContent, "running");
+  assert.equal(details.hidden, true);
+  assert.equal(details.children[1].textContent, '{"command":"ls"}', "args are there before the result");
+  chip.onclick();
+  assert.equal(details.hidden, false, "a tap expands");
+
+  es._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "tc-1", resultText: "total 8", isError: false });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(chip.children.length, 2, "the spinner is gone");
+  assert.equal(chip.children[1].textContent, "done");
+  assert.equal(details.children[2].textContent, "result");
+  assert.equal(details.children[3].textContent, "total 8");
+
+  // A failed call reads as failed.
+  es._serverFrame("tool", { phase: "start", name: "edit", toolCallId: "tc-2" });
+  es._serverFrame("tool", { phase: "end", name: "edit", toolCallId: "tc-2", resultText: "no such file", isError: true });
+  await new Promise((r) => setTimeout(r, 0));
+  const wrap2 = hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("toolwrap"))[1];
+  assert.match(wrap2.children[0].className, /err/);
+  assert.equal(wrap2.children[0].children[1].textContent, "failed");
+});
+
+test("W3: a tool END with no seen start mints nothing — the rail already has the line", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("tool", { phase: "end", name: "bash", toolCallId: "ghost", resultText: "x" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("toolwrap")).length, 0);
+});
+
+test("W3: '/' opens the slash menu from pi's OWN registry, filtered, one fetch per session", async () => {
+  let cmdCalls = 0;
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/commands": () => { cmdCalls++;
+      return makeResponse(200, { commands: [
+        { name: "plan", description: "plan mode", source: "extension" },
+        { name: "todos", description: "show todos", source: "extension" },
+        { name: "compact", description: "compact context", source: "extension" } ], hibernating: false }); } }),
+  });
+  await openChatSession(hub);
+  const input = hub.els["perch-input"];
+  const menu = hub.els["perch-cmdmenu"];
+
+  input.value = "/";
+  input.oninput.call(input);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(cmdCalls, 1);
+  assert.equal(menu.hidden, false);
+  assert.equal(menu.children.length, 3, "the whole registry at a bare slash");
+  assert.equal(menu.children[0].children[0].textContent, "/plan");
+
+  input.value = "/to";
+  input.oninput.call(input);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(cmdCalls, 1, "cached — one fetch per session, not per keystroke");
+  assert.equal(menu.children.length, 1);
+  assert.equal(menu.children[0].children[0].textContent, "/todos");
+
+  // Picking a command fills the composer for its argument and closes.
+  menu.children[0].onclick();
+  assert.equal(input.value, "/todos ");
+  assert.equal(menu.hidden, true);
+
+  // A message with a space in it is not a command — the menu stays shut.
+  input.value = "/todos now please";
+  input.oninput.call(input);
+  assert.equal(menu.hidden, true);
+});
+
+test("W3: a hibernating session's menu says asleep instead of faking an empty registry", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/commands": () => makeResponse(200, { commands: [], hibernating: true }) }),
+  });
+  await openChatSession(hub);
+  const input = hub.els["perch-input"];
+  input.value = "/";
+  input.oninput.call(input);
+  await new Promise((r) => setTimeout(r, 0));
+  const menu = hub.els["perch-cmdmenu"];
+  assert.equal(menu.hidden, false);
+  assert.match(menu.children[0].textContent, /asleep/);
 });
