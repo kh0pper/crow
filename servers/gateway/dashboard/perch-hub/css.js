@@ -426,6 +426,19 @@ text-transform:uppercase;letter-spacing:.07em;color:var(--dim);margin:6px 0 3px}
 #perch-hub-root .tool-details pre{background:var(--sky);padding:7px 9px;border-radius:6px;
 overflow-x:auto;overflow-y:auto;max-height:240px;margin:0;white-space:pre-wrap;word-break:break-word;
 font:11px/1.5 "JetBrains Mono",ui-monospace,monospace}
+/* PR-E (audit item 12): inline sent-file cards in the chat. Column box on the
+   .entry row (which is itself a flex row — flex-direction:column + width:100%
+   own the line). Images inline capped to the card width; a not-jail-served
+   file renders dim with a name and the honest note, never a dead link. */
+#perch-hub-root .filecard{flex-direction:column;gap:3px;align-self:stretch;width:100%;min-width:0;
+background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin:2px 0}
+#perch-hub-root .filecard.dim{opacity:.6}
+#perch-hub-root .filecard .file-title{font-weight:600;font-size:13.5px;word-break:break-all;color:var(--ink)}
+#perch-hub-root .filecard .file-cap{font-size:13px;color:var(--ink);white-space:pre-wrap;word-break:break-word}
+#perch-hub-root .filecard .file-meta{white-space:normal}
+#perch-hub-root .filecard .file-note{font-size:12px;color:var(--dim)}
+#perch-hub-root .filecard .file-dl{display:inline-block;margin-top:4px;color:var(--teal);font-size:13px;text-decoration:none}
+#perch-hub-root .filecard .file-img{max-width:100%;height:auto;border-radius:6px;margin-bottom:4px}
 /* The menu anchors to #perch-composer (position:sticky = its containing
    block) and grows UPWARD — bottom:100% — so it can never cover Send. */
 #perch-cmdmenu{position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--card);

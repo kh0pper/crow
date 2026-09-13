@@ -82,21 +82,33 @@ test("an interactive spawn appends ask_user; the channel spawn's csv is byte-ide
   assert.equal(toolsFlag(channel), "read,mcp__tasks__tasks_list",
     "no marker, no append — every channel caller stays exactly as before");
   const interactive = await spawnArgs(def, undefined, { PI_BOT_INTERACTIVE: "1" });
-  assert.equal(toolsFlag(interactive), "read,mcp__tasks__tasks_list,ask_user");
+  assert.equal(toolsFlag(interactive), "read,mcp__tasks__tasks_list,ask_user,send_user_file",
+    "PR-E (audit item 12): send_user_file rides the SAME gate — pi-lab's send-user-file\n" +
+    'extension registers it only under askUserPath "ui", exactly like ask_user');
+});
+
+test("a session can narrow send_user_file away too — same envelope model", async () => {
+  const argv = await spawnArgs({ tools: { pi_builtin: ["read"], crow_mcp: [] } },
+    JSON.stringify(["send_user_file"]), { PI_BOT_INTERACTIVE: "1" });
+  assert.equal(toolsFlag(argv), "read,ask_user",
+    "the append happens BEFORE narrowing, so the pane can take the file tool away alone");
 });
 
 test("an empty envelope still gains ask_user on an interactive spawn", async () => {
   const argv = await spawnArgs({ tools: { pi_builtin: [], crow_mcp: [] } },
     undefined, { PI_BOT_INTERACTIVE: "1" });
-  assert.equal(toolsFlag(argv), "ask_user",
+  assert.equal(toolsFlag(argv), "ask_user,send_user_file",
     "the join must not leave a leading comma on an otherwise-empty csv");
 });
 
 test("a session can narrow ask_user away — it joins the csv BEFORE narrowing", async () => {
+  // PR-E widened the interactive append set, so pin the csv down to read by
+  // narrowing BOTH appends — the point of this test (an append is narrowable)
+  // is unchanged.
   const argv = await spawnArgs({ tools: { pi_builtin: ["read"], crow_mcp: [] } },
-    JSON.stringify(["ask_user"]), { PI_BOT_INTERACTIVE: "1" });
+    JSON.stringify(["ask_user", "send_user_file"]), { PI_BOT_INTERACTIVE: "1" });
   assert.equal(toolsFlag(argv), "read",
-    "narrowing only ever removes, and it can remove this too — the envelope model holds");
+    "narrowing only ever removes, and it can remove these too — the envelope model holds");
 });
 
 test("a def cannot fake the marker: spawn_env hygiene strips PI_BOT_* before the append decision", async () => {
