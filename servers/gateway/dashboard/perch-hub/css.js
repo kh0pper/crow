@@ -197,6 +197,25 @@ border-collapse:collapse;margin:0 0 8px;font-size:13px}
 #perch-hub-root .ask-title{font-weight:600}
 #perch-hub-root .ask-message{white-space:pre-wrap}
 #perch-hub-root .ask-controls{display:flex;flex-wrap:wrap;gap:6px}
+/* PR-A (audit item 5): the combined multi-question ask card. One card carries
+   up to four questions, each with tappable options (bold label + dim
+   description), an "Other…" free-text field, and ONE Send-answers action —
+   pi-lab's AskCard layout, in the hub's palette. All selectors scoped to
+   #perch-hub-root (the page test forbids bare ones). */
+#perch-hub-root .ask-combined{gap:13px}
+#perch-hub-root .ask-q{display:grid;gap:7px}
+#perch-hub-root .ask-h{justify-self:start;font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:var(--teal);background:var(--teal-soft);border-radius:6px;padding:2px 8px}
+#perch-hub-root .ask-t{font-weight:600;line-height:1.35}
+#perch-hub-root .ask-multi{font-weight:400;color:var(--dim);font-size:12.5px}
+#perch-hub-root .ask-opts{display:grid;gap:6px}
+#perch-hub-root .ask-opt{display:grid;gap:2px;text-align:left;padding:9px 12px;min-height:44px}
+#perch-hub-root .ask-opt b{font-weight:600}
+#perch-hub-root .ask-opt span{color:var(--dim);font-size:12.5px;font-weight:400}
+#perch-hub-root .ask-opt.sel{border-color:var(--teal);background:var(--teal-soft)}
+#perch-hub-root .ask-opt.sel b{color:var(--teal)}
+#perch-hub-root .ask-foot{display:flex;gap:8px;align-items:center}
+#perch-hub-root .ask-send{flex:1}
+#perch-hub-root .ask-send:disabled{opacity:.45;cursor:default}
 /* --- hub layout ------------------------------------------------------- */
 /* Two views, one at a time on a phone, side by side on a wide screen.
    List is the default (no attribute needed): the old standalone page

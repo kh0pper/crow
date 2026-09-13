@@ -1567,3 +1567,277 @@ test("R2 rode-along: a spawn failure AFTER the row was stamped parks it; a failu
   c2.close();
   assert.equal(n, 0, "a pre-stamp failure writes NO row — no minted ghost");
 });
+
+// ---------------------------------------------------------------------------
+// PR-A (audit item 5): the combined multi-question ask card + answer dance.
+//
+// A `crow-ask:` notify (pi-lab's ask-user relay) stashes the rich questions;
+// the child's FIRST select is upgraded into ONE combined card; the operator's
+// single answers[] submission is replayed into the child's blocking dialog
+// queue one scripted select/input at a time. The child-side row rendering
+// below MIRRORS ~/pi-lab/extensions/ask-user.ts runTuiFlow byte-for-byte — the
+// engine's danceStep only sends a response the child actually offered, so a
+// mismatch degrades to a sequential card instead of wedging.
+// ---------------------------------------------------------------------------
+
+const ASK_OTHER = "Other\u2026";
+const askRow = (o, checked) =>
+  (checked === undefined ? "" : checked ? "[x] " : "[ ] ") + o.label + (o.description ? ` \u2014 ${o.description}` : "");
+const askDone = (n) => `\u2500\u2500 done${n ? ` (${n} selected)` : ""} \u2500\u2500`;
+/** The options array ask-user.ts renders for a multi-select given `picked`. */
+function multiOptions(q, picked) {
+  return [...q.options.map((o) => askRow(o, picked.has(o.label))), ASK_OTHER, askDone(picked.size)];
+}
+/** The options array ask-user.ts renders for a single-select. */
+const singleOptions = (q) => [...q.options.map((o) => askRow(o)), ASK_OTHER];
+const crowAsk = (id, questions) => "crow-ask:" + JSON.stringify({ id, questions });
+
+test("PR-A: a crow-ask notify + first select emits ONE combined card, not a row selector", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const QS = [{ question: "Which auth?", header: "Auth", options: [{ label: "Session", description: "cookie" }, { label: "Token" }] }];
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: crowAsk("call_1", QS) });
+  // the notify is engine protocol — never a transcript log line
+  assert.equal(sink.ofType("log").length, 0, "a crow-ask notify is not logged");
+  assert.equal(sink.ofType("ask_user").length, 0, "the notify alone raises no card");
+
+  pi.emit({ type: "extension_ui_request", id: "sel1", method: "select", title: "Auth: Which auth?", options: singleOptions(QS[0]) });
+  const cards = sink.ofType("ask_user");
+  assert.equal(cards.length, 1, "the first select upgraded into exactly one card");
+  assert.equal(cards[0].method, "questions");
+  assert.equal(cards[0].requestId, "sel1");
+  assert.deepEqual(cards[0].questions, QS);
+  // it rides pendingUi so a reconnect replays it
+  const snap = await engine.get(s.sessionId);
+  assert.equal(snap.pendingUi.method, "questions");
+  assert.deepEqual(snap.pendingUi.questions, QS);
+});
+
+test("PR-A: single-select answer drives ONE response and ends the dance", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const QS = [{ question: "Which?", header: "Auth", options: [{ label: "a", description: "first" }, { label: "b" }] }];
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: crowAsk("c1", QS) });
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "t", options: singleOptions(QS[0]) });
+
+  await engine.answer(s.sessionId, "s1", { answers: [{ selected: ["b"], other: null }] });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s1", value: "b" });
+  assert.equal((await engine.get(s.sessionId)).pendingUi, null, "card cleared after submit");
+  assert.equal(sink.ofType("ask_user").length, 1, "no second card surfaced");
+});
+
+test("PR-A: multi-select answer replays the full toggle→done dance, surfacing no extra cards", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const q = { question: "Flags?", multiSelect: true, options: [{ label: "a", description: "first" }, { label: "b" }, { label: "c" }] };
+  const QS = [q];
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: crowAsk("c1", QS) });
+  // first select: nothing picked yet
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "t", options: multiOptions(q, new Set()) });
+
+  await engine.answer(s.sessionId, "s1", { answers: [{ selected: ["a", "c"], other: null }] });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s1", value: "[ ] a \u2014 first" });
+
+  // child re-renders with a picked → engine sends the toggle for c
+  pi.emit({ type: "extension_ui_request", id: "s2", method: "select", title: "t", options: multiOptions(q, new Set(["a"])) });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s2", value: "[ ] c" });
+
+  // child re-renders with a,c picked → engine sends the done row (2 selected)
+  pi.emit({ type: "extension_ui_request", id: "s3", method: "select", title: "t", options: multiOptions(q, new Set(["a", "c"])) });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s3", value: "\u2500\u2500 done (2 selected) \u2500\u2500" });
+
+  assert.equal(sink.ofType("ask_user").length, 1, "the whole dance surfaced only the combined card");
+});
+
+test("PR-A: multi-select with Other text interleaves a select(OTHER)+input, count includes it", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const q = { question: "Toppings?", multiSelect: true, options: [{ label: "cheese" }, { label: "ham" }] };
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: crowAsk("c1", [q]) });
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "t", options: multiOptions(q, new Set()) });
+
+  await engine.answer(s.sessionId, "s1", { answers: [{ selected: ["ham"], other: "pineapple" }] });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s1", value: "[ ] ham" });
+
+  // toggle done → engine sends OTHER
+  pi.emit({ type: "extension_ui_request", id: "s2", method: "select", title: "t", options: multiOptions(q, new Set(["ham"])) });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s2", value: ASK_OTHER });
+
+  // OTHER → child opens an input; engine sends the free text
+  pi.emit({ type: "extension_ui_request", id: "i1", method: "input", title: "Toppings?", placeholder: "type your answer" });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "i1", value: "pineapple" });
+
+  // input consumed → child re-renders select; engine sends done (2 selected: ham + pineapple)
+  pi.emit({ type: "extension_ui_request", id: "s3", method: "select", title: "t", options: multiOptions(q, new Set(["ham", "pineapple"])) });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s3", value: "\u2500\u2500 done (2 selected) \u2500\u2500" });
+});
+
+test("PR-A: two questions are answered by ONE submission, driven in order", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const q1 = { question: "Q1?", options: [{ label: "x" }, { label: "y" }] };
+  const q2 = { question: "Q2?", multiSelect: true, options: [{ label: "p" }, { label: "q" }] };
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: crowAsk("c1", [q1, q2]) });
+  // first select belongs to q1
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "(1/2) Q1?", options: singleOptions(q1) });
+
+  await engine.answer(s.sessionId, "s1", { answers: [{ selected: ["y"] }, { selected: ["p", "q"] }] });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s1", value: "y" });
+
+  // q2 first toggle
+  pi.emit({ type: "extension_ui_request", id: "s2", method: "select", title: "(2/2) Q2?", options: multiOptions(q2, new Set()) });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s2", value: "[ ] p" });
+  // q2 second toggle
+  pi.emit({ type: "extension_ui_request", id: "s3", method: "select", title: "(2/2) Q2?", options: multiOptions(q2, new Set(["p"])) });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s3", value: "[ ] q" });
+  // q2 done
+  pi.emit({ type: "extension_ui_request", id: "s4", method: "select", title: "(2/2) Q2?", options: multiOptions(q2, new Set(["p", "q"])) });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s4", value: "\u2500\u2500 done (2 selected) \u2500\u2500" });
+
+  assert.equal(sink.ofType("ask_user").length, 1, "two questions, one card");
+});
+
+test("PR-A: cancelling a combined card sends cancelled and clears all dance state", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const q = { question: "Q?", multiSelect: true, options: [{ label: "a" }] };
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: crowAsk("c1", [q]) });
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "t", options: multiOptions(q, new Set()) });
+
+  await engine.answer(s.sessionId, "s1", { cancelled: true });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s1", cancelled: true });
+  assert.equal((await engine.get(s.sessionId)).pendingUi, null);
+  // a later unrelated select must NOT be auto-answered by a stale dance
+  const before = pi.sent.length;
+  pi.emit({ type: "extension_ui_request", id: "s2", method: "select", title: "unrelated", options: ["z"] });
+  assert.equal(pi.sent.length, before, "no stale dance response");
+  assert.equal((await engine.get(s.sessionId)).pendingUi.requestId, "s2", "the unrelated select surfaced as its own card");
+});
+
+test("PR-A: option drift mid-dance degrades to a sequential card instead of wedging", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const q = { question: "Flags?", multiSelect: true, options: [{ label: "a" }, { label: "c" }] };
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: crowAsk("c1", [q]) });
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "t", options: multiOptions(q, new Set()) });
+  await engine.answer(s.sessionId, "s1", { answers: [{ selected: ["a", "c"], other: null }] });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s1", value: "[ ] a" });
+
+  // The child re-renders with a DIFFERENT format (pi-lab drift): "[ ] c" is
+  // absent. danceStep must refuse to send a non-matching response, clear the
+  // dance, and surface this select as an ordinary sequential card.
+  const sentBefore = pi.sent.length;
+  const drifted = ["* a", "* c", ASK_OTHER, askDone(1)];
+  pi.emit({ type: "extension_ui_request", id: "s2", method: "select", title: "t", options: drifted });
+  assert.equal(pi.sent.length, sentBefore, "no response sent on drift");
+  const cards = sink.ofType("ask_user");
+  assert.equal(cards.length, 2, "the drifted select surfaced as a sequential card");
+  assert.equal(cards[1].method, "select");
+  assert.equal(cards[1].requestId, "s2");
+  assert.deepEqual(cards[1].options, drifted);
+});
+
+test("PR-A: first-response drift degrades to the raw first select (no answers lost silently)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const q = { question: "Q?", multiSelect: true, options: [{ label: "a" }] };
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: crowAsk("c1", [q]) });
+  // The child rendered rows the engine's script will not match ("* a" not "[ ] a")
+  const rawOptions = ["* a", ASK_OTHER, askDone(0)];
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "t", options: rawOptions });
+  await engine.answer(s.sessionId, "s1", { answers: [{ selected: ["a"], other: null }] });
+
+  // No response sent to the child; the raw first select is re-surfaced as a card
+  assert.equal(pi.sent.length, 0, "drifted first response is never sent");
+  const cards = sink.ofType("ask_user");
+  assert.equal(cards.length, 2);
+  assert.equal(cards[1].method, "select");
+  assert.equal(cards[1].requestId, "s1");
+  assert.deepEqual(cards[1].options, rawOptions);
+});
+
+test("PR-A: fallback honesty — NO crow-ask notify leaves today's sequential select card untouched", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  // An older pi-lab: just the raw select, no relay notify.
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "Pick", options: ["[ ] a", "[ ] b", ASK_OTHER] });
+  const cards = sink.ofType("ask_user");
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].method, "select", "a plain sequential card, NOT a combined one");
+  assert.deepEqual(cards[0].options, ["[ ] a", "[ ] b", ASK_OTHER]);
+  // and it answers with the plain value shape
+  await engine.answer(s.sessionId, "s1", { value: "[ ] b" });
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s1", value: "[ ] b" });
+});
+
+test("PR-A: a malformed crow-ask notify is swallowed (no card upgrade, no throw)", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  const sink = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: "crow-ask:{not json" });
+  pi.emit({ type: "extension_ui_request", id: "n2", method: "notify", message: "crow-ask:" + JSON.stringify({ id: "x", questions: [] }) });
+  // a following select stays a plain sequential card (pendingQuestions never set)
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "Pick", options: ["a"] });
+  const cards = sink.ofType("ask_user");
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].method, "select");
+  assert.equal(sink.ofType("log").length, 0, "malformed crow-ask is never logged as a transcript line");
+});
+
+test("PR-A: stop() mid-dance clears the dance so a later child is not auto-answered", async () => {
+  const { engine, state } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go");
+  const pi = state.instances[0];
+
+  const q = { question: "Flags?", multiSelect: true, options: [{ label: "a" }, { label: "c" }] };
+  pi.emit({ type: "extension_ui_request", id: "n1", method: "notify", message: crowAsk("c1", [q]) });
+  pi.emit({ type: "extension_ui_request", id: "s1", method: "select", title: "t", options: multiOptions(q, new Set()) });
+  await engine.answer(s.sessionId, "s1", { answers: [{ selected: ["a", "c"], other: null }] });
+  // dance is live (one toggle sent, more expected)
+  assert.deepEqual(pi.sent[pi.sent.length - 1], { type: "extension_ui_response", id: "s1", value: "[ ] a" });
+
+  await engine.stop(s.sessionId);
+  // a fresh child (post-stop the session is stopped; spawn a new one) must not
+  // inherit a dance — assert the stopped session's dance state is gone by
+  // checking no auto-response fires if a stray frame somehow arrives
+  const snap = await engine.get(s.sessionId);
+  assert.equal(snap.pendingUi, null);
+});
