@@ -380,6 +380,9 @@ export function perchHubJs(lang = "en") {
   var TOOL_DONE='${tJs("perch.toolDone", lang)}';
   var TOOL_FAILED='${tJs("perch.toolFailed", lang)}';
   var COMMANDS_HIBERNATING='${tJs("perch.commandsHibernating", lang)}';
+  /* PR-E (item 12): the chat's inline sent-file cards. */
+  var FILE_DOWNLOAD='${tJs("perch.fileDownload", lang)}';
+  var FILE_NOT_SERVABLE='${tJs("perch.fileNotServable", lang)}';
 
   /* Row identity. One bot with eight sessions renders eight rows that read
      "R4 Assistant / awake" and nothing else — measured verbatim in a browser
@@ -1089,6 +1092,7 @@ export function perchHubJs(lang = "en") {
     clearEl(el('perch-transcript')); clearEl(el('perch-ask'));
     clearEl(el('perch-activity-list'));   /* the previous session's log is not this one's */
     toolChips={};                         /* Wave 3: the chip index dies with the transcript */
+    fileSeen={};                          /* PR-E: same seam for the card dedupe */
     resetControls();                        /* the PREVIOUS session's picker must not bleed in */
     var known=rowIndex[sid];
     if(known){ showHeader(known.botId,known.botName); afterHeader(mySid,known.botId); return; }
@@ -1305,6 +1309,14 @@ export function perchHubJs(lang = "en") {
       }
       setTurnInFlight(false);
     });
+    on('file',function(d){
+      if(!d||!d.name) return;
+      if(!histSettled){ histBuf.push(d); return; }   /* round 3 R4 seam applies to cards too */
+      var k=fileKey(d);
+      if(fileSeen[k]) return;                        /* batch replay already drew it */
+      fileSeen[k]=true;
+      renderFileCard(d);
+    });
     on('ask_user',function(d){ renderAsk(d); });
     on('error',function(d){ appendActivity(d.text||'error'); });
     on('plan_state',function(d){
@@ -1436,23 +1448,32 @@ export function perchHubJs(lang = "en") {
     if(!sid||!botId) return;
     clearEl(el('perch-transcript'));
     toolChips={};                    /* the chips just died with the transcript; a stale index would write into detached DOM */
+    fileSeen={};
     histSettled=false; histBuf=[];
     loadHistory(botId,sid);
   }
 
   function loadHistory(botId,sid){
     var mySid=sid;
-    perchApi('GET','/bots/'+encodeURIComponent(botId)+'/sessions/'+encodeURIComponent(sid)+'/transcript')
-      .then(function(r){
-        if(current.sid!==mySid) return;            /* identity guard, as everywhere */
+    /* PR-E: the transcript (messages) and the sent-file card history arrive in
+       ONE join — the file cards flush only after BOTH land, so a slow history
+       fetch can never interleave cards out of order with batch messages. */
+    var histP=perchApi('GET','/interactive/'+encodeURIComponent(sid)+'/files/history')
+      .then(function(h){ return (h.ok&&h.j&&Array.isArray(h.j.items))?h.j.items:[]; });
+    Promise.all([
+      perchApi('GET','/bots/'+encodeURIComponent(botId)+'/sessions/'+encodeURIComponent(sid)+'/transcript'),
+      histP,
+    ]).then(function(pair){
+      var r=pair[0];
+      if(current.sid!==mySid) return;            /* identity guard, as everywhere */
         /* A FAILED FETCH IS NOT AN EMPTY TRANSCRIPT. The old
            \`(r.ok&&r.j&&r.j.events)||[]\` collapsed a 500, a dropped tunnel and
            a logged-out session into the same "No transcript yet." — a
            reassuring sentence about a conversation that is still there. Say
            which happened. */
-        if(!r.ok||!r.j){ appendNote(TRANSCRIPT_FAILED); flushHistBuf([]); return; }
+        if(!r.ok||!r.j){ appendNote(TRANSCRIPT_FAILED); flushHistBuf([], pair[1]); return; }
         var events=r.j.events||[];
-        if(!events.length){ appendNote(NO_TRANSCRIPT); flushHistBuf([]); return; }
+        if(!events.length){ appendNote(NO_TRANSCRIPT); flushHistBuf([], pair[1]); return; }
         var batchTexts=[];
         events.filter(function(e){ return e&&e.type==='message'; }).forEach(function(e){
           var m=e.message||{};
@@ -1464,7 +1485,7 @@ export function perchHubJs(lang = "en") {
           if(String(m.role||'?')!=='user') batchTexts.push(txt);
           appendMessage(String(m.role||'?')==='user'?'user':'bot', String(m.role||'?'), txt, e.html);
         });
-        flushHistBuf(batchTexts);
+        flushHistBuf(batchTexts, pair[1]);
       });
   }
 
@@ -1483,14 +1504,39 @@ export function perchHubJs(lang = "en") {
      not in the batch, and delaying them delays the composer. */
   var histSettled=false;
   var histBuf=[];
+  /* PR-E: name+stored keys of file cards already rendered THIS transcript —
+     dies with the transcript everywhere toolChips does (same seam). */
+  var fileSeen={};
   function renderTextFrame(d){
     appendMessage('bot','bot',d.text,d.html);
     if(d.turnId) renderedTurn=d.turnId; else turnRendered=true;
   }
-  function flushHistBuf(batchTexts){
+  /* PR-E: a card's identity across the live/replay seam. name+stored, because
+     the same original name can be sent twice (the jail stores report.png and
+     report-2.png) and both are DISTINCT cards. String()ed explicitly — an
+     earlier version of this used a bare pipe (x|''), a BITWISE or that
+     collapsed every key to "0|0" and silently dropped the second card of any
+     session. */
+  function fileKey(d){ return String((d&&d.name)||'')+'|'+String((d&&d.stored)||''); }
+  function flushHistBuf(batchTexts, sentFiles){
     histSettled=true;
+    /* PR-E: persisted sent-file cards replay first (they are older context —
+       the live buffer below can only hold TODAY's frames), deduped by
+       name+stored against buffered frames so a file sent between subscribe and
+       this batch lands exactly once. */
+    var files=sentFiles||[];
+    files.forEach(function(it){
+      if(!it||!it.name) return;
+      fileSeen[fileKey(it)]=true;
+      renderFileCard(it);
+    });
     var buf=histBuf; histBuf=[];
     buf.forEach(function(f){
+      if(f.type==='file'){
+        if(fileSeen[fileKey(f)]) return;
+        renderFileCard(f);
+        return;
+      }
       if(f.reply){
         var already=f.turnId?(renderedTurn===f.turnId):turnRendered;
         if(!already&&f.text&&batchTexts.indexOf(f.text)<0) appendMessage('bot','bot',f.text,f.html);
@@ -1631,7 +1677,7 @@ export function perchHubJs(lang = "en") {
     setAttn(false);              /* nor its unanswered-question banner */
     /* Wave 2/3: the new session inherits none of the old one's readings. */
     planState=null; renderPlan();
-    toolChips={}; commandsCache=null; hideCmdMenu();
+    toolChips={}; fileSeen={}; commandsCache=null; hideCmdMenu();
     resetFacts();
   }
 
@@ -2421,6 +2467,48 @@ export function perchHubJs(lang = "en") {
       rec.details.appendChild(pr);
     }
     if(d&&d.toolCallId!=null) delete toolChips[d.toolCallId];
+  }
+
+  /* ---- PR-E (item 12): inline sent-file cards -----------------------------
+     pi-lab's shape: an image renders inline, anything else is a download card
+     with name/caption/size; a file that could not be jail-copied renders
+     name-only with a dim "not servable" note. Servable rows link the EXISTING
+     fd-based workspace route — this adds no new serving path, and that jail's
+     O_NOFOLLOW discipline is what makes each download safe, not this markup.
+     createElement/textContent + encodeURIComponent only: names and captions
+     are child-controlled bytes and never reach a markup sink. Rides live
+     frames AND the /files/history reload batch (deduped by fileSeen). */
+  function renderFileCard(d){
+    var tr=el('perch-transcript'); if(!tr) return;
+    var name=String(d.name||'');
+    var servable=!!d.servable && !!d.stored;
+    // stored is normally a basename; the in-jail case can carry a nested
+    // relative path, so encode SEGMENT-wise (a blanket encodeURIComponent
+    // would turn its '/' into %2F).
+    var segs=String(d.stored).split('/').map(encodeURIComponent).join('/');
+    var url=servable?API+'/interactive/'+encodeURIComponent(current.sid)+'/workspace/'+segs:'';
+    var wrap=document.createElement('div'); wrap.className='entry filecard'+(servable?'':' dim');
+    var isImg=servable && String(d.mime||'').indexOf('image/')===0;
+    if(isImg){
+      var img=document.createElement('img'); img.className='file-img'; img.src=url; img.alt=name;
+      img.loading='lazy';
+      wrap.appendChild(img);
+    }
+    wrap.appendChild(line('file-title',name));
+    if(d.caption) wrap.appendChild(line('file-cap',String(d.caption)));
+    var meta=fmtSize(d.size);
+    if(servable){
+      wrap.appendChild(line('file-meta',meta));
+      var a=document.createElement('a'); a.className='file-dl'; a.href=url;
+      a.setAttribute('download',name);
+      a.textContent=FILE_DOWNLOAD;
+      wrap.appendChild(a);
+    }else{
+      wrap.appendChild(line('file-meta',meta));
+      wrap.appendChild(line('file-note',FILE_NOT_SERVABLE));
+    }
+    tr.appendChild(wrap);
+    tr.scrollTop=tr.scrollHeight;
   }
 
   /* ---- Wave 3: the slash-command menu ------------------------------------

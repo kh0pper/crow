@@ -3483,6 +3483,122 @@ test("W3: a tool call grows a chip that spins, expands, and settles to done/fail
   assert.equal(wrap2.children[0].children[1].textContent, "failed");
 });
 
+// ---------------------------------------------------------------------------
+// PR-E (audit item 12): inline sent-file cards.
+// ---------------------------------------------------------------------------
+
+function fileCards(hub) {
+  return hub.els["perch-transcript"].children.filter((c) => String(c.className).includes("filecard"));
+}
+
+test("E: a servable file frame grows an inline card — image, title, caption, size, download link on the EXISTING workspace route", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("file", {
+    name: "mockup.png", stored: "mockup.png", mime: "image/png", size: 20480,
+    caption: "the landing hero", servable: true,
+  });
+  await new Promise((r) => setTimeout(r, 0));
+
+  const card = fileCards(hub)[0];
+  assert.ok(card, "the card lands in the transcript, where the operator is looking");
+  assert.doesNotMatch(String(card.className), /dim/);
+  const img = card.children[0];
+  assert.equal(img.tagName, "IMG");
+  assert.equal(img.src, "/dashboard/perch-api/interactive/perchlive-aaaaaaaa/workspace/mockup.png",
+    "the fd-based jail route is the ONLY serving path this card knows");
+  assert.equal(card.children[1].textContent, "mockup.png");
+  assert.equal(card.children[2].textContent, "the landing hero");
+  assert.equal(card.children[4].tagName, "A");
+  assert.equal(card.children[4].className, "file-dl");
+  assert.equal(card.children[4].href,
+    "/dashboard/perch-api/interactive/perchlive-aaaaaaaa/workspace/mockup.png");
+});
+
+test("E: a non-image servable file renders no inline preview, only the download card", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("file", {
+    name: "report.pdf", stored: "report.pdf", mime: "application/pdf", size: 1024, caption: "", servable: true,
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  const card = fileCards(hub)[0];
+  assert.equal(card.children[0].tagName, "DIV", "a PDF never becomes an <img>");
+  assert.equal(card.children[0].className, "file-title");
+  assert.equal(card.children[0].textContent, "report.pdf");
+  assert.equal(card.children.filter((c) => c.className === "file-cap").length, 0,
+    "an empty caption costs no row");
+  assert.equal(card.children.at(-1).className, "file-dl");
+});
+
+test("E: a NOT-servable file renders dim, name-only, with the honest note and no dead link", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("file", {
+    name: "secrets.dump", stored: null, mime: "application/octet-stream", size: 7, caption: "", servable: false,
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  const card = fileCards(hub)[0];
+  assert.match(String(card.className), /dim/);
+  assert.equal(card.children[0].textContent, "secrets.dump");
+  assert.equal(card.children.filter((c) => c.tagName === "A").length, 0,
+    "a path the jail cannot serve must never render as a link");
+  assert.match(card.children.at(-1).textContent, /cannot serve/i);
+});
+
+test("E: persisted cards replay on open, oldest first, and a live frame the batch already drew never duplicates", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({
+      "/files/history": () => makeResponse(200, { items: [
+        { name: "one.png", stored: "one.png", mime: "image/png", size: 10, caption: "first", servable: true },
+        { name: "two.txt", stored: null, mime: "text/plain", size: 3, caption: "", servable: false },
+      ] }),
+    }),
+  });
+  await openChatSession(hub);
+  await new Promise((r) => setTimeout(r, 10));
+  const cards = fileCards(hub);
+  assert.equal(cards.length, 2, "both persisted cards replay");
+  assert.equal(cards[0].children[1].textContent, "one.png");
+  assert.match(String(cards[1].className), /dim/, "the persisted refusal replays as the same dim card");
+
+  // The same file arriving live afterwards (a resend keyed identically) is a
+  // duplicate of what the batch drew — fileSeen holds it.
+  FakeEventSource.instances[0]._serverFrame("file", {
+    name: "one.png", stored: "one.png", mime: "image/png", size: 10, caption: "first", servable: true,
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(fileCards(hub).length, 2, "the subscribe/fetch seam dedupes cards as it does text");
+});
+
+test("E: two DIFFERENT live files render two cards (the key must not collapse them)", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const es = FakeEventSource.instances[0];
+  es._serverFrame("file", { name: "shot.png", stored: "shot.png", mime: "image/png", size: 1, caption: "", servable: true });
+  es._serverFrame("file", { name: "shot.png", stored: "shot-2.png", mime: "image/png", size: 1, caption: "", servable: true });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(fileCards(hub).length, 2,
+    "same original name, different jail slots = two cards (a collapsed key drops one)");
+  assert.match(fileCards(hub)[1].children[0].src, /\/workspace\/shot-2\.png$/);
+});
+
+test("E: a session switch drops the previous session's cards (and their dedupe keys)", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("file", {
+    name: "a.png", stored: "a.png", mime: "image/png", size: 1, caption: "", servable: true,
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(fileCards(hub).length, 1);
+
+  hub.location.hash = "";
+  await new Promise((r) => setTimeout(r, 0));
+  hub.location.hash = "perchlive-aaaaaaaa";
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(fileCards(hub).length, 0, "the card index dies with the transcript, as toolChips' does");
+});
+
 test("W3: a tool END with no seen start mints nothing — the rail already has the line", async () => {
   const hub = await mountHub({ fetchImpl: stdFetch() });
   await openChatSession(hub);
