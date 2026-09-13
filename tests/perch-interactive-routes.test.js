@@ -215,7 +215,7 @@ beforeEach(() => {
   ];
   engineCalls = {
     spawn: [], message: [], steer: [], answer: [], abort: [], stop: [], get: [], subscribe: [],
-    checkCardFree: [], attachCard: [], control: [], cycle: [], options: [], rename: [],
+    checkCardFree: [], attachCard: [], control: [], cycle: [], options: [], rename: [], setArchived: [],
   };
   engineImpl = {
     async spawn({ botId, cardId, cwd }) {
@@ -243,6 +243,10 @@ beforeEach(() => {
     async rename(sid, label) {
       engineCalls.rename.push({ sid, label });
       return { label: label.trim() || null };
+    },
+    async setArchived(sid, archived) {
+      engineCalls.setArchived.push({ sid, archived });
+      return { ok: true, archived: !!archived };
     },
     async control(sid, opts) {
       engineCalls.control.push({ sid, opts });
@@ -935,6 +939,30 @@ test("POST /interactive/:sid/rename maps the engine's refusals", async () => {
   r = await postJson("/interactive/perchlive-abc/rename", { label: "x" });
   assert.equal(r.status, 409);
   assert.equal(r.body.error, "not_persisted");
+});
+
+// ---------------------------------------------------------------------------
+// POST /interactive/:sid/archive + /unarchive (PR-C, audit item 14)
+// ---------------------------------------------------------------------------
+
+test("POST /interactive/:sid/archive forwards setArchived(sid,true); /unarchive forwards false", async () => {
+  const a = await postJson("/interactive/perchlive-abc/archive", {});
+  assert.equal(a.status, 200);
+  assert.deepEqual(a.body, { ok: true, archived: true });
+  const u = await postJson("/interactive/perchlive-abc/unarchive", {});
+  assert.equal(u.status, 200);
+  assert.deepEqual(u.body, { ok: true, archived: false });
+  assert.deepEqual(engineCalls.setArchived, [
+    { sid: "perchlive-abc", archived: true },
+    { sid: "perchlive-abc", archived: false },
+  ]);
+});
+
+test("POST /interactive/:sid/archive maps no_such_session to 404", async () => {
+  engineImpl.setArchived = async () => { throw engineErr("no_such_session"); };
+  const r = await postJson("/interactive/ghost/archive", {});
+  assert.equal(r.status, 404);
+  assert.equal(r.body.error, "no_such_session");
 });
 
 test("GET /bots/:id/models awaits the catalogue, so a cold provider cache is not served as an empty list", async () => {

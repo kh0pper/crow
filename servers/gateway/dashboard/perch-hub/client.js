@@ -339,6 +339,13 @@ export function perchHubJs(lang = "en") {
   var RENAME_LABEL='${tJs("perch.rename", lang)}';
   var RENAME_PROMPT='${tJs("perch.renamePrompt", lang)}';
   var RENAME_FAILED='${tJs("perch.renameFailed", lang)}';
+  /* PR-C (audit item 14): session archive — a roster action, never an engine
+     one (an archived live child keeps running; it just leaves the list). */
+  var ARCHIVE_LABEL='${tJs("perch.archive", lang)}';
+  var ARCHIVE_FAILED='${tJs("perch.archiveFailed", lang)}';
+  var UNARCHIVE_LABEL='${tJs("perch.unarchive", lang)}';
+  var UNARCHIVE_FAILED='${tJs("perch.unarchiveFailed", lang)}';
+  var ARCHIVED_LABEL='${tJs("perch.archived", lang)}';
   var ROOST_UNREACHABLE='${tJs("perch.roostUnreachable", lang)}';
   /* Open-anywhere C2: the directory picker's own strings. ASK_CANCEL
      ("Cancel") doubles as the modal's visible Cancel — dismiss must never
@@ -419,10 +426,14 @@ export function perchHubJs(lang = "en") {
 
   var rowIndex={};                    /* sessionId -> row, for a warm openSession */
 
-  function renderList(rows){
+  function renderList(rows,archived){
     var body=el('perch-list-body'); if(!body) return;
     clearEl(body); rowIndex={};
-    if(!rows.length){ body.appendChild(line('empty',NO_SESSIONS)); flushPendingNote(); return; }
+    var arch=Array.isArray(archived)?archived:[];
+    /* No live rows: say so, UNLESS archived sessions exist — then the
+       Archived affordance below is the operator's way back in, and a flat
+       "No sessions" would hide it. */
+    if(!rows.length&&!arch.length){ body.appendChild(line('empty',NO_SESSIONS)); flushPendingNote(); return; }
     rows.forEach(function(r){
       var row=document.createElement('div'); row.className='roost-row';
       row.appendChild(line('roost-dot',''));
@@ -451,6 +462,13 @@ export function perchHubJs(lang = "en") {
         n.type='button'; n.className='roost-rename'; n.textContent=RENAME_LABEL;
         n.onclick=function(){ renameSession(r.sessionId,r.label||''); };
         row.appendChild(n);
+        /* PR-C: archive hides the session from the live list without stopping
+           it (a live child keeps running). Reversible via the Archived
+           affordance, so no confirm — same posture as rename. */
+        var ar=document.createElement('button');
+        ar.type='button'; ar.className='roost-archive'; ar.textContent=ARCHIVE_LABEL;
+        ar.onclick=function(){ archiveSession(r.sessionId); };
+        row.appendChild(ar);
         var x=document.createElement('button');
         x.type='button'; x.className='roost-close'; x.textContent=CLOSE_LABEL;
         x.onclick=function(){ stopSession(r.sessionId); };
@@ -459,7 +477,57 @@ export function perchHubJs(lang = "en") {
       if(r.sessionId) rowIndex[r.sessionId]=r;
       body.appendChild(row);
     });
+    renderArchived(body,arch);
     flushPendingNote();               /* a parked note must survive this render */
+  }
+
+  /* PR-C (audit item 14): the "Archived" affordance. A collapsed toggle whose
+     open/closed state persists across the 10s polls (archivedOpen), revealing
+     archived sessions each with an Unarchive button. Built with closures — the
+     toggle references its OWN container directly, so no runtime-id lookups and
+     nothing new for the vm harness's IDS registry to know. */
+  var archivedOpen=false;
+  function renderArchived(body,archived){
+    if(!body||!archived||!archived.length) return;
+    var head=document.createElement('button');
+    head.type='button'; head.className='archived-toggle';
+    head.textContent=ARCHIVED_LABEL+' ('+archived.length+')';
+    var cont=document.createElement('div'); cont.className='archived-list'; cont.hidden=!archivedOpen;
+    archived.forEach(function(a){
+      if(!a||!a.sessionId) return;
+      var row=document.createElement('div'); row.className='roost-row archived-row';
+      var main=document.createElement('div'); main.className='roost-main';
+      main.appendChild(line('roost-cwd',a.botName||a.botId||''));
+      if(a.label) main.appendChild(line('roost-name',a.label));
+      main.appendChild(line('roost-when',a.sessionId));
+      row.appendChild(main);
+      var u=document.createElement('button');
+      u.type='button'; u.className='roost-rename'; u.textContent=UNARCHIVE_LABEL;
+      u.onclick=function(){ unarchiveSession(a.sessionId); };
+      row.appendChild(u);
+      cont.appendChild(row);
+    });
+    head.onclick=function(){ archivedOpen=!archivedOpen; cont.hidden=!archivedOpen; };
+    body.appendChild(head);
+    body.appendChild(cont);
+  }
+  /* Archive/unarchive are LIST actions: on success reload the roster (the
+     session moves between the live list and the Archived section). They write
+     only list-level surfaces (never a session pane), so they need no mySid
+     identity guard. Failure parks a list note, matching rename/stop. */
+  function archiveSession(sid){
+    if(!sid) return;
+    perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/archive',{}).then(function(r){
+      if(!r.ok){ showListNote(ARCHIVE_FAILED); return; }
+      loadList();
+    });
+  }
+  function unarchiveSession(sid){
+    if(!sid) return;
+    perchApi('POST','/interactive/'+encodeURIComponent(sid)+'/unarchive',{}).then(function(r){
+      if(!r.ok){ showListNote(UNARCHIVE_FAILED); return; }
+      loadList();
+    });
   }
 
   /* The bots the launcher can spawn against, refreshed by every loadList().
@@ -888,7 +956,7 @@ export function perchHubJs(lang = "en") {
       /* One payload, two renders: the rows AND the launcher's bot roster.
          Deriving the launcher from the same /roost response is what keeps
          this to a single request per poll. */
-      if(r.ok&&r.j){ renderLauncher(spawnableBots(r.j)); renderList(listRows(r.j)); return; }
+      if(r.ok&&r.j){ renderLauncher(spawnableBots(r.j)); renderList(listRows(r.j),(r.j.archived||[])); return; }
       /* A failed /roost is NOT an empty roost, and the old else branch said
          both of the wrong things at once: it rendered "No live sessions." (a
          lie) and skipped renderLauncher entirely, leaving #perch-new greyed

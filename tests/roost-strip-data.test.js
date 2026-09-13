@@ -59,6 +59,10 @@ const ENGINE_SESSIONS = [
   { sessionId: "asker-a", botId: "asker", state: "awake", pendingUi: { kind: "ask" }, cardId: 11 },
   { sessionId: "asker-b", botId: "asker", state: "hibernating", pendingUi: null, cardId: null },
   { sessionId: "sleepy-1", botId: "sleepy", state: "hibernating", pendingUi: null, cardId: null },
+  // PR-C (audit item 14): an AWAKE session that is archived on its row — the
+  // case that proves roost filters archived out of the live bird even when the
+  // engine still holds it awake (archiving never touches the engine).
+  { sessionId: "arch-1", botId: "arch", state: "awake", pendingUi: null, cardId: null },
 ];
 // chatty-1 carries its label on the ENGINE snapshot, which must win.
 // (asker-b gets the mirror case — a label on its ROW only — seeded in
@@ -79,6 +83,7 @@ before(async () => {
   seedBot("sleepy", PERCH_BOT, { name: "Sleepy" });
   seedBot("empty", PERCH_BOT, { name: "Empty" });
   seedBot("quiet", GMAIL_BOT, { name: "Quiet" });
+  seedBot("arch", PERCH_BOT, { name: "Arch" });
 
   const c = raw();
   const insSession = c.prepare(
@@ -95,6 +100,10 @@ before(async () => {
   // exactly as it does for cardId.
   c.prepare("UPDATE bot_sessions SET label=? WHERE gateway_thread_id=?").run("named on the row only", "asker-b");
   insSession.run("sleepy", "perch", "sleepy-1", "perch-live", "waiting-user", null, "run");
+  // arch-1: awake in the engine fixture above, but archived on its row.
+  insSession.run("arch", "perch", "arch-1", "perch-live", "active", null, "run");
+  c.prepare("UPDATE bot_sessions SET archived_at=?, label=? WHERE gateway_thread_id=?")
+    .run("2026-09-13T12:00:00.000Z", "put away", "arch-1");
 
   const insJob = c.prepare(
     "INSERT INTO bot_jobs (job_id, bot_id, goal, card_id, card_action, status) VALUES (?,?,?,?,?,?)"
@@ -147,7 +156,7 @@ function byId(birds) {
 test("GET /roost returns one bird per bot def, with the spec §3.2 priority fold", async () => {
   const { status, body } = await getJson(base, "/roost");
   assert.equal(status, 200);
-  assert.deepEqual(Object.keys(byId(body.birds)).sort(), ["asker", "chatty", "empty", "quiet", "sleepy"]);
+  assert.deepEqual(Object.keys(byId(body.birds)).sort(), ["arch", "asker", "chatty", "empty", "quiet", "sleepy"]);
 
   const b = byId(body.birds);
   assert.equal(b.chatty.state, "working", "an awake session (ignoring the stopped one) folds to working");
@@ -220,4 +229,38 @@ test("GET /roost never conjures a live engine into existence — the production 
   const b = byId(body.birds);
   assert.equal(b.chatty.state, "idle");
   assert.deepEqual(b.chatty.sessions, []);
+});
+
+// ---------------------------------------------------------------------------
+// PR-C (audit item 14): archived sessions leave the live list, ride `archived`
+// ---------------------------------------------------------------------------
+
+test("GET /roost excludes an archived session from its live bird and surfaces it in `archived`", async () => {
+  const { status, body } = await getJson(base, "/roost");
+  assert.equal(status, 200);
+  const b = byId(body.birds);
+  // arch-1 is AWAKE in the engine fixture, but archived on its row — it must
+  // NOT appear as a live session (archiving never touches the engine, so the
+  // child is still awake; roost just hides it from the default list).
+  assert.deepEqual(b.arch.sessions, [], "the archived awake session is filtered from the live bird");
+  assert.ok(Array.isArray(body.archived), "roost carries a top-level archived list");
+  const a = body.archived.find((x) => x.sessionId === "arch-1");
+  assert.ok(a, "arch-1 rides the archived list");
+  assert.equal(a.botId, "arch");
+  assert.equal(a.botName, "Arch");
+  assert.equal(a.label, "put away");
+  assert.equal(a.state, "awake", "its live state is reported honestly");
+  assert.equal(a.archivedAt, "2026-09-13T12:00:00.000Z");
+  // and it is NOT double-listed as a live session anywhere
+  for (const bird of body.birds) {
+    assert.ok(!bird.sessions.some((s) => s.sessionId === "arch-1"), `${bird.id} must not list arch-1 as live`);
+  }
+});
+
+test("GET /roost's archived list is DB-derived — present even when the engine is null", async () => {
+  const { status, body } = await getJson(noEngineBase, "/roost");
+  assert.equal(status, 200);
+  const a = body.archived.find((x) => x.sessionId === "arch-1");
+  assert.ok(a, "archived is read from bot_sessions, independent of the engine");
+  assert.equal(a.botId, "arch");
 });

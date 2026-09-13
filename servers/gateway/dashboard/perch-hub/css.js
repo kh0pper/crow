@@ -131,6 +131,16 @@ border-radius:10px;background:var(--sky);color:var(--ink)}
 #perch-hub-root .roost-row button{padding:8px 12px;font-size:13px;min-height:44px}
 /* Close is destructive and must not compete with Open for a thumb. */
 #perch-hub-root .roost-close{color:var(--dim)}
+/* PR-C (audit item 14): the archive affordance. Archive is reversible (not
+   destructive), so it sits quiet beside Rename. The Archived section is a
+   full-width quiet toggle above a dimmed, collapsed list. */
+#perch-hub-root .roost-archive{color:var(--dim)}
+#perch-hub-root .archived-toggle{width:100%;text-align:left;color:var(--dim);font-size:12.5px;
+text-transform:uppercase;letter-spacing:.06em;background:none;border:0;border-top:1px solid var(--line);
+border-radius:0;padding:12px 16px;min-height:44px}
+#perch-hub-root .archived-list{display:grid}
+#perch-hub-root .archived-list[hidden]{display:none}
+#perch-hub-root .archived-row{opacity:.72;background:var(--sky)}
 #perch-hub-root .empty{color:var(--dim);padding:16px;font-size:14px}
 /* --- chat transcript + ask cards, ported from the deleted bundle's own
    equivalents (42f39160^:bundles/perch-hub/payload/hub/bots-page.mjs
