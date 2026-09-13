@@ -179,7 +179,7 @@ test("every string constant the script references is bound", async () => {
   // missing constant — it surfaces as a ReferenceError on the error path, which
   // is the path nobody exercises by hand.
   for (const name of ["SESSION_GONE", "NO_TRANSCRIPT", "RECONNECTING",
-                      "RECONNECT_FAILED", "ASK_STALE", "STEER_LABEL", "SEND_LABEL"]) {
+                      "ASK_STALE", "STEER_LABEL", "SEND_LABEL"]) {
     if (!js.includes(name)) continue;               // not every task binds all of them
     assert.ok(new RegExp("var\\s+" + name + "\\s*=").test(js), name + " is used but never bound");
   }
@@ -244,12 +244,71 @@ async function fnSrc(name) {
   return src.slice(start, end + 1);
 }
 
-test("the reconnect cap is actually reachable", async () => {
+test("the reconnect backoff grows exponentially, caps at 30s, and the cancel/reset split survives", async () => {
   const js = (await import("../servers/gateway/dashboard/perch-hub/client.js")).perchHubJs("en");
   assert.ok(!(await fnSrc("cancelReconnect")).includes("retries=0"),
     "cancelling the timer must not reset the counter — closeStream() runs before every schedule");
   assert.ok(js.includes("function resetBackoff"), "the counter resets on a stream that opened, not on cancel");
   assert.ok(/scheduleReconnect\(\)/.test(js), "no argument — the arity mismatch that made this dead code");
+  // The growth itself, extracted with a shadowed `retries` (the harness's
+  // extra-parameter idiom): 2s doubling, hard cap 30s. The 2026-09-12 phone
+  // finding: a FIXED 2s × 5 budget died inside one screen-doze cycle; the
+  // cap-at-30s keeps a long outage at 2 probes/min instead of 30.
+  const seq = [];
+  for (const n of [1, 2, 3, 4, 5, 6, 10]) {
+    const f = await extract("reconnectDelayMs", `var retries=${n};`);
+    seq.push(f());
+  }
+  assert.deepEqual(seq, [2000, 4000, 8000, 16000, 30000, 30000, 30000]);
+  // The cap no longer exists as a give-up: no retry budget may declare death.
+  assert.ok(!/retries\s*>=\s*\d/.test(js), "no strikes-out cap — dead sessions are the probe's job, not the budget's");
+});
+
+test("a failing reconnect schedules the NEXT slot at the doubled delay, and one rail note per streak", async () => {
+  const hub = await mountHub({
+    fetchImpl: stdFetch({ "/options": () => Promise.reject(new Error("network down")) }),
+  });
+  await openChatSession(hub);
+  assert.equal(FakeEventSource.instances.length, 1);
+
+  FakeEventSource.instances[0]._nativeError();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));   // probe rejection -> schedule
+  assert.deepEqual([...hub.timerDelays.values()], [2000], "first retry at 2s");
+  let notes = hub.els["perch-activity-list"].children.map((c) => c.textContent);
+  assert.equal(notes.filter((x) => x.includes("Reconnecting…")).length, 1);
+
+  // Fire the retry the way the real clock would: the entry LEAVES both maps
+  // when it fires (the harness only deletes on clearTimeout), then runs.
+  for (const [id, fn] of [...hub.timers.entries()]) {
+    hub.timers.delete(id); hub.timerDelays.delete(id); fn();
+  }
+  assert.equal(FakeEventSource.instances.length, 2, "the retry really re-opened a stream");
+  FakeEventSource.instances[1]._nativeError();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([...hub.timerDelays.values()], [4000], "second slot doubles");
+  notes = hub.els["perch-activity-list"].children.map((c) => c.textContent);
+  assert.equal(notes.filter((x) => x.includes("Reconnecting…")).length, 1,
+    "still ONE rail note for the streak — a note per slot would be noise");
+
+  // Unlock the phone: the visibility handler retries NOW and clears the slot.
+  hub.doc.visibilityState = "visible";
+  hub.doc._dispatch("visibilitychange", {});
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(FakeEventSource.instances.length, 3, "re-opens immediately, not at the next slot");
+  assert.equal(hub.timers.size, 0, "the pending backoff slot is cancelled, not stacked");
+});
+
+test("a live stream is left alone by the visibility handler", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  assert.equal(FakeEventSource.instances.length, 1);
+  hub.doc.visibilityState = "visible";
+  hub.doc._dispatch("visibilitychange", {});
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(FakeEventSource.instances.length, 1,
+    "a stream that is still held must not be re-opened by an unlock — that would double-subscribe");
 });
 
 test("a model option shows its human name and says when it is not serving", async () => {
@@ -601,6 +660,11 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
   // handle past the end of every test that mounts this harness.
   let timerSeq = 1;
   const timers = new Map();
+  /* Parallel record of each pending timer's DELAY (id → ms). The reconnect
+     backoff test needs to see the 2s→4s→…→30s growth, and the timers Map
+     deliberately keeps storing bare fns — a dozen existing call sites fire
+     `for (const fn of hub.timers.values()) fn()`. */
+  const timerDelays = new Map();
   // Every confirm() the script asks is recorded with the exact prompt text, so
   // a test can prove BOTH that the gate was consulted and what it said.
   // Default: the operator cancels. A stop that fires anyway under this default
@@ -629,8 +693,8 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
       fetchCalls.push({ method, path, opts });
       return Promise.resolve(fetchFn(method, path, opts));
     },
-    setTimeout(fn) { const id = timerSeq++; timers.set(id, fn); return id; },
-    clearTimeout(id) { timers.delete(id); },
+    setTimeout(fn, delay) { const id = timerSeq++; timers.set(id, fn); timerDelays.set(id, delay == null ? undefined : delay); return id; },
+    clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
     setInterval(fn) { const id = timerSeq++; timers.set(id, fn); return id; },
     clearInterval(id) { timers.delete(id); },
     FileReader: class {
@@ -650,7 +714,7 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
   // fetchCalls or the DOM it produced.
   await new Promise((r) => setTimeout(r, 0));
 
-  return { els, doc, win, location, fetchCalls, sandbox, timers, confirms, prompts, history, mq };
+  return { els, doc, win, location, fetchCalls, sandbox, timers, timerDelays, confirms, prompts, history, mq };
 }
 
 /** Opens a chat session the same way a real click does: seed a /roost
