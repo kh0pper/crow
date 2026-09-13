@@ -302,6 +302,67 @@ font-family:"JetBrains Mono",ui-monospace,monospace}
 #perch-activity-list{display:grid;gap:6px;padding:12px 0;align-content:start}
 #perch-hub-root .activity-row{color:var(--dim);font-size:12.5px;word-break:break-word;
 font-family:"JetBrains Mono",ui-monospace,monospace}
+/* --- Wave 2: Session-tab facts + plan progress -------------------------- */
+#perch-hub-root .facts{margin:6px 0 10px}
+#perch-hub-root .facts .kv{display:flex;justify-content:space-between;gap:12px;padding:6px 0;
+border-bottom:1px solid var(--line);font-size:13.5px}
+#perch-hub-root .facts .kv:last-child{border-bottom:0}
+#perch-hub-root .facts .k{color:var(--dim);flex-shrink:0}
+#perch-hub-root .facts .v{font:12.5px "JetBrains Mono",ui-monospace,monospace;text-align:right;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#perch-hub-root .ctxbar{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin:2px 0 6px}
+#perch-ctxbar-fill,#perch-planbar-fill{height:100%;background:var(--teal);width:0%;transition:width .4s}
+/* One rule for every Wave-2/3 panel that ships hidden: [hidden] must outrank
+   each panel's own display rule — attribute on class/id beats either alone. */
+#perch-hub-root .ctxbar[hidden],#perch-hub-root .plan-card[hidden],
+#perch-planbar[hidden],#perch-cmdmenu[hidden],#perch-hub-root .tool-details[hidden]{display:none}
+#perch-planbar{height:3px;background:var(--line);border-radius:2px;overflow:hidden;margin:8px 0 0;flex-shrink:0}
+#perch-hub-root .plan-card{border:1px solid var(--line);border-radius:10px;background:var(--sky);
+padding:10px 12px;margin:6px 0 10px}
+#perch-hub-root .plan-head{font:11px/1 "JetBrains Mono",ui-monospace,monospace;text-transform:uppercase;
+letter-spacing:.06em;color:var(--dim);margin-bottom:8px}
+#perch-hub-root .plan-step{display:flex;gap:8px;padding:4px 0;font-size:13.5px;align-items:baseline}
+#perch-hub-root .plan-step .sbox{font-family:"JetBrains Mono",ui-monospace,monospace;flex-shrink:0;color:var(--dim)}
+#perch-hub-root .plan-step .stxt{word-break:break-word}
+#perch-hub-root .plan-step.done{color:var(--dim)}
+#perch-hub-root .plan-step.done .stxt{text-decoration:line-through}
+#perch-hub-root .plan-step.done .sbox{color:var(--alive)}
+#perch-hub-root .plan-step.cur{color:var(--teal);font-weight:600}
+#perch-hub-root .plan-step.cur .sbox{color:var(--teal)}
+/* --- Wave 3: inline tool chips + the slash menu --------------------------
+   Chips are pi-lab's shape: a pill with a spinner while running, tap to
+   expand args/result. The details <pre>s are textContent-only (tool args
+   and results are child-controlled data) and cap at 240px scrolling inside
+   themselves — a 2000-char result must not become a second transcript. */
+#perch-hub-root .toolwrap{align-self:flex-start;max-width:90%;min-width:0}
+#perch-hub-root .tool-chip{display:inline-flex;align-items:center;gap:7px;background:var(--sky);
+border:1px solid var(--line);border-radius:999px;padding:5px 12px;min-height:32px;max-width:100%;
+font:12px "JetBrains Mono",ui-monospace,monospace;color:var(--dim);cursor:pointer;text-align:left}
+#perch-hub-root .tool-chip .tn{color:var(--teal);font-weight:600;word-break:break-all}
+#perch-hub-root .tool-chip.err{border-color:var(--attn)}
+#perch-hub-root .tool-chip.err .tn{color:var(--attn)}
+#perch-hub-root .tool-chip .spin{width:10px;height:10px;border:2px solid var(--line);
+border-top-color:var(--teal);border-radius:50%;animation:perch-spin .8s linear infinite;flex-shrink:0}
+#perch-hub-root .tool-details{background:var(--card);border:1px solid var(--line);border-radius:10px;
+margin-top:5px;padding:8px 10px;font-size:12px}
+#perch-hub-root .tool-details .td-h{font:600 10px "JetBrains Mono",ui-monospace,monospace;
+text-transform:uppercase;letter-spacing:.07em;color:var(--dim);margin:6px 0 3px}
+#perch-hub-root .tool-details .td-h:first-child{margin-top:0}
+#perch-hub-root .tool-details pre{background:var(--sky);padding:7px 9px;border-radius:6px;
+overflow-x:auto;overflow-y:auto;max-height:240px;margin:0;white-space:pre-wrap;word-break:break-word;
+font:11px/1.5 "JetBrains Mono",ui-monospace,monospace}
+/* The menu anchors to #perch-composer (position:sticky = its containing
+   block) and grows UPWARD — bottom:100% — so it can never cover Send. */
+#perch-cmdmenu{position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--card);
+border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.18);
+max-height:40vh;overflow-y:auto;z-index:20}
+#perch-hub-root #perch-cmdmenu button{display:block;width:100%;text-align:left;background:none;
+border:0;border-bottom:1px solid var(--line);border-radius:0;padding:10px 14px;color:var(--ink);
+font-size:13.5px;cursor:pointer;min-height:44px}
+#perch-cmdmenu button:last-child{border-bottom:0}
+#perch-cmdmenu .cmd-name{font-family:"JetBrains Mono",ui-monospace,monospace;color:var(--teal);font-weight:600}
+#perch-cmdmenu .cmd-desc{color:var(--dim);font-size:12px;display:block;margin-top:1px}
+#perch-cmdmenu .cmd-empty{padding:10px 14px;color:var(--dim);font-size:13px}
 /* --- open-anywhere C2: the directory-picker modal ---------------------
    Built client-side (client.js buildBrowseModal) and appended INSIDE
    #perch-hub-root, so every class rule here stays scoped the way the

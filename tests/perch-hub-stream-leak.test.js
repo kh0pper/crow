@@ -461,3 +461,59 @@ test("the working strip is live in the real DOM: shown by a turn-start frame, hi
       "the turn ending hides it");
   } finally { await s.close(); }
 });
+
+// ---------------------------------------------------------------------------
+// Wave 2/3 in the real browser: the frames the engine emits drive the facts
+// card, the plan surfaces, and an inline tool chip that settles to done —
+// against the real DOM, not the vm's flat map.
+// ---------------------------------------------------------------------------
+
+test("W2/W3 live: facts, plan bar, and a tool chip that spins then settles", async (t) => {
+  if (!available) return t.skip("no CDP endpoint at " + CDP);
+  const s = await session();
+  try {
+    await s.open();
+    broadcast("state", { state: "awake", turnInFlight: false,
+      contextUsage: { tokens: 131072, contextWindow: 262144, percent: 50 },
+      uptimeSeconds: 90, memoryMB: 512, toolCount: 14, cwd: "/tmp/x" });
+    broadcast("plan_state", { state: { enabled: true, executing: true, todosDone: 1, todosTotal: 2,
+      todos: [ { step: 1, text: "one", completed: true }, { step: 2, text: "two", completed: false } ] } });
+    broadcast("tool", { phase: "start", name: "bash", toolCallId: "tc-live", argsText: '{"command":"ls"}' });
+    await sleep(300);
+    const mid = await s.json(`JSON.stringify({
+      ctx: document.getElementById('perch-fact-context').textContent,
+      bar: document.getElementById('perch-ctxbar-fill').style.width,
+      uptime: document.getElementById('perch-fact-uptime').textContent,
+      planbar: !document.getElementById('perch-planbar').hidden,
+      planfill: document.getElementById('perch-planbar-fill').style.width,
+      steps: document.querySelectorAll('#perch-plan-steps .plan-step').length,
+      chipSpin: !!document.querySelector('#perch-transcript .tool-chip .spin'),
+      chipName: (document.querySelector('#perch-transcript .tool-chip .tn')||{}).textContent,
+      spinAnim: getComputedStyle(document.querySelector('#perch-transcript .tool-chip .spin')).animationName })`);
+    assert.equal(mid.ctx, "50% \u00b7 131k/262k");
+    assert.equal(mid.bar, "50%");
+    assert.equal(mid.uptime, "1m", "minute granularity under an hour — pi-lab's own idiom");
+    assert.equal(mid.planbar, true);
+    assert.equal(mid.planfill, "50%");
+    assert.equal(mid.steps, 2);
+    assert.equal(mid.chipSpin, true, "the chip spins while the tool runs");
+    assert.equal(mid.chipName, "bash");
+    assert.equal(mid.spinAnim, "perch-spin");
+
+    broadcast("tool", { phase: "end", name: "bash", toolCallId: "tc-live", resultText: "total 8", isError: false });
+    await sleep(200);
+    const done = await s.json(`(function(){
+      var chip=document.querySelector('#perch-transcript .tool-chip');
+      chip.click();                                   /* expand */
+      var d=chip.parentElement.querySelector('.tool-details');
+      return JSON.stringify({ spin: !!chip.querySelector('.spin'),
+        status: chip.lastElementChild.textContent,
+        open: !d.hidden,
+        pres: Array.from(d.querySelectorAll('pre')).map(function(p){return p.textContent;}) });
+    })()`);
+    assert.equal(done.spin, false, "the spinner is removed when the call ends");
+    assert.equal(done.status, "done");
+    assert.equal(done.open, true, "and a tap expands args + result");
+    assert.deepEqual(done.pres, ['{"command":"ls"}', "total 8"]);
+  } finally { await s.close(); }
+});
