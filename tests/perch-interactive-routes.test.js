@@ -1973,6 +1973,52 @@ test("files/list carries the download route's own 404/409 shapes", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// PR-E (audit item 12) — GET /interactive/:sid/files/history, the reload rail
+// for the chat's inline sent-file cards.
+// ---------------------------------------------------------------------------
+
+function seedSentRow({ bot = "botty", thread = "perchlive-11111111", name, stored, mime = "image/png", size = 3, caption = "", servable = 1 }) {
+  const c = raw();
+  c.prepare("INSERT INTO perch_session_files (bot_id, thread_id, name, stored, mime, size, caption, servable) VALUES (?,?,?,?,?,?,?,?)")
+    .run(bot, thread, name, stored, mime, size, caption, servable);
+  c.close();
+}
+
+test("files/history replays cards in order, and a servable row whose file vanished drops to servable:false", async () => {
+  const outputsDir = mkdtempSync(join(tmpdir(), "perch-hist-"));
+  writeFileSync(join(outputsDir, "live.png"), "PNGBYTES");
+  seedSentRow({ name: "live.png", stored: "live.png", caption: "still here" });
+  seedSentRow({ name: "gone.png", stored: "gone.png" });                       // servable=1, file absent
+  seedSentRow({ name: "never.png", stored: null, servable: 0 });                // refused at send time
+  engineImpl.get = async (sid) => ({ sessionId: sid, botId: "botty", uploadsDir: null, outputsDir });
+
+  const { status, body } = await getJson("/interactive/perchlive-11111111/files/history");
+  assert.equal(status, 200);
+  assert.deepEqual(body.items.map((i) => i.name), ["live.png", "gone.png", "never.png"], "id ASC = send order");
+  assert.equal(body.items[0].servable, true);
+  assert.equal(body.items[0].caption, "still here");
+  assert.equal(body.items[1].servable, false, "a dead link is worse than a dim name");
+  assert.equal(body.items[2].servable, false);
+});
+
+test("files/history is scoped to (bot_id, thread_id) — another bot's cards on a colliding thread id never leak", async () => {
+  seedSentRow({ bot: "other", thread: "perchlive-11111111", name: "priv.png", stored: null, servable: 0 });
+  engineImpl.get = async (sid) => ({ sessionId: sid, botId: "botty", uploadsDir: null, outputsDir: null });
+  const { status, body } = await getJson("/interactive/perchlive-11111111/files/history");
+  assert.equal(status, 200);
+  // (No per-test DB wipe in this harness — the assertion is the LEAK, not emptiness.)
+  assert.equal(body.items.filter((i) => i.name === "priv.png").length, 0,
+    "the bot_id filter is load-bearing, not decorative");
+});
+
+test("files/history carries the same 404 shape as files/list for an unknown session", async () => {
+  engineImpl.get = async () => null;
+  const { status, body } = await getJson("/interactive/perchlive-dead0000/files/history");
+  assert.equal(status, 404);
+  assert.equal(body.error, "no_such_session");
+});
+
+// ---------------------------------------------------------------------------
 // Wave 3 — GET /interactive/:sid/commands, the slash menu's feed.
 // ---------------------------------------------------------------------------
 

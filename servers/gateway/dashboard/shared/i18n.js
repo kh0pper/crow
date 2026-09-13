@@ -2359,6 +2359,11 @@ export const translations = {
     en: "Could not list the files.",
     es: "No se pudo listar los archivos.",
   },
+  "perch.fileDownload": { en: "Download", es: "Descargar" },
+  "perch.fileNotServable": {
+    en: "This file lives outside the session's outputs folder — the dashboard cannot serve it. Ask the bot to save it there.",
+    es: "Este archivo vive fuera de la carpeta de resultados de la sesión — el panel no puede servirlo. Pídele al bot que lo guarde allí.",
+  },
   "perch.filesCwdHeading": { en: "Working directory", es: "Directorio de trabajo" },
   "perch.filesOutputsHeading": { en: "Outputs", es: "Resultados" },
   "perch.filesViewerClose": { en: "Close", es: "Cerrar" },

@@ -921,6 +921,52 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     }
   });
 
+  // ---- GET /interactive/:sid/files/history — sent-file cards (PR-E, item 12) ----
+  // The reload rail for the chat's inline file cards: one row per crow-file:
+  // relay announce this thread has ever made, oldest first (the hub appends in
+  // order). servable=1 rows whose STORED file no longer exists in the session's
+  // outputsDir drop to servable:false — a dead link is worse than a dim name.
+  // Same session-resolution shape as files/list (a hibernating session's
+  // snapshot still carries outputsDir). Capped like the list: the transcript
+  // itself trims at its own ceiling; the card rail must not balloon.
+  router.get(P + "/interactive/:sid/files/history", async (req, res) => {
+    const sid = String(req.params.sid);
+    try {
+      const eng = resolveEngine();
+      const snap = await eng.get(sid);
+      if (!snap) return jsonError(res, 404, "no_such_session");
+      const db = createDbClient();
+      try {
+        // thread_id IS the sessionId (perch-interactive.js identity note); the
+        // bot_id filter keeps a cross-bot thread-id collision from leaking a
+        // card the caller has no right to render.
+        const r = await db.execute({
+          sql: "SELECT name, stored, mime, size, caption, servable, created_at FROM perch_session_files WHERE bot_id=? AND thread_id=? ORDER BY id ASC LIMIT 200",
+          args: [String(snap.botId || ""), sid],
+        });
+        const items = r.rows.map((row) => {
+          const it = {
+            name: String(row.name || ""),
+            stored: row.stored == null ? null : String(row.stored),
+            mime: String(row.mime || "application/octet-stream"),
+            size: Number(row.size) || 0,
+            caption: String(row.caption || ""),
+            servable: !!Number(row.servable),
+            created_at: String(row.created_at || ""),
+          };
+          if (it.servable && (!snap.outputsDir || !it.stored)) { it.servable = false; return it; }
+          if (it.servable) {
+            try { it.servable = lstatSync(join(snap.outputsDir, it.stored)).isFile(); } catch { it.servable = false; }
+          }
+          return it;
+        });
+        res.json({ items });
+      } finally { try { db.close(); } catch { /* already closed */ } }
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
   // ---- GET /interactive/:sid/cwd/list — read-only cwd browse (PR-B, item 18) ----
   // Lists dirs + files inside the session's OWN cwd, realpath-jailed under it
   // (never the uploadsDir). The Files tab's browser: a picker/viewer, not a

@@ -139,9 +139,9 @@
  * (spec §9).
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
 
 import { createDbClient } from "../db.js";
 import { jobLockFor } from "./routes/board-lock.js";
@@ -220,6 +220,14 @@ const CROW_STATE_PREFIX = "crow-state:";
  * today's sequential cards working untouched (feature-detect by arrival, never
  * by version). */
 const CROW_ASK_PREFIX = "crow-ask:";
+/** PR-E (audit item 12): pi-lab's send-user-file relay announces a sent file
+ * over the same notify channel: `"crow-file:" + JSON.stringify({path, name,
+ * mime, size, caption})`. The engine jail-copies the file into the session's
+ * outputsDir (the ONLY place the workspace route can serve from) and emits a
+ * `file` frame for the chat's inline card. */
+const CROW_FILE_PREFIX = "crow-file:";
+/** Same cap as pi-lab's own mobile.ts send_user_file (200MB). */
+const FILE_MAX_BYTES = 200 * 1024 * 1024;
 
 /** The "Other…" free-text sentinel and the row/done formatting ask-user.ts's
  * `runTuiFlow` matches on. These MUST stay byte-identical to
@@ -393,6 +401,27 @@ function cardFrom(m) {
   if (m.message != null) card.message = m.message;
   if (m.prefill != null) card.prefill = m.prefill;
   return card;
+}
+
+/**
+ * PR-E (audit item 12): pick the stored name for a jail-copied sent file.
+ * Collision policy (operator decision 2026-09-13): SUFFIX, never overwrite —
+ * `report.png` → `report-2.png` → `report-3.png`, first slot free of every
+ * existing name in the dir, sync loop. A dotfile basename is renamed out of
+ * dotness (the workspace route refuses any dotfile path SEGMENT, so a stored
+ * `.secret` would be a permanently dead card; `secret` is served instead).
+ * Pure — exported only for tests; the engine's call site does the copy.
+ */
+function resolveSentName(dir, basename) {
+  const clean = String(basename == null ? "" : basename).replace(/[\\/]/g, "").replace(/^\.+/, "").trim() || "file";
+  const dot = clean.lastIndexOf(".");
+  const stem = dot > 0 ? clean.slice(0, dot) : clean;
+  const ext = dot > 0 ? clean.slice(dot) : "";
+  let candidate = clean;
+  for (let n = 2; existsSync(join(dir, candidate)); n++) {
+    candidate = stem + "-" + n + ext;
+  }
+  return candidate;
 }
 
 /** PR-A: clear ALL combined-ask state. Called wherever `pendingUi` is cleared
@@ -1440,6 +1469,11 @@ export function createInteractiveEngine({
     // the real builder (B2); the `|| world.sessionDir` guard keeps a test seam
     // that returns no cwd from poisoning s.cwd with undefined.
     s.cwd = world.cwd || world.sessionDir || null;
+    // PR-E: the world root, recorded for handleFileNotify's no-outputsDir
+    // fallback (a session that announced a file before any spawn completed —
+    // in practice unreachable, since a crow-file: notify rides a live child;
+    // belt for the test seams that return a bare world).
+    s.worldRoot = world.sessionDir || null;
     // Track 3 Task 4 (wake fidelity, review finding 8): if the engine tracks a
     // model different from what prepareSpawn just resolved fresh (a live
     // model_select or a control() switch made while this session was awake or
@@ -1723,6 +1757,64 @@ export function createInteractiveEngine({
     return true;
   }
 
+  /**
+   * PR-E (audit item 12): act on one `crow-file:` relay announce. Jail-copy
+   * the sent file into the session's outputsDir — the ONLY place the fd-based
+   * workspace route serves from — then emit a `file` frame (live SSE) and
+   * persist a `perch_session_files` history row so a chat reload re-renders
+   * the card (operator decision: persist, not live-only). Anything that
+   * cannot land in the jail (no outputsDir yet, a special file, the 200MB
+   * cap, a copy failure) still renders as a name-only card with
+   * servable:false. Never throws — the caller is a protocol branch that must
+   * not break the turn.
+   */
+  async function handleFileNotify(s, meta) {
+    if (!meta || typeof meta !== "object") return;
+    const src = typeof meta.path === "string" ? meta.path : "";
+    const name = typeof meta.name === "string" && meta.name ? meta.name : (src ? src.split("/").pop() : "");
+    if (!src || !name) return;
+    const caption = String(meta.caption == null ? "" : meta.caption).replace(/\s+/g, " ").trim().slice(0, 300);
+    let servable = false;
+    let stored = null;
+    let size = Number(meta.size);
+    let mime = typeof meta.mime === "string" ? meta.mime : "application/octet-stream";
+    try {
+      const st = lstatSync(src);
+      if (st.isFile() && st.size <= FILE_MAX_BYTES) {
+        size = st.size;
+        // A dir is only ever mkdir'd when it is ABSOLUTE: the worldRoot
+        // fallback exists for test seams, and joining onto "" would produce a
+        // relative path and scatter an `outputs/` tree into the gateway's cwd.
+        const dir = s.outputsDir || (s.worldRoot ? join(s.worldRoot, "outputs", s.sessionId) : null);
+        if (!isAbsolute(dir || "")) throw new Error("no absolute outputs dir");
+        mkdirSync(dir, { recursive: true });
+        const dirReal = realpathSync(dir);
+        const srcReal = realpathSync(src);
+        // Strictly-under, the workspace route's own formula: the `+ sep` is
+        // what turns a string-prefix match into a containment test.
+        if (srcReal.startsWith(dirReal + sep)) {
+          // Already inside its own jail — nothing to copy, serve in place.
+          stored = srcReal.slice(dirReal.length + 1);
+          servable = true;
+        } else {
+          stored = resolveSentName(dir, name);
+          copyFileSync(srcReal, join(dir, stored));
+          servable = true;
+        }
+      }
+    } catch { /* refused/unreachable source -> name-only card */ }
+    const frame = { type: "file", name, stored, mime, size: Number.isFinite(size) ? size : 0, caption, servable };
+    emit(s, frame);
+    const db = createDbClient();
+    try {
+      await db.execute({
+        sql: "INSERT INTO perch_session_files (bot_id, thread_id, name, stored, mime, size, caption, servable) VALUES (?,?,?,?,?,?,?,?)",
+        args: [s.botId, s.threadId, name, stored, mime, frame.size, caption, servable ? 1 : 0],
+      });
+    } catch { /* the live card stands; a lost history row costs a reload only */ }
+    finally { try { db.close(); } catch { /* already closed */ } }
+  }
+
   function onUiRequest(s, m) {
     // PR-A: an in-flight combined-answer dance consumes the child's
     // select/input dialogs automatically — the operator already answered every
@@ -1816,6 +1908,22 @@ export function createInteractiveEngine({
             questions: parsed.questions,
           };
         }
+        return;
+      }
+      // PR-E (audit item 12): pi-lab's send-user-file relay announces a sent
+      // file over this same notify channel, `"crow-file:" + JSON.stringify({
+      // path, name, mime, size, caption})`. Jail-copy it into the session's
+      // outputsDir and emit a `file` frame; anything that cannot land in the
+      // jail renders as a name-only card with servable:false. Malformed JSON
+      // is swallowed exactly like the crow-state/crow-ask mirrors.
+      if (text.startsWith(CROW_FILE_PREFIX)) {
+        let parsed;
+        try {
+          parsed = JSON.parse(text.slice(CROW_FILE_PREFIX.length));
+        } catch {
+          return;
+        }
+        handleFileNotify(s, parsed).catch(() => { /* a failed card never breaks the turn */ });
         return;
       }
       emit(s, { type: "log", text });

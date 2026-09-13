@@ -202,8 +202,13 @@ export class PiRpc {
     // spawns — so every channel caller's csv stays byte-identical, and the
     // per-session narrowing below can still take it away (envelope model:
     // narrowing only ever removes).
+    // PR-E (audit item 12) rides the SAME gate: pi-lab's send-user-file
+    // extension registers send_user_file only under askUserPath "ui"
+    // (PERMISSION_POLICY + INTERACTIVE), so appending it exactly where
+    // ask_user is appended keeps every channel bot's csv byte-identical and
+    // lets per-session narrowing below still take it away.
     if (opts.extraEnv && opts.extraEnv.PI_BOT_INTERACTIVE === "1") {
-      tools = [tools, "ask_user"].filter(Boolean).join(",");
+      tools = [tools, "ask_user", "send_user_file"].filter(Boolean).join(",");
     }
     // C-6: per-session narrowing is applied to the FINAL csv — AFTER the
     // subagent append — so a session can narrow `subagent` away too. Narrowing

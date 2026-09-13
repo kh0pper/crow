@@ -2684,6 +2684,37 @@ await addColumnIfMissing("bot_sessions", "cwd", "TEXT");
 // SCHEMA_GENERATION bump.
 await addColumnIfMissing("bot_sessions", "archived_at", "TEXT");
 
+// perch_session_files (PR-E, audit item 12): durable history of files the
+// agent SENT to a perch chat via send_user_file's crow-file: relay. One row
+// per announce; the chat replays these into the transcript on reload (the
+// pi-session transcript endpoint carries messages, not tool calls, so the
+// card needs its own rail). Keyed on (bot_id, thread_id) exactly like the
+// transcript endpoint — NOT on bot_sessions.id, which a re-INSERT can move.
+// `stored` is the basename inside the session's outputsDir (what the fd-based
+// workspace route serves), NULL when servable=0 (source refused/too large/
+// copy failed — the reload then renders the same name-only dim card as the
+// live frame). A SEPARATE table, deliberately: no bot_sessions column, so
+// the canonical-COLUMN control-CHECK rebuild block below is untouched. A
+// new table rides BOTH rails (init-db here + scripts/migrations/0007) —
+// CREATE IF NOT EXISTS makes them converge idempotently on every instance.
+await initTable("perch_session_files table", `
+  CREATE TABLE IF NOT EXISTS perch_session_files (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id     TEXT NOT NULL,
+    thread_id  TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    stored     TEXT,
+    mime       TEXT NOT NULL DEFAULT 'application/octet-stream',
+    size       INTEGER NOT NULL DEFAULT 0,
+    caption    TEXT NOT NULL DEFAULT '',
+    servable   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_perch_session_files_thread
+    ON perch_session_files (bot_id, thread_id);
+`);
+
 // bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
 // (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
 // when the gateway shut down with control='interrupted' instead of 'run', so
