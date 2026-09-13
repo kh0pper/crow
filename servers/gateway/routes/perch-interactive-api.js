@@ -735,6 +735,30 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     }
   });
 
+  // ---- POST /interactive/:sid/archive + /unarchive — roster visibility ----
+  // PR-C (audit item 14): archive HIDES a session from the roost's live list
+  // without stopping it (a live child keeps running — pi-lab's exact
+  // semantics); unarchive brings it back. Both are a pure bot_sessions.
+  // archived_at write through the engine's setArchived — no child is touched,
+  // no confirmation needed (reversible, like rename). An unknown/never-spawned
+  // sid 404s no_such_session via the engine's rowsAffected check.
+  router.post(P + "/interactive/:sid/archive", async (req, res) => {
+    try {
+      const eng = resolveEngine();
+      res.json(await eng.setArchived(String(req.params.sid), true));
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+  router.post(P + "/interactive/:sid/unarchive", async (req, res) => {
+    try {
+      const eng = resolveEngine();
+      res.json(await eng.setArchived(String(req.params.sid), false));
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
   // ---- POST /interactive/:sid/cycle — force a respawn ----
   router.post(P + "/interactive/:sid/cycle", async (req, res) => {
     try {
