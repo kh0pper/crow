@@ -1833,3 +1833,25 @@ test("files/list carries the download route's own 404/409 shapes", async () => {
   assert.equal(r.status, 404);
   assert.equal(r.body.error, "not_found");
 });
+
+// ---------------------------------------------------------------------------
+// Wave 3 — GET /interactive/:sid/commands, the slash menu's feed.
+// ---------------------------------------------------------------------------
+
+test("GET /interactive/:sid/commands relays the engine's registry and carries its error shapes", async () => {
+  engineImpl.commands = async (sid) => ({
+    commands: [{ name: "plan", description: "plan mode", source: "extension" }],
+    hibernating: false,
+  });
+  let r = await getJson("/interactive/perchlive-11111111/commands");
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, {
+    commands: [{ name: "plan", description: "plan mode", source: "extension" }],
+    hibernating: false,
+  });
+
+  engineImpl.commands = async () => { throw engineErr("no_such_session"); };
+  r = await getJson("/interactive/perchlive-dead0000/commands");
+  assert.equal(r.status, 404);
+  assert.equal(r.body.error, "no_such_session");
+});
