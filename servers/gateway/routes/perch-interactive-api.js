@@ -772,6 +772,22 @@ export default function perchInteractiveApiRouter(dashboardAuth, { engine = getI
     }
   });
 
+  // ---- GET /interactive/:sid/commands — the composer's "/" menu feed ----
+  // Wave 3: pi's own get_commands registry, relayed by the engine (awake
+  // only; a hibernating child answers {commands:[], hibernating:true} and
+  // the menu says so instead of faking an empty list). Under the same
+  // dashboardAuth as every perch-api route; the engine maps the names, the
+  // client renders them with textContent.
+  router.get(P + "/interactive/:sid/commands", async (req, res) => {
+    try {
+      const eng = resolveEngine();
+      const out = await eng.commands(String(req.params.sid));
+      res.json(out);
+    } catch (err) {
+      mapEngineError(res, err);
+    }
+  });
+
   // ---- POST /interactive/:sid/files — upload into the session's uploads dir ----
   // base64 JSON body (no new dependency — multipart would need one): {name,
   // data_b64}, cap 5 MB post-decode. `name` is basename()'d and any leading

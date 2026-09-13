@@ -236,6 +236,62 @@ function normalizeLabel(raw) {
   return text ? text : null;
 }
 
+/** Wave 2/3 helpers — truncating relays for child payloads. A frame is
+ *  broadcast to every subscriber and stored in nothing; these caps keep a
+ *  write-tool's full file payload (args) or a 200KB tool result from riding
+ *  the SSE wire to every phone on the tailnet. */
+function safeSnippet(v, cap) {
+  if (v == null) return null;
+  try {
+    const s = typeof v === "string" ? v : JSON.stringify(v);
+    if (s == null) return null;
+    return s.length > cap ? s.slice(0, cap) + "\u2026" : s;
+  } catch { return null; }
+}
+
+/** A tool result is {content:[{type:'text',text},…]} in the normal case and
+ *  an arbitrary value in the odd one — take the text blocks when they exist
+ *  (that is what an operator wants to read), else stringify. pi-lab's own
+ *  mobile relay does the same 2000-char slice. */
+function toolResultSnippet(result, cap) {
+  let text = null;
+  try {
+    if (result && Array.isArray(result.content)) {
+      const joined = result.content
+        .filter((b) => b && typeof b.text === "string")
+        .map((b) => b.text).join("\n");
+      if (joined) text = joined;
+    }
+  } catch { /* fall through to stringify */ }
+  if (text == null) text = safeSnippet(result, cap);
+  if (text == null) return null;
+  return text.length > cap ? text.slice(0, cap) + "\u2026" : text;
+}
+
+/** Wave 2: how many tools the child's pinned --tools csv actually exposes
+ *  ("" is a real, deliberate zero — the empty-envelope case). */
+function countCsvTools(csv) {
+  if (csv == null) return null;
+  const n = String(csv).split(",").filter((x) => x.trim()).length;
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Wave 2: the child's RSS from /proc — Linux-only, best-effort, one small
+ *  read, cheap enough to ride every state frame while the child is awake.
+ *  statm field 2 is resident pages; the page size is 4096 on every Linux
+ *  arch crow ships on. null whenever anything is missing or unparseable —
+ *  a facts row that cannot be measured renders as "—", never as a guess. */
+function childMemoryMB(s) {
+  try {
+    const pid = s.pi && s.pi.proc && s.pi.proc.pid;
+    if (!pid) return null;
+    const fields = readFileSync("/proc/" + pid + "/statm", "utf8").trim().split(/\s+/);
+    const pages = Number(fields[1]);
+    if (!Number.isFinite(pages) || pages <= 0) return null;
+    return Math.round((pages * 4096) / (1024 * 1024));
+  } catch { return null; }
+}
+
 /**
  * Build a pendingUi card from an `extension_ui_request`.
  *
@@ -402,6 +458,16 @@ export function createInteractiveEngine({
        *  world root (sessionDir) keeps storage duty (sessions/outputs/uploads).
        *  Persisted on the row so a wake after restart runs in the same place. */
       cwd: null,
+      /** Wave 2 session facts. childSince: when the CURRENT child spawned
+       *  (null while hibernating — an uptime that survives a hibernate would
+       *  be a lie about the process). contextUsage: pi's own {tokens,
+       *  contextWindow, percent} captured at the last turn end (the only
+       *  moment get_session_stats is consulted anyway — metering). toolCount:
+       *  the size of the child's pinned --tools csv, i.e. what the model can
+       *  actually reach, envelope minus narrowing. */
+      childSince: null,
+      contextUsage: null,
+      toolCount: null,
       // Track 3 Task 4: binds at wake, never applied to a live child (pi's
       // permission policy is fixed via env at spawn time). Reset to
       // "guarded" on every adoptRow (gateway restart) — see adoptRow's
@@ -484,6 +550,12 @@ export function createInteractiveEngine({
       // startChild; null until the first spawn/wake). The Session/Files tabs
       // and the launcher read it to show where the bot actually runs.
       cwd: s.cwd || null,
+      // Wave 2: the Session tab's facts, on both shapes (snapshot feeds the
+      // engine's get()/routes; stateEvent feeds every live subscriber).
+      contextUsage: s.contextUsage || null,
+      uptimeSeconds: s.childSince ? Math.max(0, Math.round((Date.now() - s.childSince) / 1000)) : null,
+      memoryMB: childMemoryMB(s),
+      toolCount: s.toolCount == null ? null : s.toolCount,
       // I3 (final review): neither stateEvent() nor snapshot() used to
       // expose whether a turn is actually in flight, and drawer.js's
       // bd.turnInFlight was set only by the SENDING tab — so on the primary
@@ -553,6 +625,12 @@ export function createInteractiveEngine({
       permissionMode: s.permissionMode,
       planMode: s.planMode,
       cwd: s.cwd || null,
+      // Wave 2: same four facts as snapshot() above, same rule — the state
+      // frame is what a LIVE subscriber (the Session tab) refreshes from.
+      contextUsage: s.contextUsage || null,
+      uptimeSeconds: s.childSince ? Math.max(0, Math.round((Date.now() - s.childSince) / 1000)) : null,
+      memoryMB: childMemoryMB(s),
+      toolCount: s.toolCount == null ? null : s.toolCount,
       // I3 (final review): same addition, same reasoning, as snapshot()
       // above — see its comment.
       turnInFlight: !!s.turn,
@@ -1338,6 +1416,11 @@ export function createInteractiveEngine({
     }));
     s.pi = pi;
     s.piSessionId = resume;
+    // Wave 2: facts for the Session tab — the child's start time (uptime is
+    // per-CHILD, never per-session) and the effective tool count straight
+    // from the pinned --tools csv the PiRpc just computed.
+    s.childSince = Date.now();
+    s.toolCount = countCsvTools(pi.toolsCsv);
     attachExit(s, pi);
 
     await writeRow(s, {
@@ -1430,11 +1513,19 @@ export function createInteractiveEngine({
     s.lastEventAt = now();                           // Track 3 Task 7: eviction recency
     switch (m.type) {
       case "tool_execution_start":
-        emit(s, { type: "tool", name: m.toolName, phase: "start", isError: false });
+        // Wave 3: the chat's inline tool chips show what the call CARRIED,
+        // not just its name — args ride the start frame, truncated (600
+        // chars: enough to recognize a bash command or a file path, not
+        // enough to balloon a frame on a write-tool payload).
+        emit(s, { type: "tool", name: m.toolName, phase: "start", isError: false,
+          toolCallId: m.toolCallId || null, argsText: safeSnippet(m.args, 600) });
         return;
       case "tool_execution_end":
         if (s.turn && m.toolName) s.turn.toolNames.push(m.toolName);
-        emit(s, { type: "tool", name: m.toolName, phase: "end", isError: !!m.isError });
+        // Wave 3: same for the outcome — the result's TEXT blocks, pi-lab's
+        // own 2000-char cap, stringified fallback for non-text payloads.
+        emit(s, { type: "tool", name: m.toolName, phase: "end", isError: !!m.isError,
+          toolCallId: m.toolCallId || null, resultText: toolResultSnippet(m.result, 2000) });
         return;
       case "message_end": {
         // Message-level streaming; delta-level is a recorded non-goal.
@@ -1574,6 +1665,12 @@ export function createInteractiveEngine({
 
     const S = await loadSeams();
     const statsAfter = s.pi ? await s.pi.getSessionStats().catch(() => null) : null;
+    // Wave 2: the context meter's source. pi's own SessionStats carries
+    // contextUsage {tokens, contextWindow, percent} — captured here, at the
+    // only moment stats are already being fetched (metering), so the meter
+    // costs zero extra RPCs. null right after a compaction or before the
+    // first turn ends; the Session tab renders "—" for it.
+    s.contextUsage = (statsAfter && statsAfter.data && statsAfter.data.contextUsage) || null;
     // r2 CR6: every other bot turn meters AND audits (bridge handleInbound,
     // job_runner). An interactive turn is a bot turn.
     try {
@@ -2370,6 +2467,30 @@ export function createInteractiveEngine({
    * when an operator wants to. Renaming is reversible and touches no child, so
    * unlike stop() it is never refused mid-turn.
    */
+  /** Wave 3: the child's own slash-command list for the composer's "/" menu
+   *  (pi's get_commands RPC — the same source pi-lab's /chat/commands
+   *  serves). Awake only: a hibernating child has no command registry to
+   *  ask, and waking one because the operator typed a "/" would be a lie of
+   *  availability — the honest answer is {commands:[], hibernating:true} and
+   *  the menu says so. Names are mapped, never passed through raw: this
+   *  reaches every subscriber's DOM. */
+  async function commands(sessionId) {
+    const s = await resolveSession(sessionId);
+    if (!s) throw engineError("no_such_session");
+    if (!s.pi) return { commands: [], hibernating: true };
+    const res = await s.pi.commandSince({ type: "get_commands" }).catch(() => null);
+    const raw = (res && res.data && Array.isArray(res.data.commands)) ? res.data.commands : [];
+    const commands = raw
+      .map((c) => ({
+        name: String((c && c.name) || ""),
+        description: String((c && c.description) || ""),
+        source: String((c && c.source) || ""),
+      }))
+      .filter((c) => c.name)
+      .slice(0, 100);
+    return { commands, hibernating: false };
+  }
+
   async function rename(sessionId, label) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
@@ -2531,6 +2652,7 @@ export function createInteractiveEngine({
     if (!s.pi) return;
     const pi = s.pi;
     s.pi = null;
+    s.childSince = null;               // Wave 2: uptime belongs to the CHILD
     clearIdle(s);
     clearStall(s);
     s.pendingUi = null;
@@ -2595,6 +2717,7 @@ export function createInteractiveEngine({
     cycle,
     control,
     options,
+    commands,
     rename,
     answer,
     abort,

@@ -111,6 +111,10 @@ function makeBridge(opts = {}) {
       this._exitCode = null;
       this.proc = { pid: ++pidSeq };
       this.piSessionId = "pisess-" + this.proc.pid;
+      // Wave 2: PiRpc exposes the FINAL --tools csv it pinned; the engine's
+      // Session-tab tool count reads it. A fixed, known list so tests can
+      // assert the exact number.
+      this.toolsCsv = "read,write,ask_user";
       this.statsSeq = 0;
       let done;
       this.exited = new Promise((r) => { done = r; });
@@ -1359,4 +1363,97 @@ test("B4: control({cwd}) refuses a relative path, a nonexistent path, and a file
   const filePath = join(dir, "b4-a-file.txt");
   writeFileSync(filePath, "not a dir");
   await assert.rejects(() => engine.control(s.sessionId, { cwd: filePath }), (e) => e.code === "bad_request", "a file is not a directory");
+});
+
+// ---------------------------------------------------------------------------
+// Wave 2/3 — the Session tab's facts on the engine's own shapes, the tool
+// frame relay's args/result payloads, and the get_commands relay behind the
+// composer's slash menu.
+// ---------------------------------------------------------------------------
+
+test("Wave 2: snapshot carries the facts; a hibernating child reports honest nulls", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  const snap = await engine.get(s.sessionId);
+  assert.equal(snap.toolCount, 3, "the pinned --tools csv, counted — envelope minus narrowing, as spawned");
+  assert.ok(snap.uptimeSeconds >= 0, "awake since just now");
+  assert.equal(snap.memoryMB, null,
+    "a fake pid has no /proc entry — a fact that cannot be measured is null, never a guess");
+  assert.equal(snap.contextUsage, null, "no turn has ended yet, so pi has no context number");
+
+  await engine._hibernateForTest(s.sessionId);
+  const after = await engine.get(s.sessionId);
+  assert.equal(after.uptimeSeconds, null, "uptime belongs to the CHILD, not the session");
+  assert.equal(after.toolCount, 3, "the envelope fact survives a hibernate — it is what the next wake pins");
+});
+
+test("Wave 2: contextUsage is captured at turn end from pi's own stats and rides the state frame", async () => {
+  const { engine, bridge } = makeEngine();
+  const Base = bridge.PiRpc;
+  bridge.PiRpc = class StatsPi extends Base {
+    async getSessionStats() {
+      const r = await super.getSessionStats();
+      r.data.contextUsage = { tokens: 110163, contextWindow: 262144, percent: 42 };
+      return r;
+    }
+  };
+  const s = await spawned(engine);
+  const pi = bridge._state.instances[bridge._state.instances.length - 1];
+  await engine.message(s.sessionId, "go");
+  pi.lastTurn().resolve({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }] });
+  await tick();
+  const snap = await engine.get(s.sessionId);
+  assert.deepEqual(snap.contextUsage, { tokens: 110163, contextWindow: 262144, percent: 42 },
+    "captured at the only moment stats are already being fetched — metering — so the meter costs zero extra RPCs");
+  const { events, off, ofType } = await collect(engine, s.sessionId);
+  const states = ofType("state");
+  assert.ok(states.length, "subscribe replays state");
+  assert.deepEqual(states[states.length - 1].contextUsage, snap.contextUsage);
+  off();
+});
+
+test("Wave 3: tool frames relay args and results, capped at the engine's truncation", async () => {
+  const { engine, bridge } = makeEngine();
+  const s = await spawned(engine);
+  const pi = bridge._state.instances[bridge._state.instances.length - 1];
+  const { events, off, ofType } = await collect(engine, s.sessionId);
+
+  pi.emit({ type: "tool_execution_start", toolCallId: "tc-1", toolName: "bash", args: { command: "ls -la" } });
+  const start = ofType("tool").filter((e) => e.phase === "start").pop();
+  assert.equal(start.toolCallId, "tc-1");
+  assert.ok(start.argsText.includes('"command":"ls -la"'), "the chip shows what the call CARRIED");
+
+  const huge = "x".repeat(700);
+  pi.emit({ type: "tool_execution_start", toolCallId: "tc-2", toolName: "write", args: huge });
+  const start2 = ofType("tool").filter((e) => e.phase === "start").pop();
+  assert.equal(start2.argsText.length, 601, "600 chars + the ellipsis — a write payload never balloons a frame");
+
+  pi.emit({ type: "tool_execution_end", toolCallId: "tc-1", toolName: "bash",
+    result: { content: [{ type: "text", text: "total 8" }, { type: "text", text: "drwx" }] }, isError: false });
+  const end = ofType("tool").filter((e) => e.phase === "end").pop();
+  assert.equal(end.resultText, "total 8\ndrwx", "text blocks joined — what an operator wants to read");
+  assert.equal(end.isError, false);
+  off();
+});
+
+test("Wave 3: commands() relays pi's get_commands registry; a hibernating child says so instead of faking empty", async () => {
+  const { engine, state } = makeEngine();
+  state.commandScript = (pi, payload) =>
+    payload.type === "get_commands"
+      ? { success: true, data: { commands: [
+          { name: "plan", description: "plan mode", source: "extension" },
+          { name: "", description: "junk row" },
+          null ] } }
+      : null;
+  const s = await spawned(engine);
+  const out = await engine.commands(s.sessionId);
+  assert.deepEqual(out.commands, [{ name: "plan", description: "plan mode", source: "extension" }],
+    "mapped to name/description/source, junk filtered, never passed through raw");
+  assert.equal(out.hibernating, false);
+
+  await engine._hibernateForTest(s.sessionId);
+  const asleep = await engine.commands(s.sessionId);
+  assert.deepEqual(asleep, { commands: [], hibernating: true },
+    "waking a child because the operator typed '/' would be a lie of availability");
+  await assert.rejects(() => engine.commands("perchlive-deadbeef"), /no_such_session/);
 });
