@@ -1448,6 +1448,9 @@ export function perchHubJs(lang = "en") {
     turnInFlight=next;
     el('perch-send').textContent=turnInFlight?STEER_LABEL:SEND_LABEL;
     el('perch-abort').style.display=turnInFlight?'':'none';
+    /* The working strip rides the SAME flag as the composer buttons — one
+       source of truth, so the gear and the Steer flip can never disagree. */
+    var w=el('perch-working'); if(w) w.hidden=!turnInFlight;
   }
 
   function send(){
