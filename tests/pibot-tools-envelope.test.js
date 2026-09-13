@@ -19,7 +19,7 @@ import { join } from "node:path";
 const { PiRpc } = await import("../scripts/pi-bots/bridge.mjs");
 
 /** Spawn PiRpc against a stub that dumps argv, and return the args pi saw. */
-async function spawnArgs(def, narrowedTools) {
+async function spawnArgs(def, narrowedTools, extraEnv = {}) {
   const scratch = mkdtempSync(join(tmpdir(), "crow-tools-"));
   mkdirSync(join(scratch, "sessions"), { recursive: true });
   const out = join(scratch, "argv.json");
@@ -35,7 +35,7 @@ async function spawnArgs(def, narrowedTools) {
     nodeBin: process.execPath,
     cliPath: stub,
     narrowedTools,
-    extraEnv: { CROW_TEST_ARGV_OUT: out },
+    extraEnv: { CROW_TEST_ARGV_OUT: out, ...extraEnv },
   });
   for (let i = 0; i < 100 && !existsSync(out); i++) await new Promise((r) => setTimeout(r, 50));
   try { pi.close(); } catch { /* already exited */ }
@@ -66,4 +66,47 @@ test("narrowing every tool away still pins --tools \"\"", async () => {
     { tools: { pi_builtin: ["read"], crow_mcp: [] } },
     JSON.stringify(["read"]));
   assert.equal(toolsFlag(argv), "");
+});
+
+// ---------------------------------------------------------------------------
+// PL-3 completion: ask_user rides ONLY the interactive spawn — exactly where
+// pi-lab's ask-user extension registers it (PI_BOT_INTERACTIVE=1 → askUserPath
+// "ui"). A channel csv that grew the name would be a dangling entry at best
+// and a lie about the envelope at worst; an interactive csv WITHOUT it filters
+// the registered tool away, which is the bug this pins shut.
+// ---------------------------------------------------------------------------
+
+test("an interactive spawn appends ask_user; the channel spawn's csv is byte-identical without it", async () => {
+  const def = { tools: { pi_builtin: ["read"], crow_mcp: ["tasks/tasks_list"] } };
+  const channel = await spawnArgs(def);
+  assert.equal(toolsFlag(channel), "read,mcp__tasks__tasks_list",
+    "no marker, no append — every channel caller stays exactly as before");
+  const interactive = await spawnArgs(def, undefined, { PI_BOT_INTERACTIVE: "1" });
+  assert.equal(toolsFlag(interactive), "read,mcp__tasks__tasks_list,ask_user");
+});
+
+test("an empty envelope still gains ask_user on an interactive spawn", async () => {
+  const argv = await spawnArgs({ tools: { pi_builtin: [], crow_mcp: [] } },
+    undefined, { PI_BOT_INTERACTIVE: "1" });
+  assert.equal(toolsFlag(argv), "ask_user",
+    "the join must not leave a leading comma on an otherwise-empty csv");
+});
+
+test("a session can narrow ask_user away — it joins the csv BEFORE narrowing", async () => {
+  const argv = await spawnArgs({ tools: { pi_builtin: ["read"], crow_mcp: [] } },
+    JSON.stringify(["ask_user"]), { PI_BOT_INTERACTIVE: "1" });
+  assert.equal(toolsFlag(argv), "read",
+    "narrowing only ever removes, and it can remove this too — the envelope model holds");
+});
+
+test("a def cannot fake the marker: spawn_env hygiene strips PI_BOT_* before the append decision", async () => {
+  // C-12 strips engine-reserved keys from def.spawn_env; the append reads
+  // opts.extraEnv (the engine's own channel), never the def-merged env — so a
+  // bot def claiming PI_BOT_INTERACTIVE cannot grant itself ask_user on a
+  // channel turn.
+  const argv = await spawnArgs({
+    tools: { pi_builtin: ["read"], crow_mcp: [] },
+    spawn_env: { PI_BOT_INTERACTIVE: "1" },
+  });
+  assert.equal(toolsFlag(argv), "read");
 });
