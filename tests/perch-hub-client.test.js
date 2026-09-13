@@ -202,9 +202,10 @@ test("async continuations are guarded — a fast back button must not cross sess
   // files/list fetch. A regression that drops one — the count
   // that shipped with only 6 asserted — is invisible until an operator hits
   // the exact race the dropped guard covered. 15 as of Wave 3: the slash
-  // menu's commands fetch.
+  // menu's commands fetch. 16+17 as of PR-B (item 18): the Files tab's cwd
+  // browser list fetch and its text-viewer read fetch.
   const guards = (js.match(/current\.sid\s*!==/g) || []).length;
-  assert.equal(guards, 15, "expected exactly 15 identity guards, found " + guards);
+  assert.equal(guards, 17, "expected exactly 17 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -599,7 +600,10 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     // Wave 2/3: the facts card, plan bar + card, and the slash menu.
     "perch-fact-context", "perch-fact-uptime", "perch-fact-memory", "perch-fact-tools",
     "perch-ctxbar", "perch-ctxbar-fill", "perch-planbar", "perch-planbar-fill",
-    "perch-plan-card", "perch-plan-head", "perch-plan-steps", "perch-cmdmenu"];
+    "perch-plan-card", "perch-plan-head", "perch-plan-steps", "perch-cmdmenu",
+    // PR-B (item 18): the Files tab's cwd browser + in-app text viewer.
+    "perch-cwd-crumbs", "perch-cwd-list", "perch-file-viewer", "perch-fv-name",
+    "perch-fv-close", "perch-fv-body"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -2804,6 +2808,136 @@ test("D3: a file name is rendered as text, never as markup", async () => {
     " browser check (render test) proves the DOM never parses it");
   assert.ok(row.href.endsWith("/workspace/" + encodeURIComponent(hostile)),
     "and the link carries the encoded name");
+});
+
+// ---------------------------------------------------------------------------
+// PR-B (audit item 18): the Files tab's read-only cwd browser + text viewer
+// ---------------------------------------------------------------------------
+
+const CWD_ROOT = "/home/op/project";
+/** A fetchImpl serving /cwd/list from a path-keyed tree, /cwd/read from a
+ *  path-keyed map, and an empty outputs list. */
+function cwdFetch(tree, reads) {
+  const std = stdFetch();
+  return (method, path) => {
+    if (path.indexOf("/cwd/list") >= 0) {
+      const p = path.indexOf("?path=") >= 0 ? decodeURIComponent(path.split("?path=")[1]) : "";
+      const node = tree[p] || { rel: "", dirs: [], files: [] };
+      return makeResponse(200, { root: CWD_ROOT, path: p || CWD_ROOT, rel: node.rel || "", parent: node.parent || null, dirs: node.dirs || [], files: node.files || [] });
+    }
+    if (path.indexOf("/cwd/read") >= 0) {
+      const p = path.indexOf("?path=") >= 0 ? decodeURIComponent(path.split("?path=")[1]) : "";
+      const r = (reads && reads[p]) || { status: 200, body: { name: p.split("/").pop(), rel: p, mime: "text/plain", text: "contents", truncated: false, size: 8 } };
+      return makeResponse(r.status, r.body);
+    }
+    if (path.endsWith("/files/list")) return makeResponse(200, { items: [] });
+    return std(method, path);
+  };
+}
+const tick2 = async () => { await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0)); };
+
+test("PR-B: the Files tab renders the cwd browser — root crumb, dir rows, file rows; fetched on activation only", async () => {
+  let listCalls = 0;
+  const tree = { "": { rel: "", dirs: [{ name: "src", path: CWD_ROOT + "/src" }], files: [{ name: "notes.txt", path: CWD_ROOT + "/notes.txt", size: 12, mtime: 0 }] } };
+  const inner = cwdFetch(tree);
+  const hub = await mountHub({ fetchImpl: (m, p) => { if (p.indexOf("/cwd/list") >= 0) listCalls++; return inner(m, p); } });
+  await openChatSession(hub);
+  await tick2();
+  assert.equal(listCalls, 0, "a session open must not fetch the cwd list");
+  hub.els["perch-tab-btn-files"].onclick();
+  await tick2();
+  assert.equal(listCalls, 1, "tab activation does");
+
+  const crumbs = hub.els["perch-cwd-crumbs"].children;
+  assert.equal(crumbs[0].textContent, "project", "root crumb is the cwd basename");
+  assert.equal(crumbs[0].getAttribute("aria-current"), "location");
+
+  const rows = hub.els["perch-cwd-list"].children;
+  assert.equal(rows.length, 2, "one dir + one file");
+  assert.equal(rows[0].className, "cwd-row cwd-dir");
+  assert.equal(rows[0].children[0].textContent, "src");
+  assert.equal(rows[1].className, "cwd-row cwd-file");
+  assert.equal(rows[1].children[0].textContent, "notes.txt");
+  assert.match(rows[1].children[1].textContent, /12B/);
+});
+
+test("PR-B: tapping a dir row navigates; breadcrumbs grow and mark the new location", async () => {
+  const tree = {
+    "": { rel: "", dirs: [{ name: "src", path: CWD_ROOT + "/src" }], files: [] },
+    [CWD_ROOT + "/src"]: { rel: "src", parent: CWD_ROOT, dirs: [], files: [{ name: "a.js", path: CWD_ROOT + "/src/a.js", size: 5, mtime: 0 }] },
+  };
+  const hub = await mountHub({ fetchImpl: cwdFetch(tree) });
+  await openChatSession(hub);
+  hub.els["perch-tab-btn-files"].onclick();
+  await tick2();
+  hub.els["perch-cwd-list"].children[0].onclick();   // tap src
+  await tick2();
+  const crumbs = hub.els["perch-cwd-crumbs"].children;
+  assert.equal(crumbs.length, 3, "[project, /, src]");
+  assert.equal(crumbs[2].textContent, "src");
+  assert.equal(crumbs[2].getAttribute("aria-current"), "location");
+  assert.equal(crumbs[0].getAttribute("aria-current"), null, "the root is no longer current");
+  const rows = hub.els["perch-cwd-list"].children;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].children[0].textContent, "a.js");
+});
+
+test("PR-B: tapping a file opens the in-app viewer with its text; close hides it", async () => {
+  const tree = { "": { rel: "", dirs: [], files: [{ name: "notes.txt", path: CWD_ROOT + "/notes.txt", size: 11, mtime: 0 }] } };
+  const reads = { [CWD_ROOT + "/notes.txt"]: { status: 200, body: { name: "notes.txt", rel: "notes.txt", mime: "text/plain", text: "hello world", truncated: false, size: 11 } } };
+  const hub = await mountHub({ fetchImpl: cwdFetch(tree, reads) });
+  await openChatSession(hub);
+  hub.els["perch-tab-btn-files"].onclick();
+  await tick2();
+  const viewer = hub.els["perch-file-viewer"];
+  assert.equal(viewer.hidden, true, "viewer starts hidden");
+  hub.els["perch-cwd-list"].children[0].onclick();   // tap notes.txt
+  await tick2();
+  assert.equal(viewer.hidden, false, "viewer opens");
+  assert.equal(hub.els["perch-fv-name"].textContent, "notes.txt");
+  assert.equal(hub.els["perch-fv-body"].textContent, "hello world");
+  hub.els["perch-fv-close"].onclick();
+  assert.equal(viewer.hidden, true, "close hides it");
+});
+
+test("PR-B: a 415 says 'not viewable'; a truncated read says so; no_cwd says 'no working directory'", async () => {
+  const tree = { "": { rel: "", dirs: [], files: [
+    { name: "blob.bin", path: CWD_ROOT + "/blob.bin", size: 9, mtime: 0 },
+    { name: "big.log", path: CWD_ROOT + "/big.log", size: 999, mtime: 0 },
+  ] } };
+  const reads = {
+    [CWD_ROOT + "/blob.bin"]: { status: 415, body: { error: "unsupported_type" } },
+    [CWD_ROOT + "/big.log"]: { status: 200, body: { name: "big.log", rel: "big.log", mime: "text/plain", text: "x", truncated: true, size: 999 } },
+  };
+  const hub = await mountHub({ fetchImpl: cwdFetch(tree, reads) });
+  await openChatSession(hub);
+  hub.els["perch-tab-btn-files"].onclick();
+  await tick2();
+  hub.els["perch-cwd-list"].children[0].onclick();   // blob.bin → 415
+  await tick2();
+  assert.match(hub.els["perch-fv-body"].textContent, /Not a viewable text file/);
+  hub.els["perch-cwd-list"].children[1].onclick();   // big.log → truncated
+  await tick2();
+  assert.match(hub.els["perch-fv-body"].textContent, /truncated/i);
+
+  const noCwd = await mountHub({ fetchImpl: (m, p) => p.indexOf("/cwd/list") >= 0 ? makeResponse(409, { error: "no_cwd" }) : (p.endsWith("/files/list") ? makeResponse(200, { items: [] }) : stdFetch()(m, p)) });
+  await openChatSession(noCwd);
+  noCwd.els["perch-tab-btn-files"].onclick();
+  await tick2();
+  const rows = noCwd.els["perch-cwd-list"].children;
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].textContent, /no working directory/i);
+});
+
+test("PR-B: a cwd file/dir name is rendered as text, never markup", async () => {
+  const hostile = '<img src=x onerror="1">';
+  const tree = { "": { rel: "", dirs: [{ name: hostile, path: CWD_ROOT + "/x" }], files: [] } };
+  const hub = await mountHub({ fetchImpl: cwdFetch(tree) });
+  await openChatSession(hub);
+  hub.els["perch-tab-btn-files"].onclick();
+  await tick2();
+  assert.equal(hub.els["perch-cwd-list"].children[0].children[0].textContent, hostile,
+    "textContent end to end — a child-writable name never parses as markup");
 });
 
 // ---------------------------------------------------------------------------
