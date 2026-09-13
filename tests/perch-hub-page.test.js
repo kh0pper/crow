@@ -526,3 +526,70 @@ test("the working strip CSS spins, hides by attribute, and calms under reduced m
   assert.ok(/prefers-reduced-motion:reduce\)\{#perch-workingsvg\{animation-duration:6s\}/.test(css),
     "reduced motion slows the gear instead of freezing the signal");
 });
+
+// ---------------------------------------------------------------------------
+// Wave 1 — the pi-lab parity quick wins, statically. Live measurements (copy
+// buttons in seeded markdown, the auto-grow ceiling) run in
+// perch-hub-render.test.js.
+// ---------------------------------------------------------------------------
+
+test("the attention banner ships hidden, inside the chat tab, above the transcript", async () => {
+  const { perchHubContent } = await import("../servers/gateway/dashboard/perch-hub/html.js");
+  const html = perchHubContent("en");
+  const banner = html.match(/<div id="perch-attn"[^>]*>/);
+  assert.ok(banner, "the banner exists");
+  assert.ok(banner[0].includes("hidden"), "ships hidden — only a pending card raises it");
+  const chatTab = html.indexOf('id="perch-tab-chat"');
+  const attn = html.indexOf('id="perch-attn"');
+  const tr = html.indexOf('id="perch-transcript"');
+  assert.ok(chatTab < attn && attn < tr, "it sits above the transcript, inside the chat tab");
+  assert.ok(/⚠ [^<]+</.test(html.slice(attn, tr)), "and it carries a visible sentence");
+});
+
+test("the Wave-1 CSS: grow ceiling, copy chrome, banner [hidden] discipline", async () => {
+  const { perchHubCss } = await import("../servers/gateway/dashboard/perch-hub/css.js");
+  const css = perchHubCss().replace(/\s+/g, "");
+  assert.ok(/#perch-composertextarea\{[^}]*max-height:120px/.test(css),
+    "the auto-grow ceiling — a pasted essay must not push Send off screen");
+  assert.ok(/#perch-composertextarea\{[^}]*overflow-y:auto/.test(css),
+    "past the ceiling the textarea scrolls inside itself");
+  assert.ok(/\.prewrap\{position:relative\}/.test(css), "the copy-pre button anchors to its fence");
+  assert.ok(/\.copy-pre\{position:absolute/.test(css));
+  assert.ok(/\.attn-banner\[hidden\]\{display:none\}/.test(css),
+    "[hidden] must outrank the banner's own display:flex");
+});
+
+test("the Wave-1 client wiring: Enter/Shift rule, grow-on-input, watchdog, revive signals, resync", async () => {
+  const { perchHubJs } = await import("../servers/gateway/dashboard/perch-hub/client.js");
+  const js = perchHubJs("en");
+  // Enter sends, Shift+Enter newlines — the rule itself, not the word "Enter".
+  assert.match(js, /ev\.key==='Enter'&&!ev\.shiftKey/);
+  // Auto-grow, pi-lab's exact ceiling.
+  assert.match(js, /Math\.min\(this\.scrollHeight\|\|72,120\)/);
+  // Watchdog: 15s tick, 75s silence threshold (two missed 30s server pings),
+  // visibility-gated, and it re-opens WITH resync.
+  assert.match(js, /setInterval\(function\(\)\{/, "the watchdog is an interval");
+  assert.ok(js.includes("Date.now()-lastEventAt>75000"), "75s = two missed pings plus slack");
+  assert.ok(js.includes("},15000);"), "15s tick");
+  assert.match(js, /openStream\(current\.sid,true\)/, "the watchdog's re-open resyncs");
+  // The server ping is what the watchdog measures silence against.
+  assert.match(js, /addEventListener\('ping'/);
+  // Revive on pageshow and online too, through the generation-checked registry.
+  assert.match(js, /bindOnce\(window,'pageshow','pageshow',reviveStream\)/);
+  assert.match(js, /bindOnce\(window,'online','online',reviveStream\)/);
+  // Resync-on-reconnect: the retry slot carries it.
+  assert.match(js, /openStream\(mySid,true\)/);
+  // And the refetch REPLACES the transcript rather than appending to it.
+  const resync = js.slice(js.indexOf("function resyncHistory"));
+  const body = resync.slice(0, resync.indexOf("loadHistory(botId,sid)"));
+  assert.ok(body.includes("clearEl(el('perch-transcript'))"),
+    "resync clears before loadHistory refetches — an append would double every message");
+});
+
+test("the SSE heartbeat is a named ping frame, visible to client watchdogs", async () => {
+  // Wave 1 item 20's server half: a `: keepalive` COMMENT is invisible to
+  // EventSource, so a zombie socket on a foreground tab was undiscoverable.
+  const src = readFileSync(join(REPO, "servers/gateway/streams/sse.js"), "utf8");
+  assert.match(src, /event: ping\\ndata: \{\}\\n\\n/);
+  assert.ok(!src.includes(': keepalive\\n\\n"'), "the comment-only heartbeat is gone");
+});

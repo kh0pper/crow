@@ -2350,6 +2350,20 @@ export const translations = {
     es: "No se pudo listar los archivos.",
   },
   "perch.working": { en: "Working…", es: "Trabajando…" },
+  "perch.copyMessage": { en: "Copy message", es: "Copiar mensaje" },
+  "perch.copyCode": { en: "Copy code", es: "Copiar código" },
+  "perch.waitingBanner": {
+    en: "Waiting on your answer — respond to the question card below.",
+    es: "Esperando tu respuesta — contesta la tarjeta de abajo.",
+  },
+  "perch.fileQueuedPath": {
+    en: "File uploaded — its path rides your next message.",
+    es: "Archivo subido — su ruta viaja con tu próximo mensaje.",
+  },
+  "perch.uploadedHeader": {
+    en: "I uploaded files for you to look at:",
+    es: "Subí archivos para que los revises:",
+  },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

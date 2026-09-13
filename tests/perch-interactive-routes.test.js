@@ -1065,7 +1065,8 @@ test("POST /interactive/:sid/files writes a sanitized-name file into the session
     name: "notes.txt", data_b64: data.toString("base64"),
   });
   assert.equal(status, 200);
-  assert.deepEqual(body, { path: "notes.txt" });
+  assert.deepEqual(body, { path: "notes.txt", full_path: join(uploadsDir, "notes.txt") },
+    "Wave 1: full_path is the on-disk location the client injects into the next message for non-image uploads");
   assert.deepEqual(readFileSync(join(uploadsDir, "notes.txt")), data);
 });
 

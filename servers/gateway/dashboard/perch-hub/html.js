@@ -120,6 +120,12 @@ ${engineBanner(engine, lang)}
          flex:1/min-height:0/display:flex column in css.js) so the transcript
          stays the ONLY scroller and the sticky composer backstop is intact. -->
     <section id="perch-tab-chat" role="tabpanel" aria-labelledby="perch-tab-btn-chat">
+    <!-- Wave 1: the attention banner. An ask card blocks the turn until
+         answered; on a phone the card can be a scroll away, so the banner
+         says why the bot went quiet. Toggled by renderAsk/answerAsk — the
+         same pendingUi lifecycle the list row's "waiting on you" state and
+         the engine's replay-on-subscribe already ride. -->
+    <div id="perch-attn" class="attn-banner" hidden>⚠ ${escapeHtml(t("perch.waitingBanner", lang))}</div>
     <div id="perch-transcript"></div>
     <div id="perch-ask"></div>
     <!-- The working strip: the chat tab's own "the bot is busy" signal.
