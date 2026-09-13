@@ -500,6 +500,22 @@ test("POST /interactive/:sid/answer forwards requestId + the full body as the va
   assert.deepEqual(engineCalls.answer, [{ sid: "sess-1", requestId: "r1", value: { requestId: "r1", value: "yes" } }]);
 });
 
+test("POST /interactive/:sid/answer forwards a combined card's answers[] untouched (PR-A)", async () => {
+  engineCalls.answer.length = 0;
+  const combined = {
+    requestId: "sel1",
+    answers: [
+      { question: "Which auth?", selected: ["Session"], other: null },
+      { question: "Which flags?", selected: ["a", "c"], other: null },
+    ],
+  };
+  const { status, body } = await postJson("/interactive/sess-1/answer", combined);
+  assert.equal(status, 200);
+  assert.deepEqual(body, { ok: true });
+  assert.deepEqual(engineCalls.answer, [{ sid: "sess-1", requestId: "sel1", value: combined }],
+    "the answers[] array rides the body verbatim — the engine, not the route, drives the dance");
+});
+
 test("POST /interactive/:sid/answer 409s no_such_request — including the dead-child case (S4: never a 500)", async () => {
   engineImpl.answer = async () => { throw engineErr("no_such_request"); };
   const { status, body } = await postJson("/interactive/sess-1/answer", { requestId: "stale" });

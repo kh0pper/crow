@@ -210,6 +210,92 @@ const ASK_METHODS = new Set(["select", "input", "confirm", "editor"]);
  * extension-UI channel instead of the transcript. */
 const CROW_STATE_PREFIX = "crow-state:";
 
+/** PR-A (audit item 5): prefix pi-lab's ask-user extension puts on a `notify`
+ * message to relay the RICH questions payload (`{id, questions}`) of an
+ * ask_user call over the same extension-UI channel. The engine stashes it and
+ * upgrades the child's first `select` dialog into ONE combined multi-question
+ * card instead of walking the sequential `ctx.ui` dialogs one at a time. The
+ * `ctx.ui` select/input dialogs REMAIN the answer channel — this notify only
+ * carries the questions for display. An older pi-lab that never sends it keeps
+ * today's sequential cards working untouched (feature-detect by arrival, never
+ * by version). */
+const CROW_ASK_PREFIX = "crow-ask:";
+
+/** The "Other…" free-text sentinel and the row/done formatting ask-user.ts's
+ * `runTuiFlow` matches on. These MUST stay byte-identical to
+ * ~/pi-lab/extensions/ask-user.ts (`OTHER`, `optionRow`, the `done` row) —
+ * the answer dance replays operator answers into the child's blocking dialog
+ * queue by sending these exact strings back as `select`/`input` responses, and
+ * a one-codepoint drift makes `rows.indexOf(choice)` miss, which in a
+ * multi-select would loop forever. U+2026 ellipsis, U+2014 em-dash, U+2500
+ * box-drawing — verified against the source bytes. */
+export const ASK_OTHER = "Other\u2026";
+export function askOptionRow(o, checked) {
+  const mark = checked === undefined ? "" : checked ? "[x] " : "[ ] ";
+  const label = o && o.label != null ? String(o.label) : "";
+  const desc = o && o.description != null && o.description !== "" ? ` \u2014 ${o.description}` : "";
+  return `${mark}${label}${desc}`;
+}
+export function askDoneRow(n) {
+  return `\u2500\u2500 done${n ? ` (${n} selected)` : ""} \u2500\u2500`;
+}
+
+/**
+ * PR-A: compile a combined card's structured answers into the ordered list of
+ * `select`/`input` responses that drive ask-user.ts's `runTuiFlow` to
+ * completion. Pure — unit-tested directly and by the engine dance.
+ *
+ * `answers[i]` = `{selected:[label,…], other:string|null}` (the hub's shape;
+ * `labels` is accepted as an alias). Single-select sends ONE row (or Other +
+ * an input); multi-select toggles each picked row, optionally adds Other via
+ * an input, then picks the done row — mirroring runTuiFlow exactly.
+ *
+ * Returns `null` (never throws) when the answers cannot drive the questions
+ * (a label absent from its options, malformed shape) — the caller degrades
+ * honestly rather than feeding the child a response it cannot match.
+ */
+export function buildAskScript(questions, answers) {
+  if (!Array.isArray(questions) || questions.length === 0) return null;
+  const script = [];
+  for (let qi = 0; qi < questions.length; qi++) {
+    const q = questions[qi];
+    if (!q || !Array.isArray(q.options) || q.options.length === 0) return null;
+    const a = (Array.isArray(answers) && answers[qi]) || {};
+    const rawLabels = Array.isArray(a.selected) ? a.selected : (Array.isArray(a.labels) ? a.labels : []);
+    const labels = [...new Set(rawLabels.map((x) => String(x)))].filter(Boolean);
+    const other = a.other != null && String(a.other).trim() !== "" ? String(a.other).trim() : null;
+    if (q.multiSelect) {
+      const picked = new Set();
+      for (const label of labels) {
+        const o = q.options.find((x) => x && x.label === label);
+        if (!o) return null;                          // drift: hub sent an unknown label
+        if (picked.has(label)) continue;
+        script.push({ method: "select", value: askOptionRow(o, false) });
+        picked.add(label);
+      }
+      if (other) {
+        script.push({ method: "select", value: ASK_OTHER });
+        script.push({ method: "input", value: other });
+        picked.add(other);
+      }
+      script.push({ method: "select", value: askDoneRow(picked.size) });
+    } else {
+      const label = labels[0];
+      const o = label == null ? null : q.options.find((x) => x && x.label === label);
+      if (o && !other) {
+        script.push({ method: "select", value: askOptionRow(o) });
+      } else {
+        // Other path (or a label the child does not know): lossless — ride the
+        // free text so nothing the operator chose is silently dropped.
+        const text = [label, other].filter(Boolean).join(", ");
+        script.push({ method: "select", value: ASK_OTHER });
+        script.push({ method: "input", value: text });
+      }
+    }
+  }
+  return script.length ? script : null;
+}
+
 /** Track 3 Task 4: the engine-owned permission vocabulary (bridge.mjs's
  * PiRpc constructor option of the same name) — control() rejects anything
  * outside this set with `bad_request` rather than passing an unknown mode
@@ -307,6 +393,19 @@ function cardFrom(m) {
   if (m.message != null) card.message = m.message;
   if (m.prefill != null) card.prefill = m.prefill;
   return card;
+}
+
+/** PR-A: clear ALL combined-ask state. Called wherever `pendingUi` is cleared
+ * (child exit, abandon, stop, stopAll, abort, cycle, a resolved answer) so a
+ * stale `askDance` can never auto-answer a later, unrelated dialog and a
+ * stale `pendingQuestions` can never upgrade a future select into a combined
+ * card. One expression, because the four fields must never disagree about
+ * whether an ask is live. */
+function clearAsk(s) {
+  s.pendingUi = null;
+  s.pendingQuestions = null;
+  s.askCtx = null;
+  s.askDance = null;
 }
 
 /**
@@ -480,6 +579,19 @@ export function createInteractiveEngine({
       // mirror in onUiRequest, driven the other way by control({planMode}).
       planMode: null,
       pendingUi: null,
+      // PR-A (audit item 5): combined multi-question ask-card state.
+      //   pendingQuestions — the rich `{id, questions}` from a `crow-ask:`
+      //     notify, stashed until the child's first `select` upgrades it into
+      //     ONE combined card (null once consumed or when no notify arrived).
+      //   askCtx — while a combined card is pending, the questions + the raw
+      //     first `select` frame (so a drift/malformed answer can degrade to
+      //     the sequential card the operator would have gotten anyway).
+      //   askDance — `{script, idx}` while the engine replays a submitted
+      //     combined answer into the child's blocking dialog queue; each
+      //     arriving select/input consumes one scripted response.
+      pendingQuestions: null,
+      askCtx: null,
+      askDance: null,
       lastError: null,
       turn: null,
       subscribers: new Set(),
@@ -1476,7 +1588,7 @@ export function createInteractiveEngine({
       s.turn = null;
       clearStall(s);
       clearIdle(s);
-      s.pendingUi = null;                            // r1 S4
+      clearAsk(s);                                   // r1 S4 (+ PR-A dance state)
       let message = "pi exited unexpectedly";
       try {
         if (typeof pi._exitError === "function") message = pi._exitError("responding").message;
@@ -1582,8 +1694,68 @@ export function createInteractiveEngine({
     emit(s, { type: "log", text: "now on " + key });
   }
 
+  /** PR-A: a one-line summary of a combined card for the attention push. */
+  function askSummary(qs) {
+    if (!Array.isArray(qs) || !qs.length) return "";
+    const q0 = qs[0] || {};
+    const head = q0.header ? `${q0.header}: ` : "";
+    const more = qs.length > 1 ? ` (+${qs.length - 1} more)` : "";
+    return `${head}${q0.question == null ? "" : String(q0.question)}${more}`;
+  }
+
+  /** PR-A: replay ONE scripted response into the child's blocking dialog.
+   * Returns true when it answered (the caller must NOT surface a card); false
+   * on drift — having already cleared `s.askDance` so the caller falls through
+   * and renders `m` as an ordinary sequential card (the honest degrade: an
+   * older/changed pi-lab whose rendered rows no longer match the script never
+   * wedges the child in a toggle loop, it just reverts to today's UX). */
+  function danceStep(s, m) {
+    const dance = s.askDance;
+    const step = dance && dance.script[dance.idx];
+    if (!step || step.method !== m.method) { s.askDance = null; return false; }
+    if (m.method === "select" && Array.isArray(m.options) && !m.options.includes(step.value)) {
+      s.askDance = null; return false;               // option drift → degrade
+    }
+    s.pi.send({ type: "extension_ui_response", id: m.id, value: step.value });
+    dance.idx += 1;
+    if (dance.idx >= dance.script.length) s.askDance = null;  // dance complete
+    armStall(s);                                     // child is working the queue
+    return true;
+  }
+
   function onUiRequest(s, m) {
+    // PR-A: an in-flight combined-answer dance consumes the child's
+    // select/input dialogs automatically — the operator already answered every
+    // question on ONE card, and the engine is replaying those answers into the
+    // child's blocking runTuiFlow queue one dialog at a time. On drift,
+    // danceStep clears the dance and returns false so we fall through and
+    // render this dialog as an ordinary sequential card.
+    if (s.askDance && (m.method === "select" || m.method === "input")) {
+      if (danceStep(s, m)) return;
+    }
     if (ASK_METHODS.has(m.method)) {
+      // PR-A: upgrade the child's FIRST select into a combined multi-question
+      // card when a `crow-ask:` notify stashed the rich questions payload.
+      // runTuiFlow always opens with a select, so the first select after the
+      // notify IS the ask's; consuming pendingQuestions here means a later,
+      // unrelated select can never be mis-upgraded.
+      if (m.method === "select" && s.pendingQuestions) {
+        const qs = s.pendingQuestions.questions;
+        s.pendingQuestions = null;
+        s.askCtx = { questions: qs, firstFrame: m };
+        s.pendingUi = { requestId: m.id, method: "questions", title: "", questions: qs };
+        clearStall(s);                               // paused while a human thinks
+        emit(s, { type: "ask_user", ...s.pendingUi });
+        armIdle(s);
+        pushAttention({
+          type: "attention",
+          priority: "high",
+          title: s.botId + " needs you",
+          body: askSummary(qs),
+          action_url: "/dashboard/bot-board#bird=" + s.sessionId,
+        });
+        return;
+      }
       s.pendingUi = cardFrom(m);
       clearStall(s);                                 // paused while a human thinks
       emit(s, { type: "ask_user", ...s.pendingUi });
@@ -1620,6 +1792,29 @@ export function createInteractiveEngine({
         if (parsed && parsed.kind === "plan-mode") {
           s.planMode = parsed.state;
           emit(s, { type: "plan_state", state: parsed.state });
+        }
+        return;
+      }
+      // PR-A (audit item 5): pi-lab's ask-user extension relays the RICH
+      // questions payload of an ask_user call over this same notify channel,
+      // `"crow-ask:" + JSON.stringify({id, questions})`. Stash it — the child's
+      // next `select` (above) upgrades into ONE combined card. The `ctx.ui`
+      // dialogs remain the answer channel; this carries display only. An older
+      // pi-lab never sends it, so pendingQuestions stays null and today's
+      // sequential cards are untouched. Malformed JSON is swallowed exactly
+      // like the crow-state mirror.
+      if (text.startsWith(CROW_ASK_PREFIX)) {
+        let parsed;
+        try {
+          parsed = JSON.parse(text.slice(CROW_ASK_PREFIX.length));
+        } catch {
+          return;
+        }
+        if (parsed && Array.isArray(parsed.questions) && parsed.questions.length) {
+          s.pendingQuestions = {
+            id: parsed.id == null ? null : String(parsed.id),
+            questions: parsed.questions,
+          };
         }
         return;
       }
@@ -1808,7 +2003,7 @@ export function createInteractiveEngine({
     s.turn = null;
     clearStall(s);
     clearIdle(s);
-    s.pendingUi = null;
+    clearAsk(s);
     if (s.state !== "stopped") s.state = "hibernating";
     if (reason) s.lastError = reason;
     if (pi) { try { await pi.close(); } catch { /* already dead */ } }
@@ -2392,6 +2587,51 @@ export function createInteractiveEngine({
     // no_such_request, never PiRpc's raw _exitError as a 500.
     const alive = !!(s.pi && s.pi._exitCode == null);
     if (!card || card.requestId !== requestId || !alive) throw engineError("no_such_request");
+    // PR-A (audit item 5): the combined multi-question card. The operator
+    // answered every question at once; drive the child's blocking runTuiFlow
+    // queue by replaying scripted select/input responses. The first select is
+    // the request being answered NOW (requestId); danceStep() consumes the rest
+    // as each subsequent dialog arrives.
+    if (card.method === "questions") {
+      const ctx = s.askCtx || {};
+      const firstFrame = ctx.firstFrame || null;
+      // Cancel resolves the tool cleanly ("Question cancelled") exactly like a
+      // sequential card's cancel — respond to the pending first select.
+      if (value && value.cancelled) {
+        s.pi.send({ type: "extension_ui_response", id: requestId, cancelled: true });
+        clearAsk(s);
+        armStall(s); armIdle(s); emit(s, stateEvent(s));
+        return { ok: true };
+      }
+      const answers = Array.isArray(value && value.answers) ? value.answers : [];
+      const script = buildAskScript(card.questions, answers);
+      const step0 = script && script[0];
+      // Drift guard: the first scripted response must be a value the child's
+      // actual select offered. If the script is unusable OR its first step no
+      // longer matches the rendered options, degrade to the sequential card an
+      // older pi-lab would have produced — never wedge the child in a loop.
+      const firstDrifted = !!step0 && step0.method === "select"
+        && firstFrame && Array.isArray(firstFrame.options)
+        && !firstFrame.options.includes(step0.value);
+      if (!step0 || firstDrifted) {
+        s.askCtx = null; s.askDance = null;
+        if (firstFrame) {
+          s.pendingUi = cardFrom(firstFrame);
+          clearStall(s); armIdle(s);
+          emit(s, { type: "ask_user", ...s.pendingUi });
+        } else {
+          s.pendingUi = null;
+          armStall(s); armIdle(s); emit(s, stateEvent(s));
+        }
+        return { ok: true };
+      }
+      s.pi.send({ type: "extension_ui_response", id: requestId, value: step0.value });
+      s.askDance = script.length > 1 ? { script, idx: 1 } : null;
+      s.pendingUi = null;
+      s.askCtx = null;
+      armStall(s); armIdle(s); emit(s, stateEvent(s));
+      return { ok: true };
+    }
     const payload = { type: "extension_ui_response", id: requestId };
     if (value && value.cancelled) {
       // PL-3's third edit resolves the tool as "Question cancelled" — the C2
@@ -2420,7 +2660,7 @@ export function createInteractiveEngine({
   async function abortInFlight(s) {
     const turn = s.turn;
     clearStall(s);
-    s.pendingUi = null;                              // r1 S4
+    clearAsk(s);                                     // r1 S4 (+ PR-A dance state)
     if (turn) {
       turn.aborted = true;
       turn.graceTimer = timer(() => {
@@ -2519,7 +2759,7 @@ export function createInteractiveEngine({
     s.turn = null;
     clearStall(s);
     clearIdle(s);
-    s.pendingUi = null;
+    clearAsk(s);
     s.state = "stopped";
     // Track 3 Task 6: released on stop() — a stopped session's card is free
     // for a fresh dispatch. This is the primary release path (attachExit's
@@ -2655,7 +2895,7 @@ export function createInteractiveEngine({
     s.childSince = null;               // Wave 2: uptime belongs to the CHILD
     clearIdle(s);
     clearStall(s);
-    s.pendingUi = null;
+    clearAsk(s);
     s.state = "hibernating";
     try { await pi.close(); } catch { /* already dead */ }
     writeLeases();
@@ -2679,7 +2919,7 @@ export function createInteractiveEngine({
       s.pi = null;
       clearIdle(s);
       clearStall(s);
-      s.pendingUi = null;
+      clearAsk(s);
       // Track 3 Task 7: captured BEFORE the existing `s.turn = null` below —
       // reading it AFTER always reads false (a null turn), so the
       // interrupted marker would never fire. This session was genuinely
