@@ -354,6 +354,55 @@ test("two consecutive narrows on one thread leave exactly ONE row, updated in pl
   assert.equal(rows[0].narrowed_tools, '["read","bash"]');
 });
 
+// --- PR-D (audit item 15): GET /bots/:id/envelope?threadId= carries the ----
+// --- session's SAVED narrowing, so the hub's pane renders in ONE call.   ----
+// The pane must distinguish three states without a second round-trip:
+// narrowed to a set (checkboxes pre-unchecked), reported-and-empty (all
+// checked), and not-reported (absent — a never-seen thread reads as the
+// latter, never as a fabricated null). The bare per-bot call the board
+// drawer makes must stay byte-for-byte what it was: no savedNarrowing key.
+
+test("PR-D: GET envelope?threadId= attaches the session's saved narrowing in one call", async () => {
+  await postJson("/bots/chatty/sessions/envd-a/narrow", { disabled_tools: ["bash"] });
+  const { status, body } = await getJson("/bots/chatty/envelope?threadId=envd-a");
+  assert.equal(status, 200);
+  // Emitted as the stored JSON text — the client parses it (same convention
+  // as the /sessions list); the envelope's own shape is untouched alongside.
+  assert.equal(body.savedNarrowing, '["bash"]');
+  assert.ok(Array.isArray(body.tools) && body.tools.some((t) => t.id === "bash"),
+    "the per-bot grant still comes through with the session state attached");
+});
+
+test("PR-D: GET envelope without threadId reports no savedNarrowing key at all (the board drawer's call is unchanged)", async () => {
+  // envd-a HAS a narrowing by now — the point is the field rides the query,
+  // not the bot. A bare per-bot envelope must not grow the key, or the
+  // drawer's untouched path silently changes contract.
+  const { status, body } = await getJson("/bots/chatty/envelope");
+  assert.equal(status, 200);
+  assert.equal("savedNarrowing" in body, false, "not reported ≠ null ≠ a set");
+});
+
+test("PR-D: GET envelope?threadId= for a thread that does not exist omits savedNarrowing (absent, never null)", async () => {
+  const { body } = await getJson("/bots/chatty/envelope?threadId=envd-no-such-thread");
+  assert.equal("savedNarrowing" in body, false,
+    "an unknown thread must read as 'not reported', not as 'narrowed to nothing'");
+});
+
+test("PR-D: GET envelope?threadId= reports a null row as null (the tri-state's middle)", async () => {
+  // A perch session row that exists but never narrowed: the thread IS known,
+  // nothing is taken away. This is the state a bare POST /narrow with an
+  // empty list cannot produce (it stores "[]"), so seed it directly.
+  const c = raw();
+  c.prepare(
+    "INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status,narrowed_tools) " +
+    "VALUES ('chatty','perch','envd-null','perch','waiting-user',NULL)"
+  ).run();
+  c.close();
+  const { body } = await getJson("/bots/chatty/envelope?threadId=envd-null");
+  assert.equal("savedNarrowing" in body, true, "a known row must REPORT, even when the report is empty");
+  assert.equal(body.savedNarrowing, null);
+});
+
 test("narrowed_tools is a real column, declared BOTH ways (the #250 convention)", () => {
   const c = raw();
   const cols = c.prepare("PRAGMA table_info(bot_sessions)").all().map((r) => r.name);
