@@ -27,6 +27,7 @@
  */
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1840,4 +1841,50 @@ test("PR-A: stop() mid-dance clears the dance so a later child is not auto-answe
   // checking no auto-response fires if a stray frame somehow arrives
   const snap = await engine.get(s.sessionId);
   assert.equal(snap.pendingUi, null);
+});
+
+// ---------------------------------------------------------------------------
+// PR-C (audit item 14): setArchived — a roster flag, never an engine action.
+// ---------------------------------------------------------------------------
+
+test("PR-C: setArchived stamps/clears bot_sessions.archived_at and NEVER touches the child", async () => {
+  const { engine } = makeEngine();
+  const s = await spawned(engine);
+  await engine.message(s.sessionId, "go");            // make it a live, awake session
+  assert.equal(rowFor(s.threadId).archived_at, null, "not archived by default");
+
+  const r1 = await engine.setArchived(s.sessionId, true);
+  assert.equal(r1.ok, true);
+  assert.equal(r1.archived, true);
+  const row1 = rowFor(s.threadId);
+  assert.ok(row1.archived_at, "archived_at is stamped");
+  assert.match(row1.archived_at, /^\d{4}-\d{2}-\d{2}T/, "an ISO timestamp");
+
+  // The engine is untouched: the session is still awake with its live child.
+  const snap = await engine.get(s.sessionId);
+  assert.equal(snap.state, "awake", "archiving a live session leaves the child running (pi-lab semantics)");
+
+  const r2 = await engine.setArchived(s.sessionId, false);
+  assert.equal(r2.archived, false);
+  assert.equal(rowFor(s.threadId).archived_at, null, "unarchive clears it back to NULL");
+});
+
+test("PR-C: setArchived on an unknown/never-spawned sid is no_such_session", async () => {
+  const { engine } = makeEngine();
+  const ghost = "perchlive-never-" + randomUUID().slice(0, 8);   // prefix spawn never mints (it uses perchlive-<8hex>)
+  assert.equal(rowFor(ghost), null, "diagnostic: the ghost row must not exist");
+  await assert.rejects(() => engine.setArchived(ghost, true), (e) => e.code === "no_such_session");
+});
+
+test("PR-C: setArchived works by ROW IDENTITY alone — no in-memory session, no wake", async () => {
+  const { engine } = makeEngine();
+  // A perch-live row the engine never spawned or adopted (e.g. a stopped
+  // session from a prior process). setArchived is a pure DB write by
+  // gateway_thread_id, so it stamps the row without building a session.
+  const c = raw();
+  c.prepare("INSERT INTO bot_sessions (bot_id,gateway_type,gateway_thread_id,kind,status) VALUES ('b','perch','perchlive-archonly','perch-live','stopped')").run();
+  c.close();
+  const r = await engine.setArchived("perchlive-archonly", true);
+  assert.equal(r.ok, true);
+  assert.ok(rowFor("perchlive-archonly").archived_at, "stamped by identity — no in-memory session needed");
 });

@@ -2306,6 +2306,11 @@ export const translations = {
     es: "Nombra esta sesión. Déjalo vacío para quitar el nombre.",
   },
   "perch.renameFailed": { en: "That session was not renamed.", es: "Esa sesión no se renombró." },
+  "perch.archive": { en: "Archive", es: "Archivar" },
+  "perch.unarchive": { en: "Unarchive", es: "Restaurar" },
+  "perch.archived": { en: "Archived", es: "Archivadas" },
+  "perch.archiveFailed": { en: "That session was not archived.", es: "Esa sesión no se archivó." },
+  "perch.unarchiveFailed": { en: "That session was not restored.", es: "Esa sesión no se restauró." },
   "perch.roostUnreachable": {
     en: "Could not reach the session list.",
     es: "No se pudo obtener la lista de sesiones.",

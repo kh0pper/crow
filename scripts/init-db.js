@@ -2619,6 +2619,7 @@ await initTable("bot_sessions table", `
     kind              TEXT NOT NULL DEFAULT 'chat',
     narrowed_tools    TEXT,
     label             TEXT,
+    archived_at       TEXT,
     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -2667,6 +2668,22 @@ await addColumnIfMissing("bot_sessions", "label", "TEXT");
 // SCHEMA_GENERATION bump (the `kind`/`narrowed_tools`/`label` precedent).
 await addColumnIfMissing("bot_sessions", "cwd", "TEXT");
 
+// bot_sessions.archived_at: a nullable timestamp marking a Perch session as
+// ARCHIVED (audit item 14) — hidden from the roost's live list without being
+// stopped. NULL means "not archived" (every existing row, and every non-perch
+// channel). Archiving is a ROSTER flag only: it never touches the engine, so a
+// live child keeps running exactly as pi-lab's archive does (the session just
+// leaves the default list; the hub's "Archived" affordance can unarchive it).
+// Same both-places idiom as `cwd` above: CREATE body for fresh installs, this
+// guarded ALTER for pre-existing ones, listed in BOT_SESSIONS_CANONICAL_COLUMNS
+// so the control-CHECK rebuild carries it, AND a standalone rail in
+// scripts/migrations/0006-bot-sessions-archived.mjs (the 0005/#363 lesson: an
+// additive column with no SCHEMA_GENERATION bump never re-runs init-db, so a
+// co-hosted instance converging onto this code on its own restart needs the
+// migration to add the column or its /roost SELECT 500s). Additive-only — no
+// SCHEMA_GENERATION bump.
+await addColumnIfMissing("bot_sessions", "archived_at", "TEXT");
+
 // bot_sessions.control CHECK widen, 'run'/'stop' -> 'run'/'stop'/'interrupted'
 // (Track 3 Task 7): stopAll() parks a session that was genuinely mid-turn
 // when the gateway shut down with control='interrupted' instead of 'run', so
@@ -2698,7 +2715,7 @@ await addColumnIfMissing("bot_sessions", "cwd", "TEXT");
 // is never reached, so the next run retries the migration.
 //
 // I13: PRAGMA table_info(bot_sessions) is diffed against the canonical
-// 19-column list BEFORE any DDL — an unrecognized host-present column (or a
+// 20-column list BEFORE any DDL — an unrecognized host-present column (or a
 // canonical column gone missing) aborts the migration instead of silently
 // vanishing with its data, matching the reference rebuild's C2/N1 guard.
 //
@@ -2716,7 +2733,7 @@ const BOT_SESSIONS_CANONICAL_COLUMNS = [
   "id", "bot_id", "pi_session_id", "pi_session_dir", "gateway_type",
   "gateway_thread_id", "project_id", "card_id", "plan_path", "status",
   "control", "model", "cwd", "escalated", "kind", "narrowed_tools",
-  "label", "created_at", "updated_at",
+  "label", "archived_at", "created_at", "updated_at",
 ];
 await (async () => {
   const tableInfo = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='bot_sessions'");
@@ -2779,6 +2796,7 @@ await (async () => {
         kind              TEXT NOT NULL DEFAULT 'chat',
         narrowed_tools    TEXT,
         label             TEXT,
+        archived_at       TEXT,
         created_at        TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
       )

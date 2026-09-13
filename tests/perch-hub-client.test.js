@@ -1154,6 +1154,58 @@ test("C2: a confirmed row Close posts /interactive/<sid>/stop and refreshes the 
     "the stopped row has to leave the list, which takes a re-poll");
 });
 
+// ---------------------------------------------------------------------------
+// PR-C (audit item 14): session archive — the roster affordance
+// ---------------------------------------------------------------------------
+
+const ROOST_WITH_ARCHIVED = {
+  birds: [{ id: "r4-assistant", name: "R4 Assistant", perch_attached: true, state: "idle", sessions: [] }],
+  archived: [{ sessionId: "perchlive-arch01", botId: "r4-assistant", botName: "R4 Assistant", label: "old session", state: "hibernating", archivedAt: "2026-09-13T12:00:00.000Z" }],
+};
+
+test("PR-C: a live row carries an Archive action that posts /archive and re-polls", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const before = hub.fetchCalls.filter((c) => c.path === "/roost").length;
+  const archive = listButtons(hub).find((b) => b.text === "Archive");
+  assert.ok(archive, "a live session row carries an Archive action");
+  archive.btn.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const arch = hub.fetchCalls.filter((c) => c.path.endsWith("/archive"));
+  assert.equal(arch.length, 1);
+  assert.equal(arch[0].method, "POST");
+  assert.equal(arch[0].path, "/interactive/perchlive-11111111/archive", "the row's own session");
+  assert.ok(hub.fetchCalls.filter((c) => c.path === "/roost").length > before,
+    "the archived row leaves the live list, which takes a re-poll");
+});
+
+test("PR-C: the Archived affordance lists archived sessions collapsed; Unarchive posts /unarchive", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_WITH_ARCHIVED) });
+  const body = hub.els["perch-list-body"];
+  const toggle = body.children.find((c) => String(c.className).indexOf("archived-toggle") >= 0);
+  assert.ok(toggle, "an Archived toggle renders when roost carries archived sessions");
+  assert.match(toggle.textContent, /Archived \(1\)/, "the toggle counts the archived sessions");
+  const list = body.children.find((c) => String(c.className).indexOf("archived-list") >= 0);
+  assert.ok(list, "the archived list container renders");
+  assert.equal(list.hidden, true, "collapsed by default");
+  toggle.onclick();
+  assert.equal(list.hidden, false, "the toggle reveals the archived sessions");
+  const unarch = list.children[0].children.find((c) => c.tagName === "BUTTON");
+  assert.equal(unarch.textContent, "Unarchive");
+  unarch.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  const u = hub.fetchCalls.filter((c) => c.path.endsWith("/unarchive"));
+  assert.equal(u.length, 1);
+  assert.equal(u[0].method, "POST");
+  assert.equal(u[0].path, "/interactive/perchlive-arch01/unarchive");
+});
+
+test("PR-C: no archived sessions means no Archived affordance (today's list, untouched)", async () => {
+  const hub = await mountHub({ fetchImpl: roostFetch(ROOST_ALL_BUSY) });
+  const body = hub.els["perch-list-body"];
+  assert.equal(body.children.some((c) => String(c.className).indexOf("archived-toggle") >= 0), false,
+    "a roost with no archived array renders no Archived toggle");
+});
+
 test("C2: closing the session you are IN returns to the list — no chat view on a dead stream", async () => {
   const hub = await mountHub({
     fetchImpl: roostFetch(ROOST_ALL_BUSY), confirmImpl: () => true,

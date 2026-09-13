@@ -2750,6 +2750,35 @@ export function createInteractiveEngine({
     return { label: s.label };
   }
 
+  /**
+   * PR-C (audit item 14): mark a session archived (hidden from the roost's
+   * live list) or unarchive it. A ROSTER flag ONLY — a direct bot_sessions
+   * write by identity that NEVER touches the engine's child: an awake session
+   * keeps running exactly as pi-lab's archive does, it just leaves the default
+   * list (the hub's "Archived" affordance can unarchive it). Deliberately NOT
+   * resolved through the session map — archiving a hibernating, stopped, or
+   * never-adopted row must work without building an in-memory session or
+   * waking anything, so this is a pure UPDATE keyed on gateway_thread_id.
+   * NULL archived_at = not archived (every pre-existing row's default).
+   */
+  async function setArchived(sessionId, archived) {
+    const id = String(sessionId);
+    const stamp = archived ? new Date().toISOString() : null;
+    const db = createDbClient();
+    try {
+      const res = await db.execute({
+        sql:
+          "UPDATE bot_sessions SET archived_at=?, updated_at=datetime('now') " +
+          "WHERE gateway_thread_id=? AND kind='perch-live'",
+        args: [stamp, id],
+      });
+      if (!res || res.rowsAffected === 0) throw engineError("no_such_session");
+      return { ok: true, archived: !!archived, archivedAt: stamp };
+    } finally {
+      try { db.close(); } catch { /* already closed */ }
+    }
+  }
+
   async function stop(sessionId) {
     const s = await resolveSession(sessionId);
     if (!s) throw engineError("no_such_session");
@@ -2959,6 +2988,7 @@ export function createInteractiveEngine({
     options,
     commands,
     rename,
+    setArchived,
     answer,
     abort,
     stop,

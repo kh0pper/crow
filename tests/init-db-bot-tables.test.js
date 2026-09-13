@@ -30,6 +30,7 @@ test("bot_sessions exists with model + escalated columns", () => {
   assert.ok(c.includes("model"));
   assert.ok(c.includes("escalated"));
   assert.ok(c.includes("cwd"), "cwd (the operator-chosen working directory, open-anywhere B1)");
+  assert.ok(c.includes("archived_at"), "archived_at (Perch session archive, audit item 14)");
 });
 
 test("bot_skill_events exists with action column", () => {

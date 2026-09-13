@@ -754,7 +754,7 @@ test("F1b live: crossing the breakpoint with a chat open refreshes the list that
 // ---------------------------------------------------------------------------
 
 for (const [w, h] of [[412, 730], [1280, 900]]) {
-  test(`F3 live @${w}x${h}: a named row shows the name, clips it, and keeps three thumb-sized controls`, async (t) => {
+  test(`F3 live @${w}x${h}: a named row shows the name, clips it, and keeps four thumb-sized controls`, async (t) => {
     if (!available) return t.skip("no CDP endpoint at " + CDP);
     resetApi();
     const s = await session(w, h);
@@ -784,8 +784,8 @@ for (const [w, h] of [[412, 730], [1280, 900]]) {
       assert.equal(seen.name, "November package copy pass, English and Spanish together");
       assert.equal(seen.nameOverflowsRow, false,
         "an 80-char operator name must be clipped inside its row, not spill out of it");
-      assert.deepEqual(seen.btns.map((b) => b.text), ["Open", "Rename", "Close"],
-        "the row grew a third control: " + JSON.stringify(seen.btns.map((b) => b.text)));
+      assert.deepEqual(seen.btns.map((b) => b.text), ["Open", "Rename", "Archive", "Close"],
+        "the row grew a fourth control (Archive, PR-C): " + JSON.stringify(seen.btns.map((b) => b.text)));
       for (const b of seen.btns) {
         assert.ok(b.h >= 44, `${b.text} is ${b.w}x${b.h}; every row control clears the 44px thumb target`);
         assert.equal(b.inViewport, true, `${b.text} must be on screen`);

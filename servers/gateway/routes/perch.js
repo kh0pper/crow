@@ -513,8 +513,41 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
         // control below stays whatever the engine snapshot itself carried.
       }
 
+      // PR-C (audit item 14): archived perch-live sessions. Archiving is a
+      // roster flag (bot_sessions.archived_at) that never touches the engine,
+      // so an archived session may still be awake in eng.list() — we EXCLUDE it
+      // from each bird's live `sessions` and surface it in a top-level
+      // `archived` list the hub's "Archived" affordance renders (with
+      // unarchive). One query, newest-archived first, capped.
+      const botNameById = new Map(rows.map((r) => [String(r.bot_id), r.display_name || r.bot_id]));
+      const archivedById = new Set();
+      const archived = [];
+      try {
+        const { rows: archRows } = await db.execute({
+          sql:
+            "SELECT gateway_thread_id, bot_id, label, status, archived_at FROM bot_sessions " +
+            "WHERE kind='perch-live' AND archived_at IS NOT NULL ORDER BY archived_at DESC LIMIT 100",
+          args: [],
+        });
+        for (const r of archRows) {
+          const sid = String(r.gateway_thread_id);
+          archivedById.add(sid);
+          archived.push({
+            sessionId: sid,
+            botId: String(r.bot_id),
+            botName: botNameById.get(String(r.bot_id)) || String(r.bot_id),
+            label: r.label || null,
+            state: r.status === "stopped" ? "stopped" : (r.status === "active" ? "awake" : "hibernating"),
+            archivedAt: r.archived_at,
+          });
+        }
+      } catch {
+        // bot_sessions absent (primary gateway) — nothing is archived.
+      }
+
       const sessionsByBot = new Map();
       for (const s of sessions) {
+        if (archivedById.has(String(s.sessionId))) continue;   // PR-C: archived never shows as live
         const list = sessionsByBot.get(s.botId);
         if (list) list.push(s); else sessionsByBot.set(s.botId, [s]);
       }
@@ -575,7 +608,7 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
         };
       });
 
-      res.json({ birds, occupiedCardIds: [...occupied] });
+      res.json({ birds, occupiedCardIds: [...occupied], archived });
     } catch (err) {
       jsonError(res, 500, String((err && err.message) || err));
     } finally {
