@@ -320,6 +320,12 @@ export function perchHubJs(lang = "en") {
   var ASK_DENY='${tJs("perch.askDeny", lang)}';
   var ASK_CANCEL='${tJs("perch.askCancel", lang)}';
   var ASK_SUBMIT='${tJs("perch.askSubmit", lang)}';
+  /* PR-A: the combined multi-question ask card's own strings. */
+  var ASK_SEND_ANSWERS='${tJs("perch.askSendAnswers", lang)}';
+  var ASK_SEND_ANSWER='${tJs("perch.askSendAnswer", lang)}';
+  var ASK_SENDING='${tJs("perch.askSending", lang)}';
+  var ASK_MULTI_HINT='${tJs("perch.askMultiHint", lang)}';
+  var ASK_OTHER_PH='${tJs("perch.askOtherPlaceholder", lang)}';
   var NO_ATTACHED_BOTS='${tJs("perch.noAttachedBots", lang)}';
   var MODEL_BOT_DEFAULT='${tJs("perch.modelBotDefault", lang)}';
   var MODEL_BOT_RESOLVES='${tJs("perch.modelBotResolves", lang)}';
@@ -1681,6 +1687,7 @@ export function perchHubJs(lang = "en") {
   function answerPayloadFor(card,choice){
     var out={requestId:card.requestId};
     if(choice&&choice.cancelled){ out.cancelled=true; return out; }
+    if(card.method==='questions'){ out.answers=(choice&&choice.answers)||[]; return out; }
     if(card.method==='confirm'){ out.confirmed=!!(choice&&choice.confirm); return out; }
     out.value=String(choice&&choice.value!=null?choice.value:'');
     return out;
@@ -1711,6 +1718,8 @@ export function perchHubJs(lang = "en") {
     var pane=el('perch-ask'); if(!pane) return;
     clearEl(pane);
     if(!card||!card.requestId){ setAttn(false); return; }
+    /* PR-A: the combined multi-question card gets its own layout. */
+    if(card.method==='questions'){ renderAskCombined(pane,card); return; }
     var frame=document.createElement('div'); frame.className='ask-card';
     if(card.title) frame.appendChild(line('ask-title',card.title));
     if(card.message) frame.appendChild(line('ask-message',card.message));
@@ -1751,6 +1760,90 @@ export function perchHubJs(lang = "en") {
     frame.appendChild(controls);
     pane.appendChild(frame);
     setAttn(true);                             /* Wave 1: say why the bot went quiet */
+  }
+
+  /* PR-A (audit item 5): the combined multi-question ask card. Renders every
+     question at once — optional header chip, question text, tappable options
+     (bold label + dim description), an "Other…" free-text field — behind ONE
+     Send-answers action. Submitting posts answers[] once; the engine replays
+     them into the child's blocking dialog queue (the answer dance). Mirrors
+     pi-lab's AskCard. Built with createElement/textContent only — never
+     innerHTML — and className (not classList) to match the rest of the file.
+     No async continuation lives here: the only POST is answerAsk's, which
+     already carries the mySid identity guard. */
+  function renderAskCombined(pane,card){
+    var qs=Array.isArray(card.questions)?card.questions:[];
+    if(!qs.length){ setAttn(false); return; }
+    var frame=document.createElement('div'); frame.className='ask-card ask-combined';
+    var sel=qs.map(function(){ return []; });
+    var other=qs.map(function(){ return ''; });
+    var optBtns=qs.map(function(){ return []; });   /* per question: [{btn,label}] */
+    var sent=false;
+    var sendBtn=null;
+
+    function ready(){
+      return qs.every(function(q,i){ return sel[i].length>0 || (other[i]&&other[i].trim()!==''); });
+    }
+    function repaint(qi){
+      optBtns[qi].forEach(function(ob){
+        ob.btn.className=(sel[qi].indexOf(ob.label)>=0)?'ask-opt sel':'ask-opt';
+      });
+    }
+    function refresh(){ if(sendBtn) sendBtn.disabled=(!ready()||sent); }
+
+    qs.forEach(function(q,qi){
+      var qd=document.createElement('div'); qd.className='ask-q';
+      if(q.header){ var h=document.createElement('span'); h.className='ask-h'; h.textContent=String(q.header); qd.appendChild(h); }
+      var t=document.createElement('div'); t.className='ask-t'; t.textContent=(q.question==null?'':String(q.question));
+      if(q.multiSelect){ var mh=document.createElement('span'); mh.className='ask-multi'; mh.textContent=' '+ASK_MULTI_HINT; t.appendChild(mh); }
+      qd.appendChild(t);
+      var opts=document.createElement('div'); opts.className='ask-opts';
+      (Array.isArray(q.options)?q.options:[]).forEach(function(o){
+        var label=(o&&o.label!=null)?String(o.label):'';
+        var b=document.createElement('button'); b.type='button'; b.className='ask-opt';
+        var lb=document.createElement('b'); lb.textContent=label; b.appendChild(lb);
+        if(o&&o.description){ var sp=document.createElement('span'); sp.textContent=String(o.description); b.appendChild(sp); }
+        b.onclick=function(){
+          if(sent) return;
+          if(q.multiSelect){
+            var ix=sel[qi].indexOf(label);
+            if(ix>=0) sel[qi].splice(ix,1); else sel[qi].push(label);
+          } else {
+            sel[qi]=(sel[qi].indexOf(label)>=0)?[]:[label];
+          }
+          repaint(qi); refresh();
+        };
+        opts.appendChild(b);
+        optBtns[qi].push({btn:b,label:label});
+      });
+      qd.appendChild(opts);
+      var oi=document.createElement('input'); oi.type='text'; oi.className='ask-other'; oi.placeholder=ASK_OTHER_PH;
+      oi.oninput=function(){ other[qi]=oi.value; refresh(); };
+      qd.appendChild(oi);
+      frame.appendChild(qd);
+    });
+
+    var foot=document.createElement('div'); foot.className='ask-foot';
+    sendBtn=document.createElement('button'); sendBtn.type='button'; sendBtn.className='ask-send primary';
+    sendBtn.textContent=(qs.length>1?ASK_SEND_ANSWERS:ASK_SEND_ANSWER);
+    sendBtn.disabled=true;
+    sendBtn.onclick=function(){
+      if(!ready()||sent) return;
+      sent=true; sendBtn.disabled=true; sendBtn.textContent=ASK_SENDING;
+      var answers=qs.map(function(q,i){
+        var oth=(other[i]&&other[i].trim()!=='')?other[i].trim():null;
+        return { question:(q.question==null?'':String(q.question)), selected:sel[i].slice(), other:oth };
+      });
+      answerAsk(card,{answers:answers});
+    };
+    var cancel=document.createElement('button'); cancel.type='button'; cancel.className='quiet'; cancel.textContent=ASK_CANCEL;
+    cancel.onclick=function(){ if(sent) return; answerAsk(card,{cancelled:true}); };
+    foot.appendChild(sendBtn); foot.appendChild(cancel);
+    frame.appendChild(foot);
+
+    pane.appendChild(frame);
+    setAttn(true);
+    refresh();
   }
 
   function attachFile(file){

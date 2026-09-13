@@ -2910,6 +2910,124 @@ test("W1: an ask card raises the attention banner; answering lowers it", async (
   assert.equal(attn.hidden, true, "the banner dies with the card");
 });
 
+// ---------------------------------------------------------------------------
+// PR-A (audit item 5): the combined multi-question ask card
+// ---------------------------------------------------------------------------
+
+const COMBINED_QS = [
+  { question: "Which auth?", header: "Auth", options: [{ label: "Session", description: "cookie-based" }, { label: "Token" }] },
+  { question: "Which flags?", multiSelect: true, options: [{ label: "a" }, { label: "b" }, { label: "c" }] },
+];
+
+/** Depth-first collect of descendants whose className list includes `cls`. */
+function byClass(node, cls) {
+  const out = [];
+  (function walk(n) {
+    if (!n || typeof n !== "object") return;
+    if (typeof n.className === "string" && n.className.split(/\s+/).indexOf(cls) >= 0) out.push(n);
+    (n.children || []).forEach(walk);
+  })(node);
+  return out;
+}
+const combinedCard = (hub) => hub.els["perch-ask"].children[0];
+
+test("PR-A: a questions card renders the combined layout (header, options, other, ONE send)", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("ask_user", { requestId: "r1", method: "questions", title: "", questions: COMBINED_QS });
+  await new Promise((r) => setTimeout(r, 0));
+  const card = combinedCard(hub);
+  assert.equal(card.className, "ask-card ask-combined");
+  assert.equal(byClass(card, "ask-q").length, 2, "one block per question");
+  assert.equal(byClass(card, "ask-h").length, 1, "only Q1 has a header");
+  assert.equal(byClass(card, "ask-h")[0].textContent, "Auth");
+  assert.equal(byClass(card, "ask-opt").length, 5, "2 + 3 option buttons");
+  assert.equal(byClass(card, "ask-multi").length, 1, "the multi-select question carries the hint");
+  assert.equal(byClass(card, "ask-other").length, 2, "one Other field per question");
+  assert.equal(byClass(card, "ask-send").length, 1, "ONE send action for the whole card");
+  assert.equal(byClass(card, "ask-send")[0].disabled, true, "send starts disabled");
+  assert.equal(hub.els["perch-attn"].hidden, false, "a pending card raises the banner");
+});
+
+test("PR-A: single-select is radio, multi-select toggles; submit posts answers[] once and clears", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("ask_user", { requestId: "r1", method: "questions", title: "", questions: COMBINED_QS });
+  await new Promise((r) => setTimeout(r, 0));
+  const card = combinedCard(hub);
+  const opts = byClass(card, "ask-opt");      // [Session, Token, a, b, c]
+
+  opts[1].onclick();                            // Token
+  opts[0].onclick();                            // switch to Session — radio clears Token
+  assert.equal(opts[0].className, "ask-opt sel");
+  assert.equal(opts[1].className, "ask-opt", "radio cleared the prior single-select pick");
+
+  opts[2].onclick(); opts[4].onclick();         // multi: a + c
+  assert.equal(opts[2].className, "ask-opt sel");
+  assert.equal(opts[3].className, "ask-opt", "b not picked");
+  assert.equal(opts[4].className, "ask-opt sel");
+  opts[4].onclick();                            // toggle c off, then back on
+  opts[4].onclick();
+  assert.equal(opts[4].className, "ask-opt sel");
+
+  const send = byClass(card, "ask-send")[0];
+  assert.equal(send.disabled, false, "every question answered → send enabled");
+  send.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const post = hub.fetchCalls.filter((c) => c.path.endsWith("/answer")).pop();
+  assert.ok(post, "one answer POST went out");
+  assert.deepEqual(JSON.parse(post.opts.body), {
+    requestId: "r1",
+    answers: [
+      { question: "Which auth?", selected: ["Session"], other: null },
+      { question: "Which flags?", selected: ["a", "c"], other: null },
+    ],
+  });
+  assert.equal(hub.els["perch-ask"].children.length, 0, "card cleared");
+  assert.equal(hub.els["perch-attn"].hidden, true, "banner dropped");
+});
+
+test("PR-A: an Other field carries trimmed free text; send stays disabled until every question is answered", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  const QS = [{ question: "Q1?", options: [{ label: "a" }] }, { question: "Q2?", options: [{ label: "b" }] }];
+  FakeEventSource.instances[0]._serverFrame("ask_user", { requestId: "r2", method: "questions", title: "", questions: QS });
+  await new Promise((r) => setTimeout(r, 0));
+  const card = combinedCard(hub);
+  const send = byClass(card, "ask-send")[0];
+  assert.equal(send.disabled, true);
+
+  byClass(card, "ask-opt")[0].onclick();        // answer Q1
+  assert.equal(send.disabled, true, "Q2 still unanswered");
+
+  const others = byClass(card, "ask-other");
+  others[1].value = "  custom two  ";
+  others[1].oninput();                          // answer Q2 via Other
+  assert.equal(send.disabled, false, "both answered → enabled");
+
+  send.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(JSON.parse(hub.fetchCalls.filter((c) => c.path.endsWith("/answer")).pop().opts.body).answers, [
+    { question: "Q1?", selected: ["a"], other: null },
+    { question: "Q2?", selected: [], other: "custom two" },
+  ]);
+});
+
+test("PR-A: cancel posts {cancelled:true} and clears the card", async () => {
+  const hub = await mountHub({ fetchImpl: stdFetch() });
+  await openChatSession(hub);
+  FakeEventSource.instances[0]._serverFrame("ask_user", { requestId: "r3", method: "questions", title: "", questions: COMBINED_QS });
+  await new Promise((r) => setTimeout(r, 0));
+  const card = combinedCard(hub);
+  const cancel = byClass(card, "quiet")[0];
+  assert.ok(cancel, "a cancel control exists");
+  cancel.onclick();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(JSON.parse(hub.fetchCalls.filter((c) => c.path.endsWith("/answer")).pop().opts.body), { requestId: "r3", cancelled: true });
+  assert.equal(hub.els["perch-ask"].children.length, 0);
+});
+
 test("W1: a non-image upload injects its PATH into the next message; an image still rides the wire", async () => {
   const hub = await mountHub({
     fetchImpl: stdFetch({ "/files": () => makeResponse(200, { path: "report.pdf", full_path: "/tmp/up/report.pdf" }) }),
