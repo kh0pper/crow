@@ -318,6 +318,25 @@ min-height:44px;padding:6px 4px;font-size:11px;border-color:transparent;backgrou
    the two controls keep their own 44px two-id rules further up. */
 #perch-hub-root .session-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 12px}
 #perch-hub-root .session-row .state{flex:1;min-width:0}
+/* PR-D (audit item 15): the envelope + per-session tool narrowing pane. A
+   quiet full-width toggle above a collapsible body of tool checkboxes (an
+   allowed tool, ticked = kept) and locked rows (denied by the envelope). All
+   selectors scoped; the checkbox override beats the generic full-width input
+   rule so ticks look like ticks. */
+#perch-hub-root .narrow-pane{margin:6px 0 12px}
+#perch-hub-root .narrow-toggle{width:100%;text-align:left;color:var(--dim);font-size:12.5px;
+text-transform:uppercase;letter-spacing:.06em;background:none;border:0;border-top:1px solid var(--line);
+border-radius:0;padding:12px 0;min-height:44px}
+#perch-hub-root .narrow-body[hidden]{display:none}
+#perch-hub-root .narrow-head{color:var(--dim);font-size:12.5px;margin:4px 0 8px;word-break:break-word;
+font-family:"JetBrains Mono",ui-monospace,monospace}
+#perch-hub-root .narrow-tools{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px}
+#perch-hub-root .narrow-tool{display:flex;align-items:center;gap:7px;font-size:13.5px;padding:6px 4px;min-height:36px}
+#perch-hub-root .narrow-tool input{width:auto;padding:0;min-height:0;flex-shrink:0}
+#perch-hub-root .narrow-locked{color:var(--dim);font-size:13px;padding:6px 4px}
+#perch-hub-root .narrow-note{color:var(--dim);font-size:12px;margin-top:8px;line-height:1.45}
+#perch-hub-root .narrow-msg{font-size:12.5px;margin-top:6px}
+#perch-hub-root .narrow-msg.err{color:var(--attn)}
 /* Files tab rows: the whole row is the download link (thumb target), name
    breaks long, meta never does. */
 #perch-hub-root .files-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0}
