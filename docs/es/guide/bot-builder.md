@@ -89,7 +89,7 @@ Por defecto solo una sesión por agente corre a la vez, y cada sesión compite p
 
 ### 4. Acota las herramientas de un agente para una sola sesión
 
-Abre **Envoltura y herramientas** de la sesión. Verás el envelope completo del agente: todas las herramientas que tiene permitidas, cada una con una casilla, además de su modelo y sus skills.
+El acotado de herramientas por sesión vive en el **tablero**: abre la tarjeta en la que trabaja una sesión (o inicia la sesión desde una tarjeta) y abre **Envoltura y herramientas** en el panel lateral de la tarjeta. Verás el envelope completo del agente: todas las herramientas que tiene permitidas, cada una con una casilla, además de su modelo y sus skills. (El hub no tiene panel de envelope — las concesiones son solo del Bot Builder, y los recortes van por el panel de la tarjeta.)
 
 Desmarca una herramienta y queda apagada **solo para esa sesión**, a partir del siguiente mensaje. La definición del agente no se toca, y todas las demás sesiones conservan el conjunto completo. Esto es para el momento en que quieres que un agente responda sin tocar tus archivos, sin editar nada, sin salir a la red: en esta sesión, ahora mismo.
 
