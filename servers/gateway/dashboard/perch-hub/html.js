@@ -126,6 +126,10 @@ ${engineBanner(engine, lang)}
          same pendingUi lifecycle the list row's "waiting on you" state and
          the engine's replay-on-subscribe already ride. -->
     <div id="perch-attn" class="attn-banner" hidden>⚠ ${escapeHtml(t("perch.waitingBanner", lang))}</div>
+    <!-- Wave 2: plan execution progress bar — visible only while a plan is
+         enabled/executing with steps, fed by the same plan_state frames the
+         Activity rail prints. The step checklist lives in the Session tab. -->
+    <div id="perch-planbar" hidden><div id="perch-planbar-fill"></div></div>
     <div id="perch-transcript"></div>
     <div id="perch-ask"></div>
     <!-- The working strip: the chat tab's own "the bot is busy" signal.
@@ -140,6 +144,11 @@ ${engineBanner(engine, lang)}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       <span>${escapeHtml(t("perch.working", lang))}</span></div>
     <div id="perch-composer">
+      <!-- Wave 3: the slash-command menu, anchored above the composer (which
+           is position:sticky, so it IS the containing block). Rows are
+           client-rendered from pi's own get_commands registry — never a
+           hardcoded list. -->
+      <div id="perch-cmdmenu" hidden></div>
       <textarea id="perch-input" placeholder="${escapeHtml(t("perch.composerPlaceholder", lang))}"></textarea>
       <div class="send-row">
         <button type="button" id="perch-attach" class="quiet">${escapeHtml(t("perch.attachFile", lang))}</button>
@@ -173,6 +182,23 @@ ${engineBanner(engine, lang)}
       <div class="field"><span class="field-label" id="perch-cwd-label">${escapeHtml(t("perch.cwdLabel", lang))}</span>
         <div class="meta" id="perch-session-cwd"></div>
         <button type="button" id="perch-change-cwd">${escapeHtml(t("perch.changeDirectory", lang))}</button></div>
+    </div>
+    <!-- Wave 2: the facts card. Values ride the state frames (pi's own
+         contextUsage at turn end, the child's uptime/RSS while awake, the
+         pinned --tools count) — a fact that cannot be measured renders as
+         an em dash, never as a guess. -->
+    <div class="facts" id="perch-facts">
+      <div class="kv"><span class="k">${escapeHtml(t("perch.factContext", lang))}</span><span class="v" id="perch-fact-context">—</span></div>
+      <div class="ctxbar" id="perch-ctxbar" hidden><div id="perch-ctxbar-fill"></div></div>
+      <div class="kv"><span class="k">${escapeHtml(t("perch.factUptime", lang))}</span><span class="v" id="perch-fact-uptime">—</span></div>
+      <div class="kv"><span class="k">${escapeHtml(t("perch.factMemory", lang))}</span><span class="v" id="perch-fact-memory">—</span></div>
+      <div class="kv"><span class="k">${escapeHtml(t("perch.factTools", lang))}</span><span class="v" id="perch-fact-tools">—</span></div>
+    </div>
+    <!-- Wave 2: the plan step checklist (☑ done / ▶ current / ☐ todo), from
+         the plan_state frame's todos array. -->
+    <div class="plan-card" id="perch-plan-card" hidden>
+      <div class="plan-head" id="perch-plan-head"></div>
+      <div id="perch-plan-steps"></div>
     </div>
     <div class="session-row">
       <div class="state" id="perch-state"></div>
