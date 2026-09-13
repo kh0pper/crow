@@ -89,7 +89,7 @@ Only one session per agent runs at a time by default, and every session competes
 
 ### 4. Narrow an agent's tools for one session
 
-Open **Envelope & tools** for the session. You see the agent's full envelope: every tool it is allowed to use, each with a checkbox, plus its model and skills.
+Per-session tool narrowing lives on the **board**: open the card a session is working (or start the session from a card) and open **Envelope & tools** in the card's drawer. You see the agent's full envelope: every tool it is allowed to use, each with a checkbox, plus its model and skills. (The hub itself has no envelope pane — grants are Bot Builder's alone, and removals ride the card drawer.)
 
 Uncheck a tool and it is switched off **for that session only**, from the next message onward. The agent's definition is untouched, and every other session keeps the full set. This is for the moment when you want an agent to answer without touching your files, without editing anything, without reaching out over the network — for this one session, right now.
 
