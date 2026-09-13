@@ -200,6 +200,15 @@ ${engineBanner(engine, lang)}
       <div class="plan-head" id="perch-plan-head"></div>
       <div id="perch-plan-steps"></div>
     </div>
+    <!-- PR-D (audit item 15): the envelope + per-session tool narrowing pane,
+         ported from the board's card drawer so hub-only sessions get it too.
+         Bot Builder stays the only WRITER of the envelope; this pane can only
+         REMOVE tools per session, effective from the next message (a wake
+         rebuilds the world). Collapsed until toggled; loads on first open. -->
+    <div class="narrow-pane">
+      <button type="button" id="perch-narrow-toggle" class="narrow-toggle" aria-expanded="false" aria-controls="perch-narrow-body">${escapeHtml(t("botboard.bdEnvelopeToggle", lang))}</button>
+      <div id="perch-narrow-body" class="narrow-body" hidden></div>
+    </div>
     <div class="session-row">
       <div class="state" id="perch-state"></div>
       <button type="button" id="perch-rename" class="quiet">${escapeHtml(t("perch.rename", lang))}</button>

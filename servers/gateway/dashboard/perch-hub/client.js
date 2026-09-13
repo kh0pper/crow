@@ -1614,6 +1614,11 @@ export function perchHubJs(lang = "en") {
     var planCb=el('perch-plan-mode'); if(planCb) planCb.checked=false;
     var cwdEl=el('perch-session-cwd'); if(cwdEl) cwdEl.textContent='';   /* nor its directory */
     cwdPath=''; closeFileViewer();   /* PR-B: nor its cwd browse cursor or open text viewer */
+    /* PR-D: nor its narrowing pane — collapse + clear so the next session's
+       envelope is fetched fresh, never shown from the previous bot. */
+    narrowOpen=false;
+    var nb=el('perch-narrow-body'); if(nb){ clearEl(nb); nb.hidden=true; }
+    var nt=el('perch-narrow-toggle'); if(nt) nt.setAttribute('aria-expanded','false');
     setTurnInFlight(false);      /* the PREVIOUS session's Steer/Stop state must not bleed in */
     turnRendered=false;          /* nor its "this turn already rendered" bookkeeping */
     renderedTurn=null;           /* nor the turn id that bookkeeping now keys on */
@@ -2175,6 +2180,125 @@ export function perchHubJs(lang = "en") {
     });
   }
   var fvClose=el('perch-fv-close'); if(fvClose) fvClose.onclick=closeFileViewer;
+
+  /* ---- PR-D (audit item 15): envelope + per-session tool narrowing pane ----
+     Ported from the board card drawer (drawer.js:265-380) so hub-only sessions
+     get per-session narrowing too. Bot Builder stays the ONLY WRITER of the
+     envelope; this pane can only REMOVE tools for the session (the POST
+     .../narrow route rejects widening), effective from the next message — a
+     wake rebuilds the world. Reuses the drawer's botboard.bd* i18n strings
+     (shared table, already EN+ES) and its tri-state narrowing semantics: a Set
+     is a real narrowing, null is "reported, nothing narrowed", undefined is
+     "not reported" — the middle must never collapse into the last. Envelope +
+     the session's saved narrowing come in ONE call via ?threadId=. Checkboxes
+     are tracked in a closure array (not querySelectorAll) so the pane is
+     testable in the vm harness. The load continuation carries the file-wide
+     mySid identity guard; saveNarrowing writes only its own (possibly detached
+     after a session switch) message element, so it needs none. */
+  var narrowOpen=false;
+  function savedNarrowingFromEnvelope(env){
+    if(!env||!Object.prototype.hasOwnProperty.call(env,'savedNarrowing')) return undefined;
+    var list=env.savedNarrowing;
+    if(list==null) return null;
+    if(typeof list==='string'){ try{ list=JSON.parse(list); }catch(e){ return undefined; } }
+    if(!Array.isArray(list)) return undefined;
+    var s={}; list.forEach(function(id){ s[String(id)]=true; });
+    return s;
+  }
+  function toggleNarrowPane(){
+    var body=el('perch-narrow-body'), tog=el('perch-narrow-toggle');
+    if(!body) return;
+    if(narrowOpen){
+      narrowOpen=false; body.hidden=true;
+      if(tog) tog.setAttribute('aria-expanded','false');
+      return;
+    }
+    narrowOpen=true; body.hidden=false;
+    if(tog) tog.setAttribute('aria-expanded','true');
+    loadNarrowPane();
+  }
+  function narrowPaneErr(){
+    var body=el('perch-narrow-body'); if(!body) return;
+    clearEl(body);
+    var e=document.createElement('div'); e.className='narrow-msg err';
+    e.textContent='${tJs("botboard.loadFailed", lang)}';
+    body.appendChild(e);
+  }
+  function loadNarrowPane(){
+    var body=el('perch-narrow-body');
+    if(!body||!current.sid||!current.botId) return;
+    var mySid=current.sid;
+    clearEl(body);
+    var loading=document.createElement('div'); loading.className='narrow-msg'; loading.textContent='\\u2026';
+    body.appendChild(loading);
+    perchApi('GET','/bots/'+encodeURIComponent(current.botId)+'/envelope?threadId='+encodeURIComponent(mySid)).then(function(r){
+      if(current.sid!==mySid) return;                  /* identity guard, as everywhere */
+      if(!r.ok||!r.j){ narrowPaneErr(); return; }
+      renderNarrowPane(r.j);
+    });
+  }
+  function renderNarrowPane(envelope){
+    var body=el('perch-narrow-body'); if(!body) return;
+    clearEl(body);
+    var allowed=envelope.tools||[];
+    var denied=envelope.denied||[];
+    var saved=savedNarrowingFromEnvelope(envelope);
+    var disabledSet=(saved&&typeof saved==='object')?saved:{};
+    var head=document.createElement('div'); head.className='narrow-head';
+    var skillsTxt=(envelope.skills||[]).length?(' \\u00b7 ${tJs("botboard.bdEnvelopeSkillsPrefix", lang)}'+envelope.skills.join(', ')):'';
+    head.textContent='${tJs("botboard.bdEnvelopeModelPrefix", lang)}'+(envelope.model||'${tJs("botboard.bdEnvelopeModelUnset", lang)}')+skillsTxt;
+    body.appendChild(head);
+    var toolsWrap=document.createElement('div'); toolsWrap.className='narrow-tools';
+    var toolBoxes=[];
+    if(!allowed.length&&!denied.length){
+      var none=document.createElement('div'); none.className='narrow-locked'; none.textContent='${tJs("botboard.bdToolsNone", lang)}';
+      toolsWrap.appendChild(none);
+    }
+    allowed.forEach(function(tool){
+      var label=document.createElement('label'); label.className='narrow-tool';
+      var cb=document.createElement('input'); cb.type='checkbox';
+      cb.checked=!disabledSet[String(tool.id)];
+      cb.setAttribute('data-narrow-tool',tool.id);
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' '+(tool.label||tool.id)));
+      toolsWrap.appendChild(label);
+      toolBoxes.push(cb);
+    });
+    denied.forEach(function(tool){
+      var locked=document.createElement('div'); locked.className='narrow-locked';
+      locked.textContent='\\uD83D\\uDD12 '+(tool.label||tool.id);
+      toolsWrap.appendChild(locked);
+    });
+    body.appendChild(toolsWrap);
+    var note=document.createElement('div'); note.className='narrow-note';
+    note.textContent=(saved&&typeof saved==='object')?'${tJs("botboard.bdNarrowNoteSaved", lang)}'
+      : saved===null?'${tJs("botboard.bdNarrowNoteEmpty", lang)}'
+      : '${tJs("botboard.bdNarrowNoteUnknown", lang)}';
+    body.appendChild(note);
+    var narrowMsg=document.createElement('div'); narrowMsg.className='narrow-msg';
+    body.appendChild(narrowMsg);
+    toolsWrap.addEventListener('change',function(ev){
+      if(ev.target&&ev.target.hasAttribute&&ev.target.hasAttribute('data-narrow-tool')) saveNarrowing(toolBoxes,narrowMsg,ev.target);
+    });
+  }
+  function saveNarrowing(toolBoxes,narrowMsg,changedInput){
+    if(!current.botId||!current.sid) return;
+    var botId=current.botId, sid=current.sid;
+    var disabled=toolBoxes.filter(function(b){ return !b.checked; }).map(function(b){ return b.getAttribute('data-narrow-tool'); });
+    narrowMsg.className='narrow-msg'; narrowMsg.textContent='\\u2026';
+    perchApi('POST','/bots/'+encodeURIComponent(botId)+'/sessions/'+encodeURIComponent(sid)+'/narrow',{disabled_tools:disabled}).then(function(r){
+      if(r.ok){
+        narrowMsg.textContent=disabled.length
+          ? ('${tJs("botboard.bdNarrowedToPrefix", lang)}'+(toolBoxes.length-disabled.length)+'${tJs("botboard.bdNarrowedToMid", lang)}'+toolBoxes.length+'${tJs("botboard.bdNarrowedToSuffix", lang)}')
+          : '${tJs("botboard.bdFullEnvelopeRestored", lang)}';
+      } else {
+        changedInput.checked=!changedInput.checked;
+        narrowMsg.className='narrow-msg err';
+        narrowMsg.textContent=(r.j&&r.j.error==='widening_rejected')?'${tJs("botboard.bdNarrowRejected", lang)}':'${tJs("botboard.bdNarrowFailed", lang)}';
+      }
+    });
+  }
+  var narrowToggle=el('perch-narrow-toggle'); if(narrowToggle) narrowToggle.onclick=toggleNarrowPane;
 
   /* ---- Wave 2: Session-tab facts + plan progress -------------------------
      All readings ride the state/plan_state frames the engine already emits

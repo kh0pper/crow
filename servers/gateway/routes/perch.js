@@ -689,13 +689,27 @@ export default function perchApiRouter(dashboardAuth, { interactiveEngine = getI
   });
 
   // ---- GET /bots/:id/envelope — what Bot Builder grants ----
+  // PR-D (audit item 15): with an optional ?threadId=<sid>, the response also
+  // carries that session's SAVED narrowing (tri-state: field absent = not
+  // reported, null = reported-and-nothing-narrowed, JSON array = the narrowed
+  // set) so the hub's ported pane renders correct checkbox state in ONE call.
+  // The board drawer keeps calling the bare per-bot envelope (no threadId) and
+  // reads narrowing from its own row snapshot — unchanged.
   router.get(P + "/bots/:id/envelope", async (req, res) => {
     const botId = String(req.params.id);
+    const threadId = req.query.threadId == null ? null : String(req.query.threadId);
     const db = createDbClient();
     try {
       const row = await loadBotRow(db, botId);
       if (!row) return jsonError(res, 404, "unknown_bot");
-      res.json(await buildEnvelope(db, parseDef(row)));
+      const envelope = await buildEnvelope(db, parseDef(row));
+      if (threadId) {
+        const sess = await latestSession(db, botId, threadId);
+        if (sess && Object.prototype.hasOwnProperty.call(sess, "narrowed_tools")) {
+          envelope.savedNarrowing = sess.narrowed_tools == null ? null : sess.narrowed_tools;
+        }
+      }
+      res.json(envelope);
     } catch (err) {
       jsonError(res, 500, String((err && err.message) || err));
     } finally {

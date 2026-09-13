@@ -89,11 +89,11 @@ Only one session per agent runs at a time by default, and every session competes
 
 ### 4. Narrow an agent's tools for one session
 
-Per-session tool narrowing lives on the **board**: open the card a session is working (or start the session from a card) and open **Envelope & tools** in the card's drawer. You see the agent's full envelope: every tool it is allowed to use, each with a checkbox, plus its model and skills. (The hub itself has no envelope pane — grants are Bot Builder's alone, and removals ride the card drawer.)
+Per-session tool narrowing lives in the hub: open a session, go to its **Session** tab, and toggle **`Envelope & tools`**. You see the agent's full envelope: every tool it is allowed to use, each with a checkbox, plus its model and skills. The same pane is still on the board — open the drawer of the card a session is working — and both read and write the same per-session narrowing. Grants themselves are Bot Builder's alone; the pane can only take away.
 
 Uncheck a tool and it is switched off **for that session only**, from the next message onward. The agent's definition is untouched, and every other session keeps the full set. This is for the moment when you want an agent to answer without touching your files, without editing anything, without reaching out over the network — for this one session, right now.
 
-Tools shown with a padlock are ones the agent is not allowed at all. They are not togglable here; they link to Bot Builder, which is the only place that grants a tool. The session can only ever take away.
+Tools shown with a padlock are ones the agent is not allowed at all. They are not togglable from either pane; only Bot Builder grants a tool. The session can only ever take away.
 
 ### 5. Answering a question the agent asks you
 

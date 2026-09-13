@@ -203,9 +203,10 @@ test("async continuations are guarded — a fast back button must not cross sess
   // that shipped with only 6 asserted — is invisible until an operator hits
   // the exact race the dropped guard covered. 15 as of Wave 3: the slash
   // menu's commands fetch. 16+17 as of PR-B (item 18): the Files tab's cwd
-  // browser list fetch and its text-viewer read fetch.
+  // browser list fetch and its text-viewer read fetch. 18 as of PR-D (item 15):
+  // the Session tab's narrowing-pane envelope fetch.
   const guards = (js.match(/current\.sid\s*!==/g) || []).length;
-  assert.equal(guards, 17, "expected exactly 17 identity guards, found " + guards);
+  assert.equal(guards, 18, "expected exactly 18 identity guards, found " + guards);
 });
 
 test("the emitted script never assigns to an innerHTML-class sink", async () => {
@@ -506,6 +507,7 @@ function makeFakeElement(tag) {
     },
     setAttribute(name, val) { attrs[name] = String(val); },
     getAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null; },
+    hasAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name); },
     click() { if (this.onclick) this.onclick(); },
   });
   // defineProperty, NOT a `get firstChild()` in the object literal above:
@@ -603,7 +605,9 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     "perch-plan-card", "perch-plan-head", "perch-plan-steps", "perch-cmdmenu",
     // PR-B (item 18): the Files tab's cwd browser + in-app text viewer.
     "perch-cwd-crumbs", "perch-cwd-list", "perch-file-viewer", "perch-fv-name",
-    "perch-fv-close", "perch-fv-body"];
+    "perch-fv-close", "perch-fv-body",
+    // PR-D (item 15): the Session tab's envelope + narrowing pane.
+    "perch-narrow-toggle", "perch-narrow-body"];
   const els = {};
   for (const id of IDS) els[id] = makeFakeElement(id === "perch-plan-mode" ? "input" : "div");
 
@@ -626,6 +630,7 @@ async function mountHub({ fetchImpl, confirmImpl, promptImpl, initialHash = "", 
     body: bodyEl,
     getElementById(id) { return els[id] || dynamic[id] || null; },
     createElement(tag) { return makeFakeElement(tag); },
+    createTextNode(text) { const n = makeFakeElement("#text"); n.textContent = String(text == null ? "" : text); return n; },
   });
 
   const winTarget = makeEventTarget();
@@ -1204,6 +1209,97 @@ test("PR-C: no archived sessions means no Archived affordance (today's list, unt
   const body = hub.els["perch-list-body"];
   assert.equal(body.children.some((c) => String(c.className).indexOf("archived-toggle") >= 0), false,
     "a roost with no archived array renders no Archived toggle");
+});
+
+// ---------------------------------------------------------------------------
+// PR-D (audit item 15): the Session tab's envelope + narrowing pane
+// ---------------------------------------------------------------------------
+
+const NARROW_ENVELOPE = {
+  model: "crow-local/qwen", skills: ["alpha"],
+  tools: [{ id: "read", label: "Read" }, { id: "bash", label: "Bash" }],
+  denied: [{ id: "write", label: "Write" }],
+};
+
+test("PR-D: the narrowing pane loads the envelope (with threadId), renders tools, and narrows on uncheck", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ONE_LIVE, {
+      "/envelope": () => makeResponse(200, { ...NARROW_ENVELOPE, savedNarrowing: null }),
+      "/narrow": () => makeResponse(200, { ok: true }),
+    }),
+  });
+  await openChatSession(hub);
+  await tick2();
+  hub.els["perch-narrow-toggle"].onclick();     // open the pane
+  await tick2();
+  const body = hub.els["perch-narrow-body"];
+  assert.equal(body.hidden, false, "the pane opens");
+
+  // the envelope GET is per-bot AND carries the session threadId (one call)
+  const envCall = hub.fetchCalls.filter((c) => c.path.indexOf("/envelope") >= 0).pop();
+  assert.ok(envCall.path.indexOf("/bots/r4/envelope") >= 0, "per-bot envelope: " + envCall.path);
+  assert.ok(envCall.path.indexOf("threadId=perchlive-aaaaaaaa") >= 0, "carries the session: " + envCall.path);
+
+  // head shows model + skills
+  assert.match(body.children[0].textContent, /crow-local\/qwen/);
+  assert.match(body.children[0].textContent, /alpha/);
+  // two allowed tools (checked: savedNarrowing null = nothing narrowed), one denied (locked)
+  const toolsWrap = body.children[1];
+  const labels = toolsWrap.children.filter((c) => c.tagName === "LABEL");
+  assert.equal(labels.length, 2);
+  const readCb = labels[0].children[0], bashCb = labels[1].children[0];
+  assert.equal(readCb.checked, true);
+  assert.equal(bashCb.checked, true, "savedNarrowing null → nothing pre-disabled");
+  assert.equal(toolsWrap.children.filter((c) => String(c.className).indexOf("narrow-locked") >= 0).length, 1,
+    "the denied tool renders locked");
+
+  // uncheck bash → change → POST /narrow with disabled_tools:['bash']
+  bashCb.checked = false;
+  toolsWrap._dispatch("change", { target: bashCb });
+  await tick2();
+  const post = hub.fetchCalls.filter((c) => c.path.endsWith("/narrow")).pop();
+  assert.ok(post, "a narrow POST went out");
+  assert.equal(post.path, "/bots/r4/sessions/perchlive-aaaaaaaa/narrow");
+  assert.deepEqual(JSON.parse(post.opts.body), { disabled_tools: ["bash"] });
+});
+
+test("PR-D: a saved narrowing pre-unchecks exactly those tools (tri-state, not 'full envelope')", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ONE_LIVE, {
+      "/envelope": () => makeResponse(200, { ...NARROW_ENVELOPE, savedNarrowing: '["bash"]' }),
+      "/narrow": () => makeResponse(200, { ok: true }),
+    }),
+  });
+  await openChatSession(hub);
+  await tick2();
+  hub.els["perch-narrow-toggle"].onclick();
+  await tick2();
+  const toolsWrap = hub.els["perch-narrow-body"].children[1];
+  const labels = toolsWrap.children.filter((c) => c.tagName === "LABEL");
+  assert.equal(labels[0].children[0].checked, true, "read stays checked");
+  assert.equal(labels[1].children[0].checked, false, "bash was narrowed → pre-unchecked");
+});
+
+test("PR-D: a widening_rejected narrow reverts the checkbox and says why", async () => {
+  const hub = await mountHub({
+    fetchImpl: roostFetch(ROOST_ONE_LIVE, {
+      "/envelope": () => makeResponse(200, { ...NARROW_ENVELOPE, savedNarrowing: null }),
+      "/narrow": () => makeResponse(400, { error: "widening_rejected" }),
+    }),
+  });
+  await openChatSession(hub);
+  await tick2();
+  hub.els["perch-narrow-toggle"].onclick();
+  await tick2();
+  const body = hub.els["perch-narrow-body"];
+  const toolsWrap = body.children[1];
+  const readCb = toolsWrap.children.filter((c) => c.tagName === "LABEL")[0].children[0];
+  readCb.checked = false;
+  toolsWrap._dispatch("change", { target: readCb });
+  await tick2();
+  assert.equal(readCb.checked, true, "a rejected narrow reverts the checkbox");
+  const msg = body.children[body.children.length - 1];
+  assert.match(msg.textContent, /only remove tools|never add/i, "and explains the rejection");
 });
 
 test("C2: closing the session you are IN returns to the list — no chat view on a dead stream", async () => {
