@@ -65,7 +65,27 @@ El barrido corre en el mismo tick de 15 s. Las filas expiradas se borran localme
 
 ## Tu huevo y tu pájaro
 
-Cada instancia siempre tiene un huevo incubando. La actividad real acredita **calor** hacia él; cuando el calor alcanza el umbral de eclosión, el huevo eclosiona en un pájaro.
+Tú eres el huevo. La actividad real acredita **calor** hacia él; cuando el calor alcanza el umbral de eclosión, eclosionas en un pájaro, y el huevo incubando después de eso eres **tú de nuevo**.
+
+Los huevos vienen de tres lugares, y ninguno es gratis:
+
+- **Nidos** — camina a uno en el mapa, un reclamo por día local, dentro de 75 m.
+- **Regalos e intercambios** de contactos.
+- **Poner** — mientras no tengas ningún huevo, cada día local que termines feliz cuenta como uno. En
+  `lay.days` (predeterminado 14) pones uno tú misma. Los días no necesitan ser consecutivos, y el conteo solo
+  corre mientras estés sin huevo, así que esto es un piso más que un caño.
+
+La repisa rellena la ranura de incubación cuando un huevo **eclosiona** — el más viejo de tu repisa
+entra automáticamente. Si un huevo llega mientras tu ranura está vacía en cambio — un regalo, un
+intercambio, o uno liberado cuando un intercambio caduca y desbloquea el último de tu repisa —
+**no** se promueve automáticamente: espera en tu repisa, y la página de tu mascota ofrece un
+**Calentarlo** de un toque para traerlo. **El calor ganado con la ranura vacía desaparece, incluso
+si tienes huevos esperando en tu repisa** — así que calienta un huevo en espera antes de salir a
+caminar.
+
+| Configuración | Predeterminado | Rige |
+|---|---|---|
+| `lay.days` | 14 | Días felices sin huevo antes de poner uno tú misma |
 
 | Evento | Calor |
 |---|---|
@@ -85,7 +105,7 @@ Cada evento es idempotente según su propia clave, así que repetir la misma acc
 
 Encontrarte con Crows tiene además un tope de **5 acreditaciones por día calendario local** (`MEET_CROW_DAILY_CAP` en `bundles/ramble/server/eggs.js`): una persona no es más que una clave pública que cualquiera puede generar, así que sin ese techo una avalancha de personas falsas podría forzar eclosión tras eclosión; los encuentros por encima del tope no acreditan nada ni dejan fila en el registro.
 
-Cuando el calor alcanza el umbral de eclosión, se sortean una especie y una semilla del lado del servidor (`crypto.randomInt`, nunca `Math.random`, para que la tirada no se pueda predecir ni repetir); el aspecto del pájaro es único para esa semilla. Un huevo nuevo empieza a incubar de inmediato.
+Cuando el calor alcanza el umbral de eclosión, se sortean una especie y una semilla del lado del servidor (`crypto.randomInt`, nunca `Math.random`, para que la tirada no se pueda predecir ni repetir); el aspecto del pájaro es único para esa semilla. Si tienes un huevo esperando en la repisa, pasa al hueco; si no, no empieza nada nuevo, y el siguiente hay que encontrarlo, recibirlo o ponerlo.
 
 Tu pájaro activo viaja en tus caws y marcas **públicas** — el JSON del cable lleva `bird: { species, seed }`, así que otras personas lo ven en tus pines. Las marcas de contactos y "solo para mí" nunca llegan al cable de Nostr (ver abajo), así que el pájaro se omite solo del **cable**: esas filas siguen guardando `bird_species` / `bird_seed` localmente y se replican, con pájaro incluido, a tus propias instancias enlazadas.
 

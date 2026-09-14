@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { initRambleTables } from "../bundles/ramble/server/init-tables.js";
-import { ensureIncubatingEgg } from "../bundles/ramble/server/eggs.js";
+import { mintIncubatingEgg } from "../bundles/ramble/server/eggs.js";
 import { pendingDeliveries, deleteDelivery } from "../bundles/ramble/server/delivery.js";
 import {
   TRADE_TTL_MS, giftEgg, receiveGift, proposeSwap, acceptSwap, declineSwap, receiveTrade, expireTrades,
@@ -36,7 +36,7 @@ const emitter = () => { const calls = []; return { calls, emit: async (t, op, ro
 test("giftEgg: shelf/received only, egg leaves as 'gifted', one queued ramble.egg without species/seed", async () => {
   const db = await freshDb();
   await shelf(db, "g1", 30);
-  await ensureIncubatingEgg(db, { now: T0 });
+  await mintIncubatingEgg(db, { now: T0 });
   assert.deepEqual(await giftEgg(db, { eggId: "g1", toCrowId: "bad id", now: T0 }), { ok: false, reason: "bad-recipient" });
   assert.equal((await egg(db, "g1")).status, "shelf", "a bad recipient never touches the egg");
   const { calls, emit } = emitter();

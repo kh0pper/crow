@@ -197,6 +197,7 @@ export default {
 
             <p class="rb-big" id="rb-egg-percent">&mdash;</p>
             <p class="rb-muted rb-fine" id="rb-egg-line">Reading the warmth&hellip;</p>
+            <p class="rb-muted rb-fine" id="rb-egg-empty" hidden>Nests hold them. So do friends.</p>
           </section>
 
           <section class="rb-card rb-hatch-reveal" id="rb-hatch-reveal" hidden>
@@ -307,9 +308,9 @@ export default {
             </div>
           </section>
 
-          <!-- The successor egg is minted the moment one hatches, and the perch
-               swaps to the bird for good — so without this the egg view (and
-               its daily check-in) would be unreachable after the first hatch. -->
+          <!-- Once a bird hatches the perch swaps to it for good — this card
+               is the only route back to the egg view (and its daily
+               check-in), so it must never be hidden. -->
           <section class="rb-card" id="rb-pet-nextegg">
             <p class="rb-eyebrow">Next egg</p>
             <div class="rb-row">
@@ -324,6 +325,10 @@ export default {
               <strong class="rb-big rb-grow" id="rb-nextegg-percent">&mdash;</strong>
               <button class="rb-btn rb-btn-ghost" id="rb-see-egg" type="button">See egg</button>
             </div>
+            <p class="rb-muted rb-fine" id="rb-nextegg-empty" hidden>Nothing warming just now.</p>
+            <p class="rb-muted rb-fine" id="rb-nextegg-lay" hidden></p>
+            <p class="rb-muted rb-fine" id="rb-nextegg-waiting" hidden>One&rsquo;s waiting on your shelf.</p>
+            <button class="rb-btn rb-btn-ghost" id="rb-nextegg-warm" type="button" hidden>Warm it</button>
           </section>
 
           <button class="rb-btn" id="rb-my-flock" type="button">${icon("flock")}My flock</button>
@@ -460,6 +465,29 @@ export default {
               <button class="rb-icon-btn" id="rb-ar-sheet-close" type="button" aria-label="Close">${icon("close")}</button>
             </div>
             <div id="rb-ar-sheet-body"></div>
+          </div>
+        </div>
+
+        <!-- ─────────────────────────────────────────────── the prologue -->
+        <!-- Ramble's first narrative content (spec §4.4). Written from inside
+             the premise: you ARE the egg. Skippable; both beats set a flag
+             that replicates, and a game-state wipe clears them so the
+             prologue genuinely replays. -->
+        <div class="rb-prologue" id="rb-prologue" hidden>
+          <div class="rb-prologue-card">
+            <div id="rb-prologue-intro" hidden>
+              <p class="rb-prologue-lead">You are an egg.</p>
+              <p>You wandered off from your nest. Nobody is coming to look for you &mdash; that&rsquo;s alright. It happens more than you&rsquo;d think.</p>
+              <p>Nobody knows what&rsquo;s inside you yet. Not even you.</p>
+              <p>Go somewhere. That&rsquo;s how eggs get warm.</p>
+              <button class="rb-btn" id="rb-prologue-go" type="button">Go</button>
+            </div>
+            <div id="rb-prologue-hatch" hidden>
+              <p class="rb-prologue-lead" id="rb-prologue-hatch-lead">You&rsquo;re out.</p>
+              <p>You live on what you do: new streets, new faces, the small daily things. Keep moving and you stay bright. Go still long enough and you droop.</p>
+              <p>That&rsquo;s all that happens. Nothing here is ever lost.</p>
+              <button class="rb-btn" id="rb-prologue-seen" type="button">Have a look at yourself</button>
+            </div>
           </div>
         </div>
       </div>
