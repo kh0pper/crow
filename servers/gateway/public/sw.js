@@ -5,7 +5,7 @@
  * Handles push events and notification clicks.
  */
 
-const CACHE_NAME = "crow-v1";
+const CACHE_NAME = "crow-v2";
 const SHELL_ASSETS = ["/dashboard/nest"];
 
 self.addEventListener("install", (e) => {
@@ -39,6 +39,19 @@ self.addEventListener("fetch", (e) => {
   let reqOrigin;
   try { reqOrigin = new URL(url).origin; } catch { reqOrigin = null; }
   if (reqOrigin && reqOrigin !== self.location.origin) return;
+
+  // PR-F explicit guard (2026-09-13): the perch interactive API is
+  // authenticated JSON, and its /events route is SSE. Never intercept
+  // either. Authed responses must not touch any cache path — and even
+  // respondWith(fetch()) on an event-stream route pipes the stream
+  // through the SW's fetch layer instead of the browser's native
+  // EventSource handling. No respondWith at all keeps both exactly as
+  // if this worker were not there.
+  if (url.includes("/dashboard/perch-api/")) return;
+  if (e.request.destination === "eventsource") return;
+  try {
+    if ((e.request.headers.get("accept") || "").includes("text/event-stream")) return;
+  } catch { /* header read on an odd request — let the branches below decide */ }
 
   // Special case: /dashboard/nest is pre-cached for offline shell loading
   if (url.endsWith("/dashboard/nest")) {

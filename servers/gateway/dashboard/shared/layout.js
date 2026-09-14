@@ -223,8 +223,11 @@ export function renderLayout({ title, content, activePanel, panels, scripts, aft
   <link rel="manifest" href="/manifest.json">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Crow">
   <link rel="icon" type="image/svg+xml" href="/icons/crow-icon.svg">
-  <link rel="apple-touch-icon" href="/icons/crow-icon.svg">
+  <!-- iOS reads apple-touch-icon as PNG only — an SVG href lands a blank
+       home-screen tile (PR-F parity polish, 2026-09-13). -->
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   ${FONT_LINKS}
   ${dashboardCss()}
   ${turboHead()}
