@@ -139,7 +139,7 @@
  * (spec §9).
  */
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 
@@ -1059,6 +1059,23 @@ export function createInteractiveEngine({
     }
   }
 
+  /** True when pi's session store holds a transcript for `id` — the file pi
+   * writes is `<timestamp>_<id>.jsonl` under `<sessionDir>/sessions` (the dir
+   * PiRpc passes as `--session-dir`), and it appears only AFTER the first
+   * completed turn. An unreadable dir means no transcript. The dead-resume
+   * preflight in startChild globs here rather than matching pi's exit
+   * "No session found" stderr because the file is the fact; the stderr is
+   * pi's phrasing. */
+  function resumeTranscriptExists(sessionDir, id) {
+    try {
+      return readdirSync(join(sessionDir, "sessions")).some(
+        (f) => f.endsWith(".jsonl") && f.includes(id)
+      );
+    } catch {
+      return false;
+    }
+  }
+
   /** Persist the pi session id the child reported (the resume handle, and what
    * the P1 transcript endpoint globs the session file by). */
   async function writePiSessionId(s) {
@@ -1438,7 +1455,8 @@ export function createInteractiveEngine({
   /**
    * Build the world FRESH, warm the model, construct the child, attach the exit
    * handler, and stamp the row. Shared by spawn (piSessionId null) and wake
-   * (piSessionId = the stored pi session, so pi resumes the same transcript).
+   * (piSessionId = the stored pi session, so pi resumes the same transcript —
+   * when that transcript actually exists on disk, see the preflight below).
    */
   async function startChild(S, s) {
     const slog = sessionLog(s);
@@ -1533,7 +1551,20 @@ export function createInteractiveEngine({
     s.outputsDir = outputsDir;
     s.uploadsDir = uploadsDir;
 
-    const resume = (world.session && world.session.pi_session_id) || s.piSessionId || null;
+    let resume = (world.session && world.session.pi_session_id) || s.piSessionId || null;
+    // Dead-transcript preflight (measured on R4 2026-09-13): pi reports its
+    // session id at ready but only PERSISTS the transcript after the first
+    // COMPLETED turn — so a cycle()/control() switch (or a restart adopt) of a
+    // never-conversed session handed pi a `--session` id it cannot find. pi
+    // exited code 1 ("No session found"), attachExit parked, and every later
+    // wake re-read the same dead row id: a permanent pi_gone crash-loop. An
+    // absent transcript now means wake FRESH; the reported-id stamp at this
+    // function's tail repairs the row. The transcript is lost either way — the
+    // child never completed a turn — so fresh costs nothing real.
+    if (resume && !resumeTranscriptExists(world.sessionDir, resume)) {
+      slog("resume transcript missing — waking fresh (" + resume + ")");
+      resume = null;
+    }
     const pi = new S.PiRpc(Object.assign({}, prep.piRpcOpts, {
       piSessionId: resume,
       // Open-anywhere B3/B4: pi's process cwd is the operator's chosen dir.
