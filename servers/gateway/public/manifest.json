@@ -1,13 +1,20 @@
 {
+  "id": "/dashboard",
   "name": "Crow's Nest",
   "short_name": "Crow",
   "description": "AI-powered personal platform",
   "start_url": "/dashboard/nest",
+  "scope": "/dashboard",
   "display": "standalone",
   "background_color": "#1d1d1f",
   "theme_color": "#1d1d1f",
   "orientation": "any",
+  "categories": ["productivity", "developer tools"],
   "icons": [
-    { "src": "/icons/crow-icon.svg", "sizes": "any", "type": "image/svg+xml" }
+    { "src": "/icons/crow-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }
