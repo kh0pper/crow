@@ -61,7 +61,15 @@ Gotcha #1 is non-negotiable after any `perch-hub/client.js` edit (template liter
 
 ## Still owed when the parity arc concludes
 
-- `servers/gateway/public/perch-parity-audit.html` — **untracked**, served tailnet-only. Decide: commit it as the arc's record or delete it.
-- Also untracked and worth a decision at the same time: `docs/superpowers/handoffs/2026-09-13-perch-parity-remaining-handoff.md` and `docs/superpowers/handoffs/2026-09-12-perch-open-anywhere-session-handoff.md` (the PR-E handoff `2026-09-13-perch-pr-e-send-user-file-handoff.md` IS tracked — the earlier ones predate it).
-- `docs/superpowers/specs/2026-09-12-perch-hub-pi-lab-parity-audit.md` item 12's table row still reads **investigate**; PR-A…E were never annotated in the spec (consistent with siblings — no per-PR spec edit is required, but the arc-closing commit is the natural place to mark the ledger).
-- Separate un-owned bug: `~/pi-lab/bin/pi-extension-check` (see memory #8) — `npm run test:extensions` currently gates nothing on this host.
+> **RESOLVED at arc close (2026-09-13, spec ledger updated in `14b9eeaf`):**
+> the operator chose DELETE for the tailnet-only `perch-parity-audit.html`
+> working artifact (its content now lives in the spec ledger rows) and to
+> TRACK the three handoffs (this file + the parent parity-remaining + the
+> open-anywhere session) alongside the 13 already-tracked handoffs — all in
+> the ledger commit. The `pi-extension-check` item below remains OPEN and
+> un-owned; it was out of scope for the parity arc.
+
+- ~~`servers/gateway/public/perch-parity-audit.html`~~ — **deleted** (was untracked, tailnet-only; the ledger rows carry the record).
+- ~~the two sibling untracked handoffs~~ (`…2026-09-13-perch-parity-remaining-handoff.md`, `…2026-09-12-perch-open-anywhere-session-handoff.md`) — **tracked** alongside this one, matching the 13 tracked handoffs already in the tree.
+- ~~item 12's table row still reads **investigate**~~ — marked **shipped** in the ledger commit (item 22 annotated too). PR-A…E remain unannotated in the spec body (consistent with siblings).
+- Separate un-owned bug: `~/pi-lab/bin/pi-extension-check` (see memory #8) — `npm run test:extensions` currently gates nothing on this host. **STILL OPEN.**
