@@ -31,7 +31,7 @@
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
@@ -150,9 +150,10 @@ export class PiRpc {
     // that pass no cwd (every channel caller — prepareSpawn's piRpcOpts stay
     // cwd-free by design) get spawnCwd === sessionDir: byte-identical spawn.
     // --no-approve keeps project-trust DENY in the chosen cwd too (the bot
-    // must never load .pi/ config from an arbitrary directory), and pi-lab's
-    // mcp-client reads spawnCwd/.mcp.json — which is why buildBotWorld writes
-    // the per-bot .mcp.json there (B2).
+    // must never load .pi/ config from an arbitrary directory). The per-bot
+    // .mcp.json stays in the world root (buildBotWorld writes it there) and
+    // reaches pi through PI_BOT_MCP_CONFIG below, so a chosen project
+    // directory's own .mcp.json is neither read by the bot nor overwritten.
     const spawnCwd = opts.cwd || sessionDir;
     // Phase 3.0 (R3): provider+model are resolved per-turn by
     // model_resolver.resolveModel() and passed in via opts.resolved — there
@@ -171,8 +172,9 @@ export class PiRpc {
     // own sessionDir/workspace, so auto-trusting cwd files would let a bot
     // write .pi/ config and load an extension around the permission gate
     // (the GHSA-mqxh-6gq7-558m vector). Per-bot MCP is unaffected: pi-lab's
-    // mcp-client reads cwd/.mcp.json itself (verified live on 0.82.0
-    // 2026-07-25: probe server loaded + tool called with this flag set).
+    // mcp-client reads the PI_BOT_MCP_CONFIG file itself, independent of
+    // project trust (before that variable existed it read cwd/.mcp.json —
+    // verified live on 0.82.0 2026-07-25 with this flag set).
     // Older pi (0.74.2) accepts the flag too, so no version gating.
     const args = [cliPath, "--mode", "rpc", "--no-approve", "--provider", resolved.provider, "--model", resolved.model,
       "--session-dir", sessionDir + "/sessions"];
@@ -298,6 +300,13 @@ export class PiRpc {
       { PATH: dirname(nodeBin) + ":" + (process.env.PATH || ""),
         PI_PROVIDER: resolved.provider,
         PIBOT_SUBAGENT_DEPTH: "0",
+        // The bot's closed-world MCP config lives in the WORLD ROOT, not at
+        // spawnCwd: pi-lab's mcp-client loads the global file plus this file
+        // only when the variable is set (no cwd-ancestor walk), so an
+        // operator's project directory keeps its own .mcp.json untouched and
+        // unread. Engine-reserved (PI_BOT_ prefix): stripped from def.spawn_env
+        // above, so a def can never point pi at a file of its choosing.
+        PI_BOT_MCP_CONFIG: join(sessionDir, ".mcp.json"),
         PI_BOT_PERMISSION_POLICY: JSON.stringify(piPolicy) },
       spawnEnv,
       // C-12: the interactive engine's per-session overrides (e.g.
