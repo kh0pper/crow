@@ -119,18 +119,19 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // deliverables must not litter the project directory).
   mkdirSync(sessionDir + "/sessions", { recursive: true });
 
-  // Keep the per-bot <cwd>/.mcp.json in sync with the def on every
-  // turn (best-effort; additive merge — homedir ~/.pi/agent/mcp.json still
-  // wins on collision, so a writer hiccup can never break a turn). Primary
+  // Keep the per-bot <sessionDir>/.mcp.json in sync with the def on every
+  // turn (best-effort; a writer hiccup can never break a turn). Primary
   // writer is the GUI save handler; this is the defensive backstop.
   // M3b: pass the resolved sessionDir (which may differ from def.session_dir
-  // when the bot has a project_space workspace) so the .mcp.json lives next
-  // to where pi actually runs.
-  // Open-anywhere B2: "where pi actually runs" is now the operator's cwd, not
-  // the world root — pi-lab's mcp-client reads `cwd/.mcp.json` (bridge.mjs's
-  // own comment says so), so writing it anywhere else would silently strip
-  // the bot of every MCP tool. writeBotMcp is an additive merge, so a chosen
-  // dir that carries its own .mcp.json survives.
+  // when the bot has a project_space workspace).
+  // The file ALWAYS lives in the world root, never in the operator's chosen
+  // cwd: writeBotMcp replaces the whole file (closed-world), so writing it
+  // into a project directory destroyed that project's own .mcp.json on every
+  // turn (r4-tehcy and crow itself, 2026-09-12/13). pi finds it through the
+  // engine-reserved PI_BOT_MCP_CONFIG env var the bridge sets at spawn
+  // (pi-lab mcp-client: global file + that file only, no cwd-ancestor walk),
+  // so a chosen directory is read-only to the MCP layer and its own
+  // .mcp.json neither leaks into the bot nor gets rewritten.
   // F4a L2b: read the remote_invocation flag + trusted peer gateway URLs once
   // (local-only, default off). With the flag off, remoteEnabled=false ⇒
   // writeBotMcp mints no remote blocks and toolAllowlist adds no remote entries
@@ -145,7 +146,7 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
     // acceptance F2: a card-bound session (or a job turn) must be able to
     // call board_report_result — ensure the board entry is minted.
     const w = writeBotMcp(def, {
-      sessionDir: resolvedCwd, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId,
+      sessionDir, crowHome, remoteEnabled, peerGatewayUrls, botId, jobId,
       ensureServers: (jobId || cardBound) ? ["board"] : [],
     });
     if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
@@ -178,8 +179,10 @@ export async function buildBotWorld({ botId, threadId, gatewayType = "perch", lo
   // gatewayType is carried through inert (no behavior depends on it here) so a
   // caller that only holds the world still knows which channel asked for it.
   // cwd: the resolved working directory (=== sessionDir when not chosen).
+  // mcpConfigPath: the per-bot closed-world config, always under the world
+  // root; the bridge hands it to pi via PI_BOT_MCP_CONFIG.
   return { def, bot, crowHome, projectId, projectSpace, projectMembers, sessionDir,
-    cwd: resolvedCwd, tasksDbPath, remoteEnabled, peerGatewayUrls, session,
+    cwd: resolvedCwd, mcpConfigPath: join(sessionDir, ".mcp.json"), tasksDbPath, remoteEnabled, peerGatewayUrls, session,
     narrowedTools, gatewayType };
 }
 

@@ -349,6 +349,28 @@ test("(f) spawn_env keys matching PI_BOT_*/PIBOT_* are stripped before merge; ot
 });
 
 // ---------------------------------------------------------------------------
+// (g) the per-bot MCP config reaches pi by path, not by cwd — an operator's
+// chosen directory is never where the bot's .mcp.json lives
+// ---------------------------------------------------------------------------
+
+test("(g) PI_BOT_MCP_CONFIG names <sessionDir>/.mcp.json even when cwd is a different directory; a def cannot override it", async () => {
+  const scratch = scratchDir();
+  const chosen = mkdtempSync(join(scratch, "chosen-"));
+  const outPath = join(scratch, "env.json");
+  const stub = envDumpStub(scratch, outPath);
+  const pi = mkPi(scratch, stub, {
+    cwd: chosen,
+    def: { spawn_env: { PI_BOT_MCP_CONFIG: join(chosen, ".mcp.json") } }, // reserved prefix — must be stripped
+  });
+  await pi.exited;
+  await pi.close();
+  const { readFileSync } = await import("node:fs");
+  const env = JSON.parse(readFileSync(outPath, "utf8"));
+  assert.equal(env.PI_BOT_MCP_CONFIG, join(scratch, ".mcp.json"),
+    "pi is pointed at the world-root config, not at anything under the chosen cwd");
+});
+
+// ---------------------------------------------------------------------------
 // (g) extraEnv wins over spawn_env
 // ---------------------------------------------------------------------------
 

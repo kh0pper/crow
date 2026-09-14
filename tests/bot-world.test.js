@@ -274,6 +274,7 @@ const GOLDENS = {
       "PIBOT_TURN_TIMEOUT_MS": "5000",
       "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
       "PIBOT_WARM_TIMEOUT_MS": "1500",
+      "PI_BOT_MCP_CONFIG": "__TMP__/bots/goldenbot/.mcp.json",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[\"__TMP__/bots/goldenbot/proposed-skills\"],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
       "PI_GOLDEN_MARKER": "1",
       "PI_MODELS_JSON": "__TMP__/models.json",
@@ -310,6 +311,7 @@ const GOLDENS = {
       "PIBOT_TURN_TIMEOUT_MS": "5000",
       "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
       "PIBOT_WARM_TIMEOUT_MS": "1500",
+      "PI_BOT_MCP_CONFIG": "__TMP__/bots/goldenbot/.mcp.json",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[\"__TMP__/bots/goldenbot/proposed-skills\"],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
       "PI_GOLDEN_MARKER": "1",
       "PI_MODELS_JSON": "__TMP__/models.json",
@@ -344,6 +346,7 @@ const GOLDENS = {
       "PIBOT_TURN_TIMEOUT_MS": "5000",
       "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
       "PIBOT_WARM_TIMEOUT_MS": "1500",
+      "PI_BOT_MCP_CONFIG": "__TMP__/bots/goldenbot/.mcp.json",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[\"__TMP__/bots/goldenbot/proposed-skills\"],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
       "PI_GOLDEN_MARKER": "1",
       "PI_MODELS_JSON": "__TMP__/models.json",
@@ -378,6 +381,7 @@ const GOLDENS = {
       "PIBOT_TURN_TIMEOUT_MS": "5000",
       "PIBOT_WARM_GATEWAY_URL": "http://127.0.0.1:1",
       "PIBOT_WARM_TIMEOUT_MS": "1500",
+      "PI_BOT_MCP_CONFIG": "__OSTMP__/pibot-job-XXXXXX/.mcp.json",
       "PI_BOT_PERMISSION_POLICY": "{\"bash\":\"deny\",\"write_paths\":[],\"multi_agent\":false,\"self_authoring\":true,\"model_capable\":false}",
       "PI_GOLDEN_MARKER": "1",
       "PI_MODELS_JSON": "__TMP__/models.json",
@@ -447,12 +451,32 @@ test("B2: an explicit cwd is honored and returned; the world root keeps storage 
   const world = await buildBotWorld({ botId: "goldenbot", threadId: "b2-cwd", gatewayType: "perch", cwd: chosen });
   assert.equal(world.cwd, chosen, "cwd is the operator's chosen directory");
   assert.equal(world.sessionDir, join(dir, "bots", "goldenbot"), "world root is unchanged by a chosen cwd");
-  assert.ok(existsSync(join(chosen, ".mcp.json")),
-    ".mcp.json is written at the chosen cwd — pi-lab's mcp-client reads cwd/.mcp.json, so anywhere else silently strips every MCP tool");
+  assert.ok(existsSync(join(dir, "bots", "goldenbot", ".mcp.json")),
+    ".mcp.json is written in the WORLD root — pi reads it via PI_BOT_MCP_CONFIG, not from cwd");
+  assert.equal(world.mcpConfigPath, join(dir, "bots", "goldenbot", ".mcp.json"),
+    "the world reports where the config lives so the bridge can hand it to pi");
+  assert.ok(!existsSync(join(chosen, ".mcp.json")),
+    "no .mcp.json is minted into the operator's chosen directory");
   assert.ok(existsSync(join(dir, "bots", "goldenbot", "sessions")),
     "sessions/ is minted under the WORLD root");
   assert.ok(!existsSync(join(chosen, "sessions")),
     "no sessions/ dir littering the operator's chosen directory");
+});
+
+test("B2: a chosen directory's own .mcp.json survives byte-identical across a world build", async () => {
+  // Regression: the per-bot writer replaces the whole file (closed-world).
+  // Writing it into the chosen cwd destroyed r4-tehcy/.mcp.json and
+  // crow/.mcp.json on 2026-09-12/13 — every project MCP server vanished.
+  const { buildBotWorld } = await import("../scripts/pi-bots/bot-world.mjs");
+  const chosen = mkdtempSync(join(dir, "chosen-"));
+  const projectCfg = JSON.stringify({ mcpServers: { "project-only": { command: "node", args: ["-e", "0"] } } }, null, 2) + "\n";
+  writeFileSync(join(chosen, ".mcp.json"), projectCfg);
+  const world = await buildBotWorld({ botId: "goldenbot", threadId: "b2-preserve", gatewayType: "perch", cwd: chosen });
+  assert.equal(readFileSync(join(chosen, ".mcp.json"), "utf8"), projectCfg,
+    "the project's own .mcp.json is untouched by a bot world built in that directory");
+  const botCfg = JSON.parse(readFileSync(world.mcpConfigPath, "utf8"));
+  assert.ok(!botCfg.mcpServers["project-only"],
+    "the project's servers are not copied into the bot's closed-world config either");
 });
 
 test("B2: a bad cwd is refused as bad_cwd, before any side effect", async () => {
