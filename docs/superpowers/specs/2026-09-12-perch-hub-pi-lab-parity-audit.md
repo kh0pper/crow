@@ -35,7 +35,7 @@ pi's tool surface for a bot = built-ins + pi-lab extension tools + MCP, filtered
 | plan-mode | pi-lab `plan-mode/` | ✓ extension checkbox | parity |
 | subagent | pi-lab `subagent/` | ✓ extension checkbox + `multi_agent` policy + capability gate; name appended by the bridge | parity |
 | **ask_user** | pi-lab `ask-user.ts` (registers ONLY under `PI_BOT_INTERACTIVE=1`) | **was missing** — `--tools` filtered it even on perch spawns | **FIXED this PR**: appended for interactive spawns exactly where the extension registers it; narrowing can remove it; channel csvs byte-identical (goldens pin it) |
-| send_user_file | pi harness/web surface; pi-lab's mobile.ts serves the files as inline cards | ✗ not in crow's catalog; no engine relay for agent-sent files | **investigate** (item 12): needs an SSE frame + a serving route; crow's Files tab covers the download half |
+| send_user_file | pi harness/web surface; pi-lab's mobile.ts serves the files as inline cards | crow half: engine relay + jail-disciplined serving route + `--tools` append (PR-E, crow `c8377e28`); pi-lab half: `extensions/send-user-file.ts` relaying `crow-file:` notify (pi-lab `e5f2626`) | **shipped** (item 12): joint live smoke green on R4 2026-09-13 — model tool-call → SSE `file` frame → `perch_session_files` row → `GET …/workspace/<name>` 200 |
 | MCP tools (crow servers, addons, remote peers) | mcp.json per instance | ✓ `crow_mcp` picker + remote capability gate | parity (crow's is richer: instance-bound, journal-guarded) |
 
 ## 3. Gaps — pi-lab has, crow lacks
@@ -74,7 +74,7 @@ Sized S/M/L; ⚠ = needs an operator decision before building.
 21. **S** — Wake signals: crow has visibilitychange (#364) + focus; pi-lab also revives on `pageshow` and `online`.
 
 **Shell**
-22. **L ⚠** — PWA: pi-lab's mobile page is installable (manifest + service worker + standalone). Crow's hub lives inside the dashboard; making the DASHBOARD installable is a shell-level decision (CSP, SW scope, auth) well beyond perch.
+22. **L ⚠** — PWA: pi-lab's mobile page is installable (manifest + service worker + standalone). Crow's hub lives inside the dashboard; making the DASHBOARD installable is a shell-level decision (CSP, SW scope, auth) well beyond perch. **Closed 2026-09-13 (PR-F, crow `b12f9cda`):** the dashboard was already installable (`bb1cb865`); this shipped the measured parity gaps — manifest `scope: /dashboard` + `id`, 192/512 PNG + maskable icons, `apple-mobile-web-app-title` + PNG `apple-touch-icon` (SVG renders blank on iOS), and explicit SW pass-through guards for `/dashboard/perch-api/*` and SSE (no authed response touches a cache; native browser streaming preserved). The funnel invariant was left untouched: `/sw.js` stays outside the public prefixes (403 measured).
 
 ## 4. Suggested waves (if the operator greenlights parity work)
 
