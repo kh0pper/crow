@@ -978,6 +978,11 @@ test("wake: a message to a hibernating session rebuilds the world FRESH and resu
   // The operator narrowed the session (or edited the envelope) while it slept.
   state.narrowedTools = '["bash","write"]';
   state.piSessionIdInRow = firstPi.piSessionId;
+  // The dead-resume preflight drops a resume whose transcript file is absent
+  // (pi writes `<timestamp>_<id>.jsonl` only after the first completed turn),
+  // so — mirroring a session that HAS conversed — plant the file pi left.
+  mkdirSync(join(dir, "bots", "botty", "sessions"), { recursive: true });
+  writeFileSync(join(dir, "bots", "botty", "sessions", `2026-01-01T00-00-00-000Z_${firstPi.piSessionId}.jsonl`), "");
 
   await engine.message(s.sessionId, "back again");
   await tick();
@@ -990,6 +995,28 @@ test("wake: a message to a hibernating session rebuilds the world FRESH and resu
   assert.equal((await engine.get(s.sessionId)).state, "awake");
   assert.equal(rowFor(s.threadId).status, "active");
   assert.equal(state.instances[1].turns[0].message, "back again");
+});
+
+test("wake preflight: a dead pi session id (transcript never written — the cycle-before-first-turn brick, R4 2026-09-13) wakes FRESH instead of crash-looping", async () => {
+  const { engine, clock, state } = makeEngine();
+  const s = await spawned(engine);
+  const firstPi = state.instances[0];
+  clock.advance(600_001);
+  await tick();                                        // hibernate
+  // The row claims a resume handle pi never persisted — exactly the state the
+  // live smoke hit: id recorded at ready, no completed turn, no .jsonl.
+  state.piSessionIdInRow = "pisess-dead-" + firstPi.proc.pid;
+  const sub = await collect(engine, s.sessionId);
+  await engine.message(s.sessionId, "wake me");
+  await tick();
+  assert.equal(state.instances.length, 2, "the wake spawned its single child");
+  assert.equal(state.instances[1].opts.piSessionId, null,
+    "the dead id is NOT handed to pi — a --session resume of it exits code 1");
+  assert.ok(sub.ofType("log").some((e) => /resume transcript missing/.test(e.text)),
+    "the drop is logged honestly on the session stream");
+  assert.equal((await engine.get(s.sessionId)).state, "awake", "the wake lands awake");
+  assert.equal(rowFor(s.threadId).pi_session_id, state.instances[1].piSessionId,
+    "the reported fresh id repairs the row");
 });
 
 test("C8: a wake past the interactive cap with no eligible victim is refused with the exact code and spawns no child", async () => {
@@ -1346,6 +1373,10 @@ test("I-1 restart: stopAll parks every row so a NEW process on the same DB can w
   assert.equal(r.stopped, 1);
   assert.equal(rowFor(s.threadId).status, "waiting-user",
     "stopAll PARKS the row — a fresh 'active' would read as a live claim and 409 the next boot for a full turn budget");
+  // The adopted resume handle must survive the dead-transcript preflight —
+  // plant the transcript a real pi writes after a completed turn.
+  mkdirSync(join(dir, "bots", "restarty", "sessions"), { recursive: true });
+  writeFileSync(join(dir, "bots", "restarty", "sessions", `2026-01-01T00-00-00-000Z_${A.state.instances[0].piSessionId}.jsonl`), "");
 
   // The restart: a fresh engine (fresh bridge seam, empty sessions map), same DB.
   const B = makeEngine();
