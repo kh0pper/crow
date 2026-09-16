@@ -18,6 +18,13 @@
  *                          summary is older than this many minutes (default
  *                          1440 = 24h). Drive uses the file's modifiedTime;
  *                          HTTP uses the wrapper's received_at.
+ *   OUTLOOK_MAIL_IGNORE  — optional; `;`-separated case-insensitive patterns
+ *                          (regex, or plain text) matched against each
+ *                          message's subject and sender. Matching messages
+ *                          are dropped from the mail section (automated
+ *                          notifications the reader never acts on). The
+ *                          drop file itself is untouched; filtering happens
+ *                          at render time.
  *
  * Summary payload shape (either source):
  *   { calendar?: [{ start?, end?, subject?, location? }],
@@ -90,6 +97,35 @@ function fmtMessages(items) {
     label: m.subject || "(no subject)",
     detail: m.from || undefined,
   }));
+}
+
+/**
+ * Compile OUTLOOK_MAIL_IGNORE into RegExps. Each `;`-separated entry is tried
+ * as a case-insensitive regex; an entry that fails to compile is matched as
+ * literal text instead, so a stray "(" never silently disables the filter.
+ */
+export function parseMailIgnore(raw) {
+  if (typeof raw !== "string") return [];
+  return raw
+    .split(";")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((x) => {
+      try {
+        return new RegExp(x, "i");
+      } catch {
+        return new RegExp(x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      }
+    });
+}
+
+/** Drop messages whose subject or sender matches any ignore pattern. */
+export function filterMessages(items, patterns) {
+  if (!patterns || patterns.length === 0) return items;
+  return items.filter((m) => {
+    const hay = [m && m.subject, m && m.from].filter((v) => typeof v === "string");
+    return !patterns.some((re) => hay.some((h) => re.test(h)));
+  });
 }
 
 /**
@@ -177,7 +213,9 @@ export async function outlookSections(config) {
   if (typeof payload.unread_count === "number") {
     mailBits.push({ label: `Unread: ${payload.unread_count}` });
   }
-  if (Array.isArray(payload.messages)) mailBits.push(...fmtMessages(payload.messages));
+  if (Array.isArray(payload.messages)) {
+    mailBits.push(...fmtMessages(filterMessages(payload.messages, parseMailIgnore(config.OUTLOOK_MAIL_IGNORE))));
+  }
   if (mailBits.length) {
     mail.available = true;
     mail.items = mailBits;

@@ -50,6 +50,7 @@ secrets file works as-is.
 | `OUTLOOK_DRIVE_FOLDER_ID` | Optional (preferred). Read the newest JSON file an external agent (e.g. a Power Automate flow) drops into this Google Drive folder, using `GOOGLE_TOKEN_FILE` for auth. Lets tenants that block Graph user-consent feed Outlook into the digest with no extra hosting |
 | `OUTLOOK_INGEST_URL` / `OUTLOOK_INGEST_TOKEN` | Optional (alternative to the Drive drop). Pull the summary from a bearer-authed HTTP endpoint the agent POSTs to. Used only when `OUTLOOK_DRIVE_FOLDER_ID` is unset |
 | `OUTLOOK_INGEST_MAX_AGE_MIN` | Optional. Label the Outlook section stale if the summary is older than this many minutes (default 1440). Drive uses the file's `modifiedTime`; HTTP uses the wrapper's `received_at` |
+| `OUTLOOK_MAIL_IGNORE` | Optional. `;`-separated case-insensitive patterns (regex or plain text) matched against each message's subject and sender; matches are dropped from the digest's mail section. For automated notifications the reader never acts on. The drop file is left intact; filtering happens at render time |
 | `CROW_GATEWAY_URL` | Used for the digest footer link |
 | `CROW_GATEWAY_ALT_URLS` | Optional comma-separated extra bases (e.g. a public proxy) — the footer links all of them |
 | `CROW_TASKS_DB_PATH` | Kanban tasks DB, default `$CROW_DATA_DIR/tasks.db` |
