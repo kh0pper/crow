@@ -140,6 +140,42 @@ pi-lab's caveats, also recorded in the module:
 
 The profile applies to native starts only. Docker bundles build their own command lines.
 
+## External engines
+
+A provider row can declare that **another machine runs the engine**: `gpu_policy.engine = { managed: "external", host: "<machine>", label?: "<engine>" }` (today: halogen on raven, row `raven-flash-next`). `managed` must be exactly `"external"`, the only value defined. `host` is a display label, never a routing input, and `providers.host` stays `cloud` (the tab shows "network" + "external · raven"). The helper is `isExternalEngine` in `servers/shared/provider-engine.js`. `gpu_policy` replicates, so every paired instance learns that the row is not its to manage.
+
+**Never orchestrated.** Every orchestrator path checks the marker first. `maybeAcquireLocalProvider` returns `null`, so the caller dials `base_url` directly, exactly as for a cloud row. `acquireProvider` throws `ExternalEngineError` (`code: "external_engine"`). `resolveWarmableProviderName` returns `null`. `ensureResident` skips the row and logs once per provider. The row is never always-resident, never a mutex sibling (so it is never evicted), never a mutex-group member, and never an idle-revert default. The legacy `servers/shared/lifecycle.js` `ensureModelWarm` refuses it (`reason: "external_engine"`), and `releaseModel` is a no-op for it.
+
+**Write validation (transition-only).** `upsertProvider` judges a write only when it **changes** `gpu_policy.engine`, `bundleId` or `gpu_policy.runtime` relative to the stored row. It then refuses a resulting row that has any of these:
+- a malformed marker (`EXTERNAL_ENGINE_INVALID`);
+- a marker combined with a `bundleId` or `runtime: "native"`, judged on the effective policy after the upsert's `COALESCE` (`EXTERNAL_ENGINE_CONFLICT`);
+- a marked row turned into an orchestratable one in a single write (`EXTERNAL_ENGINE_CONFLICT`). To convert such a row, first unmark it with its own write (no `engine`, no bundle, no native runtime), then register.
+
+A malformed incoming `gpu_policy` JSON string is always `EXTERNAL_ENGINE_INVALID`.
+
+A write that leaves those three fields as stored always passes. Replication writes rows directly, never through `upsertProvider`, so a contradictory row can arrive from a peer, and the tab's re-enable, host repair and the reconciler must keep working on it.
+
+The models.json reconciler keeps a stored `engine` when it re-asserts `gpu_policy`. It also runs each entry in its own try/catch: a refused entry is logged as `[providers-reconcile] <id> skipped: …` and counted in `failed`.
+
+**Read-only health.** `servers/gateway/external-engine-poll.js` is armed by `initOrchestrator` next to the residency monitor.
+- Every `CROW_EXTERNAL_ENGINE_POLL_MS` (default 60000; `0` disables it; the scratch test suite sets `0`), each enabled marked row gets one `GET <base_url>/models` with no auth header and a 3 s timeout. 2xx means ready.
+- Results land in `getProviderHealth().external` (`servers/gateway/provider-health.js`). Disabled and removed rows are pruned from it.
+- A tick probes and prunes only when the providers config came from the DB (`_source === "db:providers"`). The models.json fallback that `loadProviders()` serves after a cache invalidation or a DB error carries no markers, so such a tick is a no-op and every clock survives.
+- Each instance probes from its own network position. A peer on another LAN may even reach a *different* device at the same private IP (for example `10.0.0.126`). That is harmless: the result is info-only, and the request is a header-less GET on `/models`.
+
+**Surfacing.** External engines have their **own** nest signal, `externalEngines`, at **info severity at most, never warn**, so they never trigger a health-monitor push. There is no card when no engine is watched. Each engine gets one line:
+- `"halogen on raven: up"`;
+- `"… down for <age> (externally managed)"` once it has answered in this process;
+- `"… not reachable from this instance"` if it never has.
+
+Engines run outside Crow are stopped on purpose: raven's production windows stop halogen for hours, and Crow has no route-away.
+
+The engines deliberately do **not** share the `providers` id. The monitor's dedupe is per issue id with a 24 h window, and a marker survives while any issue with that id is active. An external info issue under `providers` would therefore swallow the next real resident-model push. The resident `providers` signal is exactly as before.
+
+The Settings > LLM > Providers dot for a marked row shows this instance's probe result: reachable, not reachable, or not probed yet.
+
+**Not in scope:** remote lifecycle (the window script starts and stops halogen over ssh), route-away or fallback when an engine is down, and sync filtering. `GET /api/providers/health` still probes every row on demand.
+
 ## What later plans add
 
 This branch is scoped to the native path's own capabilities; three later plans build on top of it. **Plan 2** adds a model-addressed `/llm/v1` door (`<providerId>/<modelId>` and bare-id resolution with a 400 on ambiguity), a lifecycle API under `/llm/models` (start/stop/status as async jobs, local-MCP-token auth), and the pi-lab contract change to call the gateway instead of raw ports — plus the fix for why a provider disable or bundle→native conversion made on the primary hasn't been replicating to r4, black-swan, and grackle. **Plan 3** reworks the Extensions and Model Catalog panels: a single "Local models" card replacing the per-bundle inference cards, a registration dialog (provider id, mutex group, launch knobs), an adopt-from-disk flow, and the runtime-override card. **Plan 4** is the actual migration: an ops script (`adopt`/`convert`/`revert`/`status`) driving six windows — embed, voice, chat (35B), the 27B variants, r4's gemma, then deleting crow's four model bundles and their `installed.json`/`~/.crow/bundles` entries — each run inside a registered box reservation with a live acceptance check.
