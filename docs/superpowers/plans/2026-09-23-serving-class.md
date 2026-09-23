@@ -12,7 +12,7 @@ one-tap start for either.
   and the refusal decision.
 - The validator enforces the field in CI.
 - `acquireOrStartNative`, the single native spawn funnel, calls the module
-  after the reservation gate.
+  after the resident fast path and before the reservation gate.
 - Each caller maps the typed error the same way it already maps
   `ReservedError`.
 - The panel and the catalog API expose the class and withhold the Start
@@ -62,9 +62,9 @@ first. Decisions D1–D8 are binding.
    Task 3.
 4. **Refusals must not collapse into a generic 502 or START_FAILED.**
    `maybeAcquireLocalProvider` must rethrow. Pinned in Tasks 3 and 4.
-6. **A reserved box and a wedge-risk model together**: the permanent refusal must win over `box_reserved`, so the check runs before `startBlockedBy`. Pinned in Task 3.
 5. **The runtime strip's Start button** is a second one-tap surface for a
    registered model. It must also be withheld. Pinned in Task 5.
+6. **A reserved box and a wedge-risk model together**: the permanent refusal must win over `box_reserved`, so the check runs before `startBlockedBy`. Pinned in Task 3.
 
 ---
 
